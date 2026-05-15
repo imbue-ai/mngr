@@ -6,7 +6,7 @@
 **Synopsis:**
 
 ```text
-mngr push [TARGET] [SOURCE] [--target <TARGET>] [--source <DIR>] [--target-agent <AGENT>] [--sync-mode <MODE>] [--mirror] [--dry-run] [--stop]
+mngr push [TARGET] [SOURCE] [--target <TARGET>] [--source <DIR>] [--target-agent <AGENT>] [--sync-mode <MODE>] [--mirror] [--dry-run] [--start/--no-start] [--stop]
 ```
 
 Push files or git commits from local machine to an agent [experimental].
@@ -52,6 +52,7 @@ mngr push [OPTIONS] TARGET SOURCE
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
 | `--dry-run` | boolean | Show what would be transferred without actually transferring | `False` |
+| `--start`, `--no-start` | boolean | Automatically start the host if offline (the agent does not need to be running) | `True` |
 | `--stop` | boolean | Stop the agent after pushing (for state consistency) | `False` |
 | `--delete`, `--no-delete` | boolean | Delete files in destination that don't exist in source | `False` |
 | `--sync-mode` | choice (`files` &#x7C; `git` &#x7C; `full`) | What to sync: files (working directory via rsync), git (push git branches), or full (everything) [future] | `files` |

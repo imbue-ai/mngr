@@ -12,6 +12,7 @@ from imbue.imbue_common.logging import log_call
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr.api.find import AgentMatch
+from imbue.mngr.api.find import ensure_agent_started
 from imbue.mngr.api.find import ensure_host_started
 from imbue.mngr.api.find import find_all_agents
 from imbue.mngr.api.find import find_one_agent
@@ -118,11 +119,25 @@ def exec_command_on_agent(
 ) -> ExecResult:
     """Execute a shell command on the host where an agent runs.
 
-    Resolves the agent by :class:`AgentAddress`, optionally starts it if
-    stopped, then executes the command on its host (defaulting to the agent's
-    work_dir).
+    Resolves the agent by :class:`AgentAddress`, optionally starts the host
+    and agent if stopped, then executes the command on its host (defaulting
+    to the agent's work_dir).
     """
-    agent, host = find_one_agent(address, mngr_ctx, is_start_desired=is_start_desired)
+    host_ref, agent_ref = find_one_agent(address, mngr_ctx)
+    provider = get_provider_instance(host_ref.provider_name, mngr_ctx)
+    host_interface = provider.get_host(host_ref.host_id)
+    host, _was_started = ensure_host_started(host_interface, is_start_desired=is_start_desired, provider=provider)
+
+    agent: AgentInterface | None = next(
+        (a for a in host.get_agents() if a.id == agent_ref.agent_id),
+        None,
+    )
+    if agent is None:
+        raise RuntimeError(
+            f"Agent '{agent_ref.agent_name}' (ID: {agent_ref.agent_id}) was found during discovery but is "
+            f"no longer present on host {host_ref.host_name}.{host_ref.provider_name}."
+        )
+    ensure_agent_started(agent, host, is_start_desired=is_start_desired)
 
     # Determine working directory: explicit --cwd, or agent's work_dir
     effective_cwd = Path(cwd) if cwd is not None else agent.work_dir

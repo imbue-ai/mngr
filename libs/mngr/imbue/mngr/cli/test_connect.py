@@ -13,18 +13,18 @@ from urwid.widget.text import Text
 from urwid.widget.wimp import SelectableIcon
 
 from imbue.imbue_common.model_update import to_update
-from imbue.mngr.cli.connect import AgentSelectorState
+from imbue.mngr.cli.agent_selector import AgentSelectorState
+from imbue.mngr.cli.agent_selector import SelectorInputHandler
+from imbue.mngr.cli.agent_selector import _create_selectable_agent_item
+from imbue.mngr.cli.agent_selector import _handle_selector_input
+from imbue.mngr.cli.agent_selector import _refresh_agent_list
+from imbue.mngr.cli.agent_selector import build_status_text
+from imbue.mngr.cli.agent_selector import filter_agents
+from imbue.mngr.cli.agent_selector import handle_search_key
+from imbue.mngr.cli.agent_selector import select_agent_interactively
 from imbue.mngr.cli.connect import ConnectCliOptions
-from imbue.mngr.cli.connect import SelectorInputHandler
 from imbue.mngr.cli.connect import _build_connection_options
-from imbue.mngr.cli.connect import _create_selectable_agent_item
-from imbue.mngr.cli.connect import _handle_selector_input
-from imbue.mngr.cli.connect import _refresh_agent_list
-from imbue.mngr.cli.connect import build_status_text
 from imbue.mngr.cli.connect import connect
-from imbue.mngr.cli.connect import filter_agents
-from imbue.mngr.cli.connect import handle_search_key
-from imbue.mngr.cli.connect import select_agent_interactively
 from imbue.mngr.cli.create import create
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.interfaces.data_types import AgentDetails

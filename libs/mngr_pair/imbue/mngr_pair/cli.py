@@ -8,6 +8,7 @@ from loguru import logger
 from imbue.mngr.cli.address_params import AGENT_ADDRESS
 from imbue.mngr.cli.address_params import HOSTED_LOCATION
 from imbue.mngr.cli.address_params import HOST_ADDRESS
+from imbue.mngr.cli.agent_utils import ensure_host_started_and_resolve_agent
 from imbue.mngr.cli.agent_utils import find_agent_for_command
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
@@ -183,7 +184,13 @@ def pair(ctx: click.Context, **kwargs) -> None:
     if result is None:
         logger.info("No agent selected")
         return
-    agent, host = result
+    host_ref, agent_ref = result
+    agent, host = ensure_host_started_and_resolve_agent(
+        host_ref=host_ref,
+        agent_ref=agent_ref,
+        allow_auto_start=True,
+        mngr_ctx=mngr_ctx,
+    )
 
     # Only local agents are supported right now
     if not host.is_local:

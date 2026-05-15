@@ -6,7 +6,7 @@
 **Synopsis:**
 
 ```text
-mngr pull [SOURCE] [DESTINATION] [--source <SOURCE>] [--source-agent <AGENT>] [--sync-mode <MODE>] [--include PATTERN] [--dry-run] [--stop]
+mngr pull [SOURCE] [DESTINATION] [--source <SOURCE>] [--source-agent <AGENT>] [--sync-mode <MODE>] [--include PATTERN] [--dry-run] [--start/--no-start] [--stop]
 ```
 
 Pull files or git commits from an agent to local machine [experimental].
@@ -49,6 +49,7 @@ mngr pull [OPTIONS] SOURCE DESTINATION
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
 | `--dry-run` | boolean | Show what would be transferred without actually transferring | `False` |
+| `--start`, `--no-start` | boolean | Automatically start the host if offline (the agent does not need to be running) | `True` |
 | `--stop` | boolean | Stop the agent after pulling (for state consistency) | `False` |
 | `--delete`, `--no-delete` | boolean | Delete files in destination that don't exist in source | `False` |
 | `--sync-mode` | choice (`files` &#x7C; `git` &#x7C; `full`) | What to sync: files (working directory via rsync), git (merge git branches), or full (everything) [future] | `files` |

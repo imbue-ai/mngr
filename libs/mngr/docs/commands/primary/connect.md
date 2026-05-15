@@ -46,7 +46,7 @@ mngr connect [OPTIONS] [AGENT]
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
 | `--agent` | agent_address | The agent to connect to (by name or ID, optionally @HOST[.PROVIDER]) | None |
-| `--start`, `--no-start` | boolean | Automatically start the agent if stopped | `True` |
+| `--start`, `--no-start` | boolean | Automatically start the host and agent if offline/stopped | `True` |
 
 ## Options
 

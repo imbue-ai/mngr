@@ -9,6 +9,7 @@ from imbue.mngr.api.pull import pull_git
 from imbue.mngr.cli.address_params import AGENT_ADDRESS
 from imbue.mngr.cli.address_params import HOSTED_LOCATION
 from imbue.mngr.cli.address_params import HOST_ADDRESS
+from imbue.mngr.cli.agent_utils import ensure_host_started_and_resolve_agent
 from imbue.mngr.cli.agent_utils import find_agent_for_command
 from imbue.mngr.cli.agent_utils import stop_agent_after_sync
 from imbue.mngr.cli.common_opts import add_common_options
@@ -40,6 +41,7 @@ class PullCliOptions(CommonCliOptions):
     source_path: str | None
     destination: str | None
     dry_run: bool
+    start: bool
     stop: bool
     delete: bool
     sync_mode: str
@@ -93,6 +95,12 @@ class PullCliOptions(CommonCliOptions):
     is_flag=True,
     default=False,
     help="Show what would be transferred without actually transferring",
+)
+@optgroup.option(
+    "--start/--no-start",
+    default=True,
+    show_default=True,
+    help="Automatically start the host if offline (the agent does not need to be running)",
 )
 @optgroup.option(
     "--stop",
@@ -283,7 +291,13 @@ def pull(ctx: click.Context, **kwargs) -> None:
     if result is None:
         logger.info("No agent selected")
         return
-    agent, host = result
+    host_ref, agent_ref = result
+    agent, host = ensure_host_started_and_resolve_agent(
+        host_ref=host_ref,
+        agent_ref=agent_ref,
+        allow_auto_start=opts.start,
+        mngr_ctx=mngr_ctx,
+    )
 
     emit_info(f"Pulling from agent: {agent.name}", output_opts.output_format)
 
@@ -349,7 +363,7 @@ def pull(ctx: click.Context, **kwargs) -> None:
 CommandHelpMetadata(
     key="pull",
     one_line_description="Pull files or git commits from an agent to local machine [experimental]",
-    synopsis="mngr pull [SOURCE] [DESTINATION] [--source <SOURCE>] [--source-agent <AGENT>] [--sync-mode <MODE>] [--include PATTERN] [--dry-run] [--stop]",
+    synopsis="mngr pull [SOURCE] [DESTINATION] [--source <SOURCE>] [--source-agent <AGENT>] [--sync-mode <MODE>] [--include PATTERN] [--dry-run] [--start/--no-start] [--stop]",
     description="""Syncs files or git state from an agent's working directory to a local directory.
 Default behavior uses rsync for efficient incremental file transfer.
 Use --sync-mode=git to merge git branches instead of syncing files.

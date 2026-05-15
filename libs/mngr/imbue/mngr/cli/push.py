@@ -9,6 +9,7 @@ from imbue.mngr.api.push import push_git
 from imbue.mngr.cli.address_params import AGENT_ADDRESS
 from imbue.mngr.cli.address_params import HOSTED_LOCATION
 from imbue.mngr.cli.address_params import HOST_ADDRESS
+from imbue.mngr.cli.agent_utils import ensure_host_started_and_resolve_agent
 from imbue.mngr.cli.agent_utils import find_agent_for_command
 from imbue.mngr.cli.agent_utils import stop_agent_after_sync
 from imbue.mngr.cli.common_opts import add_common_options
@@ -40,6 +41,7 @@ class PushCliOptions(CommonCliOptions):
     target_path: str | None
     source: str | None
     dry_run: bool
+    start: bool
     stop: bool
     delete: bool
     sync_mode: str
@@ -71,6 +73,12 @@ class PushCliOptions(CommonCliOptions):
     is_flag=True,
     default=False,
     help="Show what would be transferred without actually transferring",
+)
+@optgroup.option(
+    "--start/--no-start",
+    default=True,
+    show_default=True,
+    help="Automatically start the host if offline (the agent does not need to be running)",
 )
 @optgroup.option(
     "--stop",
@@ -193,7 +201,13 @@ def push(ctx: click.Context, **kwargs) -> None:
     if result is None:
         logger.info("No agent selected")
         return
-    agent, host = result
+    host_ref, agent_ref = result
+    agent, host = ensure_host_started_and_resolve_agent(
+        host_ref=host_ref,
+        agent_ref=agent_ref,
+        allow_auto_start=opts.start,
+        mngr_ctx=mngr_ctx,
+    )
 
     emit_info(f"Pushing to agent: {agent.name}", output_opts.output_format)
 
@@ -259,7 +273,7 @@ def push(ctx: click.Context, **kwargs) -> None:
 CommandHelpMetadata(
     key="push",
     one_line_description="Push files or git commits from local machine to an agent [experimental]",
-    synopsis="mngr push [TARGET] [SOURCE] [--target <TARGET>] [--source <DIR>] [--target-agent <AGENT>] [--sync-mode <MODE>] [--mirror] [--dry-run] [--stop]",
+    synopsis="mngr push [TARGET] [SOURCE] [--target <TARGET>] [--source <DIR>] [--target-agent <AGENT>] [--sync-mode <MODE>] [--mirror] [--dry-run] [--start/--no-start] [--stop]",
     description="""Syncs files or git state from a local directory to an agent's working directory.
 Default behavior uses rsync for efficient incremental file transfer.
 Use --sync-mode=git to push git branches instead of syncing files.

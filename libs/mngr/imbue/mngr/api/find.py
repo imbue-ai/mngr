@@ -317,40 +317,6 @@ def ensure_agent_started(agent: AgentInterface, host: OnlineHostInterface, is_st
             )
 
 
-def materialize_agent(
-    host_ref: DiscoveredHost,
-    agent_ref: DiscoveredAgent,
-    mngr_ctx: MngrContext,
-    is_start_desired: bool = False,
-    skip_agent_state_check: bool = False,
-) -> tuple[AgentInterface, OnlineHostInterface]:
-    """Materialize discovered refs into live :class:`AgentInterface` and :class:`OnlineHostInterface`.
-
-    Brings the host online (starting it if ``is_start_desired`` and offline),
-    then looks the agent up on the live host. If ``skip_agent_state_check`` is
-    False (the default) and the agent is stopped, raises unless
-    ``is_start_desired`` is also True.
-
-    Raises :class:`UserInputError` if the host is offline and
-    ``is_start_desired`` is False. Raises :class:`RuntimeError` if the agent
-    was present at discovery time but is no longer on the live host
-    (a stale-cache / inconsistency case).
-    """
-    provider = get_provider_instance(host_ref.provider_name, mngr_ctx)
-    host = provider.get_host(host_ref.host_id)
-    online_host, _was_started = ensure_host_started(host, is_start_desired=is_start_desired, provider=provider)
-    for live_agent in online_host.get_agents():
-        if live_agent.id == agent_ref.agent_id:
-            if not skip_agent_state_check:
-                ensure_agent_started(live_agent, online_host, is_start_desired=is_start_desired)
-            return live_agent, online_host
-    raise RuntimeError(
-        f"Agent '{agent_ref.agent_name}' (ID: {agent_ref.agent_id}) was found during discovery but is "
-        f"no longer present on host {host_ref.host_name}.{host_ref.provider_name}. "
-        "This indicates a stale discovery cache or host state inconsistency."
-    )
-
-
 class AgentMatch(FrozenModel):
     """Information about an agent that matched a search query."""
 
@@ -571,17 +537,23 @@ def _post_filter_matches_by_addresses(
     return filtered
 
 
-def find_one_agent(
+def find_one_agent_and_agents_by_host(
     address: AgentAddress,
     mngr_ctx: MngrContext,
-    is_start_desired: bool = False,
-    skip_agent_state_check: bool = False,
-) -> tuple[AgentInterface, OnlineHostInterface]:
-    """Find an agent by :class:`AgentAddress` and return live interfaces.
+) -> tuple[DiscoveredHost, DiscoveredAgent, Mapping[DiscoveredHost, Sequence[DiscoveredAgent]]]:
+    """Find an agent by :class:`AgentAddress` and return its refs plus the full discovery result.
 
-    Runs discovery (skipping irrelevant providers), matches the address's
-    agent identifier against discovered agents (filtered by the address's
-    host constraint if any), then materializes live interfaces.
+    Performs discovery (skipping irrelevant providers) and matches the
+    address's agent identifier against the discovered agents (filtered by
+    the address's host constraint if any). Returns the matching refs and
+    the unfiltered ``agents_by_host`` mapping so callers that need the
+    whole discovery result (for example to check name conflicts across
+    other agents) can reuse it instead of running discovery a second time.
+
+    Returns only metadata. Callers that need a live ``AgentInterface`` or
+    ``OnlineHostInterface`` should compose with
+    :func:`imbue.mngr.cli.agent_utils.ensure_host_started_and_resolve_agent`
+    or :func:`imbue.mngr.cli.agent_utils.ensure_host_and_agent_started`.
 
     Raises :class:`UserInputError` if the host constraint matches no hosts.
     Raises :class:`AgentNotFoundError` / :class:`UserInputError` if the
@@ -592,10 +564,18 @@ def find_one_agent(
         raise UserInputError(f"No hosts found matching {address.host}")
 
     host_ref, agent_ref = filter_one_agent(address.agent, resolved_host=None, agents_by_host=agents_by_host)
-    return materialize_agent(
-        host_ref,
-        agent_ref,
-        mngr_ctx,
-        is_start_desired=is_start_desired,
-        skip_agent_state_check=skip_agent_state_check,
-    )
+    return host_ref, agent_ref, agents_by_host
+
+
+def find_one_agent(
+    address: AgentAddress,
+    mngr_ctx: MngrContext,
+) -> tuple[DiscoveredHost, DiscoveredAgent]:
+    """Find an agent by :class:`AgentAddress` and return its discovery refs.
+
+    Thin wrapper around :func:`find_one_agent_and_agents_by_host` that
+    drops the full discovery mapping. See that function for the contract
+    and error behaviour.
+    """
+    host_ref, agent_ref, _ = find_one_agent_and_agents_by_host(address, mngr_ctx)
+    return host_ref, agent_ref

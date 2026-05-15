@@ -5,12 +5,11 @@ import click
 from click_option_group import optgroup
 from loguru import logger
 
-from imbue.mngr.api.discover import discover_by_address
 from imbue.mngr.api.discovery_events import emit_discovery_events_for_host
-from imbue.mngr.api.find import filter_one_agent
-from imbue.mngr.api.find import materialize_agent
+from imbue.mngr.api.find import find_one_agent_and_agents_by_host
 from imbue.mngr.cli.address_params import AGENT_ADDRESS
 from imbue.mngr.cli.address_params import AGENT_NAME
+from imbue.mngr.cli.agent_utils import ensure_host_started_and_resolve_agent
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
 from imbue.mngr.cli.help_formatter import CommandHelpMetadata
@@ -33,6 +32,7 @@ class RenameCliOptions(CommonCliOptions):
     current: AgentAddress
     new_name: AgentName
     dry_run: bool
+    start: bool
     label: tuple[str, ...] = ()
     # Planned features (not yet implemented)
     host: bool
@@ -77,6 +77,12 @@ def _output_result(
     help="Show what would be renamed without actually renaming",
 )
 @optgroup.option(
+    "--start/--no-start",
+    default=True,
+    show_default=True,
+    help="Automatically start the host if offline (the agent does not need to be running)",
+)
+@optgroup.option(
     "--host",
     is_flag=True,
     help="Rename a host instead of an agent [future]",
@@ -116,11 +122,15 @@ def rename(ctx: click.Context, **kwargs: Any) -> None:
         labels_to_merge[key] = value
 
     # Resolve the agent (without requiring the agent process to be running).
-    # Discovery is run explicitly so the result can also drive the
-    # name-conflict check below.
-    agents_by_host, _ = discover_by_address(opts.current, mngr_ctx)
-    host_ref, agent_ref = filter_one_agent(opts.current.agent, None, agents_by_host)
-    agent, host = materialize_agent(host_ref, agent_ref, mngr_ctx, skip_agent_state_check=True)
+    # Use the sibling find function so the full discovery result is available
+    # for the name-conflict check below without a second discovery pass.
+    host_ref, agent_ref, agents_by_host = find_one_agent_and_agents_by_host(opts.current, mngr_ctx)
+    agent, host = ensure_host_started_and_resolve_agent(
+        host_ref=host_ref,
+        agent_ref=agent_ref,
+        allow_auto_start=opts.start,
+        mngr_ctx=mngr_ctx,
+    )
 
     old_name = str(agent.name)
 
@@ -165,7 +175,7 @@ def rename(ctx: click.Context, **kwargs: Any) -> None:
 CommandHelpMetadata(
     key="rename",
     one_line_description="Rename an agent or host [experimental]",
-    synopsis="mngr [rename|mv] <CURRENT> <NEW-NAME> [--dry-run] [--host] [-l KEY=VALUE ...]",
+    synopsis="mngr [rename|mv] <CURRENT> <NEW-NAME> [--dry-run] [--start/--no-start] [--host] [-l KEY=VALUE ...]",
     arguments_description="- `CURRENT`: Current name or ID of the agent to rename\n- `NEW-NAME`: New name for the agent",
     description="""Updates the agent's name in its data.json and renames the tmux session
 if the agent is currently running. Git branch names are not renamed.

@@ -4,8 +4,7 @@ These tests create a real agent via the CLI, then exercise
 select_agent_interactively_with_host and find_agent_for_command end-to-end.
 The only thing monkeypatched is the urwid TUI (select_agent_interactively),
 since it requires an interactive terminal. Everything else -- list_agents,
-discover_hosts_and_agents, find_one_agent, materialize_agent --
-runs against real data on disk.
+discover_hosts_and_agents, find_one_agent -- runs against real data on disk.
 """
 
 import time
@@ -14,6 +13,8 @@ import pluggy
 import pytest
 from click.testing import CliRunner
 
+from imbue.mngr.cli.agent_utils import ensure_host_and_agent_started
+from imbue.mngr.cli.agent_utils import ensure_host_started_and_resolve_agent
 from imbue.mngr.cli.agent_utils import find_agent_for_command
 from imbue.mngr.cli.agent_utils import select_agent_interactively_with_host
 from imbue.mngr.cli.stop import stop
@@ -23,6 +24,8 @@ from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import AgentAddress
 from imbue.mngr.primitives import AgentName
+from imbue.mngr.primitives import DiscoveredAgent
+from imbue.mngr.primitives import DiscoveredHost
 
 
 @pytest.mark.tmux
@@ -31,7 +34,7 @@ def test_select_agent_interactively_with_host_returns_selected_agent(
     temp_mngr_ctx: MngrContext,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """With a real agent, returns the (AgentInterface, OnlineHostInterface) tuple."""
+    """With a real agent, returns the (DiscoveredHost, DiscoveredAgent) tuple."""
     agent_name = f"test-select-agent-{int(time.time())}"
     create_test_agent(agent_name, "sleep 564738")
 
@@ -44,10 +47,10 @@ def test_select_agent_interactively_with_host_returns_selected_agent(
     result = select_agent_interactively_with_host(temp_mngr_ctx)
 
     assert result is not None
-    agent, host = result
-    assert isinstance(agent, AgentInterface)
-    assert isinstance(host, OnlineHostInterface)
-    assert agent.name == AgentName(agent_name)
+    host_ref, agent_ref = result
+    assert isinstance(host_ref, DiscoveredHost)
+    assert isinstance(agent_ref, DiscoveredAgent)
+    assert agent_ref.agent_name == AgentName(agent_name)
 
 
 @pytest.mark.tmux
@@ -71,17 +74,18 @@ def test_select_agent_interactively_with_host_returns_none_when_user_quits(
 
 
 @pytest.mark.tmux
-def test_find_agent_for_command_with_stopped_agent_and_skip_agent_state_check(
+def test_find_agent_for_command_plus_resolve_finds_stopped_agent(
     cli_runner: CliRunner,
     create_test_agent,
     plugin_manager: pluggy.PluginManager,
     temp_mngr_ctx: MngrContext,
 ) -> None:
-    """find_agent_for_command with skip_agent_state_check finds a stopped agent.
+    """find_agent_for_command + ensure_host_started_and_resolve_agent works on a stopped agent.
 
-    Regression test: provision needs the host online but does not need the
-    agent process running. Without skip_agent_state_check, a stopped agent
-    raises UserInputError.
+    Regression test: commands like provision and rename need the host
+    online but do not need the agent process running. Using the
+    "resolve_agent" helper instead of "ensure_host_and_agent_started"
+    leaves the agent state untouched.
     """
     agent_name = f"test-find-stopped-{int(time.time())}"
     create_test_agent(agent_name, "sleep 564740")
@@ -90,33 +94,37 @@ def test_find_agent_for_command_with_stopped_agent_and_skip_agent_state_check(
     stop_result = cli_runner.invoke(stop, [agent_name], obj=plugin_manager, catch_exceptions=False)
     assert stop_result.exit_code == 0, f"Stop failed with: {stop_result.output}"
 
-    # With skip_agent_state_check=True, should find the stopped agent
     result = find_agent_for_command(
         mngr_ctx=temp_mngr_ctx,
         address=AgentAddress(agent=AgentName(agent_name)),
         host_filter=None,
-        is_start_desired=True,
-        skip_agent_state_check=True,
     )
 
     assert result is not None
-    agent, host = result
+    host_ref, agent_ref = result
+    agent, host = ensure_host_started_and_resolve_agent(
+        host_ref=host_ref,
+        agent_ref=agent_ref,
+        allow_auto_start=True,
+        mngr_ctx=temp_mngr_ctx,
+    )
     assert isinstance(agent, AgentInterface)
     assert isinstance(host, OnlineHostInterface)
     assert agent.name == AgentName(agent_name)
 
 
 @pytest.mark.tmux
-def test_find_agent_for_command_raises_for_stopped_agent_without_skip(
+def test_ensure_host_and_agent_started_raises_for_stopped_agent_without_auto_start(
     cli_runner: CliRunner,
     create_test_agent,
     plugin_manager: pluggy.PluginManager,
     temp_mngr_ctx: MngrContext,
 ) -> None:
-    """find_agent_for_command without skip_agent_state_check raises for stopped agent.
+    """ensure_host_and_agent_started raises for a stopped agent when allow_auto_start=False.
 
-    Verifies the default behavior: when skip_agent_state_check is False
-    (the default), a stopped agent causes UserInputError.
+    Verifies the default behavior for commands that require the agent to
+    be running (connect, capture): a stopped agent causes UserInputError
+    when auto-start is disabled.
     """
     agent_name = f"test-find-stopped-err-{int(time.time())}"
     create_test_agent(agent_name, "sleep 564741")
@@ -125,10 +133,18 @@ def test_find_agent_for_command_raises_for_stopped_agent_without_skip(
     stop_result = cli_runner.invoke(stop, [agent_name], obj=plugin_manager, catch_exceptions=False)
     assert stop_result.exit_code == 0, f"Stop failed with: {stop_result.output}"
 
-    # Without skip_agent_state_check, should raise for stopped agent
+    result = find_agent_for_command(
+        mngr_ctx=temp_mngr_ctx,
+        address=AgentAddress(agent=AgentName(agent_name)),
+        host_filter=None,
+    )
+    assert result is not None
+    host_ref, agent_ref = result
+
     with pytest.raises(UserInputError, match="stopped and automatic starting is disabled"):
-        find_agent_for_command(
+        ensure_host_and_agent_started(
+            host_ref=host_ref,
+            agent_ref=agent_ref,
+            allow_auto_start=False,
             mngr_ctx=temp_mngr_ctx,
-            address=AgentAddress(agent=AgentName(agent_name)),
-            host_filter=None,
         )
