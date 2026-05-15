@@ -1024,7 +1024,7 @@ mngr create my-task --provider modal --pass-host-env MODAL_TOKEN_ID --pass-host-
 
 # control mngr itself via environment variables. All config options can be set this way, use double-underscore ("__")
 # in order to index into the nested config structure. For example, to set the provider to "modal" for a create command:
-export MNGR_COMMANDS__CREATE__PROVIDER=modal
+export MNGR__COMMANDS__CREATE__PROVIDER=modal
 mngr create my-task
 
 ##############################################################################
