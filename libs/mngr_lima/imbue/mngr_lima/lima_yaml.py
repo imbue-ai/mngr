@@ -54,8 +54,7 @@ def generate_default_lima_yaml(
         host_private_key_pem: Optional pre-generated SSH host private key (OpenSSH PEM format).
             When provided alongside host_public_key_openssh, the guest's sshd is configured
             to use this key as its ed25519 host key, eliminating the ssh-keyscan race during
-            VM bring-up. Mirrors the cloud-init ssh_keys injection pattern used by
-            mngr_vps_docker, adapted to Lima's provision-script surface.
+            VM bring-up.
         host_public_key_openssh: Optional matching public key (single-line OpenSSH format,
             e.g. ``ssh-ed25519 AAAA...``).
     """

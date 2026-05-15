@@ -157,8 +157,7 @@ class LimaProviderInstance(BaseProviderInstance):
         """Directory holding this host's pre-injected sshd host keypair.
 
         Per-host (not per-provider) so each VM has its own identity and removing
-        a host cleanly leaves no shared state. Mirrors mngr_vps_docker's
-        pre-injected sshd host-key layout.
+        a host cleanly leaves no shared state.
         """
         return self._keys_dir / "hosts" / str(host_id)
 
@@ -168,14 +167,7 @@ class LimaProviderInstance(BaseProviderInstance):
         return host_keys_dir / _HOST_KEY_NAME, host_keys_dir / f"{_HOST_KEY_NAME}.pub"
 
     def _host_known_hosts_path(self, host_id: HostId) -> Path:
-        """Path to this host's known_hosts file.
-
-        Per-host (not per-provider) so each VM's entry is isolated. Every Lima VM
-        shares the 127.0.0.1 hostname and the forwarded port is reassigned on
-        each restart, so a shared file would accumulate dead [127.0.0.1]:<old>
-        lines; a per-host file is just rewritten in place. Lives under the
-        per-host keys dir, so delete_host's rmtree already cleans it up.
-        """
+        """Path to this host's per-host known_hosts file, under its keys dir."""
         return self._host_keys_dir(host_id) / "known_hosts"
 
     def _ensure_host_keypair(self, host_id: HostId) -> tuple[str, str]:
