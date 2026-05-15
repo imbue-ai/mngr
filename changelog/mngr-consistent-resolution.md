@@ -5,15 +5,15 @@ interfaces they operate on. The "find" stage (discovery + matching against
 the address) is now strictly separate from the "ensure live" stage (bringing
 the host online, looking up the live agent, optionally starting it).
 
-Two new helpers in `imbue.mngr.cli.agent_utils` replace the previous
+Two new helpers in `imbue.mngr.api.find` replace the previous
 `is_start_desired` / `skip_agent_state_check` flags on
 `find_one_agent` / `find_agent_for_command`:
 
-- `ensure_host_started_and_resolve_agent`: bring the host online and resolve
+- `resolve_to_started_host_and_agent`: bring the host online and resolve
   the agent ref to an `AgentInterface` without checking the agent's
   lifecycle state. Used by `push`, `pull`, `provision`, and `rename`.
-- `ensure_host_and_agent_started`: as above, but also require / auto-start
-  the agent process. Used by `connect` and `capture`.
+- `resolve_to_started_host_and_running_agent`: as above, but also
+  require / auto-start the agent process. Used by `connect` and `capture`.
 
 Both helpers take a single `allow_auto_start` flag (driven by `--start`).
 
