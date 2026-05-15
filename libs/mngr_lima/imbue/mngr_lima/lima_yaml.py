@@ -120,8 +120,7 @@ mkdir -p /run/sshd
 # Lima VMs run as a regular user, not root, so /code must be pre-created.
 mkdir -p /code && chmod 777 /code
 
-# Install the caller-provided sshd host key (when given). Written
-# unconditionally; sshd is restarted below if it changed.
+# Install the caller-provided sshd host key (when given).
 SSH_KEY_CHANGED=0
 {host_key_block}
 
