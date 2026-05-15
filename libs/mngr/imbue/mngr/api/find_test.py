@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 from pydantic import Field
 
+from imbue.imbue_common.model_update import to_update
 from imbue.mngr.agents.base_agent import BaseAgent
 from imbue.mngr.api.address_parsers import parse_hosted_location
 from imbue.mngr.api.find import AgentMatch
@@ -1004,13 +1005,18 @@ def test_ensure_agent_started_uses_per_agent_ready_timeout(
 
 
 @pytest.mark.tmux
-def test_ensure_agent_started_respects_env_var_when_data_unset(
+def test_ensure_agent_started_respects_config_when_data_unset(
     local_provider: LocalProviderInstance,
     temp_work_dir: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """ensure_agent_started must honor MNGR_AGENT_READY_TIMEOUT when data.json has no override."""
-    monkeypatch.setenv("MNGR_AGENT_READY_TIMEOUT", "37.5")
+    """ensure_agent_started must fall back to MngrConfig.agent_ready_timeout when data.json has no override."""
+    base_ctx = local_provider.mngr_ctx
+    new_config = base_ctx.config.model_copy_update(
+        to_update(base_ctx.config.field_ref().agent_ready_timeout, 37.5),
+    )
+    local_provider.mngr_ctx = base_ctx.model_copy_update(
+        to_update(base_ctx.field_ref().config, new_config),
+    )
     agent = create_test_agent(
         local_provider,
         temp_work_dir,
