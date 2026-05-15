@@ -1,0 +1,1 @@
+Add an OVH Cloud provider plugin (`mngr_ovh`) for running mngr agents in Docker containers on OVH Public Cloud VPS instances. Mirrors the structure of `mngr_vultr` on top of the `mngr_vps_docker` base.
