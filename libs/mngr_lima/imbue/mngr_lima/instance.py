@@ -257,10 +257,8 @@ class LimaProviderInstance(BaseProviderInstance):
         ssh_config: LimaSshConfig,
     ) -> Host:
         """Create a Host object from SSH connection info."""
-        # Add the host to known_hosts. This rewrites the per-host known_hosts
-        # file wholesale on every create/start/get_host, so when a Lima restart
-        # reassigns the forwarded port, the current [127.0.0.1]:<port> entry
-        # just replaces the old one -- no stale entry, no scan needed.
+        # Add the host to known_hosts. Re-run on every create/start/get_host
+        # because Lima reassigns the forwarded port across restarts.
         self._record_pre_injected_host_key(host_id, ssh_config.hostname, ssh_config.port)
 
         pyinfra_host = create_pyinfra_host(
@@ -284,13 +282,9 @@ class LimaProviderInstance(BaseProviderInstance):
         )
 
     def _record_pre_injected_host_key(self, host_id: HostId, hostname: str, port: int) -> None:
-        """(Re)write this host's known_hosts file from its pre-injected public key.
+        """Write this host's known_hosts file from its pre-injected public key.
 
-        The file is rewritten wholesale -- it only ever needs the single current
-        hostname:port entry. Lima reassigns the forwarded port on every restart,
-        so an append-style update would leave stale lines behind; a one-line
-        rewrite cannot. The write goes through ``atomic_write`` (temp file +
-        fsync + rename) so a concurrent reader never sees a partial file.
+        Uses atomic_write so a concurrent reader never sees a partial file.
         """
         _, public_key_path = self._host_keypair_paths(host_id)
         public_key = public_key_path.read_text().strip()
