@@ -22,7 +22,6 @@ from imbue.mngr.primitives import CommandString
 from imbue.mngr_gemini import resources as _gemini_resources
 from imbue.mngr_gemini.gemini_config import build_permission_auto_allow_hooks_config
 from imbue.mngr_gemini.gemini_config import build_readiness_hooks_config
-from imbue.mngr_gemini.gemini_config import merge_hooks_config
 
 _COMMON_TRANSCRIPT_SCRIPT_NAME = "common_transcript.sh"
 
@@ -199,12 +198,20 @@ class GeminiAgent(InteractiveTuiAgent[GeminiAgentConfig], HasCommonTranscriptMix
         ``BeforeTool`` wildcard hook that auto-approves every tool call.
         Because mngr owns this file outright (it lives in the per-agent state
         dir), no merge logic is needed: each provision run rewrites it. The
-        ``merge_hooks_config`` helper is still used here so multiple hook
-        builders compose without overwriting each other's event lists.
+        two builders write to disjoint hook-event keys (``SessionStart`` vs
+        ``BeforeTool``), so they compose by simple dict update; the assert
+        guards against a future builder accidentally re-using an event name
+        and silently overwriting another's entries.
         """
         settings = build_readiness_hooks_config()
         if self.agent_config.auto_allow_permissions:
-            settings = merge_hooks_config(settings, build_permission_auto_allow_hooks_config()) or settings
+            extra = build_permission_auto_allow_hooks_config()
+            for event_name, event_hooks in extra["hooks"].items():
+                assert event_name not in settings["hooks"], (
+                    f"Hook event {event_name!r} is configured by multiple builders; "
+                    "merge them through gemini_config.merge_hooks_config instead."
+                )
+                settings["hooks"][event_name] = event_hooks
         host.write_text_file(self._get_system_settings_path(), json.dumps(settings, indent=2) + "\n")
 
     def assemble_command(
