@@ -63,12 +63,6 @@ class AIProvider(UpperCaseStrEnum):
     SUBSCRIPTION = auto()
 
 
-class AgentName(NonEmptyStr):
-    """User-chosen name for an agent."""
-
-    ...
-
-
 class OneTimeCode(NonEmptyStr):
     """A single-use authentication code for workspace access."""
 

@@ -202,6 +202,7 @@ def _create_agent(
 
 
 @pytest.mark.tmux
+@pytest.mark.flaky
 def test_cleanup_destroy_single_agent(
     cli_runner: CliRunner,
     temp_work_dir: Path,

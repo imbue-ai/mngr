@@ -365,7 +365,7 @@ class ImbueCloudProvider(BaseProviderInstance):
         return [
             DiscoveredHost(
                 host_id=HostId(entry.host_id),
-                host_name=HostName(entry.host_id),
+                host_name=HostName(entry.host_name),
                 provider_name=self.name,
                 host_state=HostState.RUNNING,
             )
@@ -409,7 +409,7 @@ class ImbueCloudProvider(BaseProviderInstance):
                 fallback_state = HostState.UNAUTHENTICATED if is_auth_failure else HostState.CRASHED
                 host_ref = DiscoveredHost(
                     host_id=host_id,
-                    host_name=HostName(entry.host_id),
+                    host_name=HostName(entry.host_name),
                     provider_name=self.name,
                     host_state=fallback_state,
                 )
@@ -433,9 +433,12 @@ class ImbueCloudProvider(BaseProviderInstance):
             host_state = _derive_host_state_from_raw(raw)
             if host_state == HostState.DESTROYED and not include_destroyed:
                 continue
+            # ``entry.host_name`` is the canonical user-supplied name from the
+            # connector. On-host certified data may lag (e.g. the bake's
+            # initial value before a lease overwrites it), so the lease wins.
             host_ref = DiscoveredHost(
                 host_id=host_id,
-                host_name=HostName(_certified_host_name(raw) or entry.host_id),
+                host_name=HostName(entry.host_name),
                 provider_name=self.name,
                 host_state=host_state,
             )
@@ -678,12 +681,14 @@ class ImbueCloudProvider(BaseProviderInstance):
             datetime.fromtimestamp(ssh_activity_mtime, tz=timezone.utc) if ssh_activity_mtime is not None else None
         )
         # ``certified_data`` is the host-level data.json the pool host
-        # baked at provision time. It carries name, image, idle settings,
-        # tags, plugin state, etc. -- richer than what the lease object
-        # alone tells us. Fall back to lease-level defaults when the
-        # remote read produced an empty dict.
+        # baked at provision time. It carries image, idle settings, tags,
+        # plugin state, etc. -- richer than what the lease object alone
+        # tells us. For the friendly name we trust the lease (the
+        # connector-side canonical, mutable per-lease) rather than the
+        # baked-in certified data, which may still hold the bake-time
+        # placeholder.
         certified = raw.get("certified_data") or {}
-        host_name_str = certified.get("host_name") or lease.host_id
+        host_name_str = lease.host_name
         image = certified.get("image", "")
         tags = dict(certified.get("user_tags", {}))
         plugin = dict(certified.get("plugin", {}))
@@ -819,7 +824,7 @@ class ImbueCloudProvider(BaseProviderInstance):
         connector = PyinfraConnector(pyinfra_host)
         host = ImbueCloudHost(
             id=host_id,
-            host_name=HostName(lease.host_id),
+            host_name=HostName(lease.host_name),
             connector=connector,
             provider_instance=self,
             mngr_ctx=self.mngr_ctx,
@@ -837,7 +842,7 @@ class ImbueCloudProvider(BaseProviderInstance):
         for entry in leased:
             if isinstance(host, HostId) and entry.host_id == str(host):
                 return self._build_host_object(entry)
-            if isinstance(host, HostName) and entry.host_id == str(host):
+            if isinstance(host, HostName) and entry.host_name == str(host):
                 return self._build_host_object(entry)
         raise HostNotFoundError(host)
 
@@ -855,7 +860,7 @@ class ImbueCloudProvider(BaseProviderInstance):
         now = datetime.now(timezone.utc)
         certified_host_data = CertifiedHostData(
             host_id=str(host_id),
-            host_name=lease.host_id,
+            host_name=lease.host_name,
             created_at=now,
             updated_at=now,
         )
@@ -940,7 +945,10 @@ class ImbueCloudProvider(BaseProviderInstance):
         tmp_private_key, tmp_public_key = save_ssh_keypair(tmp_key_dir, "ssh_key")
         public_key_text = tmp_public_key.read_text().strip()
 
-        lease_result = self.client.lease_host(token, attributes, public_key_text)
+        # ``name`` is the user-supplied HostName; send it to the connector so
+        # the leased pool row carries the same friendly name minds renders to
+        # the user. The connector validates it server-side too.
+        lease_result = self.client.lease_host(token, attributes, public_key_text, str(name))
         self.reset_caches()
 
         host_id = HostId(lease_result.host_id)
@@ -992,6 +1000,7 @@ class ImbueCloudProvider(BaseProviderInstance):
             container_ssh_port=lease_result.container_ssh_port,
             agent_id=lease_result.agent_id,
             host_id=lease_result.host_id,
+            host_name=lease_result.host_name,
             attributes=lease_result.attributes,
             leased_at="",
         )

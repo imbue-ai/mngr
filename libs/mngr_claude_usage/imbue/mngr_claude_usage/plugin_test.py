@@ -120,9 +120,9 @@ def test_provision_creates_shim_writer_and_settings_local(local_host: Host, tmp_
     _provision_statusline_shim(local_host, state_dir, work_dir)
     commands = state_dir / "commands"
     assert (commands / "claude_statusline.sh").is_file()
-    assert (commands / "claude_rate_limits_writer.sh").is_file()
+    assert (commands / "claude_usage_writer.sh").is_file()
     assert (commands / "claude_statusline.sh").stat().st_mode & 0o111
-    assert (commands / "claude_rate_limits_writer.sh").stat().st_mode & 0o111
+    assert (commands / "claude_usage_writer.sh").stat().st_mode & 0o111
     settings = json.loads((work_dir / ".claude" / "settings.local.json").read_text())
     assert settings["statusLine"]["command"] == str(commands / "claude_statusline.sh")
     sidecar = commands / "user_statusline_cmd"

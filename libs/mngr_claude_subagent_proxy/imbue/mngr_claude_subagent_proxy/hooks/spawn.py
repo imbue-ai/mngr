@@ -28,6 +28,8 @@ from imbue.mngr_claude_subagent_proxy.hook_io import emit_depth_limit_deny
 from imbue.mngr_claude_subagent_proxy.hook_io import emit_json_response
 from imbue.mngr_claude_subagent_proxy.hook_io import parse_int_env
 from imbue.mngr_claude_subagent_proxy.hook_io import read_hook_stdin_json
+from imbue.mngr_claude_subagent_proxy.hooks.agent_definitions import AgentDefinition
+from imbue.mngr_claude_subagent_proxy.hooks.agent_definitions import resolve_agent_definition
 from imbue.mngr_claude_subagent_proxy.mngr_binary import get_mngr_command_shell_form
 
 _PASS_THROUGH_RESPONSE: Final[dict[str, Any]] = {
@@ -194,6 +196,31 @@ def build_wait_script(tool_use_id: str, target_name: str, parent_cwd: str) -> st
     )
 
 
+def compose_typed_prompt(subagent_type: str, definition: AgentDefinition, orig_prompt: str) -> str:
+    """Compose a typed-subagent prompt file body: agent system prompt + parent task.
+
+    Claude Code's typed-Task contract is to spawn the subagent with the
+    definition's body as its system prompt. The mngr proxy flow only
+    has one input channel (``mngr create --message-file``), so we
+    inline the system prompt into the same file under a clearly-marked
+    section header, followed by the parent's prompt under its own
+    header. The spawned mngr subagent reads both as a single initial
+    message and behaves as if the system prompt had been injected
+    natively. Tool restrictions declared in the frontmatter are NOT
+    honored here -- see ``agent_definitions`` for the v1 limitation.
+    """
+    return (
+        f"# System prompt for subagent_type {subagent_type!r}\n"
+        f"# (resolved from {definition.path})\n"
+        f"\n"
+        f"{definition.body.rstrip()}\n"
+        f"\n"
+        f"# Task from parent\n"
+        f"\n"
+        f"{orig_prompt}"
+    )
+
+
 def _write_secure_file(path: Path, content: str) -> None:
     """Write content to path with 0600 perms, creating parents as needed."""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -277,8 +304,21 @@ def run(stdin: TextIO, stdout: TextIO) -> None:
     map_file = map_dir / f"{tool_use_id}.json"
     script_file = cmd_dir / f"wait-{tool_use_id}.sh"
 
+    # Typed-subagent contract: when ``orig_subagent_type`` resolves to a
+    # Claude Code agent definition on disk, prepend its body (the spawned
+    # subagent's system prompt) to the prompt file. Built-in / unknown
+    # types resolve to None and the prompt file gets the parent's raw
+    # prompt unchanged -- same behavior the proxy had before this change.
+    definition = resolve_agent_definition(orig_subagent_type, Path(parent_cwd))
+    if definition is None:
+        prompt_file_content = orig_prompt
+        resolved_path_str: str | None = None
+    else:
+        prompt_file_content = compose_typed_prompt(orig_subagent_type, definition, orig_prompt)
+        resolved_path_str = str(definition.path)
+
     try:
-        _write_secure_file(prompt_file, orig_prompt)
+        _write_secure_file(prompt_file, prompt_file_content)
     except OSError as e:
         logger.warning("spawn: failed to write prompt file {}: {}", prompt_file, e)
         _emit_pass_through(stdout)
@@ -287,6 +327,7 @@ def run(stdin: TextIO, stdout: TextIO) -> None:
     map_payload = {
         "target_name": target_name,
         "subagent_type": orig_subagent_type,
+        "subagent_type_resolved_path": resolved_path_str,
         "parent_cwd": parent_cwd,
         "run_in_background": orig_run_bg,
     }

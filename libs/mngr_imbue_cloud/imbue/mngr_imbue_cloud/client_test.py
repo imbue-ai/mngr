@@ -43,7 +43,7 @@ def test_lease_host_503_raises_unavailable(monkeypatch: pytest.MonkeyPatch) -> N
     monkeypatch.setattr(httpx, "post", fake_post)
     client = ImbueCloudConnectorClient(base_url=AnyUrl("https://example.com"))
     with pytest.raises(ImbueCloudLeaseUnavailableError):
-        client.lease_host(SecretStr("tok"), LeaseAttributes(cpus=2), "ssh-ed25519 AAAA")
+        client.lease_host(SecretStr("tok"), LeaseAttributes(cpus=2), "ssh-ed25519 AAAA", "my-host")
 
 
 def test_lease_host_success_parses_response(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -51,6 +51,7 @@ def test_lease_host_success_parses_response(monkeypatch: pytest.MonkeyPatch) -> 
         body = _json.loads(request.content)
         assert body["attributes"] == {"cpus": 2}
         assert body["ssh_public_key"] == "ssh-ed25519 AAAA"
+        assert body["host_name"] == "my-host"
         return httpx.Response(
             200,
             json={
@@ -61,6 +62,7 @@ def test_lease_host_success_parses_response(monkeypatch: pytest.MonkeyPatch) -> 
                 "container_ssh_port": 2222,
                 "agent_id": "agent-abc",
                 "host_id": "host-xyz",
+                "host_name": "my-host",
                 "attributes": {"cpus": 2},
             },
         )
@@ -73,9 +75,10 @@ def test_lease_host_success_parses_response(monkeypatch: pytest.MonkeyPatch) -> 
 
     monkeypatch.setattr(httpx, "post", fake_post)
     client = ImbueCloudConnectorClient(base_url=AnyUrl("https://example.com"))
-    result = client.lease_host(SecretStr("tok"), LeaseAttributes(cpus=2), "ssh-ed25519 AAAA")
+    result = client.lease_host(SecretStr("tok"), LeaseAttributes(cpus=2), "ssh-ed25519 AAAA", "my-host")
     assert result.vps_ip == "10.0.0.1"
     assert result.agent_id == "agent-abc"
+    assert result.host_name == "my-host"
     assert result.attributes == {"cpus": 2}
 
 
@@ -108,7 +111,7 @@ def test_500_lease_raises_connector_error(monkeypatch: pytest.MonkeyPatch) -> No
     monkeypatch.setattr(httpx, "post", fake_post)
     client = ImbueCloudConnectorClient(base_url=AnyUrl("https://example.com"))
     with pytest.raises(ImbueCloudConnectorError):
-        client.lease_host(SecretStr("tok"), LeaseAttributes(cpus=1), "ssh-ed25519 X")
+        client.lease_host(SecretStr("tok"), LeaseAttributes(cpus=1), "ssh-ed25519 X", "my-host")
 
 
 # -- AuthPolicy translation --
