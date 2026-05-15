@@ -2,6 +2,7 @@ import json
 import os
 import subprocess
 import tomllib
+import typing
 from collections.abc import MutableMapping
 from enum import auto
 from pathlib import Path
@@ -964,11 +965,19 @@ def _walk_schema(
 
 
 def _render_annotation(annotation: Any) -> str:
-    """Best-effort string for an annotation; falls back to ``repr`` for exotic
-    types so the output is informative without trying to be exhaustive.
+    """Best-effort string for an annotation.
+
+    Parameterised generics like ``list[str]`` carry a useful type parameter
+    that ``__name__`` discards (it would return just ``"list"``), so for any
+    annotation that has generic args or origin we use ``repr`` -- which
+    renders as ``list[str]``, ``dict[str, Path]``, ``str | None``, etc.
+    Plain classes (``str``, ``Path``, ``int``) still use ``__name__`` for the
+    short, familiar form.
     """
     if annotation is None:
         return "None"
+    if typing.get_args(annotation) or typing.get_origin(annotation) is not None:
+        return repr(annotation)
     name = getattr(annotation, "__name__", None)
     if name:
         return name

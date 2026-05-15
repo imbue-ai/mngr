@@ -409,3 +409,31 @@ def test_config_path_with_json_format(
     output = json.loads(result.output)
     assert "paths" in output
     assert len(output["paths"]) > 0
+
+
+def test_config_schema_preserves_generic_type_parameters(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """`mngr config schema` should render parameterised generics with their args.
+
+    Regression test: ``_render_annotation`` previously returned just ``"list"``
+    for ``list[str]`` (via ``__name__``), losing the type parameter -- which
+    defeats the schema's purpose of telling users what values a setting takes.
+    The renderer must emit ``"list[str]"`` (or equivalent) for parameterised
+    annotations.
+    """
+    result = cli_runner.invoke(
+        config,
+        ["schema", "--format", "json"],
+        obj=plugin_manager,
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 0
+    output = json.loads(result.output)
+    rows_by_key = {row["key"]: row for row in output["schema"]}
+    # ``unset_vars: list[str]`` should keep the [str] in the rendered type.
+    unset_vars_type = rows_by_key["unset_vars"]["type"]
+    assert "list" in unset_vars_type and "str" in unset_vars_type, (
+        f"expected unset_vars type to mention both 'list' and 'str', got: {unset_vars_type!r}"
+    )
