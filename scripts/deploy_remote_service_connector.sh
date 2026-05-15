@@ -71,6 +71,19 @@ uv run python "$repo_root/scripts/push_modal_secrets.py" "$tier" \
     litellm-connector \
     paid-accounts
 
+# Modal won't auto-create the env on deploy; create it idempotently so
+# operators don't have to remember a separate step on the first deploy
+# of a new env.
+echo "==> Ensuring Modal environment '${modal_env}' exists..."
+if ! env_create_output=$(uv run modal environment create "$modal_env" 2>&1); then
+    if echo "$env_create_output" | grep -qi "already exists"; then
+        echo "    (already exists)"
+    else
+        echo "$env_create_output" >&2
+        exit 1
+    fi
+fi
+
 export MNGR_DEPLOY_ENV="$tier"
 
 echo "==> Deploying remote-service-connector-${tier} to workspace='${modal_workspace}', env='${modal_env}'..."
