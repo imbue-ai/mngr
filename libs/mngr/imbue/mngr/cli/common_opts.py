@@ -380,16 +380,6 @@ def _process_template_escapes(template: str) -> str:
 
 
 @pure
-def _parse_setting_value(value_str: str) -> Any:
-    """Parse a setting value string into the appropriate Python type.
-
-    Thin wrapper over ``parse_scalar_value`` so ``--setting`` value semantics
-    stay in lockstep with TOML / env-var / ``mngr config set`` parsing.
-    """
-    return parse_scalar_value(value_str)
-
-
-@pure
 def apply_settings_to_config(
     config: MngrConfig,
     settings: Sequence[str],
@@ -418,7 +408,7 @@ def apply_settings_to_config(
         key_path = key_path.strip()
         if not key_path:
             raise UserInputError("Invalid --setting: key cannot be empty")
-        parsed_value = _parse_setting_value(value_str)
+        parsed_value = parse_scalar_value(value_str)
         set_at_path(raw, key_path.split("."), parsed_value)
 
     resolved = resolve_extends(config, raw)

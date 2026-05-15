@@ -850,15 +850,6 @@ def parse_config(
 # =============================================================================
 
 
-def _parse_env_value(value_str: str) -> Any:
-    """Parse a ``MNGR__*`` env var value, mirroring ``--setting`` semantics.
-
-    Thin wrapper over ``parse_scalar_value`` so the env-var path stays in
-    lockstep with TOML / ``--setting`` / ``mngr config`` value parsing.
-    """
-    return parse_scalar_value(value_str)
-
-
 def _env_segments_to_key_path(segments: list[str]) -> list[str]:
     """Convert lowercased env-var segments into raw-dict key path segments.
 
@@ -890,7 +881,7 @@ def _parse_mngr_env_overrides(environ: Mapping[str, str]) -> dict[str, Any]:
         suffix = env_key[len(_ENV_OVERRIDE_PREFIX) :]
         segments = [seg.lower() for seg in suffix.split("__")]
         key_path = _env_segments_to_key_path(segments)
-        set_at_path(raw, key_path, _parse_env_value(env_value))
+        set_at_path(raw, key_path, parse_scalar_value(env_value))
     return raw
 
 

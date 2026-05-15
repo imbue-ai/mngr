@@ -140,15 +140,6 @@ def _unset_nested_value(doc: tomlkit.TOMLDocument, key_path: str) -> bool:
     return False
 
 
-def _parse_value(value_str: str) -> Any:
-    """Parse a string value into the appropriate type.
-
-    Thin wrapper over ``parse_scalar_value`` so ``mngr config set/extend``
-    value semantics stay in lockstep with TOML / env-var / ``--setting``.
-    """
-    return parse_scalar_value(value_str)
-
-
 def _format_value_for_display(value: Any) -> str:
     """Format a value for human-readable display."""
     if isinstance(value, bool):
@@ -546,7 +537,7 @@ def _config_set_impl(ctx: click.Context, key: str, value: str, **kwargs: Any) ->
     doc = load_config_file_tomlkit(config_path)
 
     # Parse and set the value
-    parsed_value = _parse_value(value)
+    parsed_value = parse_scalar_value(value)
     set_nested_value(doc, key, parsed_value)
 
     # Validate the resulting config (resolving any ``__extend`` keys already in
@@ -589,7 +580,7 @@ def _config_extend_impl(ctx: click.Context, key: str, value: str, **kwargs: Any)
     config_path = get_config_path(scope, root_name, mngr_ctx.profile_dir, mngr_ctx.concurrency_group)
 
     doc = load_config_file_tomlkit(config_path)
-    parsed_value = _parse_value(value)
+    parsed_value = parse_scalar_value(value)
     extend_key = f"{key}{EXTEND_SUFFIX}"
     set_nested_value(doc, extend_key, parsed_value)
 
