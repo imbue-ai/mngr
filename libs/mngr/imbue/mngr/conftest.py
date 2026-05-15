@@ -1,5 +1,6 @@
 import importlib.metadata
 import os
+import shutil
 import subprocess
 import sys
 from datetime import datetime
@@ -20,6 +21,7 @@ from urwid.widget.listbox import SimpleFocusListWalker
 
 import imbue.mngr.main
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.mngr.agents.agent_registry import load_agents_from_plugins
 from imbue.mngr.agents.agent_registry import reset_agent_registry
 from imbue.mngr.api.providers import reset_provider_instances
@@ -452,6 +454,80 @@ def isolated_mngr_venv(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     (venv_dir / "uv-receipt.toml").write_text(receipt_content)
 
     return venv_dir
+
+
+class MinimalInstallEnv(FrozenModel):
+    """A fresh mngr install in an isolated venv, with subprocess env and git repo."""
+
+    venv_dir: Path
+    env: dict[str, str]
+    repo_dir: Path
+
+    def run_mngr(self, args: list[str]) -> subprocess.CompletedProcess[str]:
+        """Run the venv's mngr binary with the given arguments."""
+        mngr_bin = str(self.venv_dir / "bin" / "mngr")
+        return subprocess.run(
+            [mngr_bin, *args],
+            capture_output=True,
+            text=True,
+            cwd=self.repo_dir,
+            env=self.env,
+            timeout=30,
+        )
+
+    def run_python(self, script: str) -> subprocess.CompletedProcess[str]:
+        """Run a Python script in the isolated venv."""
+        python_bin = str(self.venv_dir / "bin" / "python")
+        return subprocess.run(
+            [python_bin, "-c", script],
+            capture_output=True,
+            text=True,
+            cwd=self.repo_dir,
+            env=self.env,
+            timeout=30,
+        )
+
+
+@pytest.fixture
+def minimal_install_env(
+    isolated_mngr_venv: Path,
+    temp_host_dir: Path,
+    mngr_test_root_name: str,
+    tmp_path: Path,
+) -> MinimalInstallEnv:
+    """Provide a fresh mngr install in an isolated venv for install tests.
+
+    The venv is built from the workspace (not the dev venv), so it exercises
+    the real install path: entry points, dependency resolution, etc.
+
+    The subprocess environment is intentionally minimal (not inherited from
+    the parent process). PATH contains only the venv bin and the directories
+    of mngr's declared system dependencies (from scripts/install.sh: git,
+    tmux, jq, curl, ssh, rsync). This catches code that depends on tools from the
+    developer's environment (e.g. the modal CLI being on PATH).
+    """
+    # Build PATH from only the venv and the directories containing mngr's
+    # declared system dependencies (from scripts/install.sh). This mirrors
+    # what a user would have after running install.sh.
+    system_deps = ["git", "tmux", "jq", "curl", "ssh", "rsync"]
+    dep_dirs: set[str] = set()
+    for dep in system_deps:
+        dep_path = shutil.which(dep)
+        if dep_path is not None:
+            dep_dirs.add(str(Path(dep_path).parent))
+    system_path = ":".join(sorted(dep_dirs))
+
+    env = {
+        "PATH": f"{isolated_mngr_venv / 'bin'}:{system_path}",
+        "HOME": str(temp_host_dir.parent),
+        "MNGR_HOST_DIR": str(temp_host_dir),
+        "MNGR_ROOT_NAME": mngr_test_root_name,
+    }
+
+    repo_dir = tmp_path / "repo"
+    init_git_repo(repo_dir)
+
+    return MinimalInstallEnv(venv_dir=isolated_mngr_venv, env=env, repo_dir=repo_dir)
 
 
 @pytest.fixture
