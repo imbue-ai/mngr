@@ -124,6 +124,17 @@ def load_or_create_host_keypair(key_dir: Path, key_name: str = "host_key") -> tu
     return private_key_path, public_key_openssh
 
 
+def format_known_hosts_host_pattern(hostname: str, port: int) -> str:
+    """Format a host:port pair as the leading field of an OpenSSH known_hosts line.
+
+    OpenSSH expects a bare hostname for the default SSH port and a ``[host]:port``
+    bracketed form for any non-default port.
+    """
+    if port == 22:
+        return hostname
+    return f"[{hostname}]:{port}"
+
+
 def clear_host_from_known_hosts(
     known_hosts_path: Path,
     hostname: str,
@@ -137,10 +148,7 @@ def clear_host_from_known_hosts(
     if not known_hosts_path.exists():
         return
 
-    if port == 22:
-        host_pattern = hostname
-    else:
-        host_pattern = f"[{hostname}]:{port}"
+    host_pattern = format_known_hosts_host_pattern(hostname, port)
 
     with open(known_hosts_path, "a+") as f:
         fcntl.flock(f.fileno(), fcntl.LOCK_EX)
@@ -171,11 +179,7 @@ def add_host_to_known_hosts(
     """
     known_hosts_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # Format the host entry - use [host]:port format for non-standard ports
-    if port == 22:
-        host_pattern = hostname
-    else:
-        host_pattern = f"[{hostname}]:{port}"
+    host_pattern = format_known_hosts_host_pattern(hostname, port)
 
     # The public key should already be in OpenSSH format: "ssh-ed25519 AAAA..."
     entry = f"{host_pattern} {public_key}\n"
