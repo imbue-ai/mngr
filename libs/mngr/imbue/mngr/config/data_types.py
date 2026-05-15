@@ -549,7 +549,8 @@ class MngrConfig(FrozenModel):
     )
     completion_cache_dir: Path | None = Field(
         default=None,
-        description="Directory for tab completion cache files. When None, uses the mngr host directory.",
+        description="Directory for tab completion cache files. When None, falls back to MNGR__COMPLETION_CACHE_DIR "
+        "and then to the mngr host directory.",
     )
 
     def merge_with(self, override: Self) -> Self:

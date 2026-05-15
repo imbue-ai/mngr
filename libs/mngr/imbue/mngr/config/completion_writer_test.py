@@ -6,6 +6,7 @@ from pathlib import Path
 import click
 import pytest
 
+from imbue.imbue_common.model_update import to_update
 from imbue.mngr.agents.agent_registry import list_registered_agent_types
 from imbue.mngr.config.completion_cache import COMPLETION_CACHE_FILENAME
 from imbue.mngr.config.completion_cache import get_completion_cache_dir
@@ -43,6 +44,49 @@ def test_get_completion_cache_dir_falls_back_to_default_host_dir(
     result = get_completion_cache_dir()
     assert result == tmp_path / "default_host"
     assert result.exists()
+
+
+def test_get_completion_cache_dir_prefers_config_value(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """An explicit config_value should win over the env var and host-dir fallback.
+
+    Locks in that ``MngrConfig.completion_cache_dir`` (from settings.toml or
+    ``MNGR__COMPLETION_CACHE_DIR`` resolved into the parsed config) actually
+    drives the on-disk cache location.
+    """
+    env_dir = tmp_path / "env_cache"
+    config_dir = tmp_path / "config_cache"
+    monkeypatch.setenv("MNGR__COMPLETION_CACHE_DIR", str(env_dir))
+    result = get_completion_cache_dir(config_dir)
+    assert result == config_dir
+    assert config_dir.exists()
+    assert not env_dir.exists()
+
+
+def test_write_cli_completions_cache_honors_config_completion_cache_dir(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """The writer should write to ``mngr_ctx.config.completion_cache_dir`` when set.
+
+    Regression test: previously the writer always called
+    ``get_completion_cache_dir()`` without consulting the config, so a user who
+    set ``completion_cache_dir = "/foo"`` in ``settings.toml`` was silently
+    ignored.
+    """
+    target_dir = tmp_path / "from_config"
+    monkeypatch.delenv("MNGR__COMPLETION_CACHE_DIR", raising=False)
+    new_config = temp_mngr_ctx.config.model_copy_update(
+        to_update(temp_mngr_ctx.config.field_ref().completion_cache_dir, target_dir),
+    )
+    new_ctx = temp_mngr_ctx.model_copy_update(
+        to_update(temp_mngr_ctx.field_ref().config, new_config),
+    )
+
+    group = click.Group(name="test", commands={"list": click.Command("list")})
+    write_cli_completions_cache(cli_group=group, mngr_ctx=new_ctx)
+
+    assert (target_dir / COMPLETION_CACHE_FILENAME).exists()
 
 
 def test_write_cli_completions_cache_handles_oserror(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
