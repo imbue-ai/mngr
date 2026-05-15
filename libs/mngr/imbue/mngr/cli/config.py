@@ -63,7 +63,10 @@ class ConfigCliOptions(CommonCliOptions):
     For that information, see the click.option() and click.argument() decorators on the config() function itself.
     """
 
-    scope: str | None
+    # ``scope`` is optional because ``config schema`` doesn't accept a
+    # --scope flag (so click never populates ``ctx.params['scope']`` for it);
+    # other subcommands either default it (config_set) or leave it as None.
+    scope: str | None = None
     # Arguments used by subcommands (get, set, unset)
     key: str | None = None
     value: str | None = None
