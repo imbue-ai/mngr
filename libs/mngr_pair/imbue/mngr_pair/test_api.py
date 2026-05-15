@@ -65,8 +65,8 @@ def test_sync_git_state_performs_push_when_local_is_ahead(pair_ctx: SyncTestCont
     assert git_action.local_is_ahead is True
 
     git_pull_performed, git_push_performed = sync_git_state(
-        agent=pair_ctx.agent,
         host=pair_ctx.host,
+        agent_path=pair_ctx.agent_dir,
         local_path=pair_ctx.local_dir,
         git_sync_action=git_action,
         uncommitted_changes=UncommittedChangesMode.CLOBBER,
@@ -91,8 +91,8 @@ def test_sync_git_state_performs_pull_when_agent_is_ahead(pair_ctx: SyncTestCont
     assert git_action.agent_is_ahead is True
 
     git_pull_performed, git_push_performed = sync_git_state(
-        agent=pair_ctx.agent,
         host=pair_ctx.host,
+        agent_path=pair_ctx.agent_dir,
         local_path=pair_ctx.local_dir,
         git_sync_action=git_action,
         uncommitted_changes=UncommittedChangesMode.CLOBBER,
@@ -120,7 +120,6 @@ def test_pair_files_raises_when_unison_not_installed_and_mocked(
 
     with pytest.raises(BinaryNotInstalledError):
         with pair_files(
-            agent=pair_ctx.agent,
             host=pair_ctx.host,
             agent_path=pair_ctx.agent_dir,
             local_path=pair_ctx.local_dir,
@@ -149,12 +148,10 @@ def test_pair_files_raises_when_git_required_but_not_present(
     source_dir.mkdir()
     target_dir.mkdir()
 
-    agent = cast(AgentInterface, FakeAgent(work_dir=source_dir))
     host = cast(OnlineHostInterface, FakeHost())
 
     with pytest.raises(MngrError) as exc_info:
         with pair_files(
-            agent=agent,
             host=host,
             agent_path=source_dir,
             local_path=target_dir,
@@ -175,7 +172,6 @@ def test_pair_files_raises_when_git_required_but_not_present(
 def test_pair_files_starts_and_stops_syncer(pair_ctx: SyncTestContext, cg: ConcurrencyGroup) -> None:
     """Test that pair_files properly starts and stops the unison syncer."""
     with pair_files(
-        agent=pair_ctx.agent,
         host=pair_ctx.host,
         agent_path=pair_ctx.agent_dir,
         local_path=pair_ctx.local_dir,
@@ -221,7 +217,6 @@ def test_pair_files_syncs_git_state_before_starting(pair_ctx: SyncTestContext, c
     assert not (pair_ctx.local_dir / "agent_commit.txt").exists()
 
     with pair_files(
-        agent=pair_ctx.agent,
         host=pair_ctx.host,
         agent_path=pair_ctx.agent_dir,
         local_path=pair_ctx.local_dir,
@@ -254,11 +249,9 @@ def test_pair_files_with_no_git_requirement(tmp_path: Path, cg: ConcurrencyGroup
     # Create a file in source
     (source_dir / "test_file.txt").write_text("test content")
 
-    agent = cast(AgentInterface, FakeAgent(work_dir=source_dir))
     host = cast(OnlineHostInterface, FakeHost())
 
     with pair_files(
-        agent=agent,
         host=host,
         agent_path=source_dir,
         local_path=target_dir,

@@ -18,7 +18,6 @@ from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr.api.pull import pull_git
 from imbue.mngr.api.push import push_git
 from imbue.mngr.errors import MngrError
-from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import ConflictMode
 from imbue.mngr.primitives import SyncDirection
@@ -286,14 +285,14 @@ def determine_git_sync_actions(
 
 
 def sync_git_state(
-    agent: AgentInterface,
     host: OnlineHostInterface,
+    agent_path: Path,
     local_path: Path,
     git_sync_action: GitSyncAction,
     uncommitted_changes: UncommittedChangesMode,
     cg: ConcurrencyGroup,
 ) -> tuple[bool, bool]:
-    """Synchronize git state between agent and local paths.
+    """Synchronize git state between the agent-side and local paths.
 
     Returns (did_pull, did_push) indicating which operations were performed.
     """
@@ -301,11 +300,11 @@ def sync_git_state(
     did_push = False
 
     if git_sync_action.agent_is_ahead:
-        logger.debug("Pulling git state from agent to local")
+        logger.debug("Pulling git state from agent-side to local")
         pull_git(
-            agent=agent,
             host=host,
             destination=local_path,
+            source_path=agent_path,
             source_branch=git_sync_action.agent_branch,
             target_branch=git_sync_action.local_branch,
             is_dry_run=False,
@@ -315,11 +314,11 @@ def sync_git_state(
         did_pull = True
 
     if git_sync_action.local_is_ahead:
-        logger.debug("Pushing git state from local to agent")
+        logger.debug("Pushing git state from local to agent-side")
         push_git(
-            agent=agent,
             host=host,
             source=local_path,
+            destination_path=agent_path,
             source_branch=git_sync_action.local_branch,
             target_branch=git_sync_action.agent_branch,
             is_dry_run=False,
@@ -334,7 +333,6 @@ def sync_git_state(
 
 @contextmanager
 def pair_files(
-    agent: AgentInterface,
     host: OnlineHostInterface,
     agent_path: Path,
     local_path: Path,
@@ -346,10 +344,10 @@ def pair_files(
     include_patterns: tuple[str, ...],
     cg: ConcurrencyGroup,
 ) -> Iterator[UnisonSyncer]:
-    """Start continuous file synchronization between agent and local directory.
+    """Start continuous file synchronization between an agent-side and a local directory.
 
-    This function first synchronizes git state if both paths are git repositories,
-    then starts a unison process for continuous file synchronization.
+    First synchronizes git state if both paths are git repositories, then starts
+    a unison process for continuous file synchronization.
 
     The returned context manager yields a UnisonSyncer that can be used to
     programmatically stop the sync. The sync is automatically stopped when
@@ -359,14 +357,14 @@ def pair_files(
 
     # Validate directories exist
     if not agent_path.is_dir():
-        raise MngrError(f"Agent directory does not exist: {agent_path}")
+        raise MngrError(f"Agent-side directory does not exist: {agent_path}")
     if not local_path.is_dir():
         raise MngrError(f"Local directory does not exist: {local_path}")
 
-    # Validate agent and local are different directories
+    # Validate agent-side and local are different directories
     if agent_path.resolve() == local_path.resolve():
         raise MngrError(
-            f"Agent and local are the same directory: {agent_path.resolve()}. "
+            f"Agent-side and local are the same directory: {agent_path.resolve()}. "
             "Pair requires two different directories to sync between."
         )
 
@@ -377,7 +375,7 @@ def pair_files(
     if is_require_git and not (agent_is_git and local_is_git):
         missing = []
         if not agent_is_git:
-            missing.append(f"agent ({agent_path})")
+            missing.append(f"agent-side ({agent_path})")
         if not local_is_git:
             missing.append(f"local ({local_path})")
         raise MngrError(
@@ -396,8 +394,8 @@ def pair_files(
                 git_action.local_is_ahead,
             )
             sync_git_state(
-                agent=agent,
                 host=host,
+                agent_path=agent_path,
                 local_path=local_path,
                 git_sync_action=git_action,
                 uncommitted_changes=uncommitted_changes,

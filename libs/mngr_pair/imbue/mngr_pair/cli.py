@@ -5,6 +5,8 @@ import click
 from click_option_group import optgroup
 from loguru import logger
 
+from imbue.mngr.api.discover import discover_hosts_and_agents
+from imbue.mngr.api.find import resolve_hosted_location
 from imbue.mngr.cli.address_params import HOSTED_LOCATION
 from imbue.mngr.cli.agent_utils import find_agent_for_command
 from imbue.mngr.cli.common_opts import add_common_options
@@ -18,6 +20,7 @@ from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.config.data_types import OutputOptions
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import UserInputError
+from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import AgentAddress
 from imbue.mngr.primitives import ConflictMode
 from imbue.mngr.primitives import HostedLocation
@@ -137,23 +140,9 @@ def pair(ctx: click.Context, **kwargs) -> None:
         command_class=PairCliOptions,
     )
 
-    # Merge positional and named arguments (named option takes precedence)
     if opts.source is not None and opts.source_pos is not None and opts.source != opts.source_pos:
         raise UserInputError("Cannot specify both SOURCE and --source with different values")
     effective_source_loc: HostedLocation | None = opts.source if opts.source is not None else opts.source_pos
-
-    source_address: AgentAddress | None = None
-    source_subpath: Path | None = None
-    if effective_source_loc is not None:
-        # Pair syncs through an agent, so a host without an agent is incomplete.
-        if effective_source_loc.agent is None and effective_source_loc.host is not None:
-            raise UserInputError(
-                "Source must include an agent name or ID; "
-                "specifying only a host (@HOST[:PATH]) is not supported for `mngr pair`"
-            )
-        if effective_source_loc.agent is not None:
-            source_address = AgentAddress(agent=effective_source_loc.agent, host=effective_source_loc.host)
-        source_subpath = effective_source_loc.path
 
     # Determine target path
     if opts.target is not None:
@@ -163,29 +152,53 @@ def pair(ctx: click.Context, **kwargs) -> None:
         git_root = find_git_worktree_root(None, mngr_ctx.concurrency_group)
         target_path = git_root if git_root is not None else Path.cwd()
 
-    # Find the agent
-    result = find_agent_for_command(
-        mngr_ctx=mngr_ctx,
-        address=source_address,
-    )
-    if result is None:
-        logger.info("No agent selected")
-        return
-    agent, host = result
+    host: OnlineHostInterface
+    source_path: Path
+    if (
+        effective_source_loc is not None
+        and effective_source_loc.agent is None
+        and effective_source_loc.host is not None
+    ):
+        # @HOST:PATH source: resolve the host directly without picking an agent.
+        # `resolve_hosted_location` enforces that path must be set when no agent
+        # is given (no agent.work_dir to fall back to).
+        agents_by_host, _ = discover_hosts_and_agents(
+            mngr_ctx,
+            provider_names=None,
+            agent_identifiers=None,
+            include_destroyed=False,
+            reset_caches=False,
+        )
+        resolved = resolve_hosted_location(effective_source_loc, agents_by_host, mngr_ctx)
+        host = resolved.location.host
+        source_path = resolved.location.path
+        emit_info(f"Pairing with source: {source_path}", output_opts.output_format)
+    else:
+        source_address: AgentAddress | None = None
+        source_subpath: Path | None = None
+        if effective_source_loc is not None:
+            if effective_source_loc.agent is not None:
+                source_address = AgentAddress(agent=effective_source_loc.agent, host=effective_source_loc.host)
+            source_subpath = effective_source_loc.path
 
-    # Only local agents are supported right now
+        result = find_agent_for_command(mngr_ctx=mngr_ctx, address=source_address)
+        if result is None:
+            logger.info("No agent selected")
+            return
+        agent, host = result
+
+        source_path = agent.work_dir
+        if source_subpath is not None:
+            if source_subpath.is_absolute():
+                source_path = source_subpath
+            else:
+                source_path = agent.work_dir / source_subpath
+
+        emit_info(f"Pairing with agent: {agent.name}", output_opts.output_format)
+
+    # Only local hosts are supported right now
     if not host.is_local:
-        raise NotImplementedError("Pairing with remote agents is not implemented yet")
-
-    # Determine source path (agent's work_dir, potentially with subpath)
-    source_path = agent.work_dir
-    if source_subpath is not None:
-        if source_subpath.is_absolute():
-            source_path = source_subpath
-        else:
-            source_path = agent.work_dir / source_subpath
-
-    emit_info(f"Pairing with agent: {agent.name}", output_opts.output_format)
+        raise NotImplementedError("Pairing with remote hosts is not implemented yet")
 
     # Parse enum options
     sync_direction = SyncDirection(opts.sync_direction.upper())
@@ -197,7 +210,6 @@ def pair(ctx: click.Context, **kwargs) -> None:
     # Start the pair sync
     try:
         with pair_files(
-            agent=agent,
             host=host,
             agent_path=source_path,
             local_path=target_path,
@@ -242,6 +254,7 @@ During rapid concurrent edits, changes will be debounced to avoid partial writes
         ("Prefer source on conflicts", "mngr pair my-agent --conflict=source"),
         ("Pair an agent on a specific host", "mngr pair my-agent@localhost"),
         ("Pair a subdirectory of the agent", "mngr pair my-agent:subdir"),
+        ("Pair a path on a host directly (no agent)", "mngr pair @localhost:/abs/path"),
     ),
     see_also=(
         ("push", "Push files or git commits to an agent"),

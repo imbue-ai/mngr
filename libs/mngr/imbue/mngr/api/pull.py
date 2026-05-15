@@ -36,21 +36,21 @@ def pull_files(
 
 
 def pull_git(
-    agent: AgentInterface,
     host: OnlineHostInterface,
     destination: Path,
+    source_path: Path,
     source_branch: str | None,
     target_branch: str | None,
     is_dry_run: bool,
     uncommitted_changes: UncommittedChangesMode,
     cg: ConcurrencyGroup,
 ) -> SyncGitResult:
-    """Pull git commits from an agent's repository by merging branches."""
+    """Pull git commits from a remote repository at ``source_path`` into ``destination``."""
     return sync_git(
-        agent=agent,
         host=host,
         mode=SyncMode.PULL,
         local_path=destination,
+        remote_path=source_path,
         source_branch=source_branch,
         target_branch=target_branch,
         is_dry_run=is_dry_run,

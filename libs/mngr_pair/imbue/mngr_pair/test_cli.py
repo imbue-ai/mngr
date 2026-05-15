@@ -24,13 +24,12 @@ def test_pair_source_as_path_raises_error(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
 ) -> None:
-    """Using --source with a path correctly requires the path to exist."""
+    """Passing conflicting positional and --source values is rejected."""
     result = cli_runner.invoke(
         pair,
         ["agent-name", "--source", "/nonexistent/path/12345"],
         obj=plugin_manager,
     )
-    # Should fail because path doesn't exist
     assert result.exit_code != 0
 
 
@@ -62,29 +61,48 @@ def test_pair_nonexistent_agent_on_specific_host(
     assert result.exit_code != 0
 
 
-def test_pair_host_only_source_is_rejected(
+def test_pair_host_only_no_path_is_rejected(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
 ) -> None:
-    """`@HOST` (no agent) is incomplete and must be rejected with a clear message."""
+    """`@HOST` (no agent, no path) is incomplete: there is no work_dir to fall back to."""
     result = cli_runner.invoke(
         pair,
         ["@localhost"],
         obj=plugin_manager,
     )
     assert result.exit_code != 0
-    assert "agent" in result.output.lower()
+    # The error from determine_resolved_path mentions both "path" and "agent".
+    assert "path" in result.output.lower()
 
 
-def test_pair_host_with_path_but_no_agent_is_rejected(
+def test_pair_host_with_nonexistent_path_fails_after_resolution(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
 ) -> None:
-    """`@HOST:PATH` (no agent) is rejected: pair syncs through an agent."""
+    """`@HOST:PATH` resolves the host directly (no agent picker) and then validates the path.
+
+    Using a path that doesn't exist ensures we exercise the @HOST:PATH wiring without
+    actually starting a unison process.
+    """
     result = cli_runner.invoke(
         pair,
-        ["@localhost:/tmp"],
+        ["@localhost:/nonexistent/path/for-pair-test-99999"],
         obj=plugin_manager,
     )
     assert result.exit_code != 0
-    assert "agent" in result.output.lower()
+    assert "does not exist" in result.output.lower() or "no such" in result.output.lower()
+
+
+def test_pair_host_with_nonexistent_host_fails_at_resolution(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """`@NONEXISTENT_HOST:PATH` fails at host resolution with a clear error."""
+    result = cli_runner.invoke(
+        pair,
+        ["@nonexistent-host-for-pair-test-99999:/tmp"],
+        obj=plugin_manager,
+    )
+    assert result.exit_code != 0
+    assert "host" in result.output.lower()

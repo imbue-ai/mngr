@@ -596,7 +596,7 @@ def test_push_git_basic_push(git_push_ctx: SyncTestContext, cg: ConcurrencyGroup
     run_git_command(git_push_ctx.local_dir, "commit", "-m", "Add new file")
 
     result = push_git(
-        agent=git_push_ctx.agent,
+        destination_path=git_push_ctx.agent.work_dir,
         host=git_push_ctx.host,
         source=git_push_ctx.local_dir,
         source_branch=None,
@@ -623,7 +623,7 @@ def test_push_git_dry_run(git_push_ctx: SyncTestContext, cg: ConcurrencyGroup) -
     run_git_command(git_push_ctx.local_dir, "commit", "-m", "Add new file")
 
     result = push_git(
-        agent=git_push_ctx.agent,
+        destination_path=git_push_ctx.agent.work_dir,
         host=git_push_ctx.host,
         source=git_push_ctx.local_dir,
         source_branch=None,
@@ -651,7 +651,7 @@ def test_push_git_with_stash_mode(git_push_ctx: SyncTestContext, cg: Concurrency
     initial_stash_count = get_stash_count(git_push_ctx.agent_dir)
 
     push_git(
-        agent=git_push_ctx.agent,
+        destination_path=git_push_ctx.agent.work_dir,
         host=git_push_ctx.host,
         source=git_push_ctx.local_dir,
         source_branch=None,
@@ -680,7 +680,7 @@ def test_push_git_with_merge_mode(git_push_ctx: SyncTestContext, cg: Concurrency
     initial_stash_count = get_stash_count(git_push_ctx.agent_dir)
 
     push_git(
-        agent=git_push_ctx.agent,
+        destination_path=git_push_ctx.agent.work_dir,
         host=git_push_ctx.host,
         source=git_push_ctx.local_dir,
         source_branch=None,
@@ -717,7 +717,7 @@ def test_push_git_does_not_modify_host_directory(git_push_ctx: SyncTestContext, 
     ).stdout.strip()
 
     push_git(
-        agent=git_push_ctx.agent,
+        destination_path=git_push_ctx.agent.work_dir,
         host=git_push_ctx.host,
         source=git_push_ctx.local_dir,
         source_branch=None,
@@ -756,7 +756,7 @@ def test_push_git_mirror_mode_dry_run(git_push_ctx: SyncTestContext, cg: Concurr
     run_git_command(git_push_ctx.local_dir, "commit", "-m", "Add new file")
 
     result = push_git(
-        agent=git_push_ctx.agent,
+        destination_path=git_push_ctx.agent.work_dir,
         host=git_push_ctx.host,
         source=git_push_ctx.local_dir,
         source_branch=None,
@@ -790,7 +790,7 @@ def test_push_git_mirror_mode(git_push_ctx: SyncTestContext, cg: ConcurrencyGrou
     ).stdout.strip()
 
     result = push_git(
-        agent=git_push_ctx.agent,
+        destination_path=git_push_ctx.agent.work_dir,
         host=git_push_ctx.host,
         source=git_push_ctx.local_dir,
         source_branch=None,
@@ -890,7 +890,7 @@ def test_push_git_with_remote_host_without_ssh_info_raises_assertion(
 
     with pytest.raises(AssertionError, match="SSH connection info"):
         push_git(
-            agent=remote_git_push_ctx.agent,
+            destination_path=remote_git_push_ctx.agent.work_dir,
             host=remote_git_push_ctx.host,
             source=remote_git_push_ctx.local_dir,
             source_branch=None,

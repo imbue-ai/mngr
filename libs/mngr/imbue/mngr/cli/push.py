@@ -208,9 +208,9 @@ def push(ctx: click.Context, **kwargs) -> None:
 
         # Git mode: push branches
         git_result = push_git(
-            agent=agent,
             host=host,
             source=source_path,
+            destination_path=agent.work_dir,
             source_branch=opts.source_branch,
             target_branch=None,
             is_dry_run=opts.dry_run,

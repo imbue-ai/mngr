@@ -667,7 +667,7 @@ def test_pull_git_with_local_path_from_remote_host_works(
     run_git_command(remote_git_pull_ctx.agent_dir, "commit", "-m", "Add new file")
 
     result = pull_git(
-        agent=remote_git_pull_ctx.agent,
+        source_path=remote_git_pull_ctx.agent.work_dir,
         host=remote_git_pull_ctx.host,
         destination=remote_git_pull_ctx.local_dir,
         source_branch=None,
@@ -712,7 +712,7 @@ def test_pull_git_merge_mode_with_different_branch_restores_stash_on_original(
     assert has_uncommitted_changes(local_dir, cg)
 
     result = pull_git(
-        agent=remote_git_pull_ctx.agent,
+        source_path=remote_git_pull_ctx.agent.work_dir,
         host=remote_git_pull_ctx.host,
         destination=local_dir,
         source_branch="feature-branch",
@@ -781,7 +781,7 @@ def test_pull_git_uses_agent_branch_as_default_source(
     run_git_command(ctx.local_dir, "checkout", "-b", "feature-branch")
 
     result = pull_git(
-        agent=ctx.agent,
+        source_path=ctx.agent.work_dir,
         host=ctx.host,
         destination=ctx.local_dir,
         source_branch=None,
@@ -806,7 +806,7 @@ def test_pull_git_uses_destination_branch_as_default_target(
     run_git_command(ctx.agent_dir, "commit", "-m", "New commit")
 
     result = pull_git(
-        agent=ctx.agent,
+        source_path=ctx.agent.work_dir,
         host=ctx.host,
         destination=ctx.local_dir,
         source_branch=None,
@@ -832,7 +832,7 @@ def test_pull_git_dry_run_does_not_merge(
         run_git_command(ctx.agent_dir, "commit", "-m", f"Commit {i}")
 
     result = pull_git(
-        agent=ctx.agent,
+        source_path=ctx.agent.work_dir,
         host=ctx.host,
         destination=ctx.local_dir,
         source_branch=None,
@@ -861,7 +861,7 @@ def test_pull_git_merge_mode_stashes_and_restores(
     (ctx.local_dir / "README.md").write_text("uncommitted local change")
 
     pull_git(
-        agent=ctx.agent,
+        source_path=ctx.agent.work_dir,
         host=ctx.host,
         destination=ctx.local_dir,
         source_branch=None,
@@ -890,7 +890,7 @@ def test_pull_git_stash_mode_does_not_restore(
     (ctx.local_dir / "README.md").write_text("uncommitted local change")
 
     pull_git(
-        agent=ctx.agent,
+        source_path=ctx.agent.work_dir,
         host=ctx.host,
         destination=ctx.local_dir,
         source_branch=None,
@@ -921,7 +921,7 @@ def test_pull_git_raises_on_merge_failure(
 
     with pytest.raises(GitSyncError):
         pull_git(
-            agent=ctx.agent,
+            source_path=ctx.agent.work_dir,
             host=ctx.host,
             destination=ctx.local_dir,
             source_branch=None,

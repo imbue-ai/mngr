@@ -125,3 +125,9 @@ $ mngr pair my-agent@localhost
 ```bash
 $ mngr pair my-agent:subdir
 ```
+
+**Pair a path on a host directly (no agent)**
+
+```bash
+$ mngr pair @localhost:/abs/path
+```

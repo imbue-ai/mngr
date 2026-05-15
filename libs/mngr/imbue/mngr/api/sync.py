@@ -898,9 +898,9 @@ def _remote_git_push_branch(
 
 
 def _sync_git_push(
-    agent: AgentInterface,
     host: OnlineHostInterface,
     local_path: Path,
+    remote_path: Path,
     source_branch: str,
     target_branch: str,
     is_dry_run: bool,
@@ -908,8 +908,8 @@ def _sync_git_push(
     is_mirror: bool,
     cg: ConcurrencyGroup,
 ) -> SyncGitResult:
-    """Push git commits from local to agent repository."""
-    destination_path = agent.work_dir
+    """Push git commits from local to a remote repository."""
+    destination_path = remote_path
     git_ctx = RemoteGitContext(host=host)
 
     with _stash_guard(git_ctx, destination_path, uncommitted_changes):
@@ -992,13 +992,13 @@ def _fetch_and_merge(
     When ssh_info is provided, fetches from the remote host via SSH URL instead
     of a local path.
     """
-    # Fetch from the agent's repository (sets FETCH_HEAD)
+    # Fetch from the remote repository (sets FETCH_HEAD)
     if ssh_info is not None:
         # Remote host: fetch via SSH URL
         git_url = _build_ssh_git_url(ssh_info, source_path)
         git_ssh_cmd = _build_ssh_transport_args(ssh_info, known_hosts_file)
         fetch_env = {**os.environ, "GIT_SSH_COMMAND": git_ssh_cmd}
-        logger.debug("Fetching from remote agent repository via SSH: {}", git_url)
+        logger.debug("Fetching from remote repository via SSH: {}", git_url)
         try:
             cg.run_process_to_completion(
                 ["git", "fetch", git_url, source_branch],
@@ -1006,17 +1006,17 @@ def _fetch_and_merge(
                 env=fetch_env,
             )
         except ProcessError as e:
-            raise MngrError(f"Failed to fetch from agent: {e.stderr}") from e
+            raise MngrError(f"Failed to fetch from remote: {e.stderr}") from e
     else:
         # Local host: fetch from local path
-        logger.debug("Fetching from agent repository: {}", source_path)
+        logger.debug("Fetching from remote repository: {}", source_path)
         try:
             cg.run_process_to_completion(
                 ["git", "fetch", str(source_path), source_branch],
                 cwd=local_path,
             )
         except ProcessError as e:
-            raise MngrError(f"Failed to fetch from agent: {e.stderr}") from e
+            raise MngrError(f"Failed to fetch from remote: {e.stderr}") from e
 
     # Checkout the target branch if different from current
     did_checkout = original_branch != target_branch
@@ -1087,17 +1087,17 @@ def _fetch_and_merge(
 
 
 def _sync_git_pull(
-    agent: AgentInterface,
     host: OnlineHostInterface,
     local_path: Path,
+    remote_path: Path,
     source_branch: str,
     target_branch: str,
     is_dry_run: bool,
     uncommitted_changes: UncommittedChangesMode,
     cg: ConcurrencyGroup,
 ) -> SyncGitResult:
-    """Pull git commits from agent to local repository."""
-    source_path = agent.work_dir
+    """Pull git commits from a remote repository to local."""
+    source_path = remote_path
     git_ctx = LocalGitContext(cg=cg)
     original_branch = get_current_branch(local_path, cg)
 
@@ -1133,10 +1133,10 @@ def _sync_git_pull(
 
 
 def sync_git(
-    agent: AgentInterface,
     host: OnlineHostInterface,
     mode: SyncMode,
     local_path: Path,
+    remote_path: Path,
     source_branch: str | None,
     target_branch: str | None,
     is_dry_run: bool,
@@ -1144,8 +1144,7 @@ def sync_git(
     is_mirror: bool,
     cg: ConcurrencyGroup,
 ) -> SyncGitResult:
-    """Sync git commits between local and agent."""
-    remote_path = agent.work_dir
+    """Sync git commits between a local path and a path on a (possibly remote) host."""
     local_git_ctx = LocalGitContext(cg=cg)
     remote_git_ctx = RemoteGitContext(host=host)
 
@@ -1162,7 +1161,7 @@ def sync_git(
 
     match mode:
         case SyncMode.PUSH:
-            # Push: local -> agent
+            # Push: local -> remote
             actual_source_branch = (
                 source_branch if source_branch is not None else local_git_ctx.get_current_branch(local_path)
             )
@@ -1171,9 +1170,9 @@ def sync_git(
             )
 
             return _sync_git_push(
-                agent=agent,
                 host=host,
                 local_path=local_path,
+                remote_path=remote_path,
                 source_branch=actual_source_branch,
                 target_branch=actual_target_branch,
                 is_dry_run=is_dry_run,
@@ -1182,7 +1181,7 @@ def sync_git(
                 cg=cg,
             )
         case SyncMode.PULL:
-            # Pull: agent -> local
+            # Pull: remote -> local
             actual_source_branch = (
                 source_branch if source_branch is not None else remote_git_ctx.get_current_branch(remote_path)
             )
@@ -1194,9 +1193,9 @@ def sync_git(
                 raise NotImplementedError("Mirror mode is only supported for push operations")
 
             return _sync_git_pull(
-                agent=agent,
                 host=host,
                 local_path=local_path,
+                remote_path=remote_path,
                 source_branch=actual_source_branch,
                 target_branch=actual_target_branch,
                 is_dry_run=is_dry_run,

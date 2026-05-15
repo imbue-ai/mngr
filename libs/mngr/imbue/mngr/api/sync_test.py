@@ -551,10 +551,10 @@ def test_sync_git_adds_safe_directory_for_non_local_host(
     run_git_command(agent_dir, "commit", "-m", "Agent commit")
 
     sync_git(
-        agent=agent,
         host=host,
         mode=SyncMode.PULL,
         local_path=local_dir,
+        remote_path=agent.work_dir,
         source_branch=None,
         target_branch=None,
         is_dry_run=False,

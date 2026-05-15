@@ -274,9 +274,9 @@ def pull_agent_branch(
             _create_local_branch(destination, branch_name, base_commit, cg)
 
         pull_git(
-            agent=_get_agent_from_host(host, agent_id),
             host=host,
             destination=destination,
+            source_path=_get_agent_from_host(host, agent_id).work_dir,
             source_branch=branch_name,
             target_branch=branch_name,
             is_dry_run=False,

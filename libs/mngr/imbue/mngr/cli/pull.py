@@ -299,9 +299,9 @@ def pull(ctx: click.Context, **kwargs) -> None:
         # Git mode: merge branches
         # source_branch=None means use agent's current branch
         git_result = pull_git(
-            agent=agent,
             host=host,
             destination=destination_path,
+            source_path=agent.work_dir,
             source_branch=None,
             target_branch=opts.target_branch,
             is_dry_run=opts.dry_run,
