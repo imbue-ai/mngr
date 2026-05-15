@@ -31,13 +31,6 @@ EXTEND_SUFFIX: Final[str] = "__extend"
 # convention for ``MNGR__*`` segments.
 EXTEND_SUFFIX_ENV: Final[str] = "__EXTEND"
 
-# Top-level container fields on ``MngrConfig`` that keep per-key additive
-# merging across config layers. Everything else flips to assign-by-default.
-# Kept here so the resolver and ``MngrConfig.merge_with`` agree.
-TOP_LEVEL_CONTAINER_FIELDS: Final[frozenset[str]] = frozenset(
-    {"agent_types", "providers", "plugins", "commands", "create_templates"}
-)
-
 
 @pure
 def parse_scalar_value(value_str: str) -> Any:
