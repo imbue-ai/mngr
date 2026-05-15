@@ -24,10 +24,12 @@ def _build_client(handler: Callable[[httpx.Request], httpx.Response]) -> Latchke
     :class:`Latchkey`. Tests skip that lazy-init path entirely by
     pre-populating the credentials directly on the instance.
     """
-    client = LatchkeyGatewayClient(transport=httpx.MockTransport(handler))
-    client._base_url = "http://gateway.invalid:1989"
-    client._password = "hunter2"
-    client._admin_jwt = "admin-jwt-token"
+    client = LatchkeyGatewayClient.from_credentials(
+        base_url="http://gateway.invalid:1989",
+        password="hunter2",
+        admin_jwt="admin-jwt-token",
+        transport=httpx.MockTransport(handler),
+    )
     return client
 
 

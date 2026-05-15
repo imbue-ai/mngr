@@ -97,27 +97,13 @@ class LatchkeyGatewayClient(MutableModel):
     pool used by the request thread).
     """
 
-    latchkey: Latchkey | None = Field(
-        default=None,
-        description=(
-            "Source of the gateway credentials. Required for :meth:`ensure_initialized` to do any "
-            "work; tests that pre-populate the private credential attrs directly (e.g. via the "
-            "``testing`` helpers) can leave this ``None``."
-        ),
-    )
-    transport: httpx.BaseTransport | None = Field(
-        default=None,
-        description=(
-            "Optional custom :class:`httpx.BaseTransport` to use for every request. "
-            "Tests inject an :class:`httpx.MockTransport` here so the client can be exercised "
-            "without a real network endpoint; production callers leave it ``None`` to get "
-            "the httpx default transport."
-        ),
-    )
+    _latchkey: Latchkey | None = PrivateAttr(default=None)
 
+    _transport: httpx.BaseTransport | None = PrivateAttr(default=None)
     _base_url: str | None = PrivateAttr(default=None)
     _password: str | None = PrivateAttr(default=None)
     _admin_jwt: str | None = PrivateAttr(default=None)
+
     _init_lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
 
     # ``httpx.BaseTransport`` is not pydantic-native; allow it through.
@@ -138,21 +124,38 @@ class LatchkeyGatewayClient(MutableModel):
             if self._base_url is not None:
                 # Already initialized.
                 return
-            if self.latchkey is None:
+            if self._latchkey is None:
                 raise LatchkeyGatewayClientNotInitializedError(
                     "LatchkeyGatewayClient was constructed without a Latchkey instance; cannot initialize.",
                 )
-            forward_info = self._wait_for_gateway_port(self.latchkey)
-            self._base_url = f"http://{self.latchkey.listen_host}:{forward_info.gateway_port}"
-            self._admin_jwt = self.latchkey.create_admin_permissions_jwt()
-            self._password = self.latchkey.derive_gateway_password()
+            forward_info = self._wait_for_gateway_port()
+            self._base_url = f"http://{self._latchkey.listen_host}:{forward_info.gateway_port}"
+            self._admin_jwt = self._latchkey.create_admin_permissions_jwt()
+            self._password = self._latchkey.derive_gateway_password()
+
+    @classmethod
+    def from_latchkey(cls, latchkey: Latchkey) -> "LatchkeyGatewayClient":
+        client = cls()
+        client._latchkey = latchkey
+        return client
+
+    @classmethod
+    def from_credentials(
+        cls, base_url: str, password: str, admin_jwt: str, transport: httpx.BaseTransport | None = None
+    ) -> "LatchkeyGatewayClient":
+        client = cls()
+        client._base_url = base_url
+        client._password = password
+        client._admin_jwt = admin_jwt
+        client._transport = transport
+        return client
 
     def _require_base_url(self) -> str:
         if self._base_url is None:
             raise LatchkeyGatewayClientNotInitializedError("LatchkeyGatewayClient is not initialized yet.")
         return self._base_url
 
-    def _wait_for_gateway_port(self, latchkey: Latchkey) -> LatchkeyForwardInfo:
+    def _wait_for_gateway_port(self) -> LatchkeyForwardInfo:
         """Block until the supervised ``mngr latchkey forward`` stamps its bound gateway port.
 
         The supervisor writes its ``LatchkeyForwardInfo`` record with
@@ -163,7 +166,11 @@ class LatchkeyGatewayClient(MutableModel):
         build the gateway URL deterministically without racing the
         supervisor's own startup.
         """
-        plugin_dir = latchkey.plugin_data_dir
+        if self._latchkey is None:
+            raise LatchkeyGatewayInitializationError(
+                "LatchkeyGatewayClient was constructed without a Latchkey instance; cannot wait for gateway port.",
+            )
+        plugin_dir = self._latchkey.plugin_data_dir
         deadline = threading.Event()
         timer = threading.Timer(_GATEWAY_PORT_WAIT_SECONDS, deadline.set)
         timer.daemon = True

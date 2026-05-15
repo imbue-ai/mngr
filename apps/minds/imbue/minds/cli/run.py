@@ -158,7 +158,8 @@ def run(
     # orphan tree running across restarts.
     start_grandparent_death_watcher(root_concurrency_group)
 
-    gateway_client = LatchkeyGatewayClient(latchkey=latchkey)
+    gateway_client = LatchkeyGatewayClient.from_latchkey(latchkey)
+    # Pre-warm the gateway client in a background thread.
     root_concurrency_group.start_new_thread(gateway_client.ensure_initialized, name="latchkey-gateway-init")
 
     latchkey_permission_handler = LatchkeyPermissionGrantHandler(
