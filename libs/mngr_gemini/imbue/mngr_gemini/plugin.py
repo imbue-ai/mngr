@@ -42,15 +42,17 @@ _SYSTEM_SETTINGS_FILENAME = "system_settings.json"
 # https://geminicli.com/docs/cli/enterprise/#system-settings-path-configuration.
 _SYSTEM_SETTINGS_PATH_ENV_VAR = "GEMINI_CLI_SYSTEM_SETTINGS_PATH"
 
-# Set so Gemini treats ``work_dir`` as persistently trusted for the session,
-# without which workspace-declared hooks would be silently stripped (smoke-
-# tested against Gemini CLI 0.42.0: ``Hook registry initialized with 0 hook
-# entries`` under ``--skip-trust`` vs ``1 hook entries`` under this env var).
-# See https://geminicli.com/docs/cli/trusted-folders/#headless-and-automated-environments.
-# Strictly speaking we no longer install workspace-tier hooks (they live in
-# the system-tier file pointed to by _SYSTEM_SETTINGS_PATH_ENV_VAR), but the
-# env var also covers the broader "is this folder trusted?" gate that
-# determines whether Gemini will run at all in headless mode.
+# Set so Gemini treats ``work_dir`` as persistently trusted for the session.
+# This clears Gemini's "Do you trust this folder?" gate; without it a headless
+# launch either refuses to start or consumes the first keystroke sent via tmux
+# to accept the dialog. The env var is Gemini's documented automation path
+# (see https://geminicli.com/docs/cli/trusted-folders/#headless-and-automated-environments)
+# and is paired with ``_SYSTEM_SETTINGS_PATH_ENV_VAR``: the latter points
+# Gemini at the system-tier settings file, this one ensures Gemini gets far
+# enough into startup to load it. Smoke-tested against Gemini CLI 0.42.0:
+# with this env var set, ``--debug`` reports ``Hook registry initialized
+# with N hook entries`` (N matches the configured count); without it the
+# count drops to 0.
 _TRUST_WORKSPACE_ENV_VAR = "GEMINI_CLI_TRUST_WORKSPACE"
 
 
