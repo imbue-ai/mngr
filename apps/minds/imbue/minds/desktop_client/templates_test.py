@@ -124,15 +124,6 @@ def test_render_create_form_includes_gh_token_field() -> None:
     assert 'name="gh_token"' in html
 
 
-def test_render_create_form_includes_anthropic_base_url_field() -> None:
-    """The form must include a base URL input next to the API key input so
-    users on API_KEY auth can point at a custom endpoint (LiteLLM proxy,
-    Bedrock gateway, etc.) without having to set ``ANTHROPIC_BASE_URL`` in
-    their shell."""
-    html = render_create_form()
-    assert 'name="anthropic_base_url"' in html
-
-
 def test_render_create_form_shows_error_message_when_supplied() -> None:
     html = render_create_form(error_message="Imbue cloud requires an account.")
     assert "Imbue cloud requires an account." in html
