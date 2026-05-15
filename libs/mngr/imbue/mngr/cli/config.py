@@ -321,6 +321,9 @@ def _filter_branch(
                 result[key] = filtered
         elif path in explicit_keys:
             result[key] = value
+        else:
+            # Leaf value at a path the user never wrote to a TOML file; drop it.
+            continue
     return result
 
 

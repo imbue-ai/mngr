@@ -14,10 +14,16 @@ def test_config_list_shows_merged_config(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
 ) -> None:
-    """Test config list shows the merged configuration."""
+    """Test config list --all shows the merged configuration including defaults.
+
+    ``mngr config list`` without ``--all`` only lists keys that have been
+    explicitly written to a TOML scope; in this clean test environment that's
+    empty. ``--all`` includes default-valued fields so ``prefix`` (which has a
+    default of ``mngr-``) appears.
+    """
     result = cli_runner.invoke(
         config,
-        ["list"],
+        ["list", "--all"],
         obj=plugin_manager,
         catch_exceptions=False,
     )
@@ -30,7 +36,30 @@ def test_config_list_with_json_format(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
 ) -> None:
-    """Test config list with JSON output format."""
+    """Test config list --all with JSON output format."""
+    result = cli_runner.invoke(
+        config,
+        ["list", "--all", "--format", "json"],
+        obj=plugin_manager,
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 0
+    output = json.loads(result.output)
+    assert "config" in output
+    assert "prefix" in output["config"]
+
+
+def test_config_list_without_all_omits_default_only_keys(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """Without ``--all``, keys that only have default values are omitted.
+
+    Regression test for the previous implementation where ``--all`` was a
+    no-op: the default view dumped every field regardless of whether the user
+    had ever written it to a TOML file.
+    """
     result = cli_runner.invoke(
         config,
         ["list", "--format", "json"],
@@ -41,7 +70,9 @@ def test_config_list_with_json_format(
     assert result.exit_code == 0
     output = json.loads(result.output)
     assert "config" in output
-    assert "prefix" in output["config"]
+    # In the clean test env no TOML scopes are written; ``prefix`` (a default-
+    # only field here) must not appear in the explicit-keys-only listing.
+    assert "prefix" not in output["config"]
 
 
 def test_config_list_with_scope_shows_file_path(
