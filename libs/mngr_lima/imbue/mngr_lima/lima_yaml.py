@@ -93,17 +93,7 @@ def _build_provisioning_script(
     host_private_key_pem: str | None = None,
     host_public_key_openssh: str | None = None,
 ) -> str:
-    """Build the Lima ``provision[mode=system]`` script that ensures required packages are installed.
-
-    When host_private_key_pem and host_public_key_openssh are both provided, the script
-    also overwrites the guest's ed25519 sshd host key with the pre-generated pair and
-    removes other host-key types so sshd presents only the pre-trusted key. Lima runs
-    this script during VM bring-up; it overwrites the host key file unconditionally
-    (so it does not matter what key, if any, the image generated earlier) and then
-    restarts sshd. By the time ``limactl_start_new`` returns, sshd is running with our
-    known key, so the host machine's known_hosts entry (written atomically alongside)
-    is correct without ever scanning the guest.
-    """
+    """Build the Lima ``provision[mode=system]`` script that installs required packages, configures sshd, and (when a keypair is supplied) installs it as the guest's ed25519 sshd host key."""
     host_key_block = _build_host_key_block(host_private_key_pem, host_public_key_openssh)
     return f"""\
 #!/bin/bash
