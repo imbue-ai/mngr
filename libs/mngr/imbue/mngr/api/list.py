@@ -28,6 +28,7 @@ from imbue.mngr.api.providers import list_provider_names_to_load
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import BaseMngrError
 from imbue.mngr.errors import MngrError
+from imbue.mngr.errors import ProviderDiscoveryError
 from imbue.mngr.errors import ProviderInstanceNotFoundError
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.data_types import AgentDetails
@@ -311,9 +312,14 @@ def _construct_and_discover_for_provider(
         provider_results = provider.discover_hosts_and_agents(cg=mngr_ctx.concurrency_group, include_destroyed=True)
     except Exception as e:
         if params.error_behavior == ErrorBehavior.ABORT:
-            if isinstance(e, MngrError):
-                raise
-            raise MngrError(str(e)) from e
+            # Wrap so downstream handlers (e.g. discovery_events'
+            # _write_unfiltered_full_snapshot_logged, which only knows how to
+            # extract provider_name from ProviderDiscoveryError) can attribute
+            # the failure to this provider. The CONTINUE branch below already
+            # carries provider_name through emit_discovery_error_event; ABORT
+            # needs the same attribution so minds' auto-disable-on-auth-error
+            # path sees a usable provider_name on the emitted event.
+            raise ProviderDiscoveryError(provider_name, e) from e
         logger.opt(exception=e).error("Error discovering agents for provider {}", provider_name)
         emit_discovery_error_event(
             mngr_ctx.config,
