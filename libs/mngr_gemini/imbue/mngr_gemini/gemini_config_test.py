@@ -227,6 +227,24 @@ def test_hook_already_exists_returns_false_for_empty_existing() -> None:
     assert hook_already_exists([], {"hooks": [{"command": "echo a"}]}) is False
 
 
+def test_hook_already_exists_distinguishes_by_matcher() -> None:
+    """Same inner commands under different matchers describe different runtime behavior."""
+    existing = [{"matcher": ".*", "hooks": [{"command": "echo a"}]}]
+    new_same_matcher = {"matcher": ".*", "hooks": [{"command": "echo a"}]}
+    new_diff_matcher = {"matcher": "^bash$", "hooks": [{"command": "echo a"}]}
+    assert hook_already_exists(existing, new_same_matcher) is True
+    assert hook_already_exists(existing, new_diff_matcher) is False
+
+
+def test_hook_already_exists_treats_missing_matcher_as_none() -> None:
+    """Events that don't carry a matcher key (e.g. SessionStart) still dedupe."""
+    existing = [{"hooks": [{"command": "echo a"}]}]
+    duplicate = {"hooks": [{"command": "echo a"}]}
+    matcher_present = {"matcher": ".*", "hooks": [{"command": "echo a"}]}
+    assert hook_already_exists(existing, duplicate) is True
+    assert hook_already_exists(existing, matcher_present) is False
+
+
 def test_merge_hooks_config_adds_new_event() -> None:
     existing: dict[str, object] = {"general": {"approvalMode": "default"}}
     new_hooks = build_readiness_hooks_config()

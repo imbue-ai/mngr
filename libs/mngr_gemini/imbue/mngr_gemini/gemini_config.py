@@ -256,15 +256,24 @@ def build_permission_auto_allow_hooks_config() -> dict[str, Any]:
 
 @pure
 def hook_already_exists(existing_hooks: list[dict[str, Any]], new_hook: dict[str, Any]) -> bool:
-    """Return True if a matcher-group with the same set of inner commands exists.
+    """Return True if a matcher-group with the same matcher and inner commands exists.
 
-    Compares the set of inner ``hooks[*].command`` strings so that two matcher
-    groups with the same commands (in any order) are treated as duplicates.
+    A matcher group is considered a duplicate when both:
+      * its ``matcher`` field is equal (a missing ``matcher`` is treated as
+        ``None``, so two events that don't carry a matcher key match each other)
+      * the set of inner ``hooks[*].command`` strings matches (order-insensitive)
+
+    Comparing the matcher matters because Gemini scopes a group's hooks to
+    the tools whose name matches the regex; two groups with the same inner
+    command but different matchers (e.g. ``.*`` and ``^bash$``) describe
+    different runtime behavior and must not collapse.
     """
+    new_matcher = new_hook.get("matcher")
     new_commands = {h.get("command") for h in new_hook.get("hooks", [])}
     for existing in existing_hooks:
+        existing_matcher = existing.get("matcher")
         existing_commands = {h.get("command") for h in existing.get("hooks", [])}
-        if new_commands == existing_commands:
+        if existing_matcher == new_matcher and existing_commands == new_commands:
             return True
     return False
 
