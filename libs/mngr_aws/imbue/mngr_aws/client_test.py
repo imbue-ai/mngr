@@ -1,0 +1,358 @@
+"""Tests for the AWS EC2 client.
+
+We use ``botocore.stub.Stubber`` to script EC2 API responses without making
+real API calls. The fixture below creates a real boto3 session and EC2 client
+and wraps it in a stubber so each test can declaratively queue expected
+requests and canned responses.
+"""
+
+from collections.abc import Iterator
+from datetime import datetime
+from datetime import timezone
+
+import boto3
+import pytest
+from botocore.stub import ANY
+from botocore.stub import Stubber
+
+from imbue.mngr_aws.client import AwsVpsClient
+from imbue.mngr_vps_docker.errors import VpsApiError
+from imbue.mngr_vps_docker.errors import VpsProvisioningError
+from imbue.mngr_vps_docker.primitives import VpsInstanceId
+from imbue.mngr_vps_docker.primitives import VpsInstanceStatus
+from imbue.mngr_vps_docker.primitives import VpsSnapshotId
+
+
+@pytest.fixture()
+def stubbed_client() -> Iterator[tuple[AwsVpsClient, Stubber]]:
+    """Yield an AwsVpsClient whose underlying EC2 client is wrapped in a Stubber.
+
+    The client's ``_ec2()`` is patched (on this instance only) to always return
+    the same stubbed EC2 client, so multiple operations within a test share the
+    stubber state.
+    """
+    session = boto3.Session(
+        aws_access_key_id="AKIATEST",
+        aws_secret_access_key="secret",
+        region_name="us-east-1",
+    )
+    ec2 = session.client("ec2", region_name="us-east-1")
+    stubber = Stubber(ec2)
+
+    client = AwsVpsClient(
+        session=session,
+        region="us-east-1",
+        ami_id="ami-test12345",
+        security_group_id="sg-test",
+    )
+    # Pin the stubbed EC2 client so repeated _ec2() calls reuse it.
+    client.__dict__["_ec2"] = lambda: ec2
+
+    stubber.activate()
+    try:
+        yield client, stubber
+    finally:
+        stubber.deactivate()
+
+
+class TestAwsVpsClientInstances:
+    def test_create_instance(self, stubbed_client: tuple[AwsVpsClient, Stubber]) -> None:
+        client, stubber = stubbed_client
+        stubber.add_response(
+            "run_instances",
+            {"Instances": [{"InstanceId": "i-0abc123def456"}]},
+            expected_params={
+                "ImageId": "ami-test12345",
+                "InstanceType": "t3.small",
+                "MinCount": 1,
+                "MaxCount": 1,
+                "UserData": "test-user-data",
+                "BlockDeviceMappings": ANY,
+                "NetworkInterfaces": ANY,
+                "InstanceInitiatedShutdownBehavior": "terminate",
+                "TagSpecifications": ANY,
+                "KeyName": "key-1",
+            },
+        )
+        instance_id = client.create_instance(
+            label="test-host",
+            region="us-east-1",
+            plan="t3.small",
+            os_id=0,
+            user_data="test-user-data",
+            ssh_key_ids=["key-1"],
+            tags=["mngr-provider=test", "mngr-host-id=h1"],
+        )
+        assert instance_id == VpsInstanceId("i-0abc123def456")
+
+    def test_create_instance_no_instances_raises(self, stubbed_client: tuple[AwsVpsClient, Stubber]) -> None:
+        client, stubber = stubbed_client
+        stubber.add_response("run_instances", {"Instances": []})
+        with pytest.raises(VpsProvisioningError):
+            client.create_instance(
+                label="test-host",
+                region="us-east-1",
+                plan="t3.small",
+                os_id=0,
+                user_data="test",
+                ssh_key_ids=[],
+                tags=[],
+            )
+
+    def test_create_instance_cross_region_raises(self, stubbed_client: tuple[AwsVpsClient, Stubber]) -> None:
+        client, _stubber = stubbed_client
+        with pytest.raises(VpsApiError, match="Cross-region create not supported"):
+            client.create_instance(
+                label="test",
+                region="eu-west-1",
+                plan="t3.small",
+                os_id=0,
+                user_data="test",
+                ssh_key_ids=[],
+                tags=[],
+            )
+
+    def test_destroy_instance(self, stubbed_client: tuple[AwsVpsClient, Stubber]) -> None:
+        client, stubber = stubbed_client
+        stubber.add_response(
+            "terminate_instances",
+            {"TerminatingInstances": [{"InstanceId": "i-abc"}]},
+            expected_params={"InstanceIds": ["i-abc"]},
+        )
+        client.destroy_instance(VpsInstanceId("i-abc"))
+
+    def test_get_instance_status_running(self, stubbed_client: tuple[AwsVpsClient, Stubber]) -> None:
+        client, stubber = stubbed_client
+        stubber.add_response(
+            "describe_instances",
+            {"Reservations": [{"Instances": [{"InstanceId": "i-1", "State": {"Name": "running"}}]}]},
+            expected_params={"InstanceIds": ["i-1"]},
+        )
+        assert client.get_instance_status(VpsInstanceId("i-1")) == VpsInstanceStatus.ACTIVE
+
+    def test_get_instance_status_stopped(self, stubbed_client: tuple[AwsVpsClient, Stubber]) -> None:
+        client, stubber = stubbed_client
+        stubber.add_response(
+            "describe_instances",
+            {"Reservations": [{"Instances": [{"InstanceId": "i-1", "State": {"Name": "stopped"}}]}]},
+            expected_params={"InstanceIds": ["i-1"]},
+        )
+        assert client.get_instance_status(VpsInstanceId("i-1")) == VpsInstanceStatus.HALTED
+
+    def test_get_instance_status_pending(self, stubbed_client: tuple[AwsVpsClient, Stubber]) -> None:
+        client, stubber = stubbed_client
+        stubber.add_response(
+            "describe_instances",
+            {"Reservations": [{"Instances": [{"InstanceId": "i-1", "State": {"Name": "pending"}}]}]},
+            expected_params={"InstanceIds": ["i-1"]},
+        )
+        assert client.get_instance_status(VpsInstanceId("i-1")) == VpsInstanceStatus.PENDING
+
+    def test_get_instance_status_no_reservations(self, stubbed_client: tuple[AwsVpsClient, Stubber]) -> None:
+        client, stubber = stubbed_client
+        stubber.add_response(
+            "describe_instances",
+            {"Reservations": []},
+            expected_params={"InstanceIds": ["i-1"]},
+        )
+        assert client.get_instance_status(VpsInstanceId("i-1")) == VpsInstanceStatus.UNKNOWN
+
+    def test_get_instance_ip(self, stubbed_client: tuple[AwsVpsClient, Stubber]) -> None:
+        client, stubber = stubbed_client
+        stubber.add_response(
+            "describe_instances",
+            {
+                "Reservations": [
+                    {
+                        "Instances": [
+                            {
+                                "InstanceId": "i-1",
+                                "State": {"Name": "running"},
+                                "PublicIpAddress": "1.2.3.4",
+                            }
+                        ]
+                    }
+                ]
+            },
+            expected_params={"InstanceIds": ["i-1"]},
+        )
+        assert client.get_instance_ip(VpsInstanceId("i-1")) == "1.2.3.4"
+
+    def test_get_instance_ip_not_ready(self, stubbed_client: tuple[AwsVpsClient, Stubber]) -> None:
+        client, stubber = stubbed_client
+        stubber.add_response(
+            "describe_instances",
+            {"Reservations": [{"Instances": [{"InstanceId": "i-1", "State": {"Name": "pending"}}]}]},
+            expected_params={"InstanceIds": ["i-1"]},
+        )
+        with pytest.raises(VpsProvisioningError):
+            client.get_instance_ip(VpsInstanceId("i-1"))
+
+    def test_list_instances_filters_by_provider_tag(self, stubbed_client: tuple[AwsVpsClient, Stubber]) -> None:
+        client, stubber = stubbed_client
+        stubber.add_response(
+            "describe_instances",
+            {
+                "Reservations": [
+                    {
+                        "Instances": [
+                            {
+                                "InstanceId": "i-1",
+                                "State": {"Name": "running"},
+                                "PublicIpAddress": "10.0.0.1",
+                                "Tags": [
+                                    {"Key": "mngr-provider", "Value": "test"},
+                                    {"Key": "mngr-host-id", "Value": "h1"},
+                                ],
+                            }
+                        ]
+                    }
+                ]
+            },
+            expected_params={
+                "Filters": [
+                    {"Name": "instance-state-name", "Values": ["pending", "running", "stopping", "stopped"]},
+                    {"Name": "tag:mngr-provider", "Values": ["test"]},
+                ]
+            },
+        )
+        instances = client.list_instances(provider_tag="test")
+        assert len(instances) == 1
+        assert instances[0]["id"] == "i-1"
+        assert instances[0]["main_ip"] == "10.0.0.1"
+        assert "mngr-provider=test" in instances[0]["tags"]
+
+
+class TestAwsVpsClientKeyPairs:
+    def test_upload_ssh_key(self, stubbed_client: tuple[AwsVpsClient, Stubber]) -> None:
+        client, stubber = stubbed_client
+        stubber.add_response(
+            "import_key_pair",
+            {"KeyName": "mngr-test-h1", "KeyFingerprint": "ab:cd"},
+            expected_params={"KeyName": "mngr-test-h1", "PublicKeyMaterial": b"ssh-ed25519 AAAA test"},
+        )
+        key_id = client.upload_ssh_key("mngr-test-h1", "ssh-ed25519 AAAA test")
+        assert key_id == "mngr-test-h1"
+
+    def test_delete_ssh_key(self, stubbed_client: tuple[AwsVpsClient, Stubber]) -> None:
+        client, stubber = stubbed_client
+        stubber.add_response(
+            "delete_key_pair",
+            {},
+            expected_params={"KeyName": "mngr-test-h1"},
+        )
+        client.delete_ssh_key("mngr-test-h1")
+
+    def test_list_ssh_keys(self, stubbed_client: tuple[AwsVpsClient, Stubber]) -> None:
+        client, stubber = stubbed_client
+        stubber.add_response(
+            "describe_key_pairs",
+            {"KeyPairs": [{"KeyName": "k1", "KeyFingerprint": "aa"}, {"KeyName": "k2", "KeyFingerprint": "bb"}]},
+        )
+        keys = client.list_ssh_keys()
+        assert len(keys) == 2
+        assert keys[0].id == "k1"
+        assert keys[0].name == "k1"
+
+
+class TestAwsVpsClientSnapshots:
+    def test_list_snapshots_empty(self, stubbed_client: tuple[AwsVpsClient, Stubber]) -> None:
+        client, stubber = stubbed_client
+        stubber.add_response(
+            "describe_snapshots",
+            {"Snapshots": []},
+            expected_params={"OwnerIds": ["self"]},
+        )
+        assert client.list_snapshots() == []
+
+    def test_list_snapshots(self, stubbed_client: tuple[AwsVpsClient, Stubber]) -> None:
+        client, stubber = stubbed_client
+        stubber.add_response(
+            "describe_snapshots",
+            {
+                "Snapshots": [
+                    {
+                        "SnapshotId": "snap-1",
+                        "Description": "test snapshot",
+                        "StartTime": datetime(2026, 1, 1, tzinfo=timezone.utc),
+                    }
+                ]
+            },
+            expected_params={"OwnerIds": ["self"]},
+        )
+        snapshots = client.list_snapshots()
+        assert len(snapshots) == 1
+        assert snapshots[0].id == VpsSnapshotId("snap-1")
+        assert snapshots[0].description == "test snapshot"
+
+    def test_delete_snapshot(self, stubbed_client: tuple[AwsVpsClient, Stubber]) -> None:
+        client, stubber = stubbed_client
+        stubber.add_response(
+            "delete_snapshot",
+            {},
+            expected_params={"SnapshotId": "snap-1"},
+        )
+        client.delete_snapshot(VpsSnapshotId("snap-1"))
+
+
+class TestAwsVpsClientSecurityGroup:
+    @pytest.fixture()
+    def auto_sg_client(self) -> Iterator[tuple[AwsVpsClient, Stubber]]:
+        """Like ``stubbed_client`` but with no preset security_group_id."""
+        session = boto3.Session(
+            aws_access_key_id="AKIATEST",
+            aws_secret_access_key="secret",
+            region_name="us-east-1",
+        )
+        ec2 = session.client("ec2", region_name="us-east-1")
+        stubber = Stubber(ec2)
+        client = AwsVpsClient(
+            session=session,
+            region="us-east-1",
+            ami_id="ami-test",
+            security_group_id=None,
+            security_group_name="mngr-aws-test",
+        )
+        client.__dict__["_ec2"] = lambda: ec2
+        stubber.activate()
+        try:
+            yield client, stubber
+        finally:
+            stubber.deactivate()
+
+    def test_returns_preset_id_when_provided(self, stubbed_client: tuple[AwsVpsClient, Stubber]) -> None:
+        client, _stubber = stubbed_client
+        assert client.ensure_security_group() == "sg-test"
+
+    def test_reuses_existing_sg_when_found(self, auto_sg_client: tuple[AwsVpsClient, Stubber]) -> None:
+        client, stubber = auto_sg_client
+        stubber.add_response(
+            "describe_security_groups",
+            {"SecurityGroups": [{"GroupId": "sg-existing", "GroupName": "mngr-aws-test"}]},
+            expected_params={"Filters": [{"Name": "group-name", "Values": ["mngr-aws-test"]}]},
+        )
+        stubber.add_response(
+            "authorize_security_group_ingress",
+            {},
+            expected_params={"GroupId": "sg-existing", "IpPermissions": ANY},
+        )
+        assert client.ensure_security_group() == "sg-existing"
+
+    def test_creates_sg_when_missing(self, auto_sg_client: tuple[AwsVpsClient, Stubber]) -> None:
+        client, stubber = auto_sg_client
+        stubber.add_response(
+            "describe_security_groups",
+            {"SecurityGroups": []},
+            expected_params={"Filters": [{"Name": "group-name", "Values": ["mngr-aws-test"]}]},
+        )
+        stubber.add_response(
+            "create_security_group",
+            {"GroupId": "sg-new"},
+            expected_params={"GroupName": "mngr-aws-test", "Description": ANY},
+        )
+        stubber.add_response(
+            "authorize_security_group_ingress",
+            {},
+            expected_params={"GroupId": "sg-new", "IpPermissions": ANY},
+        )
+        assert client.ensure_security_group() == "sg-new"

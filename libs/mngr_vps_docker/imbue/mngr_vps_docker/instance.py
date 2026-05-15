@@ -23,6 +23,7 @@ from pydantic import PrivateAttr
 from pyinfra.api import Host as PyinfraHost
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.concurrency_group.executor import ConcurrencyGroupExecutor
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import log_span
 from imbue.mngr.errors import HostConnectionError
@@ -1628,39 +1629,120 @@ class VpsDockerProvider(BaseProviderInstance):
 
         return result
 
+    def _get_tagged_vps_ips(self) -> list[str]:
+        """Return public IPs of VPS instances tagged for this provider.
+
+        Subclasses override this to query their provider's instance-listing API
+        for instances tagged with ``mngr-provider=<self.name>`` and return
+        their public IPs. The base implementation returns an empty list, which
+        causes discovery to return no records (suitable for tests / providers
+        that have not wired up listing).
+        """
+        return []
+
+    def _credentials_configured(self) -> bool:
+        """Return True iff the provider's API credentials are resolvable.
+
+        Used by ``_find_host_record`` to short-circuit a full discovery sweep
+        when no credentials are available. Subclasses override to check their
+        own credential source.
+        """
+        return False
+
+    def _read_records_from_vps(
+        self,
+        vps_ip: str,
+    ) -> tuple[list[VpsDockerHostRecord], dict[HostId, list[dict[str, Any]]]]:
+        """Read all host records and agent data from a single VPS in one SSH command.
+
+        Uses the read-only host store so that discovery never creates the
+        state container. If the container does not exist yet (e.g., the VPS
+        is still being set up by a concurrent ``mngr create``), returns
+        empty results. If outer SSH to the VPS fails, fall back to any
+        in-process cached records for that VPS so the hosts still appear
+        in the listing (with an offline state) instead of disappearing
+        entirely; one bad VPS must not silently drop its hosts.
+        """
+        try:
+            with self._make_outer_for_vps_ip(vps_ip) as outer:
+                host_store = self._get_existing_host_store(outer)
+                if host_store is None:
+                    logger.debug("State container not ready on VPS {}, skipping", vps_ip)
+                    return [], {}
+                return host_store.list_all_host_records_with_agents()
+        except (HostConnectionError, MngrError) as e:
+            cached_records = [r for r in self._host_record_cache.values() if r.vps_ip == vps_ip]
+            if cached_records:
+                logger.warning(
+                    "Failed to read records from VPS {} ({}); surfacing {} cached host record(s) as offline",
+                    vps_ip,
+                    e,
+                    len(cached_records),
+                )
+            else:
+                logger.warning("Failed to read records from VPS {}: {}", vps_ip, e)
+            return cached_records, {}
+
     def _discover_host_records_with_agents(
         self,
     ) -> tuple[list[VpsDockerHostRecord], dict[HostId, list[dict[str, Any]]]]:
-        """Discover host records and agent data from state volumes.
+        """Discover host records and agent data from all tagged VPS instances.
 
-        Calls _discover_host_records() for host records, and reads agent data
-        from the state volume in the same batched SSH call. Concrete subclasses
-        override this to include API-based discovery.
+        Asks the subclass for the list of tagged VPS IPs (via
+        ``_get_tagged_vps_ips``) and then SSHes to each VPS in parallel,
+        reading the state volume for host records and agent data in a single
+        SSH command per VPS.
         """
-        return [], {}
+        vps_ips = self._get_tagged_vps_ips()
+        if not vps_ips:
+            return [], {}
+
+        all_records: list[VpsDockerHostRecord] = []
+        all_agent_data: dict[HostId, list[dict[str, Any]]] = {}
+
+        with log_span("Reading records from {} VPS instance(s) in parallel", len(vps_ips)):
+            cg = ConcurrencyGroup(name=f"{self.config.backend}-discover")
+            with cg:
+                with ConcurrencyGroupExecutor(
+                    parent_cg=cg,
+                    name=f"{self.config.backend}_read_records",
+                    max_workers=min(len(vps_ips), 32),
+                ) as executor:
+                    futures = [executor.submit(self._read_records_from_vps, ip) for ip in vps_ips]
+
+                for future in futures:
+                    records, agent_data = future.result()
+                    all_records.extend(records)
+                    for host_id, agents in agent_data.items():
+                        all_agent_data.setdefault(host_id, []).extend(agents)
+
+        return all_records, all_agent_data
 
     def _discover_host_records(self) -> list[VpsDockerHostRecord]:
-        """Discover host records by iterating known VPS instances."""
-        # For each VPS instance that has our provider tag, SSH in and read
-        # the state volume for host records
-        all_records: list[VpsDockerHostRecord] = []
-
-        # VpsClientInterface doesn't expose list_instances, so this base
-        # implementation returns empty. Concrete subclasses override this
-        # to query their provider API for tagged instances.
-
-        # Since we can't easily list all VPS instances from the abstract interface,
-        # we'll iterate host records from the state volumes of known VPSes.
-        # This requires us to know at least one VPS IP to read from.
-
-        # Approach: use the vps_client to list instances if it supports it,
-        # otherwise return empty. Concrete implementations will override discover_hosts.
-        return all_records
+        records, _agent_data = self._discover_host_records_with_agents()
+        return records
 
     def _find_host_record(self, host: HostId | HostName) -> VpsDockerHostRecord | None:
-        """Find a host record by ID or name across all known VPSes."""
-        # For now, we need to iterate through VPS instances
-        # This is a placeholder that concrete subclasses should improve
+        """Find a host record by ID or name, checking the cache first then doing API discovery."""
+        if isinstance(host, HostId) and host in self._host_record_cache:
+            return self._host_record_cache[host]
+        if isinstance(host, HostName):
+            for cached_record in self._host_record_cache.values():
+                if cached_record.certified_host_data.host_name == str(host):
+                    return cached_record
+
+        if not self._credentials_configured():
+            logger.warning("{} credentials not configured, cannot resolve host", self.config.backend)
+            return None
+
+        records = self._discover_host_records()
+        for record in records:
+            host_id = HostId(record.certified_host_data.host_id)
+            self._host_record_cache[host_id] = record
+            if isinstance(host, HostId) and record.certified_host_data.host_id == str(host):
+                return record
+            elif isinstance(host, HostName) and record.certified_host_data.host_name == str(host):
+                return record
         return None
 
     # =========================================================================

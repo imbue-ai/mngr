@@ -107,5 +107,9 @@ To add support for a new VPS provider (e.g., DigitalOcean, Hetzner):
 
 1. Create a new package (e.g., `mngr_digitalocean`)
 2. Implement `VpsClientInterface` with the provider's API
-3. Subclass `VpsDockerProvider` and override `_discover_host_records()` and `_find_host_record()` to use the provider's instance listing API
+3. Subclass `VpsDockerProvider` and override the two discovery extension points:
+   - `_get_tagged_vps_ips()` — return public IPs of instances tagged with `mngr-provider=<self.name>`
+   - `_credentials_configured()` — return whether the provider's API credentials are resolvable
+   The shared discovery flow (SSH-into-each-VPS, read state container, fall back to cache on failure)
+   lives on `VpsDockerProvider` itself; subclasses only need to wire up these two hooks.
 4. Create a `ProviderBackendInterface` implementation and register via pluggy entry points

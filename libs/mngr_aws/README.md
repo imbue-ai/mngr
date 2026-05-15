@@ -1,0 +1,118 @@
+# mngr AWS Provider
+
+AWS provider backend plugin for mngr. Runs agents in Docker containers on Amazon EC2 instances.
+
+See `mngr_vps_docker` for the base architecture and shared infrastructure.
+
+## Setup
+
+Credentials are resolved via boto3's default chain. Any of the following works:
+
+- Environment: `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` (and optional `AWS_SESSION_TOKEN`)
+- Named profile: `AWS_PROFILE=my-profile`, or `profile = "my-profile"` in the provider config
+- `~/.aws/credentials` / `~/.aws/config`
+- IAM instance profile (when running on EC2)
+
+Explicit config fields take precedence over environment variables and credential files.
+
+```toml
+[providers.aws]
+backend = "aws"
+# Optional: explicit credentials (otherwise boto3 default chain is used)
+# access_key_id = "..."
+# secret_access_key = "..."
+# profile = "default"
+
+default_region = "us-east-1"
+default_plan = "t3.small"          # instance type
+default_ami_id = ""                # leave empty to use default_ami_by_region
+
+# Optional networking
+# security_group_id = "sg-..."     # auto-created if unset
+# subnet_id = "subnet-..."          # default-VPC subnet if unset
+allowed_ssh_cidr = "0.0.0.0/0"
+
+# Optional EBS sizing
+root_volume_size_gb = 30
+root_volume_type = "gp3"
+```
+
+## Usage
+
+```bash
+mngr create my-agent --provider aws
+mngr create my-agent --provider aws -b --vps-plan=t3.medium -b --vps-region=us-west-2
+mngr list
+mngr exec my-agent "echo hello"
+mngr stop my-agent
+mngr start my-agent
+mngr destroy my-agent
+```
+
+## AWS-specific configuration
+
+These fields extend the base `VpsDockerProviderConfig` (see `mngr_vps_docker`):
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `access_key_id` | `None` | AWS access key. Falls back to env / `~/.aws`. |
+| `secret_access_key` | `None` | AWS secret key. Falls back to env / `~/.aws`. |
+| `session_token` | `None` | Optional STS / SSO session token. |
+| `profile` | `None` | Named profile from `~/.aws/credentials`. |
+| `default_region` | `us-east-1` | AWS region for new instances. |
+| `default_plan` | `t3.small` | EC2 instance type. |
+| `default_ami_id` | `""` | Explicit AMI override; takes precedence over the per-region map. |
+| `default_ami_by_region` | (pinned Debian 12 amd64 per region) | Per-region default AMIs. |
+| `security_group_id` | `None` | Existing SG; auto-created when unset. |
+| `security_group_name` | `mngr-aws` | Name used for the auto-created SG. |
+| `subnet_id` | `None` | Optional explicit subnet. |
+| `vpc_id` | `None` | Scopes auto-SG lookup. |
+| `allowed_ssh_cidr` | `0.0.0.0/0` | Inbound CIDR for tcp/22 and tcp/`container_ssh_port`. |
+| `associate_public_ip` | `True` | Assign a public IPv4 to instances. |
+| `root_volume_size_gb` | `30` | Root EBS volume size. |
+| `root_volume_type` | `gp3` | Root EBS volume type. |
+| `iam_instance_profile` | `None` | IAM instance profile name. |
+
+## Required IAM permissions
+
+The minimal policy actions needed:
+
+```
+ec2:RunInstances, ec2:TerminateInstances, ec2:DescribeInstances,
+ec2:StopInstances, ec2:StartInstances, ec2:CreateTags,
+ec2:DescribeKeyPairs, ec2:ImportKeyPair, ec2:DeleteKeyPair,
+ec2:DescribeSecurityGroups, ec2:CreateSecurityGroup,
+ec2:AuthorizeSecurityGroupIngress,
+ec2:DescribeSnapshots, ec2:CreateSnapshot, ec2:DeleteSnapshot,
+ec2:DescribeVolumes
+```
+
+## Implementation details
+
+- Uses boto3 for EC2 API access (no hand-rolled SigV4 signing).
+- EC2 instances are tagged with `mngr-provider=<name>`, `mngr-host-id=<id>`, and `mngr-created-at=<iso8601>` for discovery and cleanup-tracking.
+- SSH key auth: each host gets a per-host EC2 KeyPair via `ImportKeyPair`, deleted on `destroy_host`.
+- Discovery: `DescribeInstances` filtered by `tag:mngr-provider`, then SSH to each VPS to read host records from the state volume.
+- Instance shutdown behavior is set to `terminate` so a self-halted instance is garbage-collected automatically.
+- The security group (`mngr-aws` by default) is auto-created on first `create_host` and reused across hosts; it is not deleted on `destroy_host` — clean up manually when retiring a provider.
+
+## Release tests and cost
+
+Release tests provision real EC2 instances and cost money. They are double-gated:
+
+```bash
+AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=... \
+  MNGR_AWS_RELEASE_TESTS=1 \
+  just test libs/mngr_aws/imbue/mngr_aws/test_release_aws.py
+```
+
+A session-scoped cleanup fixture force-terminates any test instances older than 1 hour to limit damage from leaked resources.
+
+## Future improvements
+
+- `--vps-ami=<ami-id>` build-arg for per-host AMI override.
+- Spot instances via `InstanceMarketOptions`.
+- GPU instances with pre-baked CUDA AMIs.
+- Auto SSM Parameter Store lookup for current Debian AMIs per region.
+- Optional EIP allocation for stable public addressing across stops/starts.
+- Multi-container per EC2 instance packing.
