@@ -91,12 +91,12 @@ def create_neon_database(
     api_token: SecretStr,
     role_name: str = "minds_dev",
 ) -> NeonDatabaseRecord:
-    """Create a database named ``minds-dev-<name>`` on the dev-tier project.
+    """Create (or look up) the per-dev-env database on the dev-tier project.
 
-    Ensures ``role_name`` exists on the project (creating it if not) so the
-    new database has a non-superuser owner. Returns the pooled DSN for the
-    new database; not idempotent (Neon rejects duplicate database names
-    with HTTP 409).
+    Ensures ``role_name`` exists on the project (creating it if not) so
+    the database has a non-superuser owner. Idempotent: if the database
+    already exists (Neon returns HTTP 409 on duplicate-name create), we
+    skip the create and proceed straight to reading the connection URI.
     """
     branch = _resolve_default_branch(project_id, api_token=api_token)
     database_name = f"minds-dev-{name}"
@@ -113,12 +113,17 @@ def create_neon_database(
         if "409" not in str(exc):
             raise
 
-    _neon_request(
-        "POST",
-        f"/projects/{project_id}/branches/{branch.id}/databases",
-        api_token=api_token,
-        json_body={"database": {"name": database_name, "owner_name": role_name}},
-    )
+    # Same idempotency story for the database itself.
+    try:
+        _neon_request(
+            "POST",
+            f"/projects/{project_id}/branches/{branch.id}/databases",
+            api_token=api_token,
+            json_body={"database": {"name": database_name, "owner_name": role_name}},
+        )
+    except NeonProviderError as exc:
+        if "409" not in str(exc):
+            raise
 
     uri_payload = _neon_request(
         "GET",

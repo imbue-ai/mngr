@@ -1,16 +1,23 @@
-"""Orchestrate ``minds env create / list / destroy`` flows.
+"""Orchestrate ``minds env deploy / list / destroy`` flows.
 
 The orchestration is split into pure logic (this module) and CLI plumbing
 (``imbue.minds.cli.env``). The pure side takes a :class:`Providers` bundle
 so tests can swap in fakes for each external dependency; the CLI side
 constructs the real providers (Modal CLI, Neon HTTP, SuperTokens HTTP,
-Vultr HTTP) at runtime.
+Vultr HTTP, Modal deploy) at runtime.
 
-Failure model for ``create_dev_env``: best-effort cleanup. If step N fails,
-we attempt to delete every resource the previous N-1 steps created (in
-reverse order) and then re-raise wrapped in :class:`DevEnvProvisioningError`.
-The local TOML file is only written after all provisioning succeeds, so a
-failed ``create`` never leaves a stale ``~/.minds/envs/<name>.toml`` behind.
+``deploy_dev_env`` is idempotent: re-running it for an existing dev env
+re-pushes Modal Secrets and re-deploys both Modal apps, picking up any
+new tier-shared values that landed in Vault since the last run. The
+local TOML file is overwritten in place; there is no "already exists"
+gate.
+
+Failure model: if any *provider creation* step (Modal env, Neon DB,
+SuperTokens app) fails partway through on a fresh deploy, the helper
+rolls back whatever it just created and re-raises. The push-secrets and
+Modal-deploy steps are intrinsically idempotent (Modal Secret upserts
+with ``--force``, Modal deploys overwrite), so they don't need rollback
+-- the operator can just re-run ``minds env deploy <name>``.
 """
 
 from collections.abc import Callable
@@ -20,6 +27,7 @@ from pydantic import AnyUrl
 from pydantic import Field
 from pydantic import SecretStr
 
+from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.minds.config.data_types import DeployEnvConfig
 from imbue.minds.envs.local_store import LocalDevEnvConfig
@@ -28,7 +36,16 @@ from imbue.minds.envs.local_store import list_dev_env_files
 from imbue.minds.envs.local_store import read_dev_env_file
 from imbue.minds.envs.local_store import write_dev_env_file
 from imbue.minds.envs.paths import dev_env_file
-from imbue.minds.envs.primitives import DevEnvAlreadyExistsError
+from imbue.minds.envs.per_env_deploy import ModalDeployError
+from imbue.minds.envs.per_env_deploy import build_per_env_secret_values
+from imbue.minds.envs.per_env_deploy import compute_per_env_overrides
+from imbue.minds.envs.per_env_deploy import deploy_litellm_proxy
+from imbue.minds.envs.per_env_deploy import deploy_remote_service_connector
+from imbue.minds.envs.per_env_deploy import ensure_modal_env
+from imbue.minds.envs.per_env_deploy import per_env_connector_url
+from imbue.minds.envs.per_env_deploy import per_env_litellm_proxy_url
+from imbue.minds.envs.per_env_deploy import per_env_secret_services
+from imbue.minds.envs.per_env_deploy import push_per_env_modal_secret
 from imbue.minds.envs.primitives import DevEnvName
 from imbue.minds.envs.primitives import DevEnvNotFoundError
 from imbue.minds.envs.primitives import DevEnvProvisioningError
@@ -44,6 +61,7 @@ _PROVIDER_ERRORS: tuple[type[Exception], ...] = (
     ModalEnvProviderError,
     NeonProviderError,
     SuperTokensProviderError,
+    ModalDeployError,
     MindError,
 )
 
@@ -53,8 +71,8 @@ class ProviderCredentials(FrozenModel):
 
     Each dynamic dev env shares these dev-tier creds (the user's whole
     point in flagging that dev secrets stay local-only): minds reads them
-    fresh from Vault for the duration of an ``env create`` invocation and
-    does not persist them.
+    fresh from Vault for the duration of an ``env deploy`` invocation
+    and does not persist them.
     """
 
     neon_project_id: str = Field(description="Dev-tier Neon project id under which per-dev-env DBs are created.")
@@ -66,37 +84,51 @@ class ProviderCredentials(FrozenModel):
 
 # Type aliases for the injectable provider callables. Tests substitute
 # fakes here; the CLI wires the real provider modules at runtime.
-CreateModalEnvFn = Callable[[DevEnvName], None]
-DeleteModalEnvFn = Callable[[DevEnvName], None]
 CreateNeonDbFn = Callable[[DevEnvName, str, SecretStr], NeonDatabaseRecord]
 DeleteNeonDbFn = Callable[[DevEnvName, str, SecretStr], None]
 CreateSuperTokensAppFn = Callable[[DevEnvName, str, SecretStr], SuperTokensAppRecord]
 DeleteSuperTokensAppFn = Callable[[DevEnvName, str, SecretStr], None]
 ListVultrInstancesFn = Callable[[DevEnvName, SecretStr], tuple[VultrInstanceSummary, ...]]
 DeleteVultrInstancesFn = Callable[[tuple[VultrInstanceSummary, ...], SecretStr], None]
+ModalEnvOpFn = Callable[[DevEnvName, ConcurrencyGroup], None]
+PushPerEnvSecretFn = Callable[[str, dict[str, str], str, ConcurrencyGroup], None]
+DeployModalAppFn = Callable[[DevEnvName, str, ConcurrencyGroup], None]
+ReadPerEnvSecretValuesFn = Callable[[str, str, dict[str, str], ConcurrencyGroup], dict[str, str]]
 
 
 class Providers(FrozenModel):
     """Injectable provider bundle.
 
-    Defaulting fields would tempt callers to omit them and silently get
-    no-op behaviour, so every field is required.
+    All fields are required so tests can't silently get default no-op
+    behaviour by forgetting one.
     """
 
     model_config = {"arbitrary_types_allowed": True}
 
-    create_modal_env: CreateModalEnvFn = Field(description="Create a Modal environment for the dev env.")
-    delete_modal_env: DeleteModalEnvFn = Field(description="Delete the Modal environment.")
-    create_neon_db: CreateNeonDbFn = Field(description="Create a per-dev-env Neon database.")
+    ensure_modal_env: ModalEnvOpFn = Field(description="Create the Modal environment (idempotent).")
+    delete_modal_env: ModalEnvOpFn = Field(description="Delete the Modal environment.")
+    create_neon_db: CreateNeonDbFn = Field(description="Create or look up the per-dev-env Neon database.")
     delete_neon_db: DeleteNeonDbFn = Field(description="Delete the per-dev-env Neon database.")
-    create_supertokens_app: CreateSuperTokensAppFn = Field(description="Create a per-dev-env SuperTokens app.")
+    create_supertokens_app: CreateSuperTokensAppFn = Field(description="Create the per-dev-env SuperTokens app.")
     delete_supertokens_app: DeleteSuperTokensAppFn = Field(description="Delete the per-dev-env SuperTokens app.")
     list_vultr_instances: ListVultrInstancesFn = Field(description="List Vultr instances tagged for this dev env.")
     delete_vultr_instances: DeleteVultrInstancesFn = Field(description="Delete the listed Vultr instances.")
+    read_per_env_secret_values: ReadPerEnvSecretValuesFn = Field(
+        description="(service, tier_vault_prefix, overrides, cg) -> merged values dict for one Modal Secret.",
+    )
+    push_per_env_modal_secret: PushPerEnvSecretFn = Field(
+        description="(secret_name, values, modal_env, cg) -> upsert the Modal Secret in the per-env Modal env.",
+    )
+    deploy_litellm_proxy: DeployModalAppFn = Field(
+        description="(name, tier, cg) -> `modal deploy` the litellm-proxy app into env <name>.",
+    )
+    deploy_remote_service_connector: DeployModalAppFn = Field(
+        description="(name, tier, cg) -> `modal deploy` the connector app into env <name>.",
+    )
 
 
-class CreatedDevEnv(FrozenModel):
-    """Summary returned by :func:`create_dev_env`."""
+class DeployedDevEnv(FrozenModel):
+    """Summary returned by :func:`deploy_dev_env`."""
 
     name: DevEnvName
     config_path: str = Field(description="Path to the ~/.minds/envs/<name>.toml that was written.")
@@ -112,87 +144,104 @@ class DevEnvSummary(FrozenModel):
     connector_url: AnyUrl
 
 
-def _build_dev_env_urls(name: DevEnvName, deploy: DeployEnvConfig) -> tuple[AnyUrl, AnyUrl]:
-    """Derive (connector_url, litellm_proxy_url) for a dynamic dev env.
-
-    Modal exposes asgi apps at ``<workspace>--<app-name>-<function>.modal.run``
-    where ``<app-name>`` is the deploy-time name (``remote-service-connector-<env>``
-    here). For dynamic dev envs the env *name* equals ``<dev-name>``, so the
-    pattern is ``<workspace>--remote-service-connector-<dev-name>-fastapi-app.modal.run``.
-    LiteLLM follows the same shape.
-    """
-    workspace = str(deploy.modal_workspace)
-    connector = f"https://{workspace}--remote-service-connector-{name}-fastapi-app.modal.run"
-    litellm = f"https://{workspace}--litellm-proxy-{name}-litellm-app.modal.run"
-    return AnyUrl(connector), AnyUrl(litellm)
-
-
-def create_dev_env(
+def deploy_dev_env(
     name: DevEnvName,
     *,
+    tier: str,
     deploy_config: DeployEnvConfig,
     credentials: ProviderCredentials,
     providers: Providers,
+    parent_concurrency_group: ConcurrencyGroup,
     root_name: str | None = None,
-) -> CreatedDevEnv:
-    """Provision a new dynamic dev env, rolling back on partial failure.
+) -> DeployedDevEnv:
+    """Provision (or upgrade) the dev env named ``name``.
 
-    Steps in order:
+    Steps, in order:
 
-    1. Refuse if ``~/.minds/envs/<name>.toml`` already exists.
-    2. Create the Modal environment.
-    3. Create the Neon database.
-    4. Create the SuperTokens app.
-    5. Write the local TOML.
+    1. Ensure the Modal env exists (idempotent).
+    2. Create or look up the per-dev-env Neon database.
+    3. Create or look up the per-dev-env SuperTokens app.
+    4. Push every per-env Modal Secret (tier-shared Vault values + per-env
+       overrides; placeholder for Vault entries that aren't populated).
+    5. Deploy ``litellm-proxy-<tier>`` into env ``<name>``.
+    6. Deploy ``remote-service-connector-<tier>`` into env ``<name>``.
+    7. Write ``~/.<root>/envs/<name>.toml`` (overwriting any existing).
 
-    On any step failing, the cleanup for previously-completed steps runs
-    in reverse order and the original exception is re-raised wrapped in
-    :class:`DevEnvProvisioningError`. Vultr is intentionally not touched
-    at create time -- it is only consulted during destroy to clean up any
-    instances the operator later tagged with this dev env.
+    On any *provider creation* step (1-3) failing, the cleanup for
+    previously-completed creation steps runs in reverse order and the
+    original exception is re-raised wrapped in
+    :class:`DevEnvProvisioningError`. Steps 4-7 are idempotent; if any
+    fail, the operator re-runs ``minds env deploy <name>`` after
+    addressing the cause.
     """
-    target_path = dev_env_file(name, root_name=root_name)
-    if target_path.exists():
-        raise DevEnvAlreadyExistsError(
-            f"Dev env {name!r} already has a local file at {target_path}. Run `minds env destroy {name}` first."
-        )
-
-    completed_steps: list[str] = []
+    completed_creation_steps: list[str] = []
     neon_record: NeonDatabaseRecord | None = None
     supertokens_record: SuperTokensAppRecord | None = None
 
     try:
-        logger.info("Creating Modal environment {!r}...", str(name))
-        providers.create_modal_env(name)
-        completed_steps.append("modal_env")
+        logger.info("Ensuring Modal environment {!r}...", str(name))
+        providers.ensure_modal_env(name, parent_concurrency_group)
+        completed_creation_steps.append("modal_env")
 
-        logger.info("Creating Neon database for {!r}...", str(name))
+        logger.info("Ensuring Neon database for {!r}...", str(name))
         neon_record = providers.create_neon_db(name, credentials.neon_project_id, credentials.neon_api_token)
-        completed_steps.append("neon_db")
+        completed_creation_steps.append("neon_db")
 
-        logger.info("Creating SuperTokens app for {!r}...", str(name))
+        logger.info("Ensuring SuperTokens app for {!r}...", str(name))
         supertokens_record = providers.create_supertokens_app(
             name,
             credentials.supertokens_core_url,
             credentials.supertokens_api_key,
         )
-        completed_steps.append("supertokens_app")
+        completed_creation_steps.append("supertokens_app")
     except _PROVIDER_ERRORS as exc:
         _best_effort_rollback(
             name=name,
-            completed_steps=completed_steps,
+            completed_steps=completed_creation_steps,
             providers=providers,
             credentials=credentials,
+            parent_concurrency_group=parent_concurrency_group,
         )
         raise DevEnvProvisioningError(
             f"Failed to provision dev env {name!r}: {exc!s}. "
-            f"Rolled back: {completed_steps[::-1] or 'nothing was created yet'}."
+            f"Rolled back: {completed_creation_steps[::-1] or 'nothing was created yet'}."
         ) from exc
 
     assert neon_record is not None
     assert supertokens_record is not None
 
-    connector_url, litellm_proxy_url = _build_dev_env_urls(name, deploy_config)
+    modal_workspace = str(deploy_config.modal_workspace)
+    overrides_by_service = compute_per_env_overrides(
+        name,
+        modal_workspace=modal_workspace,
+        neon_record=neon_record,
+        supertokens_record=supertokens_record,
+    )
+    tier_vault_prefix = str(deploy_config.vault_path_prefix).rstrip("/")
+
+    logger.info("Pushing per-env Modal Secrets into env {!r}...", str(name))
+    for service in per_env_secret_services():
+        values = providers.read_per_env_secret_values(
+            service,
+            tier_vault_prefix,
+            overrides_by_service.get(service, {}),
+            parent_concurrency_group,
+        )
+        providers.push_per_env_modal_secret(
+            f"{service}-{tier}",
+            values,
+            str(name),
+            parent_concurrency_group,
+        )
+
+    logger.info("Deploying litellm-proxy-{} into env {!r}...", tier, str(name))
+    providers.deploy_litellm_proxy(name, tier, parent_concurrency_group)
+
+    logger.info("Deploying remote-service-connector-{} into env {!r}...", tier, str(name))
+    providers.deploy_remote_service_connector(name, tier, parent_concurrency_group)
+
+    connector_url = per_env_connector_url(name, modal_workspace)
+    litellm_proxy_url = per_env_litellm_proxy_url(name, modal_workspace)
     local_config = LocalDevEnvConfig(
         connector_url=connector_url,
         litellm_proxy_url=litellm_proxy_url,
@@ -202,9 +251,9 @@ def create_dev_env(
             "SUPERTOKENS_API_KEY": supertokens_record.api_key,
         },
     )
-    config_path = write_dev_env_file(local_config, name=name, root_name=root_name)
+    config_path = write_dev_env_file(local_config, name=name, root_name=root_name, overwrite=True)
 
-    return CreatedDevEnv(
+    return DeployedDevEnv(
         name=name,
         config_path=str(config_path),
         connector_url=connector_url,
@@ -218,34 +267,44 @@ def _best_effort_rollback(
     completed_steps: list[str],
     providers: Providers,
     credentials: ProviderCredentials,
+    parent_concurrency_group: ConcurrencyGroup,
 ) -> None:
-    """Walk completed steps in reverse, swallowing per-step failures.
-
-    A second failure during rollback is logged but does not mask the
-    original ``create`` failure -- the user sees the original error in the
-    raised :class:`DevEnvProvisioningError` and is told which steps got
-    rolled back.
-    """
+    """Walk completed creation steps in reverse, swallowing per-step failures."""
     for step in reversed(completed_steps):
         rollback_fn = _ROLLBACK_TABLE.get(step)
         if rollback_fn is None:
             logger.warning("Unknown rollback step {!r} for dev env {!r}; skipping", step, str(name))
             continue
         try:
-            rollback_fn(name, providers, credentials)
+            rollback_fn(name, providers, credentials, parent_concurrency_group)
         except _PROVIDER_ERRORS as exc:
             logger.warning("Rollback of {!r} step for dev env {!r} failed: {}", step, str(name), exc)
 
 
-def _rollback_modal_env(name: DevEnvName, providers: "Providers", credentials: "ProviderCredentials") -> None:
-    providers.delete_modal_env(name)
+def _rollback_modal_env(
+    name: DevEnvName,
+    providers: "Providers",
+    credentials: "ProviderCredentials",
+    parent_concurrency_group: ConcurrencyGroup,
+) -> None:
+    providers.delete_modal_env(name, parent_concurrency_group)
 
 
-def _rollback_neon_db(name: DevEnvName, providers: "Providers", credentials: "ProviderCredentials") -> None:
+def _rollback_neon_db(
+    name: DevEnvName,
+    providers: "Providers",
+    credentials: "ProviderCredentials",
+    parent_concurrency_group: ConcurrencyGroup,
+) -> None:
     providers.delete_neon_db(name, credentials.neon_project_id, credentials.neon_api_token)
 
 
-def _rollback_supertokens_app(name: DevEnvName, providers: "Providers", credentials: "ProviderCredentials") -> None:
+def _rollback_supertokens_app(
+    name: DevEnvName,
+    providers: "Providers",
+    credentials: "ProviderCredentials",
+    parent_concurrency_group: ConcurrencyGroup,
+) -> None:
     providers.delete_supertokens_app(
         name,
         credentials.supertokens_core_url,
@@ -253,7 +312,10 @@ def _rollback_supertokens_app(name: DevEnvName, providers: "Providers", credenti
     )
 
 
-_ROLLBACK_TABLE: dict[str, Callable[[DevEnvName, "Providers", "ProviderCredentials"], None]] = {
+_ROLLBACK_TABLE: dict[
+    str,
+    Callable[[DevEnvName, "Providers", "ProviderCredentials", ConcurrencyGroup], None],
+] = {
     "modal_env": _rollback_modal_env,
     "neon_db": _rollback_neon_db,
     "supertokens_app": _rollback_supertokens_app,
@@ -265,12 +327,13 @@ def destroy_dev_env(
     *,
     credentials: ProviderCredentials,
     providers: Providers,
+    parent_concurrency_group: ConcurrencyGroup,
     keep_agents: bool = False,
     root_name: str | None = None,
 ) -> None:
-    """Tear down every resource ``create_dev_env`` provisioned.
+    """Tear down every resource ``deploy_dev_env`` provisioned.
 
-    Order is the reverse of create: SuperTokens, Neon, Modal, then any
+    Order is the reverse of deploy: SuperTokens, Neon, Modal, then any
     Vultr instances tagged with this dev env. Finally the local TOML file
     is removed.
 
@@ -304,7 +367,7 @@ def destroy_dev_env(
         credentials.supertokens_api_key,
     )
     providers.delete_neon_db(name, credentials.neon_project_id, credentials.neon_api_token)
-    providers.delete_modal_env(name)
+    providers.delete_modal_env(name, parent_concurrency_group)
 
     delete_dev_env_file(name, root_name=root_name)
 
@@ -324,3 +387,21 @@ def list_dev_envs(*, root_name: str | None = None) -> tuple[DevEnvSummary, ...]:
             )
         )
     return tuple(summaries)
+
+
+# Re-export the per_env_deploy helpers so the CLI can build a Providers
+# bundle without importing both modules.
+__all__ = [
+    "DeployedDevEnv",
+    "DevEnvSummary",
+    "ProviderCredentials",
+    "Providers",
+    "build_per_env_secret_values",
+    "deploy_dev_env",
+    "deploy_litellm_proxy",
+    "deploy_remote_service_connector",
+    "destroy_dev_env",
+    "ensure_modal_env",
+    "list_dev_envs",
+    "push_per_env_modal_secret",
+]
