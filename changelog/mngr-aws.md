@@ -12,3 +12,9 @@
 
 - Shared discovery logic (parallel SSH-read across tagged VPSes, cache fallback, name/id lookup) lifted from `VultrProvider` into `VpsDockerProvider`.
 - Subclasses now only implement two small extension points: `_get_tagged_vps_ips()` and `_credentials_configured()`. `VultrProvider` and the new `AwsProvider` both consume the shared implementation.
+
+## VPS Docker auto-shutdown TTL
+
+- New optional `auto_shutdown_minutes` field on `VpsDockerProviderConfig`. When set, cloud-init schedules `shutdown -P +N` so the VPS halts itself after the configured number of minutes.
+- On AWS, combined with `InstanceInitiatedShutdownBehavior=terminate` (always on), this auto-terminates the EC2 instance — useful as a runaway-cost safety net for ephemeral / test hosts.
+- AWS release tests force this to 60 minutes via `MNGR_AWS_AUTO_SHUTDOWN_MINUTES=60` (test-only env-var escape hatch) so instances self-terminate even if pytest is killed before any cleanup runs.

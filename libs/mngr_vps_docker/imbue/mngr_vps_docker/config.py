@@ -63,6 +63,18 @@ class VpsDockerProviderConfig(ProviderInstanceConfig):
         default=(),
         description="Default docker run arguments applied to all containers",
     )
+    auto_shutdown_minutes: int | None = Field(
+        default=None,
+        description=(
+            "When set, the VPS schedules `shutdown -P +N` during cloud-init so the OS "
+            "halts itself after N minutes. On AWS, combined with "
+            "InstanceInitiatedShutdownBehavior=terminate, this auto-terminates the EC2 "
+            "instance (billing stops) even if the orchestrating process is killed. On "
+            "Vultr the OS halts but billing continues until the VPS is destroyed -- "
+            "useful as a circuit-breaker. Leave as None for the normal long-lived "
+            "behavior. Primarily intended as a safety net for release-test runs."
+        ),
+    )
     builder: DockerBuilder = Field(
         default=DockerBuilder.DOCKER,
         description=(

@@ -954,6 +954,7 @@ class VpsDockerProvider(BaseProviderInstance):
         user_data = generate_cloud_init_user_data(
             host_private_key=vps_host_private_key,
             host_public_key=vps_host_public_key,
+            auto_shutdown_minutes=self._get_effective_auto_shutdown_minutes(),
         )
 
         logger.log(LogLevel.BUILD.value, "Creating VPS instance (region: {}, plan: {})...", region, plan, source="vps")
@@ -1628,6 +1629,15 @@ class VpsDockerProvider(BaseProviderInstance):
             result[host_ref] = agent_refs
 
         return result
+
+    def _get_effective_auto_shutdown_minutes(self) -> int | None:
+        """Return the auto-shutdown TTL (in minutes) to inject into cloud-init.
+
+        Subclasses can override this to add provider-specific escape hatches
+        (e.g., a test-only env-var that forces a TTL regardless of project
+        config). The base implementation simply returns the configured value.
+        """
+        return self.config.auto_shutdown_minutes
 
     def _get_tagged_vps_ips(self) -> list[str]:
         """Return public IPs of VPS instances tagged for this provider.

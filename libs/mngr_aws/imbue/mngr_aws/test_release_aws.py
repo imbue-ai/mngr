@@ -25,6 +25,7 @@ from collections.abc import Iterator
 from datetime import datetime
 from datetime import timedelta
 from datetime import timezone
+from typing import Final
 
 import boto3
 import pytest
@@ -38,6 +39,12 @@ _OPT_IN = os.environ.get("MNGR_AWS_RELEASE_TESTS") == "1"
 _AWS_REGION = os.environ.get("AWS_REGION", "us-east-1")
 _TEST_LEAK_TTL = timedelta(hours=1)
 _TEST_NAME_PREFIX = "test-aws-"
+# Belt-and-suspenders backstop against runaway EC2 cost: even if pytest is
+# killed and ``cleanup_leaked_instances`` never runs, this TTL drives cloud-init
+# to schedule ``shutdown -P +N`` which (combined with the AWS launch flag
+# ``InstanceInitiatedShutdownBehavior=terminate``) terminates the instance from
+# the inside. 60 min is conservatively above any normal test run length.
+_TEST_INSTANCE_AUTO_SHUTDOWN_MINUTES: Final[int] = 60
 
 pytestmark = [
     pytest.mark.release,
@@ -88,7 +95,16 @@ def cleanup_leaked_instances() -> Iterator[None]:
 
 
 def _run_mngr(*args: str, timeout: int = 300) -> subprocess.CompletedProcess[str]:
-    """Run a mngr command and return the result."""
+    """Run a mngr command and return the result.
+
+    Inherits the current process env, then forces ``MNGR_AWS_AUTO_SHUTDOWN_MINUTES``
+    so every EC2 instance the test spins up has cloud-init schedule a
+    ``shutdown -P +N``. Combined with the launch flag
+    ``InstanceInitiatedShutdownBehavior=terminate``, this guarantees self-
+    termination even if pytest is killed before the cleanup fixture runs.
+    """
+    env = os.environ.copy()
+    env["MNGR_AWS_AUTO_SHUTDOWN_MINUTES"] = str(_TEST_INSTANCE_AUTO_SHUTDOWN_MINUTES)
     cmd = ["uv", "run", "mngr", *args]
     return subprocess.run(
         cmd,
@@ -96,6 +112,7 @@ def _run_mngr(*args: str, timeout: int = 300) -> subprocess.CompletedProcess[str
         text=True,
         timeout=timeout,
         cwd=os.environ.get("MNGR_REPO_ROOT", os.getcwd()),
+        env=env,
     )
 
 

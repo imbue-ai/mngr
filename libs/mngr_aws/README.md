@@ -72,6 +72,7 @@ These fields extend the base `VpsDockerProviderConfig` (see `mngr_vps_docker`):
 | `root_volume_size_gb` | `30` | Root EBS volume size. |
 | `root_volume_type` | `gp3` | Root EBS volume type. |
 | `iam_instance_profile` | `None` | IAM instance profile name. |
+| `auto_shutdown_minutes` | `None` | When set, cloud-init schedules `shutdown -P +N` so the OS halts itself after N minutes. Combined with `InstanceInitiatedShutdownBehavior=terminate` (always on), this auto-terminates the EC2 instance. Leave `None` for normal long-lived behavior; useful for ephemeral test / scratch hosts. |
 
 ## Required IAM permissions
 
@@ -106,7 +107,13 @@ AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=... \
   just test libs/mngr_aws/imbue/mngr_aws/test_release_aws.py
 ```
 
-A session-scoped cleanup fixture force-terminates any test instances older than 1 hour to limit damage from leaked resources.
+Three layers of damage control limit leaks from killed-mid-run tests:
+
+1. Every test's `finally` calls `mngr destroy --force`.
+2. A session-scoped autouse fixture force-terminates any test-tagged instance older than 1 hour at the end of the run.
+3. Release tests set `MNGR_AWS_AUTO_SHUTDOWN_MINUTES=60`, which propagates to cloud-init as `shutdown -P +60` on every test instance. Combined with `InstanceInitiatedShutdownBehavior=terminate`, this means a test instance auto-terminates 60 minutes after boot even if pytest is killed before any cleanup runs.
+
+The `MNGR_AWS_AUTO_SHUTDOWN_MINUTES` env var is intentionally a test-only escape hatch — production users should set `auto_shutdown_minutes` in `[providers.aws]` config directly.
 
 ## Future improvements
 

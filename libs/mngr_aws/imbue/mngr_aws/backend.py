@@ -8,6 +8,7 @@ from pydantic import ConfigDict
 from pydantic import Field
 from pydantic import PrivateAttr
 
+from imbue.imbue_common.env_vars import parse_int_env
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import ProviderInstanceConfig
 from imbue.mngr.errors import MngrError
@@ -21,6 +22,16 @@ from imbue.mngr_aws.config import AwsProviderConfig
 from imbue.mngr_vps_docker.instance import VpsDockerProvider
 
 AWS_BACKEND_NAME: Final[ProviderBackendName] = ProviderBackendName("aws")
+
+# Test-only escape hatch: forces ``auto_shutdown_minutes`` to the configured
+# value (overriding any project-config value), so release tests can guarantee
+# an OS-level self-shutdown even when the user's main config does not opt in.
+# Combined with ``InstanceInitiatedShutdownBehavior=terminate``, this means EC2
+# instances created by a release-test run auto-terminate after the window even
+# if pytest is killed by SIGKILL or the host crashes mid-test. Intentionally
+# not a config field; production users should set ``auto_shutdown_minutes`` in
+# their provider config directly.
+_TEST_AUTO_SHUTDOWN_ENV_VAR: Final[str] = "MNGR_AWS_AUTO_SHUTDOWN_MINUTES"
 
 
 class AwsProvider(VpsDockerProvider):
@@ -46,6 +57,22 @@ class AwsProvider(VpsDockerProvider):
 
     def _credentials_configured(self) -> bool:
         return self.aws_config.has_resolvable_credentials()
+
+    def _get_effective_auto_shutdown_minutes(self) -> int | None:
+        """Resolve auto-shutdown TTL with the AWS test-only env-var override.
+
+        ``MNGR_AWS_AUTO_SHUTDOWN_MINUTES`` is a test-only escape hatch: when
+        set to a positive integer, it forces the cloud-init shutdown timer
+        regardless of project config. Combined with the EC2 launch flag
+        ``InstanceInitiatedShutdownBehavior=terminate``, this guarantees that
+        instances created by a release-test run auto-terminate after the
+        window even if pytest is killed or the host crashes. Malformed values
+        (non-integer, zero, negative) silently fall back to the config value.
+        """
+        override = parse_int_env(_TEST_AUTO_SHUTDOWN_ENV_VAR)
+        if override is not None and override > 0:
+            return override
+        return super()._get_effective_auto_shutdown_minutes()
 
     def _get_tagged_vps_ips(self) -> list[str]:
         """Get public IPs of EC2 instances tagged with this provider's name."""

@@ -78,3 +78,35 @@ def test_generate_cloud_init_deletes_existing_keys() -> None:
         host_public_key="ssh-ed25519 AAAA fake",
     )
     assert "ssh_deletekeys: true" in result
+
+
+def test_generate_cloud_init_no_shutdown_by_default() -> None:
+    result = generate_cloud_init_user_data(
+        host_private_key="fake-key",
+        host_public_key="ssh-ed25519 AAAA fake",
+    )
+    assert "shutdown -P" not in result
+
+
+def test_generate_cloud_init_with_auto_shutdown_adds_shutdown_command() -> None:
+    result = generate_cloud_init_user_data(
+        host_private_key="fake-key",
+        host_public_key="ssh-ed25519 AAAA fake",
+        auto_shutdown_minutes=42,
+    )
+    assert "shutdown -P +42" in result
+
+
+def test_generate_cloud_init_with_auto_shutdown_appears_in_runcmd() -> None:
+    """The shutdown entry must be inside the runcmd block, not loose YAML."""
+    result = generate_cloud_init_user_data(
+        host_private_key="fake-key",
+        host_public_key="ssh-ed25519 AAAA fake",
+        auto_shutdown_minutes=15,
+    )
+    runcmd_index = result.index("runcmd:")
+    shutdown_index = result.index("shutdown -P +15")
+    assert runcmd_index < shutdown_index
+    # The shutdown line is a list item under runcmd (starts with "  - ").
+    line = next(line for line in result.splitlines() if "shutdown -P" in line)
+    assert line.lstrip().startswith("- shutdown -P")

@@ -1,6 +1,7 @@
 def generate_cloud_init_user_data(
     host_private_key: str,
     host_public_key: str,
+    auto_shutdown_minutes: int | None = None,
 ) -> str:
     """Generate a cloud-init user_data script for VPS provisioning.
 
@@ -12,7 +13,22 @@ def generate_cloud_init_user_data(
     default 10:30:100 pre-auth cap and lose connections mid-transfer.
     Mirrors the equivalent ``MaxSessions=100`` / ``MaxStartups=100:30:200``
     knob the lima provider applies to its VMs.
+
+    When ``auto_shutdown_minutes`` is set, the VPS schedules a
+    ``shutdown -P +N`` from cloud-init, so the OS halts itself after the
+    deadline. On AWS, paired with ``InstanceInitiatedShutdownBehavior=
+    terminate``, this means the EC2 instance auto-terminates and stops
+    billing even if the orchestrating process is killed. On Vultr the OS
+    halts but billing continues until the VPS is destroyed -- still useful
+    as a circuit-breaker so an abandoned VPS becomes obviously unreachable
+    rather than silently consuming the agent slot.
     """
+    shutdown_block = ""
+    if auto_shutdown_minutes is not None:
+        shutdown_block = (
+            f"  - shutdown -P +{auto_shutdown_minutes} "
+            f"'mngr_vps_docker auto-shutdown after {auto_shutdown_minutes} minutes'\n"
+        )
     return f"""#cloud-config
 ssh_deletekeys: true
 ssh_keys:
@@ -37,7 +53,7 @@ runcmd:
         systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null || service ssh restart 2>/dev/null || true
     fi
   - touch /var/run/mngr-ready
-"""
+{shutdown_block}"""
 
 
 def _indent(text: str, spaces: int) -> str:
