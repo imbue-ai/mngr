@@ -1,0 +1,1 @@
+Fix `test_snapshot_and_shutdown_missing_sandbox_id` and `test_snapshot_and_shutdown_missing_host_id` failing with "Test marked with @pytest.mark.modal but never invoked modal". Dropped the module-level `pytestmark = [pytest.mark.modal]` and now apply `@pytest.mark.modal` only to the three tests that directly invoke the modal SDK from the test body.

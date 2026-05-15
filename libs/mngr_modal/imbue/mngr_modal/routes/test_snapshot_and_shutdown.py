@@ -23,11 +23,16 @@ from imbue.mngr_modal.constants import MODAL_TEST_APP_PREFIX
 from imbue.mngr_modal.routes.deployment import deploy_function
 from imbue.modal_proxy.direct import DirectModalInterface
 
-pytestmark = [pytest.mark.modal]
-
 # =============================================================================
 # Acceptance tests (require Modal network access)
 # =============================================================================
+#
+# The ``@pytest.mark.modal`` mark is applied only to tests that directly invoke
+# the modal SDK from the test body. The module-scoped ``deployed_snapshot_function``
+# fixture also makes modal calls during setup, but those are attributed by the
+# resource guard to whichever test triggered setup -- so applying the mark at
+# module level caused HTTP-only sibling tests to fail with
+# "Test marked with @pytest.mark.modal but never invoked modal".
 
 
 class DeploymentError(RuntimeError):
@@ -151,6 +156,7 @@ def deployed_snapshot_function() -> Generator[tuple[str, str], None, None]:
 
 
 @pytest.mark.acceptance
+@pytest.mark.modal
 @pytest.mark.timeout(180)
 def test_snapshot_and_shutdown_success(
     deployed_snapshot_function: tuple[str, str],
@@ -253,6 +259,7 @@ def test_snapshot_and_shutdown_missing_host_id(
 
 
 @pytest.mark.acceptance
+@pytest.mark.modal
 @pytest.mark.timeout(180)
 def test_snapshot_and_shutdown_nonexistent_sandbox(
     deployed_snapshot_function: tuple[str, str],
@@ -278,6 +285,7 @@ def test_snapshot_and_shutdown_nonexistent_sandbox(
 
 
 @pytest.mark.acceptance
+@pytest.mark.modal
 @pytest.mark.timeout(180)
 def test_snapshot_and_shutdown_nonexistent_host_record(
     deployed_snapshot_function: tuple[str, str],
