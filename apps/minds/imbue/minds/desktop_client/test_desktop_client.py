@@ -3,6 +3,7 @@ import queue
 from pathlib import Path
 
 import httpx
+import pytest
 from fastapi import FastAPI
 from fastapi import Request as FastAPIRequest
 from fastapi.responses import HTMLResponse
@@ -352,6 +353,42 @@ def test_landing_page_shows_create_form_after_discovery_finds_no_agents(tmp_path
     assert response.status_code == 200
     assert "Create a Project" in response.text
     assert "git_url" in response.text
+
+
+def test_landing_page_create_form_surfaces_env_anthropic_credentials(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression: when the landing page falls back to rendering the inline
+    create form (no agents discovered yet), it must surface the same
+    ``ANTHROPIC_*`` env-detection notices as the dedicated ``/create`` route.
+
+    Earlier the env-detection wiring was only added to ``_handle_create_page``;
+    ``_handle_landing_page``'s parallel ``render_create_form`` call was missed,
+    so a user on a fresh install who landed straight on ``/`` would never see
+    the opt-in/opt-out checkboxes even with ``ANTHROPIC_API_KEY`` /
+    ``ANTHROPIC_BASE_URL`` set in their shell. This test pins that fix down.
+    """
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://litellm.test.example/v1")
+    backend_resolver = StaticBackendResolver(url_by_agent_and_service={})
+    client, auth_store = _create_test_desktop_client(
+        tmp_path=tmp_path,
+        backend_resolver=backend_resolver,
+        http_client=None,
+    )
+    _authenticate_client(client=client, auth_store=auth_store)
+
+    response = client.get("/")
+    assert response.status_code == 200
+    assert 'id="env-api-key-notice"' in response.text
+    assert 'id="env-base-url-notice"' in response.text
+    assert 'name="use_env_anthropic_api_key"' in response.text
+    assert 'name="use_env_anthropic_base_url"' in response.text
+    # Base URL is non-secret and shown inline so the user can sanity-check it.
+    assert "https://litellm.test.example/v1" in response.text
+    # API key value must NEVER appear in the HTML.
+    assert "sk-ant-test" not in response.text
 
 
 def test_landing_page_prefills_git_url_from_query_param(tmp_path: Path) -> None:

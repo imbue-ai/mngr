@@ -308,11 +308,14 @@ def _handle_landing_page(
     minds_config: MindsConfig | None = request.app.state.minds_config
     accounts = session_store.list_accounts() if session_store else []
     default_account_id = minds_config.get_default_account_id() if minds_config else None
+    detected_env_anthropic_api_key, detected_env_anthropic_base_url_value = _detect_env_anthropic_credentials()
     html = render_create_form(
         git_url=git_url,
         branch=branch,
         accounts=accounts,
         default_account_id=default_account_id or "",
+        detected_env_anthropic_api_key=detected_env_anthropic_api_key,
+        detected_env_anthropic_base_url_value=detected_env_anthropic_base_url_value,
     )
     return HTMLResponse(content=html)
 
