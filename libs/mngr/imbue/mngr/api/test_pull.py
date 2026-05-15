@@ -53,10 +53,9 @@ def test_pull_files_fail_mode_with_no_uncommitted_changes_succeeds(
     assert not has_uncommitted_changes(pull_ctx.local_dir, cg)
 
     result = pull_files(
-        agent=pull_ctx.agent,
         host=pull_ctx.host,
         destination=pull_ctx.local_dir,
-        source_path=None,
+        source_path=pull_ctx.agent.work_dir,
         is_dry_run=False,
         is_delete=False,
         uncommitted_changes=UncommittedChangesMode.FAIL,
@@ -80,10 +79,9 @@ def test_pull_files_fail_mode_with_uncommitted_changes_raises_error(
 
     with pytest.raises(UncommittedChangesError) as exc_info:
         pull_files(
-            agent=pull_ctx.agent,
             host=pull_ctx.host,
             destination=pull_ctx.local_dir,
-            source_path=None,
+            source_path=pull_ctx.agent.work_dir,
             is_dry_run=False,
             is_delete=False,
             uncommitted_changes=UncommittedChangesMode.FAIL,
@@ -109,10 +107,9 @@ def test_pull_files_clobber_mode_overwrites_host_changes(
     assert has_uncommitted_changes(pull_ctx.local_dir, cg)
 
     result = pull_files(
-        agent=pull_ctx.agent,
         host=pull_ctx.host,
         destination=pull_ctx.local_dir,
-        source_path=None,
+        source_path=pull_ctx.agent.work_dir,
         is_dry_run=False,
         is_delete=False,
         uncommitted_changes=UncommittedChangesMode.CLOBBER,
@@ -134,10 +131,9 @@ def test_pull_files_clobber_mode_when_only_host_has_changes(
     assert has_uncommitted_changes(pull_ctx.local_dir, cg)
 
     pull_files(
-        agent=pull_ctx.agent,
         host=pull_ctx.host,
         destination=pull_ctx.local_dir,
-        source_path=None,
+        source_path=pull_ctx.agent.work_dir,
         is_dry_run=False,
         is_delete=False,
         uncommitted_changes=UncommittedChangesMode.CLOBBER,
@@ -161,10 +157,9 @@ def test_pull_files_clobber_mode_with_delete_flag_removes_host_only_files(
     run_git_command(pull_ctx.local_dir, "commit", "-m", "Add host extra file")
 
     pull_files(
-        agent=pull_ctx.agent,
         host=pull_ctx.host,
         destination=pull_ctx.local_dir,
-        source_path=None,
+        source_path=pull_ctx.agent.work_dir,
         is_dry_run=False,
         is_delete=True,
         uncommitted_changes=UncommittedChangesMode.CLOBBER,
@@ -193,10 +188,9 @@ def test_pull_files_stash_mode_stashes_changes_and_leaves_stashed(
     assert has_uncommitted_changes(pull_ctx.local_dir, cg)
 
     pull_files(
-        agent=pull_ctx.agent,
         host=pull_ctx.host,
         destination=pull_ctx.local_dir,
-        source_path=None,
+        source_path=pull_ctx.agent.work_dir,
         is_dry_run=False,
         is_delete=False,
         uncommitted_changes=UncommittedChangesMode.STASH,
@@ -229,10 +223,9 @@ def test_pull_files_stash_mode_when_both_agent_and_host_modify_same_file(
     (pull_ctx.agent_dir / "shared.txt").write_text("agent version of shared")
 
     pull_files(
-        agent=pull_ctx.agent,
         host=pull_ctx.host,
         destination=pull_ctx.local_dir,
-        source_path=None,
+        source_path=pull_ctx.agent.work_dir,
         is_dry_run=False,
         is_delete=False,
         uncommitted_changes=UncommittedChangesMode.STASH,
@@ -256,10 +249,9 @@ def test_pull_files_stash_mode_stashes_untracked_files(
     assert has_uncommitted_changes(pull_ctx.local_dir, cg)
 
     pull_files(
-        agent=pull_ctx.agent,
         host=pull_ctx.host,
         destination=pull_ctx.local_dir,
-        source_path=None,
+        source_path=pull_ctx.agent.work_dir,
         is_dry_run=False,
         is_delete=False,
         uncommitted_changes=UncommittedChangesMode.STASH,
@@ -285,10 +277,9 @@ def test_pull_files_merge_mode_restores_untracked_files(
     assert has_uncommitted_changes(pull_ctx.local_dir, cg)
 
     pull_files(
-        agent=pull_ctx.agent,
         host=pull_ctx.host,
         destination=pull_ctx.local_dir,
-        source_path=None,
+        source_path=pull_ctx.agent.work_dir,
         is_dry_run=False,
         is_delete=False,
         uncommitted_changes=UncommittedChangesMode.MERGE,
@@ -314,10 +305,9 @@ def test_pull_files_stash_mode_with_no_uncommitted_changes_does_not_stash(
     initial_stash_count = get_stash_count(pull_ctx.local_dir)
 
     pull_files(
-        agent=pull_ctx.agent,
         host=pull_ctx.host,
         destination=pull_ctx.local_dir,
-        source_path=None,
+        source_path=pull_ctx.agent.work_dir,
         is_dry_run=False,
         is_delete=False,
         uncommitted_changes=UncommittedChangesMode.STASH,
@@ -347,10 +337,9 @@ def test_pull_files_merge_mode_stashes_and_restores_changes(
     assert has_uncommitted_changes(pull_ctx.local_dir, cg)
 
     pull_files(
-        agent=pull_ctx.agent,
         host=pull_ctx.host,
         destination=pull_ctx.local_dir,
-        source_path=None,
+        source_path=pull_ctx.agent.work_dir,
         is_dry_run=False,
         is_delete=False,
         uncommitted_changes=UncommittedChangesMode.MERGE,
@@ -377,10 +366,9 @@ def test_pull_files_merge_mode_when_only_agent_file_is_modified(
     assert not has_uncommitted_changes(pull_ctx.local_dir, cg)
 
     pull_files(
-        agent=pull_ctx.agent,
         host=pull_ctx.host,
         destination=pull_ctx.local_dir,
-        source_path=None,
+        source_path=pull_ctx.agent.work_dir,
         is_dry_run=False,
         is_delete=False,
         uncommitted_changes=UncommittedChangesMode.MERGE,
@@ -401,10 +389,9 @@ def test_pull_files_merge_mode_when_only_host_has_changes(
     assert has_uncommitted_changes(pull_ctx.local_dir, cg)
 
     pull_files(
-        agent=pull_ctx.agent,
         host=pull_ctx.host,
         destination=pull_ctx.local_dir,
-        source_path=None,
+        source_path=pull_ctx.agent.work_dir,
         is_dry_run=False,
         is_delete=False,
         uncommitted_changes=UncommittedChangesMode.MERGE,
@@ -427,10 +414,9 @@ def test_pull_files_merge_mode_when_both_modify_different_files(
     assert has_uncommitted_changes(pull_ctx.local_dir, cg)
 
     pull_files(
-        agent=pull_ctx.agent,
         host=pull_ctx.host,
         destination=pull_ctx.local_dir,
-        source_path=None,
+        source_path=pull_ctx.agent.work_dir,
         is_dry_run=False,
         is_delete=False,
         uncommitted_changes=UncommittedChangesMode.MERGE,
@@ -454,10 +440,9 @@ def test_pull_files_merge_mode_with_no_uncommitted_changes(
     initial_stash_count = get_stash_count(pull_ctx.local_dir)
 
     pull_files(
-        agent=pull_ctx.agent,
         host=pull_ctx.host,
         destination=pull_ctx.local_dir,
-        source_path=None,
+        source_path=pull_ctx.agent.work_dir,
         is_dry_run=False,
         is_delete=False,
         uncommitted_changes=UncommittedChangesMode.MERGE,
@@ -496,10 +481,9 @@ def test_pull_files_excludes_git_directory(
     ).stdout.strip()
 
     pull_files(
-        agent=pull_ctx.agent,
         host=pull_ctx.host,
         destination=pull_ctx.local_dir,
-        source_path=None,
+        source_path=pull_ctx.agent.work_dir,
         is_dry_run=False,
         is_delete=False,
         uncommitted_changes=UncommittedChangesMode.CLOBBER,
@@ -532,10 +516,9 @@ def test_pull_files_dry_run_does_not_modify_files(
     assert not (pull_ctx.local_dir / "new_file.txt").exists()
 
     result = pull_files(
-        agent=pull_ctx.agent,
         host=pull_ctx.host,
         destination=pull_ctx.local_dir,
-        source_path=None,
+        source_path=pull_ctx.agent.work_dir,
         is_dry_run=True,
         is_delete=False,
         uncommitted_changes=UncommittedChangesMode.FAIL,
@@ -563,7 +546,6 @@ def test_pull_files_with_custom_source_path(
     (pull_ctx.agent_dir / "file_in_root.txt").write_text("content from root")
 
     result = pull_files(
-        agent=pull_ctx.agent,
         host=pull_ctx.host,
         destination=pull_ctx.local_dir,
         source_path=custom_source,
@@ -637,10 +619,9 @@ def test_pull_files_with_remote_host_without_ssh_info_raises_assertion(
 
     with pytest.raises(AssertionError, match="SSH connection info"):
         pull_files(
-            agent=remote_pull_ctx.agent,
             host=remote_pull_ctx.host,
             destination=remote_pull_ctx.local_dir,
-            source_path=None,
+            source_path=remote_pull_ctx.agent.work_dir,
             is_dry_run=False,
             is_delete=False,
             uncommitted_changes=UncommittedChangesMode.CLOBBER,
@@ -960,10 +941,9 @@ def test_pull_files_to_non_git_directory_succeeds(
     host = cast(OnlineHostInterface, FakeHost())
 
     result = pull_files(
-        agent=agent,
         host=host,
         destination=dest_dir,
-        source_path=None,
+        source_path=agent.work_dir,
         is_dry_run=False,
         is_delete=False,
         uncommitted_changes=UncommittedChangesMode.FAIL,

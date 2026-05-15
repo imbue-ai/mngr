@@ -6,7 +6,7 @@
 **Synopsis:**
 
 ```text
-mngr push [TARGET] [SOURCE] [--target <TARGET>] [--source <DIR>] [--target-agent <AGENT>] [--sync-mode <MODE>] [--mirror] [--dry-run] [--stop]
+mngr push [TARGET] [SOURCE] [--target <TARGET>] [--source <DIR>] [--sync-mode <MODE>] [--mirror] [--dry-run] [--stop]
 ```
 
 Push files or git commits from local machine to an agent [experimental].
@@ -37,9 +37,6 @@ mngr push [OPTIONS] TARGET SOURCE
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
 | `--target` | hosted_location | Target specification: AGENT[@HOST[.PROVIDER]][:PATH] | None |
-| `--target-agent` | agent_address | Target agent address (NAME[@HOST[.PROVIDER]]) | None |
-| `--target-host` | host_address | Target host address (HOST[.PROVIDER]) [future] | None |
-| `--target-path` | text | Path within the agent's work directory | None |
 
 ## Source
 
@@ -107,6 +104,12 @@ $ mngr push my-agent ./local-dir
 
 ```bash
 $ mngr push my-agent:subdir ./local-src
+```
+
+**Push to a path on a host directly (no agent)**
+
+```bash
+$ mngr push @localhost:/abs/path ./local-dir
 ```
 
 **Preview what would be transferred**

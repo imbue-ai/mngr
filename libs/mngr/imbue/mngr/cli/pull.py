@@ -4,11 +4,11 @@ import click
 from click_option_group import optgroup
 from loguru import logger
 
+from imbue.mngr.api.discover import discover_hosts_and_agents
+from imbue.mngr.api.find import resolve_hosted_location
 from imbue.mngr.api.pull import pull_files
 from imbue.mngr.api.pull import pull_git
-from imbue.mngr.cli.address_params import AGENT_ADDRESS
 from imbue.mngr.cli.address_params import HOSTED_LOCATION
-from imbue.mngr.cli.address_params import HOST_ADDRESS
 from imbue.mngr.cli.agent_utils import find_agent_for_command
 from imbue.mngr.cli.agent_utils import stop_agent_after_sync
 from imbue.mngr.cli.common_opts import add_common_options
@@ -20,8 +20,9 @@ from imbue.mngr.cli.output_helpers import output_sync_files_result
 from imbue.mngr.cli.output_helpers import output_sync_git_result
 from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.errors import UserInputError
+from imbue.mngr.interfaces.agent import AgentInterface
+from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import AgentAddress
-from imbue.mngr.primitives import HostAddress
 from imbue.mngr.primitives import HostedLocation
 from imbue.mngr.primitives import UncommittedChangesMode
 
@@ -35,9 +36,6 @@ class PullCliOptions(CommonCliOptions):
     source_pos: HostedLocation | None
     destination_pos: str | None
     source: HostedLocation | None
-    source_agent: AgentAddress | None
-    source_host: HostAddress | None
-    source_path: str | None
     destination: str | None
     dry_run: bool
     stop: bool
@@ -48,9 +46,6 @@ class PullCliOptions(CommonCliOptions):
     target_branch: str | None
     # Planned features (not yet implemented)
     target: HostedLocation | None
-    target_agent: AgentAddress | None
-    target_host: HostAddress | None
-    target_path: str | None
     stdin: bool
     include: tuple[str, ...]
     include_gitignored: bool
@@ -77,9 +72,6 @@ class PullCliOptions(CommonCliOptions):
     type=HOSTED_LOCATION,
     help="Source specification: AGENT[@HOST[.PROVIDER]][:PATH]",
 )
-@optgroup.option("--source-agent", type=AGENT_ADDRESS, help="Source agent address (NAME[@HOST[.PROVIDER]])")
-@optgroup.option("--source-host", type=HOST_ADDRESS, help="Source host address (HOST[.PROVIDER]) [future]")
-@optgroup.option("--source-path", help="Path within the agent's work directory")
 @optgroup.group("Destination")
 @optgroup.option(
     "--destination",
@@ -123,9 +115,6 @@ class PullCliOptions(CommonCliOptions):
     type=HOSTED_LOCATION,
     help="Target specification: AGENT[@HOST[.PROVIDER]][:PATH] [future]",
 )
-@optgroup.option("--target-agent", type=AGENT_ADDRESS, help="Target agent address [future]")
-@optgroup.option("--target-host", type=HOST_ADDRESS, help="Target host address [future]")
-@optgroup.option("--target-path", help="Path within target to sync to [future]")
 @optgroup.group("Multi-source")
 @optgroup.option(
     "--stdin",
@@ -188,7 +177,8 @@ def pull(ctx: click.Context, **kwargs) -> None:
         command_class=PullCliOptions,
     )
 
-    # Merge positional and named arguments (named option takes precedence)
+    if opts.source is not None and opts.source_pos is not None and opts.source != opts.source_pos:
+        raise UserInputError("Cannot specify both SOURCE and --source with different values")
     effective_source_loc: HostedLocation | None = opts.source if opts.source is not None else opts.source_pos
     effective_destination = opts.destination if opts.destination is not None else opts.destination_pos
 
@@ -199,9 +189,6 @@ def pull(ctx: click.Context, **kwargs) -> None:
     if opts.exclude:
         raise NotImplementedError("--exclude is not implemented yet")
 
-    if opts.source_host is not None:
-        raise NotImplementedError("--source-host is not implemented yet (only local agents are supported)")
-
     # Validate git-specific options
     if opts.target_branch is not None and opts.sync_mode != "git":
         raise UserInputError("--target-branch can only be used with --sync-mode=git")
@@ -209,12 +196,6 @@ def pull(ctx: click.Context, **kwargs) -> None:
     # Planned features - target options (for agent-to-agent sync)
     if opts.target is not None:
         raise NotImplementedError("--target is not implemented yet (agent-to-agent sync is planned)")
-    if opts.target_agent is not None:
-        raise NotImplementedError("--target-agent is not implemented yet (agent-to-agent sync is planned)")
-    if opts.target_host is not None:
-        raise NotImplementedError("--target-host is not implemented yet (agent-to-agent sync is planned)")
-    if opts.target_path is not None:
-        raise NotImplementedError("--target-path is not implemented yet (agent-to-agent sync is planned)")
 
     # Planned features - multi-source
     if opts.stdin:
@@ -252,56 +233,67 @@ def pull(ctx: click.Context, **kwargs) -> None:
     if opts.uncommitted_source is not None:
         raise NotImplementedError("--uncommitted-source is not implemented yet")
 
-    # Build source address and sub-path from positional/named source options.
-    source_address: AgentAddress | None = None
-    source_subpath: Path | None = None
-    if effective_source_loc is not None:
-        if effective_source_loc.agent is None:
-            raise UserInputError("Source must include an agent name or ID")
-        source_address = AgentAddress(agent=effective_source_loc.agent, host=effective_source_loc.host)
-        source_subpath = effective_source_loc.path
-    if opts.source_agent is not None:
-        if source_address is not None and source_address != opts.source_agent:
-            raise UserInputError("Cannot specify both --source and --source-agent with different values")
-        source_address = opts.source_agent
-    if opts.source_path is not None:
-        explicit_source_path = Path(opts.source_path)
-        if source_subpath is not None and source_subpath != explicit_source_path:
-            raise UserInputError("Cannot specify both a subpath in source and --source-path")
-        source_subpath = explicit_source_path
-    source_path: str | None = str(source_subpath) if source_subpath is not None else None
-
     # Determine destination
     destination_path = Path(effective_destination) if effective_destination else Path.cwd()
 
-    # Find the agent
-    result = find_agent_for_command(
-        mngr_ctx=mngr_ctx,
-        address=source_address,
-    )
-    if result is None:
-        logger.info("No agent selected")
-        return
-    agent, host = result
+    agent: AgentInterface | None
+    host: OnlineHostInterface
+    source_remote_path: Path
+    if (
+        effective_source_loc is not None
+        and effective_source_loc.agent is None
+        and effective_source_loc.host is not None
+    ):
+        # @HOST:PATH source: resolve the host directly without picking an agent.
+        # `resolve_hosted_location` enforces that path must be set when no agent
+        # is given (no agent.work_dir to fall back to).
+        agents_by_host, _ = discover_hosts_and_agents(
+            mngr_ctx,
+            provider_names=None,
+            agent_identifiers=None,
+            include_destroyed=False,
+            reset_caches=False,
+        )
+        resolved = resolve_hosted_location(effective_source_loc, agents_by_host, mngr_ctx)
+        agent = None
+        host = resolved.location.host
+        source_remote_path = resolved.location.path
+        emit_info(f"Pulling from source: {source_remote_path}", output_opts.output_format)
+    else:
+        source_address: AgentAddress | None = None
+        source_subpath: Path | None = None
+        if effective_source_loc is not None:
+            if effective_source_loc.agent is not None:
+                source_address = AgentAddress(agent=effective_source_loc.agent, host=effective_source_loc.host)
+            source_subpath = effective_source_loc.path
 
-    emit_info(f"Pulling from agent: {agent.name}", output_opts.output_format)
+        result = find_agent_for_command(mngr_ctx=mngr_ctx, address=source_address)
+        if result is None:
+            logger.info("No agent selected")
+            return
+        agent, host = result
+
+        source_remote_path = agent.work_dir
+        if source_subpath is not None:
+            if source_subpath.is_absolute():
+                source_remote_path = source_subpath
+            else:
+                source_remote_path = agent.work_dir / source_subpath
+
+        emit_info(f"Pulling from agent: {agent.name}", output_opts.output_format)
+
+    if opts.stop and agent is None:
+        raise UserInputError("--stop requires an agent (cannot stop a host-only source)")
 
     # Parse uncommitted changes mode
     uncommitted_changes_mode = UncommittedChangesMode(opts.uncommitted_changes.upper())
 
     if opts.sync_mode == "git":
-        if source_path is not None:
-            raise UserInputError(
-                "--sync-mode=git operates on the entire repository; "
-                "subpath specifications (AGENT:PATH or --source-path) are not supported in git mode"
-            )
-
-        # Git mode: merge branches
-        # source_branch=None means use agent's current branch
+        # Git mode: merge branches. source_branch=None means use the source's current branch.
         git_result = pull_git(
             host=host,
             destination=destination_path,
-            source_path=agent.work_dir,
+            source_path=source_remote_path,
             source_branch=None,
             target_branch=opts.target_branch,
             is_dry_run=opts.dry_run,
@@ -310,27 +302,12 @@ def pull(ctx: click.Context, **kwargs) -> None:
         )
 
         output_sync_git_result(git_result, output_opts.output_format)
-
-        # Stop agent if requested (after outputting result so it's not lost if stop fails)
-        if opts.stop:
-            stop_agent_after_sync(agent, host, opts.dry_run, output_opts.output_format)
     else:
         # Files mode: rsync
-        # Parse source_path if provided
-        parsed_source_path: Path | None = None
-        if source_path is not None:
-            # If source_path is relative, make it relative to agent's work_dir
-            parsed_path = Path(source_path)
-            if parsed_path.is_absolute():
-                parsed_source_path = parsed_path
-            else:
-                parsed_source_path = agent.work_dir / parsed_path
-
         files_result = pull_files(
-            agent=agent,
             host=host,
             destination=destination_path,
-            source_path=parsed_source_path,
+            source_path=source_remote_path,
             is_dry_run=opts.dry_run,
             is_delete=opts.delete,
             uncommitted_changes=uncommitted_changes_mode,
@@ -339,16 +316,16 @@ def pull(ctx: click.Context, **kwargs) -> None:
 
         output_sync_files_result(files_result, output_opts.output_format)
 
-        # Stop agent if requested (after outputting result so it's not lost if stop fails)
-        if opts.stop:
-            stop_agent_after_sync(agent, host, opts.dry_run, output_opts.output_format)
+    # Stop agent if requested (after outputting result so it's not lost if stop fails)
+    if opts.stop and agent is not None:
+        stop_agent_after_sync(agent, host, opts.dry_run, output_opts.output_format)
 
 
 # Register help metadata for git-style help formatting
 CommandHelpMetadata(
     key="pull",
     one_line_description="Pull files or git commits from an agent to local machine [experimental]",
-    synopsis="mngr pull [SOURCE] [DESTINATION] [--source <SOURCE>] [--source-agent <AGENT>] [--sync-mode <MODE>] [--include PATTERN] [--dry-run] [--stop]",
+    synopsis="mngr pull [SOURCE] [DESTINATION] [--source <SOURCE>] [--sync-mode <MODE>] [--include PATTERN] [--dry-run] [--stop]",
     description="""Syncs files or git state from an agent's working directory to a local directory.
 Default behavior uses rsync for efficient incremental file transfer.
 Use --sync-mode=git to merge git branches instead of syncing files.
@@ -358,6 +335,7 @@ If no source is specified, shows an interactive selector to choose an agent.""",
         ("Pull from agent to current directory", "mngr pull my-agent"),
         ("Pull to specific local directory", "mngr pull my-agent ./local-copy"),
         ("Pull specific subdirectory", "mngr pull my-agent:src ./local-src"),
+        ("Pull a path on a host directly (no agent)", "mngr pull @localhost:/abs/path ./local-copy"),
         ("Preview what would be transferred", "mngr pull my-agent --dry-run"),
         ("Pull git commits", "mngr pull my-agent --sync-mode=git"),
     ),

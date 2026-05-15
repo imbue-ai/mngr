@@ -22,7 +22,6 @@ from imbue.mngr.errors import MngrError
 from imbue.mngr.hosts.common import add_safe_directory_on_remote
 from imbue.mngr.hosts.common import build_ssh_transport_command
 from imbue.mngr.hosts.common import get_ssh_known_hosts_file
-from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.data_types import CommandResult
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import SyncMode
@@ -436,29 +435,26 @@ def _build_remote_rsync_command(
 
 
 def sync_files(
-    agent: AgentInterface,
     host: OnlineHostInterface,
     mode: SyncMode,
     local_path: Path,
-    remote_path: Path | None,
+    remote_path: Path,
     is_dry_run: bool,
     is_delete: bool,
     uncommitted_changes: UncommittedChangesMode,
     cg: ConcurrencyGroup,
 ) -> SyncFilesResult:
-    """Sync files between local and agent using rsync."""
+    """Sync files between a local path and a path on a (possibly remote) host using rsync."""
     RSYNC.require()
-
-    actual_remote_path = remote_path if remote_path is not None else agent.work_dir
 
     # Determine source and destination based on mode
     match mode:
         case SyncMode.PUSH:
             source_path = local_path
-            destination_path = actual_remote_path
+            destination_path = remote_path
             git_ctx: GitContextInterface = RemoteGitContext(host=host)
         case SyncMode.PULL:
-            source_path = actual_remote_path
+            source_path = remote_path
             destination_path = local_path
             git_ctx = LocalGitContext(cg=cg)
         case _ as unreachable:

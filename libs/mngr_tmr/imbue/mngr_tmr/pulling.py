@@ -234,7 +234,6 @@ def pull_integrator_outputs(
     local_dest.mkdir(parents=True, exist_ok=True)
     try:
         pull_files(
-            agent=agent,
             host=host,
             destination=local_dest,
             source_path=agent.work_dir / ".test_output",

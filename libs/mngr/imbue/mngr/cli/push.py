@@ -4,11 +4,11 @@ import click
 from click_option_group import optgroup
 from loguru import logger
 
+from imbue.mngr.api.discover import discover_hosts_and_agents
+from imbue.mngr.api.find import resolve_hosted_location
 from imbue.mngr.api.push import push_files
 from imbue.mngr.api.push import push_git
-from imbue.mngr.cli.address_params import AGENT_ADDRESS
 from imbue.mngr.cli.address_params import HOSTED_LOCATION
-from imbue.mngr.cli.address_params import HOST_ADDRESS
 from imbue.mngr.cli.agent_utils import find_agent_for_command
 from imbue.mngr.cli.agent_utils import stop_agent_after_sync
 from imbue.mngr.cli.common_opts import add_common_options
@@ -20,8 +20,9 @@ from imbue.mngr.cli.output_helpers import output_sync_files_result
 from imbue.mngr.cli.output_helpers import output_sync_git_result
 from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.errors import UserInputError
+from imbue.mngr.interfaces.agent import AgentInterface
+from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import AgentAddress
-from imbue.mngr.primitives import HostAddress
 from imbue.mngr.primitives import HostedLocation
 from imbue.mngr.primitives import UncommittedChangesMode
 
@@ -35,9 +36,6 @@ class PushCliOptions(CommonCliOptions):
     target_pos: HostedLocation | None
     source_pos: str | None
     target: HostedLocation | None
-    target_agent: AgentAddress | None
-    target_host: HostAddress | None
-    target_path: str | None
     source: str | None
     dry_run: bool
     stop: bool
@@ -60,9 +58,6 @@ class PushCliOptions(CommonCliOptions):
     type=HOSTED_LOCATION,
     help="Target specification: AGENT[@HOST[.PROVIDER]][:PATH]",
 )
-@optgroup.option("--target-agent", type=AGENT_ADDRESS, help="Target agent address (NAME[@HOST[.PROVIDER]])")
-@optgroup.option("--target-host", type=HOST_ADDRESS, help="Target host address (HOST[.PROVIDER]) [future]")
-@optgroup.option("--target-path", help="Path within the agent's work directory")
 @optgroup.group("Source")
 @optgroup.option("--source", "source", type=click.Path(exists=True), help="Local source directory [default: .]")
 @optgroup.group("Sync Options")
@@ -128,7 +123,8 @@ def push(ctx: click.Context, **kwargs) -> None:
         command_class=PushCliOptions,
     )
 
-    # Merge positional and named arguments (named option takes precedence)
+    if opts.target is not None and opts.target_pos is not None and opts.target != opts.target_pos:
+        raise UserInputError("Cannot specify both TARGET and --target with different values")
     effective_target_loc: HostedLocation | None = opts.target if opts.target is not None else opts.target_pos
     effective_source = opts.source if opts.source is not None else opts.source_pos
 
@@ -138,9 +134,6 @@ def push(ctx: click.Context, **kwargs) -> None:
 
     if opts.exclude:
         raise NotImplementedError("--exclude is not implemented yet")
-
-    if opts.target_host is not None:
-        raise NotImplementedError("--target-host is not implemented yet (only local agents are supported)")
 
     # Validate git-specific options
     if opts.source_branch is not None and opts.sync_mode != "git":
@@ -159,58 +152,67 @@ def push(ctx: click.Context, **kwargs) -> None:
                 "--rsync-only with --sync-mode=git is not yet supported; use --sync-mode=files instead"
             )
 
-    # Build target address and sub-path from positional/named target options.
-    # The TARGET positional carries the agent (and optional :PATH); --target-agent
-    # is an alternative way to specify the agent; --target-path is an alternative
-    # way to specify the sub-path.
-    target_address: AgentAddress | None = None
-    target_subpath: Path | None = None
-    if effective_target_loc is not None:
-        if effective_target_loc.agent is None:
-            raise UserInputError("Target must include an agent name or ID")
-        target_address = AgentAddress(agent=effective_target_loc.agent, host=effective_target_loc.host)
-        target_subpath = effective_target_loc.path
-    if opts.target_agent is not None:
-        if target_address is not None and target_address != opts.target_agent:
-            raise UserInputError("Cannot specify both --target and --target-agent with different values")
-        target_address = opts.target_agent
-    if opts.target_path is not None:
-        explicit_target_path = Path(opts.target_path)
-        if target_subpath is not None and target_subpath != explicit_target_path:
-            raise UserInputError("Cannot specify both a subpath in target and --target-path")
-        target_subpath = explicit_target_path
-    target_path: str | None = str(target_subpath) if target_subpath is not None else None
-
-    # Determine source path
+    # Determine source path (the local side)
     source_path = Path(effective_source) if effective_source else Path.cwd()
 
-    # Find the agent
-    result = find_agent_for_command(
-        mngr_ctx=mngr_ctx,
-        address=target_address,
-    )
-    if result is None:
-        logger.info("No agent selected")
-        return
-    agent, host = result
+    agent: AgentInterface | None
+    host: OnlineHostInterface
+    target_remote_path: Path
+    if (
+        effective_target_loc is not None
+        and effective_target_loc.agent is None
+        and effective_target_loc.host is not None
+    ):
+        # @HOST:PATH target: resolve the host directly without picking an agent.
+        # `resolve_hosted_location` enforces that path must be set when no agent
+        # is given (no agent.work_dir to fall back to).
+        agents_by_host, _ = discover_hosts_and_agents(
+            mngr_ctx,
+            provider_names=None,
+            agent_identifiers=None,
+            include_destroyed=False,
+            reset_caches=False,
+        )
+        resolved = resolve_hosted_location(effective_target_loc, agents_by_host, mngr_ctx)
+        agent = None
+        host = resolved.location.host
+        target_remote_path = resolved.location.path
+        emit_info(f"Pushing to target: {target_remote_path}", output_opts.output_format)
+    else:
+        target_address: AgentAddress | None = None
+        target_subpath: Path | None = None
+        if effective_target_loc is not None:
+            if effective_target_loc.agent is not None:
+                target_address = AgentAddress(agent=effective_target_loc.agent, host=effective_target_loc.host)
+            target_subpath = effective_target_loc.path
 
-    emit_info(f"Pushing to agent: {agent.name}", output_opts.output_format)
+        result = find_agent_for_command(mngr_ctx=mngr_ctx, address=target_address)
+        if result is None:
+            logger.info("No agent selected")
+            return
+        agent, host = result
+
+        target_remote_path = agent.work_dir
+        if target_subpath is not None:
+            if target_subpath.is_absolute():
+                target_remote_path = target_subpath
+            else:
+                target_remote_path = agent.work_dir / target_subpath
+
+        emit_info(f"Pushing to agent: {agent.name}", output_opts.output_format)
+
+    if opts.stop and agent is None:
+        raise UserInputError("--stop requires an agent (cannot stop a host-only target)")
 
     # Parse uncommitted changes mode
     uncommitted_changes_mode = UncommittedChangesMode(opts.uncommitted_changes.upper())
 
     if opts.sync_mode == "git" and not opts.rsync_only:
-        if target_path is not None:
-            raise UserInputError(
-                "--sync-mode=git operates on the entire repository; "
-                "subpath specifications (AGENT:PATH or --target-path) are not supported in git mode"
-            )
-
         # Git mode: push branches
         git_result = push_git(
             host=host,
             source=source_path,
-            destination_path=agent.work_dir,
+            destination_path=target_remote_path,
             source_branch=opts.source_branch,
             target_branch=None,
             is_dry_run=opts.dry_run,
@@ -220,27 +222,12 @@ def push(ctx: click.Context, **kwargs) -> None:
         )
 
         output_sync_git_result(git_result, output_opts.output_format)
-
-        # Stop agent if requested (after outputting result so it's not lost if stop fails)
-        if opts.stop:
-            stop_agent_after_sync(agent, host, opts.dry_run, output_opts.output_format)
     else:
         # Files mode: rsync
-        # Parse target_path if provided
-        parsed_target_path: Path | None = None
-        if target_path is not None:
-            # If target_path is relative, make it relative to agent's work_dir
-            parsed_path = Path(target_path)
-            if parsed_path.is_absolute():
-                parsed_target_path = parsed_path
-            else:
-                parsed_target_path = agent.work_dir / parsed_path
-
         files_result = push_files(
-            agent=agent,
             host=host,
             source=source_path,
-            destination_path=parsed_target_path,
+            destination_path=target_remote_path,
             is_dry_run=opts.dry_run,
             is_delete=opts.delete,
             uncommitted_changes=uncommitted_changes_mode,
@@ -249,16 +236,16 @@ def push(ctx: click.Context, **kwargs) -> None:
 
         output_sync_files_result(files_result, output_opts.output_format)
 
-        # Stop agent if requested (after outputting result so it's not lost if stop fails)
-        if opts.stop:
-            stop_agent_after_sync(agent, host, opts.dry_run, output_opts.output_format)
+    # Stop agent if requested (after outputting result so it's not lost if stop fails)
+    if opts.stop and agent is not None:
+        stop_agent_after_sync(agent, host, opts.dry_run, output_opts.output_format)
 
 
 # Register help metadata for git-style help formatting
 CommandHelpMetadata(
     key="push",
     one_line_description="Push files or git commits from local machine to an agent [experimental]",
-    synopsis="mngr push [TARGET] [SOURCE] [--target <TARGET>] [--source <DIR>] [--target-agent <AGENT>] [--sync-mode <MODE>] [--mirror] [--dry-run] [--stop]",
+    synopsis="mngr push [TARGET] [SOURCE] [--target <TARGET>] [--source <DIR>] [--sync-mode <MODE>] [--mirror] [--dry-run] [--stop]",
     description="""Syncs files or git state from a local directory to an agent's working directory.
 Default behavior uses rsync for efficient incremental file transfer.
 Use --sync-mode=git to push git branches instead of syncing files.
@@ -271,6 +258,7 @@ IMPORTANT: The source (host) workspace is never modified. Only the target
         ("Push to agent from current directory", "mngr push my-agent"),
         ("Push from specific local directory", "mngr push my-agent ./local-dir"),
         ("Push to specific subdirectory", "mngr push my-agent:subdir ./local-src"),
+        ("Push to a path on a host directly (no agent)", "mngr push @localhost:/abs/path ./local-dir"),
         ("Preview what would be transferred", "mngr push my-agent --dry-run"),
         ("Push git commits", "mngr push my-agent --sync-mode=git"),
         ("Mirror all refs to agent", "mngr push my-agent --sync-mode=git --mirror"),

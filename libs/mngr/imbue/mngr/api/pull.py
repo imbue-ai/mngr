@@ -5,25 +5,22 @@ from imbue.mngr.api.sync import SyncFilesResult
 from imbue.mngr.api.sync import SyncGitResult
 from imbue.mngr.api.sync import sync_files
 from imbue.mngr.api.sync import sync_git
-from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import SyncMode
 from imbue.mngr.primitives import UncommittedChangesMode
 
 
 def pull_files(
-    agent: AgentInterface,
     host: OnlineHostInterface,
     destination: Path,
-    source_path: Path | None,
+    source_path: Path,
     is_dry_run: bool,
     is_delete: bool,
     uncommitted_changes: UncommittedChangesMode,
     cg: ConcurrencyGroup,
 ) -> SyncFilesResult:
-    """Pull files from an agent's work directory to a local directory using rsync."""
+    """Pull files from ``source_path`` (on ``host``) to a local ``destination`` using rsync."""
     return sync_files(
-        agent=agent,
         host=host,
         mode=SyncMode.PULL,
         local_path=destination,

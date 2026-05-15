@@ -55,10 +55,9 @@ def test_push_files_fail_mode_with_no_uncommitted_changes_succeeds(
     assert not _has_uncommitted_changes_on_host(push_ctx.host, push_ctx.agent_dir)
 
     result = push_files(
-        agent=push_ctx.agent,
         host=push_ctx.host,
         source=push_ctx.local_dir,
-        destination_path=None,
+        destination_path=push_ctx.agent.work_dir,
         is_dry_run=False,
         is_delete=False,
         uncommitted_changes=UncommittedChangesMode.FAIL,
@@ -82,10 +81,9 @@ def test_push_files_fail_mode_with_uncommitted_changes_raises_error(
 
     with pytest.raises(UncommittedChangesError) as exc_info:
         push_files(
-            agent=push_ctx.agent,
             host=push_ctx.host,
             source=push_ctx.local_dir,
-            destination_path=None,
+            destination_path=push_ctx.agent.work_dir,
             is_dry_run=False,
             is_delete=False,
             uncommitted_changes=UncommittedChangesMode.FAIL,
@@ -111,10 +109,9 @@ def test_push_files_clobber_mode_overwrites_agent_changes(
     assert _has_uncommitted_changes_on_host(push_ctx.host, push_ctx.agent_dir)
 
     result = push_files(
-        agent=push_ctx.agent,
         host=push_ctx.host,
         source=push_ctx.local_dir,
-        destination_path=None,
+        destination_path=push_ctx.agent.work_dir,
         is_dry_run=False,
         is_delete=False,
         uncommitted_changes=UncommittedChangesMode.CLOBBER,
@@ -136,10 +133,9 @@ def test_push_files_clobber_mode_when_only_agent_has_changes(
     assert _has_uncommitted_changes_on_host(push_ctx.host, push_ctx.agent_dir)
 
     push_files(
-        agent=push_ctx.agent,
         host=push_ctx.host,
         source=push_ctx.local_dir,
-        destination_path=None,
+        destination_path=push_ctx.agent.work_dir,
         is_dry_run=False,
         is_delete=False,
         uncommitted_changes=UncommittedChangesMode.CLOBBER,
@@ -163,10 +159,9 @@ def test_push_files_clobber_mode_with_delete_flag_removes_agent_only_files(
     run_git_command(push_ctx.agent_dir, "commit", "-m", "Add agent extra file")
 
     push_files(
-        agent=push_ctx.agent,
         host=push_ctx.host,
         source=push_ctx.local_dir,
-        destination_path=None,
+        destination_path=push_ctx.agent.work_dir,
         is_dry_run=False,
         is_delete=True,
         uncommitted_changes=UncommittedChangesMode.CLOBBER,
@@ -195,10 +190,9 @@ def test_push_files_stash_mode_stashes_changes_and_leaves_stashed(
     assert _has_uncommitted_changes_on_host(push_ctx.host, push_ctx.agent_dir)
 
     push_files(
-        agent=push_ctx.agent,
         host=push_ctx.host,
         source=push_ctx.local_dir,
-        destination_path=None,
+        destination_path=push_ctx.agent.work_dir,
         is_dry_run=False,
         is_delete=False,
         uncommitted_changes=UncommittedChangesMode.STASH,
@@ -225,10 +219,9 @@ def test_push_files_stash_mode_stashes_untracked_files(
     assert _has_uncommitted_changes_on_host(push_ctx.host, push_ctx.agent_dir)
 
     push_files(
-        agent=push_ctx.agent,
         host=push_ctx.host,
         source=push_ctx.local_dir,
-        destination_path=None,
+        destination_path=push_ctx.agent.work_dir,
         is_dry_run=False,
         is_delete=False,
         uncommitted_changes=UncommittedChangesMode.STASH,
@@ -253,10 +246,9 @@ def test_push_files_stash_mode_with_no_uncommitted_changes_does_not_stash(
     initial_stash_count = get_stash_count(push_ctx.agent_dir)
 
     push_files(
-        agent=push_ctx.agent,
         host=push_ctx.host,
         source=push_ctx.local_dir,
-        destination_path=None,
+        destination_path=push_ctx.agent.work_dir,
         is_dry_run=False,
         is_delete=False,
         uncommitted_changes=UncommittedChangesMode.STASH,
@@ -286,10 +278,9 @@ def test_push_files_merge_mode_stashes_and_restores_changes(
     assert _has_uncommitted_changes_on_host(push_ctx.host, push_ctx.agent_dir)
 
     push_files(
-        agent=push_ctx.agent,
         host=push_ctx.host,
         source=push_ctx.local_dir,
-        destination_path=None,
+        destination_path=push_ctx.agent.work_dir,
         is_dry_run=False,
         is_delete=False,
         uncommitted_changes=UncommittedChangesMode.MERGE,
@@ -314,10 +305,9 @@ def test_push_files_merge_mode_restores_untracked_files(
     assert _has_uncommitted_changes_on_host(push_ctx.host, push_ctx.agent_dir)
 
     push_files(
-        agent=push_ctx.agent,
         host=push_ctx.host,
         source=push_ctx.local_dir,
-        destination_path=None,
+        destination_path=push_ctx.agent.work_dir,
         is_dry_run=False,
         is_delete=False,
         uncommitted_changes=UncommittedChangesMode.MERGE,
@@ -344,10 +334,9 @@ def test_push_files_merge_mode_when_both_modify_different_files(
     assert _has_uncommitted_changes_on_host(push_ctx.host, push_ctx.agent_dir)
 
     push_files(
-        agent=push_ctx.agent,
         host=push_ctx.host,
         source=push_ctx.local_dir,
-        destination_path=None,
+        destination_path=push_ctx.agent.work_dir,
         is_dry_run=False,
         is_delete=False,
         uncommitted_changes=UncommittedChangesMode.MERGE,
@@ -371,10 +360,9 @@ def test_push_files_merge_mode_with_no_uncommitted_changes(
     initial_stash_count = get_stash_count(push_ctx.agent_dir)
 
     push_files(
-        agent=push_ctx.agent,
         host=push_ctx.host,
         source=push_ctx.local_dir,
-        destination_path=None,
+        destination_path=push_ctx.agent.work_dir,
         is_dry_run=False,
         is_delete=False,
         uncommitted_changes=UncommittedChangesMode.MERGE,
@@ -413,10 +401,9 @@ def test_push_files_excludes_git_directory(
     ).stdout.strip()
 
     push_files(
-        agent=push_ctx.agent,
         host=push_ctx.host,
         source=push_ctx.local_dir,
-        destination_path=None,
+        destination_path=push_ctx.agent.work_dir,
         is_dry_run=False,
         is_delete=False,
         uncommitted_changes=UncommittedChangesMode.CLOBBER,
@@ -449,10 +436,9 @@ def test_push_files_dry_run_does_not_modify_files(
     assert not (push_ctx.agent_dir / "new_file.txt").exists()
 
     result = push_files(
-        agent=push_ctx.agent,
         host=push_ctx.host,
         source=push_ctx.local_dir,
-        destination_path=None,
+        destination_path=push_ctx.agent.work_dir,
         is_dry_run=True,
         is_delete=False,
         uncommitted_changes=UncommittedChangesMode.FAIL,
@@ -479,7 +465,6 @@ def test_push_files_with_custom_destination_path(
     (push_ctx.local_dir / "file_from_host.txt").write_text("content from host")
 
     result = push_files(
-        agent=push_ctx.agent,
         host=push_ctx.host,
         source=push_ctx.local_dir,
         destination_path=custom_dest,
@@ -536,10 +521,9 @@ def test_push_files_does_not_modify_host_directory(
         (push_ctx.agent_dir / "agent_uncommitted.txt").write_text("agent uncommitted")
 
     push_files(
-        agent=push_ctx.agent,
         host=push_ctx.host,
         source=push_ctx.local_dir,
-        destination_path=None,
+        destination_path=push_ctx.agent.work_dir,
         is_dry_run=False,
         is_delete=False,
         uncommitted_changes=mode,
@@ -868,10 +852,9 @@ def test_push_files_with_remote_host_without_ssh_info_raises_assertion(
 
     with pytest.raises(AssertionError, match="SSH connection info"):
         push_files(
-            agent=remote_push_ctx.agent,
             host=remote_push_ctx.host,
             source=remote_push_ctx.local_dir,
-            destination_path=None,
+            destination_path=remote_push_ctx.agent.work_dir,
             is_dry_run=False,
             is_delete=False,
             uncommitted_changes=UncommittedChangesMode.CLOBBER,
@@ -924,7 +907,6 @@ def test_push_files_to_nonexistent_subdir_creates_directory(
     assert not subdir_path.exists()
 
     result = push_files(
-        agent=push_ctx.agent,
         host=push_ctx.host,
         source=push_ctx.local_dir,
         destination_path=subdir_path,

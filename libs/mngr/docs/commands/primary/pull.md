@@ -6,7 +6,7 @@
 **Synopsis:**
 
 ```text
-mngr pull [SOURCE] [DESTINATION] [--source <SOURCE>] [--source-agent <AGENT>] [--sync-mode <MODE>] [--include PATTERN] [--dry-run] [--stop]
+mngr pull [SOURCE] [DESTINATION] [--source <SOURCE>] [--sync-mode <MODE>] [--include PATTERN] [--dry-run] [--stop]
 ```
 
 Pull files or git commits from an agent to local machine [experimental].
@@ -34,9 +34,6 @@ mngr pull [OPTIONS] SOURCE DESTINATION
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
 | `--source` | hosted_location | Source specification: AGENT[@HOST[.PROVIDER]][:PATH] | None |
-| `--source-agent` | agent_address | Source agent address (NAME[@HOST[.PROVIDER]]) | None |
-| `--source-host` | host_address | Source host address (HOST[.PROVIDER]) [future] | None |
-| `--source-path` | text | Path within the agent's work directory | None |
 
 ## Destination
 
@@ -59,9 +56,6 @@ mngr pull [OPTIONS] SOURCE DESTINATION
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
 | `--target` | hosted_location | Target specification: AGENT[@HOST[.PROVIDER]][:PATH] [future] | None |
-| `--target-agent` | agent_address | Target agent address [future] | None |
-| `--target-host` | host_address | Target host address [future] | None |
-| `--target-path` | text | Path within target to sync to [future] | None |
 
 ## Multi-source
 
@@ -141,6 +135,12 @@ $ mngr pull my-agent ./local-copy
 
 ```bash
 $ mngr pull my-agent:src ./local-src
+```
+
+**Pull a path on a host directly (no agent)**
+
+```bash
+$ mngr pull @localhost:/abs/path ./local-copy
 ```
 
 **Preview what would be transferred**

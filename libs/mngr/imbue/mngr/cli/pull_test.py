@@ -32,9 +32,6 @@ def test_pull_cli_options_can_be_instantiated() -> None:
         source_pos=None,
         destination_pos=None,
         source=None,
-        source_agent=None,
-        source_host=None,
-        source_path=None,
         destination=None,
         dry_run=False,
         stop=False,
@@ -44,9 +41,6 @@ def test_pull_cli_options_can_be_instantiated() -> None:
         uncommitted_changes="fail",
         target_branch=None,
         target=None,
-        target_agent=None,
-        target_host=None,
-        target_path=None,
         stdin=False,
         include=(),
         include_gitignored=False,
@@ -79,10 +73,8 @@ def test_pull_cli_options_has_all_fields() -> None:
     """Test that PullCliOptions has all expected fields."""
     assert hasattr(PullCliOptions, "__annotations__")
     annotations = PullCliOptions.__annotations__
+    assert "source_pos" in annotations
     assert "source" in annotations
-    assert "source_agent" in annotations
-    assert "source_host" in annotations
-    assert "source_path" in annotations
     assert "destination" in annotations
     assert "dry_run" in annotations
     assert "stop" in annotations
@@ -90,6 +82,10 @@ def test_pull_cli_options_has_all_fields() -> None:
     assert "sync_mode" in annotations
     assert "exclude" in annotations
     assert "target_branch" in annotations
+    # The granular source flags have been replaced by the single HostedLocation source.
+    assert "source_agent" not in annotations
+    assert "source_host" not in annotations
+    assert "source_path" not in annotations
 
 
 def test_pull_command_is_registered() -> None:
@@ -105,14 +101,17 @@ def test_pull_command_help_shows_options() -> None:
     runner = CliRunner()
     result = runner.invoke(cli, ["pull", "--help"])
     assert result.exit_code == 0
-    assert "--source-agent" in result.output
-    assert "--source-path" in result.output
+    assert "--source" in result.output
     assert "--destination" in result.output
     assert "--dry-run" in result.output
     assert "--stop" in result.output
     assert "--delete" in result.output
     assert "--sync-mode" in result.output
     assert "--exclude" in result.output
+    # The granular source flags have been replaced by the single HostedLocation source.
+    assert "--source-agent" not in result.output
+    assert "--source-host" not in result.output
+    assert "--source-path" not in result.output
 
 
 def test_pull_command_sync_mode_choices() -> None:
