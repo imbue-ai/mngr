@@ -250,7 +250,14 @@ class OvhVpsClient(VpsClientInterface):
     # =========================================================================
 
     def create_snapshot(self, instance_id: VpsInstanceId, description: str) -> VpsSnapshotId:
-        """Create a VPS-level snapshot. OVH supports at most one snapshot per VPS."""
+        """Create a VPS-level snapshot. OVH supports at most one snapshot per VPS.
+
+        Returns a ``VpsSnapshotId`` equal to the owning ``serviceName``. OVH's
+        single-snapshot-per-VPS model means the snapshot is identified solely
+        by which VPS owns it (``DELETE /vps/{s}/snapshot`` operates on the
+        only slot), so encoding the serviceName here keeps ``create_snapshot``
+        / ``list_snapshots`` / ``delete_snapshot`` round-trippable.
+        """
         existing = self._safe_get_snapshot(instance_id)
         if existing is not None:
             raise MngrError(
@@ -265,7 +272,7 @@ class OvhVpsClient(VpsClientInterface):
         snap = self._safe_get_snapshot(instance_id)
         if snap is None:
             raise MngrError(f"OVH createSnapshot completed but no snapshot returned for {instance_id}")
-        return VpsSnapshotId(str(snap.get("id") or instance_id))
+        return VpsSnapshotId(str(instance_id))
 
     def delete_snapshot(self, snapshot_id: VpsSnapshotId) -> None:
         """Delete the snapshot whose id (== owning ``serviceName`` for OVH) is given.

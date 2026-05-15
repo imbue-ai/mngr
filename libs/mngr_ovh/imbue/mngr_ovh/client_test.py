@@ -129,6 +129,38 @@ class TestOvhVpsClientSnapshots:
         client.delete_snapshot(VpsSnapshotId("vps-eec8860b.vps.ovh.us"))
         assert captured == [("DELETE", "/vps/vps-eec8860b.vps.ovh.us/snapshot")]
 
+    def test_create_snapshot_returns_service_name_for_delete_round_trip(self) -> None:
+        """create_snapshot must return the owning serviceName, not the snapshot's internal id.
+
+        delete_snapshot's URL pattern is /vps/{serviceName}/snapshot, so the id
+        round-tripped through VpsSnapshotId must always be the serviceName --
+        even when the OVH API populates a distinct 'id' field on the snapshot.
+        """
+        service_name = "vps-abc.vps.ovh.us"
+        call_log: list[tuple[str, str]] = []
+
+        def fake_call(method: str, path: str, body: Any = None, need_auth: bool = True) -> Any:
+            call_log.append((method, path))
+            if method == "GET" and path == f"/vps/{service_name}/snapshot":
+                # First call (existence check): no snapshot yet. Subsequent calls
+                # (post-task verification): a snapshot whose internal id differs
+                # from the serviceName, which is what would break delete if we
+                # returned snap['id'] instead of the serviceName.
+                get_calls = [c for c in call_log if c == ("GET", f"/vps/{service_name}/snapshot")]
+                if len(get_calls) == 1:
+                    return None
+                return {"id": "internal-snapshot-uuid", "description": "x"}
+            if method == "POST" and path.endswith("/createSnapshot"):
+                return {"id": 42}
+            if method == "GET" and "/tasks/" in path:
+                return {"id": 42, "state": "done", "type": "snapshotCreate"}
+            raise AssertionError(f"Unexpected call: {method} {path}")
+
+        client = _client_with_call(fake_call)
+        client.task_poll_interval = 0.0
+        snapshot_id = client.create_snapshot(VpsInstanceId(service_name), "desc")
+        assert str(snapshot_id) == service_name
+
 
 class TestOvhVpsClientSshKeyShim:
     def test_upload_ssh_key_caches_and_returns_name(self) -> None:
