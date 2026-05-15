@@ -154,11 +154,7 @@ class LimaProviderInstance(BaseProviderInstance):
         return self._provider_dir / "keys"
 
     def _host_keys_dir(self, host_id: HostId) -> Path:
-        """Directory holding this host's pre-injected sshd host keypair.
-
-        Per-host (not per-provider) so each VM has its own identity and removing
-        a host cleanly leaves no shared state.
-        """
+        """Directory holding this host's pre-injected sshd host keypair and matching known_hosts file."""
         return self._keys_dir / "hosts" / str(host_id)
 
     def _host_keypair_paths(self, host_id: HostId) -> tuple[Path, Path]:
