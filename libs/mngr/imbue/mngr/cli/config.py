@@ -214,9 +214,14 @@ def config_list(ctx: click.Context, **kwargs: Any) -> None:
 def _config_list_impl(ctx: click.Context, **kwargs: Any) -> None:
     """Implementation of config list command.
 
-    Default: merged config (only explicitly-set keys appear). ``--all`` adds
-    every settable field with its current effective value, so users can
-    discover what is settable via ``MNGR__*`` env vars or ``--setting``.
+    Default: merged config restricted to keys that appear in at least one of
+    the user / project / local TOML scopes. Keys defaulted by ``MngrConfig``
+    (or set via ``MNGR__*`` env vars / ``--setting`` for this invocation only)
+    are omitted, matching the user expectation that ``list`` reflects what's
+    persisted in config files.
+
+    ``--all`` switches to the full ``model_dump`` view so users can discover
+    every settable key with its current effective value.
     """
     mngr_ctx, output_opts, opts = setup_command_context(
         ctx=ctx,
@@ -234,16 +239,89 @@ def _config_list_impl(ctx: click.Context, **kwargs: Any) -> None:
         config_data = _load_config_file(config_path)
         _emit_config_list(config_data, output_opts, scope, config_path)
     else:
-        # List merged config (show what's currently in effect). ``--all``
-        # includes every field including those at their default value.
-        config_data = mngr_ctx.config.model_dump(mode="json")
+        full_view = mngr_ctx.config.model_dump(mode="json")
         if opts.all:
-            # model_dump already includes every field, so the existing dump
-            # is the full schema view. The flag stays in the API to make
-            # the intent explicit; future refinements (e.g. annotating
-            # default vs explicit values) can hook in here.
-            pass
+            config_data = full_view
+        else:
+            explicit_keys = _collect_explicit_toml_keys(
+                root_name,
+                mngr_ctx.profile_dir,
+                mngr_ctx.concurrency_group,
+            )
+            config_data = _filter_to_explicit_keys(full_view, explicit_keys)
         _emit_config_list(config_data, output_opts, None, None)
+
+
+def _collect_explicit_toml_keys(
+    root_name: str,
+    profile_dir: Path,
+    cg: ConcurrencyGroup,
+) -> set[tuple[str, ...]]:
+    """Return the set of flattened key paths set in any user/project/local TOML scope.
+
+    Used by ``mngr config list`` (without ``--all``) to filter the merged
+    config view to keys the user has actually written to a config file.
+    Missing or unreadable scope files contribute no keys.
+    """
+    explicit: set[tuple[str, ...]] = set()
+    for scope in (ConfigScope.USER, ConfigScope.PROJECT, ConfigScope.LOCAL):
+        try:
+            config_path = get_config_path(scope, root_name, profile_dir, cg)
+        except ConfigNotFoundError:
+            # E.g. local scope outside a git repo; nothing to contribute.
+            continue
+        raw = _load_config_file(config_path)
+        _collect_key_paths(raw, prefix=(), out=explicit)
+    return explicit
+
+
+def _collect_key_paths(
+    data: dict[str, Any],
+    prefix: tuple[str, ...],
+    out: set[tuple[str, ...]],
+) -> None:
+    """Walk ``data`` and add a tuple key-path for every leaf key into ``out``.
+
+    A leaf is any value that is not a dict (so nested tables recurse). The
+    operator suffix ``__extend`` is stripped so an extend write surfaces under
+    the same path as the bare assignment.
+    """
+    for key, value in data.items():
+        bare = key[: -len(EXTEND_SUFFIX)] if isinstance(key, str) and key.endswith(EXTEND_SUFFIX) else key
+        path = prefix + (bare,)
+        if isinstance(value, dict):
+            _collect_key_paths(value, path, out)
+        else:
+            out.add(path)
+
+
+def _filter_to_explicit_keys(
+    config_data: dict[str, Any],
+    explicit_keys: set[tuple[str, ...]],
+) -> dict[str, Any]:
+    """Project ``config_data`` down to only the keys present in ``explicit_keys``.
+
+    Intermediate container dicts are retained when at least one descendant
+    key is explicit; empty branches are dropped.
+    """
+    return _filter_branch(config_data, prefix=(), explicit_keys=explicit_keys)
+
+
+def _filter_branch(
+    data: dict[str, Any],
+    prefix: tuple[str, ...],
+    explicit_keys: set[tuple[str, ...]],
+) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in data.items():
+        path = prefix + (key,)
+        if isinstance(value, dict):
+            filtered = _filter_branch(value, path, explicit_keys)
+            if filtered:
+                result[key] = filtered
+        elif path in explicit_keys:
+            result[key] = value
+    return result
 
 
 def _emit_config_list(
