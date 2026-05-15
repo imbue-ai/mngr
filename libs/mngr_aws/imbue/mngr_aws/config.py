@@ -109,10 +109,10 @@ class AwsProviderConfig(VpsDockerProviderConfig):
     def get_session(self) -> boto3.Session:
         """Build a boto3 Session using configured credentials or the default credential chain.
 
-        Raises ``ValueError`` if no credentials can be resolved from any source
-        (config fields, AWS_* env vars, ~/.aws/credentials, IMDS) or if boto3
-        itself rejects the request (e.g., a configured profile name does not
-        exist).
+        Raises ``ValueError`` when no credentials are resolvable from any source
+        (config fields, AWS_* env vars, ~/.aws/credentials, IMDS), and lets
+        ``botocore.exceptions.BotoCoreError`` subclasses (e.g., ``ProfileNotFound``)
+        propagate when boto3 itself rejects the inputs.
         """
         kwargs: dict[str, object] = {}
         if self.access_key_id is not None:
@@ -125,12 +125,8 @@ class AwsProviderConfig(VpsDockerProviderConfig):
             kwargs["profile_name"] = self.profile
         kwargs["region_name"] = self.default_region
 
-        try:
-            session = boto3.Session(**kwargs)
-            credentials = session.get_credentials()
-        except BotoCoreError as e:
-            raise ValueError(f"AWS credentials not resolvable: {e}") from e
-        if credentials is None:
+        session = boto3.Session(**kwargs)
+        if session.get_credentials() is None:
             raise ValueError(
                 "AWS credentials not configured. Set AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY, "
                 "configure ~/.aws/credentials, or set access_key_id/secret_access_key in the "
@@ -144,11 +140,13 @@ class AwsProviderConfig(VpsDockerProviderConfig):
         Delegates to ``get_session`` so that the resolution surface matches
         boto3's actual default chain (config fields, env vars, ``~/.aws/credentials``
         / ``~/.aws/config``, instance role / IMDS) and stays in sync with what
-        downstream EC2 calls will see.
+        downstream EC2 calls will see. Both the "no credentials at all"
+        ``ValueError`` and boto3's own ``BotoCoreError`` subclasses (e.g.,
+        ``ProfileNotFound``) are treated as unresolvable.
         """
         try:
             self.get_session()
-        except ValueError:
+        except (ValueError, BotoCoreError):
             return False
         return True
 

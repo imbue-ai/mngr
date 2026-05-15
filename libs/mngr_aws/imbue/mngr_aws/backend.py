@@ -2,6 +2,7 @@ from typing import Any
 from typing import Final
 
 import boto3
+from botocore.exceptions import BotoCoreError
 from loguru import logger
 from pydantic import ConfigDict
 from pydantic import Field
@@ -105,7 +106,7 @@ class AwsProviderBackend(ProviderBackendInterface):
 
         try:
             session = config.get_session()
-        except ValueError as e:
+        except (ValueError, BotoCoreError) as e:
             logger.warning(
                 "AWS provider {} initialised without resolvable AWS credentials: {}. "
                 "Discovery operations will return empty results.",
