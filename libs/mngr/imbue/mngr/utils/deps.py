@@ -19,7 +19,7 @@ from imbue.mngr.errors import MngrError
 # ConcurrencyExceptionGroup before re-raising. So the subprocess-runner
 # helpers below must catch the group in addition to the bare ProcessError --
 # either can surface depending on where the failure happens.
-_SUBPROCESS_ERRORS: tuple[type[BaseException], ...] = (OSError, ProcessError, ConcurrencyExceptionGroup)
+_SUBPROCESS_ERRORS: tuple[type[Exception], ...] = (OSError, ProcessError, ConcurrencyExceptionGroup)
 
 
 class OsName(UpperCaseStrEnum):
