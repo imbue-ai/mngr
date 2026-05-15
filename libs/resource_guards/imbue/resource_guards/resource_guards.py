@@ -632,9 +632,12 @@ def _make_guarded_fixture_wrapper(
             with patch.dict(os.environ, fixture_env):
                 value = next(gen)
             yield value
+            # Drain the generator's post-yield (teardown). Pytest fixtures yield
+            # exactly once, so next(..., None) is enough -- it absorbs the
+            # StopIteration that signals teardown completed normally and lets
+            # any teardown-raised exception propagate.
             with patch.dict(os.environ, fixture_env):
-                for _ in gen:
-                    pass
+                next(gen, None)
 
         return wrapped
 

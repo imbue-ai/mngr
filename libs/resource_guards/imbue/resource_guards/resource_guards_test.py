@@ -1,22 +1,32 @@
 import asyncio
 import os
 from collections.abc import Callable
+from collections.abc import Generator
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 import imbue.resource_guards.resource_guards as resource_guards
 from imbue.resource_guards.resource_guards import MethodKind
 from imbue.resource_guards.resource_guards import ResourceGuardViolation
+from imbue.resource_guards.resource_guards import _GuardViolation
+from imbue.resource_guards.resource_guards import _GuardViolationKind
 from imbue.resource_guards.resource_guards import _PerTestGuardState
 from imbue.resource_guards.resource_guards import _build_guard_env
+from imbue.resource_guards.resource_guards import _check_fixture_setup_violations
 from imbue.resource_guards.resource_guards import _check_guard_violations
+from imbue.resource_guards.resource_guards import _detect_guard_violations
+from imbue.resource_guards.resource_guards import _fixture_resource_marks
+from imbue.resource_guards.resource_guards import _make_guarded_fixture_wrapper
+from imbue.resource_guards.resource_guards import _pytest_fixture_setup
 from imbue.resource_guards.resource_guards import cleanup_resource_guard_wrappers
 from imbue.resource_guards.resource_guards import cleanup_sdk_resource_guards
 from imbue.resource_guards.resource_guards import create_resource_guard_wrappers
 from imbue.resource_guards.resource_guards import create_sdk_method_guard
 from imbue.resource_guards.resource_guards import create_sdk_resource_guards
 from imbue.resource_guards.resource_guards import enforce_sdk_guard
+from imbue.resource_guards.resource_guards import fixture_uses_resources
 from imbue.resource_guards.resource_guards import generate_stub_wrapper_script
 from imbue.resource_guards.resource_guards import generate_wrapper_script
 from imbue.resource_guards.resource_guards import get_guarded_resource_names
@@ -846,6 +856,21 @@ def _make_state(tmp_path: Path, marks: set[str]) -> _PerTestGuardState:
     )
 
 
+class _FakeFixtureDef:
+    """Minimal stand-in for pytest's FixtureDef for unit-testing the hookwrapper."""
+
+    def __init__(self, func: Callable[..., Any], argname: str) -> None:
+        self.func = func
+        self.argname = argname
+
+
+class _FakeOutcome:
+    """Minimal stand-in for the Result object yielded into a pytest hookwrapper."""
+
+    def __init__(self, excinfo: object | None) -> None:
+        self.excinfo = excinfo
+
+
 def test_check_guard_violations_blocked_invocation_fails_passing_test(
     isolated_guard_state: None,
     tmp_path: Path,
@@ -923,6 +948,233 @@ def test_check_guard_violations_skips_superfluous_check_on_failing_test(
     assert report.outcome == "failed"
     assert "never invoked" not in str(report.longrepr)
     assert report.longrepr == "real failure"
+
+
+# ---------------------------------------------------------------------------
+# Fixture-scope helpers (unit tests)
+# ---------------------------------------------------------------------------
+
+
+def test_fixture_uses_resources_records_declaration() -> None:
+    def some_fixture() -> None:
+        pass
+
+    fixture_uses_resources("modal")(some_fixture)
+    assert _fixture_resource_marks[some_fixture] == {"modal"}
+
+
+def test_fixture_uses_resources_accumulates_across_calls() -> None:
+    def some_fixture() -> None:
+        pass
+
+    fixture_uses_resources("modal")(some_fixture)
+    fixture_uses_resources("docker")(some_fixture)
+    assert _fixture_resource_marks[some_fixture] == {"modal", "docker"}
+
+
+def test_detect_guard_violations_returns_blocked_when_present(
+    isolated_guard_state: None,
+    tmp_path: Path,
+) -> None:
+    register_resource_guard("cat")
+    (tmp_path / "blocked_cat").touch()
+
+    violation = _detect_guard_violations(set(), str(tmp_path), check_never_invoked=True)
+    assert violation == _GuardViolation(resource="cat", kind=_GuardViolationKind.BLOCKED)
+
+
+def test_detect_guard_violations_returns_never_invoked_for_unused_mark(
+    isolated_guard_state: None,
+    tmp_path: Path,
+) -> None:
+    register_resource_guard("cat")
+
+    violation = _detect_guard_violations({"cat"}, str(tmp_path), check_never_invoked=True)
+    assert violation == _GuardViolation(resource="cat", kind=_GuardViolationKind.NEVER_INVOKED)
+
+
+def test_detect_guard_violations_skips_never_invoked_when_flag_false(
+    isolated_guard_state: None,
+    tmp_path: Path,
+) -> None:
+    register_resource_guard("cat")
+
+    assert _detect_guard_violations({"cat"}, str(tmp_path), check_never_invoked=False) is None
+
+
+def test_detect_guard_violations_ignores_non_guarded_marks(
+    isolated_guard_state: None,
+    tmp_path: Path,
+) -> None:
+    """Marks not registered as guarded resources should never trigger never-invoked."""
+    register_resource_guard("cat")
+
+    assert _detect_guard_violations({"xdist_group"}, str(tmp_path), check_never_invoked=True) is None
+
+
+def test_detect_guard_violations_returns_none_when_clean(
+    isolated_guard_state: None,
+    tmp_path: Path,
+) -> None:
+    register_resource_guard("cat")
+    (tmp_path / "cat").touch()
+
+    assert _detect_guard_violations({"cat"}, str(tmp_path), check_never_invoked=True) is None
+
+
+def test_make_guarded_fixture_wrapper_generator_applies_env_on_setup_and_teardown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Setup and teardown should see fixture_env; consumer phase should not."""
+    fixture_env = {"_TEST_FIXTURE_FLAG": "active"}
+    seen_at_setup: list[str | None] = []
+    seen_at_teardown: list[str | None] = []
+
+    def original() -> Generator[str, None, None]:
+        seen_at_setup.append(os.environ.get("_TEST_FIXTURE_FLAG"))
+        yield "value"
+        seen_at_teardown.append(os.environ.get("_TEST_FIXTURE_FLAG"))
+
+    monkeypatch.delenv("_TEST_FIXTURE_FLAG", raising=False)
+    wrapped = _make_guarded_fixture_wrapper(original, fixture_env)
+    gen = wrapped()
+    value = next(gen)
+    consumer_view = os.environ.get("_TEST_FIXTURE_FLAG")
+    for _ in gen:
+        pass
+
+    assert value == "value"
+    assert seen_at_setup == ["active"]
+    assert consumer_view is None
+    assert seen_at_teardown == ["active"]
+
+
+def test_make_guarded_fixture_wrapper_plain_fixture_applies_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixture_env = {"_TEST_FIXTURE_FLAG": "active"}
+    seen: list[str | None] = []
+
+    def original() -> str:
+        seen.append(os.environ.get("_TEST_FIXTURE_FLAG"))
+        return "value"
+
+    monkeypatch.delenv("_TEST_FIXTURE_FLAG", raising=False)
+    wrapped = _make_guarded_fixture_wrapper(original, fixture_env)
+    result = wrapped()
+
+    assert result == "value"
+    assert seen == ["active"]
+    assert os.environ.get("_TEST_FIXTURE_FLAG") is None
+
+
+def test_check_fixture_setup_violations_passes_when_clean(
+    isolated_guard_state: None,
+    tmp_path: Path,
+) -> None:
+    register_resource_guard("cat")
+    (tmp_path / "cat").touch()
+
+    _check_fixture_setup_violations("my_fixture", {"cat"}, str(tmp_path), setup_failed=False)
+
+
+def test_check_fixture_setup_violations_raises_on_blocked(
+    isolated_guard_state: None,
+    tmp_path: Path,
+) -> None:
+    register_resource_guard("cat")
+    (tmp_path / "blocked_cat").touch()
+
+    with pytest.raises(ResourceGuardViolation, match="did not declare it"):
+        _check_fixture_setup_violations("my_fixture", set(), str(tmp_path), setup_failed=False)
+
+
+def test_check_fixture_setup_violations_raises_on_never_invoked(
+    isolated_guard_state: None,
+    tmp_path: Path,
+) -> None:
+    register_resource_guard("cat")
+
+    with pytest.raises(ResourceGuardViolation, match="did not invoke cat during setup"):
+        _check_fixture_setup_violations("my_fixture", {"cat"}, str(tmp_path), setup_failed=False)
+
+
+def test_check_fixture_setup_violations_skips_never_invoked_when_setup_failed(
+    isolated_guard_state: None,
+    tmp_path: Path,
+) -> None:
+    """If fixture setup raised, the never-invoked check is suppressed (likely a downstream effect)."""
+    register_resource_guard("cat")
+
+    _check_fixture_setup_violations("my_fixture", {"cat"}, str(tmp_path), setup_failed=True)
+
+
+def test_pytest_fixture_setup_skips_undeclared_fixture() -> None:
+    """An ordinary fixture without @fixture_uses_resources should pass through untouched."""
+
+    def some_fixture() -> str:
+        return "value"
+
+    fixturedef = _FakeFixtureDef(func=some_fixture, argname="some_fixture")
+    hook = _pytest_fixture_setup(fixturedef, request=None)  # ty: ignore[invalid-argument-type]
+
+    # Hookwrapper yields once.
+    next(hook)
+    with pytest.raises(StopIteration):
+        hook.send(_FakeOutcome(excinfo=None))  # ty: ignore[invalid-argument-type]
+
+    assert fixturedef.func is some_fixture
+
+
+def test_pytest_fixture_setup_wraps_declared_fixture_and_restores_on_exit(
+    isolated_guard_state: None,
+) -> None:
+    register_resource_guard("cat")
+
+    @fixture_uses_resources("cat")
+    def some_fixture() -> Generator[str, None, None]:
+        # Simulate the fixture's setup calling cat by manually touching the tracking file.
+        Path(os.environ["_PYTEST_GUARD_TRACKING_DIR"]).joinpath("cat").touch()
+        yield "value"
+
+    fixturedef = _FakeFixtureDef(func=some_fixture, argname="some_fixture")
+    hook = _pytest_fixture_setup(fixturedef, request=None)  # ty: ignore[invalid-argument-type]
+
+    next(hook)
+    # fixturedef.func has been replaced with the wrapper. Drive it to exercise setup.
+    gen = fixturedef.func()
+    value = next(gen)
+    assert value == "value"
+    for _ in gen:
+        pass
+
+    # Closing the hookwrapper restores fixturedef.func and runs the check.
+    with pytest.raises(StopIteration):
+        hook.send(_FakeOutcome(excinfo=None))  # ty: ignore[invalid-argument-type]
+    assert fixturedef.func is some_fixture
+
+
+def test_pytest_fixture_setup_raises_on_undeclared_fixture_call(
+    isolated_guard_state: None,
+) -> None:
+    register_resource_guard("cat")
+
+    @fixture_uses_resources("ls")
+    def some_fixture() -> Generator[str, None, None]:
+        Path(os.environ["_PYTEST_GUARD_TRACKING_DIR"]).joinpath("blocked_cat").touch()
+        yield "value"
+
+    fixturedef = _FakeFixtureDef(func=some_fixture, argname="some_fixture")
+    hook = _pytest_fixture_setup(fixturedef, request=None)  # ty: ignore[invalid-argument-type]
+
+    next(hook)
+    gen = fixturedef.func()
+    next(gen)
+    for _ in gen:
+        pass
+
+    with pytest.raises(ResourceGuardViolation, match="did not declare it"):
+        hook.send(_FakeOutcome(excinfo=None))  # ty: ignore[invalid-argument-type]
 
 
 # ---------------------------------------------------------------------------
