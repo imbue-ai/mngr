@@ -27,6 +27,7 @@ if the operator did not already export them.
 """
 
 import argparse
+import json
 import os
 import shlex
 import subprocess
@@ -120,19 +121,22 @@ def main() -> int:
         return 1
 
     path = f"minds/{args.tier}/{args.service}"
-    command = ["vault", "kv", "put", "-mount=secrets", path]
-    for key, value in filled_values.items():
-        command.append(f"{key}={value}")
-    printable = [a if "=" not in a else f"{a.split('=', 1)[0]}=***" for a in command]
+    # Pipe values as JSON on stdin instead of `KEY=VALUE` positional args:
+    # the vault CLI interprets a leading `@` in a positional value as a
+    # "read from file" sigil, which mangles emails / suffix lists. Stdin
+    # JSON bypasses that parser entirely.
+    command = ["vault", "kv", "put", "-mount=secrets", path, "-"]
+    payload = json.dumps(filled_values)
+    printable = " ".join(shlex.quote(p) for p in command)
     print(f"[push] secrets/{path}: {len(non_empty)} non-empty key(s)")
-    print(f"       {' '.join(shlex.quote(p) for p in printable)}")
+    print(f"       {printable} < <json on stdin>")
     if args.dry_run:
         return 0
 
     env = os.environ.copy()
     env.setdefault("VAULT_NAMESPACE", _DEFAULT_VAULT_NAMESPACE)
     env.setdefault("VAULT_ADDR", _DEFAULT_VAULT_ADDR)
-    subprocess.run(command, check=True, env=env)
+    subprocess.run(command, check=True, env=env, input=payload, text=True)
 
     print()
     print(f"Done. Now shred the filled file: shred -u {args.filled_file}")
