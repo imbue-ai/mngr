@@ -33,6 +33,7 @@ from imbue.mngr.config.host_dir import read_default_host_dir
 from imbue.mngr.config.key_resolver import EXTEND_SUFFIX
 from imbue.mngr.config.key_resolver import parse_scalar_value
 from imbue.mngr.config.key_resolver import resolve_extends
+from imbue.mngr.config.key_resolver import set_at_path
 from imbue.mngr.config.plugin_registry import get_plugin_config_class
 from imbue.mngr.config.pre_readers import get_user_config_path
 from imbue.mngr.config.pre_readers import load_local_config
@@ -869,19 +870,6 @@ def _env_segments_to_key_path(segments: list[str]) -> list[str]:
     return list(segments)
 
 
-def _set_raw_at_path(data: dict[str, Any], key_path: list[str], value: Any) -> None:
-    """Set ``value`` at the nested ``key_path`` inside ``data``, creating
-    intermediate dicts as needed. Existing non-dict values along the path are
-    replaced with dicts (the override wins by construction).
-    """
-    current = data
-    for segment in key_path[:-1]:
-        if segment not in current or not isinstance(current[segment], dict):
-            current[segment] = {}
-        current = current[segment]
-    current[key_path[-1]] = value
-
-
 def _parse_mngr_env_overrides(environ: Mapping[str, str]) -> dict[str, Any]:
     """Parse ``MNGR__X__Y[__EXTEND]=value`` env vars into a raw config dict.
 
@@ -902,7 +890,7 @@ def _parse_mngr_env_overrides(environ: Mapping[str, str]) -> dict[str, Any]:
         suffix = env_key[len(_ENV_OVERRIDE_PREFIX) :]
         segments = [seg.lower() for seg in suffix.split("__")]
         key_path = _env_segments_to_key_path(segments)
-        _set_raw_at_path(raw, key_path, _parse_env_value(env_value))
+        set_at_path(raw, key_path, _parse_env_value(env_value))
     return raw
 
 
@@ -937,7 +925,7 @@ def _collect_env_overrides(environ: Mapping[str, str]) -> dict[str, Any]:
                     f"MNGR__{canonical_path.upper()}={existing!r} are both set with different values. "
                     "Use exactly one form."
                 )
-        _set_raw_at_path(raw, canonical_path.split("."), parsed)
+        set_at_path(raw, canonical_path.split("."), parsed)
     return raw
 
 

@@ -14,7 +14,6 @@ from imbue.mngr.cli.common_opts import _parse_setting_value
 from imbue.mngr.cli.common_opts import _process_template_escapes
 from imbue.mngr.cli.common_opts import _run_pre_command_scripts
 from imbue.mngr.cli.common_opts import _run_single_script
-from imbue.mngr.cli.common_opts import _set_nested_dict_value
 from imbue.mngr.cli.common_opts import _split_known_and_plugin_params
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import apply_config_defaults
@@ -27,6 +26,7 @@ from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.config.data_types import CreateTemplate
 from imbue.mngr.config.data_types import CreateTemplateName
 from imbue.mngr.config.data_types import MngrConfig
+from imbue.mngr.config.key_resolver import set_at_path
 from imbue.mngr.errors import ConfigParseError
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.plugins import hookspecs
@@ -828,35 +828,35 @@ def test_parse_setting_value(input_str: str, expected: Any, expected_type: type)
 
 
 # =============================================================================
-# Tests for _set_nested_dict_value
+# Tests for the shared set_at_path helper used by --setting parsing
 # =============================================================================
 
 
-def test_set_nested_dict_value_single_key() -> None:
-    """_set_nested_dict_value should set a top-level key."""
+def test_set_at_path_single_segment() -> None:
+    """set_at_path should set a top-level key."""
     data: dict[str, Any] = {}
-    _set_nested_dict_value(data, "prefix", "my-")
+    set_at_path(data, ["prefix"], "my-")
     assert data == {"prefix": "my-"}
 
 
-def test_set_nested_dict_value_nested_key() -> None:
-    """_set_nested_dict_value should create intermediate dicts for nested keys."""
+def test_set_at_path_nested_segments() -> None:
+    """set_at_path should create intermediate dicts for nested segment paths."""
     data: dict[str, Any] = {}
-    _set_nested_dict_value(data, "commands.create.connect", False)
+    set_at_path(data, ["commands", "create", "connect"], False)
     assert data == {"commands": {"create": {"connect": False}}}
 
 
-def test_set_nested_dict_value_preserves_existing() -> None:
-    """_set_nested_dict_value should preserve existing sibling keys."""
+def test_set_at_path_preserves_existing_siblings() -> None:
+    """set_at_path should preserve existing sibling keys at each level."""
     data: dict[str, Any] = {"commands": {"create": {"branch": "main"}}}
-    _set_nested_dict_value(data, "commands.create.connect", False)
+    set_at_path(data, ["commands", "create", "connect"], False)
     assert data == {"commands": {"create": {"branch": "main", "connect": False}}}
 
 
-def test_set_nested_dict_value_overwrites_non_dict() -> None:
-    """_set_nested_dict_value should overwrite a non-dict intermediate with a dict."""
+def test_set_at_path_overwrites_non_dict_intermediate() -> None:
+    """set_at_path should replace a non-dict intermediate value with a fresh dict."""
     data: dict[str, Any] = {"commands": "not-a-dict"}
-    _set_nested_dict_value(data, "commands.create.connect", False)
+    set_at_path(data, ["commands", "create", "connect"], False)
     assert data == {"commands": {"create": {"connect": False}}}
 
 

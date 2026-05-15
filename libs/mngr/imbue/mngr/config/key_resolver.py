@@ -15,6 +15,7 @@ kept here so env-var parsing, TOML parsing, ``--setting`` parsing, and
 
 import json
 from collections.abc import Mapping
+from collections.abc import Sequence
 from typing import Any
 from typing import Final
 
@@ -59,6 +60,32 @@ def is_extend_key(key: str) -> bool:
 def bare_key(extend_key: str) -> str:
     """Return the field name with the ``__extend`` suffix stripped."""
     return extend_key[: -len(EXTEND_SUFFIX)]
+
+
+def set_at_path(data: dict[str, Any], key_path: Sequence[str], value: Any) -> None:
+    """Set ``value`` at the nested ``key_path`` inside ``data``.
+
+    Creates intermediate dicts as needed. Non-dict intermediate values along
+    the path are replaced with fresh dicts -- the override wins by
+    construction, which matches the layered-merge model where higher-precedence
+    layers overwrite earlier values rather than try to merge into them.
+
+    Shared by the env-var loader, ``--setting`` parsing, and the
+    preserved-alias synthesis step so all three entry points produce the same
+    raw-dict shape.
+    """
+    if not key_path:
+        raise ValueError("key_path must contain at least one segment")
+    current = data
+    for segment in key_path[:-1]:
+        existing = current.get(segment)
+        if not isinstance(existing, dict):
+            new_dict: dict[str, Any] = {}
+            current[segment] = new_dict
+            current = new_dict
+        else:
+            current = existing
+    current[key_path[-1]] = value
 
 
 def _walk_to_field(base: Any, path: tuple[str, ...]) -> Any:

@@ -28,6 +28,7 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import OutputOptions
 from imbue.mngr.config.key_resolver import parse_scalar_value
 from imbue.mngr.config.key_resolver import resolve_extends
+from imbue.mngr.config.key_resolver import set_at_path
 from imbue.mngr.config.loader import block_disabled_plugins
 from imbue.mngr.config.loader import load_config
 from imbue.mngr.config.loader import parse_config
@@ -388,17 +389,6 @@ def _parse_setting_value(value_str: str) -> Any:
     return parse_scalar_value(value_str)
 
 
-def _set_nested_dict_value(data: dict[str, Any], key_path: str, value: Any) -> None:
-    """Set a value in a nested dict using dot-separated key path, creating intermediate dicts as needed."""
-    keys = key_path.split(".")
-    current = data
-    for key in keys[:-1]:
-        if key not in current or not isinstance(current[key], dict):
-            current[key] = {}
-        current = current[key]
-    current[keys[-1]] = value
-
-
 @pure
 def apply_settings_to_config(
     config: MngrConfig,
@@ -429,7 +419,7 @@ def apply_settings_to_config(
         if not key_path:
             raise UserInputError("Invalid --setting: key cannot be empty")
         parsed_value = _parse_setting_value(value_str)
-        _set_nested_dict_value(raw, key_path, parsed_value)
+        set_at_path(raw, key_path.split("."), parsed_value)
 
     resolved = resolve_extends(config, raw)
     settings_config = parse_config(resolved, disabled_plugins=disabled_plugins, strict=True)
