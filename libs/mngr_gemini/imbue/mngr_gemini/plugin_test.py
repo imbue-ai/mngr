@@ -204,11 +204,12 @@ def test_wait_for_ready_signal_raises_when_sentinel_never_appears(
 
     with pytest.raises(AgentStartError) as excinfo:
         gemini_agent.wait_for_ready_signal(is_creating=False, start_action=lambda: None, timeout=0.2)
-    assert (
-        "GEMINI_CLI_SYSTEM_SETTINGS_PATH" in str(excinfo.value)
-        or "session_started" in str(excinfo.value)
-        or "0.2s" in str(excinfo.value)
-    )
+    message = str(excinfo.value)
+    # The diagnostic must report the timeout value so operators can tell
+    # whether the budget was too short, and must name at least one of the
+    # env vars the hook depends on so the most likely fix is discoverable.
+    assert "0.2" in message
+    assert "GEMINI_CLI_SYSTEM_SETTINGS_PATH" in message or "GEMINI_CLI_TRUST_WORKSPACE" in message
 
 
 def test_get_common_transcript_scripts_returns_common_transcript_sh(gemini_agent: GeminiAgent) -> None:
