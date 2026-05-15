@@ -1,6 +1,7 @@
 import json
 import os
 import re
+from collections.abc import Callable
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -61,12 +62,19 @@ _ENV_OVERRIDE_PATTERN: Final[re.Pattern[str]] = re.compile(r"^MNGR__[A-Z0-9_]+(_
 
 # Old-style ``MNGR_*`` env vars that remain accepted as documented aliases for
 # specific ``MngrConfig`` fields. Each entry maps the env var name to the dotted
-# config path it sets. The synthesis step raises ``ConfigParseError`` when both
-# the alias and the canonical ``MNGR__*`` form are set with different values.
-_PRESERVED_ALIASES: Final[dict[str, str]] = {
-    "MNGR_HEADLESS": "headless",
-    "MNGR_PREFIX": "prefix",
-    "MNGR_HOST_DIR": "default_host_dir",
+# config path it sets and a value parser. The synthesis step raises
+# ``ConfigParseError`` when both the alias and the canonical ``MNGR__*`` form
+# are set with different (parsed) values.
+#
+# The value parser preserves each alias's historic value semantics:
+# ``MNGR_HEADLESS`` accepted "1"/"true"/"yes" as truthy long before the new
+# ``MNGR__*`` scheme, so it keeps using ``parse_bool_env``. The string-valued
+# aliases (``MNGR_PREFIX``, ``MNGR_HOST_DIR``) are JSON-parsed-with-string-fallback
+# like every other ``MNGR__*`` value, since they were always plain strings.
+_PRESERVED_ALIASES: Final[dict[str, tuple[str, Callable[[str], Any]]]] = {
+    "MNGR_HEADLESS": ("headless", parse_bool_env),
+    "MNGR_PREFIX": ("prefix", lambda v: _parse_env_value(v)),
+    "MNGR_HOST_DIR": ("default_host_dir", lambda v: _parse_env_value(v)),
 }
 
 
@@ -901,15 +909,18 @@ def _collect_env_overrides(environ: Mapping[str, str]) -> dict[str, Any]:
     """Combine ``MNGR__*`` overrides with preserved-alias env vars into a single
     raw config dict.
 
-    Raises ``ConfigParseError`` when a preserved alias and its canonical
-    ``MNGR__*`` form are both set with different values.
+    Each preserved alias uses its historic value parser (see
+    ``_PRESERVED_ALIASES``) so backwards-compatible spellings like
+    ``MNGR_HEADLESS=yes`` keep their old meaning. Raises ``ConfigParseError``
+    when a preserved alias and its canonical ``MNGR__*`` form are both set
+    with different parsed values.
     """
     raw = _parse_mngr_env_overrides(environ)
-    for alias_name, canonical_path in _PRESERVED_ALIASES.items():
+    for alias_name, (canonical_path, value_parser) in _PRESERVED_ALIASES.items():
         alias_value = environ.get(alias_name)
         if alias_value is None:
             continue
-        parsed = _parse_env_value(alias_value)
+        parsed = value_parser(alias_value)
         existing = _walk_raw(raw, canonical_path.split("."))
         if existing is not None and existing != parsed:
             raise ConfigParseError(

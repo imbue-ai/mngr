@@ -132,6 +132,25 @@ def test_collect_env_overrides_allows_alias_and_canonical_with_same_value() -> N
     assert raw["headless"] is True
 
 
+@pytest.mark.parametrize("value", ["yes", "1", "True", "TRUE"])
+def test_collect_env_overrides_preserves_mngr_headless_truthy_spellings(value: str) -> None:
+    """MNGR_HEADLESS keeps parse_bool_env semantics for backwards compatibility.
+
+    Pre-existing scripts that set MNGR_HEADLESS=yes / =1 / =True must continue to
+    yield headless=True; only the canonical MNGR__HEADLESS uses the
+    JSON-parsed-with-string-fallback shape shared by the rest of MNGR__*.
+    """
+    raw = _collect_env_overrides({"MNGR_HEADLESS": value})
+    assert raw["headless"] is True
+
+
+@pytest.mark.parametrize("value", ["no", "false", "0", "", "anything-else"])
+def test_collect_env_overrides_mngr_headless_falsy_values(value: str) -> None:
+    """Anything not in parse_bool_env's truthy set resolves to headless=False."""
+    raw = _collect_env_overrides({"MNGR_HEADLESS": value})
+    assert raw["headless"] is False
+
+
 # =============================================================================
 # Tests for _parse_providers
 # =============================================================================
