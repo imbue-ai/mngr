@@ -99,6 +99,21 @@ def test_parse_mngr_env_overrides_empty_environ() -> None:
     assert _parse_mngr_env_overrides({}) == {}
 
 
+def test_parse_mngr_env_overrides_skips_empty_segments() -> None:
+    """The pattern's ``[A-Z0-9_]+`` lets shapes like ``MNGR__X__`` (trailing __)
+    or ``MNGR____X`` (leading empty segment) slip through. Those produce an
+    empty segment after ``split('__')``; the parser must skip them rather than
+    silently materialising an unnamed key in the raw config dict.
+    """
+    environ = {
+        "MNGR__X__": "trailing-double-underscore",
+        "MNGR____X": "leading-double-underscore",
+        "MNGR__COMMANDS__CREATE__": "trailing-in-middle",
+    }
+    raw = _parse_mngr_env_overrides(environ)
+    assert raw == {}
+
+
 def test_collect_env_overrides_synthesizes_preserved_aliases() -> None:
     """Preserved aliases (MNGR_PREFIX, MNGR_HOST_DIR, MNGR_HEADLESS) flow into the same raw dict."""
     environ = {

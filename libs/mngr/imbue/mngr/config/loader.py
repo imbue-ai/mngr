@@ -880,6 +880,12 @@ def _parse_mngr_env_overrides(environ: Mapping[str, str]) -> dict[str, Any]:
             continue
         suffix = env_key[len(_ENV_OVERRIDE_PREFIX) :]
         segments = [seg.lower() for seg in suffix.split("__")]
+        # The pattern's ``[A-Z0-9_]+`` permits embedded underscores, which means
+        # malformed shapes like ``MNGR__X__`` or ``MNGR____X`` slip through the
+        # regex and produce empty segments after ``split("__")``. Skip those so
+        # a stray trailing ``__`` doesn't silently materialize an unnamed key.
+        if any(not seg for seg in segments):
+            continue
         key_path = _env_segments_to_key_path(segments)
         set_at_path(raw, key_path, parse_scalar_value(env_value))
     return raw
