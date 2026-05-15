@@ -26,13 +26,6 @@ from imbue.modal_proxy.direct import DirectModalInterface
 # =============================================================================
 # Acceptance tests (require Modal network access)
 # =============================================================================
-#
-# The ``@pytest.mark.modal`` mark is applied only to tests that directly invoke
-# the modal SDK from the test body. The module-scoped ``deployed_snapshot_function``
-# fixture also makes modal calls during setup, but those are attributed by the
-# resource guard to whichever test triggered setup -- so applying the mark at
-# module level caused HTTP-only sibling tests to fail with
-# "Test marked with @pytest.mark.modal but never invoked modal".
 
 
 class DeploymentError(RuntimeError):
