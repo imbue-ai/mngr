@@ -1,9 +1,24 @@
 """Tests for AWS provider configuration."""
 
+from pathlib import Path
+
 import pytest
 from pydantic import SecretStr
 
 from imbue.mngr_aws.config import AwsProviderConfig
+
+
+def write_default_credentials_file(directory: Path) -> Path:
+    """Write a minimal AWS shared-credentials file with a ``[default]`` profile.
+
+    The returned path is suitable for use with ``AWS_SHARED_CREDENTIALS_FILE``.
+    """
+    creds_path = directory / "credentials"
+    creds_path.write_text(
+        "[default]\naws_access_key_id = AKIATEST\naws_secret_access_key = test-secret\n",
+        encoding="utf-8",
+    )
+    return creds_path
 
 
 def test_default_config_values() -> None:
@@ -36,12 +51,18 @@ def test_has_resolvable_credentials_with_config(monkeypatch: pytest.MonkeyPatch)
     assert config.has_resolvable_credentials()
 
 
-def test_has_resolvable_credentials_with_profile(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_has_resolvable_credentials_with_nonexistent_profile_returns_false(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A profile name that boto3 cannot locate must not be reported as resolvable."""
     monkeypatch.delenv("AWS_ACCESS_KEY_ID", raising=False)
     monkeypatch.delenv("AWS_SECRET_ACCESS_KEY", raising=False)
     monkeypatch.delenv("AWS_PROFILE", raising=False)
-    config = AwsProviderConfig(profile="myprofile")
-    assert config.has_resolvable_credentials()
+    monkeypatch.setenv("AWS_EC2_METADATA_DISABLED", "true")
+    monkeypatch.setenv("AWS_CONFIG_FILE", "/nonexistent")
+    monkeypatch.setenv("AWS_SHARED_CREDENTIALS_FILE", "/nonexistent")
+    config = AwsProviderConfig(profile="does-not-exist")
+    assert not config.has_resolvable_credentials()
 
 
 def test_has_resolvable_credentials_with_env(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -52,20 +73,45 @@ def test_has_resolvable_credentials_with_env(monkeypatch: pytest.MonkeyPatch) ->
     assert config.has_resolvable_credentials()
 
 
-def test_has_resolvable_credentials_with_aws_profile_env(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_has_resolvable_credentials_with_aws_profile_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """AWS_PROFILE pointing at the default profile resolves via boto3's chain."""
     monkeypatch.delenv("AWS_ACCESS_KEY_ID", raising=False)
     monkeypatch.delenv("AWS_SECRET_ACCESS_KEY", raising=False)
     monkeypatch.setenv("AWS_PROFILE", "default")
+    monkeypatch.setenv("AWS_EC2_METADATA_DISABLED", "true")
+    # Point at a fake credentials file with a [default] profile so boto3 resolves the chain
+    # without depending on the real ~/.aws/credentials on the test machine.
+    creds_file = write_default_credentials_file(tmp_path)
+    monkeypatch.setenv("AWS_SHARED_CREDENTIALS_FILE", str(creds_file))
     config = AwsProviderConfig()
     assert config.has_resolvable_credentials()
 
 
 def test_has_resolvable_credentials_returns_false_when_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With no env / file / explicit credentials, the check must return False."""
     monkeypatch.delenv("AWS_ACCESS_KEY_ID", raising=False)
     monkeypatch.delenv("AWS_SECRET_ACCESS_KEY", raising=False)
     monkeypatch.delenv("AWS_PROFILE", raising=False)
+    monkeypatch.delenv("AWS_SESSION_TOKEN", raising=False)
+    monkeypatch.setenv("AWS_EC2_METADATA_DISABLED", "true")
+    monkeypatch.setenv("AWS_CONFIG_FILE", "/nonexistent")
+    monkeypatch.setenv("AWS_SHARED_CREDENTIALS_FILE", "/nonexistent")
     config = AwsProviderConfig()
     assert not config.has_resolvable_credentials()
+
+
+def test_has_resolvable_credentials_finds_shared_credentials_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Regression: previously the check missed credentials present only in ~/.aws/credentials."""
+    monkeypatch.delenv("AWS_ACCESS_KEY_ID", raising=False)
+    monkeypatch.delenv("AWS_SECRET_ACCESS_KEY", raising=False)
+    monkeypatch.delenv("AWS_PROFILE", raising=False)
+    monkeypatch.setenv("AWS_EC2_METADATA_DISABLED", "true")
+    creds_file = write_default_credentials_file(tmp_path)
+    monkeypatch.setenv("AWS_SHARED_CREDENTIALS_FILE", str(creds_file))
+    config = AwsProviderConfig()
+    assert config.has_resolvable_credentials()
 
 
 def test_get_session_raises_when_missing(monkeypatch: pytest.MonkeyPatch) -> None:

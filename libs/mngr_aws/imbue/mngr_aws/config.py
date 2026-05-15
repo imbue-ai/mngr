@@ -1,7 +1,7 @@
-import os
 from typing import Final
 
 import boto3
+from botocore.exceptions import BotoCoreError
 from pydantic import Field
 from pydantic import SecretStr
 
@@ -110,7 +110,9 @@ class AwsProviderConfig(VpsDockerProviderConfig):
         """Build a boto3 Session using configured credentials or the default credential chain.
 
         Raises ``ValueError`` if no credentials can be resolved from any source
-        (config fields, AWS_* env vars, ~/.aws/credentials, IMDS).
+        (config fields, AWS_* env vars, ~/.aws/credentials, IMDS) or if boto3
+        itself rejects the request (e.g., a configured profile name does not
+        exist).
         """
         kwargs: dict[str, object] = {}
         if self.access_key_id is not None:
@@ -123,8 +125,12 @@ class AwsProviderConfig(VpsDockerProviderConfig):
             kwargs["profile_name"] = self.profile
         kwargs["region_name"] = self.default_region
 
-        session = boto3.Session(**kwargs)
-        if session.get_credentials() is None:
+        try:
+            session = boto3.Session(**kwargs)
+            credentials = session.get_credentials()
+        except BotoCoreError as e:
+            raise ValueError(f"AWS credentials not resolvable: {e}") from e
+        if credentials is None:
             raise ValueError(
                 "AWS credentials not configured. Set AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY, "
                 "configure ~/.aws/credentials, or set access_key_id/secret_access_key in the "
@@ -133,16 +139,18 @@ class AwsProviderConfig(VpsDockerProviderConfig):
         return session
 
     def has_resolvable_credentials(self) -> bool:
-        """Return True if a credentials chain can be resolved without raising."""
-        if self.access_key_id is not None and self.secret_access_key is not None:
-            return True
-        if self.profile is not None:
-            return True
-        if os.environ.get("AWS_ACCESS_KEY_ID") and os.environ.get("AWS_SECRET_ACCESS_KEY"):
-            return True
-        if os.environ.get("AWS_PROFILE"):
-            return True
-        return False
+        """Return True if a credentials chain can be resolved without raising.
+
+        Delegates to ``get_session`` so that the resolution surface matches
+        boto3's actual default chain (config fields, env vars, ``~/.aws/credentials``
+        / ``~/.aws/config``, instance role / IMDS) and stays in sync with what
+        downstream EC2 calls will see.
+        """
+        try:
+            self.get_session()
+        except ValueError:
+            return False
+        return True
 
     def get_ami_id_for_region(self, region: str) -> str:
         """Return the AMI ID to use for the given region.
