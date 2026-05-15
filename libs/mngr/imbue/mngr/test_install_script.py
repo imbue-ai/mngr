@@ -14,6 +14,8 @@ from pathlib import Path
 
 import pytest
 
+from imbue.mngr.utils.testing import write_executable_script
+
 _THIS_DIR = Path(__file__).resolve().parent
 _REPO_ROOT = next(p for p in [_THIS_DIR, *_THIS_DIR.parents] if (p / ".git").exists())
 _INSTALL_SH = _REPO_ROOT / "scripts" / "install.sh"
@@ -21,11 +23,6 @@ _INSTALL_SH = _REPO_ROOT / "scripts" / "install.sh"
 # minimal PATH we hand the child (which only contains the mock bin dir
 # plus a couple of system dirs for grep/printf).
 _BASH = shutil.which("bash") or "/bin/bash"
-
-
-def _write_executable(path: Path, content: str) -> None:
-    path.write_text(content)
-    path.chmod(0o755)
 
 
 def _uv_mock(log_file: Path, *, mngr_already_installed: bool) -> str:
@@ -102,8 +99,8 @@ def test_install_sh_upgrades_when_mngr_already_installed(tmp_path: Path) -> None
     log_file = tmp_path / "calls.log"
     log_file.touch()
 
-    _write_executable(bin_dir / "uv", _uv_mock(log_file, mngr_already_installed=True))
-    _write_executable(bin_dir / "mngr", _mngr_mock(log_file))
+    write_executable_script(bin_dir / "uv", _uv_mock(log_file, mngr_already_installed=True))
+    write_executable_script(bin_dir / "mngr", _mngr_mock(log_file))
 
     result = _run_install_sh(env=_make_env(bin_dir, tmp_path), cwd=tmp_path)
 
@@ -124,8 +121,8 @@ def test_install_sh_installs_when_mngr_not_present(tmp_path: Path) -> None:
     log_file = tmp_path / "calls.log"
     log_file.touch()
 
-    _write_executable(bin_dir / "uv", _uv_mock(log_file, mngr_already_installed=False))
-    _write_executable(bin_dir / "mngr", _mngr_mock(log_file))
+    write_executable_script(bin_dir / "uv", _uv_mock(log_file, mngr_already_installed=False))
+    write_executable_script(bin_dir / "mngr", _mngr_mock(log_file))
 
     result = _run_install_sh(env=_make_env(bin_dir, tmp_path), cwd=tmp_path)
 
@@ -153,7 +150,7 @@ def test_install_sh_errors_when_mngr_not_on_path_after_install(tmp_path: Path) -
 
     # uv mock present, but no mngr binary on PATH -- simulates a successful
     # install whose bin dir is not on the user's PATH.
-    _write_executable(bin_dir / "uv", _uv_mock(log_file, mngr_already_installed=False))
+    write_executable_script(bin_dir / "uv", _uv_mock(log_file, mngr_already_installed=False))
 
     result = _run_install_sh(env=_make_env(bin_dir, tmp_path), cwd=tmp_path)
 
@@ -176,8 +173,8 @@ def test_install_sh_continues_when_dependencies_fail(tmp_path: Path) -> None:
     log_file = tmp_path / "calls.log"
     log_file.touch()
 
-    _write_executable(bin_dir / "uv", _uv_mock(log_file, mngr_already_installed=True))
-    _write_executable(bin_dir / "mngr", _mngr_mock(log_file, fail_subcommands=("dependencies",)))
+    write_executable_script(bin_dir / "uv", _uv_mock(log_file, mngr_already_installed=True))
+    write_executable_script(bin_dir / "mngr", _mngr_mock(log_file, fail_subcommands=("dependencies",)))
 
     result = _run_install_sh(env=_make_env(bin_dir, tmp_path), cwd=tmp_path)
 
@@ -196,8 +193,8 @@ def test_install_sh_continues_when_extras_fail(tmp_path: Path) -> None:
     log_file = tmp_path / "calls.log"
     log_file.touch()
 
-    _write_executable(bin_dir / "uv", _uv_mock(log_file, mngr_already_installed=True))
-    _write_executable(bin_dir / "mngr", _mngr_mock(log_file, fail_subcommands=("extras",)))
+    write_executable_script(bin_dir / "uv", _uv_mock(log_file, mngr_already_installed=True))
+    write_executable_script(bin_dir / "mngr", _mngr_mock(log_file, fail_subcommands=("extras",)))
 
     result = _run_install_sh(env=_make_env(bin_dir, tmp_path), cwd=tmp_path)
 

@@ -5,9 +5,7 @@ binaries on PATH and call ``_install_via_brew`` / ``_install_via_apt``
 directly, verifying that they spawn the real subprocess with the exact
 command line we expect. Unit tests in ``deps_test.py`` cover only the
 *planning* layer (``describe_install_commands``, OS-branch selection,
-install-method routing) and never exercise the subprocess call, which has
-been a source of regressions historically (wrong flags, missing batching,
-broken quoting).
+install-method routing) and never exercise the subprocess call.
 
 The release tests exercise the real package manager end-to-end against a
 likely-already-installed package. They are macOS-only (where brew is the
@@ -27,11 +25,7 @@ import pytest
 
 from imbue.mngr.utils.deps import _install_via_apt
 from imbue.mngr.utils.deps import _install_via_brew
-
-
-def _write_executable(path: Path, content: str) -> None:
-    path.write_text(content)
-    path.chmod(0o755)
+from imbue.mngr.utils.testing import write_executable_script
 
 
 def _logging_mock(log_file: Path, *, exit_code: int = 0) -> str:
@@ -46,7 +40,7 @@ def _logging_mock(log_file: Path, *, exit_code: int = 0) -> str:
 
 
 def _install_mock_bin(bin_dir: Path, name: str, log_file: Path, *, exit_code: int = 0) -> None:
-    _write_executable(bin_dir / name, _logging_mock(log_file, exit_code=exit_code))
+    write_executable_script(bin_dir / name, _logging_mock(log_file, exit_code=exit_code))
 
 
 # -- _install_via_brew --
