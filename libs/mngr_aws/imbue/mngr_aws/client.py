@@ -249,16 +249,6 @@ class AwsVpsClient(VpsClientInterface):
             self._ec2().terminate_instances(InstanceIds=[str(instance_id)])
         logger.info("Terminated EC2 instance {}", instance_id)
 
-    def stop_ec2_instance(self, instance_id: VpsInstanceId) -> None:
-        """Stop (not terminate) an EC2 instance. Used to halt without destroying."""
-        with self._translate_aws_errors():
-            self._ec2().stop_instances(InstanceIds=[str(instance_id)])
-
-    def start_ec2_instance(self, instance_id: VpsInstanceId) -> None:
-        """Start a stopped EC2 instance."""
-        with self._translate_aws_errors():
-            self._ec2().start_instances(InstanceIds=[str(instance_id)])
-
     def _describe_instance(self, instance_id: VpsInstanceId) -> dict[str, Any] | None:
         with self._translate_aws_errors():
             result = self._ec2().describe_instances(InstanceIds=[str(instance_id)])

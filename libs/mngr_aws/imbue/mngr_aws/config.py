@@ -2,7 +2,6 @@ import os
 from typing import Final
 
 import boto3
-from botocore.session import Session as BotoCoreSession
 from pydantic import Field
 from pydantic import SecretStr
 
@@ -54,7 +53,13 @@ class AwsProviderConfig(VpsDockerProviderConfig):
     )
     default_os_id: int = Field(
         default=0,
-        description="Unused on AWS (AMIs are strings). See default_ami_id / default_ami_by_region.",
+        description=(
+            "Unused on AWS — kept only to override the Vultr-flavored default (2136) that "
+            "the shared VpsDockerProviderConfig carries. AWS selects images by AMI string; "
+            "see default_ami_id / default_ami_by_region. Dropping this field from the shared "
+            "base would let AWS omit it entirely, but that refactor cascades into "
+            "VpsClientInterface.create_instance and is deferred to a follow-up."
+        ),
     )
     default_ami_id: str = Field(
         default="",
@@ -119,8 +124,7 @@ class AwsProviderConfig(VpsDockerProviderConfig):
         kwargs["region_name"] = self.default_region
 
         session = boto3.Session(**kwargs)
-        botocore_session: BotoCoreSession = session._session
-        if botocore_session.get_credentials() is None:
+        if session.get_credentials() is None:
             raise ValueError(
                 "AWS credentials not configured. Set AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY, "
                 "configure ~/.aws/credentials, or set access_key_id/secret_access_key in the "
