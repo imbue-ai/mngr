@@ -320,6 +320,13 @@ class LimaProviderInstance(BaseProviderInstance):
             is_checked_after=False,
         )
         if result.returncode != 0 or not result.stdout.strip():
+            logger.debug(
+                "ssh-keyscan attempt failed for {}:{} (rc={}): {}",
+                hostname,
+                port,
+                result.returncode,
+                result.stderr.strip(),
+            )
             return False
         keys = _parse_keyscan_lines(result.stdout)
         for key_type, key_data in keys:
