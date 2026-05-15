@@ -6,6 +6,7 @@ from enum import auto
 
 from pydantic import Field
 
+from imbue.concurrency_group.concurrency_group import ConcurrencyExceptionGroup
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.errors import ProcessError
 from imbue.imbue_common.enums import UpperCaseStrEnum
@@ -261,7 +262,10 @@ def _install_via_brew(packages: list[str]) -> bool:
         with ConcurrencyGroup(name="brew-install") as cg:
             cg.run_process_to_completion(["brew", "install", *packages])
         return True
-    except (OSError, ProcessError):
+    except (OSError, ProcessError, ConcurrencyExceptionGroup):
+        # ConcurrencyGroup's __exit__ wraps the underlying ProcessError in a
+        # ConcurrencyExceptionGroup before re-raising, so catching ProcessError
+        # alone is not enough -- we have to catch the group as well.
         return False
 
 
@@ -274,7 +278,7 @@ def _install_via_apt(packages: list[str]) -> bool:
             cg.run_process_to_completion(["sudo", "apt-get", "update", "-qq"])
             cg.run_process_to_completion(["sudo", "apt-get", "install", "-y", "-qq", *packages])
         return True
-    except (OSError, ProcessError):
+    except (OSError, ProcessError, ConcurrencyExceptionGroup):
         return False
 
 
