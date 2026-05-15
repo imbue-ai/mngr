@@ -93,11 +93,13 @@ class GeminiAgentConfig(AgentTypeConfig):
         default=False,
         description="When True, install a BeforeTool hook (wildcard matcher) that "
         'auto-approves every tool call by emitting `{"decision":"allow"}` on '
-        "stdout. Mirrors mngr_claude's `auto_allow_permissions` flag (which "
-        "uses Gemini's PermissionRequest event equivalent). Prefer this over "
-        "the `-y`/`--approval-mode yolo` CLI flag: the hook survives admin "
-        "policies that disable yolo mode (`security.disableYoloMode`) and "
-        "shows up explicitly in Gemini's `--debug` hook-registry output.",
+        "stdout. Gemini analogue of mngr_claude's `auto_allow_permissions` "
+        "flag (which wires Claude Code's `PermissionRequest` hook); Gemini "
+        "has no `PermissionRequest` event, so `BeforeTool` is the equivalent "
+        "extension point. Prefer this over the `-y`/`--approval-mode yolo` "
+        "CLI flag: the hook survives admin policies that disable yolo mode "
+        "(`security.disableYoloMode`) and shows up explicitly in Gemini's "
+        "`--debug` hook-registry output.",
     )
 
 
