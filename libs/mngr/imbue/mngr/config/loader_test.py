@@ -1713,3 +1713,55 @@ def test_parse_config_silent_does_not_warn_on_unknown_top_level_field(log_warnin
     raw = {"future_top_level_field": "x"}
     parse_config(raw, disabled_plugins=frozenset(), strict=False, silent=True)
     assert not any("future_top_level_field" in msg for msg in log_warnings), log_warnings
+
+
+# =============================================================================
+# Tests for _normalize_field_keys invariants (env-var path safety)
+# =============================================================================
+
+
+def test_parse_config_rejects_field_name_with_double_underscore() -> None:
+    """A field name containing '__' (other than the trailing __extend suffix)
+    is rejected at config-load time. The double-underscore segment separator
+    is reserved for env-var encoding, so a key like ``foo__bar`` would be
+    indistinguishable from a nested ``foo.bar`` in MNGR__FOO__BAR form.
+    """
+    raw = {"foo__bar": 1}
+    with pytest.raises(ConfigParseError, match=r"containing '__' in its field name"):
+        parse_config(raw, disabled_plugins=frozenset())
+
+
+def test_parse_config_accepts_extend_suffix_on_field_name() -> None:
+    """The trailing __extend suffix is the one place '__' is allowed in a key.
+
+    The suffix is stripped before the field-name shape check, so an extend
+    write on an aggregate field doesn't trigger the double-underscore
+    rejection. The resolver would normally apply the suffix before
+    ``parse_config`` is invoked; passing it through here directly exercises
+    the normalisation path in isolation.
+    """
+    # ``cli_args__extend`` on an agent-type block normalises OK and is
+    # forwarded as an unknown field to the agent-type parser; the surrounding
+    # parse_config call must not raise from _normalize_field_keys.
+    raw = {"agent_types": {"my_agent": {"cli_args__extend": ["--debug"]}}}
+    # Strict mode would reject the unknown ``cli_args__extend`` field on the
+    # agent-type config, but the failure point we care about is the top-level
+    # name shape check, which must pass. Use strict=False so the agent-type
+    # parser drops the unknown field with a warning instead of raising.
+    parse_config(raw, disabled_plugins=frozenset(), strict=False, silent=True)
+
+
+def test_parse_config_rejects_sibling_lowercase_collision_within_block() -> None:
+    """Two sibling keys *within a single block* that lowercase-collapse to the
+    same env-var segment are ambiguous in MNGR__* lookups and are rejected.
+
+    Example: an agent-type block with both ``Cli-Args`` and ``cli_args`` keys
+    would resolve to the same ``CLI_ARGS`` env-var segment, so the loader
+    raises rather than silently choosing one.
+    """
+    raw = {"agent_types": {"my_agent": {"Cli-Args": ["--foo"], "cli_args": ["--bar"]}}}
+    with pytest.raises(
+        ConfigParseError,
+        match=r"collapse to the same env-var segment 'CLI_ARGS'",
+    ):
+        parse_config(raw, disabled_plugins=frozenset())
