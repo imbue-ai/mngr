@@ -312,17 +312,20 @@ class GeminiAgent(InteractiveTuiAgent[GeminiAgentConfig], HasCommonTranscriptMix
         of provisioning uses. Missing source artifacts are skipped silently --
         a user who hasn't run gemini interactively yet won't have all three.
 
-        Caveat: on a remote host the source path is interpreted on the remote
-        side, so the user's ``~/.gemini/`` artifacts need to already exist on
-        the remote machine. A future PR may add a copy-then-sync mode for
-        cross-machine setups; for now, remote hosts are expected to have
-        their own ``~/.gemini/`` populated (or to use API-key auth instead).
+        The existence check uses ``host.path_exists`` so the gate is scoped to
+        the same host as the ``ln -sf``: on a remote host that becomes a
+        ``test -e`` over SSH, avoiding both broken symlinks (when the source
+        exists locally but not remotely) and missed symlinks (when the source
+        exists remotely but not locally). Cross-machine copy-and-keep-in-sync
+        for users who only have ``~/.gemini/`` on their workstation is left to
+        a future PR; for now, remote hosts are expected to have their own
+        ``~/.gemini/`` populated (or to use API-key auth instead).
         """
         relocated_dir = self._get_relocated_gemini_dir()
         user_dir = get_user_gemini_settings_path().parent
         for name in _AUTH_ARTIFACT_FILENAMES:
             source = user_dir / name
-            if not source.exists():
+            if not host.path_exists(source):
                 continue
             link = relocated_dir / name
             host.execute_idempotent_command(
