@@ -9,6 +9,7 @@ from typing import Any
 import pytest
 
 from imbue.mngr.agents.tui_agent import InteractiveTuiAgent
+from imbue.mngr.errors import AgentStartError
 from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
@@ -139,10 +140,18 @@ def test_assemble_command_appends_user_agent_args_after_cli_args(gemini_agent: G
     assert str(command).endswith("gemini --debug")
 
 
+def test_assemble_command_prepends_stale_sentinel_cleanup(gemini_agent: GeminiAgent) -> None:
+    """Every assembled command must clear a leftover readiness sentinel before launching."""
+    command = str(gemini_agent.assemble_command(gemini_agent.host, (), command_override=None))
+    assert command.startswith("rm -f $MNGR_AGENT_STATE_DIR/session_started && ")
+
+
 def test_assemble_command_prepends_transcript_watcher_when_enabled(gemini_agent: GeminiAgent) -> None:
     command = str(gemini_agent.assemble_command(gemini_agent.host, (), command_override=None))
     assert "$MNGR_AGENT_STATE_DIR/commands/common_transcript.sh" in command
-    assert command.startswith("(")
+    # Watcher subshell must come AFTER the sentinel-cleanup so its leading
+    # ``(`` does not get mistaken for the head of the whole command.
+    assert " ( bash $MNGR_AGENT_STATE_DIR/commands/common_transcript.sh ) &" in command
 
 
 def test_assemble_command_skips_transcript_watcher_when_disabled(
@@ -157,6 +166,49 @@ def test_assemble_command_skips_transcript_watcher_when_disabled(
 def test_get_expected_process_name_returns_node(gemini_agent: GeminiAgent) -> None:
     """gemini-cli is a node script with no process.title override -- ps shows 'node'."""
     assert gemini_agent.get_expected_process_name() == "node"
+
+
+def test_get_readiness_sentinel_path_lives_in_per_agent_state_dir(gemini_agent: GeminiAgent) -> None:
+    """The sentinel path matches the file the SessionStart hook touches at runtime."""
+    sentinel = gemini_agent._get_readiness_sentinel_path()
+    assert sentinel == gemini_agent._get_agent_dir() / "session_started"
+
+
+def test_wait_for_ready_signal_returns_when_sentinel_appears(gemini_agent: GeminiAgent) -> None:
+    """Polling succeeds once the SessionStart hook has touched the sentinel file."""
+    # Simulate the SessionStart hook having already fired by creating the
+    # sentinel before start_action runs.
+    sentinel = gemini_agent._get_readiness_sentinel_path()
+    sentinel.parent.mkdir(parents=True, exist_ok=True)
+
+    start_action_invocations = []
+
+    def start_action() -> None:
+        start_action_invocations.append(None)
+        sentinel.touch()
+
+    # is_creating=False skips the TUI-banner poll the super().wait_for_ready_signal does,
+    # which we can't reasonably satisfy in a unit test (no real tmux pane).
+    gemini_agent.wait_for_ready_signal(is_creating=False, start_action=start_action, timeout=2.0)
+    assert start_action_invocations == [None]
+    assert sentinel.exists()
+
+
+def test_wait_for_ready_signal_raises_when_sentinel_never_appears(
+    gemini_agent: GeminiAgent,
+) -> None:
+    """If the SessionStart hook never fires, surface a clear AgentStartError."""
+    sentinel = gemini_agent._get_readiness_sentinel_path()
+    sentinel.parent.mkdir(parents=True, exist_ok=True)
+    assert not sentinel.exists()
+
+    with pytest.raises(AgentStartError) as excinfo:
+        gemini_agent.wait_for_ready_signal(is_creating=False, start_action=lambda: None, timeout=0.2)
+    assert (
+        "GEMINI_CLI_SYSTEM_SETTINGS_PATH" in str(excinfo.value)
+        or "session_started" in str(excinfo.value)
+        or "0.2s" in str(excinfo.value)
+    )
 
 
 def test_get_common_transcript_scripts_returns_common_transcript_sh(gemini_agent: GeminiAgent) -> None:

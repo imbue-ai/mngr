@@ -1,24 +1,29 @@
 from __future__ import annotations
 
 import importlib.resources
+from collections.abc import Callable
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 from typing import ClassVar
+from typing import Final
 
 from pydantic import Field
 
+from imbue.imbue_common.logging import log_span
 from imbue.mngr import hookimpl
 from imbue.mngr.agents.common_transcript import maybe_provision_common_transcript_scripts
 from imbue.mngr.agents.tui_agent import InteractiveTuiAgent
 from imbue.mngr.agents.tui_utils import send_enter_and_poll_for_cleared_indicator
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.errors import AgentStartError
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.agent import HasCommonTranscriptMixin
 from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import CommandString
+from imbue.mngr.utils.polling import poll_until
 from imbue.mngr_gemini import resources as _gemini_resources
 from imbue.mngr_gemini.gemini_config import build_permission_auto_allow_hooks_config
 from imbue.mngr_gemini.gemini_config import build_readiness_hooks_config
@@ -26,6 +31,18 @@ from imbue.mngr_gemini.gemini_config import merge_hooks_config
 from imbue.mngr_gemini.gemini_config import serialize_gemini_settings
 
 _COMMON_TRANSCRIPT_SCRIPT_NAME = "common_transcript.sh"
+
+# Name of the readiness sentinel file the SessionStart hook touches. Polled by
+# ``GeminiAgent.wait_for_ready_signal`` to detect that the Gemini session has
+# fully started. Kept in sync with the path embedded in
+# ``build_readiness_hooks_config`` (``$MNGR_AGENT_STATE_DIR/session_started``).
+_READINESS_SENTINEL_FILENAME: Final[str] = "session_started"
+
+# Matches mngr_claude's _READY_SIGNAL_TIMEOUT_SECONDS. Gemini start-up is
+# generally faster than Claude's because we don't have plugin/credential
+# provisioning to wait on, but the timeout budget here is for the full
+# super().wait_for_ready_signal() + sentinel-poll path.
+_READY_SIGNAL_TIMEOUT_SECONDS: Final[float] = 10.0
 
 # Plugin-scoped subdir inside the per-agent state dir. Mirrors how
 # ``mngr_claude`` namespaces its files under ``plugin/claude/anthropic/``
@@ -129,6 +146,42 @@ class GeminiAgent(InteractiveTuiAgent[GeminiAgentConfig], HasCommonTranscriptMix
             cleared_indicator=self.INPUT_CLEARED_INDICATOR,
         )
 
+    def _get_readiness_sentinel_path(self) -> Path:
+        """Path the ``SessionStart`` hook touches once Gemini has finished starting up."""
+        return self._get_agent_dir() / _READINESS_SENTINEL_FILENAME
+
+    def wait_for_ready_signal(
+        self, is_creating: bool, start_action: Callable[[], None], timeout: float | None = None
+    ) -> None:
+        """Run start_action, then wait for both the TUI banner and the readiness sentinel.
+
+        Polls for the ``$MNGR_AGENT_STATE_DIR/session_started`` file that the
+        ``SessionStart`` hook installed by ``provision`` touches when the
+        Gemini session is ready. Mirrors ``ClaudeAgent.wait_for_ready_signal``;
+        the super-call still polls the TUI banner (``InteractiveTuiAgent``'s
+        contract), so this method adds the sentinel poll on top.
+        """
+        if timeout is None:
+            timeout = _READY_SIGNAL_TIMEOUT_SECONDS
+
+        sentinel_path = self._get_readiness_sentinel_path()
+        with log_span("Waiting for session_started file (timeout={}s)", timeout):
+            with log_span("Calling start_action..."):
+                super().wait_for_ready_signal(is_creating, start_action, timeout)
+            if poll_until(
+                lambda: self._check_file_exists(sentinel_path),
+                timeout=timeout,
+                poll_interval=0.05,
+            ):
+                return
+            raise AgentStartError(
+                str(self.name),
+                f"Agent did not signal readiness within {timeout}s. "
+                "This may indicate Gemini CLI failed to start, the workspace was not trusted "
+                "(GEMINI_CLI_TRUST_WORKSPACE), or the SessionStart hook was not registered "
+                "(GEMINI_CLI_SYSTEM_SETTINGS_PATH).",
+            )
+
     @property
     def is_common_transcript_enabled(self) -> bool:
         return self.agent_config.emit_common_transcript
@@ -222,22 +275,26 @@ class GeminiAgent(InteractiveTuiAgent[GeminiAgentConfig], HasCommonTranscriptMix
         command_override: CommandString | None,
         initial_message: str | None = None,
     ) -> CommandString:
-        """Assemble the gemini command, prefixing the transcript watcher if enabled.
+        """Assemble the gemini command with stale-sentinel cleanup and the transcript watcher.
 
-        The watcher is launched fire-and-forget as a backgrounded subshell
+        Prepends ``rm -f $MNGR_AGENT_STATE_DIR/session_started`` so that a
+        leftover sentinel from a previous run doesn't make
+        ``wait_for_ready_signal`` succeed before the new Gemini session has
+        actually started (relevant on every restart, not just first launch).
+
+        When ``is_common_transcript_enabled`` is True, also launches the
+        transcript watcher fire-and-forget as a backgrounded subshell
         (``( bash ... ) &``). Bash does not propagate SIGHUP to background
         children of non-interactive shells by default, so the watcher may
         outlive the tmux session and continue polling until killed by host
-        teardown or until its session inputs disappear. When
-        ``is_common_transcript_enabled`` is ``False`` the watcher is not
-        prepended and the returned command is the base assembled by the
-        superclass.
+        teardown or until its session inputs disappear.
         """
         base_command = super().assemble_command(host, agent_args, command_override, initial_message)
+        clear_sentinel = f"rm -f $MNGR_AGENT_STATE_DIR/{_READINESS_SENTINEL_FILENAME}"
         if not self.is_common_transcript_enabled:
-            return base_command
+            return CommandString(f"{clear_sentinel} && {base_command}")
         background_cmd = f"( bash $MNGR_AGENT_STATE_DIR/commands/{_COMMON_TRANSCRIPT_SCRIPT_NAME} ) &"
-        return CommandString(f"{background_cmd} {base_command}")
+        return CommandString(f"{clear_sentinel} && {background_cmd} {base_command}")
 
 
 @hookimpl
