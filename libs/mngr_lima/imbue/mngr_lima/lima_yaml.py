@@ -138,8 +138,6 @@ SSHD_EOF
     SSHD_CONFIG_CHANGED=1
 fi
 
-# Single restart at the end picks up both the host-key swap and any
-# sshd_config change.
 if [ "$SSH_KEY_CHANGED" = "1" ] || [ "$SSHD_CONFIG_CHANGED" = "1" ]; then
     systemctl restart sshd 2>/dev/null || service ssh restart 2>/dev/null || true
 fi
