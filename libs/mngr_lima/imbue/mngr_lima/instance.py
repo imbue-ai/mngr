@@ -256,13 +256,11 @@ class LimaProviderInstance(BaseProviderInstance):
         host_name: HostName,
         ssh_config: LimaSshConfig,
     ) -> Host:
-        """Create a Host object from SSH connection info.
-
-        Assumes the per-host ed25519 keypair has already been generated (and
-        injected into the VM during ``create_host``). Re-applies the entry to
-        known_hosts each call so that a Lima restart -- which can change the
-        host-side forwarded port -- stays in sync without scanning.
-        """
+        """Create a Host object from SSH connection info."""
+        # Add the host to known_hosts. This rewrites the per-host known_hosts
+        # file wholesale on every create/start/get_host, so when a Lima restart
+        # reassigns the forwarded port, the current [127.0.0.1]:<port> entry
+        # just replaces the old one -- no stale entry, no scan needed.
         self._record_pre_injected_host_key(host_id, ssh_config.hostname, ssh_config.port)
 
         pyinfra_host = create_pyinfra_host(
