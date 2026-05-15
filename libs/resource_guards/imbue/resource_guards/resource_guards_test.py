@@ -956,6 +956,8 @@ def test_check_guard_violations_skips_superfluous_check_on_failing_test(
 
 
 def test_fixture_uses_resources_records_declaration() -> None:
+    """The decorator should record the function's declared resources."""
+
     def some_fixture() -> None:
         pass
 
@@ -964,6 +966,8 @@ def test_fixture_uses_resources_records_declaration() -> None:
 
 
 def test_fixture_uses_resources_accumulates_across_calls() -> None:
+    """Stacking the decorator should union the declared resource sets."""
+
     def some_fixture() -> None:
         pass
 
@@ -976,6 +980,7 @@ def test_detect_guard_violations_returns_blocked_when_present(
     isolated_guard_state: None,
     tmp_path: Path,
 ) -> None:
+    """A blocked_<resource> file should report a BLOCKED violation."""
     register_resource_guard("cat")
     (tmp_path / "blocked_cat").touch()
 
@@ -987,6 +992,7 @@ def test_detect_guard_violations_returns_never_invoked_for_unused_mark(
     isolated_guard_state: None,
     tmp_path: Path,
 ) -> None:
+    """A guarded resource in marks with no tracking file should report NEVER_INVOKED."""
     register_resource_guard("cat")
 
     violation = _detect_guard_violations({"cat"}, str(tmp_path), check_never_invoked=True)
@@ -997,6 +1003,7 @@ def test_detect_guard_violations_skips_never_invoked_when_flag_false(
     isolated_guard_state: None,
     tmp_path: Path,
 ) -> None:
+    """When check_never_invoked is False, an unused mark should not produce a violation."""
     register_resource_guard("cat")
 
     assert _detect_guard_violations({"cat"}, str(tmp_path), check_never_invoked=False) is None
@@ -1016,6 +1023,7 @@ def test_detect_guard_violations_returns_none_when_clean(
     isolated_guard_state: None,
     tmp_path: Path,
 ) -> None:
+    """A tracking_dir with the expected tracking file and no blocked files should be clean."""
     register_resource_guard("cat")
     (tmp_path / "cat").touch()
 
@@ -1052,6 +1060,7 @@ def test_make_guarded_fixture_wrapper_generator_applies_env_on_setup_and_teardow
 def test_make_guarded_fixture_wrapper_plain_fixture_applies_env(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """A non-generator fixture should run with fixture_env active and restore afterward."""
     fixture_env = {"_TEST_FIXTURE_FLAG": "active"}
     seen: list[str | None] = []
 
@@ -1072,6 +1081,7 @@ def test_check_fixture_setup_violations_passes_when_clean(
     isolated_guard_state: None,
     tmp_path: Path,
 ) -> None:
+    """A fixture that invoked its declared resource should pass the check."""
     register_resource_guard("cat")
     (tmp_path / "cat").touch()
 
@@ -1082,6 +1092,7 @@ def test_check_fixture_setup_violations_raises_on_blocked(
     isolated_guard_state: None,
     tmp_path: Path,
 ) -> None:
+    """A fixture that invoked an undeclared resource should raise ResourceGuardViolation."""
     register_resource_guard("cat")
     (tmp_path / "blocked_cat").touch()
 
@@ -1093,6 +1104,7 @@ def test_check_fixture_setup_violations_raises_on_never_invoked(
     isolated_guard_state: None,
     tmp_path: Path,
 ) -> None:
+    """A fixture that declared a resource but never invoked it should raise."""
     register_resource_guard("cat")
 
     with pytest.raises(ResourceGuardViolation, match="did not invoke cat during setup"):
@@ -1129,6 +1141,7 @@ def test_pytest_fixture_setup_skips_undeclared_fixture() -> None:
 def test_pytest_fixture_setup_wraps_declared_fixture_and_restores_on_exit(
     isolated_guard_state: None,
 ) -> None:
+    """A declared fixture should be wrapped during setup and restored after the hookwrapper exits."""
     register_resource_guard("cat")
 
     @fixture_uses_resources("cat")
@@ -1157,6 +1170,7 @@ def test_pytest_fixture_setup_wraps_declared_fixture_and_restores_on_exit(
 def test_pytest_fixture_setup_raises_on_undeclared_fixture_call(
     isolated_guard_state: None,
 ) -> None:
+    """A declared fixture that invokes an undeclared resource should raise on hookwrapper close."""
     register_resource_guard("cat")
 
     @fixture_uses_resources("ls")
