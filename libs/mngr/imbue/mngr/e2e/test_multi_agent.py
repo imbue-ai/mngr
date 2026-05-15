@@ -72,6 +72,7 @@ def test_destroy_all_via_stdin(e2e: E2eSession) -> None:
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.modal
+@pytest.mark.timeout(120)
 def test_list_filter_by_state(e2e: E2eSession) -> None:
     # Pin a unique sleep value per agent so leaked processes trace back to the specific create call.
     for name, sleep_seconds in [("running-agent", 100103), ("stopped-agent", 100121)]:
@@ -85,16 +86,20 @@ def test_list_filter_by_state(e2e: E2eSession) -> None:
     # Stop one agent
     expect(e2e.run("mngr stop stopped-agent", comment="Stop one agent")).to_succeed()
 
-    # --stopped should show only the stopped agent
+    # --stopped should show only the stopped agent, in STOPPED state
     stopped_result = e2e.run(
         "mngr list --stopped --format json",
         comment="List only stopped agents",
     )
     expect(stopped_result).to_succeed()
     stopped_agents = json.loads(stopped_result.stdout)["agents"]
-    stopped_names = [a["name"] for a in stopped_agents]
-    assert "stopped-agent" in stopped_names
-    assert "running-agent" not in stopped_names
+    stopped_by_name = {a["name"]: a for a in stopped_agents}
+    assert "stopped-agent" in stopped_by_name
+    assert "running-agent" not in stopped_by_name
+    # Confirm the filter is keyed on actual state, not just whatever the agent is named.
+    assert stopped_by_name["stopped-agent"]["state"] == "STOPPED"
+    # Every entry returned under --stopped must itself be STOPPED.
+    assert all(a["state"] == "STOPPED" for a in stopped_agents)
 
     # Without --stopped, both agents should appear (the non-stopped one may
     # be RUNNING or WAITING depending on timing)
@@ -104,6 +109,8 @@ def test_list_filter_by_state(e2e: E2eSession) -> None:
     )
     expect(all_result).to_succeed()
     all_agents = json.loads(all_result.stdout)["agents"]
-    all_names = [a["name"] for a in all_agents]
-    assert "running-agent" in all_names
-    assert "stopped-agent" in all_names
+    all_by_name = {a["name"]: a for a in all_agents}
+    assert "running-agent" in all_by_name
+    assert "stopped-agent" in all_by_name
+    assert all_by_name["stopped-agent"]["state"] == "STOPPED"
+    assert all_by_name["running-agent"]["state"] != "STOPPED"

@@ -37,3 +37,7 @@ def test_create_and_destroy_agent(e2e: E2eSession) -> None:
     list_result = e2e.run("mngr list", comment="Verify agent no longer appears in list")
     expect(list_result).to_succeed()
     expect(list_result.stdout).not_to_contain("my-task")
+    # In the isolated test environment, this was the only agent, so list should
+    # report that nothing remains -- a stronger positive check than just absence
+    # of the name.
+    expect(list_result.stdout).to_contain("No agents found")

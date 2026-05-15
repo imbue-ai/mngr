@@ -27,6 +27,10 @@ def test_create_default(e2e: E2eSession) -> None:
     )
     expect(result).to_succeed()
 
+    pwd_result = e2e.run("pwd", comment="Get the session cwd for comparison")
+    expect(pwd_result).to_succeed()
+    session_cwd = pwd_result.stdout.strip()
+
     list_result = e2e.run(
         "mngr list --format json",
         comment="the defaults are the following: agent=claude, provider=local, project=current dir",
@@ -37,23 +41,32 @@ def test_create_default(e2e: E2eSession) -> None:
     matching = [a for a in agents if a["name"] == "my-task"]
     assert len(matching) == 1
     agent = matching[0]
-    # Default creation should use a worktree (not in-place)
+    # Default creation should use a worktree (not in-place): work_dir must differ from session cwd
+    assert os.path.realpath(agent["work_dir"]) != os.path.realpath(session_cwd), (
+        f"Expected worktree work_dir distinct from session cwd, but got the same path: {agent['work_dir']}"
+    )
     assert "worktrees" in agent["work_dir"], f"Expected worktree-based work_dir, got: {agent['work_dir']}"
+    # Default provider should be local, per the tutorial block
+    assert agent["host"]["provider_name"] == "local", (
+        f"Expected default provider=local, got: {agent['host']['provider_name']}"
+    )
+    assert agent["state"] in ("RUNNING", "WAITING")
 
 
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.modal
+@pytest.mark.timeout(60)
 def test_create_in_place(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
-    # if you want the default behavior of claude (starting in-place), you can specify that:
-    mngr create --transfer=none
+    # you can run the agent in-place (directly in your source directory) without any transfer:
+    mngr create my-task --transfer=none
     # mngr defaults to creating a new worktree for each agent because the whole point of mngr is to let you run multiple agents in parallel.
     # without creating a new worktree for each, they will make conflicting changes with one another.
     """)
     result = e2e.run(
         "mngr create my-task --transfer=none --type command --no-ensure-clean -- sleep 100071",
-        comment="if you want the default behavior of claude (starting in-place), you can specify that",
+        comment="you can run the agent in-place (directly in your source directory) without any transfer",
     )
     expect(result).to_succeed()
 
@@ -83,6 +96,7 @@ def test_create_in_place(e2e: E2eSession) -> None:
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.modal
+@pytest.mark.timeout(60)
 def test_create_short_forms(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
     # you can use a short form for most commands (like create) as well--the above command is the same as these:
@@ -145,12 +159,19 @@ def test_create_codex_agent(e2e: E2eSession) -> None:
     assert len(matching) == 1
     assert matching[0]["type"] == "codex"
     assert matching[0]["state"] in ("RUNNING", "WAITING")
+    # The configured codex command should be what mngr launched for the agent.
+    assert "sleep 99999" in matching[0]["command"]
+
+    # Verify the agent is actually running by executing a command on its host.
+    exec_result = e2e.run("mngr exec my-task pwd", comment="Verify codex agent is actually running")
+    expect(exec_result).to_succeed()
 
 
 @pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.modal
+@pytest.mark.timeout(120)
 def test_create_with_agent_args(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
     # you can specify the arguments to the *agent* (ie, send args to claude rather than mngr)
@@ -177,14 +198,19 @@ def test_create_with_agent_args(e2e: E2eSession) -> None:
     agents = parsed["agents"]
     matching = [a for a in agents if a["name"] == "my-task"]
     assert len(matching) == 1
-    assert "sleep 100073" in matching[0]["command"]
-    assert "--model opus" in matching[0]["command"]
+    # Everything after `--` should be joined verbatim into the stored command,
+    # in the order given. This is the actual contract of agent args via `--`,
+    # so asserting on the exact string catches both missing args and any
+    # reordering or normalization that would slip past substring checks.
+    assert matching[0]["command"] == "sleep 100073 --model opus"
+    assert matching[0]["type"] == "command"
 
 
 @pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.modal
+@pytest.mark.timeout(120)
 def test_create_named_agent(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
     # when creating agents to accomplish tasks, it's recommended that you give them a name to make it easier to manage them:
@@ -216,6 +242,7 @@ def test_create_named_agent(e2e: E2eSession) -> None:
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.modal
+@pytest.mark.timeout(60)
 def test_create_with_json_output(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
     # you can control output format for scripting:
@@ -230,10 +257,48 @@ def test_create_with_json_output(e2e: E2eSession) -> None:
 
     # The create command with --format json should produce valid JSON with agent_id and host_id
     create_json = json.loads(create_result.stdout)
-    assert "agent_id" in create_json
-    assert "host_id" in create_json
+    assert create_json.keys() == {"agent_id", "host_id"}, f"Unexpected JSON keys: {create_json.keys()}"
+    agent_id = create_json["agent_id"]
+    host_id = create_json["host_id"]
+    assert agent_id.startswith("agent-"), f"Expected agent_id to start with 'agent-', got: {agent_id}"
+    assert host_id.startswith("host-"), f"Expected host_id to start with 'host-', got: {host_id}"
 
     list_result = e2e.run("mngr list --format json", comment="Verify agent appears in JSON list")
+    expect(list_result).to_succeed()
+    parsed = json.loads(list_result.stdout)
+    agents = parsed["agents"]
+    assert len(agents) == 1
+    agent = agents[0]
+    assert agent["name"] == "my-task"
+    # The IDs reported by `mngr create --format json` must match what `mngr list --format json` reports
+    assert agent["id"] == agent_id, f"Agent id mismatch: create reported {agent_id}, list reported {agent['id']}"
+    assert agent["host"]["id"] == host_id, (
+        f"Host id mismatch: create reported {host_id}, list reported {agent['host']['id']}"
+    )
+    # --no-connect should still result in a running/waiting agent (the flag just skips client attach)
+    assert agent["state"] in ("RUNNING", "WAITING"), f"Unexpected agent state: {agent['state']}"
+
+
+@pytest.mark.rsync
+@pytest.mark.release
+@pytest.mark.tmux
+@pytest.mark.modal
+@pytest.mark.timeout(60)
+def test_create_with_quiet_output(e2e: E2eSession) -> None:
+    e2e.write_tutorial_block("""
+    # you can control output format for scripting:
+    mngr create my-task --no-connect --format json
+    # (--quiet suppresses all output)
+    """)
+    # --quiet should suppress the JSON output of mngr create, but the agent must still be created.
+    create_result = e2e.run(
+        "mngr create my-task --no-connect --type command --no-ensure-clean --quiet -- sleep 100077",
+        comment="--quiet suppresses all output",
+    )
+    expect(create_result).to_succeed()
+    assert create_result.stdout == "", f"Expected --quiet to produce no stdout, got: {create_result.stdout!r}"
+
+    list_result = e2e.run("mngr list --format json", comment="Verify agent was still created despite --quiet")
     expect(list_result).to_succeed()
     parsed = json.loads(list_result.stdout)
     agents = parsed["agents"]
@@ -245,6 +310,7 @@ def test_create_with_json_output(e2e: E2eSession) -> None:
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.modal
+@pytest.mark.timeout(120)
 def test_create_headless(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
     # mngr is very much meant to be used for scripting and automation, so nothing requires interactivity.
@@ -261,3 +327,7 @@ def test_create_headless(e2e: E2eSession) -> None:
     list_result = e2e.run("mngr list", comment="Verify headless agent appears in list")
     expect(list_result).to_succeed()
     expect(list_result.stdout).to_match(r"my-task\s+(RUNNING|WAITING)")
+
+    # Verify the agent is actually running by executing a command on its host
+    exec_result = e2e.run("mngr exec my-task pwd", comment="Verify agent is actually running")
+    expect(exec_result).to_succeed()

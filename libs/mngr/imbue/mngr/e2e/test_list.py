@@ -14,6 +14,7 @@ from imbue.skitwright.expect import expect
 
 @pytest.mark.release
 @pytest.mark.modal
+@pytest.mark.timeout(60)
 def test_list_with_no_agents(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
         # list all agents
@@ -26,6 +27,7 @@ def test_list_with_no_agents(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 @pytest.mark.modal
+@pytest.mark.timeout(60)
 def test_list_json_with_no_agents(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
     # output all objects as one big JSON array when complete  (useful for scripting)
