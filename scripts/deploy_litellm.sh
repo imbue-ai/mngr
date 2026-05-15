@@ -51,8 +51,11 @@ if [[ -z "$modal_workspace" || "$modal_workspace" == "CHANGE_ME" ]]; then
     exit 1
 fi
 
-echo "==> Pushing Vault secrets to Modal for tier '${tier}'..."
-uv run python "$repo_root/scripts/push_modal_secrets.py" "$tier"
+echo "==> Pushing the litellm Vault secret to Modal for tier '${tier}'..."
+# litellm-proxy only consumes the `litellm-<tier>` Modal Secret; pushing
+# everything else would force every other tier's Vault entries to be
+# populated even when we're only iterating on the proxy.
+uv run python "$repo_root/scripts/push_modal_secrets.py" "$tier" litellm
 
 export MNGR_DEPLOY_ENV="$tier"
 

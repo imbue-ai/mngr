@@ -120,6 +120,15 @@ def main() -> int:
         help="Environment tier name (must match a directory under apps/minds/imbue/minds/config/envs/)",
     )
     parser.add_argument(
+        "services",
+        nargs="*",
+        help=(
+            "Optional list of services to push (e.g. `litellm cloudflare`). "
+            "Every name must appear in the tier's deploy.toml [secrets].services list. "
+            "When omitted, every service from deploy.toml is pushed."
+        ),
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Print the Modal commands without executing them",
@@ -143,13 +152,26 @@ def main() -> int:
         return 2
 
     vault_prefix = str(deploy_config.vault_path_prefix).rstrip("/")
-    services = deploy_config.secrets.services
-    if not services:
+    declared_services = deploy_config.secrets.services
+    if not declared_services:
         print(
             f"error: tier {args.tier!r} declares no services in [secrets].services; nothing to push.",
             file=sys.stderr,
         )
         return 2
+
+    if args.services:
+        unknown = sorted(set(args.services) - {str(s) for s in declared_services})
+        if unknown:
+            print(
+                f"error: services {unknown} are not declared in tier {args.tier!r}'s [secrets].services. "
+                f"Add them to deploy.toml or remove them from the command line.",
+                file=sys.stderr,
+            )
+            return 2
+        services = tuple(s for s in declared_services if str(s) in set(args.services))
+    else:
+        services = declared_services
 
     for service in services:
         vault_path = VaultPath(f"{vault_prefix}/{service}")

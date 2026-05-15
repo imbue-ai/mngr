@@ -55,8 +55,18 @@ if [[ -z "$modal_workspace" || "$modal_workspace" == "CHANGE_ME" ]]; then
     exit 1
 fi
 
-echo "==> Pushing Vault secrets to Modal for tier '${tier}'..."
-uv run python "$repo_root/scripts/push_modal_secrets.py" "$tier"
+echo "==> Pushing the connector's Vault secrets to Modal for tier '${tier}'..."
+# The remote_service_connector binds these specific Modal Secrets in
+# apps/remote_service_connector/.../app.py. Pushing the litellm secret
+# is deferred to scripts/deploy_litellm.sh, which deploys a different
+# Modal app.
+uv run python "$repo_root/scripts/push_modal_secrets.py" "$tier" \
+    cloudflare \
+    supertokens \
+    neon \
+    pool-ssh \
+    litellm-connector \
+    paid-accounts
 
 export MNGR_DEPLOY_ENV="$tier"
 
