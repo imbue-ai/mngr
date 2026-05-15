@@ -49,6 +49,7 @@ from imbue.mngr.providers.ssh_host_setup import build_start_activity_watcher_com
 from imbue.mngr.providers.ssh_utils import create_pyinfra_host
 from imbue.mngr.providers.ssh_utils import load_or_create_host_keypair
 from imbue.mngr.providers.ssh_utils import wait_for_sshd
+from imbue.mngr.utils.file_utils import atomic_write
 from imbue.mngr_lima.config import LimaProviderConfig
 from imbue.mngr_lima.constants import CLOUD_INIT_TIMEOUT_SECONDS
 from imbue.mngr_lima.errors import LimaCommandError
@@ -298,15 +299,13 @@ class LimaProviderInstance(BaseProviderInstance):
         The file is rewritten wholesale -- it only ever needs the single current
         hostname:port entry. Lima reassigns the forwarded port on every restart,
         so an append-style update would leave stale lines behind; a one-line
-        rewrite cannot. No locking needed: only this host's own
-        _create_host_object touches this file.
+        rewrite cannot. The write goes through ``atomic_write`` (temp file +
+        fsync + rename) so a concurrent reader never sees a partial file.
         """
         _, public_key_path = self._host_keypair_paths(host_id)
         public_key = public_key_path.read_text().strip()
         host_pattern = hostname if port == 22 else f"[{hostname}]:{port}"
-        known_hosts_path = self._host_known_hosts_path(host_id)
-        known_hosts_path.parent.mkdir(parents=True, exist_ok=True)
-        known_hosts_path.write_text(f"{host_pattern} {public_key}\n")
+        atomic_write(self._host_known_hosts_path(host_id), f"{host_pattern} {public_key}\n")
 
     def _on_certified_host_data_updated(self, host_id: HostId, certified_data: CertifiedHostData) -> None:
         """Update the certified host data in the host record."""
