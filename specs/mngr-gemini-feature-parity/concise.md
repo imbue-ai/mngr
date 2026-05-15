@@ -36,12 +36,13 @@ Already implemented in `mngr_gemini`:
 
 - `register_agent_type` hookimpl (returns `("gemini", GeminiAgent, GeminiAgentConfig)`)
 - `GeminiAgent` extends `InteractiveTuiAgent` + `HasCommonTranscriptMixin`
-- `--skip-trust` injected via default `cli_args` (workaround for trust dialog)
+- Workspace trust granted via `GEMINI_CLI_TRUST_WORKSPACE=true` in `modify_env_vars` (Gemini's documented headless-automation trust path); no CLI flag needed
+- System-tier settings file at `$MNGR_AGENT_STATE_DIR/plugin/gemini/system_settings.json`, pointed at via `GEMINI_CLI_SYSTEM_SETTINGS_PATH`, carrying the `SessionStart` readiness hook (so `mngr` detects readiness from `$MNGR_AGENT_STATE_DIR/session_started` instead of polling the TUI) and, when `GeminiAgentConfig.auto_allow_permissions=True`, a `BeforeTool` wildcard auto-allow hook
 - `resources/common_transcript.sh` watching `~/.gemini/tmp/*/chats/*.jsonl`
 - tmux-based input via `send_enter_and_poll_for_cleared_indicator` keyed on `"Type your message"` placeholder
 - Reports `node` as expected process name (gemini does not override `process.title`)
 
-Missing relative to `mngr_claude`: everything else (settings management, hook injection, the other six hookimpls, session adoption, headless variant, skill-provisioned subtypes, subagent proxy package, usage telemetry package).
+Missing relative to `mngr_claude`: the other six hookimpls (preflight, deploy, host-destroy, field-generators, CLI options, etc.), session adoption, headless variant, skill-provisioned subtypes, subagent proxy package, usage telemetry package.
 
 ## Proposed PR breakdown
 
