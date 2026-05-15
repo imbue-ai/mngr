@@ -4,6 +4,7 @@ import html
 import json
 import os
 import queue
+import threading
 from collections.abc import AsyncGenerator
 from collections.abc import Mapping
 from contextlib import asynccontextmanager
@@ -171,6 +172,17 @@ async def _managed_lifespan(
     try:
         yield
     finally:
+        # Signal SSE handlers to exit before anything else. Setting the
+        # event alone isn't enough -- the chrome SSE blocks on a
+        # ``change_event.wait()`` with a 30s timeout, so it'd take up to
+        # 30s to notice the shutdown. Poke the backend resolver's
+        # change callback (which fires the same change_event) to wake
+        # every chrome SSE handler immediately; they then see the
+        # shutdown event set and return cleanly from their generators.
+        inner_app.state.shutdown_event.set()
+        backend_resolver = inner_app.state.backend_resolver
+        if isinstance(backend_resolver, MngrCliBackendResolver):
+            backend_resolver.notify_change()
         # Clear the captured loop reference first so background callbacks that
         # race with shutdown see None and drop their events instead of trying
         # to schedule on a loop that is about to close.
@@ -822,10 +834,17 @@ async def _stream_creation_logs(
     log_queue: queue.Queue[str],
     agent_creator: AgentCreator,
     creation_id: CreationId,
+    shutdown_event: threading.Event,
 ) -> AsyncGenerator[str, None]:
-    """Async generator that yields SSE events from a creation log queue."""
+    """Async generator that yields SSE events from a creation log queue.
+
+    Exits cleanly when ``shutdown_event`` is set so the server's
+    graceful-shutdown deadline doesn't have to cancel us mid-stream.
+    """
     streaming = True
     while streaming:
+        if shutdown_event.is_set():
+            return
         try:
             line = await asyncio.get_running_loop().run_in_executor(None, log_queue.get, True, 1.0)
         except (queue.Empty, TimeoutError, OSError):
@@ -871,7 +890,7 @@ async def _handle_creation_logs_sse(
         return Response(status_code=404, content="Unknown agent creation")
 
     return StreamingResponse(
-        _stream_creation_logs(log_queue, agent_creator, creation_id),
+        _stream_creation_logs(log_queue, agent_creator, creation_id, request.app.state.shutdown_event),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -1246,14 +1265,23 @@ async def _handle_chrome_events(
             )
 
             # Wait for changes and push updates until client disconnects
+            shutdown_event: threading.Event = request.app.state.shutdown_event
             connected = not await request.is_disconnected()
-            while connected:
+            while connected and not shutdown_event.is_set():
                 # Wait for a change signal or timeout (timeout for disconnect checks)
                 change_event.clear()
                 try:
                     await asyncio.wait_for(change_event.wait(), timeout=30.0)
                 except TimeoutError:
                     pass
+
+                # Server-side shutdown signalled (via lifespan teardown
+                # calling backend_resolver.notify_change() right after
+                # setting shutdown_event). Exit the generator cleanly so
+                # uvicorn's graceful-shutdown deadline doesn't have to
+                # cancel us mid-stream.
+                if shutdown_event.is_set():
+                    break
 
                 connected = not await request.is_disconnected()
                 if not connected:
@@ -2105,6 +2133,14 @@ def create_desktop_client(
     # unconditionally; ``cli/run.py`` overwrites it with the running
     # consumer right after starting it.
     app.state.permission_requests_consumer = None
+    # Cross-thread flag the SSE handlers poll to exit cleanly on
+    # process shutdown. ``threading.Event`` (not ``asyncio.Event``) so
+    # tests that exercise the endpoints without invoking the lifespan
+    # context manager still see a valid, settable object on app.state
+    # -- and because the lifespan teardown setter runs in the asyncio
+    # event loop's thread but the SSE handlers read it from the same
+    # thread, so awaitability buys us nothing here.
+    app.state.shutdown_event = threading.Event()
     app.state.agent_creator = agent_creator
     app.state.imbue_cloud_cli = imbue_cloud_cli
     app.state.telegram_orchestrator = telegram_orchestrator
