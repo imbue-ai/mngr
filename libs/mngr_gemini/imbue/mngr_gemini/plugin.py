@@ -180,8 +180,8 @@ class GeminiAgent(InteractiveTuiAgent[GeminiAgentConfig], HasCommonTranscriptMix
                 str(self.name),
                 f"Agent did not signal readiness within {timeout}s. "
                 "This may indicate Gemini CLI failed to start, the workspace was not trusted "
-                "(GEMINI_CLI_TRUST_WORKSPACE), or the SessionStart hook was not registered "
-                "(GEMINI_CLI_SYSTEM_SETTINGS_PATH).",
+                f"({_TRUST_WORKSPACE_ENV_VAR}), or the SessionStart hook was not registered "
+                f"({_SYSTEM_SETTINGS_PATH_ENV_VAR}).",
             )
 
     @property
