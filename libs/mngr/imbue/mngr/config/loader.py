@@ -73,8 +73,8 @@ _ENV_OVERRIDE_PATTERN: Final[re.Pattern[str]] = re.compile(r"^MNGR__[A-Z0-9_]+(_
 # like every other ``MNGR__*`` value, since they were always plain strings.
 _PRESERVED_ALIASES: Final[dict[str, tuple[str, Callable[[str], Any]]]] = {
     "MNGR_HEADLESS": ("headless", parse_bool_env),
-    "MNGR_PREFIX": ("prefix", lambda v: _parse_env_value(v)),
-    "MNGR_HOST_DIR": ("default_host_dir", lambda v: _parse_env_value(v)),
+    "MNGR_PREFIX": ("prefix", parse_scalar_value),
+    "MNGR_HOST_DIR": ("default_host_dir", parse_scalar_value),
 }
 
 
