@@ -27,9 +27,8 @@ from imbue.mngr_vps_docker.primitives import VpsSnapshotId
 def stubbed_client() -> Iterator[tuple[AwsVpsClient, Stubber]]:
     """Yield an AwsVpsClient whose underlying EC2 client is wrapped in a Stubber.
 
-    The client's ``_ec2()`` is patched (on this instance only) to always return
-    the same stubbed EC2 client, so multiple operations within a test share the
-    stubber state.
+    The stubbed EC2 client is injected via the ``ec2_client`` constructor field
+    so that all internal ``_ec2()`` calls return the same stubbed instance.
     """
     session = boto3.Session(
         aws_access_key_id="AKIATEST",
@@ -44,9 +43,8 @@ def stubbed_client() -> Iterator[tuple[AwsVpsClient, Stubber]]:
         region="us-east-1",
         ami_id="ami-test12345",
         security_group_id="sg-test",
+        ec2_client=ec2,
     )
-    # Pin the stubbed EC2 client so repeated _ec2() calls reuse it.
-    client.__dict__["_ec2"] = lambda: ec2
 
     stubber.activate()
     try:
@@ -329,8 +327,8 @@ class TestAwsVpsClientSecurityGroup:
             ami_id="ami-test",
             security_group_id=None,
             security_group_name="mngr-aws-test",
+            ec2_client=ec2,
         )
-        client.__dict__["_ec2"] = lambda: ec2
         stubber.activate()
         try:
             yield client, stubber

@@ -12,6 +12,7 @@ from botocore.exceptions import ClientError
 from loguru import logger
 from pydantic import ConfigDict
 from pydantic import Field
+from pydantic import PrivateAttr
 
 from imbue.mngr_vps_docker.errors import VpsApiError
 from imbue.mngr_vps_docker.errors import VpsProvisioningError
@@ -73,9 +74,22 @@ class AwsVpsClient(VpsClientInterface):
     container_ssh_port: int = Field(
         default=2222, description="Port the container's sshd is exposed on (added to the SG)"
     )
+    ec2_client: Any | None = Field(
+        default=None,
+        description=(
+            "Optional pre-built EC2 client (e.g. a botocore Stubber-wrapped client for tests). "
+            "When None, the client is lazily built from ``session`` on first use and cached."
+        ),
+    )
+
+    _cached_ec2_client: Any = PrivateAttr(default=None)
 
     def _ec2(self) -> Any:
-        return self.session.client("ec2", region_name=self.region)
+        if self.ec2_client is not None:
+            return self.ec2_client
+        if self._cached_ec2_client is None:
+            self._cached_ec2_client = self.session.client("ec2", region_name=self.region)
+        return self._cached_ec2_client
 
     @contextmanager
     def _translate_aws_errors(self) -> Iterator[None]:
