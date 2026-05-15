@@ -76,11 +76,11 @@ class GeminiAgentConfig(AgentTypeConfig):
     cli_args: tuple[str, ...] = Field(
         default=(),
         description="Additional CLI arguments to pass to the gemini agent. "
-        "Workspace trust is handled via the GEMINI_CLI_TRUST_WORKSPACE env "
-        "var (see modify_env_vars), so `--skip-trust` is not needed here -- "
-        "that flag only trusts the workspace for tool execution, not hook "
-        "registration, so the readiness hook installed by provision() would "
-        "not fire under it.",
+        "No flags are needed by default: workspace trust is cleared via the "
+        "GEMINI_CLI_TRUST_WORKSPACE env var (Gemini's documented headless-"
+        "automation trust path, set in modify_env_vars), and the mngr-owned "
+        "settings file is loaded via GEMINI_CLI_SYSTEM_SETTINGS_PATH, so "
+        "neither `--skip-trust` nor a `--settings` flag is required here.",
     )
     emit_common_transcript: bool = Field(
         default=True,
