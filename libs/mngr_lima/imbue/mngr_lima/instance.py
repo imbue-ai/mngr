@@ -722,7 +722,8 @@ sudo poweroff
         if tags_path.exists():
             tags_path.unlink(missing_ok=True)
 
-        # Delete the per-host pre-injected sshd keypair directory.
+        # Delete the per-host keys directory (holds the pre-injected sshd
+        # keypair and the matching known_hosts file).
         host_keys_dir = self._host_keys_dir(host_id)
         if host_keys_dir.exists():
             shutil.rmtree(host_keys_dir, ignore_errors=True)
