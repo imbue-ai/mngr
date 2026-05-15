@@ -40,10 +40,14 @@ _READINESS_SENTINEL_FILENAME: Final[str] = "session_started"
 
 # Matches mngr_claude's _READY_SIGNAL_TIMEOUT_SECONDS. Gemini start-up is
 # generally faster than Claude's because we don't have plugin/credential
-# provisioning to wait on. Applied independently to each phase of
-# ``wait_for_ready_signal``: the ``super().wait_for_ready_signal()`` call
-# (TUI banner poll when ``is_creating=True``) and the sentinel-file poll
-# afterwards each get their own budget of this many seconds.
+# provisioning to wait on. Governs only the sentinel-file poll in
+# ``wait_for_ready_signal`` below. The TUI banner poll (run by
+# ``InteractiveTuiAgent.wait_for_ready_signal`` when ``is_creating=True``)
+# has its own independent budget -- ``_TUI_READY_TIMEOUT_SECONDS`` in
+# ``mngr.agents.tui_utils`` -- and ignores the ``timeout`` argument we
+# forward through ``super()``. Worst-case total wait is therefore roughly
+# ``start_action duration + (is_creating ? _TUI_READY_TIMEOUT_SECONDS : 0)
+# + _READY_SIGNAL_TIMEOUT_SECONDS``.
 _READY_SIGNAL_TIMEOUT_SECONDS: Final[float] = 10.0
 
 # Plugin-scoped subdir inside the per-agent state dir. Mirrors how
