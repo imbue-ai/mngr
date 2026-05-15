@@ -66,7 +66,9 @@ def add_common_options(command: TDecorated) -> TDecorated:
     - --headless: Disable all interactive behavior
     - --plugin: Enable plugins
     - --disable-plugin: Disable plugins
-    - -S, --setting: Override config settings for this invocation (KEY=VALUE, dot-separated paths)
+    - -S, --setting: Override config settings for this invocation (KEY=VALUE, dot-separated
+      paths; a trailing ``__extend`` on the leaf key opts into the list/dict/set extend
+      operator)
     """
     # Apply decorators in reverse order (bottom to top)
     # These are wrapped in the "Common" option group
@@ -74,7 +76,10 @@ def add_common_options(command: TDecorated) -> TDecorated:
         "-S",
         "--setting",
         multiple=True,
-        help="Override a config setting for this invocation (KEY=VALUE, dot-separated paths) [repeatable]",
+        help=(
+            "Override a config setting for this invocation (KEY=VALUE, dot-separated paths; "
+            "append __extend to the leaf key to extend list/dict/set fields) [repeatable]"
+        ),
     )(command)
     command = optgroup.option("--disable-plugin", multiple=True, help="Disable a plugin [repeatable]")(command)
     command = optgroup.option("--plugin", "--enable-plugin", multiple=True, help="Enable a plugin [repeatable]")(
