@@ -22,7 +22,6 @@ from imbue.mngr.primitives import CommandString
 from imbue.mngr_gemini import resources as _gemini_resources
 from imbue.mngr_gemini.gemini_config import build_permission_auto_allow_hooks_config
 from imbue.mngr_gemini.gemini_config import build_readiness_hooks_config
-from imbue.mngr_gemini.gemini_config import merge_hooks_config
 from imbue.mngr_gemini.gemini_config import serialize_gemini_settings
 
 _COMMON_TRANSCRIPT_SCRIPT_NAME = "common_transcript.sh"
@@ -200,24 +199,17 @@ class GeminiAgent(InteractiveTuiAgent[GeminiAgentConfig], HasCommonTranscriptMix
         ``BeforeTool`` wildcard hook that auto-approves every tool call.
         Because mngr owns this file outright (it lives in the per-agent state
         dir), no read-modify-merge dance against any pre-existing file is
-        needed: each provision run rewrites it from scratch. Composition of
-        the configured builders still goes through ``merge_hooks_config`` so
-        any future builder that adds entries under an already-used event key
-        is handled correctly (matcher-group dedup, deep copy, no mutation).
+        needed: each provision run rewrites it from scratch. The active
+        builders contribute disjoint event keys (``SessionStart`` vs
+        ``BeforeTool``), so composition is a flat ``dict.update`` over their
+        ``hooks`` sub-dicts; ``merge_hooks_config`` would only be needed if a
+        future builder shared an event key with one of these.
         """
-        builders = [build_readiness_hooks_config()]
+        hooks: dict[str, Any] = {}
+        hooks.update(build_readiness_hooks_config()["hooks"])
         if self.agent_config.auto_allow_permissions:
-            builders.append(build_permission_auto_allow_hooks_config())
-
-        settings: dict[str, Any] = {}
-        for builder_output in builders:
-            merged = merge_hooks_config(settings, builder_output)
-            # Each builder contributes at least one new matcher group against
-            # a fresh accumulator, so merge_hooks_config never returns None.
-            assert merged is not None
-            settings = merged
-
-        host.write_text_file(self._get_system_settings_path(), serialize_gemini_settings(settings))
+            hooks.update(build_permission_auto_allow_hooks_config()["hooks"])
+        host.write_text_file(self._get_system_settings_path(), serialize_gemini_settings({"hooks": hooks}))
 
     def assemble_command(
         self,
