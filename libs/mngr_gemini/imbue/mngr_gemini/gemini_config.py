@@ -65,9 +65,12 @@ def get_system_gemini_settings_path() -> Path:
 def read_gemini_settings(settings_path: Path) -> dict[str, Any]:
     """Read a Gemini ``settings.json`` file.
 
-    Missing or empty files return ``{}``. Malformed JSON is logged and treated
-    as ``{}`` (matching the behavior of ``mngr.utils.file_utils.read_json_dict``)
-    so that a user typo in their settings does not break agent provisioning.
+    Missing files return ``{}`` silently. Empty files and malformed JSON
+    both raise ``JSONDecodeError`` from ``json.loads``; ``read_json_dict``
+    catches that, logs a warning, and returns ``{}``. A top-level JSON value
+    that is not an object (e.g. a list) is treated as ``{}`` as well. Net
+    effect: a user typo in their settings does not break agent provisioning,
+    but is observable in logs.
     """
     return read_json_dict(settings_path)
 
