@@ -115,8 +115,7 @@ def test_prevent_namedtuple() -> None:
 def test_prevent_yaml_usage() -> None:
     # Misfire: mngr_lima MUST use YAML (Lima's native config format -- limactl
     # only accepts YAML, not TOML). The regex matches `generate_default_lima_yaml`
-    # function references in lima_yaml_test.py. Bumping the snapshot to absorb
-    # the new pre-injected-host-key test cases.
+    # function references in lima_yaml_test.py.
     rc.check_yaml_usage(_DIR, snapshot(77))
 
 
