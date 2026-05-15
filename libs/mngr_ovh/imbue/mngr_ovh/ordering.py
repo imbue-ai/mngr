@@ -9,6 +9,7 @@ from imbue.mngr.errors import MngrError
 from imbue.mngr_ovh.catalog import find_required_field
 from imbue.mngr_ovh.catalog import validate_datacenter
 from imbue.mngr_ovh.client import OvhVpsClient
+from imbue.mngr_vps_docker.errors import VpsApiError
 from imbue.mngr_vps_docker.errors import VpsProvisioningError
 
 _OVH_DELIVERY_POLL_INTERVAL_SECONDS: float = 10.0
@@ -86,10 +87,7 @@ def order_and_wait_for_vps(
 
             logger.info("OVH order placed (cart={}); waiting for VPS delivery", cart_id)
             return _wait_for_new_service_name(client, existing_before, deliver_timeout_seconds)
-        except VpsProvisioningError:
-            _safe_delete_cart(client, cart_id)
-            raise
-        except Exception:
+        except (MngrError, VpsApiError, VpsProvisioningError):
             _safe_delete_cart(client, cart_id)
             raise
 
@@ -112,7 +110,7 @@ def _set_configuration(
 def _safe_delete_cart(client: OvhVpsClient, cart_id: str) -> None:
     try:
         client.call_api("DELETE", f"/order/cart/{cart_id}")
-    except Exception as e:
+    except (VpsApiError, MngrError) as e:
         logger.debug("Failed to clean up OVH cart {}: {}", cart_id, e)
 
 

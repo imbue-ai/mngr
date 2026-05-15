@@ -1,10 +1,11 @@
 import os
+from enum import auto
 from typing import Final
-from typing import Literal
 
 from pydantic import Field
 from pydantic import SecretStr
 
+from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.mngr.errors import MngrError
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr_vps_docker.config import VpsDockerProviderConfig
@@ -13,6 +14,18 @@ _DEFAULT_ENDPOINT: Final[str] = "ovh-us"
 _DEFAULT_PLAN: Final[str] = "vps-2025-model1"
 _DEFAULT_REGION: Final[str] = "US-EAST-VA"
 _DEFAULT_IMAGE_NAME: Final[str] = "Debian 12 - Docker"
+
+
+class OvhPricingMode(UpperCaseStrEnum):
+    """OVH cart pricing modes for VPS orders."""
+
+    DEFAULT = auto()
+    UPFRONT6 = auto()
+    UPFRONT12 = auto()
+
+    def to_wire_value(self) -> str:
+        """Return the lowercase string OVH's order/cart API expects."""
+        return self.value.lower()
 
 
 class OvhCredentialsError(MngrError):
@@ -66,9 +79,9 @@ class OvhProviderConfig(VpsDockerProviderConfig):
         default=_DEFAULT_IMAGE_NAME,
         description="Default OS image name (resolved to UUID per-VPS at create time).",
     )
-    pricing_mode: Literal["default", "upfront6", "upfront12"] = Field(
-        default="default",
-        description="OVH pricing mode. 'upfront6' / 'upfront12' get a discount in exchange for prepayment.",
+    pricing_mode: OvhPricingMode = Field(
+        default=OvhPricingMode.DEFAULT,
+        description="OVH pricing mode. UPFRONT6 / UPFRONT12 get a discount in exchange for prepayment.",
     )
     duration: str = Field(
         default="P1M",

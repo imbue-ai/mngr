@@ -31,6 +31,7 @@ from imbue.mngr_ovh.iam_tags import list_vps_resources_for_provider
 from imbue.mngr_ovh.iam_tags import vps_urn_for
 from imbue.mngr_ovh.ordering import order_and_wait_for_vps
 from imbue.mngr_ovh.ordering import rebuild_vps_with_public_key
+from imbue.mngr_vps_docker.errors import VpsApiError
 from imbue.mngr_vps_docker.instance import ParsedVpsBuildOptions
 from imbue.mngr_vps_docker.instance import VpsDockerProvider
 from imbue.mngr_vps_docker.primitives import VpsInstanceId
@@ -109,7 +110,7 @@ class OvhProvider(VpsDockerProvider):
             return list(self._vps_iam_cache)
         try:
             resources = list_vps_resources_for_provider(self.ovh_client, provider_name=str(self.name))
-        except Exception as e:
+        except (VpsApiError, MngrError) as e:
             logger.warning("OVH IAM tag listing failed; treating as empty: {}", e)
             self._vps_iam_cache = []
             return []
@@ -161,7 +162,7 @@ class OvhProvider(VpsDockerProvider):
                 plan_code=plan,
                 datacenter=region,
                 image_name=image_name,
-                pricing_mode=self.ovh_config.pricing_mode,
+                pricing_mode=self.ovh_config.pricing_mode.to_wire_value(),
                 duration=self.ovh_config.duration,
                 deliver_timeout_seconds=self.ovh_config.vps_boot_timeout,
             )

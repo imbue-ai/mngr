@@ -15,20 +15,18 @@ _TOFU_CONNECT_BACKOFF_SECONDS: float = 5.0
 _TOFU_CONNECT_BANNER_TIMEOUT_SECONDS: float = 30.0
 
 
-class _AcceptAndCapturePolicy(paramiko.MissingHostKeyPolicy):
-    """Paramiko policy that records the first-seen host key without writing anywhere.
+class _SilentAcceptHostKeyPolicy(paramiko.MissingHostKeyPolicy):
+    """Paramiko policy that silently accepts any host key on first sight.
 
-    Equivalent to ``StrictHostKeyChecking=accept-new`` semantics: the first
-    connection accepts the presented key, captures it for the caller to
-    pin out-of-band, and lets the connection proceed. Subsequent calls
-    should use a real ``known_hosts`` file with strict checking.
+    Equivalent to ``StrictHostKeyChecking=accept-new`` semantics: the
+    first connection lets the handshake proceed without verification.
+    Callers read the actually-presented key out of the live transport
+    via ``client.get_transport().get_remote_server_key()`` and pin it
+    to a strict ``known_hosts`` file before any further connections.
     """
 
-    def __init__(self) -> None:
-        self.captured_key: PKey | None = None
-
     def missing_host_key(self, client: paramiko.SSHClient, hostname: str, key: PKey) -> None:
-        self.captured_key = key
+        pass
 
 
 def pin_host_key_via_tofu(
@@ -64,9 +62,8 @@ def pin_host_key_via_tofu(
     private_key = paramiko.Ed25519Key.from_private_key_file(str(private_key_path))
 
     while time.monotonic() < deadline:
-        capture = _AcceptAndCapturePolicy()
         client = paramiko.SSHClient()
-        client.set_missing_host_key_policy(capture)
+        client.set_missing_host_key_policy(_SilentAcceptHostKeyPolicy())
         try:
             client.connect(
                 hostname=hostname,
@@ -84,16 +81,18 @@ def pin_host_key_via_tofu(
             time.sleep(_TOFU_CONNECT_BACKOFF_SECONDS)
             continue
         try:
-            if capture.captured_key is None:
+            transport = client.get_transport()
+            captured_key = transport.get_remote_server_key() if transport is not None else None
+            if captured_key is None:
                 raise VpsProvisioningError(f"Connected to {hostname}:{port} but paramiko did not report a host key")
-            host_key_str = _format_openssh_public_key(capture.captured_key)
+            host_key_str = _format_openssh_public_key(captured_key)
             add_host_to_known_hosts(
                 known_hosts_path=known_hosts_path,
                 hostname=hostname,
                 port=port,
                 public_key=host_key_str,
             )
-            logger.info("Pinned OVH VPS host key for {}:{} ({})", hostname, port, capture.captured_key.get_name())
+            logger.info("Pinned OVH VPS host key for {}:{} ({})", hostname, port, captured_key.get_name())
             return host_key_str
         finally:
             client.close()

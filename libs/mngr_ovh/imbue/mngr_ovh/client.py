@@ -8,7 +8,14 @@ from typing import Final
 import ovh
 from loguru import logger
 from ovh.exceptions import APIError
+from ovh.exceptions import BadParametersError
+from ovh.exceptions import Forbidden
 from ovh.exceptions import HTTPError
+from ovh.exceptions import InvalidCredential
+from ovh.exceptions import NotCredential
+from ovh.exceptions import NotGrantedCall
+from ovh.exceptions import ResourceConflictError
+from ovh.exceptions import ResourceNotFoundError
 from pydantic import ConfigDict
 from pydantic import Field
 from pydantic import PrivateAttr
@@ -90,8 +97,8 @@ class OvhVpsClient(VpsClientInterface):
         except HTTPError as e:
             raise VpsApiError(0, f"OVH API {method} {path} transport failed: {e}") from e
         except APIError as e:
-            status = getattr(e, "status_code", 0) or 0
-            raise VpsApiError(int(status), f"OVH API {method} {path} returned error: {e}") from e
+            status = _ovh_api_error_status_code(e)
+            raise VpsApiError(status, f"OVH API {method} {path} returned error: {e}") from e
 
     def call_api(self, method: str, path: str, **kwargs: Any) -> Any:
         """Public escape hatch for helpers in the same package.
@@ -315,6 +322,27 @@ class OvhVpsClient(VpsClientInterface):
 
     def list_ssh_keys(self) -> list[VpsSshKeyInfo]:
         return [VpsSshKeyInfo(id=key, name=key) for key in self._ssh_key_cache]
+
+
+def _ovh_api_error_status_code(error: APIError) -> int:
+    """Map a python-ovh ``APIError`` subclass to its HTTP status code.
+
+    The SDK doesn't expose an ``http_status`` attribute; instead each
+    well-known status maps to a specific exception subclass. We return ``0``
+    for anything we don't recognise so callers can fall through to the
+    string form of the error for diagnostics.
+    """
+    if isinstance(error, ResourceNotFoundError):
+        return 404
+    if isinstance(error, BadParametersError):
+        return 400
+    if isinstance(error, (Forbidden, NotGrantedCall)):
+        return 403
+    if isinstance(error, (InvalidCredential, NotCredential)):
+        return 401
+    if isinstance(error, ResourceConflictError):
+        return 409
+    return 0
 
 
 def _snapshot_info_from_payload(service_name: str, payload: dict[str, Any]) -> VpsSnapshotInfo:

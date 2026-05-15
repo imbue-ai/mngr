@@ -3,6 +3,7 @@
 import pytest
 from pydantic import SecretStr
 
+from imbue.mngr_ovh.config import OvhPricingMode
 from imbue.mngr_ovh.config import OvhProviderConfig
 
 
@@ -28,7 +29,8 @@ def test_default_config_values(clean_env: None) -> None:
     assert config.default_region == "US-EAST-VA"
     assert config.default_plan == "vps-2025-model1"
     assert config.default_image_name == "Debian 12 - Docker"
-    assert config.pricing_mode == "default"
+    assert config.pricing_mode == OvhPricingMode.DEFAULT
+    assert config.pricing_mode.to_wire_value() == "default"
     assert config.duration == "P1M"
     assert config.vps_boot_timeout == 600.0
     assert config.ovh_subsidiary == "US"

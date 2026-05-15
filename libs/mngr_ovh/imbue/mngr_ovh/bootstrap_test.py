@@ -47,11 +47,13 @@ def test_pin_host_key_via_tofu_writes_known_hosts(tmp_path: Path) -> None:
     known_hosts_path = tmp_path / "known_hosts"
     fake_server_key = _make_paramiko_ed25519_pkey()
 
-    def fake_connect(self: paramiko.SSHClient, **kwargs: Any) -> None:
-        policy = self._policy  # noqa: SLF001 -- paramiko's internal but stable
-        policy.missing_host_key(self, kwargs["hostname"], fake_server_key)
+    fake_transport = MagicMock()
+    fake_transport.get_remote_server_key.return_value = fake_server_key
 
-    with patch.object(paramiko.SSHClient, "connect", autospec=True, side_effect=fake_connect):
+    with (
+        patch.object(paramiko.SSHClient, "connect", autospec=True, return_value=None),
+        patch.object(paramiko.SSHClient, "get_transport", autospec=True, return_value=fake_transport),
+    ):
         pinned = pin_host_key_via_tofu(
             hostname="vps-x.vps.ovh.us",
             port=22,
