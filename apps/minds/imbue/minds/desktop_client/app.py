@@ -177,23 +177,34 @@ async def _managed_lifespan(
         inner_app.state.event_loop = None
         if not is_externally_managed_client:
             await inner_app.state.http_client.aclose()
-        # Terminate the `mngr forward` subprocess BEFORE draining the
-        # concurrency group. The CG owns three reader threads
-        # (`mngr-forward-stdout-reader`, `mngr-forward-stderr-reader`,
-        # `mngr-forward-lifecycle-watcher`) that are blocked on the
-        # subprocess's pipes; only the subprocess dying closes those pipes
-        # and unblocks the reads. If we hand control to ``CG.__exit__``
-        # while the subprocess is still alive, the readers stay blocked
-        # until the CG's shutdown timeout fires and force-terminates them
-        # with a noisy "N strands did not finish in time" warning on
-        # every clean shutdown. Doing the terminate here flips the order:
-        # subprocess dies → pipes close → reader threads exit → CG drains
-        # cleanly. A redundant ``.terminate()`` in ``cli/run.py``'s finally
-        # block remains as a fallback for startup-error paths that never
-        # reach this lifespan teardown.
+        # Stop every long-lived strand that's blocked on external I/O
+        # BEFORE draining the concurrency group. The CG's __exit__ just
+        # joins threads with a timeout; threads blocked on subprocess
+        # pipes or socket reads with no read timeout can't unblock on
+        # their own. If we drain the CG while they're still wedged, it
+        # times out waiting for them and surfaces "N strands did not
+        # finish in time" warnings on every clean shutdown.
+        #
+        # Order matters within this block only to the extent that each
+        # stop() returns quickly; their effects (terminate subprocess,
+        # close httpx connection) all unblock threads independently.
+        # Redundant cleanup calls in ``cli/run.py``'s finally block
+        # remain as fallbacks for startup-error paths that never reach
+        # this lifespan teardown.
         envelope_stream_consumer = inner_app.state.envelope_stream_consumer
         if envelope_stream_consumer is not None:
+            # SIGTERMs the mngr forward subprocess; closes its pipes so
+            # the three mngr-forward-{stdout,stderr,lifecycle} reader
+            # threads exit their for-line loops.
             envelope_stream_consumer.terminate()
+        permission_requests_consumer = inner_app.state.permission_requests_consumer
+        if permission_requests_consumer is not None:
+            # Sets the consumer's stop event AND closes the in-flight
+            # follow-stream httpx client so the latchkey-permission-
+            # requests-consumer thread unblocks from its iter_lines read
+            # (which uses read=None timeout and otherwise blocks forever
+            # waiting for the gateway to push the next request).
+            permission_requests_consumer.stop()
         # Exit the root ConcurrencyGroup. ``__exit__`` waits up to
         # ``shutdown_timeout_seconds`` for any still-in-flight strands (e.g.
         # a detached tunnel-setup task) to finish.
@@ -2090,6 +2101,10 @@ def create_desktop_client(
     app.state.auth_store = auth_store
     app.state.backend_resolver = backend_resolver
     app.state.envelope_stream_consumer = envelope_stream_consumer
+    # Placeholder so the lifespan teardown can read this slot
+    # unconditionally; ``cli/run.py`` overwrites it with the running
+    # consumer right after starting it.
+    app.state.permission_requests_consumer = None
     app.state.agent_creator = agent_creator
     app.state.imbue_cloud_cli = imbue_cloud_cli
     app.state.telegram_orchestrator = telegram_orchestrator

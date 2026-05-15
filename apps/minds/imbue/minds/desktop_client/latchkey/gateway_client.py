@@ -27,6 +27,7 @@ called from the FastAPI request thread under
 """
 
 import json
+import threading
 from collections.abc import Iterator
 from collections.abc import Sequence
 from pathlib import Path
@@ -35,6 +36,7 @@ from typing import Final
 import httpx
 from loguru import logger
 from pydantic import Field
+from pydantic import PrivateAttr
 
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
@@ -104,6 +106,15 @@ class LatchkeyGatewayClient(MutableModel):
     # ``httpx.BaseTransport`` is not pydantic-native; allow it through.
     model_config = {"arbitrary_types_allowed": True, "frozen": False, "extra": "forbid"}
 
+    # Active follow-stream client, tracked so an external caller (e.g.
+    # the PermissionRequestsConsumer's stop()) can close it from another
+    # thread and unblock the in-flight iter_lines read on shutdown. The
+    # follow stream uses read=None timeout, so without an external close
+    # the consumer thread blocks indefinitely waiting for the gateway to
+    # push the next request.
+    _active_stream_client_lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
+    _active_stream_client: httpx.Client | None = PrivateAttr(default=None)
+
     def _build_headers(self) -> dict[str, str]:
         return {
             _HEADER_PASSWORD: self.password,
@@ -131,11 +142,20 @@ class LatchkeyGatewayClient(MutableModel):
         (raising :class:`LatchkeyGatewayClientError` on any HTTP error)
         when the gateway closes the connection or a network error
         terminates the stream.
+
+        The underlying ``httpx.Client`` is published to
+        ``self._active_stream_client`` for the duration of the stream so
+        :meth:`cancel_active_stream` can close it from another thread,
+        which is the only way to unblock the read-end iter_lines loop on
+        process shutdown.
         """
         url = f"{self.base_url.rstrip('/')}/permission-requests"
         params = {"follow": "true"}
+        client = self._stream_client()
+        with self._active_stream_client_lock:
+            self._active_stream_client = client
         try:
-            with self._stream_client() as client:
+            with client:
                 with client.stream("GET", url, params=params, headers=self._build_headers()) as response:
                     response.raise_for_status()
                     for raw_line in response.iter_lines():
@@ -158,6 +178,33 @@ class LatchkeyGatewayClient(MutableModel):
                             continue
         except httpx.HTTPError as e:
             raise LatchkeyGatewayClientError(f"GET /permission-requests stream failed: {e}") from e
+        finally:
+            with self._active_stream_client_lock:
+                if self._active_stream_client is client:
+                    self._active_stream_client = None
+
+    def cancel_active_stream(self) -> None:
+        """Close the in-flight follow-stream connection, if any.
+
+        Used by :meth:`PermissionRequestsConsumer.stop` on shutdown to
+        unblock the consumer thread, which is otherwise stuck on the
+        read=None socket inside ``response.iter_lines()``. Closing the
+        httpx client from another thread is safe -- the in-flight read
+        raises ``httpx.HTTPError`` (caught by the outer try in
+        ``iter_permission_requests`` and re-raised as
+        ``LatchkeyGatewayClientError``), the consumer's reconnect loop
+        sees the error, checks its stop event, and exits.
+
+        No-op when no stream is active.
+        """
+        with self._active_stream_client_lock:
+            client = self._active_stream_client
+        if client is None:
+            return
+        try:
+            client.close()
+        except (OSError, RuntimeError) as e:
+            logger.debug("cancel_active_stream: ignored {} during close", e)
 
     def delete_permission_request(self, request_id: str) -> None:
         """Remove the named pending request from the gateway's queue.

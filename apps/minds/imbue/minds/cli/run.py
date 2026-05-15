@@ -347,6 +347,12 @@ def run(
         on_request=_StreamedPermissionRequestHandler(app=app, backend_resolver=backend_resolver),
     )
     permission_requests_consumer.start(root_concurrency_group)
+    # Stash on app.state so the lifespan shutdown can stop() the consumer
+    # before draining the root concurrency group; without this the
+    # consumer thread stays blocked on its follow-stream read=None socket
+    # for the full CG shutdown timeout and the group surfaces a "1 strand
+    # did not finish in time" warning on every clean exit.
+    app.state.permission_requests_consumer = permission_requests_consumer
 
     if not no_browser:
         # Open the URL that carries the one-time code rather than the bare

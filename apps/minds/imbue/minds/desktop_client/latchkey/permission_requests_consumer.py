@@ -122,11 +122,19 @@ class PermissionRequestsConsumer(MutableModel):
     def stop(self) -> None:
         """Signal the consumer thread to exit. Returns immediately.
 
-        The thread is daemonised so process-wide shutdown does not have
-        to ``join`` on it; this method is provided for explicit cleanup
-        paths (tests, foreground shutdowns).
+        Sets the stop event AND cancels any in-flight follow-stream so
+        the consumer thread unblocks from ``response.iter_lines()`` and
+        exits promptly. Without the cancel the consumer would stay
+        wedged on the read=None socket until the gateway happened to
+        push the next request -- which on a clean shutdown could be
+        never, causing the root concurrency group to time out waiting
+        for the thread to join.
+
+        Safe to call concurrently with :meth:`start` / ``_run`` /
+        another :meth:`stop`; both side effects are idempotent.
         """
         self._stop_event.set()
+        self.gateway_client.cancel_active_stream()
 
     def _run(self) -> None:
         """Consumer-thread main loop: stream, reconnect on failure, exit on stop."""
