@@ -890,8 +890,12 @@ def test_apply_settings_to_config_sets_command_defaults(mngr_test_prefix: str) -
     assert result.commands["create"].defaults["connect"] is False
 
 
-def test_apply_settings_to_config_merges_with_existing_command_defaults(mngr_test_prefix: str) -> None:
-    """apply_settings_to_config should merge settings with existing command defaults."""
+def test_apply_settings_to_config_replaces_existing_command_defaults(mngr_test_prefix: str) -> None:
+    """Assign-by-default: --setting on a command param replaces the whole defaults map.
+
+    To preserve other keys, the user would explicitly write ``defaults__extend``
+    or repeat each key in the --setting list.
+    """
     config = MngrConfig(
         prefix=mngr_test_prefix,
         commands={"create": CommandDefaults(defaults={"branch": "main:agent/*"})},
@@ -901,9 +905,30 @@ def test_apply_settings_to_config_merges_with_existing_command_defaults(mngr_tes
         ("commands.create.connect=false",),
         frozenset(),
     )
-    # Both the existing default and the new setting should be present
-    assert result.commands["create"].defaults["branch"] == "main:agent/*"
-    assert result.commands["create"].defaults["connect"] is False
+    # Only the new setting's key is present; the prior "branch" entry was wiped.
+    assert result.commands["create"].defaults == {"connect": False}
+
+
+def test_apply_settings_to_config_extends_list_field(mngr_test_prefix: str) -> None:
+    """``--setting unset_vars__extend=...`` appends to the base list without wiping it."""
+    config = MngrConfig(prefix=mngr_test_prefix, unset_vars=["BASE_VAR"])
+    result = apply_settings_to_config(
+        config,
+        ('unset_vars__extend=["FROM_SETTING"]',),
+        frozenset(),
+    )
+    assert result.unset_vars == ["BASE_VAR", "FROM_SETTING"]
+
+
+def test_apply_settings_to_config_extend_on_scalar_raises(mngr_test_prefix: str) -> None:
+    """``__extend`` is not valid on a scalar field; the resolver raises ConfigParseError."""
+    config = MngrConfig(prefix=mngr_test_prefix)
+    with pytest.raises(ConfigParseError, match="__extend on field 'prefix'"):
+        apply_settings_to_config(
+            config,
+            ("prefix__extend=oops",),
+            frozenset(),
+        )
 
 
 def test_apply_settings_to_config_multiple_settings(mngr_test_prefix: str) -> None:

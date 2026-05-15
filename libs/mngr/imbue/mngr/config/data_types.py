@@ -72,6 +72,16 @@ def split_cli_args_string(cli_args: str) -> tuple[str, ...]:
     return tuple(lexer)
 
 
+def _assign_scalar(base_value: Any, override_value: Any) -> Any:
+    """Return ``override_value`` when it is not None; otherwise fall back to ``base_value``.
+
+    Used inside ``MngrConfig.merge_with`` to express the "override wins if
+    explicitly set" rule for scalar fields without duplicating the conditional
+    at every call site.
+    """
+    return override_value if override_value is not None else base_value
+
+
 def _merge_container_dict(
     base: dict[Any, Any],
     override: dict[Any, Any],
@@ -263,15 +273,16 @@ class ProviderInstanceConfig(FrozenModel):
         if not isinstance(override, self.__class__):
             raise ConfigParseError(f"Cannot merge {self.__class__.__name__} with different provider config type")
 
+        base_values = self.model_dump()
+        override_values = override.model_dump()
         merged_values: dict[str, Any] = {}
         for field_name in self.__class__.model_fields:
             if field_name == "backend":
                 # Backend identifies the config class itself; always take it from override.
-                merged_values[field_name] = override.backend
+                merged_values[field_name] = override_values[field_name]
                 continue
-            base_value = getattr(self, field_name)
-            override_value = getattr(override, field_name)
-            merged_values[field_name] = override_value if override_value is not None else base_value
+            override_value = override_values[field_name]
+            merged_values[field_name] = override_value if override_value is not None else base_values[field_name]
         return self.__class__(**merged_values)
 
 
@@ -558,10 +569,6 @@ class MngrConfig(FrozenModel):
         For keys that appear in both, the sub-class's ``merge_with`` is
         invoked, where leaf fields again use assign-by-default.
         """
-
-        def assign_scalar(base_value: Any, override_value: Any) -> Any:
-            return override_value if override_value is not None else base_value
-
         merged_agent_types = _merge_container_dict(self.agent_types, override.agent_types)
         merged_providers = _merge_container_dict(self.providers, override.providers)
         merged_plugins = _merge_container_dict(self.plugins, override.plugins)
@@ -572,9 +579,9 @@ class MngrConfig(FrozenModel):
         merged_logging = self.logging.merge_with(override.logging) if override.logging is not None else self.logging
 
         return self.__class__(
-            prefix=assign_scalar(self.prefix, override.prefix),
-            default_host_dir=assign_scalar(self.default_host_dir, override.default_host_dir),
-            pager=assign_scalar(self.pager, override.pager),
+            prefix=_assign_scalar(self.prefix, override.prefix),
+            default_host_dir=_assign_scalar(self.default_host_dir, override.default_host_dir),
+            pager=_assign_scalar(self.pager, override.pager),
             unset_vars=override.unset_vars if override.unset_vars is not None else self.unset_vars,
             work_dir_extra_paths=override.work_dir_extra_paths
             if override.work_dir_extra_paths is not None
@@ -594,30 +601,30 @@ class MngrConfig(FrozenModel):
             pre_command_scripts=override.pre_command_scripts
             if override.pre_command_scripts is not None
             else self.pre_command_scripts,
-            is_remote_agent_installation_allowed=assign_scalar(
+            is_remote_agent_installation_allowed=_assign_scalar(
                 self.is_remote_agent_installation_allowed,
                 override.is_remote_agent_installation_allowed,
             ),
-            connect_command=assign_scalar(self.connect_command, override.connect_command),
+            connect_command=_assign_scalar(self.connect_command, override.connect_command),
             retry=merged_retry,
             logging=merged_logging,
-            is_nested_tmux_allowed=assign_scalar(self.is_nested_tmux_allowed, override.is_nested_tmux_allowed),
-            headless=assign_scalar(self.headless, override.headless),
-            is_error_reporting_enabled=assign_scalar(
+            is_nested_tmux_allowed=_assign_scalar(self.is_nested_tmux_allowed, override.is_nested_tmux_allowed),
+            headless=_assign_scalar(self.headless, override.headless),
+            is_error_reporting_enabled=_assign_scalar(
                 self.is_error_reporting_enabled,
                 override.is_error_reporting_enabled,
             ),
-            is_allowed_in_pytest=assign_scalar(self.is_allowed_in_pytest, override.is_allowed_in_pytest),
-            default_destroyed_host_persisted_seconds=assign_scalar(
+            is_allowed_in_pytest=_assign_scalar(self.is_allowed_in_pytest, override.is_allowed_in_pytest),
+            default_destroyed_host_persisted_seconds=_assign_scalar(
                 self.default_destroyed_host_persisted_seconds,
                 override.default_destroyed_host_persisted_seconds,
             ),
-            default_min_online_host_age_seconds=assign_scalar(
+            default_min_online_host_age_seconds=_assign_scalar(
                 self.default_min_online_host_age_seconds,
                 override.default_min_online_host_age_seconds,
             ),
-            agent_ready_timeout=assign_scalar(self.agent_ready_timeout, override.agent_ready_timeout),
-            completion_cache_dir=assign_scalar(self.completion_cache_dir, override.completion_cache_dir),
+            agent_ready_timeout=_assign_scalar(self.agent_ready_timeout, override.agent_ready_timeout),
+            completion_cache_dir=_assign_scalar(self.completion_cache_dir, override.completion_cache_dir),
         )
 
 

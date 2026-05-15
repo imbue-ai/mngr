@@ -54,14 +54,16 @@ def bare_key(extend_key: str) -> str:
 def _walk_to_field(base: Any, path: tuple[str, ...]) -> Any:
     """Walk ``base`` along ``path`` and return the value, or None if any
     intermediate step is missing or untraversable.
+
+    Models are projected to plain dicts via ``model_dump`` so we can traverse
+    everything through ``Mapping`` lookups (avoids the dynamic-attribute
+    access ratchet).
     """
-    current: Any = base
+    current: Any = base.model_dump() if isinstance(base, BaseModel) else base
     for segment in path:
         if current is None:
             return None
-        if isinstance(current, BaseModel):
-            current = getattr(current, segment, None)
-        elif isinstance(current, Mapping):
+        if isinstance(current, Mapping):
             current = current.get(segment)
         else:
             return None
