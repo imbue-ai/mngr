@@ -122,19 +122,16 @@ class PermissionRequestsConsumer(MutableModel):
     def stop(self) -> None:
         """Signal the consumer thread to exit. Returns immediately.
 
-        Sets the stop event AND cancels any in-flight follow-stream so
-        the consumer thread unblocks from ``response.iter_lines()`` and
-        exits promptly. Without the cancel the consumer would stay
-        wedged on the read=None socket until the gateway happened to
-        push the next request -- which on a clean shutdown could be
-        never, causing the root concurrency group to time out waiting
-        for the thread to join.
+        The follow stream uses a finite read timeout (see
+        :data:`~imbue.minds.desktop_client.latchkey.gateway_client._FOLLOW_READ_TIMEOUT`)
+        so the consumer thread wakes up at least every couple of seconds
+        and notices the stop event between reconnect attempts. Worst-case
+        shutdown delay is one read-timeout interval.
 
         Safe to call concurrently with :meth:`start` / ``_run`` /
-        another :meth:`stop`; both side effects are idempotent.
+        another :meth:`stop`; the event set is idempotent.
         """
         self._stop_event.set()
-        self.gateway_client.cancel_active_stream()
 
     def _run(self) -> None:
         """Consumer-thread main loop: stream, reconnect on failure, exit on stop."""
@@ -166,11 +163,21 @@ class PermissionRequestsConsumer(MutableModel):
                     e,
                     delay,
                 )
+                # Real error -- escalate the backoff so a dead gateway
+                # doesn't get hammered.
+                if self._stop_event.wait(timeout=delay):
+                    return
+                delay = min(delay * _RECONNECT_DELAY_GROWTH, _RECONNECT_MAX_DELAY_SECONDS)
             else:
-                logger.debug(
-                    "permission-requests stream closed cleanly by gateway; reconnecting in {:.1f}s",
-                    delay,
-                )
-            if self._stop_event.wait(timeout=delay):
-                return
-            delay = min(delay * _RECONNECT_DELAY_GROWTH, _RECONNECT_MAX_DELAY_SECONDS)
+                # Clean close from the gateway side OR a read-timeout
+                # idle reconnect (iter_permission_requests treats
+                # httpx.ReadTimeout as a clean close, see its docstring).
+                # Reset the backoff -- the previous attempt succeeded at
+                # the protocol level, no failure to back off from -- but
+                # still pace ourselves with the min delay so a gateway
+                # that immediately closes every connection (instead of
+                # holding the stream open) can't induce a tight
+                # reconnect loop.
+                delay = _RECONNECT_MIN_DELAY_SECONDS
+                if self._stop_event.wait(timeout=delay):
+                    return
