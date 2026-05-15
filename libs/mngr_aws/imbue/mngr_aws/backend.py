@@ -155,12 +155,16 @@ class AwsProviderBackend(ProviderBackendInterface):
 
 
 def _make_unresolved_session(config: AwsProviderConfig) -> boto3.Session:
-    """Return a boto3 Session bound to the configured region but with no credentials.
+    """Return a plain boto3 Session bound to the configured region.
 
-    The session is constructed without raising; calling EC2 operations on it
-    will fail at request time with a clear AWS auth error. This lets us
-    register the provider even when credentials are missing, so listing
-    operations gracefully short-circuit in ``_get_tagged_vps_ips``.
+    Only called after ``config.get_session()`` has already failed to resolve
+    credentials. The returned Session still walks boto3's default credential
+    chain (env vars, profile, shared credentials file, IMDS); we don't strip
+    credentials, we just don't require them at construction time. Any EC2
+    call on this Session is expected to fail loudly with an AWS auth error,
+    which is the desired behavior: we want the provider to be registrable
+    even without credentials so that listing operations short-circuit in
+    ``_get_tagged_vps_ips`` while host-creation operations fail clearly.
     """
     return boto3.Session(region_name=config.default_region)
 
