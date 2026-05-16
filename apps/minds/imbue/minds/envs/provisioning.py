@@ -96,6 +96,22 @@ from imbue.minds.errors import MindError
 # on the shared dev-tier CF account).
 MINDS_ENV_NAME_KEY: Final[str] = "MINDS_ENV_NAME"
 
+# Tier names that are NOT eligible for generation-id tracking. The
+# generation id is a "did this shared env get destroyed + redeployed
+# since I last activated" signal -- it only matters for tiers where
+# multiple developers share one deployment AND destroy is a real
+# possibility. ``dev`` is per-developer (each dev controls their own
+# destroy, no inter-dev coordination needed). ``production`` is
+# hard-refused for destroy at the CLI layer, so there's no signal to
+# track. Anything else (``staging`` today, future shared envs) gets
+# generation tracking.
+_TIERS_WITHOUT_GENERATION_TRACKING: Final[frozenset[str]] = frozenset({"dev", "production"})
+
+
+def tier_uses_generation_tracking(tier: str) -> bool:
+    """Return True iff this tier should mint + expose + auto-wipe on generation id."""
+    return tier not in _TIERS_WITHOUT_GENERATION_TRACKING
+
 
 _PROVIDER_ERRORS: tuple[type[Exception], ...] = (
     ModalEnvProviderError,
@@ -478,103 +494,107 @@ def deploy_dev_env(
     )
 
 
-def destroy_tier_env(
+_DEV_TIER: Final[str] = "dev"
+
+
+def destroy_env(
+    name: DevEnvName,
     *,
     tier: str,
     deploy_config: DeployEnvConfig,
+    credentials: ProviderCredentials,
     providers: Providers,
     parent_concurrency_group: ConcurrencyGroup,
+    keep_agents: bool = False,
 ) -> None:
-    """Tear down everything ``deploy_tier_env`` created (and clear the env-specific data) for ``tier``.
+    """Tear down everything ``deploy`` created for env ``name`` and remove the env root.
 
-    Used by ``minds env destroy --yes-i-mean-staging`` (production is
-    refused at the CLI layer). Walks the cleanup steps in dependency
-    order + adds the env-specific data wipes that keep operator-managed
-    shared resources (Neon DB, SuperTokens app, Cloudflare zone) intact
-    while clearing the data accumulated inside them:
+    Single destroy function for every env type (dev, staging, anything
+    else that follows the per-env-data-roots pattern). The flow is
+    shared end to end -- only the *implementation* of a few cleanup
+    steps differs by tier because resource ownership does:
 
-    1. Destroy every mngr agent under ``~/.minds-<tier>/mngr/agents/``
-       via ``mngr destroy``. Done first so agents stop cleanly before
-       their cloud resources go away (no orphan tunnels / pool hosts
-       pointing at dead URLs).
-    2. ``modal app stop`` both deployed apps in the tier's stable
-       Modal env.
-    3. ``modal secret delete`` every per-tier Modal Secret pushed by
-       deploy (``<service>-<tier>``). Forces the next deploy to push
-       fresh values from Vault.
-    4. Wipe the SuperTokens app's user / session data via
-       delete + recreate with the same ``app_id`` (extracted from the
-       ``SUPERTOKENS_CONNECTION_URI`` in the tier's Vault entry). The
-       app's connection URI and API key stay valid for the next deploy.
-    5. Wipe the Neon DB's schema via ``DROP SCHEMA public CASCADE; CREATE
-       SCHEMA public;`` against the tier's DATABASE_URL (read from
-       Vault). The DB itself and its DSN stay valid for the next deploy.
-    6. Finally, remove ``~/.minds-<tier>/`` -- ONLY if every prior step
+    * For the ``dev`` tier, ``deploy`` creates the per-env Modal
+      environment, Neon DB, and SuperTokens app outright. So destroy
+      *deletes* them (cascade-clears their contents).
+    * For shared tiers (``staging`` today, anything similar later),
+      ``deploy`` does NOT create those resources -- they're operator-
+      managed via Vault. Destroy clears the *data inside them*
+      (``modal app stop`` + ``modal secret delete``, SuperTokens user
+      wipe via delete + recreate of the same ``app_id``, Neon
+      ``DROP SCHEMA public CASCADE``) but leaves the resources
+      themselves intact so the operator's Vault entries stay valid.
+    * Generation-id removal is the *only* outright difference:
+      shared tiers track a per-tier generation id in Vault that powers
+      ``activate``-time auto-wipe across developers; dev envs and
+      production don't (see :func:`tier_uses_generation_tracking`).
+
+    Steps, in order, for every env type:
+
+    1. ``mngr destroy`` every agent under ``~/.minds-<name>/mngr/agents/``
+       so their cloud resources (Docker containers, pool hosts,
+       Cloudflare tunnels) stop cleanly before being torn down.
+       Skipped when ``keep_agents=True``.
+    2. Delete every Vultr instance tagged ``minds_env=<name>``.
+    3. Enumerate + delete every Cloudflare tunnel with
+       ``metadata.env=<name>`` (filtered by env name; the tag the
+       connector sets at create time encodes the owning env, not the
+       tier).
+    4. Clear SuperTokens app data (tier-dependent: delete the app
+       outright for dev / wipe its users for shared tiers).
+    5. Clear Neon DB data (tier-dependent: delete the DB outright for
+       dev / DROP SCHEMA for shared tiers).
+    6. Clear Modal infra (tier-dependent: delete the Modal env outright
+       for dev / stop apps + delete secrets for shared tiers).
+    7. For shared tiers only: delete the tier generation id from Vault
+       so the next deploy mints a fresh one + every dev's next
+       ``activate`` sees a mismatch and auto-wipes their local state.
+    8. Finally, remove ``~/.minds-<name>/`` -- ONLY if every prior step
        succeeded. On any failure, the env root stays so the operator
-       can re-run ``destroy`` to pick up where things broke.
+       can re-run ``destroy`` to pick up where things broke (rather
+       than silently leaking expensive cloud resources because the
+       local pointer is gone).
 
-    Leaves the tier's Neon DB, SuperTokens app, Cloudflare zone, and
-    Vault entries themselves untouched -- those are operator-managed
-    (created out of band, populated via Vault) and survive a
-    destroy/redeploy cycle so the next ``minds env deploy`` can
-    re-push the same secrets and re-deploy the same apps in place.
-    (Cloudflare tunnel cleanup ships as a separate change so destroy
-    can be tested end-to-end without the tunnel-metadata migration.)
+    Raises :class:`DevEnvNotFoundError` if no env root exists -- the
+    operator is asked to confirm the name they meant.
     """
-    name = DevEnvName(tier)
-    modal_env = str(deploy_config.modal_env)
+    if not env_root_exists(name):
+        raise DevEnvNotFoundError(f"No env root for env {name!r} at {env_root_dir(name)}; nothing to destroy.")
+
     tier_vault_prefix = str(deploy_config.vault_path_prefix).rstrip("/")
-    apps_to_handle = (
-        f"litellm-proxy-{tier}",
-        f"remote-service-connector-{tier}",
-    )
+    is_dev_tier = tier == _DEV_TIER
+    # For dev-tier deploys the Modal env is the env name (each dev gets
+    # their own); for shared tiers it's the tier's stable Modal env
+    # from deploy.toml (``main`` by convention).
+    modal_env_for_tier_ops = str(name) if is_dev_tier else str(deploy_config.modal_env)
 
-    # Step 1: agents first, so their docker containers / pool hosts /
-    # tunnels get torn down cleanly before we yank the connector.
-    destroyed_count = destroy_all_mngr_agents_in_env(
-        name,
-        destroy_agent=providers.destroy_mngr_agent,
-        parent_concurrency_group=parent_concurrency_group,
-    )
-    if destroyed_count:
-        logger.info("Destroyed {} mngr agent(s) under env {!r}.", destroyed_count, tier)
+    # Step 1: mngr agents first, so their docker containers / pool
+    # hosts / tunnels stop cleanly before we tear down the cloud
+    # resources they reference.
+    if keep_agents:
+        logger.warning(
+            "minds env destroy {!r}: --keep-agents passed; skipping mngr-agent teardown. "
+            "Run `mngr destroy <agent>` manually for any agents bound to this env.",
+            str(name),
+        )
+    else:
+        destroyed_count = destroy_all_mngr_agents_in_env(
+            name,
+            destroy_agent=providers.destroy_mngr_agent,
+            parent_concurrency_group=parent_concurrency_group,
+        )
+        if destroyed_count:
+            logger.info("Destroyed {} mngr agent(s) under env {!r}.", destroyed_count, str(name))
 
-    # Step 2: stop the deployed Modal apps.
-    logger.info("Stopping tier {!r} Modal apps in env {!r}...", tier, modal_env)
-    for app_name in apps_to_handle:
-        providers.stop_modal_app(app_name, modal_env, parent_concurrency_group)
+    # Step 2: Vultr instances tagged with this env.
+    instances = providers.list_vultr_instances(name, credentials.vultr_api_key)
+    if instances:
+        providers.delete_vultr_instances(instances, credentials.vultr_api_key)
 
-    # Step 3: delete per-tier Modal Secrets. Next deploy re-pushes from Vault.
-    logger.info("Deleting tier {!r} Modal Secrets in env {!r}...", tier, modal_env)
-    for service in deploy_config.secrets.services:
-        providers.delete_modal_secret(f"{service}-{tier}", modal_env, parent_concurrency_group)
-
-    # Step 4: wipe the SuperTokens app's user/session data via delete+recreate.
-    # Read the tier's `supertokens` Vault entry to find the core URL +
-    # API key + connection URI (which encodes the app_id we need to
-    # wipe). ``read_per_env_secret_values`` is reused with empty
-    # overrides so we get the Vault dict as-is.
-    logger.info("Wiping SuperTokens app data for tier {!r}...", tier)
-    supertokens_values = providers.read_per_env_secret_values(
-        "supertokens",
-        tier_vault_prefix,
-        {},
-        parent_concurrency_group,
-    )
-    _wipe_supertokens_for_tier(supertokens_values, providers=providers, tier=tier)
-
-    # Step 5: wipe the Neon DB schema.
-    logger.info("Wiping Neon DB schema for tier {!r}...", tier)
-    neon_values = providers.read_per_env_secret_values(
-        "neon",
-        tier_vault_prefix,
-        {},
-        parent_concurrency_group,
-    )
-    _wipe_neon_for_tier(neon_values, providers=providers, tier=tier, parent_cg=parent_concurrency_group)
-
-    # Step 5.5: clean up Cloudflare tunnels tagged for this tier.
-    logger.info("Cleaning up Cloudflare tunnels tagged for tier {!r}...", tier)
+    # Step 3: Cloudflare tunnels tagged with this env. Keyed off env
+    # NAME (not tier), since dev envs share the dev-tier CF account and
+    # we want to find only this specific env's tunnels.
+    logger.info("Cleaning up Cloudflare tunnels tagged for env {!r}...", str(name))
     cf_vault_values = providers.read_per_env_secret_values(
         "cloudflare",
         tier_vault_prefix,
@@ -585,17 +605,64 @@ def destroy_tier_env(
         name, cloudflare_vault_values=cf_vault_values, providers=providers
     )
     if deleted_tunnels:
-        logger.info("Deleted {} Cloudflare tunnel(s) for tier {!r}.", deleted_tunnels, tier)
+        logger.info("Deleted {} Cloudflare tunnel(s) for env {!r}.", deleted_tunnels, str(name))
 
-    # Step 6: delete the tier generation id from Vault so the next
-    # deploy mints a fresh one (which all devs' next activation
-    # against the tier sees as a mismatch + auto-wipes their local
-    # state).
-    logger.info("Deleting tier {!r} generation id from Vault...", tier)
-    providers.delete_generation_id(tier_vault_prefix, parent_concurrency_group)
+    # Step 4: SuperTokens (dev deletes the per-env app outright; shared
+    # tiers wipe users via delete + recreate of the same app id).
+    if is_dev_tier:
+        providers.delete_supertokens_app(
+            name,
+            credentials.supertokens_core_url,
+            credentials.supertokens_api_key,
+        )
+    else:
+        logger.info("Wiping SuperTokens app data for env {!r}...", str(name))
+        supertokens_values = providers.read_per_env_secret_values(
+            "supertokens",
+            tier_vault_prefix,
+            {},
+            parent_concurrency_group,
+        )
+        _wipe_supertokens_for_tier(supertokens_values, providers=providers, tier=tier)
 
-    # Step 7: remove the env root LAST, only if every step above succeeded
-    # (exceptions from any step propagate up and skip this).
+    # Step 5: Neon (dev deletes the per-env DB outright; shared tiers
+    # DROP SCHEMA on the operator-managed DB).
+    if is_dev_tier:
+        providers.delete_neon_db(name, credentials.neon_project_id, credentials.neon_api_token)
+    else:
+        logger.info("Wiping Neon DB schema for env {!r}...", str(name))
+        neon_values = providers.read_per_env_secret_values(
+            "neon",
+            tier_vault_prefix,
+            {},
+            parent_concurrency_group,
+        )
+        _wipe_neon_for_tier(neon_values, providers=providers, tier=tier, parent_cg=parent_concurrency_group)
+
+    # Step 6: Modal (dev deletes the per-env Modal env outright which
+    # cascade-deletes its apps / secrets / volumes; shared tiers stop
+    # the deployed apps + delete per-tier Modal Secrets so the next
+    # deploy re-pushes fresh values from Vault).
+    if is_dev_tier:
+        providers.delete_modal_env(name, parent_concurrency_group)
+    else:
+        logger.info("Stopping Modal apps for env {!r} in Modal env {!r}...", str(name), modal_env_for_tier_ops)
+        for app_name in (f"litellm-proxy-{tier}", f"remote-service-connector-{tier}"):
+            providers.stop_modal_app(app_name, modal_env_for_tier_ops, parent_concurrency_group)
+        logger.info("Deleting per-tier Modal Secrets in env {!r}...", modal_env_for_tier_ops)
+        for service in deploy_config.secrets.services:
+            providers.delete_modal_secret(f"{service}-{tier}", modal_env_for_tier_ops, parent_concurrency_group)
+
+    # Step 7: generation id removal -- ONLY for tiers that use generation
+    # tracking (i.e. shared tiers like staging). For dev / production,
+    # there is no generation Vault entry to remove. This is the one
+    # genuinely tier-specific step (everything else above is the same
+    # flow with tier-driven cleanup ops).
+    if tier_uses_generation_tracking(tier):
+        logger.info("Deleting tier {!r} generation id from Vault...", tier)
+        providers.delete_generation_id(tier_vault_prefix, parent_concurrency_group)
+
+    # Step 8: env root removal LAST, only on full success.
     delete_env_root(name)
 
 
@@ -700,9 +767,13 @@ def deploy_tier_env(
 
     # Mint (or look up) the tier generation id BEFORE pushing secrets
     # -- the id rides along in the litellm-connector secret so the
-    # deployed connector can expose it via ``/generation``.
-    generation_id = providers.ensure_generation_id(tier_vault_prefix, parent_concurrency_group)
-    logger.info("Tier {!r} generation id: {}", tier, generation_id)
+    # deployed connector can expose it via ``/generation``. Only minted
+    # for shared tiers (staging today; not dev / production -- see
+    # :func:`tier_uses_generation_tracking` for the rationale).
+    generation_id: str | None = None
+    if tier_uses_generation_tracking(tier):
+        generation_id = providers.ensure_generation_id(tier_vault_prefix, parent_concurrency_group)
+        logger.info("Tier {!r} generation id: {}", tier, generation_id)
 
     logger.info(
         "Pushing tier-shared Modal Secrets for tier {!r} into Modal env {!r}...",
@@ -718,7 +789,8 @@ def deploy_tier_env(
         # connector's other custom env values already live.
         overrides: dict[str, str] = {}
         if service == "litellm-connector":
-            overrides[GENERATION_ID_KEY] = generation_id
+            if generation_id is not None:
+                overrides[GENERATION_ID_KEY] = generation_id
             overrides[MINDS_ENV_NAME_KEY] = tier
         values = providers.read_per_env_secret_values(
             service,
@@ -825,95 +897,6 @@ _ROLLBACK_TABLE: dict[
 }
 
 
-def destroy_dev_env(
-    name: DevEnvName,
-    *,
-    tier: str,
-    deploy_config: DeployEnvConfig,
-    credentials: ProviderCredentials,
-    providers: Providers,
-    parent_concurrency_group: ConcurrencyGroup,
-    keep_agents: bool = False,
-) -> None:
-    """Tear down every resource ``deploy_dev_env`` provisioned and remove the env root.
-
-    Steps, in order:
-
-    1. Destroy every mngr agent under ``~/.minds-<name>/mngr/agents/``
-       via ``mngr destroy``. Done first so agents stop cleanly before
-       their cloud resources go away (Docker containers / pool hosts /
-       tunnels otherwise linger as orphans). Skipped when
-       ``keep_agents=True``.
-    2. Delete every Vultr instance tagged ``minds_env=<name>``.
-    3. Delete the per-dev-env SuperTokens app (cascade-deletes its users).
-    4. Delete the per-dev-env Neon database (cascade-deletes its tables).
-    5. Delete the per-dev-env Modal environment (cascade-deletes the
-       deployed apps, Modal Secrets, and Volumes within it).
-    6. Finally, remove ``~/.minds-<name>/`` -- ONLY if every prior step
-       succeeded. On any failure, the env root stays so the operator
-       can re-run ``destroy`` to pick up where things broke (rather
-       than silently leaking expensive cloud resources because the
-       local pointer is gone).
-
-    Raises :class:`DevEnvNotFoundError` if no env root exists -- the
-    operator is asked to confirm the name they meant.
-    """
-    if not env_root_exists(name):
-        raise DevEnvNotFoundError(f"No env root for dev env {name!r} at {env_root_dir(name)}; nothing to destroy.")
-
-    # Step 1: agents first.
-    if keep_agents:
-        logger.warning(
-            "minds env destroy {!r}: --keep-agents passed; skipping mngr-agent teardown. "
-            "Run `mngr destroy <agent>` manually for any agents bound to this env.",
-            str(name),
-        )
-    else:
-        destroyed_count = destroy_all_mngr_agents_in_env(
-            name,
-            destroy_agent=providers.destroy_mngr_agent,
-            parent_concurrency_group=parent_concurrency_group,
-        )
-        if destroyed_count:
-            logger.info("Destroyed {} mngr agent(s) under env {!r}.", destroyed_count, str(name))
-
-    # Step 2: Vultr instances.
-    instances = providers.list_vultr_instances(name, credentials.vultr_api_key)
-    if instances:
-        providers.delete_vultr_instances(instances, credentials.vultr_api_key)
-
-    # Step 3: Cloudflare tunnels tagged with this env.
-    tier_vault_prefix = str(deploy_config.vault_path_prefix).rstrip("/")
-    logger.info("Cleaning up Cloudflare tunnels tagged for env {!r}...", str(name))
-    cf_vault_values = providers.read_per_env_secret_values(
-        "cloudflare",
-        tier_vault_prefix,
-        {},
-        parent_concurrency_group,
-    )
-    deleted_tunnels = _cleanup_cloudflare_tunnels_for_env(
-        name, cloudflare_vault_values=cf_vault_values, providers=providers
-    )
-    if deleted_tunnels:
-        logger.info("Deleted {} Cloudflare tunnel(s) for env {!r}.", deleted_tunnels, str(name))
-
-    # Step 4: SuperTokens app (delete-app cascades user data).
-    providers.delete_supertokens_app(
-        name,
-        credentials.supertokens_core_url,
-        credentials.supertokens_api_key,
-    )
-
-    # Step 5: Neon DB (delete-DB cascades tables).
-    providers.delete_neon_db(name, credentials.neon_project_id, credentials.neon_api_token)
-
-    # Step 6: Modal env (cascade-deletes apps + secrets + volumes inside).
-    providers.delete_modal_env(name, parent_concurrency_group)
-
-    # Step 7: env root LAST, only on full success.
-    delete_env_root(name)
-
-
 def list_dev_envs() -> tuple[DevEnvSummary, ...]:
     """Return one :class:`DevEnvSummary` per ``~/.minds*/`` directory on disk.
 
@@ -976,8 +959,7 @@ __all__ = [
     "deploy_litellm_proxy",
     "deploy_remote_service_connector",
     "deploy_tier_env",
-    "destroy_dev_env",
-    "destroy_tier_env",
+    "destroy_env",
     "ensure_modal_env",
     "list_dev_envs",
     "push_per_env_modal_secret",

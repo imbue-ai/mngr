@@ -83,8 +83,7 @@ from imbue.minds.envs.provisioning import ProviderCredentials
 from imbue.minds.envs.provisioning import Providers
 from imbue.minds.envs.provisioning import deploy_dev_env
 from imbue.minds.envs.provisioning import deploy_tier_env
-from imbue.minds.envs.provisioning import destroy_dev_env
-from imbue.minds.envs.provisioning import destroy_tier_env
+from imbue.minds.envs.provisioning import destroy_env
 from imbue.minds.envs.provisioning import list_dev_envs
 from imbue.minds.envs.vault_reader import VaultPath
 from imbue.minds.envs.vault_reader import read_vault_kv
@@ -824,19 +823,17 @@ def env_destroy(ctx: click.Context, keep_agents: bool, yes_i_mean_staging: bool)
     """Tear down every resource ``minds env deploy`` provisioned for the activated env.
 
     Refuses hard-coded when no env is activated. Refuses hard-coded when
-    the activated env is ``production`` (tier teardown for prod is
-    operator-managed outside this CLI).
+    the activated env is ``production`` (production teardown is
+    operator-managed outside this CLI). ``staging`` requires
+    ``--yes-i-mean-staging``.
 
-    For ``staging``: requires ``--yes-i-mean-staging``. Stops both
-    deployed Modal apps via ``modal app stop`` and removes
-    ``~/.minds-staging/``. Leaves Modal Secrets, the tier's Neon DB,
-    SuperTokens app, and Cloudflare zone in place -- those are
-    operator-managed via Vault and survive a destroy/redeploy cycle.
-
-    For any other (dev) env: tears down the per-env Modal env, Neon DB,
-    SuperTokens app, any tagged Vultr instances, and removes
-    ``~/.minds-<name>/``. Required because dev envs own all of those
-    resources outright.
+    The same destroy flow runs for every env type (see
+    :func:`provisioning.destroy_env`). The only branches are the
+    resource-management operations that genuinely differ by tier (dev
+    deletes its own per-env Modal env / Neon DB / SuperTokens app
+    outright; shared tiers wipe data inside operator-managed shared
+    resources) and the generation-id removal (only for shared tiers
+    that use generation tracking).
     """
     output_format: OutputFormat = ctx.obj.get("output_format", OutputFormat.HUMAN)
     env_name = _require_activated_env()
@@ -859,31 +856,13 @@ def env_destroy(ctx: click.Context, keep_agents: bool, yes_i_mean_staging: bool)
     providers = _build_real_providers()
 
     with ConcurrencyGroup(name=f"minds-env-destroy-{env_name}") as cg:
-        if tier == _STAGING_ENV_NAME:
-            # Tier destroy: no dev-tier vault credentials needed (we
-            # don't touch Neon / SuperTokens / Vultr -- those are
-            # operator-managed and survive the cycle).
-            try:
-                destroy_tier_env(
-                    tier=tier,
-                    deploy_config=deploy_config,
-                    providers=providers,
-                    parent_concurrency_group=cg,
-                )
-            except MindError as exc:
-                logger.error("Destroy of tier {!r} failed: {}", tier, exc)
-                raise click.ClickException(str(exc)) from exc
-            _emit_destroy_result(env_name, output_format=output_format)
-            return
-
-        # Dev tier destroy: full per-env teardown.
         try:
             credentials = _load_dev_credentials_from_vault(str(deploy_config.vault_path_prefix), cg=cg)
         except VaultReadError as exc:
             raise click.ClickException(str(exc)) from exc
 
         try:
-            destroy_dev_env(
+            destroy_env(
                 DevEnvName(env_name),
                 tier=tier,
                 deploy_config=deploy_config,

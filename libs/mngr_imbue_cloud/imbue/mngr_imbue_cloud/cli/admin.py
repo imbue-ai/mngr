@@ -13,6 +13,8 @@ provisioning at all.
 """
 
 import json as _json
+import os
+import re
 import shlex
 import sys
 from pathlib import Path
@@ -31,6 +33,33 @@ from imbue.mngr_imbue_cloud.cli._common import emit_json
 from imbue.mngr_imbue_cloud.cli._common import fail_with_json
 
 _CONTAINER_SSH_PORT: Final[int] = 2222
+# Mirrors the regex enforced by ``imbue.minds.bootstrap`` (kept inline
+# to avoid pulling apps/minds into the mngr_imbue_cloud import surface).
+# Recognizes the activated minds env name from ``MINDS_ROOT_NAME``:
+# ``minds`` -> ``production``; ``minds-<env>`` -> ``<env>``. Anything
+# else is treated as "no activation" -- pool-bake then skips the
+# ``minds_env`` tag (the operator will have to clean up the resulting
+# instances by hand if they're in a non-minds context).
+_MINDS_ROOT_NAME_PATTERN: Final[re.Pattern[str]] = re.compile(r"^minds(?:-([a-z0-9][a-z0-9_-]{0,38}[a-z0-9]))?$")
+
+
+def _activated_minds_env_name() -> str | None:
+    """Return the activated minds env name from ``MINDS_ROOT_NAME``, or None.
+
+    Returns ``"production"`` for ``MINDS_ROOT_NAME=minds``, the suffix
+    for ``MINDS_ROOT_NAME=minds-<env>``, and ``None`` for unset / invalid
+    (which is the right signal for "don't apply a minds_env tag at
+    VPS create time").
+    """
+    raw = os.environ.get("MINDS_ROOT_NAME")
+    if raw is None:
+        return None
+    match = _MINDS_ROOT_NAME_PATTERN.match(raw)
+    if match is None:
+        return None
+    return match.group(1) or "production"
+
+
 # 30 min: the inner ``mngr create ... --template vultr`` builds a fresh
 # Docker image on the leased VPS, which can take 10-20 min (network bound).
 # A previous 10-min cap occasionally killed otherwise-healthy provisions.
@@ -78,6 +107,7 @@ def _run_mngr_command(
     cwd: Path | None = None,
     timeout: int = _MNGR_COMMAND_TIMEOUT_SECONDS,
     is_streaming: bool = False,
+    extra_env: dict[str, str] | None = None,
 ) -> FinishedProcess:
     """Run a mngr CLI command and return the result.
 
@@ -88,10 +118,19 @@ def _run_mngr_command(
     minutes and otherwise produces no visible output until completion,
     which makes diagnosing pool-bake failures (or just confirming that
     provisioning is making progress) difficult.
+
+    ``extra_env`` merges into ``os.environ`` for the subprocess.
+    Used by the pool-bake to thread ``MNGR_VPS_EXTRA_TAGS`` (so the
+    spawned VPS gets the activated minds env's ``minds_env=<name>``
+    tag) without polluting the calling process's own env.
     """
     full_command = ["mngr"] + args
     logger.info("  Running: {}", " ".join(full_command))
     on_output = _stream_subprocess_line if is_streaming else None
+    subprocess_env: dict[str, str] | None = None
+    if extra_env:
+        subprocess_env = dict(os.environ)
+        subprocess_env.update(extra_env)
     cg = ConcurrencyGroup(name="pool-mngr")
     with cg:
         return cg.run_process_to_completion(
@@ -100,6 +139,7 @@ def _run_mngr_command(
             is_checked_after=False,
             cwd=cwd,
             on_output=on_output,
+            env=subprocess_env,
         )
 
 
@@ -259,7 +299,19 @@ def _create_single_pool_host(
         "MNGR_PREFIX",
     ]
 
-    create_result = _run_mngr_command(mngr_command, cwd=workspace_dir, is_streaming=True)
+    # Thread the activated minds env name through as a VPS tag so
+    # ``minds env destroy`` can later find + delete this pool host
+    # via the Vultr tag filter. Skipped silently when the operator
+    # runs pool-bake outside a minds env (e.g. straight from `mngr`
+    # without `minds env activate`) -- in that case the operator
+    # owns whatever they create.
+    pool_create_env: dict[str, str] | None = None
+    env_name = _activated_minds_env_name()
+    if env_name is not None:
+        pool_create_env = {"MNGR_VPS_EXTRA_TAGS": f"minds_env={env_name}"}
+        logger.info("  Tagging VPS with minds_env={} (from activated MINDS_ROOT_NAME)", env_name)
+
+    create_result = _run_mngr_command(mngr_command, cwd=workspace_dir, is_streaming=True, extra_env=pool_create_env)
     if create_result.returncode != 0:
         logger.error("mngr create failed: {}", create_result.stderr)
         return False

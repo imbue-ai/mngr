@@ -27,8 +27,7 @@ from imbue.minds.envs.provisioning import ProviderCredentials
 from imbue.minds.envs.provisioning import Providers
 from imbue.minds.envs.provisioning import deploy_dev_env
 from imbue.minds.envs.provisioning import deploy_tier_env
-from imbue.minds.envs.provisioning import destroy_dev_env
-from imbue.minds.envs.provisioning import destroy_tier_env
+from imbue.minds.envs.provisioning import destroy_env
 from imbue.minds.envs.provisioning import list_dev_envs
 from imbue.minds.errors import MindError
 from imbue.minds.primitives import ServiceName
@@ -403,7 +402,7 @@ def test_deploy_dev_env_pushes_per_env_secrets_into_dev_modal_env(
     ]
 
 
-def test_destroy_dev_env_walks_providers_in_order_and_removes_root(
+def test_destroy_env_dev_walks_providers_in_order_and_removes_root(
     _isolated_home: Path, _root_cg: ConcurrencyGroup
 ) -> None:
     """Dev destroy: mngr agents first, then cloud resources, env root LAST."""
@@ -420,7 +419,7 @@ def test_destroy_dev_env_walks_providers_in_order_and_removes_root(
     assert env_root_exists(DevEnvName("george"))
     call_log["calls"].clear()
 
-    destroy_dev_env(
+    destroy_env(
         DevEnvName("george"),
         tier="dev",
         deploy_config=_deploy_config(),
@@ -451,7 +450,7 @@ def test_destroy_dev_env_walks_providers_in_order_and_removes_root(
     assert not env_root_exists(DevEnvName("george"))
 
 
-def test_destroy_dev_env_destroys_mngr_agents_before_cloud_teardown(
+def test_destroy_env_dev_destroys_mngr_agents_before_cloud_teardown(
     _isolated_home: Path, _root_cg: ConcurrencyGroup
 ) -> None:
     """When the env root has mngr agents, destroy must clean them up FIRST."""
@@ -472,7 +471,7 @@ def test_destroy_dev_env_destroys_mngr_agents_before_cloud_teardown(
     (agents_dir / "agent-2222").mkdir()
     call_log["calls"].clear()
 
-    destroy_dev_env(
+    destroy_env(
         DevEnvName("kim"),
         tier="dev",
         deploy_config=_deploy_config(),
@@ -489,7 +488,7 @@ def test_destroy_dev_env_destroys_mngr_agents_before_cloud_teardown(
     assert agent_ids_destroyed == ["agent-1111", "agent-2222"]
 
 
-def test_destroy_dev_env_keep_agents_skips_mngr_destroy(_isolated_home: Path, _root_cg: ConcurrencyGroup) -> None:
+def test_destroy_env_dev_keep_agents_skips_mngr_destroy(_isolated_home: Path, _root_cg: ConcurrencyGroup) -> None:
     """The legacy keep_agents=True flag must skip the mngr-agent step entirely."""
     call_log = _make_call_log()
     providers = _build_fake_providers(call_log)
@@ -506,7 +505,7 @@ def test_destroy_dev_env_keep_agents_skips_mngr_destroy(_isolated_home: Path, _r
     (agents_dir / "agent-1111").mkdir()
     call_log["calls"].clear()
 
-    destroy_dev_env(
+    destroy_env(
         DevEnvName("liz"),
         tier="dev",
         deploy_config=_deploy_config(),
@@ -519,7 +518,7 @@ def test_destroy_dev_env_keep_agents_skips_mngr_destroy(_isolated_home: Path, _r
     assert "destroy_mngr_agent" not in step_names
 
 
-def test_destroy_dev_env_leaves_env_root_when_step_fails(_isolated_home: Path, _root_cg: ConcurrencyGroup) -> None:
+def test_destroy_env_dev_leaves_env_root_when_step_fails(_isolated_home: Path, _root_cg: ConcurrencyGroup) -> None:
     """If any cleanup step fails, the env root must stay so re-runs can recover."""
     # First, do a successful deploy so the env root exists.
     providers_ok = _build_fake_providers(_make_call_log())
@@ -537,7 +536,7 @@ def test_destroy_dev_env_leaves_env_root_when_step_fails(_isolated_home: Path, _
     # root must NOT be removed.
     failing_providers = _build_fake_providers(_make_call_log(), fail_delete={"neon_db"})
     with pytest.raises(NeonProviderError, match="neon delete boom"):
-        destroy_dev_env(
+        destroy_env(
             DevEnvName("matt"),
             tier="dev",
             deploy_config=_deploy_config(),
@@ -562,7 +561,7 @@ def test_destroy_deletes_vultr_instances(_isolated_home: Path, _root_cg: Concurr
     )
     call_log["calls"].clear()
 
-    destroy_dev_env(
+    destroy_env(
         DevEnvName("hank"),
         tier="dev",
         deploy_config=_deploy_config(),
@@ -577,7 +576,7 @@ def test_destroy_deletes_vultr_instances(_isolated_home: Path, _root_cg: Concurr
 def test_destroy_missing_env_raises(_isolated_home: Path, _root_cg: ConcurrencyGroup) -> None:
     providers = _build_fake_providers(_make_call_log())
     with pytest.raises(DevEnvNotFoundError):
-        destroy_dev_env(
+        destroy_env(
             DevEnvName("ghost"),
             tier="dev",
             deploy_config=_deploy_config(),
@@ -692,7 +691,7 @@ def test_deploy_tier_env_runs_both_modal_deploys(_isolated_home: Path, _root_cg:
     ]
 
 
-def test_destroy_tier_env_stops_apps_deletes_secrets_and_removes_env_root(
+def test_destroy_env_tier_stops_apps_deletes_secrets_and_removes_env_root(
     _isolated_home: Path, _root_cg: ConcurrencyGroup
 ) -> None:
     """Tier destroy: agents -> modal app stop -> modal secret delete -> env root."""
@@ -702,9 +701,11 @@ def test_destroy_tier_env_stops_apps_deletes_secrets_and_removes_env_root(
 
     call_log = _make_call_log()
     providers = _build_fake_providers(call_log)
-    destroy_tier_env(
+    destroy_env(
+        DevEnvName("staging"),
         tier="staging",
         deploy_config=_deploy_config(tier="staging", modal_env="main"),
+        credentials=_credentials(),
         providers=providers,
         parent_concurrency_group=_root_cg,
     )
@@ -726,7 +727,7 @@ def test_destroy_tier_env_stops_apps_deletes_secrets_and_removes_env_root(
     assert not staging_root.exists()
 
 
-def test_destroy_tier_env_destroys_mngr_agents_first(_isolated_home: Path, _root_cg: ConcurrencyGroup) -> None:
+def test_destroy_env_tier_destroys_mngr_agents_first(_isolated_home: Path, _root_cg: ConcurrencyGroup) -> None:
     """Tier destroy must `mngr destroy` any agents under the env root before cloud teardown."""
     # Seed an env root + a couple of fake agent dirs under it.
     staging_root = _isolated_home / ".minds-staging"
@@ -737,9 +738,11 @@ def test_destroy_tier_env_destroys_mngr_agents_first(_isolated_home: Path, _root
 
     call_log = _make_call_log()
     providers = _build_fake_providers(call_log)
-    destroy_tier_env(
+    destroy_env(
+        DevEnvName("staging"),
         tier="staging",
         deploy_config=_deploy_config(tier="staging", modal_env="main"),
+        credentials=_credentials(),
         providers=providers,
         parent_concurrency_group=_root_cg,
     )
@@ -751,41 +754,46 @@ def test_destroy_tier_env_destroys_mngr_agents_first(_isolated_home: Path, _root
     assert last_agent_index < first_app_index
 
 
-def test_destroy_tier_env_is_idempotent_when_env_root_missing(
-    _isolated_home: Path, _root_cg: ConcurrencyGroup
-) -> None:
-    """Destroy must not fail when the env root has already been removed."""
+def test_destroy_env_tier_refuses_when_env_root_missing(_isolated_home: Path, _root_cg: ConcurrencyGroup) -> None:
+    """Unified destroy raises DevEnvNotFoundError when the env root is missing.
+
+    Mirrors the dev-tier behaviour: the env root is the authoritative
+    "this env exists locally" marker. Without it, destroy has no way
+    to know which env to clean up, so it refuses outright rather than
+    silently no-op'ing.
+    """
     call_log = _make_call_log()
     providers = _build_fake_providers(call_log)
-    # Env root doesn't exist -- destroy should still stop the apps and
-    # return cleanly.
-    destroy_tier_env(
-        tier="staging",
-        deploy_config=_deploy_config(tier="staging", modal_env="main"),
-        providers=providers,
-        parent_concurrency_group=_root_cg,
-    )
-    stops = [c for c in call_log["calls"] if c[0] == "stop_modal_app"]
-    assert len(stops) == 2
+    with pytest.raises(DevEnvNotFoundError):
+        destroy_env(
+            DevEnvName("staging"),
+            tier="staging",
+            deploy_config=_deploy_config(tier="staging", modal_env="main"),
+            credentials=_credentials(),
+            providers=providers,
+            parent_concurrency_group=_root_cg,
+        )
 
 
-def test_destroy_tier_env_leaves_env_root_when_step_fails(_isolated_home: Path, _root_cg: ConcurrencyGroup) -> None:
+def test_destroy_env_tier_leaves_env_root_when_step_fails(_isolated_home: Path, _root_cg: ConcurrencyGroup) -> None:
     """If any cleanup step fails, the env root must stay so re-runs can recover."""
     staging_root = _isolated_home / ".minds-staging"
     staging_root.mkdir()
 
     failing_providers = _build_fake_providers(_make_call_log(), fail_step="stop_modal_app")
     with pytest.raises(ModalDeployError, match="modal app stop boom"):
-        destroy_tier_env(
+        destroy_env(
+            DevEnvName("staging"),
             tier="staging",
             deploy_config=_deploy_config(tier="staging", modal_env="main"),
+            credentials=_credentials(),
             providers=failing_providers,
             parent_concurrency_group=_root_cg,
         )
     assert staging_root.exists()
 
 
-def test_destroy_tier_env_wipes_supertokens_app_with_parsed_app_id(
+def test_destroy_env_tier_wipes_supertokens_app_with_parsed_app_id(
     _isolated_home: Path, _root_cg: ConcurrencyGroup
 ) -> None:
     """SuperTokens wipe must extract the app_id from the Vault connection URI."""
@@ -803,9 +811,11 @@ def test_destroy_tier_env_wipes_supertokens_app_with_parsed_app_id(
             "cloudflare": {"CLOUDFLARE_ACCOUNT_ID": "a", "CLOUDFLARE_API_TOKEN": "t"},
         },
     )
-    destroy_tier_env(
+    destroy_env(
+        DevEnvName("staging"),
         tier="staging",
         deploy_config=_deploy_config(tier="staging", modal_env="main"),
+        credentials=_credentials(),
         providers=providers,
         parent_concurrency_group=_root_cg,
     )
@@ -813,7 +823,7 @@ def test_destroy_tier_env_wipes_supertokens_app_with_parsed_app_id(
     assert st_calls == [("wipe_supertokens_app_data", "my-staging-app", "https://st.imbue.com")]
 
 
-def test_destroy_tier_env_wipes_neon_with_dsn_from_vault(_isolated_home: Path, _root_cg: ConcurrencyGroup) -> None:
+def test_destroy_env_tier_wipes_neon_with_dsn_from_vault(_isolated_home: Path, _root_cg: ConcurrencyGroup) -> None:
     """Neon wipe must use the DATABASE_URL from the tier Vault entry."""
     staging_root = _isolated_home / ".minds-staging"
     staging_root.mkdir()
@@ -829,9 +839,11 @@ def test_destroy_tier_env_wipes_neon_with_dsn_from_vault(_isolated_home: Path, _
             "cloudflare": {"CLOUDFLARE_ACCOUNT_ID": "a", "CLOUDFLARE_API_TOKEN": "t"},
         },
     )
-    destroy_tier_env(
+    destroy_env(
+        DevEnvName("staging"),
         tier="staging",
         deploy_config=_deploy_config(tier="staging", modal_env="main"),
+        credentials=_credentials(),
         providers=providers,
         parent_concurrency_group=_root_cg,
     )
@@ -839,7 +851,7 @@ def test_destroy_tier_env_wipes_neon_with_dsn_from_vault(_isolated_home: Path, _
     assert neon_calls == [("wipe_neon_db_schema", "postgres://realuser:realpass@neon.host/realdb")]
 
 
-def test_destroy_tier_env_refuses_when_supertokens_vault_entry_incomplete(
+def test_destroy_env_tier_refuses_when_supertokens_vault_entry_incomplete(
     _isolated_home: Path, _root_cg: ConcurrencyGroup
 ) -> None:
     """A misconfigured / missing Vault entry must fail loud, not skip the wipe."""
@@ -854,9 +866,11 @@ def test_destroy_tier_env_refuses_when_supertokens_vault_entry_incomplete(
         },
     )
     with pytest.raises(MindError, match="SUPERTOKENS_CONNECTION_URI"):
-        destroy_tier_env(
+        destroy_env(
+            DevEnvName("staging"),
             tier="staging",
             deploy_config=_deploy_config(tier="staging", modal_env="main"),
+            credentials=_credentials(),
             providers=providers,
             parent_concurrency_group=_root_cg,
         )
@@ -864,8 +878,8 @@ def test_destroy_tier_env_refuses_when_supertokens_vault_entry_incomplete(
     assert staging_root.exists()
 
 
-def test_destroy_tier_env_full_step_order(_isolated_home: Path, _root_cg: ConcurrencyGroup) -> None:
-    """End-to-end: agents -> modal stop -> secret delete -> ST wipe -> Neon wipe -> generation delete -> env root removed."""
+def test_destroy_env_tier_full_step_order(_isolated_home: Path, _root_cg: ConcurrencyGroup) -> None:
+    """End-to-end tier destroy: same step ordering as dev destroy (only resource-management ops differ + the generation-id removal is tier-only)."""
     staging_root = _isolated_home / ".minds-staging"
     agents_dir = staging_root / "mngr" / "agents"
     agents_dir.mkdir(parents=True)
@@ -873,25 +887,34 @@ def test_destroy_tier_env_full_step_order(_isolated_home: Path, _root_cg: Concur
 
     call_log = _make_call_log()
     providers = _build_fake_providers(call_log)
-    destroy_tier_env(
+    destroy_env(
+        DevEnvName("staging"),
         tier="staging",
         deploy_config=_deploy_config(tier="staging", modal_env="main"),
+        credentials=_credentials(),
         providers=providers,
         parent_concurrency_group=_root_cg,
     )
     step_names = [c[0] for c in call_log["calls"]]
     assert step_names == [
+        # 1: agents
         "destroy_mngr_agent",
+        # 2: Vultr (shared with dev, by env name).
+        "list_vultr_instances",
+        # 3: CF tunnels (shared with dev, by env name).
+        "read_per_env_secret_values",
+        "list_cloudflare_tunnels_for_env",
+        # 4: SuperTokens -- wipe path (tier-specific).
+        "read_per_env_secret_values",
+        "wipe_supertokens_app_data",
+        # 5: Neon -- wipe path (tier-specific).
+        "read_per_env_secret_values",
+        "wipe_neon_db_schema",
+        # 6: Modal -- stop + secret delete path (tier-specific).
         "stop_modal_app",
         "stop_modal_app",
         "delete_modal_secret",
-        # supertokens, then neon, then cloudflare:
-        "read_per_env_secret_values",
-        "wipe_supertokens_app_data",
-        "read_per_env_secret_values",
-        "wipe_neon_db_schema",
-        "read_per_env_secret_values",
-        "list_cloudflare_tunnels_for_env",
+        # 7: generation id (tier-only).
         "delete_generation_id",
     ]
     # And env root is gone after the full flow succeeds.
