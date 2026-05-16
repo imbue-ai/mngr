@@ -142,8 +142,10 @@ def clear_host_from_known_hosts(
 ) -> None:
     """Remove all entries for a host:port from the known_hosts file.
 
-    Called before scanning a newly created host to ensure stale keys
-    from a previous VM that reused the same port are removed.
+    If the file does not exist, returns without error. Otherwise, takes an
+    exclusive lock on the file, drops any line whose leading host pattern
+    matches the given host:port, and rewrites the file in place if any line
+    was removed.
     """
     if not known_hosts_path.exists():
         return
