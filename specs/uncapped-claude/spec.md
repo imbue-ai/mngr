@@ -22,7 +22,7 @@ You'll probably need to experiment a little bit with claude -p in order to see t
 * Spawns a regular `claude` agent type via `mngr create --no-connect --transfer none --message <first-prompt>` (auto-generated agent name with `uncapped-` prefix AND `created-by=uncapped-claude` label, local host, current cwd). For follow-up turns in stream-json input mode, uses `mngr message`. Each turn's reply is harvested from `mngr transcript --format jsonl`.
 * The agent is ephemeral: destroyed on exit (success, failure, or signal).
 * End-of-turn detection: inline polling of `agent.get_lifecycle_state()` waiting for `WAITING` (premature `STOPPED`/`DONE` returns `EXIT_CLAUDE_ERROR=1`).
-* Sets `mngr_claude`'s existing unattended config vars (`auto_dismiss_dialogs=True`, `auto_allow_permissions=True`, etc.) via `mngr create -S` settings overrides; no new permission semantics introduced. `sync_home_settings` stays at its default (`True`) so the spawned agent inherits `~/.claude/` (skills, plugins, MCP, hooks) — matches `claude -p` semantics.
+* Sets `agent_types.claude.use_env_config_dir=true` via `mngr create -S` settings override; this puts `mngr_claude` into "don't touch the config dir" mode so the spawned agent inherits the parent shell's `$CLAUDE_CONFIG_DIR` (or `~/.claude/` when that env var is unset), giving the run the same credentials, plugins, marketplaces, sessions, and dialog-state the user already has on their machine — matches `claude -p` semantics with no new permission semantics introduced. The previous unattended overrides (`auto_dismiss_dialogs`, `auto_allow_permissions`, `settings_overrides.*`) are unnecessary in shared-config-dir mode because `mngr_claude` skips those code paths there; the user is responsible for the one-time onboarding/trust dialogs in their own config dir.
 * Working directory: user's cwd, in-place; implies `--no-ensure-clean` so a dirty tree is OK.
 * `session_preserve_on_destroy` stays at its default (`True`); per-invocation session files remain on disk for debugging.
 * Pass through all `claude` flags as agent args via `--` to `mngr create`, except:
@@ -135,11 +135,8 @@ You'll probably need to experiment a little bit with claude -p in order to see t
     8. Map any `MngrError` / `UserInputError` / `BaseException` to the appropriate exit code in a top-level try/except.
   - `def destroy_run(run: UncappedRun, mngr_ctx: MngrContext) -> None` — best-effort destroy; logs and swallows errors so signal cleanup never raises.
   - Settings overrides applied via `mngr create -S` (passed through `MngrContext.config`):
-    - `agent_types.claude.auto_dismiss_dialogs = true`
-    - `agent_types.claude.auto_allow_permissions = true`
-    - `agent_types.claude.settings_overrides.skipDangerousModePermissionPrompt = true`
-    - `agent_types.claude.settings_overrides.bypassPermissionsModeAccepted = true`
-    - (These mirror what `headless_claude` config already turns on.)
+    - `agent_types.claude.use_env_config_dir = true`
+    - (Delegates the entire `$CLAUDE_CONFIG_DIR` question to the parent shell; the spawned agent inherits the user's existing credentials, plugins, marketplaces, sessions, and dialog-state. The previous `auto_dismiss_dialogs` / `auto_allow_permissions` / `settings_overrides.*` flags are unnecessary in shared-config-dir mode because `mngr_claude` skips those code paths there.)
 
 - `data_types.py`
   - `class InputFormat(UpperCaseStrEnum)` — `TEXT`, `STREAM_JSON`.
