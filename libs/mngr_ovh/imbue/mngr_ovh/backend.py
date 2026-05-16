@@ -232,6 +232,16 @@ class OvhProvider(VpsDockerProvider):
             # success, ownership transfers to `_on_host_finalized` which
             # calls `finalize_recycle`.
             recycle_lock_owned = recycle_handle is not None
+            # Fresh-order analogue: once `order_and_wait_for_vps` has
+            # delivered a VPS, any later failure inside this function
+            # leaks that VPS (the outer `_create_host_internal` cleanup
+            # is gated on `vps_instance_id is not None` and we never
+            # got to `return`). OVH bills monthly with no proration on
+            # early termination, so a leaked fresh-order VPS costs a
+            # full month. Track the freshly-ordered serviceName here
+            # and terminate it in `finally` if we don't reach the
+            # successful-exit point below.
+            fresh_order_service_name: str | None = None
             try:
                 if recycle_handle is None:
                     service_name = order_and_wait_for_vps(
@@ -243,6 +253,7 @@ class OvhProvider(VpsDockerProvider):
                         duration=self.ovh_config.duration,
                         deliver_timeout_seconds=self.ovh_config.vps_boot_timeout,
                     )
+                    fresh_order_service_name = service_name
                 else:
                     service_name = recycle_handle.service_name
                     self._vps_iam_cache = None
@@ -281,16 +292,45 @@ class OvhProvider(VpsDockerProvider):
                         MNGR_HOST_ID_TAG_KEY: str(host_id),
                     },
                 )
-                # All post-claim steps succeeded. Recycle-lock ownership
-                # transfers to the caller (`_on_host_finalized` releases
-                # it after the host record is durable). Disarm the
-                # abort-on-failure branch below.
+                # All post-claim steps succeeded. Ownership of both the
+                # recycle lock (recycle path) and the freshly-ordered
+                # VPS (fresh-order path) transfers to the caller -- on
+                # success `_on_host_finalized` finalizes the recycle,
+                # and on later failure `_create_host_internal` will
+                # call `destroy_instance` with the now-returned
+                # vps_instance_id. Disarm both abort-on-failure
+                # branches below.
                 recycle_lock_owned = False
+                fresh_order_service_name = None
             finally:
                 if recycle_lock_owned and recycle_handle is not None:
                     abort_recycle(self.ovh_client, recycle_handle)
+                if fresh_order_service_name is not None:
+                    self._terminate_orphaned_fresh_order(fresh_order_service_name)
 
         return VpsInstanceId(service_name), service_name
+
+    def _terminate_orphaned_fresh_order(self, service_name: str) -> None:
+        """Best-effort terminate of a freshly-ordered OVH VPS that we are about to leak.
+
+        Called from the ``_provision_vps`` ``finally`` branch when an
+        exception fires after ``order_and_wait_for_vps`` succeeded but
+        before the caller takes ownership. Wraps the failure in a
+        narrow try/except so the cleanup error doesn't mask the
+        primary exception that triggered the abort.
+        """
+        try:
+            self.ovh_client.destroy_instance(VpsInstanceId(service_name))
+            logger.warning(
+                "OVH _provision_vps failed after fresh order delivered {}; requested termination to avoid a leaked month of billing",
+                service_name,
+            )
+        except (VpsApiError, MngrError) as e:
+            logger.error(
+                "OVH _provision_vps cleanup: failed to terminate freshly-ordered VPS {} ({}); manual cleanup may be needed to avoid a leaked month of billing",
+                service_name,
+                e,
+            )
 
 
 def _iam_region_code(endpoint: str) -> str:
