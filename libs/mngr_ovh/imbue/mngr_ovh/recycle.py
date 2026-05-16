@@ -255,7 +255,7 @@ def _try_recycle_one(
         _swap_host_id_tag(client, urn, new_host_id)
         return True
     finally:
-        _release_lock(client, urn)
+        _release_lock(client, urn, lock_value)
 
 
 def _confirm_lock_held(client: OvhVpsClient, urn: str, lock_value: str) -> bool:
@@ -298,8 +298,33 @@ def _swap_host_id_tag(client: OvhVpsClient, urn: str, new_host_id: HostId) -> No
     attach_tag(client, urn, MNGR_HOST_ID_TAG_KEY, str(new_host_id))
 
 
-def _release_lock(client: OvhVpsClient, urn: str) -> None:
-    """Best-effort drop of the ``mngr-recycling-by`` lock tag."""
+def _release_lock(client: OvhVpsClient, urn: str, lock_value: str) -> None:
+    """Best-effort drop of the ``mngr-recycling-by`` lock tag *iff we still own it*.
+
+    Re-reads the tag before deleting so that, in a contention scenario
+    where another process overwrote our lock value between ``attach_tag``
+    and this finally call, we do not clobber the winning process's lock.
+    There is still a TOCTOU window between this re-read and the DELETE
+    (OVH IAM has no conditional DELETE), but the worst case shrinks from
+    "clobber a real lock holder" to "delete a stale tag" / "racing DELETE
+    returns 404".
+    """
+    try:
+        resource = get_vps_resource(client, urn)
+    except (VpsApiError, MngrError) as e:
+        logger.warning("OVH recycle: failed to re-read lock tag on {} before release: {}", urn, e)
+        return
+    if resource is None:
+        return
+    current = resource.tags.get(MNGR_RECYCLING_LOCK_TAG_KEY)
+    if current != lock_value:
+        logger.debug(
+            "OVH recycle: not releasing lock on {} (current value {!r} != ours {!r})",
+            urn,
+            current,
+            lock_value,
+        )
+        return
     try:
         delete_tag(client, urn, MNGR_RECYCLING_LOCK_TAG_KEY)
     except VpsApiError as e:
