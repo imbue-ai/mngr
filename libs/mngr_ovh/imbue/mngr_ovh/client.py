@@ -393,17 +393,26 @@ class OvhVpsClient(VpsClientInterface):
         """
         deadline = time.monotonic() + timeout_seconds
         last_active: list[int] = []
+        last_api_error: VpsApiError | None = None
+        had_successful_poll = False
         while time.monotonic() < deadline:
             try:
                 last_active = self._list_active_task_ids(service_name)
+                had_successful_poll = True
                 if not last_active:
                     return
             except VpsApiError as e:
+                last_api_error = e
                 logger.warning("Failed to list active OVH tasks for {}: {}", service_name, e)
             time.sleep(self.task_poll_interval)
+        if had_successful_poll:
+            raise VpsProvisioningError(
+                f"OVH VPS {service_name} still has active tasks {last_active!r} after {timeout_seconds}s; "
+                "subsequent /rebuild would race the in-flight task"
+            )
         raise VpsProvisioningError(
-            f"OVH VPS {service_name} still has active tasks {last_active!r} after {timeout_seconds}s; "
-            "subsequent /rebuild would race the in-flight task"
+            f"OVH VPS {service_name} tasks listing never succeeded within {timeout_seconds}s; "
+            f"cannot confirm whether tasks are active. Last API error: {last_api_error!r}"
         )
 
     def _list_active_task_ids(self, service_name: str) -> list[int]:

@@ -241,6 +241,22 @@ class TestOvhVpsClientTask:
         with pytest.raises(VpsProvisioningError, match="still has active tasks"):
             client.wait_for_no_active_tasks("vps-x", timeout_seconds=0.05)
 
+    def test_wait_for_no_active_tasks_distinguishes_api_outage_from_lingering_tasks(self) -> None:
+        """If every poll errors, the timeout message must surface the API error.
+
+        Previously the function reported "still has active tasks []" whenever
+        every poll raised, which is self-contradicting and gave the operator
+        no clue that the failure mode was the tasks endpoint itself.
+        """
+
+        def fake_call(method: str, path: str, body: Any = None, need_auth: bool = True) -> Any:
+            raise VpsApiError(503, "OVH tasks API is unavailable")
+
+        client = _client_with_call(fake_call)
+        client.task_poll_interval = 0.0
+        with pytest.raises(VpsProvisioningError, match="tasks listing never succeeded"):
+            client.wait_for_no_active_tasks("vps-x", timeout_seconds=0.05)
+
 
 class TestOvhVpsClientSnapshots:
     def test_create_snapshot_raises_when_one_already_exists(self) -> None:
