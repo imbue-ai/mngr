@@ -6,7 +6,7 @@
 - Per-host EC2 KeyPair via `ImportKeyPair`, deleted on `destroy_host`.
 - EC2 instances tagged with `mngr-provider`, `mngr-host-id`, and `mngr-created-at`; discovery filters `DescribeInstances` by `tag:mngr-provider`.
 - `InstanceInitiatedShutdownBehavior=terminate` so a self-halted instance is GC'd automatically.
-- Release tests double-gated by `MNGR_AWS_RELEASE_TESTS=1` plus credential presence; Modal-style `pytest_sessionfinish` hook in `libs/mngr_aws/imbue/mngr_aws/conftest.py` force-terminates any tracked or test-tagged leaked instance at session end and fails the session.
+- Release tests double-gated by `MNGR_AWS_RELEASE_TESTS=1` plus credential presence; Modal-style `pytest_sessionfinish` hook in `libs/mngr_aws/imbue/mngr_aws/conftest.py` scans for any test-tagged EC2 instance older than 1h at session end, force-terminates leaks, and fails the session.
 
 ## VPS Docker shared interface cleanup
 
