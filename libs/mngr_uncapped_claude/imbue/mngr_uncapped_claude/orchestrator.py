@@ -52,17 +52,23 @@ from imbue.mngr_uncapped_claude.output_modes import StreamingOutputWriter
 from imbue.mngr_uncapped_claude.output_modes import monotonic_ms_since
 
 # Settings overrides applied to mngr_ctx so the spawned claude agent runs
-# unattended. The two ``settings_overrides`` flags are normally added by
-# ``mngr_claude`` only when ``ProvisioningContext.is_unattended`` is true,
-# which is computed as ``not host.is_local``; uncapped-claude always runs
-# on the local host, so we set them explicitly to avoid hangs on the
-# "bypass permissions mode" and "skip dangerous mode" prompts.
-_UNATTENDED_SETTINGS: Final[tuple[str, ...]] = (
-    "agent_types.claude.auto_dismiss_dialogs=true",
-    "agent_types.claude.auto_allow_permissions=true",
-    "agent_types.claude.settings_overrides.skipDangerousModePermissionPrompt=true",
-    "agent_types.claude.settings_overrides.bypassPermissionsModeAccepted=true",
-)
+# unattended.
+#
+# ``use_env_config_dir=true`` puts mngr_claude into "don't touch the config"
+# mode: the spawned agent inherits the parent shell's ``$CLAUDE_CONFIG_DIR``
+# (or ``~/.claude/`` when that env var is unset), rather than getting a
+# per-agent config dir. That gives uncapped-claude the same credentials,
+# plugins, marketplaces, sessions, and dialog-state that the user already
+# has on their machine -- no copy/symlink shuffling, no per-agent auth
+# provisioning to fail on. It is the entire reason the wrapper can stay
+# this small.
+#
+# The trade-off: in shared mode mngr_claude does not auto-dismiss claude's
+# startup dialogs. Users who have never run ``claude`` interactively will
+# see the trust / onboarding TUI block at startup. That's the documented
+# user-side prerequisite for ``use_env_config_dir`` (see specs/single-
+# claude-data-dir/spec.md), not something the wrapper papers over.
+_UNATTENDED_SETTINGS: Final[tuple[str, ...]] = ("agent_types.claude.use_env_config_dir=true",)
 
 # Poll cadence for end-of-turn detection plus transcript tailing.
 _POLL_INTERVAL_SECONDS: Final[float] = 0.1

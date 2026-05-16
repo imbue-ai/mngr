@@ -2,4 +2,6 @@ Add `mngr uncapped-claude`, a new top-level command provided by the `imbue-mngr-
 
 - `--input-format` (text / stream-json) and `--output-format` (text / json / stream-json) are simulated by the wrapper to shape stdin/stdout.
 - The following flags are explicitly rejected with exit code 2 in v1: `--fallback-model`, `--max-budget-usd`, `--no-session-persistence`, `--include-hook-events`, `--include-partial-messages`, `-c`/`--continue`, `-r`/`--resume`, `--session-id`.
-- The spawned agent runs with `auto_dismiss_dialogs=True` and `auto_allow_permissions=True` so it never blocks on Claude Code dialogs or permission prompts.
+- The spawned agent runs in `use_env_config_dir` mode: it shares the user's existing `$CLAUDE_CONFIG_DIR` (or `~/.claude/` when that env var is unset), so credentials, plugins, marketplaces, sessions, and prior dialog-state all "just work" from the user's normal claude setup. The wrapper does no per-agent config dir provisioning.
+
+Also includes a small `imbue-mngr-claude` change to support this: `resolve_shared_claude_config_dir()` now falls back to `~/.claude/` when `$CLAUDE_CONFIG_DIR` is unset (previously it raised). The fallback matches claude's own default, so `use_env_config_dir=True` becomes the "don't touch the config dir at all" knob even on machines where the user never sets `CLAUDE_CONFIG_DIR`.

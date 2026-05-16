@@ -1696,13 +1696,14 @@ def test_on_before_provisioning_shared_mode_raises_for_remote_host(
         agent.on_before_provisioning(host=remote_host, options=options, mngr_ctx=temp_mngr_ctx)
 
 
-def test_on_before_provisioning_shared_mode_raises_when_env_unset(
+def test_on_before_provisioning_shared_mode_passes_when_env_unset(
     local_provider: LocalProviderInstance,
     tmp_path: Path,
     temp_mngr_ctx: MngrContext,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """With use_env_config_dir=True and $CLAUDE_CONFIG_DIR unset, on_before_provisioning raises."""
+    """With use_env_config_dir=True and $CLAUDE_CONFIG_DIR unset, on_before_provisioning falls
+    back to ``~/.claude/`` and does not raise (it's the "don't touch the config" path)."""
     monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
     agent, host = make_claude_agent(
         local_provider,
@@ -1713,8 +1714,8 @@ def test_on_before_provisioning_shared_mode_raises_when_env_unset(
 
     options = CreateAgentOptions(agent_type=AgentTypeName("claude"))
 
-    with pytest.raises(UserInputError, match="use_env_config_dir"):
-        agent.on_before_provisioning(host=host, options=options, mngr_ctx=temp_mngr_ctx)
+    # Should not raise.
+    agent.on_before_provisioning(host=host, options=options, mngr_ctx=temp_mngr_ctx)
 
 
 def test_on_destroy_removes_trust(
@@ -4405,13 +4406,17 @@ def test_get_claude_config_dir_returns_shared_env_value_in_shared_mode(
     assert agent.get_claude_config_dir() == shared
 
 
-def test_get_claude_config_dir_raises_in_shared_mode_when_env_unset(
+def test_get_claude_config_dir_falls_back_to_home_in_shared_mode_when_env_unset(
     local_provider: LocalProviderInstance,
     tmp_path: Path,
     temp_mngr_ctx: MngrContext,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """In shared mode with $CLAUDE_CONFIG_DIR unset, get_claude_config_dir raises."""
+    """In shared mode with $CLAUDE_CONFIG_DIR unset, get_claude_config_dir falls back
+    to ``~/.claude/`` (claude's own default), so ``use_env_config_dir=True`` effectively
+    means "don't touch the config dir at all -- inherit whatever the parent shell would
+    have used."
+    """
     monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
     agent, _ = make_claude_agent(
         local_provider,
@@ -4420,8 +4425,7 @@ def test_get_claude_config_dir_raises_in_shared_mode_when_env_unset(
         agent_config=ClaudeAgentConfig(check_installation=False, use_env_config_dir=True),
     )
 
-    with pytest.raises(UserInputError, match="use_env_config_dir"):
-        agent.get_claude_config_dir()
+    assert agent.get_claude_config_dir() == Path.home() / ".claude"
 
 
 # =============================================================================
