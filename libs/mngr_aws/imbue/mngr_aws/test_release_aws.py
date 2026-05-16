@@ -36,8 +36,9 @@ import pytest
 
 from imbue.mngr_aws.client import AwsVpsClient
 from imbue.mngr_aws.constants import AWS_TEST_NAME_PREFIX
+from imbue.mngr_aws.testing import aws_credentials_available
 
-_AWS_CREDS_PRESENT = bool(os.environ.get("AWS_ACCESS_KEY_ID")) or bool(os.environ.get("AWS_PROFILE"))
+_AWS_CREDS_PRESENT = aws_credentials_available()
 _OPT_IN = os.environ.get("MNGR_AWS_RELEASE_TESTS") == "1"
 _AWS_REGION = os.environ.get("AWS_REGION", "us-east-1")
 # Belt-and-suspenders backstop against runaway EC2 cost: even if pytest is

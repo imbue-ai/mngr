@@ -38,6 +38,7 @@ from botocore.exceptions import ClientError
 from loguru import logger
 
 from imbue.mngr_aws.constants import AWS_TEST_NAME_PREFIX
+from imbue.mngr_aws.testing import aws_credentials_available
 
 # Region used by the session-end leak scan. Tests can override via
 # ``AWS_REGION``; defaults to ``us-east-1`` to match the rest of the suite.
@@ -48,10 +49,6 @@ _AWS_REGION: Final[str] = os.environ.get("AWS_REGION", "us-east-1")
 # worker. Aligned with the ``MNGR_AWS_AUTO_SHUTDOWN_MINUTES=60`` cap that
 # release tests propagate into cloud-init.
 _TEST_LEAK_TTL: Final[timedelta] = timedelta(hours=1)
-
-
-def _aws_credentials_available() -> bool:
-    return bool(os.environ.get("AWS_ACCESS_KEY_ID")) or bool(os.environ.get("AWS_PROFILE"))
 
 
 def _force_terminate_instances(ec2: Any, instance_ids: list[str]) -> None:
@@ -103,7 +100,7 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
     # exitstatus is required by the hook signature but unused; we read
     # session.exitstatus, which is the canonical source.
     del exitstatus
-    if not _aws_credentials_available():
+    if not aws_credentials_available():
         return
 
     try:
