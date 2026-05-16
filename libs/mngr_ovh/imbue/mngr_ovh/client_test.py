@@ -162,6 +162,41 @@ class TestOvhVpsClientSnapshots:
         assert str(snapshot_id) == service_name
 
 
+class TestOvhVpsClientServiceInfo:
+    def test_get_service_info_returns_payload(self) -> None:
+        def fake(method: str, path: str, body: Any = None, need_auth: bool = True) -> Any:
+            assert method == "GET" and path == "/vps/vps-x/serviceInfos"
+            return {"renew": {"deleteAtExpiration": True}, "expiration": "2026-06-15"}
+
+        client = _client_with_call(fake)
+        info = client.get_service_info("vps-x")
+        assert info["renew"]["deleteAtExpiration"] is True
+
+    def test_set_renew_at_expiration_preserves_other_fields(self) -> None:
+        seen: dict[str, Any] = {}
+
+        def fake(method: str, path: str, body: Any = None, need_auth: bool = True) -> Any:
+            if method == "GET" and path.endswith("/serviceInfos"):
+                return {
+                    "renew": {"deleteAtExpiration": True, "automatic": True, "period": 1},
+                    "expiration": "2026-06-15",
+                    "contactAdmin": "infra@imbue.com",
+                    "renewalType": "automaticV2012",
+                }
+            if method == "PUT" and path.endswith("/serviceInfos"):
+                seen["body"] = body
+                return None
+            raise AssertionError(f"Unexpected {method} {path}")
+
+        client = _client_with_call(fake)
+        client.set_renew_at_expiration("vps-x", delete_at_expiration=False)
+        body = seen["body"]
+        assert body["renew"]["deleteAtExpiration"] is False
+        assert body["renew"]["automatic"] is True
+        assert body["contactAdmin"] == "infra@imbue.com"
+        assert body["renewalType"] == "automaticV2012"
+
+
 class TestOvhVpsClientSshKeyShim:
     def test_upload_ssh_key_caches_and_returns_name(self) -> None:
         client = _client_with_call(lambda *a, **k: None)

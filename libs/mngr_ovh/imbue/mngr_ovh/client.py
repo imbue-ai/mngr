@@ -210,6 +210,32 @@ class OvhVpsClient(VpsClientInterface):
         """Return the raw ``GET /vps/{s}`` payload."""
         return dict(self._call("GET", f"/vps/{instance_id}") or {})
 
+    def get_service_info(self, service_name: str) -> dict[str, Any]:
+        """Return the raw ``GET /vps/{s}/serviceInfos`` payload.
+
+        Used by the recycle path to read the ``renew.deleteAtExpiration``
+        flag and the ``expiration`` date, and as the basis for a
+        read-modify-write to set or clear that flag.
+        """
+        return dict(self._call("GET", f"/vps/{service_name}/serviceInfos") or {})
+
+    def set_renew_at_expiration(self, service_name: str, delete_at_expiration: bool) -> None:
+        """Toggle whether the VPS is scheduled for deletion at the next billing boundary.
+
+        Performs a read-modify-write on the full ``services.Service`` body to
+        avoid clobbering unrelated fields (contact info, renewal type, etc.):
+        ``GET /vps/{s}/serviceInfos`` → mutate ``renew.deleteAtExpiration`` →
+        ``PUT /vps/{s}/serviceInfos``. Setting ``False`` is the way to undo a
+        prior cancellation request (no email token required, verified live).
+        Setting ``True`` is equivalent to the user clicking "confirm
+        termination" in the email (also skips the email round-trip).
+        """
+        info = self.get_service_info(service_name)
+        renew = dict(info.get("renew") or {})
+        renew["deleteAtExpiration"] = delete_at_expiration
+        info["renew"] = renew
+        self._call("PUT", f"/vps/{service_name}/serviceInfos", **info)
+
     # =========================================================================
     # Task polling
     # =========================================================================

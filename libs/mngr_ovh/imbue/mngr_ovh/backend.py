@@ -32,6 +32,7 @@ from imbue.mngr_ovh.iam_tags import list_vps_resources_for_provider
 from imbue.mngr_ovh.iam_tags import vps_urn_for
 from imbue.mngr_ovh.ordering import order_and_wait_for_vps
 from imbue.mngr_ovh.ordering import rebuild_vps_with_public_key
+from imbue.mngr_ovh.recycle import try_recycle_cancelled_vps
 from imbue.mngr_vps_docker.errors import VpsApiError
 from imbue.mngr_vps_docker.instance import ParsedVpsBuildOptions
 from imbue.mngr_vps_docker.instance import VpsDockerProvider
@@ -135,6 +136,33 @@ class OvhProvider(VpsDockerProvider):
     # VPS provisioning -- OVH order + rebuild + TOFU + IAM tag attach
     # =========================================================================
 
+    def _maybe_recycle_cancelled_vps(
+        self,
+        *,
+        new_host_id: HostId,
+        requested_plan: str,
+        requested_region: str,
+    ) -> str | None:
+        """Try to recycle a cancelled VPS; return its serviceName or None.
+
+        Returns ``None`` (and the caller falls through to a fresh order)
+        when recycling is disabled in config, when no eligible candidates
+        exist, or when every candidate failed mid-recycle (lock race, API
+        error, propagation timeout, ...). See ``recycle.try_recycle_cancelled_vps``
+        for the detailed eligibility filters.
+        """
+        if not self.ovh_config.enable_recycle_cancelled:
+            return None
+        return try_recycle_cancelled_vps(
+            client=self.ovh_client,
+            provider_name=str(self.name),
+            new_host_id=new_host_id,
+            requested_plan=requested_plan,
+            requested_region=requested_region,
+            safety_margin_hours=self.ovh_config.recycle_safety_margin_hours,
+            max_candidates=self.ovh_config.recycle_max_candidates_considered,
+        )
+
     def _provision_vps(
         self,
         host_id: HostId,
@@ -149,7 +177,10 @@ class OvhProvider(VpsDockerProvider):
         """Drive the OVH classic-VPS provisioning flow.
 
         Unlike the Vultr-shaped base implementation, this:
-        1. Orders a fresh VPS via the order/cart API (multi-step, ~minutes).
+        0. Tries to recycle a cancelled OVH VPS owned by this provider
+           (un-cancels it via ``PUT /serviceInfos``) instead of ordering a
+           fresh one. Controlled by ``OvhProviderConfig.enable_recycle_cancelled``.
+        1. Otherwise orders a fresh VPS via the order/cart API.
         2. Rebuilds it with our local SSH public key pre-installed.
         3. Pins the SSH host key on first connect (TOFU; see README caveat).
         4. Attaches the ``mngr-provider`` / ``mngr-host-id`` IAM tags used
@@ -170,15 +201,21 @@ class OvhProvider(VpsDockerProvider):
         public_key = self.ovh_client.get_cached_public_key(vps_ssh_key_id)
 
         with log_span("OVH provisioning for host {} ({})", name, host_id):
-            service_name = order_and_wait_for_vps(
-                self.ovh_client,
-                plan_code=plan,
-                datacenter=region,
-                image_name=image_name,
-                pricing_mode=self.ovh_config.pricing_mode.to_wire_value(),
-                duration=self.ovh_config.duration,
-                deliver_timeout_seconds=self.ovh_config.vps_boot_timeout,
+            service_name = self._maybe_recycle_cancelled_vps(
+                new_host_id=host_id, requested_plan=plan, requested_region=region
             )
+            if service_name is None:
+                service_name = order_and_wait_for_vps(
+                    self.ovh_client,
+                    plan_code=plan,
+                    datacenter=region,
+                    image_name=image_name,
+                    pricing_mode=self.ovh_config.pricing_mode.to_wire_value(),
+                    duration=self.ovh_config.duration,
+                    deliver_timeout_seconds=self.ovh_config.vps_boot_timeout,
+                )
+            else:
+                self._vps_iam_cache = None
 
             image_id = resolve_image_id(self.ovh_client, service_name, image_name)
             rebuild_vps_with_public_key(

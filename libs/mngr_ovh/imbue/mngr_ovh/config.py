@@ -90,6 +90,33 @@ class OvhProviderConfig(VpsDockerProviderConfig):
         default="US",
         description="OVHcloud subsidiary code used for ordering. Must match the account region.",
     )
+    enable_recycle_cancelled: bool = Field(
+        default=True,
+        description=(
+            "Whether `mngr create` may reuse an OVH VPS that has been marked for "
+            "cancellation (``renew.deleteAtExpiration=true``) by un-cancelling it "
+            "and rebuilding the OS, instead of ordering a fresh one. "
+            "Useful for pool-style workloads (e.g. mngr_imbue_cloud) where a "
+            "VPS is destroyed in the mngr sense but OVH keeps it billable "
+            "until end of month."
+        ),
+    )
+    recycle_safety_margin_hours: int = Field(
+        default=24,
+        description=(
+            "Minimum number of hours of remaining ``expiration`` for a cancelled "
+            "VPS to be considered for recycling. Buffer against the billing "
+            "boundary so OVH does not decommission the VPS mid-recycle."
+        ),
+    )
+    recycle_max_candidates_considered: int = Field(
+        default=10,
+        description=(
+            "If more than this many cancelled, tagged VPSes exist, stop trying "
+            "to recycle and fall through to a fresh order. Caps the number of "
+            "per-VPS API round-trips during candidate selection."
+        ),
+    )
 
     def resolve_endpoint(self) -> str:
         """Return the python-ovh endpoint id, applying env-var fallback."""

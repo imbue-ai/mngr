@@ -11,6 +11,7 @@ from imbue.mngr_ovh.client import OvhVpsClient
 
 MNGR_PROVIDER_TAG_KEY: Final[str] = "mngr-provider"
 MNGR_HOST_ID_TAG_KEY: Final[str] = "mngr-host-id"
+MNGR_RECYCLING_LOCK_TAG_KEY: Final[str] = "mngr-recycling-by"
 
 _VPS_RESOURCE_TYPE: Final[str] = "vps"
 
@@ -81,6 +82,19 @@ def list_vps_resources_for_provider(
 ) -> list[IamResource]:
     """Return only VPSes whose ``mngr-provider`` tag matches ``provider_name``."""
     return [r for r in list_vps_resources(client) if r.tags.get(MNGR_PROVIDER_TAG_KEY) == provider_name]
+
+
+def get_vps_resource(client: OvhVpsClient, urn: str) -> IamResource | None:
+    """Return the IAM resource record for a single VPS URN, or None if absent.
+
+    Used by the recycle path to re-read tags after attempting to acquire a
+    cooperative lock: if our lock UUID is no longer the unique recycler,
+    another process beat us and we must back off.
+    """
+    for r in list_vps_resources(client):
+        if r.urn == urn:
+            return r
+    return None
 
 
 def _iam_resource_from_payload(raw: dict[str, Any]) -> IamResource:
