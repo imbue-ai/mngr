@@ -37,13 +37,10 @@ def _get_arch_string() -> str:
 def _disable_port_forwards_rules() -> list[dict]:
     """Lima portForwards entries that disable all guest -> host port forwarding.
 
-    Lima appends one internal fallback rule that forwards any TCP/UDP guest
-    socket on guestIP 127.0.0.1 -- which also matches bind addresses 0.0.0.0,
-    ::, and ::1 -- to host 127.0.0.1. An empty user list does not override
-    that fallback. We supply Lima's documented "disable all forwarding"
-    catchall (one rule, proto any, full port range, ignore true) so the
-    fallback never fires. Lima manages the SSH port outside of portForwards,
-    so it remains reachable.
+    Lima always appends a fallback rule that forwards any guest TCP/UDP
+    socket to host loopback; an empty list does not suppress it. This
+    catchall matches first so the fallback never fires. SSH uses Lima's
+    separate ssh.localPort mechanism and is unaffected.
     """
     return [
         {
@@ -229,14 +226,14 @@ def merge_lima_yaml(base: dict, override: dict) -> dict:
     volume mount in `mounts` -- are not silently dropped by a user who only
     meant to add their own. Lima runs `provision[mode=system]` scripts in list
     order, so base-first means mngr's host-key swap runs before any user
-    script. Keys in `_LOCKED_KEYS` (currently `portForwards`) are not
-    overridable -- the base's value wins, with a warning -- so security-
-    sensitive defaults can't be unset via a user `--file` YAML.
+    script. Keys in `_LOCKED_KEYS` (currently `portForwards`) are retained
+    from the base so a user `--file` YAML cannot reopen security-sensitive
+    defaults.
     """
     merged = dict(base)
     for key, value in override.items():
         if key in _LOCKED_KEYS:
-            logger.warning("Ignoring locked key {!r} in user-provided Lima YAML.", key)
+            logger.trace("Ignoring locked key {!r} in user Lima YAML", key)
             continue
         if key in _LIST_EXTEND_KEYS and isinstance(value, list) and isinstance(merged.get(key), list):
             merged[key] = list(merged[key]) + list(value)
