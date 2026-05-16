@@ -30,7 +30,7 @@ def create_test_agent(
     *,
     extra_data: Mapping[str, Any] | None,
     agent_class: type[BaseAgent[AgentTypeConfig]],
-    register_agent_type: bool = True,
+    is_type_registered: bool = True,
 ) -> BaseAgent[AgentTypeConfig]:
     """Create a test agent backed by a real local host filesystem.
 
@@ -44,7 +44,7 @@ def create_test_agent(
 
     By default the agent's type is registered as ``BaseAgent`` on the fly so
     that downstream resolution (e.g. ``check_agent_type_known``) treats it
-    as a known type. Set ``register_agent_type=False`` to keep the type
+    as a known type. Set ``is_type_registered=False`` to keep the type
     deliberately unregistered -- needed by tests that exercise the
     ``RUNNING_UNKNOWN_AGENT_TYPE`` lifecycle branch.
     """
@@ -53,7 +53,7 @@ def create_test_agent(
     agent_id = AgentId.generate()
     agent_name = AgentName(f"test-agent-{get_short_random_string()}")
     resolved_type = agent_type or AgentTypeName(PLACEHOLDER_AGENT_TYPE)
-    if register_agent_type:
+    if is_type_registered:
         register_placeholder_agent_type(str(resolved_type))
     resolved_config = agent_config or AgentTypeConfig(command=CommandString("sleep 1000"))
     create_time = datetime.now(timezone.utc)
