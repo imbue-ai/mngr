@@ -42,10 +42,17 @@ from imbue.mngr_aws.testing import aws_credentials_available
 # ``AWS_REGION``; defaults to ``us-east-1`` to match the rest of the suite.
 _AWS_REGION: Final[str] = os.environ.get("AWS_REGION", "us-east-1")
 
-# Orphan-scan grace period. An untracked test-named instance younger than
-# this is left alone to avoid race-killing an in-flight test on a parallel
-# worker. Aligned with the ``MNGR_AWS_AUTO_SHUTDOWN_MINUTES=60`` cap that
-# release tests propagate into cloud-init.
+# Release-test opt-in flag, read once at import time. Mirrors the same env
+# var that ``test_release_aws.py`` uses to gate ``pytestmark``. We gate the
+# session-end orphan scan on this so a developer who merely has AWS
+# credentials configured (very common) does not trigger a live EC2
+# DescribeInstances call after every unit-test run.
+_OPT_IN: Final[bool] = os.environ.get("MNGR_AWS_RELEASE_TESTS") == "1"
+
+# Orphan-scan grace period. A test-named instance younger than this is left
+# alone to avoid race-killing an in-flight test on a parallel worker.
+# Aligned with the ``MNGR_AWS_AUTO_SHUTDOWN_MINUTES=60`` cap that release
+# tests propagate into cloud-init.
 _TEST_LEAK_TTL: Final[timedelta] = timedelta(hours=1)
 
 
@@ -89,16 +96,19 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
 
     Implemented as a pytest hook (not a fixture) so it runs after every
     session-scoped fixture teardown, mirroring the Modal pattern. Skips
-    silently when AWS credentials are unavailable (release tests gated
-    off). If leaks are found, force-cleans them and sets
-    ``session.exitstatus`` to ``TESTS_FAILED`` -- but only when the
-    session was otherwise passing, so a more-specific failure
+    silently unless release tests were actually opted into
+    (``MNGR_AWS_RELEASE_TESTS=1``) and AWS credentials are available --
+    the same conjunction that gates the release-test ``pytestmark``, so
+    the cleanup hook never makes a live EC2 API call from a run that did
+    not opt into AWS-using tests. If leaks are found, force-cleans them
+    and sets ``session.exitstatus`` to ``TESTS_FAILED`` -- but only when
+    the session was otherwise passing, so a more-specific failure
     (INTERRUPTED, INTERNAL_ERROR, etc.) is preserved.
     """
     # exitstatus is required by the hook signature but unused; we read
     # session.exitstatus, which is the canonical source.
     del exitstatus
-    if not aws_credentials_available():
+    if not (_OPT_IN and aws_credentials_available()):
         return
 
     try:
