@@ -38,13 +38,23 @@ def _disable_port_forwards_rules() -> list[dict]:
     """Lima portForwards entries that disable all guest -> host port forwarding.
 
     Lima always appends a fallback rule that forwards any guest TCP/UDP
-    socket to host loopback; an empty list does not suppress it. This
-    catchall matches first so the fallback never fires. SSH uses Lima's
-    separate ssh.localPort mechanism and is unaffected.
+    socket to host loopback; an empty list does not suppress it. User
+    rules match the guest bind address literally (Lima 2.1.1), so a
+    single `guestIP: 0.0.0.0` rule does not catch `127.0.0.1`-bound
+    sockets and vice versa. We supply one rule for each so neither
+    leaks. SSH uses Lima's separate ssh.localPort mechanism and is
+    unaffected.
     """
     return [
         {
+            "guestIPMustBeZero": True,
             "guestIP": "0.0.0.0",
+            "proto": "any",
+            "guestPortRange": [1, 65535],
+            "ignore": True,
+        },
+        {
+            "guestIP": "127.0.0.1",
             "proto": "any",
             "guestPortRange": [1, 65535],
             "ignore": True,
