@@ -252,7 +252,15 @@ def _try_recycle_one(
         if not _wait_for_uncancel(client, candidate.service_name):
             logger.warning("OVH recycle: un-cancel did not propagate on {}; aborting", candidate.service_name)
             return False
-        _swap_host_id_tag(client, urn, new_host_id)
+        try:
+            _swap_host_id_tag(client, urn, new_host_id)
+        except (VpsApiError, MngrError) as e:
+            logger.warning(
+                "OVH recycle: host-id tag swap failed on {} ({}); aborting (VPS is un-cancelled but tag is stale)",
+                candidate.service_name,
+                e,
+            )
+            return False
         return True
     finally:
         _release_lock(client, urn, lock_value)

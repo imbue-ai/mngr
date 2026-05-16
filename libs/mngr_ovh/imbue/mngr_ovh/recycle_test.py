@@ -8,6 +8,7 @@ from unittest.mock import MagicMock
 
 import ovh
 import pytest
+from ovh.exceptions import APIError
 
 from imbue.mngr.primitives import HostId
 from imbue.mngr_ovh.client import OvhVpsClient
@@ -385,6 +386,44 @@ def test_uncancel_uses_read_modify_write() -> None:
     assert body is not None
     for key in ("contactAdmin", "contactBilling", "contactTech", "renewalType", "expiration"):
         assert key in body, f"PUT serviceInfos body is missing {key} -- the read-modify-write is broken"
+
+
+def test_returns_none_when_host_id_tag_swap_fails() -> None:
+    """If the host-id tag DELETE/POST fails mid-recycle, we must fall through, not raise.
+
+    The public contract of ``try_recycle_cancelled_vps`` is that mid-recycle
+    API errors return ``None`` so the caller can order a fresh VPS. A bug
+    where the host-id-tag swap propagated ``VpsApiError`` would crash the
+    whole ``mngr create`` after the VPS was already un-cancelled.
+    """
+    fake = _FakeOvh()
+    fake.iam_payload = [_iam_payload("vps-x.vps.ovh.us")]
+    fake.service_info_by_name["vps-x.vps.ovh.us"] = _service_info()
+    fake.vps_details_by_name["vps-x.vps.ovh.us"] = _vps_details()
+
+    host_id_tag_path_fragment = f"/tag/{MNGR_HOST_ID_TAG_KEY}"
+
+    def call(method: str, path: str, body: Any = None, need_auth: bool = True) -> Any:
+        # Simulate a transient OVH IAM failure on the host-id-tag DELETE
+        # only; everything else (lock attach, set_renew, propagation poll)
+        # uses the normal _FakeOvh scripting.
+        if method == "DELETE" and host_id_tag_path_fragment in path:
+            raise APIError("simulated IAM tag DELETE failure")
+        return fake(method, path, body, need_auth)
+
+    client = _client(call)
+    result = try_recycle_cancelled_vps(
+        client=client,
+        provider_name="alice-ovh",
+        new_host_id=HostId.generate(),
+        requested_plan="vps-2025-model1",
+        requested_region="US-EAST-VA",
+        safety_margin_hours=24,
+        max_candidates=10,
+    )
+    assert result is None
+    # The VPS was un-cancelled before the failure, as documented.
+    assert fake.service_info_by_name["vps-x.vps.ovh.us"]["renew"]["deleteAtExpiration"] is False
 
 
 @pytest.mark.parametrize(
