@@ -15,6 +15,8 @@ from imbue.mngr_ovh.client import OvhVpsClient
 from imbue.mngr_ovh.iam_tags import MNGR_HOST_ID_TAG_KEY
 from imbue.mngr_ovh.iam_tags import MNGR_PROVIDER_TAG_KEY
 from imbue.mngr_ovh.iam_tags import MNGR_RECYCLING_LOCK_TAG_KEY
+from imbue.mngr_ovh.recycle import abort_recycle
+from imbue.mngr_ovh.recycle import finalize_recycle
 from imbue.mngr_ovh.recycle import try_recycle_cancelled_vps
 
 
@@ -191,10 +193,16 @@ def test_returns_none_when_no_candidates() -> None:
     )
 
 
-def test_recycles_eligible_candidate() -> None:
+def test_recycle_claim_swaps_host_id_but_leaves_vps_cancelled() -> None:
+    """``try_recycle_cancelled_vps`` claims the VPS without un-cancelling it.
+
+    The un-cancel step is deferred to ``finalize_recycle`` so that any
+    failure between claim and host-record write leaves the VPS still
+    cancelled (and therefore auto-decommissioning at end of month).
+    """
     client, fake = _make_fake_client_with_one_candidate()
     new_host_id = HostId.generate()
-    result = try_recycle_cancelled_vps(
+    handle = try_recycle_cancelled_vps(
         client=client,
         provider_name="alice-ovh",
         new_host_id=new_host_id,
@@ -203,12 +211,54 @@ def test_recycles_eligible_candidate() -> None:
         safety_margin_hours=24,
         max_candidates=10,
     )
-    assert result == "vps-x.vps.ovh.us"
-    # Final state should reflect the un-cancel and tag swap.
+    assert handle is not None
+    assert handle.service_name == "vps-x.vps.ovh.us"
+    # VPS must still be cancelled at this point.
+    info = fake.service_info_by_name["vps-x.vps.ovh.us"]
+    assert info["renew"]["deleteAtExpiration"] is True
+    # Host-id tag swapped; lock still held.
+    tags = fake.iam_payload[0]["tags"]
+    assert tags[MNGR_HOST_ID_TAG_KEY] == str(new_host_id)
+    assert tags[MNGR_RECYCLING_LOCK_TAG_KEY] == handle.lock_value
+
+
+def test_finalize_recycle_un_cancels_and_releases_lock() -> None:
+    client, fake = _make_fake_client_with_one_candidate()
+    handle = try_recycle_cancelled_vps(
+        client=client,
+        provider_name="alice-ovh",
+        new_host_id=HostId.generate(),
+        requested_plan="vps-2025-model1",
+        requested_region="US-EAST-VA",
+        safety_margin_hours=24,
+        max_candidates=10,
+    )
+    assert handle is not None
+    assert finalize_recycle(client, handle) is True
     info = fake.service_info_by_name["vps-x.vps.ovh.us"]
     assert info["renew"]["deleteAtExpiration"] is False
     tags = fake.iam_payload[0]["tags"]
-    assert tags[MNGR_HOST_ID_TAG_KEY] == str(new_host_id)
+    assert MNGR_RECYCLING_LOCK_TAG_KEY not in tags
+
+
+def test_abort_recycle_leaves_vps_cancelled_and_releases_lock() -> None:
+    client, fake = _make_fake_client_with_one_candidate()
+    handle = try_recycle_cancelled_vps(
+        client=client,
+        provider_name="alice-ovh",
+        new_host_id=HostId.generate(),
+        requested_plan="vps-2025-model1",
+        requested_region="US-EAST-VA",
+        safety_margin_hours=24,
+        max_candidates=10,
+    )
+    assert handle is not None
+    abort_recycle(client, handle)
+    info = fake.service_info_by_name["vps-x.vps.ovh.us"]
+    # Crucially: cancellation state is unchanged on abort, so the VPS
+    # auto-decommissions at end of month -- no orphan billing.
+    assert info["renew"]["deleteAtExpiration"] is True
+    tags = fake.iam_payload[0]["tags"]
     assert MNGR_RECYCLING_LOCK_TAG_KEY not in tags
 
 
@@ -322,7 +372,8 @@ def test_picks_candidate_with_latest_expiration() -> None:
         safety_margin_hours=24,
         max_candidates=10,
     )
-    assert result == "vps-far.vps.ovh.us"
+    assert result is not None
+    assert result.service_name == "vps-far.vps.ovh.us"
 
 
 def test_caps_candidates_considered() -> None:
@@ -367,20 +418,20 @@ def test_skips_candidate_with_active_engagement() -> None:
     assert result is None
 
 
-def test_uncancel_uses_read_modify_write() -> None:
-    """The PUT must preserve every non-`renew` field, not just clobber to a partial body."""
+def test_finalize_uses_read_modify_write() -> None:
+    """``finalize_recycle``'s PUT must preserve every non-`renew` field."""
     client, fake = _make_fake_client_with_one_candidate()
-    new_host_id = HostId.generate()
-    try_recycle_cancelled_vps(
+    handle = try_recycle_cancelled_vps(
         client=client,
         provider_name="alice-ovh",
-        new_host_id=new_host_id,
+        new_host_id=HostId.generate(),
         requested_plan="vps-2025-model1",
         requested_region="US-EAST-VA",
         safety_margin_hours=24,
         max_candidates=10,
     )
-    # The PUT body should still carry every contact / renewalType field.
+    assert handle is not None
+    finalize_recycle(client, handle)
     put_call = next(c for c in fake.calls if c[0] == "PUT" and c[1].endswith("/serviceInfos"))
     body = put_call[2]
     assert body is not None
@@ -389,12 +440,13 @@ def test_uncancel_uses_read_modify_write() -> None:
 
 
 def test_returns_none_when_host_id_tag_swap_fails() -> None:
-    """If the host-id tag DELETE/POST fails mid-recycle, we must fall through, not raise.
+    """If the host-id tag DELETE/POST fails mid-claim, we must fall through, not raise.
 
-    The public contract of ``try_recycle_cancelled_vps`` is that mid-recycle
-    API errors return ``None`` so the caller can order a fresh VPS. A bug
-    where the host-id-tag swap propagated ``VpsApiError`` would crash the
-    whole ``mngr create`` after the VPS was already un-cancelled.
+    The public contract of ``try_recycle_cancelled_vps`` is that mid-claim
+    API errors return ``None`` so the caller can order a fresh VPS.
+    Crucially, the VPS stays cancelled in that case (since the un-cancel
+    is deferred to ``finalize_recycle``), so a failed claim doesn't leak
+    a still-billing orphan.
     """
     fake = _FakeOvh()
     fake.iam_payload = [_iam_payload("vps-x.vps.ovh.us")]
@@ -404,9 +456,6 @@ def test_returns_none_when_host_id_tag_swap_fails() -> None:
     host_id_tag_path_fragment = f"/tag/{MNGR_HOST_ID_TAG_KEY}"
 
     def call(method: str, path: str, body: Any = None, need_auth: bool = True) -> Any:
-        # Simulate a transient OVH IAM failure on the host-id-tag DELETE
-        # only; everything else (lock attach, set_renew, propagation poll)
-        # uses the normal _FakeOvh scripting.
         if method == "DELETE" and host_id_tag_path_fragment in path:
             raise APIError("simulated IAM tag DELETE failure")
         return fake(method, path, body, need_auth)
@@ -422,8 +471,9 @@ def test_returns_none_when_host_id_tag_swap_fails() -> None:
         max_candidates=10,
     )
     assert result is None
-    # The VPS was un-cancelled before the failure, as documented.
-    assert fake.service_info_by_name["vps-x.vps.ovh.us"]["renew"]["deleteAtExpiration"] is False
+    # VPS stays cancelled -- defers un-cancel to finalize_recycle, so a
+    # failed claim cannot orphan a still-billing VPS.
+    assert fake.service_info_by_name["vps-x.vps.ovh.us"]["renew"]["deleteAtExpiration"] is True
 
 
 @pytest.mark.parametrize(

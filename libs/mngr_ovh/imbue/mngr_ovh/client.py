@@ -11,6 +11,7 @@ from ovh.exceptions import APIError
 from ovh.exceptions import BadParametersError
 from ovh.exceptions import Forbidden
 from ovh.exceptions import HTTPError
+from ovh.exceptions import InvalidConfiguration
 from ovh.exceptions import InvalidCredential
 from ovh.exceptions import NotCredential
 from ovh.exceptions import NotGrantedCall
@@ -20,7 +21,9 @@ from pydantic import ConfigDict
 from pydantic import Field
 from pydantic import PrivateAttr
 
+from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.mngr.errors import MngrError
+from imbue.mngr_ovh.config import OvhProviderConfig
 from imbue.mngr_vps_docker.errors import VpsApiError
 from imbue.mngr_vps_docker.errors import VpsProvisioningError
 from imbue.mngr_vps_docker.primitives import VpsInstanceId
@@ -48,6 +51,30 @@ _VPS_STATE_MAP: Final[dict[str, VpsInstanceStatus]] = {
 
 _TASK_TERMINAL_STATES: Final[frozenset[str]] = frozenset({"done", "error", "cancelled", "blocked"})
 _TASK_FAILURE_STATES: Final[frozenset[str]] = frozenset({"error", "cancelled", "blocked"})
+
+_MNGR_RECYCLING_LOCK_TAG_KEY: Final[str] = "mngr-recycling-by"
+
+
+class RecycleHandle(FrozenModel):
+    """In-flight recycle of a cancelled OVH VPS.
+
+    Returned by ``recycle.try_recycle_cancelled_vps`` once a candidate
+    has been locked and re-tagged with the new host id, but **before**
+    the VPS has been un-cancelled. Defined in this module (rather than
+    in ``recycle.py``) so that ``OvhVpsClient.destroy_instance`` can
+    consult the pending-handles dict without an import cycle.
+
+    The caller drives the rest of provisioning and then calls either:
+    - ``recycle.finalize_recycle(client, handle)`` -- flips
+      ``deleteAtExpiration=False`` and releases the lock,
+    - ``recycle.abort_recycle(client, handle)`` -- releases the lock
+      only; the VPS stays cancelled and auto-decommissions at end of
+      month so no orphan billing.
+    """
+
+    urn: str
+    service_name: str
+    lock_value: str
 
 
 class OvhVpsClient(VpsClientInterface):
@@ -94,6 +121,30 @@ class OvhVpsClient(VpsClientInterface):
     )
 
     _ssh_key_cache: dict[str, str] = PrivateAttr(default_factory=dict)
+    _pending_recycle_handles: dict[str, RecycleHandle] = PrivateAttr(default_factory=dict)
+
+    def register_recycle_handle(self, handle: RecycleHandle) -> None:
+        """Record an in-flight ``RecycleHandle``.
+
+        Used by ``recycle.try_recycle_cancelled_vps`` so that if the
+        base ``VpsDockerProvider.create_host`` cleanup calls
+        ``destroy_instance`` on a VPS that's mid-recycle,
+        ``destroy_instance`` releases the recycle lock instead of
+        terminating an already-cancelled VPS.
+        """
+        self._pending_recycle_handles[handle.service_name] = handle
+
+    def discard_recycle_handle(self, service_name: str) -> None:
+        """Drop the tracked ``RecycleHandle`` for ``service_name`` if any.
+
+        Called by ``recycle.finalize_recycle`` and ``abort_recycle`` once
+        they've taken over responsibility for releasing the lock.
+        """
+        self._pending_recycle_handles.pop(service_name, None)
+
+    def get_recycle_handle(self, service_name: str) -> RecycleHandle | None:
+        """Return the in-flight ``RecycleHandle`` for ``service_name`` if any."""
+        return self._pending_recycle_handles.get(service_name)
 
     def _call(self, method: str, path: str, **kwargs: Any) -> Any:
         """Invoke the OVH SDK and translate its exceptions to ``VpsApiError``."""
@@ -148,7 +199,7 @@ class OvhVpsClient(VpsClientInterface):
         )
 
     def destroy_instance(self, instance_id: VpsInstanceId) -> None:
-        """Request termination of an OVH VPS.
+        """Request termination of an OVH VPS (or abort an in-flight recycle).
 
         OVH's termination is asynchronous and billing-anniversary aware:
         ``POST /vps/{s}/terminate`` registers the request and OVH emails a
@@ -156,7 +207,25 @@ class OvhVpsClient(VpsClientInterface):
         token finalizes termination. In practice for mngr's use case, the
         VPS is logically destroyed at this point even though the service
         may linger until the end of the billing period.
+
+        If this VPS is currently mid-recycle (a ``RecycleHandle`` was
+        registered via ``register_recycle_aborter`` but neither
+        ``finalize_recycle`` nor ``abort_recycle`` has run yet), this
+        call short-circuits to release the recycle lock only. The VPS
+        is already cancelled, so calling ``/terminate`` again would be
+        a no-op on OVH's side; releasing the lock lets a subsequent
+        ``mngr create`` re-attempt the recycle.
         """
+        service_name = str(instance_id)
+        handle = self._pending_recycle_handles.pop(service_name, None)
+        if handle is not None:
+            logger.info("OVH VPS {} is mid-recycle; releasing recycle lock instead of re-terminating", service_name)
+            try:
+                self._call("DELETE", f"/v2/iam/resource/{handle.urn}/tag/{_MNGR_RECYCLING_LOCK_TAG_KEY}")
+            except VpsApiError as e:
+                if e.status_code != 404:
+                    logger.warning("OVH recycle lock release failed for {}: {}", service_name, e)
+            return
         try:
             self._call("POST", f"/vps/{instance_id}/terminate")
             logger.info("Requested termination of OVH VPS {} (billing remainder is forfeit)", instance_id)
@@ -393,4 +462,41 @@ def _snapshot_info_from_payload(service_name: str, payload: dict[str, Any]) -> V
         id=VpsSnapshotId(service_name),
         description=str(payload.get("description", "")),
         created_at=created_at,
+    )
+
+
+def build_ovh_client(config: OvhProviderConfig) -> "OvhVpsClient":
+    """Construct an ``OvhVpsClient`` from config / env / ``~/.ovh.conf``.
+
+    If no credentials are configured anywhere, ``python-ovh`` raises
+    ``InvalidConfiguration`` at construction time. We catch that and
+    substitute placeholder credentials so the client is still
+    constructible -- any actual API call will then fail with a clear
+    auth error rather than the provider blowing up at registration
+    time. This mirrors how ``mngr_vultr`` accepts an empty API key when
+    none is configured, and lets unrelated tests that merely enumerate
+    registered backends run without OVH credentials. The returned
+    client has ``is_unconfigured=True`` so ``OvhProvider`` can
+    short-circuit discovery without emitting log noise.
+    """
+    kwargs = config.resolve_python_ovh_kwargs()
+    try:
+        raw_client = ovh.Client(**kwargs)
+        is_unconfigured = False
+    except InvalidConfiguration:
+        logger.debug(
+            "OVH credentials not configured; constructing a placeholder client. "
+            "OVH provider API calls will fail until credentials are provided."
+        )
+        raw_client = ovh.Client(
+            endpoint=kwargs.get("endpoint", "ovh-us"),
+            application_key="mngr-ovh-unconfigured",
+            application_secret="mngr-ovh-unconfigured",
+            consumer_key="mngr-ovh-unconfigured",
+        )
+        is_unconfigured = True
+    return OvhVpsClient(
+        ovh_client=raw_client,
+        subsidiary=config.ovh_subsidiary,
+        is_unconfigured=is_unconfigured,
     )

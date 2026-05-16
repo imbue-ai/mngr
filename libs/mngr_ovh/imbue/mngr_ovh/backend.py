@@ -2,9 +2,8 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Final
 
-import ovh
+import click
 from loguru import logger
-from ovh.exceptions import InvalidConfiguration
 from pydantic import ConfigDict
 from pydantic import Field
 from pydantic import PrivateAttr
@@ -23,7 +22,10 @@ from imbue.mngr_ovh import hookimpl
 from imbue.mngr_ovh.bootstrap import pin_host_key_via_tofu
 from imbue.mngr_ovh.bootstrap import wait_for_ssh_after_rebuild
 from imbue.mngr_ovh.catalog import resolve_image_id
+from imbue.mngr_ovh.cli import ovh as ovh_cli_group
 from imbue.mngr_ovh.client import OvhVpsClient
+from imbue.mngr_ovh.client import RecycleHandle
+from imbue.mngr_ovh.client import build_ovh_client
 from imbue.mngr_ovh.config import OvhProviderConfig
 from imbue.mngr_ovh.iam_tags import MNGR_HOST_ID_TAG_KEY
 from imbue.mngr_ovh.iam_tags import MNGR_PROVIDER_TAG_KEY
@@ -32,6 +34,7 @@ from imbue.mngr_ovh.iam_tags import list_vps_resources_for_provider
 from imbue.mngr_ovh.iam_tags import vps_urn_for
 from imbue.mngr_ovh.ordering import order_and_wait_for_vps
 from imbue.mngr_ovh.ordering import rebuild_vps_with_public_key
+from imbue.mngr_ovh.recycle import finalize_recycle
 from imbue.mngr_ovh.recycle import try_recycle_cancelled_vps
 from imbue.mngr_vps_docker.errors import VpsApiError
 from imbue.mngr_vps_docker.instance import ParsedVpsBuildOptions
@@ -136,20 +139,22 @@ class OvhProvider(VpsDockerProvider):
     # VPS provisioning -- OVH order + rebuild + TOFU + IAM tag attach
     # =========================================================================
 
-    def _maybe_recycle_cancelled_vps(
+    def _maybe_claim_recycled_vps(
         self,
         *,
         new_host_id: HostId,
         requested_plan: str,
         requested_region: str,
-    ) -> str | None:
-        """Try to recycle a cancelled VPS; return its serviceName or None.
+    ) -> RecycleHandle | None:
+        """Try to lock + re-tag a cancelled VPS; return the recycle handle or None.
 
-        Returns ``None`` (and the caller falls through to a fresh order)
-        when recycling is disabled in config, when no eligible candidates
-        exist, or when every candidate failed mid-recycle (lock race, API
-        error, propagation timeout, ...). See ``recycle.try_recycle_cancelled_vps``
-        for the detailed eligibility filters.
+        The un-cancel (``deleteAtExpiration=false``) is **not** applied
+        here; the handle is registered on ``self.ovh_client`` so that the
+        base ``create_host`` cleanup -- which calls
+        ``vps_client.destroy_instance`` on failure -- releases the
+        recycle lock instead of re-terminating. ``_on_host_finalized``
+        commits the un-cancel once the host record is durably written.
+        See ``recycle.try_recycle_cancelled_vps`` for the eligibility filters.
         """
         if not self.ovh_config.enable_recycle_cancelled:
             return None
@@ -162,6 +167,21 @@ class OvhProvider(VpsDockerProvider):
             safety_margin_hours=self.ovh_config.recycle_safety_margin_hours,
             max_candidates=self.ovh_config.recycle_max_candidates_considered,
         )
+
+    def _on_host_finalized(self, *, host_id: HostId, vps_ip: str) -> None:
+        """Commit a pending recycle (un-cancel + release lock) once the host is durable.
+
+        Only fires for recycled hosts; fresh-order hosts have no pending
+        recycle handle and this is a no-op. Errors from
+        ``finalize_recycle`` are logged but never raised -- the host
+        record is already written, so we must not fail ``create_host``
+        over a billing-state flip.
+        """
+        del host_id
+        handle = self.ovh_client.get_recycle_handle(vps_ip)
+        if handle is None:
+            return
+        finalize_recycle(self.ovh_client, handle)
 
     def _provision_vps(
         self,
@@ -201,10 +221,10 @@ class OvhProvider(VpsDockerProvider):
         public_key = self.ovh_client.get_cached_public_key(vps_ssh_key_id)
 
         with log_span("OVH provisioning for host {} ({})", name, host_id):
-            service_name = self._maybe_recycle_cancelled_vps(
+            recycle_handle = self._maybe_claim_recycled_vps(
                 new_host_id=host_id, requested_plan=plan, requested_region=region
             )
-            if service_name is None:
+            if recycle_handle is None:
                 service_name = order_and_wait_for_vps(
                     self.ovh_client,
                     plan_code=plan,
@@ -215,6 +235,7 @@ class OvhProvider(VpsDockerProvider):
                     deliver_timeout_seconds=self.ovh_config.vps_boot_timeout,
                 )
             else:
+                service_name = recycle_handle.service_name
                 self._vps_iam_cache = None
 
             image_id = resolve_image_id(self.ovh_client, service_name, image_name)
@@ -262,43 +283,6 @@ def _iam_region_code(endpoint: str) -> str:
     return "us"
 
 
-def _build_ovh_client(config: OvhProviderConfig) -> OvhVpsClient:
-    """Construct an ``OvhVpsClient`` from config / env / ``~/.ovh.conf``.
-
-    If no credentials are configured anywhere, ``python-ovh`` raises
-    ``InvalidConfiguration`` at construction time. We catch that and
-    substitute placeholder credentials so the client is still
-    constructible -- any actual API call will then fail with a clear
-    auth error rather than the provider blowing up at registration
-    time. This mirrors how ``mngr_vultr`` accepts an empty API key when
-    none is configured, and lets unrelated tests that merely enumerate
-    registered backends run without OVH credentials. The returned
-    client has ``is_unconfigured=True`` so ``OvhProvider`` can
-    short-circuit discovery without emitting log noise.
-    """
-    kwargs = config.resolve_python_ovh_kwargs()
-    try:
-        raw_client = ovh.Client(**kwargs)
-        is_unconfigured = False
-    except InvalidConfiguration:
-        logger.debug(
-            "OVH credentials not configured; constructing a placeholder client. "
-            "OVH provider API calls will fail until credentials are provided."
-        )
-        raw_client = ovh.Client(
-            endpoint=kwargs.get("endpoint", "ovh-us"),
-            application_key="mngr-ovh-unconfigured",
-            application_secret="mngr-ovh-unconfigured",
-            consumer_key="mngr-ovh-unconfigured",
-        )
-        is_unconfigured = True
-    return OvhVpsClient(
-        ovh_client=raw_client,
-        subsidiary=config.ovh_subsidiary,
-        is_unconfigured=is_unconfigured,
-    )
-
-
 class OvhProviderBackend(ProviderBackendInterface):
     """Backend for creating OVH classic-VPS Docker provider instances."""
 
@@ -339,7 +323,7 @@ class OvhProviderBackend(ProviderBackendInterface):
     ) -> ProviderInstanceInterface:
         if not isinstance(config, OvhProviderConfig):
             raise MngrError(f"Expected OvhProviderConfig, got {type(config).__name__}")
-        ovh_client = _build_ovh_client(config)
+        ovh_client = build_ovh_client(config)
         return OvhProvider(
             name=name,
             host_dir=config.host_dir,
@@ -355,3 +339,9 @@ class OvhProviderBackend(ProviderBackendInterface):
 def register_provider_backend() -> tuple[type[ProviderBackendInterface], type[ProviderInstanceConfig]]:
     """Register the OVH provider backend."""
     return (OvhProviderBackend, OvhProviderConfig)
+
+
+@hookimpl
+def register_cli_commands() -> Sequence[click.Command]:
+    """Register the ``mngr ovh ...`` operator command group."""
+    return [ovh_cli_group]

@@ -31,6 +31,7 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.mngr.errors import MngrError
 from imbue.mngr.primitives import HostId
 from imbue.mngr_ovh.client import OvhVpsClient
+from imbue.mngr_ovh.client import RecycleHandle
 from imbue.mngr_ovh.iam_tags import MNGR_HOST_ID_TAG_KEY
 from imbue.mngr_ovh.iam_tags import MNGR_RECYCLING_LOCK_TAG_KEY
 from imbue.mngr_ovh.iam_tags import attach_tag
@@ -63,24 +64,23 @@ def try_recycle_cancelled_vps(
     requested_region: str,
     safety_margin_hours: int,
     max_candidates: int,
-) -> str | None:
-    """Attempt to reuse a cancelled VPS for a new host. Returns its serviceName, or None.
+) -> RecycleHandle | None:
+    """Lock a cancelled VPS and re-tag it for ``new_host_id``. Returns a handle, or None.
 
     Side effects on success:
-    1. The chosen VPS's ``renew.deleteAtExpiration`` is set to ``False``.
+    1. The chosen VPS gets a transient ``mngr-recycling-by`` IAM lock tag.
     2. Its old ``mngr-host-id`` IAM tag is replaced with ``new_host_id``.
-    3. Its transient ``mngr-recycling-by`` lock tag is removed.
+    3. ``deleteAtExpiration`` is **NOT** flipped here; the caller flips it
+       via ``finalize_recycle`` once the rebuild + container setup + host
+       record write have all succeeded.
 
     Side effects on failure (any step after the lock is acquired):
     - Best-effort attempt to remove the ``mngr-recycling-by`` lock tag.
-    - The VPS may have been un-cancelled but not fully recycled; the caller
-      is responsible for either retrying or re-terminating it via
-      ``OvhVpsClient.destroy_instance``.
+    - The VPS stays cancelled (``deleteAtExpiration=True``).
 
-    Returns ``None`` (with logs) for any of: no candidates, all candidates
-    fail safety filters, lock acquisition lost a race, mid-recycle API
-    error. In all those cases the caller should fall through to ordering
-    a fresh VPS.
+    Returns ``None`` for any of: no candidates, all candidates failed
+    safety filters, lock acquisition lost a race, mid-recycle API error.
+    In all those cases the caller should fall through to ordering fresh.
     """
     if client.is_unconfigured:
         return None
@@ -99,21 +99,74 @@ def try_recycle_cancelled_vps(
 
     lock_value = uuid.uuid4().hex
     for candidate in candidates:
-        if _try_recycle_one(
+        handle = _try_recycle_one(
             client=client,
             candidate=candidate,
             new_host_id=new_host_id,
             lock_value=lock_value,
-        ):
+        )
+        if handle is not None:
             logger.info(
-                "OVH recycle: reusing cancelled VPS {} (expires {}) for host {}",
+                "OVH recycle: claimed cancelled VPS {} (expires {}) for host {}",
                 candidate.service_name,
                 candidate.expiration.isoformat(),
                 new_host_id,
             )
-            return candidate.service_name
+            client.register_recycle_handle(handle)
+            return handle
     logger.info("OVH recycle: all {} candidate(s) failed eligibility/lock; ordering fresh", len(candidates))
     return None
+
+
+def finalize_recycle(client: OvhVpsClient, handle: RecycleHandle) -> bool:
+    """Commit the recycle: flip ``deleteAtExpiration=False`` and release the lock.
+
+    Called *after* the host has been fully provisioned (container running,
+    host record written) so the VPS only becomes "un-cancelled" once we
+    know it'll actually be useful. Returns True if the un-cancel API call
+    + propagation poll both succeeded.
+
+    On failure (API error / propagation timeout): the VPS stays cancelled
+    and the host record points at a VPS that will auto-decommission at end
+    of month. We log loudly so an operator can manually flip the flag if
+    the host is meant to be long-lived. Lock release is best-effort either
+    way; the lock has no TTL on OVH's side, so leaking it would block
+    future recycle attempts of this VPS.
+    """
+    client.discard_recycle_handle(handle.service_name)
+    try:
+        client.set_renew_at_expiration(handle.service_name, delete_at_expiration=False)
+    except (VpsApiError, MngrError) as e:
+        logger.error(
+            "OVH recycle: un-cancel of {} failed at finalize ({}); VPS will auto-decommission at end of month",
+            handle.service_name,
+            e,
+        )
+        _release_lock(client, handle.urn, handle.lock_value)
+        return False
+    if not _wait_for_uncancel(client, handle.service_name):
+        logger.error(
+            "OVH recycle: un-cancel of {} did not propagate at finalize; VPS may auto-decommission at end of month",
+            handle.service_name,
+        )
+        _release_lock(client, handle.urn, handle.lock_value)
+        return False
+    _release_lock(client, handle.urn, handle.lock_value)
+    logger.info("OVH recycle: finalized recycle of {} (un-cancelled, lock released)", handle.service_name)
+    return True
+
+
+def abort_recycle(client: OvhVpsClient, handle: RecycleHandle) -> None:
+    """Release the recycle lock without un-cancelling.
+
+    Used on any failure between claim and finalize. The VPS stays
+    cancelled and will auto-decommission at end of month, so a partial
+    recycle does not leak a still-billing orphan -- the very property the
+    deferred-un-cancel design buys us.
+    """
+    client.discard_recycle_handle(handle.service_name)
+    _release_lock(client, handle.urn, handle.lock_value)
+    logger.info("OVH recycle: aborted recycle of {} (lock released; VPS stays cancelled)", handle.service_name)
 
 
 def _select_candidates(
@@ -232,38 +285,37 @@ def _try_recycle_one(
     candidate: _Candidate,
     new_host_id: HostId,
     lock_value: str,
-) -> bool:
-    """Acquire the lock, un-cancel, replace identity tags. Returns True on success."""
+) -> RecycleHandle | None:
+    """Lock + re-tag a candidate. Returns a handle on success, ``None`` on failure.
+
+    Does **not** un-cancel: that step is deferred to ``finalize_recycle``,
+    called by the caller after the host record has been written, so a
+    failure between here and the host-record write leaves the VPS still
+    cancelled (and therefore harmless: it auto-decommissions at the next
+    billing boundary).
+
+    The lock is intentionally **not** released on a successful return.
+    Ownership of the lock transfers to the caller via the returned
+    ``RecycleHandle`` until either ``finalize_recycle`` or
+    ``abort_recycle`` is called.
+    """
     urn = candidate.urn
     try:
         attach_tag(client, urn, MNGR_RECYCLING_LOCK_TAG_KEY, lock_value)
     except (VpsApiError, MngrError) as e:
         logger.debug("OVH recycle: failed to acquire lock on {} ({}); skipping", candidate.service_name, e)
-        return False
-    try:
-        if not _confirm_lock_held(client, urn, lock_value):
-            logger.info("OVH recycle: lost lock race on {}; trying next candidate", candidate.service_name)
-            return False
-        try:
-            client.set_renew_at_expiration(candidate.service_name, delete_at_expiration=False)
-        except (VpsApiError, MngrError) as e:
-            logger.warning("OVH recycle: un-cancel failed on {} ({}); aborting", candidate.service_name, e)
-            return False
-        if not _wait_for_uncancel(client, candidate.service_name):
-            logger.warning("OVH recycle: un-cancel did not propagate on {}; aborting", candidate.service_name)
-            return False
-        try:
-            _swap_host_id_tag(client, urn, new_host_id)
-        except (VpsApiError, MngrError) as e:
-            logger.warning(
-                "OVH recycle: host-id tag swap failed on {} ({}); aborting (VPS is un-cancelled but tag is stale)",
-                candidate.service_name,
-                e,
-            )
-            return False
-        return True
-    finally:
+        return None
+    if not _confirm_lock_held(client, urn, lock_value):
+        logger.info("OVH recycle: lost lock race on {}; trying next candidate", candidate.service_name)
         _release_lock(client, urn, lock_value)
+        return None
+    try:
+        _swap_host_id_tag(client, urn, new_host_id)
+    except (VpsApiError, MngrError) as e:
+        logger.warning("OVH recycle: host-id tag swap failed on {} ({}); aborting", candidate.service_name, e)
+        _release_lock(client, urn, lock_value)
+        return None
+    return RecycleHandle(urn=urn, service_name=candidate.service_name, lock_value=lock_value)
 
 
 def _confirm_lock_held(client: OvhVpsClient, urn: str, lock_value: str) -> bool:

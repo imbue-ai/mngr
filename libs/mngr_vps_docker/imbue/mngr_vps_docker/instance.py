@@ -1166,7 +1166,25 @@ class VpsDockerProvider(BaseProviderInstance):
         # a stale instance list that doesn't include the VPS we just created.
         self._host_record_cache[host_id] = host_record
 
+        self._on_host_finalized(host_id=host_id, vps_ip=vps_ip)
+
         return host
+
+    def _on_host_finalized(self, *, host_id: HostId, vps_ip: str) -> None:
+        """Hook called at the very end of ``_finalize_host_creation``.
+
+        Fires after the host record has been written to the state volume
+        and is therefore the "point of no return" for ``create_host``.
+        Subclasses can override to commit any deferred provisioning side
+        effects that must only become durable once the host is fully
+        usable -- e.g. OVH classic VPS un-cancellation, which must wait
+        until container setup has succeeded so that a failure earlier in
+        the flow lets the VPS auto-decommission instead of leaking
+        a still-billing orphan.
+
+        Default no-op. Must not raise; any errors should be caught and
+        logged by the override.
+        """
 
     def _wait_for_container_sshd(self, vps_ip: str) -> None:
         """Wait for sshd in the container to be reachable via the VPS's exposed port."""
