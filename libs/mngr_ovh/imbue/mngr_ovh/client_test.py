@@ -6,9 +6,11 @@ from unittest.mock import MagicMock
 import ovh
 import pytest
 from ovh.exceptions import APIError
+from ovh.exceptions import ResourceNotFoundError
 
 from imbue.mngr.errors import MngrError
 from imbue.mngr_ovh.client import OvhVpsClient
+from imbue.mngr_ovh.client import RecycleHandle
 from imbue.mngr_vps_docker.errors import VpsApiError
 from imbue.mngr_vps_docker.errors import VpsProvisioningError
 from imbue.mngr_vps_docker.primitives import VpsInstanceId
@@ -40,6 +42,61 @@ class TestOvhVpsClientLifecycle:
         client = _client_with_call(fake_call)
         client.destroy_instance(VpsInstanceId("vps-abc.vps.ovh.us"))
         assert captured == [("POST", "/vps/vps-abc.vps.ovh.us/terminate")]
+
+    def test_destroy_instance_short_circuits_when_mid_recycle(self) -> None:
+        """A pending recycle handle skips /terminate and releases the IAM lock instead.
+
+        The base ``VpsDockerProvider.create_host`` cleanup path calls
+        ``vps_client.destroy_instance`` on failure. For a mid-recycle VPS
+        (un-cancel not yet applied because we defer it to finalize), the
+        VPS is already cancelled, so /terminate would be a no-op.
+        Instead the client releases the IAM ``mngr-recycling-by`` lock
+        tag so a subsequent ``mngr create`` can re-try the recycle.
+        """
+        captured: list[tuple[str, str]] = []
+
+        def fake_call(method: str, path: str, body: Any = None, need_auth: bool = True) -> Any:
+            captured.append((method, path))
+            return None
+
+        client = _client_with_call(fake_call)
+        handle = RecycleHandle(
+            urn="urn:v1:us:resource:vps:vps-abc.vps.ovh.us",
+            service_name="vps-abc.vps.ovh.us",
+            lock_value="lock-uuid",
+        )
+        client.register_recycle_handle(handle)
+        client.destroy_instance(VpsInstanceId("vps-abc.vps.ovh.us"))
+        # Crucially: no POST /terminate (would be a wasted call against an
+        # already-cancelled VPS); only the IAM lock DELETE happens.
+        assert captured == [
+            ("DELETE", "/v2/iam/resource/urn:v1:us:resource:vps:vps-abc.vps.ovh.us/tag/mngr-recycling-by"),
+        ]
+        # Handle is consumed exactly once: a second destroy on the same
+        # service_name should fall through to the normal /terminate path.
+        captured.clear()
+        client.destroy_instance(VpsInstanceId("vps-abc.vps.ovh.us"))
+        assert captured == [("POST", "/vps/vps-abc.vps.ovh.us/terminate")]
+
+    def test_destroy_instance_short_circuit_swallows_404_on_lock_release(self) -> None:
+        """A 404 on the lock-release DELETE is treated as "lock already gone" and not raised.
+
+        Common when the lock has already been finalize_recycle'd or
+        abort_recycle'd before destroy_instance runs.
+        """
+
+        def fake_call(method: str, path: str, body: Any = None, need_auth: bool = True) -> Any:
+            raise ResourceNotFoundError("tag gone")
+
+        client = _client_with_call(fake_call)
+        client.register_recycle_handle(
+            RecycleHandle(
+                urn="urn:v1:us:resource:vps:vps-x",
+                service_name="vps-x",
+                lock_value="lock-uuid",
+            )
+        )
+        client.destroy_instance(VpsInstanceId("vps-x"))
 
     def test_get_instance_status_active_when_running(self) -> None:
         def fake_call(method: str, path: str, body: Any = None, need_auth: bool = True) -> Any:

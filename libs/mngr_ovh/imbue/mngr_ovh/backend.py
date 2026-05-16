@@ -172,17 +172,35 @@ class OvhProvider(VpsDockerProvider):
     def _on_host_finalized(self, *, host_id: HostId, vps_ip: str) -> None:
         """Commit a pending recycle (un-cancel + release lock) once the host is durable.
 
+        ``vps_ip`` is the OVH ``serviceName`` for OVH-backed hosts (e.g.
+        ``vps-eec8860b.vps.ovh.us`` -- a DNS name, not an IP). The
+        parameter is named ``vps_ip`` for consistency with the base
+        class hook signature.
+
         Only fires for recycled hosts; fresh-order hosts have no pending
-        recycle handle and this is a no-op. Errors from
-        ``finalize_recycle`` are logged but never raised -- the host
-        record is already written, so we must not fail ``create_host``
-        over a billing-state flip.
+        recycle handle and this is a no-op. ``finalize_recycle`` may
+        raise via ``client.set_renew_at_expiration`` if OVH's API
+        misbehaves; that's caught here so we never fail ``create_host``
+        over a billing-state flip after the host record is already
+        durably written. The downside is that an unfinalized recycle
+        leaves the VPS in its still-cancelled state, where it will
+        auto-decommission at end of month -- the operator sees the
+        ``ERROR`` log line and can flip ``deleteAtExpiration=false`` by
+        hand if the host is meant to be long-lived.
         """
         del host_id
         handle = self.ovh_client.get_recycle_handle(vps_ip)
         if handle is None:
             return
-        finalize_recycle(self.ovh_client, handle)
+        try:
+            finalize_recycle(self.ovh_client, handle)
+        except (VpsApiError, MngrError) as e:
+            logger.error(
+                "OVH recycle: finalize_recycle raised for {} after host record was written; "
+                "the VPS may auto-decommission at end of month -- manual un-cancel may be needed. {}",
+                vps_ip,
+                e,
+            )
 
     def _provision_vps(
         self,
@@ -334,10 +352,20 @@ class OvhProvider(VpsDockerProvider):
 
 
 def _iam_region_code(endpoint: str) -> str:
-    """Map a python-ovh endpoint id (``ovh-us``) to the URN's region segment (``us``)."""
+    """Map a python-ovh endpoint id (``ovh-us``) to the URN's region segment (``us``).
+
+    Recognises the ``ovh-*`` family (which is what mngr's OVH backend
+    supports). Raises ``MngrError`` for unrecognised endpoints rather
+    than silently defaulting; a wrong URN region segment makes IAM v2
+    tag operations target a non-existent resource, which would surface
+    as a confusing 404 deep inside the recycle path.
+    """
     if endpoint.startswith("ovh-"):
         return endpoint.removeprefix("ovh-")
-    return "us"
+    raise MngrError(
+        f"Cannot derive IAM URN region from OVH endpoint {endpoint!r}; "
+        "expected an ``ovh-*`` endpoint id (e.g. 'ovh-us', 'ovh-eu', 'ovh-ca')."
+    )
 
 
 class OvhProviderBackend(ProviderBackendInterface):

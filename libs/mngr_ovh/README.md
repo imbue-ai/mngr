@@ -42,6 +42,13 @@ mngr start my-agent
 mngr destroy my-agent
 ```
 
+### Operator inspection
+
+```bash
+mngr ovh list           # show all mngr-tagged OVH VPSes (plan, datacenter, state, expiration, cancel?, IAM tags)
+mngr ovh list --all     # include untagged VPSes too -- useful for sanity-checking the account contents
+```
+
 ## OVH-specific configuration
 
 These fields extend the base `VpsDockerProviderConfig` (see `mngr_vps_docker`):

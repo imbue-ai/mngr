@@ -51,8 +51,6 @@ class _Candidate(FrozenModel):
     service_name: str
     urn: str
     expiration: datetime
-    plan_code: str
-    region: str
 
 
 def try_recycle_cancelled_vps(
@@ -186,22 +184,30 @@ def _select_candidates(
     try:
         all_resources = list_vps_resources_for_provider(client, provider_name=provider_name)
     except (VpsApiError, MngrError) as e:
-        logger.debug("OVH recycle: provider VPS listing failed ({}); falling through", e)
+        # Surface as WARNING (not DEBUG): every ``mngr create`` will silently
+        # fall back to ordering a fresh VPS if discovery is broken, which is
+        # surprising and expensive (OVH bills monthly per VPS). Operators
+        # should see this in normal log output.
+        logger.warning("OVH recycle: provider VPS listing failed ({}); falling through to fresh order", e)
         return []
     if not all_resources:
         return []
-    if len(all_resources) > max_candidates:
-        logger.debug(
-            "OVH recycle: provider has {} tagged VPSes, capping candidates at {}",
-            len(all_resources),
-            max_candidates,
-        )
-        all_resources = all_resources[:max_candidates]
 
     now = datetime.now(timezone.utc)
     threshold = now.timestamp() + safety_margin_hours * 3600
     candidates: list[_Candidate] = []
+    fetched = 0
     for r in all_resources:
+        if fetched >= max_candidates:
+            logger.debug(
+                "OVH recycle: hit max_candidates={} after evaluating {} VPSes; "
+                "stopping selection (eligible candidates so far: {})",
+                max_candidates,
+                fetched,
+                len(candidates),
+            )
+            break
+        fetched += 1
         candidate = _evaluate_candidate(
             client=client,
             resource_name=r.name,
@@ -261,22 +267,14 @@ def _evaluate_candidate(
     state = str(vps.get("state", ""))
     if state not in {"running", "stopped"}:
         return None
-    plan_code = str((vps.get("model") or {}).get("name", ""))
-    if plan_code != requested_plan:
+    if str((vps.get("model") or {}).get("name", "")) != requested_plan:
         return None
-    region = str(vps.get("zone", ""))
     # OVH zone strings embed the datacenter code in lowercase
     # (e.g. ``Region OpenStack: os-us-east-va-vps-1`` for the ``US-EAST-VA``
     # datacenter), so the substring match must be case-insensitive.
-    if requested_region.lower() not in region.lower():
+    if requested_region.lower() not in str(vps.get("zone", "")).lower():
         return None
-    return _Candidate(
-        service_name=resource_name,
-        urn=urn,
-        expiration=expiration,
-        plan_code=plan_code,
-        region=region,
-    )
+    return _Candidate(service_name=resource_name, urn=urn, expiration=expiration)
 
 
 def _try_recycle_one(

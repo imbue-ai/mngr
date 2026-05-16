@@ -112,9 +112,14 @@ class OvhProviderConfig(VpsDockerProviderConfig):
     recycle_max_candidates_considered: int = Field(
         default=10,
         description=(
-            "If more than this many cancelled, tagged VPSes exist, stop trying "
-            "to recycle and fall through to a fresh order. Caps the number of "
-            "per-VPS API round-trips during candidate selection."
+            "Maximum number of provider-tagged VPSes whose serviceInfos / vps "
+            "detail will be fetched during candidate selection on a single "
+            "``mngr create``. Caps per-VPS API round-trips; if every fetched "
+            "VPS is filtered out (e.g. all currently active), recycling falls "
+            "through to a fresh order. Note the cap is applied to the raw "
+            "tagged-VPS list before the cancellation/state/expiration filters "
+            "run, so on accounts with many active mngr-tagged VPSes a "
+            "recyclable candidate further down the list may be missed."
         ),
     )
 

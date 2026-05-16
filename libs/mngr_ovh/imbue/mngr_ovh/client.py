@@ -23,6 +23,7 @@ from pydantic import PrivateAttr
 
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.mngr.errors import MngrError
+from imbue.mngr_ovh._tag_keys import MNGR_RECYCLING_LOCK_TAG_KEY
 from imbue.mngr_ovh.config import OvhProviderConfig
 from imbue.mngr_vps_docker.errors import VpsApiError
 from imbue.mngr_vps_docker.errors import VpsProvisioningError
@@ -51,8 +52,6 @@ _VPS_STATE_MAP: Final[dict[str, VpsInstanceStatus]] = {
 
 _TASK_TERMINAL_STATES: Final[frozenset[str]] = frozenset({"done", "error", "cancelled", "blocked"})
 _TASK_FAILURE_STATES: Final[frozenset[str]] = frozenset({"error", "cancelled", "blocked"})
-
-_MNGR_RECYCLING_LOCK_TAG_KEY: Final[str] = "mngr-recycling-by"
 
 
 class RecycleHandle(FrozenModel):
@@ -221,7 +220,7 @@ class OvhVpsClient(VpsClientInterface):
         if handle is not None:
             logger.info("OVH VPS {} is mid-recycle; releasing recycle lock instead of re-terminating", service_name)
             try:
-                self._call("DELETE", f"/v2/iam/resource/{handle.urn}/tag/{_MNGR_RECYCLING_LOCK_TAG_KEY}")
+                self._call("DELETE", f"/v2/iam/resource/{handle.urn}/tag/{MNGR_RECYCLING_LOCK_TAG_KEY}")
             except VpsApiError as e:
                 if e.status_code != 404:
                     logger.warning("OVH recycle lock release failed for {}: {}", service_name, e)
