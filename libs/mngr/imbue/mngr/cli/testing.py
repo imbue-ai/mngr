@@ -22,17 +22,6 @@ from imbue.mngr.utils.plugin_testing import register_placeholder_agent_type
 from imbue.mngr.utils.testing import get_short_random_string
 
 
-def _ensure_test_agent_type_registered(agent_type: AgentTypeName) -> None:
-    """Register an arbitrary agent-type name as BaseAgent if it is otherwise unknown.
-
-    ``resolve_agent_type`` (and ``host.create_agent_state``, which goes through
-    it) rejects names that are not registered or declared in user config.
-    Test helpers that pass ad-hoc placeholder agent-type names register them
-    on demand here so resolution succeeds for the rest of the test session.
-    """
-    register_placeholder_agent_type(str(agent_type))
-
-
 def create_test_agent(
     local_provider: LocalProviderInstance,
     temp_work_dir: Path,
@@ -65,7 +54,7 @@ def create_test_agent(
     agent_name = AgentName(f"test-agent-{get_short_random_string()}")
     resolved_type = agent_type or AgentTypeName(PLACEHOLDER_AGENT_TYPE)
     if register_agent_type:
-        _ensure_test_agent_type_registered(resolved_type)
+        register_placeholder_agent_type(str(resolved_type))
     resolved_config = agent_config or AgentTypeConfig(command=CommandString("sleep 1000"))
     create_time = datetime.now(timezone.utc)
 
@@ -108,7 +97,7 @@ def create_test_agent_state(host: Host, work_dir: Path, name: str) -> AgentInter
     that need an agent to exist but don't need it running.
     """
     agent_type = AgentTypeName(PLACEHOLDER_AGENT_TYPE)
-    _ensure_test_agent_type_registered(agent_type)
+    register_placeholder_agent_type(str(agent_type))
     options = CreateAgentOptions(
         name=AgentName(name),
         agent_type=agent_type,
