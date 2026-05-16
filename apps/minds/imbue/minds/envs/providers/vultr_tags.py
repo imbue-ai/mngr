@@ -1,13 +1,20 @@
-"""Find and delete Vultr instances belonging to a dynamic dev env.
+"""Find and delete Vultr instances belonging to a minds env.
 
-Dev envs share the dev-tier Vultr API key, so the per-instance attribution
-happens via a tag: every instance the pool-host bake creates for a dev
-env carries ``minds_dev_env=<dev-name>`` in its ``tags`` array. ``minds env
-destroy`` walks that list to enumerate / tear down everything its env owns.
+Per the per-env-data-roots refactor, every Vultr instance the pool-host
+bake creates for a minds env (dev, staging, or any other) carries
+``minds_env=<env-name>`` in its ``tags`` array. ``minds env destroy``
+walks that list to enumerate / tear down everything its env owns.
+
+The tag key was previously ``minds_dev_env`` (dev-env-only) -- it was
+renamed to ``minds_env`` so the same lookup works for any env (dev or
+tier). Existing instances tagged with the old key are orphaned;
+operators can either retag them via the Vultr dashboard or destroy
+them manually.
 
 There is no ``create`` operation here -- pool hosts are still provisioned
-via the existing ``mngr imbue_cloud admin pool create`` flow; this module
-only handles discovery + destruction.
+via the existing ``mngr imbue_cloud admin pool create`` flow, which is
+the layer responsible for applying the tag at instance-create time.
+This module only handles discovery + destruction.
 """
 
 from typing import Final
@@ -24,7 +31,7 @@ from imbue.minds.errors import MindError
 
 _VULTR_API_BASE: Final[str] = "https://api.vultr.com/v2"
 _REQUEST_TIMEOUT_SECONDS: Final[float] = 60.0
-_TAG_KEY: Final[str] = "minds_dev_env"
+_TAG_KEY: Final[str] = "minds_env"
 
 
 class VultrProviderError(MindError):
@@ -81,20 +88,24 @@ def _vultr_request(
         raise VultrProviderError(f"Vultr API returned non-JSON for {method} {url}: {exc}") from exc
 
 
-def dev_env_tag(name: DevEnvName) -> str:
-    """Return the tag string applied to Vultr instances owned by ``name``."""
+def env_tag(name: DevEnvName) -> str:
+    """Return the tag string applied to Vultr instances owned by env ``name``.
+
+    Format: ``minds_env=<env-name>``. Applied at instance-create time by
+    the pool-bake flow; consumed at destroy time by :func:`list_env_instances`.
+    """
     return f"{_TAG_KEY}={name}"
 
 
-def list_dev_env_instances(name: DevEnvName, *, api_key: SecretStr) -> tuple[VultrInstanceSummary, ...]:
-    """Return every Vultr instance carrying this dev env's tag.
+def list_env_instances(name: DevEnvName, *, api_key: SecretStr) -> tuple[VultrInstanceSummary, ...]:
+    """Return every Vultr instance carrying this env's tag.
 
     Walks the paginated ``/instances`` endpoint and filters client-side
     rather than relying on the ``tag`` query param (Vultr's filter is a
     substring match on the tag prefix, which can return false positives
-    for similarly-named dev envs).
+    for similarly-named envs).
     """
-    expected_tag = dev_env_tag(name)
+    expected_tag = env_tag(name)
     matches: list[VultrInstanceSummary] = []
     cursor: str | None = None
     has_more = True

@@ -65,7 +65,7 @@ from imbue.minds.envs.providers.supertokens_app import create_supertokens_app
 from imbue.minds.envs.providers.supertokens_app import delete_supertokens_app
 from imbue.minds.envs.providers.vultr_tags import VultrInstanceSummary
 from imbue.minds.envs.providers.vultr_tags import delete_instances as delete_vultr_instances
-from imbue.minds.envs.providers.vultr_tags import list_dev_env_instances as list_vultr_instances
+from imbue.minds.envs.providers.vultr_tags import list_env_instances as list_vultr_instances
 from imbue.minds.envs.provisioning import DeployedDevEnv
 from imbue.minds.envs.provisioning import DeployedTierEnv
 from imbue.minds.envs.provisioning import ProviderCredentials
