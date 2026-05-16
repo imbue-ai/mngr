@@ -21,10 +21,12 @@ logged in to the ``vault`` CLI.
 import json
 import os
 import shlex
+import shutil
 from pathlib import Path
 from typing import Final
 
 import click
+import httpx
 from loguru import logger
 from pydantic import AnyUrl
 from pydantic import SecretStr
@@ -39,8 +41,11 @@ from imbue.minds.bootstrap import mngr_host_dir_for
 from imbue.minds.bootstrap import mngr_prefix_for
 from imbue.minds.bootstrap import root_name_for_env_name
 from imbue.minds.config.loader import EnvConfigError
+from imbue.minds.config.loader import load_client_config
 from imbue.minds.config.loader import load_deploy_config
 from imbue.minds.config.loader import repo_tier_client_config_path
+from imbue.minds.envs.generation import delete_generation_id as real_delete_generation_id
+from imbue.minds.envs.generation import ensure_generation_id as real_ensure_generation_id
 from imbue.minds.envs.local_store import env_root_exists
 from imbue.minds.envs.mngr_agent_cleanup import real_destroy_mngr_agent
 from imbue.minds.envs.paths import active_env_name_or_none
@@ -219,6 +224,14 @@ def _wipe_neon_db_schema_for_provider(dsn: SecretStr, cg: ConcurrencyGroup) -> N
     real_wipe_neon_db_schema(dsn, parent_cg=cg)
 
 
+def _ensure_generation_id_for_provider(tier_vault_prefix: str, cg: ConcurrencyGroup) -> str:
+    return real_ensure_generation_id(tier_vault_prefix, parent_concurrency_group=cg)
+
+
+def _delete_generation_id_for_provider(tier_vault_prefix: str, cg: ConcurrencyGroup) -> None:
+    real_delete_generation_id(tier_vault_prefix, parent_concurrency_group=cg)
+
+
 def _build_real_providers() -> Providers:
     """Wire the provider modules into the Providers bundle.
 
@@ -244,6 +257,8 @@ def _build_real_providers() -> Providers:
         destroy_mngr_agent=real_destroy_mngr_agent,
         wipe_supertokens_app_data=_wipe_supertokens_for_provider,
         wipe_neon_db_schema=_wipe_neon_db_schema_for_provider,
+        ensure_generation_id=_ensure_generation_id_for_provider,
+        delete_generation_id=_delete_generation_id_for_provider,
     )
 
 
@@ -442,12 +457,20 @@ def env_activate(name: str, create: bool) -> None:
         target.mkdir(parents=True, exist_ok=True)
 
     root_name = root_name_for_env_name(name)
+    config_path = client_config_file(dev_env_name)
     exports = {
         MINDS_ROOT_NAME_ENV_VAR: root_name,
         "MNGR_HOST_DIR": str(mngr_host_dir_for(root_name)),
         "MNGR_PREFIX": mngr_prefix_for(root_name),
-        "MINDS_CLIENT_CONFIG_PATH": str(client_config_file(dev_env_name)),
+        "MINDS_CLIENT_CONFIG_PATH": str(config_path),
     }
+    # Check the tier generation id + auto-wipe local state on mismatch.
+    # Skipped silently when the per-env client.toml doesn't exist yet
+    # (fresh `activate --create` before the first deploy) -- the deploy
+    # then writes both client.toml and an initial generation marker on
+    # success, so subsequent activations have something to compare against.
+    if config_path.is_file():
+        _try_run_generation_check(env_name=name, client_config_path=config_path, env_root=target)
     _print_activation_exports(name=name, exports=exports)
 
 
@@ -486,6 +509,13 @@ def _activate_reserved_env(name: str) -> None:
         "MNGR_PREFIX": mngr_prefix_for(root_name),
         "MINDS_CLIENT_CONFIG_PATH": str(repo_client),
     }
+    # Generation-id check applies to staging (the shared tier where
+    # destroy/redeploy by one dev outdates everyone's local state).
+    # Production destroy is hard-refused so a mismatch there is
+    # impossible -- skip the network round-trip.
+    if name == _STAGING_ENV_NAME:
+        env_root = mngr_host.parent
+        _try_run_generation_check(env_name=name, client_config_path=repo_client, env_root=env_root)
     _print_activation_exports(name=name, exports=exports)
 
 
@@ -493,6 +523,116 @@ def _print_activation_exports(*, name: str, exports: dict[str, str]) -> None:
     write_stdout_line(f'# Activated env {name!r}. Source via: eval "$(uv run minds env activate {name})"')
     for key, value in exports.items():
         write_stdout_line(f"export {key}={shlex.quote(value)}")
+
+
+# Trailing marker file name under each env root. Stores the generation
+# id the dev last saw on this machine for this env, so subsequent
+# activations can detect a tier destroy + redeploy and auto-wipe stale
+# local state. Lives at ``~/.minds-<env-name>/last_seen_generation``.
+_LAST_SEEN_GENERATION_FILE: Final[str] = "last_seen_generation"
+
+# Local-state subdirs the auto-wipe nukes on generation mismatch.
+# Picked to clear everything that points at the (now-gone) old tier:
+# mngr profile (agents, host config, provider sessions), auth (one-time
+# codes, signing key), logs (stale event JSONLs that would seed the
+# next UI with vanished workspaces). The env root itself stays so
+# subsequent commands have somewhere to write.
+_AUTO_WIPED_LOCAL_STATE_SUBDIRS: Final[tuple[str, ...]] = ("mngr", "auth", "logs")
+
+
+def _try_run_generation_check(*, env_name: str, client_config_path: Path, env_root: Path) -> None:
+    """Load ``client_config_path`` -> call the generation check, swallow / log on errors.
+
+    Wrapped here so the activate path never blocks on a misconfigured
+    client config: a parse failure surfaces as a warning + skip rather
+    than tanking activation.
+    """
+    try:
+        client_config = load_client_config(client_config_path)
+    except EnvConfigError as exc:
+        logger.warning(
+            "Could not load {} for generation-id check ({}); skipping the check.",
+            client_config_path,
+            exc,
+        )
+        return
+    _check_generation_id_and_wipe_local_state_on_mismatch(
+        env_name=env_name,
+        connector_url=str(client_config.connector_url).rstrip("/"),
+        env_root=env_root,
+    )
+
+
+def _check_generation_id_and_wipe_local_state_on_mismatch(
+    *,
+    env_name: str,
+    connector_url: str,
+    env_root: Path,
+) -> None:
+    """Fetch ``<connector_url>/generation`` and wipe local state on mismatch.
+
+    Writes diagnostics to stderr (stdout is reserved for shell-sourceable
+    exports). Network or parse errors are logged as warnings and do NOT
+    block activation -- the operator can still go through the rest of
+    the activation, and the next time they activate with a working
+    connector the marker will get reconciled.
+
+    Auto-wipe scope: removes the contents of the subdirs in
+    :data:`_AUTO_WIPED_LOCAL_STATE_SUBDIRS` under ``env_root``. Anything
+    else under the env root (the env's own ``client.toml`` /
+    ``secrets.toml`` for dev envs, plus the new ``last_seen_generation``
+    marker we're about to write) survives so the env stays usable for
+    the operator's next ``mngr create`` / ``minds run``.
+    """
+    marker_path = env_root / _LAST_SEEN_GENERATION_FILE
+    last_seen = marker_path.read_text().strip() if marker_path.is_file() else ""
+
+    url = connector_url.rstrip("/") + "/generation"
+    try:
+        with httpx.Client(timeout=5.0) as client:
+            response = client.get(url)
+        response.raise_for_status()
+        payload = response.json()
+    except (httpx.HTTPError, ValueError) as exc:
+        logger.warning(
+            "Could not fetch {} ({}); skipping generation-id check. Local state may be stale "
+            "if the tier was destroyed since you last activated.",
+            url,
+            exc,
+        )
+        return
+
+    current = payload.get("generation_id") if isinstance(payload, dict) else None
+    if not isinstance(current, str) or not current:
+        # Connector exposed an empty id, meaning the deploy never pushed
+        # one (e.g. pre-generation-lifecycle deploy). Skip the wipe;
+        # operator can re-deploy to start tracking generations.
+        return
+
+    if last_seen == current:
+        # Already up to date. Refresh the marker mtime so file-system
+        # debug tools show a fresh timestamp, but no wipe needed.
+        return
+
+    if last_seen:
+        logger.warning(
+            "Env {!r} generation id changed (was {}, now {}). Wiping local mngr/auth/logs "
+            "state under {} so this shell doesn't see stale agents pointing at the previous "
+            "deploy.",
+            env_name,
+            last_seen,
+            current,
+            env_root,
+        )
+        for subdir in _AUTO_WIPED_LOCAL_STATE_SUBDIRS:
+            target = env_root / subdir
+            if target.exists():
+                shutil.rmtree(target)
+
+    # Write the new marker -- both for the first-time-activation case
+    # (no marker yet) and after a wipe.
+    env_root.mkdir(parents=True, exist_ok=True)
+    marker_path.write_text(current + "\n")
 
 
 @env.command("deactivate")

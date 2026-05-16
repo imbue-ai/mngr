@@ -1466,6 +1466,33 @@ def _append_authorized_key(
 web_app = FastAPI()
 
 
+# Public env var name the deployed connector reads at startup to expose
+# the tier's generation id via ``GET /generation``. The id is minted by
+# ``minds env deploy`` and stored in HCP Vault at
+# ``secrets/minds/<tier>/generation``; the per-tier ``litellm-connector-<tier>``
+# Modal Secret carries it into the container. See
+# ``apps/minds/imbue/minds/envs/generation.py`` for the full lifecycle.
+# Empty when the deploy didn't push one (e.g. an older deploy from
+# before this branch landed) so the endpoint is always callable; the
+# client uses an empty string as "no generation tracked yet".
+_GENERATION_ID_ENV_VAR = "MINDS_TIER_GENERATION_ID"
+
+
+@web_app.get("/generation")
+def get_generation() -> dict[str, str]:
+    """Return the tier generation id minted at ``minds env deploy`` time.
+
+    ``minds env activate <tier>`` polls this on the client side: if the
+    returned id differs from the per-env ``last_seen_generation``
+    marker the dev has on disk, the tier has been destroyed + redeployed
+    since they last activated, and local state needs to be wiped.
+
+    Doesn't require auth -- the generation id is non-sensitive (just a
+    uuid the operator can read off ``minds env list`` or Vault anyway).
+    """
+    return {"generation_id": os.environ.get(_GENERATION_ID_ENV_VAR, "")}
+
+
 @web_app.post("/tunnels")
 def create_tunnel(request: Request, body: CreateTunnelRequest) -> dict[str, object]:
     """Create a tunnel (idempotent) and return its info with token."""

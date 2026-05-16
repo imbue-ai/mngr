@@ -128,3 +128,131 @@ def read_vault_kv(
             )
         result_map[key] = value
     return result_map
+
+
+def write_vault_kv(
+    path: VaultPath,
+    values: dict[str, str],
+    *,
+    parent_concurrency_group: ConcurrencyGroup | None = None,
+    vault_binary: str = VAULT_BINARY,
+) -> None:
+    """Write a flat ``{key: value}`` dict to the KV-v2 entry at ``path``.
+
+    Used by :mod:`imbue.minds.envs.generation` to write the tier
+    generation ID. Mirrors :func:`read_vault_kv`'s subprocess wrapping
+    + auth inheritance. Refuses to pass any value containing the ``@``
+    sigil since ``vault kv put`` would interpret it as a file-path
+    reference -- callers that need to write such values should add a
+    JSON-stdin variant (see ``scripts/push_vault_from_file.py``).
+    """
+    if shutil.which(vault_binary) is None:
+        raise VaultReadError(
+            f"`{vault_binary}` CLI not found on PATH. Install it from "
+            "https://developer.hashicorp.com/vault/install and run `vault login` first."
+        )
+    if not path.startswith(_KV_PATH_PREFIX):
+        raise VaultReadError(
+            f"Vault path {path!r} must start with {_KV_PATH_PREFIX!r}. "
+            "Use the layout `secrets/minds/<tier>/<service>`."
+        )
+    relative = path[len(_KV_PATH_PREFIX) :].lstrip("/")
+    if not relative:
+        raise VaultReadError(f"Vault path {path!r} has no trailing key after the mount prefix.")
+    for key, value in values.items():
+        if value.startswith("@"):
+            raise VaultReadError(
+                f"write_vault_kv cannot write the value for {key!r}: it begins with the `@` "
+                "sigil that `vault kv put` interprets as a file-path reference. Use a "
+                "JSON-stdin variant or strip the leading `@`."
+            )
+
+    command = [
+        vault_binary,
+        "kv",
+        "put",
+        "-format=json",
+        f"-mount={_DEFAULT_MOUNT}",
+        relative,
+        *(f"{k}={v}" for k, v in values.items()),
+    ]
+    subprocess_env = dict(os.environ)
+    subprocess_env.setdefault("VAULT_ADDR", _DEFAULT_VAULT_ADDR)
+    subprocess_env.setdefault("VAULT_NAMESPACE", _DEFAULT_VAULT_NAMESPACE)
+    parent_cg = (
+        parent_concurrency_group if parent_concurrency_group is not None else ConcurrencyGroup(name="vault-kv-put")
+    )
+    cg = (
+        parent_cg.make_concurrency_group(name="vault-kv-put-child")
+        if parent_concurrency_group is not None
+        else parent_cg
+    )
+    try:
+        with cg:
+            result = cg.run_process_to_completion(
+                command=command,
+                timeout=_DEFAULT_TIMEOUT_SECONDS,
+                is_checked_after=False,
+                env=subprocess_env,
+            )
+    except OSError as exc:
+        raise VaultReadError(f"Failed to invoke {vault_binary}: {exc}") from exc
+    if result.returncode != 0:
+        stderr = result.stderr.strip() or result.stdout.strip()
+        raise VaultReadError(f"`{vault_binary} kv put {relative}` failed (exit {result.returncode}): {stderr}")
+
+
+def delete_vault_kv(
+    path: VaultPath,
+    *,
+    parent_concurrency_group: ConcurrencyGroup | None = None,
+    vault_binary: str = VAULT_BINARY,
+) -> None:
+    """Delete the KV-v2 entry at ``path``.
+
+    Idempotent: a 404 / "not found" is treated as success so re-running
+    destroy after a partial failure is safe.
+    """
+    if shutil.which(vault_binary) is None:
+        raise VaultReadError(
+            f"`{vault_binary}` CLI not found on PATH. Install it from "
+            "https://developer.hashicorp.com/vault/install and run `vault login` first."
+        )
+    if not path.startswith(_KV_PATH_PREFIX):
+        raise VaultReadError(
+            f"Vault path {path!r} must start with {_KV_PATH_PREFIX!r}. "
+            "Use the layout `secrets/minds/<tier>/<service>`."
+        )
+    relative = path[len(_KV_PATH_PREFIX) :].lstrip("/")
+    if not relative:
+        raise VaultReadError(f"Vault path {path!r} has no trailing key after the mount prefix.")
+
+    command = [vault_binary, "kv", "metadata", "delete", f"-mount={_DEFAULT_MOUNT}", relative]
+    subprocess_env = dict(os.environ)
+    subprocess_env.setdefault("VAULT_ADDR", _DEFAULT_VAULT_ADDR)
+    subprocess_env.setdefault("VAULT_NAMESPACE", _DEFAULT_VAULT_NAMESPACE)
+    parent_cg = (
+        parent_concurrency_group if parent_concurrency_group is not None else ConcurrencyGroup(name="vault-kv-delete")
+    )
+    cg = (
+        parent_cg.make_concurrency_group(name="vault-kv-delete-child")
+        if parent_concurrency_group is not None
+        else parent_cg
+    )
+    try:
+        with cg:
+            result = cg.run_process_to_completion(
+                command=command,
+                timeout=_DEFAULT_TIMEOUT_SECONDS,
+                is_checked_after=False,
+                env=subprocess_env,
+            )
+    except OSError as exc:
+        raise VaultReadError(f"Failed to invoke {vault_binary}: {exc}") from exc
+    if result.returncode == 0:
+        return
+    message = (result.stderr + result.stdout).lower()
+    if "not found" in message or "no value found" in message or "404" in message:
+        return
+    stderr = result.stderr.strip() or result.stdout.strip()
+    raise VaultReadError(f"`{vault_binary} kv metadata delete {relative}` failed (exit {result.returncode}): {stderr}")

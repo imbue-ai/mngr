@@ -50,6 +50,7 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.minds.config.data_types import ClientEnvConfig
 from imbue.minds.config.data_types import DeployEnvConfig
+from imbue.minds.envs.generation import GENERATION_ID_KEY
 from imbue.minds.envs.local_store import client_config_exists
 from imbue.minds.envs.local_store import delete_env_root
 from imbue.minds.envs.local_store import env_root_exists
@@ -135,6 +136,12 @@ WipeSuperTokensAppFn = Callable[[str, str, SecretStr], None]
 # (dsn, cg) -> None. Used by tier destroys to drop + recreate the
 # ``public`` schema in the Neon DB the DSN points at.
 WipeNeonSchemaFn = Callable[[SecretStr, ConcurrencyGroup], None]
+# (tier_vault_prefix, cg) -> generation_id. Mints + writes if missing,
+# otherwise returns the existing id. Used by tier deploys.
+EnsureGenerationIdFn = Callable[[str, ConcurrencyGroup], str]
+# (tier_vault_prefix, cg) -> None. Removes the generation Vault entry
+# so the next deploy mints a fresh one. Used by tier destroys.
+DeleteGenerationIdFn = Callable[[str, ConcurrencyGroup], None]
 ReadPerEnvSecretValuesFn = Callable[[str, str, dict[str, str], ConcurrencyGroup], dict[str, str]]
 
 
@@ -191,6 +198,18 @@ class Providers(FrozenModel):
         description=(
             "(dsn,) -> DROP SCHEMA public CASCADE; CREATE SCHEMA public; against the DSN. "
             "Used for tier destroys where the Neon DB is operator-managed and must keep its DSN."
+        ),
+    )
+    ensure_generation_id: EnsureGenerationIdFn = Field(
+        description=(
+            "(tier_vault_prefix, cg) -> generation id. Mints + writes a fresh uuid to "
+            "secrets/minds/<tier>/generation if no entry exists; otherwise returns the existing id."
+        ),
+    )
+    delete_generation_id: DeleteGenerationIdFn = Field(
+        description=(
+            "(tier_vault_prefix, cg) -> None. Removes secrets/minds/<tier>/generation so the "
+            "next deploy mints a fresh id (triggers activate-time auto-wipe on every dev's machine)."
         ),
     )
 
@@ -521,7 +540,14 @@ def destroy_tier_env(
     )
     _wipe_neon_for_tier(neon_values, providers=providers, tier=tier, parent_cg=parent_concurrency_group)
 
-    # Step 6: remove the env root LAST, only if every step above succeeded
+    # Step 6: delete the tier generation id from Vault so the next
+    # deploy mints a fresh one (which all devs' next activation
+    # against the tier sees as a mismatch + auto-wipes their local
+    # state).
+    logger.info("Deleting tier {!r} generation id from Vault...", tier)
+    providers.delete_generation_id(tier_vault_prefix, parent_concurrency_group)
+
+    # Step 7: remove the env root LAST, only if every step above succeeded
     # (exceptions from any step propagate up and skip this).
     delete_env_root(name)
 
@@ -599,19 +625,28 @@ def deploy_tier_env(
     modal_env = str(deploy_config.modal_env)
     services = tuple(str(s) for s in deploy_config.secrets.services)
 
+    # Mint (or look up) the tier generation id BEFORE pushing secrets
+    # -- the id rides along in the litellm-connector secret so the
+    # deployed connector can expose it via ``/generation``.
+    generation_id = providers.ensure_generation_id(tier_vault_prefix, parent_concurrency_group)
+    logger.info("Tier {!r} generation id: {}", tier, generation_id)
+
     logger.info(
         "Pushing tier-shared Modal Secrets for tier {!r} into Modal env {!r}...",
         tier,
         modal_env,
     )
     for service in services:
-        # Tier deploys have no per-env overrides: the value the connector /
-        # proxy sees is exactly what's in Vault. ``read_per_env_secret_values``
-        # accepts an empty overrides dict for this case.
+        # Tier deploys have no per-env overrides except the generation
+        # id, which we inject into the litellm-connector secret so the
+        # connector reads MINDS_TIER_GENERATION_ID at startup.
+        overrides: dict[str, str] = {}
+        if service == "litellm-connector":
+            overrides[GENERATION_ID_KEY] = generation_id
         values = providers.read_per_env_secret_values(
             service,
             tier_vault_prefix,
-            {},
+            overrides,
             parent_concurrency_group,
         )
         providers.push_per_env_modal_secret(

@@ -198,6 +198,13 @@ def _build_fake_providers(
         if fail_step == "wipe_neon":
             raise NeonProviderError("neon wipe boom")
 
+    def ensure_generation_id(tier_vault_prefix, cg):
+        call_log["calls"].append(("ensure_generation_id", tier_vault_prefix))
+        return "fake-generation-id"
+
+    def delete_generation_id(tier_vault_prefix, cg):
+        call_log["calls"].append(("delete_generation_id", tier_vault_prefix))
+
     return Providers(
         ensure_modal_env=ensure_modal_env,
         delete_modal_env=delete_modal_env,
@@ -216,6 +223,8 @@ def _build_fake_providers(
         destroy_mngr_agent=destroy_mngr_agent,
         wipe_supertokens_app_data=wipe_supertokens_app_data,
         wipe_neon_db_schema=wipe_neon_db_schema,
+        ensure_generation_id=ensure_generation_id,
+        delete_generation_id=delete_generation_id,
     )
 
 
@@ -824,7 +833,7 @@ def test_destroy_tier_env_refuses_when_supertokens_vault_entry_incomplete(
 
 
 def test_destroy_tier_env_full_step_order(_isolated_home: Path, _root_cg: ConcurrencyGroup) -> None:
-    """End-to-end: agents -> modal stop -> secret delete -> supertokens wipe -> neon wipe -> env root removed."""
+    """End-to-end: agents -> modal stop -> secret delete -> ST wipe -> Neon wipe -> generation delete -> env root removed."""
     staging_root = _isolated_home / ".minds-staging"
     agents_dir = staging_root / "mngr" / "agents"
     agents_dir.mkdir(parents=True)
@@ -848,6 +857,7 @@ def test_destroy_tier_env_full_step_order(_isolated_home: Path, _root_cg: Concur
         "wipe_supertokens_app_data",
         "read_per_env_secret_values",
         "wipe_neon_db_schema",
+        "delete_generation_id",
     ]
     # And env root is gone after the full flow succeeds.
     assert not staging_root.exists()
