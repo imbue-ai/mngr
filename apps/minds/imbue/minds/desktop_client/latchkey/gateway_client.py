@@ -43,11 +43,17 @@ from imbue.imbue_common.mutable_model import MutableModel
 _HEADER_PASSWORD: Final[str] = "X-Latchkey-Gateway-Password"
 _HEADER_PERMISSIONS_OVERRIDE: Final[str] = "X-Latchkey-Gateway-Permissions-Override"
 
-# The follow-stream connection is held open for the lifetime of the
-# desktop-client process; the per-line read timeout has to be ``None``
-# so it does not fire during the (intentional) long quiet periods
-# between requests.
-_FOLLOW_READ_TIMEOUT: Final[httpx.Timeout] = httpx.Timeout(connect=10.0, read=None, write=10.0, pool=10.0)
+# Per-line read timeout on the follow stream. Finite (not ``None``) so
+# the consumer thread can exit promptly on shutdown -- a read=None would
+# leave the consumer wedged inside ``response.iter_lines()`` until the
+# gateway happened to push the next request, which on a clean shutdown
+# is never, and the root concurrency group would then time out waiting
+# for the thread to join. The trade-off is that an idle stream gets torn
+# down and rebuilt every ~2 seconds, which is fine for the local
+# 127.0.0.1 gateway (negligible network cost) and bounds shutdown delay
+# to one read-timeout interval. The consumer's reconnect loop treats a
+# ReadTimeout-driven close as "no work to do", not as an error.
+_FOLLOW_READ_TIMEOUT: Final[httpx.Timeout] = httpx.Timeout(connect=10.0, read=2.0, write=10.0, pool=10.0)
 
 # Short timeout for one-shot POST / DELETE / GET calls.
 _ONE_SHOT_TIMEOUT_SECONDS: Final[float] = 10.0
@@ -131,6 +137,14 @@ class LatchkeyGatewayClient(MutableModel):
         (raising :class:`LatchkeyGatewayClientError` on any HTTP error)
         when the gateway closes the connection or a network error
         terminates the stream.
+
+        ``httpx.ReadTimeout`` is treated specially: the stream uses a
+        finite per-read timeout (see ``_FOLLOW_READ_TIMEOUT``) so the
+        consumer thread can unblock on shutdown, and a timeout therefore
+        means "no events arrived in the polling window" -- not an
+        error. We swallow it and return cleanly so the caller's
+        reconnect loop can decide whether to keep going (idle) or exit
+        (stop event set).
         """
         url = f"{self.base_url.rstrip('/')}/permission-requests"
         params = {"follow": "true"}
@@ -156,6 +170,11 @@ class LatchkeyGatewayClient(MutableModel):
                                 e,
                             )
                             continue
+        except httpx.ReadTimeout:
+            # Idle window -- not an error. Return so the caller's
+            # reconnect loop can check its stop event and either exit or
+            # reconnect promptly without backoff.
+            return
         except httpx.HTTPError as e:
             raise LatchkeyGatewayClientError(f"GET /permission-requests stream failed: {e}") from e
 

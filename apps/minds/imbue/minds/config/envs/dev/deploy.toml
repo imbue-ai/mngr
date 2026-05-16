@@ -1,0 +1,28 @@
+# Dev tier deploy config -- read by `minds env deploy` for any dev env.
+#
+# `modal_workspace` is the dev tier's Modal workspace. The dev tier has
+# no shared Modal environment of its own -- every dev iterates against
+# a *per-developer* Modal environment that takes the activated dev env's
+# name. The `modal_env` field below is unused for dev-tier deploys:
+# `minds env deploy` (with a dev env activated) always pins the Modal
+# env to the activated dev env name. Staging / production deploys are
+# the ones that consume `modal_env`; we leave it at its default ("main")
+# for shape consistency.
+
+modal_workspace = "imbue-minds-dev"
+vault_path_prefix = "secrets/minds/dev"
+cloudflare_domain = "minds-dev.com"
+
+oauth_google_client_id = ""
+oauth_github_client_id = ""
+
+[secrets]
+services = [
+    "cloudflare",
+    "litellm",
+    "litellm-connector",
+    "neon",
+    "paid-accounts",
+    "pool-ssh",
+    "supertokens",
+]

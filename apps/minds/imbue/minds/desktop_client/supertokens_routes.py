@@ -189,6 +189,18 @@ def _get_output_format(request: Request) -> OutputFormat:
     return request.app.state.auth_output_format
 
 
+def _get_connector_url(request: Request) -> str:
+    """Read the connector URL out of the request's loaded client env config.
+
+    The desktop client always populates ``app.state.client_env_config``
+    from a ``--config-file`` (or the build-time default), so this assert
+    fires only in tests that forgot to wire one up.
+    """
+    client_env_config = request.app.state.client_env_config
+    assert client_env_config is not None, "create_desktop_client() was constructed without a client_env_config"
+    return str(client_env_config.connector_url).rstrip("/")
+
+
 def _store_session_from_auth_result(
     session_store: MultiAccountSessionStore,
     result: AuthResult,
@@ -215,7 +227,12 @@ def _store_session_from_auth_result(
 
     # Explicit signin -- always re-enable the provider entry, even if a
     # previous run auto-disabled it after an auth error.
-    if set_imbue_cloud_provider_for_account(result.user.email, force_enable=True):
+    connector_url = _get_connector_url(request)
+    if set_imbue_cloud_provider_for_account(
+        result.user.email,
+        connector_url=connector_url,
+        force_enable=True,
+    ):
         _bounce_forward_observe(request)
 
 
@@ -482,6 +499,7 @@ def _run_oauth_subprocess(
     minds_config: MindsConfig | None,
     output_format: OutputFormat,
     envelope_stream_consumer: EnvelopeStreamConsumer | None,
+    connector_url: str,
 ) -> None:
     """Run ``mngr imbue_cloud auth oauth <provider>`` in a background thread.
 
@@ -513,7 +531,11 @@ def _run_oauth_subprocess(
     if minds_config is not None and minds_config.get_default_account_id() is None:
         minds_config.set_default_account_id(str(result.user_id))
 
-    if set_imbue_cloud_provider_for_account(str(result.email), force_enable=True):
+    if set_imbue_cloud_provider_for_account(
+        str(result.email),
+        connector_url=connector_url,
+        force_enable=True,
+    ):
         if envelope_stream_consumer is not None:
             envelope_stream_consumer.bounce_observe()
 
@@ -581,6 +603,7 @@ def _handle_oauth_redirect(provider_id: str, request: Request) -> Response:
             "minds_config": minds_config,
             "output_format": output_format,
             "envelope_stream_consumer": envelope_stream_consumer,
+            "connector_url": _get_connector_url(request),
         },
         name=f"imbue-cloud-oauth-{provider_id}",
         is_checked=False,

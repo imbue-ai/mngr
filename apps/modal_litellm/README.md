@@ -11,24 +11,25 @@ A serverless [LiteLLM](https://github.com/BerriAI/litellm) proxy deployed as a M
 
 ## Setup
 
-### 1. Push secrets to Modal
+### 1. Deploy (pushes secrets + runs `modal deploy`)
 
 ```bash
-uv run python scripts/push_modal_secrets.py production
+eval "$(uv run minds env activate production)"
+uv run minds env deploy --yes-i-mean-production
 ```
 
-This reads from `.minds/production/litellm.sh` and creates a `litellm-production` Modal secret with:
+`minds env deploy` reads `apps/minds/imbue/minds/config/envs/production/deploy.toml`
+for the Modal workspace + the list of services to push from Vault,
+creates the `litellm-production` Modal secret with:
+
 - `ANTHROPIC_API_KEY` -- for forwarding to Anthropic
 - `DATABASE_URL` -- Neon PostgreSQL connection string
 - `LITELLM_MASTER_KEY` -- admin API key
 
-### 2. Deploy
-
-```bash
-scripts/deploy_litellm.sh production
-```
-
-This runs `uv run modal deploy apps/modal_litellm/app.py` with `MNGR_DEPLOY_ENV=production`.
+and then runs `uv run modal deploy apps/modal_litellm/app.py` with
+`MNGR_DEPLOY_ENV=production`. The `--yes-i-mean-production` flag is
+the mandatory safety bar; substitute `--yes-i-mean-staging` (and
+`activate staging`) for the staging tier.
 
 ### 3. First-time DB migration
 

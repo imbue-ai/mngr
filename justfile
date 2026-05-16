@@ -198,80 +198,68 @@ sync-vendor-mngr fct="$HOME/project/forever-claude-template":
 
 # === Modal deploy / minds iteration helpers ===
 #
-# All of these read per-env config from .minds/<env>/ (gitignored). The
-# `<env>` name is whatever directory you have under .minds/ -- e.g.
-# `production`, `staging`. The matching templates live in .minds/template/.
+# Every recipe below requires an activated minds env. Activate first via
+# `eval "$(uv run minds env activate <name>)"`, then run the recipe in
+# the same shell. Tier (dev / staging / production) is derived from the
+# activated env name -- see `apps/minds/imbue/minds/cli/env.py`.
 
-# Validate that .minds/<env>/*.sh files declare every key the templates
-# declare, and print the modal-secret commands that `push-secrets` would
-# run. Does NOT touch Modal. Run this first when you change a template
-# or add a new per-env file.
-push-secrets-dry-run env="production":
-    uv run scripts/push_modal_secrets.py {{env}} --dry-run
+# Push every tier-shared Vault secret to Modal Secrets AND deploy both
+# Modal apps (litellm-proxy, remote-service-connector) for the activated
+# env. For the dev tier this provisions / re-deploys a per-developer
+# Modal env, Neon DB, and SuperTokens app and writes the result to
+# ~/.minds-<env>/client.toml + secrets.toml. For staging / production
+# (which require --yes-i-mean-<tier>) this only pushes Vault secrets
+# to Modal and runs `modal deploy`; no local files change.
+deploy *args:
+    uv run minds env deploy {{args}}
 
-# Upsert every per-env Modal secret declared in .minds/template/ for the
-# given env. Reads .minds/<env>/<service>.sh and writes <service>-<env>
-# secrets to Modal. Idempotent (uses --force).
-push-secrets env="production":
-    uv run scripts/push_modal_secrets.py {{env}}
-
-# Deploy the remote_service_connector Modal app for the given env.
-# Does NOT push secrets first -- run `just push-secrets <env>` if any
-# .minds/<env>/*.sh files have changed since the last deploy.
-deploy-connector env="production":
-    bash scripts/deploy_remote_service_connector.sh {{env}}
-
-# Deploy the modal_litellm proxy Modal app for the given env.
-# Does NOT push secrets first -- run `just push-secrets <env>` if
-# .minds/<env>/litellm.sh has changed since the last deploy.
-deploy-litellm env="production":
-    bash scripts/deploy_litellm.sh {{env}}
-
-# Push every per-env secret then deploy every Modal app for the given
-# env. Equivalent to push-secrets + deploy-connector + deploy-litellm.
-deploy-all env="production": (push-secrets env) (deploy-connector env) (deploy-litellm env)
-
-# One-shot recipe for dev iteration on the minds stack. Combines the
-# vendor/mngr sync and the Electron launch into a single command so the
-# very first Create after starting the app picks up your local mngr code
-# rather than whatever stale snapshot the FCT worktree was created from.
+# Start the minds desktop client (electron) in dev mode against the
+# activated env. Sources .env (for ANTHROPIC_API_KEY etc.) and sets
+# MINDS_WORKSPACE_* env vars so the create-form auto-fills "repository",
+# "name", and "branch":
+#   MINDS_WORKSPACE_GIT_URL = .external_worktrees/forever-claude-template/
+#       (REQUIRED -- recipe fails if missing; create the worktree with
+#       `git -C ~/project/forever-claude-template worktree add` before
+#       running minds-start).
+#   MINDS_WORKSPACE_BRANCH  = the FCT worktree's current branch.
+#   MINDS_WORKSPACE_NAME    = "mindtest".
 #
-# Why the sync step is necessary on EVERY startup:
-#   The desktop client's Create flow (apps/minds/.../agent_creator.py)
-#   rsyncs the FCT worktree (including vendor/mngr/) into a temp clone
-#   and ships THAT into the Docker container. mngr inside the container
-#   is editable-installed from /code/vendor/mngr/. So if vendor/mngr/ in
-#   the worktree is older than the mngr code you actually want to test
-#   (e.g. a new field you added to settings.toml), the container's mngr
-#   will reject your settings and the bootstrap's chat-agent create call
-#   will fail. The user-visible symptom is an empty workspace with "No
-#   conversation data" in the chat panel. Re-syncing on every startup
-#   makes the first Create work without a follow-up propagate_changes.
+# Always re-syncs the live mngr working tree into the FCT worktree's
+# vendor/mngr/ first, so the very first Create after starting the app
+# picks up your local mngr code rather than whatever stale snapshot the
+# FCT worktree was created from. Uses rsync (vs `just sync-vendor-mngr`'s
+# git archive) so uncommitted mngr changes flow through and the FCT
+# worktree's git state stays as a normal diff.
 #
-# Why rsync (not `git archive` like `just sync-vendor-mngr`):
-#   - rsync carries uncommitted mngr changes through, so you don't have
-#     to commit just to test something.
-#   - rsync leaves the FCT worktree's git state as a normal diff (visible
-#     to `git status`) instead of creating a commit you'd then have to
-#     undo. Use `just sync-vendor-mngr` for the release-flow sync that
-#     does want to commit.
+# Requires that you've activated a minds env in this shell first --
+# `eval "$(uv run minds env activate <your-user>-dev)"` is the typical
+# dev case. Refuses without activation so the recipe never silently
+# writes to the wrong env's data root.
 #
-# Why MINDS_ROOT_NAME=devminds:
-#   Keeps dev state under ~/.devminds/ (separate from prod ~/.minds/) so
-#   running this recipe doesn't clobber the prod minds profile and the
-#   minds bootstrap derives MNGR_HOST_DIR / MNGR_PREFIX correctly.
-#
-# Override agent_name / branch via positional args -- they're forwarded
-# verbatim to `just minds-start`:
-#   just devminds-start agent_name=foo branch=some-branch
-devminds-start agent_name="mindtest" branch="":
+# Override agent_name / branch via positional args:
+#   just minds-start agent_name=foo branch=some-branch
+# Refuses to start if another minds-start is already running in this
+# worktree (PID file under /tmp keyed by worktree path). Use `just
+# minds-stop` to kill the running instance first.
+minds-start agent_name="mindtest" branch="":
     #!/bin/bash
     set -ueo pipefail
+    if [ -z "${MINDS_ROOT_NAME:-}" ]; then
+        echo "error: no minds env activated in this shell." >&2
+        echo "       Run \`eval \"\$(uv run minds env activate <name>)\"\` first" >&2
+        echo "       (e.g. \`<your-user>-dev\` for your personal dev env), then" >&2
+        echo "       re-run \`just minds-start\` from the same shell." >&2
+        echo "" >&2
+        echo "       Without activation, an inherited MNGR_HOST_DIR from the parent" >&2
+        echo "       shell would silently win and minds would read a different mngr" >&2
+        echo "       settings.toml than its bootstrap writes to." >&2
+        exit 2
+    fi
     fct_wt="$(pwd)/.external_worktrees/forever-claude-template"
     if [ ! -e "$fct_wt/.git" ]; then
         echo "error: no FCT worktree at $fct_wt" >&2
         echo "       run \`git -C ~/project/forever-claude-template worktree add -b <branch> $fct_wt <base>\`" >&2
-        echo "       (e.g. base = josh/start-minds) before re-running devminds-start." >&2
+        echo "       (e.g. base = josh/start-minds) before re-running minds-start." >&2
         exit 2
     fi
     vendor_mngr="$fct_wt/vendor/mngr"
@@ -294,37 +282,6 @@ devminds-start agent_name="mindtest" branch="":
         --exclude=.git \
         --exclude=uv.lock \
         ./ "$vendor_mngr/"
-    export MINDS_ROOT_NAME=devminds
-    # Delegate to minds-start to keep the env-loading / MINDS_WORKSPACE_*
-    # setup / PID-file gating logic in one place.
-    just minds-start "{{agent_name}}" "{{branch}}"
-
-# Start the minds desktop client (electron) in dev mode.
-# Sources .env (for ANTHROPIC_API_KEY etc.) and sets MINDS_WORKSPACE_*
-# env vars so the create-form auto-fills "repository", "name", and
-# "branch":
-#   MINDS_WORKSPACE_GIT_URL = .external_worktrees/forever-claude-template/
-#       (REQUIRED -- recipe fails if missing; create the worktree with
-#       `git -C ~/project/forever-claude-template worktree add` before
-#       running minds-start).
-#   MINDS_WORKSPACE_BRANCH  = the FCT worktree's current branch.
-#   MINDS_WORKSPACE_NAME    = "mindtest".
-# Override agent_name / branch via positional args:
-#   just minds-start agent_name=foo branch=some-branch
-# Refuses to start if another minds-start is already running in this
-# worktree (PID file under /tmp keyed by worktree path). Use `just
-# minds-stop` to kill the running instance first.
-minds-start agent_name="mindtest" branch="":
-    #!/bin/bash
-    set -ueo pipefail
-    if [ -z "${MINDS_ROOT_NAME:-}" ]; then
-        echo "error: MINDS_ROOT_NAME is not set." >&2
-        echo "       Add \`export MINDS_ROOT_NAME=devminds\` (or your chosen root name) to your ~/.bashrc" >&2
-        echo "       so that minds bootstrap can derive MNGR_HOST_DIR / MNGR_PREFIX correctly." >&2
-        echo "       Without an explicit MINDS_ROOT_NAME, an inherited MNGR_HOST_DIR from the parent" >&2
-        echo "       shell wins and minds reads a different mngr settings.toml than its bootstrap writes." >&2
-        exit 2
-    fi
     pid_file="/tmp/minds-start-$(echo -n "$PWD" | sha1sum | cut -c1-12).pid"
     if [ -f "$pid_file" ]; then
         existing=$(cat "$pid_file" 2>/dev/null || echo "")
@@ -464,15 +421,24 @@ minds-build:
 # into a running Docker agent's container, then restart the agent and the
 # desktop client. Wraps apps/minds/scripts/propagate_changes by auto-
 # discovering the agent's Docker SSH port (via `docker port`) and the
-# minds-side SSH key (under MNGR_HOST_DIR's profiles/.../docker/.../keys/).
-# Defaults MNGR_HOST_DIR to ~/.minds/mngr (production minds); pass
-# mngr_host_dir=$HOME/.devminds/mngr if you're on a dev profile.
-propagate-changes agent_name mngr_host_dir="$HOME/.minds/mngr":
+# minds-side SSH key (under the activated env's MNGR_HOST_DIR's
+# profiles/.../docker/.../keys/).
+#
+# Requires an activated minds env: reads MNGR_HOST_DIR from the shell
+# (set by `minds env activate`). Refuses without activation so this
+# recipe never silently targets the wrong env's docker keys.
+propagate-changes agent_name:
     #!/bin/bash
     set -ueo pipefail
+    if [ -z "${MNGR_HOST_DIR:-}" ]; then
+        echo "error: MNGR_HOST_DIR is not set. Run" >&2
+        echo "       \`eval \"\$(uv run minds env activate <name>)\"\` first" >&2
+        echo "       then re-run \`just propagate-changes ${1}\` from the same shell." >&2
+        exit 2
+    fi
     agent_name="{{agent_name}}"
-    mngr_host_dir="{{mngr_host_dir}}"
-    container_name="mngr-${agent_name}-host"
+    mngr_host_dir="${MNGR_HOST_DIR}"
+    container_name="${MNGR_PREFIX:-mngr-}${agent_name}-host"
     if ! docker inspect "$container_name" >/dev/null 2>&1; then
         echo "error: no docker container named '$container_name'" >&2
         echo "       run \`docker ps\` to see running containers" >&2
@@ -487,15 +453,14 @@ propagate-changes agent_name mngr_host_dir="$HOME/.minds/mngr":
     keys=$(find "$mngr_host_dir/profiles" -path "*/docker/*/keys/docker_ssh_key" 2>/dev/null || true)
     if [ -z "$keys" ]; then
         echo "error: no docker_ssh_key found under $mngr_host_dir/profiles" >&2
-        echo "       try mngr_host_dir=\$HOME/.devminds/mngr if you're on a dev profile," >&2
-        echo "       or pass mngr_host_dir=<custom path>." >&2
+        echo "       (is the right minds env activated for this agent?)" >&2
         exit 2
     fi
     key_count=$(echo "$keys" | wc -l)
     if [ "$key_count" -gt 1 ]; then
         echo "error: multiple docker_ssh_key files found under $mngr_host_dir/profiles:" >&2
         echo "$keys" >&2
-        echo "       narrow with mngr_host_dir=<more specific path>." >&2
+        echo "       narrow the activated env if you have multiple envs sharing one host_dir." >&2
         exit 2
     fi
     key="$keys"
@@ -511,18 +476,18 @@ propagate-changes agent_name mngr_host_dir="$HOME/.minds/mngr":
 # resulting public hostname. Idempotent: tunnels create returns the
 # existing tunnel if one already exists; service add no-ops if the same
 # DNS+target is already registered.
-# Forward system_interface for a minds-profile agent.
-forward-minds-system-interface agent_name: (_forward-system-interface agent_name "$HOME/.minds/mngr" "minds-")
-
-# Same as forward-minds-system-interface but for the dev (devminds) profile.
-forward-devminds-system-interface agent_name: (_forward-system-interface agent_name "$HOME/.devminds/mngr" "devminds-")
-
-[private]
-_forward-system-interface agent_name mngr_host_dir mngr_prefix:
+#
+# Requires an activated minds env: reads MNGR_HOST_DIR / MNGR_PREFIX from
+# the shell (set by `minds env activate`).
+forward-system-interface agent_name:
     #!/bin/bash
     set -ueo pipefail
-    export MNGR_HOST_DIR="{{mngr_host_dir}}"
-    export MNGR_PREFIX="{{mngr_prefix}}"
+    if [ -z "${MNGR_HOST_DIR:-}" ] || [ -z "${MNGR_PREFIX:-}" ]; then
+        echo "error: MNGR_HOST_DIR / MNGR_PREFIX are not set. Run" >&2
+        echo "       \`eval \"\$(uv run minds env activate <name>)\"\` first" >&2
+        echo "       then re-run \`just forward-system-interface ${1}\` from the same shell." >&2
+        exit 2
+    fi
     AGENT_NAME="{{agent_name}}"
 
     # Resolve agent name to its full agent_id from local mngr state. The

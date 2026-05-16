@@ -515,11 +515,12 @@ def _remote_host_env_flags() -> list[str]:
     Remote containers always store their mngr state under ``/mngr`` (the
     conventional container-internal path -- this is also what
     ``_REMOTE_HOST_DIR`` in ``runner.py`` looks for when writing reverse-tunnel
-    API URLs), independent of the local ``MNGR_HOST_DIR`` (which could be
-    ``~/.minds/mngr`` or ``~/.devminds/mngr``). We only propagate
-    ``MNGR_PREFIX`` so the inner mngr's tmux/session names match the local
-    ones, avoiding confusion when the same name has to refer to the "same"
-    thing on both sides.
+    API URLs), independent of the local ``MNGR_HOST_DIR`` (which could
+    be ``~/.minds/mngr`` for production or ``~/.minds-<env-name>/mngr``
+    for any other activated env). We only propagate ``MNGR_PREFIX`` so
+    the inner mngr's tmux/session names match the local ones, avoiding
+    confusion when the same name has to refer to the "same" thing on
+    both sides.
     """
     return [
         "--host-env",

@@ -428,8 +428,46 @@ def cf_list_all_pages(client: httpx.Client, url: str, params: dict[str, str]) ->
 # --- Tunnel operations ---
 
 
+# Env var the deployed connector reads at startup to identify which
+# minds env it belongs to. The value is pushed by ``minds env deploy``
+# into the per-tier ``litellm-connector-<tier>`` Modal Secret. For
+# dev-tier deploys this is the per-developer dev env name (e.g.
+# ``josh-3``); for tier deploys it's the tier itself (``staging`` /
+# ``production``). Used to tag every Cloudflare tunnel the connector
+# creates so the destroy-side can enumerate + delete only the tunnels
+# belonging to a specific minds env -- without it, deleting tunnels
+# would have to walk every tunnel on the dev-tier CF account
+# (potentially clobbering other devs' tunnels).
+_MINDS_ENV_NAME_VAR = "MINDS_ENV_NAME"
+
+
+def _current_minds_env_name() -> str:
+    """Return the value of ``MINDS_ENV_NAME`` or empty string.
+
+    Empty when the deploy didn't push one (e.g. a pre-this-branch
+    deploy). Callers must treat the empty case as "no env tag" -- the
+    tunnel will still be creatable, just without env-aware destroy
+    cleanup metadata.
+    """
+    return os.environ.get(_MINDS_ENV_NAME_VAR, "")
+
+
 def cf_create_tunnel(client: httpx.Client, account_id: str, name: str) -> dict[str, Any]:
-    response = client.post(f"/accounts/{account_id}/cfd_tunnel", json={"name": name, "config_src": "cloudflare"})
+    """Create a Cloudflare tunnel + tag it with the minds env name in metadata.
+
+    The ``metadata`` field on ``cfd_tunnel`` POST accepts arbitrary
+    string-keyed values; we shove ``{"env": "<minds-env-name>"}`` in so
+    ``minds env destroy`` can later filter the tier's tunnels by env.
+    Empty env_name still creates the tunnel (back-compat with older
+    connector deploys); destroy then filters by exact match, so empty
+    means "doesn't match any env" -- the operator can clean those up
+    manually.
+    """
+    body: dict[str, Any] = {"name": name, "config_src": "cloudflare"}
+    env_name = _current_minds_env_name()
+    if env_name:
+        body["metadata"] = {"env": env_name}
+    response = client.post(f"/accounts/{account_id}/cfd_tunnel", json=body)
     return cf_check(response)["result"]
 
 
@@ -1466,6 +1504,33 @@ def _append_authorized_key(
 web_app = FastAPI()
 
 
+# Public env var name the deployed connector reads at startup to expose
+# the tier's generation id via ``GET /generation``. The id is minted by
+# ``minds env deploy`` and stored in HCP Vault at
+# ``secrets/minds/<tier>/generation``; the per-tier ``litellm-connector-<tier>``
+# Modal Secret carries it into the container. See
+# ``apps/minds/imbue/minds/envs/generation.py`` for the full lifecycle.
+# Empty when the deploy didn't push one (e.g. an older deploy from
+# before this branch landed) so the endpoint is always callable; the
+# client uses an empty string as "no generation tracked yet".
+_GENERATION_ID_ENV_VAR = "MINDS_TIER_GENERATION_ID"
+
+
+@web_app.get("/generation")
+def get_generation() -> dict[str, str]:
+    """Return the tier generation id minted at ``minds env deploy`` time.
+
+    ``minds env activate <tier>`` polls this on the client side: if the
+    returned id differs from the per-env ``last_seen_generation``
+    marker the dev has on disk, the tier has been destroyed + redeployed
+    since they last activated, and local state needs to be wiped.
+
+    Doesn't require auth -- the generation id is non-sensitive (just a
+    uuid the operator can read off ``minds env list`` or Vault anyway).
+    """
+    return {"generation_id": os.environ.get(_GENERATION_ID_ENV_VAR, "")}
+
+
 @web_app.post("/tunnels")
 def create_tunnel(request: Request, body: CreateTunnelRequest) -> dict[str, object]:
     """Create a tunnel (idempotent) and return its info with token."""
@@ -2394,18 +2459,25 @@ image = modal.Image.debian_slim().pip_install(
 app = modal.App(name=f"remote-service-connector-{_DEPLOY_ENV}", image=image)
 
 
-# Modal URLs follow ``{workspace}--{app-name}-{function-name}.modal.run``, with
-# underscores in identifiers normalized to hyphens. For this deployment that's
-# ``joshalbrecht--remote-service-connector-<env>-fastapi-app.modal.run``. This
-# fallback is only used when AUTH_WEBSITE_DOMAIN is not set in the secret; in
-# practice we set it explicitly from ``.minds/<env>/supertokens.sh``.
-_MODAL_WORKSPACE = "joshalbrecht"
-_DEFAULT_CONNECTOR_DOMAIN = f"https://{_MODAL_WORKSPACE}--remote-service-connector-{_DEPLOY_ENV}-fastapi-app.modal.run"
-
-
 def _get_auth_website_domain() -> str:
-    """Return the public URL used in outbound email links (verification, reset)."""
-    return os.environ.get("AUTH_WEBSITE_DOMAIN", _DEFAULT_CONNECTOR_DOMAIN)
+    """Return the public URL used in outbound email links (verification, reset).
+
+    Reads ``AUTH_WEBSITE_DOMAIN`` from the per-tier ``supertokens-<env>``
+    Modal secret. The value is **required**: it is the URL embedded into
+    password-reset and email-verification links, and it must match the
+    workspace this app is actually deployed under. Raises
+    :class:`RuntimeError` if the secret forgot to set it -- silently
+    falling back to a hardcoded workspace would be wrong for every
+    non-default tier.
+    """
+    value = os.environ.get("AUTH_WEBSITE_DOMAIN")
+    if not value:
+        raise RuntimeError(
+            "AUTH_WEBSITE_DOMAIN is not set. Populate it in the "
+            f"`supertokens-{_DEPLOY_ENV}` Modal secret (the deploy script "
+            "pushes it from the tier's Vault entry)."
+        )
+    return value
 
 
 def _build_oauth_providers() -> list[ProviderInput]:
