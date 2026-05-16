@@ -55,10 +55,6 @@ class VpsDockerProviderConfig(ProviderInstanceConfig):
         default="vc2-1c-1gb",
         description="Default VPS plan (CPU/RAM specification)",
     )
-    default_os_id: int = Field(
-        default=2136,
-        description="Default VPS OS image ID (2136 = Debian 12 x64)",
-    )
     default_start_args: tuple[str, ...] = Field(
         default=(),
         description="Default docker run arguments applied to all containers",

@@ -29,7 +29,6 @@ class VpsHostConfig(HostConfig):
     vps_instance_id: VpsInstanceId = Field(description="Provider-specific VPS instance ID")
     region: str = Field(description="Region where the VPS was created")
     plan: str = Field(description="VPS plan (CPU/RAM specification)")
-    os_id: int = Field(description="OS image ID used to create the VPS")
     start_args: tuple[str, ...] = Field(default=(), description="Docker run arguments for replay on snapshot restore")
     image: str | None = Field(default=None, description="Docker image used for the container")
     container_name: str = Field(description="Docker container name on the VPS")

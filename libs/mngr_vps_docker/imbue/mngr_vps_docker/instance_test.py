@@ -12,7 +12,6 @@ from imbue.mngr_vps_docker.instance import _resolve_dockerfile_paths
 
 _DEFAULT_REGION = "ewr"
 _DEFAULT_PLAN = "vc2-1c-1gb"
-_DEFAULT_OS_ID = 2136
 
 
 def _parse_with_defaults(build_args: list[str] | None) -> _ParsedVpsBuildOptions:
@@ -20,7 +19,6 @@ def _parse_with_defaults(build_args: list[str] | None) -> _ParsedVpsBuildOptions
         build_args,
         default_region=_DEFAULT_REGION,
         default_plan=_DEFAULT_PLAN,
-        default_os_id=_DEFAULT_OS_ID,
     )
 
 
@@ -28,7 +26,6 @@ def test_parse_build_args_defaults_when_none() -> None:
     parsed = _parse_with_defaults(None)
     assert parsed.region == "ewr"
     assert parsed.plan == "vc2-1c-1gb"
-    assert parsed.os_id == 2136
     assert parsed.docker_build_args == ()
     assert parsed.git_depth is None
 
@@ -37,7 +34,6 @@ def test_parse_build_args_defaults_when_empty() -> None:
     parsed = _parse_with_defaults([])
     assert parsed.region == "ewr"
     assert parsed.plan == "vc2-1c-1gb"
-    assert parsed.os_id == 2136
     assert parsed.docker_build_args == ()
 
 
@@ -45,18 +41,12 @@ def test_parse_build_args_vps_region() -> None:
     parsed = _parse_with_defaults(["--vps-region=lax"])
     assert parsed.region == "lax"
     assert parsed.plan == "vc2-1c-1gb"
-    assert parsed.os_id == 2136
     assert parsed.docker_build_args == ()
 
 
 def test_parse_build_args_vps_plan() -> None:
     parsed = _parse_with_defaults(["--vps-plan=vc2-2c-4gb"])
     assert parsed.plan == "vc2-2c-4gb"
-
-
-def test_parse_build_args_vps_os() -> None:
-    parsed = _parse_with_defaults(["--vps-os=9999"])
-    assert parsed.os_id == 9999
 
 
 def test_parse_build_args_docker_args_passthrough() -> None:
@@ -71,23 +61,27 @@ def test_parse_build_args_mixed_vps_and_docker() -> None:
     )
     assert parsed.region == "lax"
     assert parsed.plan == "vc2-2c-4gb"
-    assert parsed.os_id == 2136
     assert parsed.docker_build_args == ("--file=Dockerfile", ".")
 
 
 def test_parse_build_args_all_vps_overrides() -> None:
     parsed = _parse_with_defaults(
-        ["--vps-region=sjc", "--vps-plan=vc2-4c-8gb", "--vps-os=1234"],
+        ["--vps-region=sjc", "--vps-plan=vc2-4c-8gb"],
     )
     assert parsed.region == "sjc"
     assert parsed.plan == "vc2-4c-8gb"
-    assert parsed.os_id == 1234
     assert parsed.docker_build_args == ()
 
 
 def test_parse_build_args_rejects_unknown_vps_arg() -> None:
     with pytest.raises(MngrError, match="Unknown VPS build arg.*--vps-regiom"):
         _parse_with_defaults(["--vps-regiom=ewr"])
+
+
+def test_parse_build_args_rejects_dropped_vps_os_arg() -> None:
+    """--vps-os= was a Vultr-specific knob; now rejected like any other unknown --vps- arg."""
+    with pytest.raises(MngrError, match="Unknown VPS build arg.*--vps-os"):
+        _parse_with_defaults(["--vps-os=9999"])
 
 
 def test_parse_build_args_git_depth() -> None:

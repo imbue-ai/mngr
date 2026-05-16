@@ -84,9 +84,10 @@ class VultrProviderBackend(ProviderBackendInterface):
             "VPS-specific args (consumed by provider, not passed to docker):\n"
             "  --vps-region=REGION  Vultr region (default: ewr)\n"
             "  --vps-plan=PLAN      Vultr plan (default: vc2-2c-4gb)\n"
-            "  --vps-os=OS_ID       Vultr OS ID (default: 2136 = Debian 12 x64)\n"
             "  --git-depth=N        Shallow-clone build context to depth N before upload\n"
             "\n"
+            "OS image is set via default_os_id on the provider config (Debian 12 x64 by\n"
+            "default); per-host overrides are not supported via build args.\n"
             "All other build args are passed to 'docker build' on the VPS.\n"
             "Example: -b --vps-plan=vc2-2c-4gb -b --file=Dockerfile -b .\n"
         )
@@ -111,7 +112,7 @@ class VultrProviderBackend(ProviderBackendInterface):
             # The provider will be discoverable but discovery operations will
             # return empty results and log a warning when the API is called.
             api_key = ""
-        vultr_client = VultrVpsClient(api_key=SecretStr(api_key))
+        vultr_client = VultrVpsClient(api_key=SecretStr(api_key), os_id=config.default_os_id)
 
         return VultrProvider(
             name=name,

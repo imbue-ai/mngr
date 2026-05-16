@@ -188,19 +188,11 @@ class AwsVpsClient(VpsClientInterface):
         label: str,
         region: str,
         plan: str,
-        os_id: int,
         user_data: str,
         ssh_key_ids: Sequence[str],
         tags: Sequence[str],
     ) -> VpsInstanceId:
-        """Provision an EC2 instance using the client's configured AMI.
-
-        ``os_id`` is ignored — AMIs are strings on AWS and live on the
-        client (``self.ami_id``) and config rather than the interface. To
-        override the AMI per-create, instantiate a separate client.
-        """
-        # ``os_id`` is unused on AWS (AMIs are strings, lookup is on ``self.ami_id``).
-        del os_id
+        """Provision an EC2 instance using the client's configured AMI."""
         if region != self.region:
             raise VpsApiError(
                 400,

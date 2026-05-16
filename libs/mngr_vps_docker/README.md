@@ -58,8 +58,11 @@ The base config (`VpsDockerProviderConfig`) provides these settings:
 | `container_ssh_port` | 2222 | Container sshd port exposed on VPS |
 | `default_region` | `ewr` | Default VPS region |
 | `default_plan` | `vc2-1c-1gb` | Default VPS plan |
-| `default_os_id` | 2136 | Default OS image (Debian 12 x64) |
 | `default_start_args` | `()` | Default `docker run` arguments |
+
+OS image selection is provider-specific (Vultr's `default_os_id`, AWS's
+`default_ami_id` / `default_ami_by_region`) and lives on each provider's
+config, not on this shared base.
 
 ## Build and start args
 
@@ -69,7 +72,6 @@ Build args (`-b`) serve two purposes: VPS provisioning and Docker image building
 ```
 --vps-region=ewr          # VPS region
 --vps-plan=vc2-2c-4gb     # VPS plan (CPU/RAM)
---vps-os=2136             # VPS OS ID
 ```
 
 **All other build args** are passed through to `docker build` on the VPS. This follows the same pattern as the Docker provider:

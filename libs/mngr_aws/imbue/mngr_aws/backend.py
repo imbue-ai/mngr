@@ -106,15 +106,15 @@ class AwsProviderBackend(ProviderBackendInterface):
     @staticmethod
     def get_build_args_help() -> str:
         return (
-            "VPS-specific args (consumed by provider, not passed to docker):\n"
+            "EC2-specific args (consumed by provider, not passed to docker):\n"
             "  --vps-region=REGION  AWS region (default: us-east-1)\n"
             "  --vps-plan=TYPE      EC2 instance type (default: t3.small)\n"
             "  --git-depth=N        Shallow-clone build context to depth N before upload\n"
             "\n"
-            "AMI selection is taken from the provider config (default_ami_id /\n"
-            "default_ami_by_region) for v1; per-host AMI override is a future improvement.\n"
+            "AMI is taken from the provider config (default_ami_id / default_ami_by_region);\n"
+            "per-host AMI overrides are not supported via build args.\n"
             "\n"
-            "All other build args are passed to 'docker build' on the VPS.\n"
+            "All other build args are passed to 'docker build' on the EC2 instance.\n"
             "Example: -b --vps-plan=t3.medium -b --file=Dockerfile -b .\n"
         )
 

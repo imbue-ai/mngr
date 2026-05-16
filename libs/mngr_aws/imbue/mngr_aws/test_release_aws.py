@@ -7,9 +7,17 @@ and are double-gated:
 - AWS credentials must be available (env vars, profile, or instance role)
 - ``MNGR_AWS_RELEASE_TESTS=1`` must be set explicitly
 
-A session-scoped autouse fixture force-terminates any leftover instances
-matching the test naming convention older than 1 hour, providing a
-backstop against leaked resources from previous runs.
+Three layers of damage control prevent leaked EC2 cost (see
+``conftest.py`` in this package for the full picture):
+
+1. Each test's ``finally`` calls ``mngr destroy --force``.
+2. ``pytest_sessionfinish`` in ``conftest.py`` force-terminates any
+   instance still tagged with the test name prefix at session end and
+   fails the session.
+3. ``MNGR_AWS_AUTO_SHUTDOWN_MINUTES=60`` is propagated into cloud-init,
+   triggering ``shutdown -P +60`` on each test instance. Combined with
+   ``InstanceInitiatedShutdownBehavior=terminate``, this auto-terminates
+   the instance from the inside even if pytest itself is killed.
 
 Run manually:
 
@@ -21,26 +29,20 @@ Run manually:
 import os
 import subprocess
 import time
-from collections.abc import Iterator
-from datetime import datetime
-from datetime import timedelta
-from datetime import timezone
 from typing import Final
 
 import boto3
 import pytest
-from botocore.exceptions import BotoCoreError
-from botocore.exceptions import ClientError
 
 from imbue.mngr_aws.client import AwsVpsClient
+from imbue.mngr_aws.conftest import AWS_TEST_NAME_PREFIX
 
 _AWS_CREDS_PRESENT = bool(os.environ.get("AWS_ACCESS_KEY_ID")) or bool(os.environ.get("AWS_PROFILE"))
 _OPT_IN = os.environ.get("MNGR_AWS_RELEASE_TESTS") == "1"
 _AWS_REGION = os.environ.get("AWS_REGION", "us-east-1")
-_TEST_LEAK_TTL = timedelta(hours=1)
-_TEST_NAME_PREFIX = "test-aws-"
+_TEST_NAME_PREFIX = AWS_TEST_NAME_PREFIX
 # Belt-and-suspenders backstop against runaway EC2 cost: even if pytest is
-# killed and ``cleanup_leaked_instances`` never runs, this TTL drives cloud-init
+# killed and the session-end leak detector never runs, this TTL drives cloud-init
 # to schedule ``shutdown -P +N`` which (combined with the AWS launch flag
 # ``InstanceInitiatedShutdownBehavior=terminate``) terminates the instance from
 # the inside. 60 min is conservatively above any normal test run length.
@@ -54,44 +56,6 @@ pytestmark = [
         reason="AWS credentials or MNGR_AWS_RELEASE_TESTS=1 not set",
     ),
 ]
-
-
-@pytest.fixture(scope="session", autouse=True)
-def cleanup_leaked_instances() -> Iterator[None]:
-    """After the session, force-terminate any leftover test instances older than 1h.
-
-    Guards against leaked EC2 instances from previously-killed test runs. Only
-    targets instances whose ``Name`` tag begins with the test-name prefix.
-
-    Gated on the same condition as the test ``skipif`` (credentials present
-    *and* opt-in set) so that a "creds missing, opt-in set" run skips tests
-    silently rather than failing the session inside this teardown trying to
-    call AWS without credentials.
-    """
-    yield
-    if not (_AWS_CREDS_PRESENT and _OPT_IN):
-        return
-    try:
-        session = boto3.Session(region_name=_AWS_REGION)
-        ec2 = session.client("ec2", region_name=_AWS_REGION)
-        cutoff = datetime.now(timezone.utc) - _TEST_LEAK_TTL
-        leaked: list[str] = []
-        paginator = ec2.get_paginator("describe_instances")
-        for page in paginator.paginate(
-            Filters=[
-                {"Name": "instance-state-name", "Values": ["pending", "running", "stopping", "stopped"]},
-                {"Name": "tag:Name", "Values": [f"mngr-{_TEST_NAME_PREFIX}*"]},
-            ]
-        ):
-            for reservation in page.get("Reservations", []):
-                for instance in reservation.get("Instances", []):
-                    launch_time = instance.get("LaunchTime")
-                    if isinstance(launch_time, datetime) and launch_time < cutoff:
-                        leaked.append(instance["InstanceId"])
-        if leaked:
-            ec2.terminate_instances(InstanceIds=leaked)
-    except (BotoCoreError, ClientError, KeyError) as e:
-        pytest.fail(f"Leaked-instance cleanup failed: {e}")
 
 
 def _run_mngr(*args: str, timeout: int = 300) -> subprocess.CompletedProcess[str]:

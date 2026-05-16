@@ -43,12 +43,17 @@ class VpsClientInterface(MutableModel, ABC):
         label: str,
         region: str,
         plan: str,
-        os_id: int,
         user_data: str,
         ssh_key_ids: Sequence[str],
         tags: Sequence[str],
     ) -> VpsInstanceId:
-        """Provision a new VPS instance. Returns the instance ID."""
+        """Provision a new VPS instance. Returns the instance ID.
+
+        Provider-specific image selection (AMI on AWS, OS image ID on Vultr)
+        is configured on the client at construction time, not passed per
+        call. To target a different image for a specific create, instantiate
+        a separate client.
+        """
         ...
 
     @abstractmethod

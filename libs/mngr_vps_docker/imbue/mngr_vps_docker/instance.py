@@ -109,7 +109,6 @@ class _ParsedVpsBuildOptions(FrozenModel):
 
     region: str = Field(description="VPS region")
     plan: str = Field(description="VPS plan")
-    os_id: int = Field(description="VPS OS image ID")
     git_depth: int | None = Field(
         default=None, description="Git clone depth for build context, or None for full clone"
     )
@@ -121,7 +120,6 @@ def _parse_build_args(
     *,
     default_region: str,
     default_plan: str,
-    default_os_id: int,
 ) -> _ParsedVpsBuildOptions:
     """Parse build args, separating VPS provisioning args from Docker build args.
 
@@ -131,7 +129,6 @@ def _parse_build_args(
     """
     region = default_region
     plan = default_plan
-    os_id = default_os_id
     git_depth: int | None = None
     docker_build_args: list[str] = []
 
@@ -141,13 +138,11 @@ def _parse_build_args(
                 region = arg.split("=", 1)[1]
             elif arg.startswith("--vps-plan="):
                 plan = arg.split("=", 1)[1]
-            elif arg.startswith("--vps-os="):
-                os_id = int(arg.split("=", 1)[1])
             elif arg.startswith("--git-depth="):
                 git_depth = int(arg.split("=", 1)[1])
             elif arg.startswith("--vps-"):
                 raise MngrError(
-                    f"Unknown VPS build arg: {arg}. Valid VPS args: --vps-region=, --vps-plan=, --vps-os=, --git-depth="
+                    f"Unknown VPS build arg: {arg}. Valid VPS args: --vps-region=, --vps-plan=, --git-depth="
                 )
             else:
                 docker_build_args.append(arg)
@@ -155,7 +150,6 @@ def _parse_build_args(
     return _ParsedVpsBuildOptions(
         region=region,
         plan=plan,
-        os_id=os_id,
         git_depth=git_depth,
         docker_build_args=tuple(docker_build_args),
     )
@@ -851,7 +845,7 @@ class VpsDockerProvider(BaseProviderInstance):
         base_image = str(image) if image else self.config.default_image
         effective_start_args = tuple(self.config.default_start_args) + tuple(start_args or ())
         parsed = self._parse_build_args(build_args)
-        region, plan, os_id = parsed.region, parsed.plan, parsed.os_id
+        region, plan = parsed.region, parsed.plan
         docker_build_args = parsed.docker_build_args
 
         _vps_key_path, vps_public_key = self._get_vps_ssh_keypair()
@@ -869,7 +863,6 @@ class VpsDockerProvider(BaseProviderInstance):
                 name=name,
                 region=region,
                 plan=plan,
-                os_id=os_id,
                 vps_host_key_path=vps_host_key_path,
                 vps_host_public_key=vps_host_public_key,
                 vps_ssh_key_id=vps_ssh_key_id,
@@ -904,7 +897,6 @@ class VpsDockerProvider(BaseProviderInstance):
                     lifecycle=lifecycle,
                     region=region,
                     plan=plan,
-                    os_id=os_id,
                     vps_instance_id=vps_instance_id,
                     vps_ssh_key_id=vps_ssh_key_id,
                     vps_host_public_key=vps_host_public_key,
@@ -941,7 +933,6 @@ class VpsDockerProvider(BaseProviderInstance):
         name: HostName,
         region: str,
         plan: str,
-        os_id: int,
         vps_host_key_path: Path,
         vps_host_public_key: str,
         vps_ssh_key_id: str,
@@ -964,7 +955,6 @@ class VpsDockerProvider(BaseProviderInstance):
                 label=f"mngr-{name}",
                 region=region,
                 plan=plan,
-                os_id=os_id,
                 user_data=user_data,
                 ssh_key_ids=[vps_ssh_key_id],
                 tags=vps_tags,
@@ -1091,7 +1081,6 @@ class VpsDockerProvider(BaseProviderInstance):
         lifecycle: HostLifecycleOptions | None,
         region: str,
         plan: str,
-        os_id: int,
         vps_instance_id: VpsInstanceId,
         vps_ssh_key_id: str,
         vps_host_public_key: str,
@@ -1134,7 +1123,6 @@ class VpsDockerProvider(BaseProviderInstance):
                 vps_instance_id=vps_instance_id,
                 region=region,
                 plan=plan,
-                os_id=os_id,
                 start_args=effective_start_args,
                 image=base_image,
                 container_name=container_name,
@@ -1307,7 +1295,6 @@ class VpsDockerProvider(BaseProviderInstance):
             build_args,
             default_region=self.config.default_region,
             default_plan=self.config.default_plan,
-            default_os_id=self.config.default_os_id,
         )
 
     # =========================================================================

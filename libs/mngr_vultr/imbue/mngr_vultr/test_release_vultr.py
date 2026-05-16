@@ -179,18 +179,18 @@ class TestVultrApiClient:
 
     def test_list_instances_does_not_error(self) -> None:
         """Verify the API client can list instances without error."""
-        client = VultrVpsClient(api_key=SecretStr(_VULTR_API_KEY))
+        client = VultrVpsClient(api_key=SecretStr(_VULTR_API_KEY), os_id=2136)
         instances = client.list_instances()
         assert isinstance(instances, list)
 
     def test_list_ssh_keys(self) -> None:
         """Verify the API client can list SSH keys."""
-        client = VultrVpsClient(api_key=SecretStr(_VULTR_API_KEY))
+        client = VultrVpsClient(api_key=SecretStr(_VULTR_API_KEY), os_id=2136)
         keys = client.list_ssh_keys()
         assert isinstance(keys, list)
 
     def test_list_snapshots(self) -> None:
         """Verify the API client can list snapshots."""
-        client = VultrVpsClient(api_key=SecretStr(_VULTR_API_KEY))
+        client = VultrVpsClient(api_key=SecretStr(_VULTR_API_KEY), os_id=2136)
         snapshots = client.list_snapshots()
         assert isinstance(snapshots, list)

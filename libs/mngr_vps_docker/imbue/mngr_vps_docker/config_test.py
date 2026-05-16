@@ -21,7 +21,6 @@ def test_default_config_values() -> None:
     assert config.container_ssh_port == 2222
     assert config.default_region == "ewr"
     assert config.default_plan == "vc2-1c-1gb"
-    assert config.default_os_id == 2136
     assert config.default_start_args == ()
     assert config.builder is DockerBuilder.DOCKER
 

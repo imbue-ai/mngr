@@ -3,7 +3,6 @@ from typing import Final
 import boto3
 from botocore.exceptions import BotoCoreError
 from pydantic import Field
-from pydantic import SecretStr
 
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr_vps_docker.config import VpsDockerProviderConfig
@@ -21,27 +20,18 @@ DEFAULT_AMI_BY_REGION: Final[dict[str, str]] = {
 
 
 class AwsProviderConfig(VpsDockerProviderConfig):
-    """Configuration for the AWS EC2 VPS Docker provider."""
+    """Configuration for the AWS EC2 VPS Docker provider.
+
+    Credentials are deliberately not stored in this config. boto3's default
+    credential resolution chain (``AWS_*`` env vars, ``~/.aws/credentials``,
+    ``~/.aws/config``, EC2 IMDS) is used exclusively. This matches the
+    Modal provider convention and the broader project preference: do not
+    handle credentials in mngr configs when an SDK can do it for us.
+    """
 
     backend: ProviderBackendName = Field(
         default=ProviderBackendName("aws"),
         description="Provider backend (always 'aws' for this type)",
-    )
-    access_key_id: SecretStr | None = Field(
-        default=None,
-        description="AWS access key ID. Falls back to AWS_ACCESS_KEY_ID env var or ~/.aws/credentials.",
-    )
-    secret_access_key: SecretStr | None = Field(
-        default=None,
-        description="AWS secret access key. Falls back to AWS_SECRET_ACCESS_KEY env var or ~/.aws/credentials.",
-    )
-    session_token: SecretStr | None = Field(
-        default=None,
-        description="Optional AWS session token (for STS / SSO).",
-    )
-    profile: str | None = Field(
-        default=None,
-        description="Optional named profile from ~/.aws/credentials.",
     )
     default_region: str = Field(
         default="us-east-1",
@@ -50,16 +40,6 @@ class AwsProviderConfig(VpsDockerProviderConfig):
     default_plan: str = Field(
         default="t3.small",
         description="Default EC2 instance type (e.g., 't3.small' for 2 vCPU, 2GB RAM).",
-    )
-    default_os_id: int = Field(
-        default=0,
-        description=(
-            "Unused on AWS — kept only to override the Vultr-flavored default (2136) that "
-            "the shared VpsDockerProviderConfig carries. AWS selects images by AMI string; "
-            "see default_ami_id / default_ami_by_region. Dropping this field from the shared "
-            "base would let AWS omit it entirely, but that refactor cascades into "
-            "VpsClientInterface.create_instance and is deferred to a follow-up."
-        ),
     )
     default_ami_id: str = Field(
         default="",
@@ -107,42 +87,28 @@ class AwsProviderConfig(VpsDockerProviderConfig):
     )
 
     def get_session(self) -> boto3.Session:
-        """Build a boto3 Session using configured credentials or the default credential chain.
+        """Build a boto3 Session that resolves credentials via boto3's default chain.
 
         Raises ``ValueError`` when no credentials are resolvable from any source
-        (config fields, AWS_* env vars, ~/.aws/credentials, IMDS), and lets
-        ``botocore.exceptions.BotoCoreError`` subclasses (e.g., ``ProfileNotFound``)
-        propagate when boto3 itself rejects the inputs.
+        (``AWS_*`` env vars, ``~/.aws/credentials``, ``~/.aws/config``, EC2
+        IMDS). Lets ``botocore.exceptions.BotoCoreError`` subclasses (e.g.,
+        ``ProfileNotFound``) propagate when boto3 itself rejects the
+        environment.
         """
-        kwargs: dict[str, object] = {}
-        if self.access_key_id is not None:
-            kwargs["aws_access_key_id"] = self.access_key_id.get_secret_value()
-        if self.secret_access_key is not None:
-            kwargs["aws_secret_access_key"] = self.secret_access_key.get_secret_value()
-        if self.session_token is not None:
-            kwargs["aws_session_token"] = self.session_token.get_secret_value()
-        if self.profile is not None:
-            kwargs["profile_name"] = self.profile
-        kwargs["region_name"] = self.default_region
-
-        session = boto3.Session(**kwargs)
+        session = boto3.Session(region_name=self.default_region)
         if session.get_credentials() is None:
             raise ValueError(
                 "AWS credentials not configured. Set AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY, "
-                "configure ~/.aws/credentials, or set access_key_id/secret_access_key in the "
-                "provider config."
+                "configure ~/.aws/credentials, set AWS_PROFILE, or attach an EC2 instance role."
             )
         return session
 
     def has_resolvable_credentials(self) -> bool:
-        """Return True if a credentials chain can be resolved without raising.
+        """Return True iff boto3's default credential chain can resolve credentials.
 
-        Delegates to ``get_session`` so that the resolution surface matches
-        boto3's actual default chain (config fields, env vars, ``~/.aws/credentials``
-        / ``~/.aws/config``, instance role / IMDS) and stays in sync with what
-        downstream EC2 calls will see. Both the "no credentials at all"
-        ``ValueError`` and boto3's own ``BotoCoreError`` subclasses (e.g.,
-        ``ProfileNotFound``) are treated as unresolvable.
+        Both the "no credentials at all" ``ValueError`` and boto3's own
+        ``BotoCoreError`` subclasses (e.g., ``ProfileNotFound``) are treated
+        as unresolvable.
         """
         try:
             self.get_session()

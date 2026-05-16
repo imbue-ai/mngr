@@ -35,6 +35,10 @@ class VultrVpsClient(VpsClientInterface):
     """Vultr API v2 client using raw HTTP calls."""
 
     api_key: SecretStr = Field(frozen=True, description="Vultr API key")
+    os_id: int = Field(
+        frozen=True,
+        description="Vultr OS image ID used by create_instance (e.g., 2136 = Debian 12 x64)",
+    )
 
     def _headers(self) -> dict[str, str]:
         return {
@@ -98,7 +102,6 @@ class VultrVpsClient(VpsClientInterface):
         label: str,
         region: str,
         plan: str,
-        os_id: int,
         user_data: str,
         ssh_key_ids: Sequence[str],
         tags: Sequence[str],
@@ -109,7 +112,7 @@ class VultrVpsClient(VpsClientInterface):
         data: dict[str, Any] = {
             "region": region,
             "plan": plan,
-            "os_id": os_id,
+            "os_id": self.os_id,
             "label": label,
             "user_data": user_data_b64,
             "sshkey_id": list(ssh_key_ids),

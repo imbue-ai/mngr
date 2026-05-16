@@ -202,15 +202,15 @@ See [connect options](./connect.md) for full details (only applies if `--connect
 ## Provider Build/Start Arguments
 
 Provider: aws
-  VPS-specific args (consumed by provider, not passed to docker):
+  EC2-specific args (consumed by provider, not passed to docker):
     --vps-region=REGION  AWS region (default: us-east-1)
     --vps-plan=TYPE      EC2 instance type (default: t3.small)
     --git-depth=N        Shallow-clone build context to depth N before upload
 
-  AMI selection is taken from the provider config (default_ami_id /
-  default_ami_by_region) for v1; per-host AMI override is a future improvement.
+  AMI is taken from the provider config (default_ami_id / default_ami_by_region);
+  per-host AMI overrides are not supported via build args.
 
-  All other build args are passed to 'docker build' on the VPS.
+  All other build args are passed to 'docker build' on the EC2 instance.
   Example: -b --vps-plan=t3.medium -b --file=Dockerfile -b .
   Start args are passed directly to 'docker run'. Run 'docker run --help' for details.
 
@@ -283,9 +283,10 @@ Provider: vultr
   VPS-specific args (consumed by provider, not passed to docker):
     --vps-region=REGION  Vultr region (default: ewr)
     --vps-plan=PLAN      Vultr plan (default: vc2-2c-4gb)
-    --vps-os=OS_ID       Vultr OS ID (default: 2136 = Debian 12 x64)
     --git-depth=N        Shallow-clone build context to depth N before upload
 
+  OS image is set via default_os_id on the provider config (Debian 12 x64 by
+  default); per-host overrides are not supported via build args.
   All other build args are passed to 'docker build' on the VPS.
   Example: -b --vps-plan=vc2-2c-4gb -b --file=Dockerfile -b .
   Start args are passed directly to 'docker run'. Run 'docker run --help' for details.

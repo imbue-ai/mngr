@@ -6,22 +6,18 @@ See `mngr_vps_docker` for the base architecture and shared infrastructure.
 
 ## Setup
 
-Credentials are resolved via boto3's default chain. Any of the following works:
+Credentials are resolved exclusively via boto3's default chain — they are
+deliberately not configurable in `mngr.toml` (matching the Modal provider
+convention). Any of the following works:
 
 - Environment: `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` (and optional `AWS_SESSION_TOKEN`)
-- Named profile: `AWS_PROFILE=my-profile`, or `profile = "my-profile"` in the provider config
+- Named profile: `AWS_PROFILE=my-profile`
 - `~/.aws/credentials` / `~/.aws/config`
 - IAM instance profile (when running on EC2)
-
-Explicit config fields take precedence over environment variables and credential files.
 
 ```toml
 [providers.aws]
 backend = "aws"
-# Optional: explicit credentials (otherwise boto3 default chain is used)
-# access_key_id = "..."
-# secret_access_key = "..."
-# profile = "default"
 
 default_region = "us-east-1"
 default_plan = "t3.small"          # instance type
@@ -55,10 +51,6 @@ These fields extend the base `VpsDockerProviderConfig` (see `mngr_vps_docker`):
 
 | Field | Default | Description |
 |-------|---------|-------------|
-| `access_key_id` | `None` | AWS access key. Falls back to env / `~/.aws`. |
-| `secret_access_key` | `None` | AWS secret key. Falls back to env / `~/.aws`. |
-| `session_token` | `None` | Optional STS / SSO session token. |
-| `profile` | `None` | Named profile from `~/.aws/credentials`. |
 | `default_region` | `us-east-1` | AWS region for new instances. |
 | `default_plan` | `t3.small` | EC2 instance type. |
 | `default_ami_id` | `""` | Explicit AMI override; takes precedence over the per-region map. |
