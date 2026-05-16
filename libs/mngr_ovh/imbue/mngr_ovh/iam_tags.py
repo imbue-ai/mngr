@@ -23,6 +23,17 @@ _VPS_RESOURCE_TYPE: Final[str] = "vps"
 # leaks a freshly-ordered month of billing).
 _IAM_TAG_KEY_PATTERN: Final[re.Pattern[str]] = re.compile(r"^[a-z][a-z0-9_-]{0,48}$")
 
+# Tag keys reserved by mngr internals. ``mngr-provider`` / ``mngr-host-id``
+# back the cross-process discovery path; ``mngr-recycling-by`` is the
+# cooperative recycle lock. All three match :data:`_IAM_TAG_KEY_PATTERN`,
+# so without an explicit reservation an operator could silently overwrite
+# them via ``MNGR_VPS_EXTRA_TAGS`` (e.g. break ``mngr list`` by retagging
+# the provider, or hijack the recycle handshake). Reject the keys at
+# parse time with a clear error.
+_RESERVED_TAG_KEYS: Final[frozenset[str]] = frozenset(
+    {MNGR_PROVIDER_TAG_KEY, MNGR_HOST_ID_TAG_KEY, MNGR_RECYCLING_LOCK_TAG_KEY}
+)
+
 
 class IamResource(FrozenModel):
     """Minimal subset of OVH IAM v2 ``/iam/resource`` response we care about."""
@@ -120,6 +131,12 @@ def parse_extra_tags_env(raw: str) -> dict[str, str]:
       (uppercase, leading digit, illegal symbol) before any API call --
       the alternative is an OVH 400 deep in the IAM attach loop, after
       we've already ordered the VPS.
+    - Keys in :data:`_RESERVED_TAG_KEYS` (``mngr-provider``, ``mngr-host-id``,
+      ``mngr-recycling-by``) are rejected because the OVH provider uses
+      them as the discovery / recycle-lock tags. Letting a caller overwrite
+      them silently breaks ``mngr list`` (a retagged ``mngr-provider``
+      hides the VPS from the owning provider) and could hijack the
+      cooperative recycle handshake.
 
     Empty / whitespace-only input is treated as no extra tags.
     """
@@ -138,6 +155,12 @@ def parse_extra_tags_env(raw: str) -> dict[str, str]:
                 f"MNGR_VPS_EXTRA_TAGS key {key!r} is not a valid OVH IAM tag key. "
                 f"Expected pattern {_IAM_TAG_KEY_PATTERN.pattern} "
                 "(1-49 chars, starting with a lowercase letter, then [a-z0-9_-])."
+            )
+        if key in _RESERVED_TAG_KEYS:
+            raise MngrError(
+                f"MNGR_VPS_EXTRA_TAGS key {key!r} is reserved by mngr internals "
+                f"(reserved keys: {sorted(_RESERVED_TAG_KEYS)}). Choose a different "
+                "tag key."
             )
         tags[key] = value
     return tags

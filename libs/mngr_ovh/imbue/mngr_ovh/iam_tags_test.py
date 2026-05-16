@@ -198,3 +198,21 @@ def test_parse_extra_tags_env_accepts_empty_value() -> None:
     # ``minds_env=`` shape isn't actually useful, but we don't want to
     # reject it here either).
     assert parse_extra_tags_env("minds_env=") == {"minds_env": ""}
+
+
+def test_parse_extra_tags_env_rejects_reserved_provider_key() -> None:
+    """The ``mngr-provider`` tag backs discovery -- overwriting it via env breaks list/find."""
+    with pytest.raises(MngrError, match="reserved by mngr internals"):
+        parse_extra_tags_env("mngr-provider=hijack")
+
+
+def test_parse_extra_tags_env_rejects_reserved_host_id_key() -> None:
+    """``mngr-host-id`` ties the OVH VPS back to the mngr host record."""
+    with pytest.raises(MngrError, match="reserved by mngr internals"):
+        parse_extra_tags_env("mngr-host-id=spoofed")
+
+
+def test_parse_extra_tags_env_rejects_reserved_recycle_lock_key() -> None:
+    """``mngr-recycling-by`` is the cooperative recycle lock; do not let callers spoof it."""
+    with pytest.raises(MngrError, match="reserved by mngr internals"):
+        parse_extra_tags_env("mngr-recycling-by=other-process")
