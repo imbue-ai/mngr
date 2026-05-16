@@ -117,6 +117,32 @@ def test_merge_lima_yaml() -> None:
     assert merged["images"] == [{"location": "default.qcow2"}]
 
 
+def test_merge_lima_yaml_extends_provision_and_mounts_replaces_images() -> None:
+    # provision: a user-supplied list must not silently drop mngr's host-key
+    # injection. mngr's entries come first so its provision script runs before
+    # any user script (Lima executes provision[mode=system] in list order).
+    base = {"provision": [{"mode": "system", "script": "MNGR_HOST_KEY_INJECTION"}]}
+    override = {"provision": [{"mode": "system", "script": "apt-get install -y postgres"}]}
+    merged = merge_lima_yaml(base, override)
+    assert len(merged["provision"]) == 2
+    assert merged["provision"][0]["script"] == "MNGR_HOST_KEY_INJECTION"
+    assert merged["provision"][1]["script"] == "apt-get install -y postgres"
+
+    # mounts: extend with base first; mngr's /mngr mount must survive.
+    base = {"mounts": [{"location": "/host/vol", "mountPoint": "/mngr", "writable": True}]}
+    override = {"mounts": [{"location": "/host/data", "mountPoint": "/data", "writable": False}]}
+    merged = merge_lima_yaml(base, override)
+    assert len(merged["mounts"]) == 2
+    assert merged["mounts"][0]["mountPoint"] == "/mngr"
+    assert merged["mounts"][1]["mountPoint"] == "/data"
+
+    # images: a user supplying images: clearly means to override -- still replace.
+    base = {"images": [{"location": "default.qcow2"}]}
+    override = {"images": [{"location": "custom.qcow2"}]}
+    merged = merge_lima_yaml(base, override)
+    assert merged["images"] == [{"location": "custom.qcow2"}]
+
+
 def test_parse_build_args_for_yaml_path() -> None:
     assert parse_build_args_for_yaml_path(("--file", "/path/to/config.yaml")) == Path("/path/to/config.yaml")
     assert parse_build_args_for_yaml_path(("--file=/path/to/config.yaml",)) == Path("/path/to/config.yaml")
