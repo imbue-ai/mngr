@@ -188,10 +188,67 @@ class MultiAccountSessionStore(MutableModel):
                 # transient subprocess failure would otherwise stick
                 # ``no accounts`` until the next sign-in / sign-out
                 # invalidates the cache. Return an empty mapping for
-                # this call only and let the next read retry.
+                # this call only and let the next read retry. Also
+                # skip the orphan-association GC below -- nuking
+                # associations because a subprocess crashed would be a
+                # disastrous data-loss bug.
                 return {}
             self._identity_cache = {account.user_id: account for account in accounts}
-            return dict(self._identity_cache)
+            result = dict(self._identity_cache)
+        # GC orphan associations OUTSIDE the cache lock so we don't hold
+        # two locks (cache + disk) in a fixed order across this method's
+        # full extent. The cache is already committed by the time we
+        # land here; even if another thread reads it between unlock and
+        # GC, they see the new identity but possibly stale associations,
+        # which is harmless (any lookup just returns the same result the
+        # GC is about to converge to).
+        #
+        # Only GC on explicit refresh: the default-read path is hot (a
+        # FastAPI request handler iterating workspaces, the chrome SSE
+        # loop, etc.) and we don't want to take the disk lock + walk
+        # every association on every read. Refresh is the moment we know
+        # the identity is freshly-authoritative, which is exactly when
+        # GC is safe to run.
+        if refresh:
+            self._gc_orphan_associations(known_user_ids=frozenset(result.keys()))
+        return result
+
+    def _gc_orphan_associations(self, *, known_user_ids: frozenset[str]) -> None:
+        """Remove user_id keys from ``workspace_associations.json`` whose user_id no longer exists.
+
+        Called from the refresh branch of :meth:`_identity_by_user_id`
+        with the freshly-authoritative set of current user_ids. Any
+        association keyed under a user_id NOT in that set is presumed
+        orphaned (the SuperTokens user was deleted server-side, or the
+        local sessions were rotated to a fresh user_id for the same
+        email) and the orphan key is removed.
+
+        Without this GC, workspace_associations.json grows monotonically
+        across signin/signout cycles and old user_ids become permanent
+        residents of the file. Worse, when minds creates a workspace
+        under an orphan user_id (because the form rendered between an
+        identity transition), that workspace stays associated with the
+        orphan forever -- ``get_account_for_workspace`` returns None
+        because the orphan isn't in current identity, and the UI shows
+        "no associated account" with no way to recover short of editing
+        the file by hand.
+
+        No-op when the file is missing or contains only known user_ids.
+        """
+        with self._disk_lock:
+            associations = self._read_associations_unlocked()
+            orphan_user_ids = [uid for uid in associations if uid not in known_user_ids]
+            if not orphan_user_ids:
+                return
+            for uid in orphan_user_ids:
+                logger.info(
+                    "GCing orphan workspace_associations entry for user {} (workspaces={}); "
+                    "user_id no longer present in current auth list",
+                    uid[:8],
+                    associations[uid],
+                )
+                del associations[uid]
+            self._write_associations_unlocked(associations)
 
     # -- Public read API ----------------------------------------------------
 
@@ -232,13 +289,28 @@ class MultiAccountSessionStore(MutableModel):
         )
 
     def get_account_for_workspace(self, agent_id: str) -> AccountSession | None:
-        """Find the account that owns ``agent_id`` (or None if private)."""
+        """Find the account that owns ``agent_id`` (or None if private).
+
+        When the on-disk association points to a user_id whose identity
+        isn't in the cached ``auth list`` snapshot, we refresh the cache
+        once and retry before giving up. This recovers from the case
+        where the identity cache was populated under a prior user_id
+        (e.g. before a signin/oauth that rotated to a new id) and never
+        learned about the rotation -- without the retry, the UI would
+        permanently render the workspace as "no associated account"
+        even though the association is correct on disk. The refresh
+        also runs the orphan-association GC, so this lookup-miss path
+        doubles as the maintenance trigger.
+        """
         with self._disk_lock:
             associations = self._read_associations_unlocked()
         for user_id, workspace_ids in associations.items():
             if agent_id in workspace_ids:
                 identity = self._identity_by_user_id()
                 account = identity.get(user_id)
+                if account is None:
+                    identity = self._identity_by_user_id(refresh=True)
+                    account = identity.get(user_id)
                 if account is None:
                     return None
                 return _build_session(account, workspace_ids)

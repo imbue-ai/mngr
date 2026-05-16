@@ -446,6 +446,14 @@ class _OnCreatedCallbackFactory(MutableModel):
         frozen=True,
         description="Dispatcher for surfacing tunnel-setup failures as OS notifications.",
     )
+    backend_resolver: BackendResolverInterface = Field(
+        frozen=True,
+        description=(
+            "Backend resolver pinged via notify_change() after the association write so the "
+            "chrome SSE workspace list refreshes its 'account' field without waiting for the "
+            "next 30s discovery heartbeat."
+        ),
+    )
     account_id: str = Field(
         frozen=True,
         default="",
@@ -462,6 +470,12 @@ class _OnCreatedCallbackFactory(MutableModel):
         # this is what later ``get_account_for_workspace`` lookups (e.g. for
         # the destruction handler) expect to find.
         self.session_store.associate_workspace(self.account_id, str(agent_id))
+        # Wake the chrome SSE so the workspace tile picks up its new
+        # 'account' field immediately. Without this, the chrome shows
+        # the workspace as unassociated until the next discovery cycle
+        # (~30s+) writes an unrelated change.
+        if isinstance(self.backend_resolver, MngrCliBackendResolver):
+            self.backend_resolver.notify_change()
         account = self.session_store.get_account_for_workspace(str(agent_id))
         if account is None:
             # The account vanished between selection and now (logout?). The
@@ -503,6 +517,7 @@ def _build_on_created_callback(
     imbue_cloud_cli: ImbueCloudCli | None = request.app.state.imbue_cloud_cli
     root_concurrency_group: ConcurrencyGroup | None = request.app.state.root_concurrency_group
     notification_dispatcher: NotificationDispatcher | None = request.app.state.notification_dispatcher
+    backend_resolver: BackendResolverInterface = request.app.state.backend_resolver
 
     if (
         session_store is None
@@ -517,6 +532,7 @@ def _build_on_created_callback(
         imbue_cloud_cli=imbue_cloud_cli,
         root_concurrency_group=root_concurrency_group,
         notification_dispatcher=notification_dispatcher,
+        backend_resolver=backend_resolver,
         account_id=account_id,
     )
 
@@ -1455,6 +1471,14 @@ async def _handle_workspace_associate(
     session_store: MultiAccountSessionStore | None = request.app.state.session_store
     if session_store and user_id:
         session_store.associate_workspace(user_id, agent_id)
+        # Wake the chrome SSE so the workspace tile picks up its new
+        # 'account' field immediately rather than at the next 30s SSE
+        # heartbeat. Without this, the user clicks Associate, the page
+        # reloads via 303, but the chrome panel still shows the old
+        # unassociated state for ~half a minute.
+        backend_resolver: BackendResolverInterface = request.app.state.backend_resolver
+        if isinstance(backend_resolver, MngrCliBackendResolver):
+            backend_resolver.notify_change()
     location = redirect_url if redirect_url else f"/workspace/{agent_id}/settings"
     return Response(status_code=303, headers={"Location": location})
 
@@ -1482,6 +1506,12 @@ async def _handle_workspace_disassociate(
                 except ImbueCloudCliError as e:
                     logger.warning("Failed to delete tunnel during disassociation: {}", e)
             session_store.disassociate_workspace(str(account.user_id), agent_id)
+            # Mirror the associate handler: poke the chrome SSE so the
+            # tile flips back to unassociated immediately instead of
+            # waiting out the 30s heartbeat.
+            backend_resolver: BackendResolverInterface = request.app.state.backend_resolver
+            if isinstance(backend_resolver, MngrCliBackendResolver):
+                backend_resolver.notify_change()
     return Response(status_code=303, headers={"Location": f"/workspace/{agent_id}/settings"})
 
 
