@@ -126,7 +126,7 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
         "=" * 70
         + "\nAWS SESSION CLEANUP FOUND LEAKED RESOURCES!\n"
         + "=" * 70
-        + "\n\nUntracked EC2 instances matching the test name prefix and older than 1h:\n  "
+        + "\n\nLeaked EC2 instances matching the test name prefix and older than 1h:\n  "
         + "\n  ".join(orphans)
         + "\n\nInstances have been force-terminated, but tests should not leak.\n"
     )
