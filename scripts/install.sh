@@ -9,10 +9,11 @@
 #   1. Installs uv (https://docs.astral.sh/uv/) if not already present
 #   2. Installs mngr via: uv tool install imbue-mngr
 #   3. Runs: mngr dependencies -i  (interactively install system deps)
-#   4. Runs: mngr extras -i        (optional: plugins, shell completion, etc.)
+#   4. Runs: mngr extras -i        (optional: plugins, shell completion,
+#                                   Claude Code plugin, default agent type)
 #
 # Steps 1-2 run automatically. Steps 3-4 prompt before installing anything.
-# Safe to re-run: skips anything already installed.
+# Safe to re-run: skips anything already installed or configured.
 # Source: https://github.com/imbue-ai/mngr
 #
 set -euo pipefail
@@ -72,7 +73,7 @@ fi
 # when they need interactive input, so they work even when stdin is piped.
 mngr dependencies -i || warn "Some dependencies could not be installed. Run 'mngr dependencies' to see what's missing."
 
-# ── Step 4: Optional extras (plugins, shell completion, Claude Code plugin) ──
+# ── Step 4: Optional extras (plugins, shell completion, Claude Code plugin, default agent type) ──
 
 mngr extras -i || warn "Some extras could not be installed. Run 'mngr extras' to see status."
 

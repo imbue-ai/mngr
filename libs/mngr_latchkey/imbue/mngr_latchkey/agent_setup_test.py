@@ -7,6 +7,7 @@ subclass so we can drive the various success / failure permutations
 deterministically.
 """
 
+import json
 from collections.abc import Mapping
 from pathlib import Path
 
@@ -25,7 +26,6 @@ from imbue.mngr_latchkey.core import AGENT_SIDE_LATCHKEY_PORT
 from imbue.mngr_latchkey.core import LatchkeyError
 from imbue.mngr_latchkey.core import LatchkeyJwtMintError
 from imbue.mngr_latchkey.store import LatchkeyStoreError
-from imbue.mngr_latchkey.store import load_permissions
 from imbue.mngr_latchkey.store import opaque_permissions_dir
 from imbue.mngr_latchkey.store import permissions_path_for_host
 from imbue.mngr_latchkey.testing import FakeLatchkey
@@ -73,10 +73,18 @@ def test_prepare_full_wiring_tunneled(tmp_path: Path) -> None:
     assert setup.env[ENV_LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE] == "header.payload.signature"
     assert setup.env[ENV_LATCHKEY_DISABLE_COUNTING] == "1"
     assert setup.opaque_permissions_path is not None
-    # The opaque path lives under the plugin's data subdir and was
-    # materialized with deny-all baseline rules.
     assert setup.opaque_permissions_path.parent == opaque_permissions_dir(fake.plugin_data_dir)
-    assert load_permissions(setup.opaque_permissions_path).rules == ()
+    on_disk = json.loads(setup.opaque_permissions_path.read_text())
+    assert on_disk["rules"] == [
+        {"latchkey-self": ["latchkey-self-create-permission-request"]},
+    ]
+    schemas = on_disk["schemas"]
+    assert schemas["latchkey-self"]["properties"]["domain"] == {"const": "latchkey-self.invalid"}
+    assert schemas["latchkey-self-create-permission-request"]["properties"] == {
+        "method": {"const": "POST"},
+        "path": {"const": "/permission-requests"},
+    }
+    assert "latchkey-self-read-permissions" not in schemas
 
 
 def test_prepare_full_wiring_on_host_uses_live_port(tmp_path: Path) -> None:

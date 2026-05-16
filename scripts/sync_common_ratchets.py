@@ -26,7 +26,7 @@ SECTION_HEADER_RE = re.compile(r"^# --- (.+) ---$")
 # Projects excluded from ratchet requirements (scheduled for deletion).
 # Keep in sync with _EXCLUDED_PROJECTS in test_meta_ratchets.py
 # (verified by test_excluded_projects_in_sync in scripts/sync_common_ratchets_test.py).
-EXCLUDED_RATCHET_PROJECTS: frozenset[str] = frozenset({"flexmux"})
+EXCLUDED_RATCHET_PROJECTS: frozenset[str] = frozenset()
 
 # Path to the source of truth for which ratchet checks exist.
 STANDARD_RATCHET_CHECKS_PATH = (

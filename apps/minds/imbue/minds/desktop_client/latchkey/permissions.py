@@ -41,6 +41,8 @@ from imbue.imbue_common.mutable_model import MutableModel
 from imbue.minds.config.data_types import MNGR_BINARY
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
+from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClient
+from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClientError
 from imbue.minds.desktop_client.latchkey.services_catalog import IMPLICIT_DEFAULT_PERMISSIONS
 from imbue.minds.desktop_client.latchkey.services_catalog import ServicePermissionInfo
 from imbue.minds.desktop_client.latchkey.services_catalog import get_service_info
@@ -59,13 +61,7 @@ from imbue.mngr.primitives import HostId
 from imbue.mngr_latchkey.core import CredentialStatus
 from imbue.mngr_latchkey.core import LATCHKEY_AUTH_OPTION_BROWSER
 from imbue.mngr_latchkey.core import Latchkey
-from imbue.mngr_latchkey.store import LatchkeyPermissionsConfig
-from imbue.mngr_latchkey.store import LatchkeyStoreError
-from imbue.mngr_latchkey.store import granted_permissions_for_scope
-from imbue.mngr_latchkey.store import load_permissions
 from imbue.mngr_latchkey.store import permissions_path_for_host
-from imbue.mngr_latchkey.store import save_permissions
-from imbue.mngr_latchkey.store import set_permissions_for_scope
 
 _MNGR_MESSAGE_TIMEOUT_SECONDS: Final[float] = 30.0
 
@@ -297,6 +293,12 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
         ),
     )
     mngr_message_sender: MngrMessageSender = Field(description="Sends mngr message to the waiting agent.")
+    gateway_client: LatchkeyGatewayClient = Field(
+        description=(
+            "HTTP client used to apply permission grants and remove pending requests through the "
+            "gateway's bundled ``permissions`` / ``permission-requests`` extensions."
+        ),
+    )
 
     # -- Pure logic (unit-testable) ------------------------------------------
 
@@ -545,6 +547,15 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
             )
         except LatchkeyPermissionFlowError as e:
             return _json_error(str(e), status_code=400)
+        except LatchkeyGatewayClientError as e:
+            # The grant flow could not reach the gateway's permissions
+            # extension; surface that as a 502 so the dialog can show a
+            # meaningful error instead of a generic 500.
+            logger.warning("Could not apply latchkey permission grant via gateway: {}", e)
+            return _json_error(
+                f"Could not apply grant through the latchkey gateway: {e}",
+                status_code=502,
+            )
 
         # The grant call may have appended a response event to
         # ~/.minds/events/requests/events.jsonl; mirror it into the
@@ -618,18 +629,17 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
             return IMPLICIT_DEFAULT_PERMISSIONS
         path = permissions_path_for_host(self.latchkey.plugin_data_dir, host_id)
         try:
-            config = load_permissions(path)
-        except LatchkeyStoreError as e:
+            granted = self.gateway_client.get_granted_permissions_for_scopes(
+                path,
+                service_info.scope_schemas,
+            )
+        except LatchkeyGatewayClientError as e:
             logger.warning(
-                "Could not load permissions for host {}; using implicit defaults: {}",
+                "Could not load permissions for host {} via the gateway extension; using implicit defaults: {}",
                 host_id,
                 e,
             )
             return IMPLICIT_DEFAULT_PERMISSIONS
-
-        granted: set[str] = set()
-        for scope in service_info.scope_schemas:
-            granted.update(granted_permissions_for_scope(config, scope))
         granted_in_catalog = tuple(p for p in service_info.permission_schemas if p in granted)
         if granted_in_catalog:
             return granted_in_catalog
@@ -641,25 +651,21 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
         scope_schemas: Sequence[str],
         granted_permissions: Sequence[str],
     ) -> None:
-        path = permissions_path_for_host(self.latchkey.plugin_data_dir, host_id)
-        try:
-            existing = load_permissions(path)
-        except LatchkeyStoreError as e:
-            logger.warning(
-                "Existing latchkey_permissions.json at {} is unreadable; replacing it: {}",
-                path,
-                e,
-            )
-            existing = LatchkeyPermissionsConfig()
+        """Apply a grant by POSTing through the gateway's ``permissions`` extension.
 
-        updated = existing
+        The extension owns the actual write to
+        ``<plugin_data_dir>/hosts/<host_id>/latchkey_permissions.json``;
+        we just tell it which scopes to upsert. Iterating per scope
+        mirrors the previous in-process loop semantics and keeps the
+        wire shape (one rule key per request) trivial.
+        """
+        path = permissions_path_for_host(self.latchkey.plugin_data_dir, host_id)
         for scope in scope_schemas:
-            updated = set_permissions_for_scope(
-                updated,
-                scope=scope,
+            self.gateway_client.set_permission_rule(
+                permissions_file_path=path,
+                rule_key=scope,
                 granted_permissions=granted_permissions,
             )
-        save_permissions(path, updated)
 
     def _write_response_and_notify(
         self,
@@ -669,11 +675,31 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
         status: RequestStatus,
         message: str,
     ) -> RequestResponseEvent:
-        """Persist the response event to disk and send the agent a notification.
+        """Persist the response event to disk, drop the gateway record, and notify the agent.
 
         Returns the newly-created event so callers can mirror it into the
         in-memory inbox without re-creating it (and getting a fresh event_id).
+
+        Three things happen in order:
+
+        1. Issue ``DELETE /permission-requests/<request_event_id>`` so
+           the gateway forgets the pending entry (a future reconnect of
+           the follow stream must not redeliver an already-resolved
+           request). Failure is logged but does not abort: the user
+           cares more about the agent getting unblocked than about a
+           stale on-disk file the gateway will clean up next restart.
+        2. Append the response event to the on-disk JSONL so the inbox
+           survives a desktop-client restart.
+        3. Send the agent a ``mngr message`` nudge.
         """
+        try:
+            self.gateway_client.delete_permission_request(request_event_id)
+        except LatchkeyGatewayClientError as e:
+            logger.warning(
+                "Could not DELETE permission request {} from gateway; will rely on next-restart cleanup: {}",
+                request_event_id,
+                e,
+            )
         response_event = create_request_response_event(
             request_event_id=request_event_id,
             status=status,

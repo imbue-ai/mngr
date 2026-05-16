@@ -8,8 +8,14 @@ shared gateway); we cover the underlying dispatch logic in
 ``discovery_stream_test.py`` instead.
 """
 
+import contextlib
+import hashlib
 import json
+import subprocess
+import sys
 from collections.abc import Iterator
+from datetime import datetime
+from datetime import timezone
 from pathlib import Path
 from typing import Final
 from uuid import uuid4
@@ -30,8 +36,11 @@ from imbue.mngr_latchkey.cli import _resolve_latchkey_settings
 from imbue.mngr_latchkey.cli import latchkey
 from imbue.mngr_latchkey.config import LatchkeyPluginConfig
 from imbue.mngr_latchkey.core import LATCHKEY_BINARY
+from imbue.mngr_latchkey.store import LatchkeyForwardInfo
+from imbue.mngr_latchkey.store import load_forward_info
 from imbue.mngr_latchkey.store import permissions_path_for_host
 from imbue.mngr_latchkey.store import plugin_data_dir
+from imbue.mngr_latchkey.store import save_forward_info
 
 # A version string the upstream ``Latchkey.initialize`` is happy with
 # (``LATCHKEY_MIN_VERSION`` is 2.8.0). Kept as a constant so the fake
@@ -252,6 +261,189 @@ def test_create_agent_env_exits_nonzero_when_binary_missing(
     assert "LATCHKEY_GATEWAY" not in result.output
 
 
+# -- admin-jwt --------------------------------------------------------------
+
+
+def test_admin_jwt_prints_jwt_and_creates_admin_file(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    latchkey_root: Path,
+    fake_latchkey_binary: Path,
+    clean_latchkey_env: None,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """``admin-jwt`` materializes the wildcard admin permissions file and prints the JWT."""
+    del clean_latchkey_env
+    monkeypatch.setenv(ENV_LATCHKEY_DIRECTORY, str(latchkey_root))
+    monkeypatch.setenv(ENV_LATCHKEY_BINARY, str(fake_latchkey_binary))
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    result = cli_runner.invoke(
+        latchkey,
+        ["admin-jwt"],
+        obj=plugin_manager,
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 0, result.output
+    output = result.output.strip()
+    assert output.startswith("fake-jwt-for:")
+    # The path embedded in the (fake) JWT must be the admin permissions
+    # path under ``plugin_data_dir``.
+    pdd = plugin_data_dir(latchkey_root)
+    admin_path = pdd / "latchkey_admin_permissions.json"
+    assert admin_path.is_file()
+    assert output == f"fake-jwt-for:{admin_path}"
+    on_disk = json.loads(admin_path.read_text())
+    assert on_disk == {"rules": [{"any": ["any"]}]}
+
+
+# -- gateway-info -----------------------------------------------------------
+
+
+@contextlib.contextmanager
+def _fake_running_supervisor() -> Iterator[int]:
+    """Yield the PID of a sleeping subprocess whose cmdline passes the supervisor liveness check.
+
+    The subprocess's argv is shaped like ``[python, -c, ..., "mngr",
+    "latchkey", "forward"]`` so
+    :func:`_cmdline_looks_like_mngr_latchkey_forward` accepts it.
+    Terminated on context exit.
+    """
+    proc = subprocess.Popen(
+        [sys.executable, "-c", "import signal; signal.pause()", "mngr", "latchkey", "forward"],
+        start_new_session=True,
+    )
+    try:
+        yield proc.pid
+    finally:
+        proc.kill()
+        proc.wait(timeout=5.0)
+
+
+def _build_forward_info(*, pid: int, gateway_port: int | None) -> LatchkeyForwardInfo:
+    return LatchkeyForwardInfo(
+        pid=pid,
+        started_at=datetime.now(timezone.utc),
+        gateway_port=gateway_port,
+    )
+
+
+def test_gateway_info_prints_url_and_password_when_supervisor_record_is_ready(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    latchkey_root: Path,
+    fake_latchkey_binary: Path,
+    clean_latchkey_env: None,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """With a live supervisor + complete record, the subcommand emits ``{url, password}``."""
+    del clean_latchkey_env
+    monkeypatch.setenv(ENV_LATCHKEY_DIRECTORY, str(latchkey_root))
+    monkeypatch.setenv(ENV_LATCHKEY_BINARY, str(fake_latchkey_binary))
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    with _fake_running_supervisor() as pid:
+        save_forward_info(plugin_data_dir(latchkey_root), _build_forward_info(pid=pid, gateway_port=32867))
+        result = cli_runner.invoke(
+            latchkey,
+            ["gateway-info"],
+            obj=plugin_manager,
+            catch_exceptions=False,
+        )
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    expected_password = hashlib.sha256(b"fake-jwt-for:/__minds_gateway_password__/sentinel").hexdigest()
+    assert payload == {
+        "url": "http://127.0.0.1:32867",
+        "password": expected_password,
+    }
+
+
+def test_gateway_info_exits_nonzero_when_no_supervisor_record(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    latchkey_root: Path,
+    fake_latchkey_binary: Path,
+    clean_latchkey_env: None,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """No on-disk supervisor record => loud non-zero exit, no JSON."""
+    del clean_latchkey_env
+    monkeypatch.setenv(ENV_LATCHKEY_DIRECTORY, str(latchkey_root))
+    monkeypatch.setenv(ENV_LATCHKEY_BINARY, str(fake_latchkey_binary))
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    result = cli_runner.invoke(
+        latchkey,
+        ["gateway-info"],
+        obj=plugin_manager,
+        catch_exceptions=False,
+    )
+    assert result.exit_code != 0
+    assert "no ``mngr latchkey forward`` supervisor is running" in result.output.lower()
+
+
+def test_gateway_info_exits_nonzero_when_supervisor_record_is_stale(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    latchkey_root: Path,
+    fake_latchkey_binary: Path,
+    clean_latchkey_env: None,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Record exists but its PID is a stranger (or dead) => non-zero exit, same message as 'no record'.
+
+    Picks PID 1 (init) on Linux: alive, but its cmdline is not ours, so
+    :func:`is_forward_info_alive` rejects it -- the exact PID-reuse case
+    we want the subcommand to handle, not propagate as 'still warming up'.
+    """
+    del clean_latchkey_env
+    monkeypatch.setenv(ENV_LATCHKEY_DIRECTORY, str(latchkey_root))
+    monkeypatch.setenv(ENV_LATCHKEY_BINARY, str(fake_latchkey_binary))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    save_forward_info(plugin_data_dir(latchkey_root), _build_forward_info(pid=1, gateway_port=32867))
+
+    result = cli_runner.invoke(
+        latchkey,
+        ["gateway-info"],
+        obj=plugin_manager,
+        catch_exceptions=False,
+    )
+    assert result.exit_code != 0
+    assert "no ``mngr latchkey forward`` supervisor is running" in result.output.lower()
+
+
+def test_gateway_info_exits_nonzero_while_supervisor_still_warming_up(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    latchkey_root: Path,
+    fake_latchkey_binary: Path,
+    clean_latchkey_env: None,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Live supervisor but no port stamped yet => 'still warming up' message."""
+    del clean_latchkey_env
+    monkeypatch.setenv(ENV_LATCHKEY_DIRECTORY, str(latchkey_root))
+    monkeypatch.setenv(ENV_LATCHKEY_BINARY, str(fake_latchkey_binary))
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    with _fake_running_supervisor() as pid:
+        save_forward_info(plugin_data_dir(latchkey_root), _build_forward_info(pid=pid, gateway_port=None))
+        result = cli_runner.invoke(
+            latchkey,
+            ["gateway-info"],
+            obj=plugin_manager,
+            catch_exceptions=False,
+        )
+    assert result.exit_code != 0
+    assert "has not finished binding" in result.output
+
+
 # -- link-permissions -------------------------------------------------------
 
 
@@ -364,20 +556,60 @@ def test_link_permissions_rejects_missing_opaque_path(
     assert "does not exist" in result.output
 
 
+# -- forward ----------------------------------------------------------------
+
+
+def test_forward_refuses_to_start_when_another_supervisor_is_alive(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    latchkey_root: Path,
+    fake_latchkey_binary: Path,
+    clean_latchkey_env: None,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A live competing forward record => clean ClickException, no second gateway spawn."""
+    del clean_latchkey_env
+    monkeypatch.setenv(ENV_LATCHKEY_DIRECTORY, str(latchkey_root))
+    monkeypatch.setenv(ENV_LATCHKEY_BINARY, str(fake_latchkey_binary))
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    with _fake_running_supervisor() as pid:
+        save_forward_info(plugin_data_dir(latchkey_root), _build_forward_info(pid=pid, gateway_port=12345))
+        result = cli_runner.invoke(
+            latchkey,
+            ["forward"],
+            obj=plugin_manager,
+            catch_exceptions=False,
+        )
+    assert result.exit_code != 0
+    assert "already running" in result.output.lower()
+    assert str(pid) in result.output
+    # The competing record must be preserved verbatim -- the failing
+    # ``forward`` invocation must not clobber the live supervisor's
+    # PID.
+    persisted = load_forward_info(plugin_data_dir(latchkey_root))
+    assert persisted is not None
+    assert persisted.pid == pid
+    assert persisted.gateway_port == 12345
+
+
 # -- Group wiring -----------------------------------------------------------
 
 
 def test_group_exposes_three_subcommands() -> None:
-    """The ``mngr latchkey`` group exposes exactly the three subcommands the spec promises."""
+    """The ``mngr latchkey`` group exposes the documented subcommands."""
     assert set(latchkey.commands.keys()) == {
         "create-agent-env",
         "link-permissions",
         "forward",
+        "admin-jwt",
+        "gateway-info",
     }
 
 
 def test_help_text_lists_subcommands(cli_runner: CliRunner) -> None:
     result = cli_runner.invoke(latchkey, ["--help"], catch_exceptions=False)
     assert result.exit_code == 0
-    for subcommand in ("create-agent-env", "link-permissions", "forward"):
+    for subcommand in ("create-agent-env", "link-permissions", "forward", "admin-jwt", "gateway-info"):
         assert subcommand in result.output

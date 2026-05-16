@@ -319,8 +319,10 @@ def _build_package_mode_dockerfile(mngr_dockerfile_content: str) -> str:
     """Build a Dockerfile for PACKAGE mode from the mngr Dockerfile.
 
     Replaces the monorepo-specific installation steps (COPY, extraction,
-    uv sync, uv tool install) with a pip install from PyPI. All preceding
-    layers (system deps, uv, Claude Code) are preserved.
+    uv sync, uv tool install -- whether inline in the Dockerfile or
+    encapsulated in scripts/post-source-setup.sh) with a pip install from
+    PyPI. All preceding layers (system deps, uv, Claude Code) and any
+    layers after the install section (e.g. CMD) are preserved.
 
     The mngr Dockerfile has a section that copies and extracts the monorepo
     tarball, syncs dependencies, and installs mngr as a tool. For PACKAGE
@@ -346,13 +348,21 @@ def _build_package_mode_dockerfile(mngr_dockerfile_content: str) -> str:
             continue
 
         # Skip lines until we pass the last monorepo-specific install command.
-        # The sentinel is any RUN line containing "uv tool install" (which may
-        # be combined with other commands on the same line via &&).
+        # Two Dockerfile shapes are supported:
+        #   - Legacy: install commands inline in the Dockerfile, ended by a
+        #     `RUN ... uv tool install ...` line.
+        #   - Current: install commands consolidated into
+        #     scripts/post-source-setup.sh, called via a single
+        #     `RUN bash scripts/post-source-setup.sh` line.
+        # Either sentinel ends the install section.
         if is_in_install_section:
-            if stripped.startswith("RUN") and "uv tool install" in stripped:
+            if stripped.startswith("RUN") and (
+                "uv tool install" in stripped or "scripts/post-source-setup.sh" in stripped
+            ):
                 is_in_install_section = False
                 continue
-            # Also skip WORKDIR, RUN uv sync, and the tarball extraction lines
+            # Also skip WORKDIR, RUN uv sync, the tarball extraction lines,
+            # and the comment block above the post-source-setup.sh RUN.
             continue
 
         result_lines.append(line)
@@ -360,7 +370,8 @@ def _build_package_mode_dockerfile(mngr_dockerfile_content: str) -> str:
     if is_in_install_section:
         raise ScheduleDeployError(
             "Failed to generate PACKAGE mode Dockerfile: could not find the end of the monorepo "
-            "install section (expected a 'RUN uv tool install' line after 'COPY . /code/'). "
+            "install section (expected a 'RUN uv tool install ...' line, or a "
+            "'RUN bash scripts/post-source-setup.sh' line, after 'COPY . /code/'). "
             "The mngr Dockerfile structure may have changed."
         )
 
@@ -621,12 +632,12 @@ def invoke_modal_trigger_function(record: ModalScheduleCreationRecord) -> str:
     """Invoke the deployed modal function for a trigger.
 
     Calls modal.Function.from_name() to look up the deployed function and
-    invokes it remotely. Returns the full captured output of the command
-    (from run_scheduled_trigger's return value).
+    invokes it remotely. Returns the captured stdout of the mngr command
+    that the runner executed, extracted from the structured result dict
+    (shape: {"status": ..., "output": <str>, ...}).
 
-    Raises MngrError if the function is not found, the invocation fails,
-    or the returned value is not a string (signalling a deployed-function
-    signature drift).
+    Raises MngrError if the function is not found or the invocation fails,
+    or if the result shape is not the expected dict-with-output.
     """
     try:
         fn = modal.Function.from_name(
@@ -642,12 +653,19 @@ def invoke_modal_trigger_function(record: ModalScheduleCreationRecord) -> str:
         ) from None
     except modal.exception.Error as exc:
         raise MngrError(f"Modal invocation failed: {exc}") from None
-    if not isinstance(result, str):
+
+    if not isinstance(result, dict):
         raise MngrError(
-            f"Modal function returned unexpected type {type(result).__name__}; expected str. "
-            "run_scheduled_trigger may have a mismatched signature."
+            f"run_scheduled_trigger returned unexpected type {type(result).__name__}; "
+            "expected a dict with an 'output' field."
         )
-    return result
+    output = result.get("output")
+    if not isinstance(output, str):
+        raise MngrError(
+            f"run_scheduled_trigger result missing string 'output' field (got {type(output).__name__}). "
+            "The trigger may need to be re-deployed with 'mngr schedule add'."
+        )
+    return output
 
 
 def remove_modal_schedule(
@@ -998,17 +1016,18 @@ def deploy_schedule(
     logger.info("Schedule '{}' deployed to Modal app '{}'", trigger.name, app_name)
 
     # FIXME: split this verification logic out and up a layer, this function is already more complicated than necessary
-    # Post-deploy verification (must happen while temp dir is still alive)
+    # Post-deploy verification (must happen while temp dir is still alive).
+    # The runner does the real verify work inside the container and reports
+    # back via a sentinel line; this side just streams logs and interprets
+    # the result.
     if verify_mode != VerifyMode.NONE:
-        is_finish = verify_mode == VerifyMode.FULL
         with log_span("Verifying deployment of schedule '{}'", trigger.name):
             verify_schedule_deployment(
                 trigger_name=trigger.name,
                 modal_env_name=modal_env_name,
-                is_finish_initial_run=is_finish,
+                verify_mode=verify_mode,
                 env=env,
                 cron_runner_path=cron_runner_path,
-                mngr_ctx=mngr_ctx,
             )
 
     # Save the creation record to the provider's state volume.
