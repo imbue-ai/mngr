@@ -47,7 +47,7 @@ from imbue.mngr.providers.ssh_host_setup import build_add_authorized_keys_comman
 from imbue.mngr.providers.ssh_host_setup import build_add_known_hosts_command
 from imbue.mngr.providers.ssh_host_setup import build_start_activity_watcher_command
 from imbue.mngr.providers.ssh_utils import create_pyinfra_host
-from imbue.mngr.providers.ssh_utils import format_known_hosts_host_pattern
+from imbue.mngr.providers.ssh_utils import format_as_known_hosts_address
 from imbue.mngr.providers.ssh_utils import load_or_create_host_keypair
 from imbue.mngr.providers.ssh_utils import wait_for_sshd
 from imbue.mngr.utils.file_utils import atomic_write
@@ -280,7 +280,7 @@ class LimaProviderInstance(BaseProviderInstance):
         """
         _, public_key_path = self._host_keypair_paths(host_id)
         public_key = public_key_path.read_text().strip()
-        host_pattern = format_known_hosts_host_pattern(hostname, port)
+        host_pattern = format_as_known_hosts_address(hostname, port)
         atomic_write(self._host_known_hosts_path(host_id), f"{host_pattern} {public_key}\n")
 
     def _on_certified_host_data_updated(self, host_id: HostId, certified_data: CertifiedHostData) -> None:
