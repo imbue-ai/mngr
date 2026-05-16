@@ -61,6 +61,9 @@ These fields extend the base `VpsDockerProviderConfig` (see `mngr_vps_docker`):
 | `pricing_mode` | `default` | OVH pricing mode (`default`, `upfront6`, `upfront12`) |
 | `duration` | `P1M` | ISO-8601 commitment duration (monthly only) |
 | `vps_boot_timeout` | `600.0` | Seconds to wait for the OVH order to deliver a VPS |
+| `enable_recycle_cancelled` | `True` | Whether `mngr create` may reuse a cancelled-but-still-alive VPS instead of ordering fresh |
+| `recycle_safety_margin_hours` | `24` | Min hours of remaining `expiration` for a cancelled VPS to be recyclable |
+| `recycle_max_candidates_considered` | `10` | Cap on the number of cancelled VPSes evaluated before falling through to a fresh order |
 
 ## Implementation details
 
@@ -80,4 +83,22 @@ Pinned host keys live under `<profile_dir>/providers/ovh/<provider_name>/known_h
 
 ## Billing caveat
 
-OVH classic VPS is billed monthly (no hourly option). `mngr stop my-agent` halts the Docker container only — the VPS keeps running, and you keep being billed until the next renewal anniversary. `mngr destroy my-agent` removes the VPS but **forfeits the prorated remainder of the current month**. Intended usage is to keep a VPS pool warm (e.g., via `mngr_imbue_cloud`) and reinstall the OS to recycle, rather than destroying.
+OVH classic VPS is billed monthly (no hourly option). `mngr stop my-agent` halts the Docker container only — the VPS keeps running, and you keep being billed until the next renewal anniversary. `mngr destroy my-agent` triggers termination via `POST /vps/{s}/terminate`, which (per OVH's two-step flow) emails a confirmation token to the admin contact and only fully decommissions the VPS at end of month after that token is acted on. In practice the VPS keeps running and billing until then.
+
+## Auto-reuse of cancelled VPSes
+
+To avoid wasting the remainder of a paid month, `mngr create --provider ovh` first checks for cancelled VPSes (those with `renew.deleteAtExpiration=true`) tagged by this provider instance. If one matches the requested plan + datacenter and has enough buffer until `expiration`, it is **un-cancelled** in place via `PUT /vps/{s}/serviceInfos` (no email round-trip needed for the reversal), its OS is rebuilt with our SSH key, and the `mngr-host-id` IAM tag is swapped to the new host. Only when no eligible cancelled VPS exists does a fresh order go out.
+
+Eligibility filters (all required):
+- `renew.deleteAtExpiration == true` and `status == "ok"`
+- `engagedUpTo` is null (no active engagement commitment)
+- `expiration` is at least `recycle_safety_margin_hours` (default 24h) into the future — guards against the billing boundary
+- VPS `state` is `running` or `stopped` (not installing/maintenance/etc)
+- VPS plan/model and datacenter match the request
+- No `mngr-recycling-by` lock tag (another `mngr create` is mid-recycle)
+
+A cooperative lock tag (`mngr-recycling-by=<uuid>`) is attached before any mutating call, and re-read after attach to detect concurrent recyclers. The lock is best-effort: OVH IAM tag writes are not atomic, so under extreme contention two recyclers could both attach their UUIDs. The mitigation is that the second one's rebuild will hit OVH's per-VPS task-lock and fail, falling through to a fresh order.
+
+This is opt-in via `enable_recycle_cancelled` (default `True`). Disable by setting `enable_recycle_cancelled = false` in your provider config if you'd rather see fresh VPS deliveries on every `mngr create`.
+
+Intended usage is to keep a VPS pool warm (e.g., via `mngr_imbue_cloud`) so that destroy → create within the same billing month is essentially free.
