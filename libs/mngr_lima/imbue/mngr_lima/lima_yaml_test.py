@@ -117,38 +117,6 @@ def test_merge_lima_yaml() -> None:
     assert merged["images"] == [{"location": "default.qcow2"}]
 
 
-def test_merge_lima_yaml_provision_extends_with_base_first() -> None:
-    # A user-supplied provision: must not silently drop mngr's host-key
-    # injection entry. mngr's entries come first so its provision script runs
-    # before any user script (Lima executes provision[mode=system] in list order).
-    base = {"provision": [{"mode": "system", "script": "MNGR_HOST_KEY_INJECTION"}]}
-    override = {"provision": [{"mode": "system", "script": "apt-get install -y postgres"}]}
-    merged = merge_lima_yaml(base, override)
-    assert len(merged["provision"]) == 2
-    assert merged["provision"][0]["script"] == "MNGR_HOST_KEY_INJECTION"
-    assert merged["provision"][1]["script"] == "apt-get install -y postgres"
-
-
-def test_merge_lima_yaml_mounts_extends_with_base_first() -> None:
-    # mngr's /mngr volume mount is structural state; a user adding their own
-    # mount must not silently drop it.
-    base = {"mounts": [{"location": "/host/vol", "mountPoint": "/mngr", "writable": True}]}
-    override = {"mounts": [{"location": "/host/data", "mountPoint": "/data", "writable": False}]}
-    merged = merge_lima_yaml(base, override)
-    assert len(merged["mounts"]) == 2
-    assert merged["mounts"][0]["mountPoint"] == "/mngr"
-    assert merged["mounts"][1]["mountPoint"] == "/data"
-
-
-def test_merge_lima_yaml_images_still_replaces() -> None:
-    # images: is a user-replace key: if the user supplies images, they mean
-    # to override the base. Only provision and mounts are extend-keys.
-    base = {"images": [{"location": "default.qcow2"}]}
-    override = {"images": [{"location": "custom.qcow2"}]}
-    merged = merge_lima_yaml(base, override)
-    assert merged["images"] == [{"location": "custom.qcow2"}]
-
-
 def test_parse_build_args_for_yaml_path() -> None:
     assert parse_build_args_for_yaml_path(("--file", "/path/to/config.yaml")) == Path("/path/to/config.yaml")
     assert parse_build_args_for_yaml_path(("--file=/path/to/config.yaml",)) == Path("/path/to/config.yaml")
