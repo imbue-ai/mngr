@@ -276,7 +276,35 @@ class OvhProvider(VpsDockerProvider):
                     fresh_order_service_name = service_name
                 else:
                     service_name = recycle_handle.service_name
-                    self._vps_iam_cache = None
+
+                # Tag-immediately on first sight: attach mngr-provider /
+                # mngr-host-id as the very first action against the new
+                # serviceName. Anything that fails later (rebuild, TOFU,
+                # root bootstrap, host-record write) leaves the VPS
+                # discoverable via the normal mngr discovery path (which
+                # filters on `mngr-provider`), so the operator sees the
+                # orphan in `mngr list` and the create-cleanup path can
+                # clean it up by service name. The recycle path arrives
+                # already tagged -- `try_recycle_cancelled_vps` swapped
+                # `mngr-host-id` to the new host id under a cooperative
+                # lock -- so we skip the re-tag there to avoid two
+                # redundant POST /tag calls per recycled host.
+                urn = vps_urn_for(service_name, region_code=_iam_region_code(self.ovh_config.endpoint))
+                if recycle_handle is None:
+                    attach_tags(
+                        self.ovh_client,
+                        urn,
+                        {
+                            MNGR_PROVIDER_TAG_KEY: str(self.name),
+                            MNGR_HOST_ID_TAG_KEY: str(host_id),
+                        },
+                    )
+                # Invalidate the IAM-listing cache so a concurrent
+                # `mngr list` / `mngr ovh list` issued later in this
+                # process sees the new VPS. Done for both fresh-order
+                # (tags just attached above) and recycle (tags swapped
+                # by try_recycle_cancelled_vps) paths.
+                self._vps_iam_cache = None
 
                 image_id = resolve_image_id(self.ovh_client, service_name, image_name)
                 rebuild_vps_with_public_key(
@@ -323,16 +351,6 @@ class OvhProvider(VpsDockerProvider):
                     private_key_path=vps_private_key_path,
                     known_hosts_path=self._vps_known_hosts_path(),
                     timeout_seconds=self.config.ssh_connect_timeout,
-                )
-
-                urn = vps_urn_for(service_name, region_code=_iam_region_code(self.ovh_config.endpoint))
-                attach_tags(
-                    self.ovh_client,
-                    urn,
-                    {
-                        MNGR_PROVIDER_TAG_KEY: str(self.name),
-                        MNGR_HOST_ID_TAG_KEY: str(host_id),
-                    },
                 )
                 # All post-claim steps succeeded. Ownership of both the
                 # recycle lock (recycle path) and the freshly-ordered
