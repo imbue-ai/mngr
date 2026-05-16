@@ -27,7 +27,6 @@ from imbue.mngr.config.data_types import EnvVar
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import BaseMngrError
 from imbue.mngr.errors import MngrError
-from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.host import AgentEnvironmentOptions
 from imbue.mngr.interfaces.host import AgentLabelOptions
 from imbue.mngr.interfaces.host import CreateAgentOptions
@@ -45,6 +44,7 @@ from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.utils.jsonl_warn import MalformedJsonLineWarner
 from imbue.mngr.utils.jsonl_warn import split_complete_lines
 from imbue.mngr.utils.name_generator import generate_agent_name
+from imbue.mngr_claude.plugin import ClaudeAgent
 from imbue.mngr_uncapped_claude.data_types import ArgPartition
 from imbue.mngr_uncapped_claude.data_types import ResultMeta
 from imbue.mngr_uncapped_claude.input_modes import iter_user_prompts
@@ -126,7 +126,7 @@ class _RunState(FrozenModel):
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
-    agent: AgentInterface[Any]
+    agent: ClaudeAgent
     host: OnlineHostInterface
     writer: StreamingOutputWriter
 
@@ -236,6 +236,15 @@ def _run_with_agent(
         logger.error("Failed to create agent: {}", exc)
         return None, EXIT_MNGR_ERROR
 
+    if not isinstance(result.agent, ClaudeAgent):
+        # api_create with ``agent_type=AgentTypeName("claude")`` always
+        # returns a ClaudeAgent; this assert is purely a type-narrowing
+        # check that should be unreachable in practice. We need the narrowed
+        # type because ``_RunState.agent`` is typed ``ClaudeAgent`` (its
+        # pydantic field re-validation rejects the abstract ``AgentInterface``
+        # base type otherwise — see commit message for details).
+        logger.error("Unexpected agent type from api_create: {!r}", type(result.agent).__name__)
+        return None, EXIT_MNGR_ERROR
     agent = result.agent
     host = result.host
 
@@ -329,7 +338,7 @@ def _build_pass_env_vars() -> AgentEnvironmentOptions:
     return AgentEnvironmentOptions(env_vars=pairs)
 
 
-def _build_events_target(mngr_ctx: MngrContext, agent: AgentInterface[Any]) -> EventsTarget | None:
+def _build_events_target(mngr_ctx: MngrContext, agent: ClaudeAgent) -> EventsTarget | None:
     return try_build_events_target_for_agent(
         mngr_ctx=mngr_ctx,
         agent_id=agent.id,
@@ -339,7 +348,7 @@ def _build_events_target(mngr_ctx: MngrContext, agent: AgentInterface[Any]) -> E
     )
 
 
-def _send_user_turn(mngr_ctx: MngrContext, agent: AgentInterface[Any], prompt: str) -> None:
+def _send_user_turn(mngr_ctx: MngrContext, agent: ClaudeAgent, prompt: str) -> None:
     """Deliver a follow-up prompt to the running agent via ``send_message_to_agents``."""
     include_filter = f'id == "{agent.id}"'
     result = send_message_to_agents(
@@ -357,7 +366,7 @@ def _send_user_turn(mngr_ctx: MngrContext, agent: AgentInterface[Any], prompt: s
 
 
 def _wait_for_turn_end(
-    agent: AgentInterface[Any],
+    agent: ClaudeAgent,
     events_target: EventsTarget,
     writer: StreamingOutputWriter,
     parser_warner: MalformedJsonLineWarner,
@@ -466,7 +475,7 @@ def _finalize_run(
     writer.finalize(meta, turn_count=turn_count)
 
 
-def _destroy_agent(agent: AgentInterface[Any], host: OnlineHostInterface) -> None:
+def _destroy_agent(agent: ClaudeAgent, host: OnlineHostInterface) -> None:
     """Best-effort: stop and destroy the agent, swallowing cleanup errors."""
     try:
         host.stop_agents([agent.id])
