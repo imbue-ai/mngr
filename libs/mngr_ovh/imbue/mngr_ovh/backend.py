@@ -19,7 +19,9 @@ from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_ovh import hookimpl
+from imbue.mngr_ovh.bootstrap import bootstrap_root_authorized_keys_via_user
 from imbue.mngr_ovh.bootstrap import pin_host_key_via_tofu
+from imbue.mngr_ovh.bootstrap import verify_root_ssh
 from imbue.mngr_ovh.bootstrap import wait_for_ssh_after_rebuild
 from imbue.mngr_ovh.catalog import resolve_image_id
 from imbue.mngr_ovh.cli import ovh as ovh_cli_group
@@ -291,11 +293,33 @@ class OvhProvider(VpsDockerProvider):
                     timeout_seconds=self.config.ssh_connect_timeout,
                 )
 
+                # OVH installs the rebuild key for the image's default
+                # non-root user (e.g. `debian` on `Debian 12 - Docker`),
+                # not for root. TOFU + bootstrap happen as that user;
+                # the bootstrap sudo-copies the key to /root/.ssh so the
+                # rest of the provider (which operates as root via the
+                # base VpsDockerProvider) works without per-call sudos.
                 vps_private_key_path, _ = self._get_vps_ssh_keypair()
+                bootstrap_user = self.ovh_config.bootstrap_ssh_user
                 pin_host_key_via_tofu(
                     hostname=service_name,
                     port=22,
-                    ssh_user="root",
+                    ssh_user=bootstrap_user,
+                    private_key_path=vps_private_key_path,
+                    known_hosts_path=self._vps_known_hosts_path(),
+                    timeout_seconds=self.config.ssh_connect_timeout,
+                )
+                bootstrap_root_authorized_keys_via_user(
+                    hostname=service_name,
+                    port=22,
+                    bootstrap_user=bootstrap_user,
+                    private_key_path=vps_private_key_path,
+                    known_hosts_path=self._vps_known_hosts_path(),
+                    timeout_seconds=self.config.ssh_connect_timeout,
+                )
+                verify_root_ssh(
+                    hostname=service_name,
+                    port=22,
                     private_key_path=vps_private_key_path,
                     known_hosts_path=self._vps_known_hosts_path(),
                     timeout_seconds=self.config.ssh_connect_timeout,

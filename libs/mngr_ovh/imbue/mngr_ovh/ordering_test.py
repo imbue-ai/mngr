@@ -21,7 +21,13 @@ def _client(call_side_effect: Any) -> OvhVpsClient:
 
 
 def _success_order_responses() -> list[Any]:
-    """Drives ordering through every required step exactly once."""
+    """Drives ordering through every required step exactly once.
+
+    Trailing two ``[]`` entries are the ``GET /vps/{s}/tasks?state=todo``
+    and ``?state=doing`` polls that ``wait_for_no_active_tasks`` issues
+    at the end of ``order_and_wait_for_vps`` to ensure the post-delivery
+    ``deliverVm`` task has drained before the caller issues ``/rebuild``.
+    """
     return [
         [],
         {"cartId": "cart-1"},
@@ -37,6 +43,8 @@ def _success_order_responses() -> list[Any]:
         None,
         None,
         ["vps-new.vps.ovh.us"],
+        [],
+        [],
     ]
 
 
@@ -163,7 +171,7 @@ def test_order_raises_when_delivery_times_out() -> None:
 
 
 def test_rebuild_polls_task_to_completion() -> None:
-    responses = iter(
+    task_polls = iter(
         [
             {"id": 555, "state": "todo", "type": "reinstallVm"},
             {"id": 555, "state": "doing", "type": "reinstallVm"},
@@ -172,9 +180,13 @@ def test_rebuild_polls_task_to_completion() -> None:
     )
 
     def fake_call(method: str, path: str, body: Any = None, need_auth: bool = True) -> Any:
+        # The pre-rebuild drain probes both ?state=todo and ?state=doing;
+        # both return [] here so the drain returns immediately.
+        if method == "GET" and "/tasks?state=" in path:
+            return []
         if method == "POST" and path.endswith("/rebuild"):
             return {"id": 555, "state": "todo"}
-        return next(responses)
+        return next(task_polls)
 
     client = _client(fake_call)
     rebuild_vps_with_public_key(
@@ -188,6 +200,8 @@ def test_rebuild_polls_task_to_completion() -> None:
 
 def test_rebuild_raises_when_task_errors() -> None:
     def fake_call(method: str, path: str, body: Any = None, need_auth: bool = True) -> Any:
+        if method == "GET" and "/tasks?state=" in path:
+            return []
         if method == "POST" and path.endswith("/rebuild"):
             return {"id": 556, "state": "todo"}
         return {"id": 556, "state": "error", "type": "reinstallVm"}
@@ -201,3 +215,39 @@ def test_rebuild_raises_when_task_errors() -> None:
             public_ssh_key="ssh-ed25519 AAAA test",
             task_timeout_seconds=10.0,
         )
+
+
+def test_rebuild_waits_when_tasks_still_active() -> None:
+    """The pre-rebuild drain must block until both active-state lists empty.
+
+    Reproduces the original Bug 1 condition: a deliverVm task is still
+    in `doing` immediately after the VPS appears in /vps. The fixed
+    `rebuild_vps_with_public_key` must wait that task out before POSTing
+    /rebuild (which would otherwise return HTTP 400 with "Action not
+    available while there are running tasks on the VPS").
+    """
+    todo_responses = iter([[], [], []])
+    doing_responses = iter([[42], [42], []])
+    rebuild_was_called: list[bool] = []
+
+    def fake_call(method: str, path: str, body: Any = None, need_auth: bool = True) -> Any:
+        if method == "GET" and "/tasks?state=todo" in path:
+            return next(todo_responses)
+        if method == "GET" and "/tasks?state=doing" in path:
+            return next(doing_responses)
+        if method == "POST" and path.endswith("/rebuild"):
+            rebuild_was_called.append(True)
+            return {"id": 999, "state": "todo"}
+        if method == "GET" and "/tasks/999" in path:
+            return {"id": 999, "state": "done", "type": "reinstallVm"}
+        raise AssertionError(f"Unexpected call: {method} {path}")
+
+    client = _client(fake_call)
+    rebuild_vps_with_public_key(
+        client,
+        service_name="vps-x.vps.ovh.us",
+        image_id="uuid-img",
+        public_ssh_key="ssh-ed25519 AAAA test",
+        task_timeout_seconds=10.0,
+    )
+    assert rebuild_was_called == [True]

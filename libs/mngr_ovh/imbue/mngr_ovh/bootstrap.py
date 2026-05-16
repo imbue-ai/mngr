@@ -13,6 +13,21 @@ from imbue.mngr_vps_docker.errors import VpsProvisioningError
 
 _TOFU_CONNECT_BACKOFF_SECONDS: float = 5.0
 _TOFU_CONNECT_BANNER_TIMEOUT_SECONDS: float = 30.0
+_SSH_CONNECT_RETRY_EXCEPTIONS: tuple[type[BaseException], ...] = (
+    paramiko.SSHException,
+    socket.error,
+    socket.timeout,
+    EOFError,
+    OSError,
+)
+
+_ROOT_AUTHORIZED_KEYS_COPY_COMMAND: str = (
+    "set -e && "
+    "sudo -n install -m 700 -o root -g root -d /root/.ssh && "
+    "sudo -n install -m 600 -o root -g root "
+    "~/.ssh/authorized_keys /root/.ssh/authorized_keys"
+)
+_ROOT_VERIFY_COMMAND: str = 'test "$(whoami)" = root && echo OK'
 
 
 class _SilentAcceptHostKeyPolicy(paramiko.MissingHostKeyPolicy):
@@ -57,49 +72,31 @@ def pin_host_key_via_tofu(
 
     Returns the OpenSSH-formatted public host key string that was pinned.
     """
-    deadline = time.monotonic() + timeout_seconds
-    last_error: Exception | None = None
-    private_key = paramiko.Ed25519Key.from_private_key_file(str(private_key_path))
-
-    while time.monotonic() < deadline:
-        client = paramiko.SSHClient()
-        client.set_missing_host_key_policy(_SilentAcceptHostKeyPolicy())
-        try:
-            client.connect(
-                hostname=hostname,
-                port=port,
-                username=ssh_user,
-                pkey=private_key,
-                allow_agent=False,
-                look_for_keys=False,
-                timeout=10.0,
-                banner_timeout=_TOFU_CONNECT_BANNER_TIMEOUT_SECONDS,
-                auth_timeout=15.0,
-            )
-        except (paramiko.SSHException, socket.error, socket.timeout, EOFError, OSError) as e:
-            last_error = e
-            time.sleep(_TOFU_CONNECT_BACKOFF_SECONDS)
-            continue
-        try:
-            transport = client.get_transport()
-            captured_key = transport.get_remote_server_key() if transport is not None else None
-            if captured_key is None:
-                raise VpsProvisioningError(f"Connected to {hostname}:{port} but paramiko did not report a host key")
-            host_key_str = _format_openssh_public_key(captured_key)
-            add_host_to_known_hosts(
-                known_hosts_path=known_hosts_path,
-                hostname=hostname,
-                port=port,
-                public_key=host_key_str,
-            )
-            logger.info("Pinned OVH VPS host key for {}:{} ({})", hostname, port, captured_key.get_name())
-            return host_key_str
-        finally:
-            client.close()
-    raise VpsProvisioningError(
-        f"Could not SSH into {ssh_user}@{hostname}:{port} within {timeout_seconds}s to pin the host key "
-        f"(last error: {last_error!r})"
+    client = _connect_with_retry(
+        hostname=hostname,
+        port=port,
+        ssh_user=ssh_user,
+        private_key_path=private_key_path,
+        known_hosts_path=None,
+        timeout_seconds=timeout_seconds,
+        failure_label=f"SSH as {ssh_user} for host-key TOFU",
     )
+    try:
+        transport = client.get_transport()
+        captured_key = transport.get_remote_server_key() if transport is not None else None
+        if captured_key is None:
+            raise VpsProvisioningError(f"Connected to {hostname}:{port} but paramiko did not report a host key")
+        host_key_str = _format_openssh_public_key(captured_key)
+        add_host_to_known_hosts(
+            known_hosts_path=known_hosts_path,
+            hostname=hostname,
+            port=port,
+            public_key=host_key_str,
+        )
+        logger.info("Pinned OVH VPS host key for {}:{} ({})", hostname, port, captured_key.get_name())
+        return host_key_str
+    finally:
+        client.close()
 
 
 def _format_openssh_public_key(key: PKey) -> str:
@@ -128,3 +125,163 @@ def wait_for_ssh_after_rebuild(
             except OSError:
                 time.sleep(2.0)
     raise VpsProvisioningError(f"SSH on {hostname}:{port} not reachable within {timeout_seconds}s")
+
+
+def bootstrap_root_authorized_keys_via_user(
+    *,
+    hostname: str,
+    port: int,
+    bootstrap_user: str,
+    private_key_path: Path,
+    known_hosts_path: Path,
+    timeout_seconds: float,
+) -> None:
+    """Copy the rebuild SSH key from ``bootstrap_user``'s account to ``root``'s.
+
+    OVH's Debian-family VPS images (verified: ``Debian 12 - Docker``)
+    install the rebuild ``publicSshKey`` into the image's default
+    non-root user (``debian``), not into ``/root/.ssh/authorized_keys``.
+    The default user is in the ``sudo`` group with passwordless sudo and
+    in the ``docker`` group, so it can bootstrap root login itself.
+
+    mngr operates as root everywhere downstream (the base
+    ``VpsDockerProvider`` opens its outer SSH sessions as ``root``,
+    ``docker_over_ssh`` shells out as ``root``, etc.), so this helper
+    bridges the OVH-default and the mngr expectation by sudo-copying
+    the authorized_keys file into root's home before any other code
+    tries to connect as root.
+
+    Assumes the host key is already pinned in ``known_hosts_path`` --
+    call ``pin_host_key_via_tofu`` first with the same
+    ``bootstrap_user`` so the strict host-key verification here matches.
+
+    Idempotent: running twice produces the same on-disk state.
+    """
+    with log_span("Bootstrapping root SSH via {}@{}:{}", bootstrap_user, hostname, port):
+        client = _connect_with_retry(
+            hostname=hostname,
+            port=port,
+            ssh_user=bootstrap_user,
+            private_key_path=private_key_path,
+            known_hosts_path=known_hosts_path,
+            timeout_seconds=timeout_seconds,
+            failure_label=f"SSH as {bootstrap_user} to bootstrap root SSH",
+        )
+        try:
+            _run_or_raise(
+                client,
+                _ROOT_AUTHORIZED_KEYS_COPY_COMMAND,
+                failure_label="copy authorized_keys to /root",
+            )
+            logger.info("Bootstrapped root SSH on {} (copied {}'s authorized_keys)", hostname, bootstrap_user)
+        finally:
+            client.close()
+
+
+def verify_root_ssh(
+    *,
+    hostname: str,
+    port: int,
+    private_key_path: Path,
+    known_hosts_path: Path,
+    timeout_seconds: float,
+) -> None:
+    """Open one SSH session as ``root`` and confirm the bootstrap worked.
+
+    Run after ``bootstrap_root_authorized_keys_via_user`` to fail loudly
+    here -- with a clear error message naming SSH-as-root -- rather than
+    deep inside the first ``DockerOverSsh`` call that assumes root works.
+    """
+    client = _connect_with_retry(
+        hostname=hostname,
+        port=port,
+        ssh_user="root",
+        private_key_path=private_key_path,
+        known_hosts_path=known_hosts_path,
+        timeout_seconds=timeout_seconds,
+        failure_label="SSH as root (post-bootstrap verification; check sshd PermitRootLogin if this fails)",
+    )
+    try:
+        _run_or_raise(client, _ROOT_VERIFY_COMMAND, failure_label="root smoke-test")
+        logger.info("Verified SSH as root works on {}:{}", hostname, port)
+    finally:
+        client.close()
+
+
+def _connect_with_retry(
+    *,
+    hostname: str,
+    port: int,
+    ssh_user: str,
+    private_key_path: Path,
+    known_hosts_path: Path | None,
+    timeout_seconds: float,
+    failure_label: str,
+) -> paramiko.SSHClient:
+    """Open an SSH session with retry-on-transient-errors; return the connected client.
+
+    Caller owns the returned client (must call ``.close()`` when done).
+
+    When ``known_hosts_path`` is None, uses ``_SilentAcceptHostKeyPolicy``
+    (TOFU semantics; required for the very first connection to a
+    freshly-rebuilt VPS where no host key has been pinned yet). When a
+    path is given, strict host-key verification is enforced against that
+    file; any unknown key raises.
+
+    Centralises the retry loop so we have exactly one ``time.sleep``
+    across all SSH-with-retry call sites in this module.
+    """
+    deadline = time.monotonic() + timeout_seconds
+    last_error: BaseException | None = None
+    private_key = paramiko.Ed25519Key.from_private_key_file(str(private_key_path))
+
+    while time.monotonic() < deadline:
+        client = paramiko.SSHClient()
+        if known_hosts_path is None:
+            client.set_missing_host_key_policy(_SilentAcceptHostKeyPolicy())
+        else:
+            client.load_host_keys(str(known_hosts_path))
+            client.set_missing_host_key_policy(paramiko.RejectPolicy())
+        try:
+            client.connect(
+                hostname=hostname,
+                port=port,
+                username=ssh_user,
+                pkey=private_key,
+                allow_agent=False,
+                look_for_keys=False,
+                timeout=10.0,
+                banner_timeout=_TOFU_CONNECT_BANNER_TIMEOUT_SECONDS,
+                auth_timeout=15.0,
+            )
+        except _SSH_CONNECT_RETRY_EXCEPTIONS as e:
+            last_error = e
+            time.sleep(_TOFU_CONNECT_BACKOFF_SECONDS)
+            continue
+        return client
+
+    raise VpsProvisioningError(
+        f"OVH bootstrap step {failure_label!r} on {hostname}:{port} did not succeed within "
+        f"{timeout_seconds}s (last error: {last_error!r})"
+    )
+
+
+def _run_or_raise(
+    client: paramiko.SSHClient,
+    command: str,
+    *,
+    failure_label: str,
+) -> None:
+    """Execute ``command`` over the open SSH session; raise on non-zero exit.
+
+    Captures stderr into the raised error to make remote sudo failures
+    diagnosable without re-running.
+    """
+    _stdin, stdout, stderr = client.exec_command(command, timeout=60.0)
+    exit_status = stdout.channel.recv_exit_status()
+    if exit_status != 0:
+        err = stderr.read().decode("utf-8", errors="replace").strip()
+        out = stdout.read().decode("utf-8", errors="replace").strip()
+        raise VpsProvisioningError(
+            f"OVH bootstrap step {failure_label!r} failed (exit={exit_status}): stderr={err!r} stdout={out!r}"
+        )

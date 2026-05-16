@@ -32,24 +32,49 @@ class TestOvhVpsClientErrorMapping:
 
 
 class TestOvhVpsClientLifecycle:
-    def test_destroy_instance_calls_terminate(self) -> None:
-        captured: list[tuple[str, str]] = []
+    def test_destroy_instance_flips_delete_at_expiration(self) -> None:
+        """`destroy_instance` must set `renew.deleteAtExpiration=true` directly.
+
+        The legacy implementation called ``POST /terminate`` which only
+        emails a confirmation token; without acting on the email the VPS
+        would auto-renew indefinitely. The corrected implementation goes
+        straight to the ``PUT /serviceInfos`` flow so the VPS actually
+        stops billing at end of month.
+        """
+        captured: list[tuple[str, str, Any]] = []
 
         def fake_call(method: str, path: str, body: Any = None, need_auth: bool = True) -> Any:
-            captured.append((method, path))
+            captured.append((method, path, body))
+            if method == "GET" and path.endswith("/serviceInfos"):
+                return {
+                    "renew": {"deleteAtExpiration": False, "automatic": True, "period": 1},
+                    "expiration": "2026-06-15",
+                    "contactAdmin": "infra@imbue.com",
+                    "renewalType": "automaticV2012",
+                }
             return None
 
         client = _client_with_call(fake_call)
         client.destroy_instance(VpsInstanceId("vps-abc.vps.ovh.us"))
-        assert captured == [("POST", "/vps/vps-abc.vps.ovh.us/terminate")]
+        methods_paths = [(m, p) for m, p, _ in captured]
+        assert methods_paths == [
+            ("GET", "/vps/vps-abc.vps.ovh.us/serviceInfos"),
+            ("PUT", "/vps/vps-abc.vps.ovh.us/serviceInfos"),
+        ]
+        # Crucially: no /terminate -- that endpoint is documented as
+        # email-confirmed termination and is not what we want.
+        for _method, p, _body in captured:
+            assert "/terminate" not in p
+        put_body = captured[-1][2]
+        assert put_body["renew"]["deleteAtExpiration"] is True
 
     def test_destroy_instance_short_circuits_when_mid_recycle(self) -> None:
-        """A pending recycle handle skips /terminate and releases the IAM lock instead.
+        """A pending recycle handle skips cancellation and releases the IAM lock instead.
 
         The base ``VpsDockerProvider.create_host`` cleanup path calls
         ``vps_client.destroy_instance`` on failure. For a mid-recycle VPS
         (un-cancel not yet applied because we defer it to finalize), the
-        VPS is already cancelled, so /terminate would be a no-op.
+        VPS is already cancelled, so re-cancelling would be wasted work.
         Instead the client releases the IAM ``mngr-recycling-by`` lock
         tag so a subsequent ``mngr create`` can re-try the recycle.
         """
@@ -57,6 +82,13 @@ class TestOvhVpsClientLifecycle:
 
         def fake_call(method: str, path: str, body: Any = None, need_auth: bool = True) -> Any:
             captured.append((method, path))
+            if method == "GET" and path.endswith("/serviceInfos"):
+                return {
+                    "renew": {"deleteAtExpiration": False, "automatic": True, "period": 1},
+                    "expiration": "2026-06-15",
+                    "contactAdmin": "infra@imbue.com",
+                    "renewalType": "automaticV2012",
+                }
             return None
 
         client = _client_with_call(fake_call)
@@ -67,16 +99,20 @@ class TestOvhVpsClientLifecycle:
         )
         client.register_recycle_handle(handle)
         client.destroy_instance(VpsInstanceId("vps-abc.vps.ovh.us"))
-        # Crucially: no POST /terminate (would be a wasted call against an
-        # already-cancelled VPS); only the IAM lock DELETE happens.
+        # Crucially: no /serviceInfos mutation (would be a wasted call
+        # against an already-cancelled VPS); only the IAM lock DELETE.
         assert captured == [
             ("DELETE", "/v2/iam/resource/urn:v1:us:resource:vps:vps-abc.vps.ovh.us/tag/mngr-recycling-by"),
         ]
         # Handle is consumed exactly once: a second destroy on the same
-        # service_name should fall through to the normal /terminate path.
+        # service_name should fall through to the normal cancellation
+        # path (GET + PUT serviceInfos).
         captured.clear()
         client.destroy_instance(VpsInstanceId("vps-abc.vps.ovh.us"))
-        assert captured == [("POST", "/vps/vps-abc.vps.ovh.us/terminate")]
+        assert captured == [
+            ("GET", "/vps/vps-abc.vps.ovh.us/serviceInfos"),
+            ("PUT", "/vps/vps-abc.vps.ovh.us/serviceInfos"),
+        ]
 
     def test_destroy_instance_short_circuit_swallows_404_on_lock_release(self) -> None:
         """A 404 on the lock-release DELETE is treated as "lock already gone" and not raised.
@@ -163,6 +199,48 @@ class TestOvhVpsClientTask:
         with pytest.raises(VpsProvisioningError):
             client.wait_for_task("vps-x", 3, timeout_seconds=0.05)
 
+    def test_wait_for_no_active_tasks_returns_immediately_when_idle(self) -> None:
+        """Each poll calls both ?state=todo and ?state=doing; both empty -> return."""
+        calls: list[str] = []
+
+        def fake_call(method: str, path: str, body: Any = None, need_auth: bool = True) -> Any:
+            calls.append(path)
+            return []
+
+        client = _client_with_call(fake_call)
+        client.wait_for_no_active_tasks("vps-x", timeout_seconds=5.0)
+        assert calls == ["/vps/vps-x/tasks?state=todo", "/vps/vps-x/tasks?state=doing"]
+
+    def test_wait_for_no_active_tasks_blocks_then_returns_when_tasks_drain(self) -> None:
+        """Reproduces the Bug 1 sequence: deliverVm in `doing`, then done.
+
+        Each poll round queries ?state=todo and ?state=doing in order.
+        First round returns ([], [42]) -> still active. Second returns
+        ([], []) -> drained, return.
+        """
+        todo_iter = iter([[], []])
+        doing_iter = iter([[42], []])
+
+        def fake_call(method: str, path: str, body: Any = None, need_auth: bool = True) -> Any:
+            if "?state=todo" in path:
+                return next(todo_iter)
+            if "?state=doing" in path:
+                return next(doing_iter)
+            raise AssertionError(f"Unexpected path {path}")
+
+        client = _client_with_call(fake_call)
+        client.task_poll_interval = 0.0
+        client.wait_for_no_active_tasks("vps-x", timeout_seconds=5.0)
+
+    def test_wait_for_no_active_tasks_raises_on_timeout(self) -> None:
+        def fake_call(method: str, path: str, body: Any = None, need_auth: bool = True) -> Any:
+            return [99] if "?state=doing" in path else []
+
+        client = _client_with_call(fake_call)
+        client.task_poll_interval = 0.0
+        with pytest.raises(VpsProvisioningError, match="still has active tasks"):
+            client.wait_for_no_active_tasks("vps-x", timeout_seconds=0.05)
+
 
 class TestOvhVpsClientSnapshots:
     def test_create_snapshot_raises_when_one_already_exists(self) -> None:
@@ -229,16 +307,26 @@ class TestOvhVpsClientServiceInfo:
         info = client.get_service_info("vps-x")
         assert info["renew"]["deleteAtExpiration"] is True
 
-    def test_set_renew_at_expiration_preserves_other_fields(self) -> None:
+    def test_set_renew_at_expiration_false_restores_auto_renewal_fields(self) -> None:
+        """Un-cancelling must restore the fields OVH auto-flips on cancel.
+
+        Verified live: setting ``renew.deleteAtExpiration=true`` causes
+        OVH to also flip ``renew.automatic`` to ``false`` and
+        ``renewalType`` to ``"manual"``. Un-cancelling without explicitly
+        restoring those would leave the VPS in a state where it does not
+        auto-renew at the next anniversary even though our flag flip
+        succeeded -- silently breaking the recycle path.
+        """
         seen: dict[str, Any] = {}
 
         def fake(method: str, path: str, body: Any = None, need_auth: bool = True) -> Any:
             if method == "GET" and path.endswith("/serviceInfos"):
+                # Mirror the post-cancellation state OVH leaves us in.
                 return {
-                    "renew": {"deleteAtExpiration": True, "automatic": True, "period": 1},
+                    "renew": {"deleteAtExpiration": True, "automatic": False, "period": 1},
                     "expiration": "2026-06-15",
                     "contactAdmin": "infra@imbue.com",
-                    "renewalType": "automaticV2012",
+                    "renewalType": "manual",
                 }
             if method == "PUT" and path.endswith("/serviceInfos"):
                 seen["body"] = body
@@ -249,8 +337,41 @@ class TestOvhVpsClientServiceInfo:
         client.set_renew_at_expiration("vps-x", delete_at_expiration=False)
         body = seen["body"]
         assert body["renew"]["deleteAtExpiration"] is False
+        # Un-cancel must restore auto-renewal so the VPS actually renews
+        # at the next anniversary; OVH does not do this automatically.
         assert body["renew"]["automatic"] is True
+        assert body["renewalType"] == "automaticV2012"
+        # Unrelated fields preserved (read-modify-write contract).
         assert body["contactAdmin"] == "infra@imbue.com"
+
+    def test_set_renew_at_expiration_true_does_not_force_auto_renewal_fields(self) -> None:
+        """Cancelling does not touch ``automatic`` / ``renewalType``.
+
+        OVH flips them itself as a server-side side effect; clobbering
+        them client-side would be redundant and could mask a future
+        OVH-side behavior change. The fix-up only runs on un-cancel.
+        """
+        seen: dict[str, Any] = {}
+
+        def fake(method: str, path: str, body: Any = None, need_auth: bool = True) -> Any:
+            if method == "GET" and path.endswith("/serviceInfos"):
+                return {
+                    "renew": {"deleteAtExpiration": False, "automatic": True, "period": 1},
+                    "expiration": "2026-06-15",
+                    "contactAdmin": "infra@imbue.com",
+                    "renewalType": "automaticV2012",
+                }
+            if method == "PUT" and path.endswith("/serviceInfos"):
+                seen["body"] = body
+                return None
+            raise AssertionError(f"Unexpected {method} {path}")
+
+        client = _client_with_call(fake)
+        client.set_renew_at_expiration("vps-x", delete_at_expiration=True)
+        body = seen["body"]
+        assert body["renew"]["deleteAtExpiration"] is True
+        # automatic / renewalType left as-read; OVH flips them server-side.
+        assert body["renew"]["automatic"] is True
         assert body["renewalType"] == "automaticV2012"
 
 
