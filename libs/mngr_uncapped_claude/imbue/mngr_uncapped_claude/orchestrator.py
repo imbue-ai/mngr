@@ -2,7 +2,6 @@ import os
 import signal
 import time
 from collections.abc import Iterator
-from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 from typing import Final
@@ -51,6 +50,8 @@ from imbue.mngr_uncapped_claude.data_types import ResultMeta
 from imbue.mngr_uncapped_claude.input_modes import iter_user_prompts
 from imbue.mngr_uncapped_claude.output_modes import StreamingOutputWriter
 from imbue.mngr_uncapped_claude.output_modes import monotonic_ms_since
+from imbue.mngr_uncapped_claude.raw_transcript import RAW_TRANSCRIPT_PATH
+from imbue.mngr_uncapped_claude.raw_transcript import RawTranscriptParser
 
 # Settings overrides applied to mngr_ctx so the spawned claude agent runs
 # unattended. The two ``settings_overrides`` flags are normally added by
@@ -92,9 +93,6 @@ _POLL_INTERVAL_SECONDS: Final[float] = 0.1
 # message is delivered. mngr's 10-second default is too short here.
 _AGENT_READY_TIMEOUT_SECONDS: Final[float] = 120.0
 
-# Filename relative to the agent's events directory holding the common
-# transcript stream produced by mngr_claude.
-_COMMON_TRANSCRIPT_PATH: Final[str] = "claude/common_transcript/events.jsonl"
 
 # Lifecycle states that end the per-turn polling loop. WAITING is the
 # success case (agent paused for the next user turn); the others all mean
@@ -325,15 +323,19 @@ def _run_with_agent(
     turn_count = 1
     # Transcript read state is owned by the run, not the per-turn helper, so
     # that multi-turn invocations do not re-read or re-parse lines from prior
-    # turns and the malformed-line warner keeps its "warn-once" memory across
-    # turns.
+    # turns, the malformed-line warner keeps its "warn-once" memory across
+    # turns, and the raw-transcript parser keeps its tool_name_by_call_id
+    # map across turns so a tool_result in turn N can still be labeled with
+    # the tool name declared in turn N-1's assistant message.
     seen_bytes = 0
-    parser_warner = MalformedJsonLineWarner(source_description=f"common transcript for agent {agent.name}")
+    parser = RawTranscriptParser(
+        warner=MalformedJsonLineWarner(source_description=f"raw transcript for agent {agent.name}"),
+    )
     read_failure_warner = _TranscriptReadFailureWarner()
     with _DestroyOnSignal(state=state):
         try:
             final_state, seen_bytes = _wait_for_turn_end(
-                agent, events_target, writer, parser_warner, read_failure_warner, seen_bytes
+                agent, events_target, writer, parser, read_failure_warner, seen_bytes
             )
             for next_prompt in remaining_prompts:
                 if final_state != AgentLifecycleState.WAITING:
@@ -351,7 +353,7 @@ def _run_with_agent(
                 _send_user_turn(mngr_ctx, agent, next_prompt)
                 turn_count += 1
                 final_state, seen_bytes = _wait_for_turn_end(
-                    agent, events_target, writer, parser_warner, read_failure_warner, seen_bytes
+                    agent, events_target, writer, parser, read_failure_warner, seen_bytes
                 )
         except BaseMngrError as exc:
             logger.error("Run failed: {}", exc)
@@ -431,7 +433,7 @@ def _wait_for_turn_end(
     agent: ClaudeAgent,
     events_target: EventsTarget,
     writer: StreamingOutputWriter,
-    parser_warner: MalformedJsonLineWarner,
+    parser: RawTranscriptParser,
     read_failure_warner: _TranscriptReadFailureWarner,
     seen_bytes: int,
 ) -> tuple[AgentLifecycleState, int]:
@@ -446,10 +448,10 @@ def _wait_for_turn_end(
     """
     final_state: AgentLifecycleState | None = None
     while final_state is None:
-        seen_bytes = _drain_new_events(events_target, writer, parser_warner, read_failure_warner, seen_bytes)
+        seen_bytes = _drain_new_events(events_target, writer, parser, read_failure_warner, seen_bytes)
         state = agent.get_lifecycle_state()
         if state in _TURN_END_STATES:
-            seen_bytes = _drain_new_events(events_target, writer, parser_warner, read_failure_warner, seen_bytes)
+            seen_bytes = _drain_new_events(events_target, writer, parser, read_failure_warner, seen_bytes)
             final_state = state
         else:
             time.sleep(_POLL_INTERVAL_SECONDS)
@@ -459,28 +461,29 @@ def _wait_for_turn_end(
 def _drain_new_events(
     events_target: EventsTarget,
     writer: StreamingOutputWriter,
-    parser_warner: MalformedJsonLineWarner,
+    parser: RawTranscriptParser,
     read_failure_warner: _TranscriptReadFailureWarner,
     seen_bytes: int,
 ) -> int:
-    """Read the transcript file, emit any new events past ``seen_bytes``, return new offset.
+    """Read the raw transcript file, emit any new events past ``seen_bytes``, return new offset.
 
     Only consumes complete newline-terminated lines; any trailing partial line
-    (a write that has not yet been flushed by mngr_claude) is held back until
-    the next poll, so we do not silently drop in-flight events. The offset is
-    tracked in UTF-8 bytes to match :func:`split_complete_lines`.
+    (a write that has not yet been flushed by ``stream_transcript.sh``) is held
+    back until the next poll, so we do not silently drop in-flight events.
+    The offset is tracked in UTF-8 bytes to match :func:`split_complete_lines`.
     """
     try:
-        content = read_event_content(events_target, _COMMON_TRANSCRIPT_PATH)
+        content = read_event_content(events_target, RAW_TRANSCRIPT_PATH)
     except MngrError as exc:
         # ``read_event_content`` reads the transcript via ``cat`` on the
-        # agent's online host. Before mngr_claude has written the common
-        # transcript, ``cat`` exits with "No such file or directory" and the
-        # API turns that into an ``MngrError``. That case is benign during the
-        # normal startup window and must not flood the log on every poll;
-        # everything else is a real read failure worth surfacing once.
+        # agent's online host. Before ``stream_transcript.sh`` has produced
+        # the raw transcript file, ``cat`` exits with
+        # "No such file or directory" and the API turns that into an
+        # ``MngrError``. That case is benign during the normal startup
+        # window and must not flood the log on every poll; everything else
+        # is a real read failure worth surfacing once.
         if "No such file or directory" in str(exc):
-            logger.trace("common transcript not yet available at {}", _COMMON_TRANSCRIPT_PATH)
+            logger.trace("raw transcript not yet available at {}", RAW_TRANSCRIPT_PATH)
         else:
             read_failure_warner.warn(exc)
         return seen_bytes
@@ -492,24 +495,10 @@ def _drain_new_events(
     if consumed_bytes == 0:
         # Only a partial line so far; wait for the writer to flush a newline.
         return seen_bytes
-    new_events = _parse_event_lines(new_lines, parser_warner)
+    new_events = parser.parse_lines(new_lines)
     if new_events:
         writer.emit_events(new_events)
     return seen_bytes + consumed_bytes
-
-
-def _parse_event_lines(lines: Sequence[str], parser_warner: MalformedJsonLineWarner) -> list[dict[str, Any]]:
-    events: list[dict[str, Any]] = []
-    for line in lines:
-        stripped = line.strip()
-        if stripped == "":
-            continue
-        parsed = parser_warner.parse(stripped)
-        if parsed is None:
-            continue
-        event, _ = parsed
-        events.append(event)
-    return events
 
 
 def _build_result_meta(
