@@ -275,13 +275,22 @@ def test_create_agent_with_unknown_type_raises(
 
     agent_options = _make_options(agent_name, command=None, agent_type="my-custom-command")
 
-    with pytest.raises(UnknownAgentTypeError, match="Unknown agent type 'my-custom-command'"):
+    with pytest.raises(UnknownAgentTypeError, match="Unknown agent type 'my-custom-command'") as exc_info:
         create(
             source_location=source_location,
             target_host=local_host,
             agent_options=agent_options,
             mngr_ctx=temp_mngr_ctx,
         )
+
+    # Pin the user-facing help text contract promised by the docstring:
+    # get_plugin_install_hint is invoked for the unknown name (yielding the
+    # generic "do not recognize" fallback because the name is uncataloged),
+    # and the agent-type-kind branch appends the shell-command escape hatch.
+    user_help_text = exc_info.value.user_help_text
+    assert user_help_text is not None
+    assert "do not recognize 'my-custom-command'" in user_help_text
+    assert "--type command" in user_help_text
 
 
 # =============================================================================
