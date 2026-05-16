@@ -113,7 +113,8 @@ def test_prevent_namedtuple() -> None:
 
 
 def test_prevent_yaml_usage() -> None:
-    rc.check_yaml_usage(_DIR, snapshot(75))
+    # lima native config only accepts yaml
+    rc.check_yaml_usage(_DIR, snapshot(83))
 
 
 def test_prevent_functools_partial() -> None:
