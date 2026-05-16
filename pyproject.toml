@@ -90,6 +90,7 @@ addopts = [
   "--cov=imbue.mngr_uncapped_claude",
   "--cov=imbue.mngr_vps_docker",
   "--cov=imbue.mngr_vultr",
+  "--cov=imbue.mngr_ovh",
   "--cov-report=term-missing",
   "--cov-report=xml",
   "--durations=20",

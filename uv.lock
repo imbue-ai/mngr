@@ -26,6 +26,7 @@ members = [
     "imbue-mngr-modal",
     "imbue-mngr-notifications",
     "imbue-mngr-opencode",
+    "imbue-mngr-ovh",
     "imbue-mngr-pair",
     "imbue-mngr-pi-coding",
     "imbue-mngr-recursive",
@@ -1963,6 +1964,23 @@ dependencies = [
 requires-dist = [{ name = "imbue-mngr", editable = "libs/mngr" }]
 
 [[package]]
+name = "imbue-mngr-ovh"
+version = "0.1.0"
+source = { editable = "libs/mngr_ovh" }
+dependencies = [
+    { name = "imbue-mngr" },
+    { name = "imbue-mngr-vps-docker" },
+    { name = "ovh" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "imbue-mngr", editable = "libs/mngr" },
+    { name = "imbue-mngr-vps-docker", editable = "libs/mngr_vps_docker" },
+    { name = "ovh", specifier = ">=1.2.0" },
+]
+
+[[package]]
 name = "imbue-mngr-pair"
 version = "0.2.8"
 source = { editable = "libs/mngr_pair" }
@@ -2891,6 +2909,19 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/24/dd/3590348818f58f837a75fb969b04cdf187ae197e14d60b5e5a794a38b79d/orjson-3.11.8-cp314-cp314-win32.whl", hash = "sha256:0b57f67710a8cd459e4e54eb96d5f77f3624eba0c661ba19a525807e42eccade", size = 131983, upload-time = "2026-03-31T16:16:21.823Z" },
     { url = "https://files.pythonhosted.org/packages/3f/0f/b6cb692116e05d058f31ceee819c70f097fa9167c82f67fabe7516289abc/orjson-3.11.8-cp314-cp314-win_amd64.whl", hash = "sha256:735e2262363dcbe05c35e3a8869898022af78f89dde9e256924dc02e99fe69ca", size = 127396, upload-time = "2026-03-31T16:16:23.685Z" },
     { url = "https://files.pythonhosted.org/packages/c0/d1/facb5b5051fabb0ef9d26c6544d87ef19a939a9a001198655d0d891062dd/orjson-3.11.8-cp314-cp314-win_arm64.whl", hash = "sha256:6ccdea2c213cf9f3d9490cbd5d427693c870753df41e6cb375bd79bcbafc8817", size = 127330, upload-time = "2026-03-31T16:16:25.496Z" },
+]
+
+[[package]]
+name = "ovh"
+version = "1.2.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "requests" },
+    { name = "requests-oauthlib" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/83/14/d8a9e302b6de0bb9b807f33f77afbfb32466a6afbbc70163b6e1f1ba8083/ovh-1.2.0.tar.gz", hash = "sha256:d311f08ec17b62cc61216b3dacf03ee89f95a1da9036a595dac29fc9d798b827", size = 119764, upload-time = "2024-07-23T14:53:27.044Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/fa/e1/5b64ce848fe2a85b0aabad5b883fa00beadbe79d70e6654914a3e831d037/ovh-1.2.0-py2.py3-none-any.whl", hash = "sha256:0e9940bd53fc615dc89d3cfcd80f07282a4ad9f083c3f769b6fb98d501938307", size = 24899, upload-time = "2024-07-23T14:53:24.693Z" },
 ]
 
 [[package]]
@@ -3869,6 +3900,19 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/3c/f8/5dc70102e4d337063452c82e1f0d95e39abfe67aa222ed8a5ddeb9df8de8/requests_file-3.0.1.tar.gz", hash = "sha256:f14243d7796c588f3521bd423c5dea2ee4cc730e54a3cac9574d78aca1272576", size = 6967, upload-time = "2025-10-20T18:56:42.279Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/e1/d5/de8f089119205a09da657ed4784c584ede8381a0ce6821212a6d4ca47054/requests_file-3.0.1-py2.py3-none-any.whl", hash = "sha256:d0f5eb94353986d998f80ac63c7f146a307728be051d4d1cd390dbdb59c10fa2", size = 4514, upload-time = "2025-10-20T18:56:41.184Z" },
+]
+
+[[package]]
+name = "requests-oauthlib"
+version = "2.0.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "oauthlib" },
+    { name = "requests" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/42/f2/05f29bc3913aea15eb670be136045bf5c5bbf4b99ecb839da9b422bb2c85/requests-oauthlib-2.0.0.tar.gz", hash = "sha256:b3dffaebd884d8cd778494369603a9e7b58d29111bf6b41bdc2dcd87203af4e9", size = 55650, upload-time = "2024-03-22T20:32:29.939Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/3b/5d/63d4ae3b9daea098d5d6f5da83984853c1bbacd5dc826764b249fe119d24/requests_oauthlib-2.0.0-py2.py3-none-any.whl", hash = "sha256:7dd8a5c40426b779b0868c404bdef9768deccf22749cde15852df527e6269b36", size = 24179, upload-time = "2024-03-22T20:32:28.055Z" },
 ]
 
 [[package]]
