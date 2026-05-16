@@ -40,6 +40,7 @@ with ``--force``, Modal deploys overwrite), so they don't need rollback
 
 from collections.abc import Callable
 from pathlib import Path
+from typing import Final
 
 from loguru import logger
 from pydantic import AnyUrl
@@ -83,6 +84,18 @@ from imbue.minds.envs.providers.supertokens_app import SuperTokensProviderError
 from imbue.minds.envs.providers.supertokens_app import app_id_from_connection_uri
 from imbue.minds.envs.providers.vultr_tags import VultrInstanceSummary
 from imbue.minds.errors import MindError
+
+# Env var the deployed connector reads at startup to identify which
+# minds env it belongs to. Pushed alongside ``MINDS_TIER_GENERATION_ID``
+# in the per-env ``litellm-connector-<tier>`` Modal Secret. For dev-tier
+# deploys this is the per-developer dev env name (e.g. ``josh-3``); for
+# tier deploys it's the tier itself (``staging`` / ``production``).
+# Used by ``cf_create_tunnel`` to tag every Cloudflare tunnel the
+# connector creates with the owning env, so ``minds env destroy`` can
+# enumerate + delete only that env's tunnels (vs walking every tunnel
+# on the shared dev-tier CF account).
+MINDS_ENV_NAME_KEY: Final[str] = "MINDS_ENV_NAME"
+
 
 _PROVIDER_ERRORS: tuple[type[Exception], ...] = (
     ModalEnvProviderError,
@@ -142,6 +155,10 @@ EnsureGenerationIdFn = Callable[[str, ConcurrencyGroup], str]
 # (tier_vault_prefix, cg) -> None. Removes the generation Vault entry
 # so the next deploy mints a fresh one. Used by tier destroys.
 DeleteGenerationIdFn = Callable[[str, ConcurrencyGroup], None]
+# (name, account_id, api_token) -> tuple of tunnel uuids matching env.
+ListCloudflareTunnelsFn = Callable[[DevEnvName, str, SecretStr], tuple[str, ...]]
+# (tunnel_ids, account_id, api_token) -> None. Deletes the listed tunnels.
+DeleteCloudflareTunnelsFn = Callable[[tuple[str, ...], str, SecretStr], None]
 ReadPerEnvSecretValuesFn = Callable[[str, str, dict[str, str], ConcurrencyGroup], dict[str, str]]
 
 
@@ -210,6 +227,18 @@ class Providers(FrozenModel):
         description=(
             "(tier_vault_prefix, cg) -> None. Removes secrets/minds/<tier>/generation so the "
             "next deploy mints a fresh id (triggers activate-time auto-wipe on every dev's machine)."
+        ),
+    )
+    list_cloudflare_tunnels_for_env: ListCloudflareTunnelsFn = Field(
+        description=(
+            "(name, account_id, api_token) -> tuple of cloudflare tunnel uuids whose metadata.env "
+            "equals the env name. Used by destroy to enumerate the env's tunnels."
+        ),
+    )
+    delete_cloudflare_tunnels: DeleteCloudflareTunnelsFn = Field(
+        description=(
+            "(tunnel_ids, account_id, api_token) -> None. Deletes the listed cloudflare tunnels. "
+            "Idempotent per-tunnel (404 -> success)."
         ),
     )
 
@@ -353,9 +382,13 @@ def deploy_dev_env(
         per_service_overrides = dict(first_pass_overrides.get(service, {}))
         # Auto-populate litellm-connector with the master key from the
         # litellm Vault entry. LITELLM_PROXY_URL is filled in second-pass
-        # below once we know the actual proxy URL.
-        if service == "litellm-connector" and litellm_master_key:
-            per_service_overrides.setdefault("LITELLM_MASTER_KEY", litellm_master_key)
+        # below once we know the actual proxy URL. Also push the env
+        # name so the connector can tag Cloudflare tunnels with their
+        # owning minds env (used by destroy to enumerate + delete).
+        if service == "litellm-connector":
+            if litellm_master_key:
+                per_service_overrides.setdefault("LITELLM_MASTER_KEY", litellm_master_key)
+            per_service_overrides.setdefault(MINDS_ENV_NAME_KEY, str(name))
         values = providers.read_per_env_secret_values(
             service,
             tier_vault_prefix,
@@ -540,6 +573,20 @@ def destroy_tier_env(
     )
     _wipe_neon_for_tier(neon_values, providers=providers, tier=tier, parent_cg=parent_concurrency_group)
 
+    # Step 5.5: clean up Cloudflare tunnels tagged for this tier.
+    logger.info("Cleaning up Cloudflare tunnels tagged for tier {!r}...", tier)
+    cf_vault_values = providers.read_per_env_secret_values(
+        "cloudflare",
+        tier_vault_prefix,
+        {},
+        parent_concurrency_group,
+    )
+    deleted_tunnels = _cleanup_cloudflare_tunnels_for_env(
+        name, cloudflare_vault_values=cf_vault_values, providers=providers
+    )
+    if deleted_tunnels:
+        logger.info("Deleted {} Cloudflare tunnel(s) for tier {!r}.", deleted_tunnels, tier)
+
     # Step 6: delete the tier generation id from Vault so the next
     # deploy mints a fresh one (which all devs' next activation
     # against the tier sees as a mismatch + auto-wipes their local
@@ -578,6 +625,32 @@ def _wipe_supertokens_for_tier(
     app_id = app_id_from_connection_uri(connection_uri)
     core_base_url = connection_uri.rsplit(f"/appid-{app_id}", 1)[0]
     providers.wipe_supertokens_app_data(app_id, core_base_url, SecretStr(api_key_str))
+
+
+def _cleanup_cloudflare_tunnels_for_env(
+    name: DevEnvName,
+    *,
+    cloudflare_vault_values: dict[str, str],
+    providers: Providers,
+) -> int:
+    """List + delete every Cloudflare tunnel whose metadata.env equals ``name``.
+
+    Returns the count of tunnels deleted. Raises :class:`MindError`
+    when the cloudflare Vault entry is missing the keys we need; the
+    caller propagates so destroy aborts and the operator can fix
+    Vault rather than silently leaking tunnels.
+    """
+    account_id = cloudflare_vault_values.get("CLOUDFLARE_ACCOUNT_ID", "")
+    api_token = cloudflare_vault_values.get("CLOUDFLARE_API_TOKEN", "")
+    if not account_id or not api_token:
+        raise MindError(
+            f"Cannot enumerate Cloudflare tunnels for env {str(name)!r}: cloudflare Vault entry "
+            "is missing CLOUDFLARE_ACCOUNT_ID or CLOUDFLARE_API_TOKEN."
+        )
+    tunnel_ids = providers.list_cloudflare_tunnels_for_env(name, account_id, SecretStr(api_token))
+    if tunnel_ids:
+        providers.delete_cloudflare_tunnels(tunnel_ids, account_id, SecretStr(api_token))
+    return len(tunnel_ids)
 
 
 def _wipe_neon_for_tier(
@@ -638,11 +711,15 @@ def deploy_tier_env(
     )
     for service in services:
         # Tier deploys have no per-env overrides except the generation
-        # id, which we inject into the litellm-connector secret so the
-        # connector reads MINDS_TIER_GENERATION_ID at startup.
+        # id and the env name, both of which the connector reads at
+        # startup -- the id powers ``/generation``, the env name is the
+        # Cloudflare-tunnel metadata tag. Both ride in the
+        # ``litellm-connector-<tier>`` secret since that's where the
+        # connector's other custom env values already live.
         overrides: dict[str, str] = {}
         if service == "litellm-connector":
             overrides[GENERATION_ID_KEY] = generation_id
+            overrides[MINDS_ENV_NAME_KEY] = tier
         values = providers.read_per_env_secret_values(
             service,
             tier_vault_prefix,
@@ -751,6 +828,8 @@ _ROLLBACK_TABLE: dict[
 def destroy_dev_env(
     name: DevEnvName,
     *,
+    tier: str,
+    deploy_config: DeployEnvConfig,
     credentials: ProviderCredentials,
     providers: Providers,
     parent_concurrency_group: ConcurrencyGroup,
@@ -803,20 +882,35 @@ def destroy_dev_env(
     if instances:
         providers.delete_vultr_instances(instances, credentials.vultr_api_key)
 
-    # Step 3: SuperTokens app (delete-app cascades user data).
+    # Step 3: Cloudflare tunnels tagged with this env.
+    tier_vault_prefix = str(deploy_config.vault_path_prefix).rstrip("/")
+    logger.info("Cleaning up Cloudflare tunnels tagged for env {!r}...", str(name))
+    cf_vault_values = providers.read_per_env_secret_values(
+        "cloudflare",
+        tier_vault_prefix,
+        {},
+        parent_concurrency_group,
+    )
+    deleted_tunnels = _cleanup_cloudflare_tunnels_for_env(
+        name, cloudflare_vault_values=cf_vault_values, providers=providers
+    )
+    if deleted_tunnels:
+        logger.info("Deleted {} Cloudflare tunnel(s) for env {!r}.", deleted_tunnels, str(name))
+
+    # Step 4: SuperTokens app (delete-app cascades user data).
     providers.delete_supertokens_app(
         name,
         credentials.supertokens_core_url,
         credentials.supertokens_api_key,
     )
 
-    # Step 4: Neon DB (delete-DB cascades tables).
+    # Step 5: Neon DB (delete-DB cascades tables).
     providers.delete_neon_db(name, credentials.neon_project_id, credentials.neon_api_token)
 
-    # Step 5: Modal env (cascade-deletes apps + secrets + volumes inside).
+    # Step 6: Modal env (cascade-deletes apps + secrets + volumes inside).
     providers.delete_modal_env(name, parent_concurrency_group)
 
-    # Step 6: env root LAST, only on full success.
+    # Step 7: env root LAST, only on full success.
     delete_env_root(name)
 
 

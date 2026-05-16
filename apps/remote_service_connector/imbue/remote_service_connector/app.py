@@ -428,8 +428,46 @@ def cf_list_all_pages(client: httpx.Client, url: str, params: dict[str, str]) ->
 # --- Tunnel operations ---
 
 
+# Env var the deployed connector reads at startup to identify which
+# minds env it belongs to. The value is pushed by ``minds env deploy``
+# into the per-tier ``litellm-connector-<tier>`` Modal Secret. For
+# dev-tier deploys this is the per-developer dev env name (e.g.
+# ``josh-3``); for tier deploys it's the tier itself (``staging`` /
+# ``production``). Used to tag every Cloudflare tunnel the connector
+# creates so the destroy-side can enumerate + delete only the tunnels
+# belonging to a specific minds env -- without it, deleting tunnels
+# would have to walk every tunnel on the dev-tier CF account
+# (potentially clobbering other devs' tunnels).
+_MINDS_ENV_NAME_VAR = "MINDS_ENV_NAME"
+
+
+def _current_minds_env_name() -> str:
+    """Return the value of ``MINDS_ENV_NAME`` or empty string.
+
+    Empty when the deploy didn't push one (e.g. a pre-this-branch
+    deploy). Callers must treat the empty case as "no env tag" -- the
+    tunnel will still be creatable, just without env-aware destroy
+    cleanup metadata.
+    """
+    return os.environ.get(_MINDS_ENV_NAME_VAR, "")
+
+
 def cf_create_tunnel(client: httpx.Client, account_id: str, name: str) -> dict[str, Any]:
-    response = client.post(f"/accounts/{account_id}/cfd_tunnel", json={"name": name, "config_src": "cloudflare"})
+    """Create a Cloudflare tunnel + tag it with the minds env name in metadata.
+
+    The ``metadata`` field on ``cfd_tunnel`` POST accepts arbitrary
+    string-keyed values; we shove ``{"env": "<minds-env-name>"}`` in so
+    ``minds env destroy`` can later filter the tier's tunnels by env.
+    Empty env_name still creates the tunnel (back-compat with older
+    connector deploys); destroy then filters by exact match, so empty
+    means "doesn't match any env" -- the operator can clean those up
+    manually.
+    """
+    body: dict[str, Any] = {"name": name, "config_src": "cloudflare"}
+    env_name = _current_minds_env_name()
+    if env_name:
+        body["metadata"] = {"env": env_name}
+    response = client.post(f"/accounts/{account_id}/cfd_tunnel", json=body)
     return cf_check(response)["result"]
 
 

@@ -81,6 +81,7 @@ def _build_fake_providers(
     fail_delete: set[str] | None = None,
     vultr_instances: tuple[VultrInstanceSummary, ...] = (),
     vault_responses: dict[str, dict[str, str]] | None = None,
+    cloudflare_tunnels: tuple[str, ...] = (),
 ) -> Providers:
     fail_delete = fail_delete or set()
     # Canned Vault dicts so tier-destroy wipes can find what they need
@@ -95,6 +96,10 @@ def _build_fake_providers(
             },
             "neon": {
                 "DATABASE_URL": "postgres://user:pass@host/db",
+            },
+            "cloudflare": {
+                "CLOUDFLARE_ACCOUNT_ID": "fake-cf-account",
+                "CLOUDFLARE_API_TOKEN": "fake-cf-token",
             },
         }
 
@@ -205,6 +210,14 @@ def _build_fake_providers(
     def delete_generation_id(tier_vault_prefix, cg):
         call_log["calls"].append(("delete_generation_id", tier_vault_prefix))
 
+    def list_cloudflare_tunnels_for_env(name, account_id, api_token):
+        call_log["calls"].append(("list_cloudflare_tunnels_for_env", str(name), account_id))
+        # Default fake: no tunnels. Tests that care set ``cloudflare_tunnels``.
+        return cloudflare_tunnels
+
+    def delete_cloudflare_tunnels(tunnel_ids, account_id, api_token):
+        call_log["calls"].append(("delete_cloudflare_tunnels", tuple(tunnel_ids)))
+
     return Providers(
         ensure_modal_env=ensure_modal_env,
         delete_modal_env=delete_modal_env,
@@ -225,6 +238,8 @@ def _build_fake_providers(
         wipe_neon_db_schema=wipe_neon_db_schema,
         ensure_generation_id=ensure_generation_id,
         delete_generation_id=delete_generation_id,
+        list_cloudflare_tunnels_for_env=list_cloudflare_tunnels_for_env,
+        delete_cloudflare_tunnels=delete_cloudflare_tunnels,
     )
 
 
@@ -407,6 +422,8 @@ def test_destroy_dev_env_walks_providers_in_order_and_removes_root(
 
     destroy_dev_env(
         DevEnvName("george"),
+        tier="dev",
+        deploy_config=_deploy_config(),
         credentials=_credentials(),
         providers=providers,
         parent_concurrency_group=_root_cg,
@@ -414,18 +431,20 @@ def test_destroy_dev_env_walks_providers_in_order_and_removes_root(
     step_names = [c[0] for c in call_log["calls"]]
     assert step_names == [
         # Step 1: mngr agents are listed but none exist in the fresh
-        # env root; no destroy_mngr_agent calls. (See dedicated test
-        # for the with-agents case.)
+        # env root; no destroy_mngr_agent calls.
         # Step 2: Vultr.
         "list_vultr_instances",
-        # Step 3: SuperTokens app (cascade-deletes its users).
+        # Step 3: read CF Vault entry + enumerate this env's tunnels.
+        "read_per_env_secret_values",
+        "list_cloudflare_tunnels_for_env",
+        # (No `delete_cloudflare_tunnels` -- fake returns empty list.)
+        # Step 4: SuperTokens app (cascade-deletes its users).
         "delete_supertokens_app",
-        # Step 4: Neon DB (cascade-deletes its schema).
+        # Step 5: Neon DB (cascade-deletes its schema).
         "delete_neon_db",
-        # Step 5: Modal env (cascade-deletes apps/secrets/volumes inside).
+        # Step 6: Modal env (cascade-deletes apps/secrets/volumes inside).
         "delete_modal_env",
-        # Step 6: env root removal happens AFTER all provider calls
-        # succeed (no provider call for it -- it's local FS).
+        # Step 7: env root removal happens after all provider calls succeed.
     ]
     # Env root removed so subsequent commands fail fast on a dangling
     # activation rather than silently re-creating partial state.
@@ -455,6 +474,8 @@ def test_destroy_dev_env_destroys_mngr_agents_before_cloud_teardown(
 
     destroy_dev_env(
         DevEnvName("kim"),
+        tier="dev",
+        deploy_config=_deploy_config(),
         credentials=_credentials(),
         providers=providers,
         parent_concurrency_group=_root_cg,
@@ -487,6 +508,8 @@ def test_destroy_dev_env_keep_agents_skips_mngr_destroy(_isolated_home: Path, _r
 
     destroy_dev_env(
         DevEnvName("liz"),
+        tier="dev",
+        deploy_config=_deploy_config(),
         credentials=_credentials(),
         providers=providers,
         parent_concurrency_group=_root_cg,
@@ -516,6 +539,8 @@ def test_destroy_dev_env_leaves_env_root_when_step_fails(_isolated_home: Path, _
     with pytest.raises(NeonProviderError, match="neon delete boom"):
         destroy_dev_env(
             DevEnvName("matt"),
+            tier="dev",
+            deploy_config=_deploy_config(),
             credentials=_credentials(),
             providers=failing_providers,
             parent_concurrency_group=_root_cg,
@@ -539,6 +564,8 @@ def test_destroy_deletes_vultr_instances(_isolated_home: Path, _root_cg: Concurr
 
     destroy_dev_env(
         DevEnvName("hank"),
+        tier="dev",
+        deploy_config=_deploy_config(),
         credentials=_credentials(),
         providers=providers,
         parent_concurrency_group=_root_cg,
@@ -552,6 +579,8 @@ def test_destroy_missing_env_raises(_isolated_home: Path, _root_cg: ConcurrencyG
     with pytest.raises(DevEnvNotFoundError):
         destroy_dev_env(
             DevEnvName("ghost"),
+            tier="dev",
+            deploy_config=_deploy_config(),
             credentials=_credentials(),
             providers=providers,
             parent_concurrency_group=_root_cg,
@@ -771,6 +800,7 @@ def test_destroy_tier_env_wipes_supertokens_app_with_parsed_app_id(
                 "SUPERTOKENS_API_KEY": "secret-key-xyz",
             },
             "neon": {"DATABASE_URL": "postgres://x"},
+            "cloudflare": {"CLOUDFLARE_ACCOUNT_ID": "a", "CLOUDFLARE_API_TOKEN": "t"},
         },
     )
     destroy_tier_env(
@@ -796,6 +826,7 @@ def test_destroy_tier_env_wipes_neon_with_dsn_from_vault(_isolated_home: Path, _
                 "SUPERTOKENS_API_KEY": "k",
             },
             "neon": {"DATABASE_URL": "postgres://realuser:realpass@neon.host/realdb"},
+            "cloudflare": {"CLOUDFLARE_ACCOUNT_ID": "a", "CLOUDFLARE_API_TOKEN": "t"},
         },
     )
     destroy_tier_env(
@@ -819,6 +850,7 @@ def test_destroy_tier_env_refuses_when_supertokens_vault_entry_incomplete(
         vault_responses={
             "supertokens": {},
             "neon": {"DATABASE_URL": "postgres://x"},
+            "cloudflare": {"CLOUDFLARE_ACCOUNT_ID": "a", "CLOUDFLARE_API_TOKEN": "t"},
         },
     )
     with pytest.raises(MindError, match="SUPERTOKENS_CONNECTION_URI"):
@@ -853,10 +885,13 @@ def test_destroy_tier_env_full_step_order(_isolated_home: Path, _root_cg: Concur
         "stop_modal_app",
         "stop_modal_app",
         "delete_modal_secret",
+        # supertokens, then neon, then cloudflare:
         "read_per_env_secret_values",
         "wipe_supertokens_app_data",
         "read_per_env_secret_values",
         "wipe_neon_db_schema",
+        "read_per_env_secret_values",
+        "list_cloudflare_tunnels_for_env",
         "delete_generation_id",
     ]
     # And env root is gone after the full flow succeeds.
