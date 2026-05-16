@@ -152,6 +152,34 @@ class _TranscriptReadFailureWarner(MutableModel):
         self.has_warned = True
 
 
+def _normalize_credentials_env() -> None:
+    """Unset ``ORIGINAL_CLAUDE_CONFIG_DIR`` so mngr_claude reads credentials
+    from the live ``$CLAUDE_CONFIG_DIR``.
+
+    When ``mngr uncapped-claude`` runs from inside another mngr claude agent,
+    the parent process has ``ORIGINAL_CLAUDE_CONFIG_DIR=~/.claude`` (set by
+    that parent agent's ``modify_env_vars``) and ``CLAUDE_CONFIG_DIR`` set to
+    the parent agent's per-agent config dir. mngr_claude's credentials sync
+    reads via ``get_user_claude_config_dir()``, which prefers
+    ``ORIGINAL_CLAUDE_CONFIG_DIR`` -> ``~/.claude`` -- but on machines where
+    the user has never run ``claude login`` outside of mngr, ``~/.claude/``
+    has no ``primaryApiKey`` or ``.credentials.json``, so the sync is a no-op
+    and the spawned claude boots without auth.
+
+    Dropping ``ORIGINAL_CLAUDE_CONFIG_DIR`` here makes
+    ``get_user_claude_config_dir()`` fall through to ``CLAUDE_CONFIG_DIR``
+    (per its existing resolution order). On this machine that is the parent
+    agent's per-agent dir, which DOES have credentials because the parent
+    agent's own provisioning copied them there. The new agent's
+    per-agent provisioning then copies from THAT dir into the spawned
+    agent's config dir, and claude boots correctly.
+
+    Safe in the no-parent-agent case too: ``ORIGINAL_CLAUDE_CONFIG_DIR`` is
+    not normally set in a plain shell, so the pop is a no-op there.
+    """
+    os.environ.pop("ORIGINAL_CLAUDE_CONFIG_DIR", None)
+
+
 def run(
     mngr_ctx: MngrContext,
     partition: ArgPartition,
@@ -163,6 +191,7 @@ def run(
 
     Returns the integer exit code the caller should pass to ``ctx.exit()``.
     """
+    _normalize_credentials_env()
     mngr_ctx = _apply_unattended_settings(mngr_ctx)
 
     try:
