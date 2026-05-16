@@ -11,8 +11,8 @@ from imbue.imbue_common.logging import log_span
 from imbue.mngr.providers.ssh_utils import add_host_to_known_hosts
 from imbue.mngr_vps_docker.errors import VpsProvisioningError
 
-_TOFU_CONNECT_BACKOFF_SECONDS: float = 5.0
-_TOFU_CONNECT_BANNER_TIMEOUT_SECONDS: float = 30.0
+_SSH_CONNECT_BACKOFF_SECONDS: float = 5.0
+_SSH_CONNECT_BANNER_TIMEOUT_SECONDS: float = 30.0
 _SSH_CONNECT_RETRY_EXCEPTIONS: tuple[type[BaseException], ...] = (
     paramiko.SSHException,
     socket.error,
@@ -251,12 +251,12 @@ def _connect_with_retry(
                 allow_agent=False,
                 look_for_keys=False,
                 timeout=10.0,
-                banner_timeout=_TOFU_CONNECT_BANNER_TIMEOUT_SECONDS,
+                banner_timeout=_SSH_CONNECT_BANNER_TIMEOUT_SECONDS,
                 auth_timeout=15.0,
             )
         except _SSH_CONNECT_RETRY_EXCEPTIONS as e:
             last_error = e
-            time.sleep(_TOFU_CONNECT_BACKOFF_SECONDS)
+            time.sleep(_SSH_CONNECT_BACKOFF_SECONDS)
             continue
         return client
 

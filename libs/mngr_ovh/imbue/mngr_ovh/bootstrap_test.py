@@ -80,7 +80,7 @@ def test_pin_host_key_times_out_when_connect_keeps_failing(tmp_path: Path) -> No
         raise paramiko.SSHException("nope")
 
     with patch.object(paramiko.SSHClient, "connect", autospec=True, side_effect=fake_connect):
-        with patch("imbue.mngr_ovh.bootstrap._TOFU_CONNECT_BACKOFF_SECONDS", 0.0):
+        with patch("imbue.mngr_ovh.bootstrap._SSH_CONNECT_BACKOFF_SECONDS", 0.0):
             with pytest.raises(VpsProvisioningError, match="host-key TOFU"):
                 pin_host_key_via_tofu(
                     hostname="vps-x.vps.ovh.us",
@@ -234,7 +234,7 @@ def test_bootstrap_root_times_out_when_connect_fails(tmp_path: Path) -> None:
             side_effect=paramiko.SSHException("auth"),
         ),
         patch.object(paramiko.SSHClient, "load_host_keys", autospec=True, return_value=None),
-        patch("imbue.mngr_ovh.bootstrap._TOFU_CONNECT_BACKOFF_SECONDS", 0.0),
+        patch("imbue.mngr_ovh.bootstrap._SSH_CONNECT_BACKOFF_SECONDS", 0.0),
     ):
         with pytest.raises(VpsProvisioningError, match="bootstrap root SSH"):
             bootstrap_root_authorized_keys_via_user(
@@ -320,7 +320,7 @@ def test_verify_root_ssh_raises_when_root_login_fails(tmp_path: Path) -> None:
             side_effect=paramiko.SSHException("publickey"),
         ),
         patch.object(paramiko.SSHClient, "load_host_keys", autospec=True, return_value=None),
-        patch("imbue.mngr_ovh.bootstrap._TOFU_CONNECT_BACKOFF_SECONDS", 0.0),
+        patch("imbue.mngr_ovh.bootstrap._SSH_CONNECT_BACKOFF_SECONDS", 0.0),
     ):
         with pytest.raises(VpsProvisioningError, match="post-bootstrap verification"):
             verify_root_ssh(
