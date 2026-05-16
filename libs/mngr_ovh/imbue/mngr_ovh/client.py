@@ -314,16 +314,16 @@ class OvhVpsClient(VpsClientInterface):
         Performs a read-modify-write on the full ``services.Service`` body to
         avoid clobbering unrelated fields (contact info, renewal type, etc.):
         ``GET /vps/{s}/serviceInfos`` → mutate ``renew.deleteAtExpiration`` →
-        ``PUT /vps/{s}/serviceInfos``. Setting ``False`` is the way to undo a
-        prior cancellation request (no email token required, verified live).
+        ``PUT /vps/{s}/serviceInfos``. No email token required for either
+        direction (verified live on US-EAST-VA).
 
-        OVH auto-flips ``renew.automatic`` to ``False`` and
-        ``renewalType`` to ``"manual"`` as a side effect of setting
-        ``deleteAtExpiration=True`` (verified live on US-EAST-VA). When
-        un-cancelling (``delete_at_expiration=False``) we explicitly
-        restore both fields so the VPS resumes auto-renewing; otherwise
-        a recycled VPS would silently fail to renew at the next
-        anniversary even though our flag flip succeeded.
+        Setting ``True`` only flips ``deleteAtExpiration``; OVH auto-flips
+        ``renew.automatic`` to ``False`` and ``renewalType`` to ``"manual"``
+        as a server-side side effect of the cancellation. Setting ``False``
+        un-cancels, but OVH does **not** auto-restore ``automatic`` /
+        ``renewalType``, so this function explicitly restores both on the
+        un-cancel path; otherwise a recycled VPS would silently fail to
+        renew at the next anniversary even though our flag flip succeeded.
         """
         info = self.get_service_info(service_name)
         renew = dict(info.get("renew") or {})
