@@ -2051,12 +2051,14 @@ name = "imbue-mngr-tmr"
 version = "0.1.0"
 source = { editable = "libs/mngr_tmr" }
 dependencies = [
+    { name = "boto3" },
     { name = "imbue-mngr" },
     { name = "markdown-it-py" },
 ]
 
 [package.metadata]
 requires-dist = [
+    { name = "boto3", specifier = ">=1.40,<2" },
     { name = "imbue-mngr", editable = "libs/mngr" },
     { name = "markdown-it-py", specifier = ">=3.0.0" },
 ]
