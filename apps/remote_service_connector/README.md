@@ -19,22 +19,25 @@ Deployment is split into two pieces so you can rotate secrets without redeployin
 
 ### 1. Environment-scoped Modal secrets
 
-The committed `.minds/template/*.sh` files declare the expected keys for each service. Per-env secrets live at `.minds/<env-name>/<service>.sh` and are gitignored; to bootstrap a new env, copy the template into it:
+The committed `.minds/template/*.sh` files declare the expected keys for each service -- they are the schema for the HCP Vault entries at `secrets/minds/<tier>/<service>`. To populate a fresh tier's Vault entry, copy the template into a tmp file, fill in the values, push it to Vault, and shred the local file:
 
 ```bash
-cp -r .minds/template/ .minds/production/
+cp .minds/template/cloudflare.sh /tmp/cloudflare-production.sh
+$EDITOR /tmp/cloudflare-production.sh
+uv run scripts/push_vault_from_file.py production cloudflare /tmp/cloudflare-production.sh
+shred -u /tmp/cloudflare-production.sh
 ```
 
-Each file is shell-style:
+Each template file is shell-style:
 
 ```sh
-# .minds/production/cloudflare.sh
-export CLOUDFLARE_API_TOKEN=...
-export CLOUDFLARE_ACCOUNT_ID=...
+# .minds/template/cloudflare.sh
+export CLOUDFLARE_API_TOKEN=
+export CLOUDFLARE_ACCOUNT_ID=
 # ...
 ```
 
-Push them to Modal and deploy in one shot:
+Push everything to Modal and deploy in one shot:
 
 ```bash
 eval "$(uv run minds env activate production)"
