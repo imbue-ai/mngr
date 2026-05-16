@@ -42,10 +42,12 @@ from imbue.minds.config.loader import EnvConfigError
 from imbue.minds.config.loader import load_deploy_config
 from imbue.minds.config.loader import repo_tier_client_config_path
 from imbue.minds.envs.local_store import env_root_exists
+from imbue.minds.envs.mngr_agent_cleanup import real_destroy_mngr_agent
 from imbue.minds.envs.paths import active_env_name_or_none
 from imbue.minds.envs.paths import client_config_file
 from imbue.minds.envs.paths import env_root_dir
 from imbue.minds.envs.per_env_deploy import build_per_env_secret_values
+from imbue.minds.envs.per_env_deploy import delete_modal_secret as real_delete_modal_secret
 from imbue.minds.envs.per_env_deploy import deploy_litellm_proxy as real_deploy_litellm_proxy
 from imbue.minds.envs.per_env_deploy import deploy_remote_service_connector as real_deploy_remote_service_connector
 from imbue.minds.envs.per_env_deploy import ensure_modal_env as real_ensure_modal_env
@@ -203,6 +205,10 @@ def _stop_modal_app_for_provider(app_name: str, modal_env: str, cg: ConcurrencyG
     real_stop_modal_app(app_name=app_name, modal_env=modal_env, parent_cg=cg)
 
 
+def _delete_modal_secret_for_provider(secret_name: str, modal_env: str, cg: ConcurrencyGroup) -> None:
+    real_delete_modal_secret(secret_name=secret_name, modal_env=modal_env, parent_cg=cg)
+
+
 def _build_real_providers() -> Providers:
     """Wire the provider modules into the Providers bundle.
 
@@ -224,6 +230,8 @@ def _build_real_providers() -> Providers:
         deploy_litellm_proxy=_deploy_litellm_proxy_for_provider,
         deploy_remote_service_connector=_deploy_connector_for_provider,
         stop_modal_app=_stop_modal_app_for_provider,
+        delete_modal_secret=_delete_modal_secret_for_provider,
+        destroy_mngr_agent=real_destroy_mngr_agent,
     )
 
 

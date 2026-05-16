@@ -12,6 +12,7 @@ from imbue.minds.envs.local_store import client_config_exists
 from imbue.minds.envs.local_store import env_root_exists
 from imbue.minds.envs.local_store import read_client_config_file
 from imbue.minds.envs.local_store import read_secrets_file
+from imbue.minds.envs.mngr_agent_cleanup import MngrAgentCleanupError
 from imbue.minds.envs.per_env_deploy import ModalDeployError
 from imbue.minds.envs.primitives import DevEnvName
 from imbue.minds.envs.primitives import DevEnvNotFoundError
@@ -156,6 +157,16 @@ def _build_fake_providers(
         if fail_step == "stop_modal_app":
             raise ModalDeployError("modal app stop boom")
 
+    def delete_modal_secret(secret_name, modal_env, cg):
+        call_log["calls"].append(("delete_modal_secret", secret_name, modal_env))
+        if fail_step == "delete_modal_secret":
+            raise ModalDeployError("modal secret delete boom")
+
+    def destroy_mngr_agent(agent_id, mngr_host_dir, mngr_prefix, cg):
+        call_log["calls"].append(("destroy_mngr_agent", agent_id, str(mngr_host_dir), mngr_prefix))
+        if fail_step == "destroy_mngr_agent":
+            raise MngrAgentCleanupError("mngr destroy boom")
+
     return Providers(
         ensure_modal_env=ensure_modal_env,
         delete_modal_env=delete_modal_env,
@@ -170,6 +181,8 @@ def _build_fake_providers(
         deploy_litellm_proxy=deploy_litellm_proxy,
         deploy_remote_service_connector=deploy_remote_service_connector,
         stop_modal_app=stop_modal_app,
+        delete_modal_secret=delete_modal_secret,
+        destroy_mngr_agent=destroy_mngr_agent,
     )
 
 
@@ -333,9 +346,10 @@ def test_deploy_dev_env_pushes_per_env_secrets_into_dev_modal_env(
     ]
 
 
-def test_destroy_dev_env_walks_providers_in_reverse_and_removes_root(
+def test_destroy_dev_env_walks_providers_in_order_and_removes_root(
     _isolated_home: Path, _root_cg: ConcurrencyGroup
 ) -> None:
+    """Dev destroy: mngr agents first, then cloud resources, env root LAST."""
     call_log = _make_call_log()
     providers = _build_fake_providers(call_log)
     deploy_dev_env(
@@ -357,14 +371,114 @@ def test_destroy_dev_env_walks_providers_in_reverse_and_removes_root(
     )
     step_names = [c[0] for c in call_log["calls"]]
     assert step_names == [
+        # Step 1: mngr agents are listed but none exist in the fresh
+        # env root; no destroy_mngr_agent calls. (See dedicated test
+        # for the with-agents case.)
+        # Step 2: Vultr.
         "list_vultr_instances",
+        # Step 3: SuperTokens app (cascade-deletes its users).
         "delete_supertokens_app",
+        # Step 4: Neon DB (cascade-deletes its schema).
         "delete_neon_db",
+        # Step 5: Modal env (cascade-deletes apps/secrets/volumes inside).
         "delete_modal_env",
+        # Step 6: env root removal happens AFTER all provider calls
+        # succeed (no provider call for it -- it's local FS).
     ]
     # Env root removed so subsequent commands fail fast on a dangling
     # activation rather than silently re-creating partial state.
     assert not env_root_exists(DevEnvName("george"))
+
+
+def test_destroy_dev_env_destroys_mngr_agents_before_cloud_teardown(
+    _isolated_home: Path, _root_cg: ConcurrencyGroup
+) -> None:
+    """When the env root has mngr agents, destroy must clean them up FIRST."""
+    call_log = _make_call_log()
+    providers = _build_fake_providers(call_log)
+    deploy_dev_env(
+        DevEnvName("kim"),
+        tier="dev",
+        deploy_config=_deploy_config(),
+        credentials=_credentials(),
+        providers=providers,
+        parent_concurrency_group=_root_cg,
+    )
+    # Seed two fake agent dirs under the env's mngr profile.
+    agents_dir = _isolated_home / ".minds-kim" / "mngr" / "agents"
+    agents_dir.mkdir(parents=True, exist_ok=True)
+    (agents_dir / "agent-1111").mkdir()
+    (agents_dir / "agent-2222").mkdir()
+    call_log["calls"].clear()
+
+    destroy_dev_env(
+        DevEnvName("kim"),
+        credentials=_credentials(),
+        providers=providers,
+        parent_concurrency_group=_root_cg,
+    )
+    # Two destroy_mngr_agent calls (sorted by agent id) BEFORE any
+    # cloud-side teardown.
+    step_names = [c[0] for c in call_log["calls"]]
+    first_cloud_index = step_names.index("list_vultr_instances")
+    assert step_names[:first_cloud_index] == ["destroy_mngr_agent", "destroy_mngr_agent"]
+    agent_ids_destroyed = [c[1] for c in call_log["calls"] if c[0] == "destroy_mngr_agent"]
+    assert agent_ids_destroyed == ["agent-1111", "agent-2222"]
+
+
+def test_destroy_dev_env_keep_agents_skips_mngr_destroy(_isolated_home: Path, _root_cg: ConcurrencyGroup) -> None:
+    """The legacy keep_agents=True flag must skip the mngr-agent step entirely."""
+    call_log = _make_call_log()
+    providers = _build_fake_providers(call_log)
+    deploy_dev_env(
+        DevEnvName("liz"),
+        tier="dev",
+        deploy_config=_deploy_config(),
+        credentials=_credentials(),
+        providers=providers,
+        parent_concurrency_group=_root_cg,
+    )
+    agents_dir = _isolated_home / ".minds-liz" / "mngr" / "agents"
+    agents_dir.mkdir(parents=True, exist_ok=True)
+    (agents_dir / "agent-1111").mkdir()
+    call_log["calls"].clear()
+
+    destroy_dev_env(
+        DevEnvName("liz"),
+        credentials=_credentials(),
+        providers=providers,
+        parent_concurrency_group=_root_cg,
+        keep_agents=True,
+    )
+    step_names = [c[0] for c in call_log["calls"]]
+    assert "destroy_mngr_agent" not in step_names
+
+
+def test_destroy_dev_env_leaves_env_root_when_step_fails(_isolated_home: Path, _root_cg: ConcurrencyGroup) -> None:
+    """If any cleanup step fails, the env root must stay so re-runs can recover."""
+    # First, do a successful deploy so the env root exists.
+    providers_ok = _build_fake_providers(_make_call_log())
+    deploy_dev_env(
+        DevEnvName("matt"),
+        tier="dev",
+        deploy_config=_deploy_config(),
+        credentials=_credentials(),
+        providers=providers_ok,
+        parent_concurrency_group=_root_cg,
+    )
+    assert env_root_exists(DevEnvName("matt"))
+
+    # Now destroy with a provider that fails on neon_db delete -- env
+    # root must NOT be removed.
+    failing_providers = _build_fake_providers(_make_call_log(), fail_delete={"neon_db"})
+    with pytest.raises(NeonProviderError, match="neon delete boom"):
+        destroy_dev_env(
+            DevEnvName("matt"),
+            credentials=_credentials(),
+            providers=failing_providers,
+            parent_concurrency_group=_root_cg,
+        )
+    assert env_root_exists(DevEnvName("matt"))
 
 
 def test_destroy_deletes_vultr_instances(_isolated_home: Path, _root_cg: ConcurrencyGroup) -> None:
@@ -507,12 +621,10 @@ def test_deploy_tier_env_runs_both_modal_deploys(_isolated_home: Path, _root_cg:
     ]
 
 
-def test_destroy_tier_env_stops_both_apps_and_removes_env_root(
+def test_destroy_tier_env_stops_apps_deletes_secrets_and_removes_env_root(
     _isolated_home: Path, _root_cg: ConcurrencyGroup
 ) -> None:
-    """Tier destroy stops both Modal apps and rmdir's ~/.minds-<tier>/."""
-    # Materialize the env root + a couple of files so we can verify
-    # delete_env_root actually removed everything.
+    """Tier destroy: agents -> modal app stop -> modal secret delete -> env root."""
     staging_root = _isolated_home / ".minds-staging"
     staging_root.mkdir()
     (staging_root / "client.toml").write_text('connector_url = "x"\nlitellm_proxy_url = "y"\n')
@@ -532,8 +644,40 @@ def test_destroy_tier_env_stops_both_apps_and_removes_env_root(
         ("stop_modal_app", "litellm-proxy-staging", "main"),
         ("stop_modal_app", "remote-service-connector-staging", "main"),
     ]
+    # Deletes the per-tier Modal Secrets (just `cloudflare-staging` for
+    # the _deploy_config used here, which declares only that service).
+    deletes = [c for c in call_log["calls"] if c[0] == "delete_modal_secret"]
+    assert deletes == [("delete_modal_secret", "cloudflare-staging", "main")]
+    # And stop comes BEFORE delete (otherwise the running app loses
+    # its secret out from under it).
+    assert call_log["calls"].index(stops[-1]) < call_log["calls"].index(deletes[0])
     # Env root gone -- subsequent activation has to re-create it.
     assert not staging_root.exists()
+
+
+def test_destroy_tier_env_destroys_mngr_agents_first(_isolated_home: Path, _root_cg: ConcurrencyGroup) -> None:
+    """Tier destroy must `mngr destroy` any agents under the env root before cloud teardown."""
+    # Seed an env root + a couple of fake agent dirs under it.
+    staging_root = _isolated_home / ".minds-staging"
+    agents_dir = staging_root / "mngr" / "agents"
+    agents_dir.mkdir(parents=True)
+    (agents_dir / "agent-9999").mkdir()
+    (agents_dir / "agent-8888").mkdir()
+
+    call_log = _make_call_log()
+    providers = _build_fake_providers(call_log)
+    destroy_tier_env(
+        tier="staging",
+        deploy_config=_deploy_config(tier="staging", modal_env="main"),
+        providers=providers,
+        parent_concurrency_group=_root_cg,
+    )
+    # Two destroy_mngr_agent calls (sorted) BEFORE any stop_modal_app.
+    agent_calls = [c for c in call_log["calls"] if c[0] == "destroy_mngr_agent"]
+    assert [c[1] for c in agent_calls] == ["agent-8888", "agent-9999"]
+    first_app_index = next(i for i, c in enumerate(call_log["calls"]) if c[0] == "stop_modal_app")
+    last_agent_index = next(i for i, c in reversed(list(enumerate(call_log["calls"]))) if c[0] == "destroy_mngr_agent")
+    assert last_agent_index < first_app_index
 
 
 def test_destroy_tier_env_is_idempotent_when_env_root_missing(
@@ -552,3 +696,19 @@ def test_destroy_tier_env_is_idempotent_when_env_root_missing(
     )
     stops = [c for c in call_log["calls"] if c[0] == "stop_modal_app"]
     assert len(stops) == 2
+
+
+def test_destroy_tier_env_leaves_env_root_when_step_fails(_isolated_home: Path, _root_cg: ConcurrencyGroup) -> None:
+    """If any cleanup step fails, the env root must stay so re-runs can recover."""
+    staging_root = _isolated_home / ".minds-staging"
+    staging_root.mkdir()
+
+    failing_providers = _build_fake_providers(_make_call_log(), fail_step="stop_modal_app")
+    with pytest.raises(ModalDeployError, match="modal app stop boom"):
+        destroy_tier_env(
+            tier="staging",
+            deploy_config=_deploy_config(tier="staging", modal_env="main"),
+            providers=failing_providers,
+            parent_concurrency_group=_root_cg,
+        )
+    assert staging_root.exists()

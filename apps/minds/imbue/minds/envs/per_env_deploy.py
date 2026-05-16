@@ -280,6 +280,44 @@ def deploy_litellm_proxy(
     )
 
 
+def delete_modal_secret(
+    *,
+    secret_name: str,
+    modal_env: str,
+    parent_cg: ConcurrencyGroup,
+) -> None:
+    """``modal secret delete <secret_name> --env=<modal_env>``.
+
+    Used by ``minds env destroy --yes-i-mean-staging`` to remove the
+    ``<service>-staging`` Modal Secrets after stopping the apps. For dev
+    env destroy this is handled implicitly by ``modal environment
+    delete`` (which cascade-deletes everything inside the env), so this
+    helper is only needed for tier destroys where the Modal env stays.
+
+    Idempotent: treats "secret not found" / "no such secret" as success
+    so re-running ``destroy`` after a partial failure is safe.
+    """
+    command = ["modal", "secret", "delete", "--env", modal_env, "--yes", secret_name]
+    cg = parent_cg.make_concurrency_group(name=f"modal-secret-delete-{secret_name}")
+    with cg:
+        result = cg.run_process_to_completion(
+            command=command,
+            timeout=_MODAL_SECRET_TIMEOUT_SECONDS,
+            is_checked_after=False,
+            env=_modal_subprocess_env(),
+        )
+    if result.returncode == 0:
+        return
+    message = (result.stderr + result.stdout).lower()
+    if "not found" in message or "no such" in message or "does not exist" in message:
+        logger.info("`modal secret delete {} --env {}`: secret already absent.", secret_name, modal_env)
+        return
+    stderr = result.stderr.strip() or result.stdout.strip()
+    raise ModalDeployError(
+        f"`modal secret delete {secret_name} --env {modal_env}` failed (exit {result.returncode}): {stderr}"
+    )
+
+
 def stop_modal_app(
     *,
     app_name: str,

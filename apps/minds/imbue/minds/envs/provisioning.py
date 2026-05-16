@@ -56,12 +56,15 @@ from imbue.minds.envs.local_store import env_root_exists
 from imbue.minds.envs.local_store import read_client_config_file
 from imbue.minds.envs.local_store import write_client_config
 from imbue.minds.envs.local_store import write_secrets_file
+from imbue.minds.envs.mngr_agent_cleanup import DestroyMngrAgentFn
+from imbue.minds.envs.mngr_agent_cleanup import destroy_all_mngr_agents_in_env
 from imbue.minds.envs.paths import client_config_file
 from imbue.minds.envs.paths import env_root_dir
 from imbue.minds.envs.paths import list_env_root_dirs
 from imbue.minds.envs.per_env_deploy import ModalDeployError
 from imbue.minds.envs.per_env_deploy import build_per_env_secret_values
 from imbue.minds.envs.per_env_deploy import compute_per_env_overrides
+from imbue.minds.envs.per_env_deploy import delete_modal_secret
 from imbue.minds.envs.per_env_deploy import deploy_litellm_proxy
 from imbue.minds.envs.per_env_deploy import deploy_remote_service_connector
 from imbue.minds.envs.per_env_deploy import ensure_modal_env
@@ -121,6 +124,9 @@ DeployModalAppFn = Callable[[str, str, ConcurrencyGroup], AnyUrl]
 # (app_name, modal_env, cg) -> None. Used by tier destroys to ``modal
 # app stop`` each deployed app. Idempotent in the underlying call.
 StopModalAppFn = Callable[[str, str, ConcurrencyGroup], None]
+# (secret_name, modal_env, cg) -> None. Used by tier destroys to
+# ``modal secret delete`` each pushed per-tier Modal Secret. Idempotent.
+DeleteModalSecretFn = Callable[[str, str, ConcurrencyGroup], None]
 ReadPerEnvSecretValuesFn = Callable[[str, str, dict[str, str], ConcurrencyGroup], dict[str, str]]
 
 
@@ -155,6 +161,16 @@ class Providers(FrozenModel):
     )
     stop_modal_app: StopModalAppFn = Field(
         description="(app_name, modal_env, cg) -> `modal app stop` the named app. Idempotent.",
+    )
+    delete_modal_secret: DeleteModalSecretFn = Field(
+        description="(secret_name, modal_env, cg) -> `modal secret delete` the named secret. Idempotent.",
+    )
+    destroy_mngr_agent: DestroyMngrAgentFn = Field(
+        description=(
+            "(agent_id, mngr_host_dir, mngr_prefix, cg) -> `mngr destroy <agent_id>` "
+            "with the env's MNGR_* vars exported. Used before cloud teardown so the env's "
+            "agents stop cleanly before their resources go away."
+        ),
     )
 
 
@@ -396,40 +412,64 @@ def destroy_tier_env(
     providers: Providers,
     parent_concurrency_group: ConcurrencyGroup,
 ) -> None:
-    """Stop the tier's deployed Modal apps and remove the env root.
+    """Tear down everything ``deploy_tier_env`` created for ``tier`` and remove the env root.
 
     Used by ``minds env destroy --yes-i-mean-staging`` (production is
-    refused at the CLI layer). Symmetric with :func:`deploy_tier_env`
-    but in reverse: stops both ``litellm-proxy-<tier>`` and
-    ``remote-service-connector-<tier>`` in the tier's stable Modal env
-    via ``modal app stop``, then removes ``~/.minds-<tier>/`` so a
-    subsequent activation has to re-create the env root (and any
-    dangling shell activation fails fast).
+    refused at the CLI layer). Walks the cleanup steps in reverse order
+    of deploy + adds the env-specific extras that aren't owned by
+    deploy (e.g. mngr agents running against the tier):
 
-    Leaves Modal Secrets (``<service>-<tier>``), the tier's Neon DB,
-    SuperTokens app, and Cloudflare zone untouched -- those are
-    operator-managed (created out of band, populated via Vault) and
-    survive a destroy/redeploy cycle so the next ``minds env deploy``
-    can re-push the same secrets and re-deploy the same apps in place.
+    1. Destroy every mngr agent under ``~/.minds-<tier>/mngr/agents/``
+       via ``mngr destroy``. Done first so agents stop cleanly before
+       their cloud resources go away (no orphan tunnels / pool hosts
+       pointing at dead URLs).
+    2. ``modal app stop`` both deployed apps in the tier's stable
+       Modal env.
+    3. ``modal secret delete`` every per-tier Modal Secret pushed by
+       deploy (``<service>-<tier>``). Forces the next deploy to push
+       fresh values from Vault.
+    4. Finally, remove ``~/.minds-<tier>/`` -- ONLY if every prior
+       step succeeded. On any failure, the env root stays so the
+       operator can re-run ``destroy`` to pick up where things broke.
 
-    Idempotent: ``modal app stop`` treats "app not found" as success
-    (see :func:`per_env_deploy.stop_modal_app`), and the env-root
-    removal is a no-op if the dir is already gone.
+    Leaves the tier's Neon DB, SuperTokens app, Cloudflare zone, and
+    Vault entries themselves untouched -- those are operator-managed
+    (created out of band, populated via Vault) and survive a
+    destroy/redeploy cycle so the next ``minds env deploy`` can
+    re-push the same secrets and re-deploy the same apps in place.
+    (Wiping the *data inside* those resources -- SuperTokens users,
+    Neon DB schema, Cloudflare tunnels -- is a follow-up.)
     """
+    name = DevEnvName(tier)
     modal_env = str(deploy_config.modal_env)
-    apps_to_stop = (
+    apps_to_handle = (
         f"litellm-proxy-{tier}",
         f"remote-service-connector-{tier}",
     )
 
+    # Step 1: agents first, so their docker containers / pool hosts /
+    # tunnels get torn down cleanly before we yank the connector.
+    destroyed_count = destroy_all_mngr_agents_in_env(
+        name,
+        destroy_agent=providers.destroy_mngr_agent,
+        parent_concurrency_group=parent_concurrency_group,
+    )
+    if destroyed_count:
+        logger.info("Destroyed {} mngr agent(s) under env {!r}.", destroyed_count, tier)
+
+    # Step 2: stop the deployed Modal apps.
     logger.info("Stopping tier {!r} Modal apps in env {!r}...", tier, modal_env)
-    for app_name in apps_to_stop:
+    for app_name in apps_to_handle:
         providers.stop_modal_app(app_name, modal_env, parent_concurrency_group)
 
-    # The tier's env root mirrors the dev-env layout: ``staging`` ->
-    # ``~/.minds-staging/``. Reuse DevEnvName + delete_env_root so the
-    # path computation stays in one place.
-    delete_env_root(DevEnvName(tier))
+    # Step 3: delete per-tier Modal Secrets. Next deploy re-pushes from Vault.
+    logger.info("Deleting tier {!r} Modal Secrets in env {!r}...", tier, modal_env)
+    for service in deploy_config.secrets.services:
+        providers.delete_modal_secret(f"{service}-{tier}", modal_env, parent_concurrency_group)
+
+    # Step 4: remove the env root LAST, only if every step above succeeded
+    # (exceptions from any step propagate up and skip this).
+    delete_env_root(name)
 
 
 def deploy_tier_env(
@@ -583,44 +623,65 @@ def destroy_dev_env(
 ) -> None:
     """Tear down every resource ``deploy_dev_env`` provisioned and remove the env root.
 
-    Order is the reverse of deploy: any Vultr instances tagged with this
-    dev env, SuperTokens app, Neon DB, Modal env. Finally
-    ``~/.minds-<name>/`` is removed entirely so subsequent commands fail
-    fast on the dangling activation instead of silently re-creating
-    partial state under a half-torn-down env root.
+    Steps, in order:
 
-    ``keep_agents`` is a forward-compatible knob for the eventual
-    ``mngr destroy`` integration. Today the provisioning path does not
-    own running workspace agents, so the flag is effectively a no-op:
-    running agents are left alone whether it is passed or not. When
-    ``keep_agents=False`` (the value implying "tear down everything"),
-    a warning is logged so the operator knows manual ``mngr destroy``
-    is still required for any agents bound to this env.
+    1. Destroy every mngr agent under ``~/.minds-<name>/mngr/agents/``
+       via ``mngr destroy``. Done first so agents stop cleanly before
+       their cloud resources go away (Docker containers / pool hosts /
+       tunnels otherwise linger as orphans). Skipped when
+       ``keep_agents=True``.
+    2. Delete every Vultr instance tagged ``minds_env=<name>``.
+    3. Delete the per-dev-env SuperTokens app (cascade-deletes its users).
+    4. Delete the per-dev-env Neon database (cascade-deletes its tables).
+    5. Delete the per-dev-env Modal environment (cascade-deletes the
+       deployed apps, Modal Secrets, and Volumes within it).
+    6. Finally, remove ``~/.minds-<name>/`` -- ONLY if every prior step
+       succeeded. On any failure, the env root stays so the operator
+       can re-run ``destroy`` to pick up where things broke (rather
+       than silently leaking expensive cloud resources because the
+       local pointer is gone).
 
     Raises :class:`DevEnvNotFoundError` if no env root exists -- the
     operator is asked to confirm the name they meant.
     """
     if not env_root_exists(name):
         raise DevEnvNotFoundError(f"No env root for dev env {name!r} at {env_root_dir(name)}; nothing to destroy.")
-    if not keep_agents:
+
+    # Step 1: agents first.
+    if keep_agents:
         logger.warning(
-            "minds env destroy {!r}: workspace-agent teardown is not yet implemented. "
+            "minds env destroy {!r}: --keep-agents passed; skipping mngr-agent teardown. "
             "Run `mngr destroy <agent>` manually for any agents bound to this env.",
             str(name),
         )
+    else:
+        destroyed_count = destroy_all_mngr_agents_in_env(
+            name,
+            destroy_agent=providers.destroy_mngr_agent,
+            parent_concurrency_group=parent_concurrency_group,
+        )
+        if destroyed_count:
+            logger.info("Destroyed {} mngr agent(s) under env {!r}.", destroyed_count, str(name))
 
+    # Step 2: Vultr instances.
     instances = providers.list_vultr_instances(name, credentials.vultr_api_key)
     if instances:
         providers.delete_vultr_instances(instances, credentials.vultr_api_key)
 
+    # Step 3: SuperTokens app (delete-app cascades user data).
     providers.delete_supertokens_app(
         name,
         credentials.supertokens_core_url,
         credentials.supertokens_api_key,
     )
+
+    # Step 4: Neon DB (delete-DB cascades tables).
     providers.delete_neon_db(name, credentials.neon_project_id, credentials.neon_api_token)
+
+    # Step 5: Modal env (cascade-deletes apps + secrets + volumes inside).
     providers.delete_modal_env(name, parent_concurrency_group)
 
+    # Step 6: env root LAST, only on full success.
     delete_env_root(name)
 
 
@@ -681,6 +742,7 @@ __all__ = [
     "ProviderCredentials",
     "Providers",
     "build_per_env_secret_values",
+    "delete_modal_secret",
     "deploy_dev_env",
     "deploy_litellm_proxy",
     "deploy_remote_service_connector",
