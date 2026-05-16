@@ -14,6 +14,7 @@ from imbue.mngr.config.agent_config_registry import list_registered_agent_config
 from imbue.mngr.config.agent_config_registry import register_agent_config
 from imbue.mngr.config.agent_config_registry import reset_agent_config_registry
 from imbue.mngr.config.data_types import AgentTypeConfig
+from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.interfaces.agent import AgentInterface
 
 # =============================================================================
@@ -80,6 +81,19 @@ def list_registered_agent_types() -> list[str]:
     class_types = set(list_registered_agent_class_types())
     config_types = set(list_registered_agent_config_types())
     return sorted(class_types | config_types)
+
+
+def list_available_agent_types(config: MngrConfig) -> list[str]:
+    """List every agent type the user can pick.
+
+    This is the union of plugin-registered types (``list_registered_agent_types``)
+    and any user-config-defined types under ``[agent_types.X]`` (subclass
+    types that delegate to a registered ``parent_type``). This is the
+    canonical list to show the user in pickers, error messages, and tab
+    completions -- the same set the completion cache exposes for ``--type``.
+    """
+    custom = [str(k) for k in config.agent_types.keys()]
+    return sorted(set(list_registered_agent_types() + custom))
 
 
 def _register_agent(
