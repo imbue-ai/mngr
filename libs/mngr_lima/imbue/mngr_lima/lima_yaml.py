@@ -196,14 +196,26 @@ def load_user_lima_yaml(yaml_path: Path) -> dict:
     return config
 
 
+_LIST_EXTEND_KEYS = frozenset({"provision", "mounts"})
+
+
 def merge_lima_yaml(base: dict, override: dict) -> dict:
     """Merge a user-provided YAML config with the base config.
 
-    User-provided values override base values. Lists are replaced, not merged.
+    Most keys are replaced by the user's value. For `provision` and `mounts`,
+    the user's list is appended after the base's (base entries first) so mngr's
+    load-bearing entries -- the host-key injection in `provision`, the `/mngr`
+    volume mount in `mounts` -- are not silently dropped by a user who only
+    meant to add their own. Lima runs `provision[mode=system]` scripts in list
+    order, so base-first means mngr's host-key swap runs before any user
+    script.
     """
     merged = dict(base)
     for key, value in override.items():
-        merged[key] = value
+        if key in _LIST_EXTEND_KEYS and isinstance(value, list) and isinstance(merged.get(key), list):
+            merged[key] = list(merged[key]) + list(value)
+        else:
+            merged[key] = value
     return merged
 
 
