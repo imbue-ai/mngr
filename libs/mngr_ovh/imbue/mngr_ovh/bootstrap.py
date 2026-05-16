@@ -256,6 +256,17 @@ def _connect_with_retry(
             )
         except _SSH_CONNECT_RETRY_EXCEPTIONS as e:
             last_error = e
+            # paramiko's SSHClient.close() warns that GC-based cleanup is
+            # unreliable and may hang at end-of-process; the loop creates a
+            # fresh client per iteration, so explicitly close the failed
+            # one before retrying to avoid stacking zombie Transport
+            # threads when auth takes several attempts to succeed. The
+            # narrow except guards against paramiko teardown errors
+            # masking the retryable error we're about to recover from.
+            try:
+                client.close()
+            except (OSError, paramiko.SSHException, EOFError):
+                pass
             time.sleep(_SSH_CONNECT_BACKOFF_SECONDS)
             continue
         return client
