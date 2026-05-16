@@ -263,6 +263,28 @@ _RETRYABLE_RSYNC_PATTERNS: Final[tuple[str, ...]] = (
 )
 
 
+def build_vps_tags(host_id: HostId, provider_name: str, extra_tags_raw: str) -> list[str]:
+    """Compose the tag list passed to the VPS create call.
+
+    Always emits ``mngr-host-id=<id>`` and ``mngr-provider=<name>``. The
+    ``extra_tags_raw`` string is a comma-separated list of ``key=value``
+    tags that the spawning caller wants attached at create time -- e.g.
+    minds-side pool-bake sets ``MNGR_VPS_EXTRA_TAGS=minds_env=<name>``
+    so the env's destroy can later find + delete the instance via the
+    Vultr tag filter. Empty / whitespace-only entries are skipped so
+    trailing commas don't produce blank tags.
+
+    Pulled out to module scope so the comma-splitting behaviour is unit
+    testable without standing up an entire provisioning flow.
+    """
+    tags = [f"mngr-host-id={host_id}", f"mngr-provider={provider_name}"]
+    for tag in extra_tags_raw.split(","):
+        stripped = tag.strip()
+        if stripped:
+            tags.append(stripped)
+    return tags
+
+
 def _redact_secret_env(remote_command: str) -> str:
     """Return remote_command with values of known-secret env-var assignments replaced."""
     return _SECRET_ENV_PATTERN.sub(r"\1=<redacted>", remote_command)
@@ -969,22 +991,7 @@ class VpsDockerProvider(BaseProviderInstance):
 
         logger.log(LogLevel.BUILD.value, "Creating VPS instance (region: {}, plan: {})...", region, plan, source="vps")
         with log_span("Creating VPS instance"):
-            vps_tags = [f"mngr-host-id={host_id}", f"mngr-provider={self.name}"]
-            # MNGR_VPS_EXTRA_TAGS is a comma-separated list of `key=value`
-            # tags the spawning caller wants applied to the VPS at create
-            # time. minds-side pool-bake sets it to ``minds_env=<env-name>``
-            # so the env's destroy can later find + delete this instance via
-            # the Vultr tag filter. Generic env-var indirection rather than
-            # a new mngr CLI flag so this stays a layering-clean opt-in:
-            # mngr_vps_docker has no minds dependency, but minds (or any
-            # other tag-aware caller) can populate it before invoking
-            # ``mngr create``.
-            extra_tags_raw = os.environ.get("MNGR_VPS_EXTRA_TAGS", "")
-            if extra_tags_raw:
-                for tag in extra_tags_raw.split(","):
-                    tag = tag.strip()
-                    if tag:
-                        vps_tags.append(tag)
+            vps_tags = build_vps_tags(host_id, self.name, os.environ.get("MNGR_VPS_EXTRA_TAGS", ""))
             vps_instance_id = self.vps_client.create_instance(
                 label=f"mngr-{name}",
                 region=region,
