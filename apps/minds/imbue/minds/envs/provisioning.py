@@ -20,7 +20,7 @@ Split into two deploy paths driven by the activated env's tier:
 
 The orchestration is pure logic; the CLI plumbing in
 ``imbue.minds.cli.env`` builds the :class:`Providers` bundle with the
-real Modal CLI / Neon HTTP / SuperTokens HTTP / Vultr HTTP / Modal
+real Modal CLI / Neon HTTP / SuperTokens HTTP / OVH HTTP / Modal
 deploy callables, and dispatches to the right deploy function based
 on the activated env's name.
 
@@ -79,11 +79,13 @@ from imbue.minds.envs.primitives import DevEnvProvisioningError
 from imbue.minds.envs.providers.modal_env import ModalEnvProviderError
 from imbue.minds.envs.providers.neon_db import NeonDatabaseRecord
 from imbue.minds.envs.providers.neon_db import NeonProviderError
+from imbue.minds.envs.providers.ovh_tags import OvhCredentials
+from imbue.minds.envs.providers.ovh_tags import OvhProviderError
 from imbue.minds.envs.providers.supertokens_app import SuperTokensAppRecord
 from imbue.minds.envs.providers.supertokens_app import SuperTokensProviderError
 from imbue.minds.envs.providers.supertokens_app import app_id_from_connection_uri
-from imbue.minds.envs.providers.vultr_tags import VultrInstanceSummary
 from imbue.minds.errors import MindError
+from imbue.mngr_ovh.iam_tags import IamResource
 
 # Env var the deployed connector reads at startup to identify which
 # minds env it belongs to. Pushed alongside ``MINDS_TIER_GENERATION_ID``
@@ -118,6 +120,7 @@ _PROVIDER_ERRORS: tuple[type[Exception], ...] = (
     NeonProviderError,
     SuperTokensProviderError,
     ModalDeployError,
+    OvhProviderError,
     MindError,
 )
 
@@ -135,7 +138,7 @@ class ProviderCredentials(FrozenModel):
     neon_api_token: SecretStr = Field(description="Dev-tier Neon API token.")
     supertokens_core_url: str = Field(description="Dev-tier SuperTokens core base URL.")
     supertokens_api_key: SecretStr = Field(description="Dev-tier SuperTokens admin API key.")
-    vultr_api_key: SecretStr = Field(description="Dev-tier Vultr API key (shared across dev envs).")
+    ovh_credentials: OvhCredentials = Field(description="Dev-tier OVH AK/AS/CK credentials (shared across dev envs).")
 
 
 # Type aliases for the injectable provider callables. Tests substitute
@@ -144,8 +147,8 @@ CreateNeonDbFn = Callable[[DevEnvName, str, SecretStr], NeonDatabaseRecord]
 DeleteNeonDbFn = Callable[[DevEnvName, str, SecretStr], None]
 CreateSuperTokensAppFn = Callable[[DevEnvName, str, SecretStr], SuperTokensAppRecord]
 DeleteSuperTokensAppFn = Callable[[DevEnvName, str, SecretStr], None]
-ListVultrInstancesFn = Callable[[DevEnvName, SecretStr], tuple[VultrInstanceSummary, ...]]
-DeleteVultrInstancesFn = Callable[[tuple[VultrInstanceSummary, ...], SecretStr], None]
+ListOvhInstancesFn = Callable[[DevEnvName, OvhCredentials], tuple[IamResource, ...]]
+DeleteOvhInstancesFn = Callable[[tuple[IamResource, ...], OvhCredentials], None]
 ModalEnvOpFn = Callable[[DevEnvName, ConcurrencyGroup], None]
 PushPerEnvSecretFn = Callable[[str, dict[str, str], str, ConcurrencyGroup], None]
 # (modal_env, tier, cg) -> deployed URL. ``modal_env`` is the dev env
@@ -193,8 +196,8 @@ class Providers(FrozenModel):
     delete_neon_db: DeleteNeonDbFn = Field(description="Delete the per-dev-env Neon database.")
     create_supertokens_app: CreateSuperTokensAppFn = Field(description="Create the per-dev-env SuperTokens app.")
     delete_supertokens_app: DeleteSuperTokensAppFn = Field(description="Delete the per-dev-env SuperTokens app.")
-    list_vultr_instances: ListVultrInstancesFn = Field(description="List Vultr instances tagged for this dev env.")
-    delete_vultr_instances: DeleteVultrInstancesFn = Field(description="Delete the listed Vultr instances.")
+    list_ovh_instances: ListOvhInstancesFn = Field(description="List OVH VPSes tagged for this dev env.")
+    delete_ovh_instances: DeleteOvhInstancesFn = Field(description="Delete the listed OVH VPSes.")
     read_per_env_secret_values: ReadPerEnvSecretValuesFn = Field(
         description="(service, tier_vault_prefix, overrides, cg) -> merged values dict for one Modal Secret.",
     )
@@ -535,7 +538,7 @@ def destroy_env(
        so their cloud resources (Docker containers, pool hosts,
        Cloudflare tunnels) stop cleanly before being torn down.
        Skipped when ``keep_agents=True``.
-    2. Delete every Vultr instance tagged ``minds_env=<name>``.
+    2. Delete every OVH VPS tagged ``minds_env=<name>``.
     3. Enumerate + delete every Cloudflare tunnel with
        ``metadata.env=<name>`` (filtered by env name; the tag the
        connector sets at create time encodes the owning env, not the
@@ -586,10 +589,10 @@ def destroy_env(
         if destroyed_count:
             logger.info("Destroyed {} mngr agent(s) under env {!r}.", destroyed_count, str(name))
 
-    # Step 2: Vultr instances tagged with this env.
-    instances = providers.list_vultr_instances(name, credentials.vultr_api_key)
-    if instances:
-        providers.delete_vultr_instances(instances, credentials.vultr_api_key)
+    # Step 2: OVH VPSes tagged with this env.
+    ovh_instances = providers.list_ovh_instances(name, credentials.ovh_credentials)
+    if ovh_instances:
+        providers.delete_ovh_instances(ovh_instances, credentials.ovh_credentials)
 
     # Step 3: Cloudflare tunnels tagged with this env. Keyed off env
     # NAME (not tier), since dev envs share the dev-tier CF account and

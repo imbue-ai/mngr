@@ -20,9 +20,9 @@ from imbue.minds.envs.primitives import DevEnvProvisioningError
 from imbue.minds.envs.providers.modal_env import ModalEnvProviderError
 from imbue.minds.envs.providers.neon_db import NeonDatabaseRecord
 from imbue.minds.envs.providers.neon_db import NeonProviderError
+from imbue.minds.envs.providers.ovh_tags import OvhCredentials
 from imbue.minds.envs.providers.supertokens_app import SuperTokensAppRecord
 from imbue.minds.envs.providers.supertokens_app import SuperTokensProviderError
-from imbue.minds.envs.providers.vultr_tags import VultrInstanceSummary
 from imbue.minds.envs.provisioning import ProviderCredentials
 from imbue.minds.envs.provisioning import Providers
 from imbue.minds.envs.provisioning import deploy_dev_env
@@ -31,6 +31,7 @@ from imbue.minds.envs.provisioning import destroy_env
 from imbue.minds.envs.provisioning import list_dev_envs
 from imbue.minds.errors import MindError
 from imbue.minds.primitives import ServiceName
+from imbue.mngr_ovh.iam_tags import IamResource
 
 
 @pytest.fixture
@@ -65,7 +66,11 @@ def _credentials() -> ProviderCredentials:
         neon_api_token=SecretStr("neon-token"),
         supertokens_core_url="https://supertokens.example.com",
         supertokens_api_key=SecretStr("st-api-key"),
-        vultr_api_key=SecretStr("vultr-token"),
+        ovh_credentials=OvhCredentials(
+            application_key=SecretStr("ovh-ak"),
+            application_secret=SecretStr("ovh-as"),
+            consumer_key=SecretStr("ovh-ck"),
+        ),
     )
 
 
@@ -78,7 +83,7 @@ def _build_fake_providers(
     *,
     fail_step: str | None = None,
     fail_delete: set[str] | None = None,
-    vultr_instances: tuple[VultrInstanceSummary, ...] = (),
+    ovh_instances: tuple[IamResource, ...] = (),
     vault_responses: dict[str, dict[str, str]] | None = None,
     cloudflare_tunnels: tuple[str, ...] = (),
 ) -> Providers:
@@ -144,12 +149,12 @@ def _build_fake_providers(
         if "supertokens_app" in fail_delete:
             raise SuperTokensProviderError("supertokens delete boom")
 
-    def list_vultr_instances(name, api_key):
-        call_log["calls"].append(("list_vultr_instances", str(name)))
-        return vultr_instances
+    def list_ovh_instances(name, credentials):
+        call_log["calls"].append(("list_ovh_instances", str(name)))
+        return ovh_instances
 
-    def delete_vultr_instances(instances, api_key):
-        call_log["calls"].append(("delete_vultr_instances", len(instances)))
+    def delete_ovh_instances(instances, credentials):
+        call_log["calls"].append(("delete_ovh_instances", len(instances)))
 
     def read_per_env_secret_values(service, tier_vault_prefix, overrides, cg):
         call_log["calls"].append(("read_per_env_secret_values", service))
@@ -224,8 +229,8 @@ def _build_fake_providers(
         delete_neon_db=delete_neon_db,
         create_supertokens_app=create_supertokens_app,
         delete_supertokens_app=delete_supertokens_app,
-        list_vultr_instances=list_vultr_instances,
-        delete_vultr_instances=delete_vultr_instances,
+        list_ovh_instances=list_ovh_instances,
+        delete_ovh_instances=delete_ovh_instances,
         read_per_env_secret_values=read_per_env_secret_values,
         push_per_env_modal_secret=push_per_env_modal_secret,
         deploy_litellm_proxy=deploy_litellm_proxy,
@@ -431,8 +436,8 @@ def test_destroy_env_dev_walks_providers_in_order_and_removes_root(
     assert step_names == [
         # Step 1: mngr agents are listed but none exist in the fresh
         # env root; no destroy_mngr_agent calls.
-        # Step 2: Vultr.
-        "list_vultr_instances",
+        # Step 2: OVH.
+        "list_ovh_instances",
         # Step 3: read CF Vault entry + enumerate this env's tunnels.
         "read_per_env_secret_values",
         "list_cloudflare_tunnels_for_env",
@@ -482,7 +487,7 @@ def test_destroy_env_dev_destroys_mngr_agents_before_cloud_teardown(
     # Two destroy_mngr_agent calls (sorted by agent id) BEFORE any
     # cloud-side teardown.
     step_names = [c[0] for c in call_log["calls"]]
-    first_cloud_index = step_names.index("list_vultr_instances")
+    first_cloud_index = step_names.index("list_ovh_instances")
     assert step_names[:first_cloud_index] == ["destroy_mngr_agent", "destroy_mngr_agent"]
     agent_ids_destroyed = [c[1] for c in call_log["calls"] if c[0] == "destroy_mngr_agent"]
     assert agent_ids_destroyed == ["agent-1111", "agent-2222"]
@@ -547,10 +552,23 @@ def test_destroy_env_dev_leaves_env_root_when_step_fails(_isolated_home: Path, _
     assert env_root_exists(DevEnvName("matt"))
 
 
-def test_destroy_deletes_vultr_instances(_isolated_home: Path, _root_cg: ConcurrencyGroup) -> None:
-    instances = (VultrInstanceSummary(id="i-1"), VultrInstanceSummary(id="i-2"))
+def test_destroy_deletes_ovh_instances(_isolated_home: Path, _root_cg: ConcurrencyGroup) -> None:
+    instances = (
+        IamResource(
+            urn="urn:v1:us:resource:vps:vps-a.vps.ovh.us",
+            name="vps-a.vps.ovh.us",
+            type="vps",
+            tags={"minds_env": "hank"},
+        ),
+        IamResource(
+            urn="urn:v1:us:resource:vps:vps-b.vps.ovh.us",
+            name="vps-b.vps.ovh.us",
+            type="vps",
+            tags={"minds_env": "hank"},
+        ),
+    )
     call_log = _make_call_log()
-    providers = _build_fake_providers(call_log, vultr_instances=instances)
+    providers = _build_fake_providers(call_log, ovh_instances=instances)
     deploy_dev_env(
         DevEnvName("hank"),
         tier="dev",
@@ -569,8 +587,8 @@ def test_destroy_deletes_vultr_instances(_isolated_home: Path, _root_cg: Concurr
         providers=providers,
         parent_concurrency_group=_root_cg,
     )
-    delete_call = next(c for c in call_log["calls"] if c[0] == "delete_vultr_instances")
-    assert delete_call == ("delete_vultr_instances", 2)
+    delete_call = next(c for c in call_log["calls"] if c[0] == "delete_ovh_instances")
+    assert delete_call == ("delete_ovh_instances", 2)
 
 
 def test_destroy_missing_env_raises(_isolated_home: Path, _root_cg: ConcurrencyGroup) -> None:
@@ -899,8 +917,8 @@ def test_destroy_env_tier_full_step_order(_isolated_home: Path, _root_cg: Concur
     assert step_names == [
         # 1: agents
         "destroy_mngr_agent",
-        # 2: Vultr (shared with dev, by env name).
-        "list_vultr_instances",
+        # 2: OVH (shared with dev, by env name).
+        "list_ovh_instances",
         # 3: CF tunnels (shared with dev, by env name).
         "read_per_env_secret_values",
         "list_cloudflare_tunnels_for_env",

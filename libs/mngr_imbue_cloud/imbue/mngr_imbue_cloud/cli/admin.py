@@ -1,20 +1,25 @@
 """`mngr imbue_cloud admin pool ...` -- operator-only pool provisioning.
 
-Ported from ``apps/minds/imbue/minds/cli/pool.py``. Provisions Vultr VPSes via
-``mngr create`` (the imbue-team operator must have a Vultr-configured mngr
-provider available locally), waits for the agent, installs a management SSH key
-on both the VPS and the container, then writes a row to the connector's Neon
+Provisions OVH classic VPSes via ``mngr create`` (the imbue-team operator must
+have an OVH-configured mngr provider available locally), waits for the agent,
+installs + configures ufw on the VPS, installs a management SSH key on both
+the VPS and the container, then writes a row to the connector's Neon
 ``pool_hosts`` table.
 
+Provider-generic by design: extra VPS-side tags (e.g. ``minds_env=<name>``
+threaded through by the ``minds pool`` env-aware wrapper) come from
+repeatable ``--tag KEY=VALUE`` CLI options. This command itself has no
+knowledge of minds environments; that's the caller's responsibility.
+
 Authentication: this command talks to Neon directly via ``DATABASE_URL`` and to
-Vultr via the operator's local ``mngr`` provider config. It does NOT use the
-operator's SuperTokens session; the connector is not involved in pool
-provisioning at all.
+OVH via the operator's local ``mngr`` provider config (or
+``OVH_APPLICATION_KEY`` / ``OVH_APPLICATION_SECRET`` / ``OVH_CONSUMER_KEY``
+env vars). It does NOT use the operator's SuperTokens session; the connector
+is not involved in pool provisioning at all.
 """
 
 import json as _json
 import os
-import re
 import shlex
 import sys
 from pathlib import Path
@@ -33,34 +38,8 @@ from imbue.mngr_imbue_cloud.cli._common import emit_json
 from imbue.mngr_imbue_cloud.cli._common import fail_with_json
 
 _CONTAINER_SSH_PORT: Final[int] = 2222
-# Mirrors the regex enforced by ``imbue.minds.bootstrap`` (kept inline
-# to avoid pulling apps/minds into the mngr_imbue_cloud import surface).
-# Recognizes the activated minds env name from ``MINDS_ROOT_NAME``:
-# ``minds`` -> ``production``; ``minds-<env>`` -> ``<env>``. Anything
-# else is treated as "no activation" -- pool-bake then skips the
-# ``minds_env`` tag (the operator will have to clean up the resulting
-# instances by hand if they're in a non-minds context).
-_MINDS_ROOT_NAME_PATTERN: Final[re.Pattern[str]] = re.compile(r"^minds(?:-([a-z0-9][a-z0-9_-]{0,38}[a-z0-9]))?$")
 
-
-def _activated_minds_env_name() -> str | None:
-    """Return the activated minds env name from ``MINDS_ROOT_NAME``, or None.
-
-    Returns ``"production"`` for ``MINDS_ROOT_NAME=minds``, the suffix
-    for ``MINDS_ROOT_NAME=minds-<env>``, and ``None`` for unset / invalid
-    (which is the right signal for "don't apply a minds_env tag at
-    VPS create time").
-    """
-    raw = os.environ.get("MINDS_ROOT_NAME")
-    if raw is None:
-        return None
-    match = _MINDS_ROOT_NAME_PATTERN.match(raw)
-    if match is None:
-        return None
-    return match.group(1) or "production"
-
-
-# 30 min: the inner ``mngr create ... --template vultr`` builds a fresh
+# 30 min: the inner ``mngr create ... --template ovh`` builds a fresh
 # Docker image on the leased VPS, which can take 10-20 min (network bound).
 # A previous 10-min cap occasionally killed otherwise-healthy provisions.
 _MNGR_COMMAND_TIMEOUT_SECONDS: Final[int] = 1800
@@ -85,7 +64,7 @@ def admin() -> None:
 
 @admin.group(name="pool")
 def pool() -> None:
-    """Pool host provisioning (Vultr + Neon)."""
+    """Pool host provisioning (OVH + Neon)."""
 
 
 def _stream_subprocess_line(line: str, is_stdout: bool) -> None:
@@ -179,10 +158,10 @@ def _run_ssh_command(
     return True
 
 
-def _get_agent_info(agent_name: str, provider: str = "vultr") -> dict[str, Any] | None:
+def _get_agent_info(agent_name: str, provider: str = "ovh") -> dict[str, Any] | None:
     """Query mngr list --format json and find the agent by name.
 
-    Scopes to ``--provider <provider>`` (the bake only ever creates on vultr
+    Scopes to ``--provider <provider>`` (the bake only ever creates on ovh
     today, so the default matches the call site) and passes ``--on-error
     continue`` so unrelated stale hosts on the operator's machine -- e.g. a
     pre-existing leased pool host whose container's ``/code/`` workdir has
@@ -256,23 +235,77 @@ def _sync_mngr_into_template(mngr_source: Path, workspace_dir: Path) -> None:
         logger.warning("rsync failed (exit {}): {}", result.returncode, result.stderr.strip())
 
 
+def build_extra_tags_env_value(tags: tuple[str, ...]) -> str:
+    """Join repeated ``--tag KEY=VALUE`` CLI values into ``MNGR_VPS_EXTRA_TAGS``.
+
+    Each entry must already be a ``KEY=VALUE`` string (validated client-side
+    before we ever construct the env var so a typo'd ``--tag foo`` aborts the
+    bake with a usage error instead of crashing inside mngr).
+    ``mngr_vps_docker.build_vps_tags`` and ``mngr_ovh.iam_tags.parse_extra_tags_env``
+    both consume the comma-separated form.
+    """
+    for entry in tags:
+        if "=" not in entry:
+            raise click.UsageError(f"--tag value must be KEY=VALUE, got: {entry!r}")
+    return ",".join(tags)
+
+
+def _ufw_provision_commands(container_ssh_port: int) -> tuple[str, ...]:
+    """Return the sequence of root-shell commands that install + configure ufw.
+
+    The order matters: allow port 22 *before* enabling ufw, otherwise enabling
+    severs the in-progress SSH session that runs the next command. Default
+    policy is deny-incoming + allow-outgoing once 22 and the container sshd
+    port are explicitly allowed.
+    """
+    return (
+        "apt-get update",
+        "DEBIAN_FRONTEND=noninteractive apt-get install -y ufw",
+        "ufw allow 22/tcp",
+        f"ufw allow {container_ssh_port}/tcp",
+        "ufw default allow outgoing",
+        "ufw default deny incoming",
+        "ufw --force enable",
+    )
+
+
+def _checked_ssh_command(vps_ip: str, ssh_key_path: str, port: int, command: str, *, label: str) -> None:
+    """Run an SSH command and raise on non-zero exit.
+
+    Used for steps that MUST succeed (ufw install/configure, management key
+    install). The bake aborts on failure rather than continuing with a
+    half-configured host that would silently land in the pool.
+    """
+    if not _run_ssh_command(vps_ip, ssh_key_path, port, command):
+        raise PoolBakeError(f"{label} failed on VPS {vps_ip}; aborting bake")
+
+
+class PoolBakeError(RuntimeError):
+    """Raised when a required pool-bake step fails irrecoverably."""
+
+
 def _create_single_pool_host(
     workspace_dir: Path,
     attributes: dict[str, Any],
     management_public_key: str,
     database_url: str,
+    region: str,
+    extra_tags: tuple[str, ...],
 ) -> bool:
     """Create a single pool host. Returns True on success.
 
     Inserts a row with the request-side ``attributes`` dict so the connector's
-    ``attributes @>`` match can find it.
+    ``attributes @>`` match can find it. ``extra_tags`` is a tuple of
+    ``KEY=VALUE`` strings forwarded as ``MNGR_VPS_EXTRA_TAGS`` to the inner
+    ``mngr create``; ``mngr_ovh`` then attaches them as additional OVH IAM
+    v2 tags alongside ``mngr-provider`` / ``mngr-host-id``.
     """
     suffix = uuid4().hex
     agent_name = f"pool-{suffix}"
     host_name = f"{agent_name}-host"
-    address = f"{agent_name}@{host_name}.vultr"
+    address = f"{agent_name}@{host_name}.ovh"
 
-    logger.info("Creating pool host: {}", address)
+    logger.info("Creating pool host: {} (region={})", address, region)
 
     mngr_command = [
         "create",
@@ -284,7 +317,7 @@ def _create_single_pool_host(
         "--template",
         "main",
         "--template",
-        "vultr",
+        "ovh",
         "--label",
         f"workspace={agent_name}",
         "--label",
@@ -297,19 +330,16 @@ def _create_single_pool_host(
         "MNGR_HOST_DIR=/mngr",
         "--pass-host-env",
         "MNGR_PREFIX",
+        # Per-bake region: the ``ovh`` create template does NOT bake one
+        # in, so every host can land in a different OVH datacenter.
+        "-b",
+        f"--vps-datacenter={region}",
     ]
 
-    # Thread the activated minds env name through as a VPS tag so
-    # ``minds env destroy`` can later find + delete this pool host
-    # via the Vultr tag filter. Skipped silently when the operator
-    # runs pool-bake outside a minds env (e.g. straight from `mngr`
-    # without `minds env activate`) -- in that case the operator
-    # owns whatever they create.
     pool_create_env: dict[str, str] | None = None
-    env_name = _activated_minds_env_name()
-    if env_name is not None:
-        pool_create_env = {"MNGR_VPS_EXTRA_TAGS": f"minds_env={env_name}"}
-        logger.info("  Tagging VPS with minds_env={} (from activated MINDS_ROOT_NAME)", env_name)
+    if extra_tags:
+        pool_create_env = {"MNGR_VPS_EXTRA_TAGS": build_extra_tags_env_value(extra_tags)}
+        logger.info("  Tagging VPS with extra tags: {}", pool_create_env["MNGR_VPS_EXTRA_TAGS"])
 
     create_result = _run_mngr_command(mngr_command, cwd=workspace_dir, is_streaming=True, extra_env=pool_create_env)
     if create_result.returncode != 0:
@@ -374,7 +404,12 @@ def _create_single_pool_host(
 
     vps_key_path = str(Path(container_key_path).parent / "vps_ssh_key")
 
-    _run_ssh_command(vps_ip, vps_key_path, 22, f"ufw allow {_CONTAINER_SSH_PORT}/tcp")
+    # Install + configure ufw on the VPS. Each step must succeed; we bail
+    # on the whole bake if anything fails (otherwise the host would land
+    # in the pool with no firewall and a half-applied policy).
+    logger.info("  Installing + configuring ufw on VPS {}", vps_ip)
+    for ufw_command in _ufw_provision_commands(_CONTAINER_SSH_PORT):
+        _checked_ssh_command(vps_ip, vps_key_path, 22, ufw_command, label=f"ufw step {ufw_command!r}")
 
     key_line = shlex.quote(management_public_key.strip())
     install_cmd = (
@@ -382,10 +417,14 @@ def _create_single_pool_host(
         + key_line
         + " >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys"
     )
-    _run_ssh_command(vps_ip, vps_key_path, 22, install_cmd)
+    _checked_ssh_command(vps_ip, vps_key_path, 22, install_cmd, label="install management key on VPS")
 
     logger.info("  Installing management key in container via mngr exec")
-    _run_mngr_command(["exec", agent_name, install_cmd], timeout=60)
+    container_install = _run_mngr_command(["exec", agent_name, install_cmd], timeout=60)
+    if container_install.returncode != 0:
+        raise PoolBakeError(
+            f"installing management key inside container for {agent_name} failed: {container_install.stderr.strip()}"
+        )
 
     row_id = uuid4()
     conn = psycopg2.connect(database_url)
@@ -416,6 +455,25 @@ def _create_single_pool_host(
 
 @pool.command(name="create")
 @click.option("--count", required=True, type=int, help="Number of pool hosts to create")
+@click.option(
+    "--region",
+    required=True,
+    type=str,
+    help=(
+        "OVH datacenter code for the new pool VPSes (e.g. ``US-EAST-VA``, ``US-WEST-OR``). "
+        "Validated by OVH at order time; failure surfaces as a 'datacenter not allowed for this plan' error."
+    ),
+)
+@click.option(
+    "--tag",
+    "tags",
+    multiple=True,
+    help=(
+        "Repeatable ``KEY=VALUE`` tag attached to every freshly-provisioned VPS via the OVH IAM v2 "
+        "tag system. Forwarded to the inner ``mngr create`` as ``MNGR_VPS_EXTRA_TAGS=k1=v1,k2=v2``. "
+        "Example: ``--tag minds_env=alice --tag pool-owner=bob``."
+    ),
+)
 @click.option(
     "--attributes",
     "attributes_json",
@@ -449,6 +507,8 @@ def _create_single_pool_host(
 )
 def pool_create(
     count: int,
+    region: str,
+    tags: tuple[str, ...],
     attributes_json: str,
     workspace_dir: str,
     management_public_key_file: str,
@@ -463,6 +523,12 @@ def pool_create(
         fail_with_json(f"Invalid --attributes JSON: {exc}", error_class="UsageError")
     if not isinstance(parsed_attributes, dict):
         fail_with_json("--attributes must be a JSON object", error_class="UsageError")
+    # Validate ``--tag`` shapes up front so we don't bake the first
+    # host and then trip over a typo on the second one.
+    try:
+        build_extra_tags_env_value(tags)
+    except click.UsageError as exc:
+        fail_with_json(str(exc), error_class="UsageError")
 
     management_public_key = Path(management_public_key_file).read_text().strip()
     if not management_public_key:
@@ -472,7 +538,13 @@ def pool_create(
     if mngr_source is not None:
         _sync_mngr_into_template(Path(mngr_source), workspace_path)
 
-    logger.info("Creating {} pool host(s) with attributes={}", count, parsed_attributes)
+    logger.info(
+        "Creating {} pool host(s) with region={}, attributes={}, tags={}",
+        count,
+        region,
+        parsed_attributes,
+        list(tags),
+    )
 
     success_count = 0
     failures: list[str] = []
@@ -484,8 +556,10 @@ def pool_create(
                 attributes=parsed_attributes,
                 management_public_key=management_public_key,
                 database_url=database_url,
+                region=region,
+                extra_tags=tags,
             )
-        except (ConcurrencyGroupError, psycopg2.Error, OSError) as exc:
+        except (ConcurrencyGroupError, PoolBakeError, psycopg2.Error, OSError) as exc:
             logger.warning("[{}] Failed: {}", i, exc)
             failures.append(str(exc))
             is_success = False
@@ -558,7 +632,7 @@ def pool_list(database_url: str) -> None:
 def pool_destroy(pool_host_id: str, database_url: str, force: bool) -> None:
     """Remove a pool_hosts row.
 
-    Note: this does NOT destroy the underlying Vultr VPS; that is intentional
+    Note: this does NOT destroy the underlying OVH VPS; that is intentional
     so an operator can use ``mngr destroy`` themselves and inspect the row
     state first.
     """

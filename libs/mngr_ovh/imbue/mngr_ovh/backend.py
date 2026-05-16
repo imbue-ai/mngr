@@ -1,3 +1,4 @@
+import os
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Final
@@ -31,6 +32,7 @@ from imbue.mngr_ovh.iam_tags import MNGR_HOST_ID_TAG_KEY
 from imbue.mngr_ovh.iam_tags import MNGR_PROVIDER_TAG_KEY
 from imbue.mngr_ovh.iam_tags import attach_tags
 from imbue.mngr_ovh.iam_tags import list_vps_resources_for_provider
+from imbue.mngr_ovh.iam_tags import parse_extra_tags_env
 from imbue.mngr_ovh.iam_tags import vps_urn_for
 from imbue.mngr_ovh.ordering import order_and_wait_for_vps
 from imbue.mngr_ovh.ordering import rebuild_vps_with_public_key
@@ -302,13 +304,23 @@ class OvhProvider(VpsDockerProvider):
                 )
 
                 urn = vps_urn_for(service_name, region_code=_iam_region_code(self.ovh_config.endpoint))
+                # ``MNGR_VPS_EXTRA_TAGS`` mirrors the contract
+                # ``mngr_vps_docker.build_vps_tags`` honors for Vultr-style
+                # callers (e.g. the imbue_cloud pool bake setting
+                # ``minds_env=<name>``). Parsed strictly with local IAM-key
+                # validation so a typo fails here (before the API call)
+                # rather than as a 400 partway through the attach loop,
+                # which would leak the freshly-ordered month of billing.
+                extra_tags = parse_extra_tags_env(os.environ.get("MNGR_VPS_EXTRA_TAGS", ""))
+                all_tags: dict[str, str] = {
+                    MNGR_PROVIDER_TAG_KEY: str(self.name),
+                    MNGR_HOST_ID_TAG_KEY: str(host_id),
+                }
+                all_tags.update(extra_tags)
                 attach_tags(
                     self.ovh_client,
                     urn,
-                    {
-                        MNGR_PROVIDER_TAG_KEY: str(self.name),
-                        MNGR_HOST_ID_TAG_KEY: str(host_id),
-                    },
+                    all_tags,
                 )
                 # All post-claim steps succeeded. Ownership of both the
                 # recycle lock (recycle path) and the freshly-ordered
