@@ -9,12 +9,40 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 ### Added
 
 - Added: New `Volume.path_exists(path)` method across all providers (local, Docker, Modal) and `ScopedVolume`.
+- Added: `gemini` agent type plugin (`imbue-mngr-gemini`) wiring Google's Gemini CLI into mngr.
+- Added: `mngr extras config` subcommand walking through user-scope config gaps (currently the default agent type for `mngr create`).
+- Added: `mngr plugin list --kind agent-type|provider` filter projecting plugins to canonical agent-type or provider names.
+- Added: `use_env_config_dir` option on the `claude` agent type so local Claude agents share the user's `$CLAUDE_CONFIG_DIR` instead of provisioning a per-agent dir.
+- Added: `mngr latchkey admin-jwt` and `mngr latchkey gateway-info` subcommands for shell-driven access to the shared gateway.
 
 ### Changed
 
 - Changed: Bumped bundled Latchkey to 2.11.1.
 - Changed: `mngr tmr` testing agents now publish a single `outputs.tar.gz` archive into the per-agent volume API, replacing the rsync + git-pull finalization; SSH provider no longer supported for testing-agent outputs.
 - Changed: `mngr list --format json` no longer emits the redundant `address` field; same value remains on parsed `AgentDetails.address` / `HostDetails.address`.
+- Changed: Restored Modal compatibility for the standard mngr Dockerfile — single-stage `python:3.12-slim`, source-dependent setup moved to `scripts/post-source-setup.sh` and wired as offload's `post_patch_cmd`.
+- Changed: Bumped offload pin from 0.9.2 to 0.9.5.
+- Changed: Switched latchkey permission management to the latchkey 2.9.0 gateway extensions (`permission_requests.mjs`, `permissions.mjs`); `LATCHKEY_MIN_VERSION` bumped 2.8.0 → 2.9.0. Agents still posting `LATCHKEY_PERMISSION` via the old `events.jsonl` channel will no longer reach the minds inbox.
+- Changed: `mngr create` no longer hard-codes `claude` as the default agent type; must come from a positional argument, `--type`, or `[commands.create] type` in user settings.
+- Changed: `mngr extras -i` and `scripts/install.sh` no longer contain custom shell logic for the default agent type; `mngr extras -i` walks through it as a step, and `mngr extras completion` / `mngr extras claude-plugin` now use the same urwid picker.
+- Changed: Bumped pinned Claude Code CLI from `2.1.116` to `2.1.141`.
+- Changed: `mngr schedule add --verify quick|full` now works when the trigger's `mngr create` produces an agent inside the cron-runner's local provider; verification runs inside the container and reports back over a structured sentinel line.
+- Changed: `mngr_claude_subagent_proxy` typed `subagent_type` (e.g. `imbue-code-guardian:verify-and-fix`) now preserves Claude Code's system-prompt contract — PROXY mode prepends the resolved agent definition body; DENY mode appends a one-line pointer.
+- Changed: minds split the services agent from the chat agent — the primary `system-services` agent runs only bootstrap/background services and is hidden from the UI; chat agents are created post-boot, share `CLAUDE_CONFIG_DIR`, and can be destroyed without tearing down services. Existing pre-change workspaces are not migrated.
+- Changed: `mngr usage` now aggregates cost per-session within a `--since` window (default 24h), keeps subscription vs `ANTHROPIC_API_KEY` spend in separate aggregates, and exposes `subscription_cost` / `api_cost` on the `mngr usage wait --until` CEL surface. The Claude statusline writer also now emits `cost_snapshot` events when only `cost` is present (direct API-key users).
+- Changed: minds "Name" field on the create-project form now sets the *host* name (validated via `HostName`); the agent is always called `system-services`. The imbue_cloud connector grows a required `host_name` on `/hosts/lease` and `/hosts`.
+- Changed: Regenerated CLI docs for `mngr tmr` and `mngr latchkey`.
+- Changed: CI acceptance speedups — granted `contents: write` to `test-offload`/`test-offload-acceptance` so offload's image-cache `git push` succeeds; lowered `max_parallel` from 200 → 50 in `offload-modal-acceptance.toml` for better LPT batching.
+
+### Removed
+
+- Removed: Unused `libs/flexmux/` project and all references (justfile recipes, `EXCLUDED_RATCHET_PROJECTS` exclusions, `uv.lock` workspace member).
+
+### Fixed
+
+- Fixed: Cloned claude agents now actually resume the source agent's conversation — `_adopt_cloned_session` renames the project subdir to the destination's realpath-resolved encoding, drops the stale `sessions-index.json`, writes the JSONL filename stem as `claude_session_id`, and carries `claude_session_id_history` forward; `--adopt-session` shares the same finalize step.
+- Fixed: tmux argv-parsing footguns — `tmux send-keys -l` and `tmux rename-session` now use `--` so agent commands/messages and session prefixes starting with `-` are no longer misparsed as flags.
+- Fixed: `mngr_modal` session-end leak detector no longer false-positives during Modal's eventually-consistent post-delete listing — cleanup deregisters only on synchronous DELETE/NOT_FOUND, and the check runs in `pytest_sessionfinish` after all session-scoped teardowns.
 
 ## [v0.2.8] - 2026-05-13
 
