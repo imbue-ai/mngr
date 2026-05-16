@@ -759,7 +759,7 @@ class FakePoolRow:
     """In-memory record for a single pool_hosts row."""
 
     host_id: UUID
-    vps_ip: str
+    vps_address: str
     vps_instance_id: str
     agent_id: str
     host_id_str: str
@@ -799,7 +799,7 @@ def _attributes_contain(row_attrs: dict[str, Any], requested: dict[str, Any]) ->
 
 def _make_pool_row(
     host_id: UUID,
-    vps_ip: str,
+    vps_address: str,
     agent_id: str,
     host_id_str: str,
     ssh_port: int,
@@ -813,7 +813,7 @@ def _make_pool_row(
 ) -> FakePoolRow:
     row = FakePoolRow()
     row.host_id = host_id
-    row.vps_ip = vps_ip
+    row.vps_address = vps_address
     row.vps_instance_id = f"vps-{host_id}"
     row.agent_id = agent_id
     row.host_id_str = host_id_str
@@ -859,7 +859,7 @@ class FakeCursor:
                 self._results = [
                     (
                         row.host_id,
-                        row.vps_ip,
+                        row.vps_address,
                         row.ssh_port,
                         row.ssh_user,
                         row.container_ssh_port,
@@ -904,7 +904,7 @@ class FakeCursor:
                         self._results.append(
                             (
                                 row.host_id,
-                                row.vps_ip,
+                                row.vps_address,
                                 row.ssh_port,
                                 row.ssh_user,
                                 row.container_ssh_port,
@@ -1013,7 +1013,7 @@ class FakePoolBackend:
         self,
         host_id: UUID,
         version: str,
-        vps_ip: str = "203.0.113.10",
+        vps_address: str = "203.0.113.10",
         ssh_port: int = 22,
         ssh_user: str = "root",
         container_ssh_port: int = 2222,
@@ -1024,7 +1024,7 @@ class FakePoolBackend:
         """Add an available host to the in-memory pool."""
         row = _make_pool_row(
             host_id=host_id,
-            vps_ip=vps_ip,
+            vps_address=vps_address,
             agent_id=agent_id,
             host_id_str=host_id_str,
             ssh_port=ssh_port,
@@ -1041,7 +1041,7 @@ class FakePoolBackend:
         host_id: UUID,
         version: str,
         leased_to_user: str,
-        vps_ip: str = "203.0.113.10",
+        vps_address: str = "203.0.113.10",
         ssh_port: int = 22,
         ssh_user: str = "root",
         container_ssh_port: int = 2222,
@@ -1052,7 +1052,7 @@ class FakePoolBackend:
         """Add a leased host to the in-memory pool."""
         row = _make_pool_row(
             host_id=host_id,
-            vps_ip=vps_ip,
+            vps_address=vps_address,
             agent_id=agent_id,
             host_id_str=host_id_str,
             ssh_port=ssh_port,

@@ -27,3 +27,10 @@ services = [
     "pool-ssh",
     "supertokens",
 ]
+
+# Per-app warm-pool sizes. Keep one container of each app alive so the
+# desktop client never pays a cold-boot penalty on auth / lease /
+# tunnel hits. Bump if you want more headroom for spiky traffic.
+[min_containers]
+connector = 1
+litellm_proxy = 1

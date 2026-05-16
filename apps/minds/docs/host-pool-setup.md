@@ -21,7 +21,7 @@ CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
 CREATE TABLE pool_hosts (
     id UUID PRIMARY KEY,
-    vps_ip TEXT NOT NULL,
+    vps_address TEXT NOT NULL,
     vps_instance_id TEXT NOT NULL,
     agent_id TEXT NOT NULL,
     host_id TEXT NOT NULL,
@@ -156,7 +156,7 @@ uv run mngr imbue_cloud admin pool list --database-url "$DATABASE_URL"
 ## Step 6: Verify
 
 ```bash
-psql "$NEON_DB_DIRECT" -c "SELECT id, vps_ip, status, attributes FROM pool_hosts ORDER BY created_at DESC"
+psql "$NEON_DB_DIRECT" -c "SELECT id, vps_address, status, attributes FROM pool_hosts ORDER BY created_at DESC"
 ```
 
 ## Cleanup

@@ -26,13 +26,24 @@ DEFAULT_MINDS_ROOT_NAME: Final[str] = "minds"
 # to the production path (``~/.minds-/`` is nonsensical) and we'd rather
 # fail loudly than silently coerce.
 _MINDS_PREFIX: Final[str] = "minds"
-# Env names matching this pattern can legally appear as the suffix after
-# ``minds-``. Mirrors :class:`imbue.minds.envs.primitives.DEV_ENV_NAME_PATTERN`
-# (kept inlined so this module stays free of any ``imbue.mngr.*`` /
-# pydantic imports -- see module docstring).
-_ENV_NAME_PATTERN: Final[str] = r"[a-z0-9][a-z0-9_-]{0,38}[a-z0-9]"
-# The full set of legal MINDS_ROOT_NAME values is either ``minds`` alone
-# (production) or ``minds-<env-name>`` (any other environment).
+# Legal env-name suffixes after ``minds-``. Mirrors the rules in
+# :mod:`imbue.minds.envs.primitives` and the reserved tier names in
+# :mod:`imbue.minds.cli.env`:
+#
+#   * ``staging`` -- the reserved staging tier name.
+#   * ``dev-<rest>`` -- any dev env. ``<rest>`` matches
+#     :data:`imbue.minds.envs.primitives.DEV_ENV_NAME_PATTERN` after the
+#     ``dev-`` prefix; kept inlined here so this module stays free of
+#     ``imbue.mngr.*`` / pydantic imports (see module docstring).
+#
+# Production has no suffix (``minds`` alone). Anything that does not
+# fit this pattern is treated as ``unset`` by ``resolve_minds_root_name``
+# and falls back to production with a warning.
+_STAGING_SUFFIX_PATTERN: Final[str] = r"staging"
+_DEV_SUFFIX_PATTERN: Final[str] = r"dev-[a-z0-9][a-z0-9_-]{0,33}[a-z0-9]"
+_ENV_NAME_PATTERN: Final[str] = rf"(?:{_STAGING_SUFFIX_PATTERN}|{_DEV_SUFFIX_PATTERN})"
+# The full set of legal MINDS_ROOT_NAME values is ``minds`` (production),
+# ``minds-staging``, or ``minds-dev-<rest>``.
 MINDS_ROOT_NAME_PATTERN: Final[str] = rf"{_MINDS_PREFIX}(-{_ENV_NAME_PATTERN})?"
 
 

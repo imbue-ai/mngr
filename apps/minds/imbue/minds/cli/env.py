@@ -184,12 +184,14 @@ def _push_per_env_modal_secret_for_provider(
     real_push_per_env_modal_secret(secret_name, values, modal_env=modal_env, parent_cg=cg)
 
 
-def _deploy_litellm_proxy_for_provider(modal_env: str, tier: str, cg: ConcurrencyGroup) -> AnyUrl:
-    return real_deploy_litellm_proxy(modal_env=modal_env, tier=tier, parent_cg=cg)
+def _deploy_litellm_proxy_for_provider(modal_env: str, tier: str, min_containers: int, cg: ConcurrencyGroup) -> AnyUrl:
+    return real_deploy_litellm_proxy(modal_env=modal_env, tier=tier, min_containers=min_containers, parent_cg=cg)
 
 
-def _deploy_connector_for_provider(modal_env: str, tier: str, cg: ConcurrencyGroup) -> AnyUrl:
-    return real_deploy_remote_service_connector(modal_env=modal_env, tier=tier, parent_cg=cg)
+def _deploy_connector_for_provider(modal_env: str, tier: str, min_containers: int, cg: ConcurrencyGroup) -> AnyUrl:
+    return real_deploy_remote_service_connector(
+        modal_env=modal_env, tier=tier, min_containers=min_containers, parent_cg=cg
+    )
 
 
 def _stop_modal_app_for_provider(app_name: str, modal_env: str, cg: ConcurrencyGroup) -> None:

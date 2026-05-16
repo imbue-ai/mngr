@@ -8,6 +8,7 @@ from pydantic import Field
 
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.primitives import NonEmptyStr
+from imbue.imbue_common.primitives import NonNegativeInt
 from imbue.minds.errors import MalformedMngrOutputError
 from imbue.minds.primitives import ServiceName
 from imbue.mngr.primitives import AgentId
@@ -83,6 +84,32 @@ class DeploySecretsConfig(FrozenModel):
     )
 
 
+class MinContainersConfig(FrozenModel):
+    """Warm-pool sizes for each Modal app the tier deploy ships.
+
+    Read by ``minds env deploy`` and threaded into each ``modal deploy``
+    invocation as the matching ``MINDS_<APP>_MIN_CONTAINERS`` env var.
+    The Modal app reads its value at module load (which is the moment
+    ``modal deploy`` serializes the function spec) so the deployed
+    function pin includes the configured warm-pool size.
+
+    Defaults are zero so a tier that omits the block (or omits a
+    specific service) gets the cheapest possible warm pool. Staging /
+    production override to ``1`` in their committed ``deploy.toml`` so
+    the desktop client doesn't pay a cold-boot penalty on auth / lease
+    / tunnel hits.
+    """
+
+    connector: NonNegativeInt = Field(
+        default=NonNegativeInt(0),
+        description="Warm containers to keep alive for ``remote-service-connector-<tier>``.",
+    )
+    litellm_proxy: NonNegativeInt = Field(
+        default=NonNegativeInt(0),
+        description="Warm containers to keep alive for ``litellm-proxy-<tier>``.",
+    )
+
+
 class DeployEnvConfig(FrozenModel):
     """Per-tier deploy-time config read by deploy scripts and `minds env create`.
 
@@ -120,6 +147,15 @@ class DeployEnvConfig(FrozenModel):
     )
     secrets: DeploySecretsConfig = Field(
         description="Which `.minds/template/*.sh`-shaped services the deploy step pulls from Vault and pushes to Modal."
+    )
+    min_containers: MinContainersConfig = Field(
+        default_factory=MinContainersConfig,
+        description=(
+            "Per-service warm-pool sizes for the Modal apps this tier ships. "
+            "Each entry is threaded into the matching ``modal deploy`` as an env var "
+            "(``MINDS_CONNECTOR_MIN_CONTAINERS`` / ``MINDS_LITELLM_PROXY_MIN_CONTAINERS``) "
+            "so the deployed function pin honors the tier's config."
+        ),
     )
 
 

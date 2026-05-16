@@ -90,7 +90,7 @@ from imbue.mngr_ovh.iam_tags import IamResource
 # Env var the deployed connector reads at startup to identify which
 # minds env it belongs to. Pushed alongside ``MINDS_TIER_GENERATION_ID``
 # in the per-env ``litellm-connector-<tier>`` Modal Secret. For dev-tier
-# deploys this is the per-developer dev env name (e.g. ``josh-3``); for
+# deploys this is the per-developer dev env name (e.g. ``dev-josh-3``); for
 # tier deploys it's the tier itself (``staging`` / ``production``).
 # Used by ``cf_create_tunnel`` to tag every Cloudflare tunnel the
 # connector creates with the owning env, so ``minds env destroy`` can
@@ -151,10 +151,12 @@ ListOvhInstancesFn = Callable[[DevEnvName, OvhCredentials], tuple[IamResource, .
 DeleteOvhInstancesFn = Callable[[tuple[IamResource, ...], OvhCredentials], None]
 ModalEnvOpFn = Callable[[DevEnvName, ConcurrencyGroup], None]
 PushPerEnvSecretFn = Callable[[str, dict[str, str], str, ConcurrencyGroup], None]
-# (modal_env, tier, cg) -> deployed URL. ``modal_env`` is the dev env
-# name for dev-tier deploys or the tier's stable Modal env (``main`` by
-# convention) for staging / production deploys.
-DeployModalAppFn = Callable[[str, str, ConcurrencyGroup], AnyUrl]
+# (modal_env, tier, min_containers, cg) -> deployed URL. ``modal_env``
+# is the dev env name for dev-tier deploys or the tier's stable Modal
+# env (``main`` by convention) for staging / production deploys.
+# ``min_containers`` is the per-app warm-pool size from the tier's
+# ``[min_containers]`` deploy.toml block.
+DeployModalAppFn = Callable[[str, str, int, ConcurrencyGroup], AnyUrl]
 # (app_name, modal_env, cg) -> None. Used by tier destroys to ``modal
 # app stop`` each deployed app. Idempotent in the underlying call.
 StopModalAppFn = Callable[[str, str, ConcurrencyGroup], None]
@@ -294,7 +296,7 @@ class DevEnvSummary(FrozenModel):
     yet, or a partial deploy that failed before writing the file).
     """
 
-    name: str = Field(description="The env name (e.g. 'josh-3'), or 'production' for ~/.minds/.")
+    name: str = Field(description="The env name (e.g. 'dev-josh-3'), or 'production' for ~/.minds/.")
     env_root: str = Field(description="Absolute path to the env root directory on disk.")
     client_config_path: str | None = Field(
         default=None,
@@ -421,11 +423,28 @@ def deploy_dev_env(
             parent_concurrency_group,
         )
 
-    logger.info("Deploying litellm-proxy-{} into env {!r}...", tier, modal_env)
-    litellm_proxy_url = providers.deploy_litellm_proxy(modal_env, tier, parent_concurrency_group)
+    litellm_proxy_min_containers = int(deploy_config.min_containers.litellm_proxy)
+    connector_min_containers = int(deploy_config.min_containers.connector)
 
-    logger.info("Deploying remote-service-connector-{} into env {!r}...", tier, modal_env)
-    connector_url = providers.deploy_remote_service_connector(modal_env, tier, parent_concurrency_group)
+    logger.info(
+        "Deploying litellm-proxy-{} into env {!r} (min_containers={})...",
+        tier,
+        modal_env,
+        litellm_proxy_min_containers,
+    )
+    litellm_proxy_url = providers.deploy_litellm_proxy(
+        modal_env, tier, litellm_proxy_min_containers, parent_concurrency_group
+    )
+
+    logger.info(
+        "Deploying remote-service-connector-{} into env {!r} (min_containers={})...",
+        tier,
+        modal_env,
+        connector_min_containers,
+    )
+    connector_url = providers.deploy_remote_service_connector(
+        modal_env, tier, connector_min_containers, parent_concurrency_group
+    )
 
     # Second pass: now that we have the real connector + proxy URLs,
     # update the two Modal Secrets whose values depended on them
@@ -472,7 +491,9 @@ def deploy_dev_env(
     )
 
     logger.info("Redeploying remote-service-connector-{} to pick up final secrets...", tier)
-    connector_url = providers.deploy_remote_service_connector(modal_env, tier, parent_concurrency_group)
+    connector_url = providers.deploy_remote_service_connector(
+        modal_env, tier, connector_min_containers, parent_concurrency_group
+    )
 
     public_config = ClientEnvConfig(
         connector_url=connector_url,
@@ -808,11 +829,28 @@ def deploy_tier_env(
             parent_concurrency_group,
         )
 
-    logger.info("Deploying litellm-proxy-{} into Modal env {!r}...", tier, modal_env)
-    litellm_proxy_url = providers.deploy_litellm_proxy(modal_env, tier, parent_concurrency_group)
+    litellm_proxy_min_containers = int(deploy_config.min_containers.litellm_proxy)
+    connector_min_containers = int(deploy_config.min_containers.connector)
 
-    logger.info("Deploying remote-service-connector-{} into Modal env {!r}...", tier, modal_env)
-    connector_url = providers.deploy_remote_service_connector(modal_env, tier, parent_concurrency_group)
+    logger.info(
+        "Deploying litellm-proxy-{} into Modal env {!r} (min_containers={})...",
+        tier,
+        modal_env,
+        litellm_proxy_min_containers,
+    )
+    litellm_proxy_url = providers.deploy_litellm_proxy(
+        modal_env, tier, litellm_proxy_min_containers, parent_concurrency_group
+    )
+
+    logger.info(
+        "Deploying remote-service-connector-{} into Modal env {!r} (min_containers={})...",
+        tier,
+        modal_env,
+        connector_min_containers,
+    )
+    connector_url = providers.deploy_remote_service_connector(
+        modal_env, tier, connector_min_containers, parent_concurrency_group
+    )
 
     return DeployedTierEnv(
         tier=tier,

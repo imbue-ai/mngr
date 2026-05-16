@@ -17,3 +17,9 @@ services = [
     "pool-ssh",
     "supertokens",
 ]
+
+[min_containers]
+# Keep one container of each app warm so the desktop client never pays
+# a cold-boot penalty on auth / lease / tunnel hits.
+connector = 1
+litellm_proxy = 1

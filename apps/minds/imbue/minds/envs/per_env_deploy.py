@@ -82,6 +82,13 @@ _MODAL_DEPLOY_TIMEOUT_SECONDS: Final[float] = 600.0
 _MODAL_SECRET_TIMEOUT_SECONDS: Final[float] = 60.0
 _MODAL_ENV_CREATE_TIMEOUT_SECONDS: Final[float] = 60.0
 
+# Env-var names the deployed modal apps read at module load to pin
+# their warm-pool size. Kept here (one name per app) so the deploy
+# side and the app side stay in lockstep -- changing either name in
+# isolation would silently fall back to the in-app default (0).
+CONNECTOR_MIN_CONTAINERS_ENV_VAR: Final[str] = "MINDS_CONNECTOR_MIN_CONTAINERS"
+LITELLM_PROXY_MIN_CONTAINERS_ENV_VAR: Final[str] = "MINDS_LITELLM_PROXY_MIN_CONTAINERS"
+
 
 class ModalDeployError(MindError):
     """Raised when a ``modal deploy`` or ``modal secret create`` call fails."""
@@ -238,6 +245,7 @@ def deploy_litellm_proxy(
     *,
     modal_env: str,
     tier: str,
+    min_containers: int,
     parent_cg: ConcurrencyGroup,
 ) -> AnyUrl:
     """``modal deploy`` the litellm-proxy app into ``modal_env`` for ``tier``.
@@ -257,6 +265,10 @@ def deploy_litellm_proxy(
     ``modal_env`` is the Modal environment to deploy into: the activated
     dev env's name for dev-tier deploys, or the tier's stable Modal env
     (``main`` by convention) for staging / production deploys.
+
+    ``min_containers`` controls the deployed function's warm-pool size.
+    Threaded into the subprocess env as ``MINDS_LITELLM_PROXY_MIN_CONTAINERS``
+    so the modal app picks it up at module load.
     """
     app_file = _litellm_app_file()
     logger.info(
@@ -276,6 +288,7 @@ def deploy_litellm_proxy(
         app_name=f"litellm-proxy-{tier}",
         modal_env=modal_env,
         tier=tier,
+        extra_env={LITELLM_PROXY_MIN_CONTAINERS_ENV_VAR: str(min_containers)},
         parent_cg=parent_cg,
     )
 
@@ -359,18 +372,22 @@ def deploy_remote_service_connector(
     *,
     modal_env: str,
     tier: str,
+    min_containers: int,
     parent_cg: ConcurrencyGroup,
 ) -> AnyUrl:
     """``modal deploy`` the remote_service_connector app into ``modal_env`` for ``tier``.
 
     See :func:`deploy_litellm_proxy` for return-value semantics and the
-    meaning of ``modal_env``.
+    meaning of ``modal_env``. ``min_containers`` is threaded into the
+    subprocess env as ``MINDS_CONNECTOR_MIN_CONTAINERS`` and consumed
+    by the modal app at module load.
     """
     return _deploy_modal_app(
         app_file=_connector_app_file(),
         app_name=f"remote-service-connector-{tier}",
         modal_env=modal_env,
         tier=tier,
+        extra_env={CONNECTOR_MIN_CONTAINERS_ENV_VAR: str(min_containers)},
         parent_cg=parent_cg,
     )
 
@@ -398,6 +415,7 @@ def _deploy_modal_app(
     app_name: str,
     modal_env: str,
     tier: str,
+    extra_env: dict[str, str] | None = None,
     parent_cg: ConcurrencyGroup,
 ) -> AnyUrl:
     if not app_file.is_file():
@@ -416,6 +434,12 @@ def _deploy_modal_app(
     # right secret names; tier deploys set this in the shell wrapper, so
     # mirror that here.
     subprocess_env["MNGR_DEPLOY_ENV"] = tier
+    # Extra env vars (e.g. per-app ``MINDS_*_MIN_CONTAINERS``) are
+    # baked into the deployment spec at module load -- threading them
+    # in via the subprocess env is the only way modal's deploy-time
+    # serialization sees them.
+    if extra_env is not None:
+        subprocess_env.update(extra_env)
     cg = parent_cg.make_concurrency_group(name=f"modal-deploy-{app_name}")
     with cg:
         result = cg.run_process_to_completion(

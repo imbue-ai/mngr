@@ -33,9 +33,9 @@ def test_list_tunnels_for_env_filters_by_metadata_env() -> None:
         captured.append(request)
         return _ok_list_response(
             [
-                {"id": "match-1", "metadata": {"env": "josh-dev"}},
+                {"id": "match-1", "metadata": {"env": "dev-josh"}},
                 {"id": "other", "metadata": {"env": "different"}},
-                {"id": "match-2", "metadata": {"env": "josh-dev"}},
+                {"id": "match-2", "metadata": {"env": "dev-josh"}},
                 {"id": "no-metadata"},
                 {"id": "non-dict-metadata", "metadata": "weird"},
                 "not-a-dict",
@@ -43,7 +43,7 @@ def test_list_tunnels_for_env_filters_by_metadata_env() -> None:
         )
 
     result = list_tunnels_for_env(
-        DevEnvName("josh-dev"),
+        DevEnvName("dev-josh"),
         account_id="acct-123",
         api_token=SecretStr("token-abc"),
         transport=httpx.MockTransport(handler),
@@ -61,16 +61,16 @@ def test_list_tunnels_for_env_paginates() -> None:
         calls.append(str(request.url))
         if "page=1" in str(request.url):
             return _ok_list_response(
-                [{"id": "p1-match", "metadata": {"env": "josh-dev"}}],
+                [{"id": "p1-match", "metadata": {"env": "dev-josh"}}],
                 total_pages=2,
             )
         return _ok_list_response(
-            [{"id": "p2-match", "metadata": {"env": "josh-dev"}}],
+            [{"id": "p2-match", "metadata": {"env": "dev-josh"}}],
             total_pages=2,
         )
 
     result = list_tunnels_for_env(
-        DevEnvName("josh-dev"),
+        DevEnvName("dev-josh"),
         account_id="acct",
         api_token=SecretStr("t"),
         transport=httpx.MockTransport(handler),
@@ -85,7 +85,7 @@ def test_list_tunnels_for_env_returns_empty_when_no_match() -> None:
 
     assert (
         list_tunnels_for_env(
-            DevEnvName("josh-dev"),
+            DevEnvName("dev-josh"),
             account_id="acct",
             api_token=SecretStr("t"),
             transport=httpx.MockTransport(handler),
@@ -100,7 +100,7 @@ def test_list_tunnels_for_env_raises_on_http_error() -> None:
 
     with pytest.raises(CloudflareTunnelProviderError, match="500"):
         list_tunnels_for_env(
-            DevEnvName("josh-dev"),
+            DevEnvName("dev-josh"),
             account_id="acct",
             api_token=SecretStr("t"),
             transport=httpx.MockTransport(handler),
@@ -113,7 +113,7 @@ def test_list_tunnels_for_env_raises_on_non_json() -> None:
 
     with pytest.raises(CloudflareTunnelProviderError, match="non-JSON"):
         list_tunnels_for_env(
-            DevEnvName("josh-dev"),
+            DevEnvName("dev-josh"),
             account_id="acct",
             api_token=SecretStr("t"),
             transport=httpx.MockTransport(handler),
@@ -126,7 +126,7 @@ def test_list_tunnels_for_env_raises_on_success_false() -> None:
 
     with pytest.raises(CloudflareTunnelProviderError, match="reported failure"):
         list_tunnels_for_env(
-            DevEnvName("josh-dev"),
+            DevEnvName("dev-josh"),
             account_id="acct",
             api_token=SecretStr("t"),
             transport=httpx.MockTransport(handler),
@@ -139,7 +139,7 @@ def test_list_tunnels_for_env_raises_on_non_list_result() -> None:
 
     with pytest.raises(CloudflareTunnelProviderError, match="non-list"):
         list_tunnels_for_env(
-            DevEnvName("josh-dev"),
+            DevEnvName("dev-josh"),
             account_id="acct",
             api_token=SecretStr("t"),
             transport=httpx.MockTransport(handler),
@@ -152,7 +152,7 @@ def test_list_tunnels_for_env_wraps_transport_error() -> None:
 
     with pytest.raises(CloudflareTunnelProviderError, match="connection refused"):
         list_tunnels_for_env(
-            DevEnvName("josh-dev"),
+            DevEnvName("dev-josh"),
             account_id="acct",
             api_token=SecretStr("t"),
             transport=httpx.MockTransport(handler),

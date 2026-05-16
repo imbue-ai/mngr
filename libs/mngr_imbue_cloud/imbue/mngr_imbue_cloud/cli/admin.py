@@ -431,13 +431,9 @@ def _create_single_pool_host(
     try:
         with conn:
             with conn.cursor() as cur:
-                # NB: the SQL column is still named ``vps_ip`` because we
-                # don't yet have a schema migration; the Python field is
-                # ``vps_address`` (it can hold either an IPv4 or a DNS
-                # hostname like the OVH serviceName).
                 cur.execute(
                     "INSERT INTO pool_hosts "
-                    "(id, vps_ip, vps_instance_id, agent_id, host_id, ssh_port, ssh_user, "
+                    "(id, vps_address, vps_instance_id, agent_id, host_id, ssh_port, ssh_user, "
                     "container_ssh_port, status, attributes, created_at) "
                     "VALUES (%s, %s, %s, %s, %s, 22, 'root', %s, 'available', %s::jsonb, NOW())",
                     (
@@ -597,7 +593,7 @@ def pool_list(database_url: str) -> None:
     try:
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT id, vps_ip, agent_id, host_id, status, attributes, "
+                "SELECT id, vps_address, agent_id, host_id, status, attributes, "
                 "leased_to_user, leased_at, released_at, created_at "
                 "FROM pool_hosts ORDER BY created_at DESC"
             )

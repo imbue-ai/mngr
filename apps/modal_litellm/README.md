@@ -36,10 +36,14 @@ the mandatory safety bar; substitute `--yes-i-mean-staging` (and
 On the first cold start, LiteLLM runs ~118 Prisma migrations against the database. This takes ~14 minutes. Subsequent container starts take ~6 seconds.
 
 The `min_containers` setting keeps containers warm to avoid cold
-starts. Defaults: `1` for production / staging, `0` for dev. Override
-at `modal deploy` time by exporting `MINDS_MIN_CONTAINERS=<n>` (the
-value is read at module load, which is when `modal deploy` serializes
-the function spec).
+starts. ``minds env deploy`` reads the value from the tier's
+``apps/minds/imbue/minds/config/envs/<tier>/deploy.toml``
+(``[min_containers].litellm_proxy``, default ``0``; staging and
+production ship with ``1``) and threads it into ``modal deploy`` as
+``MINDS_LITELLM_PROXY_MIN_CONTAINERS``. The value is read at module
+load, which is when ``modal deploy`` serializes the function spec.
+To override for a one-off deploy you control directly, export the env
+var before running ``modal deploy`` by hand.
 
 ### 4. Create a virtual key
 

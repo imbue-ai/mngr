@@ -6,8 +6,10 @@ from pydantic import SecretStr
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.primitives import NonEmptyStr
+from imbue.imbue_common.primitives import NonNegativeInt
 from imbue.minds.config.data_types import DeployEnvConfig
 from imbue.minds.config.data_types import DeploySecretsConfig
+from imbue.minds.config.data_types import MinContainersConfig
 from imbue.minds.envs.local_store import client_config_exists
 from imbue.minds.envs.local_store import env_root_exists
 from imbue.minds.envs.local_store import read_client_config_file
@@ -50,13 +52,19 @@ def _root_cg() -> ConcurrencyGroup:
     return ConcurrencyGroup(name="provisioning-test-root")
 
 
-def _deploy_config(*, tier: str = "dev", modal_env: str = "main") -> DeployEnvConfig:
+def _deploy_config(
+    *,
+    tier: str = "dev",
+    modal_env: str = "main",
+    min_containers: MinContainersConfig | None = None,
+) -> DeployEnvConfig:
     return DeployEnvConfig(
         modal_workspace=NonEmptyStr("dev-workspace"),
         modal_env=NonEmptyStr(modal_env),
         vault_path_prefix=NonEmptyStr(f"secrets/minds/{tier}"),
         cloudflare_domain=NonEmptyStr(f"{tier}.example.com"),
         secrets=DeploySecretsConfig(services=(ServiceName("cloudflare"),)),
+        min_containers=min_containers if min_containers is not None else MinContainersConfig(),
     )
 
 
@@ -170,14 +178,14 @@ def _build_fake_providers(
         if fail_step == "push_secret" and "supertokens" in secret_name:
             raise ModalDeployError("push secret boom")
 
-    def deploy_litellm_proxy(modal_env, tier, cg):
-        call_log["calls"].append(("deploy_litellm_proxy", modal_env, tier))
+    def deploy_litellm_proxy(modal_env, tier, min_containers, cg):
+        call_log["calls"].append(("deploy_litellm_proxy", modal_env, tier, min_containers))
         if fail_step == "deploy_litellm":
             raise ModalDeployError("litellm deploy boom")
         return AnyUrl(f"https://fake-litellm-{modal_env}.modal.run")
 
-    def deploy_remote_service_connector(modal_env, tier, cg):
-        call_log["calls"].append(("deploy_remote_service_connector", modal_env, tier))
+    def deploy_remote_service_connector(modal_env, tier, min_containers, cg):
+        call_log["calls"].append(("deploy_remote_service_connector", modal_env, tier, min_containers))
         if fail_step == "deploy_connector":
             raise ModalDeployError("connector deploy boom")
         return AnyUrl(f"https://fake-connector-{modal_env}.modal.run")
@@ -251,31 +259,31 @@ def test_deploy_dev_env_writes_split_files(_isolated_home: Path, _root_cg: Concu
     """Dev deploy must write client.toml (URLs only) + secrets.toml (chmod 600)."""
     providers = _build_fake_providers(_make_call_log())
     result = deploy_dev_env(
-        DevEnvName("alice"),
+        DevEnvName("dev-alice"),
         tier="dev",
         deploy_config=_deploy_config(),
         credentials=_credentials(),
         providers=providers,
         parent_concurrency_group=_root_cg,
     )
-    assert str(result.connector_url) == "https://fake-connector-alice.modal.run/"
-    assert str(result.litellm_proxy_url) == "https://fake-litellm-alice.modal.run/"
+    assert str(result.connector_url) == "https://fake-connector-dev-alice.modal.run/"
+    assert str(result.litellm_proxy_url) == "https://fake-litellm-dev-alice.modal.run/"
 
     # client.toml has only URL fields (no secrets).
-    assert client_config_exists(DevEnvName("alice"))
-    public = read_client_config_file(DevEnvName("alice"))
-    assert str(public.connector_url) == "https://fake-connector-alice.modal.run/"
-    assert str(public.litellm_proxy_url) == "https://fake-litellm-alice.modal.run/"
+    assert client_config_exists(DevEnvName("dev-alice"))
+    public = read_client_config_file(DevEnvName("dev-alice"))
+    assert str(public.connector_url) == "https://fake-connector-dev-alice.modal.run/"
+    assert str(public.litellm_proxy_url) == "https://fake-litellm-dev-alice.modal.run/"
 
     # secrets.toml has the per-env provider state, chmod 600.
-    secrets = read_secrets_file(DevEnvName("alice"))
-    assert secrets.secrets["NEON_POOLED_DSN"].get_secret_value() == "postgres://pooled/alice"
+    secrets = read_secrets_file(DevEnvName("dev-alice"))
+    assert secrets.secrets["NEON_POOLED_DSN"].get_secret_value() == "postgres://pooled/dev-alice"
     assert "SUPERTOKENS_CONNECTION_URI" in secrets.secrets
     assert "SUPERTOKENS_API_KEY" in secrets.secrets
 
     # Sanity: the result struct carries paths to both files.
-    assert result.client_config_path.endswith("/.minds-alice/client.toml")
-    assert result.secrets_path.endswith("/.minds-alice/secrets.toml")
+    assert result.client_config_path.endswith("/.minds-dev-alice/client.toml")
+    assert result.secrets_path.endswith("/.minds-dev-alice/secrets.toml")
 
 
 def test_deploy_dev_env_is_idempotent_on_re_run(_isolated_home: Path, _root_cg: ConcurrencyGroup) -> None:
@@ -283,7 +291,7 @@ def test_deploy_dev_env_is_idempotent_on_re_run(_isolated_home: Path, _root_cg: 
     call_log = _make_call_log()
     providers = _build_fake_providers(call_log)
     deploy_dev_env(
-        DevEnvName("bob"),
+        DevEnvName("dev-bob"),
         tier="dev",
         deploy_config=_deploy_config(),
         credentials=_credentials(),
@@ -291,7 +299,7 @@ def test_deploy_dev_env_is_idempotent_on_re_run(_isolated_home: Path, _root_cg: 
         parent_concurrency_group=_root_cg,
     )
     deploy_dev_env(
-        DevEnvName("bob"),
+        DevEnvName("dev-bob"),
         tier="dev",
         deploy_config=_deploy_config(),
         credentials=_credentials(),
@@ -312,7 +320,7 @@ def test_deploy_dev_env_rollback_on_neon_failure(_isolated_home: Path, _root_cg:
     providers = _build_fake_providers(call_log, fail_step="neon_db")
     with pytest.raises(DevEnvProvisioningError, match="neon create boom"):
         deploy_dev_env(
-            DevEnvName("carol"),
+            DevEnvName("dev-carol"),
             tier="dev",
             deploy_config=_deploy_config(),
             credentials=_credentials(),
@@ -326,7 +334,7 @@ def test_deploy_dev_env_rollback_on_neon_failure(_isolated_home: Path, _root_cg:
         "delete_modal_env",
     ]
     # No client.toml / secrets.toml written for a failed deploy.
-    assert not client_config_exists(DevEnvName("carol"))
+    assert not client_config_exists(DevEnvName("dev-carol"))
 
 
 def test_deploy_dev_env_rollback_on_supertokens_failure(_isolated_home: Path, _root_cg: ConcurrencyGroup) -> None:
@@ -334,7 +342,7 @@ def test_deploy_dev_env_rollback_on_supertokens_failure(_isolated_home: Path, _r
     providers = _build_fake_providers(call_log, fail_step="supertokens_app")
     with pytest.raises(DevEnvProvisioningError, match="supertokens create boom"):
         deploy_dev_env(
-            DevEnvName("dan"),
+            DevEnvName("dev-dan"),
             tier="dev",
             deploy_config=_deploy_config(),
             credentials=_credentials(),
@@ -360,7 +368,7 @@ def test_deploy_dev_env_rollback_swallows_secondary_failure(_isolated_home: Path
     )
     with pytest.raises(DevEnvProvisioningError, match="supertokens create boom"):
         deploy_dev_env(
-            DevEnvName("eve"),
+            DevEnvName("dev-eve"),
             tier="dev",
             deploy_config=_deploy_config(),
             credentials=_credentials(),
@@ -378,7 +386,7 @@ def test_deploy_dev_env_pushes_per_env_secrets_into_dev_modal_env(
     call_log = _make_call_log()
     providers = _build_fake_providers(call_log)
     deploy_dev_env(
-        DevEnvName("frank"),
+        DevEnvName("dev-frank"),
         tier="dev",
         deploy_config=_deploy_config(),
         credentials=_credentials(),
@@ -396,14 +404,14 @@ def test_deploy_dev_env_pushes_per_env_secrets_into_dev_modal_env(
         "litellm-connector-dev",
         "paid-accounts-dev",
     }
-    # All pushes target the same Modal env (the dev env name 'frank') --
+    # All pushes target the same Modal env (the dev env name 'dev-frank') --
     # not the tier's stable 'main' env. Two devs never share one Modal env.
-    assert all(c[2] == "frank" for c in pushes)
+    assert all(c[2] == "dev-frank" for c in pushes)
     deploys = [c for c in call_log["calls"] if c[0].startswith("deploy_")]
     assert deploys == [
-        ("deploy_litellm_proxy", "frank", "dev"),
-        ("deploy_remote_service_connector", "frank", "dev"),
-        ("deploy_remote_service_connector", "frank", "dev"),
+        ("deploy_litellm_proxy", "dev-frank", "dev", 0),
+        ("deploy_remote_service_connector", "dev-frank", "dev", 0),
+        ("deploy_remote_service_connector", "dev-frank", "dev", 0),
     ]
 
 
@@ -414,18 +422,18 @@ def test_destroy_env_dev_walks_providers_in_order_and_removes_root(
     call_log = _make_call_log()
     providers = _build_fake_providers(call_log)
     deploy_dev_env(
-        DevEnvName("george"),
+        DevEnvName("dev-george"),
         tier="dev",
         deploy_config=_deploy_config(),
         credentials=_credentials(),
         providers=providers,
         parent_concurrency_group=_root_cg,
     )
-    assert env_root_exists(DevEnvName("george"))
+    assert env_root_exists(DevEnvName("dev-george"))
     call_log["calls"].clear()
 
     destroy_env(
-        DevEnvName("george"),
+        DevEnvName("dev-george"),
         tier="dev",
         deploy_config=_deploy_config(),
         credentials=_credentials(),
@@ -452,7 +460,7 @@ def test_destroy_env_dev_walks_providers_in_order_and_removes_root(
     ]
     # Env root removed so subsequent commands fail fast on a dangling
     # activation rather than silently re-creating partial state.
-    assert not env_root_exists(DevEnvName("george"))
+    assert not env_root_exists(DevEnvName("dev-george"))
 
 
 def test_destroy_env_dev_destroys_mngr_agents_before_cloud_teardown(
@@ -462,7 +470,7 @@ def test_destroy_env_dev_destroys_mngr_agents_before_cloud_teardown(
     call_log = _make_call_log()
     providers = _build_fake_providers(call_log)
     deploy_dev_env(
-        DevEnvName("kim"),
+        DevEnvName("dev-kim"),
         tier="dev",
         deploy_config=_deploy_config(),
         credentials=_credentials(),
@@ -470,14 +478,14 @@ def test_destroy_env_dev_destroys_mngr_agents_before_cloud_teardown(
         parent_concurrency_group=_root_cg,
     )
     # Seed two fake agent dirs under the env's mngr profile.
-    agents_dir = _isolated_home / ".minds-kim" / "mngr" / "agents"
+    agents_dir = _isolated_home / ".minds-dev-kim" / "mngr" / "agents"
     agents_dir.mkdir(parents=True, exist_ok=True)
     (agents_dir / "agent-1111").mkdir()
     (agents_dir / "agent-2222").mkdir()
     call_log["calls"].clear()
 
     destroy_env(
-        DevEnvName("kim"),
+        DevEnvName("dev-kim"),
         tier="dev",
         deploy_config=_deploy_config(),
         credentials=_credentials(),
@@ -498,20 +506,20 @@ def test_destroy_env_dev_keep_agents_skips_mngr_destroy(_isolated_home: Path, _r
     call_log = _make_call_log()
     providers = _build_fake_providers(call_log)
     deploy_dev_env(
-        DevEnvName("liz"),
+        DevEnvName("dev-liz"),
         tier="dev",
         deploy_config=_deploy_config(),
         credentials=_credentials(),
         providers=providers,
         parent_concurrency_group=_root_cg,
     )
-    agents_dir = _isolated_home / ".minds-liz" / "mngr" / "agents"
+    agents_dir = _isolated_home / ".minds-dev-liz" / "mngr" / "agents"
     agents_dir.mkdir(parents=True, exist_ok=True)
     (agents_dir / "agent-1111").mkdir()
     call_log["calls"].clear()
 
     destroy_env(
-        DevEnvName("liz"),
+        DevEnvName("dev-liz"),
         tier="dev",
         deploy_config=_deploy_config(),
         credentials=_credentials(),
@@ -528,28 +536,28 @@ def test_destroy_env_dev_leaves_env_root_when_step_fails(_isolated_home: Path, _
     # First, do a successful deploy so the env root exists.
     providers_ok = _build_fake_providers(_make_call_log())
     deploy_dev_env(
-        DevEnvName("matt"),
+        DevEnvName("dev-matt"),
         tier="dev",
         deploy_config=_deploy_config(),
         credentials=_credentials(),
         providers=providers_ok,
         parent_concurrency_group=_root_cg,
     )
-    assert env_root_exists(DevEnvName("matt"))
+    assert env_root_exists(DevEnvName("dev-matt"))
 
     # Now destroy with a provider that fails on neon_db delete -- env
     # root must NOT be removed.
     failing_providers = _build_fake_providers(_make_call_log(), fail_delete={"neon_db"})
     with pytest.raises(NeonProviderError, match="neon delete boom"):
         destroy_env(
-            DevEnvName("matt"),
+            DevEnvName("dev-matt"),
             tier="dev",
             deploy_config=_deploy_config(),
             credentials=_credentials(),
             providers=failing_providers,
             parent_concurrency_group=_root_cg,
         )
-    assert env_root_exists(DevEnvName("matt"))
+    assert env_root_exists(DevEnvName("dev-matt"))
 
 
 def test_destroy_deletes_ovh_instances(_isolated_home: Path, _root_cg: ConcurrencyGroup) -> None:
@@ -570,7 +578,7 @@ def test_destroy_deletes_ovh_instances(_isolated_home: Path, _root_cg: Concurren
     call_log = _make_call_log()
     providers = _build_fake_providers(call_log, ovh_instances=instances)
     deploy_dev_env(
-        DevEnvName("hank"),
+        DevEnvName("dev-hank"),
         tier="dev",
         deploy_config=_deploy_config(),
         credentials=_credentials(),
@@ -580,7 +588,7 @@ def test_destroy_deletes_ovh_instances(_isolated_home: Path, _root_cg: Concurren
     call_log["calls"].clear()
 
     destroy_env(
-        DevEnvName("hank"),
+        DevEnvName("dev-hank"),
         tier="dev",
         deploy_config=_deploy_config(),
         credentials=_credentials(),
@@ -595,7 +603,7 @@ def test_destroy_missing_env_raises(_isolated_home: Path, _root_cg: ConcurrencyG
     providers = _build_fake_providers(_make_call_log())
     with pytest.raises(DevEnvNotFoundError):
         destroy_env(
-            DevEnvName("ghost"),
+            DevEnvName("dev-ghost"),
             tier="dev",
             deploy_config=_deploy_config(),
             credentials=_credentials(),
@@ -607,7 +615,7 @@ def test_destroy_missing_env_raises(_isolated_home: Path, _root_cg: ConcurrencyG
 def test_list_dev_envs_returns_summaries_in_sorted_order(_isolated_home: Path, _root_cg: ConcurrencyGroup) -> None:
     providers = _build_fake_providers(_make_call_log())
     deploy_dev_env(
-        DevEnvName("ivy"),
+        DevEnvName("dev-ivy"),
         tier="dev",
         deploy_config=_deploy_config(),
         credentials=_credentials(),
@@ -615,7 +623,7 @@ def test_list_dev_envs_returns_summaries_in_sorted_order(_isolated_home: Path, _
         parent_concurrency_group=_root_cg,
     )
     deploy_dev_env(
-        DevEnvName("juan"),
+        DevEnvName("dev-juan"),
         tier="dev",
         deploy_config=_deploy_config(),
         credentials=_credentials(),
@@ -624,7 +632,7 @@ def test_list_dev_envs_returns_summaries_in_sorted_order(_isolated_home: Path, _
     )
     summaries = list_dev_envs()
     names = [s.name for s in summaries]
-    assert names == ["ivy", "juan"]
+    assert names == ["dev-ivy", "dev-juan"]
     assert all(str(s.connector_url).startswith("https://fake-connector-") for s in summaries)
 
 
@@ -646,10 +654,10 @@ def test_list_dev_envs_treats_minds_dir_as_production_row(
 def test_list_dev_envs_marks_dev_env_without_client_toml_as_no_client(
     _isolated_home: Path,
 ) -> None:
-    """A freshly-mkdir'd ~/.minds-josh-3/ (no client.toml yet) still shows up."""
-    (_isolated_home / ".minds-josh-3").mkdir()
+    """A freshly-mkdir'd ~/.minds-dev-josh-3/ (no client.toml yet) still shows up."""
+    (_isolated_home / ".minds-dev-josh-3").mkdir()
     summaries = list_dev_envs()
-    assert [s.name for s in summaries] == ["josh-3"]
+    assert [s.name for s in summaries] == ["dev-josh-3"]
     only = summaries[0]
     assert only.connector_url is None
     assert only.client_config_path is None
@@ -704,8 +712,33 @@ def test_deploy_tier_env_runs_both_modal_deploys(_isolated_home: Path, _root_cg:
     )
     deploys = [c for c in call_log["calls"] if c[0].startswith("deploy_")]
     assert deploys == [
-        ("deploy_litellm_proxy", "main", "staging"),
-        ("deploy_remote_service_connector", "main", "staging"),
+        ("deploy_litellm_proxy", "main", "staging", 0),
+        ("deploy_remote_service_connector", "main", "staging", 0),
+    ]
+
+
+def test_deploy_tier_env_threads_min_containers_through(_isolated_home: Path, _root_cg: ConcurrencyGroup) -> None:
+    """``[min_containers]`` from deploy.toml lands on each deploy call.
+
+    Mirrors the committed shape of staging / production deploy.toml
+    (``connector = 1, litellm_proxy = 1``) so a regression in the
+    threading path surfaces here before a real deploy ever runs.
+    """
+    call_log = _make_call_log()
+    providers = _build_fake_providers(call_log)
+    deploy_tier_env(
+        tier="staging",
+        deploy_config=_deploy_config(
+            tier="staging",
+            min_containers=MinContainersConfig(connector=NonNegativeInt(2), litellm_proxy=NonNegativeInt(3)),
+        ),
+        providers=providers,
+        parent_concurrency_group=_root_cg,
+    )
+    deploys = [c for c in call_log["calls"] if c[0].startswith("deploy_")]
+    assert deploys == [
+        ("deploy_litellm_proxy", "main", "staging", 3),
+        ("deploy_remote_service_connector", "main", "staging", 2),
     ]
 
 

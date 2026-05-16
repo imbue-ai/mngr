@@ -1678,11 +1678,8 @@ def lease_host(request: Request, body: LeaseHostRequest) -> dict[str, object]:
         try:
             with conn:
                 with conn.cursor() as cur:
-                    # NB: the DB column is still named ``vps_ip``; the
-                    # API field is ``vps_address`` (can hold an IPv4 or a
-                    # DNS hostname like OVH's serviceName).
                     cur.execute(
-                        "SELECT id, vps_ip, ssh_port, ssh_user, container_ssh_port, agent_id, host_id, attributes "
+                        "SELECT id, vps_address, ssh_port, ssh_user, container_ssh_port, agent_id, host_id, attributes "
                         "FROM pool_hosts "
                         "WHERE status = 'available' AND attributes @> %s::jsonb "
                         "ORDER BY created_at ASC LIMIT 1 FOR UPDATE SKIP LOCKED",
@@ -1784,7 +1781,7 @@ def list_leased_hosts(request: Request) -> list[dict[str, object]]:
         try:
             with conn.cursor() as cur:
                 cur.execute(
-                    "SELECT id, vps_ip, ssh_port, ssh_user, container_ssh_port, agent_id, host_id, "
+                    "SELECT id, vps_address, ssh_port, ssh_user, container_ssh_port, agent_id, host_id, "
                     "host_name, attributes, leased_at "
                     "FROM pool_hosts "
                     "WHERE status = 'leased' AND leased_to_user = %s",
@@ -2470,17 +2467,14 @@ def auth_get_user(user_id: str) -> UserProviderInfo:
 
 _DEPLOY_ENV = os.environ.get("MNGR_DEPLOY_ENV", "production")
 
-# Per-tier defaults for the warm-pool size. Production / staging keep at
-# least one container alive so every desktop-client startup hit (auth,
-# lease, tunnel ops) lands without a cold boot. Dev defaults to zero
-# because per-developer dev envs sit idle most of the time and the
-# operator already accepts a cold boot on the first request. Override
-# at ``modal deploy`` time via ``MINDS_MIN_CONTAINERS=<n>`` -- read here
-# at module load (the moment ``modal deploy`` serializes the function
-# spec), so the value is baked into the deployment.
-_DEFAULT_MIN_CONTAINERS_BY_TIER = {"production": 1, "staging": 1, "dev": 0}
-_DEFAULT_MIN_CONTAINERS = _DEFAULT_MIN_CONTAINERS_BY_TIER.get(_DEPLOY_ENV, 0)
-_MIN_CONTAINERS = int(os.environ.get("MINDS_MIN_CONTAINERS", str(_DEFAULT_MIN_CONTAINERS)))
+# Warm-pool size for the deployed function. ``minds env deploy`` reads
+# the tier's ``[min_containers].connector`` from its committed
+# ``deploy.toml`` and threads the value here as
+# ``MINDS_CONNECTOR_MIN_CONTAINERS`` at ``modal deploy`` time -- which
+# is when this module is imported and the function spec is serialized.
+# Defaults to 0 so a deploy that forgets to set the env var gets the
+# cheapest possible warm pool (cold start on first hit).
+_MIN_CONTAINERS = int(os.environ.get("MINDS_CONNECTOR_MIN_CONTAINERS", "0"))
 
 image = modal.Image.debian_slim().pip_install(
     "fastapi[standard]", "httpx", "supertokens-python", "psycopg2-binary", "paramiko"
