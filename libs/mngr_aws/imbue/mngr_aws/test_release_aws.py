@@ -40,7 +40,6 @@ from imbue.mngr_aws.constants import AWS_TEST_NAME_PREFIX
 _AWS_CREDS_PRESENT = bool(os.environ.get("AWS_ACCESS_KEY_ID")) or bool(os.environ.get("AWS_PROFILE"))
 _OPT_IN = os.environ.get("MNGR_AWS_RELEASE_TESTS") == "1"
 _AWS_REGION = os.environ.get("AWS_REGION", "us-east-1")
-_TEST_NAME_PREFIX = AWS_TEST_NAME_PREFIX
 # Belt-and-suspenders backstop against runaway EC2 cost: even if pytest is
 # killed and the session-end leak detector never runs, this TTL drives cloud-init
 # to schedule ``shutdown -P +N`` which (combined with the AWS launch flag
@@ -84,7 +83,7 @@ class TestAwsProviderLifecycle:
     """Tests for the full EC2 Docker provider lifecycle."""
 
     def test_create_exec_and_destroy(self) -> None:
-        agent_name = f"{_TEST_NAME_PREFIX}{int(time.time()) % 100000}"
+        agent_name = f"{AWS_TEST_NAME_PREFIX}{int(time.time()) % 100000}"
 
         result = _run_mngr(
             "create",
@@ -120,7 +119,7 @@ class TestAwsProviderLifecycle:
             time.sleep(20)
 
     def test_create_stop_start_destroy(self) -> None:
-        agent_name = f"{_TEST_NAME_PREFIX}ss-{int(time.time()) % 100000}"
+        agent_name = f"{AWS_TEST_NAME_PREFIX}ss-{int(time.time()) % 100000}"
 
         result = _run_mngr(
             "create",
