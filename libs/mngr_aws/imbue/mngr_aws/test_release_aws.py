@@ -12,8 +12,8 @@ Three layers of damage control prevent leaked EC2 cost (see
 
 1. Each test's ``finally`` calls ``mngr destroy --force``.
 2. ``pytest_sessionfinish`` in ``conftest.py`` force-terminates any
-   instance still tagged with the test name prefix at session end and
-   fails the session.
+   instance still tagged with the test name prefix and older than 1h
+   at session end and fails the session.
 3. ``MNGR_AWS_AUTO_SHUTDOWN_MINUTES=60`` is propagated into cloud-init,
    triggering ``shutdown -P +60`` on each test instance. Combined with
    ``InstanceInitiatedShutdownBehavior=terminate``, this auto-terminates
