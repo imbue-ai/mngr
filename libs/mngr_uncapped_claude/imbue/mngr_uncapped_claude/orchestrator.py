@@ -285,6 +285,14 @@ def _run_with_agent(
                 if final_state != AgentLifecycleState.WAITING:
                     # Agent already terminated; sending another prompt would just
                     # produce a confusing delivery error that hides the real cause.
+                    # The prompt has already been pulled off the input iterator, so
+                    # surface a warning rather than silently dropping it.
+                    logger.warning(
+                        "Discarding pending user prompt because agent {} terminated in state {} "
+                        "before reaching WAITING; the prompt had already been consumed from stdin.",
+                        agent.name,
+                        final_state.value,
+                    )
                     break
                 _send_user_turn(mngr_ctx, agent, next_prompt)
                 turn_count += 1
