@@ -102,11 +102,14 @@ class OvhProviderConfig(VpsDockerProviderConfig):
         ),
     )
     recycle_safety_margin_hours: int = Field(
-        default=24,
+        default=2,
         description=(
             "Minimum number of hours of remaining ``expiration`` for a cancelled "
             "VPS to be considered for recycling. Buffer against the billing "
-            "boundary so OVH does not decommission the VPS mid-recycle."
+            "boundary so OVH does not decommission the VPS mid-recycle. "
+            "The default is tuned for pool workloads (the recycle path's "
+            "intended user), where same-day destroy + create is the common "
+            "case and we want recycling to claim a cancelled VPS aggressively."
         ),
     )
     recycle_max_candidates_considered: int = Field(

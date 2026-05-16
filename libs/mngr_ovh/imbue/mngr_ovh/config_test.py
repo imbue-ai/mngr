@@ -35,6 +35,10 @@ def test_default_config_values(clean_env: None) -> None:
     assert config.vps_boot_timeout == 600.0
     assert config.ovh_subsidiary == "US"
     assert config.application_key is None
+    # Pool-workload-tuned: tight enough that destroy + create in the same
+    # day reuses the cancelled VPS even when it has only a few hours of
+    # paid month left.
+    assert config.recycle_safety_margin_hours == 2
 
 
 def test_backend_name_defaults_to_ovh(clean_env: None) -> None:

@@ -1,6 +1,6 @@
 # mngr OVH Cloud Provider
 
-OVH Cloud VPS provider backend plugin for mngr. Runs agents in Docker containers on OVH classic VPS instances (e.g. VPS-1 at ~$7.60/mo).
+OVH Cloud VPS provider backend plugin for mngr. Runs agents in Docker containers on OVH classic VPS instances (e.g. `vps-2025-model1` with 1 vCPU / 8 GB RAM / 80 GB SSD at ~$7.99/mo).
 
 See `mngr_vps_docker` for the base architecture and shared infrastructure.
 
@@ -63,13 +63,13 @@ These fields extend the base `VpsDockerProviderConfig` (see `mngr_vps_docker`):
 | `client_secret` | `None` (env / `~/.ovh.conf`) | OAuth2 client secret |
 | `project_id` | `None` | Reserved for future Public Cloud support; unused for classic VPS |
 | `default_region` | `US-EAST-VA` | Default VPS datacenter |
-| `default_plan` | `vps-2025-model1` | Default plan code (VPS-1, $7.60/mo) |
+| `default_plan` | `vps-2025-model1` | Default plan code (1 vCPU / 8 GB RAM / 80 GB SSD, ~$7.99/mo as of 2025-05) |
 | `default_image_name` | `Debian 12 - Docker` | Default OS image (Docker pre-installed) |
 | `pricing_mode` | `default` | OVH pricing mode (`default`, `upfront6`, `upfront12`) |
 | `duration` | `P1M` | ISO-8601 commitment duration (monthly only) |
 | `vps_boot_timeout` | `600.0` | Seconds to wait for the OVH order to deliver a VPS |
 | `enable_recycle_cancelled` | `True` | Whether `mngr create` may reuse a cancelled-but-still-alive VPS instead of ordering fresh |
-| `recycle_safety_margin_hours` | `24` | Min hours of remaining `expiration` for a cancelled VPS to be recyclable |
+| `recycle_safety_margin_hours` | `2` | Min hours of remaining `expiration` for a cancelled VPS to be recyclable |
 | `recycle_max_candidates_considered` | `10` | Cap on the number of cancelled VPSes evaluated before falling through to a fresh order |
 
 ## Implementation details

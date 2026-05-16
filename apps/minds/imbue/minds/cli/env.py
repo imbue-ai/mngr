@@ -10,7 +10,7 @@ which keeps "I'm activated against dev env A but accidentally typed
 ``minds env destroy production``" impossible.
 
 The CLI side constructs real provider callables (Modal CLI / Neon /
-SuperTokens / Vultr HTTP / Modal deploy) and threads them into the
+SuperTokens / OVH HTTP / Modal deploy) and threads them into the
 pure orchestration in :mod:`imbue.minds.envs.provisioning`.
 
 Dev-tier credentials needed for provisioning come from HCP Vault at
@@ -70,13 +70,13 @@ from imbue.minds.envs.providers.neon_db import NeonDatabaseRecord
 from imbue.minds.envs.providers.neon_db import create_neon_database
 from imbue.minds.envs.providers.neon_db import delete_neon_database
 from imbue.minds.envs.providers.neon_db import wipe_neon_db_schema as real_wipe_neon_db_schema
+from imbue.minds.envs.providers.ovh_tags import OvhCredentials
+from imbue.minds.envs.providers.ovh_tags import delete_instances as delete_ovh_instances
+from imbue.minds.envs.providers.ovh_tags import list_env_instances as list_ovh_instances
 from imbue.minds.envs.providers.supertokens_app import SuperTokensAppRecord
 from imbue.minds.envs.providers.supertokens_app import create_supertokens_app
 from imbue.minds.envs.providers.supertokens_app import delete_supertokens_app
 from imbue.minds.envs.providers.supertokens_app import wipe_supertokens_app_data as real_wipe_supertokens_app_data
-from imbue.minds.envs.providers.vultr_tags import VultrInstanceSummary
-from imbue.minds.envs.providers.vultr_tags import delete_instances as delete_vultr_instances
-from imbue.minds.envs.providers.vultr_tags import list_env_instances as list_vultr_instances
 from imbue.minds.envs.provisioning import DeployedDevEnv
 from imbue.minds.envs.provisioning import DeployedTierEnv
 from imbue.minds.envs.provisioning import ProviderCredentials
@@ -90,6 +90,7 @@ from imbue.minds.envs.vault_reader import read_vault_kv
 from imbue.minds.errors import MindError
 from imbue.minds.primitives import OutputFormat
 from imbue.minds.utils.output import write_stdout_line
+from imbue.mngr_ovh.iam_tags import IamResource
 
 # Reserved env names that map to named tiers; everything else is the
 # ``dev`` tier. Mirrors the spec's hard-coded tier mapping and lets
@@ -170,12 +171,12 @@ def _delete_supertokens_for_provider(name: DevEnvName, core_base_url: str, api_k
     delete_supertokens_app(name, core_base_url=core_base_url, api_key=api_key)
 
 
-def _list_vultr_for_provider(name: DevEnvName, api_key: SecretStr) -> tuple[VultrInstanceSummary, ...]:
-    return list_vultr_instances(name, api_key=api_key)
+def _list_ovh_for_provider(name: DevEnvName, credentials: OvhCredentials) -> tuple[IamResource, ...]:
+    return list_ovh_instances(name, credentials=credentials)
 
 
-def _delete_vultr_for_provider(instances: tuple[VultrInstanceSummary, ...], api_key: SecretStr) -> None:
-    delete_vultr_instances(instances, api_key=api_key)
+def _delete_ovh_for_provider(instances: tuple[IamResource, ...], credentials: OvhCredentials) -> None:
+    delete_ovh_instances(instances, credentials=credentials)
 
 
 def _read_per_env_secret_values_for_provider(
@@ -259,8 +260,8 @@ def _build_real_providers() -> Providers:
         delete_neon_db=_delete_neon_for_provider,
         create_supertokens_app=_create_supertokens_for_provider,
         delete_supertokens_app=_delete_supertokens_for_provider,
-        list_vultr_instances=_list_vultr_for_provider,
-        delete_vultr_instances=_delete_vultr_for_provider,
+        list_ovh_instances=_list_ovh_for_provider,
+        delete_ovh_instances=_delete_ovh_for_provider,
         read_per_env_secret_values=_read_per_env_secret_values_for_provider,
         push_per_env_modal_secret=_push_per_env_modal_secret_for_provider,
         deploy_litellm_proxy=_deploy_litellm_proxy_for_provider,
@@ -292,19 +293,20 @@ def _load_dev_credentials_from_vault(vault_prefix: str, *, cg: ConcurrencyGroup)
     - ``<vault_prefix>/supertokens`` -- ``SUPERTOKENS_CONNECTION_URI``,
       ``SUPERTOKENS_API_KEY`` (read from the Modal-pushed entry; safe to
       read here because the connector also legitimately needs both keys)
-    - ``<vault_prefix>/vultr`` -- ``VULTR_API_KEY``
+    - ``<vault_prefix>/ovh`` -- ``OVH_APPLICATION_KEY``, ``OVH_APPLICATION_SECRET``,
+      ``OVH_CONSUMER_KEY``
     """
     neon_admin = read_vault_kv(VaultPath(f"{vault_prefix}/neon-admin"), parent_concurrency_group=cg)
     supertokens = read_vault_kv(VaultPath(f"{vault_prefix}/supertokens"), parent_concurrency_group=cg)
-    # The vultr entry is optional -- a tier with no Vultr provisioning yet
+    # The ovh entry is optional -- a tier with no OVH provisioning yet
     # may not have it populated. Treat a missing entry as empty so the
-    # deploy still progresses; per-env Vultr-touching operations will fail
+    # deploy still progresses; per-env OVH-touching operations will fail
     # later if/when the operator wires them up without populating Vault.
     try:
-        vultr_secret = read_vault_kv(VaultPath(f"{vault_prefix}/vultr"), parent_concurrency_group=cg)
+        ovh_secret = read_vault_kv(VaultPath(f"{vault_prefix}/ovh"), parent_concurrency_group=cg)
     except VaultReadError as exc:
-        logger.warning("No vultr Vault entry yet ({}); proceeding with empty VULTR_API_KEY.", exc)
-        vultr_secret = {}
+        logger.warning("No ovh Vault entry yet ({}); proceeding with empty OVH credentials.", exc)
+        ovh_secret = {}
 
     project_id = neon_admin.get("NEON_PROJECT_ID", "")
     api_token = neon_admin.get("NEON_API_TOKEN", "")
@@ -326,7 +328,11 @@ def _load_dev_credentials_from_vault(vault_prefix: str, *, cg: ConcurrencyGroup)
         neon_api_token=SecretStr(api_token),
         supertokens_core_url=core_url,
         supertokens_api_key=SecretStr(core_api_key),
-        vultr_api_key=SecretStr(vultr_secret.get("VULTR_API_KEY", "")),
+        ovh_credentials=OvhCredentials(
+            application_key=SecretStr(ovh_secret.get("OVH_APPLICATION_KEY", "")),
+            application_secret=SecretStr(ovh_secret.get("OVH_APPLICATION_SECRET", "")),
+            consumer_key=SecretStr(ovh_secret.get("OVH_CONSUMER_KEY", "")),
+        ),
     )
 
 
