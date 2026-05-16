@@ -632,7 +632,7 @@ def pool_list(database_url: str) -> None:
 def pool_destroy(pool_host_id: str, database_url: str, force: bool) -> None:
     """Remove a pool_hosts row.
 
-    Note: this does NOT destroy the underlying Vultr VPS; that is intentional
+    Note: this does NOT destroy the underlying OVH VPS; that is intentional
     so an operator can use ``mngr destroy`` themselves and inspect the row
     state first.
     """
