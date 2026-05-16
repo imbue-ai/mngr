@@ -280,6 +280,43 @@ def deploy_litellm_proxy(
     )
 
 
+def stop_modal_app(
+    *,
+    app_name: str,
+    modal_env: str,
+    parent_cg: ConcurrencyGroup,
+) -> None:
+    """``modal app stop <app_name> --env=<modal_env>``.
+
+    Used by ``minds env destroy --yes-i-mean-staging`` to tear down the
+    staging tier's deployed apps. Treats "app not found" / "app already
+    stopped" as success so re-running ``destroy`` after a failed first
+    pass is safe. Any other non-zero exit raises :class:`ModalDeployError`.
+    """
+    command = ["modal", "app", "stop", "--env", modal_env, app_name]
+    cg = parent_cg.make_concurrency_group(name=f"modal-app-stop-{app_name}")
+    with cg:
+        result = cg.run_process_to_completion(
+            command=command,
+            timeout=_MODAL_SECRET_TIMEOUT_SECONDS,
+            is_checked_after=False,
+            env=_modal_subprocess_env(),
+        )
+    if result.returncode == 0:
+        return
+    # Modal's "no such app" wording has shifted; both known variants
+    # contain "not found" or "already stopped". Treat either as a no-op
+    # so destroy stays idempotent.
+    message = (result.stderr + result.stdout).lower()
+    if "not found" in message or "already stopped" in message or "no such" in message:
+        logger.info("`modal app stop {} --env {}`: app already stopped or missing.", app_name, modal_env)
+        return
+    stderr = result.stderr.strip() or result.stdout.strip()
+    raise ModalDeployError(
+        f"`modal app stop {app_name} --env {modal_env}` failed (exit {result.returncode}): {stderr}"
+    )
+
+
 def deploy_remote_service_connector(
     *,
     modal_env: str,

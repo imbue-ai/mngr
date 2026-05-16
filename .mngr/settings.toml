@@ -2,20 +2,6 @@ is_allowed_in_pytest = false
 #default_destroyed_host_persisted_seconds = 36000
 default_destroyed_host_persisted_seconds = 10
 
-[commands.create]
-# for minds -- give every agent spawned from this checkout its own minds
-# env data root so it doesn't collide with the operator's installed
-# minds (which uses `~/.minds/`). The name follows the per-env-data-roots
-# convention: `minds-<env-name>` -> `~/.minds-<env-name>/`. We also set
-# the derived MNGR_* vars so the bootstrap (which is a no-op when only
-# MINDS_ROOT_NAME is set in os.environ at child-process import time)
-# doesn't have to re-derive them.
-env = [
-    "MINDS_ROOT_NAME=minds-mngrdev",
-    "MNGR_HOST_DIR=${HOME}/.minds-mngrdev/mngr",
-    "MNGR_PREFIX=minds-mngrdev-",
-]
-
 [work_dir_extra_paths]
 test-results = "COPY"
 ".reviewer/settings.local.json" = "COPY"

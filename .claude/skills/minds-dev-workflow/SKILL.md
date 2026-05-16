@@ -50,9 +50,9 @@ git -C ~/project/forever-claude-template worktree add \
     josh/start-minds   # or another base branch / tag
 
 # 3. (Once) Bootstrap your personal dev env. Pick a name like
-#    "<your-user>-dev" (convention; any DevEnvName works).
-mkdir ~/.minds-<your-user>-dev
-eval "$(uv run minds env activate <your-user>-dev)"
+#    "<your-user>-dev" (convention; any DevEnvName works). --create
+#    idempotently mkdirs ~/.minds-<your-user>-dev/ if it doesn't exist.
+eval "$(uv run minds env activate --create <your-user>-dev)"
 uv run minds env deploy
 
 # 4. (Every time you start the app, in a fresh shell) Activate the env

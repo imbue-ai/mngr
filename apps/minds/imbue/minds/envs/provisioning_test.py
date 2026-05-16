@@ -27,6 +27,7 @@ from imbue.minds.envs.provisioning import Providers
 from imbue.minds.envs.provisioning import deploy_dev_env
 from imbue.minds.envs.provisioning import deploy_tier_env
 from imbue.minds.envs.provisioning import destroy_dev_env
+from imbue.minds.envs.provisioning import destroy_tier_env
 from imbue.minds.envs.provisioning import list_dev_envs
 from imbue.minds.primitives import ServiceName
 
@@ -150,6 +151,11 @@ def _build_fake_providers(
             raise ModalDeployError("connector deploy boom")
         return AnyUrl(f"https://fake-connector-{modal_env}.modal.run")
 
+    def stop_modal_app(app_name, modal_env, cg):
+        call_log["calls"].append(("stop_modal_app", app_name, modal_env))
+        if fail_step == "stop_modal_app":
+            raise ModalDeployError("modal app stop boom")
+
     return Providers(
         ensure_modal_env=ensure_modal_env,
         delete_modal_env=delete_modal_env,
@@ -163,6 +169,7 @@ def _build_fake_providers(
         push_per_env_modal_secret=push_per_env_modal_secret,
         deploy_litellm_proxy=deploy_litellm_proxy,
         deploy_remote_service_connector=deploy_remote_service_connector,
+        stop_modal_app=stop_modal_app,
     )
 
 
@@ -498,3 +505,50 @@ def test_deploy_tier_env_runs_both_modal_deploys(_isolated_home: Path, _root_cg:
         ("deploy_litellm_proxy", "main", "staging"),
         ("deploy_remote_service_connector", "main", "staging"),
     ]
+
+
+def test_destroy_tier_env_stops_both_apps_and_removes_env_root(
+    _isolated_home: Path, _root_cg: ConcurrencyGroup
+) -> None:
+    """Tier destroy stops both Modal apps and rmdir's ~/.minds-<tier>/."""
+    # Materialize the env root + a couple of files so we can verify
+    # delete_env_root actually removed everything.
+    staging_root = _isolated_home / ".minds-staging"
+    staging_root.mkdir()
+    (staging_root / "client.toml").write_text('connector_url = "x"\nlitellm_proxy_url = "y"\n')
+
+    call_log = _make_call_log()
+    providers = _build_fake_providers(call_log)
+    destroy_tier_env(
+        tier="staging",
+        deploy_config=_deploy_config(tier="staging", modal_env="main"),
+        providers=providers,
+        parent_concurrency_group=_root_cg,
+    )
+
+    # Stops both apps in the tier's Modal env, in deploy order (litellm first).
+    stops = [c for c in call_log["calls"] if c[0] == "stop_modal_app"]
+    assert stops == [
+        ("stop_modal_app", "litellm-proxy-staging", "main"),
+        ("stop_modal_app", "remote-service-connector-staging", "main"),
+    ]
+    # Env root gone -- subsequent activation has to re-create it.
+    assert not staging_root.exists()
+
+
+def test_destroy_tier_env_is_idempotent_when_env_root_missing(
+    _isolated_home: Path, _root_cg: ConcurrencyGroup
+) -> None:
+    """Destroy must not fail when the env root has already been removed."""
+    call_log = _make_call_log()
+    providers = _build_fake_providers(call_log)
+    # Env root doesn't exist -- destroy should still stop the apps and
+    # return cleanly.
+    destroy_tier_env(
+        tier="staging",
+        deploy_config=_deploy_config(tier="staging", modal_env="main"),
+        providers=providers,
+        parent_concurrency_group=_root_cg,
+    )
+    stops = [c for c in call_log["calls"] if c[0] == "stop_modal_app"]
+    assert len(stops) == 2

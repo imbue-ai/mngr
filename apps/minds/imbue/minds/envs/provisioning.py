@@ -67,6 +67,7 @@ from imbue.minds.envs.per_env_deploy import deploy_remote_service_connector
 from imbue.minds.envs.per_env_deploy import ensure_modal_env
 from imbue.minds.envs.per_env_deploy import per_env_secret_services
 from imbue.minds.envs.per_env_deploy import push_per_env_modal_secret
+from imbue.minds.envs.per_env_deploy import stop_modal_app
 from imbue.minds.envs.primitives import DevEnvName
 from imbue.minds.envs.primitives import DevEnvNotFoundError
 from imbue.minds.envs.primitives import DevEnvProvisioningError
@@ -117,6 +118,9 @@ PushPerEnvSecretFn = Callable[[str, dict[str, str], str, ConcurrencyGroup], None
 # name for dev-tier deploys or the tier's stable Modal env (``main`` by
 # convention) for staging / production deploys.
 DeployModalAppFn = Callable[[str, str, ConcurrencyGroup], AnyUrl]
+# (app_name, modal_env, cg) -> None. Used by tier destroys to ``modal
+# app stop`` each deployed app. Idempotent in the underlying call.
+StopModalAppFn = Callable[[str, str, ConcurrencyGroup], None]
 ReadPerEnvSecretValuesFn = Callable[[str, str, dict[str, str], ConcurrencyGroup], dict[str, str]]
 
 
@@ -148,6 +152,9 @@ class Providers(FrozenModel):
     )
     deploy_remote_service_connector: DeployModalAppFn = Field(
         description="(modal_env, tier, cg) -> `modal deploy` the connector app into ``modal_env``.",
+    )
+    stop_modal_app: StopModalAppFn = Field(
+        description="(app_name, modal_env, cg) -> `modal app stop` the named app. Idempotent.",
     )
 
 
@@ -380,6 +387,49 @@ def deploy_dev_env(
         connector_url=connector_url,
         litellm_proxy_url=litellm_proxy_url,
     )
+
+
+def destroy_tier_env(
+    *,
+    tier: str,
+    deploy_config: DeployEnvConfig,
+    providers: Providers,
+    parent_concurrency_group: ConcurrencyGroup,
+) -> None:
+    """Stop the tier's deployed Modal apps and remove the env root.
+
+    Used by ``minds env destroy --yes-i-mean-staging`` (production is
+    refused at the CLI layer). Symmetric with :func:`deploy_tier_env`
+    but in reverse: stops both ``litellm-proxy-<tier>`` and
+    ``remote-service-connector-<tier>`` in the tier's stable Modal env
+    via ``modal app stop``, then removes ``~/.minds-<tier>/`` so a
+    subsequent activation has to re-create the env root (and any
+    dangling shell activation fails fast).
+
+    Leaves Modal Secrets (``<service>-<tier>``), the tier's Neon DB,
+    SuperTokens app, and Cloudflare zone untouched -- those are
+    operator-managed (created out of band, populated via Vault) and
+    survive a destroy/redeploy cycle so the next ``minds env deploy``
+    can re-push the same secrets and re-deploy the same apps in place.
+
+    Idempotent: ``modal app stop`` treats "app not found" as success
+    (see :func:`per_env_deploy.stop_modal_app`), and the env-root
+    removal is a no-op if the dir is already gone.
+    """
+    modal_env = str(deploy_config.modal_env)
+    apps_to_stop = (
+        f"litellm-proxy-{tier}",
+        f"remote-service-connector-{tier}",
+    )
+
+    logger.info("Stopping tier {!r} Modal apps in env {!r}...", tier, modal_env)
+    for app_name in apps_to_stop:
+        providers.stop_modal_app(app_name, modal_env, parent_concurrency_group)
+
+    # The tier's env root mirrors the dev-env layout: ``staging`` ->
+    # ``~/.minds-staging/``. Reuse DevEnvName + delete_env_root so the
+    # path computation stays in one place.
+    delete_env_root(DevEnvName(tier))
 
 
 def deploy_tier_env(
@@ -636,7 +686,9 @@ __all__ = [
     "deploy_remote_service_connector",
     "deploy_tier_env",
     "destroy_dev_env",
+    "destroy_tier_env",
     "ensure_modal_env",
     "list_dev_envs",
     "push_per_env_modal_secret",
+    "stop_modal_app",
 ]

@@ -50,6 +50,7 @@ from imbue.minds.envs.per_env_deploy import deploy_litellm_proxy as real_deploy_
 from imbue.minds.envs.per_env_deploy import deploy_remote_service_connector as real_deploy_remote_service_connector
 from imbue.minds.envs.per_env_deploy import ensure_modal_env as real_ensure_modal_env
 from imbue.minds.envs.per_env_deploy import push_per_env_modal_secret as real_push_per_env_modal_secret
+from imbue.minds.envs.per_env_deploy import stop_modal_app as real_stop_modal_app
 from imbue.minds.envs.primitives import DevEnvName
 from imbue.minds.envs.primitives import DevEnvNotFoundError
 from imbue.minds.envs.primitives import DevEnvProvisioningError
@@ -72,6 +73,7 @@ from imbue.minds.envs.provisioning import Providers
 from imbue.minds.envs.provisioning import deploy_dev_env
 from imbue.minds.envs.provisioning import deploy_tier_env
 from imbue.minds.envs.provisioning import destroy_dev_env
+from imbue.minds.envs.provisioning import destroy_tier_env
 from imbue.minds.envs.provisioning import list_dev_envs
 from imbue.minds.envs.vault_reader import VaultPath
 from imbue.minds.envs.vault_reader import read_vault_kv
@@ -197,6 +199,10 @@ def _deploy_connector_for_provider(modal_env: str, tier: str, cg: ConcurrencyGro
     return real_deploy_remote_service_connector(modal_env=modal_env, tier=tier, parent_cg=cg)
 
 
+def _stop_modal_app_for_provider(app_name: str, modal_env: str, cg: ConcurrencyGroup) -> None:
+    real_stop_modal_app(app_name=app_name, modal_env=modal_env, parent_cg=cg)
+
+
 def _build_real_providers() -> Providers:
     """Wire the provider modules into the Providers bundle.
 
@@ -217,6 +223,7 @@ def _build_real_providers() -> Providers:
         push_per_env_modal_secret=_push_per_env_modal_secret_for_provider,
         deploy_litellm_proxy=_deploy_litellm_proxy_for_provider,
         deploy_remote_service_connector=_deploy_connector_for_provider,
+        stop_modal_app=_stop_modal_app_for_provider,
     )
 
 
@@ -343,7 +350,20 @@ def env() -> None:
 
 @env.command("activate")
 @click.argument("name", type=str)
-def env_activate(name: str) -> None:
+@click.option(
+    "--create",
+    is_flag=True,
+    default=False,
+    help=(
+        "Idempotently create ``~/.minds-<name>/`` if it doesn't exist before activating. "
+        "Without this flag, activate refuses for dev env names whose env root is missing "
+        "(so a typo doesn't silently materialize a wrong directory). Use this for "
+        "the first activation of a fresh dev env, then `minds env deploy` to populate "
+        "it. No-op when the dir already exists, or when ``NAME`` is a reserved tier "
+        "name (`staging` / `production` always auto-create)."
+    ),
+)
+def env_activate(name: str, create: bool) -> None:
     """Print shell exports that activate env ``NAME`` in the calling shell.
 
     Designed for ``eval "$(uv run minds env activate <name>)"``: after
@@ -368,14 +388,15 @@ def env_activate(name: str) -> None:
 
     Behaviour by env type:
 
-    - ``production`` / ``staging``: auto-creates ``~/.minds/`` (or
-      ``~/.minds-staging/``) if it does not exist. The in-repo client
-      file must already exist (it ships with the repo).
+    - ``production`` / ``staging``: always auto-creates the env root if
+      it does not exist (they're reserved names -- no typo risk). The
+      in-repo ``client.toml`` for the tier must already exist (it ships
+      with the repo).
     - Any other name: validated via :class:`DevEnvName`. Refuses to
-      activate when ``~/.minds-<name>/`` does not exist and tells the
-      operator to ``minds env deploy <name>`` first. (Deploy itself
-      reads the activated env, so the operator's bootstrap flow is
-      ``mkdir ~/.minds-<your-name>-dev && eval "$(... activate <your-name>-dev)" && minds env deploy``.)
+      activate when ``~/.minds-<name>/`` does not exist *unless*
+      ``--create`` is passed -- which idempotently mkdirs the env root
+      and proceeds. Without ``--create``, the error message tells the
+      operator how to bootstrap a fresh dev env in one line.
     """
     if name in _RESERVED_TIER_ENV_NAMES or name == _PRODUCTION_ENV_NAME:
         _activate_reserved_env(name)
@@ -386,14 +407,19 @@ def env_activate(name: str) -> None:
     except InvalidDevEnvNameError as exc:
         raise click.ClickException(str(exc)) from exc
 
+    target = env_root_dir(dev_env_name)
     if not env_root_exists(dev_env_name):
-        target = env_root_dir(dev_env_name)
-        raise click.ClickException(
-            f"No env root for {name!r} at {target}. "
-            f"For a fresh dev env: `mkdir {target}` first, then "
-            f'`eval "$(uv run minds env activate {name})"` and '
-            "`uv run minds env deploy`."
-        )
+        if not create:
+            raise click.ClickException(
+                f"No env root for {name!r} at {target}. "
+                f"For a fresh dev env: re-run with --create -- "
+                f'`eval "$(uv run minds env activate --create {name})"` -- '
+                "then `uv run minds env deploy` to populate it."
+            )
+        # Idempotent mkdir: parents=True so a fresh $HOME also works,
+        # exist_ok=True is redundant with the env_root_exists check but
+        # cheap insurance against a race.
+        target.mkdir(parents=True, exist_ok=True)
 
     root_name = root_name_for_env_name(name)
     exports = {
@@ -602,49 +628,83 @@ def env_deploy(ctx: click.Context, yes_i_mean_production: bool, yes_i_mean_stagi
         "Forward-compatible flag for the eventual `mngr destroy` integration. "
         "Agent teardown is not yet implemented; running workspace agents are "
         "left alone today regardless of this flag (a warning is logged when "
-        "the flag is omitted)."
+        "the flag is omitted). Only consulted for dev-env destroys."
+    ),
+)
+@click.option(
+    "--yes-i-mean-staging",
+    is_flag=True,
+    default=False,
+    help=(
+        "Required confirmation for destroying the staging tier. Refuses without it "
+        "so an accidental `minds env destroy` while activated against staging can "
+        "never silently fire. Staging destroy `modal app stop`s both Modal apps and "
+        "removes ~/.minds-staging/ -- Modal Secrets / Neon / SuperTokens stay (those "
+        "are operator-managed). Production destroy is hard-refused regardless."
     ),
 )
 @click.pass_context
-def env_destroy(ctx: click.Context, keep_agents: bool) -> None:
+def env_destroy(ctx: click.Context, keep_agents: bool, yes_i_mean_staging: bool) -> None:
     """Tear down every resource ``minds env deploy`` provisioned for the activated env.
 
     Refuses hard-coded when no env is activated. Refuses hard-coded when
-    the activated env is ``production``. Refuses for ``staging`` too --
-    tier destroys are out of scope for this CLI (staging tier infra is
-    operator-managed; this command only tears down dev-env-local
-    resources).
+    the activated env is ``production`` (tier teardown for prod is
+    operator-managed outside this CLI).
+
+    For ``staging``: requires ``--yes-i-mean-staging``. Stops both
+    deployed Modal apps via ``modal app stop`` and removes
+    ``~/.minds-staging/``. Leaves Modal Secrets, the tier's Neon DB,
+    SuperTokens app, and Cloudflare zone in place -- those are
+    operator-managed via Vault and survive a destroy/redeploy cycle.
+
+    For any other (dev) env: tears down the per-env Modal env, Neon DB,
+    SuperTokens app, any tagged Vultr instances, and removes
+    ``~/.minds-<name>/``. Required because dev envs own all of those
+    resources outright.
     """
     output_format: OutputFormat = ctx.obj.get("output_format", OutputFormat.HUMAN)
     env_name = _require_activated_env()
+    tier = _tier_for_env_name(env_name)
 
-    # Hard-coded safety: production is never destroyable through this CLI.
-    if env_name == _PRODUCTION_ENV_NAME:
+    if tier == _PRODUCTION_ENV_NAME:
         raise click.ClickException(
-            "Refusing to destroy production. `minds env destroy` is dev-env-only -- "
-            "production tier teardown is out of scope for this CLI."
+            "Refusing to destroy production. Production tier teardown is operator-managed outside this CLI."
         )
-    # Staging tier teardown is also out of scope. Same rationale as
-    # production, but with a less alarming message because the typical
-    # accidental activation is staging not production.
-    if env_name == _STAGING_ENV_NAME:
+    if tier == _STAGING_ENV_NAME and not yes_i_mean_staging:
         raise click.ClickException(
-            "Refusing to destroy staging tier infra through `minds env destroy`. "
-            "Tier teardown is operator-managed; this command only handles dev envs."
+            "Refusing to destroy the staging tier without --yes-i-mean-staging. Pass that flag to confirm."
         )
 
     try:
-        deploy_config = load_deploy_config(_DEV_TIER)
+        deploy_config = load_deploy_config(tier)
     except EnvConfigError as exc:
         raise click.ClickException(str(exc)) from exc
 
+    providers = _build_real_providers()
+
     with ConcurrencyGroup(name=f"minds-env-destroy-{env_name}") as cg:
+        if tier == _STAGING_ENV_NAME:
+            # Tier destroy: no dev-tier vault credentials needed (we
+            # don't touch Neon / SuperTokens / Vultr -- those are
+            # operator-managed and survive the cycle).
+            try:
+                destroy_tier_env(
+                    tier=tier,
+                    deploy_config=deploy_config,
+                    providers=providers,
+                    parent_concurrency_group=cg,
+                )
+            except MindError as exc:
+                logger.error("Destroy of tier {!r} failed: {}", tier, exc)
+                raise click.ClickException(str(exc)) from exc
+            _emit_destroy_result(env_name, output_format=output_format)
+            return
+
+        # Dev tier destroy: full per-env teardown.
         try:
             credentials = _load_dev_credentials_from_vault(str(deploy_config.vault_path_prefix), cg=cg)
         except VaultReadError as exc:
             raise click.ClickException(str(exc)) from exc
-
-        providers = _build_real_providers()
 
         try:
             destroy_dev_env(

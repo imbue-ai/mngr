@@ -75,9 +75,16 @@ Behaviour by env type:
 - `production` / `staging`: activation auto-creates the env root if it
   doesn't exist yet. The in-repo `client.toml` must exist (it ships
   with the repo).
-- Any other name: validated as a `DevEnvName`. Refuses to activate
-  when `~/.minds-<name>/` doesn't exist; the error message tells the
-  operator to `mkdir` the dir and `minds env deploy` first.
+- Any other name: validated as a `DevEnvName`. When the env root
+  doesn't exist yet, activate refuses *unless* `--create` is passed
+  (which idempotently `mkdir`s the env root and proceeds). The
+  refusal message tells the operator how to bootstrap a fresh dev env
+  in one line:
+
+  ```bash
+  eval "$(uv run minds env activate --create <your-user>-dev)"
+  uv run minds env deploy
+  ```
 
 The packaged Electron app sets all four variables itself from the
 bundled config (see "Build embedding for the desktop client" below),
@@ -155,8 +162,13 @@ What a tier deploy does:
 Tier deploys are idempotent -- re-running picks up any new Vault
 values and re-deploys both apps in place.
 
-`minds env destroy` refuses for `production` and `staging` (tier
-teardown is operator-managed; this CLI only handles dev envs).
+`minds env destroy` for `staging` requires `--yes-i-mean-staging`.
+Staging destroy `modal app stop`s both deployed apps and removes
+`~/.minds-staging/` -- Modal Secrets, the tier's Neon DB, SuperTokens
+app, and Cloudflare zone stay (those are operator-managed via Vault
+and survive a destroy/redeploy cycle). Production destroy is
+hard-refused regardless of any flag -- production tier teardown is
+operator-managed outside this CLI.
 
 ## Running the desktop client
 
@@ -187,18 +199,15 @@ shared.
 Bootstrap a brand-new dev env:
 
 ```bash
-# 1. Create the empty env root so activate can point at it.
-mkdir ~/.minds-<your-user>-dev
+# 1. Activate the env (--create idempotently mkdirs ~/.minds-<name>/ if missing).
+eval "$(uv run minds env activate --create <your-user>-dev)"
 
-# 2. Activate the env in your shell.
-eval "$(uv run minds env activate <your-user>-dev)"
-
-# 3. Deploy: provisions the Modal env, Neon DB, SuperTokens app, pushes
+# 2. Deploy: provisions the Modal env, Neon DB, SuperTokens app, pushes
 #    per-env Modal Secrets, runs `modal deploy` for both apps, and
 #    writes ~/.minds-<your-user>-dev/{client.toml,secrets.toml}.
 uv run minds env deploy
 
-# 4. Launch the desktop client against the new env:
+# 3. Launch the desktop client against the new env:
 just minds-start
 ```
 
