@@ -135,8 +135,11 @@ You'll probably need to experiment a little bit with claude -p in order to see t
     8. Map any `MngrError` / `UserInputError` / `BaseException` to the appropriate exit code in a top-level try/except.
   - `def destroy_run(run: UncappedRun, mngr_ctx: MngrContext) -> None` — best-effort destroy; logs and swallows errors so signal cleanup never raises.
   - Settings overrides applied via `mngr create -S` (passed through `MngrContext.config`):
-    - `agent_types.claude.use_env_config_dir = true`
-    - (Delegates the entire `$CLAUDE_CONFIG_DIR` question to the parent shell; the spawned agent inherits the user's existing credentials, plugins, marketplaces, sessions, and dialog-state. The previous `auto_dismiss_dialogs` / `auto_allow_permissions` / `settings_overrides.*` flags are unnecessary in shared-config-dir mode because `mngr_claude` skips those code paths there.)
+    - `agent_types.claude.auto_dismiss_dialogs = true`
+    - `agent_types.claude.auto_allow_permissions = true`
+    - `agent_types.claude.settings_overrides.skipDangerousModePermissionPrompt = true`
+    - `agent_types.claude.settings_overrides.bypassPermissionsModeAccepted = true`
+    - (The two `settings_overrides.*` flags are normally added by `mngr_claude` only when `not host.is_local`; uncapped-claude always runs on the local host, so we set them explicitly to avoid hangs on the "bypass permissions mode" and "skip dangerous mode" prompts.)
 
 - `data_types.py`
   - `class InputFormat(UpperCaseStrEnum)` — `TEXT`, `STREAM_JSON`.
