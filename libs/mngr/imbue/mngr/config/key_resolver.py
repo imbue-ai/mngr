@@ -92,15 +92,20 @@ def _walk_to_field(base: Any, path: tuple[str, ...]) -> Any:
     """Walk ``base`` along ``path`` and return the value, or None if any
     intermediate step is missing or untraversable.
 
-    Models are projected to plain dicts via ``model_dump`` so we can traverse
-    everything through ``Mapping`` lookups (avoids the dynamic-attribute
-    access ratchet).
+    Pydantic models are walked via ``getattr`` (natural attribute access);
+    Mapping values are walked via ``.get``. The earlier ``model_dump``
+    round-trip kept the dynamic-attribute-access ratchet quiet but cost a
+    full model serialisation on every override application, which adds up
+    when MngrConfig and its plugin sub-configs grow. The direct walk is
+    cheap and simpler; we bump the getattr ratchet by one for it.
     """
-    current: Any = base.model_dump() if isinstance(base, BaseModel) else base
+    current: Any = base
     for segment in path:
         if current is None:
             return None
-        if isinstance(current, Mapping):
+        if isinstance(current, BaseModel):
+            current = getattr(current, segment, None)
+        elif isinstance(current, Mapping):
             current = current.get(segment)
         else:
             return None

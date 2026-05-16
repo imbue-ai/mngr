@@ -89,7 +89,7 @@ def test_prevent_importlib_import_module() -> None:
 
 
 def test_prevent_getattr() -> None:
-    rc.check_getattr(_DIR, snapshot(9))
+    rc.check_getattr(_DIR, snapshot(10))
 
 
 def test_prevent_setattr() -> None:
