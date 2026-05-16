@@ -10,7 +10,9 @@ import paramiko
 import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ed25519
+from cryptography.hazmat.primitives.asymmetric import rsa
 
+from imbue.mngr_ovh.bootstrap import _load_private_key
 from imbue.mngr_ovh.bootstrap import bootstrap_root_authorized_keys_via_user
 from imbue.mngr_ovh.bootstrap import pin_host_key_via_tofu
 from imbue.mngr_ovh.bootstrap import verify_root_ssh
@@ -100,6 +102,52 @@ def test_wait_for_ssh_times_out_when_socket_refuses() -> None:
     with patch("socket.create_connection", side_effect=OSError("ECONNREFUSED")):
         with pytest.raises(VpsProvisioningError, match="not reachable"):
             wait_for_ssh_after_rebuild(hostname="vps-x", port=22, timeout_seconds=0.05)
+
+
+def _write_rsa_private_key(tmp_path: Path, key_name: str = "id_rsa") -> Path:
+    """Write an RSA private key in the TraditionalOpenSSL PEM format.
+
+    Matches what ``ssh_utils.generate_ssh_keypair`` produces for the base
+    ``VpsDockerProvider``, so the regression test for Bug 4 reflects the
+    real on-disk format the OVH provider receives.
+    """
+    private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    pem = private_key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.TraditionalOpenSSL,
+        encryption_algorithm=serialization.NoEncryption(),
+    )
+    private_path = tmp_path / key_name
+    private_path.write_bytes(pem)
+    return private_path
+
+
+def test_load_private_key_accepts_ed25519(tmp_path: Path) -> None:
+    """Ed25519 OpenSSH-format keys must load (the original code path)."""
+    key_path = _make_private_key(tmp_path)
+    loaded = _load_private_key(key_path)
+    assert isinstance(loaded, paramiko.Ed25519Key)
+
+
+def test_load_private_key_accepts_rsa(tmp_path: Path) -> None:
+    """Bug 4: RSA keys produced by ``ssh_utils.generate_ssh_keypair`` must load.
+
+    Pre-fix, ``pin_host_key_via_tofu`` hardcoded
+    ``paramiko.Ed25519Key.from_private_key_file``, which raised
+    ``SSHException("encountered RSA key, expected OPENSSH key")`` against
+    the RSA keys the base ``VpsDockerProvider`` actually produces.
+    """
+    key_path = _write_rsa_private_key(tmp_path)
+    loaded = _load_private_key(key_path)
+    assert isinstance(loaded, paramiko.RSAKey)
+
+
+def test_load_private_key_raises_for_garbage(tmp_path: Path) -> None:
+    """A non-SSH file should produce a clear ``VpsProvisioningError``."""
+    bad_path = tmp_path / "not_a_key"
+    bad_path.write_bytes(b"this is not an SSH private key\n")
+    with pytest.raises(VpsProvisioningError, match="Could not parse SSH private key"):
+        _load_private_key(bad_path)
 
 
 def _stub_paramiko_exec(stdout: str = "", stderr: str = "", exit_status: int = 0) -> tuple[Any, Any, Any]:

@@ -233,7 +233,7 @@ def _connect_with_retry(
     """
     deadline = time.monotonic() + timeout_seconds
     last_error: BaseException | None = None
-    private_key = paramiko.Ed25519Key.from_private_key_file(str(private_key_path))
+    private_key = _load_private_key(private_key_path)
 
     while time.monotonic() < deadline:
         client = paramiko.SSHClient()
@@ -263,6 +263,32 @@ def _connect_with_retry(
     raise VpsProvisioningError(
         f"OVH bootstrap step {failure_label!r} on {hostname}:{port} did not succeed within "
         f"{timeout_seconds}s (last error: {last_error!r})"
+    )
+
+
+def _load_private_key(private_key_path: Path) -> paramiko.PKey:
+    """Load an SSH private key by trying each supported key type in turn.
+
+    The base ``VpsDockerProvider`` produces SSH keypairs via
+    ``ssh_utils.load_or_create_ssh_keypair`` -> ``generate_ssh_keypair``,
+    which currently returns an **RSA** key in TraditionalOpenSSL PEM
+    format. paramiko's per-class ``from_private_key_file`` constructors
+    are strict: ``Ed25519Key.from_private_key_file`` raises if the file
+    isn't an OpenSSH-format Ed25519 key, even though paramiko itself can
+    handle RSA fine. Rather than hardcode either type (which would break
+    if the base class swaps generator), try each type and use the one
+    that parses; this keeps the OVH provider working regardless of which
+    key flavor the base class produces.
+    """
+    last_error: paramiko.SSHException | None = None
+    for key_class in (paramiko.Ed25519Key, paramiko.RSAKey, paramiko.ECDSAKey):
+        try:
+            return key_class.from_private_key_file(str(private_key_path))
+        except paramiko.SSHException as e:
+            last_error = e
+    raise VpsProvisioningError(
+        f"Could not parse SSH private key at {private_key_path} as any supported type "
+        f"(Ed25519, RSA, ECDSA); last paramiko error: {last_error!r}"
     )
 
 
