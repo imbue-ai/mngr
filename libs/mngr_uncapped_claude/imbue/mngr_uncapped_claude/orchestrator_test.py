@@ -6,14 +6,14 @@ from pathlib import Path
 
 from imbue.mngr.api.events import EventsTarget
 from imbue.mngr.hosts.host import Host
+from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.utils.jsonl_warn import MalformedJsonLineWarner
 from imbue.mngr_uncapped_claude.data_types import OutputFormat
-from imbue.mngr_uncapped_claude.orchestrator import _TURN_END_QUIESCE_TIMEOUT_SECONDS
 from imbue.mngr_uncapped_claude.orchestrator import _TranscriptReadFailureWarner
+from imbue.mngr_uncapped_claude.orchestrator import _TurnEndTicker
 from imbue.mngr_uncapped_claude.orchestrator import _build_agent_name
 from imbue.mngr_uncapped_claude.orchestrator import _build_pass_env_vars
 from imbue.mngr_uncapped_claude.orchestrator import _build_result_meta
-from imbue.mngr_uncapped_claude.orchestrator import _quiesce_after_waiting
 from imbue.mngr_uncapped_claude.orchestrator import monotonic_ms_since
 from imbue.mngr_uncapped_claude.output_modes import StreamingOutputWriter
 from imbue.mngr_uncapped_claude.raw_transcript import RawTranscriptParser
@@ -61,13 +61,15 @@ def test_transcript_read_failure_warner_warns_once() -> None:
 
 
 # =============================================================================
-# _quiesce_after_waiting
+# _TurnEndTicker
 #
 # These tests stand up a real local-host EventsTarget pointed at a tmp file so
 # the production read path (events.read_event_content -> cat on the host) is
 # fully exercised. The transcript layout matches what stream_transcript.sh
 # produces: ``<state_dir>/logs/claude_transcript/events.jsonl``, with the
-# events root one level up at ``<state_dir>/events/``.
+# events root one level up at ``<state_dir>/events/``. The agent's lifecycle
+# state is injected as a callable so the tests don't need to construct a
+# real ClaudeAgent.
 # =============================================================================
 
 _ASSISTANT_END_TURN_LINE = json.dumps(
@@ -97,7 +99,7 @@ _ASSISTANT_TOOL_USE_LINE = json.dumps(
 )
 
 
-def _make_quiesce_target(local_host: Host, tmp_path: Path) -> tuple[EventsTarget, Path]:
+def _make_ticker_target(local_host: Host, tmp_path: Path) -> tuple[EventsTarget, Path]:
     """Build a local-host EventsTarget plus the per-session transcript path that
     stream_transcript.sh would write to.
 
@@ -127,150 +129,187 @@ def _make_writer_and_parser() -> tuple[StreamingOutputWriter, RawTranscriptParse
     return writer, parser
 
 
-def test_quiesce_exits_immediately_when_terminal_event_already_present(local_host: Host, tmp_path: Path) -> None:
-    """If the terminal assistant_message is already in the transcript when WAITING
-    is observed -- e.g. a long-running turn where stream_transcript.sh caught up
-    before idle_prompt fired -- _quiesce_after_waiting returns on its first drain
-    with no added latency."""
-    target, transcript_path = _make_quiesce_target(local_host, tmp_path)
+def _make_ticker(
+    target: EventsTarget,
+    writer: StreamingOutputWriter,
+    parser: RawTranscriptParser,
+    *,
+    baseline_assistant_count: int = 0,
+    seen_bytes: int = 0,
+    lifecycle_state: AgentLifecycleState = AgentLifecycleState.RUNNING,
+    no_progress_timeout_seconds: float = 0.5,
+) -> _TurnEndTicker:
+    """Construct a ticker for a test, with a constant lifecycle source.
+
+    Tests that want to flip the lifecycle mid-run construct the ticker
+    directly and pass their own stateful callable.
+    """
+    return _TurnEndTicker(
+        get_lifecycle_state=lambda: lifecycle_state,
+        events_target=target,
+        writer=writer,
+        parser=parser,
+        read_failure_warner=_TranscriptReadFailureWarner(),
+        baseline_assistant_count=baseline_assistant_count,
+        seen_bytes=seen_bytes,
+        last_progress_count=baseline_assistant_count,
+        no_progress_timeout_seconds=no_progress_timeout_seconds,
+    )
+
+
+def test_ticker_exits_on_terminal_stop_reason(local_host: Host, tmp_path: Path) -> None:
+    """The authoritative end-of-turn signal: a new assistant_message past the
+    baseline whose stop_reason is terminal. The ticker returns WAITING and
+    seen_bytes advances past the consumed line."""
+    target, transcript_path = _make_ticker_target(local_host, tmp_path)
     transcript_path.write_text(_ASSISTANT_END_TURN_LINE + "\n")
     writer, parser = _make_writer_and_parser()
-    read_failure_warner = _TranscriptReadFailureWarner()
+    ticker = _make_ticker(target, writer, parser)
 
-    start = time.monotonic()
-    new_seen_bytes = _quiesce_after_waiting(
-        target, writer, parser, read_failure_warner, seen_bytes=0, baseline_assistant_count=0
-    )
-    elapsed = time.monotonic() - start
+    result = ticker.tick()
 
-    # One drain, no sleep -- should be sub-second on any reasonable machine.
-    assert elapsed < 0.5
+    assert result == AgentLifecycleState.WAITING
     assert writer.assistant_message_count == 1
     assert writer.last_assistant_stop_reason == "end_turn"
-    assert new_seen_bytes == len((_ASSISTANT_END_TURN_LINE + "\n").encode("utf-8"))
+    assert ticker.seen_bytes == len((_ASSISTANT_END_TURN_LINE + "\n").encode("utf-8"))
 
 
-def test_quiesce_waits_for_terminal_event_to_arrive(local_host: Host, tmp_path: Path) -> None:
-    """The transcript is empty when WAITING is observed; a Timer appends
-    the terminal event ~250ms later. _quiesce_after_waiting must wait long enough
-    to catch it (well under the timeout) and then exit cleanly."""
-    target, transcript_path = _make_quiesce_target(local_host, tmp_path)
+def test_ticker_does_not_exit_on_tool_use_stop_reason(local_host: Host, tmp_path: Path) -> None:
+    """A tool_use assistant_message is mid-turn -- more events are still
+    coming -- so the ticker must NOT return. This is the key behavioral
+    difference from the previous WAITING-gated design: the lifecycle state
+    would have triggered an exit here (the ``active`` file flicker-clears
+    during permission auto-approval), but the transcript signal correctly
+    reports "not done yet"."""
+    target, transcript_path = _make_ticker_target(local_host, tmp_path)
+    transcript_path.write_text(_ASSISTANT_TOOL_USE_LINE + "\n")
     writer, parser = _make_writer_and_parser()
-    read_failure_warner = _TranscriptReadFailureWarner()
+    ticker = _make_ticker(target, writer, parser, lifecycle_state=AgentLifecycleState.WAITING)
+
+    result = ticker.tick()
+
+    assert result is None
+    assert writer.assistant_message_count == 1
+    assert writer.last_assistant_stop_reason == "tool_use"
+
+
+def test_ticker_exits_on_dead_agent_state(local_host: Host, tmp_path: Path) -> None:
+    """If the agent dies mid-turn (STOPPED / DONE / REPLACED / RUNNING_UNKNOWN),
+    the ticker returns that state so the caller can surface a claude-side
+    failure. The terminal-stop-reason check has priority, but with an empty
+    transcript the lifecycle fallback is what fires."""
+    target, _ = _make_ticker_target(local_host, tmp_path)
+    writer, parser = _make_writer_and_parser()
+    ticker = _make_ticker(target, writer, parser, lifecycle_state=AgentLifecycleState.STOPPED)
+
+    result = ticker.tick()
+
+    assert result == AgentLifecycleState.STOPPED
+
+
+def test_ticker_respects_baseline_for_multi_turn(local_host: Host, tmp_path: Path) -> None:
+    """A terminal assistant_message from a PRIOR turn must not satisfy the
+    current turn's exit gate. The ticker baselines off
+    ``writer.assistant_message_count`` at turn start; only growth past that
+    baseline counts as "current-turn progress"."""
+    target, transcript_path = _make_ticker_target(local_host, tmp_path)
+    transcript_path.write_text(_ASSISTANT_END_TURN_LINE + "\n")
+    writer, parser = _make_writer_and_parser()
+    # Simulate the prior turn: writer already saw the end_turn event and we
+    # already consumed the bytes for it.
+    writer.assistant_message_count = 1
+    writer.last_assistant_stop_reason = "end_turn"
+    ticker = _make_ticker(
+        target,
+        writer,
+        parser,
+        baseline_assistant_count=1,
+        seen_bytes=len((_ASSISTANT_END_TURN_LINE + "\n").encode("utf-8")),
+    )
+
+    result = ticker.tick()
+
+    # Nothing new past seen_bytes -- ticker keeps waiting.
+    assert result is None
+
+
+def test_ticker_fires_no_progress_safety_timeout(local_host: Host, tmp_path: Path) -> None:
+    """If the transcript never grows, the safety timeout fires and the ticker
+    returns WAITING so the orchestrator can finalize with whatever was
+    collected. In practice this safeguards against ``stream_transcript.sh``
+    dying or the agent being wedged without writing to its session file."""
+    target, _ = _make_ticker_target(local_host, tmp_path)
+    writer, parser = _make_writer_and_parser()
+    ticker = _make_ticker(target, writer, parser, no_progress_timeout_seconds=0.0)
+    # Drive the clock so the no-progress window appears to have already elapsed.
+    ticker.last_progress_at = time.monotonic() - 1.0
+
+    result = ticker.tick()
+
+    assert result == AgentLifecycleState.WAITING
+
+
+def test_ticker_resets_no_progress_clock_when_events_arrive(local_host: Host, tmp_path: Path) -> None:
+    """The no-progress safety timeout is measured from the most recent new
+    assistant_message, not from turn start. A turn that keeps producing tool
+    cycles (non-terminal stop_reasons) for longer than the timeout must NOT
+    be considered stalled, as long as new events keep showing up."""
+    target, transcript_path = _make_ticker_target(local_host, tmp_path)
+    writer, parser = _make_writer_and_parser()
+    ticker = _make_ticker(target, writer, parser, no_progress_timeout_seconds=0.5)
+    # Backdate the progress clock so the timeout WOULD have fired if not reset.
+    ticker.last_progress_at = time.monotonic() - 1.0
+    # Append a tool-use event so this tick observes forward progress.
+    transcript_path.write_text(_ASSISTANT_TOOL_USE_LINE + "\n")
+
+    result = ticker.tick()
+
+    # Ticker observed forward progress, so it must NOT have fired the safety
+    # timeout. Returns None because tool_use is non-terminal.
+    assert result is None
+    assert ticker.last_progress_count == 1
+
+
+def test_ticker_terminal_stop_takes_priority_over_dead_state(local_host: Host, tmp_path: Path) -> None:
+    """If a terminal assistant_message has arrived AND the agent has also gone
+    STOPPED in the same tick (race during shutdown), report the success path.
+    The transcript signal is authoritative; the lifecycle is only a fallback
+    for cases where the transcript never produces a terminal."""
+    target, transcript_path = _make_ticker_target(local_host, tmp_path)
+    transcript_path.write_text(_ASSISTANT_END_TURN_LINE + "\n")
+    writer, parser = _make_writer_and_parser()
+    ticker = _make_ticker(target, writer, parser, lifecycle_state=AgentLifecycleState.STOPPED)
+
+    result = ticker.tick()
+
+    assert result == AgentLifecycleState.WAITING
+
+
+def test_ticker_picks_up_terminal_event_appended_during_polling(local_host: Host, tmp_path: Path) -> None:
+    """End-to-end-ish: the ticker is invoked repeatedly while a Timer appends
+    the terminal event ~250ms in. The ticker returns ``None`` on the early
+    ticks and then ``WAITING`` once the line appears. This exercises the
+    transcript-driven polling that replaces the old WAITING-gated quiesce."""
+    target, transcript_path = _make_ticker_target(local_host, tmp_path)
+    writer, parser = _make_writer_and_parser()
+    ticker = _make_ticker(target, writer, parser, no_progress_timeout_seconds=5.0)
 
     def _append() -> None:
         with transcript_path.open("a") as fh:
             fh.write(_ASSISTANT_END_TURN_LINE + "\n")
 
-    # threading.Timer delegates the sleep to the stdlib, so the test exercises
-    # the production code's polling without adding a bare ``time.sleep`` call
-    # to this package's ratchet count.
+    # threading.Timer delegates the sleep to stdlib so the test exercises the
+    # ticker's polling without adding a bare ``time.sleep`` call to this
+    # package's ratchet count.
     timer = threading.Timer(0.25, _append)
     timer.start()
     try:
-        start = time.monotonic()
-        _quiesce_after_waiting(
-            target,
-            writer,
-            parser,
-            read_failure_warner,
-            seen_bytes=0,
-            baseline_assistant_count=0,
-            timeout_seconds=2.0,
-        )
-        elapsed = time.monotonic() - start
+        deadline = time.monotonic() + 2.0
+        result: AgentLifecycleState | None = None
+        while result is None and time.monotonic() < deadline:
+            result = ticker.tick()
     finally:
         timer.join(timeout=5.0)
 
-    # Should exit shortly after the 0.25s append, well before the 2s timeout.
-    assert 0.2 < elapsed < 1.5
-    assert writer.assistant_message_count == 1
+    assert result == AgentLifecycleState.WAITING
     assert writer.last_assistant_stop_reason == "end_turn"
-
-
-def test_quiesce_ignores_non_terminal_stop_reason(local_host: Host, tmp_path: Path) -> None:
-    """A tool_use assistant_message satisfies the count gate but is not a
-    terminal stop_reason -- the quiesce must keep waiting (and ultimately time
-    out, since this test never appends a terminal one)."""
-    target, transcript_path = _make_quiesce_target(local_host, tmp_path)
-    transcript_path.write_text(_ASSISTANT_TOOL_USE_LINE + "\n")
-    writer, parser = _make_writer_and_parser()
-    read_failure_warner = _TranscriptReadFailureWarner()
-
-    start = time.monotonic()
-    _quiesce_after_waiting(
-        target,
-        writer,
-        parser,
-        read_failure_warner,
-        seen_bytes=0,
-        baseline_assistant_count=0,
-        timeout_seconds=0.3,
-    )
-    elapsed = time.monotonic() - start
-
-    assert elapsed >= 0.3
-    assert writer.assistant_message_count == 1
-    assert writer.last_assistant_stop_reason == "tool_use"
-
-
-def test_quiesce_times_out_when_no_events_arrive(local_host: Host, tmp_path: Path) -> None:
-    """If the transcript stays empty for the entire quiesce window, return with
-    an empty assistant_message_count. The orchestrator finalizes with whatever
-    text the writer collected up to that point (possibly nothing) so the user
-    still gets a result envelope rather than a hang."""
-    target, _ = _make_quiesce_target(local_host, tmp_path)
-    writer, parser = _make_writer_and_parser()
-    read_failure_warner = _TranscriptReadFailureWarner()
-
-    start = time.monotonic()
-    _quiesce_after_waiting(
-        target,
-        writer,
-        parser,
-        read_failure_warner,
-        seen_bytes=0,
-        baseline_assistant_count=0,
-        timeout_seconds=0.3,
-    )
-    elapsed = time.monotonic() - start
-
-    assert elapsed >= 0.3
-    assert writer.assistant_message_count == 0
-    assert writer.last_assistant_stop_reason is None
-
-
-def test_quiesce_respects_baseline_so_old_terminal_event_does_not_satisfy(local_host: Host, tmp_path: Path) -> None:
-    """Multi-turn replay regression: a terminal assistant_message from a PRIOR
-    turn must not satisfy the current turn's quiesce. The orchestrator snapshots
-    ``writer.assistant_message_count`` at turn start; the gate requires the
-    count to grow past that snapshot before returning."""
-    target, transcript_path = _make_quiesce_target(local_host, tmp_path)
-    transcript_path.write_text(_ASSISTANT_END_TURN_LINE + "\n")
-    writer, parser = _make_writer_and_parser()
-    read_failure_warner = _TranscriptReadFailureWarner()
-
-    # Simulate the prior turn: the writer has already seen one end_turn event.
-    writer.assistant_message_count = 1
-    writer.last_assistant_stop_reason = "end_turn"
-
-    start = time.monotonic()
-    _quiesce_after_waiting(
-        target,
-        writer,
-        parser,
-        read_failure_warner,
-        seen_bytes=len((_ASSISTANT_END_TURN_LINE + "\n").encode("utf-8")),
-        baseline_assistant_count=1,
-        timeout_seconds=0.3,
-    )
-    elapsed = time.monotonic() - start
-
-    # Nothing new in the transcript past seen_bytes -- should time out.
-    assert elapsed >= 0.3
-
-
-def test_turn_end_quiesce_timeout_constant_is_at_least_one_stream_poll_interval() -> None:
-    """stream_transcript.sh polls per-session JSONL every 1s; the quiesce timeout
-    must give us at least that long so a worst-case-aligned race is bridged."""
-    assert _TURN_END_QUIESCE_TIMEOUT_SECONDS >= 1.0

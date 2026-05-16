@@ -1,6 +1,7 @@
 import os
 import signal
 import time
+from collections.abc import Callable
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -95,20 +96,20 @@ _POLL_INTERVAL_SECONDS: Final[float] = 0.1
 _AGENT_READY_TIMEOUT_SECONDS: Final[float] = 120.0
 
 
-# Lifecycle states that end the per-turn polling loop. WAITING is the
-# success case (agent paused for the next user turn); the others all mean
-# the agent will never reach WAITING and would cause the loop to hang:
-# STOPPED/DONE are the natural terminal states, REPLACED means the agent's
-# tmux pane was hijacked by another process, and RUNNING_UNKNOWN_AGENT_TYPE
-# means mngr no longer recognizes the agent type so it cannot determine when
-# the turn is done. The caller treats any non-WAITING result as a claude-side
-# failure (EXIT_CLAUDE_ERROR) with the state name in the error envelope.
-_TURN_END_STATES: Final[tuple[AgentLifecycleState, ...]] = (
-    AgentLifecycleState.WAITING,
-    AgentLifecycleState.STOPPED,
-    AgentLifecycleState.DONE,
-    AgentLifecycleState.REPLACED,
-    AgentLifecycleState.RUNNING_UNKNOWN_AGENT_TYPE,
+# Lifecycle states that mean the agent is no longer alive. Reaching one of
+# these mid-turn is a failure: the agent will never produce another
+# assistant_message, so the caller treats this as ``EXIT_CLAUDE_ERROR`` with
+# the state name in the error envelope. STOPPED/DONE are the natural
+# end-of-life states, REPLACED means the agent's tmux pane was hijacked by
+# another process, and RUNNING_UNKNOWN_AGENT_TYPE means mngr no longer
+# recognizes the agent type so it cannot reason about its state.
+_AGENT_DEAD_STATES: Final[frozenset[AgentLifecycleState]] = frozenset(
+    {
+        AgentLifecycleState.STOPPED,
+        AgentLifecycleState.DONE,
+        AgentLifecycleState.REPLACED,
+        AgentLifecycleState.RUNNING_UNKNOWN_AGENT_TYPE,
+    }
 )
 
 # Claude API stop_reason values that mean "this assistant message is the LAST
@@ -118,14 +119,14 @@ _TURN_END_STATES: Final[tuple[AgentLifecycleState, ...]] = (
 # claude's per-session JSONL into events.jsonl yet.
 _TERMINAL_STOP_REASONS: Final[frozenset[str]] = frozenset({"end_turn", "stop_sequence", "max_tokens"})
 
-# After mngr observes ``WAITING`` we keep draining the raw transcript for up
-# to this long, hoping to pick up the turn's final assistant_message before we
-# finalize the result envelope. The race we bridge: ``Notification:idle_prompt``
-# flips ``active`` essentially the moment claude reaches end-of-turn, but
-# ``stream_transcript.sh`` only polls claude's per-session JSONL every ~1s, so
-# the final assistant message can lag the WAITING signal by close to that full
-# second. 2 seconds gives us two stream_transcript poll cycles plus a margin.
-_TURN_END_QUIESCE_TIMEOUT_SECONDS: Final[float] = 2.0
+# Safety net for ``_wait_for_turn_end``: if the transcript stops growing for
+# this long while the agent is still alive, bail out and finalize with
+# whatever we have. The legitimate maximum gap between assistant events
+# inside a single turn is bounded by the longest tool the agent might run
+# (long bash builds, slow MCP calls), so this needs to be very generous --
+# we'd rather wait than truncate. A user who wants tighter control wraps
+# ``mngr uncapped-claude`` in ``timeout(1)`` per the spec.
+_TURN_END_NO_PROGRESS_TIMEOUT_SECONDS: Final[float] = 600.0
 
 EXIT_SUCCESS: Final[int] = 0
 EXIT_CLAUDE_ERROR: Final[int] = 1
@@ -446,67 +447,50 @@ def _send_user_turn(mngr_ctx: MngrContext, agent: ClaudeAgent, prompt: str) -> N
         raise MngrError(f"Failed to deliver follow-up prompt to {agent.name}: {names_and_errors}")
 
 
-def _wait_for_turn_end(
-    agent: ClaudeAgent,
-    events_target: EventsTarget,
-    writer: StreamingOutputWriter,
-    parser: RawTranscriptParser,
-    read_failure_warner: _TranscriptReadFailureWarner,
-    seen_bytes: int,
-) -> tuple[AgentLifecycleState, int]:
-    """Poll the agent until it reaches WAITING (or a terminal state); stream events meanwhile.
+class _TurnEndTicker(MutableModel):
+    """Per-iteration state for :func:`_wait_for_turn_end`.
 
-    Returns ``(final_state, new_seen_bytes)``. WAITING means the agent paused
-    for the next user turn; any other state in :data:`_TURN_END_STATES`
-    (STOPPED, DONE, REPLACED, RUNNING_UNKNOWN_AGENT_TYPE) means the agent
-    will never reach WAITING and the caller treats this as a claude-side
-    failure. The returned offset must be threaded back into the next call
-    so multi-turn invocations do not re-read prior turns' transcript bytes.
+    Polls the raw transcript and the agent's lifecycle state on each tick.
+    Returns a non-``None`` result when the turn has demonstrably ended; the
+    caller maps that result back to the orchestrator's exit code.
 
-    On WAITING, hands off to :func:`_quiesce_after_waiting` to bridge the
-    race between mngr's near-instant ``active``-file lifecycle signal and
-    ``stream_transcript.sh``'s ~1s mirroring cadence -- without this, a fast
-    end-of-turn produces an empty ``result`` envelope because the assistant
-    message hasn't been copied into events.jsonl yet.
-    """
-    baseline_assistant_count = writer.assistant_message_count
-    final_state: AgentLifecycleState | None = None
-    while final_state is None:
-        seen_bytes = _drain_new_events(events_target, writer, parser, read_failure_warner, seen_bytes)
-        state = agent.get_lifecycle_state()
-        if state in _TURN_END_STATES:
-            if state == AgentLifecycleState.WAITING:
-                seen_bytes = _quiesce_after_waiting(
-                    events_target,
-                    writer,
-                    parser,
-                    read_failure_warner,
-                    seen_bytes,
-                    baseline_assistant_count,
-                )
-            else:
-                seen_bytes = _drain_new_events(events_target, writer, parser, read_failure_warner, seen_bytes)
-            final_state = state
-        else:
-            time.sleep(_POLL_INTERVAL_SECONDS)
-    return final_state, seen_bytes
+    Exit signals (in priority order):
 
+    1. **Terminal assistant message past baseline** -- the writer has seen at
+       least one new ``assistant_message`` with a terminal ``stop_reason``
+       (``end_turn`` / ``max_tokens`` / ``stop_sequence``) since
+       :attr:`baseline_assistant_count`. This is the authoritative
+       end-of-turn signal: the LAST message of the turn has been mirrored
+       into events.jsonl and we are done.
+    2. **Agent died** -- lifecycle state in :data:`_AGENT_DEAD_STATES`
+       (STOPPED / DONE / REPLACED / RUNNING_UNKNOWN_AGENT_TYPE). The agent
+       will never produce another message; the caller treats this as a
+       claude-side failure.
+    3. **No-progress safety timeout** -- if the writer has not seen a new
+       assistant_message for :data:`_TURN_END_NO_PROGRESS_TIMEOUT_SECONDS`,
+       bail with ``AgentLifecycleState.WAITING`` and a WARNING. This is a
+       safety net for pathological cases (``stream_transcript.sh`` dies,
+       claude is wedged without writing to its session file, etc.); in
+       normal use it should never fire.
 
-class _QuiesceTicker(MutableModel):
-    """Per-iteration state for :func:`_quiesce_after_waiting`.
-
-    Wraps the drain dependencies plus a mutable ``seen_bytes`` cursor in a
-    bindable object so :func:`poll_for_value` can call :meth:`tick` directly
-    as its producer -- a plain bound-method handle, no module-level closure
-    and no wrapping helper. ``tick`` mutates ``seen_bytes`` in place and
-    returns the updated offset only when the writer has observed at least
-    one new ``assistant_message`` event with a terminal ``stop_reason``
-    since :attr:`baseline_assistant_count`; otherwise it returns ``None`` so
-    the polling helper sleeps and retries.
+    Note that the lifecycle ``WAITING`` state is intentionally NOT a trigger
+    here: it flickers briefly during tool-permission auto-approval (the
+    ``PermissionRequest`` hook touches ``permissions_waiting`` for a window
+    that elevates ``RUNNING`` to ``WAITING``), and even at the real end of
+    turn it leads ``stream_transcript.sh``'s mirror by enough that a
+    WAITING-gated exit consistently drops the final message. The transcript
+    itself is the only fully reliable end-of-turn marker.
     """
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
+    get_lifecycle_state: Callable[[], AgentLifecycleState] = Field(
+        description=(
+            "Producer for the agent's current lifecycle state. Injected as a callable (rather "
+            "than the agent itself) so the ticker doesn't depend on ``ClaudeAgent`` -- tests can "
+            "swap in a stub lifecycle source without needing to construct a real agent."
+        )
+    )
     events_target: EventsTarget = Field(description="Where to read raw transcript bytes from")
     writer: StreamingOutputWriter = Field(description="Writer whose assistant counters the ticker inspects")
     parser: RawTranscriptParser = Field(description="Parser to convert raw transcript lines to common events")
@@ -517,8 +501,24 @@ class _QuiesceTicker(MutableModel):
         description="``writer.assistant_message_count`` snapshot taken before the current turn"
     )
     seen_bytes: int = Field(description="Byte offset already consumed from the raw transcript")
+    last_progress_count: int = Field(
+        default=0,
+        description=(
+            "``writer.assistant_message_count`` as of the last tick that observed forward progress. "
+            "Used together with :attr:`last_progress_at` to fire the no-progress safety timeout only "
+            "when the transcript has genuinely stalled, not just because a turn is taking a while."
+        ),
+    )
+    last_progress_at: float = Field(
+        default_factory=time.monotonic,
+        description="``time.monotonic()`` snapshot of the last tick that observed forward progress",
+    )
+    no_progress_timeout_seconds: float = Field(
+        default=_TURN_END_NO_PROGRESS_TIMEOUT_SECONDS,
+        description="Bail after this many seconds without any new assistant_message events",
+    )
 
-    def tick(self) -> int | None:
+    def tick(self) -> AgentLifecycleState | None:
         self.seen_bytes = _drain_new_events(
             self.events_target,
             self.writer,
@@ -526,74 +526,96 @@ class _QuiesceTicker(MutableModel):
             self.read_failure_warner,
             self.seen_bytes,
         )
+        if self.writer.assistant_message_count > self.last_progress_count:
+            self.last_progress_count = self.writer.assistant_message_count
+            self.last_progress_at = time.monotonic()
         if (
             self.writer.assistant_message_count > self.baseline_assistant_count
             and self.writer.last_assistant_stop_reason in _TERMINAL_STOP_REASONS
         ):
-            return self.seen_bytes
+            return AgentLifecycleState.WAITING
+        state = self.get_lifecycle_state()
+        if state in _AGENT_DEAD_STATES:
+            return state
+        if time.monotonic() - self.last_progress_at > self.no_progress_timeout_seconds:
+            logger.warning(
+                "Turn-end safety timeout: no new assistant_message events for {:.1f}s "
+                "(assistant_message_count={}, baseline={}, last_stop_reason={!r}); "
+                "finalizing with what we have",
+                self.no_progress_timeout_seconds,
+                self.writer.assistant_message_count,
+                self.baseline_assistant_count,
+                self.writer.last_assistant_stop_reason,
+            )
+            return AgentLifecycleState.WAITING
         return None
 
 
-def _quiesce_after_waiting(
+def _wait_for_turn_end(
+    agent: ClaudeAgent,
     events_target: EventsTarget,
     writer: StreamingOutputWriter,
     parser: RawTranscriptParser,
     read_failure_warner: _TranscriptReadFailureWarner,
     seen_bytes: int,
-    baseline_assistant_count: int,
-    timeout_seconds: float = _TURN_END_QUIESCE_TIMEOUT_SECONDS,
-) -> int:
-    """Drain after WAITING until the turn's final assistant_message has arrived.
+) -> tuple[AgentLifecycleState, int]:
+    """Poll the raw transcript until the turn's terminal assistant message arrives.
 
-    Returns the new ``seen_bytes`` offset. Exits when either:
+    Returns ``(final_state, new_seen_bytes)``. The success path returns
+    :data:`AgentLifecycleState.WAITING` -- the canonical "turn over, ready
+    for next prompt" state. Any state in :data:`_AGENT_DEAD_STATES`
+    (STOPPED / DONE / REPLACED / RUNNING_UNKNOWN_AGENT_TYPE) is the failure
+    path: the agent died mid-turn and the caller treats this as a claude-
+    side failure. The returned offset must be threaded back into the next
+    call so multi-turn invocations do not re-read prior turns' transcript
+    bytes.
 
-    * The writer has observed at least one new ``assistant_message`` event
-      since ``baseline_assistant_count`` AND that event's ``stop_reason`` is in
-      :data:`_TERMINAL_STOP_REASONS` (``end_turn`` / ``max_tokens`` /
-      ``stop_sequence``). That marker means the LAST assistant message of
-      the turn has been mirrored into events.jsonl; further events would only
-      belong to the next turn, which we don't want to consume here.
-    * The :data:`_TURN_END_QUIESCE_TIMEOUT_SECONDS` deadline expires. In that
-      case we emit a single WARNING with the observed state -- common causes
-      are ``stream_transcript.sh`` dying mid-run, claude exiting before
-      flushing a complete final message, or a turn whose final assistant
-      message genuinely has a non-terminal ``stop_reason`` (rare in practice).
+    The previous version of this function gated finalization on mngr's
+    lifecycle ``WAITING`` signal (the ``active`` file being absent). That
+    signal is unreliable for two reasons:
 
-    The wait costs at most one quiesce-timeout per turn. In the happy case
-    where events.jsonl already has the terminal assistant message when WAITING
-    fires (long-running turns, slow user, etc.), the first drain inside the
-    loop satisfies the exit condition immediately with no added latency.
+    1. It flickers during tool-permission auto-approval, so a WAITING-gated
+       exit can fire mid-turn while a tool is running.
+    2. Even at the real end of turn it leads ``stream_transcript.sh``'s
+       1-second-cadence mirror by enough that the final assistant message
+       frequently hasn't been copied into events.jsonl yet, producing an
+       empty ``result`` envelope.
+
+    Instead we poll the transcript directly and look for the only signal
+    that's guaranteed reliable: an ``assistant_message`` event whose
+    ``stop_reason`` is terminal (``end_turn`` / ``max_tokens`` /
+    ``stop_sequence``). Lifecycle is consulted only as a fallback to detect
+    agent death.
     """
-    # ``poll_for_value`` owns the per-iteration sleep and the timeout
-    # bookkeeping so the orchestrator doesn't need a bare ``time.sleep`` /
-    # ``while True`` loop here. The producer is a bound method on
-    # :class:`_QuiesceTicker`; the ticker carries the per-call state across
-    # iterations so the poll target stays a plain method handle.
-    ticker = _QuiesceTicker(
+    ticker = _TurnEndTicker(
+        get_lifecycle_state=agent.get_lifecycle_state,
         events_target=events_target,
         writer=writer,
         parser=parser,
         read_failure_warner=read_failure_warner,
-        baseline_assistant_count=baseline_assistant_count,
+        baseline_assistant_count=writer.assistant_message_count,
         seen_bytes=seen_bytes,
+        last_progress_count=writer.assistant_message_count,
     )
+    # ``poll_for_value`` requires a finite ``timeout``; we want the ticker
+    # itself to decide when to stop (via the no-progress safety check), so
+    # we pass a deliberately oversized outer timeout that the ticker will
+    # never reach in normal operation. If a turn does run longer than this,
+    # ``poll_for_value`` returns ``None`` and we treat that the same as the
+    # safety timeout firing inside the ticker.
+    outer_timeout_seconds = ticker.no_progress_timeout_seconds * 10
     result, _, _ = poll_for_value(
         producer=ticker.tick,
-        timeout=timeout_seconds,
+        timeout=outer_timeout_seconds,
         poll_interval=_POLL_INTERVAL_SECONDS,
     )
     if result is None:
         logger.warning(
-            "Turn-end quiesce timed out after {:.1f}s "
-            "(assistant_message_count={}, baseline={}, last_stop_reason={!r}); "
-            "the result envelope may be missing the turn's final assistant message",
-            timeout_seconds,
-            writer.assistant_message_count,
-            baseline_assistant_count,
-            writer.last_assistant_stop_reason,
+            "Turn-end outer timeout ({:.0f}s) exceeded; finalizing as WAITING",
+            outer_timeout_seconds,
         )
-        return ticker.seen_bytes
-    return result
+        return AgentLifecycleState.WAITING, ticker.seen_bytes
+    return result, ticker.seen_bytes
 
 
 def _drain_new_events(
