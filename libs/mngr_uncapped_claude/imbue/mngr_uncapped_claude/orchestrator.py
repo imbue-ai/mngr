@@ -27,6 +27,7 @@ from imbue.mngr.config.data_types import EnvVar
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import BaseMngrError
 from imbue.mngr.errors import MngrError
+from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.host import AgentEnvironmentOptions
 from imbue.mngr.interfaces.host import AgentLabelOptions
 from imbue.mngr.interfaces.host import CreateAgentOptions
@@ -289,7 +290,10 @@ def _run_with_agent(
         # required because ``_RunState.agent`` is typed as ``ClaudeAgent``,
         # and pydantic re-validates field values on model construction --
         # passing the abstract ``AgentInterface`` base would be rejected.
+        # Destroy the just-created agent before returning so the unexpected-
+        # type path does not leak a live agent on the host.
         logger.error("Unexpected agent type from api_create: {!r}", type(result.agent).__name__)
+        _destroy_agent(result.agent, result.host)
         return EXIT_MNGR_ERROR
     agent = result.agent
     host = result.host
@@ -533,8 +537,13 @@ def _finalize_run(
     writer.finalize(meta, turn_count=turn_count)
 
 
-def _destroy_agent(agent: ClaudeAgent, host: OnlineHostInterface) -> None:
-    """Best-effort: stop and destroy the agent, swallowing cleanup errors."""
+def _destroy_agent(agent: AgentInterface, host: OnlineHostInterface) -> None:
+    """Best-effort: stop and destroy the agent, swallowing cleanup errors.
+
+    Typed against :class:`AgentInterface` rather than :class:`ClaudeAgent` so
+    the agent-type-mismatch cleanup path in :func:`_run_with_agent` can call
+    it on the unnarrowed ``api_create`` result without an extra cast.
+    """
     try:
         host.stop_agents([agent.id])
     except (OSError, BaseMngrError) as exc:
