@@ -6,7 +6,6 @@ from pydantic import Field
 from pydantic import SecretStr
 
 from imbue.imbue_common.enums import UpperCaseStrEnum
-from imbue.mngr.errors import MngrError
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr_vps_docker.config import VpsDockerProviderConfig
 
@@ -26,10 +25,6 @@ class OvhPricingMode(UpperCaseStrEnum):
     def to_wire_value(self) -> str:
         """Return the lowercase string OVH's order/cart API expects."""
         return self.value.lower()
-
-
-class OvhCredentialsError(MngrError):
-    """Raised when OVH credentials cannot be resolved."""
 
 
 class OvhProviderConfig(VpsDockerProviderConfig):
@@ -113,9 +108,11 @@ class OvhProviderConfig(VpsDockerProviderConfig):
         3. ``~/.ovh.conf`` (python-ovh reads this automatically when a
            credential is absent from the constructor kwargs).
 
-        Raises ``OvhCredentialsError`` only when neither this config, env
-        vars, nor ``~/.ovh.conf`` provide *any* credentials at all (i.e.
-        when the resulting ``ovh.Client`` would have nothing to sign with).
+        Does not raise when credentials are missing -- the resulting
+        kwargs may contain only ``endpoint``, leaving ``ovh.Client`` to
+        either pick credentials up from ``~/.ovh.conf`` or raise
+        ``ovh.exceptions.InvalidConfiguration`` itself at construction
+        time (which the backend handles by substituting placeholders).
         """
         kwargs: dict[str, str] = {"endpoint": self.resolve_endpoint()}
 

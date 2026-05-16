@@ -7,7 +7,7 @@
 - Uses the official `python-ovh` SDK as the HTTP/auth layer (not raw `requests`), because OVH's signed-request auth is non-trivial and the SDK handles both OAuth2 and AK/AS/CK plus `~/.ovh.conf` discovery.
 - Discovery uses OVH **IAM v2 universal tags** on the `vps` resource URN (`POST /v2/iam/resource/{urn}/tag`, `GET /v2/iam/resource?resourceType=vps`) — verified live to work for tagging, listing, and tag removal.
 - OVH VPS has **no cloud-init / no `userData`**, so bootstrap differs from Vultr: order the VPS, then `POST /vps/{s}/rebuild` with `publicSshKey` + `doNotSendPassword=true` to pre-install our client key, then SSH in with key auth and TOFU-pin the host key. This is the only path; OVH's API exposes no host-key injection, no fingerprint endpoint, and no text-readable console.
-- A small refactor lifts the parallel-SSH host-record discovery currently duplicated in `mngr_vultr` up into `VpsDockerProvider` (via a new `_list_provider_vps_ips()` abstract method). `mngr_vultr` is migrated to the new base in the same PR. Cloud-init stays Vultr-specific; no two-implementation bootstrap interface yet — wait for a third provider to motivate that seam.
+- A small refactor lifts the parallel-SSH host-record discovery currently duplicated in `mngr_vultr` up into `VpsDockerProvider` (via a new `_list_provider_vps_hostnames()` seam method, concrete in the base with an empty default). `mngr_vultr` is migrated to the new base in the same PR. Cloud-init stays Vultr-specific; no two-implementation bootstrap interface yet — wait for a third provider to motivate that seam.
 
 ## Expected Behavior
 
@@ -115,28 +115,30 @@ In `mngr_ovh/iam_tags.py`:
 - `IamResource` is a small `FrozenModel` with `urn`, `name`, `display_name`, `tags: Mapping[str, str]`.
 
 In `mngr_ovh/backend.py`:
-- `OvhProvider(VpsDockerProvider)` — implements the new `_list_provider_vps_ips()` abstract method by querying `iam_tags.list_vps_resources` filtered by `tags.get("mngr-provider") == self.name`, then resolving each `serviceName` → IP via `vps_client.get_instance_ip`. Caches the IAM list per-command (same pattern as `VultrProvider._list_instances_cached`).
+- `OvhProvider(VpsDockerProvider)` — implements the new `_list_provider_vps_hostnames()` seam by querying `iam_tags.list_vps_resources` filtered by `tags.get("mngr-provider") == self.name`, then returning each matching ``serviceName`` (which doubles as the VPS's DNS hostname). Caches the IAM list per-command (same pattern as `VultrProvider._list_instances_cached`).
 - `OvhProviderBackend(ProviderBackendInterface)` — name `"ovh"`, build-args help, config class. `build_provider_instance` constructs `OvhVpsClient` from `OvhProviderConfig.get_credentials()`.
 - `@hookimpl register_provider_backend()` returns the tuple.
 
 ### Refactor of `mngr_vps_docker`
 
 In `libs/mngr_vps_docker/imbue/mngr_vps_docker/instance.py`:
-- Add new abstract method on `VpsDockerProvider`:
+- Add a new provider-specific seam method on `VpsDockerProvider`:
   ```
-  def _list_provider_vps_ips(self) -> list[str]: ...
+  def _list_provider_vps_hostnames(self) -> list[str]:
+      return []
   ```
-- Move the following from `VultrProvider` (in `libs/mngr_vultr/.../backend.py`) into `VpsDockerProvider` as concrete (non-abstract) methods, using `_list_provider_vps_ips()` as the only provider-specific seam:
+  Concrete in the base with an empty default so tests and providers without a listing API can opt out; concrete providers override.
+- Move the following from `VultrProvider` (in `libs/mngr_vultr/.../backend.py`) into `VpsDockerProvider` as concrete (non-abstract) methods, using `_list_provider_vps_hostnames()` as the only provider-specific seam:
   - `_read_records_from_vps(vps_ip)` (unchanged body)
-  - `_discover_host_records_with_agents()` (uses `_list_provider_vps_ips()` instead of the Vultr-specific `_get_tagged_vps_ips`)
+  - `_discover_host_records_with_agents()` (uses `_list_provider_vps_hostnames()` instead of the Vultr-specific `_get_tagged_vps_ips`)
   - `_discover_host_records()` (becomes a one-liner over the above)
   - `_find_host_record(host)` (cache-first then falls through to `_discover_host_records`)
 - Concurrency-group name in the lifted method is parameterized: `f"{type(self).__name__}-discover"`.
 
 In `libs/mngr_vultr/imbue/mngr_vultr/backend.py`:
-- `VultrProvider` becomes much smaller — only implements `_list_provider_vps_ips()` and `reset_caches()` (to wipe the new `_instances_cache` field plus call `super().reset_caches()`).
+- `VultrProvider` becomes much smaller — only implements `_list_provider_vps_hostnames()` and `reset_caches()` (to wipe the new `_instances_cache` field plus call `super().reset_caches()`).
 - Delete `_get_tagged_vps_ips`, `_read_records_from_vps`, `_discover_host_records_with_agents`, `_discover_host_records`, `_find_host_record`.
-- Implementation of `_list_provider_vps_ips()` is the body of the current `_get_tagged_vps_ips()`.
+- Implementation of `_list_provider_vps_hostnames()` is the body of the current `_get_tagged_vps_ips()`.
 
 ### Plugin registration
 
@@ -157,9 +159,9 @@ Workspace registration: add `libs/mngr_ovh` to the root `pyproject.toml`'s works
 Each phase ends with a working (if incomplete) system that can be merged independently if needed.
 
 ### Phase 1 — Refactor `mngr_vps_docker` discovery, keep Vultr green
-- Add `_list_provider_vps_ips()` abstract method to `VpsDockerProvider`.
+- Add `_list_provider_vps_hostnames()` seam method (concrete in the base, `return []` default) to `VpsDockerProvider`.
 - Lift `_read_records_from_vps`, `_discover_host_records_with_agents`, `_discover_host_records`, `_find_host_record` from `VultrProvider` to `VpsDockerProvider`.
-- Slim down `VultrProvider` to implement only `_list_provider_vps_ips()` + the cache helpers.
+- Slim down `VultrProvider` to implement only `_list_provider_vps_hostnames()` + the cache helpers.
 - All existing `mngr_vultr` unit/integration/release tests continue to pass unchanged.
 - No new functionality.
 
@@ -185,7 +187,7 @@ Each phase ends with a working (if incomplete) system that can be merged indepen
 
 ### Phase 5 — IAM tag wiring + provider integration
 - Implement `iam_tags.py`.
-- Wire it into `OvhProvider`: tag attach in `create_host` after VPS is ready; tag-based discovery in `_list_provider_vps_ips`.
+- Wire it into `OvhProvider`: tag attach in `create_host` after VPS is ready; tag-based discovery in `_list_provider_vps_hostnames`.
 - Unit tests for IAM tag wrappers + discovery filtering.
 
 ### Phase 6 — End-to-end and release tests

@@ -103,7 +103,14 @@ class OvhProvider(VpsDockerProvider):
     # Discovery -- list our VPSes via IAM v2 tags
     # =========================================================================
 
-    def _list_provider_vps_ips(self) -> list[str]:
+    def _list_provider_vps_hostnames(self) -> list[str]:
+        """Return SSH hostnames for OVH VPSes tagged with this provider's name.
+
+        Each entry is an OVH ``serviceName`` like
+        ``vps-eec8860b.vps.ovh.us`` -- a DNS name that resolves to the
+        VPS's public IPv4, which is what paramiko / pyinfra ultimately
+        connect to.
+        """
         if self._vps_iam_cache is not None:
             return list(self._vps_iam_cache)
         if self.ovh_client.is_unconfigured:
@@ -120,9 +127,9 @@ class OvhProvider(VpsDockerProvider):
             logger.warning("OVH IAM tag listing failed; treating as empty: {}", e)
             self._vps_iam_cache = []
             return []
-        vps_ips = [r.name for r in resources if r.name]
-        self._vps_iam_cache = vps_ips
-        return list(vps_ips)
+        hostnames = [r.name for r in resources if r.name]
+        self._vps_iam_cache = hostnames
+        return list(hostnames)
 
     # =========================================================================
     # VPS provisioning -- OVH order + rebuild + TOFU + IAM tag attach

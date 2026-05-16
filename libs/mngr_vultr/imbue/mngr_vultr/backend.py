@@ -48,8 +48,13 @@ class VultrProvider(VpsDockerProvider):
         self._instances_cache = self.vultr_client.list_instances()
         return self._instances_cache
 
-    def _list_provider_vps_ips(self) -> list[str]:
-        """Return IPs of Vultr instances tagged with this provider's name."""
+    def _list_provider_vps_hostnames(self) -> list[str]:
+        """Return public IPs of Vultr instances tagged with this provider's name.
+
+        Vultr uses raw IPv4 addresses as SSH targets, not DNS names. The
+        return values are strings to satisfy the base-class contract,
+        which accepts either IPs or hostnames.
+        """
         if not self.vultr_client.api_key.get_secret_value():
             logger.warning("Vultr API key not configured, skipping VPS discovery")
             return []

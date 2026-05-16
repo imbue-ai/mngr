@@ -1640,14 +1640,23 @@ class VpsDockerProvider(BaseProviderInstance):
 
         return result
 
-    def _list_provider_vps_ips(self) -> list[str]:
-        """Return the public IPs of VPSes owned by this provider instance.
+    def _list_provider_vps_hostnames(self) -> list[str]:
+        """Return SSH-reachable hostnames for VPSes owned by this provider instance.
+
+        Each entry is whatever the provider hands back as the SSH target
+        for one of its VPSes -- a public IPv4 (Vultr) or a provider DNS
+        name (OVH classic VPS like ``vps-eec8860b.vps.ovh.us``). The
+        discovery machinery below treats it as an opaque ``hostname``
+        passed to paramiko.
 
         Concrete subclasses implement this by querying their provider's
         listing API (e.g. by tag) and resolving the matching instances'
-        public IPs. The remaining discovery machinery -- parallel SSH into
-        each VPS, reading host records and agent data from the state
-        volume, caching -- is shared and lives in this base class.
+        SSH targets. The remaining discovery machinery -- parallel SSH
+        into each VPS, reading host records and agent data from the
+        state volume, caching -- is shared and lives in this base class.
+
+        Default returns ``[]`` so test doubles and providers without a
+        listing API can opt out without overriding.
         """
         return []
 
@@ -1690,11 +1699,11 @@ class VpsDockerProvider(BaseProviderInstance):
     ) -> tuple[list[VpsDockerHostRecord], dict[HostId, list[dict[str, Any]]]]:
         """Discover host records and agent data from all VPSes for this provider.
 
-        Calls ``_list_provider_vps_ips`` to enumerate VPSes (provider-specific),
-        then SSHes to each in parallel to read host records and agent data
-        in a single command per VPS.
+        Calls ``_list_provider_vps_hostnames`` to enumerate VPSes
+        (provider-specific), then SSHes to each in parallel to read host
+        records and agent data in a single command per VPS.
         """
-        vps_ips = self._list_provider_vps_ips()
+        vps_ips = self._list_provider_vps_hostnames()
         if not vps_ips:
             return [], {}
 

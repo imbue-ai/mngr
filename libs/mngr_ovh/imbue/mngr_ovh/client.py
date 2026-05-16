@@ -95,10 +95,6 @@ class OvhVpsClient(VpsClientInterface):
 
     _ssh_key_cache: dict[str, str] = PrivateAttr(default_factory=dict)
 
-    @staticmethod
-    def _wrap_api_call() -> None:
-        """Placeholder hook for retry/backoff; currently a no-op."""
-
     def _call(self, method: str, path: str, **kwargs: Any) -> Any:
         """Invoke the OVH SDK and translate its exceptions to ``VpsApiError``."""
         try:
