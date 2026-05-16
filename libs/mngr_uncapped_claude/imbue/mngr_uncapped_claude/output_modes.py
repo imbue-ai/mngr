@@ -222,6 +222,26 @@ class StreamingOutputWriter(MutableModel):
     assistant_text_parts: list[str] = Field(
         default_factory=list, description="Buffered assistant text used for text/json finalize"
     )
+    assistant_message_count: int = Field(
+        default=0,
+        description=(
+            "Number of distinct ``assistant_message`` transcript events the writer has seen "
+            "(deduped by ``event_id``). The orchestrator snapshots this at turn start and waits "
+            "after WAITING for it to grow past the snapshot, so we don't emit a partial result "
+            "while ``stream_transcript.sh`` is still mirroring claude's per-session JSONL into "
+            "events.jsonl."
+        ),
+    )
+    last_assistant_stop_reason: str | None = Field(
+        default=None,
+        description=(
+            "``stop_reason`` of the most recent ``assistant_message`` event observed. The "
+            "orchestrator uses this together with ``assistant_message_count`` to decide whether "
+            "to finalize on WAITING: a terminal stop_reason (``end_turn``, ``max_tokens``, "
+            "``stop_sequence``) means the LAST assistant message of the turn has arrived; "
+            "anything else (notably ``tool_use``) means more events are still coming."
+        ),
+    )
 
     def write_init_if_needed(self) -> None:
         """Write the synthesized ``system/init`` envelope on first stream-json call."""
@@ -250,6 +270,10 @@ class StreamingOutputWriter(MutableModel):
             text = _coerce_str(event.get("text", ""))
             if text:
                 self.assistant_text_parts.append(text)
+            self.assistant_message_count += 1
+            stop_reason = event.get("stop_reason")
+            if isinstance(stop_reason, str):
+                self.last_assistant_stop_reason = stop_reason
         match self.output_format:
             case OutputFormat.TEXT:
                 pass

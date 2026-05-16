@@ -44,6 +44,7 @@ from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.utils.jsonl_warn import MalformedJsonLineWarner
 from imbue.mngr.utils.jsonl_warn import split_complete_lines
 from imbue.mngr.utils.name_generator import generate_agent_name
+from imbue.mngr.utils.polling import poll_for_value
 from imbue.mngr_claude.plugin import ClaudeAgent
 from imbue.mngr_uncapped_claude.data_types import ArgPartition
 from imbue.mngr_uncapped_claude.data_types import ResultMeta
@@ -109,6 +110,22 @@ _TURN_END_STATES: Final[tuple[AgentLifecycleState, ...]] = (
     AgentLifecycleState.REPLACED,
     AgentLifecycleState.RUNNING_UNKNOWN_AGENT_TYPE,
 )
+
+# Claude API stop_reason values that mean "this assistant message is the LAST
+# one of the turn". Anything else (notably ``tool_use``, or a missing
+# stop_reason) means more events are still coming -- either later cycles
+# within the same turn, or a follow-up message that hasn't been mirrored from
+# claude's per-session JSONL into events.jsonl yet.
+_TERMINAL_STOP_REASONS: Final[frozenset[str]] = frozenset({"end_turn", "stop_sequence", "max_tokens"})
+
+# After mngr observes ``WAITING`` we keep draining the raw transcript for up
+# to this long, hoping to pick up the turn's final assistant_message before we
+# finalize the result envelope. The race we bridge: ``Notification:idle_prompt``
+# flips ``active`` essentially the moment claude reaches end-of-turn, but
+# ``stream_transcript.sh`` only polls claude's per-session JSONL every ~1s, so
+# the final assistant message can lag the WAITING signal by close to that full
+# second. 2 seconds gives us two stream_transcript poll cycles plus a margin.
+_TURN_END_QUIESCE_TIMEOUT_SECONDS: Final[float] = 2.0
 
 EXIT_SUCCESS: Final[int] = 0
 EXIT_CLAUDE_ERROR: Final[int] = 1
@@ -445,17 +462,138 @@ def _wait_for_turn_end(
     will never reach WAITING and the caller treats this as a claude-side
     failure. The returned offset must be threaded back into the next call
     so multi-turn invocations do not re-read prior turns' transcript bytes.
+
+    On WAITING, hands off to :func:`_quiesce_after_waiting` to bridge the
+    race between mngr's near-instant ``active``-file lifecycle signal and
+    ``stream_transcript.sh``'s ~1s mirroring cadence -- without this, a fast
+    end-of-turn produces an empty ``result`` envelope because the assistant
+    message hasn't been copied into events.jsonl yet.
     """
+    baseline_assistant_count = writer.assistant_message_count
     final_state: AgentLifecycleState | None = None
     while final_state is None:
         seen_bytes = _drain_new_events(events_target, writer, parser, read_failure_warner, seen_bytes)
         state = agent.get_lifecycle_state()
         if state in _TURN_END_STATES:
-            seen_bytes = _drain_new_events(events_target, writer, parser, read_failure_warner, seen_bytes)
+            if state == AgentLifecycleState.WAITING:
+                seen_bytes = _quiesce_after_waiting(
+                    events_target,
+                    writer,
+                    parser,
+                    read_failure_warner,
+                    seen_bytes,
+                    baseline_assistant_count,
+                )
+            else:
+                seen_bytes = _drain_new_events(events_target, writer, parser, read_failure_warner, seen_bytes)
             final_state = state
         else:
             time.sleep(_POLL_INTERVAL_SECONDS)
     return final_state, seen_bytes
+
+
+class _QuiesceTicker(MutableModel):
+    """Per-iteration state for :func:`_quiesce_after_waiting`.
+
+    Wraps the drain dependencies plus a mutable ``seen_bytes`` cursor in a
+    bindable object so :func:`poll_for_value` can call :meth:`tick` directly
+    as its producer -- a plain bound-method handle, no module-level closure
+    and no wrapping helper. ``tick`` mutates ``seen_bytes`` in place and
+    returns the updated offset only when the writer has observed at least
+    one new ``assistant_message`` event with a terminal ``stop_reason``
+    since :attr:`baseline_assistant_count`; otherwise it returns ``None`` so
+    the polling helper sleeps and retries.
+    """
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    events_target: EventsTarget = Field(description="Where to read raw transcript bytes from")
+    writer: StreamingOutputWriter = Field(description="Writer whose assistant counters the ticker inspects")
+    parser: RawTranscriptParser = Field(description="Parser to convert raw transcript lines to common events")
+    read_failure_warner: _TranscriptReadFailureWarner = Field(
+        description="Throttler for transcript-read failure warnings"
+    )
+    baseline_assistant_count: int = Field(
+        description="``writer.assistant_message_count`` snapshot taken before the current turn"
+    )
+    seen_bytes: int = Field(description="Byte offset already consumed from the raw transcript")
+
+    def tick(self) -> int | None:
+        self.seen_bytes = _drain_new_events(
+            self.events_target,
+            self.writer,
+            self.parser,
+            self.read_failure_warner,
+            self.seen_bytes,
+        )
+        if (
+            self.writer.assistant_message_count > self.baseline_assistant_count
+            and self.writer.last_assistant_stop_reason in _TERMINAL_STOP_REASONS
+        ):
+            return self.seen_bytes
+        return None
+
+
+def _quiesce_after_waiting(
+    events_target: EventsTarget,
+    writer: StreamingOutputWriter,
+    parser: RawTranscriptParser,
+    read_failure_warner: _TranscriptReadFailureWarner,
+    seen_bytes: int,
+    baseline_assistant_count: int,
+    timeout_seconds: float = _TURN_END_QUIESCE_TIMEOUT_SECONDS,
+) -> int:
+    """Drain after WAITING until the turn's final assistant_message has arrived.
+
+    Returns the new ``seen_bytes`` offset. Exits when either:
+
+    * The writer has observed at least one new ``assistant_message`` event
+      since ``baseline_assistant_count`` AND that event's ``stop_reason`` is in
+      :data:`_TERMINAL_STOP_REASONS` (``end_turn`` / ``max_tokens`` /
+      ``stop_sequence``). That marker means the LAST assistant message of
+      the turn has been mirrored into events.jsonl; further events would only
+      belong to the next turn, which we don't want to consume here.
+    * The :data:`_TURN_END_QUIESCE_TIMEOUT_SECONDS` deadline expires. In that
+      case we emit a single WARNING with the observed state -- common causes
+      are ``stream_transcript.sh`` dying mid-run, claude exiting before
+      flushing a complete final message, or a turn whose final assistant
+      message genuinely has a non-terminal ``stop_reason`` (rare in practice).
+
+    The wait costs at most one quiesce-timeout per turn. In the happy case
+    where events.jsonl already has the terminal assistant message when WAITING
+    fires (long-running turns, slow user, etc.), the first drain inside the
+    loop satisfies the exit condition immediately with no added latency.
+    """
+    # ``poll_for_value`` owns the per-iteration sleep and the timeout
+    # bookkeeping so the orchestrator doesn't need a bare ``time.sleep`` /
+    # ``while True`` loop here. The producer is a bound method on
+    # :class:`_QuiesceTicker`; the ticker carries the per-call state across
+    # iterations so the poll target stays a plain method handle.
+    ticker = _QuiesceTicker(
+        events_target=events_target,
+        writer=writer,
+        parser=parser,
+        read_failure_warner=read_failure_warner,
+        baseline_assistant_count=baseline_assistant_count,
+        seen_bytes=seen_bytes,
+    )
+    result, _, _ = poll_for_value(
+        producer=ticker.tick,
+        timeout=timeout_seconds,
+        poll_interval=_POLL_INTERVAL_SECONDS,
+    )
+    if result is None:
+        logger.warning(
+            "Turn-end quiesce timed out after {:.1f}s "
+            "(assistant_message_count={}, baseline={}, last_stop_reason={!r}); "
+            "the result envelope may be missing the turn's final assistant message",
+            timeout_seconds,
+            writer.assistant_message_count,
+            baseline_assistant_count,
+            writer.last_assistant_stop_reason,
+        )
+        return ticker.seen_bytes
+    return result
 
 
 def _drain_new_events(

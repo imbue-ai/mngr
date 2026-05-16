@@ -156,6 +156,92 @@ def test_stream_json_writer_suppresses_user_messages_by_default() -> None:
     assert types == ["system", "assistant", "result"]
 
 
+def test_writer_tracks_assistant_message_count_across_events() -> None:
+    """Every assistant_message event bumps the count, even ones with empty text
+    (which are common for tool-only cycles within a single turn). Non-assistant
+    events (user_message, tool_result) do not advance the counter."""
+    stdout = io.StringIO()
+    writer = StreamingOutputWriter(output_format=OutputFormat.TEXT, session_id="s", stdout=stdout)
+    assert writer.assistant_message_count == 0
+
+    writer.emit_events([_assistant_event("hi")])
+    assert writer.assistant_message_count == 1
+
+    empty_text_assistant: dict[str, object] = {
+        "type": "assistant_message",
+        "event_id": "evt-tool-only",
+        "text": "",
+        "tool_calls": [],
+        "model": "claude-test",
+        "stop_reason": "tool_use",
+        "usage": None,
+        "message_uuid": "uuid-tool-only",
+    }
+    writer.emit_events([empty_text_assistant])
+    assert writer.assistant_message_count == 2
+
+    writer.emit_events([_user_event("ignored")])
+    assert writer.assistant_message_count == 2
+
+
+def test_writer_tracks_last_assistant_stop_reason() -> None:
+    """The orchestrator uses ``last_assistant_stop_reason`` to gate end-of-turn
+    finalization, so it must always reflect the most recently observed value."""
+    stdout = io.StringIO()
+    writer = StreamingOutputWriter(output_format=OutputFormat.TEXT, session_id="s", stdout=stdout)
+    assert writer.last_assistant_stop_reason is None
+
+    tool_use_assistant: dict[str, object] = {
+        "type": "assistant_message",
+        "event_id": "evt-1",
+        "text": "calling a tool",
+        "tool_calls": [],
+        "model": "claude-test",
+        "stop_reason": "tool_use",
+        "usage": None,
+        "message_uuid": "uuid-1",
+    }
+    writer.emit_events([tool_use_assistant])
+    assert writer.last_assistant_stop_reason == "tool_use"
+
+    end_turn_assistant: dict[str, object] = {
+        "type": "assistant_message",
+        "event_id": "evt-2",
+        "text": "final answer",
+        "tool_calls": [],
+        "model": "claude-test",
+        "stop_reason": "end_turn",
+        "usage": None,
+        "message_uuid": "uuid-2",
+    }
+    writer.emit_events([end_turn_assistant])
+    assert writer.last_assistant_stop_reason == "end_turn"
+
+
+def test_writer_ignores_non_string_stop_reason() -> None:
+    """A missing or non-string ``stop_reason`` must not clobber the last seen
+    value with ``None`` -- otherwise a malformed mid-stream event would erase
+    a previously observed terminal stop_reason and trigger an unnecessary
+    quiesce wait downstream."""
+    stdout = io.StringIO()
+    writer = StreamingOutputWriter(output_format=OutputFormat.TEXT, session_id="s", stdout=stdout)
+    writer.emit_events([_assistant_event("done")])
+    assert writer.last_assistant_stop_reason == "end_turn"
+
+    no_stop_reason: dict[str, object] = {
+        "type": "assistant_message",
+        "event_id": "evt-mal",
+        "text": "more",
+        "tool_calls": [],
+        "model": "claude-test",
+        "stop_reason": None,
+        "usage": None,
+        "message_uuid": "uuid-mal",
+    }
+    writer.emit_events([no_stop_reason])
+    assert writer.last_assistant_stop_reason == "end_turn"
+
+
 def test_stream_json_writer_replays_user_messages_when_enabled() -> None:
     stdout = io.StringIO()
     writer = StreamingOutputWriter(
