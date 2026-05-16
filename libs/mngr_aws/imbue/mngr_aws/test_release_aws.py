@@ -65,7 +65,8 @@ def _run_mngr(*args: str, timeout: int = 300) -> subprocess.CompletedProcess[str
     so every EC2 instance the test spins up has cloud-init schedule a
     ``shutdown -P +N``. Combined with the launch flag
     ``InstanceInitiatedShutdownBehavior=terminate``, this guarantees self-
-    termination even if pytest is killed before the cleanup fixture runs.
+    termination even if pytest is killed before the session-end cleanup
+    hook in ``conftest.py`` runs.
     """
     env = os.environ.copy()
     env["MNGR_AWS_AUTO_SHUTDOWN_MINUTES"] = str(_TEST_INSTANCE_AUTO_SHUTDOWN_MINUTES)
