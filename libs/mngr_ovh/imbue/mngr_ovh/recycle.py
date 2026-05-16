@@ -1,12 +1,12 @@
 """Recycle cancelled OVH VPSes on ``mngr create`` instead of ordering fresh.
 
-OVH classic VPS billing is monthly and termination is an
-email-confirmation-required, end-of-month event. Between
-``destroy_host`` (which calls ``POST /vps/{s}/terminate``) and the actual
-end-of-month decommission, the VPS keeps running and keeps being billed.
-A new ``mngr create`` against the same provider during that window can
-reuse one of these cancelled-but-still-alive VPSes for free instead of
-ordering a fresh one for a new full month of billing.
+OVH classic VPS billing is monthly and OVH does not prorate cancellations.
+``mngr destroy`` cancels via ``PUT /vps/{s}/serviceInfos``
+(``renew.deleteAtExpiration=true``); between that flag flip and the
+OVH-side ``expiration`` date the VPS keeps running and keeps being
+billed. A new ``mngr create`` against the same provider during that
+window can reuse one of these cancelled-but-still-alive VPSes for free
+instead of ordering a fresh one for a new full month of billing.
 
 This module owns:
 - candidate selection (filter cancelled+tagged VPSes by plan/region/state/expiration)
