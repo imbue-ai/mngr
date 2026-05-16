@@ -209,7 +209,7 @@ class OvhVpsClient(VpsClientInterface):
         may linger until the end of the billing period.
 
         If this VPS is currently mid-recycle (a ``RecycleHandle`` was
-        registered via ``register_recycle_aborter`` but neither
+        registered via ``register_recycle_handle`` but neither
         ``finalize_recycle`` nor ``abort_recycle`` has run yet), this
         call short-circuits to release the recycle lock only. The VPS
         is already cancelled, so calling ``/terminate`` again would be
