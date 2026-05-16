@@ -32,13 +32,8 @@ def test_generate_default_lima_yaml(tmp_path: Path) -> None:
 
     assert config["portForwards"] == [
         {
-            "guestIPMustBeZero": True,
             "guestIP": "0.0.0.0",
-            "guestPortRange": [1, 65535],
-            "ignore": True,
-        },
-        {
-            "guestIP": "127.0.0.1",
+            "proto": "any",
             "guestPortRange": [1, 65535],
             "ignore": True,
         },
@@ -159,8 +154,7 @@ def test_merge_lima_yaml_extends_provision_and_mounts_replaces_images() -> None:
 
 def test_merge_lima_yaml_forces_port_forwards_disabled() -> None:
     base_disabled = [
-        {"guestIPMustBeZero": True, "guestIP": "0.0.0.0", "guestPortRange": [1, 65535], "ignore": True},
-        {"guestIP": "127.0.0.1", "guestPortRange": [1, 65535], "ignore": True},
+        {"guestIP": "0.0.0.0", "proto": "any", "guestPortRange": [1, 65535], "ignore": True},
     ]
     base = {"portForwards": base_disabled, "cpus": 4}
     user_override = {"portForwards": [{"guestPort": 8082, "hostPort": 8082}], "cpus": 8}

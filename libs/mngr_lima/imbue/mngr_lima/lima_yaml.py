@@ -37,21 +37,18 @@ def _get_arch_string() -> str:
 def _disable_port_forwards_rules() -> list[dict]:
     """Lima portForwards entries that disable all guest -> host port forwarding.
 
-    Lima always appends two default rules that forward any TCP port bound on
-    127.0.0.1 or 0.0.0.0 in the guest to 127.0.0.1 on the host. An empty
-    user list does not override those defaults. We supply explicit matching
-    rules with ignore: true so the defaults never fire. Lima manages the SSH
-    port outside of portForwards, so it remains reachable.
+    Lima appends one internal fallback rule that forwards any TCP/UDP guest
+    socket on guestIP 127.0.0.1 -- which also matches bind addresses 0.0.0.0,
+    ::, and ::1 -- to host 127.0.0.1. An empty user list does not override
+    that fallback. We supply Lima's documented "disable all forwarding"
+    catchall (one rule, proto any, full port range, ignore true) so the
+    fallback never fires. Lima manages the SSH port outside of portForwards,
+    so it remains reachable.
     """
     return [
         {
-            "guestIPMustBeZero": True,
             "guestIP": "0.0.0.0",
-            "guestPortRange": [1, 65535],
-            "ignore": True,
-        },
-        {
-            "guestIP": "127.0.0.1",
+            "proto": "any",
             "guestPortRange": [1, 65535],
             "ignore": True,
         },
@@ -220,6 +217,7 @@ def load_user_lima_yaml(yaml_path: Path) -> dict:
 
 
 _LIST_EXTEND_KEYS = frozenset({"provision", "mounts"})
+_LOCKED_KEYS = frozenset({"portForwards"})
 
 
 def merge_lima_yaml(base: dict, override: dict) -> dict:
@@ -231,22 +229,19 @@ def merge_lima_yaml(base: dict, override: dict) -> dict:
     volume mount in `mounts` -- are not silently dropped by a user who only
     meant to add their own. Lima runs `provision[mode=system]` scripts in list
     order, so base-first means mngr's host-key swap runs before any user
-    script. `portForwards` is always forced to the disabled rules so guest-
-    bound services never get auto-exposed on the host loopback; all traffic
-    must go through SSH.
+    script. Keys in `_LOCKED_KEYS` (currently `portForwards`) are not
+    overridable -- the base's value wins, with a warning -- so security-
+    sensitive defaults can't be unset via a user `--file` YAML.
     """
     merged = dict(base)
     for key, value in override.items():
-        if key == "portForwards":
-            logger.warning(
-                "Ignoring portForwards in user-provided Lima YAML; port forwarding is disabled.",
-            )
+        if key in _LOCKED_KEYS:
+            logger.warning("Ignoring locked key {!r} in user-provided Lima YAML.", key)
             continue
         if key in _LIST_EXTEND_KEYS and isinstance(value, list) and isinstance(merged.get(key), list):
             merged[key] = list(merged[key]) + list(value)
         else:
             merged[key] = value
-    merged["portForwards"] = _disable_port_forwards_rules()
     return merged
 
 
