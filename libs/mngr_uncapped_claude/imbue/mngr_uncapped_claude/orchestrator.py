@@ -210,9 +210,19 @@ def run(
         return EXIT_MNGR_ERROR
 
     start_time = time.monotonic()
-    state, exit_code = _run_with_agent(mngr_ctx, partition, first_prompt, prompts, stdout, start_time)
-    if state is not None:
-        _destroy_agent(state.agent, state.host)
+    # ``state_holder`` is populated by ``_run_with_agent`` as soon as the agent
+    # has been created. The ``finally`` below destroys whatever ended up in
+    # it, so even an unexpected exception inside ``_run_with_agent`` (anything
+    # other than the ``BaseMngrError`` it handles internally) cannot leak the
+    # agent. On SIGINT the ``_DestroyOnSignal`` handler destroys the agent and
+    # then ``os.kill``s the process, so this ``finally`` does not run -- which
+    # is intentional and avoids a double-destroy.
+    state_holder: list[_RunState] = []
+    try:
+        exit_code = _run_with_agent(mngr_ctx, partition, first_prompt, prompts, stdout, start_time, state_holder)
+    finally:
+        if state_holder:
+            _destroy_agent(state_holder[0].agent, state_holder[0].host)
     return exit_code
 
 
@@ -233,8 +243,15 @@ def _run_with_agent(
     remaining_prompts: Iterator[str],
     stdout: IO[str],
     start_time: float,
-) -> tuple[_RunState | None, int]:
-    """Create the agent, drive all turns, return (state, exit_code)."""
+    state_holder_out: list[_RunState],
+) -> int:
+    """Create the agent, drive all turns, return the exit code.
+
+    ``state_holder_out`` is appended-to as soon as the agent has been created;
+    the caller owns destroying whatever ends up in it. This split means that
+    even an unexpected exception inside this function (anything other than the
+    ``BaseMngrError`` cases handled internally) cannot leak the agent.
+    """
     local_host = _get_local_host(mngr_ctx)
     cwd = Path.cwd().resolve()
     source_location = HostLocation(host=local_host, path=cwd)
@@ -263,17 +280,17 @@ def _run_with_agent(
         )
     except BaseMngrError as exc:
         logger.error("Failed to create agent: {}", exc)
-        return None, EXIT_MNGR_ERROR
+        return EXIT_MNGR_ERROR
 
     if not isinstance(result.agent, ClaudeAgent):
-        # api_create with ``agent_type=AgentTypeName("claude")`` always
-        # returns a ClaudeAgent; this assert is purely a type-narrowing
-        # check that should be unreachable in practice. We need the narrowed
-        # type because ``_RunState.agent`` is typed ``ClaudeAgent`` (its
-        # pydantic field re-validation rejects the abstract ``AgentInterface``
-        # base type otherwise — see commit message for details).
+        # ``api_create`` with ``agent_type=AgentTypeName("claude")`` always
+        # returns a ``ClaudeAgent``; this branch is purely a type-narrowing
+        # check that should be unreachable in practice. The narrowing is
+        # required because ``_RunState.agent`` is typed as ``ClaudeAgent``,
+        # and pydantic re-validates field values on model construction --
+        # passing the abstract ``AgentInterface`` base would be rejected.
         logger.error("Unexpected agent type from api_create: {!r}", type(result.agent).__name__)
-        return None, EXIT_MNGR_ERROR
+        return EXIT_MNGR_ERROR
     agent = result.agent
     host = result.host
 
@@ -284,13 +301,17 @@ def _run_with_agent(
         replay_user_messages=partition.replay_user_messages,
     )
     state = _RunState(agent=agent, host=host, writer=writer)
+    # Publish the state to the caller's holder before any failable work so
+    # that the caller's ``finally`` clause can destroy the agent if anything
+    # below raises an unexpected exception.
+    state_holder_out.append(state)
 
     events_target = _build_events_target(mngr_ctx, agent)
     if events_target is None:
         error_text = f"Cannot read events for agent {agent.name} (no online host or volume)"
         logger.error("{}", error_text)
         _finalize_run(writer, start_time, agent_id=str(agent.id), error_text=error_text, turn_count=1)
-        return state, EXIT_MNGR_ERROR
+        return EXIT_MNGR_ERROR
 
     final_state: AgentLifecycleState
     # Count conversational turns delivered. The initial_message in
@@ -331,16 +352,16 @@ def _run_with_agent(
         except BaseMngrError as exc:
             logger.error("Run failed: {}", exc)
             _finalize_run(writer, start_time, agent_id=str(agent.id), error_text=str(exc), turn_count=turn_count)
-            return state, EXIT_MNGR_ERROR
+            return EXIT_MNGR_ERROR
 
     if final_state != AgentLifecycleState.WAITING:
         error_text = f"agent ended in state {final_state.value} before reaching WAITING"
         logger.error("{}", error_text)
         _finalize_run(writer, start_time, agent_id=str(agent.id), error_text=error_text, turn_count=turn_count)
-        return state, EXIT_CLAUDE_ERROR
+        return EXIT_CLAUDE_ERROR
 
     _finalize_run(writer, start_time, agent_id=str(agent.id), error_text=None, turn_count=turn_count)
-    return state, EXIT_SUCCESS
+    return EXIT_SUCCESS
 
 
 def _get_local_host(mngr_ctx: MngrContext) -> OnlineHostInterface:
