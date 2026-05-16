@@ -34,6 +34,34 @@ def _get_arch_string() -> str:
     return "x86_64"
 
 
+def _disable_port_forwards_rules() -> list[dict]:
+    """Lima portForwards entries that disable all guest -> host port forwarding.
+
+    Lima always appends a fallback rule that forwards any guest TCP/UDP
+    socket to host loopback; an empty list does not suppress it. User
+    rules match the guest bind address literally (Lima 2.1.1), so a
+    single `guestIP: 0.0.0.0` rule does not catch `127.0.0.1`-bound
+    sockets and vice versa. We supply one rule for each so neither
+    leaks. SSH uses Lima's separate ssh.localPort mechanism and is
+    unaffected.
+    """
+    return [
+        {
+            "guestIPMustBeZero": True,
+            "guestIP": "0.0.0.0",
+            "proto": "any",
+            "guestPortRange": [1, 65535],
+            "ignore": True,
+        },
+        {
+            "guestIP": "127.0.0.1",
+            "proto": "any",
+            "guestPortRange": [1, 65535],
+            "ignore": True,
+        },
+    ]
+
+
 def generate_default_lima_yaml(
     volume_host_path: Path,
     host_dir: str,
@@ -75,8 +103,7 @@ def generate_default_lima_yaml(
                 "writable": True,
             },
         ],
-        # Disable port forwarding -- use SSH for everything
-        "portForwards": [],
+        "portForwards": _disable_port_forwards_rules(),
         # Provision required packages if not in the image
         "provision": [
             {
@@ -197,6 +224,7 @@ def load_user_lima_yaml(yaml_path: Path) -> dict:
 
 
 _LIST_EXTEND_KEYS = frozenset({"provision", "mounts"})
+_LOCKED_KEYS = frozenset({"portForwards"})
 
 
 def merge_lima_yaml(base: dict, override: dict) -> dict:
@@ -208,10 +236,15 @@ def merge_lima_yaml(base: dict, override: dict) -> dict:
     volume mount in `mounts` -- are not silently dropped by a user who only
     meant to add their own. Lima runs `provision[mode=system]` scripts in list
     order, so base-first means mngr's host-key swap runs before any user
-    script.
+    script. Keys in `_LOCKED_KEYS` (currently `portForwards`) are retained
+    from the base so a user `--file` YAML cannot reopen security-sensitive
+    defaults.
     """
     merged = dict(base)
     for key, value in override.items():
+        if key in _LOCKED_KEYS:
+            logger.trace("Ignoring locked key {!r} in user Lima YAML", key)
+            continue
         if key in _LIST_EXTEND_KEYS and isinstance(value, list) and isinstance(merged.get(key), list):
             merged[key] = list(merged[key]) + list(value)
         else:
