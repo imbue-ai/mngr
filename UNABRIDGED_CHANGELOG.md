@@ -4,6 +4,213 @@ Full, unedited changelog entries consolidated nightly from individual files in t
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-05-15
+
+Restore Modal compatibility for the standard mngr Dockerfile and adopt offload's `post_patch_cmd` (introduced in v0.9.4). The Dockerfile is back to a single `FROM python:3.12-slim` stage (mngr's Modal image builder rejects multi-stage Dockerfiles), and all source-dependent setup (tarball extraction, git normalization, `image_commit_hash`, `uv sync`) lives in `scripts/post-source-setup.sh`, called both as the final Dockerfile RUN and as offload's `post_patch_cmd` so the two paths stay in sync. Bumps the offload pin from 0.9.2 to 0.9.5.
+
+## 2026-05-14
+
+## mngr-latchkey + minds: switch permission management to the latchkey 2.9.0 gateway extensions
+
+### Summary
+
+Latchkey 2.9.0 ships two new gateway extensions that this branch wires
+into `mngr_latchkey` and the minds desktop client:
+
+- `permission_requests.mjs` -- per-process pending-permission queue.
+  Agents `POST /permission-requests` when they hit a blocked service;
+  the desktop client consumes `GET /permission-requests?follow=true`
+  to learn about new requests and `DELETE /permission-requests/<id>`
+  to clear them once granted or denied.
+- `permissions.mjs` -- a `permissions.json` editor that operates on any
+  file path inside `LATCHKEY_EXTENSION_PERMISSIONS_ROOT`. Used by the
+  desktop client to apply per-host permission grants via
+  `POST /permissions/rules?path=<host_file>&rule_key=<scope>`.
+
+Both extensions are bundled in `imbue-mngr-latchkey` and dropped into
+`<LATCHKEY_DIRECTORY>/extensions/` automatically every time `mngr
+latchkey forward` spawns the shared gateway.
+
+### `imbue-mngr-latchkey`
+
+- `LATCHKEY_MIN_VERSION` bumped from 2.8.0 to 2.9.0.
+- New extension files at
+  `imbue/mngr_latchkey/extensions/{permission_requests,permissions}.mjs`,
+  rewritten from the originally-supplied drafts:
+    * `permissions.mjs` now takes the target file path and rule key
+      via the `?path=` and `?rule_key=` query params. It requires the
+      `LATCHKEY_EXTENSION_PERMISSIONS_ROOT` env var (set by
+      `Latchkey._spawn_gateway` to the plugin data dir) and refuses
+      any path that resolves outside it.
+    * `permission_requests.mjs` no longer accepts a caller-supplied
+      `request_id`; the extension generates one server-side (a
+      UUID-shaped hex string) and returns it in the POST response.
+- `Latchkey.create_admin_permissions_jwt()` -- materializes
+  `<plugin_data_dir>/latchkey_admin_permissions.json` (idempotent,
+  with the wildcard rule `{"any": ["any"]}`) and returns a cached
+  JWT pointing at it. Calling code uses this JWT in the
+  `X-Latchkey-Gateway-Permissions-Override` header when it needs
+  full access to the gateway's extension endpoints.
+- New `mngr latchkey admin-jwt` CLI subcommand wraps the above and
+  prints the JWT on stdout for shell-driven workflows.
+- New `mngr latchkey gateway-info` CLI subcommand that prints the
+  shared gateway's URL + password as a single JSON object on stdout.
+  The bound gateway port is stamped onto the existing
+  `LatchkeyForwardInfo` record (`gateway_port` field) so non-spawning
+  processes can discover where the gateway is listening; the
+  password is intentionally **never** persisted on disk and is
+  derived locally by every consumer via
+  :meth:`Latchkey.derive_gateway_password` (a pure function of the
+  user's latchkey encryption key).
+
+### Minds desktop client
+
+- `cli/run.py` now blocks on `_wait_for_gateway_port` (which polls
+  `LatchkeyForwardInfo.gateway_port` for a non-None value) before the
+  FastAPI app is built, then derives the gateway password and mints
+  the admin JWT in-process and constructs a `LatchkeyGatewayClient`
+  shared by every code path that talks to the gateway extensions.
+- New `PermissionRequestsConsumer` daemon thread streams
+  `GET /permission-requests?follow=true` and feeds each pending
+  request into the existing `RequestInbox`. The legacy
+  `events.jsonl` callback now ignores `LATCHKEY_PERMISSION` lines
+  because the extension owns that flow; non-latchkey
+  `PERMISSIONS` events still go through the JSONL channel
+  unchanged.
+- `LatchkeyPermissionGrantHandler` applies grants via the new
+  `permissions` extension (`POST /permissions/rules?path=...&rule_key=...`)
+  and clears the pending gateway record via `DELETE
+  /permission-requests/<id>` on both grant and deny.
+- New `gateway_client.py`, `permission_requests_consumer.py`, and
+  `testing.py` modules support the above; corresponding unit-test
+  files exercise the HTTP wire shape and the streaming/translation
+  paths.
+
+### Compatibility
+
+Agents that still post `LATCHKEY_PERMISSION` request events via the
+old `events.jsonl` channel will no longer reach the minds inbox.
+Migrating agents to the gateway-side `POST /permission-requests`
+endpoint is a follow-up; agents will additionally need their
+per-host baseline permissions to grant `latchkey-self` access so the
+gateway accepts the POST.
+
+- Fixed: a cloned claude agent now actually resumes the source agent's conversation (the model sees and acts on the source's history), not just inherits the session JSONL on disk. Previously, after #1598's cross-host plugin/ rsync, claude on the destination would still start fresh because the JSONL was filed under the *source's* encoded work_dir, the rsynced ``sessions-index.json`` pointed at source paths, and ``claude_session_id`` was wrong. ``_adopt_cloned_session`` now renames the project subdir to the destination's realpath-resolved encoding (handles the ``/mngr/projects/agent-X`` → ``/__modal/volumes/<vol-id>/projects/agent-X`` symlink on Modal), drops the stale index, writes ``claude_session_id`` to the JSONL filename's stem (the ground truth — the source's own ``claude_session_id`` file holds the agent UUID from the SessionStart hook default rather than the real id), and carries forward ``claude_session_id_history``. The ``--adopt-session`` flow shares the same finalize step.
+
+Regenerated CLI docs for `mngr tmr` and `mngr latchkey` to reflect current options.
+
+Add `gemini` agent type plugin (`imbue-mngr-gemini`) that wires Google's Gemini CLI into mngr.
+
+`mngr create` no longer hard-codes `claude` as the default agent type. The agent type must now come from a positional argument, `--type`, or `[commands.create] type` in user settings. If none of those is supplied, `mngr create` exits with a clear error listing the registered agent types and pointing at `mngr config set commands.create.type <name> --scope user`. (Supersedes the `--type` source-default introduced in `mngr-fix-default.md` from this same release.)
+
+New subcommand `mngr extras config`: walks through user-scope config settings the installer would otherwise leave blank. Each step short-circuits if its setting is already configured, so re-running only prompts for the gaps. Today this just covers the default agent type for `mngr create`; future config-related setup will be added as additional walk steps under the same subcommand. With an interactive terminal, presents an urwid single-select picker of every available agent type plus a "Keep no default" option, and writes the selection to `[commands.create] type` in user settings. With `-y` or without a terminal, prints the suggested `mngr config set` command and lists available agent types -- writes nothing.
+
+`mngr extras completion` and `mngr extras claude-plugin` also use the new urwid picker (Install / Skip) instead of the old `[y/n]:` text prompt -- the entire `mngr extras -i` walkthrough now uses a consistent TUI rather than mixing the plugin-wizard's full-screen TUI with bare-text confirmation prompts.
+
+`mngr extras -i` now also walks through the default agent type prompt as a final step, alongside the existing plugins / completion / Claude-plugin steps. `mngr extras` (no flag) reports the current default agent type as part of the status block.
+
+`scripts/install.sh` no longer contains custom shell logic for the default agent type -- step 5 is gone, since the default agent type prompt now runs as part of `mngr extras -i` (step 4). The new subcommand is also re-runnable via `mngr extras config` if you skip it the first time.
+
+`mngr plugin list` gains a `--kind` filter with two values, `agent-type` and `provider`, that project the plugin list to the canonical set of agent type names or provider backend names (with version/description metadata when entry-point names match).
+
+Migration: existing users who upgrade and have no `[commands.create] type` set will see an error from `mngr create` until they run `mngr config set commands.create.type <name> --scope user` (or pick one via `mngr extras config`). The error message includes the registered agent types so you can copy-paste a value.
+
+Removed the unused `libs/flexmux/` project and all references to it (justfile recipes, `EXCLUDED_RATCHET_PROJECTS` exclusions in `test_meta_ratchets.py` and `scripts/sync_common_ratchets.py`, and the `uv.lock` workspace member).
+
+Bumped the pinned Claude Code CLI version from `2.1.116` to `2.1.141` in `libs/mngr/imbue/mngr/resources/Dockerfile` and the `.github/workflows/{ci,tmr}.yml` install steps, matching the corresponding bump to `[agent_types.claude].version` in `forever-claude-template/.mngr/settings.toml`.
+
+`mngr schedule add --verify quick|full` now works when the trigger's `mngr create` produces an agent that lives inside the cron-runner's local provider (i.e. inside the ephemeral Modal container). Previously the deploy machine could not reach into the container to observe or destroy the agent, so verify failed for that configuration. Verification now runs inside the container itself and reports the result back to the deploy machine over a structured sentinel line.
+
+Add a `use_env_config_dir` option on the `claude` agent type config. When set
+to `true`, local Claude agents share the user's `$CLAUDE_CONFIG_DIR` instead of
+provisioning a per-agent config dir, and mngr does not write to the user's
+Claude config (no trust additions, dialog dismissal, per-agent settings, or
+keychain provisioning). Only supported for local hosts; `$CLAUDE_CONFIG_DIR`
+must be set. The user is responsible for one-time interactive `claude` setup.
+See `libs/mngr_claude/README.md` for details.
+
+CI acceptance test speedups, three changes:
+
+1. Grant `contents: write` to the `test-offload` and `test-offload-acceptance` jobs so offload can push its image-cache git notes back to `refs/notes/offload-images`. Previously every run was a cache miss (the `git push` from offload failed with "Permission to imbue-ai/mngr.git denied to github-actions[bot]"), forcing a full `checkpoint_base_prepare` rebuild (~150 s wasted per CI run on acceptance, similar on the regular offload job). Measured saving on cache hit: ~124 s per acceptance run.
+
+2. Lower `max_parallel` from 200 to 50 in `offload-modal-acceptance.toml`. With 200 slots and ~89 tests, offload's LPT scheduler degenerated to one-test-per-batch, so every batch paid full pytest cold-start, Modal sandbox creation, and an orchestrator-side `uv run` cold-start per download. Lowering to 50 lets LPT pack ~2-4 tests per batch (longest single tests still alone via load-balancing). Combined measured saving: ~62% acceptance wall-clock reduction.
+
+3. Fix the session-end leak detector in `libs/mngr_modal/imbue/mngr_modal/conftest.py` (previously the `modal_session_cleanup` autouse fixture; now a `pytest_sessionfinish` hook so it runs after all session-scoped fixture teardowns -- pytest's autouse session-scoped fixtures tear down before non-autouse session-scoped fixtures regardless of declared dependencies, which made the previous fixture poll a still-registered env and fail before the deregister could run). The detector compared the global `modal environment list --json` against tests' tracked env names, but Modal's listing endpoints are eventually consistent w.r.t. deletion -- after a `modal environment delete X` returns "Environment 'X' not found", the env can still appear in the global list for tens of seconds (and other endpoints have been observed to flip their answers across the same window). With one-test-per-batch the assertion almost never landed in the inconsistency window; with several tests per session it became consistent enough to repeatedly fail teardown on whichever test happened to be last. The fix is twofold: (a) the per-test and session-scope cleanup fixtures deregister tracked resources from `worker_modal_*_names` *only* when the cleanup chain confirmed the resource was deleted or already gone (the synchronous response is authoritative); cleanup failures keep the resource tracked and log a `logger.error` so the session-end leak detector still has a chance to surface a real leak. Cleanup return values are typed via a new `ModalCleanupOutcome` enum (`DELETED | NOT_FOUND | FAILED`). (b) the `pytest_sessionfinish` hook runs after all session-scoped fixture teardowns, so any name still in `worker_modal_*_names` at that point corresponds to a resource whose cleanup either FAILED or was never attempted (test crashed mid-fixture) -- i.e. a real leak rather than a listing-staleness false positive. `_get_leaked_modal_environments` is therefore a single-shot `modal environment list --json` call shaped exactly like its `_get_leaked_modal_apps` / `_get_leaked_modal_volumes` siblings; the CI hourly `cleanup_old_modal_test_environments.py` script remains the broader safety net.
+
+- `mngr_claude_subagent_proxy`: typed `subagent_type` (e.g. `imbue-code-guardian:verify-and-fix`) now preserves Claude Code's system-prompt contract.
+  - PROXY mode: when the resolver finds an on-disk `.md` definition for the parent's `subagent_type` under `<work_dir>/.claude/agents/`, `~/.claude/agents/`, or `~/.claude/plugins/marketplaces/*/plugins/<plugin>/agents/`, the definition body is prepended to the spawned mngr subagent's prompt file under a labeled section header. Built-in types (`general-purpose`, `Explore`, ...) fall through to the prompt-only path unchanged.
+  - DENY mode: the deny reason now appends a one-line pointer at the resolved path so Claude can prepend the body to its own prompt file before running the skill's spawn-and-wait protocol. The base skill-pointer text is unchanged for unresolved / built-in types.
+  - The `mngr-subagents` skill documents the typed case (including the v1 limitation that tool restrictions declared in agent-definition frontmatter are not honored -- the spawned mngr subagent inherits the user's full Claude config).
+
+**minds**: split the services agent from the initial chat agent. The "primary" agent in a minds workspace now runs only the bootstrap and background services (its window-0 command is `sleep infinity && claude`, so claude never actually starts) and is hidden from the agent list in the UI. On first container boot the bootstrap creates a real chat agent named after the host, sends it `/welcome`, and writes `CLAUDE_CONFIG_DIR` to the host env so every subsequent agent (chat, worktree, worker) shares the services agent's Claude config dir (auth, plugins, marketplaces, sessions). Destroying chat agents no longer tears down services, and restarting services no longer kills chat agents. The workspace_server `/api/agents/<id>/destroy` endpoint refuses to destroy `is_primary=true` agents as a server-side guard. Existing pre-change workspaces are not migrated — re-create them.
+
+Fix tmux argv-parsing footguns for arguments starting with `-`:
+
+- `tmux send-keys -l` now uses the `--` end-of-options separator, so agent commands and messages that start with `-` (e.g. `--model gemma`, `--help`) are no longer misparsed by tmux as flags.
+- `tmux rename-session` now uses `--` before the positional new-name argument, so renaming an agent under a custom prefix that starts with `-` works correctly.
+
+## mngr usage: per-session cost aggregation across recent sessions
+
+The Claude statusline writer (`mngr_claude_usage`) captures `rate_limits` +
+per-render `session_id` + `cost.*` from Claude Code's statusline JSON, into
+`events/claude/usage/events.jsonl` (renamed from `events/claude/rate_limits/`
+since the file is no longer rate-limit-only). The event `type` is
+`cost_snapshot`. The writer no longer skips emission when only `cost` is
+present (no `rate_limits`), so cost tracking now works for direct
+`ANTHROPIC_API_KEY` users -- Claude Code doesn't emit `rate_limits` for them
+(it's Pro/Max only), but `cost` is always present. The writer script is
+named `claude_usage_writer.sh` and reads `$MNGR_USAGE_EVENTS_PATH` for
+the test override.
+
+`mngr usage` now aggregates cost **per session** within a recency window
+instead of just rendering the freshest event's reading, and keeps
+**subscription** and **API-key** spend in separate aggregates so imputed
+estimates never get lumped with real billable spend:
+
+- Reader scans every line of each agent's events file (not just the last),
+  partitions each agent's events into Claude Code processes via cost-drop
+  detection (cost is process-cumulative; `/clear` doesn't reset it), and
+  within each process builds a `SessionCostRecord` per session whose `cost`
+  is its delta from the prior session's cumulative reading.
+- Each session is tagged with a `cost_mode`: `SUBSCRIPTION` if any event in
+  its Claude Code process carried `rate_limits` (Claude.ai Pro/Max --
+  cost is imputed by Claude Code, the user actually pays a flat subscription)
+  or `API_KEY` otherwise (direct `ANTHROPIC_API_KEY` -- cost is real
+  billable spend).
+- Sessions are filtered to those whose last event is within `--since`
+  (default 24h, configurable per-invocation or via plugin config).
+- Human output (default): one cost line per mode that contributed --
+  `subscription cost (imputed): $X.YY ...` and/or `api cost: $X.YY ...`
+  -- followed by the populated rate-limit window lines. Subscription is
+  rendered first; either or both can be present.
+- Human output with `--detail`: adds indented per-session lines (newest-first)
+  between the cost lines and the window lines, each tagged `[sub]` or `[api]`.
+- JSON output (default): `source.subscription_cost.*` and `source.api_cost.*`
+  are the per-mode aggregates; `source.subscription_session_count`,
+  `source.api_session_count`, and `source.session_count` (total) are also
+  exposed. There is intentionally **no** combined `source.cost` field.
+  `sessions[]` is omitted unless `--detail` is set.
+- JSON output with `--detail`: adds `source.sessions[]` (newest-first
+  records, each carrying `cost_mode`).
+- `mngr usage wait --until` CEL surface: `subscription_cost.total_cost_usd`
+  and `api_cost.total_cost_usd` are the per-mode aggregates; no combined
+  `cost` field exists. To predicate on a specific session, index
+  `sessions[]` directly. New `--since` flag affects the aggregates.
+- Format template: top-level `{subscription_cost.*}` / `{api_cost.*}` keys;
+  the format-template surface intentionally doesn't expose per-session
+  paths (use `--format json` if you need them).
+
+Examples:
+
+```
+mngr usage --since 7d                                # aggregate over 7 days
+mngr usage wait --until 'api_cost.total_cost_usd > 20'  # real billable spend crossed $20
+mngr usage wait --until 'subscription_cost.total_cost_usd > 50'  # imputed >$50 of value
+mngr usage wait --until 'sessions[0].cost.total_cost_usd > 5'  # most recent session only
+```
+
+Minds: the "Name" field on the create-project form now sets the *host* name (validated via mngr's `HostName` regex), not the agent name. The agent is always called `system-services`. The imbue_cloud connector grows a required `host_name` on `/hosts/lease` and `/hosts`. Sister change in `forever-claude-template` (matching branch) drops the now-unused `MINDS_WORKSPACE_NAME` from `[commands.create].pass_env`.
+
 ## 2026-05-14
 
 - Bump bundled Latchkey version to 2.11.1.
