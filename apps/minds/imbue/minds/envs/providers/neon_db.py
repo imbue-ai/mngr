@@ -9,6 +9,7 @@ Returns the pooled connection string the connector / connector clients use
 at runtime.
 """
 
+import shutil
 from typing import Final
 
 import httpx
@@ -17,6 +18,7 @@ from pydantic import SecretStr
 from pydantic import TypeAdapter
 from pydantic import ValidationError
 
+from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.minds.envs.primitives import DevEnvName
 from imbue.minds.errors import MindError
@@ -34,6 +36,12 @@ _REQUEST_TIMEOUT_SECONDS: Final[float] = 60.0
 # Neon region doesn't trip us up.
 _LOCKED_RETRY_POLL_INTERVAL_SECONDS: Final[float] = 2.0
 _LOCKED_RETRY_TOTAL_BUDGET_SECONDS: Final[float] = 60.0
+
+# psql shellout for schema-level wipe (Neon REST API doesn't expose
+# schema ops). Generous enough to absorb a slow Neon cold-start; short
+# enough that a real connectivity failure surfaces in well under a
+# minute.
+_PSQL_WIPE_TIMEOUT_SECONDS: Final[float] = 60.0
 
 
 class NeonProviderError(MindError):
@@ -232,3 +240,52 @@ def delete_neon_database(
         if "404" in str(exc):
             return
         raise
+
+
+def wipe_neon_db_schema(dsn: SecretStr, *, parent_cg: ConcurrencyGroup) -> None:
+    """Drop and recreate the ``public`` schema in the database ``dsn`` points at.
+
+    Used by ``minds env destroy --yes-i-mean-staging`` to clear the
+    staging Neon DB's tables without deleting the database itself --
+    the operator's Vault entry holds the DSN, and we want it to stay
+    valid across destroy / redeploy cycles.
+
+    Implementation: shells out to ``psql <dsn>`` with ``DROP SCHEMA public
+    CASCADE; CREATE SCHEMA public;``. The Neon REST API does not expose
+    schema-level operations, and pulling psycopg into the minds runtime
+    just for this single op is more weight than the shellout. ``psql``
+    is a standard postgres-client binary; the deploy machine already
+    has it (Modal workers / dev laptops both ship it via ``apt install
+    postgresql-client`` or homebrew). Raises :class:`NeonProviderError`
+    when ``psql`` is missing or the SQL fails -- destroy aborts so the
+    operator can fix the underlying issue rather than silently leaving
+    the schema half-wiped.
+
+    Idempotent: ``DROP SCHEMA public CASCADE`` succeeds whether or not
+    the schema has tables, and ``CREATE SCHEMA public`` recreates an
+    empty one.
+    """
+    psql_path = shutil.which("psql")
+    if psql_path is None:
+        raise NeonProviderError(
+            "psql binary not on PATH; cannot wipe the Neon schema. Install via "
+            "`apt install postgresql-client` (Debian/Ubuntu) or `brew install libpq` (macOS)."
+        )
+    command = [
+        psql_path,
+        dsn.get_secret_value(),
+        "-v",
+        "ON_ERROR_STOP=1",
+        "-c",
+        "DROP SCHEMA public CASCADE; CREATE SCHEMA public;",
+    ]
+    cg = parent_cg.make_concurrency_group(name="psql-wipe-neon-schema")
+    with cg:
+        result = cg.run_process_to_completion(
+            command=command,
+            timeout=_PSQL_WIPE_TIMEOUT_SECONDS,
+            is_checked_after=False,
+        )
+    if result.returncode != 0:
+        stderr = result.stderr.strip() or result.stdout.strip()
+        raise NeonProviderError(f"`psql` exited {result.returncode} while wiping the Neon schema: {stderr}")

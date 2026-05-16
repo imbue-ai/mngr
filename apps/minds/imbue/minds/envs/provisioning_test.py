@@ -30,6 +30,7 @@ from imbue.minds.envs.provisioning import deploy_tier_env
 from imbue.minds.envs.provisioning import destroy_dev_env
 from imbue.minds.envs.provisioning import destroy_tier_env
 from imbue.minds.envs.provisioning import list_dev_envs
+from imbue.minds.errors import MindError
 from imbue.minds.primitives import ServiceName
 
 
@@ -79,8 +80,23 @@ def _build_fake_providers(
     fail_step: str | None = None,
     fail_delete: set[str] | None = None,
     vultr_instances: tuple[VultrInstanceSummary, ...] = (),
+    vault_responses: dict[str, dict[str, str]] | None = None,
 ) -> Providers:
     fail_delete = fail_delete or set()
+    # Canned Vault dicts so tier-destroy wipes can find what they need
+    # (SUPERTOKENS_CONNECTION_URI / SUPERTOKENS_API_KEY for the
+    # SuperTokens wipe; DATABASE_URL for the Neon wipe). Tests that
+    # exercise the empty-Vault failure mode pass an explicit empty dict.
+    if vault_responses is None:
+        vault_responses = {
+            "supertokens": {
+                "SUPERTOKENS_CONNECTION_URI": "https://st.example.com/appid-staging",
+                "SUPERTOKENS_API_KEY": "fake-api-key",
+            },
+            "neon": {
+                "DATABASE_URL": "postgres://user:pass@host/db",
+            },
+        }
 
     def ensure_modal_env(name, cg):
         call_log["calls"].append(("ensure_modal_env", str(name)))
@@ -133,7 +149,12 @@ def _build_fake_providers(
 
     def read_per_env_secret_values(service, tier_vault_prefix, overrides, cg):
         call_log["calls"].append(("read_per_env_secret_values", service))
-        return dict(overrides)
+        # Merge canned Vault baseline + caller overrides, mirroring the
+        # real ``build_per_env_secret_values`` behaviour. Empty for
+        # services the test setup didn't pre-populate.
+        merged = dict(vault_responses.get(service, {}))
+        merged.update(overrides)
+        return merged
 
     def push_per_env_modal_secret(secret_name, values, modal_env, cg):
         call_log["calls"].append(("push_per_env_modal_secret", secret_name, modal_env))
@@ -167,6 +188,16 @@ def _build_fake_providers(
         if fail_step == "destroy_mngr_agent":
             raise MngrAgentCleanupError("mngr destroy boom")
 
+    def wipe_supertokens_app_data(app_id, core_base_url, api_key):
+        call_log["calls"].append(("wipe_supertokens_app_data", app_id, core_base_url))
+        if fail_step == "wipe_supertokens":
+            raise SuperTokensProviderError("st wipe boom")
+
+    def wipe_neon_db_schema(dsn, cg):
+        call_log["calls"].append(("wipe_neon_db_schema", dsn.get_secret_value()))
+        if fail_step == "wipe_neon":
+            raise NeonProviderError("neon wipe boom")
+
     return Providers(
         ensure_modal_env=ensure_modal_env,
         delete_modal_env=delete_modal_env,
@@ -183,6 +214,8 @@ def _build_fake_providers(
         stop_modal_app=stop_modal_app,
         delete_modal_secret=delete_modal_secret,
         destroy_mngr_agent=destroy_mngr_agent,
+        wipe_supertokens_app_data=wipe_supertokens_app_data,
+        wipe_neon_db_schema=wipe_neon_db_schema,
     )
 
 
@@ -712,3 +745,109 @@ def test_destroy_tier_env_leaves_env_root_when_step_fails(_isolated_home: Path, 
             parent_concurrency_group=_root_cg,
         )
     assert staging_root.exists()
+
+
+def test_destroy_tier_env_wipes_supertokens_app_with_parsed_app_id(
+    _isolated_home: Path, _root_cg: ConcurrencyGroup
+) -> None:
+    """SuperTokens wipe must extract the app_id from the Vault connection URI."""
+    staging_root = _isolated_home / ".minds-staging"
+    staging_root.mkdir()
+    call_log = _make_call_log()
+    providers = _build_fake_providers(
+        call_log,
+        vault_responses={
+            "supertokens": {
+                "SUPERTOKENS_CONNECTION_URI": "https://st.imbue.com/appid-my-staging-app",
+                "SUPERTOKENS_API_KEY": "secret-key-xyz",
+            },
+            "neon": {"DATABASE_URL": "postgres://x"},
+        },
+    )
+    destroy_tier_env(
+        tier="staging",
+        deploy_config=_deploy_config(tier="staging", modal_env="main"),
+        providers=providers,
+        parent_concurrency_group=_root_cg,
+    )
+    st_calls = [c for c in call_log["calls"] if c[0] == "wipe_supertokens_app_data"]
+    assert st_calls == [("wipe_supertokens_app_data", "my-staging-app", "https://st.imbue.com")]
+
+
+def test_destroy_tier_env_wipes_neon_with_dsn_from_vault(_isolated_home: Path, _root_cg: ConcurrencyGroup) -> None:
+    """Neon wipe must use the DATABASE_URL from the tier Vault entry."""
+    staging_root = _isolated_home / ".minds-staging"
+    staging_root.mkdir()
+    call_log = _make_call_log()
+    providers = _build_fake_providers(
+        call_log,
+        vault_responses={
+            "supertokens": {
+                "SUPERTOKENS_CONNECTION_URI": "https://st/appid-staging",
+                "SUPERTOKENS_API_KEY": "k",
+            },
+            "neon": {"DATABASE_URL": "postgres://realuser:realpass@neon.host/realdb"},
+        },
+    )
+    destroy_tier_env(
+        tier="staging",
+        deploy_config=_deploy_config(tier="staging", modal_env="main"),
+        providers=providers,
+        parent_concurrency_group=_root_cg,
+    )
+    neon_calls = [c for c in call_log["calls"] if c[0] == "wipe_neon_db_schema"]
+    assert neon_calls == [("wipe_neon_db_schema", "postgres://realuser:realpass@neon.host/realdb")]
+
+
+def test_destroy_tier_env_refuses_when_supertokens_vault_entry_incomplete(
+    _isolated_home: Path, _root_cg: ConcurrencyGroup
+) -> None:
+    """A misconfigured / missing Vault entry must fail loud, not skip the wipe."""
+    staging_root = _isolated_home / ".minds-staging"
+    staging_root.mkdir()
+    providers = _build_fake_providers(
+        _make_call_log(),
+        vault_responses={
+            "supertokens": {},
+            "neon": {"DATABASE_URL": "postgres://x"},
+        },
+    )
+    with pytest.raises(MindError, match="SUPERTOKENS_CONNECTION_URI"):
+        destroy_tier_env(
+            tier="staging",
+            deploy_config=_deploy_config(tier="staging", modal_env="main"),
+            providers=providers,
+            parent_concurrency_group=_root_cg,
+        )
+    # Env root stays because the wipe step failed mid-flight.
+    assert staging_root.exists()
+
+
+def test_destroy_tier_env_full_step_order(_isolated_home: Path, _root_cg: ConcurrencyGroup) -> None:
+    """End-to-end: agents -> modal stop -> secret delete -> supertokens wipe -> neon wipe -> env root removed."""
+    staging_root = _isolated_home / ".minds-staging"
+    agents_dir = staging_root / "mngr" / "agents"
+    agents_dir.mkdir(parents=True)
+    (agents_dir / "agent-aaaa").mkdir()
+
+    call_log = _make_call_log()
+    providers = _build_fake_providers(call_log)
+    destroy_tier_env(
+        tier="staging",
+        deploy_config=_deploy_config(tier="staging", modal_env="main"),
+        providers=providers,
+        parent_concurrency_group=_root_cg,
+    )
+    step_names = [c[0] for c in call_log["calls"]]
+    assert step_names == [
+        "destroy_mngr_agent",
+        "stop_modal_app",
+        "stop_modal_app",
+        "delete_modal_secret",
+        "read_per_env_secret_values",
+        "wipe_supertokens_app_data",
+        "read_per_env_secret_values",
+        "wipe_neon_db_schema",
+    ]
+    # And env root is gone after the full flow succeeds.
+    assert not staging_root.exists()

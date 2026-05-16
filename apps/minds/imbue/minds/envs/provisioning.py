@@ -79,6 +79,7 @@ from imbue.minds.envs.providers.neon_db import NeonDatabaseRecord
 from imbue.minds.envs.providers.neon_db import NeonProviderError
 from imbue.minds.envs.providers.supertokens_app import SuperTokensAppRecord
 from imbue.minds.envs.providers.supertokens_app import SuperTokensProviderError
+from imbue.minds.envs.providers.supertokens_app import app_id_from_connection_uri
 from imbue.minds.envs.providers.vultr_tags import VultrInstanceSummary
 from imbue.minds.errors import MindError
 
@@ -127,6 +128,13 @@ StopModalAppFn = Callable[[str, str, ConcurrencyGroup], None]
 # (secret_name, modal_env, cg) -> None. Used by tier destroys to
 # ``modal secret delete`` each pushed per-tier Modal Secret. Idempotent.
 DeleteModalSecretFn = Callable[[str, str, ConcurrencyGroup], None]
+# (app_id, core_base_url, api_key) -> None. Used by tier destroys to
+# wipe every user/session in an existing SuperTokens app without
+# deleting the app itself. Idempotent via delete + recreate.
+WipeSuperTokensAppFn = Callable[[str, str, SecretStr], None]
+# (dsn, cg) -> None. Used by tier destroys to drop + recreate the
+# ``public`` schema in the Neon DB the DSN points at.
+WipeNeonSchemaFn = Callable[[SecretStr, ConcurrencyGroup], None]
 ReadPerEnvSecretValuesFn = Callable[[str, str, dict[str, str], ConcurrencyGroup], dict[str, str]]
 
 
@@ -170,6 +178,19 @@ class Providers(FrozenModel):
             "(agent_id, mngr_host_dir, mngr_prefix, cg) -> `mngr destroy <agent_id>` "
             "with the env's MNGR_* vars exported. Used before cloud teardown so the env's "
             "agents stop cleanly before their resources go away."
+        ),
+    )
+    wipe_supertokens_app_data: WipeSuperTokensAppFn = Field(
+        description=(
+            "(app_id, core_base_url, api_key) -> wipe all users / sessions in the named "
+            "SuperTokens app without deleting the app itself. Used for tier destroys where "
+            "the app is operator-managed and must keep its connection URI / API key."
+        ),
+    )
+    wipe_neon_db_schema: WipeNeonSchemaFn = Field(
+        description=(
+            "(dsn,) -> DROP SCHEMA public CASCADE; CREATE SCHEMA public; against the DSN. "
+            "Used for tier destroys where the Neon DB is operator-managed and must keep its DSN."
         ),
     )
 
@@ -412,12 +433,13 @@ def destroy_tier_env(
     providers: Providers,
     parent_concurrency_group: ConcurrencyGroup,
 ) -> None:
-    """Tear down everything ``deploy_tier_env`` created for ``tier`` and remove the env root.
+    """Tear down everything ``deploy_tier_env`` created (and clear the env-specific data) for ``tier``.
 
     Used by ``minds env destroy --yes-i-mean-staging`` (production is
-    refused at the CLI layer). Walks the cleanup steps in reverse order
-    of deploy + adds the env-specific extras that aren't owned by
-    deploy (e.g. mngr agents running against the tier):
+    refused at the CLI layer). Walks the cleanup steps in dependency
+    order + adds the env-specific data wipes that keep operator-managed
+    shared resources (Neon DB, SuperTokens app, Cloudflare zone) intact
+    while clearing the data accumulated inside them:
 
     1. Destroy every mngr agent under ``~/.minds-<tier>/mngr/agents/``
        via ``mngr destroy``. Done first so agents stop cleanly before
@@ -428,20 +450,28 @@ def destroy_tier_env(
     3. ``modal secret delete`` every per-tier Modal Secret pushed by
        deploy (``<service>-<tier>``). Forces the next deploy to push
        fresh values from Vault.
-    4. Finally, remove ``~/.minds-<tier>/`` -- ONLY if every prior
-       step succeeded. On any failure, the env root stays so the
-       operator can re-run ``destroy`` to pick up where things broke.
+    4. Wipe the SuperTokens app's user / session data via
+       delete + recreate with the same ``app_id`` (extracted from the
+       ``SUPERTOKENS_CONNECTION_URI`` in the tier's Vault entry). The
+       app's connection URI and API key stay valid for the next deploy.
+    5. Wipe the Neon DB's schema via ``DROP SCHEMA public CASCADE; CREATE
+       SCHEMA public;`` against the tier's DATABASE_URL (read from
+       Vault). The DB itself and its DSN stay valid for the next deploy.
+    6. Finally, remove ``~/.minds-<tier>/`` -- ONLY if every prior step
+       succeeded. On any failure, the env root stays so the operator
+       can re-run ``destroy`` to pick up where things broke.
 
     Leaves the tier's Neon DB, SuperTokens app, Cloudflare zone, and
     Vault entries themselves untouched -- those are operator-managed
     (created out of band, populated via Vault) and survive a
     destroy/redeploy cycle so the next ``minds env deploy`` can
     re-push the same secrets and re-deploy the same apps in place.
-    (Wiping the *data inside* those resources -- SuperTokens users,
-    Neon DB schema, Cloudflare tunnels -- is a follow-up.)
+    (Cloudflare tunnel cleanup ships as a separate change so destroy
+    can be tested end-to-end without the tunnel-metadata migration.)
     """
     name = DevEnvName(tier)
     modal_env = str(deploy_config.modal_env)
+    tier_vault_prefix = str(deploy_config.vault_path_prefix).rstrip("/")
     apps_to_handle = (
         f"litellm-proxy-{tier}",
         f"remote-service-connector-{tier}",
@@ -467,9 +497,79 @@ def destroy_tier_env(
     for service in deploy_config.secrets.services:
         providers.delete_modal_secret(f"{service}-{tier}", modal_env, parent_concurrency_group)
 
-    # Step 4: remove the env root LAST, only if every step above succeeded
+    # Step 4: wipe the SuperTokens app's user/session data via delete+recreate.
+    # Read the tier's `supertokens` Vault entry to find the core URL +
+    # API key + connection URI (which encodes the app_id we need to
+    # wipe). ``read_per_env_secret_values`` is reused with empty
+    # overrides so we get the Vault dict as-is.
+    logger.info("Wiping SuperTokens app data for tier {!r}...", tier)
+    supertokens_values = providers.read_per_env_secret_values(
+        "supertokens",
+        tier_vault_prefix,
+        {},
+        parent_concurrency_group,
+    )
+    _wipe_supertokens_for_tier(supertokens_values, providers=providers, tier=tier)
+
+    # Step 5: wipe the Neon DB schema.
+    logger.info("Wiping Neon DB schema for tier {!r}...", tier)
+    neon_values = providers.read_per_env_secret_values(
+        "neon",
+        tier_vault_prefix,
+        {},
+        parent_concurrency_group,
+    )
+    _wipe_neon_for_tier(neon_values, providers=providers, tier=tier, parent_cg=parent_concurrency_group)
+
+    # Step 6: remove the env root LAST, only if every step above succeeded
     # (exceptions from any step propagate up and skip this).
     delete_env_root(name)
+
+
+def _wipe_supertokens_for_tier(
+    supertokens_vault_values: dict[str, str],
+    *,
+    providers: Providers,
+    tier: str,
+) -> None:
+    """Pull the bits we need from the SuperTokens Vault entry + invoke the wipe.
+
+    Surfaces a ``MindError`` if either the connection URI or the API
+    key is missing from the Vault entry (which would mean the tier
+    wasn't fully provisioned -- destroy shouldn't silently skip the
+    wipe in that case).
+    """
+    connection_uri = supertokens_vault_values.get("SUPERTOKENS_CONNECTION_URI", "")
+    api_key_str = supertokens_vault_values.get("SUPERTOKENS_API_KEY", "")
+    if not connection_uri or not api_key_str:
+        raise MindError(
+            f"Cannot wipe SuperTokens app data for tier {tier!r}: Vault entry is missing "
+            "SUPERTOKENS_CONNECTION_URI or SUPERTOKENS_API_KEY. Populate the entry "
+            f"at secrets/minds/{tier}/supertokens (see .minds/template/supertokens.sh)."
+        )
+    # The connection URI is `<core_url>/appid-<app_id>`; the core URL
+    # is everything up to the `/appid-` segment.
+    app_id = app_id_from_connection_uri(connection_uri)
+    core_base_url = connection_uri.rsplit(f"/appid-{app_id}", 1)[0]
+    providers.wipe_supertokens_app_data(app_id, core_base_url, SecretStr(api_key_str))
+
+
+def _wipe_neon_for_tier(
+    neon_vault_values: dict[str, str],
+    *,
+    providers: Providers,
+    tier: str,
+    parent_cg: ConcurrencyGroup,
+) -> None:
+    """Pull DATABASE_URL out of the Neon Vault entry + invoke the schema wipe."""
+    dsn_str = neon_vault_values.get("DATABASE_URL", "")
+    if not dsn_str:
+        raise MindError(
+            f"Cannot wipe Neon DB schema for tier {tier!r}: Vault entry is missing "
+            f"DATABASE_URL. Populate the entry at secrets/minds/{tier}/neon "
+            "(see .minds/template/neon.sh)."
+        )
+    providers.wipe_neon_db_schema(SecretStr(dsn_str), parent_cg)
 
 
 def deploy_tier_env(

@@ -9,6 +9,7 @@ to create / delete a per-dev-env tenant. The result is the connection URI
 the per-dev-env ``remote_service_connector`` will read.
 """
 
+import re
 from typing import Final
 
 import httpx
@@ -124,3 +125,51 @@ def delete_supertokens_app(
         if "does not exist" in message or "404" in message or "not found" in message:
             return
         raise
+
+
+def wipe_supertokens_app_data(
+    app_id: str,
+    *,
+    core_base_url: str,
+    api_key: SecretStr,
+) -> None:
+    """Wipe every user / session / per-tenant record in an existing SuperTokens app.
+
+    Used by ``minds env destroy --yes-i-mean-staging`` to clear the
+    staging app's accumulated data without removing the app itself --
+    the operator's Vault entry for staging holds the app's connection
+    URI and admin API key, and we want both to stay valid across
+    destroy / redeploy cycles.
+
+    Implementation: delete the SuperTokens app and immediately recreate
+    it with the same ``app_id``. SuperTokens treats this as a fresh app
+    (zero users, zero sessions, no per-tenant config) but the
+    multi-tenant connection URI ``<core>/appid-<app_id>`` is unchanged
+    -- so the operator's Vault entry and the per-tier Modal Secret it
+    pushes to the connector both continue to work without updating.
+
+    Idempotent: if the app was already deleted out of band, the recreate
+    succeeds and the wipe is effectively a no-op.
+    """
+    name = DevEnvName(app_id)
+    delete_supertokens_app(name, core_base_url=core_base_url, api_key=api_key)
+    create_supertokens_app(name, core_base_url=core_base_url, api_key=api_key)
+
+
+def app_id_from_connection_uri(connection_uri: str) -> str:
+    """Extract the SuperTokens app id from a multi-tenant connection URI.
+
+    SuperTokens encodes the app id as a path segment: ``<core_url>/appid-<app_id>``.
+    The destroy-side wipe needs the bare ``<app_id>`` to call the
+    multi-tenancy admin endpoints. Raises :class:`SuperTokensProviderError`
+    when the URI doesn't carry an ``/appid-<id>`` segment so a
+    misconfigured Vault entry surfaces immediately instead of trying to
+    wipe the wrong app.
+    """
+    match = re.search(r"/appid-([^/?#]+)", connection_uri)
+    if match is None:
+        raise SuperTokensProviderError(
+            f"SUPERTOKENS_CONNECTION_URI {connection_uri!r} has no `/appid-<app_id>` segment; "
+            "cannot determine which SuperTokens app to wipe."
+        )
+    return match.group(1)

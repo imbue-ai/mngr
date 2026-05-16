@@ -62,9 +62,11 @@ from imbue.minds.envs.providers.modal_env import delete_modal_env as real_delete
 from imbue.minds.envs.providers.neon_db import NeonDatabaseRecord
 from imbue.minds.envs.providers.neon_db import create_neon_database
 from imbue.minds.envs.providers.neon_db import delete_neon_database
+from imbue.minds.envs.providers.neon_db import wipe_neon_db_schema as real_wipe_neon_db_schema
 from imbue.minds.envs.providers.supertokens_app import SuperTokensAppRecord
 from imbue.minds.envs.providers.supertokens_app import create_supertokens_app
 from imbue.minds.envs.providers.supertokens_app import delete_supertokens_app
+from imbue.minds.envs.providers.supertokens_app import wipe_supertokens_app_data as real_wipe_supertokens_app_data
 from imbue.minds.envs.providers.vultr_tags import VultrInstanceSummary
 from imbue.minds.envs.providers.vultr_tags import delete_instances as delete_vultr_instances
 from imbue.minds.envs.providers.vultr_tags import list_env_instances as list_vultr_instances
@@ -209,6 +211,14 @@ def _delete_modal_secret_for_provider(secret_name: str, modal_env: str, cg: Conc
     real_delete_modal_secret(secret_name=secret_name, modal_env=modal_env, parent_cg=cg)
 
 
+def _wipe_supertokens_for_provider(app_id: str, core_base_url: str, api_key: SecretStr) -> None:
+    real_wipe_supertokens_app_data(app_id, core_base_url=core_base_url, api_key=api_key)
+
+
+def _wipe_neon_db_schema_for_provider(dsn: SecretStr, cg: ConcurrencyGroup) -> None:
+    real_wipe_neon_db_schema(dsn, parent_cg=cg)
+
+
 def _build_real_providers() -> Providers:
     """Wire the provider modules into the Providers bundle.
 
@@ -232,6 +242,8 @@ def _build_real_providers() -> Providers:
         stop_modal_app=_stop_modal_app_for_provider,
         delete_modal_secret=_delete_modal_secret_for_provider,
         destroy_mngr_agent=real_destroy_mngr_agent,
+        wipe_supertokens_app_data=_wipe_supertokens_for_provider,
+        wipe_neon_db_schema=_wipe_neon_db_schema_for_provider,
     )
 
 
