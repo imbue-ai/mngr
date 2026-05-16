@@ -20,7 +20,7 @@ _REPO_ROOT = Path(__file__).parent
 # Projects that are excluded from ratchet requirements (scheduled for deletion).
 # Keep in sync with EXCLUDED_RATCHET_PROJECTS in scripts/sync_common_ratchets.py
 # (verified by test_excluded_projects_in_sync in scripts/sync_common_ratchets_test.py).
-_EXCLUDED_PROJECTS: frozenset[str] = frozenset({"flexmux"})
+_EXCLUDED_PROJECTS: frozenset[str] = frozenset()
 
 _SELF_EXCLUSION: tuple[str, ...] = ("test_meta_ratchets.py",)
 _BINARY_FILE_EXCLUSION: tuple[str, ...] = ("*.png", "*.ico", "*.jpg", "*.jpeg", "*.gif", "*.webp")

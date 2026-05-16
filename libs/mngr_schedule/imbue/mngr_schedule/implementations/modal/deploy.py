@@ -319,8 +319,10 @@ def _build_package_mode_dockerfile(mngr_dockerfile_content: str) -> str:
     """Build a Dockerfile for PACKAGE mode from the mngr Dockerfile.
 
     Replaces the monorepo-specific installation steps (COPY, extraction,
-    uv sync, uv tool install) with a pip install from PyPI. All preceding
-    layers (system deps, uv, Claude Code) are preserved.
+    uv sync, uv tool install -- whether inline in the Dockerfile or
+    encapsulated in scripts/post-source-setup.sh) with a pip install from
+    PyPI. All preceding layers (system deps, uv, Claude Code) and any
+    layers after the install section (e.g. CMD) are preserved.
 
     The mngr Dockerfile has a section that copies and extracts the monorepo
     tarball, syncs dependencies, and installs mngr as a tool. For PACKAGE
@@ -346,13 +348,21 @@ def _build_package_mode_dockerfile(mngr_dockerfile_content: str) -> str:
             continue
 
         # Skip lines until we pass the last monorepo-specific install command.
-        # The sentinel is any RUN line containing "uv tool install" (which may
-        # be combined with other commands on the same line via &&).
+        # Two Dockerfile shapes are supported:
+        #   - Legacy: install commands inline in the Dockerfile, ended by a
+        #     `RUN ... uv tool install ...` line.
+        #   - Current: install commands consolidated into
+        #     scripts/post-source-setup.sh, called via a single
+        #     `RUN bash scripts/post-source-setup.sh` line.
+        # Either sentinel ends the install section.
         if is_in_install_section:
-            if stripped.startswith("RUN") and "uv tool install" in stripped:
+            if stripped.startswith("RUN") and (
+                "uv tool install" in stripped or "scripts/post-source-setup.sh" in stripped
+            ):
                 is_in_install_section = False
                 continue
-            # Also skip WORKDIR, RUN uv sync, and the tarball extraction lines
+            # Also skip WORKDIR, RUN uv sync, the tarball extraction lines,
+            # and the comment block above the post-source-setup.sh RUN.
             continue
 
         result_lines.append(line)
@@ -360,7 +370,8 @@ def _build_package_mode_dockerfile(mngr_dockerfile_content: str) -> str:
     if is_in_install_section:
         raise ScheduleDeployError(
             "Failed to generate PACKAGE mode Dockerfile: could not find the end of the monorepo "
-            "install section (expected a 'RUN uv tool install' line after 'COPY . /code/'). "
+            "install section (expected a 'RUN uv tool install ...' line, or a "
+            "'RUN bash scripts/post-source-setup.sh' line, after 'COPY . /code/'). "
             "The mngr Dockerfile structure may have changed."
         )
 
