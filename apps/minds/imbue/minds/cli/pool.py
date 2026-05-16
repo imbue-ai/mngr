@@ -23,7 +23,6 @@ click commands so unit tests can verify the env-name injection + flag
 forwarding behaviour without standing up a fake subprocess runner.
 """
 
-import os
 import shlex
 import sys
 from typing import Final
@@ -33,38 +32,9 @@ from loguru import logger
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.subprocess_utils import FinishedProcess
-from imbue.minds.bootstrap import BootstrapError
-from imbue.minds.bootstrap import MINDS_ROOT_NAME_ENV_VAR
-from imbue.minds.bootstrap import env_name_from_root_name
-from imbue.minds.bootstrap import is_minds_root_name_set_to_active_env
+from imbue.minds.cli._activated_env import require_activated_env_name
 
 _POOL_COMMAND_TIMEOUT_SECONDS: Final[int] = 7200
-
-
-def _require_activated_env_name() -> str:
-    """Return the activated minds env name or raise ``ClickException``.
-
-    Refuses when no env is activated. Mirrors the check used by
-    ``minds env deploy`` / ``destroy`` (see :func:`_require_activated_env`
-    in ``imbue.minds.cli.env``) so the pool bake follows the same UX:
-    every host the bake creates carries a ``minds_env=<env-name>`` tag,
-    and that tag is what ``minds env destroy`` uses to find pool VPSes
-    later. If we let pool-bake run outside an activated env the
-    resulting VPSes would be orphans no destroy command can find.
-    """
-    if not is_minds_root_name_set_to_active_env():
-        raise click.ClickException(
-            "No minds env is activated in this shell. Run "
-            '`eval "$(uv run minds env activate <name>)"` first '
-            "(e.g. ``<your-user>-dev`` for your personal dev env, or "
-            "``staging`` / ``production``). The activated env's name is "
-            "applied as ``minds_env=<env-name>`` IAM tag on every VPS so "
-            "``minds env destroy`` can later tear them down."
-        )
-    try:
-        return env_name_from_root_name(os.environ[MINDS_ROOT_NAME_ENV_VAR])
-    except BootstrapError as exc:
-        raise click.ClickException(str(exc)) from exc
 
 
 def build_create_admin_args(
@@ -216,7 +186,7 @@ def pool_create(
     mngr_source: str | None,
 ) -> None:
     """Create pool hosts for the activated minds env (OVH-backed via admin)."""
-    env_name = _require_activated_env_name()
+    env_name = require_activated_env_name()
     args = build_create_admin_args(
         env_name=env_name,
         count=count,
@@ -243,10 +213,10 @@ def pool_list(database_url: str) -> None:
     # No env-name filter: the admin command does not know about minds_env
     # today and we don't want to start parsing its JSON output here just to
     # filter. Operators who only want rows for the active env can pipe the
-    # JSON through ``jq``. ``_require_activated_env_name`` is still called
+    # JSON through ``jq``. ``require_activated_env_name`` is still called
     # for consistency -- a pool list run outside an activated env is almost
     # always an operator mistake.
-    _require_activated_env_name()
+    require_activated_env_name()
     args = build_list_admin_args(database_url=database_url)
     _raise_on_failure("list", _run_admin_command(args))
 
@@ -263,6 +233,6 @@ def pool_list(database_url: str) -> None:
 @click.option("--force", is_flag=True, help="Drop the row even if status != 'released'")
 def pool_destroy(pool_host_id: str, database_url: str, force: bool) -> None:
     """Remove a pool_hosts row by id (forwards to ``mngr imbue_cloud admin pool destroy``)."""
-    _require_activated_env_name()
+    require_activated_env_name()
     args = build_destroy_admin_args(pool_host_id=pool_host_id, database_url=database_url, force=force)
     _raise_on_failure("destroy", _run_admin_command(args))

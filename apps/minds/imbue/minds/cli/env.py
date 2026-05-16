@@ -19,7 +19,6 @@ logged in to the ``vault`` CLI.
 """
 
 import json
-import os
 import shlex
 import shutil
 from pathlib import Path
@@ -32,14 +31,12 @@ from pydantic import AnyUrl
 from pydantic import SecretStr
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
-from imbue.minds.bootstrap import BootstrapError
 from imbue.minds.bootstrap import DEFAULT_MINDS_ROOT_NAME
 from imbue.minds.bootstrap import MINDS_ROOT_NAME_ENV_VAR
-from imbue.minds.bootstrap import env_name_from_root_name
-from imbue.minds.bootstrap import is_minds_root_name_set_to_active_env
 from imbue.minds.bootstrap import mngr_host_dir_for
 from imbue.minds.bootstrap import mngr_prefix_for
 from imbue.minds.bootstrap import root_name_for_env_name
+from imbue.minds.cli._activated_env import require_activated_env_name
 from imbue.minds.config.loader import EnvConfigError
 from imbue.minds.config.loader import load_client_config
 from imbue.minds.config.loader import load_deploy_config
@@ -121,30 +118,6 @@ def _tier_for_env_name(env_name: str) -> str:
     if env_name == _STAGING_ENV_NAME:
         return _STAGING_ENV_NAME
     return _DEV_TIER
-
-
-def _require_activated_env() -> str:
-    """Return the activated env name or raise ``ClickException``.
-
-    Used by ``minds env deploy`` / ``destroy`` to refuse when no env has
-    been activated. Mirrors the bootstrap's
-    :func:`is_minds_root_name_set_to_active_env` check.
-    """
-    if not is_minds_root_name_set_to_active_env():
-        raise click.ClickException(
-            "No minds env is activated in this shell. Run "
-            '`eval "$(uv run minds env activate <name>)"` first '
-            "(e.g. `<your-user>-dev` for your personal dev env, or "
-            "`staging` / `production`)."
-        )
-    try:
-        return env_name_from_root_name(os.environ[MINDS_ROOT_NAME_ENV_VAR])
-    except BootstrapError as exc:
-        # Should be unreachable -- ``is_minds_root_name_set_to_active_env``
-        # already validated the value matches the pattern. Guarded
-        # anyway so a future drift between the two doesn't surface as
-        # a confusing AttributeError.
-        raise click.ClickException(str(exc)) from exc
 
 
 def _ensure_modal_env_for_provider(name: DevEnvName, cg: ConcurrencyGroup) -> None:
@@ -747,7 +720,7 @@ def env_deploy(ctx: click.Context, yes_i_mean_production: bool, yes_i_mean_stagi
     re-deploys in place.
     """
     output_format: OutputFormat = ctx.obj.get("output_format", OutputFormat.HUMAN)
-    env_name = _require_activated_env()
+    env_name = require_activated_env_name()
     tier = _tier_for_env_name(env_name)
 
     if tier == _PRODUCTION_ENV_NAME and not yes_i_mean_production:
@@ -842,7 +815,7 @@ def env_destroy(ctx: click.Context, keep_agents: bool, yes_i_mean_staging: bool)
     that use generation tracking).
     """
     output_format: OutputFormat = ctx.obj.get("output_format", OutputFormat.HUMAN)
-    env_name = _require_activated_env()
+    env_name = require_activated_env_name()
     tier = _tier_for_env_name(env_name)
 
     if tier == _PRODUCTION_ENV_NAME:

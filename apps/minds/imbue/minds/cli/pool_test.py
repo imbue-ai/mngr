@@ -3,7 +3,7 @@
 The argv-construction logic is split into pure ``build_*_args`` helpers in
 :mod:`imbue.minds.cli.pool` so we can verify the contract directly,
 without faking a subprocess runner. The click command's role is just to
-parse args, call ``_require_activated_env_name``, and run the result --
+parse args, call ``require_activated_env_name``, and run the result --
 we test that with :class:`click.testing.CliRunner`.
 """
 
