@@ -22,8 +22,6 @@ tracking list would live. The scan is naturally tag-based (matching
 parallel worker.
 """
 
-from __future__ import annotations
-
 import os
 from datetime import datetime
 from datetime import timedelta
