@@ -23,8 +23,6 @@ from imbue.mngr_modal.constants import MODAL_TEST_APP_PREFIX
 from imbue.mngr_modal.routes.deployment import deploy_function
 from imbue.modal_proxy.direct import DirectModalInterface
 
-pytestmark = [pytest.mark.modal]
-
 # =============================================================================
 # Acceptance tests (require Modal network access)
 # =============================================================================
@@ -151,6 +149,7 @@ def deployed_snapshot_function() -> Generator[tuple[str, str], None, None]:
 
 
 @pytest.mark.acceptance
+@pytest.mark.modal
 @pytest.mark.timeout(180)
 def test_snapshot_and_shutdown_success(
     deployed_snapshot_function: tuple[str, str],
@@ -278,6 +277,7 @@ def test_snapshot_and_shutdown_nonexistent_sandbox(
 
 
 @pytest.mark.acceptance
+@pytest.mark.modal
 @pytest.mark.timeout(180)
 def test_snapshot_and_shutdown_nonexistent_host_record(
     deployed_snapshot_function: tuple[str, str],
