@@ -329,15 +329,40 @@ class MultiAccountSessionStore(MutableModel):
     # -- Public write API (workspace associations) -------------------------
 
     def associate_workspace(self, user_id: str, agent_id: str) -> None:
-        """Bind ``agent_id`` to ``user_id`` on disk."""
+        """Bind ``agent_id`` to ``user_id`` on disk, dropping any prior owner.
+
+        A workspace has at most one owning user_id at a time: re-binding
+        to a new owner first removes ``agent_id`` from every OTHER
+        user_id's workspace list, then appends it to ``user_id``'s.
+        Without this, a workspace that gets re-associated after a
+        SuperTokens user_id rotation (or after the operator manually
+        flipped the dropdown on the settings page) would end up listed
+        under both the old and new user_ids -- ``get_account_for_workspace``
+        would return whichever owner happens to iterate first, which is
+        a no-error-but-wrong-account footgun.
+        """
         with self._disk_lock:
             associations = self._read_associations_unlocked()
+            # Strip ``agent_id`` from every other user_id first.
+            changed = False
+            for other_user_id, workspace_ids in list(associations.items()):
+                if other_user_id == user_id or agent_id not in workspace_ids:
+                    continue
+                associations[other_user_id] = [wid for wid in workspace_ids if wid != agent_id]
+                changed = True
+                logger.info(
+                    "Re-associating workspace {} away from user {} to {}",
+                    agent_id,
+                    other_user_id[:8],
+                    user_id[:8],
+                )
             existing = associations.get(user_id, [])
-            if agent_id in existing:
-                return
-            associations[user_id] = [*existing, agent_id]
-            self._write_associations_unlocked(associations)
-            logger.info("Associated workspace {} with user {}", agent_id, user_id[:8])
+            if agent_id not in existing:
+                associations[user_id] = [*existing, agent_id]
+                changed = True
+                logger.info("Associated workspace {} with user {}", agent_id, user_id[:8])
+            if changed:
+                self._write_associations_unlocked(associations)
 
     def disassociate_workspace(self, user_id: str, agent_id: str) -> None:
         """Remove ``agent_id`` from ``user_id``'s workspace list."""

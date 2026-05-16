@@ -10,6 +10,7 @@ logged in to the ``vault`` CLI.
 """
 
 import json
+import shlex
 from typing import Final
 
 import click
@@ -18,8 +19,13 @@ from pydantic import AnyUrl
 from pydantic import SecretStr
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.minds.bootstrap import mngr_host_dir_for
+from imbue.minds.bootstrap import mngr_prefix_for
+from imbue.minds.bootstrap import resolve_minds_root_name
 from imbue.minds.config.loader import EnvConfigError
 from imbue.minds.config.loader import load_deploy_config
+from imbue.minds.envs.local_store import read_dev_env_file
+from imbue.minds.envs.paths import dev_env_file
 from imbue.minds.envs.per_env_deploy import build_per_env_secret_values
 from imbue.minds.envs.per_env_deploy import deploy_litellm_proxy as real_deploy_litellm_proxy
 from imbue.minds.envs.per_env_deploy import deploy_remote_service_connector as real_deploy_remote_service_connector
@@ -306,6 +312,62 @@ def env_list(ctx: click.Context) -> None:
             write_stdout_line(json.dumps(entry, default=str))
     else:
         write_stdout_line(json.dumps(payload, indent=2, default=str))
+
+
+@env.command("activate")
+@click.argument("name", type=str)
+def env_activate(name: str) -> None:
+    """Print shell exports that make ad-hoc commands talk to dev env ``NAME``.
+
+    Designed for ``eval "$(uv run minds env activate <name>)"``: after
+    sourcing, standalone ``mngr imbue_cloud ...`` commands hit this
+    dev env's connector, ``mngr`` writes to the devminds host_dir, and
+    ``just devminds-start`` / ``minds run`` pick up the per-env client
+    config without any per-invocation flags.
+
+    Emitted variables:
+
+    - ``MINDS_ROOT_NAME`` / ``MNGR_HOST_DIR`` / ``MNGR_PREFIX`` -- pin
+      mngr's on-disk profile to ``~/.devminds`` so the standalone CLI
+      sees the same sessions/settings as the desktop client. The two
+      ``MNGR_*`` vars are derived from ``MINDS_ROOT_NAME`` but exported
+      explicitly because the plain ``mngr`` CLI doesn't run the
+      ``minds.bootstrap`` translation hook.
+    - ``MINDS_CLIENT_CONFIG_PATH`` -- ``minds run`` (and Electron, via
+      ``just devminds-start``) reads this as a fallback for
+      ``--config-file`` so the desktop client targets this env.
+    - ``MNGR__PROVIDERS__IMBUE_CLOUD__CONNECTOR_URL`` -- the standalone
+      ``mngr imbue_cloud ...`` CLI commands read this to find the
+      per-env connector (the per-account block in settings.toml has
+      the same URL but the CLI doesn't yet read settings.toml; this
+      is the workaround).
+
+    Output goes to stdout in shell-sourceable form; a one-line ``#``
+    comment at the top makes the output safe to ``eval`` while still
+    being a self-documenting hint when run interactively.
+    """
+    try:
+        dev_env_name = DevEnvName(name)
+    except InvalidDevEnvNameError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    root_name = resolve_minds_root_name()
+    try:
+        env_config = read_dev_env_file(dev_env_name, root_name=root_name)
+    except DevEnvNotFoundError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    config_path = dev_env_file(dev_env_name, root_name=root_name)
+    exports = {
+        "MINDS_ROOT_NAME": root_name,
+        "MNGR_HOST_DIR": str(mngr_host_dir_for(root_name)),
+        "MNGR_PREFIX": mngr_prefix_for(root_name),
+        "MINDS_CLIENT_CONFIG_PATH": str(config_path),
+        "MNGR__PROVIDERS__IMBUE_CLOUD__CONNECTOR_URL": str(env_config.connector_url).rstrip("/"),
+    }
+    write_stdout_line(f'# Activated dev env {name!r}. Source via: eval "$(uv run minds env activate {name})"')
+    for key, value in exports.items():
+        write_stdout_line(f"export {key}={shlex.quote(value)}")
 
 
 @env.command("destroy")
