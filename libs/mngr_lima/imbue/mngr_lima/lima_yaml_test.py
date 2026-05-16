@@ -30,6 +30,20 @@ def test_generate_default_lima_yaml(tmp_path: Path) -> None:
     assert len(config["provision"]) == 1
     assert config["provision"][0]["mode"] == "system"
 
+    assert config["portForwards"] == [
+        {
+            "guestIPMustBeZero": True,
+            "guestIP": "0.0.0.0",
+            "guestPortRange": [1, 65535],
+            "ignore": True,
+        },
+        {
+            "guestIP": "127.0.0.1",
+            "guestPortRange": [1, 65535],
+            "ignore": True,
+        },
+    ]
+
 
 def test_generate_default_lima_yaml_custom_image(tmp_path: Path) -> None:
     volume_path = tmp_path / "volume"
@@ -78,6 +92,18 @@ def test_merge_lima_yaml() -> None:
     assert merged["cpus"] == 8
     assert merged["memory"] == "16GiB"
     assert merged["images"] == [{"location": "default.qcow2"}]
+
+
+def test_merge_lima_yaml_forces_port_forwards_disabled() -> None:
+    base_disabled = [
+        {"guestIPMustBeZero": True, "guestIP": "0.0.0.0", "guestPortRange": [1, 65535], "ignore": True},
+        {"guestIP": "127.0.0.1", "guestPortRange": [1, 65535], "ignore": True},
+    ]
+    base = {"portForwards": base_disabled, "cpus": 4}
+    user_override = {"portForwards": [{"guestPort": 8082, "hostPort": 8082}], "cpus": 8}
+    merged = merge_lima_yaml(base, user_override)
+    assert merged["cpus"] == 8
+    assert merged["portForwards"] == base_disabled
 
 
 def test_parse_build_args_for_yaml_path() -> None:

@@ -34,6 +34,30 @@ def _get_arch_string() -> str:
     return "x86_64"
 
 
+def _disable_port_forwards_rules() -> list[dict]:
+    """Lima portForwards entries that disable all guest -> host port forwarding.
+
+    Lima always appends two default rules that forward any TCP port bound on
+    127.0.0.1 or 0.0.0.0 in the guest to 127.0.0.1 on the host. An empty
+    user list does not override those defaults. We supply explicit matching
+    rules with ignore: true so the defaults never fire. Lima manages the SSH
+    port outside of portForwards, so it remains reachable.
+    """
+    return [
+        {
+            "guestIPMustBeZero": True,
+            "guestIP": "0.0.0.0",
+            "guestPortRange": [1, 65535],
+            "ignore": True,
+        },
+        {
+            "guestIP": "127.0.0.1",
+            "guestPortRange": [1, 65535],
+            "ignore": True,
+        },
+    ]
+
+
 def generate_default_lima_yaml(
     volume_host_path: Path,
     host_dir: str,
@@ -67,8 +91,7 @@ def generate_default_lima_yaml(
                 "writable": True,
             },
         ],
-        # Disable port forwarding -- use SSH for everything
-        "portForwards": [],
+        "portForwards": _disable_port_forwards_rules(),
         # Provision required packages if not in the image
         "provision": [
             {
@@ -152,10 +175,19 @@ def merge_lima_yaml(base: dict, override: dict) -> dict:
     """Merge a user-provided YAML config with the base config.
 
     User-provided values override base values. Lists are replaced, not merged.
+    portForwards is the exception: it is always forced to the disabled rules
+    so guest-bound services never get auto-exposed on the host loopback. All
+    traffic must go through SSH.
     """
     merged = dict(base)
     for key, value in override.items():
+        if key == "portForwards":
+            logger.warning(
+                "Ignoring portForwards in user-provided Lima YAML; port forwarding is disabled.",
+            )
+            continue
         merged[key] = value
+    merged["portForwards"] = _disable_port_forwards_rules()
     return merged
 
 
