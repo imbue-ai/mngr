@@ -27,9 +27,8 @@ or an rsync copy (for non-git projects). Specify a host in the agent address
 (e.g. NAME@HOST.PROVIDER) to target a remote host, or use NAME@.PROVIDER
 to create a new one.
 
-The agent type defaults to 'claude' if not specified. Arguments after --
-are passed directly to the agent command. To run an arbitrary shell
-command, use the built-in 'command' agent type:
+Arguments after -- are passed directly to the agent command. To run an
+arbitrary shell command, use the built-in 'command' agent type:
 `mngr create my-task --type command -- sleep 3600`.
 
 Headless agent types (those implementing StreamingHeadlessAgentMixin,
@@ -59,7 +58,7 @@ mngr create [OPTIONS] [POSITIONAL_NAME] [POSITIONAL_AGENT_TYPE] [AGENT_ARGS]...
   - `NAME@HOST.PROVIDER --new-host` -- agent on a new host with the given name
   - `NAME:PATH` -- agent with a target path for the working directory
   - `:PATH` -- auto-named agent with a target path (equivalent to omitting the name)
-- `AGENT_TYPE`: Which type of agent to run (default: `claude`). Can also be specified via `--type`
+- `AGENT_TYPE`: Which type of agent to run. Can also be specified via `--type`.
 - `AGENT_ARGS`: Additional arguments passed to the agent
 
 **Options:**
@@ -72,7 +71,7 @@ mngr create [OPTIONS] [POSITIONAL_NAME] [POSITIONAL_AGENT_TYPE] [AGENT_ARGS]...
 | `-n`, `--name` | new_agent_location | Agent address (alternative to positional argument, mutually exclusive) [default: auto-generated] | None |
 | `--id` | text | Explicit agent ID [default: auto-generated] | None |
 | `--name-style` | choice (`coolname` &#x7C; `english` &#x7C; `fantasy` &#x7C; `scifi` &#x7C; `painters` &#x7C; `authors` &#x7C; `artists` &#x7C; `musicians` &#x7C; `animals` &#x7C; `scientists` &#x7C; `demons`) | Auto-generated name style | `coolname` |
-| `--type` | text | Which type of agent to run | `claude` |
+| `--type` | text | Which type of agent to run | None |
 | `-w`, `--extra-window` | text | Run extra command in additional window. Use name="command" to set window name. Note: ALL_UPPERCASE names (e.g., FOO="bar") are treated as env var assignments, not window names | None |
 | `--label` | text | Agent label KEY=VALUE [repeatable] [experimental] | None |
 | `--project` | text | Project name for the agent (sets the 'project' label; '.' inherits from source agent's project label when --from references an agent, else uses the source's git remote origin, else the source's folder name) [default: .] | `.` |
@@ -329,7 +328,7 @@ $ mngr create my-agent --template modal
 $ mngr create my-agent -t modal -t codex
 ```
 
-**Create a codex agent instead of claude**
+**Create a codex agent instead of the default**
 
 ```bash
 $ mngr create my-agent codex
