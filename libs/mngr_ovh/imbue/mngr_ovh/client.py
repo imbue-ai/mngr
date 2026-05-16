@@ -314,16 +314,16 @@ class OvhVpsClient(VpsClientInterface):
         Performs a read-modify-write on the full ``services.Service`` body to
         avoid clobbering unrelated fields (contact info, renewal type, etc.):
         ``GET /vps/{s}/serviceInfos`` → mutate ``renew.deleteAtExpiration`` →
-        ``PUT /vps/{s}/serviceInfos``. Setting ``False`` is the way to undo a
-        prior cancellation request (no email token required, verified live).
+        ``PUT /vps/{s}/serviceInfos``. No email token required for either
+        direction (verified live on US-EAST-VA).
 
-        OVH auto-flips ``renew.automatic`` to ``False`` and
-        ``renewalType`` to ``"manual"`` as a side effect of setting
-        ``deleteAtExpiration=True`` (verified live on US-EAST-VA). When
-        un-cancelling (``delete_at_expiration=False``) we explicitly
-        restore both fields so the VPS resumes auto-renewing; otherwise
-        a recycled VPS would silently fail to renew at the next
-        anniversary even though our flag flip succeeded.
+        Setting ``True`` only flips ``deleteAtExpiration``; OVH auto-flips
+        ``renew.automatic`` to ``False`` and ``renewalType`` to ``"manual"``
+        as a server-side side effect of the cancellation. Setting ``False``
+        un-cancels, but OVH does **not** auto-restore ``automatic`` /
+        ``renewalType``, so this function explicitly restores both on the
+        un-cancel path; otherwise a recycled VPS would silently fail to
+        renew at the next anniversary even though our flag flip succeeded.
         """
         info = self.get_service_info(service_name)
         renew = dict(info.get("renew") or {})
@@ -393,17 +393,26 @@ class OvhVpsClient(VpsClientInterface):
         """
         deadline = time.monotonic() + timeout_seconds
         last_active: list[int] = []
+        last_api_error: VpsApiError | None = None
+        had_successful_poll = False
         while time.monotonic() < deadline:
             try:
                 last_active = self._list_active_task_ids(service_name)
+                had_successful_poll = True
                 if not last_active:
                     return
             except VpsApiError as e:
+                last_api_error = e
                 logger.warning("Failed to list active OVH tasks for {}: {}", service_name, e)
             time.sleep(self.task_poll_interval)
+        if had_successful_poll:
+            raise VpsProvisioningError(
+                f"OVH VPS {service_name} still has active tasks {last_active!r} after {timeout_seconds}s; "
+                "subsequent /rebuild would race the in-flight task"
+            )
         raise VpsProvisioningError(
-            f"OVH VPS {service_name} still has active tasks {last_active!r} after {timeout_seconds}s; "
-            "subsequent /rebuild would race the in-flight task"
+            f"OVH VPS {service_name} tasks listing never succeeded within {timeout_seconds}s; "
+            f"cannot confirm whether tasks are active. Last API error: {last_api_error!r}"
         )
 
     def _list_active_task_ids(self, service_name: str) -> list[int]:
