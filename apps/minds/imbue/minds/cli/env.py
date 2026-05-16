@@ -1,4 +1,13 @@
-"""``minds env {deploy,list,destroy} <name>``.
+"""``minds env {activate,deactivate,deploy,destroy,list}``.
+
+Activation is the central UX: ``eval "$(minds env activate <name>)"``
+exports the four env vars (``MINDS_ROOT_NAME``, ``MNGR_HOST_DIR``,
+``MNGR_PREFIX``, ``MINDS_CLIENT_CONFIG_PATH``) that point the rest of
+the stack at the activated env's ``~/.minds-<name>/`` data root.
+``minds env deploy`` / ``destroy`` then operate implicitly on whichever
+env the shell is activated against -- no env-name argument is accepted,
+which keeps "I'm activated against dev env A but accidentally typed
+``minds env destroy production``" impossible.
 
 The CLI side constructs real provider callables (Modal CLI / Neon /
 SuperTokens / Vultr HTTP / Modal deploy) and threads them into the
@@ -10,7 +19,9 @@ logged in to the ``vault`` CLI.
 """
 
 import json
+import os
 import shlex
+from pathlib import Path
 from typing import Final
 
 import click
@@ -19,13 +30,21 @@ from pydantic import AnyUrl
 from pydantic import SecretStr
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.minds.bootstrap import BootstrapError
+from imbue.minds.bootstrap import DEFAULT_MINDS_ROOT_NAME
+from imbue.minds.bootstrap import MINDS_ROOT_NAME_ENV_VAR
+from imbue.minds.bootstrap import env_name_from_root_name
+from imbue.minds.bootstrap import is_minds_root_name_set_to_active_env
 from imbue.minds.bootstrap import mngr_host_dir_for
 from imbue.minds.bootstrap import mngr_prefix_for
-from imbue.minds.bootstrap import resolve_minds_root_name
+from imbue.minds.bootstrap import root_name_for_env_name
 from imbue.minds.config.loader import EnvConfigError
 from imbue.minds.config.loader import load_deploy_config
-from imbue.minds.envs.local_store import read_dev_env_file
-from imbue.minds.envs.paths import dev_env_file
+from imbue.minds.config.loader import repo_tier_client_config_path
+from imbue.minds.envs.local_store import env_root_exists
+from imbue.minds.envs.paths import active_env_name_or_none
+from imbue.minds.envs.paths import client_config_file
+from imbue.minds.envs.paths import env_root_dir
 from imbue.minds.envs.per_env_deploy import build_per_env_secret_values
 from imbue.minds.envs.per_env_deploy import deploy_litellm_proxy as real_deploy_litellm_proxy
 from imbue.minds.envs.per_env_deploy import deploy_remote_service_connector as real_deploy_remote_service_connector
@@ -47,9 +66,11 @@ from imbue.minds.envs.providers.vultr_tags import VultrInstanceSummary
 from imbue.minds.envs.providers.vultr_tags import delete_instances as delete_vultr_instances
 from imbue.minds.envs.providers.vultr_tags import list_dev_env_instances as list_vultr_instances
 from imbue.minds.envs.provisioning import DeployedDevEnv
+from imbue.minds.envs.provisioning import DeployedTierEnv
 from imbue.minds.envs.provisioning import ProviderCredentials
 from imbue.minds.envs.provisioning import Providers
 from imbue.minds.envs.provisioning import deploy_dev_env
+from imbue.minds.envs.provisioning import deploy_tier_env
 from imbue.minds.envs.provisioning import destroy_dev_env
 from imbue.minds.envs.provisioning import list_dev_envs
 from imbue.minds.envs.vault_reader import VaultPath
@@ -58,7 +79,59 @@ from imbue.minds.errors import MindError
 from imbue.minds.primitives import OutputFormat
 from imbue.minds.utils.output import write_stdout_line
 
+# Reserved env names that map to named tiers; everything else is the
+# ``dev`` tier. Mirrors the spec's hard-coded tier mapping and lets
+# ``minds env deploy`` / ``destroy`` dispatch on env name alone.
+_RESERVED_TIER_ENV_NAMES: Final[frozenset[str]] = frozenset({"production", "staging"})
+_PRODUCTION_ENV_NAME: Final[str] = "production"
+_STAGING_ENV_NAME: Final[str] = "staging"
 _DEV_TIER: Final[str] = "dev"
+
+# Env vars exported by ``activate`` (and unset by ``deactivate``). The
+# list lives here so the two sides stay in sync.
+_ACTIVATION_ENV_VARS: Final[tuple[str, ...]] = (
+    MINDS_ROOT_NAME_ENV_VAR,
+    "MNGR_HOST_DIR",
+    "MNGR_PREFIX",
+    "MINDS_CLIENT_CONFIG_PATH",
+)
+
+
+def _tier_for_env_name(env_name: str) -> str:
+    """Hard-coded env-name -> tier mapping.
+
+    ``production`` -> ``production``; ``staging`` -> ``staging``;
+    everything else (the convention is ``<user>-<suffix>``) -> ``dev``.
+    """
+    if env_name == _PRODUCTION_ENV_NAME:
+        return _PRODUCTION_ENV_NAME
+    if env_name == _STAGING_ENV_NAME:
+        return _STAGING_ENV_NAME
+    return _DEV_TIER
+
+
+def _require_activated_env() -> str:
+    """Return the activated env name or raise ``ClickException``.
+
+    Used by ``minds env deploy`` / ``destroy`` to refuse when no env has
+    been activated. Mirrors the bootstrap's
+    :func:`is_minds_root_name_set_to_active_env` check.
+    """
+    if not is_minds_root_name_set_to_active_env():
+        raise click.ClickException(
+            "No minds env is activated in this shell. Run "
+            '`eval "$(uv run minds env activate <name>)"` first '
+            "(e.g. `<your-user>-dev` for your personal dev env, or "
+            "`staging` / `production`)."
+        )
+    try:
+        return env_name_from_root_name(os.environ[MINDS_ROOT_NAME_ENV_VAR])
+    except BootstrapError as exc:
+        # Should be unreachable -- ``is_minds_root_name_set_to_active_env``
+        # already validated the value matches the pattern. Guarded
+        # anyway so a future drift between the two doesn't surface as
+        # a confusing AttributeError.
+        raise click.ClickException(str(exc)) from exc
 
 
 def _ensure_modal_env_for_provider(name: DevEnvName, cg: ConcurrencyGroup) -> None:
@@ -116,12 +189,12 @@ def _push_per_env_modal_secret_for_provider(
     real_push_per_env_modal_secret(secret_name, values, modal_env=modal_env, parent_cg=cg)
 
 
-def _deploy_litellm_proxy_for_provider(name: DevEnvName, tier: str, cg: ConcurrencyGroup) -> AnyUrl:
-    return real_deploy_litellm_proxy(name, tier=tier, parent_cg=cg)
+def _deploy_litellm_proxy_for_provider(modal_env: str, tier: str, cg: ConcurrencyGroup) -> AnyUrl:
+    return real_deploy_litellm_proxy(modal_env=modal_env, tier=tier, parent_cg=cg)
 
 
-def _deploy_connector_for_provider(name: DevEnvName, tier: str, cg: ConcurrencyGroup) -> AnyUrl:
-    return real_deploy_remote_service_connector(name, tier=tier, parent_cg=cg)
+def _deploy_connector_for_provider(modal_env: str, tier: str, cg: ConcurrencyGroup) -> AnyUrl:
+    return real_deploy_remote_service_connector(modal_env=modal_env, tier=tier, parent_cg=cg)
 
 
 def _build_real_providers() -> Providers:
@@ -209,18 +282,20 @@ def _emit_json(payload: object, *, output_format: OutputFormat) -> None:
         write_stdout_line(str(payload))
 
 
-def _emit_deploy_result(result: DeployedDevEnv, *, output_format: OutputFormat) -> None:
+def _emit_dev_deploy_result(result: DeployedDevEnv, *, output_format: OutputFormat) -> None:
     if output_format is OutputFormat.HUMAN:
         logger.info("Deployed dev env '{}'.", result.name)
-        logger.info("  config:    {}", result.config_path)
-        logger.info("  connector: {}", result.connector_url)
-        logger.info("  litellm:   {}", result.litellm_proxy_url)
-        logger.info("Run `minds run --config-file {}` to launch against this env.", result.config_path)
+        logger.info("  client.toml:  {}", result.client_config_path)
+        logger.info("  secrets.toml: {}", result.secrets_path)
+        logger.info("  connector:    {}", result.connector_url)
+        logger.info("  litellm:      {}", result.litellm_proxy_url)
+        logger.info("Run `minds run` (with this env still activated) to launch against it.")
         return
     _emit_json(
         {
             "name": str(result.name),
-            "config_path": result.config_path,
+            "client_config_path": result.client_config_path,
+            "secrets_path": result.secrets_path,
             "connector_url": str(result.connector_url),
             "litellm_proxy_url": str(result.litellm_proxy_url),
         },
@@ -228,82 +303,196 @@ def _emit_deploy_result(result: DeployedDevEnv, *, output_format: OutputFormat) 
     )
 
 
-def _emit_destroy_result(name: DevEnvName, *, output_format: OutputFormat) -> None:
+def _emit_tier_deploy_result(result: DeployedTierEnv, *, output_format: OutputFormat) -> None:
     if output_format is OutputFormat.HUMAN:
-        logger.info("Destroyed dev env '{}'.", name)
+        logger.info("Deployed tier '{}' into Modal env '{}'.", result.tier, result.modal_env)
+        logger.info("  connector: {}", result.connector_url)
+        logger.info("  litellm:   {}", result.litellm_proxy_url)
+        logger.info(
+            "Update `apps/minds/imbue/minds/config/envs/{}/client.toml` if these URLs "
+            "differ from what's committed, and open a PR.",
+            result.tier,
+        )
         return
-    _emit_json({"name": str(name), "status": "destroyed"}, output_format=output_format)
+    _emit_json(
+        {
+            "tier": result.tier,
+            "modal_env": result.modal_env,
+            "connector_url": str(result.connector_url),
+            "litellm_proxy_url": str(result.litellm_proxy_url),
+        },
+        output_format=output_format,
+    )
+
+
+def _emit_destroy_result(env_name: str, *, output_format: OutputFormat) -> None:
+    if output_format is OutputFormat.HUMAN:
+        logger.info("Destroyed dev env '{}'.", env_name)
+        logger.info(
+            'Your shell is still activated against "{}". Clear it with: eval "$(uv run minds env deactivate)"',
+            env_name,
+        )
+        return
+    _emit_json({"name": env_name, "status": "destroyed"}, output_format=output_format)
 
 
 @click.group()
 def env() -> None:
-    """Manage dynamic dev environments."""
+    """Manage minds environments (dev / staging / production)."""
 
 
-@env.command("deploy")
+@env.command("activate")
 @click.argument("name", type=str)
-@click.pass_context
-def env_deploy(ctx: click.Context, name: str) -> None:
-    """Provision or upgrade the dynamic dev env named ``NAME``.
+def env_activate(name: str) -> None:
+    """Print shell exports that activate env ``NAME`` in the calling shell.
 
-    Idempotent: re-running picks up any new tier-shared Vault values and
-    re-deploys both Modal apps in place. There is no separate "create"
-    step; ``deploy`` does both first-time and upgrade.
+    Designed for ``eval "$(uv run minds env activate <name>)"``: after
+    sourcing, ``mngr`` writes to ``~/.minds-<name>/mngr``, ``minds run``
+    picks up the per-env client config without a ``--config-file`` flag,
+    and ``minds env deploy`` / ``destroy`` operate on this env.
+
+    Emitted variables:
+
+    - ``MINDS_ROOT_NAME`` -- ``minds`` for the reserved ``production``
+      name, ``minds-<name>`` for every other env. Validation runs at
+      activation time, so a typo in ``<name>`` fails here instead of
+      silently exporting nonsense.
+    - ``MNGR_HOST_DIR`` -- the env's mngr profile (``~/.minds-<name>/mngr``).
+    - ``MNGR_PREFIX`` -- the env's mngr-resource prefix
+      (``minds-<name>-``).
+    - ``MINDS_CLIENT_CONFIG_PATH`` -- the in-repo
+      ``apps/minds/imbue/minds/config/envs/<tier>/client.toml`` for
+      ``staging`` / ``production`` (the source of truth for those tiers,
+      committed); the per-env ``~/.minds-<name>/client.toml`` for dev
+      envs (written by ``minds env deploy``).
+
+    Behaviour by env type:
+
+    - ``production`` / ``staging``: auto-creates ``~/.minds/`` (or
+      ``~/.minds-staging/``) if it does not exist. The in-repo client
+      file must already exist (it ships with the repo).
+    - Any other name: validated via :class:`DevEnvName`. Refuses to
+      activate when ``~/.minds-<name>/`` does not exist and tells the
+      operator to ``minds env deploy <name>`` first. (Deploy itself
+      reads the activated env, so the operator's bootstrap flow is
+      ``mkdir ~/.minds-<your-name>-dev && eval "$(... activate <your-name>-dev)" && minds env deploy``.)
     """
-    output_format: OutputFormat = ctx.obj.get("output_format", OutputFormat.HUMAN)
+    if name in _RESERVED_TIER_ENV_NAMES or name == _PRODUCTION_ENV_NAME:
+        _activate_reserved_env(name)
+        return
+
     try:
         dev_env_name = DevEnvName(name)
     except InvalidDevEnvNameError as exc:
         raise click.ClickException(str(exc)) from exc
 
-    try:
-        deploy_config = load_deploy_config(_DEV_TIER)
-    except EnvConfigError as exc:
-        raise click.ClickException(str(exc)) from exc
+    if not env_root_exists(dev_env_name):
+        target = env_root_dir(dev_env_name)
+        raise click.ClickException(
+            f"No env root for {name!r} at {target}. "
+            f"For a fresh dev env: `mkdir {target}` first, then "
+            f'`eval "$(uv run minds env activate {name})"` and '
+            "`uv run minds env deploy`."
+        )
 
-    with ConcurrencyGroup(name="minds-env-deploy") as cg:
-        try:
-            credentials = _load_dev_credentials_from_vault(str(deploy_config.vault_path_prefix), cg=cg)
-        except VaultReadError as exc:
-            raise click.ClickException(str(exc)) from exc
+    root_name = root_name_for_env_name(name)
+    exports = {
+        MINDS_ROOT_NAME_ENV_VAR: root_name,
+        "MNGR_HOST_DIR": str(mngr_host_dir_for(root_name)),
+        "MNGR_PREFIX": mngr_prefix_for(root_name),
+        "MINDS_CLIENT_CONFIG_PATH": str(client_config_file(dev_env_name)),
+    }
+    _print_activation_exports(name=name, exports=exports)
 
-        providers = _build_real_providers()
 
-        try:
-            result = deploy_dev_env(
-                dev_env_name,
-                tier=_DEV_TIER,
-                deploy_config=deploy_config,
-                credentials=credentials,
-                providers=providers,
-                parent_concurrency_group=cg,
-            )
-        except DevEnvProvisioningError as exc:
-            raise click.ClickException(str(exc)) from exc
+def _activate_reserved_env(name: str) -> None:
+    """Activate ``staging`` or ``production`` -- in-repo client.toml is the truth.
 
-    _emit_deploy_result(result, output_format=output_format)
+    Auto-creates the env root if missing so subsequent commands have
+    somewhere to write runtime state (mngr profile, auth, agents).
+    Verifies the committed in-repo ``client.toml`` exists -- otherwise
+    activation would silently point at a non-existent file and the next
+    ``minds run`` would fail with a confusing "Cannot read client
+    config" error.
+    """
+    if name == _PRODUCTION_ENV_NAME:
+        root_name = DEFAULT_MINDS_ROOT_NAME
+        repo_client = repo_tier_client_config_path(_PRODUCTION_ENV_NAME)
+    else:
+        assert name == _STAGING_ENV_NAME
+        root_name = root_name_for_env_name(_STAGING_ENV_NAME)
+        repo_client = repo_tier_client_config_path(_STAGING_ENV_NAME)
+
+    if not repo_client.is_file():
+        raise click.ClickException(
+            f"In-repo {name} client config not found at {repo_client}. "
+            f"This file is committed for {name}; check your monorepo checkout."
+        )
+
+    # Create the env root if missing. Safe because the names are
+    # reserved -- no typo can land here.
+    mngr_host = mngr_host_dir_for(root_name)
+    mngr_host.parent.mkdir(parents=True, exist_ok=True)
+
+    exports = {
+        MINDS_ROOT_NAME_ENV_VAR: root_name,
+        "MNGR_HOST_DIR": str(mngr_host),
+        "MNGR_PREFIX": mngr_prefix_for(root_name),
+        "MINDS_CLIENT_CONFIG_PATH": str(repo_client),
+    }
+    _print_activation_exports(name=name, exports=exports)
+
+
+def _print_activation_exports(*, name: str, exports: dict[str, str]) -> None:
+    write_stdout_line(f'# Activated env {name!r}. Source via: eval "$(uv run minds env activate {name})"')
+    for key, value in exports.items():
+        write_stdout_line(f"export {key}={shlex.quote(value)}")
+
+
+@env.command("deactivate")
+def env_deactivate() -> None:
+    """Print the ``unset`` exports that deactivate the current env.
+
+    Symmetric with :func:`env_activate`. Use as
+    ``eval "$(uv run minds env deactivate)"``. After sourcing, the shell
+    has no activated env -- ``minds run`` refuses to start until you
+    activate something, and ``mngr`` falls back to its own
+    ``~/.mngr/`` default.
+    """
+    write_stdout_line('# Deactivate the current env. Source via: eval "$(uv run minds env deactivate)"')
+    for key in _ACTIVATION_ENV_VARS:
+        write_stdout_line(f"unset {key}")
 
 
 @env.command("list")
 @click.pass_context
 def env_list(ctx: click.Context) -> None:
-    """List the dynamic dev envs configured on this machine."""
+    """List every minds env on disk (every ``~/.minds*/`` dir)."""
     output_format: OutputFormat = ctx.obj.get("output_format", OutputFormat.HUMAN)
     summaries = list_dev_envs()
+    active = active_env_name_or_none()
 
     if output_format is OutputFormat.HUMAN:
         if not summaries:
-            logger.info("No dev envs configured. Run `minds env deploy <name>` to create one.")
+            logger.info("No minds env roots found under {}.", Path.home())
+            logger.info('Run `eval "$(uv run minds env activate <name>)"` to create one.')
             return
         for s in summaries:
-            logger.info("{}\t{}\t{}", s.name, s.connector_url, s.config_path)
+            marker = " (active)" if s.name == active else ""
+            connector = str(s.connector_url) if s.connector_url is not None else "(no client.toml)"
+            client_loc = (
+                s.client_config_path if s.client_config_path is not None else "(no client.toml under env_root)"
+            )
+            logger.info("{}{}\t{}\t{}\t{}", s.name, marker, s.env_root, connector, client_loc)
         return
 
     payload = [
         {
-            "name": str(s.name),
-            "config_path": s.config_path,
-            "connector_url": str(s.connector_url),
+            "name": s.name,
+            "env_root": s.env_root,
+            "client_config_path": s.client_config_path,
+            "connector_url": str(s.connector_url) if s.connector_url is not None else None,
+            "is_active": s.name == active,
         }
         for s in summaries
     ]
@@ -314,57 +503,97 @@ def env_list(ctx: click.Context) -> None:
         write_stdout_line(json.dumps(payload, indent=2, default=str))
 
 
-@env.command("activate")
-@click.argument("name", type=str)
-def env_activate(name: str) -> None:
-    """Print shell exports that point ad-hoc commands at dev env ``NAME``.
+@env.command("deploy")
+@click.option(
+    "--yes-i-mean-production",
+    is_flag=True,
+    default=False,
+    help=(
+        "Required confirmation for deploying against the production tier. "
+        "Refuses without it so an accidental `minds env deploy` while "
+        "activated against production can never silently fire."
+    ),
+)
+@click.option(
+    "--yes-i-mean-staging",
+    is_flag=True,
+    default=False,
+    help="Required confirmation for deploying against the staging tier. Mirrors --yes-i-mean-production.",
+)
+@click.pass_context
+def env_deploy(ctx: click.Context, yes_i_mean_production: bool, yes_i_mean_staging: bool) -> None:
+    """Provision or upgrade the currently-activated env.
 
-    Designed for ``eval "$(uv run minds env activate <name>)"``: after
-    sourcing, ``mngr`` writes to the devminds host_dir, and
-    ``just devminds-start`` / ``minds run`` pick up the per-env client
-    config without any per-invocation flags.
+    Reads the activated env from ``MINDS_ROOT_NAME`` (set by
+    ``minds env activate``) and dispatches:
 
-    Emitted variables:
+    - ``production`` / ``staging``: pushes tier-shared Vault secrets to
+      Modal and ``modal deploy``s both apps into the tier's stable Modal
+      env. Writes nothing to disk. Requires
+      ``--yes-i-mean-production`` (or ``--yes-i-mean-staging``) so an
+      accidental invocation can never silently fire.
+    - Anything else: dev-tier deploy -- provisions the Modal env, Neon
+      DB, SuperTokens app, pushes per-env Modal Secrets, deploys both
+      apps, and writes ``~/.minds-<name>/client.toml`` + ``secrets.toml``.
 
-    - ``MINDS_ROOT_NAME`` / ``MNGR_HOST_DIR`` / ``MNGR_PREFIX`` -- pin
-      mngr's on-disk profile to ``~/.devminds`` so the standalone CLI
-      sees the same sessions/settings as the desktop client. The two
-      ``MNGR_*`` vars are derived from ``MINDS_ROOT_NAME`` but exported
-      explicitly because the plain ``mngr`` CLI doesn't run the
-      ``minds.bootstrap`` translation hook.
-    - ``MINDS_CLIENT_CONFIG_PATH`` -- ``minds run`` (and Electron, via
-      ``just devminds-start``) reads this as a fallback for
-      ``--config-file`` so the desktop client targets this env.
-
-    Output goes to stdout in shell-sourceable form; a one-line ``#``
-    comment at the top makes the output safe to ``eval`` while still
-    being a self-documenting hint when run interactively.
+    Idempotent: re-running picks up any new tier-shared Vault values and
+    re-deploys in place.
     """
+    output_format: OutputFormat = ctx.obj.get("output_format", OutputFormat.HUMAN)
+    env_name = _require_activated_env()
+    tier = _tier_for_env_name(env_name)
+
+    if tier == _PRODUCTION_ENV_NAME and not yes_i_mean_production:
+        raise click.ClickException(
+            "Refusing to deploy against tier 'production' without --yes-i-mean-production. Pass that flag to confirm."
+        )
+    if tier == _STAGING_ENV_NAME and not yes_i_mean_staging:
+        raise click.ClickException(
+            "Refusing to deploy against tier 'staging' without --yes-i-mean-staging. Pass that flag to confirm."
+        )
+
     try:
-        dev_env_name = DevEnvName(name)
-    except InvalidDevEnvNameError as exc:
+        deploy_config = load_deploy_config(tier)
+    except EnvConfigError as exc:
         raise click.ClickException(str(exc)) from exc
 
-    root_name = resolve_minds_root_name()
-    try:
-        read_dev_env_file(dev_env_name, root_name=root_name)
-    except DevEnvNotFoundError as exc:
-        raise click.ClickException(str(exc)) from exc
+    providers = _build_real_providers()
 
-    config_path = dev_env_file(dev_env_name, root_name=root_name)
-    exports = {
-        "MINDS_ROOT_NAME": root_name,
-        "MNGR_HOST_DIR": str(mngr_host_dir_for(root_name)),
-        "MNGR_PREFIX": mngr_prefix_for(root_name),
-        "MINDS_CLIENT_CONFIG_PATH": str(config_path),
-    }
-    write_stdout_line(f'# Activated dev env {name!r}. Source via: eval "$(uv run minds env activate {name})"')
-    for key, value in exports.items():
-        write_stdout_line(f"export {key}={shlex.quote(value)}")
+    with ConcurrencyGroup(name=f"minds-env-deploy-{env_name}") as cg:
+        if tier == _DEV_TIER:
+            try:
+                credentials = _load_dev_credentials_from_vault(str(deploy_config.vault_path_prefix), cg=cg)
+            except VaultReadError as exc:
+                raise click.ClickException(str(exc)) from exc
+            try:
+                dev_result = deploy_dev_env(
+                    DevEnvName(env_name),
+                    tier=tier,
+                    deploy_config=deploy_config,
+                    credentials=credentials,
+                    providers=providers,
+                    parent_concurrency_group=cg,
+                )
+            except DevEnvProvisioningError as exc:
+                raise click.ClickException(str(exc)) from exc
+            _emit_dev_deploy_result(dev_result, output_format=output_format)
+            return
+
+        # Tier deploy (staging / production): no per-env credentials
+        # needed, no rollback, no local state written.
+        try:
+            tier_result = deploy_tier_env(
+                tier=tier,
+                deploy_config=deploy_config,
+                providers=providers,
+                parent_concurrency_group=cg,
+            )
+        except MindError as exc:
+            raise click.ClickException(str(exc)) from exc
+        _emit_tier_deploy_result(tier_result, output_format=output_format)
 
 
 @env.command("destroy")
-@click.argument("name", type=str)
 @click.option(
     "--keep-agents",
     is_flag=True,
@@ -377,20 +606,39 @@ def env_activate(name: str) -> None:
     ),
 )
 @click.pass_context
-def env_destroy(ctx: click.Context, name: str, keep_agents: bool) -> None:
-    """Tear down every resource ``minds env deploy`` provisioned for ``NAME``."""
+def env_destroy(ctx: click.Context, keep_agents: bool) -> None:
+    """Tear down every resource ``minds env deploy`` provisioned for the activated env.
+
+    Refuses hard-coded when no env is activated. Refuses hard-coded when
+    the activated env is ``production``. Refuses for ``staging`` too --
+    tier destroys are out of scope for this CLI (staging tier infra is
+    operator-managed; this command only tears down dev-env-local
+    resources).
+    """
     output_format: OutputFormat = ctx.obj.get("output_format", OutputFormat.HUMAN)
-    try:
-        dev_env_name = DevEnvName(name)
-    except InvalidDevEnvNameError as exc:
-        raise click.ClickException(str(exc)) from exc
+    env_name = _require_activated_env()
+
+    # Hard-coded safety: production is never destroyable through this CLI.
+    if env_name == _PRODUCTION_ENV_NAME:
+        raise click.ClickException(
+            "Refusing to destroy production. `minds env destroy` is dev-env-only -- "
+            "production tier teardown is out of scope for this CLI."
+        )
+    # Staging tier teardown is also out of scope. Same rationale as
+    # production, but with a less alarming message because the typical
+    # accidental activation is staging not production.
+    if env_name == _STAGING_ENV_NAME:
+        raise click.ClickException(
+            "Refusing to destroy staging tier infra through `minds env destroy`. "
+            "Tier teardown is operator-managed; this command only handles dev envs."
+        )
 
     try:
         deploy_config = load_deploy_config(_DEV_TIER)
     except EnvConfigError as exc:
         raise click.ClickException(str(exc)) from exc
 
-    with ConcurrencyGroup(name="minds-env-destroy") as cg:
+    with ConcurrencyGroup(name=f"minds-env-destroy-{env_name}") as cg:
         try:
             credentials = _load_dev_credentials_from_vault(str(deploy_config.vault_path_prefix), cg=cg)
         except VaultReadError as exc:
@@ -400,7 +648,7 @@ def env_destroy(ctx: click.Context, name: str, keep_agents: bool) -> None:
 
         try:
             destroy_dev_env(
-                dev_env_name,
+                DevEnvName(env_name),
                 credentials=credentials,
                 providers=providers,
                 parent_concurrency_group=cg,
@@ -409,7 +657,7 @@ def env_destroy(ctx: click.Context, name: str, keep_agents: bool) -> None:
         except DevEnvNotFoundError as exc:
             raise click.ClickException(str(exc)) from exc
         except MindError as exc:
-            logger.error("Destroy of {!r} failed: {}", str(dev_env_name), exc)
+            logger.error("Destroy of {!r} failed: {}", env_name, exc)
             raise click.ClickException(str(exc)) from exc
 
-    _emit_destroy_result(dev_env_name, output_format=output_format)
+    _emit_destroy_result(env_name, output_format=output_format)

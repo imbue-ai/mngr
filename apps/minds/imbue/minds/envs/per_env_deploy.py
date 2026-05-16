@@ -235,12 +235,12 @@ def ensure_modal_env(name: DevEnvName, *, parent_cg: ConcurrencyGroup) -> None:
 
 
 def deploy_litellm_proxy(
-    name: DevEnvName,
     *,
+    modal_env: str,
     tier: str,
     parent_cg: ConcurrencyGroup,
 ) -> AnyUrl:
-    """``modal deploy`` the litellm-proxy app into env ``name`` for ``tier``.
+    """``modal deploy`` the litellm-proxy app into ``modal_env`` for ``tier``.
 
     Runs the LiteLLM Prisma schema push FIRST so the deployed proxy never
     starts up against a database missing its ``LiteLLM_VerificationToken``
@@ -253,6 +253,10 @@ def deploy_litellm_proxy(
     (parsed from ``modal deploy`` stdout). Honors Modal's hostname-
     truncation behavior, so the returned URL is correct even when the
     natural host exceeds DNS's 63-char limit.
+
+    ``modal_env`` is the Modal environment to deploy into: the activated
+    dev env's name for dev-tier deploys, or the tier's stable Modal env
+    (``main`` by convention) for staging / production deploys.
     """
     app_file = _litellm_app_file()
     logger.info(
@@ -263,33 +267,34 @@ def deploy_litellm_proxy(
     _run_modal_function(
         app_file=app_file,
         function_name="migrate_db",
-        modal_env=str(name),
+        modal_env=modal_env,
         tier=tier,
         parent_cg=parent_cg,
     )
     return _deploy_modal_app(
         app_file=app_file,
         app_name=f"litellm-proxy-{tier}",
-        modal_env=str(name),
+        modal_env=modal_env,
         tier=tier,
         parent_cg=parent_cg,
     )
 
 
 def deploy_remote_service_connector(
-    name: DevEnvName,
     *,
+    modal_env: str,
     tier: str,
     parent_cg: ConcurrencyGroup,
 ) -> AnyUrl:
-    """``modal deploy`` the remote_service_connector app into env ``name`` for ``tier``.
+    """``modal deploy`` the remote_service_connector app into ``modal_env`` for ``tier``.
 
-    See :func:`deploy_litellm_proxy` for return-value semantics.
+    See :func:`deploy_litellm_proxy` for return-value semantics and the
+    meaning of ``modal_env``.
     """
     return _deploy_modal_app(
         app_file=_connector_app_file(),
         app_name=f"remote-service-connector-{tier}",
-        modal_env=str(name),
+        modal_env=modal_env,
         tier=tier,
         parent_cg=parent_cg,
     )

@@ -12,7 +12,6 @@ import json
 import os
 import re
 import shutil
-import sys
 import tomllib
 from pathlib import Path
 from typing import Final
@@ -22,21 +21,94 @@ from loguru import logger
 
 MINDS_ROOT_NAME_ENV_VAR: Final[str] = "MINDS_ROOT_NAME"
 DEFAULT_MINDS_ROOT_NAME: Final[str] = "minds"
-MINDS_ROOT_NAME_PATTERN: Final[str] = r"[a-z0-9_-]+"
+# Names that are not legal env-name suffixes. Today this is just the prefix
+# string itself, because ``minds-`` with an empty suffix would round-trip
+# to the production path (``~/.minds-/`` is nonsensical) and we'd rather
+# fail loudly than silently coerce.
+_MINDS_PREFIX: Final[str] = "minds"
+# Env names matching this pattern can legally appear as the suffix after
+# ``minds-``. Mirrors :class:`imbue.minds.envs.primitives.DEV_ENV_NAME_PATTERN`
+# (kept inlined so this module stays free of any ``imbue.mngr.*`` /
+# pydantic imports -- see module docstring).
+_ENV_NAME_PATTERN: Final[str] = r"[a-z0-9][a-z0-9_-]{0,38}[a-z0-9]"
+# The full set of legal MINDS_ROOT_NAME values is either ``minds`` alone
+# (production) or ``minds-<env-name>`` (any other environment).
+MINDS_ROOT_NAME_PATTERN: Final[str] = rf"{_MINDS_PREFIX}(-{_ENV_NAME_PATTERN})?"
 
 
 def resolve_minds_root_name() -> str:
     """Read MINDS_ROOT_NAME from the environment or return the default.
 
-    Validates the value against MINDS_ROOT_NAME_PATTERN and exits with status
-    1 if invalid. Validation is duplicated here (instead of going through a
-    pydantic primitive) so this module never has to import pydantic/mngr.
+    Validates the value against :data:`MINDS_ROOT_NAME_PATTERN`. When the
+    env var is unset, returns :data:`DEFAULT_MINDS_ROOT_NAME` (production).
+    When the env var holds a value that does not match the pattern (e.g.
+    a stale ``devminds`` left in a parent shell from before the
+    per-env-root refactor), logs a warning and returns the default --
+    callers that genuinely need an activated env check explicitly via
+    :func:`is_minds_root_name_set_to_active_env` instead.
+
+    Validation is duplicated here (instead of going through a pydantic
+    primitive) so this module never has to import pydantic/mngr.
     """
-    value = os.environ.get(MINDS_ROOT_NAME_ENV_VAR, DEFAULT_MINDS_ROOT_NAME)
+    value = os.environ.get(MINDS_ROOT_NAME_ENV_VAR)
+    if value is None:
+        return DEFAULT_MINDS_ROOT_NAME
     if not re.fullmatch(MINDS_ROOT_NAME_PATTERN, value):
-        logger.error("{} must match {!r}; got {!r}", MINDS_ROOT_NAME_ENV_VAR, MINDS_ROOT_NAME_PATTERN, value)
-        sys.exit(1)
+        logger.warning(
+            "{}={!r} does not match {!r}; ignoring and falling back to {!r}. "
+            'Run `eval "$(minds env activate <name>)"` to activate a valid env.',
+            MINDS_ROOT_NAME_ENV_VAR,
+            value,
+            MINDS_ROOT_NAME_PATTERN,
+            DEFAULT_MINDS_ROOT_NAME,
+        )
+        return DEFAULT_MINDS_ROOT_NAME
     return value
+
+
+def is_minds_root_name_set_to_active_env() -> bool:
+    """Return True iff ``MINDS_ROOT_NAME`` is explicitly set to a valid value.
+
+    Used by ``minds env deploy/destroy`` and ``minds run`` to refuse when
+    no env has been activated. Distinguishes "operator forgot to activate"
+    (unset / invalid -> False) from "operator activated production"
+    (``MINDS_ROOT_NAME=minds`` -> True). Treats values that don't match
+    :data:`MINDS_ROOT_NAME_PATTERN` as "not activated" because they get
+    silently overridden by :func:`resolve_minds_root_name`.
+    """
+    value = os.environ.get(MINDS_ROOT_NAME_ENV_VAR)
+    if value is None:
+        return False
+    return re.fullmatch(MINDS_ROOT_NAME_PATTERN, value) is not None
+
+
+def env_name_from_root_name(root_name: str) -> str:
+    """Return the env name for a given ``MINDS_ROOT_NAME``.
+
+    ``minds`` -> ``production``; ``minds-<name>`` -> ``<name>``. Raises
+    ``BootstrapError`` for any other value -- callers should validate via
+    :func:`resolve_minds_root_name` first.
+    """
+    if root_name == DEFAULT_MINDS_ROOT_NAME:
+        return "production"
+    if not root_name.startswith(f"{_MINDS_PREFIX}-"):
+        raise BootstrapError(
+            f"Cannot extract env name from {MINDS_ROOT_NAME_ENV_VAR}={root_name!r}: "
+            f"expected {DEFAULT_MINDS_ROOT_NAME!r} or {_MINDS_PREFIX}-<env-name>."
+        )
+    return root_name[len(_MINDS_PREFIX) + 1 :]
+
+
+def root_name_for_env_name(env_name: str) -> str:
+    """Return the ``MINDS_ROOT_NAME`` value for a given env name.
+
+    ``production`` -> ``minds``; anything else -> ``minds-<name>``. The
+    env name is not re-validated here; callers should validate via
+    :class:`imbue.minds.envs.primitives.DevEnvName` first.
+    """
+    if env_name == "production":
+        return DEFAULT_MINDS_ROOT_NAME
+    return f"{_MINDS_PREFIX}-{env_name}"
 
 
 def minds_data_dir_for(root_name: str) -> Path:
@@ -187,32 +259,52 @@ def apply_bootstrap() -> None:
     """Set MNGR_HOST_DIR and MNGR_PREFIX in os.environ from MINDS_ROOT_NAME.
 
     Must be called before any ``imbue.mngr.*`` module is imported. When
-    ``MINDS_ROOT_NAME`` is explicitly set in the environment, the derived
-    ``MNGR_HOST_DIR`` / ``MNGR_PREFIX`` values unconditionally override
-    any pre-existing values -- otherwise an inherited ``MNGR_HOST_DIR``
-    from a parent process (e.g. a Claude Code agent's tmux env) would
-    silently win and minds would read a different mngr settings.toml
-    than the bootstrap wrote to. When ``MINDS_ROOT_NAME`` is not set,
-    the defaults are written via ``setdefault`` so test fixtures and
-    advanced users who pin ``MNGR_HOST_DIR`` directly can still do so.
+    ``MINDS_ROOT_NAME`` is set to a valid value (matching
+    :data:`MINDS_ROOT_NAME_PATTERN`), the derived ``MNGR_HOST_DIR`` /
+    ``MNGR_PREFIX`` values unconditionally override any pre-existing
+    values -- otherwise an inherited ``MNGR_HOST_DIR`` from a parent
+    process (e.g. a Claude Code agent's tmux env) would silently win and
+    minds would read a different mngr settings.toml than the bootstrap
+    wrote to.
 
-    Also reconciles the imbue_cloud provider entries in mngr's settings.toml
-    against the persistent session list so a user with a still-valid
-    SuperTokens cookie always has a usable ``[providers.imbue_cloud_<slug>]``
-    block for ``mngr create`` -- previously the entry was only written by
-    a fresh signin event, so any drift (older bootstrap bug, manual edit,
-    deleted-then-recreated settings.toml, etc.) left the user able to
-    sign in but unable to create a workspace until they explicitly
-    signed out and back in.
+    When ``MINDS_ROOT_NAME`` is unset, this function leaves
+    ``MNGR_HOST_DIR`` / ``MNGR_PREFIX`` untouched -- the per-env-root
+    refactor moved env activation to an explicit ``minds env activate``
+    step, so an unactivated shell has nothing to seed. Callers that need
+    an activated env refuse explicitly (e.g. ``minds run``,
+    ``minds env deploy``); callers that only need the production data
+    dir (``~/.minds/``) handle that themselves via
+    :func:`mngr_host_dir_for` + :data:`DEFAULT_MINDS_ROOT_NAME`.
+
+    When ``MINDS_ROOT_NAME`` is set to a value that does not match
+    :data:`MINDS_ROOT_NAME_PATTERN` (e.g. a stale ``devminds`` shell
+    from before the refactor), :func:`resolve_minds_root_name` logs a
+    warning and returns the default -- we then export the default's
+    derived ``MNGR_*`` vars so downstream mngr calls have *some*
+    consistent host_dir to point at instead of half-honoring the bad
+    value.
+
+    Also reconciles the imbue_cloud provider entries in mngr's
+    settings.toml against the persistent session list so a user with a
+    still-valid SuperTokens cookie always has a usable
+    ``[providers.imbue_cloud_<slug>]`` block for ``mngr create`` --
+    previously the entry was only written by a fresh signin event, so
+    any drift (older bootstrap bug, manual edit, deleted-then-recreated
+    settings.toml, etc.) left the user able to sign in but unable to
+    create a workspace until they explicitly signed out and back in.
     """
-    is_root_name_explicit = MINDS_ROOT_NAME_ENV_VAR in os.environ
+    raw_value = os.environ.get(MINDS_ROOT_NAME_ENV_VAR)
+    if raw_value is None:
+        # Unactivated shell: leave MNGR_* alone. The ``mngr`` CLI's own
+        # defaults will land it on ``~/.mngr/`` if nothing's pre-set;
+        # production-only minds entry points (the bundled Electron build)
+        # always set both ``MINDS_ROOT_NAME`` and the derived vars before
+        # invoking us, so an unset value here genuinely means "the user
+        # has not activated any env yet".
+        return
     root_name = resolve_minds_root_name()
-    if is_root_name_explicit:
-        os.environ["MNGR_HOST_DIR"] = str(mngr_host_dir_for(root_name))
-        os.environ["MNGR_PREFIX"] = mngr_prefix_for(root_name)
-    else:
-        os.environ.setdefault("MNGR_HOST_DIR", str(mngr_host_dir_for(root_name)))
-        os.environ.setdefault("MNGR_PREFIX", mngr_prefix_for(root_name))
+    os.environ["MNGR_HOST_DIR"] = str(mngr_host_dir_for(root_name))
+    os.environ["MNGR_PREFIX"] = mngr_prefix_for(root_name)
     _ensure_mngr_settings(root_name)
     # Provider reconciliation moved out of apply_bootstrap because it now
     # requires the per-env connector URL; callers (i.e. `minds run`) invoke

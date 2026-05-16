@@ -40,25 +40,26 @@ class WorkspacePaths(FrozenModel):
 
 
 class ClientEnvConfig(FrozenModel):
-    """Per-tier runtime config read by ``minds run`` (and by per-dev override files).
+    """Per-env runtime config read by ``minds run``.
 
-    This is the *small* file: the desktop client only needs to know which
-    remote services it talks to. The matching ``deploy.toml`` carries the
-    larger set of values the deploy pipeline needs.
+    The non-secret half of an env's on-disk state. Used in two places:
 
-    A dynamic dev env's ``~/.minds/envs/<dev-name>.toml`` uses the same
-    shape (it is a self-contained snapshot, not a layered override) and
-    may additionally carry a ``[secrets]`` subtable. To keep
-    ``minds run --config-file ~/.minds/envs/<name>.toml`` working against
-    such files, this model permits (and ignores) extra top-level fields
-    -- the desktop client only needs the URLs; the per-dev-env state
-    captured by :class:`LocalDevEnvConfig` is consumed elsewhere.
+    * Staging / production: ``apps/minds/imbue/minds/config/envs/<tier>/client.toml``
+      is committed to the repo. The deploy writer is forbidden from ever
+      adding fields beyond the URLs declared here -- a separate
+      :class:`PublicClientEnvConfig` type and a runtime guard in
+      ``envs/local_store.py`` make sure no secret can sneak into a
+      committed file.
+    * Dev envs: ``~/.minds-<env-name>/client.toml`` (chmod 0644) is
+      written by ``minds env deploy <name>``; secrets land in a separate
+      chmod-0600 ``secrets.toml`` next to it (see :class:`DevEnvSecretsModel`
+      in ``envs/local_store.py``).
+
+    Unknown top-level fields are rejected so a misconfigured tier file
+    fails fast rather than silently dropping unsupported knobs.
     """
 
-    # ``frozen=True`` is inherited from FrozenModel; we override only the
-    # extra-field policy so a per-dev-env TOML carrying a ``[secrets]``
-    # subtable still parses as a ClientEnvConfig.
-    model_config = ConfigDict(frozen=True, extra="ignore", arbitrary_types_allowed=False)
+    model_config = ConfigDict(frozen=True, extra="forbid", arbitrary_types_allowed=False)
 
     connector_url: AnyUrl = Field(description="Base URL of the `remote_service_connector` Modal app for this env.")
     litellm_proxy_url: AnyUrl = Field(
@@ -94,6 +95,15 @@ class DeployEnvConfig(FrozenModel):
     """
 
     modal_workspace: NonEmptyStr = Field(description="Modal workspace (Modal team/account) this tier deploys into.")
+    modal_env: NonEmptyStr = Field(
+        default=NonEmptyStr("main"),
+        description=(
+            "Modal *environment* name to deploy this tier's apps into. Only consulted for "
+            "staging / production deploys -- dev-env deploys always pin the Modal env to the "
+            "activated dev env name (so two devs never share one Modal env). Defaults to ``main`` "
+            "(the convention staging / production both follow today)."
+        ),
+    )
     vault_path_prefix: NonEmptyStr = Field(
         description="HCP Vault path prefix for this tier's secrets, e.g. `secrets/minds/production`."
     )

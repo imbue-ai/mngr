@@ -6,9 +6,10 @@ from pydantic import AnyUrl
 from imbue.minds.config.data_types import ClientEnvConfig
 from imbue.minds.config.data_types import DeployEnvConfig
 from imbue.minds.config.loader import EnvConfigError
+from imbue.minds.config.loader import bundled_client_config_path_or_none
 from imbue.minds.config.loader import load_client_config
 from imbue.minds.config.loader import load_deploy_config
-from imbue.minds.config.loader import resolve_default_client_config_path
+from imbue.minds.config.loader import repo_tier_client_config_path
 
 _VALID_CLIENT_TOML = (
     'connector_url = "https://connector.example.com/"\nlitellm_proxy_url = "https://litellm.example.com/"\n'
@@ -67,12 +68,31 @@ def test_load_deploy_config_unknown_tier_raises() -> None:
         load_deploy_config("not_a_real_tier")
 
 
-def test_resolve_default_client_config_path_falls_back_to_dev() -> None:
-    """With no _bundled/client.toml in the repo, the resolver returns dev/client.toml.
+def test_load_client_config_rejects_extra_fields(tmp_path: Path) -> None:
+    """The ClientEnvConfig model has extra='forbid' so a stray secrets table is rejected.
 
-    The dev fallback is a stable, committed file; the bundled path is
-    gitignored. This test is robust under fresh checkouts.
+    This is one of the layers that keeps secrets out of a committed
+    staging/production client.toml.
     """
-    path = resolve_default_client_config_path()
+    path = tmp_path / "client.toml"
+    path.write_text(_VALID_CLIENT_TOML + '\n[secrets]\nFOO = "bar"\n')
+    with pytest.raises(EnvConfigError, match="Invalid client config"):
+        load_client_config(path)
+
+
+def test_repo_tier_client_config_path_resolves_under_envs_dir() -> None:
+    """The returned path is `apps/minds/imbue/minds/config/envs/<tier>/client.toml`."""
+    path = repo_tier_client_config_path("staging")
     assert path.name == "client.toml"
-    assert path.parent.name == "dev" or path.parent.name == "_bundled"
+    assert path.parent.name == "staging"
+    assert path.parent.parent.name == "envs"
+
+
+def test_bundled_client_config_path_or_none_default_is_none() -> None:
+    """The committed repo has no `_bundled/client.toml` -- it ships empty.
+
+    Build-time `bundleClientConfig()` writes the file when
+    `MINDS_CLIENT_CONFIG_BUNDLE` is set; an uninstalled dev tree has
+    nothing there.
+    """
+    assert bundled_client_config_path_or_none() is None

@@ -1,19 +1,25 @@
 """Load per-tier and per-dev-env config files.
 
-The ``--config-file <path>`` flag on ``minds run`` is the only env-selection
-knob. Resolution for the default when ``--config-file`` is unset:
+Per-env on-disk layout (see ``apps/minds/imbue/minds/envs/paths.py``
+and the per-env-data-roots spec):
 
-1. If ``imbue/minds/config/envs/_bundled/client.toml`` exists (written by
-   the Electron production build step), return that path.
-2. Otherwise fall back to ``imbue/minds/config/envs/dev/client.toml``.
+* Dev envs: ``~/.minds-<env-name>/client.toml`` -- non-secret config
+  written by ``minds env deploy``. Read via ``load_client_config(path)``
+  with the path coming from ``MINDS_CLIENT_CONFIG_PATH`` (or
+  ``--config-file``); ``minds env activate`` sets the env var to this
+  path.
+* Staging / production: ``apps/minds/imbue/minds/config/envs/<tier>/client.toml``
+  is committed to the repo and read directly via
+  :func:`repo_tier_client_config_path`. ``minds env activate``
+  points ``MINDS_CLIENT_CONFIG_PATH`` at the in-repo path; the deploy
+  writer for these tiers never touches disk-local files (the values are
+  computable from the tier's Modal workspace + app names).
 
-The fall-through is what ``uv run minds run`` and any non-production build
-see; release builds always write the production tier's ``client.toml`` into
-``_bundled/`` before packaging the wheel.
-
-Both paths resolve via ``Path(__file__).parent / "envs" / ...`` so the
-function works identically when running from a source checkout and from an
-installed wheel -- hatch ships the ``envs/`` directory verbatim.
+There is no implicit fallback: ``minds run`` refuses to start unless
+``--config-file`` is passed or ``MINDS_CLIENT_CONFIG_PATH`` is
+exported. The bundled-Electron entry path always passes ``--config-file``
+explicitly (the build embeds the file's path via
+``MINDS_CLIENT_CONFIG_BUNDLE``).
 """
 
 import tomllib
@@ -26,7 +32,6 @@ from imbue.minds.errors import MindError
 
 _ENVS_DIR: Final[Path] = Path(__file__).parent / "envs"
 _BUNDLED_DIR: Final[Path] = _ENVS_DIR / "_bundled"
-_DEV_DIR: Final[Path] = _ENVS_DIR / "dev"
 _CLIENT_FILENAME: Final[str] = "client.toml"
 _DEPLOY_FILENAME: Final[str] = "deploy.toml"
 
@@ -35,20 +40,30 @@ class EnvConfigError(MindError):
     """Raised when a per-tier or per-dev-env config file cannot be loaded."""
 
 
-def resolve_default_client_config_path() -> Path:
-    """Return the path to the default client config.
+def repo_tier_client_config_path(tier: str) -> Path:
+    """Return the in-repo ``apps/minds/imbue/minds/config/envs/<tier>/client.toml``.
 
-    Honors the build-bundled file when present, otherwise returns the
-    dev-tier file. Raises if neither is present (which should never happen
-    in a normal install, since the dev fallback ships with the wheel).
+    The path is returned even when the file does not exist on disk --
+    callers that need existence check via ``.is_file()`` so the error
+    message can be tier-specific. Only the ``staging`` / ``production``
+    tiers commit a ``client.toml`` here; ``dev`` has no shared
+    ``client.toml`` (per-dev envs each carry their own URLs).
+    """
+    return _ENVS_DIR / tier / _CLIENT_FILENAME
+
+
+def bundled_client_config_path_or_none() -> Path | None:
+    """Return the bundled ``_bundled/client.toml`` if it exists, else None.
+
+    Populated at Electron build time by ``apps/minds/scripts/build.js``
+    from ``MINDS_CLIENT_CONFIG_BUNDLE=<path>``. Used by the bundled
+    Electron startup path to know what to pass as ``--config-file``
+    when launching the backend.
     """
     bundled = _BUNDLED_DIR / _CLIENT_FILENAME
     if bundled.is_file():
         return bundled
-    fallback = _DEV_DIR / _CLIENT_FILENAME
-    if fallback.is_file():
-        return fallback
-    raise EnvConfigError(f"Could not locate default client config: neither {bundled} nor {fallback} exists.")
+    return None
 
 
 def load_client_config(path: Path) -> ClientEnvConfig:

@@ -160,6 +160,14 @@ function startBackend(onProgress, onNotification, onAuthEvent, onMngrForwardStar
       const mindsRootName = paths.getMindsRootName();
       const mngrHostDir = paths.getMngrHostDir();
       const mngrPrefix = paths.getMngrPrefix();
+      // When build.js embedded a client.toml + root_name pair (production
+      // / staging / beta packaged builds), pass --config-file explicitly
+      // so the backend doesn't have to fall back to MINDS_CLIENT_CONFIG_PATH.
+      // Dev-mode builds (no bundle) inherit MINDS_CLIENT_CONFIG_PATH from
+      // the user's activated shell instead; the backend refuses to start
+      // if neither path is set.
+      const bundledClientConfig = paths.getBundledClientConfigPath();
+      const configFileArgs = bundledClientConfig ? ['--config-file', bundledClientConfig] : [];
 
       if (paths.isDev()) {
         // Dev mode: use system uv with the monorepo workspace venv
@@ -172,6 +180,7 @@ function startBackend(onProgress, onNotification, onAuthEvent, onMngrForwardStar
           '--host', '127.0.0.1',
           '--port', String(port),
           '--no-browser',
+          ...configFileArgs,
         ];
         cwd = paths.getMonorepoRoot();
         env = {
@@ -201,6 +210,7 @@ function startBackend(onProgress, onNotification, onAuthEvent, onMngrForwardStar
           '--host', '127.0.0.1',
           '--port', String(port),
           '--no-browser',
+          ...configFileArgs,
         ];
         cwd = pyprojectDir;
         env = {

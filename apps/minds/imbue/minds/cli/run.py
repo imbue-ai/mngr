@@ -46,7 +46,6 @@ from imbue.minds.config.data_types import DEFAULT_DESKTOP_CLIENT_PORT
 from imbue.minds.config.data_types import MNGR_BINARY
 from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.config.loader import load_client_config
-from imbue.minds.config.loader import resolve_default_client_config_path
 from imbue.minds.desktop_client.agent_creator import AgentCreator
 from imbue.minds.desktop_client.app import create_desktop_client
 from imbue.minds.desktop_client.auth import FileAuthStore
@@ -128,10 +127,11 @@ _GATEWAY_PORT_POLL_INTERVAL_SECONDS: Final[float] = 0.2
     default=None,
     envvar="MINDS_CLIENT_CONFIG_PATH",
     help=(
-        "Path to a per-env client config TOML. Falls back in order to the "
-        "MINDS_CLIENT_CONFIG_PATH env var (so `just devminds-start` can target a "
-        "dynamic dev env without baking the path into Electron), the build-bundled "
-        "file (production builds), and finally the dev tier defaults."
+        "Path to the per-env client config TOML. Falls back to the "
+        "MINDS_CLIENT_CONFIG_PATH env var (set by `minds env activate <name>`); "
+        "no implicit default beyond that. Refuses to start when neither is set "
+        '-- run `eval "$(minds env activate <name>)"` first. Bundled Electron '
+        "builds pass this flag explicitly from MINDS_CLIENT_CONFIG_BUNDLE."
     ),
 )
 @click.pass_context
@@ -145,10 +145,16 @@ def run(
 ) -> None:
     # noqa: PLR0913 — flag count matches the legacy `minds forward` interface
     """Run the minds bare-origin server with `mngr forward` as a subprocess."""
+    if config_file is None:
+        raise click.ClickException(
+            "No client config file is set. Activate an env first: "
+            '`eval "$(uv run minds env activate <name>)"` (e.g. '
+            "`<your-user>-dev`, `staging`, or `production`), then re-run."
+        )
     root_name = resolve_minds_root_name()
     data_directory = minds_data_dir_for(root_name)
     minds_config = MindsConfig(data_dir=data_directory)
-    client_config_path = config_file if config_file is not None else resolve_default_client_config_path()
+    client_config_path = config_file
     client_env_config = load_client_config(client_config_path)
     connector_url_str = str(client_env_config.connector_url).rstrip("/")
     output_format: OutputFormat = ctx.obj.get("output_format", OutputFormat.HUMAN)
