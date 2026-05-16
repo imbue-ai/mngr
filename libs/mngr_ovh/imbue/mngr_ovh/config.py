@@ -13,6 +13,10 @@ _DEFAULT_ENDPOINT: Final[str] = "ovh-us"
 _DEFAULT_PLAN: Final[str] = "vps-2025-model1"
 _DEFAULT_REGION: Final[str] = "US-EAST-VA"
 _DEFAULT_IMAGE_NAME: Final[str] = "Debian 12 - Docker"
+# OVH images install the rebuild SSH key into the image's default non-root
+# user, not into /root. mngr operates as root downstream so we sudo-copy the
+# key to root during provisioning; this is the user the rebuild key lands on.
+_DEFAULT_BOOTSTRAP_SSH_USER: Final[str] = "debian"
 
 
 class OvhPricingMode(UpperCaseStrEnum):
@@ -73,6 +77,17 @@ class OvhProviderConfig(VpsDockerProviderConfig):
     default_image_name: str = Field(
         default=_DEFAULT_IMAGE_NAME,
         description="Default OS image name (resolved to UUID per-VPS at create time).",
+    )
+    bootstrap_ssh_user: str = Field(
+        default=_DEFAULT_BOOTSTRAP_SSH_USER,
+        description=(
+            "Default non-root user the OVH image installs the rebuild key for. "
+            "On the default ``Debian 12 - Docker`` image this is ``debian``; "
+            "Ubuntu images use ``ubuntu``; AlmaLinux uses ``almalinux``; etc. "
+            "Used during the post-rebuild bootstrap to sudo-copy authorized_keys "
+            "into ``/root/.ssh`` so the rest of the provider (which assumes root "
+            "SSH) works without scattering sudos through downstream code."
+        ),
     )
     pricing_mode: OvhPricingMode = Field(
         default=OvhPricingMode.DEFAULT,

@@ -6,6 +6,25 @@ from imbue.mngr_lima.lima_yaml import merge_lima_yaml
 from imbue.mngr_lima.lima_yaml import parse_build_args_for_yaml_path
 from imbue.mngr_lima.lima_yaml import write_lima_yaml
 
+# Independently spelled out (rather than imported from production) so the
+# assertions still document the expected shape of the disabled-port-forwards
+# rules rather than tautologically echoing the helper.
+_EXPECTED_DISABLED_PORT_FORWARDS = [
+    {
+        "guestIPMustBeZero": True,
+        "guestIP": "0.0.0.0",
+        "proto": "any",
+        "guestPortRange": [1, 65535],
+        "ignore": True,
+    },
+    {
+        "guestIP": "127.0.0.1",
+        "proto": "any",
+        "guestPortRange": [1, 65535],
+        "ignore": True,
+    },
+]
+
 
 def test_generate_default_lima_yaml(tmp_path: Path) -> None:
     volume_path = tmp_path / "volume"
@@ -29,6 +48,8 @@ def test_generate_default_lima_yaml(tmp_path: Path) -> None:
     assert "provision" in config
     assert len(config["provision"]) == 1
     assert config["provision"][0]["mode"] == "system"
+
+    assert config["portForwards"] == _EXPECTED_DISABLED_PORT_FORWARDS
 
 
 def test_generate_default_lima_yaml_custom_image(tmp_path: Path) -> None:
@@ -141,6 +162,14 @@ def test_merge_lima_yaml_extends_provision_and_mounts_replaces_images() -> None:
     override = {"images": [{"location": "custom.qcow2"}]}
     merged = merge_lima_yaml(base, override)
     assert merged["images"] == [{"location": "custom.qcow2"}]
+
+
+def test_merge_lima_yaml_forces_port_forwards_disabled() -> None:
+    base = {"portForwards": _EXPECTED_DISABLED_PORT_FORWARDS, "cpus": 4}
+    user_override = {"portForwards": [{"guestPort": 8082, "hostPort": 8082}], "cpus": 8}
+    merged = merge_lima_yaml(base, user_override)
+    assert merged["cpus"] == 8
+    assert merged["portForwards"] == _EXPECTED_DISABLED_PORT_FORWARDS
 
 
 def test_parse_build_args_for_yaml_path() -> None:

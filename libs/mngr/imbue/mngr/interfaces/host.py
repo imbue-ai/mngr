@@ -211,8 +211,16 @@ class OuterHostInterface(MutableModel, ABC):
         ...
 
     @abstractmethod
-    def get_name(self) -> HostName:
-        """Return the human-readable name of this host."""
+    def get_name(self) -> str:
+        """Return the connector's display name (e.g. SSH hostname or IP).
+
+        Returns ``str`` -- not ``HostName`` -- because an outer host's name
+        is the literal connection target, which is commonly a dotted IPv4
+        address (``192.0.2.10``) or DNS name (``vps-x.vps.ovh.us``);
+        ``HostName`` forbids dots since it doubles as a CLI address token.
+        The ``Host`` subclass overrides this and returns a ``HostName``,
+        which is a ``str`` subclass and so satisfies the wider type here.
+        """
         ...
 
     @abstractmethod

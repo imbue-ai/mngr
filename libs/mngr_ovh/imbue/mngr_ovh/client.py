@@ -52,6 +52,9 @@ _VPS_STATE_MAP: Final[dict[str, VpsInstanceStatus]] = {
 
 _TASK_TERMINAL_STATES: Final[frozenset[str]] = frozenset({"done", "error", "cancelled", "blocked"})
 _TASK_FAILURE_STATES: Final[frozenset[str]] = frozenset({"error", "cancelled", "blocked"})
+# Only `todo` and `doing` are valid for OVH's `?state=` task filter; other
+# values (e.g. `init`) return HTTP 400 BadParametersError.
+_TASK_ACTIVE_STATE_FILTERS: Final[tuple[str, ...]] = ("todo", "doing")
 
 
 class RecycleHandle(FrozenModel):
@@ -198,27 +201,41 @@ class OvhVpsClient(VpsClientInterface):
         )
 
     def destroy_instance(self, instance_id: VpsInstanceId) -> None:
-        """Request termination of an OVH VPS (or abort an in-flight recycle).
+        """Cancel an OVH VPS so it stops auto-renewing past its next expiration.
 
-        OVH's termination is asynchronous and billing-anniversary aware:
-        ``POST /vps/{s}/terminate`` registers the request and OVH emails a
-        confirmation token. ``POST /vps/{s}/confirmTermination`` with that
-        token finalizes termination. In practice for mngr's use case, the
-        VPS is logically destroyed at this point even though the service
-        may linger until the end of the billing period.
+        OVH offers two cancellation paths:
+
+        - ``POST /vps/{s}/terminate`` queues termination behind an
+          email confirmation step (``POST /confirmTermination`` with
+          the emailed token). Without that confirmation, the VPS
+          continues to auto-renew indefinitely. This is the right call
+          for an interactive human flow but useless for an unattended
+          CLI.
+        - ``PUT /vps/{s}/serviceInfos`` with ``renew.deleteAtExpiration=True``
+          flips the auto-renewal flag directly, no email needed. OVH
+          then decommissions the VPS at the next ``expiration`` date.
+          Verified live against the OVH-US API.
+
+        We use the serviceInfos path so ``mngr destroy`` actually stops
+        the meter. The remainder of the already-paid period is still
+        forfeit (OVH does not prorate classic VPS cancellations); for
+        monthly subscriptions that is the rest of the current month,
+        for ``UPFRONT6`` / ``UPFRONT12`` it can be up to 6 / 12 months
+        of prepaid balance respectively. The VPS will not auto-renew
+        past the next OVH-side expiration date.
 
         If this VPS is currently mid-recycle (a ``RecycleHandle`` was
         registered via ``register_recycle_handle`` but neither
         ``finalize_recycle`` nor ``abort_recycle`` has run yet), this
         call short-circuits to release the recycle lock only. The VPS
-        is already cancelled, so calling ``/terminate`` again would be
-        a no-op on OVH's side; releasing the lock lets a subsequent
-        ``mngr create`` re-attempt the recycle.
+        is already cancelled in OVH's eyes; flipping the flag again is
+        a no-op and releasing the lock lets a subsequent ``mngr create``
+        re-attempt the recycle.
         """
         service_name = str(instance_id)
         handle = self._pending_recycle_handles.pop(service_name, None)
         if handle is not None:
-            logger.info("OVH VPS {} is mid-recycle; releasing recycle lock instead of re-terminating", service_name)
+            logger.info("OVH VPS {} is mid-recycle; releasing recycle lock instead of re-cancelling", service_name)
             try:
                 self._call("DELETE", f"/v2/iam/resource/{handle.urn}/tag/{MNGR_RECYCLING_LOCK_TAG_KEY}")
             except VpsApiError as e:
@@ -226,10 +243,14 @@ class OvhVpsClient(VpsClientInterface):
                     logger.warning("OVH recycle lock release failed for {}: {}", service_name, e)
             return
         try:
-            self._call("POST", f"/vps/{instance_id}/terminate")
-            logger.info("Requested termination of OVH VPS {} (billing remainder is forfeit)", instance_id)
+            self.set_renew_at_expiration(service_name, True)
+            logger.info(
+                "Cancelled OVH VPS {} (deleteAtExpiration=true; "
+                "decommissions at next OVH expiration date, any already-paid balance is forfeit)",
+                instance_id,
+            )
         except VpsApiError as e:
-            logger.warning("OVH VPS {} termination request failed: {}", instance_id, e)
+            logger.warning("OVH VPS {} cancellation request failed: {}", instance_id, e)
             raise
 
     def get_instance_status(self, instance_id: VpsInstanceId) -> VpsInstanceStatus:
@@ -295,12 +316,21 @@ class OvhVpsClient(VpsClientInterface):
         ``GET /vps/{s}/serviceInfos`` → mutate ``renew.deleteAtExpiration`` →
         ``PUT /vps/{s}/serviceInfos``. Setting ``False`` is the way to undo a
         prior cancellation request (no email token required, verified live).
-        Setting ``True`` is equivalent to the user clicking "confirm
-        termination" in the email (also skips the email round-trip).
+
+        OVH auto-flips ``renew.automatic`` to ``False`` and
+        ``renewalType`` to ``"manual"`` as a side effect of setting
+        ``deleteAtExpiration=True`` (verified live on US-EAST-VA). When
+        un-cancelling (``delete_at_expiration=False``) we explicitly
+        restore both fields so the VPS resumes auto-renewing; otherwise
+        a recycled VPS would silently fail to renew at the next
+        anniversary even though our flag flip succeeded.
         """
         info = self.get_service_info(service_name)
         renew = dict(info.get("renew") or {})
         renew["deleteAtExpiration"] = delete_at_expiration
+        if not delete_at_expiration:
+            renew["automatic"] = True
+            info["renewalType"] = "automaticV2012"
         info["renew"] = renew
         self._call("PUT", f"/vps/{service_name}/serviceInfos", **info)
 
@@ -343,6 +373,46 @@ class OvhVpsClient(VpsClientInterface):
             f"OVH task {task_id} ({last_payload.get('type', '?')}) on {service_name} "
             f"did not finish within {timeout_seconds}s (last state: {last_payload.get('state', '?')})"
         )
+
+    def wait_for_no_active_tasks(
+        self,
+        service_name: str,
+        timeout_seconds: float,
+    ) -> None:
+        """Block until ``/vps/{s}`` has no tasks in ``todo`` or ``doing`` state.
+
+        OVH's ``order/cart`` flow returns once the new ``serviceName`` is
+        visible in ``GET /vps``, but a background ``deliverVm`` task is
+        typically still running for ~1-2 minutes after that point.
+        Subsequent mutating calls (``/rebuild`` in particular) fail with
+        ``Action not available while there are running tasks on the VPS``
+        until that task drains. This helper polls until both active-state
+        filters return empty.
+
+        Raises ``VpsProvisioningError`` on timeout.
+        """
+        deadline = time.monotonic() + timeout_seconds
+        last_active: list[int] = []
+        while time.monotonic() < deadline:
+            try:
+                last_active = self._list_active_task_ids(service_name)
+                if not last_active:
+                    return
+            except VpsApiError as e:
+                logger.warning("Failed to list active OVH tasks for {}: {}", service_name, e)
+            time.sleep(self.task_poll_interval)
+        raise VpsProvisioningError(
+            f"OVH VPS {service_name} still has active tasks {last_active!r} after {timeout_seconds}s; "
+            "subsequent /rebuild would race the in-flight task"
+        )
+
+    def _list_active_task_ids(self, service_name: str) -> list[int]:
+        ids: list[int] = []
+        for state in _TASK_ACTIVE_STATE_FILTERS:
+            payload = self._call("GET", f"/vps/{service_name}/tasks?state={state}")
+            if isinstance(payload, list):
+                ids.extend(int(t) for t in payload)
+        return ids
 
     # =========================================================================
     # Snapshot operations (VPS-level)
