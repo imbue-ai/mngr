@@ -163,12 +163,68 @@ Tier deploys are idempotent -- re-running picks up any new Vault
 values and re-deploys both apps in place.
 
 `minds env destroy` for `staging` requires `--yes-i-mean-staging`.
-Staging destroy `modal app stop`s both deployed apps and removes
-`~/.minds-staging/` -- Modal Secrets, the tier's Neon DB, SuperTokens
-app, and Cloudflare zone stay (those are operator-managed via Vault
-and survive a destroy/redeploy cycle). Production destroy is
-hard-refused regardless of any flag -- production tier teardown is
-operator-managed outside this CLI.
+Production destroy is hard-refused regardless of any flag --
+production tier teardown is operator-managed outside this CLI.
+
+Destroy is "do everything `deploy` created, plus clear out the
+env-specific data that's accumulated inside operator-managed shared
+resources". For staging destroy this means:
+
+1. `mngr destroy` every agent under `~/.minds-staging/mngr/agents/`
+   so containers / pool hosts / tunnels stop cleanly before their
+   cloud resources go away.
+2. `modal app stop` both deployed apps in the tier's Modal env.
+3. `modal secret delete` every per-tier Modal Secret (`<service>-staging`).
+4. Wipe SuperTokens user / session data by delete+recreate of the
+   tier's app with the same `app_id` (the operator's connection URI
+   + API key in Vault stay valid).
+5. Wipe the Neon DB by running `DROP SCHEMA public CASCADE; CREATE
+   SCHEMA public;` against `DATABASE_URL` from Vault (the DB itself
+   + its DSN stay valid).
+6. Enumerate and delete every Cloudflare tunnel tagged with
+   `metadata.env = "staging"` (created via the connector's
+   `cf_create_tunnel` -- see "Tier generation id + activate auto-wipe"
+   below).
+7. Delete any Vultr instance tagged `minds_env=staging`.
+8. Delete the tier generation id from Vault (so the next deploy mints
+   a fresh one).
+9. Only after every cloud-side step succeeds, `rmdir`
+   `~/.minds-staging/`. On any partial failure the env root stays so
+   the operator can re-run `destroy` to pick up where things broke
+   (rather than silently leaking expensive cloud resources because
+   the local pointer is gone).
+
+Dev env destroy follows the same shape but operates on the per-dev
+Modal env / Neon DB / SuperTokens app (which deploy created outright,
+so destroy deletes them outright too rather than wiping data inside).
+The Cloudflare-tunnel + Vultr + mngr-agent + env-root-removal steps
+are identical.
+
+## Tier generation id + activate auto-wipe
+
+`minds env deploy` for a tier mints a uuid + stores it at
+`secrets/minds/<tier>/generation` in Vault, then pushes it as
+`MINDS_TIER_GENERATION_ID=<uuid>` in the tier's
+`litellm-connector-<tier>` Modal Secret. The connector exposes the
+value at `GET /generation` (no auth required -- the id is non-sensitive).
+
+`minds env destroy` removes the Vault entry, so the next deploy mints
+a *new* uuid. Subsequent activations on any developer's machine see
+the changed uuid and know their local state is stale.
+
+`minds env activate <tier>` fetches `/generation` from the connector
+URL, compares against the dev's per-env
+`~/.minds-<env-name>/last_seen_generation` marker, and on mismatch
+auto-wipes the env's `mngr/`, `auth/`, and `logs/` subdirs before
+exporting the activation env vars. Network / parse errors during the
+fetch log a warning and fall through (don't block activation).
+
+The same flow applies to dev envs that have a per-env `client.toml`
+(i.e. ones that have been deployed at least once) -- on a dev's own
+machine this is rarely useful (they alone control destroy of their own
+env), but the symmetry keeps the flow simple. Skipped silently when
+the env root has no `client.toml` yet (fresh `activate --create`
+before the first deploy).
 
 ## Running the desktop client
 
