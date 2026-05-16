@@ -149,7 +149,7 @@ def run(
         raise click.ClickException(
             "No client config file is set. Activate an env first: "
             '`eval "$(uv run minds env activate <name>)"` (e.g. '
-            "`<your-user>-dev`, `staging`, or `production`), then re-run."
+            "`dev-<your-user>`, `staging`, or `production`), then re-run."
         )
     root_name = resolve_minds_root_name()
     data_directory = minds_data_dir_for(root_name)

@@ -20,12 +20,17 @@ pool-management SSH keypair. There is zero cross-tier reach.
 
 Every minds env owns one data root:
 
-| Env name             | Data root             | `MINDS_ROOT_NAME` |
-|----------------------|-----------------------|-------------------|
-| `production`         | `~/.minds/`           | `minds`           |
-| `staging`            | `~/.minds-staging/`   | `minds-staging`   |
-| `<your-user>-dev`    | `~/.minds-<your-user>-dev/` | `minds-<your-user>-dev` |
-| `josh-3` (any dev)   | `~/.minds-josh-3/`    | `minds-josh-3`    |
+| Env name              | Data root                | `MINDS_ROOT_NAME`    |
+|-----------------------|--------------------------|----------------------|
+| `production`          | `~/.minds/`              | `minds`              |
+| `staging`             | `~/.minds-staging/`      | `minds-staging`      |
+| `dev-<your-user>`     | `~/.minds-dev-<your-user>/` | `minds-dev-<your-user>` |
+| `dev-josh-1` (any dev) | `~/.minds-dev-josh-1/`  | `minds-dev-josh-1`   |
+
+By convention dev env names lead with the tier (`dev-`) so the
+`MINDS_ROOT_NAME` always reads tier-first: `minds-dev-<your-user>`,
+`minds-dev-josh-1`, etc. The validation regex (see below) does not
+enforce the prefix, but the docs and command examples assume it.
 
 Each root holds its own mngr profile, agents, auth, logs, and (for
 dev envs) the per-env `client.toml` + chmod-0600 `secrets.toml`. Two
@@ -45,20 +50,29 @@ production root with a warning -- the operator can clean up via
 the rest of the stack at the env's data root:
 
 ```bash
-eval "$(uv run minds env activate <your-user>-dev)"
+eval "$(uv run minds env activate dev-<your-user>)"
 ```
 
 Exported variables:
 
-- `MINDS_ROOT_NAME` -- e.g. `minds-<your-user>-dev` (or just `minds`
+- `MINDS_ROOT_NAME` -- e.g. `minds-dev-<your-user>` (or just `minds`
   for production).
-- `MNGR_HOST_DIR` -- e.g. `$HOME/.minds-<your-user>-dev/mngr`.
-- `MNGR_PREFIX` -- e.g. `minds-<your-user>-dev-`.
+- `MNGR_HOST_DIR` -- e.g. `$HOME/.minds-dev-<your-user>/mngr`.
+- `MNGR_PREFIX` -- e.g. `minds-dev-<your-user>-`.
 - `MINDS_CLIENT_CONFIG_PATH` -- for dev envs, the per-env
   `~/.minds-<name>/client.toml` (written by `minds env deploy`).
   For `staging` / `production`, the in-repo
   `apps/minds/imbue/minds/config/envs/<tier>/client.toml` (committed
   to the repo).
+- `MODAL_PROFILE` -- the tier's `modal_workspace` from
+  `apps/minds/imbue/minds/config/envs/<tier>/deploy.toml`. Pins every
+  subsequent `modal` CLI shellout (`modal deploy`, `modal secret create`,
+  etc.) to the right Modal account regardless of which profile is marked
+  `active = true` in `~/.modal.toml`. **Prerequisite:** the operator
+  must have a matching profile entry in `~/.modal.toml` for each tier
+  they operate against (`modal token set --profile <workspace>` once
+  per tier). Skipped when the tier's `deploy.toml` is missing or its
+  `modal_workspace` is still the literal `CHANGE_ME` placeholder.
 
 To deactivate:
 
@@ -82,7 +96,7 @@ Behaviour by env type:
   in one line:
 
   ```bash
-  eval "$(uv run minds env activate --create <your-user>-dev)"
+  eval "$(uv run minds env activate --create dev-<your-user>)"
   uv run minds env deploy
   ```
 
@@ -256,11 +270,11 @@ Bootstrap a brand-new dev env:
 
 ```bash
 # 1. Activate the env (--create idempotently mkdirs ~/.minds-<name>/ if missing).
-eval "$(uv run minds env activate --create <your-user>-dev)"
+eval "$(uv run minds env activate --create dev-<your-user>)"
 
 # 2. Deploy: provisions the Modal env, Neon DB, SuperTokens app, pushes
 #    per-env Modal Secrets, runs `modal deploy` for both apps, and
-#    writes ~/.minds-<your-user>-dev/{client.toml,secrets.toml}.
+#    writes ~/.minds-dev-<your-user>/{client.toml,secrets.toml}.
 uv run minds env deploy
 
 # 3. Launch the desktop client against the new env:
@@ -268,22 +282,22 @@ just minds-start
 ```
 
 (For a one-off env tied to a feature you're working on, replace
-`<your-user>-dev` with e.g. `<your-user>-3`.)
+`dev-<your-user>` with e.g. `dev-<your-user>-3`.)
 
 Re-deploy in place (idempotent -- picks up any new tier-shared Vault
 values and re-deploys both Modal apps):
 
 ```bash
-eval "$(uv run minds env activate <your-user>-dev)"
+eval "$(uv run minds env activate dev-<your-user>)"
 uv run minds env deploy
 ```
 
 Tear it down (cloud resources + the env root):
 
 ```bash
-eval "$(uv run minds env activate <your-user>-dev)"
+eval "$(uv run minds env activate dev-<your-user>)"
 uv run minds env destroy
-# `minds env destroy` rmdir's ~/.minds-<your-user>-dev after success;
+# `minds env destroy` rmdir's ~/.minds-dev-<your-user> after success;
 # clear your shell with `eval "$(uv run minds env deactivate)"`.
 ```
 

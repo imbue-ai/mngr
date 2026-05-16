@@ -123,7 +123,7 @@ def _run_mngr_command(
 
 
 def _run_ssh_command(
-    vps_ip: str,
+    vps_address: str,
     ssh_key_path: str,
     port: int,
     command: str,
@@ -141,10 +141,10 @@ def _run_ssh_command(
         ssh_key_path,
         "-p",
         str(port),
-        f"root@{vps_ip}",
+        f"root@{vps_address}",
         command,
     ]
-    logger.info("  SSH {}:{}: {}", vps_ip, port, command)
+    logger.info("  SSH {}:{}: {}", vps_address, port, command)
     cg = ConcurrencyGroup(name="pool-ssh")
     with cg:
         result = cg.run_process_to_completion(
@@ -269,15 +269,15 @@ def _ufw_provision_commands(container_ssh_port: int) -> tuple[str, ...]:
     )
 
 
-def _checked_ssh_command(vps_ip: str, ssh_key_path: str, port: int, command: str, *, label: str) -> None:
+def _checked_ssh_command(vps_address: str, ssh_key_path: str, port: int, command: str, *, label: str) -> None:
     """Run an SSH command and raise on non-zero exit.
 
     Used for steps that MUST succeed (ufw install/configure, management key
     install). The bake aborts on failure rather than continuing with a
     half-configured host that would silently land in the pool.
     """
-    if not _run_ssh_command(vps_ip, ssh_key_path, port, command):
-        raise PoolBakeError(f"{label} failed on VPS {vps_ip}; aborting bake")
+    if not _run_ssh_command(vps_address, ssh_key_path, port, command):
+        raise PoolBakeError(f"{label} failed on VPS {vps_address}; aborting bake")
 
 
 class PoolBakeError(RuntimeError):
@@ -386,9 +386,9 @@ def _create_single_pool_host(
         logger.error("No SSH info in host data")
         return False
 
-    vps_ip = ssh.get("host")
-    if not isinstance(vps_ip, str):
-        logger.error("No VPS IP in SSH info")
+    vps_address = ssh.get("host")
+    if not isinstance(vps_address, str):
+        logger.error("No VPS address in SSH info")
         return False
 
     container_key_path = ssh.get("key_path")
@@ -407,9 +407,9 @@ def _create_single_pool_host(
     # Install + configure ufw on the VPS. Each step must succeed; we bail
     # on the whole bake if anything fails (otherwise the host would land
     # in the pool with no firewall and a half-applied policy).
-    logger.info("  Installing + configuring ufw on VPS {}", vps_ip)
+    logger.info("  Installing + configuring ufw on VPS {}", vps_address)
     for ufw_command in _ufw_provision_commands(_CONTAINER_SSH_PORT):
-        _checked_ssh_command(vps_ip, vps_key_path, 22, ufw_command, label=f"ufw step {ufw_command!r}")
+        _checked_ssh_command(vps_address, vps_key_path, 22, ufw_command, label=f"ufw step {ufw_command!r}")
 
     key_line = shlex.quote(management_public_key.strip())
     install_cmd = (
@@ -417,7 +417,7 @@ def _create_single_pool_host(
         + key_line
         + " >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys"
     )
-    _checked_ssh_command(vps_ip, vps_key_path, 22, install_cmd, label="install management key on VPS")
+    _checked_ssh_command(vps_address, vps_key_path, 22, install_cmd, label="install management key on VPS")
 
     logger.info("  Installing management key in container via mngr exec")
     container_install = _run_mngr_command(["exec", agent_name, install_cmd], timeout=60)
@@ -431,6 +431,10 @@ def _create_single_pool_host(
     try:
         with conn:
             with conn.cursor() as cur:
+                # NB: the SQL column is still named ``vps_ip`` because we
+                # don't yet have a schema migration; the Python field is
+                # ``vps_address`` (it can hold either an IPv4 or a DNS
+                # hostname like the OVH serviceName).
                 cur.execute(
                     "INSERT INTO pool_hosts "
                     "(id, vps_ip, vps_instance_id, agent_id, host_id, ssh_port, ssh_user, "
@@ -438,7 +442,7 @@ def _create_single_pool_host(
                     "VALUES (%s, %s, %s, %s, %s, 22, 'root', %s, 'available', %s::jsonb, NOW())",
                     (
                         str(row_id),
-                        vps_ip,
+                        vps_address,
                         host_id,
                         agent_id,
                         host_id,
@@ -449,7 +453,7 @@ def _create_single_pool_host(
     finally:
         conn.close()
 
-    logger.info("  Pool host ready: id={}, agent_id={}, vps_ip={}", row_id, agent_id, vps_ip)
+    logger.info("  Pool host ready: id={}, agent_id={}, vps_address={}", row_id, agent_id, vps_address)
     return True
 
 
@@ -604,7 +608,7 @@ def pool_list(database_url: str) -> None:
         [
             {
                 "id": str(row[0]),
-                "vps_ip": row[1],
+                "vps_address": row[1],
                 "agent_id": row[2],
                 "host_id": row[3],
                 "status": row[4],

@@ -91,7 +91,7 @@ def test_build_offline_details_from_lease_preserves_host_and_failure_reason(tmp_
     agent_id = AgentId.generate()
     lease = LeasedHostInfo(
         host_db_id=LeaseDbId("lease-db-id"),
-        vps_ip="203.0.113.42",
+        vps_address="203.0.113.42",
         ssh_port=22,
         ssh_user="user1",
         container_ssh_port=2222,
@@ -132,7 +132,7 @@ def test_build_offline_details_from_lease_preserves_host_and_failure_reason(tmp_
     # to connect to.
     assert host_details.ssh is not None
     assert host_details.ssh.user == lease.ssh_user
-    assert host_details.ssh.host == lease.vps_ip
+    assert host_details.ssh.host == lease.vps_address
     assert host_details.ssh.port == lease.container_ssh_port
     # State defaults to CRASHED in the lease-only fallback (we have no
     # outer-SSH-derived state to be more specific).

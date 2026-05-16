@@ -104,6 +104,15 @@ _ACTIVATION_ENV_VARS: Final[tuple[str, ...]] = (
     "MNGR_HOST_DIR",
     "MNGR_PREFIX",
     "MINDS_CLIENT_CONFIG_PATH",
+    # Modal CLI workspace selector. Set to the tier's ``modal_workspace``
+    # so every subsequent ``modal`` shellout (``modal deploy``,
+    # ``modal secret create``, ``modal environment create``, etc.) targets
+    # the right Modal account, regardless of which profile is marked
+    # ``active = true`` in ``~/.modal.toml``. The user must have a
+    # matching profile entry in ``~/.modal.toml`` (run
+    # ``modal token set --profile <workspace>`` once per tier they
+    # operate against).
+    "MODAL_PROFILE",
 )
 
 
@@ -458,6 +467,9 @@ def env_activate(name: str, create: bool) -> None:
         "MNGR_PREFIX": mngr_prefix_for(root_name),
         "MINDS_CLIENT_CONFIG_PATH": str(config_path),
     }
+    modal_profile = _modal_profile_for_tier_or_none(_tier_for_env_name(name))
+    if modal_profile is not None:
+        exports["MODAL_PROFILE"] = modal_profile
     # Check the tier generation id + auto-wipe local state on mismatch.
     # Skipped silently when the per-env client.toml doesn't exist yet
     # (fresh `activate --create` before the first deploy) -- the deploy
@@ -503,6 +515,9 @@ def _activate_reserved_env(name: str) -> None:
         "MNGR_PREFIX": mngr_prefix_for(root_name),
         "MINDS_CLIENT_CONFIG_PATH": str(repo_client),
     }
+    modal_profile = _modal_profile_for_tier_or_none(name)
+    if modal_profile is not None:
+        exports["MODAL_PROFILE"] = modal_profile
     # Generation-id check applies to staging (the shared tier where
     # destroy/redeploy by one dev outdates everyone's local state).
     # Production destroy is hard-refused so a mismatch there is
@@ -511,6 +526,38 @@ def _activate_reserved_env(name: str) -> None:
         env_root = mngr_host.parent
         _try_run_generation_check(env_name=name, client_config_path=repo_client, env_root=env_root)
     _print_activation_exports(name=name, exports=exports)
+
+
+def _modal_profile_for_tier_or_none(tier: str) -> str | None:
+    """Return the Modal profile name (``modal_workspace``) for ``tier``, or None.
+
+    Reads ``apps/minds/imbue/minds/config/envs/<tier>/deploy.toml`` and
+    pulls the committed ``modal_workspace`` value. We export this as
+    ``MODAL_PROFILE`` from ``minds env activate`` so every ``modal``
+    CLI shellout (deploy, secret create, environment create, etc.) is
+    pinned to the right workspace regardless of what's marked
+    ``active = true`` in ``~/.modal.toml``.
+
+    Returns ``None`` when the tier has no deploy.toml on disk (e.g.
+    a freshly-checked-out tree before tier config is committed) or
+    the committed value is still the literal ``CHANGE_ME`` placeholder.
+    Activation proceeds without ``MODAL_PROFILE`` in that case so the
+    operator's existing ``modal token set`` setup still works.
+    """
+    try:
+        deploy_config = load_deploy_config(tier)
+    except EnvConfigError as exc:
+        logger.warning(
+            "Could not load deploy.toml for tier {!r} ({}); MODAL_PROFILE will not be exported. "
+            "modal shellouts will fall back to ~/.modal.toml's active profile.",
+            tier,
+            exc,
+        )
+        return None
+    workspace = str(deploy_config.modal_workspace)
+    if not workspace or workspace == "CHANGE_ME":
+        return None
+    return workspace
 
 
 def _print_activation_exports(*, name: str, exports: dict[str, str]) -> None:

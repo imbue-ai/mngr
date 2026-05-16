@@ -12,7 +12,7 @@ Before running `just minds-start` (or invoking `minds run` directly
 from source), **activate an env in your shell**:
 
 ```bash
-eval "$(uv run minds env activate <your-user>-dev)"   # or `staging`, `production`
+eval "$(uv run minds env activate dev-<your-user>)"   # or `staging`, `production`
 just minds-start
 ```
 
@@ -77,11 +77,11 @@ eval "$(uv run minds env activate staging)"
 just minds-start
 
 # Or a per-developer dev env:
-eval "$(uv run minds env activate <your-user>-dev)"
+eval "$(uv run minds env activate dev-<your-user>)"
 just minds-start
 
 # Backend-only invocation (no Electron):
-eval "$(uv run minds env activate <your-user>-dev)"
+eval "$(uv run minds env activate dev-<your-user>)"
 minds run
 ```
 

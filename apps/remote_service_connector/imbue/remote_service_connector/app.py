@@ -329,7 +329,12 @@ class LeaseHostRequest(BaseModel):
 
 class LeaseHostResponse(BaseModel):
     host_db_id: UUID = Field(description="Database ID of the leased host")
-    vps_ip: str = Field(description="VPS IP address")
+    vps_address: str = Field(
+        description=(
+            "SSH-reachable VPS address. Public IPv4 for Vultr-backed pool rows; "
+            "a DNS hostname (e.g. ``vps-eec8860b.vps.ovh.us``) for OVH-backed rows."
+        )
+    )
     ssh_port: int = Field(description="SSH port on the VPS")
     ssh_user: str = Field(description="SSH user on the VPS")
     container_ssh_port: int = Field(description="SSH port mapped to the Docker container")
@@ -345,7 +350,12 @@ class ReleaseHostResponse(BaseModel):
 
 class LeasedHostInfo(BaseModel):
     host_db_id: UUID = Field(description="Database ID of the leased host")
-    vps_ip: str = Field(description="VPS IP address")
+    vps_address: str = Field(
+        description=(
+            "SSH-reachable VPS address. Public IPv4 for Vultr-backed pool rows; "
+            "a DNS hostname (e.g. ``vps-eec8860b.vps.ovh.us``) for OVH-backed rows."
+        )
+    )
     ssh_port: int = Field(description="SSH port on the VPS")
     ssh_user: str = Field(description="SSH user on the VPS")
     container_ssh_port: int = Field(description="SSH port mapped to the Docker container")
@@ -1668,6 +1678,9 @@ def lease_host(request: Request, body: LeaseHostRequest) -> dict[str, object]:
         try:
             with conn:
                 with conn.cursor() as cur:
+                    # NB: the DB column is still named ``vps_ip``; the
+                    # API field is ``vps_address`` (can hold an IPv4 or a
+                    # DNS hostname like OVH's serviceName).
                     cur.execute(
                         "SELECT id, vps_ip, ssh_port, ssh_user, container_ssh_port, agent_id, host_id, attributes "
                         "FROM pool_hosts "
@@ -1684,14 +1697,18 @@ def lease_host(request: Request, body: LeaseHostRequest) -> dict[str, object]:
                                 "Please ask Josh to provision more, or relax the attribute filter."
                             ),
                         )
-                    host_db_id, vps_ip, ssh_port, ssh_user, container_ssh_port, agent_id, host_id, attributes = row
+                    host_db_id, vps_address, ssh_port, ssh_user, container_ssh_port, agent_id, host_id, attributes = (
+                        row
+                    )
 
                     # Inject the user's SSH public key on VPS and container
                     management_key_pem = os.environ["POOL_SSH_PRIVATE_KEY"]
                     try:
-                        _append_authorized_key(vps_ip, ssh_port, ssh_user, management_key_pem, body.ssh_public_key)
                         _append_authorized_key(
-                            vps_ip, container_ssh_port, ssh_user, management_key_pem, body.ssh_public_key
+                            vps_address, ssh_port, ssh_user, management_key_pem, body.ssh_public_key
+                        )
+                        _append_authorized_key(
+                            vps_address, container_ssh_port, ssh_user, management_key_pem, body.ssh_public_key
                         )
                     except (paramiko.SSHException, OSError) as exc:
                         logger.warning("SSH key injection failed for host %s: %s", host_db_id, exc)
@@ -1712,7 +1729,7 @@ def lease_host(request: Request, body: LeaseHostRequest) -> dict[str, object]:
         attrs_dict = attributes if isinstance(attributes, dict) else {}
         return LeaseHostResponse(
             host_db_id=host_db_id,
-            vps_ip=vps_ip,
+            vps_address=vps_address,
             ssh_port=ssh_port,
             ssh_user=ssh_user,
             container_ssh_port=container_ssh_port,
@@ -1779,7 +1796,7 @@ def list_leased_hosts(request: Request) -> list[dict[str, object]]:
         return [
             LeasedHostInfo(
                 host_db_id=r[0],
-                vps_ip=r[1],
+                vps_address=r[1],
                 ssh_port=r[2],
                 ssh_user=r[3],
                 container_ssh_port=r[4],
@@ -2453,6 +2470,18 @@ def auth_get_user(user_id: str) -> UserProviderInfo:
 
 _DEPLOY_ENV = os.environ.get("MNGR_DEPLOY_ENV", "production")
 
+# Per-tier defaults for the warm-pool size. Production / staging keep at
+# least one container alive so every desktop-client startup hit (auth,
+# lease, tunnel ops) lands without a cold boot. Dev defaults to zero
+# because per-developer dev envs sit idle most of the time and the
+# operator already accepts a cold boot on the first request. Override
+# at ``modal deploy`` time via ``MINDS_MIN_CONTAINERS=<n>`` -- read here
+# at module load (the moment ``modal deploy`` serializes the function
+# spec), so the value is baked into the deployment.
+_DEFAULT_MIN_CONTAINERS_BY_TIER = {"production": 1, "staging": 1, "dev": 0}
+_DEFAULT_MIN_CONTAINERS = _DEFAULT_MIN_CONTAINERS_BY_TIER.get(_DEPLOY_ENV, 0)
+_MIN_CONTAINERS = int(os.environ.get("MINDS_MIN_CONTAINERS", str(_DEFAULT_MIN_CONTAINERS)))
+
 image = modal.Image.debian_slim().pip_install(
     "fastapi[standard]", "httpx", "supertokens-python", "psycopg2-binary", "paramiko"
 )
@@ -2577,11 +2606,13 @@ def _init_supertokens() -> None:
         modal.Secret.from_name(f"paid-accounts-{_DEPLOY_ENV}"),
         modal.Secret.from_dict({"MNGR_DEPLOY_ENV": _DEPLOY_ENV}),
     ],
-    # Keep one container warm at all times so the desktop client (which
-    # hits this connector for auth, lease, and tunnel ops on every minds
-    # startup) doesn't pay a cold-boot penalty after a quiet period.
-    # Mirrors the litellm-proxy deployment in apps/modal_litellm/app.py.
-    min_containers=1,
+    # Warm-pool size driven by ``_MIN_CONTAINERS`` at the top of this
+    # module: defaults to 1 for production / staging (avoid cold-boot
+    # penalty on auth / lease / tunnel hits from the desktop client) and
+    # 0 for dev (per-developer envs sit idle most of the time). Override
+    # at deploy time with ``MINDS_MIN_CONTAINERS=<n>``. Mirrors the
+    # equivalent block in apps/modal_litellm/app.py.
+    min_containers=_MIN_CONTAINERS,
 )
 @modal.asgi_app()
 def fastapi_app() -> FastAPI:

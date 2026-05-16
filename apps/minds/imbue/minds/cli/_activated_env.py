@@ -28,7 +28,7 @@ def require_activated_env_name() -> str:
         raise click.ClickException(
             "No minds env is activated in this shell. Run "
             '`eval "$(uv run minds env activate <name>)"` first '
-            "(e.g. `<your-user>-dev` for your personal dev env, or "
+            "(e.g. `dev-<your-user>` for your personal dev env, or "
             "`staging` / `production`)."
         )
     try:

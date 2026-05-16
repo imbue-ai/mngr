@@ -35,7 +35,11 @@ the mandatory safety bar; substitute `--yes-i-mean-staging` (and
 
 On the first cold start, LiteLLM runs ~118 Prisma migrations against the database. This takes ~14 minutes. Subsequent container starts take ~6 seconds.
 
-The `min_containers=1` setting keeps one container alive to avoid cold starts.
+The `min_containers` setting keeps containers warm to avoid cold
+starts. Defaults: `1` for production / staging, `0` for dev. Override
+at `modal deploy` time by exporting `MINDS_MIN_CONTAINERS=<n>` (the
+value is read at module load, which is when `modal deploy` serializes
+the function spec).
 
 ### 4. Create a virtual key
 

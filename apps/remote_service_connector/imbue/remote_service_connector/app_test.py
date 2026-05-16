@@ -1649,7 +1649,7 @@ def test_lease_host_returns_available_host(monkeypatch: pytest.MonkeyPatch) -> N
     assert resp.status_code == 200
     body = resp.json()
     assert body["host_db_id"] == "00000000-0000-0000-0000-000000000001"
-    assert body["vps_ip"] == "10.0.0.1"
+    assert body["vps_address"] == "10.0.0.1"
     assert body["agent_id"] == "agent-111"
     assert body["host_name"] == "my-workspace"
     assert body["attributes"] == {"version": "v0.1.0"}

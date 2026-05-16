@@ -27,6 +27,18 @@ import modal
 
 _DEPLOY_ENV = os.environ.get("MNGR_DEPLOY_ENV", "production")
 
+# Per-tier defaults for the warm-pool size: production / staging keep at
+# least one container alive so the desktop client never pays a cold-boot
+# penalty; dev defaults to zero because devs iterate one-at-a-time and
+# the per-dev-env Modal env is otherwise idle most of the time. Override
+# (in either direction) at ``modal deploy`` time by exporting
+# ``MINDS_MIN_CONTAINERS=<n>`` -- the value is read here at module load,
+# which is exactly the moment ``modal deploy`` serializes the function
+# spec.
+_DEFAULT_MIN_CONTAINERS_BY_TIER = {"production": 1, "staging": 1, "dev": 0}
+_DEFAULT_MIN_CONTAINERS = _DEFAULT_MIN_CONTAINERS_BY_TIER.get(_DEPLOY_ENV, 0)
+_MIN_CONTAINERS = int(os.environ.get("MINDS_MIN_CONTAINERS", str(_DEFAULT_MIN_CONTAINERS)))
+
 LITELLM_CONFIG = {
     "model_list": [
         {
@@ -103,7 +115,7 @@ app = modal.App(name=f"litellm-proxy-{_DEPLOY_ENV}", image=image)
         modal.Secret.from_name(f"litellm-{_DEPLOY_ENV}"),
         modal.Secret.from_dict({"MNGR_DEPLOY_ENV": _DEPLOY_ENV}),
     ],
-    min_containers=1,
+    min_containers=_MIN_CONTAINERS,
     timeout=600,
 )
 @modal.asgi_app()
