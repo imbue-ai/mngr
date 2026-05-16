@@ -82,7 +82,7 @@ You'll probably need to experiment a little bit with claude -p in order to see t
 - `libs/mngr_uncapped_claude/`
   - `pyproject.toml` — pypi name `imbue-mngr-uncapped-claude`, entry point `mngr_uncapped_claude = "imbue.mngr_uncapped_claude.plugin"`, deps on `imbue-mngr` and `imbue-mngr-claude`.
   - `README.md` — short description plus a usage example.
-  - `conftest.py` — empty (matches `mngr_wait`).
+  - `conftest.py` — registers the shared conftest hooks and suppresses startup warnings (matches `mngr_wait`).
   - `imbue/mngr_uncapped_claude/`
     - `__init__.py` — blank (per CLAUDE.md).
     - `plugin.py` — pluggy `@hookimpl register_cli_commands()` returning the click command.
