@@ -102,7 +102,7 @@ AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=... \
 Three layers of damage control limit leaks from killed-mid-run tests:
 
 1. Every test's `finally` calls `mngr destroy --force`.
-2. A session-scoped autouse fixture force-terminates any test-tagged instance older than 1 hour at the end of the run.
+2. A `pytest_sessionfinish` hook in `imbue/mngr_aws/conftest.py` scans for any test-tagged EC2 instance older than 1 hour at session end, force-terminates leaks, and fails the session.
 3. Release tests set `MNGR_AWS_AUTO_SHUTDOWN_MINUTES=60`, which propagates to cloud-init as `shutdown -P +60` on every test instance. Combined with `InstanceInitiatedShutdownBehavior=terminate`, this means a test instance auto-terminates 60 minutes after boot even if pytest is killed before any cleanup runs.
 
 The `MNGR_AWS_AUTO_SHUTDOWN_MINUTES` env var is intentionally a test-only escape hatch — production users should set `auto_shutdown_minutes` in `[providers.aws]` config directly.
