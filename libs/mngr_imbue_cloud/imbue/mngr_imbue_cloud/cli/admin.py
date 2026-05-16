@@ -64,7 +64,7 @@ def admin() -> None:
 
 @admin.group(name="pool")
 def pool() -> None:
-    """Pool host provisioning (Vultr + Neon)."""
+    """Pool host provisioning (OVH + Neon)."""
 
 
 def _stream_subprocess_line(line: str, is_stdout: bool) -> None:
