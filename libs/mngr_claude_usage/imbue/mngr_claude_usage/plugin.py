@@ -38,16 +38,42 @@ _STATUSLINE_SHIM_SCRIPT = "claude_statusline.sh"
 _USER_STATUSLINE_CMD_FILE = "user_statusline_cmd"
 
 
-def _capture_existing_statusline_command(host: OnlineHostInterface, work_dir: Path, our_shim_path: str) -> str:
+def _is_mngr_owned_shim_path(command: str, host_dir: Path) -> bool:
+    """True if ``command`` points to a mngr-installed statusline shim.
+
+    Matches any path of the form
+    ``<host_dir>/agents/<agent_id>/commands/claude_statusline.sh`` -- not just
+    the current agent's own shim. This is what stops the recursive wrap when
+    a previous mngr agent left its shim path in
+    ``<work_dir>/.claude/settings.local.json`` and a new agent then provisions
+    in the same ``work_dir``: capturing the previous shim into the new
+    sidecar would form an infinite loop, because both shims dereference
+    ``$MNGR_AGENT_STATE_DIR/commands/user_statusline_cmd`` and end up reading
+    the same sidecar (the env var follows the currently-running agent, not the
+    shim that's being called).
+
+    Matches by path structure rather than file existence so it works for both
+    live and already-destroyed prior agents.
+    """
+    candidate = Path(command.strip())
+    if candidate.name != _STATUSLINE_SHIM_SCRIPT:
+        return False
+    if candidate.parent.name != "commands":
+        return False
+    return candidate.parent.parent.parent == host_dir / "agents"
+
+
+def _capture_existing_statusline_command(host: OnlineHostInterface, work_dir: Path) -> str:
     """Capture the user's pre-existing ``statusLine.command`` so the shim can chain to it.
 
     Reads ``<work_dir>/.claude/settings.local.json`` first (local tier wins in
     Claude Code's precedence stack), then ``<work_dir>/.claude/settings.json``.
     Returns ``""`` if there's nothing to wrap.
 
-    Skips ``our_shim_path`` -- on re-provisioning, settings.local.json's
-    ``statusLine.command`` is OUR shim, and capturing it would form a recursive
-    wrap.
+    Skips any path that looks like a mngr-owned shim (any prior agent's
+    ``<host_dir>/agents/<id>/commands/claude_statusline.sh``), not just this
+    agent's own shim path. See :func:`_is_mngr_owned_shim_path` for the
+    rationale.
     """
     claude_dir = work_dir / ".claude"
     for filename in ("settings.local.json", "settings.json"):
@@ -58,7 +84,7 @@ def _capture_existing_statusline_command(host: OnlineHostInterface, work_dir: Pa
         command = statusline.get("command")
         if not isinstance(command, str) or not command.strip():
             continue
-        if command.strip() == our_shim_path.strip():
+        if _is_mngr_owned_shim_path(command, host.host_dir):
             continue
         return command
     return ""
@@ -110,7 +136,7 @@ def _provision_statusline_shim(host: OnlineHostInterface, state_dir: Path, work_
     """
     commands_dir = state_dir / "commands"
     shim_path = str(commands_dir / _STATUSLINE_SHIM_SCRIPT)
-    user_cmd = _capture_existing_statusline_command(host, work_dir, our_shim_path=shim_path)
+    user_cmd = _capture_existing_statusline_command(host, work_dir)
     _write_user_statusline_cmd(host, commands_dir, user_cmd)
     install_packaged_script_on_host(
         host, module=_resources, filename=_STATUSLINE_SHIM_SCRIPT, dest=commands_dir / _STATUSLINE_SHIM_SCRIPT
