@@ -1,0 +1,1 @@
+Spec only (no user-visible behavior change yet): `specs/swap-pool-to-ovh/concise.md` covers swapping the imbue-cloud pool bake (and the `minds env destroy` walker) from Vultr to OVH, plus the responsibility split that moves env-aware orchestration into a new top-level `minds pool` CLI group.
