@@ -32,6 +32,7 @@ from uuid import uuid4
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.minds.envs.primitives import VaultReadError
+from imbue.minds.envs.vault_reader import VAULT_BINARY
 from imbue.minds.envs.vault_reader import VaultPath
 from imbue.minds.envs.vault_reader import delete_vault_kv
 from imbue.minds.envs.vault_reader import read_vault_kv
@@ -49,7 +50,12 @@ def _generation_vault_path(tier_vault_prefix: str) -> VaultPath:
     return VaultPath(f"{tier_vault_prefix.rstrip('/')}/{_GENERATION_VAULT_LEAF}")
 
 
-def read_generation_id(tier_vault_prefix: str, *, parent_concurrency_group: ConcurrencyGroup) -> str | None:
+def read_generation_id(
+    tier_vault_prefix: str,
+    *,
+    parent_concurrency_group: ConcurrencyGroup,
+    vault_binary: str = VAULT_BINARY,
+) -> str | None:
     """Read the tier's generation id from Vault. Returns ``None`` if the entry doesn't exist.
 
     Used by :func:`ensure_generation_id` to decide whether to mint a
@@ -60,6 +66,7 @@ def read_generation_id(tier_vault_prefix: str, *, parent_concurrency_group: Conc
         values = read_vault_kv(
             _generation_vault_path(tier_vault_prefix),
             parent_concurrency_group=parent_concurrency_group,
+            vault_binary=vault_binary,
         )
     except VaultReadError as exc:
         # Treat "no entry" / "not found" as "no id yet"; surface anything
@@ -71,7 +78,12 @@ def read_generation_id(tier_vault_prefix: str, *, parent_concurrency_group: Conc
     return values.get(GENERATION_ID_KEY)
 
 
-def ensure_generation_id(tier_vault_prefix: str, *, parent_concurrency_group: ConcurrencyGroup) -> str:
+def ensure_generation_id(
+    tier_vault_prefix: str,
+    *,
+    parent_concurrency_group: ConcurrencyGroup,
+    vault_binary: str = VAULT_BINARY,
+) -> str:
     """Return the tier's generation id, minting + writing a new one if missing.
 
     Called by ``deploy_tier_env`` so every successful deploy emits a
@@ -80,7 +92,11 @@ def ensure_generation_id(tier_vault_prefix: str, *, parent_concurrency_group: Co
     already exists -- the id only rolls when destroy removes the
     entry.
     """
-    existing = read_generation_id(tier_vault_prefix, parent_concurrency_group=parent_concurrency_group)
+    existing = read_generation_id(
+        tier_vault_prefix,
+        parent_concurrency_group=parent_concurrency_group,
+        vault_binary=vault_binary,
+    )
     if existing is not None:
         return existing
     new_id = uuid4().hex
@@ -88,11 +104,17 @@ def ensure_generation_id(tier_vault_prefix: str, *, parent_concurrency_group: Co
         _generation_vault_path(tier_vault_prefix),
         {GENERATION_ID_KEY: new_id},
         parent_concurrency_group=parent_concurrency_group,
+        vault_binary=vault_binary,
     )
     return new_id
 
 
-def delete_generation_id(tier_vault_prefix: str, *, parent_concurrency_group: ConcurrencyGroup) -> None:
+def delete_generation_id(
+    tier_vault_prefix: str,
+    *,
+    parent_concurrency_group: ConcurrencyGroup,
+    vault_binary: str = VAULT_BINARY,
+) -> None:
     """Remove the tier's generation entry from Vault. Idempotent.
 
     Called by ``destroy_tier_env`` so the next deploy mints a fresh id
@@ -102,4 +124,5 @@ def delete_generation_id(tier_vault_prefix: str, *, parent_concurrency_group: Co
     delete_vault_kv(
         _generation_vault_path(tier_vault_prefix),
         parent_concurrency_group=parent_concurrency_group,
+        vault_binary=vault_binary,
     )

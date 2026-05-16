@@ -37,6 +37,7 @@ def list_tunnels_for_env(
     *,
     account_id: str,
     api_token: SecretStr,
+    transport: httpx.BaseTransport | None = None,
 ) -> tuple[str, ...]:
     """Return every Cloudflare tunnel uuid whose metadata.env equals ``name``.
 
@@ -61,7 +62,7 @@ def list_tunnels_for_env(
         url = f"{_CF_API_BASE}/accounts/{account_id}/cfd_tunnel"
         params = {"is_deleted": "false", "per_page": str(_TUNNELS_PER_PAGE), "page": str(page)}
         try:
-            with httpx.Client(timeout=_REQUEST_TIMEOUT_SECONDS) as client:
+            with httpx.Client(timeout=_REQUEST_TIMEOUT_SECONDS, transport=transport) as client:
                 response = client.get(url, headers=headers, params=params)
         except httpx.HTTPError as exc:
             raise CloudflareTunnelProviderError(f"Cloudflare API request failed (GET {url}): {exc}") from exc
@@ -103,6 +104,7 @@ def delete_tunnels(
     *,
     account_id: str,
     api_token: SecretStr,
+    transport: httpx.BaseTransport | None = None,
 ) -> None:
     """Delete every Cloudflare tunnel in ``tunnel_ids`` via ``DELETE /cfd_tunnel/{id}``.
 
@@ -121,7 +123,7 @@ def delete_tunnels(
     for tunnel_id in tunnel_ids:
         url = f"{_CF_API_BASE}/accounts/{account_id}/cfd_tunnel/{tunnel_id}"
         try:
-            with httpx.Client(timeout=_REQUEST_TIMEOUT_SECONDS) as client:
+            with httpx.Client(timeout=_REQUEST_TIMEOUT_SECONDS, transport=transport) as client:
                 response = client.delete(url, headers=headers)
         except httpx.HTTPError as exc:
             raise CloudflareTunnelProviderError(f"Cloudflare API request failed (DELETE {url}): {exc}") from exc
