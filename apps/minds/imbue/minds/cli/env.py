@@ -317,11 +317,10 @@ def env_list(ctx: click.Context) -> None:
 @env.command("activate")
 @click.argument("name", type=str)
 def env_activate(name: str) -> None:
-    """Print shell exports that make ad-hoc commands talk to dev env ``NAME``.
+    """Print shell exports that point ad-hoc commands at dev env ``NAME``.
 
     Designed for ``eval "$(uv run minds env activate <name>)"``: after
-    sourcing, standalone ``mngr imbue_cloud ...`` commands hit this
-    dev env's connector, ``mngr`` writes to the devminds host_dir, and
+    sourcing, ``mngr`` writes to the devminds host_dir, and
     ``just devminds-start`` / ``minds run`` pick up the per-env client
     config without any per-invocation flags.
 
@@ -336,11 +335,6 @@ def env_activate(name: str) -> None:
     - ``MINDS_CLIENT_CONFIG_PATH`` -- ``minds run`` (and Electron, via
       ``just devminds-start``) reads this as a fallback for
       ``--config-file`` so the desktop client targets this env.
-    - ``MNGR__PROVIDERS__IMBUE_CLOUD__CONNECTOR_URL`` -- the standalone
-      ``mngr imbue_cloud ...`` CLI commands read this to find the
-      per-env connector (the per-account block in settings.toml has
-      the same URL but the CLI doesn't yet read settings.toml; this
-      is the workaround).
 
     Output goes to stdout in shell-sourceable form; a one-line ``#``
     comment at the top makes the output safe to ``eval`` while still
@@ -353,7 +347,7 @@ def env_activate(name: str) -> None:
 
     root_name = resolve_minds_root_name()
     try:
-        env_config = read_dev_env_file(dev_env_name, root_name=root_name)
+        read_dev_env_file(dev_env_name, root_name=root_name)
     except DevEnvNotFoundError as exc:
         raise click.ClickException(str(exc)) from exc
 
@@ -363,7 +357,6 @@ def env_activate(name: str) -> None:
         "MNGR_HOST_DIR": str(mngr_host_dir_for(root_name)),
         "MNGR_PREFIX": mngr_prefix_for(root_name),
         "MINDS_CLIENT_CONFIG_PATH": str(config_path),
-        "MNGR__PROVIDERS__IMBUE_CLOUD__CONNECTOR_URL": str(env_config.connector_url).rstrip("/"),
     }
     write_stdout_line(f'# Activated dev env {name!r}. Source via: eval "$(uv run minds env activate {name})"')
     for key, value in exports.items():
