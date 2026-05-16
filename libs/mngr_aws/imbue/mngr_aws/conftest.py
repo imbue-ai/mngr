@@ -37,18 +37,14 @@ from botocore.exceptions import BotoCoreError
 from botocore.exceptions import ClientError
 from loguru import logger
 
+from imbue.mngr_aws.constants import AWS_TEST_NAME_PREFIX
+
 # Test-resource tracking lists scoped to this worker process (xdist-safe).
 # Each entry is added by ``register_aws_test_*`` when a resource is created
 # and removed by ``deregister_aws_test_*`` after the resource is confirmed
 # gone. Anything still in these lists at session end is reported as a leak.
 worker_aws_test_instance_ids: list[str] = []
 worker_aws_test_keypair_names: list[str] = []
-
-# ``Name`` tag prefix used by release tests when naming their hosts; the
-# session-end orphan scan uses this prefix to find instances that escaped
-# the tracked-resource lists (e.g., a test process killed between EC2
-# RunInstances and the in-Python register call).
-AWS_TEST_NAME_PREFIX: Final[str] = "test-aws-"
 
 # Region used by the session-end leak scan. Tests can override via
 # ``AWS_REGION``; defaults to ``us-east-1`` to match the rest of the suite.

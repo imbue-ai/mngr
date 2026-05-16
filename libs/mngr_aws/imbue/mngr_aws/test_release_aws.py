@@ -35,7 +35,7 @@ import boto3
 import pytest
 
 from imbue.mngr_aws.client import AwsVpsClient
-from imbue.mngr_aws.conftest import AWS_TEST_NAME_PREFIX
+from imbue.mngr_aws.constants import AWS_TEST_NAME_PREFIX
 
 _AWS_CREDS_PRESENT = bool(os.environ.get("AWS_ACCESS_KEY_ID")) or bool(os.environ.get("AWS_PROFILE"))
 _OPT_IN = os.environ.get("MNGR_AWS_RELEASE_TESTS") == "1"
