@@ -201,7 +201,7 @@ class OvhVpsClient(VpsClientInterface):
         )
 
     def destroy_instance(self, instance_id: VpsInstanceId) -> None:
-        """Cancel an OVH VPS so it stops billing at the next anniversary.
+        """Cancel an OVH VPS so it stops auto-renewing past its next expiration.
 
         OVH offers two cancellation paths:
 
@@ -217,9 +217,12 @@ class OvhVpsClient(VpsClientInterface):
           Verified live against the OVH-US API.
 
         We use the serviceInfos path so ``mngr destroy`` actually stops
-        the meter. The billing remainder of the current month is still
-        forfeit (OVH does not prorate classic VPS cancellations), but
-        the VPS will not roll over into another month.
+        the meter. The remainder of the already-paid period is still
+        forfeit (OVH does not prorate classic VPS cancellations); for
+        monthly subscriptions that is the rest of the current month,
+        for ``UPFRONT6`` / ``UPFRONT12`` it can be up to 6 / 12 months
+        of prepaid balance respectively. The VPS will not auto-renew
+        past the next OVH-side expiration date.
 
         If this VPS is currently mid-recycle (a ``RecycleHandle`` was
         registered via ``register_recycle_handle`` but neither
@@ -243,7 +246,7 @@ class OvhVpsClient(VpsClientInterface):
             self.set_renew_at_expiration(service_name, True)
             logger.info(
                 "Cancelled OVH VPS {} (deleteAtExpiration=true; "
-                "decommissions at end of billing month, current month is forfeit)",
+                "decommissions at next OVH expiration date, any already-paid balance is forfeit)",
                 instance_id,
             )
         except VpsApiError as e:
