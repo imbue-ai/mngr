@@ -62,6 +62,15 @@ _PER_ENV_SECRET_SERVICES: Final[tuple[str, ...]] = (
     "paid-accounts",
 )
 
+# Subset of ``_PER_ENV_SECRET_SERVICES`` whose values are constructed
+# entirely at deploy time from other tier secrets + deploy URLs rather
+# than read from a Vault entry. ``build_per_env_secret_values`` skips
+# the Vault read for these so the deploy log doesn't get a misleading
+# "Vault read for litellm-connector failed" warning every time. Keep
+# in sync with anything in provisioning.py that supplies overrides for
+# a service without ever expecting a Vault-backed base.
+_DERIVED_ONLY_SECRET_SERVICES: Final[frozenset[str]] = frozenset({"litellm-connector"})
+
 # Placeholder key written when a Vault entry isn't populated yet. Modal
 # requires at least one KEY=VALUE pair to create a Secret; this gives us
 # one without exposing anything meaningful, so ``modal deploy`` can still
@@ -136,18 +145,25 @@ def build_per_env_secret_values(
 ) -> dict[str, str]:
     """Read tier-shared values for one service from Vault and layer overrides.
 
-    Missing Vault entries return an empty dict (no error). The caller is
-    expected to fall back to a placeholder when both the tier-shared
-    values and overrides come up empty.
+    Services listed in ``_DERIVED_ONLY_SECRET_SERVICES`` skip the Vault
+    read entirely -- their values are 100% derived from ``overrides``
+    (other secrets + deploy URLs), so a Vault entry is intentionally
+    absent and we shouldn't warn about it.
+
+    For Vault-backed services, missing Vault entries return an empty
+    dict and emit a warning so the operator can populate them later;
+    the caller is expected to fall back to a placeholder when both the
+    tier-shared values and overrides come up empty.
     """
     base: dict[str, str] = {}
-    try:
-        base = read_vault_kv(
-            VaultPath(f"{tier_vault_prefix}/{service}"),
-            parent_concurrency_group=parent_cg,
-        )
-    except VaultReadError as exc:
-        logger.warning("Vault read for {} failed ({}); will push placeholder.", service, exc)
+    if service not in _DERIVED_ONLY_SECRET_SERVICES:
+        try:
+            base = read_vault_kv(
+                VaultPath(f"{tier_vault_prefix}/{service}"),
+                parent_concurrency_group=parent_cg,
+            )
+        except VaultReadError as exc:
+            logger.warning("Vault read for {} failed ({}); will push placeholder.", service, exc)
     merged = dict(base)
     merged.update(overrides)
     return {k: v for k, v in merged.items() if v}
@@ -239,6 +255,11 @@ def deploy_litellm_proxy(
     natural host exceeds DNS's 63-char limit.
     """
     app_file = _litellm_app_file()
+    logger.info(
+        "Running LiteLLM Prisma schema push against the litellm DATABASE_URL "
+        "(this can take ~30-60s on first run while Modal builds the image, "
+        "~5-15s thereafter; the push itself is idempotent)..."
+    )
     _run_modal_function(
         app_file=app_file,
         function_name="migrate_db",
