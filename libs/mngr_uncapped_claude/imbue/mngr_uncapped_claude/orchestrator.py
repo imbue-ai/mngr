@@ -52,23 +52,36 @@ from imbue.mngr_uncapped_claude.output_modes import StreamingOutputWriter
 from imbue.mngr_uncapped_claude.output_modes import monotonic_ms_since
 
 # Settings overrides applied to mngr_ctx so the spawned claude agent runs
-# unattended.
-#
-# ``use_env_config_dir=true`` puts mngr_claude into "don't touch the config"
-# mode: the spawned agent inherits the parent shell's ``$CLAUDE_CONFIG_DIR``
-# (or ``~/.claude/`` when that env var is unset), rather than getting a
-# per-agent config dir. That gives uncapped-claude the same credentials,
-# plugins, marketplaces, sessions, and dialog-state that the user already
-# has on their machine -- no copy/symlink shuffling, no per-agent auth
-# provisioning to fail on. It is the entire reason the wrapper can stay
-# this small.
-#
-# The trade-off: in shared mode mngr_claude does not auto-dismiss claude's
-# startup dialogs. Users who have never run ``claude`` interactively will
-# see the trust / onboarding TUI block at startup. That's the documented
-# user-side prerequisite for ``use_env_config_dir`` (see specs/single-
-# claude-data-dir/spec.md), not something the wrapper papers over.
-_UNATTENDED_SETTINGS: Final[tuple[str, ...]] = ("agent_types.claude.use_env_config_dir=true",)
+# unattended. The two ``settings_overrides`` flags are normally added by
+# ``mngr_claude`` only when ``ProvisioningContext.is_unattended`` is true,
+# which is computed as ``not host.is_local``; uncapped-claude always runs
+# on the local host, so we set them explicitly to avoid hangs on the
+# "bypass permissions mode" and "skip dangerous mode" prompts.
+_UNATTENDED_SETTINGS: Final[tuple[str, ...]] = (
+    "agent_types.claude.auto_dismiss_dialogs=true",
+    "agent_types.claude.auto_allow_permissions=true",
+    "agent_types.claude.settings_overrides.skipDangerousModePermissionPrompt=true",
+    "agent_types.claude.settings_overrides.bypassPermissionsModeAccepted=true",
+)
+
+# Env var prefixes that mngr's own ``_collect_agent_env_vars`` sets per-agent
+# (state dir, work dir, ids, ...). Forwarding the parent process's values for
+# any of these would *override* the spawned agent's correct values at the
+# "explicit env_vars" step of env-var collection, breaking the readiness
+# hook (which writes ``$MNGR_AGENT_STATE_DIR/session_started`` and would
+# otherwise touch the parent's state dir), the background-tasks script, the
+# common-transcript writer, and anything else keyed on the per-agent state
+# dir. Filtered out below in ``_build_pass_env_vars``.
+_PER_AGENT_ENV_VARS_TO_DROP: Final[frozenset[str]] = frozenset(
+    {
+        "MNGR_AGENT_ID",
+        "MNGR_AGENT_NAME",
+        "MNGR_AGENT_STATE_DIR",
+        "MNGR_AGENT_WORK_DIR",
+        "MNGR_HOST_DIR",
+        "LLM_USER_PATH",
+    }
+)
 
 # Poll cadence for end-of-turn detection plus transcript tailing.
 _POLL_INTERVAL_SECONDS: Final[float] = 0.1
@@ -300,8 +313,19 @@ def _build_agent_name() -> AgentName:
 
 
 def _build_pass_env_vars() -> AgentEnvironmentOptions:
-    """Forward every variable from the current process environment to the agent."""
-    pairs = tuple(EnvVar(key=key, value=value) for key, value in os.environ.items())
+    """Forward variables from the current process environment to the agent.
+
+    Filters out the per-agent ``MNGR_*`` / ``LLM_USER_PATH`` env vars that
+    mngr's base ``_collect_agent_env_vars`` sets specifically for the new
+    agent. Forwarding the parent process's values for those would clobber
+    the spawned agent's correct values during env-var collection and break
+    the readiness hook, the background-tasks script, and the common-
+    transcript writer (all of which key on ``$MNGR_AGENT_STATE_DIR``).
+    Everything else (auth, locale, model overrides, etc.) is passed through.
+    """
+    pairs = tuple(
+        EnvVar(key=key, value=value) for key, value in os.environ.items() if key not in _PER_AGENT_ENV_VARS_TO_DROP
+    )
     return AgentEnvironmentOptions(env_vars=pairs)
 
 
