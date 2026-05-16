@@ -34,6 +34,7 @@ from imbue.mngr_ovh.iam_tags import list_vps_resources_for_provider
 from imbue.mngr_ovh.iam_tags import vps_urn_for
 from imbue.mngr_ovh.ordering import order_and_wait_for_vps
 from imbue.mngr_ovh.ordering import rebuild_vps_with_public_key
+from imbue.mngr_ovh.recycle import abort_recycle
 from imbue.mngr_ovh.recycle import finalize_recycle
 from imbue.mngr_ovh.recycle import try_recycle_cancelled_vps
 from imbue.mngr_vps_docker.errors import VpsApiError
@@ -224,54 +225,70 @@ class OvhProvider(VpsDockerProvider):
             recycle_handle = self._maybe_claim_recycled_vps(
                 new_host_id=host_id, requested_plan=plan, requested_region=region
             )
-            if recycle_handle is None:
-                service_name = order_and_wait_for_vps(
+            # If `_provision_vps` raises before returning, the outer
+            # cleanup in `_create_host_internal` never sees a vps_instance_id
+            # and therefore never calls `destroy_instance`, so the recycle
+            # lock would leak. Release it here on any failure path; on
+            # success, ownership transfers to `_on_host_finalized` which
+            # calls `finalize_recycle`.
+            recycle_lock_owned = recycle_handle is not None
+            try:
+                if recycle_handle is None:
+                    service_name = order_and_wait_for_vps(
+                        self.ovh_client,
+                        plan_code=plan,
+                        datacenter=region,
+                        image_name=image_name,
+                        pricing_mode=self.ovh_config.pricing_mode.to_wire_value(),
+                        duration=self.ovh_config.duration,
+                        deliver_timeout_seconds=self.ovh_config.vps_boot_timeout,
+                    )
+                else:
+                    service_name = recycle_handle.service_name
+                    self._vps_iam_cache = None
+
+                image_id = resolve_image_id(self.ovh_client, service_name, image_name)
+                rebuild_vps_with_public_key(
                     self.ovh_client,
-                    plan_code=plan,
-                    datacenter=region,
-                    image_name=image_name,
-                    pricing_mode=self.ovh_config.pricing_mode.to_wire_value(),
-                    duration=self.ovh_config.duration,
-                    deliver_timeout_seconds=self.ovh_config.vps_boot_timeout,
+                    service_name=service_name,
+                    image_id=image_id,
+                    public_ssh_key=public_key,
+                    task_timeout_seconds=_OVH_REBUILD_TASK_TIMEOUT_SECONDS,
                 )
-            else:
-                service_name = recycle_handle.service_name
-                self._vps_iam_cache = None
 
-            image_id = resolve_image_id(self.ovh_client, service_name, image_name)
-            rebuild_vps_with_public_key(
-                self.ovh_client,
-                service_name=service_name,
-                image_id=image_id,
-                public_ssh_key=public_key,
-                task_timeout_seconds=_OVH_REBUILD_TASK_TIMEOUT_SECONDS,
-            )
+                wait_for_ssh_after_rebuild(
+                    hostname=service_name,
+                    port=22,
+                    timeout_seconds=self.config.ssh_connect_timeout,
+                )
 
-            wait_for_ssh_after_rebuild(
-                hostname=service_name,
-                port=22,
-                timeout_seconds=self.config.ssh_connect_timeout,
-            )
+                vps_private_key_path, _ = self._get_vps_ssh_keypair()
+                pin_host_key_via_tofu(
+                    hostname=service_name,
+                    port=22,
+                    ssh_user="root",
+                    private_key_path=vps_private_key_path,
+                    known_hosts_path=self._vps_known_hosts_path(),
+                    timeout_seconds=self.config.ssh_connect_timeout,
+                )
 
-            vps_private_key_path, _ = self._get_vps_ssh_keypair()
-            pin_host_key_via_tofu(
-                hostname=service_name,
-                port=22,
-                ssh_user="root",
-                private_key_path=vps_private_key_path,
-                known_hosts_path=self._vps_known_hosts_path(),
-                timeout_seconds=self.config.ssh_connect_timeout,
-            )
-
-            urn = vps_urn_for(service_name, region_code=_iam_region_code(self.ovh_config.endpoint))
-            attach_tags(
-                self.ovh_client,
-                urn,
-                {
-                    MNGR_PROVIDER_TAG_KEY: str(self.name),
-                    MNGR_HOST_ID_TAG_KEY: str(host_id),
-                },
-            )
+                urn = vps_urn_for(service_name, region_code=_iam_region_code(self.ovh_config.endpoint))
+                attach_tags(
+                    self.ovh_client,
+                    urn,
+                    {
+                        MNGR_PROVIDER_TAG_KEY: str(self.name),
+                        MNGR_HOST_ID_TAG_KEY: str(host_id),
+                    },
+                )
+                # All post-claim steps succeeded. Recycle-lock ownership
+                # transfers to the caller (`_on_host_finalized` releases
+                # it after the host record is durable). Disarm the
+                # abort-on-failure branch below.
+                recycle_lock_owned = False
+            finally:
+                if recycle_lock_owned and recycle_handle is not None:
+                    abort_recycle(self.ovh_client, recycle_handle)
 
         return VpsInstanceId(service_name), service_name
 
