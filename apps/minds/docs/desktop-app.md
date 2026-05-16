@@ -63,7 +63,8 @@ Each workspace (`/forwarding/{agent-id}/...`) can live in its own window. Unique
 ### Environment variables
 
 - `MINDS_HIDE_MENU=1`: Hides the application menu bar (macOS only; Linux/Windows frameless windows have no menu bar).
-- `MINDS_ROOT_NAME`: Controls the data-dir/prefix scheme described above (default: `minds`). Must match `[a-z0-9_-]+`.
+- `MINDS_ROOT_NAME`: Selects the data root for the running backend. Default `minds` (i.e. production at `~/.minds/`). Must match `minds(-<env-name>)?`. Activated by `minds env activate <name>`; legacy values like `devminds` are silently treated as unset with a warning.
+- `MINDS_CLIENT_CONFIG_PATH`: Path to the per-env `client.toml` the backend should load. Set by `minds env activate`; passing `--config-file` to `minds run` overrides it. The backend refuses to start when neither is set.
 
 ## Output and logging conventions
 
@@ -84,10 +85,12 @@ Both are placed in the `resources/` directory (outside the asar archive) and add
 
 ## Data directory
 
-All desktop app state lives in `~/.<MINDS_ROOT_NAME>/` (default: `~/.minds/`):
+Every minds env owns one data root. Production lives at `~/.minds/`;
+every other env lives at `~/.minds-<env-name>/`. The contents are the
+same shape:
 
 ```
-~/.minds/
+~/.minds-<env-name>/
   .venv/                  # uv-managed Python virtual environment
   .uv-cache/              # uv package cache
   .uv-python/             # uv-managed Python installations
@@ -96,45 +99,51 @@ All desktop app state lives in `~/.<MINDS_ROOT_NAME>/` (default: `~/.minds/`):
     minds-events.jsonl    # Structured JSONL event log
   auth/                   # Cookie signing key, one-time codes
   config.toml             # Optional minds user preferences (default account, etc.)
-  envs/                   # Per-developer dynamic dev env override files (mode 0600)
+  client.toml             # Per-env public config (URLs only; dev envs only -- staging/production source from in-repo)
+  secrets.toml            # Per-env chmod-0600 secrets (Neon DSN, SuperTokens API key; dev envs only)
   window-state.json       # Per-window content URLs, restored on next launch
   mngr/                   # mngr host directory (MNGR_HOST_DIR)
     agents/               # per-agent state managed by mngr
   <agent-id>/             # Per-agent workspace directories
 ```
 
-`MINDS_ROOT_NAME` is a single env var that isolates an installed minds
-from a dev copy. Exporting `MINDS_ROOT_NAME=devminds` moves the entire
-layout to `~/.devminds/` (separate venv, caches, logs, auth, agents).
-The corresponding `MNGR_HOST_DIR` becomes `~/.devminds/mngr/` and
-`MNGR_PREFIX` becomes `devminds-` so tmux sessions and containers for
-the two copies never collide. Standalone `mngr` invocations ignore
-`MINDS_ROOT_NAME`.
+`MINDS_ROOT_NAME` selects which data root the backend uses. Activation
+(`minds env activate <name>`) sets it to `minds-<env-name>` (or just
+`minds` for production) and exports the derived `MNGR_HOST_DIR` /
+`MNGR_PREFIX` / `MINDS_CLIENT_CONFIG_PATH` alongside. Two envs
+activated in parallel shells (or by two Electron instances pointed at
+two different bundled configs) never share state. Standalone `mngr`
+invocations ignore `MINDS_ROOT_NAME`.
 
 ### Environment selection
 
-The desktop client picks the tier it talks to (`dev`, `staging`,
-`production`, or a per-developer dynamic dev env) via:
+The desktop client picks the env it talks to via shell activation:
 
 ```bash
-minds run --config-file <path-to-client.toml>
+eval "$(uv run minds env activate <name>)"
+minds run                                  # or `just minds-start`
 ```
 
-When `--config-file` is not passed, the default resolves to
-`apps/minds/imbue/minds/config/envs/_bundled/client.toml` (written by
-the Electron production build when `MINDS_BUILD_TIER=production`), then
-falls back to `apps/minds/imbue/minds/config/envs/dev/client.toml`
-shipped with the wheel. See `apps/minds/docs/environments.md` for the
-full operator workflow and `apps/minds/docs/vault-setup.md` for how
+`minds run` reads `MINDS_CLIENT_CONFIG_PATH` (set by activation) for
+the per-env `client.toml`. Passing `--config-file <path>` overrides
+the env var. There is no implicit fallback: the backend refuses to
+start when neither is set.
+
+The packaged Electron app embeds a `client.toml` + `MINDS_ROOT_NAME`
+pair at build time via `MINDS_CLIENT_CONFIG_BUNDLE` and
+`MINDS_ROOT_NAME_BUNDLE`, and the Electron startup exports the env
+vars + passes `--config-file` explicitly -- end users never have to
+activate anything. See `apps/minds/docs/environments.md` for the full
+operator workflow and `apps/minds/docs/vault-setup.md` for how
 deploy-time secrets flow through HCP Vault.
 
 ### Configuration file
 
-`~/.<MINDS_ROOT_NAME>/config.toml` is optional and holds user-personal
+`~/.<root>/config.toml` is optional and holds user-personal
 preferences only (the default account for new workspaces, the
-auto-open behavior for the requests panel). It no longer carries any
-tier-bound URL -- env selection happens via `--config-file` as
-described above.
+auto-open behavior for the requests panel). It carries no tier-bound
+URL -- env selection happens via `MINDS_CLIENT_CONFIG_PATH` /
+`--config-file` as described above.
 
 ## Development
 

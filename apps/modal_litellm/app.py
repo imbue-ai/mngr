@@ -9,11 +9,9 @@ can connect via ANTHROPIC_BASE_URL. All requests go through LiteLLM's
 virtual key system for cost tracking.
 
 Usage:
-    # One-time: push secrets to Modal
-    uv run python scripts/push_modal_secrets.py production
-
-    # Deploy
-    MNGR_DEPLOY_ENV=production uv run modal deploy apps/modal_litellm/app.py
+    # Push secrets to Modal + deploy in one shot:
+    eval "$(uv run minds env activate production)"
+    uv run minds env deploy --yes-i-mean-production
 
     # Use with claude -p (replace with your virtual key and Modal URL)
     ANTHROPIC_BASE_URL=https://<workspace>--litellm-proxy-production-litellm-app.modal.run/anthropic \\
@@ -130,10 +128,10 @@ def litellm_app():
 def migrate_db() -> None:
     """Run `prisma db push` against DATABASE_URL to bring the LiteLLM schema current.
 
-    Invoked by the deploy scripts (scripts/deploy_litellm.sh and
-    apps/minds/imbue/minds/envs/per_env_deploy.py::deploy_litellm_proxy)
-    before each `modal deploy` so the running proxy never sees a missing
-    LiteLLM_VerificationToken / LiteLLM_BudgetTable / etc.
+    Invoked by ``minds env deploy`` (via
+    ``apps/minds/imbue/minds/envs/per_env_deploy.py::deploy_litellm_proxy``)
+    before each ``modal deploy`` so the running proxy never sees a
+    missing LiteLLM_VerificationToken / LiteLLM_BudgetTable / etc.
 
     Runs in the same image as the proxy itself, so prisma + the
     litellm[proxy] package (which ships the canonical schema.prisma)

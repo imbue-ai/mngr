@@ -80,21 +80,21 @@ vault kv put -mount=secrets kv/minds/production/pool-ssh \
 (`@<path>` tells `vault kv put` to read the value from the file -- the
 file itself never leaves the operator's laptop.)
 
-Push every tier secret from Vault to Modal:
+## Step 4: Push the Vault changes to Modal and redeploy
 
 ```bash
-uv run scripts/push_modal_secrets.py production
+eval "$(uv run minds env activate production)"
+uv run minds env deploy --yes-i-mean-production
 ```
 
-## Step 4: Redeploy the remote_service_connector
-
-```bash
-scripts/deploy_remote_service_connector.sh production
-```
-
-This re-runs the Vault->Modal push and then ``modal deploy``s the app
-against the workspace named in
-`apps/minds/imbue/minds/config/envs/production/deploy.toml`.
+`minds env deploy` pushes every tier secret from Vault into Modal
+Secrets (`<service>-production` for every service named in
+`apps/minds/imbue/minds/config/envs/production/deploy.toml`) and then
+``modal deploy``s both the connector and the LiteLLM proxy against
+the workspace named in the same `deploy.toml`. The
+`--yes-i-mean-production` flag is the mandatory safety bar for tier
+deploys; substitute `--yes-i-mean-staging` (and `activate staging`)
+for the staging tier.
 
 ## Step 5: Bake one or more pool hosts
 

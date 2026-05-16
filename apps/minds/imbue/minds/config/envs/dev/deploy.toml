@@ -1,11 +1,13 @@
-# Dev tier deploy config -- read by deploy scripts and by `minds env create`.
+# Dev tier deploy config -- read by `minds env deploy` for any dev env.
 #
-# `modal_workspace` is the dev tier's Modal workspace. The dev tier has no
-# shared Modal environment of its own -- every dev iterates against a
-# *per-developer* Modal environment they pick when invoking the deploy
-# scripts: `scripts/deploy_litellm.sh dev <my-env>`. There is no
-# `modal_env` field here on purpose; staging/production tiers set it if
-# they want a stable Modal env name baked in.
+# `modal_workspace` is the dev tier's Modal workspace. The dev tier has
+# no shared Modal environment of its own -- every dev iterates against
+# a *per-developer* Modal environment that takes the activated dev env's
+# name. The `modal_env` field below is unused for dev-tier deploys:
+# `minds env deploy` (with a dev env activated) always pins the Modal
+# env to the activated dev env name. Staging / production deploys are
+# the ones that consume `modal_env`; we leave it at its default ("main")
+# for shape consistency.
 
 modal_workspace = "imbue-minds-dev"
 vault_path_prefix = "secrets/minds/dev"

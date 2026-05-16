@@ -5,7 +5,7 @@ const path = require('path');
 const paths = require('./paths');
 
 // Swallow EPIPE on the Electron main process's own stdout/stderr. When dev
-// launches go through a pipe (e.g. `just devminds-start | head -30`), the
+// launches go through a pipe (e.g. `just minds-start | head -30`), the
 // reader can exit while the backend is still alive, leaving subsequent
 // writes from the dev-mode forwarder (below) to raise EPIPE asynchronously
 // as an 'error' event. Without this handler the unhandled error surfaces
