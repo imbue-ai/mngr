@@ -102,7 +102,7 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
         return
 
     try:
-        ec2 = boto3.Session(region_name=AWS_DEFAULT_REGION).client("ec2", region_name=AWS_DEFAULT_REGION)
+        ec2 = boto3.Session(region_name=AWS_DEFAULT_REGION).client("ec2")
     except (BotoCoreError, ClientError) as e:
         logger.warning("Failed to build EC2 client for session-end leak scan: {}", e)
         return
