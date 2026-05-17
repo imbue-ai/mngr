@@ -763,7 +763,7 @@ class CreateCliOptions(CommonCliOptions):
     positional_agent_type: str | None
     agent_args: tuple[str, ...]
     template: tuple[str, ...]
-    type: str
+    type: str | None
     reuse: bool
     connect: bool
     foreground: bool

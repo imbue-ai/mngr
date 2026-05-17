@@ -326,6 +326,43 @@ def test_tmux_target_appends_window_zero(
     assert test_agent.tmux_target == f"{test_agent.session_name}:0"
 
 
+@pytest.mark.tmux
+def test_send_tmux_literal_keys_short_message_with_leading_dash(
+    test_agent: BaseAgent,
+) -> None:
+    """A message starting with `-` must round-trip through `tmux send-keys -l` to the pane.
+
+    This is a regression test: without the `--` end-of-options separator, tmux's
+    argv parser treats the leading dash as a flag and errors with
+    `invalid flag --`, so the message never reaches the pane.
+    """
+    session_name = f"{test_agent.mngr_ctx.config.prefix}{test_agent.name}"
+    tmux_target = f"{session_name}:0"
+    message = "--model gemma --flag-leading-message"
+
+    # `cat` echoes typed characters via the PTY's line discipline, so the
+    # message becomes visible in the pane without needing to press Enter.
+    test_agent.host.execute_idempotent_command(
+        f"tmux new-session -d -s '{session_name}' -x 200 -y 24 'cat'",
+        timeout_seconds=5.0,
+    )
+
+    try:
+        # If the bug is back, this raises SendMessageError with "invalid flag --".
+        test_agent._send_tmux_literal_keys(tmux_target, message)
+
+        def _message_visible() -> bool:
+            result = test_agent.host.execute_idempotent_command(
+                f"tmux capture-pane -t '{tmux_target}' -p",
+                timeout_seconds=5.0,
+            )
+            return message in result.stdout
+
+        wait_for(_message_visible, error_message=f"Expected pane to contain {message!r}")
+    finally:
+        cleanup_tmux_session(session_name)
+
+
 # =========================================================================
 # assemble_command tests
 # =========================================================================

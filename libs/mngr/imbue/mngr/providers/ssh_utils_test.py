@@ -15,6 +15,7 @@ from imbue.mngr.errors import MngrError
 from imbue.mngr.providers.ssh_utils import add_host_to_known_hosts
 from imbue.mngr.providers.ssh_utils import clear_host_from_known_hosts
 from imbue.mngr.providers.ssh_utils import create_pyinfra_host
+from imbue.mngr.providers.ssh_utils import format_as_known_hosts_address
 from imbue.mngr.providers.ssh_utils import generate_ed25519_host_keypair
 from imbue.mngr.providers.ssh_utils import generate_ssh_keypair
 from imbue.mngr.providers.ssh_utils import load_or_create_host_keypair
@@ -221,6 +222,24 @@ def test_load_or_create_host_keypair_custom_key_name(tmp_path: Path) -> None:
     private_path, _ = load_or_create_host_keypair(key_dir, key_name="myhost")
     assert private_path == key_dir / "myhost"
     assert (key_dir / "myhost.pub").exists()
+
+
+# =============================================================================
+# format_as_known_hosts_address
+# =============================================================================
+
+
+def test_format_as_known_hosts_address_returns_bare_hostname_for_standard_port() -> None:
+    """Port 22 must produce a bare hostname with no brackets and no port suffix."""
+    assert format_as_known_hosts_address("example.com", 22) == "example.com"
+    assert format_as_known_hosts_address("127.0.0.1", 22) == "127.0.0.1"
+
+
+def test_format_as_known_hosts_address_returns_bracketed_form_for_nonstandard_port() -> None:
+    """Any non-22 port must produce OpenSSH's ``[host]:port`` form."""
+    assert format_as_known_hosts_address("example.com", 2222) == "[example.com]:2222"
+    # Lima's typical forwarded-port shape for the loopback hostname.
+    assert format_as_known_hosts_address("127.0.0.1", 60022) == "[127.0.0.1]:60022"
 
 
 # =============================================================================

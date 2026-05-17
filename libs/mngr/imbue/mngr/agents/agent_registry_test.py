@@ -3,6 +3,7 @@
 from pydantic import Field
 
 from imbue.mngr.agents.agent_registry import _register_agent
+from imbue.mngr.agents.agent_registry import list_available_agent_types
 from imbue.mngr.agents.agent_registry import list_registered_agent_types
 from imbue.mngr.agents.base_agent import BaseAgent
 from imbue.mngr.agents.default_plugins.codex_agent import CodexAgentConfig
@@ -150,3 +151,28 @@ def test_register_agent_registers_class_and_config() -> None:
 
     assert get_agent_class("runtime-test-type") == BaseAgent
     assert get_agent_config_class("runtime-test-type") == AgentTypeConfig
+
+
+def test_list_available_agent_types_unions_registered_and_user_config() -> None:
+    """list_available_agent_types must include both plugin-registered and user-config-defined types.
+
+    Users can define their own agent types under ``[agent_types.X]`` in
+    settings.toml (subclass types that delegate to a registered
+    parent_type). Those must show up in the same list the tab-completion
+    cache and the `mngr plugin list --kind agent-type` filter use, so the
+    user sees them in pickers and error messages.
+    """
+    config = MngrConfig(
+        agent_types={
+            AgentTypeName("my-custom"): AgentTypeConfig(parent_type=AgentTypeName("codex")),
+        },
+    )
+
+    available = list_available_agent_types(config)
+
+    # The codex agent type ships in-tree, so it must always appear.
+    assert "codex" in available
+    # And the user-config-defined name must appear too.
+    assert "my-custom" in available
+    # Output is sorted for stable display.
+    assert available == sorted(available)
