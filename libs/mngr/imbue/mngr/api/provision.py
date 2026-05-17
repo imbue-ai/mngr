@@ -94,10 +94,13 @@ def provision_agent(
             existing_env_local_path.unlink(missing_ok=True)
 
         # Restart agent after provisioning if it was running before,
-        # even if provisioning failed (to avoid leaving the agent stopped)
+        # even if provisioning failed (to avoid leaving the agent stopped).
+        # Hold the host lock across start_agents so the idle shutdown script
+        # cannot trigger mid-start and corrupt the new tmux session.
         if is_restart_needed:
             with log_span("Restarting agent {} after provisioning", agent.name):
-                host.start_agents([agent.id])
+                with host.lock_cooperatively():
+                    host.start_agents([agent.id])
 
     logger.info("Provisioned agent: {}", agent.name)
 

@@ -188,9 +188,12 @@ def start(ctx: click.Context, **kwargs: Any) -> None:
         # Ensure host is started (always start since this is the start command)
         online_host, _ = ensure_host_started(host, is_start_desired=True, provider=provider)
 
-        # Start each agent on this host
+        # Start each agent on this host. Hold the host lock across start_agents
+        # so the idle shutdown script cannot trigger mid-start and corrupt the
+        # new tmux session.
         agent_ids_to_start = [match.agent_id for match in agent_list]
-        online_host.start_agents(agent_ids_to_start)
+        with online_host.lock_cooperatively():
+            online_host.start_agents(agent_ids_to_start)
 
         # Emit discovery events for started agents and host
         emit_discovery_events_for_host(mngr_ctx.config, online_host)

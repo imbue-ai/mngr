@@ -305,11 +305,14 @@ def ensure_agent_started(agent: AgentInterface, host: OnlineHostInterface, is_st
     ):
         if is_start_desired:
             logger.info("Agent {} is stopped, starting it", agent.name)
-            agent.wait_for_ready_signal(
-                is_creating=False,
-                start_action=lambda: host.start_agents([agent.id]),
-                timeout=agent.get_ready_timeout_seconds(),
-            )
+            # Hold the host lock across start_agents so the idle shutdown script
+            # cannot trigger mid-start and corrupt the new tmux session.
+            with host.lock_cooperatively():
+                agent.wait_for_ready_signal(
+                    is_creating=False,
+                    start_action=lambda: host.start_agents([agent.id]),
+                    timeout=agent.get_ready_timeout_seconds(),
+                )
         else:
             raise UserInputError(
                 f"Agent '{agent.name}' is stopped and automatic starting is disabled. "
