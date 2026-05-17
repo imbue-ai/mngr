@@ -2469,17 +2469,13 @@ _DEPLOY_ENV = os.environ.get("MNGR_DEPLOY_ENV", "production")
 
 # Per-deploy timestamp baked into the deployed function spec by ``minds
 # env deploy`` so the connector pins to the matching ``<svc>-<tier>-<id>``
-# Modal Secrets. Hard-fail at module load if missing -- manual ``modal
-# deploy`` outside ``minds env deploy`` is unsupported under the
-# timestamped-secret rollback model.
-_MINDS_DEPLOY_ID = os.environ.get("MINDS_DEPLOY_ID")
-if not _MINDS_DEPLOY_ID:
-    raise RuntimeError(
-        "MINDS_DEPLOY_ID is not set. This Modal app must be deployed via "
-        "`minds env deploy`, which mints the deploy id and threads it into "
-        "the subprocess env. Manual `modal deploy` invocations are not "
-        "supported under the timestamped-secret rollback model."
-    )
+# Modal Secrets. Falls back to a sentinel value when unset so unit tests
+# can import the module without raising; the resulting
+# ``<svc>-<tier>-MINDS_DEPLOY_ID_UNSET`` secret name doesn't exist in
+# any Modal env so a real ``modal deploy`` invocation outside of
+# ``minds env deploy`` will fail with "Secret not found" -- the safety
+# property the timestamped-secret rollback model needs.
+_MINDS_DEPLOY_ID = os.environ.get("MINDS_DEPLOY_ID", "MINDS_DEPLOY_ID_UNSET")
 
 # Warm-pool size for the deployed function. ``minds env deploy`` reads
 # the tier's ``[min_containers].connector`` from its committed
