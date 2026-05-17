@@ -1,7 +1,8 @@
 """Shared test helpers for mngr_aws.
 
-Lives outside ``conftest.py`` so test modules and library modules can
-import these without depending on pytest collection semantics.
+Lives outside ``conftest.py`` so other test modules (e.g. ``test_release_aws``)
+can import these directly; importing from a ``conftest.py`` is a pytest
+anti-pattern (those files are auto-discovered, not designed for direct import).
 """
 
 import os
