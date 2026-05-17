@@ -16,9 +16,11 @@ from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import PluginConfig
 from imbue.mngr.config.data_types import ProviderInstanceConfig
+from imbue.mngr.config.data_types import RetryConfig
 from imbue.mngr.config.data_types import WorkDirExtraPathMode
 from imbue.mngr.config.data_types import get_or_create_user_id
 from imbue.mngr.config.data_types import split_cli_args_string
+from imbue.mngr.config.loader import parse_config
 from imbue.mngr.errors import ConfigParseError
 from imbue.mngr.errors import ParseSpecError
 from imbue.mngr.primitives import AgentTypeName
@@ -1009,6 +1011,86 @@ def test_mngr_config_merge_keeps_base_connect_command_when_override_none(mngr_te
 def test_mngr_config_connect_command_defaults_to_none(mngr_test_prefix: str) -> None:
     config = MngrConfig(prefix=mngr_test_prefix)
     assert config.connect_command is None
+
+
+# =============================================================================
+# Tests for MngrConfig.merge_with completeness
+# =============================================================================
+
+
+def _build_fully_populated_mngr_config(mngr_test_prefix: str) -> MngrConfig:
+    """Construct a MngrConfig with every field set to a non-default value.
+
+    Helper for the merge_with round-trip test below.
+    """
+    return MngrConfig(
+        prefix=f"{mngr_test_prefix}override-",
+        default_host_dir=Path("/tmp/non-default-host-dir"),
+        unset_vars=["NON_DEFAULT_VAR"],
+        work_dir_extra_paths={".something": WorkDirExtraPathMode.COPY},
+        pager="bat",
+        enabled_backends=[ProviderBackendName("local")],
+        agent_types={AgentTypeName("custom"): AgentTypeConfig(cli_args=("--non-default",))},
+        providers={ProviderInstanceName("custom"): ProviderInstanceConfig(backend=ProviderBackendName("docker"))},
+        plugins={PluginName("custom-plugin"): PluginConfig(enabled=False)},
+        disabled_plugins=frozenset({"some-plugin"}),
+        commands={"create": CommandDefaults(defaults={"connect": False})},
+        create_templates={CreateTemplateName("my-template"): CreateTemplate(options={"new_host": "modal"})},
+        pre_command_scripts={"create": ["echo non-default"]},
+        retry=RetryConfig(connect_retry_times=999, connect_retry_delay="123s"),
+        logging=LoggingConfig(file_level=LogLevel.TRACE),
+        is_remote_agent_installation_allowed=False,
+        connect_command="non-default-connect",
+        is_nested_tmux_allowed=True,
+        headless=True,
+        is_error_reporting_enabled=False,
+        is_allowed_in_pytest=False,
+        default_destroyed_host_persisted_seconds=98765.0,
+        default_min_online_host_age_seconds=4321.0,
+        agent_ready_timeout=42.0,
+    )
+
+
+def test_mngr_config_merge_with_round_trips_every_field(mngr_test_prefix: str) -> None:
+    """Round-trip test: every MngrConfig field survives merge_with(empty_override).
+
+    Ensures that ``MngrConfig.merge_with`` does not silently drop any field.
+    When a new field is added to MngrConfig but not threaded through
+    ``merge_with``, the merged result will diverge from the populated base on
+    that field and the assertion below will fail with a clear "extra/missing
+    items" diff.
+
+    Step 1: build a fully-populated MngrConfig with every field set to a
+        non-default value, then assert that fact (so a future refactor that
+        accidentally lands a value matching the default also surfaces here).
+    Step 2: merge with an empty override (``MngrConfig.model_construct()`` --
+        no fields set), and verify the result equals the populated base.
+    """
+    populated = _build_fully_populated_mngr_config(mngr_test_prefix)
+
+    # Step 1: confirm every field on `populated` differs from MngrConfig's
+    # default. ``MngrConfig.model_construct()`` materializes default values
+    # without running validators, so we compare against that reference.
+    defaults = MngrConfig()
+    populated_dump = populated.model_dump()
+    defaults_dump = defaults.model_dump()
+    fields_matching_default = {name for name in MngrConfig.model_fields if populated_dump[name] == defaults_dump[name]}
+    assert not fields_matching_default, (
+        "Round-trip test setup must give every field a non-default value, but the "
+        f"following fields match MngrConfig defaults: {sorted(fields_matching_default)}. "
+        "Update _build_fully_populated_mngr_config to set them to non-default values."
+    )
+
+    # Step 2: merging with an empty override must preserve every field.
+    # ``parse_config({})`` faithfully reproduces what parse_config emits for
+    # an empty TOML file -- scalar fields become None (the "unset" marker
+    # ``MngrConfig.merge_with`` keys off), container dicts become ``{}``,
+    # etc. Using ``MngrConfig.model_construct()`` here would *not* work
+    # because pydantic fills in defaults for fields not passed, making the
+    # override look like every default-valued field was explicitly set.
+    empty_override = parse_config({}, disabled_plugins=frozenset())
+    merged = populated.merge_with(empty_override)
+    assert merged == populated
 
 
 # =============================================================================
