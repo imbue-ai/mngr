@@ -22,7 +22,6 @@ tracking list would live. The scan is naturally tag-based (matching
 parallel worker.
 """
 
-import os
 from datetime import datetime
 from datetime import timedelta
 from datetime import timezone
@@ -35,19 +34,10 @@ from botocore.exceptions import BotoCoreError
 from botocore.exceptions import ClientError
 from loguru import logger
 
+from imbue.mngr_aws.constants import AWS_DEFAULT_REGION
+from imbue.mngr_aws.constants import AWS_RELEASE_TESTS_OPT_IN
 from imbue.mngr_aws.constants import AWS_TEST_NAME_PREFIX
 from imbue.mngr_aws.testing import aws_credentials_available
-
-# Region used by the session-end leak scan. Tests can override via
-# ``AWS_REGION``; defaults to ``us-east-1`` to match the rest of the suite.
-_AWS_REGION: Final[str] = os.environ.get("AWS_REGION", "us-east-1")
-
-# Release-test opt-in flag, read once at import time. Mirrors the same env
-# var that ``test_release_aws.py`` uses to gate ``pytestmark``. We gate the
-# session-end orphan scan on this so a developer who merely has AWS
-# credentials configured (very common) does not trigger a live EC2
-# DescribeInstances call after every unit-test run.
-_OPT_IN: Final[bool] = os.environ.get("MNGR_AWS_RELEASE_TESTS") == "1"
 
 # Orphan-scan grace period. A test-named instance younger than this is left
 # alone to avoid race-killing an in-flight test on a parallel worker.
@@ -108,11 +98,11 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
     # exitstatus is required by the hook signature but unused; we read
     # session.exitstatus, which is the canonical source.
     del exitstatus
-    if not (_OPT_IN and aws_credentials_available()):
+    if not (AWS_RELEASE_TESTS_OPT_IN and aws_credentials_available()):
         return
 
     try:
-        ec2 = boto3.Session(region_name=_AWS_REGION).client("ec2", region_name=_AWS_REGION)
+        ec2 = boto3.Session(region_name=AWS_DEFAULT_REGION).client("ec2", region_name=AWS_DEFAULT_REGION)
     except (BotoCoreError, ClientError) as e:
         logger.warning("Failed to build EC2 client for session-end leak scan: {}", e)
         return

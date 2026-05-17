@@ -35,12 +35,12 @@ import boto3
 import pytest
 
 from imbue.mngr_aws.client import AwsVpsClient
+from imbue.mngr_aws.constants import AWS_DEFAULT_REGION
+from imbue.mngr_aws.constants import AWS_RELEASE_TESTS_OPT_IN
 from imbue.mngr_aws.constants import AWS_TEST_NAME_PREFIX
 from imbue.mngr_aws.testing import aws_credentials_available
 
 _AWS_CREDS_PRESENT = aws_credentials_available()
-_OPT_IN = os.environ.get("MNGR_AWS_RELEASE_TESTS") == "1"
-_AWS_REGION = os.environ.get("AWS_REGION", "us-east-1")
 # Belt-and-suspenders backstop against runaway EC2 cost: even if pytest is
 # killed and the session-end leak detector never runs, this TTL drives cloud-init
 # to schedule ``shutdown -P +N`` which (combined with the AWS launch flag
@@ -52,7 +52,7 @@ pytestmark = [
     pytest.mark.release,
     pytest.mark.timeout(900),
     pytest.mark.skipif(
-        not (_AWS_CREDS_PRESENT and _OPT_IN),
+        not (_AWS_CREDS_PRESENT and AWS_RELEASE_TESTS_OPT_IN),
         reason="AWS credentials or MNGR_AWS_RELEASE_TESTS=1 not set",
     ),
 ]
@@ -161,10 +161,10 @@ class TestAwsApiClient:
     """Tests for the AWS API client with real EC2 API calls."""
 
     def _client(self) -> AwsVpsClient:
-        session = boto3.Session(region_name=_AWS_REGION)
+        session = boto3.Session(region_name=AWS_DEFAULT_REGION)
         return AwsVpsClient(
             session=session,
-            region=_AWS_REGION,
+            region=AWS_DEFAULT_REGION,
             ami_id="ami-placeholder",
             security_group_id="sg-placeholder",
         )
