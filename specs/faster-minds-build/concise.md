@@ -36,6 +36,7 @@
   - `uv tool install -e /code/vendor/mngr/libs/mngr` and `uv tool install -e /code/apps/system_interface --with-editable /code/vendor/mngr/libs/mngr_claude --with-editable /code/vendor/mngr/libs/mngr_modal`, and the existing `mngr plugin add`.
   - `uv sync --all-packages --frozen` to register editable workspace packages into the venv against the warmed cache.
 - Drop the post-`COPY` `chown -R root:root /code/` step. `COPY` without `--chown` already lands files as root:root, so the recursive chown was a no-op walk over the entire (~250 MB, including `.git/`) source tree. The `git config --global --add safe.directory /code/` part of the original `RUN` stays. This shaves ~60s off every warm-cache rebuild on top of the layer-split win.
+- Drop `mngr_modal` from both the `uv tool install -e apps/system_interface --with-editable ...` chain and the `mngr plugin add --path ...` call. The FCT `.mngr/settings.toml` already sets `providers.modal.is_enabled = false`, and nothing under `apps/` or `libs/` imports `imbue.mngr_modal`, so the plugin was being installed + registered for no consumer. `mngr plugin add` shells out to a uv-tool inject per plugin, so removing one plugin saves a few seconds (~3s warm rebuild, ~4s cold-ish). Keep a comment in the Dockerfile pointing at the lines to re-add if `providers.modal` is ever flipped on.
 
 ### Deferred-install service
 
