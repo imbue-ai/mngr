@@ -316,6 +316,20 @@ minds-start agent_name="mindtest" branch="":
     echo "MINDS_WORKSPACE_BRANCH=$MINDS_WORKSPACE_BRANCH"
     echo "$$" > "$pid_file"
     trap 'rm -f "$pid_file"' EXIT
+    # Bail with a copy-pasteable install + build hint if the electron
+    # node_modules tree isn't there yet. `pnpm start` would otherwise
+    # die with a confusing "electron: not found" + WARN-about-missing-
+    # node_modules message.
+    if [ ! -x "apps/minds/node_modules/.bin/electron" ]; then
+        echo "" >&2
+        echo "error: minds desktop client isn't installed/built yet in this worktree." >&2
+        echo "       Run:" >&2
+        echo "         cd apps/minds && pnpm install && cd -" >&2
+        echo "         just minds-build" >&2
+        echo "       (~2 min on first run; subsequent rebuilds are seconds)." >&2
+        echo "       Then re-run \`just minds-start\`." >&2
+        exit 2
+    fi
     cd apps/minds && pnpm start
 
 # Stop the minds desktop client started in this worktree by `just minds-start`.
