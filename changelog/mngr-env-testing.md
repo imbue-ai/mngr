@@ -60,3 +60,77 @@ Minds dev-environment fixes:
   documented the manual provisioning step in
   `apps/minds/docs/vault-setup.md` and
   `apps/minds/docs/host-pool-setup.md`.
+
+Minds deploy safety overhaul (spec
+`specs/minds-deploy-safety-overhaul/spec.md`):
+
+- Shorter Modal app + function names so the deployed hostname stays
+  under DNS's 63-char limit for every realistic env name:
+  `remote-service-connector` -> `rsc`, `fastapi_app` -> `api`,
+  `litellm-proxy` -> `llm`, `litellm_app` -> `proxy`. Modal workspaces
+  rename to `minds-dev` / `minds-staging` / `minds-production`. URL
+  is now exactly what we compute up front, so the deploy no longer
+  runs a second-pass secret push or a connector redeploy. `DevEnvName`
+  enforces a 40-char max so the hostname budget always fits.
+
+- One `minds env deploy` path for every tier, driven by a new required
+  `[lifecycle]` block in each tier's `deploy.toml` (flags:
+  `creates_resources`, `modal_env_strategy`, `writes_local_state`,
+  `tracks_generation`). dev / staging / production all execute the
+  same code now; behavior diverges only via the flag matrix.
+  `deploy_dev_env` + `deploy_tier_env` collapse into `deploy_env`.
+  Inline best-effort rollback machinery (`_best_effort_rollback`,
+  `_ROLLBACK_TABLE`, `_rollback_*`) deleted -- replaced by
+  `minds env recover` (below). Production now `tracks_generation=true`
+  for parity with staging (production destroy is hard-refused so the
+  generation id is effectively immutable for the tier's lifetime).
+
+- Pool-hosts schema migrations now backed by a real
+  `schema_migrations(version, applied_at)` table instead of the old
+  "replay every .sql with IF NOT EXISTS guards". New
+  `apps/minds/imbue/minds/envs/migrations.py` owns the runner. Legacy
+  files keep their `IF NOT EXISTS` guards so a backfill against an
+  already-migrated DB is a no-op + records the row; new migrations
+  land WITHOUT guards (the table is the source of truth).
+
+- Every `minds env deploy` mints a fresh `MINDS_DEPLOY_ID` (UTC
+  `YYYYMMDDTHHMMSSZ`) and pushes every Modal Secret under a new name
+  `<svc>-<tier>-<deploy_id>` (no overwrites). The deployed Modal apps
+  read `MINDS_DEPLOY_ID` at module load and pin every
+  `Secret.from_name(...)` to the matching timestamped name. Hard-fails
+  at module load if `MINDS_DEPLOY_ID` is missing (no fallback to
+  unsuffixed names; manual `modal deploy` outside `minds env deploy`
+  is unsupported). End-of-deploy GC keeps the last 10 timestamped
+  secrets per `<svc>-<tier>`; shared-tier destroy deletes all
+  timestamped secrets matching the tier.
+
+- New `minds env recover` command + recover-target file at the
+  monorepo root. Every deploy captures pre-deploy Modal app versions,
+  creates a Neon named restore-point, and writes
+  `.minds-deploy-recover-target.json` (gitignored) atomically BEFORE
+  touching any external state. On a failed deploy, the operator runs
+  `minds env recover`; it idempotently runs every reversal step
+  (`modal app rollback`, Neon `restore_to_named_restore_point`,
+  delete orphan timestamped secrets, delete the recover-target file).
+  Every other `minds env *` command (`activate` / `deactivate` /
+  `list` / `deploy` / `destroy`) refuses to run while a recover-
+  target file exists.
+
+- Post-deploy health check: `await_apps_healthy` polls
+  `<connector>/docs` and `<litellm_proxy>/health` for up to 30s each
+  (sequential), with cold-boot 5xx tolerance + immediate failure on
+  4xx / 5xx-with-body / wrong-shape responses. Failure surfaces as
+  `HealthCheckFailedError` and goes through the same "run
+  `minds env recover`" guidance as any other deploy failure.
+
+- Each deploy also gets a `[lifecycle].tracks_generation=true` tier
+  generation id minted into the litellm-connector Modal Secret (no
+  change for dev / staging; production now also gets one).
+
+Operator-visible: re-deploys after any of the above are
+backwards-compatible against the existing dev-tier resources. The
+shared (`staging` / `production`) tiers' `deploy.toml` files now
+require a `[lifecycle]` block; operators bringing up staging /
+production for the first time need to populate the existing OAuth
+client IDs as before plus ensure the `[lifecycle]` block matches the
+defaults documented in the committed file.
