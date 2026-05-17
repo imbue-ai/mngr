@@ -456,7 +456,7 @@ class FakeSuperTokensBackend:
         if exc is not None:
             raise exc
 
-    async def sign_up(
+    def sign_up(
         self,
         *,
         tenant_id: str,
@@ -481,7 +481,7 @@ class FakeSuperTokensBackend:
         user = _build_st_user(account)
         return EPSignUpOkResult(user=user, recipe_user_id=RecipeUserId(account.user_id))
 
-    async def sign_in(
+    def sign_in(
         self,
         *,
         tenant_id: str,
@@ -497,7 +497,7 @@ class FakeSuperTokensBackend:
         user = _build_st_user(account)
         return EPSignInOkResult(user=user, recipe_user_id=RecipeUserId(account.user_id))
 
-    async def is_email_verified(
+    def is_email_verified(
         self,
         *,
         recipe_user_id: RecipeUserId,
@@ -508,7 +508,7 @@ class FakeSuperTokensBackend:
         account = self.accounts_by_id.get(recipe_user_id.get_as_string())
         return account is not None and account.is_verified
 
-    async def send_email_verification_email(
+    def send_email_verification_email(
         self,
         *,
         tenant_id: str,
@@ -522,7 +522,7 @@ class FakeSuperTokensBackend:
         self.verification_tokens[token] = (user_id, email)
         self.sent_verification_emails.append((user_id, email))
 
-    async def create_new_session(
+    def create_new_session(
         self,
         *,
         tenant_id: str,
@@ -538,7 +538,7 @@ class FakeSuperTokensBackend:
         self.sessions_by_refresh_token[session.refresh_token] = session
         return session
 
-    async def refresh_session(
+    def refresh_session(
         self,
         *,
         refresh_token: str,
@@ -557,7 +557,7 @@ class FakeSuperTokensBackend:
         self.sessions_by_refresh_token[session.refresh_token] = session
         return session
 
-    async def revoke_all_sessions_for_user(
+    def revoke_all_sessions_for_user(
         self,
         *,
         user_id: str,
@@ -593,7 +593,7 @@ class FakeSuperTokensBackend:
         del anti_csrf_check, session_required, override_global_claim_validators, user_context
         return self.sessions_by_access_token.get(access_token)
 
-    async def list_users_by_account_info(
+    def list_users_by_account_info(
         self,
         *,
         tenant_id: str,
@@ -607,7 +607,7 @@ class FakeSuperTokensBackend:
             return []
         return [_build_st_user(account)]
 
-    async def send_reset_password_email(
+    def send_reset_password_email(
         self,
         *,
         tenant_id: str,
@@ -623,7 +623,7 @@ class FakeSuperTokensBackend:
         self.sent_reset_emails.append((user_id, email))
         return "OK"
 
-    async def consume_password_reset_token(
+    def consume_password_reset_token(
         self,
         *,
         tenant_id: str,
@@ -641,7 +641,7 @@ class FakeSuperTokensBackend:
         account = self.accounts_by_id[user_id]
         return ConsumePasswordResetTokenOkResult(email=account.email, user_id=user_id)
 
-    async def update_email_or_password(
+    def update_email_or_password(
         self,
         *,
         recipe_user_id: RecipeUserId,
@@ -659,7 +659,7 @@ class FakeSuperTokensBackend:
             account.password = password
         return UpdateEmailOrPasswordOkResult()
 
-    async def verify_email_using_token(
+    def verify_email_using_token(
         self,
         *,
         tenant_id: str,
@@ -682,7 +682,7 @@ class FakeSuperTokensBackend:
             user=EmailVerificationUser(recipe_user_id=RecipeUserId(user_id), email=email),
         )
 
-    async def get_provider(
+    def get_provider(
         self,
         *,
         tenant_id: str,
@@ -693,7 +693,7 @@ class FakeSuperTokensBackend:
         del tenant_id, client_type, user_context
         return self.registered_providers.get(third_party_id)
 
-    async def manually_create_or_update_user(
+    def manually_create_or_update_user(
         self,
         *,
         tenant_id: str,

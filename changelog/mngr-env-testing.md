@@ -61,6 +61,29 @@ Minds dev-environment fixes:
   `apps/minds/docs/vault-setup.md` and
   `apps/minds/docs/host-pool-setup.md`.
 
+- Connector auth endpoints no longer 500 on `/auth/session/revoke`,
+  `/auth/email/is-verified`, `/auth/email/send-verification`. The connector's
+  twelve `async def` endpoints (plus the `_build_session_tokens` helper)
+  have been converted to sync `def`, with the SuperTokens recipe imports
+  switched from their `asyncio` modules to the `syncio` equivalents. The
+  three broken endpoints were calling SuperTokens' `syncio.get_user` /
+  `syncio.get_session_without_request_response` from inside an
+  `async def`, where the syncio wrapper's `loop.run_until_complete` hit
+  "RuntimeError: This event loop is already running" against the live
+  FastAPI/uvicorn loop and produced bare 500s. The conversion makes the
+  bug class structurally impossible (no event loop is running in
+  FastAPI's threadpool workers) and also aligns the file with the
+  monorepo style guide's prohibition on `async`/`asyncio`. Each
+  newly-sync endpoint is wrapped in `with handle_endpoint_errors():` so
+  error handling stays uniform across the file. The two OAuth callback
+  endpoints still need to bridge to async-only methods on SuperTokens'
+  `Provider` object (`get_authorisation_redirect_url`,
+  `exchange_auth_code_for_oauth_tokens`, `get_user_info`); those three
+  calls go through `supertokens_python.async_to_sync_wrapper.sync`, the
+  same wrapper SuperTokens' own syncio modules use internally -- safe
+  here because FastAPI runs sync def endpoints in a threadpool worker
+  with no live event loop.
+
 - `mngr list` no longer aborts with "Provider 'modal' is not available"
   when the Modal per-user environment hasn't been created yet. The
   Modal backend now raises a new `ProviderEmptyError` (distinct from

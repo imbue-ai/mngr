@@ -59,7 +59,7 @@ formal tests; this is a checklist of probes + findings.
 | F2 | Bump health-check timeout 3s→10s, max 30s→60s | `health_check.py` |
 | F3 | Add `/health/liveness` route + switch probe | `connector/app.py`, `health_check.py` |
 | F4 | Update spec to say `/health/liveness` | spec.md |
-| F5 | **Convert all 12 connector `async def` endpoints to sync `def`** (asyncio → syncio SuperTokens; style-guide compliance) | `connector/app.py` |
+| F5 | **FIXED** — converted all 12 connector async endpoints to sync; redeployed to dev-josh-1; all 209 unit tests pass + end-to-end probes show real 200/401 statuses (no more 500s) | `connector/app.py`, `connector/testing.py` |
 | F6 | `override_global_claim_validators=lambda *_: []` so "Email not verified" becomes live | `connector/app.py` |
 | F7 | DELETE tunnel returns 200 on already-gone | `connector/app.py` |
 | F8 | Defer (test-suite fixture concern) | none |
@@ -80,13 +80,14 @@ formal tests; this is a checklist of probes + findings.
 | F24 | Thread `tier` through `per_env_*_url` helpers | `per_env_deploy.py`, `provisioning.py` |
 | F25 | Drop `_DERIVED_ONLY_SECRET_SERVICES`; read litellm-connector from Vault normally | `per_env_deploy.py` |
 | F26 | Use `os.open(O_CREAT \| O_EXCL)` for recover-target write | `recover.py` |
-| F27 | Subsumed by F5 (sync conversion + `handle_endpoint_errors`); add a defensive `exception_handler(Exception)` as a last-resort net | `connector/app.py` |
+| F27 | **PARTIALLY FIXED via F5** — every connector endpoint now wraps in `handle_endpoint_errors`. Defensive `exception_handler(Exception)` not yet added (low priority) | `connector/app.py` |
 | F28 | Defer (run `release-minds` skill intentionally) | workflow op |
 | F29 | Replace hardcoded "Ask Josh" with generic phrasing | `connector/app.py` |
 | F30 | Bundle with F7: release_host returns 200 on already-released | `connector/app.py` |
 | F31 | Defer (low blast radius, document orphan growth) | docstring only |
+| F32 | **NEW** (surfaced during F5 verification): `minds env deploy` redeploy may create a fresh Neon project instead of adopting the existing one — verify before fixing | `neon_db.py` |
 
-**Quick stats:** 24 findings get code changes (some bundled into shared PRs), 4 deferred (F8, F23, F28, F31), 3 docs-only (F4, F20, partial F21+F25 docs).
+**Quick stats:** 24 findings get code changes (some bundled into shared PRs), 4 deferred (F8, F23, F28, F31), 3 docs-only (F4, F20, partial F21+F25 docs). 1 (F5) FIXED + 1 (F27) partially fixed via F5.
 
 ## What I didn't test (gaps)
 
@@ -215,6 +216,7 @@ Each finding has:
 - **Why it matters:** `/auth/session/revoke` is the sign-out path. `/auth/email/send-verification` is how users get verification emails. `/auth/email/is-verified` is the client-side poll to know whether to unblock the UI. With these three broken, end users **cannot**: complete email verification on signup, sign out cleanly, or check verification status. The whole onboarding flow for any minds env that requires email-verified access is effectively broken.
 - **Suggested fix:** Switch both imports to their asyncio counterparts (`supertokens_python.recipe.session.asyncio.get_session_without_request_response`, `supertokens_python.asyncio.get_user`) and convert `_get_user_id_from_access_token` + the three endpoint bodies to `async def` / `await` the calls. For the call sites that today live inside *sync* endpoints (`/hosts`, `/keys/*`, `/tunnels/*`, `/auth/users/{id}`, `_default_email_getter`), the same `await` rewrite is required — converting those endpoints to `async def` as well is the simplest cross-cutting fix. Alternatively introduce an `async _get_user_id_from_access_token_async` for the async sites and leave the sync site unchanged.
 - **Decision:** **Convert every `async def` endpoint in `connector/app.py` (all 12) to sync `def`.** Switch every `from supertokens_python.recipe.X.asyncio import Y` to `.syncio import Y`, drop every `await`, drop `async` from the function defs. Style-guide compliance ("Never use `async` or `asyncio`") AND the bug class can't recur. All SuperTokens functions the file uses have syncio variants — confirmed via direct introspection. Wrap each newly-sync endpoint with `with handle_endpoint_errors():` so error handling is consistent with the rest of the file (subsumes F27 for the connector). Add a release test that hits `/auth/session/revoke`, `/auth/email/is-verified`, `/auth/email/send-verification` end-to-end against a real SuperTokens app and asserts each returns a real status, not a bare 500. **Follow-up (separate, deferred):** tighten the asyncio ratchet at `apps/remote_service_connector/imbue/remote_service_connector/test_ratchets.py` to also count `async def` and `await` (currently only `import asyncio`) — done in the larger pass that converts the desktop_client's 19 async endpoints.
+- **Status: FIXED.** Connector + testing.py + changelog committed; dev-josh-1 redeployed; the three previously-500 endpoints now return real statuses end-to-end (`/auth/email/is-verified` → 200, `/auth/email/send-verification` → 200, `/auth/session/revoke` with verified user → 200 with `revoked_count`). The two OAuth callback endpoints (`/auth/oauth/authorize`, `/auth/oauth/callback`) keep using `supertokens_python.async_to_sync_wrapper.sync` for the three async-only `Provider` methods — safe because FastAPI's threadpool worker has no live event loop. All 209 connector unit tests pass.
 
 ### F6 — `_authenticate_supertokens`'s "Email not verified" branch is dead code
 
@@ -486,6 +488,7 @@ Each finding has:
 - **Why:** Any uncaught exception in an async endpoint surfaces as the default FastAPI 500 `Internal Server Error` (no detail). The sync endpoints get a translation pass via `raise_as_http`. F5's RuntimeError is the most visible symptom of this — but even with F5 fixed, any future bug in an async endpoint will produce an unhelpful error.
 - **Suggested fix:** Mirror the wrapping for async endpoints. Either an `async with handle_endpoint_errors_async():` (a similarly-shaped async context manager) or a FastAPI exception handler registered on the app.
 - **Decision:** **Largely subsumed by F5.** Once the connector's 12 `async def` endpoints become `def`, every endpoint in the file gets a uniform `with handle_endpoint_errors():` wrapper as part of the F5 conversion (the existing sync endpoints already have it). No separate FastAPI `exception_handler` needed for the connector. Still add a defensive `@web_app.exception_handler(Exception)` registration that routes through `raise_as_http` as a last-resort net for anything that escapes — cheap, covers future regressions if the no-async rule slips again. The desktop_client's async endpoints (out of scope here) keep being a future concern.
+- **Status: PARTIALLY FIXED via F5.** Every converted endpoint in `connector/app.py` now wraps in `with handle_endpoint_errors():`. The defensive `@web_app.exception_handler(Exception)` last-resort net is **NOT** added yet (deferred, low priority — there are no `async def` endpoints left in the file to fall through).
 
 ### F28 — FCT `vendor/mngr` and the minds-side `libs/mngr` are out of sync
 
@@ -534,6 +537,26 @@ Each finding has:
 - **Why it matters:** Over many leased-then-failed-injection cycles, `authorized_keys` accumulates dead entries. Not a security hole (each user's key is theirs), but a hygiene drift.
 - **Suggested fix:** Either (a) make `_append_authorized_key` idempotent with a marker comment per key so we can prune on lease, or (b) replace `authorized_keys` wholesale on lease (the VPS is single-user anyway).
 - **Decision:** Defer. Low blast radius (each user's own key) and the cleanest fix (option b — replace `authorized_keys` wholesale) needs care so we don't lock out the pool-management key itself. Document the orphan-growth behavior in `_append_authorized_key`'s docstring + add a TODO. Revisit when pool-host hygiene matters more.
+
+### F32 — `minds env deploy` re-creates the Neon project on a redeploy instead of adopting the existing one (observed during the F5 fix verification)
+
+- **Severity:** smell (verify before treating as bug)
+- **Where:** observed in the `minds env deploy dev-josh-1` log on 2026-05-17 after the F5 fix. Code path: `provisioning.py:484-487` calls `providers.create_neon_project(...)`, which is `apps/minds/imbue/minds/envs/providers/neon_db.py:create_neon_project(...)`.
+- **Observed:** redeploying `dev-josh-1` (which already had a deployed env from earlier in the session) printed:
+
+  ```
+  Creating Neon project 'minds-dev-josh-1' under org org-jolly-cell-77900540
+  Creating Neon database 'host_pool' on branch br-old-fire-akygmp0x
+  Creating Neon database 'litellm_cost' on branch br-old-fire-akygmp0x
+  Fetching pooled DSNs for both databases
+  ```
+
+  AND the migrations all ran from scratch ("Applied 4 pool-hosts migration(s): ['000_initial_schema.sql', ...]"), which means the `schema_migrations` table on the freshly-created project was empty. This implies a NEW Neon project was created, not an idempotent adoption of the existing one. The pre-redeploy project (with its existing `host_pool` rows, if any) would now be orphaned in the Neon org.
+- **Why it matters:** Deploy idempotency is a core spec invariant: *"Idempotent: re-running picks up any new tier-shared Vault values and re-deploys in place."* If every dev-tier redeploy creates a new Neon project + leaves the old one as a leak, then (a) operators silently accumulate dead Neon projects over time, (b) any host-pool state in the old project's `host_pool` table is lost (gating lease/release tests via `mngr imbue_cloud admin pool create`), and (c) the `~/.minds-<name>/secrets.toml` DSN file is overwritten by the deploy, so the operator can't trivially get back to the old project.
+- **Repro:** verified once on dev-josh-1; needs a second observation to rule out a one-off (maybe the previous project really had been destroyed earlier in the session and I missed it). Quick check: `vault kv get` on the saved DSN before / after a deploy, OR `neon` CLI list of projects under the org.
+- **Suggested fix:** Investigate `create_neon_project` for an idempotency check — should `GET /projects?name=minds-dev-josh-1` first, return existing record if found, only create if absent.
+- **Decision:** Defer for confirmation. Capture as a finding now; before fixing, run two consecutive `minds env deploy`s against a fresh env and inspect the Neon project IDs returned (should be identical). If they differ, the bug is real; fix as a follow-up to F16 (both relate to deploy invariants).
+
 
 
 

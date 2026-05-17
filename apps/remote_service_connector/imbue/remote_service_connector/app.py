@@ -41,17 +41,12 @@ from pydantic import field_validator
 from supertokens_python import InputAppInfo
 from supertokens_python import SupertokensConfig
 from supertokens_python import init as supertokens_init
-from supertokens_python.asyncio import list_users_by_account_info
+from supertokens_python.async_to_sync_wrapper import sync as _supertokens_sync_run
 from supertokens_python.exceptions import GeneralError as SuperTokensGeneralError
 from supertokens_python.recipe import emailpassword as st_emailpassword_recipe
 from supertokens_python.recipe import emailverification as st_emailverification_recipe
 from supertokens_python.recipe import session as st_session_recipe
 from supertokens_python.recipe import thirdparty as st_thirdparty_recipe
-from supertokens_python.recipe.emailpassword.asyncio import consume_password_reset_token
-from supertokens_python.recipe.emailpassword.asyncio import send_reset_password_email
-from supertokens_python.recipe.emailpassword.asyncio import sign_in as ep_sign_in
-from supertokens_python.recipe.emailpassword.asyncio import sign_up as ep_sign_up
-from supertokens_python.recipe.emailpassword.asyncio import update_email_or_password
 from supertokens_python.recipe.emailpassword.interfaces import ConsumePasswordResetTokenOkResult
 from supertokens_python.recipe.emailpassword.interfaces import EmailAlreadyExistsError
 from supertokens_python.recipe.emailpassword.interfaces import PasswordPolicyViolationError
@@ -59,24 +54,30 @@ from supertokens_python.recipe.emailpassword.interfaces import SignInOkResult as
 from supertokens_python.recipe.emailpassword.interfaces import SignUpOkResult as EPSignUpOkResult
 from supertokens_python.recipe.emailpassword.interfaces import UpdateEmailOrPasswordOkResult
 from supertokens_python.recipe.emailpassword.interfaces import WrongCredentialsError
+from supertokens_python.recipe.emailpassword.syncio import consume_password_reset_token
+from supertokens_python.recipe.emailpassword.syncio import send_reset_password_email
+from supertokens_python.recipe.emailpassword.syncio import sign_in as ep_sign_in
+from supertokens_python.recipe.emailpassword.syncio import sign_up as ep_sign_up
+from supertokens_python.recipe.emailpassword.syncio import update_email_or_password
 from supertokens_python.recipe.emailverification import EmailVerificationClaim
-from supertokens_python.recipe.emailverification.asyncio import is_email_verified
-from supertokens_python.recipe.emailverification.asyncio import send_email_verification_email
-from supertokens_python.recipe.emailverification.asyncio import verify_email_using_token
 from supertokens_python.recipe.emailverification.interfaces import VerifyEmailUsingTokenOkResult
-from supertokens_python.recipe.session.asyncio import create_new_session_without_request_response
-from supertokens_python.recipe.session.asyncio import refresh_session_without_request_response
-from supertokens_python.recipe.session.asyncio import revoke_all_sessions_for_user
+from supertokens_python.recipe.emailverification.syncio import is_email_verified
+from supertokens_python.recipe.emailverification.syncio import send_email_verification_email
+from supertokens_python.recipe.emailverification.syncio import verify_email_using_token
 from supertokens_python.recipe.session.exceptions import SuperTokensSessionError
+from supertokens_python.recipe.session.syncio import create_new_session_without_request_response
 from supertokens_python.recipe.session.syncio import get_session_without_request_response
-from supertokens_python.recipe.thirdparty.asyncio import get_provider
-from supertokens_python.recipe.thirdparty.asyncio import manually_create_or_update_user
+from supertokens_python.recipe.session.syncio import refresh_session_without_request_response
+from supertokens_python.recipe.session.syncio import revoke_all_sessions_for_user
 from supertokens_python.recipe.thirdparty.interfaces import ManuallyCreateOrUpdateUserOkResult
 from supertokens_python.recipe.thirdparty.provider import ProviderClientConfig
 from supertokens_python.recipe.thirdparty.provider import ProviderConfig
 from supertokens_python.recipe.thirdparty.provider import ProviderInput
 from supertokens_python.recipe.thirdparty.provider import RedirectUriInfo
+from supertokens_python.recipe.thirdparty.syncio import get_provider
+from supertokens_python.recipe.thirdparty.syncio import manually_create_or_update_user
 from supertokens_python.syncio import get_user
+from supertokens_python.syncio import list_users_by_account_info
 from supertokens_python.types import RecipeUserId
 from supertokens_python.types.base import AccountInfoInput
 
@@ -2109,9 +2110,9 @@ class UserProviderInfo(BaseModel):
     provider: str = Field(description="Login method: 'email' or a third-party provider ID")
 
 
-async def _build_session_tokens(user_id: str) -> SessionTokens:
+def _build_session_tokens(user_id: str) -> SessionTokens:
     """Create a new SuperTokens session for the given user and return the tokens."""
-    session = await create_new_session_without_request_response(
+    session = create_new_session_without_request_response(
         tenant_id=_AUTH_TENANT_ID,
         recipe_user_id=RecipeUserId(user_id),
     )
@@ -2128,7 +2129,7 @@ def _require_supertokens_configured() -> None:
 
 
 @web_app.post("/auth/signup", response_model=AuthResponse)
-async def auth_signup(body: SignUpRequest) -> AuthResponse:
+def auth_signup(body: SignUpRequest) -> AuthResponse:
     """Create a new email/password account and return a session + user info.
 
     Any exception from the SuperTokens SDK (core unreachable, schema mismatch,
@@ -2136,104 +2137,107 @@ async def auth_signup(body: SignUpRequest) -> AuthResponse:
     so the desktop client receives a stable JSON shape rather than a FastAPI
     default 500 body that its typed client cannot parse.
     """
-    _require_supertokens_configured()
-    email = body.email.strip()
-    if not email or not body.password:
-        return AuthResponse(status="FIELD_ERROR", message="Email and password are required")
+    with handle_endpoint_errors():
+        _require_supertokens_configured()
+        email = body.email.strip()
+        if not email or not body.password:
+            return AuthResponse(status="FIELD_ERROR", message="Email and password are required")
 
-    try:
-        result = await ep_sign_up(tenant_id=_AUTH_TENANT_ID, email=email, password=body.password)
+        try:
+            result = ep_sign_up(tenant_id=_AUTH_TENANT_ID, email=email, password=body.password)
 
-        if isinstance(result, EmailAlreadyExistsError):
-            return AuthResponse(status="EMAIL_ALREADY_EXISTS", message="An account with this email already exists")
+            if isinstance(result, EmailAlreadyExistsError):
+                return AuthResponse(status="EMAIL_ALREADY_EXISTS", message="An account with this email already exists")
 
-        if not isinstance(result, EPSignUpOkResult):
-            return AuthResponse(status="ERROR", message="Sign-up failed")
+            if not isinstance(result, EPSignUpOkResult):
+                return AuthResponse(status="ERROR", message="Sign-up failed")
 
-        user = result.user
-        recipe_user_id = user.login_methods[0].recipe_user_id if user.login_methods else RecipeUserId(user.id)
-        tokens = await _build_session_tokens(user.id)
-        await send_email_verification_email(
-            tenant_id=_AUTH_TENANT_ID,
-            user_id=user.id,
-            recipe_user_id=recipe_user_id,
-            email=email,
+            user = result.user
+            recipe_user_id = user.login_methods[0].recipe_user_id if user.login_methods else RecipeUserId(user.id)
+            tokens = _build_session_tokens(user.id)
+            send_email_verification_email(
+                tenant_id=_AUTH_TENANT_ID,
+                user_id=user.id,
+                recipe_user_id=recipe_user_id,
+                email=email,
+            )
+        except (SuperTokensSessionError, SuperTokensGeneralError) as exc:
+            logger.error("SuperTokens SDK error during signup", exc_info=exc)
+            return AuthResponse(status="ERROR", message="Auth backend unavailable")
+        return AuthResponse(
+            status="OK",
+            user=AuthUser(user_id=user.id, email=email),
+            tokens=tokens,
+            needs_email_verification=True,
         )
-    except (SuperTokensSessionError, SuperTokensGeneralError) as exc:
-        logger.error("SuperTokens SDK error during signup", exc_info=exc)
-        return AuthResponse(status="ERROR", message="Auth backend unavailable")
-    return AuthResponse(
-        status="OK",
-        user=AuthUser(user_id=user.id, email=email),
-        tokens=tokens,
-        needs_email_verification=True,
-    )
 
 
 @web_app.post("/auth/signin", response_model=AuthResponse)
-async def auth_signin(body: SignInRequest) -> AuthResponse:
+def auth_signin(body: SignInRequest) -> AuthResponse:
     """Authenticate with email/password and return a session + user info.
 
     Any exception from the SuperTokens SDK is caught and returned as
     ``AuthResponse(status="ERROR")`` -- see the ``auth_signup`` docstring for
     the rationale.
     """
-    _require_supertokens_configured()
-    email = body.email.strip()
-    if not email or not body.password:
-        return AuthResponse(status="FIELD_ERROR", message="Email and password are required")
+    with handle_endpoint_errors():
+        _require_supertokens_configured()
+        email = body.email.strip()
+        if not email or not body.password:
+            return AuthResponse(status="FIELD_ERROR", message="Email and password are required")
 
-    try:
-        result = await ep_sign_in(tenant_id=_AUTH_TENANT_ID, email=email, password=body.password)
+        try:
+            result = ep_sign_in(tenant_id=_AUTH_TENANT_ID, email=email, password=body.password)
 
-        if isinstance(result, WrongCredentialsError):
-            return AuthResponse(status="WRONG_CREDENTIALS", message="Incorrect email or password")
+            if isinstance(result, WrongCredentialsError):
+                return AuthResponse(status="WRONG_CREDENTIALS", message="Incorrect email or password")
 
-        if not isinstance(result, EPSignInOkResult):
-            return AuthResponse(status="ERROR", message="Sign-in failed")
+            if not isinstance(result, EPSignInOkResult):
+                return AuthResponse(status="ERROR", message="Sign-in failed")
 
-        user = result.user
-        recipe_user_id = user.login_methods[0].recipe_user_id if user.login_methods else RecipeUserId(user.id)
-        verified = await is_email_verified(recipe_user_id=recipe_user_id, email=email)
-        tokens = await _build_session_tokens(user.id)
-        if not verified:
-            await send_email_verification_email(
-                tenant_id=_AUTH_TENANT_ID,
-                user_id=user.id,
-                recipe_user_id=recipe_user_id,
-                email=email,
-            )
-    except (SuperTokensSessionError, SuperTokensGeneralError) as exc:
-        logger.error("SuperTokens SDK error during signin", exc_info=exc)
-        return AuthResponse(status="ERROR", message="Auth backend unavailable")
-    return AuthResponse(
-        status="OK",
-        user=AuthUser(user_id=user.id, email=email),
-        tokens=tokens,
-        needs_email_verification=not verified,
-    )
+            user = result.user
+            recipe_user_id = user.login_methods[0].recipe_user_id if user.login_methods else RecipeUserId(user.id)
+            verified = is_email_verified(recipe_user_id=recipe_user_id, email=email)
+            tokens = _build_session_tokens(user.id)
+            if not verified:
+                send_email_verification_email(
+                    tenant_id=_AUTH_TENANT_ID,
+                    user_id=user.id,
+                    recipe_user_id=recipe_user_id,
+                    email=email,
+                )
+        except (SuperTokensSessionError, SuperTokensGeneralError) as exc:
+            logger.error("SuperTokens SDK error during signin", exc_info=exc)
+            return AuthResponse(status="ERROR", message="Auth backend unavailable")
+        return AuthResponse(
+            status="OK",
+            user=AuthUser(user_id=user.id, email=email),
+            tokens=tokens,
+            needs_email_verification=not verified,
+        )
 
 
 @web_app.post("/auth/session/refresh", response_model=RefreshSessionResponse)
-async def auth_refresh_session(body: RefreshSessionRequest) -> RefreshSessionResponse:
+def auth_refresh_session(body: RefreshSessionRequest) -> RefreshSessionResponse:
     """Exchange a refresh token for a fresh access/refresh token pair."""
-    _require_supertokens_configured()
-    try:
-        new_session = await refresh_session_without_request_response(refresh_token=body.refresh_token)
-    except (SuperTokensSessionError, SuperTokensGeneralError, ValueError, TypeError) as exc:
-        return RefreshSessionResponse(status="ERROR", message=str(exc))
-    raw = new_session.get_all_session_tokens_dangerously()
-    return RefreshSessionResponse(
-        status="OK",
-        tokens=SessionTokens(
-            access_token=raw["accessToken"],
-            refresh_token=raw["refreshToken"] or None,
-        ),
-    )
+    with handle_endpoint_errors():
+        _require_supertokens_configured()
+        try:
+            new_session = refresh_session_without_request_response(refresh_token=body.refresh_token)
+        except (SuperTokensSessionError, SuperTokensGeneralError, ValueError, TypeError) as exc:
+            return RefreshSessionResponse(status="ERROR", message=str(exc))
+        raw = new_session.get_all_session_tokens_dangerously()
+        return RefreshSessionResponse(
+            status="OK",
+            tokens=SessionTokens(
+                access_token=raw["accessToken"],
+                refresh_token=raw["refreshToken"] or None,
+            ),
+        )
 
 
 @web_app.post("/auth/session/revoke")
-async def auth_revoke_sessions(request: Request) -> dict[str, object]:
+def auth_revoke_sessions(request: Request) -> dict[str, object]:
     """Revoke every SuperTokens session for the caller's user.
 
     Authentication: the caller must send their own SuperTokens access token as
@@ -2246,47 +2250,50 @@ async def auth_revoke_sessions(request: Request) -> dict[str, object]:
     on the user's machine become useless even if copied off-box. Idempotent --
     no-op when the caller has no other active sessions.
     """
-    _require_supertokens_configured()
-    auth_header = request.headers.get("authorization", "")
-    if not auth_header.lower().startswith("bearer "):
-        raise HTTPException(status_code=401, detail="Missing Bearer credentials")
-    user_id = _get_user_id_from_access_token(auth_header[7:])
-    revoked = await revoke_all_sessions_for_user(user_id=user_id)
-    logger.info("Revoked %d sessions for user %s...", len(revoked), user_id[:8])
-    return {"status": "OK", "revoked_count": len(revoked)}
+    with handle_endpoint_errors():
+        _require_supertokens_configured()
+        auth_header = request.headers.get("authorization", "")
+        if not auth_header.lower().startswith("bearer "):
+            raise HTTPException(status_code=401, detail="Missing Bearer credentials")
+        user_id = _get_user_id_from_access_token(auth_header[7:])
+        revoked = revoke_all_sessions_for_user(user_id=user_id)
+        logger.info("Revoked %d sessions for user %s...", len(revoked), user_id[:8])
+        return {"status": "OK", "revoked_count": len(revoked)}
 
 
 @web_app.post("/auth/email/send-verification")
-async def auth_send_verification_email(body: SendVerificationEmailRequest) -> dict[str, str]:
+def auth_send_verification_email(body: SendVerificationEmailRequest) -> dict[str, str]:
     """(Re)send the verification email for a given user."""
-    _require_supertokens_configured()
-    user = get_user(body.user_id)
-    if user is None:
-        raise HTTPException(status_code=404, detail="User not found")
-    recipe_user_id = user.login_methods[0].recipe_user_id if user.login_methods else RecipeUserId(body.user_id)
-    await send_email_verification_email(
-        tenant_id=_AUTH_TENANT_ID,
-        user_id=body.user_id,
-        recipe_user_id=recipe_user_id,
-        email=body.email,
-    )
-    return {"status": "OK"}
+    with handle_endpoint_errors():
+        _require_supertokens_configured()
+        user = get_user(body.user_id)
+        if user is None:
+            raise HTTPException(status_code=404, detail="User not found")
+        recipe_user_id = user.login_methods[0].recipe_user_id if user.login_methods else RecipeUserId(body.user_id)
+        send_email_verification_email(
+            tenant_id=_AUTH_TENANT_ID,
+            user_id=body.user_id,
+            recipe_user_id=recipe_user_id,
+            email=body.email,
+        )
+        return {"status": "OK"}
 
 
 @web_app.post("/auth/email/is-verified")
-async def auth_is_email_verified(body: IsEmailVerifiedRequest) -> dict[str, bool]:
+def auth_is_email_verified(body: IsEmailVerifiedRequest) -> dict[str, bool]:
     """Return whether the given user's email is verified."""
-    _require_supertokens_configured()
-    user = get_user(body.user_id)
-    if user is None:
-        return {"verified": False}
-    recipe_user_id = user.login_methods[0].recipe_user_id if user.login_methods else RecipeUserId(body.user_id)
-    verified = await is_email_verified(recipe_user_id=recipe_user_id, email=body.email)
-    return {"verified": verified}
+    with handle_endpoint_errors():
+        _require_supertokens_configured()
+        user = get_user(body.user_id)
+        if user is None:
+            return {"verified": False}
+        recipe_user_id = user.login_methods[0].recipe_user_id if user.login_methods else RecipeUserId(body.user_id)
+        verified = is_email_verified(recipe_user_id=recipe_user_id, email=body.email)
+        return {"verified": verified}
 
 
 @web_app.get("/auth/verify-email", response_class=HTMLResponse)
-async def auth_verify_email_page(request: Request) -> HTMLResponse:
+def auth_verify_email_page(request: Request) -> HTMLResponse:
     """Handle an email verification link click from an email.
 
     Returns a human-readable HTML page indicating success or failure. Reads the
@@ -2294,19 +2301,20 @@ async def auth_verify_email_page(request: Request) -> HTMLResponse:
     them as function arguments, since SuperTokens camel-cases ``tenantId`` in
     emitted links and we do not want that to leak into the Python identifier.
     """
-    _require_supertokens_configured()
-    token = request.query_params.get("token", "")
-    tenant_id = request.query_params.get("tenantId") or _AUTH_TENANT_ID
-    if not token:
+    with handle_endpoint_errors():
+        _require_supertokens_configured()
+        token = request.query_params.get("token", "")
+        tenant_id = request.query_params.get("tenantId") or _AUTH_TENANT_ID
+        if not token:
+            return HTMLResponse(_VERIFY_EMAIL_FAILED_HTML, status_code=400)
+        try:
+            result = verify_email_using_token(tenant_id=tenant_id, token=token)
+        except (SuperTokensSessionError, SuperTokensGeneralError, ValueError) as exc:
+            logger.error("Email verification error", exc_info=exc)
+            return HTMLResponse(_VERIFY_EMAIL_FAILED_HTML, status_code=400)
+        if isinstance(result, VerifyEmailUsingTokenOkResult):
+            return HTMLResponse(_VERIFY_EMAIL_SUCCESS_HTML)
         return HTMLResponse(_VERIFY_EMAIL_FAILED_HTML, status_code=400)
-    try:
-        result = await verify_email_using_token(tenant_id=tenant_id, token=token)
-    except (SuperTokensSessionError, SuperTokensGeneralError, ValueError) as exc:
-        logger.error("Email verification error", exc_info=exc)
-        return HTMLResponse(_VERIFY_EMAIL_FAILED_HTML, status_code=400)
-    if isinstance(result, VerifyEmailUsingTokenOkResult):
-        return HTMLResponse(_VERIFY_EMAIL_SUCCESS_HTML)
-    return HTMLResponse(_VERIFY_EMAIL_FAILED_HTML, status_code=400)
 
 
 @web_app.get("/auth/reset-password", response_class=HTMLResponse)
@@ -2318,7 +2326,7 @@ def auth_reset_password_page(token: str = "") -> HTMLResponse:
 
 
 @web_app.post("/auth/password/forgot")
-async def auth_forgot_password(body: ForgotPasswordRequest) -> dict[str, str]:
+def auth_forgot_password(body: ForgotPasswordRequest) -> dict[str, str]:
     """Send a password reset email for the given address (always succeeds).
 
     Swallows any backend error (SuperTokens core unreachable, schema mismatch,
@@ -2328,111 +2336,131 @@ async def auth_forgot_password(body: ForgotPasswordRequest) -> dict[str, str]:
     500 on intermittent SuperTokens outages would violate the docstring's
     "always succeeds" contract.
     """
-    _require_supertokens_configured()
-    email = body.email.strip()
-    success = {"status": "OK", "message": "If an account exists, a reset email has been sent"}
-    if not email:
-        return success
-    try:
-        users = await list_users_by_account_info(
-            tenant_id=_AUTH_TENANT_ID,
-            account_info=AccountInfoInput(email=email),
-        )
-        if not users:
+    with handle_endpoint_errors():
+        _require_supertokens_configured()
+        email = body.email.strip()
+        success = {"status": "OK", "message": "If an account exists, a reset email has been sent"}
+        if not email:
             return success
-        user_id = users[0].id
-        result = await send_reset_password_email(tenant_id=_AUTH_TENANT_ID, user_id=user_id, email=email)
-        if result == "UNKNOWN_USER_ID_ERROR":
-            logger.warning("Failed to send password reset email for user %s", user_id)
-    except (SuperTokensSessionError, SuperTokensGeneralError) as exc:
-        logger.warning("Auth backend error during forgot-password; returning generic success: %s", exc)
-    return success
+        try:
+            users = list_users_by_account_info(
+                tenant_id=_AUTH_TENANT_ID,
+                account_info=AccountInfoInput(email=email),
+            )
+            if not users:
+                return success
+            user_id = users[0].id
+            result = send_reset_password_email(tenant_id=_AUTH_TENANT_ID, user_id=user_id, email=email)
+            if result == "UNKNOWN_USER_ID_ERROR":
+                logger.warning("Failed to send password reset email for user %s", user_id)
+        except (SuperTokensSessionError, SuperTokensGeneralError) as exc:
+            logger.warning("Auth backend error during forgot-password; returning generic success: %s", exc)
+        return success
 
 
 @web_app.post("/auth/password/reset")
-async def auth_reset_password(body: ResetPasswordRequest) -> dict[str, str]:
+def auth_reset_password(body: ResetPasswordRequest) -> dict[str, str]:
     """Consume a password reset token and set a new password."""
-    _require_supertokens_configured()
-    if not body.token or not body.new_password:
-        raise HTTPException(status_code=400, detail="Token and new password are required")
+    with handle_endpoint_errors():
+        _require_supertokens_configured()
+        if not body.token or not body.new_password:
+            raise HTTPException(status_code=400, detail="Token and new password are required")
 
-    consume_result = await consume_password_reset_token(tenant_id=_AUTH_TENANT_ID, token=body.token)
-    if not isinstance(consume_result, ConsumePasswordResetTokenOkResult):
-        return {"status": "INVALID_TOKEN", "message": "Invalid or expired reset token"}
+        consume_result = consume_password_reset_token(tenant_id=_AUTH_TENANT_ID, token=body.token)
+        if not isinstance(consume_result, ConsumePasswordResetTokenOkResult):
+            return {"status": "INVALID_TOKEN", "message": "Invalid or expired reset token"}
 
-    update_result = await update_email_or_password(
-        recipe_user_id=RecipeUserId(consume_result.user_id),
-        password=body.new_password,
-    )
-    if isinstance(update_result, PasswordPolicyViolationError):
-        return {"status": "FIELD_ERROR", "message": update_result.failure_reason}
-    if not isinstance(update_result, UpdateEmailOrPasswordOkResult):
-        raise HTTPException(status_code=500, detail="Failed to update password")
-    return {"status": "OK", "message": "Password has been reset"}
+        update_result = update_email_or_password(
+            recipe_user_id=RecipeUserId(consume_result.user_id),
+            password=body.new_password,
+        )
+        if isinstance(update_result, PasswordPolicyViolationError):
+            return {"status": "FIELD_ERROR", "message": update_result.failure_reason}
+        if not isinstance(update_result, UpdateEmailOrPasswordOkResult):
+            raise HTTPException(status_code=500, detail="Failed to update password")
+        return {"status": "OK", "message": "Password has been reset"}
 
 
 @web_app.post("/auth/oauth/authorize", response_model=OAuthAuthorizeResponse)
-async def auth_oauth_authorize(body: OAuthAuthorizeRequest) -> OAuthAuthorizeResponse:
+def auth_oauth_authorize(body: OAuthAuthorizeRequest) -> OAuthAuthorizeResponse:
     """Return the URL to which the user should be redirected to begin OAuth."""
-    _require_supertokens_configured()
-    provider = await get_provider(tenant_id=_AUTH_TENANT_ID, third_party_id=body.provider_id)
-    if provider is None:
-        return OAuthAuthorizeResponse(status="ERROR", message=f"Unknown provider: {body.provider_id}")
-    redirect = await provider.get_authorisation_redirect_url(
-        redirect_uri_on_provider_dashboard=body.callback_url,
-        user_context={},
-    )
-    return OAuthAuthorizeResponse(status="OK", url=redirect.url_with_query_params)
+    with handle_endpoint_errors():
+        _require_supertokens_configured()
+        provider = get_provider(tenant_id=_AUTH_TENANT_ID, third_party_id=body.provider_id)
+        if provider is None:
+            return OAuthAuthorizeResponse(status="ERROR", message=f"Unknown provider: {body.provider_id}")
+        # ``Provider.get_authorisation_redirect_url`` is async-only on the
+        # SuperTokens SDK (the ``syncio`` module exposes a sync ``get_provider``
+        # but the Provider object's methods are coroutines). We're inside a
+        # sync def endpoint that FastAPI runs in a threadpool worker -- the
+        # worker has no running event loop, so the SDK's own async-to-sync
+        # wrapper can spin up a fresh loop safely. Same pattern SuperTokens'
+        # own ``syncio`` helpers use internally.
+        redirect = _supertokens_sync_run(
+            provider.get_authorisation_redirect_url(
+                redirect_uri_on_provider_dashboard=body.callback_url,
+                user_context={},
+            )
+        )
+        return OAuthAuthorizeResponse(status="OK", url=redirect.url_with_query_params)
 
 
 @web_app.post("/auth/oauth/callback", response_model=AuthResponse)
-async def auth_oauth_callback(body: OAuthCallbackRequest) -> AuthResponse:
+def auth_oauth_callback(body: OAuthCallbackRequest) -> AuthResponse:
     """Exchange an OAuth callback's query params for a supertokens session."""
-    _require_supertokens_configured()
-    provider = await get_provider(tenant_id=_AUTH_TENANT_ID, third_party_id=body.provider_id)
-    if provider is None:
-        return AuthResponse(status="ERROR", message=f"Unknown provider: {body.provider_id}")
+    with handle_endpoint_errors():
+        _require_supertokens_configured()
+        provider = get_provider(tenant_id=_AUTH_TENANT_ID, third_party_id=body.provider_id)
+        if provider is None:
+            return AuthResponse(status="ERROR", message=f"Unknown provider: {body.provider_id}")
 
-    try:
-        oauth_tokens = await provider.exchange_auth_code_for_oauth_tokens(
-            redirect_uri_info=RedirectUriInfo(
-                redirect_uri_on_provider_dashboard=body.callback_url,
-                redirect_uri_query_params=dict(body.query_params),
-                pkce_code_verifier=None,
-            ),
-            user_context={},
+        try:
+            # ``Provider.exchange_auth_code_for_oauth_tokens`` and
+            # ``Provider.get_user_info`` are async-only on the SuperTokens SDK
+            # (see ``auth_oauth_authorize`` for the rationale). FastAPI runs
+            # this sync endpoint in a threadpool worker with no running event
+            # loop, so the SDK's async-to-sync wrapper is safe here.
+            oauth_tokens = _supertokens_sync_run(
+                provider.exchange_auth_code_for_oauth_tokens(
+                    redirect_uri_info=RedirectUriInfo(
+                        redirect_uri_on_provider_dashboard=body.callback_url,
+                        redirect_uri_query_params=dict(body.query_params),
+                        pkce_code_verifier=None,
+                    ),
+                    user_context={},
+                )
+            )
+            oauth_user = _supertokens_sync_run(provider.get_user_info(oauth_tokens=oauth_tokens, user_context={}))
+        except (ValueError, KeyError, OSError) as exc:
+            logger.error("OAuth callback failed for %s", body.provider_id, exc_info=exc)
+            return AuthResponse(status="ERROR", message=str(exc))
+
+        if oauth_user.email is None or oauth_user.email.id is None:
+            return AuthResponse(status="ERROR", message="No email provided by the OAuth provider")
+
+        email = oauth_user.email.id
+        result = manually_create_or_update_user(
+            tenant_id=_AUTH_TENANT_ID,
+            third_party_id=body.provider_id,
+            third_party_user_id=oauth_user.third_party_user_id,
+            email=email,
+            is_verified=oauth_user.email.is_verified,
         )
-        oauth_user = await provider.get_user_info(oauth_tokens=oauth_tokens, user_context={})
-    except (ValueError, KeyError, OSError) as exc:
-        logger.error("OAuth callback failed for %s", body.provider_id, exc_info=exc)
-        return AuthResponse(status="ERROR", message=str(exc))
+        if not isinstance(result, ManuallyCreateOrUpdateUserOkResult):
+            return AuthResponse(status="ERROR", message="Could not create or update account")
 
-    if oauth_user.email is None or oauth_user.email.id is None:
-        return AuthResponse(status="ERROR", message="No email provided by the OAuth provider")
+        display_name: str | None = None
+        if oauth_user.raw_user_info_from_provider and oauth_user.raw_user_info_from_provider.from_user_info_api:
+            raw = oauth_user.raw_user_info_from_provider.from_user_info_api
+            display_name = raw.get("name") or raw.get("login") or raw.get("displayName")
 
-    email = oauth_user.email.id
-    result = await manually_create_or_update_user(
-        tenant_id=_AUTH_TENANT_ID,
-        third_party_id=body.provider_id,
-        third_party_user_id=oauth_user.third_party_user_id,
-        email=email,
-        is_verified=oauth_user.email.is_verified,
-    )
-    if not isinstance(result, ManuallyCreateOrUpdateUserOkResult):
-        return AuthResponse(status="ERROR", message="Could not create or update account")
-
-    display_name: str | None = None
-    if oauth_user.raw_user_info_from_provider and oauth_user.raw_user_info_from_provider.from_user_info_api:
-        raw = oauth_user.raw_user_info_from_provider.from_user_info_api
-        display_name = raw.get("name") or raw.get("login") or raw.get("displayName")
-
-    tokens = await _build_session_tokens(result.user.id)
-    return AuthResponse(
-        status="OK",
-        user=AuthUser(user_id=result.user.id, email=email, display_name=display_name),
-        tokens=tokens,
-        needs_email_verification=not oauth_user.email.is_verified,
-    )
+        tokens = _build_session_tokens(result.user.id)
+        return AuthResponse(
+            status="OK",
+            user=AuthUser(user_id=result.user.id, email=email, display_name=display_name),
+            tokens=tokens,
+            needs_email_verification=not oauth_user.email.is_verified,
+        )
 
 
 @web_app.get("/auth/users/{user_id}", response_model=UserProviderInfo)
