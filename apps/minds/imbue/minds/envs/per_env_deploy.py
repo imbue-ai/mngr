@@ -33,6 +33,7 @@ from loguru import logger
 from pydantic import AnyUrl
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.imbue_common.logging import info_span
 from imbue.minds.envs.primitives import DevEnvName
 from imbue.minds.envs.primitives import VaultReadError
 from imbue.minds.envs.providers.neon_db import NeonProjectRecord
@@ -271,26 +272,27 @@ def deploy_litellm_proxy(
     so the modal app picks it up at module load.
     """
     app_file = _litellm_app_file()
-    logger.info(
-        "Running LiteLLM Prisma schema push against the litellm DATABASE_URL "
-        "(this can take ~30-60s on first run while Modal builds the image, "
-        "~5-15s thereafter; the push itself is idempotent)..."
-    )
-    _run_modal_function(
-        app_file=app_file,
-        function_name="migrate_db",
-        modal_env=modal_env,
-        tier=tier,
-        parent_cg=parent_cg,
-    )
-    return _deploy_modal_app(
-        app_file=app_file,
-        app_name=f"litellm-proxy-{tier}",
-        modal_env=modal_env,
-        tier=tier,
-        extra_env={LITELLM_PROXY_MIN_CONTAINERS_ENV_VAR: str(min_containers)},
-        parent_cg=parent_cg,
-    )
+    with info_span(
+        "Running LiteLLM Prisma schema migration against {} "
+        "(~30-60s first run while Modal builds the image, ~5-15s thereafter; idempotent)",
+        modal_env,
+    ):
+        _run_modal_function(
+            app_file=app_file,
+            function_name="migrate_db",
+            modal_env=modal_env,
+            tier=tier,
+            parent_cg=parent_cg,
+        )
+    with info_span("modal deploy litellm-proxy-{} into env {!r}", tier, modal_env):
+        return _deploy_modal_app(
+            app_file=app_file,
+            app_name=f"litellm-proxy-{tier}",
+            modal_env=modal_env,
+            tier=tier,
+            extra_env={LITELLM_PROXY_MIN_CONTAINERS_ENV_VAR: str(min_containers)},
+            parent_cg=parent_cg,
+        )
 
 
 def delete_modal_secret(
@@ -382,14 +384,15 @@ def deploy_remote_service_connector(
     subprocess env as ``MINDS_CONNECTOR_MIN_CONTAINERS`` and consumed
     by the modal app at module load.
     """
-    return _deploy_modal_app(
-        app_file=_connector_app_file(),
-        app_name=f"remote-service-connector-{tier}",
-        modal_env=modal_env,
-        tier=tier,
-        extra_env={CONNECTOR_MIN_CONTAINERS_ENV_VAR: str(min_containers)},
-        parent_cg=parent_cg,
-    )
+    with info_span("modal deploy remote-service-connector-{} into env {!r}", tier, modal_env):
+        return _deploy_modal_app(
+            app_file=_connector_app_file(),
+            app_name=f"remote-service-connector-{tier}",
+            modal_env=modal_env,
+            tier=tier,
+            extra_env={CONNECTOR_MIN_CONTAINERS_ENV_VAR: str(min_containers)},
+            parent_cg=parent_cg,
+        )
 
 
 def _parse_deploy_url_from_stdout(stdout: str) -> AnyUrl | None:

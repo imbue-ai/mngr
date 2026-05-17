@@ -32,6 +32,7 @@ from pathlib import Path
 from typing import Final
 
 import httpx
+from loguru import logger
 from pydantic import Field
 from pydantic import SecretStr
 from pydantic import TypeAdapter
@@ -39,6 +40,7 @@ from pydantic import ValidationError
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.imbue_common.logging import info_span
 from imbue.minds.envs.primitives import DevEnvName
 from imbue.minds.errors import MindError
 from imbue.mngr.utils.polling import poll_for_value
@@ -371,46 +373,52 @@ def create_neon_project(
     # Try to create. On 409 (project name collision), fall through to
     # the lookup path so a re-deploy adopts the existing project.
     project_was_pre_existing = False
-    try:
-        create_payload = _neon_request(
-            "POST",
-            "/projects",
-            api_token=api_token,
-            json_body={
-                "project": {
-                    "name": project_name,
-                    "org_id": org_id,
-                    "pg_version": _DEFAULT_PG_VERSION,
-                    "region_id": _DEFAULT_REGION_ID,
+    with info_span("Creating Neon project {!r} under org {}", project_name, org_id):
+        try:
+            create_payload = _neon_request(
+                "POST",
+                "/projects",
+                api_token=api_token,
+                json_body={
+                    "project": {
+                        "name": project_name,
+                        "org_id": org_id,
+                        "pg_version": _DEFAULT_PG_VERSION,
+                        "region_id": _DEFAULT_REGION_ID,
+                    },
                 },
-            },
-        )
-        project_id = create_payload.get("project", {}).get("id")
-        if not isinstance(project_id, str) or not project_id:
-            raise NeonProviderError(
-                f"Neon POST /projects returned no project.id for {project_name!r}; got: {create_payload!r}"
             )
-    except NeonProviderError as exc:
-        if "409" not in str(exc) and "already" not in str(exc).lower():
-            raise
-        existing = _find_project_by_name(org_id, project_name, api_token=api_token)
-        if existing is None:
-            raise NeonProviderError(
-                f"Neon POST /projects returned 409 for {project_name!r} but the project is not visible "
-                "via /projects?org_id=...; this should not happen -- check the API token scopes."
-            ) from exc
-        project_id = existing.id
-        project_was_pre_existing = True
+            project_id = create_payload.get("project", {}).get("id")
+            if not isinstance(project_id, str) or not project_id:
+                raise NeonProviderError(
+                    f"Neon POST /projects returned no project.id for {project_name!r}; got: {create_payload!r}"
+                )
+        except NeonProviderError as exc:
+            if "409" not in str(exc) and "already" not in str(exc).lower():
+                raise
+            existing = _find_project_by_name(org_id, project_name, api_token=api_token)
+            if existing is None:
+                raise NeonProviderError(
+                    f"Neon POST /projects returned 409 for {project_name!r} but the project is not visible "
+                    "via /projects?org_id=...; this should not happen -- check the API token scopes."
+                ) from exc
+            project_id = existing.id
+            project_was_pre_existing = True
+            logger.info("Adopted pre-existing Neon project {!r} (id={})", project_name, project_id)
 
     try:
         branch = _resolve_default_branch(project_id, api_token=api_token)
-        _ensure_database(project_id, branch.id, HOST_POOL_DB_NAME, api_token=api_token)
-        _ensure_database(project_id, branch.id, LITELLM_COST_DB_NAME, api_token=api_token)
+        with info_span("Creating Neon database {!r} on branch {}", HOST_POOL_DB_NAME, branch.id):
+            _ensure_database(project_id, branch.id, HOST_POOL_DB_NAME, api_token=api_token)
+        with info_span("Creating Neon database {!r} on branch {}", LITELLM_COST_DB_NAME, branch.id):
+            _ensure_database(project_id, branch.id, LITELLM_COST_DB_NAME, api_token=api_token)
 
-        host_pool_dsn = _fetch_pooled_dsn(project_id, HOST_POOL_DB_NAME, api_token=api_token)
-        litellm_cost_dsn = _fetch_pooled_dsn(project_id, LITELLM_COST_DB_NAME, api_token=api_token)
+        with info_span("Fetching pooled DSNs for both databases"):
+            host_pool_dsn = _fetch_pooled_dsn(project_id, HOST_POOL_DB_NAME, api_token=api_token)
+            litellm_cost_dsn = _fetch_pooled_dsn(project_id, LITELLM_COST_DB_NAME, api_token=api_token)
 
-        apply_pool_hosts_schema(host_pool_dsn, parent_cg=parent_cg)
+        with info_span("Applying pool_hosts schema migrations to {}", HOST_POOL_DB_NAME):
+            apply_pool_hosts_schema(host_pool_dsn, parent_cg=parent_cg)
     except NeonProviderError:
         # Best-effort: delete the just-created project before re-raising
         # so a retry starts from a clean slate. If we adopted an

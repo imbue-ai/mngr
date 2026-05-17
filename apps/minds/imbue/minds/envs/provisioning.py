@@ -49,6 +49,7 @@ from pydantic import SecretStr
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.imbue_common.logging import info_span
 from imbue.minds.config.data_types import ClientEnvConfig
 from imbue.minds.config.data_types import DeployEnvConfig
 from imbue.minds.envs.generation import GENERATION_ID_KEY
@@ -363,23 +364,23 @@ def deploy_dev_env(
     supertokens_record: SuperTokensAppRecord | None = None
 
     try:
-        logger.info("Ensuring Modal environment {!r}...", str(name))
-        providers.ensure_modal_env(name, parent_concurrency_group)
-        completed_creation_steps.append("modal_env")
+        with info_span("Ensuring Modal environment {!r}", str(name)):
+            providers.ensure_modal_env(name, parent_concurrency_group)
+            completed_creation_steps.append("modal_env")
 
-        logger.info("Ensuring Neon project for {!r}...", str(name))
-        neon_record = providers.create_neon_project(
-            name, credentials.neon_org_id, credentials.neon_api_token, parent_concurrency_group
-        )
-        completed_creation_steps.append("neon_project")
+        with info_span("Ensuring Neon project for {!r}", str(name)):
+            neon_record = providers.create_neon_project(
+                name, credentials.neon_org_id, credentials.neon_api_token, parent_concurrency_group
+            )
+            completed_creation_steps.append("neon_project")
 
-        logger.info("Ensuring SuperTokens app for {!r}...", str(name))
-        supertokens_record = providers.create_supertokens_app(
-            name,
-            credentials.supertokens_core_url,
-            credentials.supertokens_api_key,
-        )
-        completed_creation_steps.append("supertokens_app")
+        with info_span("Ensuring SuperTokens app for {!r}", str(name)):
+            supertokens_record = providers.create_supertokens_app(
+                name,
+                credentials.supertokens_core_url,
+                credentials.supertokens_api_key,
+            )
+            completed_creation_steps.append("supertokens_app")
     except _PROVIDER_ERRORS as exc:
         _best_effort_rollback(
             name=name,
@@ -415,107 +416,108 @@ def deploy_dev_env(
         neon_record=neon_record,
         supertokens_record=supertokens_record,
     )
-    logger.info("Pushing initial per-env Modal Secrets into env {!r}...", modal_env)
-    litellm_master_key = _read_litellm_master_key(
-        tier_vault_prefix,
-        providers,
-        parent_concurrency_group,
-    )
-    for service in per_env_secret_services():
-        per_service_overrides = dict(first_pass_overrides.get(service, {}))
-        # Auto-populate litellm-connector with the master key from the
-        # litellm Vault entry. LITELLM_PROXY_URL is filled in second-pass
-        # below once we know the actual proxy URL. Also push the env
-        # name so the connector can tag Cloudflare tunnels with their
-        # owning minds env (used by destroy to enumerate + delete).
-        if service == "litellm-connector":
-            if litellm_master_key:
-                per_service_overrides.setdefault("LITELLM_MASTER_KEY", litellm_master_key)
-            per_service_overrides.setdefault(MINDS_ENV_NAME_KEY, str(name))
-        values = providers.read_per_env_secret_values(
-            service,
+    with info_span("Pushing initial per-env Modal Secrets into env {!r}", modal_env):
+        litellm_master_key = _read_litellm_master_key(
             tier_vault_prefix,
-            per_service_overrides,
+            providers,
             parent_concurrency_group,
         )
-        providers.push_per_env_modal_secret(
-            f"{service}-{tier}",
-            values,
-            modal_env,
-            parent_concurrency_group,
-        )
+        for service in per_env_secret_services():
+            per_service_overrides = dict(first_pass_overrides.get(service, {}))
+            # Auto-populate litellm-connector with the master key from the
+            # litellm Vault entry. LITELLM_PROXY_URL is filled in second-pass
+            # below once we know the actual proxy URL. Also push the env
+            # name so the connector can tag Cloudflare tunnels with their
+            # owning minds env (used by destroy to enumerate + delete).
+            if service == "litellm-connector":
+                if litellm_master_key:
+                    per_service_overrides.setdefault("LITELLM_MASTER_KEY", litellm_master_key)
+                per_service_overrides.setdefault(MINDS_ENV_NAME_KEY, str(name))
+            with info_span("Pushing per-env Modal Secret {!r}", f"{service}-{tier}"):
+                values = providers.read_per_env_secret_values(
+                    service,
+                    tier_vault_prefix,
+                    per_service_overrides,
+                    parent_concurrency_group,
+                )
+                providers.push_per_env_modal_secret(
+                    f"{service}-{tier}",
+                    values,
+                    modal_env,
+                    parent_concurrency_group,
+                )
 
     litellm_proxy_min_containers = int(deploy_config.min_containers.litellm_proxy)
     connector_min_containers = int(deploy_config.min_containers.connector)
 
-    logger.info(
-        "Deploying litellm-proxy-{} into env {!r} (min_containers={})...",
+    with info_span(
+        "Deploying litellm-proxy-{} into env {!r} (min_containers={})",
         tier,
         modal_env,
         litellm_proxy_min_containers,
-    )
-    litellm_proxy_url = providers.deploy_litellm_proxy(
-        modal_env, tier, litellm_proxy_min_containers, parent_concurrency_group
-    )
+    ):
+        litellm_proxy_url = providers.deploy_litellm_proxy(
+            modal_env, tier, litellm_proxy_min_containers, parent_concurrency_group
+        )
 
-    logger.info(
-        "Deploying remote-service-connector-{} into env {!r} (min_containers={})...",
+    with info_span(
+        "Deploying remote-service-connector-{} into env {!r} (min_containers={})",
         tier,
         modal_env,
         connector_min_containers,
-    )
-    connector_url = providers.deploy_remote_service_connector(
-        modal_env, tier, connector_min_containers, parent_concurrency_group
-    )
+    ):
+        connector_url = providers.deploy_remote_service_connector(
+            modal_env, tier, connector_min_containers, parent_concurrency_group
+        )
 
     # Second pass: now that we have the real connector + proxy URLs,
     # update the two Modal Secrets whose values depended on them
     # (supertokens.AUTH_WEBSITE_DOMAIN and litellm-connector.LITELLM_PROXY_URL)
     # and redeploy the connector so the running container picks them up.
     # litellm-proxy doesn't depend on either URL so no redeploy needed.
-    logger.info(
-        "Re-pushing URL-dependent Modal Secrets with actual deploy URLs (connector={}, litellm={})...",
+    with info_span(
+        "Re-pushing URL-dependent Modal Secrets with actual deploy URLs (connector={}, litellm={})",
         connector_url,
         litellm_proxy_url,
-    )
-    supertokens_values = providers.read_per_env_secret_values(
-        "supertokens",
-        tier_vault_prefix,
-        {
-            **first_pass_overrides.get("supertokens", {}),
-            "AUTH_WEBSITE_DOMAIN": str(connector_url),
-        },
-        parent_concurrency_group,
-    )
-    providers.push_per_env_modal_secret(
-        f"supertokens-{tier}",
-        supertokens_values,
-        modal_env,
-        parent_concurrency_group,
-    )
+    ):
+        supertokens_values = providers.read_per_env_secret_values(
+            "supertokens",
+            tier_vault_prefix,
+            {
+                **first_pass_overrides.get("supertokens", {}),
+                "AUTH_WEBSITE_DOMAIN": str(connector_url),
+            },
+            parent_concurrency_group,
+        )
+        providers.push_per_env_modal_secret(
+            f"supertokens-{tier}",
+            supertokens_values,
+            modal_env,
+            parent_concurrency_group,
+        )
 
-    litellm_connector_overrides: dict[str, str] = {
-        "LITELLM_PROXY_URL": str(litellm_proxy_url),
-    }
-    if litellm_master_key:
-        litellm_connector_overrides["LITELLM_MASTER_KEY"] = litellm_master_key
-    litellm_connector_values = providers.read_per_env_secret_values(
-        "litellm-connector",
-        tier_vault_prefix,
-        litellm_connector_overrides,
-        parent_concurrency_group,
-    )
-    providers.push_per_env_modal_secret(
-        f"litellm-connector-{tier}",
-        litellm_connector_values,
-        modal_env,
-        parent_concurrency_group,
-    )
+        litellm_connector_overrides: dict[str, str] = {
+            "LITELLM_PROXY_URL": str(litellm_proxy_url),
+        }
+        if litellm_master_key:
+            litellm_connector_overrides["LITELLM_MASTER_KEY"] = litellm_master_key
+        litellm_connector_values = providers.read_per_env_secret_values(
+            "litellm-connector",
+            tier_vault_prefix,
+            litellm_connector_overrides,
+            parent_concurrency_group,
+        )
+        providers.push_per_env_modal_secret(
+            f"litellm-connector-{tier}",
+            litellm_connector_values,
+            modal_env,
+            parent_concurrency_group,
+        )
 
-    logger.info("Redeploying remote-service-connector-{} to pick up final secrets...", tier)
-    connector_url = providers.deploy_remote_service_connector(
-        modal_env, tier, connector_min_containers, parent_concurrency_group
-    )
+    with info_span("Redeploying remote-service-connector-{} to pick up final secrets", tier):
+        connector_url = providers.deploy_remote_service_connector(
+            modal_env, tier, connector_min_containers, parent_concurrency_group
+        )
 
     public_config = ClientEnvConfig(
         connector_url=connector_url,
@@ -630,81 +632,87 @@ def destroy_env(
             str(name),
         )
     else:
-        destroyed_count = destroy_all_mngr_agents_in_env(
-            name,
-            destroy_agent=providers.destroy_mngr_agent,
-            parent_concurrency_group=parent_concurrency_group,
-        )
-        if destroyed_count:
-            logger.info("Destroyed {} mngr agent(s) under env {!r}.", destroyed_count, str(name))
+        with info_span("Destroying mngr agents under env {!r}", str(name)):
+            destroyed_count = destroy_all_mngr_agents_in_env(
+                name,
+                destroy_agent=providers.destroy_mngr_agent,
+                parent_concurrency_group=parent_concurrency_group,
+            )
+            if destroyed_count:
+                logger.info("Destroyed {} mngr agent(s) under env {!r}", destroyed_count, str(name))
 
     # Step 2: OVH VPSes tagged with this env.
-    ovh_instances = providers.list_ovh_instances(name, credentials.ovh_credentials)
-    if ovh_instances:
-        providers.delete_ovh_instances(ovh_instances, credentials.ovh_credentials)
+    with info_span("Cleaning up OVH VPSes tagged for env {!r}", str(name)):
+        ovh_instances = providers.list_ovh_instances(name, credentials.ovh_credentials)
+        if ovh_instances:
+            providers.delete_ovh_instances(ovh_instances, credentials.ovh_credentials)
+            logger.info("Deleted {} OVH VPS(es) for env {!r}", len(ovh_instances), str(name))
 
     # Step 3: Cloudflare tunnels tagged with this env. Keyed off env
     # NAME (not tier), since dev envs share the dev-tier CF account and
     # we want to find only this specific env's tunnels.
-    logger.info("Cleaning up Cloudflare tunnels tagged for env {!r}...", str(name))
-    cf_vault_values = providers.read_per_env_secret_values(
-        "cloudflare",
-        tier_vault_prefix,
-        {},
-        parent_concurrency_group,
-    )
-    deleted_tunnels = _cleanup_cloudflare_tunnels_for_env(
-        name, cloudflare_vault_values=cf_vault_values, providers=providers
-    )
-    if deleted_tunnels:
-        logger.info("Deleted {} Cloudflare tunnel(s) for env {!r}.", deleted_tunnels, str(name))
-
-    # Step 4: SuperTokens (dev deletes the per-env app outright; shared
-    # tiers wipe users via delete + recreate of the same app id).
-    if is_dev_tier:
-        providers.delete_supertokens_app(
-            name,
-            credentials.supertokens_core_url,
-            credentials.supertokens_api_key,
-        )
-    else:
-        logger.info("Wiping SuperTokens app data for env {!r}...", str(name))
-        supertokens_values = providers.read_per_env_secret_values(
-            "supertokens",
+    with info_span("Cleaning up Cloudflare tunnels tagged for env {!r}", str(name)):
+        cf_vault_values = providers.read_per_env_secret_values(
+            "cloudflare",
             tier_vault_prefix,
             {},
             parent_concurrency_group,
         )
-        _wipe_supertokens_for_tier(supertokens_values, providers=providers, tier=tier)
+        deleted_tunnels = _cleanup_cloudflare_tunnels_for_env(
+            name, cloudflare_vault_values=cf_vault_values, providers=providers
+        )
+        if deleted_tunnels:
+            logger.info("Deleted {} Cloudflare tunnel(s) for env {!r}", deleted_tunnels, str(name))
+
+    # Step 4: SuperTokens (dev deletes the per-env app outright; shared
+    # tiers wipe users via delete + recreate of the same app id).
+    if is_dev_tier:
+        with info_span("Deleting SuperTokens app for env {!r}", str(name)):
+            providers.delete_supertokens_app(
+                name,
+                credentials.supertokens_core_url,
+                credentials.supertokens_api_key,
+            )
+    else:
+        with info_span("Wiping SuperTokens app data for env {!r}", str(name)):
+            supertokens_values = providers.read_per_env_secret_values(
+                "supertokens",
+                tier_vault_prefix,
+                {},
+                parent_concurrency_group,
+            )
+            _wipe_supertokens_for_tier(supertokens_values, providers=providers, tier=tier)
 
     # Step 5: Neon (dev deletes the per-env *project* outright -- atomic
     # teardown of both DBs + roles + endpoints; shared tiers DROP SCHEMA
     # on the operator-managed DB they keep across destroy/redeploy).
     if is_dev_tier:
-        providers.delete_neon_project(name, credentials.neon_org_id, credentials.neon_api_token)
+        with info_span("Deleting Neon project for env {!r}", str(name)):
+            providers.delete_neon_project(name, credentials.neon_org_id, credentials.neon_api_token)
     else:
-        logger.info("Wiping Neon DB schema for env {!r}...", str(name))
-        neon_values = providers.read_per_env_secret_values(
-            "neon",
-            tier_vault_prefix,
-            {},
-            parent_concurrency_group,
-        )
-        _wipe_neon_for_tier(neon_values, providers=providers, tier=tier, parent_cg=parent_concurrency_group)
+        with info_span("Wiping Neon DB schema for env {!r}", str(name)):
+            neon_values = providers.read_per_env_secret_values(
+                "neon",
+                tier_vault_prefix,
+                {},
+                parent_concurrency_group,
+            )
+            _wipe_neon_for_tier(neon_values, providers=providers, tier=tier, parent_cg=parent_concurrency_group)
 
     # Step 6: Modal (dev deletes the per-env Modal env outright which
     # cascade-deletes its apps / secrets / volumes; shared tiers stop
     # the deployed apps + delete per-tier Modal Secrets so the next
     # deploy re-pushes fresh values from Vault).
     if is_dev_tier:
-        providers.delete_modal_env(name, parent_concurrency_group)
+        with info_span("Deleting Modal environment {!r} (cascade-deletes apps + secrets)", str(name)):
+            providers.delete_modal_env(name, parent_concurrency_group)
     else:
-        logger.info("Stopping Modal apps for env {!r} in Modal env {!r}...", str(name), modal_env_for_tier_ops)
-        for app_name in (f"litellm-proxy-{tier}", f"remote-service-connector-{tier}"):
-            providers.stop_modal_app(app_name, modal_env_for_tier_ops, parent_concurrency_group)
-        logger.info("Deleting per-tier Modal Secrets in env {!r}...", modal_env_for_tier_ops)
-        for service in deploy_config.secrets.services:
-            providers.delete_modal_secret(f"{service}-{tier}", modal_env_for_tier_ops, parent_concurrency_group)
+        with info_span("Stopping Modal apps for env {!r} in Modal env {!r}", str(name), modal_env_for_tier_ops):
+            for app_name in (f"litellm-proxy-{tier}", f"remote-service-connector-{tier}"):
+                providers.stop_modal_app(app_name, modal_env_for_tier_ops, parent_concurrency_group)
+        with info_span("Deleting per-tier Modal Secrets in env {!r}", modal_env_for_tier_ops):
+            for service in deploy_config.secrets.services:
+                providers.delete_modal_secret(f"{service}-{tier}", modal_env_for_tier_ops, parent_concurrency_group)
 
     # Step 7: generation id removal -- ONLY for tiers that use generation
     # tracking (i.e. shared tiers like staging). For dev / production,
@@ -712,8 +720,8 @@ def destroy_env(
     # genuinely tier-specific step (everything else above is the same
     # flow with tier-driven cleanup ops).
     if tier_uses_generation_tracking(tier):
-        logger.info("Deleting tier {!r} generation id from Vault...", tier)
-        providers.delete_generation_id(tier_vault_prefix, parent_concurrency_group)
+        with info_span("Deleting tier {!r} generation id from Vault", tier):
+            providers.delete_generation_id(tier_vault_prefix, parent_concurrency_group)
 
     # Step 8: env root removal LAST, only on full success.
     delete_env_root(name)
