@@ -547,11 +547,6 @@ class MngrConfig(FrozenModel):
         description="Max seconds to wait for an agent to signal readiness before sending messages. "
         "Hook-based polling returns early; this is an upper bound, not an unconditional delay.",
     )
-    completion_cache_dir: Path | None = Field(
-        default=None,
-        description="Directory for tab completion cache files. When None, falls back to MNGR__COMPLETION_CACHE_DIR "
-        "and then to the mngr host directory.",
-    )
 
     def merge_with(self, override: Self) -> Self:
         """Merge this config with an override config.
@@ -630,7 +625,6 @@ class MngrConfig(FrozenModel):
                 override.default_min_online_host_age_seconds,
             ),
             agent_ready_timeout=_assign_scalar(self.agent_ready_timeout, override.agent_ready_timeout),
-            completion_cache_dir=_assign_scalar(self.completion_cache_dir, override.completion_cache_dir),
         )
 
 

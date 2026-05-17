@@ -871,7 +871,6 @@ _SAMPLE_CONFIG_VALUES: dict[str, Any] = {
     "default_destroyed_host_persisted_seconds": 12345.0,
     "default_min_online_host_age_seconds": 600.0,
     "agent_ready_timeout": 15.0,
-    "completion_cache_dir": "/tmp/completion-cache",
 }
 
 _SAMPLE_TOML = """\
@@ -889,7 +888,6 @@ is_allowed_in_pytest = true
 default_destroyed_host_persisted_seconds = 12345.0
 default_min_online_host_age_seconds = 600.0
 agent_ready_timeout = 15.0
-completion_cache_dir = "/tmp/completion-cache"
 
 [commands.create]
 name = "test"

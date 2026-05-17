@@ -15,27 +15,25 @@ from imbue.mngr.config.host_dir import read_default_host_dir
 COMPLETION_CACHE_FILENAME: Final[str] = ".command_completions.json"
 
 
-def get_completion_cache_dir(config_value: Path | None = None) -> Path:
+def get_completion_cache_dir() -> Path:
     """Return the directory used for completion cache files.
 
     Resolution order:
-    1. ``config_value`` (i.e. ``MngrConfig.completion_cache_dir``) when supplied
-       and non-None. Honoring the parsed config field is what makes
-       ``completion_cache_dir = "/foo"`` in ``settings.toml`` take effect.
-    2. ``MNGR__COMPLETION_CACHE_DIR`` env var (lightweight pre-reader path used
-       by tab-completion callers that run before the full config is loaded).
-    3. The mngr host directory (``MNGR_HOST_DIR`` or ``~/.mngr``).
+    1. ``MNGR_COMPLETION_CACHE_DIR`` env var. This is a "special" env var
+       (single underscore) like ``MNGR_ROOT_NAME`` / ``MNGR_PREFIX`` /
+       ``MNGR_HOST_DIR``: it isn't a parsed ``MngrConfig`` field, because tab
+       completion runs in a lightweight pre-reader path that intentionally
+       skips full config loading. The double-underscore ``MNGR__*`` form is
+       not recognised here.
+    2. The mngr host directory (``MNGR_HOST_DIR`` or ``~/.mngr``).
 
     The directory is created if it does not exist.
     """
-    if config_value is not None:
-        cache_dir = Path(config_value)
+    env_dir = os.environ.get("MNGR_COMPLETION_CACHE_DIR")
+    if env_dir:
+        cache_dir = Path(env_dir)
     else:
-        env_dir = os.environ.get("MNGR__COMPLETION_CACHE_DIR")
-        if env_dir:
-            cache_dir = Path(env_dir)
-        else:
-            cache_dir = read_default_host_dir()
+        cache_dir = read_default_host_dir()
     cache_dir.mkdir(parents=True, exist_ok=True)
     return cache_dir
 

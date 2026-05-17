@@ -34,8 +34,8 @@ def _write_discovery_events(
 
 @pytest.fixture
 def completion_cache_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """Set up a temporary completion cache directory via MNGR__COMPLETION_CACHE_DIR."""
-    monkeypatch.setenv("MNGR__COMPLETION_CACHE_DIR", str(tmp_path))
+    """Set up a temporary completion cache directory via MNGR_COMPLETION_CACHE_DIR."""
+    monkeypatch.setenv("MNGR_COMPLETION_CACHE_DIR", str(tmp_path))
     # Also set MNGR_HOST_DIR so discovery events are read from the same tmp dir
     monkeypatch.setenv("MNGR_HOST_DIR", str(tmp_path))
     return tmp_path

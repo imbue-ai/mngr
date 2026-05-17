@@ -225,7 +225,6 @@ def load_config(
     config_dict["default_destroyed_host_persisted_seconds"] = config.default_destroyed_host_persisted_seconds
     config_dict["default_min_online_host_age_seconds"] = config.default_min_online_host_age_seconds
     config_dict["agent_ready_timeout"] = config.agent_ready_timeout
-    config_dict["completion_cache_dir"] = config.completion_cache_dir
 
     # Allow plugins to modify config_dict before validation
     pm.hook.on_load_config(config_dict=config_dict)
@@ -833,7 +832,6 @@ def parse_config(
     kwargs["default_destroyed_host_persisted_seconds"] = raw.pop("default_destroyed_host_persisted_seconds", None)
     kwargs["default_min_online_host_age_seconds"] = raw.pop("default_min_online_host_age_seconds", None)
     kwargs["agent_ready_timeout"] = raw.pop("agent_ready_timeout", None)
-    kwargs["completion_cache_dir"] = raw.pop("completion_cache_dir", None)
 
     if len(raw) > 0:
         if strict:

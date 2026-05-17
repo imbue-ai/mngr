@@ -6,7 +6,6 @@ from pathlib import Path
 import click
 import pytest
 
-from imbue.imbue_common.model_update import to_update
 from imbue.mngr.agents.agent_registry import list_registered_agent_types
 from imbue.mngr.config.completion_cache import COMPLETION_CACHE_FILENAME
 from imbue.mngr.config.completion_cache import get_completion_cache_dir
@@ -27,9 +26,9 @@ from imbue.mngr.primitives import ProviderInstanceName
 
 
 def test_get_completion_cache_dir_uses_env_var(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """get_completion_cache_dir should use MNGR__COMPLETION_CACHE_DIR when set."""
+    """get_completion_cache_dir should use MNGR_COMPLETION_CACHE_DIR when set."""
     cache_dir = tmp_path / "custom_cache"
-    monkeypatch.setenv("MNGR__COMPLETION_CACHE_DIR", str(cache_dir))
+    monkeypatch.setenv("MNGR_COMPLETION_CACHE_DIR", str(cache_dir))
     result = get_completion_cache_dir()
     assert result == cache_dir
     assert cache_dir.exists()
@@ -39,61 +38,35 @@ def test_get_completion_cache_dir_falls_back_to_default_host_dir(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """get_completion_cache_dir should use read_default_host_dir when env var is unset."""
-    monkeypatch.delenv("MNGR__COMPLETION_CACHE_DIR", raising=False)
+    monkeypatch.delenv("MNGR_COMPLETION_CACHE_DIR", raising=False)
     monkeypatch.setenv("MNGR_HOST_DIR", str(tmp_path / "default_host"))
     result = get_completion_cache_dir()
     assert result == tmp_path / "default_host"
     assert result.exists()
 
 
-def test_get_completion_cache_dir_prefers_config_value(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """An explicit config_value should win over the env var and host-dir fallback.
-
-    Locks in that ``MngrConfig.completion_cache_dir`` (from settings.toml or
-    ``MNGR__COMPLETION_CACHE_DIR`` resolved into the parsed config) actually
-    drives the on-disk cache location.
-    """
-    env_dir = tmp_path / "env_cache"
-    config_dir = tmp_path / "config_cache"
-    monkeypatch.setenv("MNGR__COMPLETION_CACHE_DIR", str(env_dir))
-    result = get_completion_cache_dir(config_dir)
-    assert result == config_dir
-    assert config_dir.exists()
-    assert not env_dir.exists()
-
-
-def test_write_cli_completions_cache_honors_config_completion_cache_dir(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    temp_mngr_ctx: MngrContext,
+def test_get_completion_cache_dir_ignores_double_underscore_form(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """The writer should write to ``mngr_ctx.config.completion_cache_dir`` when set.
+    """Only ``MNGR_COMPLETION_CACHE_DIR`` is recognised; the ``MNGR__*`` form is ignored.
 
-    Regression test: previously the writer always called
-    ``get_completion_cache_dir()`` without consulting the config, so a user who
-    set ``completion_cache_dir = "/foo"`` in ``settings.toml`` was silently
-    ignored.
+    The completion cache dir is read by a lightweight pre-reader path that
+    intentionally skips full config loading, so it is one of the "special"
+    single-underscore env vars (like MNGR_ROOT_NAME / MNGR_PREFIX /
+    MNGR_HOST_DIR), not a parsed MngrConfig field.
     """
-    target_dir = tmp_path / "from_config"
-    monkeypatch.delenv("MNGR__COMPLETION_CACHE_DIR", raising=False)
-    new_config = temp_mngr_ctx.config.model_copy_update(
-        to_update(temp_mngr_ctx.config.field_ref().completion_cache_dir, target_dir),
-    )
-    new_ctx = temp_mngr_ctx.model_copy_update(
-        to_update(temp_mngr_ctx.field_ref().config, new_config),
-    )
-
-    group = click.Group(name="test", commands={"list": click.Command("list")})
-    write_cli_completions_cache(cli_group=group, mngr_ctx=new_ctx)
-
-    assert (target_dir / COMPLETION_CACHE_FILENAME).exists()
+    monkeypatch.delenv("MNGR_COMPLETION_CACHE_DIR", raising=False)
+    monkeypatch.setenv("MNGR__COMPLETION_CACHE_DIR", str(tmp_path / "double_underscore"))
+    monkeypatch.setenv("MNGR_HOST_DIR", str(tmp_path / "default_host"))
+    result = get_completion_cache_dir()
+    assert result == tmp_path / "default_host"
 
 
 def test_write_cli_completions_cache_handles_oserror(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """write_cli_completions_cache should silently handle OSError."""
     # Monkeypatch atomic_write to simulate a write failure. We can't use chmod
     # because Modal sandboxes run as root, which bypasses permission checks.
-    monkeypatch.setenv("MNGR__COMPLETION_CACHE_DIR", str(tmp_path))
+    monkeypatch.setenv("MNGR_COMPLETION_CACHE_DIR", str(tmp_path))
 
     def _raise_oserror(*_args: object, **_kwargs: object) -> None:
         raise OSError("simulated write failure")

@@ -437,8 +437,7 @@ def write_cli_completions_cache(
             config_value_choices=dynamic.config_value_choices if dynamic is not None else {},
         )
 
-        config_cache_dir = mngr_ctx.config.completion_cache_dir if mngr_ctx is not None else None
-        cache_path = get_completion_cache_dir(config_cache_dir) / COMPLETION_CACHE_FILENAME
+        cache_path = get_completion_cache_dir() / COMPLETION_CACHE_FILENAME
         atomic_write(cache_path, json.dumps(cache_data._asdict()))
     except OSError:
         logger.debug("Failed to write CLI completions cache")
