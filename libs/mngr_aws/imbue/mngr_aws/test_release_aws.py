@@ -36,10 +36,10 @@ import boto3
 import pytest
 
 from imbue.mngr_aws.client import AwsVpsClient
-from imbue.mngr_aws.constants import AWS_DEFAULT_REGION
-from imbue.mngr_aws.constants import AWS_RELEASE_TESTS_OPT_IN
-from imbue.mngr_aws.constants import AWS_TEST_INSTANCE_AUTO_SHUTDOWN_MINUTES
-from imbue.mngr_aws.constants import AWS_TEST_NAME_PREFIX
+from imbue.mngr_aws.testing import AWS_DEFAULT_REGION
+from imbue.mngr_aws.testing import AWS_RELEASE_TESTS_OPT_IN
+from imbue.mngr_aws.testing import AWS_TEST_INSTANCE_AUTO_SHUTDOWN_MINUTES
+from imbue.mngr_aws.testing import AWS_TEST_NAME_PREFIX
 from imbue.mngr_aws.testing import aws_credentials_available
 
 pytestmark = [

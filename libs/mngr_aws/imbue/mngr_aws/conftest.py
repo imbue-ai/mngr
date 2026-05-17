@@ -34,10 +34,10 @@ from botocore.exceptions import BotoCoreError
 from botocore.exceptions import ClientError
 from loguru import logger
 
-from imbue.mngr_aws.constants import AWS_DEFAULT_REGION
-from imbue.mngr_aws.constants import AWS_RELEASE_TESTS_OPT_IN
-from imbue.mngr_aws.constants import AWS_TEST_INSTANCE_AUTO_SHUTDOWN_MINUTES
-from imbue.mngr_aws.constants import AWS_TEST_NAME_PREFIX
+from imbue.mngr_aws.testing import AWS_DEFAULT_REGION
+from imbue.mngr_aws.testing import AWS_RELEASE_TESTS_OPT_IN
+from imbue.mngr_aws.testing import AWS_TEST_INSTANCE_AUTO_SHUTDOWN_MINUTES
+from imbue.mngr_aws.testing import AWS_TEST_NAME_PREFIX
 from imbue.mngr_aws.testing import aws_credentials_available
 
 # Orphan-scan grace period. A test-named instance younger than this is left
