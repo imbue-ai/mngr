@@ -276,8 +276,16 @@ def _build_fake_providers(
     def rollback_modal_app(app_name, version, modal_env, cg):
         call_log["calls"].append(("rollback_modal_app", app_name, version, modal_env))
 
-    def create_neon_restore_point(project_id, branch_id, restore_point_name, api_token):
-        call_log["calls"].append(("create_neon_restore_point", project_id, branch_id, restore_point_name))
+    def create_neon_snapshot_branch(project_id, parent_branch_id, name, api_token):
+        call_log["calls"].append(("create_neon_snapshot_branch", project_id, parent_branch_id, name))
+        return f"snap-{name}"
+
+    def delete_neon_branch(project_id, branch_id, api_token):
+        call_log["calls"].append(("delete_neon_branch", project_id, branch_id))
+
+    def resolve_neon_default_branch_id(project_id, api_token):
+        call_log["calls"].append(("resolve_neon_default_branch_id", project_id))
+        return f"br-default-{project_id}"
 
     def verify_neon_token_has_restore_scope(project_id, api_token):
         call_log["calls"].append(("verify_neon_token_has_restore_scope", project_id))
@@ -334,7 +342,9 @@ def _build_fake_providers(
         apply_pool_hosts_migrations=apply_pool_hosts_migrations,
         get_modal_app_latest_version=get_modal_app_latest_version,
         rollback_modal_app=rollback_modal_app,
-        create_neon_restore_point=create_neon_restore_point,
+        create_neon_snapshot_branch=create_neon_snapshot_branch,
+        delete_neon_branch=delete_neon_branch,
+        resolve_neon_default_branch_id=resolve_neon_default_branch_id,
         verify_neon_token_has_restore_scope=verify_neon_token_has_restore_scope,
         await_apps_healthy=await_apps_healthy,
         destroy_mngr_agent=destroy_mngr_agent,

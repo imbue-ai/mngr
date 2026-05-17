@@ -88,7 +88,7 @@ from imbue.minds.envs.providers.supertokens_app import app_id_from_connection_ur
 from imbue.minds.envs.recover import RecoverTarget
 from imbue.minds.envs.recover import delete_recover_target
 from imbue.minds.envs.recover import find_monorepo_root
-from imbue.minds.envs.recover import make_neon_restore_point_name
+from imbue.minds.envs.recover import make_neon_snapshot_branch_name
 from imbue.minds.envs.recover import recover_target_exists
 from imbue.minds.envs.recover import recover_target_path
 from imbue.minds.envs.recover import write_recover_target_atomic
@@ -123,11 +123,26 @@ class ProviderCredentials(FrozenModel):
         description=(
             "Neon organization id under which per-dev-env Neon *projects* are created "
             "(one project per dev env named ``minds-<env>``). Operator-managed; lives in "
-            "``secrets/minds/dev/neon-admin.NEON_ORG_ID``."
+            "``secrets/minds/dev/neon-admin.NEON_ORG_ID``. Required for the dev tier; "
+            "may be the empty string for shared tiers (which never call POST /projects)."
         ),
     )
     neon_api_token: SecretStr = Field(
-        description="Neon API token with project-create scope on the dev tier's Neon org.",
+        description=(
+            "Neon API token. Dev tier requires project-create + branch-create + restore "
+            "scope on the dev org; shared tiers (staging / production) just need branch-"
+            "create + restore scope on the operator-managed project (read via "
+            "``neon_project_id``)."
+        ),
+    )
+    neon_project_id: str | None = Field(
+        default=None,
+        description=(
+            "Existing Neon project id for shared tiers (``creates_resources=false``). "
+            "Read from ``secrets/minds/<tier>/neon-admin.NEON_PROJECT_ID``. Required for "
+            "shared-tier deploys so the pre-deploy snapshot + rollback restore can target "
+            "the right project; ``None`` for dev (where the project is created per-env)."
+        ),
     )
     supertokens_core_url: str = Field(description="Dev-tier SuperTokens core base URL.")
     supertokens_api_key: SecretStr = Field(description="Dev-tier SuperTokens admin API key.")
@@ -179,10 +194,16 @@ GetModalAppLatestVersionFn = Callable[[str, str, ConcurrencyGroup], str | None]
 # (app_name, version, modal_env, cg) -> None. Used by `minds env recover`
 # to roll a Modal app back to its pre-deploy version.
 RollbackModalAppFn = Callable[[str, str, str, ConcurrencyGroup], None]
-# (project_id, branch_id, restore_point_name, api_token) -> None.
-# Creates a named PITR restore-point on the Neon branch at deploy start
-# so recover can do an instant restore.
-CreateNeonRestorePointFn = Callable[[str, str, str, SecretStr], None]
+# (project_id, parent_branch_id, snapshot_name, api_token) -> new branch id.
+# Creates a child branch off the parent at the current LSN so recover
+# can `restore` the parent from this snapshot.
+CreateNeonSnapshotBranchFn = Callable[[str, str, str, SecretStr], str]
+# (project_id, branch_id, api_token) -> None. Deletes a Neon branch.
+# Used at end of successful deploy to clean up the just-created snapshot.
+DeleteNeonBranchFn = Callable[[str, str, SecretStr], None]
+# (project_id, api_token) -> default-branch id. Used by shared-tier
+# deploys to look up the operator-managed project's main branch.
+ResolveNeonDefaultBranchFn = Callable[[str, SecretStr], str]
 # (project_id, api_token) -> None. Preflight probe; raises NeonProviderError
 # on insufficient scope.
 VerifyNeonScopeFn = Callable[[str, SecretStr], None]
@@ -269,8 +290,17 @@ class Providers(FrozenModel):
     rollback_modal_app: RollbackModalAppFn = Field(
         description="(app_name, version, modal_env, cg) -> `modal app rollback` to the given version.",
     )
-    create_neon_restore_point: CreateNeonRestorePointFn = Field(
-        description="(project_id, branch_id, restore_point_name, api_token) -> create a named PITR restore-point.",
+    create_neon_snapshot_branch: CreateNeonSnapshotBranchFn = Field(
+        description=(
+            "(project_id, parent_branch_id, name, api_token) -> new branch id. "
+            "Snapshots the parent branch by creating a child branch at the current LSN."
+        ),
+    )
+    delete_neon_branch: DeleteNeonBranchFn = Field(
+        description="(project_id, branch_id, api_token) -> None. Deletes a Neon branch (snapshot cleanup).",
+    )
+    resolve_neon_default_branch_id: ResolveNeonDefaultBranchFn = Field(
+        description="(project_id, api_token) -> default-branch id. Used by shared-tier deploys.",
     )
     verify_neon_token_has_restore_scope: VerifyNeonScopeFn = Field(
         description="(project_id, api_token) -> probe call that raises NeonProviderError on insufficient scope.",
@@ -488,25 +518,48 @@ def deploy_env(
     }
     logger.info("Captured pre-deploy app versions: {}", app_versions_to_restore)
 
-    # Create a Neon named restore-point for the per-env project so
-    # recover can instant-restore both DBs to this point on rollback.
-    # Only for creates_resources=true (dev) tiers today; shared-tier
-    # restore-point support is a Phase 5+ refinement.
-    neon_restore_point_name: str | None = None
-    neon_branch_id: str | None = None
-    neon_project_id: str | None = None
+    # Snapshot the Neon project's default branch by creating a child
+    # branch off of it. On rollback, recover does an instant restore
+    # of the parent from this snapshot. Both DBs on the branch (host_pool
+    # + litellm_cost) come back atomically. Works for every tier:
+    # - creates_resources=true (dev): use the just-provisioned project + branch
+    # - creates_resources=false (staging/prod): use the operator-managed
+    #   project from ``credentials.neon_project_id`` and look up the
+    #   default branch via the Neon API.
+    neon_project_id_for_snapshot: str | None = None
+    neon_branch_id_for_snapshot: str | None = None
+    neon_snapshot_branch_id: str | None = None
     if lifecycle.creates_resources and neon_record is not None:
-        neon_restore_point_name = make_neon_restore_point_name(deploy_id)
-        neon_branch_id = neon_record.branch_id
-        neon_project_id = neon_record.project_id
+        neon_project_id_for_snapshot = neon_record.project_id
+        neon_branch_id_for_snapshot = neon_record.branch_id
+    elif credentials.neon_project_id is not None:
+        neon_project_id_for_snapshot = credentials.neon_project_id
+        with info_span("Resolving default branch on Neon project {!r}", neon_project_id_for_snapshot):
+            neon_branch_id_for_snapshot = providers.resolve_neon_default_branch_id(
+                neon_project_id_for_snapshot, credentials.neon_api_token
+            )
+    else:
+        logger.warning(
+            "Tier {!r} has no neon_project_id and creates_resources=false; "
+            "skipping pre-deploy snapshot. Recover for this deploy will not be able to "
+            "restore the database -- populate secrets/minds/{}/neon-admin.NEON_PROJECT_ID to fix.",
+            tier,
+            tier,
+        )
+
+    if neon_project_id_for_snapshot and neon_branch_id_for_snapshot:
+        snapshot_name = make_neon_snapshot_branch_name(deploy_id)
         with info_span(
-            "Creating Neon restore-point {!r} on project {} branch {}",
-            neon_restore_point_name,
-            neon_project_id,
-            neon_branch_id,
+            "Creating Neon snapshot branch {!r} off project {} branch {}",
+            snapshot_name,
+            neon_project_id_for_snapshot,
+            neon_branch_id_for_snapshot,
         ):
-            providers.create_neon_restore_point(
-                neon_project_id, neon_branch_id, neon_restore_point_name, credentials.neon_api_token
+            neon_snapshot_branch_id = providers.create_neon_snapshot_branch(
+                neon_project_id_for_snapshot,
+                neon_branch_id_for_snapshot,
+                snapshot_name,
+                credentials.neon_api_token,
             )
 
     # Write the recover-target file atomically. If anything after this
@@ -520,9 +573,9 @@ def deploy_env(
         modal_env=modal_env,
         modal_workspace=modal_workspace,
         vault_path_prefix=tier_vault_prefix,
-        neon_project_id=neon_project_id,
-        neon_branch_id=neon_branch_id,
-        neon_restore_point_name=neon_restore_point_name,
+        neon_project_id=neon_project_id_for_snapshot,
+        neon_branch_id=neon_branch_id_for_snapshot,
+        neon_snapshot_branch_id=neon_snapshot_branch_id,
         app_versions_to_restore=app_versions_to_restore,
     )
     with info_span("Writing recover-target file at monorepo root"):
@@ -634,9 +687,23 @@ def deploy_env(
             )
         )
 
-    # Deploy reached its happy path: delete the recover-target file.
-    # On any failure before this point the file stays in place and the
-    # CLI prints "run `minds env recover`" guidance.
+    # Deploy reached its happy path: delete the snapshot branch (best-
+    # effort: keeping it around just clutters the project), then delete
+    # the recover-target file. On any failure before this point the
+    # snapshot branch + file stay so recover can use them.
+    if neon_snapshot_branch_id and neon_project_id_for_snapshot:
+        with info_span("Deleting Neon snapshot branch {!r} after successful deploy", neon_snapshot_branch_id):
+            try:
+                providers.delete_neon_branch(
+                    neon_project_id_for_snapshot, neon_snapshot_branch_id, credentials.neon_api_token
+                )
+            except MindError as exc:
+                logger.warning(
+                    "Failed to delete Neon snapshot branch {!r} after successful deploy: {} -- "
+                    "leaving in place (operator can delete manually via the Neon console).",
+                    neon_snapshot_branch_id,
+                    exc,
+                )
     with info_span("Deleting recover-target file after successful deploy"):
         delete_recover_target(repo_root=repo_root)
 

@@ -419,41 +419,86 @@ def delete_neon_project(
         raise
 
 
-def create_named_restore_point(project_id: str, branch_id: str, name: str, *, api_token: SecretStr) -> None:
-    """Mark a named point-in-time restore-point on ``branch_id`` for later instant restore.
+def create_snapshot_branch(project_id: str, parent_branch_id: str, name: str, *, api_token: SecretStr) -> str:
+    """Snapshot ``parent_branch_id`` by creating a child branch at the current LSN.
 
-    Uses Neon's ``POST /projects/{id}/branches/{id}/restore_points`` endpoint
-    (separate from snapshots / backup branches -- it's a lightweight pointer
-    into the branch's existing PITR history, so it costs nothing and ages
-    out automatically with the PITR retention window).
+    Returns the new branch id. Neon's branch creation is lazy + COW
+    (copy-on-write), so the snapshot itself costs almost nothing
+    until/unless writes diverge between the snapshot and the parent.
 
-    Idempotent: passing a previously-created name re-stamps it.
+    Used by ``minds env deploy`` as the pre-deploy snapshot: if anything
+    fails, :func:`restore_branch_from_snapshot` rewinds the parent
+    branch back to this point.
+
+    NOTE: Unlike a hypothetical "named restore-point" API, this leaves
+    a real branch in the project. Successful deploys should delete it
+    via :func:`delete_neon_branch` to keep the project tidy; failed
+    deploys leave it for the restore path.
     """
-    _neon_request(
+    payload = _neon_request(
         "POST",
-        f"/projects/{project_id}/branches/{branch_id}/restore_points",
+        f"/projects/{project_id}/branches",
         api_token=api_token,
-        json_body={"restore_point": {"name": name}},
+        json_body={"branch": {"name": name, "parent_id": parent_branch_id}},
     )
+    branch = payload.get("branch", {}) if isinstance(payload, dict) else {}
+    branch_id = branch.get("id")
+    if not isinstance(branch_id, str) or not branch_id:
+        raise NeonProviderError(f"Neon POST /projects/{project_id}/branches returned no branch.id; got: {payload!r}")
+    return branch_id
 
 
-def restore_branch_to_named_restore_point(project_id: str, branch_id: str, name: str, *, api_token: SecretStr) -> None:
-    """Restore ``branch_id`` to a previously-created named restore-point.
+def restore_branch_from_snapshot(
+    project_id: str,
+    target_branch_id: str,
+    source_branch_id: str,
+    preserve_under_name: str,
+    *,
+    api_token: SecretStr,
+) -> None:
+    """Restore ``target_branch_id`` to the state of ``source_branch_id``.
 
-    Atomic and fast: Neon's "instant restore" rewinds the branch's data
-    to the point in time the named restore-point captured. Both
-    databases on the branch (host_pool + litellm_cost) come back to
-    that exact state in a single operation.
+    Neon's "instant restore" rewinds ``target_branch_id`` (typically
+    the default ``main``) to the state captured by ``source_branch_id``
+    (a snapshot branch created earlier via :func:`create_snapshot_branch`).
+    Both databases on the target branch (host_pool + litellm_cost) come
+    back to that exact state atomically.
+
+    ``preserve_under_name`` is the name Neon assigns to a fresh branch
+    holding the PRE-restore state of the target (so the operator can
+    inspect the broken state later). Pass something descriptive like
+    ``pre-rollback-<deploy_id>``.
 
     Idempotent in the sense that re-running against an already-restored
     branch is a near-no-op.
     """
     _neon_request(
         "POST",
-        f"/projects/{project_id}/branches/{branch_id}/restore",
+        f"/projects/{project_id}/branches/{target_branch_id}/restore",
         api_token=api_token,
-        json_body={"source_named_restore_point": name},
+        json_body={
+            "source_branch_id": source_branch_id,
+            "preserve_under_name": preserve_under_name,
+        },
     )
+
+
+def delete_neon_branch(project_id: str, branch_id: str, *, api_token: SecretStr) -> None:
+    """Delete a Neon branch. Used after a successful deploy to clean up the snapshot.
+
+    Idempotent: 404 treated as success. May fail with HTTP 422
+    "cannot delete branch that has children" if the branch was used as
+    a source for a restore (Neon re-parents the target onto the
+    source). That's fine: failed deploys take the restore path which
+    doesn't delete the snapshot anyway; the snapshot stays in the
+    project's history as the operator's "pre-deploy state" copy.
+    """
+    try:
+        _neon_request("DELETE", f"/projects/{project_id}/branches/{branch_id}", api_token=api_token)
+    except NeonProviderError as exc:
+        if "404" in str(exc):
+            return
+        raise
 
 
 def verify_neon_token_has_restore_scope(project_id: str, *, api_token: SecretStr) -> None:
@@ -465,6 +510,17 @@ def verify_neon_token_has_restore_scope(project_id: str, *, api_token: SecretStr
     "Neon API returned 403" before deploy starts mutating anything.
     """
     _neon_request("GET", f"/projects/{project_id}", api_token=api_token)
+
+
+def resolve_default_branch_id(project_id: str, *, api_token: SecretStr) -> str:
+    """Public helper: return the default branch id on a project.
+
+    Shared-tier deploys (``creates_resources=false``) use this to
+    resolve the branch id at deploy time -- the operator brings a Neon
+    project + DSN via Vault but doesn't need to track the branch id
+    separately.
+    """
+    return _resolve_default_branch(project_id, api_token=api_token).id
 
 
 def wipe_neon_db_schema(dsn: SecretStr, *, parent_cg: ConcurrencyGroup) -> None:

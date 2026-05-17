@@ -592,7 +592,15 @@ def get_modal_app_latest_version(*, app_name: str, modal_env: str, parent_cg: Co
         )
     if result.returncode != 0:
         message = (result.stderr + result.stdout).lower()
-        if "not found" in message or "no such" in message or "does not exist" in message:
+        # Modal CLI's "no such app" wording: empirically "could not find a
+        # deployed app named '<name>' in the '<env>' environment." Also
+        # handle older variants for forward-compat.
+        if (
+            "could not find" in message
+            or "not found" in message
+            or "no such" in message
+            or "does not exist" in message
+        ):
             return None
         stderr = result.stderr.strip() or result.stdout.strip()
         raise ModalDeployError(

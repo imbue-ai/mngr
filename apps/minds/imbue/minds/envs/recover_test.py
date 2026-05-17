@@ -11,7 +11,7 @@ from imbue.minds.envs.recover import RecoverTargetAlreadyExistsError
 from imbue.minds.envs.recover import RecoverTargetMissingError
 from imbue.minds.envs.recover import delete_recover_target
 from imbue.minds.envs.recover import find_monorepo_root
-from imbue.minds.envs.recover import make_neon_restore_point_name
+from imbue.minds.envs.recover import make_neon_snapshot_branch_name
 from imbue.minds.envs.recover import read_recover_target
 from imbue.minds.envs.recover import recover_target_exists
 from imbue.minds.envs.recover import recover_target_path
@@ -29,7 +29,7 @@ def _sample_target() -> RecoverTarget:
         vault_path_prefix="secrets/minds/dev",
         neon_project_id="proj-fake-123",
         neon_branch_id="br-main-1",
-        neon_restore_point_name="pre-deploy-20260517T143022Z",
+        neon_snapshot_branch_id="br-snap-pre-deploy",
         app_versions_to_restore={"rsc-dev": "v17", "llm-dev": None},
     )
 
@@ -85,8 +85,8 @@ def test_find_monorepo_root_raises_when_no_marker(tmp_path: Path) -> None:
         find_monorepo_root(cwd=tmp_path)
 
 
-def test_make_neon_restore_point_name() -> None:
-    assert make_neon_restore_point_name(DeployId("20260517T143022Z")) == "pre-deploy-20260517T143022Z"
+def test_make_neon_snapshot_branch_name() -> None:
+    assert make_neon_snapshot_branch_name(DeployId("20260517T143022Z")) == "pre-deploy-20260517T143022Z"
 
 
 def test_app_versions_to_restore_may_carry_none(tmp_path: Path) -> None:

@@ -67,10 +67,12 @@ from imbue.minds.envs.providers.cloudflare_tunnels import delete_tunnels as real
 from imbue.minds.envs.providers.cloudflare_tunnels import list_tunnels_for_env as real_list_cloudflare_tunnels_for_env
 from imbue.minds.envs.providers.modal_env import delete_modal_env as real_delete_modal_env
 from imbue.minds.envs.providers.neon_db import NeonProjectRecord
-from imbue.minds.envs.providers.neon_db import create_named_restore_point as real_create_neon_restore_point
 from imbue.minds.envs.providers.neon_db import create_neon_project
+from imbue.minds.envs.providers.neon_db import create_snapshot_branch as real_create_neon_snapshot_branch
+from imbue.minds.envs.providers.neon_db import delete_neon_branch as real_delete_neon_branch
 from imbue.minds.envs.providers.neon_db import delete_neon_project
 from imbue.minds.envs.providers.neon_db import pool_hosts_migrations_dir
+from imbue.minds.envs.providers.neon_db import resolve_default_branch_id as real_resolve_neon_default_branch_id
 from imbue.minds.envs.providers.neon_db import (
     verify_neon_token_has_restore_scope as real_verify_neon_token_has_restore_scope,
 )
@@ -240,10 +242,18 @@ def _rollback_modal_app_for_provider(app_name: str, version: str, modal_env: str
     real_rollback_modal_app(app_name=app_name, version=version, modal_env=modal_env, parent_cg=cg)
 
 
-def _create_neon_restore_point_for_provider(
-    project_id: str, branch_id: str, restore_point_name: str, api_token: SecretStr
-) -> None:
-    real_create_neon_restore_point(project_id, branch_id, restore_point_name, api_token=api_token)
+def _create_neon_snapshot_branch_for_provider(
+    project_id: str, parent_branch_id: str, name: str, api_token: SecretStr
+) -> str:
+    return real_create_neon_snapshot_branch(project_id, parent_branch_id, name, api_token=api_token)
+
+
+def _delete_neon_branch_for_provider(project_id: str, branch_id: str, api_token: SecretStr) -> None:
+    real_delete_neon_branch(project_id, branch_id, api_token=api_token)
+
+
+def _resolve_neon_default_branch_id_for_provider(project_id: str, api_token: SecretStr) -> str:
+    return real_resolve_neon_default_branch_id(project_id, api_token=api_token)
 
 
 def _verify_neon_token_has_restore_scope_for_provider(project_id: str, api_token: SecretStr) -> None:
@@ -308,7 +318,9 @@ def _build_real_providers() -> Providers:
         apply_pool_hosts_migrations=_apply_pool_hosts_migrations_for_provider,
         get_modal_app_latest_version=_get_modal_app_latest_version_for_provider,
         rollback_modal_app=_rollback_modal_app_for_provider,
-        create_neon_restore_point=_create_neon_restore_point_for_provider,
+        create_neon_snapshot_branch=_create_neon_snapshot_branch_for_provider,
+        delete_neon_branch=_delete_neon_branch_for_provider,
+        resolve_neon_default_branch_id=_resolve_neon_default_branch_id_for_provider,
         verify_neon_token_has_restore_scope=_verify_neon_token_has_restore_scope_for_provider,
         await_apps_healthy=_await_apps_healthy_for_provider,
         destroy_mngr_agent=real_destroy_mngr_agent,
@@ -332,9 +344,11 @@ def _load_dev_credentials_from_vault(vault_prefix: str, *, cg: ConcurrencyGroup)
 
     Paths read here (none are pushed to Modal):
 
-    - ``<vault_prefix>/neon-admin`` -- ``NEON_API_TOKEN``, ``NEON_ORG_ID``.
-      ``NEON_ORG_ID`` is the Neon organization under which per-dev-env
-      *projects* are created (one project per env named ``minds-<env>``).
+    - ``<vault_prefix>/neon-admin`` -- ``NEON_API_TOKEN`` (required),
+      ``NEON_ORG_ID`` (required for dev tier where projects are created),
+      ``NEON_PROJECT_ID`` (required for shared tiers where the operator
+      brings a pre-existing project; used by the deploy's pre-deploy
+      snapshot + recover's restore-from-snapshot calls).
     - ``<vault_prefix>/supertokens`` -- ``SUPERTOKENS_CONNECTION_URI``,
       ``SUPERTOKENS_API_KEY`` (read from the Modal-pushed entry; safe to
       read here because the connector also legitimately needs both keys)
@@ -355,11 +369,24 @@ def _load_dev_credentials_from_vault(vault_prefix: str, *, cg: ConcurrencyGroup)
 
     org_id = neon_admin.get("NEON_ORG_ID", "")
     api_token = neon_admin.get("NEON_API_TOKEN", "")
-    if not org_id or not api_token:
+    project_id_raw = neon_admin.get("NEON_PROJECT_ID", "")
+    if not api_token:
         raise VaultReadError(
-            f"Vault entry {vault_prefix}/neon-admin missing NEON_ORG_ID or NEON_API_TOKEN; "
+            f"Vault entry {vault_prefix}/neon-admin missing NEON_API_TOKEN; "
             "see .minds/template/neon-admin.sh for the schema."
         )
+    # ``NEON_ORG_ID`` is only required when the deploy creates the Neon
+    # project (dev tier). ``NEON_PROJECT_ID`` is only required when the
+    # deploy adopts an existing one (shared tiers). Either one populated
+    # is enough at the credential-load layer; deploy_env enforces the
+    # right one for its tier via ``deploy_config.lifecycle.creates_resources``.
+    if not org_id and not project_id_raw:
+        raise VaultReadError(
+            f"Vault entry {vault_prefix}/neon-admin missing both NEON_ORG_ID and NEON_PROJECT_ID. "
+            "Dev tier needs NEON_ORG_ID; shared tiers (staging / production) need NEON_PROJECT_ID. "
+            "See .minds/template/neon-admin.sh for the schema."
+        )
+    neon_project_id: str | None = project_id_raw if project_id_raw else None
 
     core_url = supertokens.get("SUPERTOKENS_CONNECTION_URI", "")
     core_api_key = supertokens.get("SUPERTOKENS_API_KEY", "")
@@ -371,6 +398,7 @@ def _load_dev_credentials_from_vault(vault_prefix: str, *, cg: ConcurrencyGroup)
     return ProviderCredentials(
         neon_org_id=org_id,
         neon_api_token=SecretStr(api_token),
+        neon_project_id=neon_project_id,
         supertokens_core_url=core_url,
         supertokens_api_key=SecretStr(core_api_key),
         ovh_credentials=OvhCredentials(

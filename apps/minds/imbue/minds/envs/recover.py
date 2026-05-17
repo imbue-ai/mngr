@@ -39,7 +39,7 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import info_span
 from imbue.minds.envs.per_env_deploy import ModalDeployError
 from imbue.minds.envs.providers.neon_db import NeonProviderError
-from imbue.minds.envs.providers.neon_db import restore_branch_to_named_restore_point
+from imbue.minds.envs.providers.neon_db import restore_branch_from_snapshot
 from imbue.minds.envs.secret_lifecycle import DeployId
 from imbue.minds.errors import MindError
 
@@ -92,20 +92,24 @@ class RecoverTarget(FrozenModel):
     neon_project_id: str | None = Field(
         default=None,
         description=(
-            "Per-env Neon project id. ``None`` for shared tiers whose project is "
-            "operator-managed -- in that case we'd need to derive the id at recover "
-            "time from Vault, which is a Phase 5+ refinement."
+            "Neon project id the snapshot branch was created in. For dev (creates_resources=true) "
+            "it's the just-provisioned per-env project; for shared tiers (creates_resources=false) "
+            "it's the operator-managed project id from "
+            "``secrets/minds/<tier>/neon-admin.NEON_PROJECT_ID``."
         ),
     )
     neon_branch_id: str | None = Field(
         default=None,
-        description="Default branch id on the Neon project the restore-point was created against.",
+        description="Default branch id on the Neon project (parent of the snapshot branch).",
     )
-    neon_restore_point_name: str | None = Field(
+    neon_snapshot_branch_id: str | None = Field(
         default=None,
         description=(
-            "Name of the named restore-point created at deploy start (``pre-deploy-<deploy_id>``). "
-            "``None`` if the deploy is for a tier without Neon-restore support."
+            "Branch id of the snapshot branch created at deploy start (off the default branch, "
+            "named ``pre-deploy-<deploy_id>``). Recover restores the default branch from this "
+            "snapshot via Neon's ``POST .../branches/{main}/restore`` with ``source_branch_id``. "
+            "``None`` if the deploy is for a tier without Neon-restore configuration (missing "
+            "``NEON_PROJECT_ID`` in Vault for a shared tier)."
         ),
     )
     app_versions_to_restore: dict[str, str | None] = Field(
@@ -246,20 +250,20 @@ def recover_env(
             logger.warning("Recover: rollback of {!r} failed: {}", app_name, exc)
             errors.append(f"modal app rollback {app_name} {version}: {exc}")
 
-    # Step 2: Neon instant restore to the captured restore-point.
-    if target.neon_restore_point_name and target.neon_project_id and target.neon_branch_id:
+    # Step 2: Neon instant restore from the captured snapshot branch.
+    if target.neon_snapshot_branch_id and target.neon_project_id and target.neon_branch_id:
         try:
             with info_span(
-                "Restoring Neon branch {!r} to restore-point {!r}",
+                "Restoring Neon branch {!r} from snapshot branch {!r}",
                 target.neon_branch_id,
-                target.neon_restore_point_name,
+                target.neon_snapshot_branch_id,
             ):
                 _restore_neon(target=target, credentials=credentials)
         except NeonProviderError as exc:
             logger.warning("Recover: Neon restore failed: {}", exc)
-            errors.append(f"neon restore_to_named_restore_point: {exc}")
+            errors.append(f"neon restore_branch_from_snapshot: {exc}")
     else:
-        logger.info("Recover: no Neon restore-point captured; skipping Neon restore step.")
+        logger.info("Recover: no Neon snapshot branch captured; skipping Neon restore step.")
 
     # Step 3: delete every <svc>-<tier>-<deploy_id> Modal Secret pushed
     # by the failed deploy. We can derive the exact set from the deploy
@@ -290,14 +294,20 @@ def recover_env(
 
 
 def _restore_neon(*, target: RecoverTarget, credentials) -> None:
-    """Adapter that calls ``restore_branch_to_named_restore_point`` with credential lookup."""
+    """Adapter that calls ``restore_branch_from_snapshot`` with credential lookup.
+
+    The ``preserve_under_name`` argument captures the broken pre-restore
+    state under ``pre-rollback-<deploy_id>`` so the operator can inspect
+    it later via the Neon console.
+    """
     assert target.neon_project_id is not None
     assert target.neon_branch_id is not None
-    assert target.neon_restore_point_name is not None
-    restore_branch_to_named_restore_point(
+    assert target.neon_snapshot_branch_id is not None
+    restore_branch_from_snapshot(
         target.neon_project_id,
         target.neon_branch_id,
-        target.neon_restore_point_name,
+        target.neon_snapshot_branch_id,
+        preserve_under_name=f"pre-rollback-{target.deploy_id}",
         api_token=credentials.neon_api_token,
     )
 
@@ -311,12 +321,13 @@ def _cleanup_orphan_secrets(*, target: RecoverTarget, providers, parent_cg: Conc
         providers.delete_modal_secret(orphan, target.modal_env, parent_cg)
 
 
-def make_neon_restore_point_name(deploy_id: DeployId) -> str:
-    """Canonical name format for the named restore-point a deploy creates.
+def make_neon_snapshot_branch_name(deploy_id: DeployId) -> str:
+    """Canonical name for the snapshot branch a deploy creates.
 
-    Lives in this module (vs. ``secret_lifecycle`` or ``neon_db``)
-    because recover is the only consumer that needs to derive it from a
-    captured deploy_id.
+    Used both by deploy (to name the branch) and by the operator (to
+    recognize the branch in the Neon console). Lives in this module
+    because recover is the only consumer that needs to derive it from
+    a captured deploy_id.
     """
     return f"pre-deploy-{deploy_id}"
 
@@ -330,7 +341,7 @@ __all__ = [
     "RecoverTargetMissingError",
     "delete_recover_target",
     "find_monorepo_root",
-    "make_neon_restore_point_name",
+    "make_neon_snapshot_branch_name",
     "read_recover_target",
     "recover_env",
     "recover_target_exists",
