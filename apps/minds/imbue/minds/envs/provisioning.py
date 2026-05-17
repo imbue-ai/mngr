@@ -526,9 +526,6 @@ def deploy_env(
     # - creates_resources=false (staging/prod): use the operator-managed
     #   project from ``credentials.neon_project_id`` and look up the
     #   default branch via the Neon API.
-    neon_project_id_for_snapshot: str | None = None
-    neon_branch_id_for_snapshot: str | None = None
-    neon_snapshot_branch_id: str | None = None
     if lifecycle.creates_resources and neon_record is not None:
         neon_project_id_for_snapshot = neon_record.project_id
         neon_branch_id_for_snapshot = neon_record.branch_id
@@ -539,28 +536,27 @@ def deploy_env(
                 neon_project_id_for_snapshot, credentials.neon_api_token
             )
     else:
-        logger.warning(
-            "Tier {!r} has no neon_project_id and creates_resources=false; "
-            "skipping pre-deploy snapshot. Recover for this deploy will not be able to "
-            "restore the database -- populate secrets/minds/{}/neon-admin.NEON_PROJECT_ID to fix.",
-            tier,
-            tier,
+        raise MindError(
+            f"Tier {tier!r} has creates_resources=false but no NEON_PROJECT_ID in Vault. "
+            f"Pre-deploy snapshot + recover-time DB restore both require it; refusing to "
+            "ship a deploy that can't be rolled back. Populate "
+            f"secrets/minds/{tier}/neon-admin.NEON_PROJECT_ID with the project id from the "
+            "Neon console and re-run."
         )
 
-    if neon_project_id_for_snapshot and neon_branch_id_for_snapshot:
-        snapshot_name = make_neon_snapshot_branch_name(deploy_id)
-        with info_span(
-            "Creating Neon snapshot branch {!r} off project {} branch {}",
-            snapshot_name,
+    snapshot_name = make_neon_snapshot_branch_name(deploy_id)
+    with info_span(
+        "Creating Neon snapshot branch {!r} off project {} branch {}",
+        snapshot_name,
+        neon_project_id_for_snapshot,
+        neon_branch_id_for_snapshot,
+    ):
+        neon_snapshot_branch_id = providers.create_neon_snapshot_branch(
             neon_project_id_for_snapshot,
             neon_branch_id_for_snapshot,
-        ):
-            neon_snapshot_branch_id = providers.create_neon_snapshot_branch(
-                neon_project_id_for_snapshot,
-                neon_branch_id_for_snapshot,
-                snapshot_name,
-                credentials.neon_api_token,
-            )
+            snapshot_name,
+            credentials.neon_api_token,
+        )
 
     # Write the recover-target file atomically. If anything after this
     # point fails, the operator runs ``minds env recover`` to converge

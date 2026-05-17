@@ -105,10 +105,11 @@ def _deploy_config(
     )
 
 
-def _credentials() -> ProviderCredentials:
+def _credentials(*, neon_project_id: str | None = "proj-fake-shared") -> ProviderCredentials:
     return ProviderCredentials(
         neon_org_id="org-fake-123",
         neon_api_token=SecretStr("neon-token"),
+        neon_project_id=neon_project_id,
         supertokens_core_url="https://supertokens.example.com",
         supertokens_api_key=SecretStr("st-api-key"),
         ovh_credentials=OvhCredentials(
