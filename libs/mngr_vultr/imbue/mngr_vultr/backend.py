@@ -107,7 +107,9 @@ class VultrProviderBackend(ProviderBackendInterface):
         name: ProviderInstanceName,
         config: ProviderInstanceConfig,
         mngr_ctx: MngrContext,
+        is_for_host_creation: bool = False,
     ) -> ProviderInstanceInterface:
+        del is_for_host_creation
         if not isinstance(config, VultrProviderConfig):
             raise MngrError(f"Expected VultrProviderConfig, got {type(config).__name__}")
 

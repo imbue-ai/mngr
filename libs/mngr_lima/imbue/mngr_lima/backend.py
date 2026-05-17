@@ -64,6 +64,7 @@ Run 'limactl start --help' for the full list.
         name: ProviderInstanceName,
         config: ProviderInstanceConfig,
         mngr_ctx: MngrContext,
+        is_for_host_creation: bool = False,
     ) -> ProviderInstanceInterface:
         """Build a Lima provider instance.
 
@@ -71,6 +72,7 @@ Run 'limactl start --help' for the full list.
         not performed here. This allows the provider to be registered in
         environments where limactl is not installed (e.g. CI).
         """
+        del is_for_host_creation
         if not isinstance(config, LimaProviderConfig):
             raise MngrError(f"Expected LimaProviderConfig, got {type(config).__name__}")
 

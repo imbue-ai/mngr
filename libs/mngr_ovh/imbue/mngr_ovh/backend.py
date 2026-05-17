@@ -459,7 +459,9 @@ class OvhProviderBackend(ProviderBackendInterface):
         name: ProviderInstanceName,
         config: ProviderInstanceConfig,
         mngr_ctx: MngrContext,
+        is_for_host_creation: bool = False,
     ) -> ProviderInstanceInterface:
+        del is_for_host_creation
         if not isinstance(config, OvhProviderConfig):
             raise MngrError(f"Expected OvhProviderConfig, got {type(config).__name__}")
         ovh_client = build_ovh_client(config)

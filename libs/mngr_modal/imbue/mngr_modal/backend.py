@@ -22,6 +22,7 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import ProviderInstanceConfig
 from imbue.mngr.errors import ConfigStructureError
 from imbue.mngr.errors import MngrError
+from imbue.mngr.errors import ProviderUnavailableError
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.host import OnlineHostInterface
@@ -106,17 +107,25 @@ def _create_environment(environment_name: str, modal_interface: ModalInterface) 
 
 
 def _lookup_persistent_app_with_env_retry(
-    app_name: str, environment_name: str, modal_interface: ModalInterface
+    app_name: str,
+    environment_name: str,
+    modal_interface: ModalInterface,
+    is_environment_creation_allowed: bool,
 ) -> AppInterface:
     """Look up or create a persistent Modal app, retrying if the environment is not found.
 
-    On the first NotFoundError, creates the environment and retries with exponential backoff
-    to handle the race condition where Modal's API may not immediately see the newly created
-    environment.
+    When ``is_environment_creation_allowed`` is True and the first lookup raises
+    ``ModalProxyNotFoundError`` (because the environment does not yet exist), the
+    environment is created and the lookup is retried with exponential backoff to
+    handle Modal's eventual consistency. When False, the missing-environment
+    error is propagated -- callers that are not creating a host should never
+    cause a Modal environment to be silently created.
     """
     try:
         return modal_interface.app_lookup(app_name, create_if_missing=True, environment_name=environment_name)
     except ModalProxyNotFoundError:
+        if not is_environment_creation_allowed:
+            raise
         # Create the environment before retrying
         _create_environment(environment_name, modal_interface)
         return _lookup_persistent_app_with_retry(app_name, environment_name, modal_interface)
@@ -137,13 +146,19 @@ def _lookup_persistent_app_with_retry(
 
 
 def _enter_ephemeral_app_context_with_env_retry(
-    app: AppInterface, environment_name: str, modal_interface: ModalInterface
+    app: AppInterface,
+    environment_name: str,
+    modal_interface: ModalInterface,
+    is_environment_creation_allowed: bool,
 ) -> Any:
     """Enter an ephemeral Modal app's run context, retrying if the environment is not found.
 
-    On the first NotFoundError, creates the environment and retries with exponential backoff
-    to handle the race condition where Modal's API may not immediately see the newly created
-    environment.
+    When ``is_environment_creation_allowed`` is True and entering the run context
+    raises ``ModalProxyNotFoundError`` (because the environment does not yet exist),
+    the environment is created and the entry is retried with exponential backoff to
+    handle Modal's eventual consistency. When False, the missing-environment error
+    is propagated -- callers that are not creating a host should never cause a
+    Modal environment to be silently created.
 
     Returns the generator context so the caller can manage its lifecycle.
     """
@@ -152,6 +167,8 @@ def _enter_ephemeral_app_context_with_env_retry(
         next(gen)
         return gen
     except ModalProxyNotFoundError:
+        if not is_environment_creation_allowed:
+            raise
         # Create the environment before retrying
         _create_environment(environment_name, modal_interface)
         return _enter_ephemeral_app_context_with_retry(app, environment_name)
@@ -247,6 +264,7 @@ class ModalProviderBackend(ProviderBackendInterface):
         environment_name: str,
         is_persistent: bool,
         modal_interface: ModalInterface,
+        is_environment_creation_allowed: bool = False,
     ) -> tuple[AppInterface, ModalAppContextHandle]:
         """Get or create a Modal app with output capture.
 
@@ -261,7 +279,15 @@ class ModalProviderBackend(ProviderBackendInterface):
         a Modal account. The state-volume name is prepared here but the
         volume is created lazily by ``get_volume_for_app()``.
 
+        ``is_environment_creation_allowed`` defaults to False: read-only paths
+        (list, gc, discover) must not silently create a Modal environment if
+        one doesn't exist yet. Only the create-host path sets this to True so
+        a brand-new install of mngr can bootstrap the environment on first
+        ``mngr create``.
+
         Raises ``ModalProxyAuthError`` if Modal credentials are missing.
+        Raises ``ModalProxyNotFoundError`` if the environment does not exist
+        and ``is_environment_creation_allowed`` is False.
         """
         if app_name in cls._app_registry:
             return cls._app_registry[app_name]
@@ -275,7 +301,9 @@ class ModalProviderBackend(ProviderBackendInterface):
 
             if is_persistent:
                 with log_span("Looking up persistent Modal app: {}", app_name):
-                    app = _lookup_persistent_app_with_env_retry(app_name, environment_name, modal_interface)
+                    app = _lookup_persistent_app_with_env_retry(
+                        app_name, environment_name, modal_interface, is_environment_creation_allowed
+                    )
                 run_context = None
             else:
                 # Create the Modal app
@@ -285,7 +313,9 @@ class ModalProviderBackend(ProviderBackendInterface):
                 # Enter the app.run() context via generator so we can return the app
                 # while keeping the context active until close() is called
                 with log_span("Entering Modal app.run() context (env: {})", environment_name):
-                    run_context = _enter_ephemeral_app_context_with_env_retry(app, environment_name, modal_interface)
+                    run_context = _enter_ephemeral_app_context_with_env_retry(
+                        app, environment_name, modal_interface, is_environment_creation_allowed
+                    )
 
             # Set app metadata on the loguru writer for structured logging
             if loguru_writer is not None:
@@ -433,8 +463,20 @@ Supported build arguments for the modal provider:
         name: ProviderInstanceName,
         config: ProviderInstanceConfig,
         mngr_ctx: MngrContext,
+        is_for_host_creation: bool = False,
     ) -> ProviderInstanceInterface:
-        """Build a Modal provider instance."""
+        """Build a Modal provider instance.
+
+        ``is_for_host_creation`` is the single switch that determines whether
+        this construction is allowed to bootstrap a missing Modal environment.
+        Only the ``mngr create`` path passes ``True``; everything else leaves
+        it at the default ``False`` so a brand-new install does not silently
+        create environments from ``mngr list`` / ``mngr gc`` / etc. When the
+        environment is missing and ``is_for_host_creation`` is ``False``, this
+        raises ``ProviderUnavailableError`` so the higher-level provider
+        loader can skip the modal provider entirely instead of constructing
+        it.
+        """
         if not isinstance(config, ModalProviderConfig):
             raise ConfigStructureError(f"Expected ModalProviderConfig, got {type(config).__name__}")
 
@@ -448,7 +490,9 @@ Supported build arguments for the modal provider:
             case _ as unreachable:
                 assert_never(unreachable)
 
-        return ModalProviderBackend._construct_modal_provider(name, config, mngr_ctx, modal_interface)
+        return ModalProviderBackend._construct_modal_provider(
+            name, config, mngr_ctx, modal_interface, is_for_host_creation=is_for_host_creation
+        )
 
     @staticmethod
     def _construct_modal_provider(
@@ -456,6 +500,7 @@ Supported build arguments for the modal provider:
         config: ProviderInstanceConfig,
         mngr_ctx: MngrContext,
         modal_interface: ModalInterface,
+        is_for_host_creation: bool = False,
     ) -> ProviderInstanceInterface:
         """Build a ``ModalProviderInstance`` against the given ``ModalInterface``.
 
@@ -465,6 +510,12 @@ Supported build arguments for the modal provider:
         ``TestingModalInterface``). Output capture is yielded off
         ``modal_interface.enable_output_capture(...)`` so this function has
         no per-implementation branches.
+
+        ``is_for_host_creation`` gates whether a missing Modal environment may
+        be created here. When ``False`` and the environment does not exist,
+        ``ProviderUnavailableError`` is raised so that read-only loaders (used
+        by ``mngr list`` / ``mngr gc`` / discovery) can skip the modal
+        provider entirely rather than creating an environment on first use.
         """
         if not isinstance(config, ModalProviderConfig):
             raise ConfigStructureError(f"Expected ModalProviderConfig, got {type(config).__name__}")
@@ -478,6 +529,7 @@ Supported build arguments for the modal provider:
                 environment_name,
                 config.is_persistent,
                 modal_interface,
+                is_environment_creation_allowed=is_for_host_creation,
             )
             volume = ModalProviderBackend.get_volume_for_app(app_name, modal_interface)
 
@@ -494,6 +546,18 @@ Supported build arguments for the modal provider:
             raise MngrError(
                 "Modal is not authorized: run 'uvx modal token set' to authenticate, or disable this provider with "
                 f"'mngr config set --scope local providers.{name}.is_enabled false'. (original error: {e})",
+            ) from e
+        except ModalProxyNotFoundError as e:
+            # Modal environment doesn't exist yet. Only the create-host path is
+            # allowed to bootstrap it -- everything else asks the loader to skip
+            # the modal provider so commands like `mngr list` / `mngr gc` don't
+            # silently create a Modal environment behind the user's back.
+            raise ProviderUnavailableError(
+                provider_name=name,
+                reason=(
+                    f"Modal environment {environment_name!r} does not exist yet. "
+                    "It will be created the first time you run `mngr create @.modal`."
+                ),
             ) from e
         except ModalProxyError as e:
             raise MngrError(f"Modal provider '{name}' failed to initialize: {e}") from e
