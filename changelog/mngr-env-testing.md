@@ -106,15 +106,26 @@ Minds deploy safety overhaul (spec
 
 - New `minds env recover` command + recover-target file at the
   monorepo root. Every deploy captures pre-deploy Modal app versions,
-  creates a Neon named restore-point, and writes
+  creates a Neon snapshot branch (`pre-deploy-<deploy_id>` off the
+  default branch -- COW so it's near-free), and writes
   `.minds-deploy-recover-target.json` (gitignored) atomically BEFORE
   touching any external state. On a failed deploy, the operator runs
   `minds env recover`; it idempotently runs every reversal step
-  (`modal app rollback`, Neon `restore_to_named_restore_point`,
+  (`modal app rollback`, Neon branch-restore from the snapshot with
+  the pre-restore state preserved under `pre-rollback-<deploy_id>`,
   delete orphan timestamped secrets, delete the recover-target file).
+  Successful deploys delete the snapshot branch (best-effort cleanup).
   Every other `minds env *` command (`activate` / `deactivate` /
   `list` / `deploy` / `destroy`) refuses to run while a recover-
   target file exists.
+
+  Snapshot/restore works for every tier (dev creates_resources=true
+  and shared creates_resources=false). Shared tiers (staging /
+  production) require `NEON_PROJECT_ID` in their
+  `secrets/minds/<tier>/neon-admin` Vault entry; the deploy resolves
+  the default branch on demand. Without `NEON_PROJECT_ID` shared-tier
+  deploys log a warning and skip the snapshot (so recover can roll
+  back Modal apps but not the DB).
 
 - Post-deploy health check: `await_apps_healthy` polls
   `<connector>/docs` and `<litellm_proxy>/health` for up to 30s each
