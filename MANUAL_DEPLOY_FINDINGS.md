@@ -59,7 +59,7 @@ formal tests; this is a checklist of probes + findings.
 | F2 | Bump health-check timeout 3s→10s, max 30s→60s | `health_check.py` |
 | F3 | Add `/health/liveness` route + switch probe | `connector/app.py`, `health_check.py` |
 | F4 | Update spec to say `/health/liveness` | spec.md |
-| F5 | Async helper for `_get_user_id_from_access_token` + 3 async endpoints | `connector/app.py` |
+| F5 | **Convert all 12 connector `async def` endpoints to sync `def`** (asyncio → syncio SuperTokens; style-guide compliance) | `connector/app.py` |
 | F6 | `override_global_claim_validators=lambda *_: []` so "Email not verified" becomes live | `connector/app.py` |
 | F7 | DELETE tunnel returns 200 on already-gone | `connector/app.py` |
 | F8 | Defer (test-suite fixture concern) | none |
@@ -80,7 +80,7 @@ formal tests; this is a checklist of probes + findings.
 | F24 | Thread `tier` through `per_env_*_url` helpers | `per_env_deploy.py`, `provisioning.py` |
 | F25 | Drop `_DERIVED_ONLY_SECRET_SERVICES`; read litellm-connector from Vault normally | `per_env_deploy.py` |
 | F26 | Use `os.open(O_CREAT \| O_EXCL)` for recover-target write | `recover.py` |
-| F27 | Add FastAPI `exception_handler(Exception)` wrapper | `connector/app.py` |
+| F27 | Subsumed by F5 (sync conversion + `handle_endpoint_errors`); add a defensive `exception_handler(Exception)` as a last-resort net | `connector/app.py` |
 | F28 | Defer (run `release-minds` skill intentionally) | workflow op |
 | F29 | Replace hardcoded "Ask Josh" with generic phrasing | `connector/app.py` |
 | F30 | Bundle with F7: release_host returns 200 on already-released | `connector/app.py` |
@@ -214,7 +214,7 @@ Each finding has:
 
 - **Why it matters:** `/auth/session/revoke` is the sign-out path. `/auth/email/send-verification` is how users get verification emails. `/auth/email/is-verified` is the client-side poll to know whether to unblock the UI. With these three broken, end users **cannot**: complete email verification on signup, sign out cleanly, or check verification status. The whole onboarding flow for any minds env that requires email-verified access is effectively broken.
 - **Suggested fix:** Switch both imports to their asyncio counterparts (`supertokens_python.recipe.session.asyncio.get_session_without_request_response`, `supertokens_python.asyncio.get_user`) and convert `_get_user_id_from_access_token` + the three endpoint bodies to `async def` / `await` the calls. For the call sites that today live inside *sync* endpoints (`/hosts`, `/keys/*`, `/tunnels/*`, `/auth/users/{id}`, `_default_email_getter`), the same `await` rewrite is required — converting those endpoints to `async def` as well is the simplest cross-cutting fix. Alternatively introduce an `async _get_user_id_from_access_token_async` for the async sites and leave the sync site unchanged.
-- **Decision:** Introduce `_get_user_id_from_access_token_async` (and an async `_authenticate_supertokens_async` that uses it) for the three broken async endpoints. Leave the sync helpers alone — every sync endpoint already works via FastAPI's threadpool. Smallest fix that doesn't ripple across `/hosts/*`, `/keys/*`, `/tunnels/*`. Add a release test that hits `/auth/session/revoke` end-to-end against a real SuperTokens app and asserts 200.
+- **Decision:** **Convert every `async def` endpoint in `connector/app.py` (all 12) to sync `def`.** Switch every `from supertokens_python.recipe.X.asyncio import Y` to `.syncio import Y`, drop every `await`, drop `async` from the function defs. Style-guide compliance ("Never use `async` or `asyncio`") AND the bug class can't recur. All SuperTokens functions the file uses have syncio variants — confirmed via direct introspection. Wrap each newly-sync endpoint with `with handle_endpoint_errors():` so error handling is consistent with the rest of the file (subsumes F27 for the connector). Add a release test that hits `/auth/session/revoke`, `/auth/email/is-verified`, `/auth/email/send-verification` end-to-end against a real SuperTokens app and asserts each returns a real status, not a bare 500. **Follow-up (separate, deferred):** tighten the asyncio ratchet at `apps/remote_service_connector/imbue/remote_service_connector/test_ratchets.py` to also count `async def` and `await` (currently only `import asyncio`) — done in the larger pass that converts the desktop_client's 19 async endpoints.
 
 ### F6 — `_authenticate_supertokens`'s "Email not verified" branch is dead code
 
@@ -485,7 +485,7 @@ Each finding has:
 - **Where:** `apps/remote_service_connector/imbue/remote_service_connector/app.py:1459-1467` defines `handle_endpoint_errors`. Sync def endpoints (`/tunnels`, `/hosts/*`, `/keys/*`, ...) wrap their body in `with handle_endpoint_errors():`. Async def endpoints (`/auth/signup`, `/auth/signin`, `/auth/session/refresh`, `/auth/session/revoke`, `/auth/email/send-verification`, `/auth/email/is-verified`, `/auth/password/forgot`, `/auth/password/reset`, `/auth/oauth/authorize`, `/auth/oauth/callback`) do not.
 - **Why:** Any uncaught exception in an async endpoint surfaces as the default FastAPI 500 `Internal Server Error` (no detail). The sync endpoints get a translation pass via `raise_as_http`. F5's RuntimeError is the most visible symptom of this — but even with F5 fixed, any future bug in an async endpoint will produce an unhelpful error.
 - **Suggested fix:** Mirror the wrapping for async endpoints. Either an `async with handle_endpoint_errors_async():` (a similarly-shaped async context manager) or a FastAPI exception handler registered on the app.
-- **Decision:** Add a FastAPI `@web_app.exception_handler(Exception)` at the top of the module that routes through `raise_as_http` (same translation the sync wrapper uses). Catches BOTH sync and async paths uniformly, and the existing `with handle_endpoint_errors():` blocks can be left in place (they short-circuit on HTTPException so they're harmless). Drop the per-endpoint `with` blocks in a follow-up if cleanup is desired. Add a release test that hits one async endpoint that intentionally raises, asserts the response is a proper 500 with body.
+- **Decision:** **Largely subsumed by F5.** Once the connector's 12 `async def` endpoints become `def`, every endpoint in the file gets a uniform `with handle_endpoint_errors():` wrapper as part of the F5 conversion (the existing sync endpoints already have it). No separate FastAPI `exception_handler` needed for the connector. Still add a defensive `@web_app.exception_handler(Exception)` registration that routes through `raise_as_http` as a last-resort net for anything that escapes — cheap, covers future regressions if the no-async rule slips again. The desktop_client's async endpoints (out of scope here) keep being a future concern.
 
 ### F28 — FCT `vendor/mngr` and the minds-side `libs/mngr` are out of sync
 
