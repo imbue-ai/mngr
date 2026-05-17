@@ -36,14 +36,16 @@ from loguru import logger
 
 from imbue.mngr_aws.constants import AWS_DEFAULT_REGION
 from imbue.mngr_aws.constants import AWS_RELEASE_TESTS_OPT_IN
+from imbue.mngr_aws.constants import AWS_TEST_INSTANCE_AUTO_SHUTDOWN_MINUTES
 from imbue.mngr_aws.constants import AWS_TEST_NAME_PREFIX
 from imbue.mngr_aws.testing import aws_credentials_available
 
 # Orphan-scan grace period. A test-named instance younger than this is left
 # alone to avoid race-killing an in-flight test on a parallel worker.
-# Aligned with the ``MNGR_AWS_AUTO_SHUTDOWN_MINUTES=60`` cap that release
-# tests propagate into cloud-init.
-_TEST_LEAK_TTL: Final[timedelta] = timedelta(hours=1)
+# Derived from the shared ``AWS_TEST_INSTANCE_AUTO_SHUTDOWN_MINUTES`` constant
+# (the same value release tests propagate into cloud-init) so the two TTLs
+# can never drift.
+_TEST_LEAK_TTL: Final[timedelta] = timedelta(minutes=AWS_TEST_INSTANCE_AUTO_SHUTDOWN_MINUTES)
 
 
 def _force_terminate_instances(ec2: Any, instance_ids: list[str]) -> None:

@@ -27,3 +27,15 @@ AWS_DEFAULT_REGION: Final[str] = os.environ.get("AWS_REGION", "us-east-1")
 # session-end orphan scan when no release tests were requested. Read once at
 # import time so both modules observe the same value.
 AWS_RELEASE_TESTS_OPT_IN: Final[bool] = os.environ.get("MNGR_AWS_RELEASE_TESTS") == "1"
+
+# Single source of truth for the release-test instance lifetime. Used in two
+# places that must stay aligned:
+#   1. ``test_release_aws.py`` propagates this into ``MNGR_AWS_AUTO_SHUTDOWN_MINUTES``
+#      so cloud-init runs ``shutdown -P +N`` on every test instance.
+#   2. ``conftest.py`` derives the orphan-scan grace period from this value
+#      so the session-end leak detector never race-kills an in-flight test
+#      on a parallel worker.
+# If these ever drift, the cloud-init backstop can fire after the leak
+# detector has already failed the session, or the leak detector can kill
+# instances that the auto-shutdown timer would have cleaned up on its own.
+AWS_TEST_INSTANCE_AUTO_SHUTDOWN_MINUTES: Final[int] = 60

@@ -31,7 +31,6 @@ Run manually:
 import os
 import subprocess
 import time
-from typing import Final
 
 import boto3
 import pytest
@@ -39,16 +38,11 @@ import pytest
 from imbue.mngr_aws.client import AwsVpsClient
 from imbue.mngr_aws.constants import AWS_DEFAULT_REGION
 from imbue.mngr_aws.constants import AWS_RELEASE_TESTS_OPT_IN
+from imbue.mngr_aws.constants import AWS_TEST_INSTANCE_AUTO_SHUTDOWN_MINUTES
 from imbue.mngr_aws.constants import AWS_TEST_NAME_PREFIX
 from imbue.mngr_aws.testing import aws_credentials_available
 
 _AWS_CREDS_PRESENT = aws_credentials_available()
-# Belt-and-suspenders backstop against runaway EC2 cost: even if pytest is
-# killed and the session-end leak detector never runs, this TTL drives cloud-init
-# to schedule ``shutdown -P +N`` which (combined with the AWS launch flag
-# ``InstanceInitiatedShutdownBehavior=terminate``) terminates the instance from
-# the inside. 60 min is conservatively above any normal test run length.
-_TEST_INSTANCE_AUTO_SHUTDOWN_MINUTES: Final[int] = 60
 
 pytestmark = [
     pytest.mark.release,
@@ -71,7 +65,7 @@ def _run_mngr(*args: str, timeout: int = 300) -> subprocess.CompletedProcess[str
     hook in ``conftest.py`` runs.
     """
     env = os.environ.copy()
-    env["MNGR_AWS_AUTO_SHUTDOWN_MINUTES"] = str(_TEST_INSTANCE_AUTO_SHUTDOWN_MINUTES)
+    env["MNGR_AWS_AUTO_SHUTDOWN_MINUTES"] = str(AWS_TEST_INSTANCE_AUTO_SHUTDOWN_MINUTES)
     cmd = ["uv", "run", "mngr", *args]
     return subprocess.run(
         cmd,
