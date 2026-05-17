@@ -42,13 +42,11 @@ from imbue.mngr_aws.constants import AWS_TEST_INSTANCE_AUTO_SHUTDOWN_MINUTES
 from imbue.mngr_aws.constants import AWS_TEST_NAME_PREFIX
 from imbue.mngr_aws.testing import aws_credentials_available
 
-_AWS_CREDS_PRESENT = aws_credentials_available()
-
 pytestmark = [
     pytest.mark.release,
     pytest.mark.timeout(900),
     pytest.mark.skipif(
-        not (_AWS_CREDS_PRESENT and AWS_RELEASE_TESTS_OPT_IN),
+        not (aws_credentials_available() and AWS_RELEASE_TESTS_OPT_IN),
         reason="AWS credentials or MNGR_AWS_RELEASE_TESTS=1 not set",
     ),
 ]
