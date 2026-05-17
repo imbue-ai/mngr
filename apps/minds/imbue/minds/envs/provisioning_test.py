@@ -282,6 +282,9 @@ def _build_fake_providers(
     def verify_neon_token_has_restore_scope(project_id, api_token):
         call_log["calls"].append(("verify_neon_token_has_restore_scope", project_id))
 
+    def await_apps_healthy(connector_url, litellm_proxy_url):
+        call_log["calls"].append(("await_apps_healthy", str(connector_url), str(litellm_proxy_url)))
+
     def destroy_mngr_agent(agent_id, mngr_host_dir, mngr_prefix, cg):
         call_log["calls"].append(("destroy_mngr_agent", agent_id, str(mngr_host_dir), mngr_prefix))
         if fail_step == "destroy_mngr_agent":
@@ -333,6 +336,7 @@ def _build_fake_providers(
         rollback_modal_app=rollback_modal_app,
         create_neon_restore_point=create_neon_restore_point,
         verify_neon_token_has_restore_scope=verify_neon_token_has_restore_scope,
+        await_apps_healthy=await_apps_healthy,
         destroy_mngr_agent=destroy_mngr_agent,
         wipe_supertokens_app_data=wipe_supertokens_app_data,
         wipe_neon_db_schema=wipe_neon_db_schema,

@@ -43,6 +43,7 @@ from imbue.minds.config.loader import load_deploy_config
 from imbue.minds.config.loader import repo_tier_client_config_path
 from imbue.minds.envs.generation import delete_generation_id as real_delete_generation_id
 from imbue.minds.envs.generation import ensure_generation_id as real_ensure_generation_id
+from imbue.minds.envs.health_check import await_apps_healthy as real_await_apps_healthy
 from imbue.minds.envs.local_store import env_root_exists
 from imbue.minds.envs.migrations import apply_pool_hosts_migrations as real_apply_pool_hosts_migrations
 from imbue.minds.envs.mngr_agent_cleanup import real_destroy_mngr_agent
@@ -249,6 +250,10 @@ def _verify_neon_token_has_restore_scope_for_provider(project_id: str, api_token
     real_verify_neon_token_has_restore_scope(project_id, api_token=api_token)
 
 
+def _await_apps_healthy_for_provider(connector_url: AnyUrl, litellm_proxy_url: AnyUrl) -> None:
+    real_await_apps_healthy(connector_url=connector_url, litellm_proxy_url=litellm_proxy_url)
+
+
 def _wipe_supertokens_for_provider(app_id: str, core_base_url: str, api_key: SecretStr) -> None:
     real_wipe_supertokens_app_data(app_id, core_base_url=core_base_url, api_key=api_key)
 
@@ -305,6 +310,7 @@ def _build_real_providers() -> Providers:
         rollback_modal_app=_rollback_modal_app_for_provider,
         create_neon_restore_point=_create_neon_restore_point_for_provider,
         verify_neon_token_has_restore_scope=_verify_neon_token_has_restore_scope_for_provider,
+        await_apps_healthy=_await_apps_healthy_for_provider,
         destroy_mngr_agent=real_destroy_mngr_agent,
         wipe_supertokens_app_data=_wipe_supertokens_for_provider,
         wipe_neon_db_schema=_wipe_neon_db_schema_for_provider,

@@ -186,6 +186,11 @@ CreateNeonRestorePointFn = Callable[[str, str, str, SecretStr], None]
 # (project_id, api_token) -> None. Preflight probe; raises NeonProviderError
 # on insufficient scope.
 VerifyNeonScopeFn = Callable[[str, SecretStr], None]
+# (connector_url, litellm_proxy_url) -> None. Polls both apps' health
+# endpoints until both return 200 (or until the per-app polling budget
+# runs out). Raises HealthCheckFailedError on definitive failure or
+# timeout. Tests inject a no-op fake; the real one shells out to httpx.
+AwaitAppsHealthyFn = Callable[[AnyUrl, AnyUrl], None]
 # (app_id, core_base_url, api_key) -> None. Used by tier destroys to
 # wipe every user/session in an existing SuperTokens app without
 # deleting the app itself. Idempotent via delete + recreate.
@@ -269,6 +274,13 @@ class Providers(FrozenModel):
     )
     verify_neon_token_has_restore_scope: VerifyNeonScopeFn = Field(
         description="(project_id, api_token) -> probe call that raises NeonProviderError on insufficient scope.",
+    )
+    await_apps_healthy: AwaitAppsHealthyFn = Field(
+        description=(
+            "(connector_url, litellm_proxy_url) -> polls both apps' health endpoints until "
+            "both return 200 (per-app polling budget). Raises HealthCheckFailedError on "
+            "definitive failure or timeout."
+        ),
     )
     destroy_mngr_agent: DestroyMngrAgentFn = Field(
         description=(
@@ -594,7 +606,15 @@ def deploy_env(
         )
     _assert_deploy_url_matches(actual=connector_url, expected=expected_connector_url, app=f"rsc-{tier}")
 
-    # Step 6: local state (only for tiers that write it).
+    # Step 6a: health check -- poll both apps' health endpoints until
+    # they return 200. Failure raises ``HealthCheckFailedError`` which
+    # the CLI surfaces with the same "run `minds env recover`" guidance
+    # as any other deploy failure. The recover-target file is still on
+    # disk at this point so recover will roll back both apps + Neon.
+    with info_span("Health check: polling both apps for 200"):
+        providers.await_apps_healthy(connector_url, litellm_proxy_url)
+
+    # Step 6b: local state (only for tiers that write it).
     client_config_path: str | None = None
     secrets_path: str | None = None
     if lifecycle.writes_local_state:
