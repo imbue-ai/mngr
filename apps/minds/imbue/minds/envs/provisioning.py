@@ -85,6 +85,13 @@ from imbue.minds.envs.providers.neon_db import NeonProjectRecord
 from imbue.minds.envs.providers.ovh_tags import OvhCredentials
 from imbue.minds.envs.providers.supertokens_app import SuperTokensAppRecord
 from imbue.minds.envs.providers.supertokens_app import app_id_from_connection_uri
+from imbue.minds.envs.recover import RecoverTarget
+from imbue.minds.envs.recover import delete_recover_target
+from imbue.minds.envs.recover import find_monorepo_root
+from imbue.minds.envs.recover import make_neon_restore_point_name
+from imbue.minds.envs.recover import recover_target_exists
+from imbue.minds.envs.recover import recover_target_path
+from imbue.minds.envs.recover import write_recover_target_atomic
 from imbue.minds.envs.secret_lifecycle import gc_old_per_tier_secrets
 from imbue.minds.envs.secret_lifecycle import make_deploy_id
 from imbue.minds.envs.secret_lifecycle import timestamped_secret_name
@@ -165,6 +172,20 @@ ListModalSecretsFn = Callable[[str, ConcurrencyGroup], tuple[str, ...]]
 # schema_migrations runner against the per-env host_pool DB. Tests
 # pass a no-op fake; the real implementation shells out to psql.
 ApplyPoolHostsMigrationsFn = Callable[[SecretStr, ConcurrencyGroup], tuple[Path, ...]]
+# (app_name, modal_env, cg) -> latest deployed version id, or None for
+# never-deployed. Used at deploy start to capture pre-deploy state so
+# ``minds env recover`` can `modal app rollback` to it on failure.
+GetModalAppLatestVersionFn = Callable[[str, str, ConcurrencyGroup], str | None]
+# (app_name, version, modal_env, cg) -> None. Used by `minds env recover`
+# to roll a Modal app back to its pre-deploy version.
+RollbackModalAppFn = Callable[[str, str, str, ConcurrencyGroup], None]
+# (project_id, branch_id, restore_point_name, api_token) -> None.
+# Creates a named PITR restore-point on the Neon branch at deploy start
+# so recover can do an instant restore.
+CreateNeonRestorePointFn = Callable[[str, str, str, SecretStr], None]
+# (project_id, api_token) -> None. Preflight probe; raises NeonProviderError
+# on insufficient scope.
+VerifyNeonScopeFn = Callable[[str, SecretStr], None]
 # (app_id, core_base_url, api_key) -> None. Used by tier destroys to
 # wipe every user/session in an existing SuperTokens app without
 # deleting the app itself. Idempotent via delete + recreate.
@@ -236,6 +257,18 @@ class Providers(FrozenModel):
             "(host_pool_dsn, cg) -> tuple of applied migration files. "
             "Runs the schema_migrations runner against the per-env host_pool DB."
         ),
+    )
+    get_modal_app_latest_version: GetModalAppLatestVersionFn = Field(
+        description="(app_name, modal_env, cg) -> latest deployed version id, or None for never-deployed.",
+    )
+    rollback_modal_app: RollbackModalAppFn = Field(
+        description="(app_name, version, modal_env, cg) -> `modal app rollback` to the given version.",
+    )
+    create_neon_restore_point: CreateNeonRestorePointFn = Field(
+        description="(project_id, branch_id, restore_point_name, api_token) -> create a named PITR restore-point.",
+    )
+    verify_neon_token_has_restore_scope: VerifyNeonScopeFn = Field(
+        description="(project_id, api_token) -> probe call that raises NeonProviderError on insufficient scope.",
     )
     destroy_mngr_agent: DestroyMngrAgentFn = Field(
         description=(
@@ -388,6 +421,17 @@ def deploy_env(
     deploy_id = make_deploy_id()
     logger.info("Deploy id for env {!r}: {}", str(name), deploy_id)
 
+    # Preflight: must not be running with a stale recover-target file.
+    # Other minds-env commands also refuse-on-exists, but check here too
+    # so deploy fails fast before any external mutation.
+    repo_root = find_monorepo_root()
+    if recover_target_exists(repo_root=repo_root):
+        raise MindError(
+            f"Recover-target file exists at {recover_target_path(repo_root=repo_root)}; "
+            "refusing to start a new deploy until the prior failed deploy is recovered. "
+            "Run `minds env recover` first."
+        )
+
     # Step 1: provider creation -- only when this tier owns the resources.
     neon_record: NeonProjectRecord | None = None
     supertokens_record: SuperTokensAppRecord | None = None
@@ -420,6 +464,57 @@ def deploy_env(
             applied = providers.apply_pool_hosts_migrations(neon_record.host_pool_dsn, parent_concurrency_group)
             if applied:
                 logger.info("Applied {} pool-hosts migration(s): {}", len(applied), [m.name for m in applied])
+
+    # Capture pre-deploy Modal app versions BEFORE any further mutation
+    # so the recover-target carries them. None for never-deployed apps
+    # (first-ever deploy of this env / tier) -- recover skips rollback
+    # for those.
+    app_names_to_capture = (f"llm-{tier}", f"rsc-{tier}")
+    app_versions_to_restore = {
+        app_name: providers.get_modal_app_latest_version(app_name, modal_env, parent_concurrency_group)
+        for app_name in app_names_to_capture
+    }
+    logger.info("Captured pre-deploy app versions: {}", app_versions_to_restore)
+
+    # Create a Neon named restore-point for the per-env project so
+    # recover can instant-restore both DBs to this point on rollback.
+    # Only for creates_resources=true (dev) tiers today; shared-tier
+    # restore-point support is a Phase 5+ refinement.
+    neon_restore_point_name: str | None = None
+    neon_branch_id: str | None = None
+    neon_project_id: str | None = None
+    if lifecycle.creates_resources and neon_record is not None:
+        neon_restore_point_name = make_neon_restore_point_name(deploy_id)
+        neon_branch_id = neon_record.branch_id
+        neon_project_id = neon_record.project_id
+        with info_span(
+            "Creating Neon restore-point {!r} on project {} branch {}",
+            neon_restore_point_name,
+            neon_project_id,
+            neon_branch_id,
+        ):
+            providers.create_neon_restore_point(
+                neon_project_id, neon_branch_id, neon_restore_point_name, credentials.neon_api_token
+            )
+
+    # Write the recover-target file atomically. If anything after this
+    # point fails, the operator runs ``minds env recover`` to converge
+    # the cloud back to the captured state. Successful deploy deletes
+    # the file as its very last step.
+    recover_target = RecoverTarget(
+        deploy_id=deploy_id,
+        env_name=str(name),
+        tier=tier,
+        modal_env=modal_env,
+        modal_workspace=modal_workspace,
+        vault_path_prefix=tier_vault_prefix,
+        neon_project_id=neon_project_id,
+        neon_branch_id=neon_branch_id,
+        neon_restore_point_name=neon_restore_point_name,
+        app_versions_to_restore=app_versions_to_restore,
+    )
+    with info_span("Writing recover-target file at monorepo root"):
+        write_recover_target_atomic(recover_target, repo_root=repo_root)
 
     # Step 2: tier generation id -- only when this tier exposes one.
     generation_id: str | None = None
@@ -518,6 +613,12 @@ def deploy_env(
                 name=name,
             )
         )
+
+    # Deploy reached its happy path: delete the recover-target file.
+    # On any failure before this point the file stays in place and the
+    # CLI prints "run `minds env recover`" guidance.
+    with info_span("Deleting recover-target file after successful deploy"):
+        delete_recover_target(repo_root=repo_root)
 
     # GC old timestamped Modal Secrets at the end of every successful
     # deploy. Best-effort -- failures here are logged but never re-raise

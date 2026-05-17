@@ -54,7 +54,9 @@ from imbue.minds.envs.per_env_deploy import delete_modal_secret as real_delete_m
 from imbue.minds.envs.per_env_deploy import deploy_litellm_proxy as real_deploy_litellm_proxy
 from imbue.minds.envs.per_env_deploy import deploy_remote_service_connector as real_deploy_remote_service_connector
 from imbue.minds.envs.per_env_deploy import ensure_modal_env as real_ensure_modal_env
+from imbue.minds.envs.per_env_deploy import get_modal_app_latest_version as real_get_modal_app_latest_version
 from imbue.minds.envs.per_env_deploy import push_per_env_modal_secret as real_push_per_env_modal_secret
+from imbue.minds.envs.per_env_deploy import rollback_modal_app as real_rollback_modal_app
 from imbue.minds.envs.per_env_deploy import stop_modal_app as real_stop_modal_app
 from imbue.minds.envs.primitives import DevEnvName
 from imbue.minds.envs.primitives import DevEnvNotFoundError
@@ -64,9 +66,13 @@ from imbue.minds.envs.providers.cloudflare_tunnels import delete_tunnels as real
 from imbue.minds.envs.providers.cloudflare_tunnels import list_tunnels_for_env as real_list_cloudflare_tunnels_for_env
 from imbue.minds.envs.providers.modal_env import delete_modal_env as real_delete_modal_env
 from imbue.minds.envs.providers.neon_db import NeonProjectRecord
+from imbue.minds.envs.providers.neon_db import create_named_restore_point as real_create_neon_restore_point
 from imbue.minds.envs.providers.neon_db import create_neon_project
 from imbue.minds.envs.providers.neon_db import delete_neon_project
 from imbue.minds.envs.providers.neon_db import pool_hosts_migrations_dir
+from imbue.minds.envs.providers.neon_db import (
+    verify_neon_token_has_restore_scope as real_verify_neon_token_has_restore_scope,
+)
 from imbue.minds.envs.providers.neon_db import wipe_neon_db_schema as real_wipe_neon_db_schema
 from imbue.minds.envs.providers.ovh_tags import OvhCredentials
 from imbue.minds.envs.providers.ovh_tags import delete_instances as delete_ovh_instances
@@ -81,6 +87,13 @@ from imbue.minds.envs.provisioning import Providers
 from imbue.minds.envs.provisioning import deploy_env
 from imbue.minds.envs.provisioning import destroy_env
 from imbue.minds.envs.provisioning import list_dev_envs
+from imbue.minds.envs.recover import RecoverFailedError
+from imbue.minds.envs.recover import RecoverTargetMissingError
+from imbue.minds.envs.recover import find_monorepo_root
+from imbue.minds.envs.recover import read_recover_target
+from imbue.minds.envs.recover import recover_env
+from imbue.minds.envs.recover import recover_target_exists
+from imbue.minds.envs.recover import recover_target_path
 from imbue.minds.envs.secret_lifecycle import list_modal_secrets as real_list_modal_secrets
 from imbue.minds.envs.vault_reader import VaultPath
 from imbue.minds.envs.vault_reader import read_vault_kv
@@ -218,6 +231,24 @@ def _apply_pool_hosts_migrations_for_provider(host_pool_dsn: SecretStr, cg: Conc
     return real_apply_pool_hosts_migrations(host_pool_dsn, migrations_dir=pool_hosts_migrations_dir(), parent_cg=cg)
 
 
+def _get_modal_app_latest_version_for_provider(app_name: str, modal_env: str, cg: ConcurrencyGroup) -> str | None:
+    return real_get_modal_app_latest_version(app_name=app_name, modal_env=modal_env, parent_cg=cg)
+
+
+def _rollback_modal_app_for_provider(app_name: str, version: str, modal_env: str, cg: ConcurrencyGroup) -> None:
+    real_rollback_modal_app(app_name=app_name, version=version, modal_env=modal_env, parent_cg=cg)
+
+
+def _create_neon_restore_point_for_provider(
+    project_id: str, branch_id: str, restore_point_name: str, api_token: SecretStr
+) -> None:
+    real_create_neon_restore_point(project_id, branch_id, restore_point_name, api_token=api_token)
+
+
+def _verify_neon_token_has_restore_scope_for_provider(project_id: str, api_token: SecretStr) -> None:
+    real_verify_neon_token_has_restore_scope(project_id, api_token=api_token)
+
+
 def _wipe_supertokens_for_provider(app_id: str, core_base_url: str, api_key: SecretStr) -> None:
     real_wipe_supertokens_app_data(app_id, core_base_url=core_base_url, api_key=api_key)
 
@@ -270,6 +301,10 @@ def _build_real_providers() -> Providers:
         delete_modal_secret=_delete_modal_secret_for_provider,
         list_modal_secrets=_list_modal_secrets_for_provider,
         apply_pool_hosts_migrations=_apply_pool_hosts_migrations_for_provider,
+        get_modal_app_latest_version=_get_modal_app_latest_version_for_provider,
+        rollback_modal_app=_rollback_modal_app_for_provider,
+        create_neon_restore_point=_create_neon_restore_point_for_provider,
+        verify_neon_token_has_restore_scope=_verify_neon_token_has_restore_scope_for_provider,
         destroy_mngr_agent=real_destroy_mngr_agent,
         wipe_supertokens_app_data=_wipe_supertokens_for_provider,
         wipe_neon_db_schema=_wipe_neon_db_schema_for_provider,
@@ -381,6 +416,30 @@ def _emit_deploy_result(result: DeployedEnv, *, output_format: OutputFormat) -> 
     )
 
 
+def _refuse_if_recover_target_exists() -> None:
+    """Block the command if a recover-target file is sitting at the monorepo root.
+
+    Every minds-env command other than ``recover`` itself refuses to
+    run while the file exists: a prior deploy failed and the operator
+    needs to clear it (via ``minds env recover``, or manually if known-
+    stale) before any new operation against the env can proceed.
+
+    Tolerates ``NotInMonorepoError`` for commands that don't strictly
+    require monorepo context (e.g. ``list`` from $HOME); when we can't
+    find a monorepo root we can't have a recover-target there either.
+    """
+    try:
+        repo_root = find_monorepo_root()
+    except MindError:
+        return
+    if recover_target_exists(repo_root=repo_root):
+        raise click.ClickException(
+            f"Recover-target file exists at {recover_target_path(repo_root=repo_root)} -- "
+            "a prior `minds env deploy` failed mid-flight. Run `minds env recover` to roll back "
+            "(or delete the file manually if it's known-stale) before any other minds env command."
+        )
+
+
 def _emit_destroy_result(env_name: str, *, output_format: OutputFormat) -> None:
     if output_format is OutputFormat.HUMAN:
         logger.info("Destroyed dev env '{}'.", env_name)
@@ -415,6 +474,10 @@ def env() -> None:
 def env_activate(name: str, create: bool) -> None:
     """Print shell exports that activate env ``NAME`` in the calling shell.
 
+    Refuses when a recover-target file exists at the monorepo root --
+    a prior failed deploy must be cleared via ``minds env recover``
+    before any other env command runs.
+
     Designed for ``eval "$(uv run minds env activate <name>)"``: after
     sourcing, ``mngr`` writes to ``~/.minds-<name>/mngr``, ``minds run``
     picks up the per-env client config without a ``--config-file`` flag,
@@ -447,6 +510,8 @@ def env_activate(name: str, create: bool) -> None:
       and proceeds. Without ``--create``, the error message tells the
       operator how to bootstrap a fresh dev env in one line.
     """
+    _refuse_if_recover_target_exists()
+
     if name in _RESERVED_TIER_ENV_NAMES or name == _PRODUCTION_ENV_NAME:
         _activate_reserved_env(name)
         return
@@ -697,6 +762,7 @@ def env_deactivate() -> None:
     activate something, and ``mngr`` falls back to its own
     ``~/.mngr/`` default.
     """
+    _refuse_if_recover_target_exists()
     write_stdout_line('# Deactivate the current env. Source via: eval "$(uv run minds env deactivate)"')
     for key in _ACTIVATION_ENV_VARS:
         write_stdout_line(f"unset {key}")
@@ -706,6 +772,7 @@ def env_deactivate() -> None:
 @click.pass_context
 def env_list(ctx: click.Context) -> None:
     """List every minds env on disk (every ``~/.minds*/`` dir)."""
+    _refuse_if_recover_target_exists()
     output_format: OutputFormat = ctx.obj.get("output_format", OutputFormat.HUMAN)
     summaries = list_dev_envs()
     active = active_env_name_or_none()
@@ -762,6 +829,8 @@ def env_list(ctx: click.Context) -> None:
 def env_deploy(ctx: click.Context, yes_i_mean_production: bool, yes_i_mean_staging: bool) -> None:
     """Provision or upgrade the currently-activated env.
 
+    Refuses when a recover-target file exists at the monorepo root.
+
     Reads the activated env from ``MINDS_ROOT_NAME`` (set by
     ``minds env activate``) and dispatches:
 
@@ -777,6 +846,7 @@ def env_deploy(ctx: click.Context, yes_i_mean_production: bool, yes_i_mean_stagi
     Idempotent: re-running picks up any new tier-shared Vault values and
     re-deploys in place.
     """
+    _refuse_if_recover_target_exists()
     output_format: OutputFormat = ctx.obj.get("output_format", OutputFormat.HUMAN)
     env_name = require_activated_env_name()
     tier = _tier_for_env_name(env_name)
@@ -817,6 +887,20 @@ def env_deploy(ctx: click.Context, yes_i_mean_production: bool, yes_i_mean_stagi
                 parent_concurrency_group=cg,
             )
         except MindError as exc:
+            # If a recover-target file was written before this failure
+            # fired, the operator needs to run `minds env recover` to
+            # converge back. Surface that guidance loudly.
+            try:
+                repo_root_for_msg = find_monorepo_root()
+            except MindError:
+                repo_root_for_msg = None
+            if repo_root_for_msg is not None and recover_target_exists(repo_root=repo_root_for_msg):
+                raise click.ClickException(
+                    f"{exc}\n\n"
+                    f"A recover-target file is sitting at {recover_target_path(repo_root=repo_root_for_msg)}. "
+                    "Run `minds env recover` to roll back to the pre-deploy state, then re-run "
+                    "`minds env deploy` after fixing the underlying issue."
+                ) from exc
             raise click.ClickException(str(exc)) from exc
         _emit_deploy_result(result, output_format=output_format)
 
@@ -862,6 +946,7 @@ def env_destroy(ctx: click.Context, keep_agents: bool, yes_i_mean_staging: bool)
     resources) and the generation-id removal (only for shared tiers
     that use generation tracking).
     """
+    _refuse_if_recover_target_exists()
     output_format: OutputFormat = ctx.obj.get("output_format", OutputFormat.HUMAN)
     env_name = require_activated_env_name()
     tier = _tier_for_env_name(env_name)
@@ -905,3 +990,43 @@ def env_destroy(ctx: click.Context, keep_agents: bool, yes_i_mean_staging: bool)
             raise click.ClickException(str(exc)) from exc
 
     _emit_destroy_result(env_name, output_format=output_format)
+
+
+@env.command("recover")
+@click.pass_context
+def env_recover(_ctx: click.Context) -> None:
+    """Roll back to the pre-deploy state captured by a failed `minds env deploy`.
+
+    Reads ``.minds-deploy-recover-target.json`` at the monorepo root,
+    runs every reversal step (modal app rollback, Neon restore, orphan
+    secret cleanup) in order, then deletes the file. Each step is
+    idempotent so re-running recover after a partial recovery converges.
+
+    Refuses to run if no recover-target file exists (nothing to do).
+    """
+    try:
+        repo_root = find_monorepo_root()
+    except MindError as exc:
+        raise click.ClickException(str(exc)) from exc
+    if not recover_target_exists(repo_root=repo_root):
+        raise click.ClickException(
+            f"No recover-target file at {recover_target_path(repo_root=repo_root)}; nothing to recover. "
+            "(Recover is only meaningful after a failed `minds env deploy`.)"
+        )
+
+    providers = _build_real_providers()
+    with ConcurrencyGroup(name="minds-env-recover") as cg:
+        # Load credentials from the tier-vault prefix the recover-target
+        # file recorded. We re-derive the tier here since the recover-
+        # target has env_name + tier already.
+        target = read_recover_target(repo_root=repo_root)
+        try:
+            credentials = _load_dev_credentials_from_vault(target.vault_path_prefix, cg=cg)
+        except VaultReadError as exc:
+            raise click.ClickException(str(exc)) from exc
+        try:
+            recover_env(repo_root=repo_root, providers=providers, credentials=credentials, parent_cg=cg)
+        except RecoverTargetMissingError as exc:
+            raise click.ClickException(str(exc)) from exc
+        except RecoverFailedError as exc:
+            raise click.ClickException(str(exc)) from exc

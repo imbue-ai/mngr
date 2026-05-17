@@ -40,8 +40,16 @@ from imbue.mngr_ovh.iam_tags import IamResource
 
 @pytest.fixture
 def _isolated_home(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
+    """Sandbox $HOME + cwd so deploy/destroy/recover write to a tmp tree only.
+
+    Also seeds an ``apps/`` marker so :func:`find_monorepo_root` (called
+    by deploy_env to pick the recover-target file location) finds a
+    monorepo root under the tmp tree instead of the real repo.
+    """
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.delenv("MINDS_ROOT_NAME", raising=False)
+    (tmp_path / "apps").mkdir()
+    monkeypatch.chdir(tmp_path)
     return tmp_path
 
 
@@ -218,6 +226,9 @@ def _build_fake_providers(
         call_log["calls"].append(("deploy_litellm_proxy", modal_env, tier, min_containers, deploy_id))
         if fail_step == "deploy_litellm":
             raise ModalDeployError("litellm deploy boom")
+        # Track the deploy id as the "version" of the deployed app for
+        # the matching get_modal_app_latest_version lookups in later runs.
+        deployed_app_versions[(modal_env, f"llm-{tier}")] = deploy_id
         # Match the same URL formula ``deploy_env`` uses so the post-
         # deploy URL-match assertion passes for both per-env (dev) and
         # shared (staging/prod) shapes.
@@ -229,6 +240,7 @@ def _build_fake_providers(
         call_log["calls"].append(("deploy_remote_service_connector", modal_env, tier, min_containers, deploy_id))
         if fail_step == "deploy_connector":
             raise ModalDeployError("connector deploy boom")
+        deployed_app_versions[(modal_env, f"rsc-{tier}")] = deploy_id
         if tier == "dev":
             return AnyUrl(f"https://{_TEST_MODAL_WORKSPACE}-{modal_env}--rsc-dev-api.modal.run")
         return AnyUrl(f"https://{_TEST_MODAL_WORKSPACE}--rsc-{tier}-api.modal.run")
@@ -251,6 +263,24 @@ def _build_fake_providers(
     def apply_pool_hosts_migrations(host_pool_dsn, cg):
         call_log["calls"].append(("apply_pool_hosts_migrations", host_pool_dsn.get_secret_value()))
         return ()
+
+    # Tracks deployed app versions across deploy + recover cycles. Lets
+    # the fake `get_modal_app_latest_version` return None for the first
+    # deploy and the captured pre-deploy id on subsequent calls.
+    deployed_app_versions: dict[tuple[str, str], str] = {}
+
+    def get_modal_app_latest_version(app_name, modal_env, cg):
+        call_log["calls"].append(("get_modal_app_latest_version", app_name, modal_env))
+        return deployed_app_versions.get((modal_env, app_name))
+
+    def rollback_modal_app(app_name, version, modal_env, cg):
+        call_log["calls"].append(("rollback_modal_app", app_name, version, modal_env))
+
+    def create_neon_restore_point(project_id, branch_id, restore_point_name, api_token):
+        call_log["calls"].append(("create_neon_restore_point", project_id, branch_id, restore_point_name))
+
+    def verify_neon_token_has_restore_scope(project_id, api_token):
+        call_log["calls"].append(("verify_neon_token_has_restore_scope", project_id))
 
     def destroy_mngr_agent(agent_id, mngr_host_dir, mngr_prefix, cg):
         call_log["calls"].append(("destroy_mngr_agent", agent_id, str(mngr_host_dir), mngr_prefix))
@@ -299,6 +329,10 @@ def _build_fake_providers(
         delete_modal_secret=delete_modal_secret,
         list_modal_secrets=list_modal_secrets,
         apply_pool_hosts_migrations=apply_pool_hosts_migrations,
+        get_modal_app_latest_version=get_modal_app_latest_version,
+        rollback_modal_app=rollback_modal_app,
+        create_neon_restore_point=create_neon_restore_point,
+        verify_neon_token_has_restore_scope=verify_neon_token_has_restore_scope,
         destroy_mngr_agent=destroy_mngr_agent,
         wipe_supertokens_app_data=wipe_supertokens_app_data,
         wipe_neon_db_schema=wipe_neon_db_schema,

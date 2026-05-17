@@ -314,3 +314,8 @@
 # re-fetch.
 /apps/minds/imbue/minds/desktop_client/static/tailwind.js
 **/.env.swp
+
+# `minds env deploy` writes a recover-target file at the monorepo root
+# on failed deploys; `minds env recover` deletes it after rolling back.
+# Never checked in.
+.minds-deploy-*.json

@@ -24,6 +24,7 @@ connector that consume those values will 500 at request time until the
 Vault entry gets populated and ``minds env deploy`` is re-run.
 """
 
+import json
 import os
 import re
 from pathlib import Path
@@ -568,6 +569,75 @@ def _run_modal_function(
         stderr = result.stderr.strip() or result.stdout.strip()
         raise ModalDeployError(
             f"`modal run --env {modal_env} {app_file}::{function_name}` failed (exit {result.returncode}): {stderr}"
+        )
+
+
+def get_modal_app_latest_version(*, app_name: str, modal_env: str, parent_cg: ConcurrencyGroup) -> str | None:
+    """Return the latest deployed version id of ``app_name`` in ``modal_env``, or None.
+
+    Shells out to ``modal app history --env=<env> <app> --json`` and
+    parses the first entry. Returns ``None`` if the app has never been
+    deployed (Modal returns "app not found" on stderr and exits non-zero),
+    so callers can distinguish first-deploy from upgrade-deploy without
+    raising.
+    """
+    command = ["modal", "app", "history", "--env", modal_env, "--json", app_name]
+    cg = parent_cg.make_concurrency_group(name=f"modal-app-history-{app_name}")
+    with cg:
+        result = cg.run_process_to_completion(
+            command=command,
+            timeout=_MODAL_SECRET_TIMEOUT_SECONDS,
+            is_checked_after=False,
+            env=_modal_subprocess_env(),
+        )
+    if result.returncode != 0:
+        message = (result.stderr + result.stdout).lower()
+        if "not found" in message or "no such" in message or "does not exist" in message:
+            return None
+        stderr = result.stderr.strip() or result.stdout.strip()
+        raise ModalDeployError(
+            f"`modal app history {app_name} --env {modal_env}` failed (exit {result.returncode}): {stderr}"
+        )
+    try:
+        rows = json.loads(result.stdout)
+    except (ValueError, json.JSONDecodeError) as exc:
+        raise ModalDeployError(f"`modal app history --json` returned non-JSON: {exc}") from exc
+    if not isinstance(rows, list) or not rows:
+        return None
+    # Modal sorts history newest-first. Look for a "version" / "Version"
+    # field on the first entry.
+    first = rows[0]
+    if isinstance(first, dict):
+        for key in ("Version", "version"):
+            value = first.get(key)
+            if isinstance(value, str | int):
+                return str(value)
+    return None
+
+
+def rollback_modal_app(*, app_name: str, version: str, modal_env: str, parent_cg: ConcurrencyGroup) -> None:
+    """``modal app rollback <app> <version> --env=<env>``.
+
+    Re-deploys the version that was active at ``version``, including the
+    env vars (notably ``MINDS_DEPLOY_ID``) captured at that deploy time
+    -- which re-attaches the rolled-back app to the matching
+    ``<svc>-<tier>-<id>`` Modal Secrets minted under that prior deploy.
+    Idempotent in the sense that re-running with the same target version
+    is just a no-op redeploy.
+    """
+    command = ["modal", "app", "rollback", "--env", modal_env, app_name, version]
+    cg = parent_cg.make_concurrency_group(name=f"modal-app-rollback-{app_name}")
+    with cg:
+        result = cg.run_process_to_completion(
+            command=command,
+            timeout=_MODAL_DEPLOY_TIMEOUT_SECONDS,
+            is_checked_after=False,
+            env=_modal_subprocess_env(),
+        )
+    if result.returncode != 0:
+        stderr = result.stderr.strip() or result.stdout.strip()
+        raise ModalDeployError(
+            f"`modal app rollback {app_name} {version} --env {modal_env}` failed (exit {result.returncode}): {stderr}"
         )
 
 

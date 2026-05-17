@@ -419,6 +419,54 @@ def delete_neon_project(
         raise
 
 
+def create_named_restore_point(project_id: str, branch_id: str, name: str, *, api_token: SecretStr) -> None:
+    """Mark a named point-in-time restore-point on ``branch_id`` for later instant restore.
+
+    Uses Neon's ``POST /projects/{id}/branches/{id}/restore_points`` endpoint
+    (separate from snapshots / backup branches -- it's a lightweight pointer
+    into the branch's existing PITR history, so it costs nothing and ages
+    out automatically with the PITR retention window).
+
+    Idempotent: passing a previously-created name re-stamps it.
+    """
+    _neon_request(
+        "POST",
+        f"/projects/{project_id}/branches/{branch_id}/restore_points",
+        api_token=api_token,
+        json_body={"restore_point": {"name": name}},
+    )
+
+
+def restore_branch_to_named_restore_point(project_id: str, branch_id: str, name: str, *, api_token: SecretStr) -> None:
+    """Restore ``branch_id`` to a previously-created named restore-point.
+
+    Atomic and fast: Neon's "instant restore" rewinds the branch's data
+    to the point in time the named restore-point captured. Both
+    databases on the branch (host_pool + litellm_cost) come back to
+    that exact state in a single operation.
+
+    Idempotent in the sense that re-running against an already-restored
+    branch is a near-no-op.
+    """
+    _neon_request(
+        "POST",
+        f"/projects/{project_id}/branches/{branch_id}/restore",
+        api_token=api_token,
+        json_body={"source_named_restore_point": name},
+    )
+
+
+def verify_neon_token_has_restore_scope(project_id: str, *, api_token: SecretStr) -> None:
+    """Preflight check: confirm the configured Neon API token can read the project.
+
+    A read of ``GET /projects/{id}`` is the cheapest probe that exercises
+    the same authorization path the snapshot + restore calls will use.
+    Failure surfaces as :class:`NeonProviderError` so the operator sees
+    "Neon API returned 403" before deploy starts mutating anything.
+    """
+    _neon_request("GET", f"/projects/{project_id}", api_token=api_token)
+
+
 def wipe_neon_db_schema(dsn: SecretStr, *, parent_cg: ConcurrencyGroup) -> None:
     """Drop and recreate the ``public`` schema in the database ``dsn`` points at.
 
