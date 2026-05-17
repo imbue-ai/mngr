@@ -23,7 +23,20 @@ from imbue.mngr_modal.constants import MODAL_TEST_APP_PREFIX
 from imbue.mngr_modal.routes.deployment import deploy_function
 from imbue.modal_proxy.direct import DirectModalInterface
 
-pytestmark = [pytest.mark.modal]
+# Module-level `pytestmark = [pytest.mark.modal]` was deliberately removed.
+# The resource guard attributes modal calls to whichever test invoked them,
+# not to every test that uses the fixture they happened in. The
+# `deployed_snapshot_function` fixture below is module-scoped and calls
+# modal during setup, so only the first test to trigger that setup "gets
+# credit" -- sibling HTTP-only tests would then fail the
+# `@pytest.mark.modal but never invoked modal` check.
+#
+# Instead, each test that directly invokes modal carries
+# `@pytest.mark.modal` explicitly. The two HTTP-only error-path tests
+# (missing_sandbox_id, missing_host_id) intentionally do NOT carry the
+# mark -- they only hit the deployed function via `httpx.post`. They
+# still depend on the fixture (which deploys the function), but that
+# dependency is implicit and doesn't trip the resource guard.
 
 # =============================================================================
 # Acceptance tests (require Modal network access)
@@ -151,6 +164,7 @@ def deployed_snapshot_function() -> Generator[tuple[str, str], None, None]:
 
 
 @pytest.mark.acceptance
+@pytest.mark.modal
 @pytest.mark.timeout(180)
 def test_snapshot_and_shutdown_success(
     deployed_snapshot_function: tuple[str, str],
@@ -217,22 +231,17 @@ def test_snapshot_and_shutdown_success(
 
 
 @pytest.mark.acceptance
-@pytest.mark.flaky
 @pytest.mark.timeout(180)
 def test_snapshot_and_shutdown_missing_sandbox_id(
     deployed_snapshot_function: tuple[str, str],
 ) -> None:
     """Test that missing sandbox_id returns 400 error.
 
-    Marked flaky because of a known collection-order interaction with
-    the module-scoped ``deployed_snapshot_function`` fixture and the
-    ``pytestmark = [pytest.mark.modal]`` guard. The fixture makes the
-    in-process modal calls during setup, but the resource guard
-    attributes those calls only to whichever test triggered the setup --
-    sibling HTTP-only tests then look like they "never invoked modal".
-    Pre-existing on main; a permanent fix needs the resource guard to
-    attribute fixture-setup modal calls to every test that uses the
-    fixture (or to drop the module-level modal mark on HTTP-only tests).
+    HTTP-only -- this test exercises the deployed function's input
+    validation path via httpx and does not itself call any modal SDK
+    method, so it intentionally does NOT carry @pytest.mark.modal (see
+    the module-level note for why). The deployed function is provided
+    by the module-scoped ``deployed_snapshot_function`` fixture.
     """
     _, function_url = deployed_snapshot_function
 
@@ -247,19 +256,14 @@ def test_snapshot_and_shutdown_missing_sandbox_id(
 
 
 @pytest.mark.acceptance
-@pytest.mark.flaky
 @pytest.mark.timeout(180)
 def test_snapshot_and_shutdown_missing_host_id(
     deployed_snapshot_function: tuple[str, str],
 ) -> None:
     """Test that missing host_id returns 400 error.
 
-    Marked flaky for the same reason as the sister
-    ``test_snapshot_and_shutdown_missing_sandbox_id`` test: the module's
-    ``pytestmark = [pytest.mark.modal]`` declaration combined with the
-    module-scoped ``deployed_snapshot_function`` fixture causes the
-    "never invoked modal" guard to misfire on HTTP-only tests when they
-    run in a sandbox alone. Pre-existing on main.
+    HTTP-only -- see ``test_snapshot_and_shutdown_missing_sandbox_id``
+    for why no @pytest.mark.modal.
     """
     _, function_url = deployed_snapshot_function
 
@@ -274,6 +278,7 @@ def test_snapshot_and_shutdown_missing_host_id(
 
 
 @pytest.mark.acceptance
+@pytest.mark.modal
 @pytest.mark.timeout(180)
 def test_snapshot_and_shutdown_nonexistent_sandbox(
     deployed_snapshot_function: tuple[str, str],
@@ -299,6 +304,7 @@ def test_snapshot_and_shutdown_nonexistent_sandbox(
 
 
 @pytest.mark.acceptance
+@pytest.mark.modal
 @pytest.mark.timeout(180)
 def test_snapshot_and_shutdown_nonexistent_host_record(
     deployed_snapshot_function: tuple[str, str],
