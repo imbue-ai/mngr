@@ -79,6 +79,7 @@ from imbue.minds.envs.provisioning import Providers
 from imbue.minds.envs.provisioning import deploy_env
 from imbue.minds.envs.provisioning import destroy_env
 from imbue.minds.envs.provisioning import list_dev_envs
+from imbue.minds.envs.secret_lifecycle import list_modal_secrets as real_list_modal_secrets
 from imbue.minds.envs.vault_reader import VaultPath
 from imbue.minds.envs.vault_reader import read_vault_kv
 from imbue.minds.errors import MindError
@@ -183,13 +184,19 @@ def _push_per_env_modal_secret_for_provider(
     real_push_per_env_modal_secret(secret_name, values, modal_env=modal_env, parent_cg=cg)
 
 
-def _deploy_litellm_proxy_for_provider(modal_env: str, tier: str, min_containers: int, cg: ConcurrencyGroup) -> AnyUrl:
-    return real_deploy_litellm_proxy(modal_env=modal_env, tier=tier, min_containers=min_containers, parent_cg=cg)
+def _deploy_litellm_proxy_for_provider(
+    modal_env: str, tier: str, min_containers: int, deploy_id: str, cg: ConcurrencyGroup
+) -> AnyUrl:
+    return real_deploy_litellm_proxy(
+        modal_env=modal_env, tier=tier, min_containers=min_containers, deploy_id=deploy_id, parent_cg=cg
+    )
 
 
-def _deploy_connector_for_provider(modal_env: str, tier: str, min_containers: int, cg: ConcurrencyGroup) -> AnyUrl:
+def _deploy_connector_for_provider(
+    modal_env: str, tier: str, min_containers: int, deploy_id: str, cg: ConcurrencyGroup
+) -> AnyUrl:
     return real_deploy_remote_service_connector(
-        modal_env=modal_env, tier=tier, min_containers=min_containers, parent_cg=cg
+        modal_env=modal_env, tier=tier, min_containers=min_containers, deploy_id=deploy_id, parent_cg=cg
     )
 
 
@@ -199,6 +206,10 @@ def _stop_modal_app_for_provider(app_name: str, modal_env: str, cg: ConcurrencyG
 
 def _delete_modal_secret_for_provider(secret_name: str, modal_env: str, cg: ConcurrencyGroup) -> None:
     real_delete_modal_secret(secret_name=secret_name, modal_env=modal_env, parent_cg=cg)
+
+
+def _list_modal_secrets_for_provider(modal_env: str, cg: ConcurrencyGroup) -> tuple[str, ...]:
+    return real_list_modal_secrets(modal_env=modal_env, parent_cg=cg)
 
 
 def _wipe_supertokens_for_provider(app_id: str, core_base_url: str, api_key: SecretStr) -> None:
@@ -251,6 +262,7 @@ def _build_real_providers() -> Providers:
         deploy_remote_service_connector=_deploy_connector_for_provider,
         stop_modal_app=_stop_modal_app_for_provider,
         delete_modal_secret=_delete_modal_secret_for_provider,
+        list_modal_secrets=_list_modal_secrets_for_provider,
         destroy_mngr_agent=real_destroy_mngr_agent,
         wipe_supertokens_app_data=_wipe_supertokens_for_provider,
         wipe_neon_db_schema=_wipe_neon_db_schema_for_provider,

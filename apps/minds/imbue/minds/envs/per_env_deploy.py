@@ -92,6 +92,13 @@ _MODAL_ENV_CREATE_TIMEOUT_SECONDS: Final[float] = 60.0
 CONNECTOR_MIN_CONTAINERS_ENV_VAR: Final[str] = "MINDS_CONNECTOR_MIN_CONTAINERS"
 LITELLM_PROXY_MIN_CONTAINERS_ENV_VAR: Final[str] = "MINDS_LITELLM_PROXY_MIN_CONTAINERS"
 
+# Env-var name the deployed modal apps read at module load to pick
+# which timestamped Modal Secret bundle to attach. Mirrors the same
+# constant in ``secret_lifecycle.py``; kept here (instead of importing
+# from there) because ``per_env_deploy`` predates that module and we
+# avoid the circular import.
+MINDS_DEPLOY_ID_ENV_VAR: Final[str] = "MINDS_DEPLOY_ID"
+
 
 class ModalDeployError(MindError):
     """Raised when a ``modal deploy`` or ``modal secret create`` call fails."""
@@ -274,6 +281,7 @@ def deploy_litellm_proxy(
     modal_env: str,
     tier: str,
     min_containers: int,
+    deploy_id: str,
     parent_cg: ConcurrencyGroup,
 ) -> AnyUrl:
     """``modal deploy`` the litellm-proxy app into ``modal_env`` for ``tier``.
@@ -309,6 +317,7 @@ def deploy_litellm_proxy(
             function_name="migrate_db",
             modal_env=modal_env,
             tier=tier,
+            deploy_id=deploy_id,
             parent_cg=parent_cg,
         )
     with info_span("modal deploy llm-{} into env {!r}", tier, modal_env):
@@ -317,6 +326,7 @@ def deploy_litellm_proxy(
             app_name=f"llm-{tier}",
             modal_env=modal_env,
             tier=tier,
+            deploy_id=deploy_id,
             extra_env={LITELLM_PROXY_MIN_CONTAINERS_ENV_VAR: str(min_containers)},
             parent_cg=parent_cg,
         )
@@ -402,6 +412,7 @@ def deploy_remote_service_connector(
     modal_env: str,
     tier: str,
     min_containers: int,
+    deploy_id: str,
     parent_cg: ConcurrencyGroup,
 ) -> AnyUrl:
     """``modal deploy`` the remote_service_connector app into ``modal_env`` for ``tier``.
@@ -410,6 +421,11 @@ def deploy_remote_service_connector(
     meaning of ``modal_env``. ``min_containers`` is threaded into the
     subprocess env as ``MINDS_CONNECTOR_MIN_CONTAINERS`` and consumed
     by the modal app at module load.
+
+    ``deploy_id`` is threaded into the subprocess env as ``MINDS_DEPLOY_ID``
+    so the deployed connector attaches to the matching ``<svc>-<tier>-<id>``
+    Modal Secrets minted by this deploy. Missing the id at the app's module
+    load is a hard failure (the app raises ``DeployIdMissingError``).
     """
     with info_span("modal deploy rsc-{} into env {!r}", tier, modal_env):
         return _deploy_modal_app(
@@ -417,6 +433,7 @@ def deploy_remote_service_connector(
             app_name=f"rsc-{tier}",
             modal_env=modal_env,
             tier=tier,
+            deploy_id=deploy_id,
             extra_env={CONNECTOR_MIN_CONTAINERS_ENV_VAR: str(min_containers)},
             parent_cg=parent_cg,
         )
@@ -445,6 +462,7 @@ def _deploy_modal_app(
     app_name: str,
     modal_env: str,
     tier: str,
+    deploy_id: str,
     extra_env: dict[str, str] | None = None,
     parent_cg: ConcurrencyGroup,
 ) -> AnyUrl:
@@ -460,10 +478,13 @@ def _deploy_modal_app(
         str(app_file),
     ]
     subprocess_env = _modal_subprocess_env()
-    # The Modal apps read MNGR_DEPLOY_ENV at module load to pick the
-    # right secret names; tier deploys set this in the shell wrapper, so
-    # mirror that here.
+    # The Modal apps read MNGR_DEPLOY_ENV + MINDS_DEPLOY_ID at module
+    # load to build their ``Secret.from_name(f"<svc>-<tier>-<id>")``
+    # calls. Both are baked into the deployment spec at modal-deploy
+    # serialization time, so threading them in via the subprocess env
+    # is the only way the deployed function spec picks them up.
     subprocess_env["MNGR_DEPLOY_ENV"] = tier
+    subprocess_env[MINDS_DEPLOY_ID_ENV_VAR] = deploy_id
     # Extra env vars (e.g. per-app ``MINDS_*_MIN_CONTAINERS``) are
     # baked into the deployment spec at module load -- threading them
     # in via the subprocess env is the only way modal's deploy-time
@@ -507,6 +528,7 @@ def _run_modal_function(
     function_name: str,
     modal_env: str,
     tier: str,
+    deploy_id: str,
     parent_cg: ConcurrencyGroup,
 ) -> None:
     """Invoke a Modal Function defined in ``app_file`` via ``modal run``.
@@ -515,13 +537,12 @@ def _run_modal_function(
     the proxy deploy. ``modal run`` of an ``@app.function`` does not
     require a prior ``modal deploy``: Modal builds an ephemeral instance
     on demand, so this works on first-time tier bootstrap when no
-    ``litellm-proxy-<tier>`` app yet exists.
+    ``llm-<tier>`` app yet exists.
 
-    ``MNGR_DEPLOY_ENV`` is set in the subprocess env because the Modal
-    app reads it at module load to pick the right per-tier Secret name
-    (``litellm-<tier>``). Without it the function would attach the wrong
-    secret and either fail to find a DATABASE_URL or, worse, migrate
-    against the wrong tier's database.
+    ``MNGR_DEPLOY_ENV`` + ``MINDS_DEPLOY_ID`` are set in the subprocess
+    env so the Modal app reads them at module load and attaches to the
+    correct ``litellm-<tier>-<deploy_id>`` Secret. The just-pushed Secret
+    must exist before this runs.
     """
     if not app_file.is_file():
         raise RepoLayoutError(f"Modal app file not found: {app_file}")
@@ -534,6 +555,7 @@ def _run_modal_function(
     ]
     subprocess_env = _modal_subprocess_env()
     subprocess_env["MNGR_DEPLOY_ENV"] = tier
+    subprocess_env[MINDS_DEPLOY_ID_ENV_VAR] = deploy_id
     cg = parent_cg.make_concurrency_group(name=f"modal-run-{function_name}")
     with cg:
         result = cg.run_process_to_completion(

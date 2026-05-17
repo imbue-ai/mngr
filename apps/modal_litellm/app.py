@@ -27,6 +27,23 @@ import modal
 
 _DEPLOY_ENV = os.environ.get("MNGR_DEPLOY_ENV", "production")
 
+# Per-deploy timestamp baked into the deployed function spec. ``minds env
+# deploy`` mints this at the start of every deploy and threads it through
+# the ``modal deploy`` subprocess env. The deployed function pins to the
+# matching ``<svc>-<tier>-<MINDS_DEPLOY_ID>`` Modal Secrets, so
+# ``modal app rollback`` reverts the captured env and re-attaches to the
+# previous deploy's secrets in one shot. Hard-fail at module load if
+# missing: this app is not supposed to be deployed outside of ``minds env
+# deploy`` (no fallback to unsuffixed secret names).
+_MINDS_DEPLOY_ID = os.environ.get("MINDS_DEPLOY_ID")
+if not _MINDS_DEPLOY_ID:
+    raise RuntimeError(
+        "MINDS_DEPLOY_ID is not set. This Modal app must be deployed via "
+        "`minds env deploy`, which mints the deploy id and threads it into "
+        "the subprocess env. Manual `modal deploy` invocations are not "
+        "supported under the timestamped-secret rollback model."
+    )
+
 # Warm-pool size for the deployed function. ``minds env deploy`` reads
 # the tier's ``[min_containers].litellm_proxy`` from its committed
 # ``deploy.toml`` and threads the value here as
@@ -110,8 +127,8 @@ app = modal.App(name=f"llm-{_DEPLOY_ENV}", image=image)
 @app.function(
     name="proxy",
     secrets=[
-        modal.Secret.from_name(f"litellm-{_DEPLOY_ENV}"),
-        modal.Secret.from_dict({"MNGR_DEPLOY_ENV": _DEPLOY_ENV}),
+        modal.Secret.from_name(f"litellm-{_DEPLOY_ENV}-{_MINDS_DEPLOY_ID}"),
+        modal.Secret.from_dict({"MNGR_DEPLOY_ENV": _DEPLOY_ENV, "MINDS_DEPLOY_ID": _MINDS_DEPLOY_ID}),
     ],
     min_containers=_MIN_CONTAINERS,
     timeout=600,
@@ -132,7 +149,7 @@ def litellm_app():
 
 
 @app.function(
-    secrets=[modal.Secret.from_name(f"litellm-{_DEPLOY_ENV}")],
+    secrets=[modal.Secret.from_name(f"litellm-{_DEPLOY_ENV}-{_MINDS_DEPLOY_ID}")],
     timeout=300,
 )
 def migrate_db() -> None:

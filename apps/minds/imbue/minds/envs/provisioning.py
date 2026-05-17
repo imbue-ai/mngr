@@ -85,6 +85,9 @@ from imbue.minds.envs.providers.neon_db import NeonProjectRecord
 from imbue.minds.envs.providers.ovh_tags import OvhCredentials
 from imbue.minds.envs.providers.supertokens_app import SuperTokensAppRecord
 from imbue.minds.envs.providers.supertokens_app import app_id_from_connection_uri
+from imbue.minds.envs.secret_lifecycle import gc_old_per_tier_secrets
+from imbue.minds.envs.secret_lifecycle import make_deploy_id
+from imbue.minds.envs.secret_lifecycle import timestamped_secret_name
 from imbue.minds.errors import MindError
 from imbue.mngr_ovh.iam_tags import IamResource
 
@@ -138,18 +141,26 @@ ListOvhInstancesFn = Callable[[DevEnvName, OvhCredentials], tuple[IamResource, .
 DeleteOvhInstancesFn = Callable[[tuple[IamResource, ...], OvhCredentials], None]
 ModalEnvOpFn = Callable[[DevEnvName, ConcurrencyGroup], None]
 PushPerEnvSecretFn = Callable[[str, dict[str, str], str, ConcurrencyGroup], None]
-# (modal_env, tier, min_containers, cg) -> deployed URL. ``modal_env``
-# is the dev env name for dev-tier deploys or the tier's stable Modal
-# env (``main`` by convention) for staging / production deploys.
+# (modal_env, tier, min_containers, deploy_id, cg) -> deployed URL.
+# ``modal_env`` is the dev env name for dev-tier deploys or the tier's
+# stable Modal env (``main`` by convention) for shared-tier deploys.
 # ``min_containers`` is the per-app warm-pool size from the tier's
-# ``[min_containers]`` deploy.toml block.
-DeployModalAppFn = Callable[[str, str, int, ConcurrencyGroup], AnyUrl]
+# ``[min_containers]`` deploy.toml block. ``deploy_id`` is the
+# UTC-timestamp deploy id minted at the start of this deploy run;
+# the implementation threads it into the modal subprocess env as
+# ``MINDS_DEPLOY_ID`` so the deployed app pins to the matching
+# ``<svc>-<tier>-<id>`` Modal Secrets.
+DeployModalAppFn = Callable[[str, str, int, str, ConcurrencyGroup], AnyUrl]
 # (app_name, modal_env, cg) -> None. Used by tier destroys to ``modal
 # app stop`` each deployed app. Idempotent in the underlying call.
 StopModalAppFn = Callable[[str, str, ConcurrencyGroup], None]
 # (secret_name, modal_env, cg) -> None. Used by tier destroys to
 # ``modal secret delete`` each pushed per-tier Modal Secret. Idempotent.
 DeleteModalSecretFn = Callable[[str, str, ConcurrencyGroup], None]
+# (modal_env, cg) -> tuple of secret names in the Modal env. Used by
+# the timestamped-secret GC to find old ``<svc>-<tier>-<id>`` entries
+# to delete after a successful deploy.
+ListModalSecretsFn = Callable[[str, ConcurrencyGroup], tuple[str, ...]]
 # (app_id, core_base_url, api_key) -> None. Used by tier destroys to
 # wipe every user/session in an existing SuperTokens app without
 # deleting the app itself. Idempotent via delete + recreate.
@@ -212,6 +223,9 @@ class Providers(FrozenModel):
     )
     delete_modal_secret: DeleteModalSecretFn = Field(
         description="(secret_name, modal_env, cg) -> `modal secret delete` the named secret. Idempotent.",
+    )
+    list_modal_secrets: ListModalSecretsFn = Field(
+        description="(modal_env, cg) -> tuple of all Modal Secret names in the env. Used by the timestamped-secret GC.",
     )
     destroy_mngr_agent: DestroyMngrAgentFn = Field(
         description=(
@@ -358,6 +372,11 @@ def deploy_env(
     modal_workspace = str(deploy_config.modal_workspace)
     tier_vault_prefix = str(deploy_config.vault_path_prefix).rstrip("/")
     modal_env = _resolve_modal_env(name=name, lifecycle=lifecycle, deploy_config=deploy_config)
+    # Mint a fresh deploy id (UTC ISO-compact timestamp). Used as the
+    # suffix on every Modal Secret pushed below and threaded into the
+    # deployed Modal app's env so it pins to the matching Secret set.
+    deploy_id = make_deploy_id()
+    logger.info("Deploy id for env {!r}: {}", str(name), deploy_id)
 
     # Step 1: provider creation -- only when this tier owns the resources.
     neon_record: NeonProjectRecord | None = None
@@ -415,7 +434,8 @@ def deploy_env(
                 if generation_id is not None:
                     per_service_overrides.setdefault(GENERATION_ID_KEY, generation_id)
                 per_service_overrides.setdefault(MINDS_ENV_NAME_KEY, str(name))
-            with info_span("Pushing per-env Modal Secret {!r}", f"{service}-{tier}"):
+            secret_name = timestamped_secret_name(service, tier, deploy_id)
+            with info_span("Pushing per-env Modal Secret {!r}", secret_name):
                 values = providers.read_per_env_secret_values(
                     service,
                     tier_vault_prefix,
@@ -423,7 +443,7 @@ def deploy_env(
                     parent_concurrency_group,
                 )
                 providers.push_per_env_modal_secret(
-                    f"{service}-{tier}",
+                    secret_name,
                     values,
                     modal_env,
                     parent_concurrency_group,
@@ -440,7 +460,7 @@ def deploy_env(
         litellm_proxy_min_containers,
     ):
         litellm_proxy_url = providers.deploy_litellm_proxy(
-            modal_env, tier, litellm_proxy_min_containers, parent_concurrency_group
+            modal_env, tier, litellm_proxy_min_containers, deploy_id, parent_concurrency_group
         )
     _assert_deploy_url_matches(actual=litellm_proxy_url, expected=expected_litellm_proxy_url, app=f"llm-{tier}")
 
@@ -451,7 +471,7 @@ def deploy_env(
         connector_min_containers,
     ):
         connector_url = providers.deploy_remote_service_connector(
-            modal_env, tier, connector_min_containers, parent_concurrency_group
+            modal_env, tier, connector_min_containers, deploy_id, parent_concurrency_group
         )
     _assert_deploy_url_matches(actual=connector_url, expected=expected_connector_url, app=f"rsc-{tier}")
 
@@ -474,6 +494,26 @@ def deploy_env(
                 name=name,
             )
         )
+
+    # GC old timestamped Modal Secrets at the end of every successful
+    # deploy. Best-effort -- failures here are logged but never re-raise
+    # (we don't want a noisy Modal API to mark the whole deploy failed).
+    with info_span("GC: keeping last {} Modal Secrets per <service>-{} in env {!r}", 10, tier, modal_env):
+        try:
+            gc_old_per_tier_secrets(
+                modal_env=modal_env,
+                tier=tier,
+                list_modal_secrets_fn=providers.list_modal_secrets,
+                delete_modal_secret_fn=providers.delete_modal_secret,
+                keep_last=10,
+                parent_cg=parent_concurrency_group,
+            )
+        except ModalDeployError as exc:
+            logger.warning(
+                "GC of old timestamped Modal Secrets failed in env {!r}: {} -- ignoring (deploy succeeded)",
+                modal_env,
+                exc,
+            )
 
     return DeployedEnv(
         name=name,
@@ -707,9 +747,18 @@ def destroy_env(
         with info_span("Stopping Modal apps for env {!r} in Modal env {!r}", str(name), modal_env_for_tier_ops):
             for app_name in (f"llm-{tier}", f"rsc-{tier}"):
                 providers.stop_modal_app(app_name, modal_env_for_tier_ops, parent_concurrency_group)
-        with info_span("Deleting per-tier Modal Secrets in env {!r}", modal_env_for_tier_ops):
-            for service in deploy_config.secrets.services:
-                providers.delete_modal_secret(f"{service}-{tier}", modal_env_for_tier_ops, parent_concurrency_group)
+        # Delete every timestamped Modal Secret matching ``<svc>-<tier>-*``
+        # in the tier's Modal env. Re-uses the same GC helper as deploy,
+        # with ``keep_last=0`` to drop the whole set.
+        with info_span("Deleting all timestamped per-tier Modal Secrets in env {!r}", modal_env_for_tier_ops):
+            gc_old_per_tier_secrets(
+                modal_env=modal_env_for_tier_ops,
+                tier=tier,
+                list_modal_secrets_fn=providers.list_modal_secrets,
+                delete_modal_secret_fn=providers.delete_modal_secret,
+                keep_last=0,
+                parent_cg=parent_concurrency_group,
+            )
 
     # Step 7: generation id removal -- ONLY for tiers that use generation
     # tracking (driven by ``deploy_config.lifecycle.tracks_generation``).

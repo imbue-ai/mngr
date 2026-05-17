@@ -1,3 +1,4 @@
+from collections import defaultdict
 from pathlib import Path
 from typing import Final
 
@@ -201,24 +202,31 @@ def _build_fake_providers(
         merged.update(overrides)
         return merged
 
+    # Tracks secret state across deploy/destroy cycles so the fake's
+    # list_modal_secrets can find what was pushed even if call_log was
+    # cleared between phases of a test. Real Modal Secrets persist
+    # until explicitly deleted; the fake mirrors that.
+    pushed_secrets_state: dict[str, set[str]] = defaultdict(set)
+
     def push_per_env_modal_secret(secret_name, values, modal_env, cg):
         call_log["calls"].append(("push_per_env_modal_secret", secret_name, modal_env))
         if fail_step == "push_secret" and "supertokens" in secret_name:
             raise ModalDeployError("push secret boom")
+        pushed_secrets_state[modal_env].add(secret_name)
 
-    def deploy_litellm_proxy(modal_env, tier, min_containers, cg):
-        call_log["calls"].append(("deploy_litellm_proxy", modal_env, tier, min_containers))
+    def deploy_litellm_proxy(modal_env, tier, min_containers, deploy_id, cg):
+        call_log["calls"].append(("deploy_litellm_proxy", modal_env, tier, min_containers, deploy_id))
         if fail_step == "deploy_litellm":
             raise ModalDeployError("litellm deploy boom")
-        # Match the same URL formula ``deploy_dev_env`` /
-        # ``deploy_tier_env`` use, so the post-deploy URL-match assertion
-        # passes for both per-env (dev) and shared (staging/prod) shapes.
+        # Match the same URL formula ``deploy_env`` uses so the post-
+        # deploy URL-match assertion passes for both per-env (dev) and
+        # shared (staging/prod) shapes.
         if tier == "dev":
             return AnyUrl(f"https://{_TEST_MODAL_WORKSPACE}-{modal_env}--llm-dev-proxy.modal.run")
         return AnyUrl(f"https://{_TEST_MODAL_WORKSPACE}--llm-{tier}-proxy.modal.run")
 
-    def deploy_remote_service_connector(modal_env, tier, min_containers, cg):
-        call_log["calls"].append(("deploy_remote_service_connector", modal_env, tier, min_containers))
+    def deploy_remote_service_connector(modal_env, tier, min_containers, deploy_id, cg):
+        call_log["calls"].append(("deploy_remote_service_connector", modal_env, tier, min_containers, deploy_id))
         if fail_step == "deploy_connector":
             raise ModalDeployError("connector deploy boom")
         if tier == "dev":
@@ -234,6 +242,11 @@ def _build_fake_providers(
         call_log["calls"].append(("delete_modal_secret", secret_name, modal_env))
         if fail_step == "delete_modal_secret":
             raise ModalDeployError("modal secret delete boom")
+        pushed_secrets_state[modal_env].discard(secret_name)
+
+    def list_modal_secrets(modal_env, cg):
+        call_log["calls"].append(("list_modal_secrets", modal_env))
+        return tuple(sorted(pushed_secrets_state[modal_env]))
 
     def destroy_mngr_agent(agent_id, mngr_host_dir, mngr_prefix, cg):
         call_log["calls"].append(("destroy_mngr_agent", agent_id, str(mngr_host_dir), mngr_prefix))
@@ -280,6 +293,7 @@ def _build_fake_providers(
         deploy_remote_service_connector=deploy_remote_service_connector,
         stop_modal_app=stop_modal_app,
         delete_modal_secret=delete_modal_secret,
+        list_modal_secrets=list_modal_secrets,
         destroy_mngr_agent=destroy_mngr_agent,
         wipe_supertokens_app_data=wipe_supertokens_app_data,
         wipe_neon_db_schema=wipe_neon_db_schema,
@@ -418,20 +432,24 @@ def test_deploy_dev_env_pushes_per_env_secrets_into_dev_modal_env(
         parent_concurrency_group=_root_cg,
     )
     pushes = [c for c in call_log["calls"] if c[0] == "push_per_env_modal_secret"]
-    pushed_secret_names = {c[1] for c in pushes}
     # _deploy_config declares only `cloudflare` in its services list, so
     # only one Modal Secret gets pushed. Production deploy.toml lists
-    # all 7 services and would push 7.
-    assert pushed_secret_names == {"cloudflare-dev"}
+    # all 7 services and would push 7. Names are timestamped
+    # ``cloudflare-dev-<deploy_id>`` -- check the prefix since the id
+    # varies per run.
+    pushed_secret_prefixes = {c[1].rsplit("-", 1)[0] for c in pushes}
+    assert pushed_secret_prefixes == {"cloudflare-dev"}
     # All pushes target the same Modal env (the dev env name 'dev-frank') --
     # not the tier's stable 'main' env. Two devs never share one Modal env.
     assert all(c[2] == "dev-frank" for c in pushes)
-    deploys = [c for c in call_log["calls"] if c[0].startswith("deploy_")]
+    deploys = [c for c in call_log["calls"] if c[0].startswith("deploy_") and c[0] != "deploy_mngr_agent"]
     # Single connector deploy (no second-pass redeploy): the shortened
     # app + function names keep the Modal hostname under DNS's 63-char
     # limit so the URL we computed up front equals the URL Modal
     # assigns, and the URL-dependent secrets are correct on first push.
-    assert deploys == [
+    # Strip the deploy_id (last tuple element, varies per run) before
+    # asserting the call shape.
+    assert [c[:4] for c in deploys] == [
         ("deploy_litellm_proxy", "dev-frank", "dev", 0),
         ("deploy_remote_service_connector", "dev-frank", "dev", 0),
     ]
@@ -724,8 +742,9 @@ def test_deploy_env_shared_tier_pushes_secrets_into_named_modal_env(
     )
     pushes = [c for c in call_log["calls"] if c[0] == "push_per_env_modal_secret"]
     # _deploy_config declares only `cloudflare` in its services list.
-    pushed_secret_names = {c[1] for c in pushes}
-    assert pushed_secret_names == {"cloudflare-production"}
+    # Names are timestamped ``cloudflare-production-<deploy_id>``.
+    pushed_secret_prefixes = {c[1].rsplit("-", 1)[0] for c in pushes}
+    assert pushed_secret_prefixes == {"cloudflare-production"}
     # All pushes target the tier's stable Modal env, not a per-dev one.
     assert all(c[2] == "main" for c in pushes)
 
@@ -742,8 +761,8 @@ def test_deploy_env_shared_tier_runs_both_modal_deploys(_isolated_home: Path, _r
         providers=providers,
         parent_concurrency_group=_root_cg,
     )
-    deploys = [c for c in call_log["calls"] if c[0].startswith("deploy_")]
-    assert deploys == [
+    deploys = [c for c in call_log["calls"] if c[0].startswith("deploy_") and c[0] != "deploy_mngr_agent"]
+    assert [c[:4] for c in deploys] == [
         ("deploy_litellm_proxy", "main", "staging", 0),
         ("deploy_remote_service_connector", "main", "staging", 0),
     ]
@@ -771,8 +790,8 @@ def test_deploy_env_shared_tier_threads_min_containers_through(
         providers=providers,
         parent_concurrency_group=_root_cg,
     )
-    deploys = [c for c in call_log["calls"] if c[0].startswith("deploy_")]
-    assert deploys == [
+    deploys = [c for c in call_log["calls"] if c[0].startswith("deploy_") and c[0] != "deploy_mngr_agent"]
+    assert [c[:4] for c in deploys] == [
         ("deploy_litellm_proxy", "main", "staging", 3),
         ("deploy_remote_service_connector", "main", "staging", 2),
     ]
@@ -781,13 +800,22 @@ def test_deploy_env_shared_tier_threads_min_containers_through(
 def test_destroy_env_tier_stops_apps_deletes_secrets_and_removes_env_root(
     _isolated_home: Path, _root_cg: ConcurrencyGroup
 ) -> None:
-    """Tier destroy: agents -> modal app stop -> modal secret delete -> env root."""
-    staging_root = _isolated_home / ".minds-staging"
-    staging_root.mkdir()
-    (staging_root / "client.toml").write_text('connector_url = "x"\nlitellm_proxy_url = "y"\n')
-
+    """Tier destroy: agents -> modal app stop -> per-tier secret delete -> env root."""
+    # Do a real deploy first so the fake "pushes" the timestamped Secrets
+    # that destroy will then list + delete. This mirrors the real
+    # operator workflow (you only destroy what you deployed).
     call_log = _make_call_log()
     providers = _build_fake_providers(call_log)
+    _isolated_home.joinpath(".minds-staging").mkdir(exist_ok=True)
+    deploy_env(
+        DevEnvName("staging"),
+        tier="staging",
+        deploy_config=_deploy_config(tier="staging", modal_env="main"),
+        credentials=_credentials(),
+        providers=providers,
+        parent_concurrency_group=_root_cg,
+    )
+    call_log["calls"].clear()
     destroy_env(
         DevEnvName("staging"),
         tier="staging",
@@ -803,15 +831,17 @@ def test_destroy_env_tier_stops_apps_deletes_secrets_and_removes_env_root(
         ("stop_modal_app", "llm-staging", "main"),
         ("stop_modal_app", "rsc-staging", "main"),
     ]
-    # Deletes the per-tier Modal Secrets (just `cloudflare-staging` for
-    # the _deploy_config used here, which declares only that service).
+    # Deletes every timestamped per-tier Modal Secret (just one for the
+    # `cloudflare` service in this _deploy_config; production has 7).
     deletes = [c for c in call_log["calls"] if c[0] == "delete_modal_secret"]
-    assert deletes == [("delete_modal_secret", "cloudflare-staging", "main")]
+    assert len(deletes) == 1
+    assert deletes[0][1].startswith("cloudflare-staging-")
+    assert deletes[0][2] == "main"
     # And stop comes BEFORE delete (otherwise the running app loses
     # its secret out from under it).
     assert call_log["calls"].index(stops[-1]) < call_log["calls"].index(deletes[0])
     # Env root gone -- subsequent activation has to re-create it.
-    assert not staging_root.exists()
+    assert not (_isolated_home / ".minds-staging").exists()
 
 
 def test_destroy_env_tier_destroys_mngr_agents_first(_isolated_home: Path, _root_cg: ConcurrencyGroup) -> None:
@@ -974,6 +1004,16 @@ def test_destroy_env_tier_full_step_order(_isolated_home: Path, _root_cg: Concur
 
     call_log = _make_call_log()
     providers = _build_fake_providers(call_log)
+    # Deploy first so destroy has timestamped Secrets to find + delete.
+    deploy_env(
+        DevEnvName("staging"),
+        tier="staging",
+        deploy_config=_deploy_config(tier="staging", modal_env="main"),
+        credentials=_credentials(),
+        providers=providers,
+        parent_concurrency_group=_root_cg,
+    )
+    call_log["calls"].clear()
     destroy_env(
         DevEnvName("staging"),
         tier="staging",
@@ -997,9 +1037,10 @@ def test_destroy_env_tier_full_step_order(_isolated_home: Path, _root_cg: Concur
         # 5: Neon -- wipe path (tier-specific).
         "read_per_env_secret_values",
         "wipe_neon_db_schema",
-        # 6: Modal -- stop + secret delete path (tier-specific).
+        # 6: Modal -- stop + list-then-delete-all-timestamped-secrets path.
         "stop_modal_app",
         "stop_modal_app",
+        "list_modal_secrets",
         "delete_modal_secret",
         # 7: generation id (tier-only).
         "delete_generation_id",

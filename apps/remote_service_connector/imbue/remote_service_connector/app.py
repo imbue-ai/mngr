@@ -2467,6 +2467,20 @@ def auth_get_user(user_id: str) -> UserProviderInfo:
 
 _DEPLOY_ENV = os.environ.get("MNGR_DEPLOY_ENV", "production")
 
+# Per-deploy timestamp baked into the deployed function spec by ``minds
+# env deploy`` so the connector pins to the matching ``<svc>-<tier>-<id>``
+# Modal Secrets. Hard-fail at module load if missing -- manual ``modal
+# deploy`` outside ``minds env deploy`` is unsupported under the
+# timestamped-secret rollback model.
+_MINDS_DEPLOY_ID = os.environ.get("MINDS_DEPLOY_ID")
+if not _MINDS_DEPLOY_ID:
+    raise RuntimeError(
+        "MINDS_DEPLOY_ID is not set. This Modal app must be deployed via "
+        "`minds env deploy`, which mints the deploy id and threads it into "
+        "the subprocess env. Manual `modal deploy` invocations are not "
+        "supported under the timestamped-secret rollback model."
+    )
+
 # Warm-pool size for the deployed function. ``minds env deploy`` reads
 # the tier's ``[min_containers].connector`` from its committed
 # ``deploy.toml`` and threads the value here as
@@ -2497,7 +2511,7 @@ def _get_auth_website_domain() -> str:
     if not value:
         raise RuntimeError(
             "AUTH_WEBSITE_DOMAIN is not set. Populate it in the "
-            f"`supertokens-{_DEPLOY_ENV}` Modal secret (the deploy script "
+            f"`supertokens-{_DEPLOY_ENV}-{_MINDS_DEPLOY_ID}` Modal secret (the deploy script "
             "pushes it from the tier's Vault entry)."
         )
     return value
@@ -2593,13 +2607,13 @@ def _init_supertokens() -> None:
 @app.function(
     name="api",
     secrets=[
-        modal.Secret.from_name(f"cloudflare-{_DEPLOY_ENV}"),
-        modal.Secret.from_name(f"supertokens-{_DEPLOY_ENV}"),
-        modal.Secret.from_name(f"neon-{_DEPLOY_ENV}"),
-        modal.Secret.from_name(f"pool-ssh-{_DEPLOY_ENV}"),
-        modal.Secret.from_name(f"litellm-connector-{_DEPLOY_ENV}"),
-        modal.Secret.from_name(f"paid-accounts-{_DEPLOY_ENV}"),
-        modal.Secret.from_dict({"MNGR_DEPLOY_ENV": _DEPLOY_ENV}),
+        modal.Secret.from_name(f"cloudflare-{_DEPLOY_ENV}-{_MINDS_DEPLOY_ID}"),
+        modal.Secret.from_name(f"supertokens-{_DEPLOY_ENV}-{_MINDS_DEPLOY_ID}"),
+        modal.Secret.from_name(f"neon-{_DEPLOY_ENV}-{_MINDS_DEPLOY_ID}"),
+        modal.Secret.from_name(f"pool-ssh-{_DEPLOY_ENV}-{_MINDS_DEPLOY_ID}"),
+        modal.Secret.from_name(f"litellm-connector-{_DEPLOY_ENV}-{_MINDS_DEPLOY_ID}"),
+        modal.Secret.from_name(f"paid-accounts-{_DEPLOY_ENV}-{_MINDS_DEPLOY_ID}"),
+        modal.Secret.from_dict({"MNGR_DEPLOY_ENV": _DEPLOY_ENV, "MINDS_DEPLOY_ID": _MINDS_DEPLOY_ID}),
     ],
     # Warm-pool size driven by ``_MIN_CONTAINERS`` at the top of this
     # module: defaults to 1 for production / staging (avoid cold-boot
