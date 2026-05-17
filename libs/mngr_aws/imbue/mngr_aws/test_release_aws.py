@@ -4,7 +4,9 @@ These tests provision and destroy real EC2 instances on AWS. They cost
 real money — typically a few cents per run for a ~5-minute t3.small —
 and are double-gated:
 
-- AWS credentials must be available (env vars, profile, or instance role)
+- AWS credentials must be available -- specifically, either ``AWS_ACCESS_KEY_ID``
+  or ``AWS_PROFILE`` must be set in the environment (this is the same probe
+  used by the session-end cleanup hook; see ``testing.aws_credentials_available``).
 - ``MNGR_AWS_RELEASE_TESTS=1`` must be set explicitly
 
 Three layers of damage control prevent leaked EC2 cost (see
