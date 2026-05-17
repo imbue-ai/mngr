@@ -260,7 +260,7 @@ def _stub_mngr_host_dir(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, root_na
     return settings_dir / "settings.toml"
 
 
-_FAKE_CONNECTOR_URL = "https://test--remote-service-connector-fastapi-app.modal.run"
+_FAKE_CONNECTOR_URL = "https://test--rsc-api.modal.run"
 
 
 def test_set_imbue_cloud_provider_for_account_writes_block(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

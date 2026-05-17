@@ -64,7 +64,7 @@ class ClientEnvConfig(FrozenModel):
 
     connector_url: AnyUrl = Field(description="Base URL of the `remote_service_connector` Modal app for this env.")
     litellm_proxy_url: AnyUrl = Field(
-        description="Base URL of the `litellm-proxy` Modal app for this env. Used as the default `ANTHROPIC_BASE_URL` for IMBUE_CLOUD-mode agents."
+        description="Base URL of the `llm` (LiteLLM proxy) Modal app for this env. Used as the default `ANTHROPIC_BASE_URL` for IMBUE_CLOUD-mode agents."
     )
 
 
@@ -102,11 +102,11 @@ class MinContainersConfig(FrozenModel):
 
     connector: NonNegativeInt = Field(
         default=NonNegativeInt(0),
-        description="Warm containers to keep alive for ``remote-service-connector-<tier>``.",
+        description="Warm containers to keep alive for ``rsc-<tier>`` (remote-service-connector).",
     )
     litellm_proxy: NonNegativeInt = Field(
         default=NonNegativeInt(0),
-        description="Warm containers to keep alive for ``litellm-proxy-<tier>``.",
+        description="Warm containers to keep alive for ``llm-<tier>`` (LiteLLM proxy).",
     )
 
 

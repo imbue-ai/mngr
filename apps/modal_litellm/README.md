@@ -48,7 +48,7 @@ var before running ``modal deploy`` by hand.
 ### 4. Create a virtual key
 
 ```bash
-PROXY_URL="https://<workspace>--litellm-proxy-production-litellm-app.modal.run"
+PROXY_URL="https://<workspace>--llm-production-proxy.modal.run"
 
 curl -s -X POST "$PROXY_URL/key/generate" \
   -H "Authorization: Bearer $LITELLM_MASTER_KEY" \
@@ -59,7 +59,7 @@ curl -s -X POST "$PROXY_URL/key/generate" \
 ### 5. Use with Claude Code
 
 ```bash
-export ANTHROPIC_BASE_URL="https://<workspace>--litellm-proxy-production-litellm-app.modal.run/anthropic"
+export ANTHROPIC_BASE_URL="https://<workspace>--llm-production-proxy.modal.run/anthropic"
 export ANTHROPIC_API_KEY="sk-your-virtual-key"
 
 claude -p "hello"

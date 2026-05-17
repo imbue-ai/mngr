@@ -166,8 +166,8 @@ What a tier deploy does:
    reads `<vault_path_prefix>/<service>` from Vault and pushes the
    non-empty subset into Modal as `<service>-<tier>` (in the Modal
    environment named by `deploy.toml`'s `modal_env`, default `main`).
-2. Runs `modal deploy` for `litellm-proxy-<tier>` (after running the
-   Prisma schema push) and `remote-service-connector-<tier>`.
+2. Runs `modal deploy` for `llm-<tier>` (after running the
+   Prisma schema push) and `rsc-<tier>`.
 3. Writes **nothing to disk** -- no local file changes, no edits to
    the in-repo `client.toml`. The committed `client.toml` is the
    source of truth; the operator updates it by hand on the rare

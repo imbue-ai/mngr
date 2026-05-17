@@ -75,7 +75,7 @@ def _seed_settings_toml(tmp_path: Path) -> Path:
     settings_path = settings_dir / "settings.toml"
     set_imbue_cloud_provider_for_account(
         _EMAIL,
-        connector_url="https://test--remote-service-connector-fastapi-app.modal.run",
+        connector_url="https://test--rsc-api.modal.run",
         root_name=_ROOT_NAME,
     )
     return settings_path

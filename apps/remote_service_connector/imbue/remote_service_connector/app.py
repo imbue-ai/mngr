@@ -2479,7 +2479,7 @@ _MIN_CONTAINERS = int(os.environ.get("MINDS_CONNECTOR_MIN_CONTAINERS", "0"))
 image = modal.Image.debian_slim().pip_install(
     "fastapi[standard]", "httpx", "supertokens-python", "psycopg2-binary", "paramiko"
 )
-app = modal.App(name=f"remote-service-connector-{_DEPLOY_ENV}", image=image)
+app = modal.App(name=f"rsc-{_DEPLOY_ENV}", image=image)
 
 
 def _get_auth_website_domain() -> str:
@@ -2591,6 +2591,7 @@ def _init_supertokens() -> None:
 
 
 @app.function(
+    name="api",
     secrets=[
         modal.Secret.from_name(f"cloudflare-{_DEPLOY_ENV}"),
         modal.Secret.from_name(f"supertokens-{_DEPLOY_ENV}"),

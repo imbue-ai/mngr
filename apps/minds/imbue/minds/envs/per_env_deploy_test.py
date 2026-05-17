@@ -38,7 +38,7 @@ def test_compute_per_env_overrides_includes_both_dsn_overrides() -> None:
     """Both neon and litellm services get DSN overrides from the per-env project."""
     overrides = compute_per_env_overrides(
         DevEnvName("dev-josh"),
-        modal_workspace="imbue-minds-dev",
+        modal_workspace="minds-dev",
         neon_record=_fake_neon_record(),
         supertokens_record=_fake_supertokens_record(),
     )
@@ -57,7 +57,7 @@ def test_compute_per_env_overrides_does_not_override_unrelated_services() -> Non
     """
     overrides = compute_per_env_overrides(
         DevEnvName("dev-josh"),
-        modal_workspace="imbue-minds-dev",
+        modal_workspace="minds-dev",
         neon_record=_fake_neon_record(),
         supertokens_record=_fake_supertokens_record(),
     )

@@ -71,9 +71,13 @@ from imbue.minds.envs.per_env_deploy import delete_modal_secret
 from imbue.minds.envs.per_env_deploy import deploy_litellm_proxy
 from imbue.minds.envs.per_env_deploy import deploy_remote_service_connector
 from imbue.minds.envs.per_env_deploy import ensure_modal_env
+from imbue.minds.envs.per_env_deploy import per_env_connector_url
+from imbue.minds.envs.per_env_deploy import per_env_litellm_proxy_url
 from imbue.minds.envs.per_env_deploy import per_env_secret_services
 from imbue.minds.envs.per_env_deploy import push_per_env_modal_secret
 from imbue.minds.envs.per_env_deploy import stop_modal_app
+from imbue.minds.envs.per_env_deploy import tier_connector_url
+from imbue.minds.envs.per_env_deploy import tier_litellm_proxy_url
 from imbue.minds.envs.primitives import DevEnvName
 from imbue.minds.envs.primitives import DevEnvNotFoundError
 from imbue.minds.envs.primitives import DevEnvProvisioningError
@@ -228,7 +232,7 @@ class Providers(FrozenModel):
         description="(secret_name, values, modal_env, cg) -> upsert the Modal Secret in the named Modal env.",
     )
     deploy_litellm_proxy: DeployModalAppFn = Field(
-        description="(modal_env, tier, cg) -> `modal deploy` the litellm-proxy app into ``modal_env``.",
+        description="(modal_env, tier, cg) -> `modal deploy` the llm app into ``modal_env``.",
     )
     deploy_remote_service_connector: DeployModalAppFn = Field(
         description="(modal_env, tier, cg) -> `modal deploy` the connector app into ``modal_env``.",
@@ -347,8 +351,15 @@ def deploy_dev_env(
     3. Create or look up the per-dev-env SuperTokens app.
     4. Push every per-env Modal Secret (tier-shared Vault values + per-env
        overrides; placeholder for Vault entries that aren't populated).
-    5. Deploy ``litellm-proxy-<tier>`` into Modal env ``<name>``.
-    6. Deploy ``remote-service-connector-<tier>`` into Modal env ``<name>``.
+       The per-env overrides already carry the *computed* deployed-app
+       URLs (``per_env_connector_url`` / ``per_env_litellm_proxy_url``);
+       since the shortened app + function names keep the natural Modal
+       hostname under DNS's 63-char limit, those computed URLs are
+       exactly what Modal will assign at deploy time -- no second-pass
+       re-push required.
+    5. Deploy ``llm-<tier>`` into Modal env ``<name>``; assert the URL
+       Modal returned matches the up-front computed value.
+    6. Deploy ``rsc-<tier>`` into Modal env ``<name>``; same assertion.
     7. Write ``~/.minds-<name>/client.toml`` (mode 0644) + ``~/.minds-<name>/secrets.toml``
        (mode 0600), overwriting any existing.
 
@@ -450,8 +461,23 @@ def deploy_dev_env(
     litellm_proxy_min_containers = int(deploy_config.min_containers.litellm_proxy)
     connector_min_containers = int(deploy_config.min_containers.connector)
 
+    # Under the shortened app + function names (``rsc-<tier>``/``api``
+    # and ``llm-<tier>``/``proxy``) the natural Modal hostname always
+    # fits under DNS's 63-char limit for any valid ``DevEnvName``, so
+    # the URL we computed up front (via ``per_env_connector_url`` /
+    # ``per_env_litellm_proxy_url``) is exactly the URL Modal will
+    # assign. That means every URL-dependent secret value
+    # (``supertokens.AUTH_WEBSITE_DOMAIN``,
+    # ``litellm-connector.LITELLM_PROXY_URL``) is correct on the FIRST
+    # secret push -- no second-pass re-push, no connector redeploy. We
+    # still assert below that the URLs Modal reported back match the
+    # ones we computed, so a future Modal URL-scheme change surfaces
+    # immediately instead of silently breaking auth links.
+    expected_litellm_proxy_url = per_env_litellm_proxy_url(name, modal_workspace)
+    expected_connector_url = per_env_connector_url(name, modal_workspace)
+
     with info_span(
-        "Deploying litellm-proxy-{} into env {!r} (min_containers={})",
+        "Deploying llm-{} into env {!r} (min_containers={})",
         tier,
         modal_env,
         litellm_proxy_min_containers,
@@ -459,9 +485,10 @@ def deploy_dev_env(
         litellm_proxy_url = providers.deploy_litellm_proxy(
             modal_env, tier, litellm_proxy_min_containers, parent_concurrency_group
         )
+    _assert_deploy_url_matches(actual=litellm_proxy_url, expected=expected_litellm_proxy_url, app=f"llm-{tier}")
 
     with info_span(
-        "Deploying remote-service-connector-{} into env {!r} (min_containers={})",
+        "Deploying rsc-{} into env {!r} (min_containers={})",
         tier,
         modal_env,
         connector_min_containers,
@@ -469,55 +496,7 @@ def deploy_dev_env(
         connector_url = providers.deploy_remote_service_connector(
             modal_env, tier, connector_min_containers, parent_concurrency_group
         )
-
-    # Second pass: now that we have the real connector + proxy URLs,
-    # update the two Modal Secrets whose values depended on them
-    # (supertokens.AUTH_WEBSITE_DOMAIN and litellm-connector.LITELLM_PROXY_URL)
-    # and redeploy the connector so the running container picks them up.
-    # litellm-proxy doesn't depend on either URL so no redeploy needed.
-    with info_span(
-        "Re-pushing URL-dependent Modal Secrets with actual deploy URLs (connector={}, litellm={})",
-        connector_url,
-        litellm_proxy_url,
-    ):
-        supertokens_values = providers.read_per_env_secret_values(
-            "supertokens",
-            tier_vault_prefix,
-            {
-                **first_pass_overrides.get("supertokens", {}),
-                "AUTH_WEBSITE_DOMAIN": str(connector_url),
-            },
-            parent_concurrency_group,
-        )
-        providers.push_per_env_modal_secret(
-            f"supertokens-{tier}",
-            supertokens_values,
-            modal_env,
-            parent_concurrency_group,
-        )
-
-        litellm_connector_overrides: dict[str, str] = {
-            "LITELLM_PROXY_URL": str(litellm_proxy_url),
-        }
-        if litellm_master_key:
-            litellm_connector_overrides["LITELLM_MASTER_KEY"] = litellm_master_key
-        litellm_connector_values = providers.read_per_env_secret_values(
-            "litellm-connector",
-            tier_vault_prefix,
-            litellm_connector_overrides,
-            parent_concurrency_group,
-        )
-        providers.push_per_env_modal_secret(
-            f"litellm-connector-{tier}",
-            litellm_connector_values,
-            modal_env,
-            parent_concurrency_group,
-        )
-
-    with info_span("Redeploying remote-service-connector-{} to pick up final secrets", tier):
-        connector_url = providers.deploy_remote_service_connector(
-            modal_env, tier, connector_min_containers, parent_concurrency_group
-        )
+    _assert_deploy_url_matches(actual=connector_url, expected=expected_connector_url, app=f"rsc-{tier}")
 
     public_config = ClientEnvConfig(
         connector_url=connector_url,
@@ -708,7 +687,7 @@ def destroy_env(
             providers.delete_modal_env(name, parent_concurrency_group)
     else:
         with info_span("Stopping Modal apps for env {!r} in Modal env {!r}", str(name), modal_env_for_tier_ops):
-            for app_name in (f"litellm-proxy-{tier}", f"remote-service-connector-{tier}"):
+            for app_name in (f"llm-{tier}", f"rsc-{tier}"):
                 providers.stop_modal_app(app_name, modal_env_for_tier_ops, parent_concurrency_group)
         with info_span("Deleting per-tier Modal Secrets in env {!r}", modal_env_for_tier_ops):
             for service in deploy_config.secrets.services:
@@ -811,8 +790,8 @@ def deploy_tier_env(
     For ``staging`` / ``production`` tiers. Reads every service named in
     ``deploy_config.secrets.services`` straight from Vault (no per-env
     overrides), pushes them into Modal as ``<service>-<tier>`` Secrets,
-    and runs ``modal deploy`` for both ``litellm-proxy-<tier>`` and
-    ``remote-service-connector-<tier>`` into ``deploy_config.modal_env``.
+    and runs ``modal deploy`` for both ``llm-<tier>`` and ``rsc-<tier>``
+    into ``deploy_config.modal_env``.
 
     Writes nothing to disk: the URLs are deterministic from the tier's
     Modal workspace + app names, and the committed in-repo
@@ -869,8 +848,15 @@ def deploy_tier_env(
     litellm_proxy_min_containers = int(deploy_config.min_containers.litellm_proxy)
     connector_min_containers = int(deploy_config.min_containers.connector)
 
+    # Computed expected URLs (deterministic under the shortened app +
+    # function names); we assert against the Modal-reported URLs below
+    # so a future Modal URL-scheme change surfaces immediately.
+    modal_workspace = str(deploy_config.modal_workspace)
+    expected_litellm_proxy_url = tier_litellm_proxy_url(tier, modal_workspace)
+    expected_connector_url = tier_connector_url(tier, modal_workspace)
+
     logger.info(
-        "Deploying litellm-proxy-{} into Modal env {!r} (min_containers={})...",
+        "Deploying llm-{} into Modal env {!r} (min_containers={})...",
         tier,
         modal_env,
         litellm_proxy_min_containers,
@@ -878,9 +864,10 @@ def deploy_tier_env(
     litellm_proxy_url = providers.deploy_litellm_proxy(
         modal_env, tier, litellm_proxy_min_containers, parent_concurrency_group
     )
+    _assert_deploy_url_matches(actual=litellm_proxy_url, expected=expected_litellm_proxy_url, app=f"llm-{tier}")
 
     logger.info(
-        "Deploying remote-service-connector-{} into Modal env {!r} (min_containers={})...",
+        "Deploying rsc-{} into Modal env {!r} (min_containers={})...",
         tier,
         modal_env,
         connector_min_containers,
@@ -888,6 +875,7 @@ def deploy_tier_env(
     connector_url = providers.deploy_remote_service_connector(
         modal_env, tier, connector_min_containers, parent_concurrency_group
     )
+    _assert_deploy_url_matches(actual=connector_url, expected=expected_connector_url, app=f"rsc-{tier}")
 
     return DeployedTierEnv(
         tier=tier,
@@ -912,6 +900,31 @@ def _read_litellm_master_key(
     """
     values = providers.read_per_env_secret_values("litellm", tier_vault_prefix, {}, parent_concurrency_group)
     return values.get("LITELLM_MASTER_KEY", "")
+
+
+def _assert_deploy_url_matches(*, actual: AnyUrl, expected: AnyUrl, app: str) -> None:
+    """Assert ``modal deploy`` reported the URL we computed up front.
+
+    Under the shortened app + function names the natural Modal hostname
+    always fits under DNS's 63-char limit, so Modal's URL is exactly
+    what ``per_env_*_url`` / ``tier_*_url`` predict. A mismatch means
+    either we miscomputed (bug) or Modal changed its URL scheme on us
+    (real-world signal we need to know about immediately). Raise a
+    ``ModalDeployError`` so the deploy fails loudly rather than
+    silently shipping the wrong URLs into the per-env secrets.
+
+    Strips any trailing slash that either side may have appended so a
+    cosmetic difference doesn't trip the check.
+    """
+    actual_str = str(actual).rstrip("/")
+    expected_str = str(expected).rstrip("/")
+    if actual_str != expected_str:
+        raise ModalDeployError(
+            f"`modal deploy` URL mismatch for {app!r}: "
+            f"computed {expected_str!r} but Modal reported {actual_str!r}. "
+            "Either the URL formula in `per_env_deploy.py` is stale or Modal "
+            "changed its hostname scheme; fix before continuing."
+        )
 
 
 def _best_effort_rollback(

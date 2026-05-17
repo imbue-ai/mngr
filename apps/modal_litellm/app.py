@@ -14,7 +14,7 @@ Usage:
     uv run minds env deploy --yes-i-mean-production
 
     # Use with claude -p (replace with your virtual key and Modal URL)
-    ANTHROPIC_BASE_URL=https://<workspace>--litellm-proxy-production-litellm-app.modal.run/anthropic \\
+    ANTHROPIC_BASE_URL=https://<workspace>--llm-production-proxy.modal.run/anthropic \\
     ANTHROPIC_API_KEY=sk-your-virtual-key \\
     claude -p "hello"
 """
@@ -104,10 +104,11 @@ image = (
     )
 )
 
-app = modal.App(name=f"litellm-proxy-{_DEPLOY_ENV}", image=image)
+app = modal.App(name=f"llm-{_DEPLOY_ENV}", image=image)
 
 
 @app.function(
+    name="proxy",
     secrets=[
         modal.Secret.from_name(f"litellm-{_DEPLOY_ENV}"),
         modal.Secret.from_dict({"MNGR_DEPLOY_ENV": _DEPLOY_ENV}),

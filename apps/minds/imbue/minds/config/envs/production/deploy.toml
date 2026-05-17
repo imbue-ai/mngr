@@ -4,7 +4,7 @@
 # list of services whose `.minds/template/<service>.sh` schemas must be
 # pulled from Vault and pushed into Modal as `<service>-production`.
 
-modal_workspace = "CHANGE_ME"
+modal_workspace = "minds-production"
 vault_path_prefix = "secrets/minds/production"
 cloudflare_domain = "CHANGE_ME.example.com"
 

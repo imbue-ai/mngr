@@ -9,7 +9,7 @@
 # the ones that consume `modal_env`; we leave it at its default ("main")
 # for shape consistency.
 
-modal_workspace = "imbue-minds-dev"
+modal_workspace = "minds-dev"
 vault_path_prefix = "secrets/minds/dev"
 cloudflare_domain = "minds-dev.com"
 

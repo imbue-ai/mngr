@@ -43,10 +43,12 @@ from imbue.minds.envs.vault_reader import read_vault_kv
 from imbue.minds.errors import MindError
 
 # Modal's `modal deploy` prints lines like:
-#     Created web function fastapi_app => https://<host>.modal.run
-# When the natural host exceeds DNS's 63-char limit, Modal truncates and
-# appends a 6-hex hash, and may wrap the URL across stdout lines. Collapsing
-# whitespace before regex matching handles both forms.
+#     Created web function api => https://<host>.modal.run
+# Under the shortened app + function names (``rsc-<tier>``/``api`` and
+# ``llm-<tier>``/``proxy``) the natural host always fits under DNS's
+# 63-char limit, so no truncation / 6-hex-suffix surfaces in practice.
+# We still collapse whitespace before regex matching in case Modal
+# wraps the URL across stdout lines for terminal display reasons.
 _MODAL_DEPLOY_URL_PATTERN: Final[re.Pattern[str]] = re.compile(r"https://[A-Za-z0-9_\-.]+\.modal\.run")
 
 # Services that need a per-env Modal Secret. Order doesn't matter for the
@@ -135,13 +137,38 @@ def per_env_connector_url(name: DevEnvName, modal_workspace: str) -> AnyUrl:
 
     Modal asgi apps follow ``<workspace>--<app>-<function>.modal.run``,
     with the env name embedded as ``<workspace>-<env>--<app>-...``
-    (Modal's URL convention for non-default envs).
+    (Modal's URL convention for non-default envs). The connector's app
+    name is ``rsc-dev`` and its FastAPI function is ``api`` -- short
+    enough that the full hostname always fits under DNS's 63-char
+    limit, so the computed URL is exactly what Modal returns (no
+    truncation, no fixup pass).
     """
-    return AnyUrl(f"https://{modal_workspace}-{name}--remote-service-connector-dev-fastapi-app.modal.run")
+    return AnyUrl(f"https://{modal_workspace}-{name}--rsc-dev-api.modal.run")
 
 
 def per_env_litellm_proxy_url(name: DevEnvName, modal_workspace: str) -> AnyUrl:
-    return AnyUrl(f"https://{modal_workspace}-{name}--litellm-proxy-dev-litellm-app.modal.run")
+    """Compute the LiteLLM proxy's URL for the given dev env.
+
+    Same hostname convention as :func:`per_env_connector_url`; the
+    proxy's app name is ``llm-dev`` and its asgi function is ``proxy``.
+    """
+    return AnyUrl(f"https://{modal_workspace}-{name}--llm-dev-proxy.modal.run")
+
+
+def tier_connector_url(tier: str, modal_workspace: str) -> AnyUrl:
+    """Compute the connector's URL for a shared-tier deploy (staging / production).
+
+    Shared tiers deploy into Modal's default-named environment (no env
+    name in the URL), so the host shape is
+    ``<workspace>--<app>-<function>.modal.run`` -- one fewer segment
+    than the per-env shape.
+    """
+    return AnyUrl(f"https://{modal_workspace}--rsc-{tier}-api.modal.run")
+
+
+def tier_litellm_proxy_url(tier: str, modal_workspace: str) -> AnyUrl:
+    """Compute the LiteLLM proxy's URL for a shared-tier deploy."""
+    return AnyUrl(f"https://{modal_workspace}--llm-{tier}-proxy.modal.run")
 
 
 def build_per_env_secret_values(
@@ -284,10 +311,10 @@ def deploy_litellm_proxy(
             tier=tier,
             parent_cg=parent_cg,
         )
-    with info_span("modal deploy litellm-proxy-{} into env {!r}", tier, modal_env):
+    with info_span("modal deploy llm-{} into env {!r}", tier, modal_env):
         return _deploy_modal_app(
             app_file=app_file,
-            app_name=f"litellm-proxy-{tier}",
+            app_name=f"llm-{tier}",
             modal_env=modal_env,
             tier=tier,
             extra_env={LITELLM_PROXY_MIN_CONTAINERS_ENV_VAR: str(min_containers)},
@@ -384,10 +411,10 @@ def deploy_remote_service_connector(
     subprocess env as ``MINDS_CONNECTOR_MIN_CONTAINERS`` and consumed
     by the modal app at module load.
     """
-    with info_span("modal deploy remote-service-connector-{} into env {!r}", tier, modal_env):
+    with info_span("modal deploy rsc-{} into env {!r}", tier, modal_env):
         return _deploy_modal_app(
             app_file=_connector_app_file(),
-            app_name=f"remote-service-connector-{tier}",
+            app_name=f"rsc-{tier}",
             modal_env=modal_env,
             tier=tier,
             extra_env={CONNECTOR_MIN_CONTAINERS_ENV_VAR: str(min_containers)},

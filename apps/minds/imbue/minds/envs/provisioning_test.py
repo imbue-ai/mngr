@@ -1,4 +1,5 @@
 from pathlib import Path
+from typing import Final
 
 import pytest
 from pydantic import AnyUrl
@@ -52,6 +53,14 @@ def _root_cg() -> ConcurrencyGroup:
     return ConcurrencyGroup(name="provisioning-test-root")
 
 
+# Fixed test workspace name used everywhere ``deploy_dev_env`` /
+# ``deploy_tier_env`` constructs an expected URL via ``per_env_*_url`` /
+# ``tier_*_url``. The fake deploy_litellm_proxy / deploy_remote_service_connector
+# below MUST return URLs matching the same formulas so the assertion
+# in ``provisioning._assert_deploy_url_matches`` passes.
+_TEST_MODAL_WORKSPACE: Final[str] = "test-ws"
+
+
 def _deploy_config(
     *,
     tier: str = "dev",
@@ -59,7 +68,7 @@ def _deploy_config(
     min_containers: MinContainersConfig | None = None,
 ) -> DeployEnvConfig:
     return DeployEnvConfig(
-        modal_workspace=NonEmptyStr("dev-workspace"),
+        modal_workspace=NonEmptyStr(_TEST_MODAL_WORKSPACE),
         modal_env=NonEmptyStr(modal_env),
         vault_path_prefix=NonEmptyStr(f"secrets/minds/{tier}"),
         cloudflare_domain=NonEmptyStr(f"{tier}.example.com"),
@@ -182,13 +191,20 @@ def _build_fake_providers(
         call_log["calls"].append(("deploy_litellm_proxy", modal_env, tier, min_containers))
         if fail_step == "deploy_litellm":
             raise ModalDeployError("litellm deploy boom")
-        return AnyUrl(f"https://fake-litellm-{modal_env}.modal.run")
+        # Match the same URL formula ``deploy_dev_env`` /
+        # ``deploy_tier_env`` use, so the post-deploy URL-match assertion
+        # passes for both per-env (dev) and shared (staging/prod) shapes.
+        if tier == "dev":
+            return AnyUrl(f"https://{_TEST_MODAL_WORKSPACE}-{modal_env}--llm-dev-proxy.modal.run")
+        return AnyUrl(f"https://{_TEST_MODAL_WORKSPACE}--llm-{tier}-proxy.modal.run")
 
     def deploy_remote_service_connector(modal_env, tier, min_containers, cg):
         call_log["calls"].append(("deploy_remote_service_connector", modal_env, tier, min_containers))
         if fail_step == "deploy_connector":
             raise ModalDeployError("connector deploy boom")
-        return AnyUrl(f"https://fake-connector-{modal_env}.modal.run")
+        if tier == "dev":
+            return AnyUrl(f"https://{_TEST_MODAL_WORKSPACE}-{modal_env}--rsc-dev-api.modal.run")
+        return AnyUrl(f"https://{_TEST_MODAL_WORKSPACE}--rsc-{tier}-api.modal.run")
 
     def stop_modal_app(app_name, modal_env, cg):
         call_log["calls"].append(("stop_modal_app", app_name, modal_env))
@@ -266,14 +282,14 @@ def test_deploy_dev_env_writes_split_files(_isolated_home: Path, _root_cg: Concu
         providers=providers,
         parent_concurrency_group=_root_cg,
     )
-    assert str(result.connector_url) == "https://fake-connector-dev-alice.modal.run/"
-    assert str(result.litellm_proxy_url) == "https://fake-litellm-dev-alice.modal.run/"
+    assert str(result.connector_url) == f"https://{_TEST_MODAL_WORKSPACE}-dev-alice--rsc-dev-api.modal.run/"
+    assert str(result.litellm_proxy_url) == f"https://{_TEST_MODAL_WORKSPACE}-dev-alice--llm-dev-proxy.modal.run/"
 
     # client.toml has only URL fields (no secrets).
     assert client_config_exists(DevEnvName("dev-alice"))
     public = read_client_config_file(DevEnvName("dev-alice"))
-    assert str(public.connector_url) == "https://fake-connector-dev-alice.modal.run/"
-    assert str(public.litellm_proxy_url) == "https://fake-litellm-dev-alice.modal.run/"
+    assert str(public.connector_url) == f"https://{_TEST_MODAL_WORKSPACE}-dev-alice--rsc-dev-api.modal.run/"
+    assert str(public.litellm_proxy_url) == f"https://{_TEST_MODAL_WORKSPACE}-dev-alice--llm-dev-proxy.modal.run/"
 
     # secrets.toml has the per-env provider state, chmod 600.
     secrets = read_secrets_file(DevEnvName("dev-alice"))
@@ -310,9 +326,10 @@ def test_deploy_dev_env_is_idempotent_on_re_run(_isolated_home: Path, _root_cg: 
     deploy_calls = [
         c for c in call_log["calls"] if c[0] in ("deploy_litellm_proxy", "deploy_remote_service_connector")
     ]
-    # Per run: 1 litellm + 2 connector deploys. Two runs => 2 + 4.
+    # Per run: 1 litellm + 1 connector deploy (no second-pass redeploy
+    # under the shortened-name URL-determinism path). Two runs => 2 + 2.
     assert len([c for c in deploy_calls if c[0] == "deploy_litellm_proxy"]) == 2
-    assert len([c for c in deploy_calls if c[0] == "deploy_remote_service_connector"]) == 4
+    assert len([c for c in deploy_calls if c[0] == "deploy_remote_service_connector"]) == 2
 
 
 def test_deploy_dev_env_rollback_on_neon_failure(_isolated_home: Path, _root_cg: ConcurrencyGroup) -> None:
@@ -409,9 +426,12 @@ def test_deploy_dev_env_pushes_per_env_secrets_into_dev_modal_env(
     # not the tier's stable 'main' env. Two devs never share one Modal env.
     assert all(c[2] == "dev-frank" for c in pushes)
     deploys = [c for c in call_log["calls"] if c[0].startswith("deploy_")]
+    # Single connector deploy (no second-pass redeploy): the shortened
+    # app + function names keep the Modal hostname under DNS's 63-char
+    # limit so the URL we computed up front equals the URL Modal
+    # assigns, and the URL-dependent secrets are correct on first push.
     assert deploys == [
         ("deploy_litellm_proxy", "dev-frank", "dev", 0),
-        ("deploy_remote_service_connector", "dev-frank", "dev", 0),
         ("deploy_remote_service_connector", "dev-frank", "dev", 0),
     ]
 
@@ -634,7 +654,7 @@ def test_list_dev_envs_returns_summaries_in_sorted_order(_isolated_home: Path, _
     summaries = list_dev_envs()
     names = [s.name for s in summaries]
     assert names == ["dev-ivy", "dev-juan"]
-    assert all(str(s.connector_url).startswith("https://fake-connector-") for s in summaries)
+    assert all(str(s.connector_url).startswith(f"https://{_TEST_MODAL_WORKSPACE}-") for s in summaries)
 
 
 def test_list_dev_envs_treats_minds_dir_as_production_row(
@@ -765,8 +785,8 @@ def test_destroy_env_tier_stops_apps_deletes_secrets_and_removes_env_root(
     # Stops both apps in the tier's Modal env, in deploy order (litellm first).
     stops = [c for c in call_log["calls"] if c[0] == "stop_modal_app"]
     assert stops == [
-        ("stop_modal_app", "litellm-proxy-staging", "main"),
-        ("stop_modal_app", "remote-service-connector-staging", "main"),
+        ("stop_modal_app", "llm-staging", "main"),
+        ("stop_modal_app", "rsc-staging", "main"),
     ]
     # Deletes the per-tier Modal Secrets (just `cloudflare-staging` for
     # the _deploy_config used here, which declares only that service).
