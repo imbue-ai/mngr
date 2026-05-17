@@ -22,7 +22,7 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import ProviderInstanceConfig
 from imbue.mngr.errors import ConfigStructureError
 from imbue.mngr.errors import MngrError
-from imbue.mngr.errors import ProviderUnavailableError
+from imbue.mngr.errors import ProviderEmptyError
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.host import OnlineHostInterface
@@ -473,9 +473,8 @@ Supported build arguments for the modal provider:
         it at the default ``False`` so a brand-new install does not silently
         create environments from ``mngr list`` / ``mngr gc`` / etc. When the
         environment is missing and ``is_for_host_creation`` is ``False``, this
-        raises ``ProviderUnavailableError`` so the higher-level provider
-        loader can skip the modal provider entirely instead of constructing
-        it.
+        raises ``ProviderEmptyError`` so the higher-level provider loader can
+        skip the modal provider entirely instead of constructing it.
         """
         if not isinstance(config, ModalProviderConfig):
             raise ConfigStructureError(f"Expected ModalProviderConfig, got {type(config).__name__}")
@@ -513,9 +512,9 @@ Supported build arguments for the modal provider:
 
         ``is_for_host_creation`` gates whether a missing Modal environment may
         be created here. When ``False`` and the environment does not exist,
-        ``ProviderUnavailableError`` is raised so that read-only loaders (used
-        by ``mngr list`` / ``mngr gc`` / discovery) can skip the modal
-        provider entirely rather than creating an environment on first use.
+        ``ProviderEmptyError`` is raised so that read-only loaders (used by
+        ``mngr list`` / ``mngr gc`` / discovery) can skip the modal provider
+        entirely rather than creating an environment on first use.
         """
         if not isinstance(config, ModalProviderConfig):
             raise ConfigStructureError(f"Expected ModalProviderConfig, got {type(config).__name__}")
@@ -552,7 +551,7 @@ Supported build arguments for the modal provider:
             # allowed to bootstrap it -- everything else asks the loader to skip
             # the modal provider so commands like `mngr list` / `mngr gc` don't
             # silently create a Modal environment behind the user's back.
-            raise ProviderUnavailableError(
+            raise ProviderEmptyError(
                 provider_name=name,
                 reason=(
                     f"Modal environment {environment_name!r} does not exist yet. "

@@ -29,6 +29,7 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import BaseMngrError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import ProviderDiscoveryError
+from imbue.mngr.errors import ProviderEmptyError
 from imbue.mngr.errors import ProviderInstanceNotFoundError
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.data_types import AgentDetails
@@ -310,6 +311,14 @@ def _construct_and_discover_for_provider(
         if reset_caches:
             provider.reset_caches()
         provider_results = provider.discover_hosts_and_agents(cg=mngr_ctx.concurrency_group, include_destroyed=True)
+    except ProviderEmptyError as e:
+        # Provider was reached and is known-empty (e.g. Modal env not yet
+        # created). Always safe to silently skip in listing -- there is
+        # provably nothing to enumerate, so the resulting listing stays
+        # correct rather than misleading. Distinct from
+        # ``ProviderUnavailableError`` whose state is unknown.
+        logger.debug("Skipping provider {} (empty -- nothing to list): {}", provider_name, e)
+        return
     except Exception as e:
         if params.error_behavior == ErrorBehavior.ABORT:
             # Wrap so downstream handlers (e.g. discovery_events'
@@ -532,6 +541,10 @@ def _construct_discover_and_emit_for_provider(
         for future in host_futures:
             future.result()
 
+    except ProviderEmptyError as e:
+        # See _construct_and_discover_for_provider's matching arm: known-empty
+        # provider is always safe to skip in listing.
+        logger.debug("Skipping provider {} (empty -- nothing to list): {}", provider_name, e)
     except Exception as e:
         if params.error_behavior == ErrorBehavior.ABORT:
             if isinstance(e, MngrError):

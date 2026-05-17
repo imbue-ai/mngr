@@ -4,6 +4,7 @@ from loguru import logger
 
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import MngrError
+from imbue.mngr.errors import ProviderEmptyError
 from imbue.mngr.errors import ProviderUnavailableError
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
@@ -186,20 +187,28 @@ def get_all_provider_instances(
     - Provider instances with is_enabled=False in their config
     - Backends not in enabled_backends list (if the list is non-empty)
     - Providers not in provider_names (if provider_names is specified)
-    - Provider instances that declare themselves unavailable at construction
-      time (by raising ``ProviderUnavailableError``). This is how the Modal
-      backend disables itself when its per-user environment doesn't exist yet
-      -- so commands like ``mngr list`` and ``mngr gc`` do not silently
-      bootstrap a Modal environment.
+    - Provider instances that declare themselves empty at construction time
+      (by raising ``ProviderEmptyError``). This is how the Modal backend
+      disables itself when its per-user environment doesn't exist yet -- so
+      commands like ``mngr list`` and ``mngr gc`` do not silently bootstrap
+      a Modal environment.
+    - Provider instances that declare themselves unreachable at construction
+      time (by raising ``ProviderUnavailableError``). The backend's state is
+      unknown in this case, but for ``mngr gc`` we still want to keep going
+      against the providers we *can* reach.
 
     Raises MngrError if ANY provider fails to instantiate for a reason other
-    than ``ProviderUnavailableError``. Callers that want to tolerate per-provider
-    instantiation errors should use list_provider_names_to_load.
+    than ``ProviderEmptyError`` / ``ProviderUnavailableError``. Callers that want
+    to tolerate per-provider instantiation errors should use
+    ``list_provider_names_to_load``.
     """
     providers: list[BaseProviderInstance] = []
     for name in list_provider_names_to_load(mngr_ctx, provider_names):
         try:
             providers.append(get_provider_instance(name, mngr_ctx))
+        except ProviderEmptyError as e:
+            logger.debug("Skipping provider {} (empty -- nothing to list): {}", name, e)
+            continue
         except ProviderUnavailableError as e:
             logger.debug("Skipping provider {} (unavailable): {}", name, e)
             continue

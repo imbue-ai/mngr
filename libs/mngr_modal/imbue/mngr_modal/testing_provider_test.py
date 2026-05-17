@@ -23,7 +23,7 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import HostNameConflictError
 from imbue.mngr.errors import HostNotFoundError
 from imbue.mngr.errors import MngrError
-from imbue.mngr.errors import ProviderUnavailableError
+from imbue.mngr.errors import ProviderEmptyError
 from imbue.mngr.errors import SnapshotNotFoundError
 from imbue.mngr.hosts.offline_host import OfflineHost
 from imbue.mngr.interfaces.data_types import CertifiedHostData
@@ -1062,8 +1062,8 @@ def test_construct_modal_provider_disables_itself_when_env_missing_and_not_creat
     modal_mngr_ctx: MngrContext, tmp_path: Path, cg: ConcurrencyGroup
 ) -> None:
     """When the Modal env doesn't exist and we're not in the create-host path,
-    ``_construct_modal_provider`` must raise ``ProviderUnavailableError`` so
-    the modal provider is filtered out of read flows (mngr list / gc / ...)
+    ``_construct_modal_provider`` must raise ``ProviderEmptyError`` so the
+    modal provider is filtered out of read flows (mngr list / gc / ...)
     instead of being silently bootstrapped behind the user's back.
 
     Uses ``modal_mngr_ctx`` so the derived env name matches the
@@ -1080,7 +1080,7 @@ def test_construct_modal_provider_disables_itself_when_env_missing_and_not_creat
         is_snapshotted_after_create=False,
     )
 
-    with pytest.raises(ProviderUnavailableError, match="Modal environment"):
+    with pytest.raises(ProviderEmptyError, match="Modal environment"):
         ModalProviderBackend._construct_modal_provider(
             ProviderInstanceName("test"),
             config,
