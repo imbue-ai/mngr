@@ -2045,19 +2045,15 @@ def test_lookup_persistent_app_with_env_retry_raises_when_env_missing_and_creati
 ) -> None:
     """When the Modal env doesn't exist and we don't authorize creating it, the
     helper must surface the underlying ``ModalProxyNotFoundError`` rather than
-    silently bootstrapping a new Modal environment. (The testing modal
-    interface's ``app_lookup`` would otherwise auto-create env on lookup --
-    we sidestep that here by checking the env never gets registered, since the
-    testing impl writes to ``modal._environments`` on lookup; we just check the
-    helper does not call ``_create_environment`` itself.)
-    """
-    modal = make_testing_modal_interface(tmp_path, cg)
-    # The testing interface's app_lookup auto-creates env on lookup, so the
-    # helper succeeds. The real check is that the helper does *not* go through
-    # the _create_environment branch -- which is exercised indirectly by the
-    # backend tests that count environment_create calls.
-    app = _lookup_persistent_app_with_env_retry("my-app", "auto-env", modal, is_environment_creation_allowed=False)
-    assert app.get_name() == "my-app"
+    silently bootstrapping a new Modal environment."""
+    # Use the NoAutoCreate variant so app_lookup mirrors real-Modal behavior
+    # (raise NotFound when env is missing) instead of the testing default
+    # (auto-create env for convenience), which would mask the gate-under-test.
+    modal = _NoAutoCreateModalInterface(root_dir=tmp_path / "modal_testing", concurrency_group=cg)
+    with pytest.raises(ModalProxyNotFoundError):
+        _lookup_persistent_app_with_env_retry("my-app", "missing-env", modal, is_environment_creation_allowed=False)
+    # Confirm the helper did NOT call _create_environment as a fallback.
+    assert "missing-env" not in modal._environments
 
 
 def test_enter_ephemeral_app_context_with_env_retry(tmp_path: Path, cg: ConcurrencyGroup) -> None:
