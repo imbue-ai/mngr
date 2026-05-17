@@ -4,6 +4,7 @@ from loguru import logger
 
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import MngrError
+from imbue.mngr.errors import ProviderUnavailableError
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.providers.base_provider import BaseProviderInstance
@@ -51,6 +52,7 @@ def reset_provider_instances() -> None:
 def get_provider_instance(
     name: ProviderInstanceName,
     mngr_ctx: MngrContext,
+    is_for_host_creation: bool = False,
 ) -> BaseProviderInstance:
     """Get or create a provider instance by name.
 
@@ -58,6 +60,12 @@ def get_provider_instance(
     Otherwise, creates a new instance: checks config.providers first, then falls
     back to treating the name as a backend name with defaults.
     The returned instance is tracked for cleanup at process exit via atexit.
+
+    ``is_for_host_creation`` is forwarded to the backend's
+    ``build_provider_instance`` so backends with one-time bootstrap resources
+    (currently: the Modal backend's per-user environment) can distinguish
+    create-host construction from construction for read-only or existing-host
+    operations. Only the ``mngr create`` path sets this to ``True``.
     """
     _ensure_atexit_registered()
 
@@ -75,6 +83,7 @@ def get_provider_instance(
             backend_name=provider_config.backend,
             config=provider_config,
             mngr_ctx=mngr_ctx,
+            is_for_host_creation=is_for_host_creation,
         )
         logger.trace("Built provider instance {} from config with backend {}", name, provider_config.backend)
     else:
@@ -88,6 +97,7 @@ def get_provider_instance(
             backend_name=backend_name,
             config=default_config,
             mngr_ctx=mngr_ctx,
+            is_for_host_creation=is_for_host_creation,
         )
         logger.trace("Built provider instance {} using backend name as default", name)
 
@@ -176,13 +186,23 @@ def get_all_provider_instances(
     - Provider instances with is_enabled=False in their config
     - Backends not in enabled_backends list (if the list is non-empty)
     - Providers not in provider_names (if provider_names is specified)
+    - Provider instances that declare themselves unavailable at construction
+      time (by raising ``ProviderUnavailableError``). This is how the Modal
+      backend disables itself when its per-user environment doesn't exist yet
+      -- so commands like ``mngr list`` and ``mngr gc`` do not silently
+      bootstrap a Modal environment.
 
-    Raises MngrError if ANY provider fails to instantiate. Callers that want to
-    tolerate per-provider instantiation errors should use list_provider_names_to_load.
+    Raises MngrError if ANY provider fails to instantiate for a reason other
+    than ``ProviderUnavailableError``. Callers that want to tolerate per-provider
+    instantiation errors should use list_provider_names_to_load.
     """
-    providers: list[BaseProviderInstance] = [
-        get_provider_instance(name, mngr_ctx) for name in list_provider_names_to_load(mngr_ctx, provider_names)
-    ]
+    providers: list[BaseProviderInstance] = []
+    for name in list_provider_names_to_load(mngr_ctx, provider_names):
+        try:
+            providers.append(get_provider_instance(name, mngr_ctx))
+        except ProviderUnavailableError as e:
+            logger.debug("Skipping provider {} (unavailable): {}", name, e)
+            continue
 
     if reset_caches:
         for provider in providers:

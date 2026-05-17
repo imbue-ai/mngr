@@ -53,7 +53,9 @@ class ImbueCloudProviderBackend(ProviderBackendInterface):
         name: ProviderInstanceName,
         config: ProviderInstanceConfig,
         mngr_ctx: MngrContext,
+        is_for_host_creation: bool = False,
     ) -> ProviderInstanceInterface:
+        del is_for_host_creation
         if not isinstance(config, ImbueCloudProviderConfig):
             raise MngrError(f"Expected ImbueCloudProviderConfig for instance '{name}', got {type(config).__name__}")
         connector_url = config.get_connector_url()
