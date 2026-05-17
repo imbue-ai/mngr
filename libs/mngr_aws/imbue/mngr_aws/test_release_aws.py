@@ -159,29 +159,34 @@ class TestAwsProviderLifecycle:
             time.sleep(20)
 
 
+@pytest.fixture()
+def aws_release_client() -> AwsVpsClient:
+    """Real AWS API client for release-test read-only calls.
+
+    Built with placeholder AMI / security-group IDs because the tests below
+    only exercise read-only API operations (list_instances, list_ssh_keys,
+    list_snapshots) that ignore those fields.
+    """
+    session = boto3.Session(region_name=AWS_DEFAULT_REGION)
+    return AwsVpsClient(
+        session=session,
+        region=AWS_DEFAULT_REGION,
+        ami_id="ami-placeholder",
+        security_group_id="sg-placeholder",
+    )
+
+
 class TestAwsApiClient:
     """Tests for the AWS API client with real EC2 API calls."""
 
-    def _client(self) -> AwsVpsClient:
-        session = boto3.Session(region_name=AWS_DEFAULT_REGION)
-        return AwsVpsClient(
-            session=session,
-            region=AWS_DEFAULT_REGION,
-            ami_id="ami-placeholder",
-            security_group_id="sg-placeholder",
-        )
-
-    def test_list_instances_does_not_error(self) -> None:
-        client = self._client()
-        instances = client.list_instances()
+    def test_list_instances_does_not_error(self, aws_release_client: AwsVpsClient) -> None:
+        instances = aws_release_client.list_instances()
         assert isinstance(instances, list)
 
-    def test_list_ssh_keys_does_not_error(self) -> None:
-        client = self._client()
-        keys = client.list_ssh_keys()
+    def test_list_ssh_keys_does_not_error(self, aws_release_client: AwsVpsClient) -> None:
+        keys = aws_release_client.list_ssh_keys()
         assert isinstance(keys, list)
 
-    def test_list_snapshots_does_not_error(self) -> None:
-        client = self._client()
-        snapshots = client.list_snapshots()
+    def test_list_snapshots_does_not_error(self, aws_release_client: AwsVpsClient) -> None:
+        snapshots = aws_release_client.list_snapshots()
         assert isinstance(snapshots, list)
