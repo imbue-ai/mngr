@@ -411,11 +411,11 @@ def test_config_path_with_json_format(
     assert len(output["paths"]) > 0
 
 
-def test_config_schema_preserves_generic_type_parameters(
+def test_config_list_schema_preserves_generic_type_parameters(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
 ) -> None:
-    """`mngr config schema` should render parameterised generics with their args.
+    """`mngr config list --schema` should render parameterised generics with their args.
 
     Regression test: ``_render_annotation`` previously returned just ``"list"``
     for ``list[str]`` (via ``__name__``), losing the type parameter -- which
@@ -425,7 +425,7 @@ def test_config_schema_preserves_generic_type_parameters(
     """
     result = cli_runner.invoke(
         config,
-        ["schema", "--format", "json"],
+        ["list", "--schema", "--format", "json"],
         obj=plugin_manager,
         catch_exceptions=False,
     )
@@ -439,19 +439,19 @@ def test_config_schema_preserves_generic_type_parameters(
     )
 
 
-def test_config_schema_lists_top_level_fields(
+def test_config_list_schema_lists_top_level_fields(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
 ) -> None:
-    """`mngr config schema` should enumerate the well-known top-level MngrConfig fields.
+    """`mngr config list --schema` should enumerate the well-known top-level MngrConfig fields.
 
-    Spot-checks the discovery surface so the schema command stays useful for
+    Spot-checks the discovery surface so the schema view stays useful for
     surfacing settable keys via the documented entry points (MNGR__*,
     --setting, mngr config set).
     """
     result = cli_runner.invoke(
         config,
-        ["schema", "--format", "json"],
+        ["list", "--schema", "--format", "json"],
         obj=plugin_manager,
         catch_exceptions=False,
     )
@@ -459,6 +459,26 @@ def test_config_schema_lists_top_level_fields(
     output = json.loads(result.output)
     keys = {row["key"] for row in output["schema"]}
     assert {"prefix", "default_host_dir", "unset_vars", "headless"} <= keys
+
+
+def test_config_list_schema_rejects_scope_combination(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """``--schema`` is global; pairing it with ``--scope`` is a UsageError.
+
+    The schema is derived from ``MngrConfig.model_fields``, not from any
+    scope-specific TOML file, so combining the two flags has no meaningful
+    interpretation. Reject it loudly so the user picks one.
+    """
+    result = cli_runner.invoke(
+        config,
+        ["list", "--schema", "--scope", "user"],
+        obj=plugin_manager,
+        catch_exceptions=False,
+    )
+    assert result.exit_code != 0
+    assert "--schema and --scope cannot be combined" in result.output
 
 
 def test_config_extend_writes_extend_suffixed_key(

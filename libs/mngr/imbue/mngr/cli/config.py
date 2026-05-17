@@ -64,7 +64,7 @@ class ConfigCliOptions(CommonCliOptions):
     For that information, see the click.option() and click.argument() decorators on the config() function itself.
     """
 
-    # ``scope`` is optional because ``config schema`` doesn't accept a
+    # ``scope`` is optional because ``mngr config list --schema`` doesn't accept a
     # --scope flag (so click never populates ``ctx.params['scope']`` for it);
     # other subcommands either default it (config_set) or leave it as None.
     scope: str | None = None
@@ -73,6 +73,12 @@ class ConfigCliOptions(CommonCliOptions):
     value: str | None = None
     # ``mngr config list --all`` opts into the full-schema listing.
     all: bool = False
+    # ``mngr config list --schema`` switches the output to the type-annotated
+    # schema view (every settable key with its declared type and description).
+    # Bound through the click option's ``"schema_view"`` ctx-params key because
+    # the bare name ``schema`` collides with pydantic's deprecated ``.schema``
+    # alias on ``BaseModel``.
+    schema_view: bool = False
 
 
 def get_config_path(scope: ConfigScope, root_name: str, profile_dir: Path, cg: ConcurrencyGroup) -> Path:
@@ -192,6 +198,14 @@ def config(ctx: click.Context, **kwargs: Any) -> None:
     default=False,
     help="Include all settable fields (with their current effective values), not just keys explicitly set in config.",
 )
+@click.option(
+    "--schema",
+    "schema_view",
+    is_flag=True,
+    default=False,
+    help="Render each settable key with its declared type and description (the schema view). "
+    "Useful for discovering what is settable via MNGR__* env vars, --setting, or mngr config set.",
+)
 @add_common_options
 @click.pass_context
 def config_list(ctx: click.Context, **kwargs: Any) -> None:
@@ -213,6 +227,12 @@ def _config_list_impl(ctx: click.Context, **kwargs: Any) -> None:
 
     ``--all`` switches to the full ``model_dump`` view so users can discover
     every settable key with its current effective value.
+
+    ``--schema`` walks ``MngrConfig.model_fields`` recursively (through any
+    enabled plugin sub-configs) and emits each settable key path alongside
+    its declared type and description. Composes naturally with ``--scope``-
+    less invocations; ``--scope`` is rejected because schema is independent
+    of which TOML file the keys came from.
     """
     mngr_ctx, output_opts, opts = setup_command_context(
         ctx=ctx,
@@ -222,6 +242,13 @@ def _config_list_impl(ctx: click.Context, **kwargs: Any) -> None:
     )
 
     root_name = os.environ.get("MNGR_ROOT_NAME", "mngr")
+
+    if opts.schema_view:
+        if opts.scope:
+            raise click.UsageError("--schema and --scope cannot be combined; the schema is global.")
+        rows = _collect_schema_rows(MngrConfig, mngr_ctx.config)
+        _emit_schema_rows(rows, output_opts)
+        return
 
     if opts.scope:
         # List config from specific scope
@@ -887,30 +914,6 @@ def _get_config_template() -> str:
 """
 
 
-@config.command(name="schema")
-@add_common_options
-@click.pass_context
-def config_schema(ctx: click.Context, **kwargs: Any) -> None:
-    """List every settable config key with its type and current effective value."""
-    try:
-        _config_schema_impl(ctx, **kwargs)
-    except AbortError as e:
-        logger.error("Aborted: {}", e.message)
-        ctx.exit(1)
-
-
-def _config_schema_impl(ctx: click.Context, **kwargs: Any) -> None:
-    """Walk ``MngrConfig.model_fields`` and emit the schema."""
-    mngr_ctx, output_opts, _ = setup_command_context(
-        ctx=ctx,
-        command_name="config",
-        command_class=ConfigCliOptions,
-        is_format_template_supported=True,
-    )
-    rows = _collect_schema_rows(MngrConfig, mngr_ctx.config)
-    _emit_schema_rows(rows, output_opts)
-
-
 def _collect_schema_rows(model_class: type[BaseModel], current: Any) -> list[dict[str, Any]]:
     """Flatten ``model_class``'s schema into ``[{key, type, value, description}, ...]``.
 
@@ -989,7 +992,7 @@ def _emit_schema_rows(rows: list[dict[str, Any]], output_opts: OutputOptions) ->
         case OutputFormat.JSON:
             emit_final_json({"schema": rows})
         case OutputFormat.JSONL:
-            emit_final_json({"event": "config_schema", "schema": rows})
+            emit_final_json({"event": "config_list_schema", "schema": rows})
         case OutputFormat.HUMAN:
             for row in rows:
                 write_human_line(
@@ -1151,12 +1154,21 @@ CommandHelpMetadata(
     one_line_description="List all configuration values",
     synopsis="mngr config list [OPTIONS]",
     description="""Shows all configuration settings from the specified scope, or from the
-merged configuration if no scope is specified.
+merged configuration if no scope is specified. By default only keys that
+appear in a user/project/local TOML file are listed; use ``--all`` to include
+every settable field with its current effective value.
+
+Pass ``--schema`` to render each settable key with its declared type and
+description (useful for discovering what is settable via ``MNGR__*`` env vars,
+``--setting``, or ``mngr config set``). ``--schema`` cannot be combined with
+``--scope``.
 
 Supports custom format templates via --format. Available fields:
-key, value.""",
+key, value (and additionally type, description when ``--schema`` is set).""",
     examples=(
         ("List merged configuration", "mngr config list"),
+        ("List every settable field with its current value", "mngr config list --all"),
+        ("Print the full schema with types", "mngr config list --schema"),
         ("List user-scope configuration", "mngr config list --scope user"),
         ("Output as JSON", "mngr config list --format json"),
         ("Custom format template", "mngr config list --format '{key}={value}'"),
@@ -1235,25 +1247,6 @@ routes through this same code path.""",
     ),
 ).register()
 add_pager_help_option(config_extend)
-
-CommandHelpMetadata(
-    key="config.schema",
-    one_line_description="List every settable config key with its type",
-    synopsis="mngr config schema [OPTIONS]",
-    description="""Walks the full ``MngrConfig`` schema (through enabled plugins)
-and emits every settable key path with its declared type and current effective
-value. Useful for discovering what is settable via ``MNGR__*`` env vars,
-``--setting``, or ``mngr config set``.""",
-    examples=(
-        ("Print the full schema", "mngr config schema"),
-        ("Output as JSON", "mngr config schema --format json"),
-    ),
-    see_also=(
-        ("config list", "List all configuration values"),
-        ("config get", "Get a configuration value"),
-    ),
-).register()
-add_pager_help_option(config_schema)
 
 CommandHelpMetadata(
     key="config.unset",
