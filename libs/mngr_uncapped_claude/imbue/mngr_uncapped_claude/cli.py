@@ -38,6 +38,16 @@ class UncappedClaudeCliOptions(CommonCliOptions):
 @add_common_options
 @click.pass_context
 def uncapped_claude(ctx: click.Context, **_kwargs: Any) -> None:
+    # Force ``--quiet`` and ``--headless`` regardless of what the user passed:
+    # this command pretends to be ``claude -p``, whose stdout/stderr contract is
+    # "only the model's response shows up, nothing else." mngr's own loguru
+    # chatter ("Creating agent state...", "Starting agent ...", "Sending
+    # initial message...") and any TUI/interactive behavior would otherwise
+    # leak into the captured output that callers consume. Both flags are still
+    # accepted on the CLI for compatibility -- this just makes them no-ops when
+    # absent rather than required.
+    ctx.params["quiet"] = True
+    ctx.params["headless"] = True
     mngr_ctx, _output_opts, opts = setup_command_context(
         ctx=ctx,
         command_name="uncapped-claude",
