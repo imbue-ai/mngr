@@ -57,7 +57,6 @@ from imbue.minds.envs.per_env_deploy import push_per_env_modal_secret as real_pu
 from imbue.minds.envs.per_env_deploy import stop_modal_app as real_stop_modal_app
 from imbue.minds.envs.primitives import DevEnvName
 from imbue.minds.envs.primitives import DevEnvNotFoundError
-from imbue.minds.envs.primitives import DevEnvProvisioningError
 from imbue.minds.envs.primitives import InvalidDevEnvNameError
 from imbue.minds.envs.primitives import VaultReadError
 from imbue.minds.envs.providers.cloudflare_tunnels import delete_tunnels as real_delete_cloudflare_tunnels
@@ -74,12 +73,10 @@ from imbue.minds.envs.providers.supertokens_app import SuperTokensAppRecord
 from imbue.minds.envs.providers.supertokens_app import create_supertokens_app
 from imbue.minds.envs.providers.supertokens_app import delete_supertokens_app
 from imbue.minds.envs.providers.supertokens_app import wipe_supertokens_app_data as real_wipe_supertokens_app_data
-from imbue.minds.envs.provisioning import DeployedDevEnv
-from imbue.minds.envs.provisioning import DeployedTierEnv
+from imbue.minds.envs.provisioning import DeployedEnv
 from imbue.minds.envs.provisioning import ProviderCredentials
 from imbue.minds.envs.provisioning import Providers
-from imbue.minds.envs.provisioning import deploy_dev_env
-from imbue.minds.envs.provisioning import deploy_tier_env
+from imbue.minds.envs.provisioning import deploy_env
 from imbue.minds.envs.provisioning import destroy_env
 from imbue.minds.envs.provisioning import list_dev_envs
 from imbue.minds.envs.vault_reader import VaultPath
@@ -333,42 +330,31 @@ def _emit_json(payload: object, *, output_format: OutputFormat) -> None:
         write_stdout_line(str(payload))
 
 
-def _emit_dev_deploy_result(result: DeployedDevEnv, *, output_format: OutputFormat) -> None:
+def _emit_deploy_result(result: DeployedEnv, *, output_format: OutputFormat) -> None:
     if output_format is OutputFormat.HUMAN:
-        logger.info("Deployed dev env '{}'.", result.name)
-        logger.info("  client.toml:  {}", result.client_config_path)
-        logger.info("  secrets.toml: {}", result.secrets_path)
+        logger.info("Deployed env '{}' (tier '{}') into Modal env '{}'.", result.name, result.tier, result.modal_env)
+        if result.client_config_path is not None:
+            logger.info("  client.toml:  {}", result.client_config_path)
+        if result.secrets_path is not None:
+            logger.info("  secrets.toml: {}", result.secrets_path)
         logger.info("  connector:    {}", result.connector_url)
         logger.info("  litellm:      {}", result.litellm_proxy_url)
-        logger.info("Run `minds run` (with this env still activated) to launch against it.")
+        if result.client_config_path is not None:
+            logger.info("Run `minds run` (with this env still activated) to launch against it.")
+        else:
+            logger.info(
+                "Update `apps/minds/imbue/minds/config/envs/{}/client.toml` if these URLs "
+                "differ from what's committed, and open a PR.",
+                result.tier,
+            )
         return
     _emit_json(
         {
             "name": str(result.name),
-            "client_config_path": result.client_config_path,
-            "secrets_path": result.secrets_path,
-            "connector_url": str(result.connector_url),
-            "litellm_proxy_url": str(result.litellm_proxy_url),
-        },
-        output_format=output_format,
-    )
-
-
-def _emit_tier_deploy_result(result: DeployedTierEnv, *, output_format: OutputFormat) -> None:
-    if output_format is OutputFormat.HUMAN:
-        logger.info("Deployed tier '{}' into Modal env '{}'.", result.tier, result.modal_env)
-        logger.info("  connector: {}", result.connector_url)
-        logger.info("  litellm:   {}", result.litellm_proxy_url)
-        logger.info(
-            "Update `apps/minds/imbue/minds/config/envs/{}/client.toml` if these URLs "
-            "differ from what's committed, and open a PR.",
-            result.tier,
-        )
-        return
-    _emit_json(
-        {
             "tier": result.tier,
             "modal_env": result.modal_env,
+            "client_config_path": result.client_config_path,
+            "secrets_path": result.secrets_path,
             "connector_url": str(result.connector_url),
             "litellm_proxy_url": str(result.litellm_proxy_url),
         },
@@ -793,37 +779,27 @@ def env_deploy(ctx: click.Context, yes_i_mean_production: bool, yes_i_mean_stagi
     providers = _build_real_providers()
 
     with ConcurrencyGroup(name=f"minds-env-deploy-{env_name}") as cg:
-        if tier == _DEV_TIER:
-            try:
-                credentials = _load_dev_credentials_from_vault(str(deploy_config.vault_path_prefix), cg=cg)
-            except VaultReadError as exc:
-                raise click.ClickException(str(exc)) from exc
-            try:
-                dev_result = deploy_dev_env(
-                    DevEnvName(env_name),
-                    tier=tier,
-                    deploy_config=deploy_config,
-                    credentials=credentials,
-                    providers=providers,
-                    parent_concurrency_group=cg,
-                )
-            except DevEnvProvisioningError as exc:
-                raise click.ClickException(str(exc)) from exc
-            _emit_dev_deploy_result(dev_result, output_format=output_format)
-            return
-
-        # Tier deploy (staging / production): no per-env credentials
-        # needed, no rollback, no local state written.
+        # Unified deploy_env runs the same code path for every tier and
+        # picks per-step behavior off ``deploy_config.lifecycle``.
+        # ``ProviderCredentials`` is loaded from Vault for every tier --
+        # tiers without ``creates_resources`` simply don't consult the
+        # neon_org_id / supertokens fields.
         try:
-            tier_result = deploy_tier_env(
+            credentials = _load_dev_credentials_from_vault(str(deploy_config.vault_path_prefix), cg=cg)
+        except VaultReadError as exc:
+            raise click.ClickException(str(exc)) from exc
+        try:
+            result = deploy_env(
+                DevEnvName(env_name),
                 tier=tier,
                 deploy_config=deploy_config,
+                credentials=credentials,
                 providers=providers,
                 parent_concurrency_group=cg,
             )
         except MindError as exc:
             raise click.ClickException(str(exc)) from exc
-        _emit_tier_deploy_result(tier_result, output_format=output_format)
+        _emit_deploy_result(result, output_format=output_format)
 
 
 @env.command("destroy")

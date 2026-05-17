@@ -41,6 +41,7 @@ with ``--force``, Modal deploys overwrite), so they don't need rollback
 from collections.abc import Callable
 from pathlib import Path
 from typing import Final
+from typing import assert_never
 
 from loguru import logger
 from pydantic import AnyUrl
@@ -52,6 +53,8 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import info_span
 from imbue.minds.config.data_types import ClientEnvConfig
 from imbue.minds.config.data_types import DeployEnvConfig
+from imbue.minds.config.data_types import DeployLifecycleConfig
+from imbue.minds.config.data_types import ModalEnvStrategy
 from imbue.minds.envs.generation import GENERATION_ID_KEY
 from imbue.minds.envs.local_store import client_config_exists
 from imbue.minds.envs.local_store import delete_env_root
@@ -66,28 +69,21 @@ from imbue.minds.envs.paths import env_root_dir
 from imbue.minds.envs.paths import list_env_root_dirs
 from imbue.minds.envs.per_env_deploy import ModalDeployError
 from imbue.minds.envs.per_env_deploy import build_per_env_secret_values
-from imbue.minds.envs.per_env_deploy import compute_per_env_overrides
 from imbue.minds.envs.per_env_deploy import delete_modal_secret
 from imbue.minds.envs.per_env_deploy import deploy_litellm_proxy
 from imbue.minds.envs.per_env_deploy import deploy_remote_service_connector
 from imbue.minds.envs.per_env_deploy import ensure_modal_env
 from imbue.minds.envs.per_env_deploy import per_env_connector_url
 from imbue.minds.envs.per_env_deploy import per_env_litellm_proxy_url
-from imbue.minds.envs.per_env_deploy import per_env_secret_services
 from imbue.minds.envs.per_env_deploy import push_per_env_modal_secret
 from imbue.minds.envs.per_env_deploy import stop_modal_app
 from imbue.minds.envs.per_env_deploy import tier_connector_url
 from imbue.minds.envs.per_env_deploy import tier_litellm_proxy_url
 from imbue.minds.envs.primitives import DevEnvName
 from imbue.minds.envs.primitives import DevEnvNotFoundError
-from imbue.minds.envs.primitives import DevEnvProvisioningError
-from imbue.minds.envs.providers.modal_env import ModalEnvProviderError
 from imbue.minds.envs.providers.neon_db import NeonProjectRecord
-from imbue.minds.envs.providers.neon_db import NeonProviderError
 from imbue.minds.envs.providers.ovh_tags import OvhCredentials
-from imbue.minds.envs.providers.ovh_tags import OvhProviderError
 from imbue.minds.envs.providers.supertokens_app import SuperTokensAppRecord
-from imbue.minds.envs.providers.supertokens_app import SuperTokensProviderError
 from imbue.minds.envs.providers.supertokens_app import app_id_from_connection_uri
 from imbue.minds.errors import MindError
 from imbue.mngr_ovh.iam_tags import IamResource
@@ -102,32 +98,6 @@ from imbue.mngr_ovh.iam_tags import IamResource
 # enumerate + delete only that env's tunnels (vs walking every tunnel
 # on the shared dev-tier CF account).
 MINDS_ENV_NAME_KEY: Final[str] = "MINDS_ENV_NAME"
-
-# Tier names that are NOT eligible for generation-id tracking. The
-# generation id is a "did this shared env get destroyed + redeployed
-# since I last activated" signal -- it only matters for tiers where
-# multiple developers share one deployment AND destroy is a real
-# possibility. ``dev`` is per-developer (each dev controls their own
-# destroy, no inter-dev coordination needed). ``production`` is
-# hard-refused for destroy at the CLI layer, so there's no signal to
-# track. Anything else (``staging`` today, future shared envs) gets
-# generation tracking.
-_TIERS_WITHOUT_GENERATION_TRACKING: Final[frozenset[str]] = frozenset({"dev", "production"})
-
-
-def tier_uses_generation_tracking(tier: str) -> bool:
-    """Return True iff this tier should mint + expose + auto-wipe on generation id."""
-    return tier not in _TIERS_WITHOUT_GENERATION_TRACKING
-
-
-_PROVIDER_ERRORS: tuple[type[Exception], ...] = (
-    ModalEnvProviderError,
-    NeonProviderError,
-    SuperTokensProviderError,
-    ModalDeployError,
-    OvhProviderError,
-    MindError,
-)
 
 
 class ProviderCredentials(FrozenModel):
@@ -289,27 +259,28 @@ class Providers(FrozenModel):
     )
 
 
-class DeployedDevEnv(FrozenModel):
-    """Summary returned by :func:`deploy_dev_env`."""
+class DeployedEnv(FrozenModel):
+    """Summary returned by :func:`deploy_env` for every tier.
 
-    name: DevEnvName
-    client_config_path: str = Field(description="Path to the ~/.minds-<name>/client.toml that was written.")
-    secrets_path: str = Field(description="Path to the ~/.minds-<name>/secrets.toml that was written.")
-    connector_url: AnyUrl
-    litellm_proxy_url: AnyUrl
-
-
-class DeployedTierEnv(FrozenModel):
-    """Summary returned by :func:`deploy_tier_env`.
-
-    Tier deploys write nothing to disk; this carries the URLs Modal
-    reported back for logging only.
+    Carries the URLs Modal assigned the two deployed apps for logging,
+    plus the paths of any local-state files written. For tiers whose
+    ``[lifecycle].writes_local_state`` is ``false``, ``client_config_path``
+    and ``secrets_path`` are ``None``.
     """
 
+    name: DevEnvName = Field(description="The activated env name (dev env name or reserved tier name).")
     tier: str
-    modal_env: str
+    modal_env: str = Field(description="The Modal env the apps deployed into.")
     connector_url: AnyUrl
     litellm_proxy_url: AnyUrl
+    client_config_path: str | None = Field(
+        default=None,
+        description="Path to the per-env client.toml, or None when ``[lifecycle].writes_local_state`` is false.",
+    )
+    secrets_path: str | None = Field(
+        default=None,
+        description="Path to the per-env secrets.toml, or None when ``[lifecycle].writes_local_state`` is false.",
+    )
 
 
 class DevEnvSummary(FrozenModel):
@@ -333,7 +304,7 @@ class DevEnvSummary(FrozenModel):
     )
 
 
-def deploy_dev_env(
+def deploy_env(
     name: DevEnvName,
     *,
     tier: str,
@@ -341,49 +312,64 @@ def deploy_dev_env(
     credentials: ProviderCredentials,
     providers: Providers,
     parent_concurrency_group: ConcurrencyGroup,
-) -> DeployedDevEnv:
-    """Provision (or upgrade) the dev env named ``name``.
+) -> DeployedEnv:
+    """Provision (or upgrade) the activated env -- unified path for every tier.
+
+    Driven by ``deploy_config.lifecycle``:
+
+    * ``creates_resources=true`` -> create per-env Modal env, Neon project,
+      and SuperTokens app outright (today: ``dev`` only).
+    * ``creates_resources=false`` -> the Modal env, Neon project, and
+      SuperTokens app are operator-managed; deploy reads their values out
+      of Vault and never calls a create/delete endpoint for them
+      (today: ``staging`` / ``production``).
+    * ``modal_env_strategy=PER_ENV`` -> apps deploy into Modal env
+      named after the activated dev env (no env shared across devs).
+    * ``modal_env_strategy=SHARED`` -> apps deploy into the tier's
+      stable Modal env from ``deploy.toml``'s ``modal_env`` field.
+    * ``writes_local_state=true`` -> write ``~/.minds-<name>/client.toml``
+      + ``secrets.toml`` after a successful deploy; ``false`` -> write
+      nothing local.
+    * ``tracks_generation=true`` -> mint a fresh per-tier generation id
+      on first deploy and thread it into the ``litellm-connector``
+      Modal Secret (powers activate-time auto-wipe across developers).
 
     Steps, in order:
 
-    1. Ensure the Modal env named ``name`` exists (idempotent).
-    2. Create or look up the per-dev-env Neon database.
-    3. Create or look up the per-dev-env SuperTokens app.
-    4. Push every per-env Modal Secret (tier-shared Vault values + per-env
-       overrides; placeholder for Vault entries that aren't populated).
-       The per-env overrides already carry the *computed* deployed-app
-       URLs (``per_env_connector_url`` / ``per_env_litellm_proxy_url``);
-       since the shortened app + function names keep the natural Modal
-       hostname under DNS's 63-char limit, those computed URLs are
-       exactly what Modal will assign at deploy time -- no second-pass
-       re-push required.
-    5. Deploy ``llm-<tier>`` into Modal env ``<name>``; assert the URL
-       Modal returned matches the up-front computed value.
-    6. Deploy ``rsc-<tier>`` into Modal env ``<name>``; same assertion.
-    7. Write ``~/.minds-<name>/client.toml`` (mode 0644) + ``~/.minds-<name>/secrets.toml``
-       (mode 0600), overwriting any existing.
+    1. (``creates_resources``) Ensure the Modal env, Neon project, and
+       SuperTokens app exist. Pre-existing instances are adopted.
+    2. (``tracks_generation``) Mint or look up the tier generation id.
+    3. Compute every per-env Modal Secret value (tier-shared Vault values
+       + per-env overrides -- DSNs from the just-provisioned / adopted
+       Neon project, app id from SuperTokens, and the *computed*
+       deployed-app URLs which are deterministic under the shortened
+       app/function names).
+    4. Push every Modal Secret named in ``deploy_config.secrets.services``.
+    5. Deploy ``llm-<tier>`` and ``rsc-<tier>`` into the Modal env from
+       step (1)/(2); assert the URL Modal returns matches the computed.
+    6. (``writes_local_state``) Write ``~/.minds-<name>/client.toml`` +
+       ``secrets.toml``, overwriting any existing.
 
-    On any *provider creation* step (1-3) failing, the cleanup for
-    previously-completed creation steps runs in reverse order and the
-    original exception is re-raised wrapped in
-    :class:`DevEnvProvisioningError`. Steps 4-7 are idempotent; if any
-    fail, the operator re-runs ``minds env deploy`` after addressing
-    the cause.
+    No inline rollback today: if any step fails mid-flight, partial
+    cloud-side state is left untouched. Phase 5 introduces
+    ``minds env recover`` to converge back to the pre-deploy state.
     """
-    completed_creation_steps: list[str] = []
+    lifecycle = deploy_config.lifecycle
+    modal_workspace = str(deploy_config.modal_workspace)
+    tier_vault_prefix = str(deploy_config.vault_path_prefix).rstrip("/")
+    modal_env = _resolve_modal_env(name=name, lifecycle=lifecycle, deploy_config=deploy_config)
+
+    # Step 1: provider creation -- only when this tier owns the resources.
     neon_record: NeonProjectRecord | None = None
     supertokens_record: SuperTokensAppRecord | None = None
-
-    try:
+    if lifecycle.creates_resources:
         with info_span("Ensuring Modal environment {!r}", str(name)):
             providers.ensure_modal_env(name, parent_concurrency_group)
-            completed_creation_steps.append("modal_env")
 
         with info_span("Ensuring Neon project for {!r}", str(name)):
             neon_record = providers.create_neon_project(
                 name, credentials.neon_org_id, credentials.neon_api_token, parent_concurrency_group
             )
-            completed_creation_steps.append("neon_project")
 
         with info_span("Ensuring SuperTokens app for {!r}", str(name)):
             supertokens_record = providers.create_supertokens_app(
@@ -391,58 +377,43 @@ def deploy_dev_env(
                 credentials.supertokens_core_url,
                 credentials.supertokens_api_key,
             )
-            completed_creation_steps.append("supertokens_app")
-    except _PROVIDER_ERRORS as exc:
-        _best_effort_rollback(
-            name=name,
-            completed_steps=completed_creation_steps,
-            providers=providers,
-            credentials=credentials,
-            parent_concurrency_group=parent_concurrency_group,
-        )
-        raise DevEnvProvisioningError(
-            f"Failed to provision dev env {name!r}: {exc!s}. "
-            f"Rolled back: {completed_creation_steps[::-1] or 'nothing was created yet'}."
-        ) from exc
 
-    assert neon_record is not None
-    assert supertokens_record is not None
+    # Step 2: tier generation id -- only when this tier exposes one.
+    generation_id: str | None = None
+    if lifecycle.tracks_generation:
+        generation_id = providers.ensure_generation_id(tier_vault_prefix, parent_concurrency_group)
+        logger.info("Tier {!r} generation id: {}", tier, generation_id)
 
-    modal_workspace = str(deploy_config.modal_workspace)
-    tier_vault_prefix = str(deploy_config.vault_path_prefix).rstrip("/")
-    # For dev-env deploys the Modal env is always the env name itself, so
-    # two devs never share one Modal env. Tier deploys (see
-    # :func:`deploy_tier_env`) use ``deploy_config.modal_env`` instead.
-    modal_env = str(name)
-
-    # First pass: push every per-env Modal Secret using URLs we can know
-    # up front (per-env Neon DSN, per-env SuperTokens app URI). Modal
-    # Secrets must exist before `modal deploy` will accept the deploy,
-    # so this happens first. AUTH_WEBSITE_DOMAIN and the connector URL
-    # we'd want in litellm-connector are filled in later, after the
-    # first connector deploy gives us the real URL.
-    first_pass_overrides = compute_per_env_overrides(
-        name,
-        modal_workspace=modal_workspace,
+    # Step 3+4: push every per-env Modal Secret. Single pass -- the
+    # shortened app + function names keep the natural Modal hostname
+    # under DNS's 63-char limit so the computed URLs in the per-env
+    # overrides are exactly the URLs Modal will assign. Defensive
+    # URL-match assertions after each ``modal deploy`` below catch any
+    # future scheme change.
+    services = tuple(str(s) for s in deploy_config.secrets.services)
+    expected_litellm_proxy_url = _expected_litellm_proxy_url(
+        name=name, lifecycle=lifecycle, tier=tier, modal_workspace=modal_workspace
+    )
+    expected_connector_url = _expected_connector_url(
+        name=name, lifecycle=lifecycle, tier=tier, modal_workspace=modal_workspace
+    )
+    first_pass_overrides = _compute_secret_overrides(
+        name=name,
+        lifecycle=lifecycle,
         neon_record=neon_record,
         supertokens_record=supertokens_record,
+        expected_connector_url=expected_connector_url,
+        expected_litellm_proxy_url=expected_litellm_proxy_url,
     )
-    with info_span("Pushing initial per-env Modal Secrets into env {!r}", modal_env):
-        litellm_master_key = _read_litellm_master_key(
-            tier_vault_prefix,
-            providers,
-            parent_concurrency_group,
-        )
-        for service in per_env_secret_services():
+    litellm_master_key = _read_litellm_master_key(tier_vault_prefix, providers, parent_concurrency_group)
+    with info_span("Pushing per-env Modal Secrets into env {!r}", modal_env):
+        for service in services:
             per_service_overrides = dict(first_pass_overrides.get(service, {}))
-            # Auto-populate litellm-connector with the master key from the
-            # litellm Vault entry. LITELLM_PROXY_URL is filled in second-pass
-            # below once we know the actual proxy URL. Also push the env
-            # name so the connector can tag Cloudflare tunnels with their
-            # owning minds env (used by destroy to enumerate + delete).
             if service == "litellm-connector":
                 if litellm_master_key:
                     per_service_overrides.setdefault("LITELLM_MASTER_KEY", litellm_master_key)
+                if generation_id is not None:
+                    per_service_overrides.setdefault(GENERATION_ID_KEY, generation_id)
                 per_service_overrides.setdefault(MINDS_ENV_NAME_KEY, str(name))
             with info_span("Pushing per-env Modal Secret {!r}", f"{service}-{tier}"):
                 values = providers.read_per_env_secret_values(
@@ -458,23 +429,9 @@ def deploy_dev_env(
                     parent_concurrency_group,
                 )
 
+    # Step 5: modal deploys.
     litellm_proxy_min_containers = int(deploy_config.min_containers.litellm_proxy)
     connector_min_containers = int(deploy_config.min_containers.connector)
-
-    # Under the shortened app + function names (``rsc-<tier>``/``api``
-    # and ``llm-<tier>``/``proxy``) the natural Modal hostname always
-    # fits under DNS's 63-char limit for any valid ``DevEnvName``, so
-    # the URL we computed up front (via ``per_env_connector_url`` /
-    # ``per_env_litellm_proxy_url``) is exactly the URL Modal will
-    # assign. That means every URL-dependent secret value
-    # (``supertokens.AUTH_WEBSITE_DOMAIN``,
-    # ``litellm-connector.LITELLM_PROXY_URL``) is correct on the FIRST
-    # secret push -- no second-pass re-push, no connector redeploy. We
-    # still assert below that the URLs Modal reported back match the
-    # ones we computed, so a future Modal URL-scheme change surfaces
-    # immediately instead of silently breaking auth links.
-    expected_litellm_proxy_url = per_env_litellm_proxy_url(name, modal_workspace)
-    expected_connector_url = per_env_connector_url(name, modal_workspace)
 
     with info_span(
         "Deploying llm-{} into env {!r} (min_containers={})",
@@ -498,36 +455,100 @@ def deploy_dev_env(
         )
     _assert_deploy_url_matches(actual=connector_url, expected=expected_connector_url, app=f"rsc-{tier}")
 
-    public_config = ClientEnvConfig(
+    # Step 6: local state (only for tiers that write it).
+    client_config_path: str | None = None
+    secrets_path: str | None = None
+    if lifecycle.writes_local_state:
+        assert neon_record is not None, "writes_local_state implies creates_resources for now"
+        assert supertokens_record is not None, "writes_local_state implies creates_resources for now"
+        public_config = ClientEnvConfig(connector_url=connector_url, litellm_proxy_url=litellm_proxy_url)
+        client_config_path = str(write_client_config(public_config, name=name))
+        secrets_path = str(
+            write_secrets_file(
+                {
+                    "NEON_HOST_POOL_DSN": neon_record.host_pool_dsn,
+                    "NEON_LITELLM_DSN": neon_record.litellm_cost_dsn,
+                    "SUPERTOKENS_CONNECTION_URI": SecretStr(supertokens_record.connection_uri),
+                    "SUPERTOKENS_API_KEY": supertokens_record.api_key,
+                },
+                name=name,
+            )
+        )
+
+    return DeployedEnv(
+        name=name,
+        tier=tier,
+        modal_env=modal_env,
         connector_url=connector_url,
         litellm_proxy_url=litellm_proxy_url,
-    )
-    client_path = write_client_config(public_config, name=name)
-    secrets_path = write_secrets_file(
-        {
-            # The two DSNs the deployed connector + LiteLLM proxy talk
-            # to at runtime. ``NEON_HOST_POOL_DSN`` is also the value
-            # that ``mngr imbue_cloud admin pool create`` (when run
-            # from this activated shell) reads as the default for its
-            # ``--database-url`` argument.
-            "NEON_HOST_POOL_DSN": neon_record.host_pool_dsn,
-            "NEON_LITELLM_DSN": neon_record.litellm_cost_dsn,
-            "SUPERTOKENS_CONNECTION_URI": SecretStr(supertokens_record.connection_uri),
-            "SUPERTOKENS_API_KEY": supertokens_record.api_key,
-        },
-        name=name,
-    )
-
-    return DeployedDevEnv(
-        name=name,
-        client_config_path=str(client_path),
-        secrets_path=str(secrets_path),
-        connector_url=connector_url,
-        litellm_proxy_url=litellm_proxy_url,
+        client_config_path=client_config_path,
+        secrets_path=secrets_path,
     )
 
 
-_DEV_TIER: Final[str] = "dev"
+def _resolve_modal_env(*, name: DevEnvName, lifecycle: DeployLifecycleConfig, deploy_config: DeployEnvConfig) -> str:
+    """Pick the Modal env name based on ``[lifecycle].modal_env_strategy``."""
+    match lifecycle.modal_env_strategy:
+        case ModalEnvStrategy.PER_ENV:
+            return str(name)
+        case ModalEnvStrategy.SHARED:
+            return str(deploy_config.modal_env)
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+def _expected_connector_url(
+    *, name: DevEnvName, lifecycle: DeployLifecycleConfig, tier: str, modal_workspace: str
+) -> AnyUrl:
+    match lifecycle.modal_env_strategy:
+        case ModalEnvStrategy.PER_ENV:
+            return per_env_connector_url(name, modal_workspace)
+        case ModalEnvStrategy.SHARED:
+            return tier_connector_url(tier, modal_workspace)
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+def _expected_litellm_proxy_url(
+    *, name: DevEnvName, lifecycle: DeployLifecycleConfig, tier: str, modal_workspace: str
+) -> AnyUrl:
+    match lifecycle.modal_env_strategy:
+        case ModalEnvStrategy.PER_ENV:
+            return per_env_litellm_proxy_url(name, modal_workspace)
+        case ModalEnvStrategy.SHARED:
+            return tier_litellm_proxy_url(tier, modal_workspace)
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+def _compute_secret_overrides(
+    *,
+    name: DevEnvName,
+    lifecycle: DeployLifecycleConfig,
+    neon_record: NeonProjectRecord | None,
+    supertokens_record: SuperTokensAppRecord | None,
+    expected_connector_url: AnyUrl,
+    expected_litellm_proxy_url: AnyUrl,
+) -> dict[str, dict[str, str]]:
+    """Build the per-service Modal Secret override dict for one deploy.
+
+    For ``creates_resources=true`` tiers the overrides include per-env
+    Neon DSNs + the per-env SuperTokens connection URI; the URLs come
+    from the computed-up-front values. For ``creates_resources=false``
+    tiers the operator's Vault entries already hold the DSNs +
+    connection URI -- we only inject the URL-dependent values.
+    """
+    overrides: dict[str, dict[str, str]] = {
+        "supertokens": {"AUTH_WEBSITE_DOMAIN": str(expected_connector_url)},
+        "litellm-connector": {"LITELLM_PROXY_URL": str(expected_litellm_proxy_url)},
+    }
+    if lifecycle.creates_resources:
+        assert neon_record is not None
+        assert supertokens_record is not None
+        overrides["supertokens"]["SUPERTOKENS_CONNECTION_URI"] = supertokens_record.connection_uri
+        overrides["neon"] = {"DATABASE_URL": neon_record.host_pool_dsn.get_secret_value()}
+        overrides["litellm"] = {"DATABASE_URL": neon_record.litellm_cost_dsn.get_secret_value()}
+    return overrides
 
 
 def destroy_env(
@@ -559,8 +580,8 @@ def destroy_env(
       themselves intact so the operator's Vault entries stay valid.
     * Generation-id removal is the *only* outright difference:
       shared tiers track a per-tier generation id in Vault that powers
-      ``activate``-time auto-wipe across developers; dev envs and
-      production don't (see :func:`tier_uses_generation_tracking`).
+      ``activate``-time auto-wipe across developers; dev doesn't.
+      Driven by ``deploy_config.lifecycle.tracks_generation``.
 
     Steps, in order, for every env type:
 
@@ -594,12 +615,9 @@ def destroy_env(
     if not env_root_exists(name):
         raise DevEnvNotFoundError(f"No env root for env {name!r} at {env_root_dir(name)}; nothing to destroy.")
 
+    lifecycle = deploy_config.lifecycle
     tier_vault_prefix = str(deploy_config.vault_path_prefix).rstrip("/")
-    is_dev_tier = tier == _DEV_TIER
-    # For dev-tier deploys the Modal env is the env name (each dev gets
-    # their own); for shared tiers it's the tier's stable Modal env
-    # from deploy.toml (``main`` by convention).
-    modal_env_for_tier_ops = str(name) if is_dev_tier else str(deploy_config.modal_env)
+    modal_env_for_tier_ops = _resolve_modal_env(name=name, lifecycle=lifecycle, deploy_config=deploy_config)
 
     # Step 1: mngr agents first, so their docker containers / pool
     # hosts / tunnels stop cleanly before we tear down the cloud
@@ -645,7 +663,7 @@ def destroy_env(
 
     # Step 4: SuperTokens (dev deletes the per-env app outright; shared
     # tiers wipe users via delete + recreate of the same app id).
-    if is_dev_tier:
+    if lifecycle.creates_resources:
         with info_span("Deleting SuperTokens app for env {!r}", str(name)):
             providers.delete_supertokens_app(
                 name,
@@ -665,7 +683,7 @@ def destroy_env(
     # Step 5: Neon (dev deletes the per-env *project* outright -- atomic
     # teardown of both DBs + roles + endpoints; shared tiers DROP SCHEMA
     # on the operator-managed DB they keep across destroy/redeploy).
-    if is_dev_tier:
+    if lifecycle.creates_resources:
         with info_span("Deleting Neon project for env {!r}", str(name)):
             providers.delete_neon_project(name, credentials.neon_org_id, credentials.neon_api_token)
     else:
@@ -682,7 +700,7 @@ def destroy_env(
     # cascade-deletes its apps / secrets / volumes; shared tiers stop
     # the deployed apps + delete per-tier Modal Secrets so the next
     # deploy re-pushes fresh values from Vault).
-    if is_dev_tier:
+    if lifecycle.creates_resources:
         with info_span("Deleting Modal environment {!r} (cascade-deletes apps + secrets)", str(name)):
             providers.delete_modal_env(name, parent_concurrency_group)
     else:
@@ -694,11 +712,11 @@ def destroy_env(
                 providers.delete_modal_secret(f"{service}-{tier}", modal_env_for_tier_ops, parent_concurrency_group)
 
     # Step 7: generation id removal -- ONLY for tiers that use generation
-    # tracking (i.e. shared tiers like staging). For dev / production,
-    # there is no generation Vault entry to remove. This is the one
-    # genuinely tier-specific step (everything else above is the same
-    # flow with tier-driven cleanup ops).
-    if tier_uses_generation_tracking(tier):
+    # tracking (driven by ``deploy_config.lifecycle.tracks_generation``).
+    # For dev, there is no generation Vault entry to remove. Production
+    # destroy is hard-refused at the CLI today, so this path is only
+    # actually reached for ``staging``.
+    if lifecycle.tracks_generation:
         with info_span("Deleting tier {!r} generation id from Vault", tier):
             providers.delete_generation_id(tier_vault_prefix, parent_concurrency_group)
 
@@ -778,113 +796,6 @@ def _wipe_neon_for_tier(
     providers.wipe_neon_db_schema(SecretStr(dsn_str), parent_cg)
 
 
-def deploy_tier_env(
-    *,
-    tier: str,
-    deploy_config: DeployEnvConfig,
-    providers: Providers,
-    parent_concurrency_group: ConcurrencyGroup,
-) -> DeployedTierEnv:
-    """Push tier-shared secrets and deploy the Modal apps for ``tier``.
-
-    For ``staging`` / ``production`` tiers. Reads every service named in
-    ``deploy_config.secrets.services`` straight from Vault (no per-env
-    overrides), pushes them into Modal as ``<service>-<tier>`` Secrets,
-    and runs ``modal deploy`` for both ``llm-<tier>`` and ``rsc-<tier>``
-    into ``deploy_config.modal_env``.
-
-    Writes nothing to disk: the URLs are deterministic from the tier's
-    Modal workspace + app names, and the committed in-repo
-    ``apps/minds/imbue/minds/config/envs/<tier>/client.toml`` is the
-    source of truth for what ``minds run`` should talk to.
-
-    Idempotent: re-runs upsert the same Modal Secrets and overwrite the
-    Modal app deploys in place.
-    """
-    tier_vault_prefix = str(deploy_config.vault_path_prefix).rstrip("/")
-    modal_env = str(deploy_config.modal_env)
-    services = tuple(str(s) for s in deploy_config.secrets.services)
-
-    # Mint (or look up) the tier generation id BEFORE pushing secrets
-    # -- the id rides along in the litellm-connector secret so the
-    # deployed connector can expose it via ``/generation``. Only minted
-    # for shared tiers (staging today; not dev / production -- see
-    # :func:`tier_uses_generation_tracking` for the rationale).
-    generation_id: str | None = None
-    if tier_uses_generation_tracking(tier):
-        generation_id = providers.ensure_generation_id(tier_vault_prefix, parent_concurrency_group)
-        logger.info("Tier {!r} generation id: {}", tier, generation_id)
-
-    logger.info(
-        "Pushing tier-shared Modal Secrets for tier {!r} into Modal env {!r}...",
-        tier,
-        modal_env,
-    )
-    for service in services:
-        # Tier deploys have no per-env overrides except the generation
-        # id and the env name, both of which the connector reads at
-        # startup -- the id powers ``/generation``, the env name is the
-        # Cloudflare-tunnel metadata tag. Both ride in the
-        # ``litellm-connector-<tier>`` secret since that's where the
-        # connector's other custom env values already live.
-        overrides: dict[str, str] = {}
-        if service == "litellm-connector":
-            if generation_id is not None:
-                overrides[GENERATION_ID_KEY] = generation_id
-            overrides[MINDS_ENV_NAME_KEY] = tier
-        values = providers.read_per_env_secret_values(
-            service,
-            tier_vault_prefix,
-            overrides,
-            parent_concurrency_group,
-        )
-        providers.push_per_env_modal_secret(
-            f"{service}-{tier}",
-            values,
-            modal_env,
-            parent_concurrency_group,
-        )
-
-    litellm_proxy_min_containers = int(deploy_config.min_containers.litellm_proxy)
-    connector_min_containers = int(deploy_config.min_containers.connector)
-
-    # Computed expected URLs (deterministic under the shortened app +
-    # function names); we assert against the Modal-reported URLs below
-    # so a future Modal URL-scheme change surfaces immediately.
-    modal_workspace = str(deploy_config.modal_workspace)
-    expected_litellm_proxy_url = tier_litellm_proxy_url(tier, modal_workspace)
-    expected_connector_url = tier_connector_url(tier, modal_workspace)
-
-    logger.info(
-        "Deploying llm-{} into Modal env {!r} (min_containers={})...",
-        tier,
-        modal_env,
-        litellm_proxy_min_containers,
-    )
-    litellm_proxy_url = providers.deploy_litellm_proxy(
-        modal_env, tier, litellm_proxy_min_containers, parent_concurrency_group
-    )
-    _assert_deploy_url_matches(actual=litellm_proxy_url, expected=expected_litellm_proxy_url, app=f"llm-{tier}")
-
-    logger.info(
-        "Deploying rsc-{} into Modal env {!r} (min_containers={})...",
-        tier,
-        modal_env,
-        connector_min_containers,
-    )
-    connector_url = providers.deploy_remote_service_connector(
-        modal_env, tier, connector_min_containers, parent_concurrency_group
-    )
-    _assert_deploy_url_matches(actual=connector_url, expected=expected_connector_url, app=f"rsc-{tier}")
-
-    return DeployedTierEnv(
-        tier=tier,
-        modal_env=modal_env,
-        connector_url=connector_url,
-        litellm_proxy_url=litellm_proxy_url,
-    )
-
-
 def _read_litellm_master_key(
     tier_vault_prefix: str,
     providers: Providers,
@@ -925,67 +836,6 @@ def _assert_deploy_url_matches(*, actual: AnyUrl, expected: AnyUrl, app: str) ->
             "Either the URL formula in `per_env_deploy.py` is stale or Modal "
             "changed its hostname scheme; fix before continuing."
         )
-
-
-def _best_effort_rollback(
-    *,
-    name: DevEnvName,
-    completed_steps: list[str],
-    providers: Providers,
-    credentials: ProviderCredentials,
-    parent_concurrency_group: ConcurrencyGroup,
-) -> None:
-    """Walk completed creation steps in reverse, swallowing per-step failures."""
-    for step in reversed(completed_steps):
-        rollback_fn = _ROLLBACK_TABLE.get(step)
-        if rollback_fn is None:
-            logger.warning("Unknown rollback step {!r} for dev env {!r}; skipping", step, str(name))
-            continue
-        try:
-            rollback_fn(name, providers, credentials, parent_concurrency_group)
-        except _PROVIDER_ERRORS as exc:
-            logger.warning("Rollback of {!r} step for dev env {!r} failed: {}", step, str(name), exc)
-
-
-def _rollback_modal_env(
-    name: DevEnvName,
-    providers: "Providers",
-    credentials: "ProviderCredentials",
-    parent_concurrency_group: ConcurrencyGroup,
-) -> None:
-    providers.delete_modal_env(name, parent_concurrency_group)
-
-
-def _rollback_neon_project(
-    name: DevEnvName,
-    providers: "Providers",
-    credentials: "ProviderCredentials",
-    parent_concurrency_group: ConcurrencyGroup,
-) -> None:
-    providers.delete_neon_project(name, credentials.neon_org_id, credentials.neon_api_token)
-
-
-def _rollback_supertokens_app(
-    name: DevEnvName,
-    providers: "Providers",
-    credentials: "ProviderCredentials",
-    parent_concurrency_group: ConcurrencyGroup,
-) -> None:
-    providers.delete_supertokens_app(
-        name,
-        credentials.supertokens_core_url,
-        credentials.supertokens_api_key,
-    )
-
-
-_ROLLBACK_TABLE: dict[
-    str,
-    Callable[[DevEnvName, "Providers", "ProviderCredentials", ConcurrencyGroup], None],
-] = {
-    "modal_env": _rollback_modal_env,
-    "neon_project": _rollback_neon_project,
-    "supertokens_app": _rollback_supertokens_app,
-}
 
 
 def list_dev_envs() -> tuple[DevEnvSummary, ...]:
@@ -1039,17 +889,15 @@ def _env_name_from_root_path(env_root: Path) -> str:
 # Re-export the per_env_deploy helpers so the CLI can build a Providers
 # bundle without importing both modules.
 __all__ = [
-    "DeployedDevEnv",
-    "DeployedTierEnv",
+    "DeployedEnv",
     "DevEnvSummary",
     "ProviderCredentials",
     "Providers",
     "build_per_env_secret_values",
     "delete_modal_secret",
-    "deploy_dev_env",
+    "deploy_env",
     "deploy_litellm_proxy",
     "deploy_remote_service_connector",
-    "deploy_tier_env",
     "destroy_env",
     "ensure_modal_env",
     "list_dev_envs",

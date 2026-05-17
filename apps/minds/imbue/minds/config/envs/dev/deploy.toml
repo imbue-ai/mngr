@@ -26,3 +26,11 @@ services = [
     "pool-ssh",
     "supertokens",
 ]
+
+# Tier-shape flags consumed by `minds env deploy` / `destroy`. All four
+# are required (no defaults) so a misconfigured tier fails fast on load.
+[lifecycle]
+creates_resources = true
+modal_env_strategy = "PER_ENV"
+writes_local_state = true
+tracks_generation = false

@@ -1,4 +1,5 @@
 import json
+from enum import auto
 from pathlib import Path
 from typing import Final
 
@@ -6,6 +7,7 @@ from pydantic import AnyUrl
 from pydantic import ConfigDict
 from pydantic import Field
 
+from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.primitives import NonEmptyStr
 from imbue.imbue_common.primitives import NonNegativeInt
@@ -84,6 +86,70 @@ class DeploySecretsConfig(FrozenModel):
     )
 
 
+class ModalEnvStrategy(UpperCaseStrEnum):
+    """How a tier picks the Modal environment its apps deploy into.
+
+    * ``PER_ENV`` -- the Modal env name equals the activated dev env
+      name (e.g. ``dev-josh-1``), so two devs never share one Modal env.
+      Used by the ``dev`` tier today.
+    * ``SHARED`` -- the Modal env name comes from ``deploy.toml``'s
+      ``modal_env`` field (``main`` by convention). Used by
+      ``staging`` / ``production``.
+    """
+
+    PER_ENV = auto()
+    SHARED = auto()
+
+
+class DeployLifecycleConfig(FrozenModel):
+    """Tier-shape flags that drive the unified ``deploy_env`` / ``destroy_env`` paths.
+
+    Every tier declares all four flags explicitly (no defaults) so a
+    misconfigured ``deploy.toml`` fails fast on load instead of
+    silently routing through a wrong branch. The matrix today:
+
+    +------------+--------------------+--------------------+---------------------+--------------------+
+    | tier       | creates_resources  | modal_env_strategy | writes_local_state  | tracks_generation  |
+    +============+====================+====================+=====================+====================+
+    | dev        | true               | per_env            | true                | false              |
+    +------------+--------------------+--------------------+---------------------+--------------------+
+    | staging    | false              | shared             | false               | true               |
+    +------------+--------------------+--------------------+---------------------+--------------------+
+    | production | false              | shared             | false               | true               |
+    +------------+--------------------+--------------------+---------------------+--------------------+
+    """
+
+    creates_resources: bool = Field(
+        description=(
+            "Whether the deploy provisions the per-env Modal env, Neon project, and "
+            "SuperTokens app outright. ``false`` means the operator brings already-existing "
+            "resources via Vault, and the deploy code refuses to call any create/delete "
+            "endpoint for those providers."
+        ),
+    )
+    modal_env_strategy: ModalEnvStrategy = Field(
+        description=(
+            "How to pick the Modal environment the apps deploy into. ``per_env`` uses the "
+            "activated dev env name; ``shared`` uses ``deploy_config.modal_env``."
+        ),
+    )
+    writes_local_state: bool = Field(
+        description=(
+            "Whether the deploy writes ``~/.minds-<env>/client.toml`` + "
+            "``secrets.toml`` after a successful deploy. ``false`` for shared tiers "
+            "whose ``client.toml`` is committed in-repo."
+        ),
+    )
+    tracks_generation: bool = Field(
+        description=(
+            "Whether the tier mints + exposes a per-tier generation id (used by activate-time "
+            "auto-wipe across developers when the tier gets destroyed + redeployed). Only "
+            "useful for shared tiers where multiple developers share one deployment AND "
+            "destroy is a real possibility."
+        ),
+    )
+
+
 class MinContainersConfig(FrozenModel):
     """Warm-pool sizes for each Modal app the tier deploy ships.
 
@@ -147,6 +213,13 @@ class DeployEnvConfig(FrozenModel):
     )
     secrets: DeploySecretsConfig = Field(
         description="Which `.minds/template/*.sh`-shaped services the deploy step pulls from Vault and pushes to Modal."
+    )
+    lifecycle: DeployLifecycleConfig = Field(
+        description=(
+            "Tier-shape flags that drive ``deploy_env`` / ``destroy_env`` branching. All "
+            "four flags are required (no defaults) so a misconfigured deploy.toml fails "
+            "fast on load."
+        ),
     )
     min_containers: MinContainersConfig = Field(
         default_factory=MinContainersConfig,

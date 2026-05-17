@@ -18,6 +18,12 @@ services = [
     "supertokens",
 ]
 
+[lifecycle]
+creates_resources = false
+modal_env_strategy = "SHARED"
+writes_local_state = false
+tracks_generation = true
+
 [min_containers]
 # Keep one container of each app warm so the desktop client never pays
 # a cold-boot penalty on auth / lease / tunnel hits.

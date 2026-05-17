@@ -28,6 +28,16 @@ services = [
     "supertokens",
 ]
 
+# Tier-shape flags consumed by `minds env deploy` / `destroy`. Production
+# tracks generation for parity with staging (production destroy is hard-
+# refused at the CLI today, so the id is effectively immutable for the
+# lifetime of the tier).
+[lifecycle]
+creates_resources = false
+modal_env_strategy = "SHARED"
+writes_local_state = false
+tracks_generation = true
+
 # Per-app warm-pool sizes. Keep one container of each app alive so the
 # desktop client never pays a cold-boot penalty on auth / lease /
 # tunnel hits. Bump if you want more headroom for spiky traffic.
