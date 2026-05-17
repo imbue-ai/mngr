@@ -44,6 +44,7 @@ from imbue.minds.config.loader import repo_tier_client_config_path
 from imbue.minds.envs.generation import delete_generation_id as real_delete_generation_id
 from imbue.minds.envs.generation import ensure_generation_id as real_ensure_generation_id
 from imbue.minds.envs.local_store import env_root_exists
+from imbue.minds.envs.migrations import apply_pool_hosts_migrations as real_apply_pool_hosts_migrations
 from imbue.minds.envs.mngr_agent_cleanup import real_destroy_mngr_agent
 from imbue.minds.envs.paths import active_env_name_or_none
 from imbue.minds.envs.paths import client_config_file
@@ -65,6 +66,7 @@ from imbue.minds.envs.providers.modal_env import delete_modal_env as real_delete
 from imbue.minds.envs.providers.neon_db import NeonProjectRecord
 from imbue.minds.envs.providers.neon_db import create_neon_project
 from imbue.minds.envs.providers.neon_db import delete_neon_project
+from imbue.minds.envs.providers.neon_db import pool_hosts_migrations_dir
 from imbue.minds.envs.providers.neon_db import wipe_neon_db_schema as real_wipe_neon_db_schema
 from imbue.minds.envs.providers.ovh_tags import OvhCredentials
 from imbue.minds.envs.providers.ovh_tags import delete_instances as delete_ovh_instances
@@ -212,6 +214,10 @@ def _list_modal_secrets_for_provider(modal_env: str, cg: ConcurrencyGroup) -> tu
     return real_list_modal_secrets(modal_env=modal_env, parent_cg=cg)
 
 
+def _apply_pool_hosts_migrations_for_provider(host_pool_dsn: SecretStr, cg: ConcurrencyGroup) -> tuple[Path, ...]:
+    return real_apply_pool_hosts_migrations(host_pool_dsn, migrations_dir=pool_hosts_migrations_dir(), parent_cg=cg)
+
+
 def _wipe_supertokens_for_provider(app_id: str, core_base_url: str, api_key: SecretStr) -> None:
     real_wipe_supertokens_app_data(app_id, core_base_url=core_base_url, api_key=api_key)
 
@@ -263,6 +269,7 @@ def _build_real_providers() -> Providers:
         stop_modal_app=_stop_modal_app_for_provider,
         delete_modal_secret=_delete_modal_secret_for_provider,
         list_modal_secrets=_list_modal_secrets_for_provider,
+        apply_pool_hosts_migrations=_apply_pool_hosts_migrations_for_provider,
         destroy_mngr_agent=real_destroy_mngr_agent,
         wipe_supertokens_app_data=_wipe_supertokens_for_provider,
         wipe_neon_db_schema=_wipe_neon_db_schema_for_provider,

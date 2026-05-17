@@ -248,6 +248,10 @@ def _build_fake_providers(
         call_log["calls"].append(("list_modal_secrets", modal_env))
         return tuple(sorted(pushed_secrets_state[modal_env]))
 
+    def apply_pool_hosts_migrations(host_pool_dsn, cg):
+        call_log["calls"].append(("apply_pool_hosts_migrations", host_pool_dsn.get_secret_value()))
+        return ()
+
     def destroy_mngr_agent(agent_id, mngr_host_dir, mngr_prefix, cg):
         call_log["calls"].append(("destroy_mngr_agent", agent_id, str(mngr_host_dir), mngr_prefix))
         if fail_step == "destroy_mngr_agent":
@@ -294,6 +298,7 @@ def _build_fake_providers(
         stop_modal_app=stop_modal_app,
         delete_modal_secret=delete_modal_secret,
         list_modal_secrets=list_modal_secrets,
+        apply_pool_hosts_migrations=apply_pool_hosts_migrations,
         destroy_mngr_agent=destroy_mngr_agent,
         wipe_supertokens_app_data=wipe_supertokens_app_data,
         wipe_neon_db_schema=wipe_neon_db_schema,

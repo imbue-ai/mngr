@@ -27,7 +27,6 @@ churn of per-developer environments.
 """
 
 import shutil
-from collections.abc import Sequence
 from pathlib import Path
 from typing import Final
 
@@ -275,13 +274,13 @@ def _fetch_pooled_dsn(
     return SecretStr(uri)
 
 
-def _migrations_dir() -> Path:
+def pool_hosts_migrations_dir() -> Path:
     """Return the directory holding the pool_hosts SQL migrations.
 
     Hops from this module's location (``apps/minds/imbue/minds/envs/providers/neon_db.py``)
     up to the monorepo root, then down to
-    ``apps/remote_service_connector/migrations``. Five ``parents`` hops
-    gets us to ``apps/minds/``; one more hop is the repo root.
+    ``apps/remote_service_connector/migrations``. Six ``parents`` hops
+    gets us to the repo root.
     """
     repo_root = Path(__file__).resolve().parents[6]
     migrations = repo_root / "apps" / "remote_service_connector" / "migrations"
@@ -291,50 +290,6 @@ def _migrations_dir() -> Path:
             "`minds env deploy` must be run from a checkout of the monorepo."
         )
     return migrations
-
-
-def _list_migration_files() -> Sequence[Path]:
-    """Return all ``.sql`` files in the migrations dir, lexicographic order."""
-    return sorted(_migrations_dir().glob("*.sql"))
-
-
-def apply_pool_hosts_schema(host_pool_dsn: SecretStr, *, parent_cg: ConcurrencyGroup) -> None:
-    """Replay every ``apps/remote_service_connector/migrations/*.sql`` against ``host_pool_dsn``.
-
-    Each migration is idempotent in isolation (uses ``IF NOT EXISTS`` /
-    ``IF EXISTS`` guards), so replaying the full set against a fresh DB
-    yields the canonical schema, and re-replaying against an
-    already-bootstrapped DB is a no-op.
-
-    Shells out to ``psql`` -- pulling psycopg into the minds runtime
-    just for this is more weight than the shellout. The deploy machine
-    already has psql (Modal / dev laptops both ship it).
-    """
-    psql_path = shutil.which("psql")
-    if psql_path is None:
-        raise NeonProviderError(
-            "psql binary not on PATH; cannot bootstrap the pool_hosts schema. Install via "
-            "`apt install postgresql-client` (Debian/Ubuntu) or `brew install libpq` (macOS)."
-        )
-    for migration in _list_migration_files():
-        command = [
-            psql_path,
-            host_pool_dsn.get_secret_value(),
-            "-v",
-            "ON_ERROR_STOP=1",
-            "-f",
-            str(migration),
-        ]
-        cg = parent_cg.make_concurrency_group(name=f"psql-pool-migration-{migration.stem}")
-        with cg:
-            result = cg.run_process_to_completion(
-                command=command,
-                timeout=_PSQL_TIMEOUT_SECONDS,
-                is_checked_after=False,
-            )
-        if result.returncode != 0:
-            stderr = result.stderr.strip() or result.stdout.strip()
-            raise NeonProviderError(f"`psql` exited {result.returncode} while applying {migration.name}: {stderr}")
 
 
 def create_neon_project(
@@ -416,9 +371,6 @@ def create_neon_project(
         with info_span("Fetching pooled DSNs for both databases"):
             host_pool_dsn = _fetch_pooled_dsn(project_id, HOST_POOL_DB_NAME, api_token=api_token)
             litellm_cost_dsn = _fetch_pooled_dsn(project_id, LITELLM_COST_DB_NAME, api_token=api_token)
-
-        with info_span("Applying pool_hosts schema migrations to {}", HOST_POOL_DB_NAME):
-            apply_pool_hosts_schema(host_pool_dsn, parent_cg=parent_cg)
     except NeonProviderError:
         # Best-effort: delete the just-created project before re-raising
         # so a retry starts from a clean slate. If we adopted an

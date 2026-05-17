@@ -161,6 +161,10 @@ DeleteModalSecretFn = Callable[[str, str, ConcurrencyGroup], None]
 # the timestamped-secret GC to find old ``<svc>-<tier>-<id>`` entries
 # to delete after a successful deploy.
 ListModalSecretsFn = Callable[[str, ConcurrencyGroup], tuple[str, ...]]
+# (host_pool_dsn, cg) -> tuple of applied migration Paths. Runs the
+# schema_migrations runner against the per-env host_pool DB. Tests
+# pass a no-op fake; the real implementation shells out to psql.
+ApplyPoolHostsMigrationsFn = Callable[[SecretStr, ConcurrencyGroup], tuple[Path, ...]]
 # (app_id, core_base_url, api_key) -> None. Used by tier destroys to
 # wipe every user/session in an existing SuperTokens app without
 # deleting the app itself. Idempotent via delete + recreate.
@@ -226,6 +230,12 @@ class Providers(FrozenModel):
     )
     list_modal_secrets: ListModalSecretsFn = Field(
         description="(modal_env, cg) -> tuple of all Modal Secret names in the env. Used by the timestamped-secret GC.",
+    )
+    apply_pool_hosts_migrations: ApplyPoolHostsMigrationsFn = Field(
+        description=(
+            "(host_pool_dsn, cg) -> tuple of applied migration files. "
+            "Runs the schema_migrations runner against the per-env host_pool DB."
+        ),
     )
     destroy_mngr_agent: DestroyMngrAgentFn = Field(
         description=(
@@ -396,6 +406,20 @@ def deploy_env(
                 credentials.supertokens_core_url,
                 credentials.supertokens_api_key,
             )
+
+        # Apply pool-hosts schema migrations against the freshly-created
+        # host_pool DB. The provider implementation wraps
+        # :func:`apply_pool_hosts_migrations` from ``migrations.py``,
+        # which uses the schema_migrations tracking table so repeated
+        # deploys only run new migrations. For a brand-new DB all
+        # migrations are applied; for an existing one the runner finds
+        # them already recorded (or no-ops on the IF NOT EXISTS guards
+        # on the legacy files) and just records them.
+        assert neon_record is not None
+        with info_span("Applying pool-hosts schema migrations to host_pool"):
+            applied = providers.apply_pool_hosts_migrations(neon_record.host_pool_dsn, parent_concurrency_group)
+            if applied:
+                logger.info("Applied {} pool-hosts migration(s): {}", len(applied), [m.name for m in applied])
 
     # Step 2: tier generation id -- only when this tier exposes one.
     generation_id: str | None = None
