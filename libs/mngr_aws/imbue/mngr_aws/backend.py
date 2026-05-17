@@ -74,8 +74,8 @@ class AwsProvider(VpsDockerProvider):
             return override
         return super()._get_effective_auto_shutdown_minutes()
 
-    def _get_tagged_vps_ips(self) -> list[str]:
-        """Get public IPs of EC2 instances tagged with this provider's name."""
+    def _list_provider_vps_hostnames(self) -> list[str]:
+        """Return public IPs of EC2 instances tagged with this provider's name."""
         if not self._credentials_configured():
             logger.warning("AWS credentials not configured, skipping EC2 discovery")
             return []
@@ -191,7 +191,7 @@ def _make_unresolved_session(config: AwsProviderConfig) -> boto3.Session:
     call on this Session is expected to fail loudly with an AWS auth error,
     which is the desired behavior: we want the provider to be registrable
     even without credentials so that listing operations short-circuit in
-    ``_get_tagged_vps_ips`` while host-creation operations fail clearly.
+    ``_list_provider_vps_hostnames`` while host-creation operations fail clearly.
     """
     return boto3.Session(region_name=config.default_region)
 

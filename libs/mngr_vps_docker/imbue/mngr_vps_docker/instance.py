@@ -104,7 +104,7 @@ def _remove_host_from_known_hosts(known_hosts_path: Path, hostname: str, port: i
     known_hosts_path.write_text("".join(filtered))
 
 
-class _ParsedVpsBuildOptions(FrozenModel):
+class ParsedVpsBuildOptions(FrozenModel):
     """Result of parsing VPS-specific build args from Docker build args."""
 
     region: str = Field(description="VPS region")
@@ -120,12 +120,17 @@ def _parse_build_args(
     *,
     default_region: str,
     default_plan: str,
-) -> _ParsedVpsBuildOptions:
+) -> ParsedVpsBuildOptions:
     """Parse build args, separating VPS provisioning args from Docker build args.
 
     VPS-specific args use the --vps- prefix (e.g., --vps-region=ewr).
     ``--git-depth=N`` controls the git clone depth for the build context.
     Everything else is passed through to docker build on the VPS.
+
+    Image selection is provider-specific and lives on the provider's client
+    or config (e.g., ``AwsProviderConfig.default_ami_id``,
+    ``VultrProviderConfig.default_os_id``, ``OvhProviderConfig.default_image_name``);
+    there is no shared ``--vps-os=`` build arg.
     """
     region = default_region
     plan = default_plan
@@ -147,7 +152,7 @@ def _parse_build_args(
             else:
                 docker_build_args.append(arg)
 
-    return _ParsedVpsBuildOptions(
+    return ParsedVpsBuildOptions(
         region=region,
         plan=plan,
         git_depth=git_depth,
@@ -1144,7 +1149,25 @@ class VpsDockerProvider(BaseProviderInstance):
         # a stale instance list that doesn't include the VPS we just created.
         self._host_record_cache[host_id] = host_record
 
+        self._on_host_finalized(host_id=host_id, vps_ip=vps_ip)
+
         return host
+
+    def _on_host_finalized(self, *, host_id: HostId, vps_ip: str) -> None:
+        """Hook called at the very end of ``_finalize_host_creation``.
+
+        Fires after the host record has been written to the state volume
+        and is therefore the "point of no return" for ``create_host``.
+        Subclasses can override to commit any deferred provisioning side
+        effects that must only become durable once the host is fully
+        usable -- e.g. OVH classic VPS un-cancellation, which must wait
+        until container setup has succeeded so that a failure earlier in
+        the flow lets the VPS auto-decommission instead of leaking
+        a still-billing orphan.
+
+        Default no-op. Must not raise; any errors should be caught and
+        logged by the override.
+        """
 
     def _wait_for_container_sshd(self, vps_ip: str) -> None:
         """Wait for sshd in the container to be reachable via the VPS's exposed port."""
@@ -1289,7 +1312,7 @@ class VpsDockerProvider(BaseProviderInstance):
         host.write_file(commands_dir / "shutdown.sh", shutdown_script.encode())
         host.execute_idempotent_command(f"chmod +x {commands_dir / 'shutdown.sh'}")
 
-    def _parse_build_args(self, build_args: Sequence[str] | None) -> _ParsedVpsBuildOptions:
+    def _parse_build_args(self, build_args: Sequence[str] | None) -> ParsedVpsBuildOptions:
         """Parse build args, separating VPS provisioning args from Docker build args."""
         return _parse_build_args(
             build_args,
@@ -1626,14 +1649,23 @@ class VpsDockerProvider(BaseProviderInstance):
         """
         return self.config.auto_shutdown_minutes
 
-    def _get_tagged_vps_ips(self) -> list[str]:
-        """Return public IPs of VPS instances tagged for this provider.
+    def _list_provider_vps_hostnames(self) -> list[str]:
+        """Return SSH-reachable hostnames for VPSes owned by this provider instance.
 
-        Subclasses override this to query their provider's instance-listing API
-        for instances tagged with ``mngr-provider=<self.name>`` and return
-        their public IPs. The base implementation returns an empty list, which
-        causes discovery to return no records (suitable for tests / providers
-        that have not wired up listing).
+        Each entry is whatever the provider hands back as the SSH target
+        for one of its VPSes -- a public IPv4 (Vultr, AWS) or a provider DNS
+        name (OVH classic VPS like ``vps-eec8860b.vps.ovh.us``). The
+        discovery machinery below treats it as an opaque ``hostname``
+        passed to paramiko.
+
+        Concrete subclasses implement this by querying their provider's
+        listing API (e.g. by tag) and resolving the matching instances'
+        SSH targets. The remaining discovery machinery -- parallel SSH
+        into each VPS, reading host records and agent data from the
+        state volume, caching -- is shared and lives in this base class.
+
+        Default returns ``[]`` so test doubles and providers without a
+        listing API can opt out without overriding.
         """
         return []
 
@@ -1642,9 +1674,11 @@ class VpsDockerProvider(BaseProviderInstance):
 
         Used by ``_find_host_record`` to short-circuit a full discovery sweep
         when no credentials are available. Subclasses override to check their
-        own credential source.
+        own credential source. The default returns True so providers that
+        don't carry credentials (test doubles, OVH IAM via env) opt in
+        automatically.
         """
-        return False
+        return True
 
     def _read_records_from_vps(
         self,
@@ -1683,26 +1717,26 @@ class VpsDockerProvider(BaseProviderInstance):
     def _discover_host_records_with_agents(
         self,
     ) -> tuple[list[VpsDockerHostRecord], dict[HostId, list[dict[str, Any]]]]:
-        """Discover host records and agent data from all tagged VPS instances.
+        """Discover host records and agent data from all VPSes for this provider.
 
-        Asks the subclass for the list of tagged VPS IPs (via
-        ``_get_tagged_vps_ips``) and then SSHes to each VPS in parallel,
-        reading the state volume for host records and agent data in a single
-        SSH command per VPS.
+        Calls ``_list_provider_vps_hostnames`` to enumerate VPSes
+        (provider-specific), then SSHes to each in parallel to read host
+        records and agent data in a single command per VPS.
         """
-        vps_ips = self._get_tagged_vps_ips()
+        vps_ips = self._list_provider_vps_hostnames()
         if not vps_ips:
             return [], {}
 
         all_records: list[VpsDockerHostRecord] = []
         all_agent_data: dict[HostId, list[dict[str, Any]]] = {}
 
+        cg_name = f"{type(self).__name__}-discover"
         with log_span("Reading records from {} VPS instance(s) in parallel", len(vps_ips)):
-            cg = ConcurrencyGroup(name=f"{self.config.backend}-discover")
+            cg = ConcurrencyGroup(name=cg_name)
             with cg:
                 with ConcurrencyGroupExecutor(
                     parent_cg=cg,
-                    name=f"{self.config.backend}_read_records",
+                    name=f"{cg_name}_read_records",
                     max_workers=min(len(vps_ips), 32),
                 ) as executor:
                     futures = [executor.submit(self._read_records_from_vps, ip) for ip in vps_ips]
@@ -1716,11 +1750,12 @@ class VpsDockerProvider(BaseProviderInstance):
         return all_records, all_agent_data
 
     def _discover_host_records(self) -> list[VpsDockerHostRecord]:
+        """Discover host records by enumerating this provider's VPSes."""
         records, _agent_data = self._discover_host_records_with_agents()
         return records
 
     def _find_host_record(self, host: HostId | HostName) -> VpsDockerHostRecord | None:
-        """Find a host record by ID or name, checking the cache first then doing API discovery."""
+        """Find a host record by ID or name, using cache first."""
         if isinstance(host, HostId) and host in self._host_record_cache:
             return self._host_record_cache[host]
         if isinstance(host, HostName):

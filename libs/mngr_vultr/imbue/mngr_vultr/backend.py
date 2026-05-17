@@ -23,7 +23,12 @@ VULTR_BACKEND_NAME: Final[ProviderBackendName] = ProviderBackendName("vultr")
 
 
 class VultrProvider(VpsDockerProvider):
-    """Vultr-specific provider that overrides discovery to use the Vultr API."""
+    """Vultr-specific provider that implements VPS listing via the Vultr API.
+
+    All cross-VPS discovery machinery (parallel SSH reads, caching,
+    per-name lookups) is inherited from ``VpsDockerProvider``; this
+    subclass only contributes the provider-specific tag-based listing.
+    """
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
@@ -46,8 +51,13 @@ class VultrProvider(VpsDockerProvider):
     def _credentials_configured(self) -> bool:
         return bool(self.vultr_client.api_key.get_secret_value())
 
-    def _get_tagged_vps_ips(self) -> list[str]:
-        """Get IPs of Vultr instances tagged with this provider's name."""
+    def _list_provider_vps_hostnames(self) -> list[str]:
+        """Return public IPs of Vultr instances tagged with this provider's name.
+
+        Vultr uses raw IPv4 addresses as SSH targets, not DNS names. The
+        return values are strings to satisfy the base-class contract,
+        which accepts either IPs or hostnames.
+        """
         if not self._credentials_configured():
             logger.warning("Vultr API key not configured, skipping VPS discovery")
             return []
