@@ -357,11 +357,20 @@ def create_neon_project(
     Idempotent: every step tolerates pre-existing resources, so calling
     this again after a partial deploy (or as part of a re-deploy)
     converges on the same state.
+
+    Transactional cleanup: if any step after the ``POST /projects``
+    fails (DB creation, DSN fetch, or schema apply), the just-created
+    project is deleted before the exception propagates. Without this,
+    a failure in the late steps would leak the Neon project (the
+    outer ``deploy_dev_env`` rollback only sees "neon_project" as a
+    completed step after this function returns, so a mid-function
+    failure would otherwise orphan the project entirely).
     """
     project_name = _project_name_for(name)
 
     # Try to create. On 409 (project name collision), fall through to
     # the lookup path so a re-deploy adopts the existing project.
+    project_was_pre_existing = False
     try:
         create_payload = _neon_request(
             "POST",
@@ -391,15 +400,31 @@ def create_neon_project(
                 "via /projects?org_id=...; this should not happen -- check the API token scopes."
             ) from exc
         project_id = existing.id
+        project_was_pre_existing = True
 
-    branch = _resolve_default_branch(project_id, api_token=api_token)
-    _ensure_database(project_id, branch.id, HOST_POOL_DB_NAME, api_token=api_token)
-    _ensure_database(project_id, branch.id, LITELLM_COST_DB_NAME, api_token=api_token)
+    try:
+        branch = _resolve_default_branch(project_id, api_token=api_token)
+        _ensure_database(project_id, branch.id, HOST_POOL_DB_NAME, api_token=api_token)
+        _ensure_database(project_id, branch.id, LITELLM_COST_DB_NAME, api_token=api_token)
 
-    host_pool_dsn = _fetch_pooled_dsn(project_id, HOST_POOL_DB_NAME, api_token=api_token)
-    litellm_cost_dsn = _fetch_pooled_dsn(project_id, LITELLM_COST_DB_NAME, api_token=api_token)
+        host_pool_dsn = _fetch_pooled_dsn(project_id, HOST_POOL_DB_NAME, api_token=api_token)
+        litellm_cost_dsn = _fetch_pooled_dsn(project_id, LITELLM_COST_DB_NAME, api_token=api_token)
 
-    apply_pool_hosts_schema(host_pool_dsn, parent_cg=parent_cg)
+        apply_pool_hosts_schema(host_pool_dsn, parent_cg=parent_cg)
+    except NeonProviderError:
+        # Best-effort: delete the just-created project before re-raising
+        # so a retry starts from a clean slate. If we adopted an
+        # operator-managed pre-existing project, we leave it alone --
+        # the operator did not ask us to manage its lifecycle.
+        if not project_was_pre_existing:
+            try:
+                _neon_request("DELETE", f"/projects/{project_id}", api_token=api_token)
+            except NeonProviderError:
+                # Swallow cleanup errors; the original failure is what
+                # the caller needs to see. A leaked project will be
+                # picked up by the next deploy via the by-name lookup.
+                pass
+        raise
 
     return NeonProjectRecord(
         project_id=project_id,
