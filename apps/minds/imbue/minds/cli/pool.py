@@ -45,7 +45,7 @@ def build_create_admin_args(
     attributes_json: str,
     workspace_dir: str,
     management_public_key_file: str,
-    database_url: str,
+    database_url: str | None,
     mngr_source: str | None,
 ) -> list[str]:
     """Compose the ``mngr imbue_cloud admin pool create`` argv from minds-side inputs.
@@ -53,6 +53,10 @@ def build_create_admin_args(
     Auto-injects ``--tag minds_env=<env_name>``; forwards every other
     user-supplied flag verbatim. Split out from the click command so
     tests can exercise the wiring without faking a subprocess.
+
+    ``--database-url`` is forwarded only when explicitly supplied. When
+    omitted, the admin CLI auto-resolves the DSN from the activated
+    minds env's ``secrets.toml`` (which the deploy wrote).
     """
     args = [
         "create",
@@ -68,22 +72,31 @@ def build_create_admin_args(
         workspace_dir,
         "--management-public-key-file",
         management_public_key_file,
-        "--database-url",
-        database_url,
     ]
+    if database_url is not None:
+        args.extend(["--database-url", database_url])
     if mngr_source is not None:
         args.extend(["--mngr-source", mngr_source])
     return args
 
 
-def build_list_admin_args(*, database_url: str) -> list[str]:
-    """Compose the ``mngr imbue_cloud admin pool list`` argv."""
-    return ["list", "--database-url", database_url]
+def build_list_admin_args(*, database_url: str | None) -> list[str]:
+    """Compose the ``mngr imbue_cloud admin pool list`` argv.
+
+    ``--database-url`` forwarded only when explicitly supplied; see
+    :func:`build_create_admin_args`.
+    """
+    args = ["list"]
+    if database_url is not None:
+        args.extend(["--database-url", database_url])
+    return args
 
 
-def build_destroy_admin_args(*, pool_host_id: str, database_url: str, force: bool) -> list[str]:
+def build_destroy_admin_args(*, pool_host_id: str, database_url: str | None, force: bool) -> list[str]:
     """Compose the ``mngr imbue_cloud admin pool destroy`` argv."""
-    args = ["destroy", pool_host_id, "--database-url", database_url]
+    args = ["destroy", pool_host_id]
+    if database_url is not None:
+        args.extend(["--database-url", database_url])
     if force:
         args.append("--force")
     return args
@@ -165,10 +178,14 @@ def pool() -> None:
 )
 @click.option(
     "--database-url",
-    required=True,
+    required=False,
+    default=None,
     type=str,
-    envvar="DATABASE_URL",
-    help="Neon PostgreSQL direct connection string",
+    help=(
+        "Neon PostgreSQL direct connection string for the pool DB. Optional: "
+        "defaults to the activated minds env's NEON_HOST_POOL_DSN (written by "
+        "`minds env deploy`). Pass explicitly only when overriding."
+    ),
 )
 @click.option(
     "--mngr-source",
@@ -182,7 +199,7 @@ def pool_create(
     attributes_json: str,
     workspace_dir: str,
     management_public_key_file: str,
-    database_url: str,
+    database_url: str | None,
     mngr_source: str | None,
 ) -> None:
     """Create pool hosts for the activated minds env (OVH-backed via admin)."""
@@ -203,12 +220,16 @@ def pool_create(
 @pool.command(name="list")
 @click.option(
     "--database-url",
-    required=True,
+    required=False,
+    default=None,
     type=str,
-    envvar="DATABASE_URL",
-    help="Neon PostgreSQL direct connection string",
+    help=(
+        "Neon PostgreSQL direct connection string for the pool DB. Optional: "
+        "defaults to the activated minds env's NEON_HOST_POOL_DSN (written by "
+        "`minds env deploy`). Pass explicitly only when overriding."
+    ),
 )
-def pool_list(database_url: str) -> None:
+def pool_list(database_url: str | None) -> None:
     """List pool_hosts rows (forwards to ``mngr imbue_cloud admin pool list``)."""
     # No env-name filter: the admin command does not know about minds_env
     # today and we don't want to start parsing its JSON output here just to
@@ -225,13 +246,17 @@ def pool_list(database_url: str) -> None:
 @click.argument("pool_host_id")
 @click.option(
     "--database-url",
-    required=True,
+    required=False,
+    default=None,
     type=str,
-    envvar="DATABASE_URL",
-    help="Neon PostgreSQL direct connection string",
+    help=(
+        "Neon PostgreSQL direct connection string for the pool DB. Optional: "
+        "defaults to the activated minds env's NEON_HOST_POOL_DSN (written by "
+        "`minds env deploy`). Pass explicitly only when overriding."
+    ),
 )
 @click.option("--force", is_flag=True, help="Drop the row even if status != 'released'")
-def pool_destroy(pool_host_id: str, database_url: str, force: bool) -> None:
+def pool_destroy(pool_host_id: str, database_url: str | None, force: bool) -> None:
     """Remove a pool_hosts row by id (forwards to ``mngr imbue_cloud admin pool destroy``)."""
     require_activated_env_name()
     args = build_destroy_admin_args(pool_host_id=pool_host_id, database_url=database_url, force=force)

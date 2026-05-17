@@ -43,14 +43,23 @@ secrets/minds/<tier>/supertokens
 
 **Read only by `minds env deploy` on a developer's laptop** (never
 pushed to Modal -- the connector's runtime doesn't need
-create-database / VPS-management permissions):
+create-project / VPS-management permissions):
 
 ```
-secrets/minds/<tier>/neon-admin   # NEON_API_TOKEN, NEON_PROJECT_ID
+secrets/minds/<tier>/neon-admin   # NEON_API_TOKEN, NEON_ORG_ID
 secrets/minds/<tier>/vultr        # VULTR_API_KEY (legacy; OVH-backed pools today)
 secrets/minds/<tier>/ovh          # OVH_APPLICATION_KEY, OVH_APPLICATION_SECRET,
                                   #   OVH_CONSUMER_KEY (shared per-tier OVH AK/AS/CK)
 ```
+
+The dev-tier `neon-admin` token must have *project-create* scope on
+the dev tier's Neon org (not just project-scoped permissions). Every
+`minds env deploy` against a dev env creates a brand-new Neon
+*project* named `minds-<env>` under `NEON_ORG_ID`, with `host_pool`
+and `litellm_cost` databases inside; `minds env destroy` deletes the
+project outright. Staging / production keep a single tier-shared DB
+each (their `secrets/minds/<tier>/neon` and `.../litellm` entries are
+the source of truth for those tiers).
 
 The `ovh` entry is read by `minds env destroy` (to enumerate +
 delete OVH VPSes tagged with the env's `minds_env=<name>` IAM tag) and

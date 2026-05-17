@@ -20,7 +20,7 @@ from imbue.minds.envs.primitives import DevEnvName
 from imbue.minds.envs.primitives import DevEnvNotFoundError
 from imbue.minds.envs.primitives import DevEnvProvisioningError
 from imbue.minds.envs.providers.modal_env import ModalEnvProviderError
-from imbue.minds.envs.providers.neon_db import NeonDatabaseRecord
+from imbue.minds.envs.providers.neon_db import NeonProjectRecord
 from imbue.minds.envs.providers.neon_db import NeonProviderError
 from imbue.minds.envs.providers.ovh_tags import OvhCredentials
 from imbue.minds.envs.providers.supertokens_app import SuperTokensAppRecord
@@ -70,7 +70,7 @@ def _deploy_config(
 
 def _credentials() -> ProviderCredentials:
     return ProviderCredentials(
-        neon_project_id="proj-123",
+        neon_org_id="org-fake-123",
         neon_api_token=SecretStr("neon-token"),
         supertokens_core_url="https://supertokens.example.com",
         supertokens_api_key=SecretStr("st-api-key"),
@@ -125,21 +125,21 @@ def _build_fake_providers(
         if "modal_env" in fail_delete:
             raise ModalEnvProviderError("modal delete boom")
 
-    def create_neon_db(name, project_id, api_token):
-        call_log["calls"].append(("create_neon_db", str(name)))
-        if fail_step == "neon_db":
+    def create_neon_project(name, org_id, api_token, cg):
+        call_log["calls"].append(("create_neon_project", str(name)))
+        if fail_step == "neon_project":
             raise NeonProviderError("neon create boom")
-        return NeonDatabaseRecord(
-            project_id=project_id,
+        return NeonProjectRecord(
+            project_id=f"proj-fake-{name}",
+            project_name=f"minds-{name}",
             branch_id="branch-1",
-            database_name=f"minds-dev-{name}",
-            role_name="minds_dev",
-            pooled_dsn=SecretStr(f"postgres://pooled/{name}"),
+            host_pool_dsn=SecretStr(f"postgres://pooled/{name}/host_pool"),
+            litellm_cost_dsn=SecretStr(f"postgres://pooled/{name}/litellm_cost"),
         )
 
-    def delete_neon_db(name, project_id, api_token):
-        call_log["calls"].append(("delete_neon_db", str(name)))
-        if "neon_db" in fail_delete:
+    def delete_neon_project(name, org_id, api_token):
+        call_log["calls"].append(("delete_neon_project", str(name)))
+        if "neon_project" in fail_delete:
             raise NeonProviderError("neon delete boom")
 
     def create_supertokens_app(name, core_base_url, api_key):
@@ -233,8 +233,8 @@ def _build_fake_providers(
     return Providers(
         ensure_modal_env=ensure_modal_env,
         delete_modal_env=delete_modal_env,
-        create_neon_db=create_neon_db,
-        delete_neon_db=delete_neon_db,
+        create_neon_project=create_neon_project,
+        delete_neon_project=delete_neon_project,
         create_supertokens_app=create_supertokens_app,
         delete_supertokens_app=delete_supertokens_app,
         list_ovh_instances=list_ovh_instances,
@@ -277,7 +277,8 @@ def test_deploy_dev_env_writes_split_files(_isolated_home: Path, _root_cg: Concu
 
     # secrets.toml has the per-env provider state, chmod 600.
     secrets = read_secrets_file(DevEnvName("dev-alice"))
-    assert secrets.secrets["NEON_POOLED_DSN"].get_secret_value() == "postgres://pooled/dev-alice"
+    assert secrets.secrets["NEON_HOST_POOL_DSN"].get_secret_value() == "postgres://pooled/dev-alice/host_pool"
+    assert secrets.secrets["NEON_LITELLM_DSN"].get_secret_value() == "postgres://pooled/dev-alice/litellm_cost"
     assert "SUPERTOKENS_CONNECTION_URI" in secrets.secrets
     assert "SUPERTOKENS_API_KEY" in secrets.secrets
 
@@ -317,7 +318,7 @@ def test_deploy_dev_env_is_idempotent_on_re_run(_isolated_home: Path, _root_cg: 
 def test_deploy_dev_env_rollback_on_neon_failure(_isolated_home: Path, _root_cg: ConcurrencyGroup) -> None:
     """Modal env created; Neon failed -> Modal env deleted, no secret push, no app deploy."""
     call_log = _make_call_log()
-    providers = _build_fake_providers(call_log, fail_step="neon_db")
+    providers = _build_fake_providers(call_log, fail_step="neon_project")
     with pytest.raises(DevEnvProvisioningError, match="neon create boom"):
         deploy_dev_env(
             DevEnvName("dev-carol"),
@@ -330,7 +331,7 @@ def test_deploy_dev_env_rollback_on_neon_failure(_isolated_home: Path, _root_cg:
     step_names = [c[0] for c in call_log["calls"]]
     assert step_names == [
         "ensure_modal_env",
-        "create_neon_db",
+        "create_neon_project",
         "delete_modal_env",
     ]
     # No client.toml / secrets.toml written for a failed deploy.
@@ -352,9 +353,9 @@ def test_deploy_dev_env_rollback_on_supertokens_failure(_isolated_home: Path, _r
     step_names = [c[0] for c in call_log["calls"]]
     assert step_names == [
         "ensure_modal_env",
-        "create_neon_db",
+        "create_neon_project",
         "create_supertokens_app",
-        "delete_neon_db",
+        "delete_neon_project",
         "delete_modal_env",
     ]
 
@@ -452,8 +453,8 @@ def test_destroy_env_dev_walks_providers_in_order_and_removes_root(
         # (No `delete_cloudflare_tunnels` -- fake returns empty list.)
         # Step 4: SuperTokens app (cascade-deletes its users).
         "delete_supertokens_app",
-        # Step 5: Neon DB (cascade-deletes its schema).
-        "delete_neon_db",
+        # Step 5: Neon project (atomic teardown of all DBs / roles / endpoints).
+        "delete_neon_project",
         # Step 6: Modal env (cascade-deletes apps/secrets/volumes inside).
         "delete_modal_env",
         # Step 7: env root removal happens after all provider calls succeed.
@@ -545,9 +546,9 @@ def test_destroy_env_dev_leaves_env_root_when_step_fails(_isolated_home: Path, _
     )
     assert env_root_exists(DevEnvName("dev-matt"))
 
-    # Now destroy with a provider that fails on neon_db delete -- env
+    # Now destroy with a provider that fails on neon_project delete -- env
     # root must NOT be removed.
-    failing_providers = _build_fake_providers(_make_call_log(), fail_delete={"neon_db"})
+    failing_providers = _build_fake_providers(_make_call_log(), fail_delete={"neon_project"})
     with pytest.raises(NeonProviderError, match="neon delete boom"):
         destroy_env(
             DevEnvName("dev-matt"),

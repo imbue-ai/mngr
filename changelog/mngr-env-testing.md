@@ -28,6 +28,34 @@ Minds dev-environment fixes:
   thread into `modal deploy` as `MINDS_CONNECTOR_MIN_CONTAINERS` /
   `MINDS_LITELLM_PROXY_MIN_CONTAINERS`, which the modal app modules
   read at import time.
+- Per-dev-env Neon **project** (not just a database): each dev env
+  now owns a brand-new Neon project named `minds-<env>` under the
+  dev-tier Neon org, containing two databases (`host_pool` and
+  `litellm_cost`). `minds env deploy` provisions the project and
+  applies the `pool_hosts` schema (via `apps/remote_service_connector/
+  migrations/*.sql`) to `host_pool` automatically. `minds env destroy`
+  deletes the project outright -- atomic teardown of both DBs, roles,
+  and the project's pooler endpoint.
+
+  The deploy now overrides BOTH `neon.DATABASE_URL` and
+  `litellm.DATABASE_URL` in the per-env Modal Secrets with the per-env
+  project's two DSNs, so the connector and the LiteLLM proxy talk to
+  the same env-isolated Neon project. The per-env `secrets.toml` on
+  disk grows two fields (`NEON_HOST_POOL_DSN`, `NEON_LITELLM_DSN`,
+  replacing the single `NEON_POOLED_DSN`).
+
+  Vault `secrets/minds/<tier>/neon-admin` now expects `NEON_ORG_ID`
+  (instead of `NEON_PROJECT_ID`). The token must have project-create
+  scope on the dev tier's Neon org.
+
+  `mngr imbue_cloud admin pool create` and friends now auto-resolve
+  `--database-url` from the activated minds env's `NEON_HOST_POOL_DSN`
+  (or `MINDS_HOST_POOL_DSN` env var), so the standard dev-env flow no
+  longer requires passing the DSN explicitly. Operators outside an
+  activated env still pass `--database-url` directly.
+
+  Staging / production keep the tier-shared single-DB model unchanged.
+
 - Added a `secrets/minds/<tier>/ovh` Vault template (AK / AS / CK) and
   documented the manual provisioning step in
   `apps/minds/docs/vault-setup.md` and

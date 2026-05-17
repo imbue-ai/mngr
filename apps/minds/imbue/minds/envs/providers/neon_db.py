@@ -1,15 +1,34 @@
-"""Create / delete Neon databases via the Neon REST API.
+"""Create / delete per-dev-env Neon *projects* via the Neon REST API.
 
-Each dynamic dev env gets its own Neon database, named ``minds-dev-<name>``,
-under a shared dev-tier Neon project. Authentication uses an API token the
-dev tier owns in Vault (``secrets/minds/dev/neon`` plus the
-operator-side Neon project id from ``deploy.toml``).
+Each dynamic dev env gets its own Neon project named ``minds-<env>``
+under the dev tier's Neon organization. The project contains two
+databases on the default branch:
 
-Returns the pooled connection string the connector / connector clients use
-at runtime.
+* ``host_pool``    -- the imbue-cloud pool host registry. The
+  ``pool_hosts`` schema is applied automatically as part of project
+  creation by replaying ``apps/remote_service_connector/migrations/*.sql``
+  via psql.
+* ``litellm_cost`` -- the LiteLLM proxy's Prisma-managed backing store.
+  Empty on creation; the LiteLLM Prisma migration runs against it later
+  inside ``deploy_litellm_proxy``.
+
+This shape matches every other dev-tier resource axis (one Modal env,
+one SuperTokens app, one Cloudflare-tunnel tag scope, one OVH IAM tag
+scope per dev env). Destroy is atomic: ``DELETE /projects/<id>``
+removes everything (branches, roles, both DBs, the project's pooler
+endpoint) in one call.
+
+Staging / production keep the tier-shared single-DB model: their
+``DATABASE_URL`` vault entries are the authoritative DSN, and
+``wipe_neon_db_schema`` (still exported here) clears state by
+``DROP SCHEMA public`` instead of destroying the project. That model
+fits a long-lived shared tier; the project-per-env model fits the
+churn of per-developer environments.
 """
 
 import shutil
+from collections.abc import Sequence
+from pathlib import Path
 from typing import Final
 
 import httpx
@@ -35,13 +54,24 @@ _REQUEST_TIMEOUT_SECONDS: Final[float] = 60.0
 # few-call provisioning flow. The total budget is generous so a slow
 # Neon region doesn't trip us up.
 _LOCKED_RETRY_POLL_INTERVAL_SECONDS: Final[float] = 2.0
-_LOCKED_RETRY_TOTAL_BUDGET_SECONDS: Final[float] = 60.0
+_LOCKED_RETRY_TOTAL_BUDGET_SECONDS: Final[float] = 120.0
 
 # psql shellout for schema-level wipe (Neon REST API doesn't expose
 # schema ops). Generous enough to absorb a slow Neon cold-start; short
 # enough that a real connectivity failure surfaces in well under a
 # minute.
-_PSQL_WIPE_TIMEOUT_SECONDS: Final[float] = 60.0
+_PSQL_TIMEOUT_SECONDS: Final[float] = 60.0
+
+# Default region for new per-env Neon projects. Matches where the
+# dev-tier org already lives; tier-shared projects (staging /
+# production) are operator-managed and not affected by this.
+_DEFAULT_REGION_ID: Final[str] = "aws-us-west-2"
+_DEFAULT_PG_VERSION: Final[int] = 17
+
+# Names of the databases we provision inside every per-env project.
+# Both names use snake_case so they don't need quoting in psql.
+HOST_POOL_DB_NAME: Final[str] = "host_pool"
+LITELLM_COST_DB_NAME: Final[str] = "litellm_cost"
 
 
 class NeonProviderError(MindError):
@@ -49,12 +79,7 @@ class NeonProviderError(MindError):
 
 
 class NeonBranchSummary(FrozenModel):
-    """One row of ``GET /projects/{id}/branches``.
-
-    Neon's API returns lots of metadata per branch (project_id, slug,
-    project_slug, parent_id, default flags, timestamps, ...). We only
-    care about ``id`` and ``name``, so we tell pydantic to drop the rest.
-    """
+    """One row of ``GET /projects/{id}/branches``."""
 
     model_config = {"extra": "ignore", "frozen": True}
 
@@ -62,17 +87,31 @@ class NeonBranchSummary(FrozenModel):
     name: str
 
 
-class NeonDatabaseRecord(FrozenModel):
-    """Result of ``create_neon_database``."""
+class NeonProjectRecord(FrozenModel):
+    """Result of :func:`create_neon_project`."""
 
-    project_id: str = Field(description="Neon project id this DB lives under (dev-tier shared project).")
-    branch_id: str = Field(description="Neon branch id (typically the main branch).")
-    database_name: str = Field(description="The created database name.")
-    role_name: str = Field(description="The role minds owns on this DB.")
-    pooled_dsn: SecretStr = Field(description="Pooled PostgreSQL connection string.")
+    project_id: str = Field(description="Neon project id (e.g. `raspy-lake-82340275`).")
+    project_name: str = Field(description="Neon project name -- equals `minds-<env-name>`.")
+    branch_id: str = Field(description="Neon default branch id (typically the main branch).")
+    host_pool_dsn: SecretStr = Field(
+        description="Pooled DSN for the `host_pool` database. Used by the connector and `mngr imbue_cloud admin pool create`.",
+    )
+    litellm_cost_dsn: SecretStr = Field(
+        description="Pooled DSN for the `litellm_cost` database. Used by the LiteLLM proxy.",
+    )
+
+
+class NeonProjectSummary(FrozenModel):
+    """One row of ``GET /projects?org_id=...``."""
+
+    model_config = {"extra": "ignore", "frozen": True}
+
+    id: str
+    name: str
 
 
 _BRANCH_LIST_ADAPTER: TypeAdapter[list[NeonBranchSummary]] = TypeAdapter(list[NeonBranchSummary])
+_PROJECT_LIST_ADAPTER: TypeAdapter[list[NeonProjectSummary]] = TypeAdapter(list[NeonProjectSummary])
 
 
 class _NeonRequestAttempt(FrozenModel):
@@ -144,6 +183,38 @@ def _neon_request(
         raise NeonProviderError(f"Neon API returned non-JSON for {method} {path}: {exc}") from exc
 
 
+def _project_name_for(name: DevEnvName) -> str:
+    """The Neon project name we use for a dev env.
+
+    Mirrors the rest of the dev-tier naming (Modal env, SuperTokens app
+    id, OVH IAM tag scope all just use the env name verbatim). The
+    ``minds-`` prefix prevents collisions with unrelated projects in
+    the same Neon org.
+    """
+    return f"minds-{name}"
+
+
+def _find_project_by_name(org_id: str, project_name: str, *, api_token: SecretStr) -> NeonProjectSummary | None:
+    """Look up a Neon project by name under ``org_id``. Returns None if not found.
+
+    We don't persist the project id locally -- destroy on a different
+    machine still needs to find the project. Filtering by name + org
+    is the canonical lookup pattern for an org-scoped Neon token.
+    """
+    payload = _neon_request("GET", f"/projects?org_id={org_id}&limit=400", api_token=api_token)
+    raw_projects = payload.get("projects")
+    if not isinstance(raw_projects, list):
+        raise NeonProviderError(f"Neon /projects returned no `projects` array; got: {payload!r}")
+    try:
+        projects = _PROJECT_LIST_ADAPTER.validate_python(raw_projects)
+    except ValidationError as exc:
+        raise NeonProviderError(f"Neon /projects returned an unexpected shape: {exc}") from exc
+    for project in projects:
+        if project.name == project_name:
+            return project
+    return None
+
+
 def _resolve_default_branch(project_id: str, *, api_token: SecretStr) -> NeonBranchSummary:
     payload = _neon_request("GET", f"/projects/{project_id}/branches", api_token=api_token)
     branches_raw = payload.get("branches")
@@ -159,83 +230,204 @@ def _resolve_default_branch(project_id: str, *, api_token: SecretStr) -> NeonBra
     return branches[0]
 
 
-def create_neon_database(
-    name: DevEnvName,
-    *,
+def _ensure_database(
     project_id: str,
-    api_token: SecretStr,
-    role_name: str = "minds_dev",
-) -> NeonDatabaseRecord:
-    """Create (or look up) the per-dev-env database on the dev-tier project.
-
-    Ensures ``role_name`` exists on the project (creating it if not) so
-    the database has a non-superuser owner. Idempotent: if the database
-    already exists (Neon returns HTTP 409 on duplicate-name create), we
-    skip the create and proceed straight to reading the connection URI.
-    """
-    branch = _resolve_default_branch(project_id, api_token=api_token)
-    database_name = f"minds-dev-{name}"
-
-    # Neon returns 409 when the role already exists; treat that as success.
-    try:
-        _neon_request(
-            "POST",
-            f"/projects/{project_id}/branches/{branch.id}/roles",
-            api_token=api_token,
-            json_body={"role": {"name": role_name}},
-        )
-    except NeonProviderError as exc:
-        if "409" not in str(exc):
-            raise
-
-    # Same idempotency story for the database itself.
-    try:
-        _neon_request(
-            "POST",
-            f"/projects/{project_id}/branches/{branch.id}/databases",
-            api_token=api_token,
-            json_body={"database": {"name": database_name, "owner_name": role_name}},
-        )
-    except NeonProviderError as exc:
-        if "409" not in str(exc):
-            raise
-
-    uri_payload = _neon_request(
-        "GET",
-        f"/projects/{project_id}/connection_uri?database_name={database_name}&role_name={role_name}&pooled=true",
-        api_token=api_token,
-    )
-    uri = uri_payload.get("uri") if isinstance(uri_payload, dict) else None
-    if not isinstance(uri, str) or not uri:
-        raise NeonProviderError(f"Neon API did not return a connection URI for database {database_name!r}")
-
-    return NeonDatabaseRecord(
-        project_id=project_id,
-        branch_id=branch.id,
-        database_name=database_name,
-        role_name=role_name,
-        pooled_dsn=SecretStr(uri),
-    )
-
-
-def delete_neon_database(
-    name: DevEnvName,
+    branch_id: str,
+    database_name: str,
     *,
-    project_id: str,
     api_token: SecretStr,
 ) -> None:
-    """Delete the database created by :func:`create_neon_database` for ``name``.
+    """Create ``database_name`` on the given branch if it does not exist.
 
-    Idempotent: returns silently when the database does not exist (HTTP 404).
+    Owner is ``neondb_owner`` (the default role Neon ships with every
+    project) -- we don't create extra roles, so the user we authenticate
+    as for `host_pool` / `litellm_cost` is the same role that owns the
+    default `neondb` database.
     """
-    branch = _resolve_default_branch(project_id, api_token=api_token)
-    database_name = f"minds-dev-{name}"
     try:
         _neon_request(
-            "DELETE",
-            f"/projects/{project_id}/branches/{branch.id}/databases/{database_name}",
+            "POST",
+            f"/projects/{project_id}/branches/{branch_id}/databases",
             api_token=api_token,
+            json_body={"database": {"name": database_name, "owner_name": "neondb_owner"}},
         )
+    except NeonProviderError as exc:
+        if "409" not in str(exc):
+            raise
+
+
+def _fetch_pooled_dsn(
+    project_id: str,
+    database_name: str,
+    *,
+    api_token: SecretStr,
+) -> SecretStr:
+    payload = _neon_request(
+        "GET",
+        f"/projects/{project_id}/connection_uri?database_name={database_name}&role_name=neondb_owner&pooled=true",
+        api_token=api_token,
+    )
+    uri = payload.get("uri") if isinstance(payload, dict) else None
+    if not isinstance(uri, str) or not uri:
+        raise NeonProviderError(f"Neon API did not return a connection URI for database {database_name!r}")
+    return SecretStr(uri)
+
+
+def _migrations_dir() -> Path:
+    """Return the directory holding the pool_hosts SQL migrations.
+
+    Hops from this module's location (``apps/minds/imbue/minds/envs/providers/neon_db.py``)
+    up to the monorepo root, then down to
+    ``apps/remote_service_connector/migrations``. Five ``parents`` hops
+    gets us to ``apps/minds/``; one more hop is the repo root.
+    """
+    repo_root = Path(__file__).resolve().parents[6]
+    migrations = repo_root / "apps" / "remote_service_connector" / "migrations"
+    if not migrations.is_dir():
+        raise NeonProviderError(
+            f"Could not locate pool_hosts migrations dir; expected {migrations}. "
+            "`minds env deploy` must be run from a checkout of the monorepo."
+        )
+    return migrations
+
+
+def _list_migration_files() -> Sequence[Path]:
+    """Return all ``.sql`` files in the migrations dir, lexicographic order."""
+    return sorted(_migrations_dir().glob("*.sql"))
+
+
+def apply_pool_hosts_schema(host_pool_dsn: SecretStr, *, parent_cg: ConcurrencyGroup) -> None:
+    """Replay every ``apps/remote_service_connector/migrations/*.sql`` against ``host_pool_dsn``.
+
+    Each migration is idempotent in isolation (uses ``IF NOT EXISTS`` /
+    ``IF EXISTS`` guards), so replaying the full set against a fresh DB
+    yields the canonical schema, and re-replaying against an
+    already-bootstrapped DB is a no-op.
+
+    Shells out to ``psql`` -- pulling psycopg into the minds runtime
+    just for this is more weight than the shellout. The deploy machine
+    already has psql (Modal / dev laptops both ship it).
+    """
+    psql_path = shutil.which("psql")
+    if psql_path is None:
+        raise NeonProviderError(
+            "psql binary not on PATH; cannot bootstrap the pool_hosts schema. Install via "
+            "`apt install postgresql-client` (Debian/Ubuntu) or `brew install libpq` (macOS)."
+        )
+    for migration in _list_migration_files():
+        command = [
+            psql_path,
+            host_pool_dsn.get_secret_value(),
+            "-v",
+            "ON_ERROR_STOP=1",
+            "-f",
+            str(migration),
+        ]
+        cg = parent_cg.make_concurrency_group(name=f"psql-pool-migration-{migration.stem}")
+        with cg:
+            result = cg.run_process_to_completion(
+                command=command,
+                timeout=_PSQL_TIMEOUT_SECONDS,
+                is_checked_after=False,
+            )
+        if result.returncode != 0:
+            stderr = result.stderr.strip() or result.stdout.strip()
+            raise NeonProviderError(f"`psql` exited {result.returncode} while applying {migration.name}: {stderr}")
+
+
+def create_neon_project(
+    name: DevEnvName,
+    *,
+    org_id: str,
+    api_token: SecretStr,
+    parent_cg: ConcurrencyGroup,
+) -> NeonProjectRecord:
+    """Provision (or look up) the per-dev-env Neon project named ``minds-<name>``.
+
+    Steps:
+
+    1. ``POST /projects`` to create the project under ``org_id`` (or
+       skip + look up the existing project on collision).
+    2. Resolve the default branch.
+    3. ``POST .../databases`` for both ``host_pool`` and ``litellm_cost``.
+       Both owned by ``neondb_owner`` (the default role).
+    4. ``GET .../connection_uri?pooled=true`` for each DB.
+    5. Apply the pool_hosts schema migrations to ``host_pool`` via psql.
+
+    Idempotent: every step tolerates pre-existing resources, so calling
+    this again after a partial deploy (or as part of a re-deploy)
+    converges on the same state.
+    """
+    project_name = _project_name_for(name)
+
+    # Try to create. On 409 (project name collision), fall through to
+    # the lookup path so a re-deploy adopts the existing project.
+    try:
+        create_payload = _neon_request(
+            "POST",
+            "/projects",
+            api_token=api_token,
+            json_body={
+                "project": {
+                    "name": project_name,
+                    "org_id": org_id,
+                    "pg_version": _DEFAULT_PG_VERSION,
+                    "region_id": _DEFAULT_REGION_ID,
+                },
+            },
+        )
+        project_id = create_payload.get("project", {}).get("id")
+        if not isinstance(project_id, str) or not project_id:
+            raise NeonProviderError(
+                f"Neon POST /projects returned no project.id for {project_name!r}; got: {create_payload!r}"
+            )
+    except NeonProviderError as exc:
+        if "409" not in str(exc) and "already" not in str(exc).lower():
+            raise
+        existing = _find_project_by_name(org_id, project_name, api_token=api_token)
+        if existing is None:
+            raise NeonProviderError(
+                f"Neon POST /projects returned 409 for {project_name!r} but the project is not visible "
+                "via /projects?org_id=...; this should not happen -- check the API token scopes."
+            ) from exc
+        project_id = existing.id
+
+    branch = _resolve_default_branch(project_id, api_token=api_token)
+    _ensure_database(project_id, branch.id, HOST_POOL_DB_NAME, api_token=api_token)
+    _ensure_database(project_id, branch.id, LITELLM_COST_DB_NAME, api_token=api_token)
+
+    host_pool_dsn = _fetch_pooled_dsn(project_id, HOST_POOL_DB_NAME, api_token=api_token)
+    litellm_cost_dsn = _fetch_pooled_dsn(project_id, LITELLM_COST_DB_NAME, api_token=api_token)
+
+    apply_pool_hosts_schema(host_pool_dsn, parent_cg=parent_cg)
+
+    return NeonProjectRecord(
+        project_id=project_id,
+        project_name=project_name,
+        branch_id=branch.id,
+        host_pool_dsn=host_pool_dsn,
+        litellm_cost_dsn=litellm_cost_dsn,
+    )
+
+
+def delete_neon_project(
+    name: DevEnvName,
+    *,
+    org_id: str,
+    api_token: SecretStr,
+) -> None:
+    """Delete the per-dev-env Neon project named ``minds-<name>``.
+
+    Looks up the project by name under ``org_id`` so destroy works from
+    any machine (no local project-id pointer required). Idempotent: a
+    missing project is treated as success.
+    """
+    project_name = _project_name_for(name)
+    existing = _find_project_by_name(org_id, project_name, api_token=api_token)
+    if existing is None:
+        return
+    try:
+        _neon_request("DELETE", f"/projects/{existing.id}", api_token=api_token)
     except NeonProviderError as exc:
         if "404" in str(exc):
             return
@@ -248,18 +440,9 @@ def wipe_neon_db_schema(dsn: SecretStr, *, parent_cg: ConcurrencyGroup) -> None:
     Used by ``minds env destroy --yes-i-mean-staging`` to clear the
     staging Neon DB's tables without deleting the database itself --
     the operator's Vault entry holds the DSN, and we want it to stay
-    valid across destroy / redeploy cycles.
-
-    Implementation: shells out to ``psql <dsn>`` with ``DROP SCHEMA public
-    CASCADE; CREATE SCHEMA public;``. The Neon REST API does not expose
-    schema-level operations, and pulling psycopg into the minds runtime
-    just for this single op is more weight than the shellout. ``psql``
-    is a standard postgres-client binary; the deploy machine already
-    has it (Modal workers / dev laptops both ship it via ``apt install
-    postgresql-client`` or homebrew). Raises :class:`NeonProviderError`
-    when ``psql`` is missing or the SQL fails -- destroy aborts so the
-    operator can fix the underlying issue rather than silently leaving
-    the schema half-wiped.
+    valid across destroy / redeploy cycles. Dev envs don't go through
+    this path (they delete the whole project via
+    :func:`delete_neon_project`).
 
     Idempotent: ``DROP SCHEMA public CASCADE`` succeeds whether or not
     the schema has tables, and ``CREATE SCHEMA public`` recreates an
@@ -283,7 +466,7 @@ def wipe_neon_db_schema(dsn: SecretStr, *, parent_cg: ConcurrencyGroup) -> None:
     with cg:
         result = cg.run_process_to_completion(
             command=command,
-            timeout=_PSQL_WIPE_TIMEOUT_SECONDS,
+            timeout=_PSQL_TIMEOUT_SECONDS,
             is_checked_after=False,
         )
     if result.returncode != 0:

@@ -14,37 +14,31 @@ How to set up the infrastructure for the imbue-cloud-leased pool host flow.
 
 ## Step 1: Create the database schema
 
-Use the **direct** (non-pooled) Neon connection string for schema migrations:
+**For dev envs:** skip this step. `minds env deploy` (against a dev
+env) provisions a brand-new Neon project per env and applies the
+schema automatically by replaying
+`apps/remote_service_connector/migrations/*.sql` against the new
+`host_pool` database.
 
-```sql
-CREATE EXTENSION IF NOT EXISTS pgcrypto;
+**For staging / production:** apply the schema once, by hand, against
+the tier's pre-provisioned `host_pool` database. Use the **direct**
+(non-pooled) Neon connection string:
 
-CREATE TABLE pool_hosts (
-    id UUID PRIMARY KEY,
-    vps_address TEXT NOT NULL,
-    vps_instance_id TEXT NOT NULL,
-    agent_id TEXT NOT NULL,
-    host_id TEXT NOT NULL,
-    ssh_port INTEGER NOT NULL,
-    ssh_user TEXT NOT NULL,
-    container_ssh_port INTEGER NOT NULL,
-    status TEXT NOT NULL,
-    attributes JSONB NOT NULL DEFAULT '{}'::jsonb,
-    leased_to_user TEXT,
-    leased_at TIMESTAMPTZ,
-    released_at TIMESTAMPTZ,
-    created_at TIMESTAMPTZ NOT NULL
-);
-
-CREATE INDEX pool_hosts_attributes_gin ON pool_hosts USING GIN (attributes);
-```
-
-Run via:
 ```bash
-psql "$NEON_DB_DIRECT" -c "<SQL above>"
+for f in apps/remote_service_connector/migrations/*.sql; do
+    psql "$NEON_DB_DIRECT" -f "$f"
+done
 ```
 
-The `attributes` JSONB column carries whatever shape the operator wants to match leases against (`repo_branch_or_tag`, `cpus`, `memory_gb`, `gpu_count`, etc.); the connector's `/hosts/lease` endpoint matches `attributes @> request_attributes`.
+The migrations are idempotent and apply cleanly to a fresh DB or one
+that already has earlier migrations applied. The `000_initial_schema.sql`
+file is the canonical full schema; `001`-`003` are defensive ALTERs
+that no-op when 000 already laid the table down in its final shape.
+
+The `attributes` JSONB column carries whatever shape the operator wants
+to match leases against (`repo_branch_or_tag`, `cpus`, `memory_gb`,
+`gpu_count`, etc.); the connector's `/hosts/lease` endpoint matches
+`attributes @> request_attributes`.
 
 ## Step 2: Generate the management SSH keypair
 

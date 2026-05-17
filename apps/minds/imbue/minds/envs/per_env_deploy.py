@@ -35,7 +35,7 @@ from pydantic import AnyUrl
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.minds.envs.primitives import DevEnvName
 from imbue.minds.envs.primitives import VaultReadError
-from imbue.minds.envs.providers.neon_db import NeonDatabaseRecord
+from imbue.minds.envs.providers.neon_db import NeonProjectRecord
 from imbue.minds.envs.providers.supertokens_app import SuperTokensAppRecord
 from imbue.minds.envs.vault_reader import VaultPath
 from imbue.minds.envs.vault_reader import read_vault_kv
@@ -528,13 +528,21 @@ def compute_per_env_overrides(
     name: DevEnvName,
     *,
     modal_workspace: str,
-    neon_record: NeonDatabaseRecord,
+    neon_record: NeonProjectRecord,
     supertokens_record: SuperTokensAppRecord,
 ) -> dict[str, dict[str, str]]:
     """Return per-service Modal Secret value overrides for this dev env.
 
     Keys missing from the result inherit the tier-shared Vault value
     verbatim (or fall through to a placeholder if no tier value exists).
+
+    Both ``neon.DATABASE_URL`` (consumed by the connector for pool host
+    rows) and ``litellm.DATABASE_URL`` (consumed by the LiteLLM proxy
+    for spend tracking + virtual keys) get overridden to point at the
+    per-env Neon project's two databases. The tier-shared vault values
+    for those keys are intentionally bypassed; only their non-DSN
+    fields (e.g. ``LITELLM_MASTER_KEY``, ``ANTHROPIC_API_KEY``) survive
+    the merge into the per-env Modal Secret.
     """
     connector_url = per_env_connector_url(name, modal_workspace)
     proxy_url = per_env_litellm_proxy_url(name, modal_workspace)
@@ -544,7 +552,10 @@ def compute_per_env_overrides(
             "AUTH_WEBSITE_DOMAIN": str(connector_url),
         },
         "neon": {
-            "DATABASE_URL": neon_record.pooled_dsn.get_secret_value(),
+            "DATABASE_URL": neon_record.host_pool_dsn.get_secret_value(),
+        },
+        "litellm": {
+            "DATABASE_URL": neon_record.litellm_cost_dsn.get_secret_value(),
         },
         "litellm-connector": {
             "LITELLM_PROXY_URL": str(proxy_url),

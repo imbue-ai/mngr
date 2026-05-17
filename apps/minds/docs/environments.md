@@ -261,10 +261,16 @@ client" below -- the runtime exports `MINDS_ROOT_NAME` and passes
 
 Each developer can stand up their own dev env on top of the shared
 dev tier. Resources created per dev env: a Modal *environment* inside
-the shared dev Modal workspace, a Neon database under the shared dev
-Neon project, and a SuperTokens app under the shared dev SuperTokens
-core. Cloudflare, Vultr, Anthropic, and OAuth clients are dev-tier
-shared.
+the shared dev Modal workspace, a Neon *project* (named
+`minds-<env>`) under the shared dev Neon org -- with `host_pool` and
+`litellm_cost` databases provisioned inside -- and a SuperTokens app
+under the shared dev SuperTokens core. Cloudflare, Vultr, Anthropic,
+and OAuth clients are dev-tier shared.
+
+The per-env Neon project gives every dev env atomic, isolated state
+for pool host rows and LiteLLM spend tracking. `minds env destroy`
+deletes the project outright (everything inside goes with it); no
+cross-dev contamination, no leftover roles to clean up.
 
 Bootstrap a brand-new dev env:
 
@@ -272,9 +278,10 @@ Bootstrap a brand-new dev env:
 # 1. Activate the env (--create idempotently mkdirs ~/.minds-<name>/ if missing).
 eval "$(uv run minds env activate --create dev-<your-user>)"
 
-# 2. Deploy: provisions the Modal env, Neon DB, SuperTokens app, pushes
-#    per-env Modal Secrets, runs `modal deploy` for both apps, and
-#    writes ~/.minds-dev-<your-user>/{client.toml,secrets.toml}.
+# 2. Deploy: provisions the Modal env, Neon project (with host_pool +
+#    litellm_cost DBs), SuperTokens app, pushes per-env Modal Secrets,
+#    runs `modal deploy` for both apps, and writes
+#    ~/.minds-dev-<your-user>/{client.toml,secrets.toml}.
 uv run minds env deploy
 
 # 3. Launch the desktop client against the new env:
@@ -309,12 +316,13 @@ uv run minds env list
 
 ## On-disk file layout per env
 
-For a dev env named `josh-3`:
+For a dev env named `dev-josh-3`:
 
 ```
-~/.minds-josh-3/
+~/.minds-dev-josh-3/
   client.toml         # connector_url, litellm_proxy_url (mode 0644)
-  secrets.toml        # NEON_POOLED_DSN, SUPERTOKENS_*, ... (mode 0600)
+  secrets.toml        # NEON_HOST_POOL_DSN, NEON_LITELLM_DSN,
+                      #   SUPERTOKENS_CONNECTION_URI, SUPERTOKENS_API_KEY (mode 0600)
   mngr/               # this env's mngr profile (MNGR_HOST_DIR)
     agents/...
     profiles/...
@@ -324,6 +332,10 @@ For a dev env named `josh-3`:
     minds-events.jsonl
   ...
 ```
+
+`NEON_HOST_POOL_DSN` is also the DSN `mngr imbue_cloud admin pool
+create` defaults to when invoked from this activated shell -- no need
+to pass `--database-url` explicitly.
 
 For production (`~/.minds/`) or staging (`~/.minds-staging/`): same
 layout *minus* `client.toml` and `secrets.toml` under the env root --

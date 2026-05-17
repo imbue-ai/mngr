@@ -63,9 +63,9 @@ from imbue.minds.envs.primitives import VaultReadError
 from imbue.minds.envs.providers.cloudflare_tunnels import delete_tunnels as real_delete_cloudflare_tunnels
 from imbue.minds.envs.providers.cloudflare_tunnels import list_tunnels_for_env as real_list_cloudflare_tunnels_for_env
 from imbue.minds.envs.providers.modal_env import delete_modal_env as real_delete_modal_env
-from imbue.minds.envs.providers.neon_db import NeonDatabaseRecord
-from imbue.minds.envs.providers.neon_db import create_neon_database
-from imbue.minds.envs.providers.neon_db import delete_neon_database
+from imbue.minds.envs.providers.neon_db import NeonProjectRecord
+from imbue.minds.envs.providers.neon_db import create_neon_project
+from imbue.minds.envs.providers.neon_db import delete_neon_project
 from imbue.minds.envs.providers.neon_db import wipe_neon_db_schema as real_wipe_neon_db_schema
 from imbue.minds.envs.providers.ovh_tags import OvhCredentials
 from imbue.minds.envs.providers.ovh_tags import delete_instances as delete_ovh_instances
@@ -137,12 +137,14 @@ def _delete_modal_env_for_provider(name: DevEnvName, cg: ConcurrencyGroup) -> No
     real_delete_modal_env(name, parent_concurrency_group=cg)
 
 
-def _create_neon_for_provider(name: DevEnvName, project_id: str, api_token: SecretStr) -> NeonDatabaseRecord:
-    return create_neon_database(name, project_id=project_id, api_token=api_token)
+def _create_neon_for_provider(
+    name: DevEnvName, org_id: str, api_token: SecretStr, cg: ConcurrencyGroup
+) -> NeonProjectRecord:
+    return create_neon_project(name, org_id=org_id, api_token=api_token, parent_cg=cg)
 
 
-def _delete_neon_for_provider(name: DevEnvName, project_id: str, api_token: SecretStr) -> None:
-    delete_neon_database(name, project_id=project_id, api_token=api_token)
+def _delete_neon_for_provider(name: DevEnvName, org_id: str, api_token: SecretStr) -> None:
+    delete_neon_project(name, org_id=org_id, api_token=api_token)
 
 
 def _create_supertokens_for_provider(name: DevEnvName, core_base_url: str, api_key: SecretStr) -> SuperTokensAppRecord:
@@ -240,8 +242,8 @@ def _build_real_providers() -> Providers:
     return Providers(
         ensure_modal_env=_ensure_modal_env_for_provider,
         delete_modal_env=_delete_modal_env_for_provider,
-        create_neon_db=_create_neon_for_provider,
-        delete_neon_db=_delete_neon_for_provider,
+        create_neon_project=_create_neon_for_provider,
+        delete_neon_project=_delete_neon_for_provider,
         create_supertokens_app=_create_supertokens_for_provider,
         delete_supertokens_app=_delete_supertokens_for_provider,
         list_ovh_instances=_list_ovh_for_provider,
@@ -273,7 +275,9 @@ def _load_dev_credentials_from_vault(vault_prefix: str, *, cg: ConcurrencyGroup)
 
     Paths read here (none are pushed to Modal):
 
-    - ``<vault_prefix>/neon-admin`` -- ``NEON_API_TOKEN``, ``NEON_PROJECT_ID``
+    - ``<vault_prefix>/neon-admin`` -- ``NEON_API_TOKEN``, ``NEON_ORG_ID``.
+      ``NEON_ORG_ID`` is the Neon organization under which per-dev-env
+      *projects* are created (one project per env named ``minds-<env>``).
     - ``<vault_prefix>/supertokens`` -- ``SUPERTOKENS_CONNECTION_URI``,
       ``SUPERTOKENS_API_KEY`` (read from the Modal-pushed entry; safe to
       read here because the connector also legitimately needs both keys)
@@ -292,11 +296,11 @@ def _load_dev_credentials_from_vault(vault_prefix: str, *, cg: ConcurrencyGroup)
         logger.warning("No ovh Vault entry yet ({}); proceeding with empty OVH credentials.", exc)
         ovh_secret = {}
 
-    project_id = neon_admin.get("NEON_PROJECT_ID", "")
+    org_id = neon_admin.get("NEON_ORG_ID", "")
     api_token = neon_admin.get("NEON_API_TOKEN", "")
-    if not project_id or not api_token:
+    if not org_id or not api_token:
         raise VaultReadError(
-            f"Vault entry {vault_prefix}/neon-admin missing NEON_PROJECT_ID or NEON_API_TOKEN; "
+            f"Vault entry {vault_prefix}/neon-admin missing NEON_ORG_ID or NEON_API_TOKEN; "
             "see .minds/template/neon-admin.sh for the schema."
         )
 
@@ -308,7 +312,7 @@ def _load_dev_credentials_from_vault(vault_prefix: str, *, cg: ConcurrencyGroup)
         )
 
     return ProviderCredentials(
-        neon_project_id=project_id,
+        neon_org_id=org_id,
         neon_api_token=SecretStr(api_token),
         supertokens_core_url=core_url,
         supertokens_api_key=SecretStr(core_api_key),

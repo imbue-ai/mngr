@@ -77,7 +77,7 @@ from imbue.minds.envs.primitives import DevEnvName
 from imbue.minds.envs.primitives import DevEnvNotFoundError
 from imbue.minds.envs.primitives import DevEnvProvisioningError
 from imbue.minds.envs.providers.modal_env import ModalEnvProviderError
-from imbue.minds.envs.providers.neon_db import NeonDatabaseRecord
+from imbue.minds.envs.providers.neon_db import NeonProjectRecord
 from imbue.minds.envs.providers.neon_db import NeonProviderError
 from imbue.minds.envs.providers.ovh_tags import OvhCredentials
 from imbue.minds.envs.providers.ovh_tags import OvhProviderError
@@ -134,8 +134,16 @@ class ProviderCredentials(FrozenModel):
     and does not persist them.
     """
 
-    neon_project_id: str = Field(description="Dev-tier Neon project id under which per-dev-env DBs are created.")
-    neon_api_token: SecretStr = Field(description="Dev-tier Neon API token.")
+    neon_org_id: str = Field(
+        description=(
+            "Neon organization id under which per-dev-env Neon *projects* are created "
+            "(one project per dev env named ``minds-<env>``). Operator-managed; lives in "
+            "``secrets/minds/dev/neon-admin.NEON_ORG_ID``."
+        ),
+    )
+    neon_api_token: SecretStr = Field(
+        description="Neon API token with project-create scope on the dev tier's Neon org.",
+    )
     supertokens_core_url: str = Field(description="Dev-tier SuperTokens core base URL.")
     supertokens_api_key: SecretStr = Field(description="Dev-tier SuperTokens admin API key.")
     ovh_credentials: OvhCredentials = Field(description="Dev-tier OVH AK/AS/CK credentials (shared across dev envs).")
@@ -143,8 +151,12 @@ class ProviderCredentials(FrozenModel):
 
 # Type aliases for the injectable provider callables. Tests substitute
 # fakes here; the CLI wires the real provider modules at runtime.
-CreateNeonDbFn = Callable[[DevEnvName, str, SecretStr], NeonDatabaseRecord]
-DeleteNeonDbFn = Callable[[DevEnvName, str, SecretStr], None]
+# ``CreateNeonProjectFn`` provisions a per-dev-env Neon project (named
+# ``minds-<env>``) that holds the env's ``host_pool`` + ``litellm_cost``
+# databases. Signature: ``(name, org_id, api_token, parent_cg) ->
+# NeonProjectRecord``.
+CreateNeonProjectFn = Callable[[DevEnvName, str, SecretStr, ConcurrencyGroup], NeonProjectRecord]
+DeleteNeonProjectFn = Callable[[DevEnvName, str, SecretStr], None]
 CreateSuperTokensAppFn = Callable[[DevEnvName, str, SecretStr], SuperTokensAppRecord]
 DeleteSuperTokensAppFn = Callable[[DevEnvName, str, SecretStr], None]
 ListOvhInstancesFn = Callable[[DevEnvName, OvhCredentials], tuple[IamResource, ...]]
@@ -194,8 +206,16 @@ class Providers(FrozenModel):
 
     ensure_modal_env: ModalEnvOpFn = Field(description="Create the Modal environment (idempotent).")
     delete_modal_env: ModalEnvOpFn = Field(description="Delete the Modal environment.")
-    create_neon_db: CreateNeonDbFn = Field(description="Create or look up the per-dev-env Neon database.")
-    delete_neon_db: DeleteNeonDbFn = Field(description="Delete the per-dev-env Neon database.")
+    create_neon_project: CreateNeonProjectFn = Field(
+        description=(
+            "Create or look up the per-dev-env Neon project (one per env, named "
+            "``minds-<env>``). Bootstraps the ``host_pool`` + ``litellm_cost`` "
+            "databases inside and returns DSNs for both."
+        ),
+    )
+    delete_neon_project: DeleteNeonProjectFn = Field(
+        description="Delete the per-dev-env Neon project (atomic teardown of all its DBs / roles / endpoints).",
+    )
     create_supertokens_app: CreateSuperTokensAppFn = Field(description="Create the per-dev-env SuperTokens app.")
     delete_supertokens_app: DeleteSuperTokensAppFn = Field(description="Delete the per-dev-env SuperTokens app.")
     list_ovh_instances: ListOvhInstancesFn = Field(description="List OVH VPSes tagged for this dev env.")
@@ -339,7 +359,7 @@ def deploy_dev_env(
     the cause.
     """
     completed_creation_steps: list[str] = []
-    neon_record: NeonDatabaseRecord | None = None
+    neon_record: NeonProjectRecord | None = None
     supertokens_record: SuperTokensAppRecord | None = None
 
     try:
@@ -347,9 +367,11 @@ def deploy_dev_env(
         providers.ensure_modal_env(name, parent_concurrency_group)
         completed_creation_steps.append("modal_env")
 
-        logger.info("Ensuring Neon database for {!r}...", str(name))
-        neon_record = providers.create_neon_db(name, credentials.neon_project_id, credentials.neon_api_token)
-        completed_creation_steps.append("neon_db")
+        logger.info("Ensuring Neon project for {!r}...", str(name))
+        neon_record = providers.create_neon_project(
+            name, credentials.neon_org_id, credentials.neon_api_token, parent_concurrency_group
+        )
+        completed_creation_steps.append("neon_project")
 
         logger.info("Ensuring SuperTokens app for {!r}...", str(name))
         supertokens_record = providers.create_supertokens_app(
@@ -502,7 +524,13 @@ def deploy_dev_env(
     client_path = write_client_config(public_config, name=name)
     secrets_path = write_secrets_file(
         {
-            "NEON_POOLED_DSN": neon_record.pooled_dsn,
+            # The two DSNs the deployed connector + LiteLLM proxy talk
+            # to at runtime. ``NEON_HOST_POOL_DSN`` is also the value
+            # that ``mngr imbue_cloud admin pool create`` (when run
+            # from this activated shell) reads as the default for its
+            # ``--database-url`` argument.
+            "NEON_HOST_POOL_DSN": neon_record.host_pool_dsn,
+            "NEON_LITELLM_DSN": neon_record.litellm_cost_dsn,
             "SUPERTOKENS_CONNECTION_URI": SecretStr(supertokens_record.connection_uri),
             "SUPERTOKENS_API_KEY": supertokens_record.api_key,
         },
@@ -649,10 +677,11 @@ def destroy_env(
         )
         _wipe_supertokens_for_tier(supertokens_values, providers=providers, tier=tier)
 
-    # Step 5: Neon (dev deletes the per-env DB outright; shared tiers
-    # DROP SCHEMA on the operator-managed DB).
+    # Step 5: Neon (dev deletes the per-env *project* outright -- atomic
+    # teardown of both DBs + roles + endpoints; shared tiers DROP SCHEMA
+    # on the operator-managed DB they keep across destroy/redeploy).
     if is_dev_tier:
-        providers.delete_neon_db(name, credentials.neon_project_id, credentials.neon_api_token)
+        providers.delete_neon_project(name, credentials.neon_org_id, credentials.neon_api_token)
     else:
         logger.info("Wiping Neon DB schema for env {!r}...", str(name))
         neon_values = providers.read_per_env_secret_values(
@@ -906,13 +935,13 @@ def _rollback_modal_env(
     providers.delete_modal_env(name, parent_concurrency_group)
 
 
-def _rollback_neon_db(
+def _rollback_neon_project(
     name: DevEnvName,
     providers: "Providers",
     credentials: "ProviderCredentials",
     parent_concurrency_group: ConcurrencyGroup,
 ) -> None:
-    providers.delete_neon_db(name, credentials.neon_project_id, credentials.neon_api_token)
+    providers.delete_neon_project(name, credentials.neon_org_id, credentials.neon_api_token)
 
 
 def _rollback_supertokens_app(
@@ -933,7 +962,7 @@ _ROLLBACK_TABLE: dict[
     Callable[[DevEnvName, "Providers", "ProviderCredentials", ConcurrencyGroup], None],
 ] = {
     "modal_env": _rollback_modal_env,
-    "neon_db": _rollback_neon_db,
+    "neon_project": _rollback_neon_project,
     "supertokens_app": _rollback_supertokens_app,
 }
 
