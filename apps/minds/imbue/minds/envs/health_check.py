@@ -25,8 +25,11 @@ The two endpoints checked:
   (always 200 when the connector is up; doesn't require generation-id
   configuration, so it works for both ``tracks_generation=true`` and
   ``tracks_generation=false`` tiers).
-* ``GET <litellm_proxy_url>/health`` -- LiteLLM's built-in health
-  endpoint (200 with a JSON body).
+* ``GET <litellm_proxy_url>/health/liveness`` -- LiteLLM's no-auth
+  liveness probe (returns 200 when the process is up). We avoid
+  ``/health`` because that endpoint requires a master-key bearer
+  token + actually pings every configured model, which is much
+  heavier than a "is the proxy responding" check.
 """
 
 from collections.abc import Callable
@@ -227,7 +230,7 @@ def await_apps_healthy(
     on timeout. Returns ``None`` on success.
     """
     connector_health_url = f"{str(connector_url).rstrip('/')}/docs"
-    litellm_health_url = f"{str(litellm_proxy_url).rstrip('/')}/health"
+    litellm_health_url = f"{str(litellm_proxy_url).rstrip('/')}/health/liveness"
 
     factory = client_factory if client_factory is not None else httpx.Client
     with factory() as client:

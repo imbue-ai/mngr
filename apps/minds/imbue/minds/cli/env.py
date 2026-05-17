@@ -19,8 +19,11 @@ logged in to the ``vault`` CLI.
 """
 
 import json
+import os
 import shlex
 import shutil
+import sys
+import time
 from pathlib import Path
 from typing import Final
 
@@ -448,6 +451,51 @@ def _emit_deploy_result(result: DeployedEnv, *, output_format: OutputFormat) -> 
         },
         output_format=output_format,
     )
+
+
+_AUTO_ROLLBACK_COUNTDOWN_SECONDS: Final[int] = 5
+
+
+def _exec_into_recover(*, deploy_error: Exception) -> None:
+    """Replace the current process with ``minds env recover``.
+
+    Called from the deploy-failure path so the operator doesn't have to
+    re-type the follow-up command. Uses the process-replacement primitive
+    so the recover process INHERITS our stdout/stderr and exit code --
+    from the operator's shell it looks like one command (``minds env
+    deploy``) that just kept running through the rollback.
+
+    The first argv element comes from ``sys.argv[0]`` so the same
+    minds binary (or ``uv run minds`` wrapper) the operator launched
+    picks up the recover subcommand. Anything currently in the
+    ConcurrencyGroup gets abandoned -- by the time we reach this path
+    the deploy has already hit a definitive failure, so any subprocess
+    work is complete + there's nothing to clean up.
+
+    A short visible countdown gives the operator a chance to Ctrl-C
+    if the failure was something they can fix in place without a full
+    rollback (e.g. a transient cloud blip, a missing Vault entry that
+    they can populate + retry). Ctrl-C during the countdown leaves the
+    recover-target file on disk so the next deploy refuses + the
+    operator can decide whether to run recover manually or delete the
+    file.
+    """
+    logger.error("Deploy failed: {}", deploy_error)
+    logger.error(
+        "Will auto-run `minds env recover` in {} seconds to roll back to the pre-deploy state. "
+        "Press Ctrl-C to cancel + run recover manually (or delete the recover-target file).",
+        _AUTO_ROLLBACK_COUNTDOWN_SECONDS,
+    )
+    sys.stderr.flush()
+    for remaining in range(_AUTO_ROLLBACK_COUNTDOWN_SECONDS, 0, -1):
+        logger.warning("Rolling back in {}...", remaining)
+        time.sleep(1)
+    logger.info("Running `minds env recover` now.")
+    # Flush before exec -- otherwise buffered loguru output gets lost.
+    sys.stdout.flush()
+    sys.stderr.flush()
+    argv0 = sys.argv[0]
+    os.execvp(argv0, [argv0, "env", "recover"])
 
 
 def _refuse_if_recover_target_exists() -> None:
@@ -916,25 +964,22 @@ def env_deploy(ctx: click.Context, yes_i_mean_production: bool, yes_i_mean_stagi
                 DevEnvName(env_name),
                 tier=tier,
                 deploy_config=deploy_config,
-                credentials=credentials,
                 providers=providers,
                 parent_concurrency_group=cg,
+                credentials=credentials,
             )
         except MindError as exc:
             # If a recover-target file was written before this failure
-            # fired, the operator needs to run `minds env recover` to
-            # converge back. Surface that guidance loudly.
+            # fired, automatically chain into `minds env recover` -- the
+            # operator's whole point in using recover is to converge back
+            # to the pre-deploy state, and forcing them to copy-paste a
+            # follow-up command on every failure is a footgun.
             try:
-                repo_root_for_msg = find_monorepo_root()
+                repo_root_for_recover = find_monorepo_root()
             except MindError:
-                repo_root_for_msg = None
-            if repo_root_for_msg is not None and recover_target_exists(repo_root=repo_root_for_msg):
-                raise click.ClickException(
-                    f"{exc}\n\n"
-                    f"A recover-target file is sitting at {recover_target_path(repo_root=repo_root_for_msg)}. "
-                    "Run `minds env recover` to roll back to the pre-deploy state, then re-run "
-                    "`minds env deploy` after fixing the underlying issue."
-                ) from exc
+                repo_root_for_recover = None
+            if repo_root_for_recover is not None and recover_target_exists(repo_root=repo_root_for_recover):
+                _exec_into_recover(deploy_error=exc)
             raise click.ClickException(str(exc)) from exc
         _emit_deploy_result(result, output_format=output_format)
 
