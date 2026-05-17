@@ -28,7 +28,7 @@
 - Remove the playwright tool install and the `playwright install --with-deps chromium` step entirely.
 - Insert a new early-deps layer between the existing tool/binary installs and `COPY . /code/`:
   - Explicitly `COPY` (one line per file, preserving directory structure) every workspace manifest needed to drive a uv resolve: root `pyproject.toml`, `uv.lock`, each `libs/<pkg>/pyproject.toml`, `apps/system_interface/pyproject.toml`, and each `vendor/mngr/libs/{imbue_common,mngr,mngr_claude,mngr_modal,mngr_wait,resource_guards,concurrency_group}/pyproject.toml`.
-  - Run `uv sync --all-packages --frozen --no-install-project --no-install-workspace` to download and cache every third-party wheel transitively required by the workspace + the mngr tools, without installing any editable package whose source is not yet present.
+  - Run `uv sync --all-packages --frozen --no-install-workspace --no-install-local` to download and cache every third-party wheel transitively required by the workspace + the mngr tools, without installing any editable package whose source is not yet present. `--no-install-workspace` already covers the root project; `--no-install-local` is the flag that skips the `[tool.uv.sources]` path deps (the `vendor/mngr/libs/*` packages).
   - `COPY` `apps/system_interface/frontend/package.json` and its lockfile and run `npm ci` in that directory.
 - After the new early-deps layer, keep `COPY . /code/` (unchanged behaviour, but now lands on a much warmer cache).
 - Post-`COPY` steps:
