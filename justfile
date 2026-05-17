@@ -304,6 +304,19 @@ minds-start agent_name="mindtest" branch="":
         . .env
         set +a
     fi
+    if [ -z "${LATCHKEY_ENCRYPTION_KEY:-}" ]; then
+        echo "" >&2
+        echo "error: LATCHKEY_ENCRYPTION_KEY is not set." >&2
+        echo "       Latchkey (the credential store the desktop client uses) needs this" >&2
+        echo "       to encrypt the local credentials database. Run once, then re-source" >&2
+        echo "       your shell profile (or just open a new shell):" >&2
+        echo "" >&2
+        echo "         echo \"export LATCHKEY_ENCRYPTION_KEY=\\\"\$(openssl rand -base64 32)\\\"\" >> ~/.bashrc" >&2
+        echo "         source ~/.bashrc" >&2
+        echo "" >&2
+        echo "       Then re-run \`just minds-start\`." >&2
+        exit 2
+    fi
     export MINDS_WORKSPACE_GIT_URL="$fct_wt"
     if [ -n "{{branch}}" ]; then
         export MINDS_WORKSPACE_BRANCH="{{branch}}"
