@@ -174,23 +174,26 @@ class TestVultrProviderLifecycle:
             time.sleep(20)
 
 
+@pytest.fixture()
+def vultr_release_client() -> VultrVpsClient:
+    """Real Vultr API client for release-test read-only calls."""
+    return VultrVpsClient(api_key=SecretStr(_VULTR_API_KEY), os_id=2136)
+
+
 class TestVultrApiClient:
     """Tests for the Vultr API client with real API calls."""
 
-    def test_list_instances_does_not_error(self) -> None:
+    def test_list_instances_does_not_error(self, vultr_release_client: VultrVpsClient) -> None:
         """Verify the API client can list instances without error."""
-        client = VultrVpsClient(api_key=SecretStr(_VULTR_API_KEY), os_id=2136)
-        instances = client.list_instances()
+        instances = vultr_release_client.list_instances()
         assert isinstance(instances, list)
 
-    def test_list_ssh_keys(self) -> None:
+    def test_list_ssh_keys(self, vultr_release_client: VultrVpsClient) -> None:
         """Verify the API client can list SSH keys."""
-        client = VultrVpsClient(api_key=SecretStr(_VULTR_API_KEY), os_id=2136)
-        keys = client.list_ssh_keys()
+        keys = vultr_release_client.list_ssh_keys()
         assert isinstance(keys, list)
 
-    def test_list_snapshots(self) -> None:
+    def test_list_snapshots(self, vultr_release_client: VultrVpsClient) -> None:
         """Verify the API client can list snapshots."""
-        client = VultrVpsClient(api_key=SecretStr(_VULTR_API_KEY), os_id=2136)
-        snapshots = client.list_snapshots()
+        snapshots = vultr_release_client.list_snapshots()
         assert isinstance(snapshots, list)
