@@ -35,6 +35,7 @@
   - `npm run build` in the frontend (separate `RUN` so a frontend code edit doesn't invalidate anything Python).
   - `uv tool install -e /code/vendor/mngr/libs/mngr` and `uv tool install -e /code/apps/system_interface --with-editable /code/vendor/mngr/libs/mngr_claude --with-editable /code/vendor/mngr/libs/mngr_modal`, and the existing `mngr plugin add`.
   - `uv sync --all-packages --frozen` to register editable workspace packages into the venv against the warmed cache.
+- Drop the post-`COPY` `chown -R root:root /code/` step. `COPY` without `--chown` already lands files as root:root, so the recursive chown was a no-op walk over the entire (~250 MB, including `.git/`) source tree. The `git config --global --add safe.directory /code/` part of the original `RUN` stays. This shaves ~60s off every warm-cache rebuild on top of the layer-split win.
 
 ### Deferred-install service
 
