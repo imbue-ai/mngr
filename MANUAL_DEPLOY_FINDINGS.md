@@ -285,7 +285,7 @@ Each finding has:
 - **Why it matters:** The connector exposes `/keys/{key_id}` as the user-facing endpoint for "how much have I spent against this key?" Today that endpoint always shows 0 unless the user happens to wait long enough for LiteLLM to flush LiteLLM_VerificationToken.spend (which appears not to happen on a short test horizon — likely a write-back/flush interval we don't control). The connector's `/keys` (list) endpoint *also* gets stale spend.
 - **Repro:** see commands in the LiteLLM probe section above; main flow is `POST /key/generate` → 5×`POST /chat/completions` → `GET /key/info?key=...` shows 0.
 - **Suggested fix:** Either (a) make the connector fall back to `/spend/keys` (or `/global/spend/keys`) for the spend column while keeping `/key/info` for the budget config, or (b) configure LiteLLM to write spend back to LiteLLM_VerificationToken on every request (cost overhead but accurate user-facing display). Worth checking LiteLLM docs for a config flag that forces synchronous spend writes.
-- **Decision:** Option (a) — connector's `/keys/{id}` and `/keys` (list) supplement `/key/info` with a call to `/spend/keys?user_id=<user_id>` (or `/global/spend/keys` for a single key), and use the latter's `spend` value. Keep `/key/info` as the source for budget config / ownership. Minimal surface area, no LiteLLM proxy changes. Confirm one LiteLLM call's worth of latency overhead is acceptable.
+- **Decision:** Ignore this for now
 
 ### F11 — `minds env list` reports `(no client.toml)` for production/staging tiers
 
@@ -309,7 +309,7 @@ Each finding has:
 - **Observed:** `uv run minds <anything>` prints `WARNING | imbue.minds.bootstrap:resolve_minds_root_name:68 - MINDS_ROOT_NAME='devminds' does not match ...` once per invocation — including for `--help`, `env list`, `env activate ...`. Triggered when the parent shell still has a legacy env value.
 - **Why it might matter:** docs say this is "harmless" but in practice it makes every minds command noisy for users still carrying around an old `MINDS_ROOT_NAME=devminds` from their shell rc. Anyone using `tab-complete` against `minds env activate <...>` sees the warning multiple times per second.
 - **Suggested fix:** Demote to `logger.debug` (warnings are for things the user should act on; this is more like a transient compatibility note). Alternatively, fire the warning only when a command is about to operate against the fallback root — not on every single invocation.
-- **Decision:** Demote to `logger.debug`. Single-line change at `bootstrap.py:68`. Anyone with the legacy var who wants visibility can `--verbose`.
+- **Decision:** Ignore (this is happening because of an old ~/.bashrc file, and I've already fixed it going forward)
 
 ### F13 — `minds env recover` against a corrupt recover-target JSON shows a raw traceback
 
@@ -335,7 +335,7 @@ Each finding has:
 
 - **Why it matters:** A partially-written or hand-edited recover-target file is exactly the scenario `minds env recover` is supposed to handle — the operator can't do anything else (all other `minds env` commands refuse while it exists) until this is resolved. Bare tracebacks are scary for an operator already in a "something failed" headspace.
 - **Suggested fix:** Catch `json.JSONDecodeError` in `read_recover_target` (or `from_json_bytes`) and raise a typed `RecoverTargetCorruptError(MindError)` with a message that tells the operator how to inspect / hand-clear the file. The CLI's existing `RecoverFailedError` handling at `cli/env.py:1110-1111` then renders it cleanly.
-- **Decision:** Add `RecoverTargetCorruptError(MindError)`. Catch both `json.JSONDecodeError` AND `pydantic.ValidationError` (covers F14) in `read_recover_target`, re-raise as `RecoverTargetCorruptError` with the file path + a one-line "to inspect: cat <path>; to clear: rm <path>" hint. Register a handler in `cli/env.py:env_recover` so it renders cleanly (existing `RecoverFailedError` catch may need extending). Bundle F13 + F14 into one PR.
+- **Decision:** Ignore (deployers are developers, we want them to see everything)
 
 ### F14 — Empty `{}` recover-target JSON dumps a raw pydantic ValidationError
 
@@ -354,7 +354,7 @@ Each finding has:
 
 - **Repro:** `echo '{}' > .minds-deploy-recover-target.json && uv run minds env recover`
 - **Why it matters:** Same as F13 — recover is the operator's escape hatch from a stuck state, and a 7-line pydantic dump is the wrong UX. Catch `pydantic.ValidationError`, wrap in a `RecoverTargetCorruptError`. (Both F13 and F14 likely want the same wrapper.)
-- **Decision:** Covered by the F13 fix — `RecoverTargetCorruptError` catches both error types.
+- **Decision:** Ignore (see F13)
 
 ### F15 — `minds env deploy` mints + logs a `deploy_id` and reads Vault credentials before the "outside monorepo" check fires
 
@@ -387,7 +387,7 @@ Each finding has:
 
   If any of mutations #1-#3 partially succeed and then fail, the operator has no recover-target file. They've leaked a Neon project / SuperTokens app / partial schema with no rollback path: `minds env recover` will refuse-on-missing-file, `minds env deploy` will succeed-but-adopt-existing on the next attempt (provider creation is "idempotent on already-exists"), and the partial schema may break things.
 - **Suggested fix:** Either (a) move provider creation AFTER recover-target write — but the snapshot needs the Neon project, so the Neon project create has to happen first; or (b) write a "tentative" recover-target file before Step 1, then re-write it with the snapshot id once that's captured. The spec's intent is clearly (b)-ish — the recover-target file gates everything.
-- **Decision:** Option (b) — write a "tentative" recover-target file BEFORE Step 1, containing `null` for `neon_snapshot_branch_id` / `app_versions_to_restore` (since we don't know them yet). After the snapshot + version capture succeed, overwrite atomically with the final populated target. Recover-against-tentative-target either: skips Neon restore (no snapshot to restore from — log warning) and skips Modal rollback (no versions captured), then proceeds to orphan-secret cleanup. This makes the invariant "any cloud mutation has a recover path" hold. Update `recover_env` to tolerate `null` fields gracefully. Add a release test that injects a failure inside the Neon project creation step and asserts recover converges.
+- **Decision:** Ignore (we don't want to "recover" by potentially deleting things, that seems bad! In practice a developer who runs this and sees it fail is just going to re-run it. And we'll need another way to clean them up anyway. And it should be easy to detect this scenario in our cleanup--it's the case where these resources exist, but no other resources exist, eg, no corresponding modal apps)
 
 ### F17 — Pool-hosts schema migrations only run for `creates_resources=true` tiers (skipped for staging/production)
 
@@ -398,7 +398,7 @@ Each finding has:
 - **Suggested fix:** Move the `apply_pool_hosts_migrations` call out of the `if lifecycle.creates_resources:` block. For shared tiers, it needs the host_pool DSN — which lives in the operator-managed Vault entry `secrets/minds/<tier>/neon.NEON_HOST_POOL_DSN`. Read it via `read_per_env_secret_values("neon", ...)`. Add a release-time check that the schemas match across tiers.
 
   Open question first: confirm with you that the spec's intent IS to run pool-hosts migrations on every tier (vs. tier ops being expected to run them by hand). The spec language reads as "every deploy" but in practice staging/production migrations could be intentionally operator-controlled.
-- **Decision:** **First, confirm intent with you.** If "every tier runs migrations on deploy" is the spec: move `apply_pool_hosts_migrations` outside the gate, read DSN from the operator-managed Vault entry for shared tiers, and add a `schema_migrations`-table comparison test that runs on PRs. If "tier ops control schema by hand": leave the code as-is and update the spec to document the asymmetry.
+- **Decision:** move `apply_pool_hosts_migrations` outside the gate, read DSN from the operator-managed Vault entry for shared tiers, and add a `schema_migrations`-table comparison test that runs on PRs.
 
 ### F18 — `writes_local_state` is independent in the spec but coupled to `creates_resources` by `assert`
 
@@ -406,7 +406,7 @@ Each finding has:
 - **Where:** `apps/minds/imbue/minds/envs/provisioning.py:670-671` asserts both `neon_record is not None` and `supertokens_record is not None` when `writes_local_state=true`. Both records are only populated when `creates_resources=true`.
 - **Why it matters:** The spec's lifecycle table presents the four flags as independently configurable. Today's tier configurations happen to keep `writes_local_state` and `creates_resources` aligned. But anyone configuring a future tier with `writes_local_state=true` + `creates_resources=false` (e.g. an internal "tier" that uses operator-managed cloud resources but still wants a local client.toml for dev tooling) would hit `AssertionError` partway through deploy — AFTER both Modal apps have been deployed and health-checked. The recover-target file is still on disk, so recover would converge — but the operator would see a Python `AssertionError` traceback.
 - **Suggested fix:** Either (a) document the coupling explicitly in the lifecycle spec (raise an `assert_never`-style explicit error early in `deploy_env`), or (b) decouple — `writes_local_state` should be able to source the DSNs / SuperTokens fields from Vault when `creates_resources=false`. (a) is the cheaper fix; (b) is the cleaner design.
-- **Decision:** Option (a) — add a `DeployLifecycleConfig` model validator that raises `ValueError` if `writes_local_state and not creates_resources`. Fails at deploy.toml parse time, not partway through a deploy. Update the spec lifecycle table to note the constraint.
+- **Decision:** Option (a) — add a `DeployLifecycleConfig` model validator that raises `ValueError` if `writes_local_state and not creates_resources`. Fails at deploy.toml parse time, not partway through a deploy. Update the spec lifecycle table to note the constraint. Have it explain that this is possible to change, but we haven't had a reason to yet, and that if we were to change it, what would need to be fixed.
 
 ### F19 — Recover Step 1 silently skips Modal rollback when `version is None` (first-ever deploy), leaving the deployed app pinned to deleted secrets
 
@@ -420,7 +420,7 @@ Each finding has:
 
   After recover, the Modal apps still exist (deployed in this run, v1), but their pinned secrets are gone. The very next request to either app will fail at `Secret.from_name(...)` resolution. The operator's belief is "I rolled back the failed deploy"; the reality is "the apps are deployed but secret-less, will 500 on any request".
 - **Suggested fix:** When `version is None`, the recover should `modal app stop` (or `modal app delete`) the app rather than skipping. Add a `stop_modal_app` call when no prior version exists. Optionally distinguish the two cases ("rolled back" vs "stopped") in the log output.
-- **Decision:** When `version is None`, call `providers.stop_modal_app(app_name, target.modal_env, parent_cg)` instead of skipping. Distinguish the log lines: "Rolled back {app} to version {version}" vs "Stopped {app} (no prior version to roll back to)". `stop_modal_app` is already on the `Providers` bundle (used by destroy step 6) — reuse. Add a release test that simulates a first-deploy health-check failure and asserts both apps end up stopped.
+- **Decision:** When `version is None`, call `providers.stop_modal_app(app_name, target.modal_env, parent_cg)` instead of skipping. Distinguish the log lines: "Rolled back {app} to version {version}" vs "Stopped {app} (no prior version to roll back to)". `stop_modal_app` is already on the `Providers` bundle (used by destroy step 6) — reuse.
 
 ### F20 — Recover-flow docstring references a `neon_restore_point_name` field that doesn't exist on `RecoverTarget`
 
@@ -436,7 +436,7 @@ Each finding has:
 - **Where:** `apps/minds/imbue/minds/envs/recover.py:315-321`.
 - **Why it matters:** `recover` deletes every Modal Secret whose name *ends with* `-<tier>-<deploy_id>`. If anything else in the Modal env happens to have a name ending with the same suffix (a future plugin / a hand-pushed secret / a different service whose name conflicts), it'd get caught up in the recover. The deploy_id is a UTC timestamp so collisions are unlikely, but the substring match is a hash-collision-style trap.
 - **Suggested fix:** Walk `deploy_config.secrets.services` (which is captured in the recover-target file's `tier` via `vault_path_prefix` → `load_deploy_config(target.tier).secrets.services`) and delete exactly those names. The current implementation doesn't have the services list on the recover-target, but adding it is a one-line schema bump.
-- **Decision:** Add `services: tuple[str, ...]` field to `RecoverTarget`. Populate it in `deploy_env` from `deploy_config.secrets.services`. In `_cleanup_orphan_secrets`, iterate `target.services` and call `providers.delete_modal_secret(timestamped_secret_name(svc, target.tier, target.deploy_id), ...)` for each. Existing recover-target files become incompatible (no `services` field); add a clear `RecoverTargetCorruptError` message when the field is missing telling the operator to re-deploy.
+- **Decision:** Ignore. This has to be scoped to a Modal environment anyway, so it doesn't matter
 
 ### F22 — Destroy refuses if env root has been manually removed, leaving cloud resources stranded
 
@@ -444,7 +444,7 @@ Each finding has:
 - **Where:** `apps/minds/imbue/minds/envs/provisioning.py:863-864` raises `DevEnvNotFoundError` if `env_root_exists(name)` is false.
 - **Why it matters:** Operator workflow: "destroy failed at step 5, I'll manually clean up Neon by hand, then `rm -rf ~/.minds-<name>/` because it looks stale". Now they want to re-run destroy to pick up Cloudflare/Modal cleanup. But destroy refuses because env root is gone. The operator now has stranded OVH VPSes, stranded Cloudflare tunnels, and stranded Modal apps — and no `minds env destroy` to clean them up.
 - **Suggested fix:** Allow destroy to proceed when the env root is missing, with a confirmation flag (e.g. `--force-without-env-root`). Or relax the check: if env root is missing but the operator passed a valid `DevEnvName`, proceed (since the env's cloud-side tag is keyed off the name, not the local root).
-- **Decision:** Add `--force-without-env-root` flag on `minds env destroy`. Without it, keep the current refuse-on-missing behavior (protects against typos). With it, skip the `env_root_exists` check, log a warning, and proceed straight to step 1 (mngr agents will be no-op since no agents dir exists), then run all cloud-side cleanup. Step 8 (`delete_env_root`) becomes a no-op since the root is already gone. Also add the flag to destroy's `--help` with an explicit "use only after manually nuking ~/.minds-<name>" disclaimer.
+- **Decision:** Allow destroy to proceed when the env root is missing, no need for a flag. The point is to clean up any and all associated resources based on that name.
 
 ### F23 — Destroy's Step 1 (`mngr destroy`) ordering means tunnels are torn down by mngr-side cleanup AND by Step 3 redundantly
 
