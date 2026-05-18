@@ -460,7 +460,7 @@ _SERVICE_UNAVAILABLE_HTML = """\
         border: 2px solid #e4e4e7;
         border-top-color: #18181b;
         border-radius: 50%;
-        animation: spin 0.8s linear infinite;
+        animation: spin 1s linear infinite;
         flex-shrink: 0;
       }
       @keyframes spin { to { transform: rotate(360deg); } }

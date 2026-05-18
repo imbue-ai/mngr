@@ -33,3 +33,7 @@ Restart UX improvements on top of the above:
 - Stale failure envelopes arriving immediately after a successful restart
   no longer cause a brief recovery-page flash; the health tracker now
   ignores failures within a short grace window after recovery.
+- The "Workspace server starting" loader spinner no longer visibly jumps
+  on each refresh. The spinner's animation duration now matches the page's
+  1-second auto-refresh interval, so the spinner is at the cycle boundary
+  (rather than 90 degrees past it) when the reload fires.
