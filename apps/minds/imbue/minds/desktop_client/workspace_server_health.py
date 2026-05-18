@@ -136,14 +136,23 @@ class WorkspaceServerHealthTracker(MutableModel):
         """
         aid_str = str(agent_id)
         with self._lock:
-            record = self._records.setdefault(aid_str, _AgentRecord())
-            if record.health != AgentHealth.HEALTHY:
+            # Lookup-only (no setdefault) so a failure that bails on any
+            # early-return path -- especially the grace-window check for a
+            # previously-unseen agent -- does not leave an empty record
+            # behind. _records is treated as "agents currently in a
+            # tracked-failure state"; entries are created only when we
+            # actually arm a stuck timer below.
+            record = self._records.get(aid_str)
+            if record is not None and record.health != AgentHealth.HEALTHY:
                 return
             last_recovery = self._last_recovery_at.get(aid_str)
             if last_recovery is not None and time.monotonic() - last_recovery < self.post_recovery_grace_seconds:
                 return
-            if record.first_failure_at is not None:
+            if record is not None and record.first_failure_at is not None:
                 return
+            if record is None:
+                record = _AgentRecord()
+                self._records[aid_str] = record
             record.first_failure_at = time.monotonic()
             timer = threading.Timer(self.stuck_threshold_seconds, self._on_stuck_timer_fired, args=(aid_str,))
             timer.daemon = True
