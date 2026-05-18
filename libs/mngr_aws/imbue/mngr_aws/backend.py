@@ -23,16 +23,6 @@ from imbue.mngr_vps_docker.instance import VpsDockerProvider
 
 AWS_BACKEND_NAME: Final[ProviderBackendName] = ProviderBackendName("aws")
 
-# Test-only escape hatch: forces ``auto_shutdown_minutes`` to the configured
-# value (overriding any project-config value), so release tests can guarantee
-# an OS-level self-shutdown even when the user's main config does not opt in.
-# Combined with ``InstanceInitiatedShutdownBehavior=terminate``, this means EC2
-# instances created by a release-test run auto-terminate after the window even
-# if pytest is killed by SIGKILL or the host crashes mid-test. Intentionally
-# not a config field; production users should set ``auto_shutdown_minutes`` in
-# their provider config directly.
-_TEST_AUTO_SHUTDOWN_ENV_VAR: Final[str] = "MNGR_AWS_AUTO_SHUTDOWN_MINUTES"
-
 
 class AwsProvider(VpsDockerProvider):
     """AWS-specific provider that discovers hosts via the EC2 DescribeInstances API."""
@@ -68,8 +58,10 @@ class AwsProvider(VpsDockerProvider):
         instances created by a release-test run auto-terminate after the
         window even if pytest is killed or the host crashes. Malformed values
         (non-integer, zero, negative) silently fall back to the config value.
+        Intentionally not a config field; production users should set
+        ``auto_shutdown_minutes`` in their provider config directly.
         """
-        override = parse_int_env(_TEST_AUTO_SHUTDOWN_ENV_VAR, 0)
+        override = parse_int_env("MNGR_AWS_AUTO_SHUTDOWN_MINUTES", 0)
         if override > 0:
             return override
         return super()._get_effective_auto_shutdown_minutes()
