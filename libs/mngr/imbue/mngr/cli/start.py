@@ -36,13 +36,14 @@ from imbue.mngr.config.data_types import OutputOptions
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import AgentAddress
+from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import HostAddress
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import OutputFormat
 from imbue.mngr.utils.polling import poll_until
 
-_in_flight_restarts: set[str] = set()
+_in_flight_restarts: set[AgentId] = set()
 _in_flight_restarts_lock = Lock()
 
 
