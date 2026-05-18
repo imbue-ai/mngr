@@ -5,7 +5,7 @@ import pytest
 from pydantic import Field
 
 from imbue.mngr.agents.base_agent import BaseAgent
-from imbue.mngr.api.address_parsers import parse_hosted_location
+from imbue.mngr.api.address_parsers import parse_host_location_address
 from imbue.mngr.api.find import AgentMatch
 from imbue.mngr.api.find import _filter_all_agents
 from imbue.mngr.api.find import _filter_one_agent
@@ -33,91 +33,91 @@ from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import DiscoveredHost
 from imbue.mngr.primitives import HostAddress
 from imbue.mngr.primitives import HostId
+from imbue.mngr.primitives import HostLocationAddress
 from imbue.mngr.primitives import HostName
-from imbue.mngr.primitives import HostedLocation
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 
 
-def test_parse_hosted_location_with_agent_only() -> None:
-    parsed = parse_hosted_location("my-agent")
+def test_parse_host_location_address_with_agent_only() -> None:
+    parsed = parse_host_location_address("my-agent")
 
-    assert parsed == HostedLocation(agent=AgentName("my-agent"))
+    assert parsed == HostLocationAddress(agent=AgentName("my-agent"))
 
 
-def test_parse_hosted_location_with_agent_and_host() -> None:
-    parsed = parse_hosted_location("my-agent@my-host")
+def test_parse_host_location_address_with_agent_and_host() -> None:
+    parsed = parse_host_location_address("my-agent@my-host")
 
-    assert parsed == HostedLocation(
+    assert parsed == HostLocationAddress(
         agent=AgentName("my-agent"),
         host=HostAddress(host=HostName("my-host")),
     )
 
 
-def test_parse_hosted_location_with_agent_host_and_provider() -> None:
-    parsed = parse_hosted_location("my-agent@my-host.modal")
+def test_parse_host_location_address_with_agent_host_and_provider() -> None:
+    parsed = parse_host_location_address("my-agent@my-host.modal")
 
-    assert parsed == HostedLocation(
+    assert parsed == HostLocationAddress(
         agent=AgentName("my-agent"),
         host=HostAddress(host=HostName("my-host"), provider=ProviderInstanceName("modal")),
     )
 
 
-def test_parse_hosted_location_with_agent_host_and_path() -> None:
-    parsed = parse_hosted_location("my-agent@my-host:/path/to/dir")
+def test_parse_host_location_address_with_agent_host_and_path() -> None:
+    parsed = parse_host_location_address("my-agent@my-host:/path/to/dir")
 
-    assert parsed == HostedLocation(
+    assert parsed == HostLocationAddress(
         agent=AgentName("my-agent"),
         host=HostAddress(host=HostName("my-host")),
         path=Path("/path/to/dir"),
     )
 
 
-def test_parse_hosted_location_with_host_and_path() -> None:
-    parsed = parse_hosted_location("@my-host:/path/to/dir")
+def test_parse_host_location_address_with_host_and_path() -> None:
+    parsed = parse_host_location_address("@my-host:/path/to/dir")
 
-    assert parsed == HostedLocation(
+    assert parsed == HostLocationAddress(
         host=HostAddress(host=HostName("my-host")),
         path=Path("/path/to/dir"),
     )
 
 
-def test_parse_hosted_location_with_absolute_path() -> None:
-    parsed = parse_hosted_location("/path/to/dir")
+def test_parse_host_location_address_with_absolute_path() -> None:
+    parsed = parse_host_location_address("/path/to/dir")
 
-    assert parsed == HostedLocation(path=Path("/path/to/dir"))
-
-
-def test_parse_hosted_location_with_relative_path() -> None:
-    parsed = parse_hosted_location("./path/to/dir")
-
-    assert parsed == HostedLocation(path=Path("./path/to/dir"))
+    assert parsed == HostLocationAddress(path=Path("/path/to/dir"))
 
 
-def test_parse_hosted_location_with_home_path() -> None:
-    parsed = parse_hosted_location("~/path/to/dir")
+def test_parse_host_location_address_with_relative_path() -> None:
+    parsed = parse_host_location_address("./path/to/dir")
 
-    assert parsed == HostedLocation(path=Path("~/path/to/dir"))
-
-
-def test_parse_hosted_location_with_parent_path() -> None:
-    parsed = parse_hosted_location("../path/to/dir")
-
-    assert parsed == HostedLocation(path=Path("../path/to/dir"))
+    assert parsed == HostLocationAddress(path=Path("./path/to/dir"))
 
 
-def test_parse_hosted_location_bare_name_is_agent_not_path() -> None:
+def test_parse_host_location_address_with_home_path() -> None:
+    parsed = parse_host_location_address("~/path/to/dir")
+
+    assert parsed == HostLocationAddress(path=Path("~/path/to/dir"))
+
+
+def test_parse_host_location_address_with_parent_path() -> None:
+    parsed = parse_host_location_address("../path/to/dir")
+
+    assert parsed == HostLocationAddress(path=Path("../path/to/dir"))
+
+
+def test_parse_host_location_address_bare_name_is_agent_not_path() -> None:
     """A bare name like 'foo' refers to agent 'foo', not directory 'foo'."""
-    parsed = parse_hosted_location("foo")
+    parsed = parse_host_location_address("foo")
 
-    assert parsed == HostedLocation(agent=AgentName("foo"))
+    assert parsed == HostLocationAddress(agent=AgentName("foo"))
 
 
-def test_parse_hosted_location_colon_prefix_is_local_path() -> None:
+def test_parse_host_location_address_colon_prefix_is_local_path() -> None:
     """:dirname is how to specify a relative local directory."""
-    parsed = parse_hosted_location(":my-dir")
+    parsed = parse_host_location_address(":my-dir")
 
-    assert parsed == HostedLocation(path=Path("my-dir"))
+    assert parsed == HostLocationAddress(path=Path("my-dir"))
 
 
 def test_filter_one_host_by_id() -> None:
@@ -353,76 +353,76 @@ def test__filter_one_agent_raises_when_multiple_agents_match() -> None:
         )
 
 
-def test_parse_hosted_location_with_colons_in_path() -> None:
-    parsed = parse_hosted_location("@my-host:/path/with:colons:in:it.txt")
+def test_parse_host_location_address_with_colons_in_path() -> None:
+    parsed = parse_host_location_address("@my-host:/path/with:colons:in:it.txt")
 
-    assert parsed == HostedLocation(
+    assert parsed == HostLocationAddress(
         host=HostAddress(host=HostName("my-host")),
         path=Path("/path/with:colons:in:it.txt"),
     )
 
 
-def test_parse_hosted_location_with_agent_host_and_colons_in_path() -> None:
-    parsed = parse_hosted_location("agent@host:/weird:path:file.txt")
+def test_parse_host_location_address_with_agent_host_and_colons_in_path() -> None:
+    parsed = parse_host_location_address("agent@host:/weird:path:file.txt")
 
-    assert parsed == HostedLocation(
+    assert parsed == HostLocationAddress(
         agent=AgentName("agent"),
         host=HostAddress(host=HostName("host")),
         path=Path("/weird:path:file.txt"),
     )
 
 
-def test_parse_hosted_location_with_empty_path_after_colon() -> None:
-    parsed = parse_hosted_location("@my-host:")
+def test_parse_host_location_address_with_empty_path_after_colon() -> None:
+    parsed = parse_host_location_address("@my-host:")
 
-    assert parsed == HostedLocation(host=HostAddress(host=HostName("my-host")))
-
-
-def test_parse_hosted_location_with_agent_and_path() -> None:
-    parsed = parse_hosted_location("my-agent:http://example.com/path")
-
-    assert parsed == HostedLocation(agent=AgentName("my-agent"), path=Path("http://example.com/path"))
+    assert parsed == HostLocationAddress(host=HostAddress(host=HostName("my-host")))
 
 
-def test_parse_hosted_location_with_agent_host_provider() -> None:
-    parsed = parse_hosted_location("my-agent@my-host.docker")
+def test_parse_host_location_address_with_agent_and_path() -> None:
+    parsed = parse_host_location_address("my-agent:http://example.com/path")
 
-    assert parsed == HostedLocation(
+    assert parsed == HostLocationAddress(agent=AgentName("my-agent"), path=Path("http://example.com/path"))
+
+
+def test_parse_host_location_address_with_agent_host_provider() -> None:
+    parsed = parse_host_location_address("my-agent@my-host.docker")
+
+    assert parsed == HostLocationAddress(
         agent=AgentName("my-agent"),
         host=HostAddress(host=HostName("my-host"), provider=ProviderInstanceName("docker")),
     )
 
 
-def test_parse_hosted_location_with_agent_host_provider_and_path() -> None:
-    parsed = parse_hosted_location("my-agent@my-host.modal:/path/to/dir")
+def test_parse_host_location_address_with_agent_host_provider_and_path() -> None:
+    parsed = parse_host_location_address("my-agent@my-host.modal:/path/to/dir")
 
-    assert parsed == HostedLocation(
+    assert parsed == HostLocationAddress(
         agent=AgentName("my-agent"),
         host=HostAddress(host=HostName("my-host"), provider=ProviderInstanceName("modal")),
         path=Path("/path/to/dir"),
     )
 
 
-def test_parse_hosted_location_with_host_provider_and_path() -> None:
-    parsed = parse_hosted_location("@my-host.docker:/path/to/dir")
+def test_parse_host_location_address_with_host_provider_and_path() -> None:
+    parsed = parse_host_location_address("@my-host.docker:/path/to/dir")
 
-    assert parsed == HostedLocation(
+    assert parsed == HostLocationAddress(
         host=HostAddress(host=HostName("my-host"), provider=ProviderInstanceName("docker")),
         path=Path("/path/to/dir"),
     )
 
 
-def test_parse_hosted_location_with_agent_colon_path() -> None:
+def test_parse_host_location_address_with_agent_colon_path() -> None:
     """Agent name followed by colon and path (no host)."""
-    parsed = parse_hosted_location("C:/Windows/path")
+    parsed = parse_host_location_address("C:/Windows/path")
 
-    assert parsed == HostedLocation(agent=AgentName("C"), path=Path("/Windows/path"))
+    assert parsed == HostLocationAddress(agent=AgentName("C"), path=Path("/Windows/path"))
 
 
-def test_parse_hosted_location_rejects_multi_dot_host() -> None:
-    """parse_hosted_location should reject HOST.PROVIDER strings with more than one dot."""
+def test_parse_host_location_address_rejects_multi_dot_host() -> None:
+    """parse_host_location_address should reject HOST.PROVIDER strings with more than one dot."""
     with pytest.raises(UserInputError, match="contains more than one dot"):
-        parse_hosted_location("@a.b.c:/path")
+        parse_host_location_address("@a.b.c:/path")
 
 
 def test_get_host_from_list_by_id_returns_matching_host() -> None:
@@ -529,10 +529,10 @@ def test_determine_resolved_path_raises_when_no_path_and_no_agent() -> None:
         )
 
 
-def test_parse_hosted_location_with_empty_prefix_before_colon() -> None:
-    """parse_hosted_location should handle :path format (empty prefix before colon)."""
-    parsed = parse_hosted_location(":/path/to/dir")
-    assert parsed == HostedLocation(path=Path("/path/to/dir"))
+def test_parse_host_location_address_with_empty_prefix_before_colon() -> None:
+    """parse_host_location_address should handle :path format (empty prefix before colon)."""
+    parsed = parse_host_location_address(":/path/to/dir")
+    assert parsed == HostLocationAddress(path=Path("/path/to/dir"))
 
 
 # =============================================================================
