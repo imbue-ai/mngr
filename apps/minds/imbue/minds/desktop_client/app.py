@@ -1478,7 +1478,7 @@ def _handle_recovery_page(
 ) -> Response:
     """Render the workspace-recovery page (shown by the 503 redirect or by direct nav)."""
     if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
-        return HTMLResponse(content=render_login_page(), status_code=401)
+        return HTMLResponse(content=render_login_page(), status_code=403)
     aid = AgentId(agent_id)
     ws_name = backend_resolver.get_workspace_name(aid)
     if not ws_name:

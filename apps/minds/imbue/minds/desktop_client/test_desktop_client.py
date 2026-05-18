@@ -1417,7 +1417,7 @@ def test_build_mngr_exec_argv_includes_agent_id_and_command() -> None:
 def test_recovery_page_requires_authentication(tmp_path: Path) -> None:
     client, _, agent_id = _setup_test_server(tmp_path)
     response = client.get(f"/agents/{agent_id}/recovery", follow_redirects=False)
-    assert response.status_code == 401
+    assert response.status_code == 403
 
 
 def test_recovery_page_renders_for_authenticated_user(tmp_path: Path) -> None:
