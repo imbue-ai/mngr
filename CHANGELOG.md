@@ -16,6 +16,11 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Added: `use_env_config_dir` option on the `claude` agent type config so local Claude agents share `$CLAUDE_CONFIG_DIR` instead of provisioning a per-agent dir.
 - Added: urwid single-select picker for `mngr extras` Install/Skip prompts (completion, claude-plugin) and the default agent type step inside `mngr extras -i`.
 - Added: `mngr usage` per-session cost aggregation with separate `subscription_cost` / `api_cost` aggregates, `--since`, `--detail`, and CEL/format-template surfaces; cost tracking now works for direct `ANTHROPIC_API_KEY` users.
+- Added: `mngr_ovh` provider plugin running mngr agents in Docker on OVH classic VPS instances — OVH IAM v2 tag discovery, TOFU host-key pinning into a per-provider `known_hosts`, recycle-on-cancel for cancelled-but-still-alive VPSes, and a `mngr ovh list [--all]` operator command.
+- Added: `--start/--no-start` flag on `mngr push`, `pull`, `provision`, and `rename` controlling whether an offline host is started automatically.
+- Added: `--run-name` flag on `mngr tmr` and a new `TMR (reintegrate)` GitHub Actions workflow that takes a run name and re-runs just the integrator phase.
+- Added: `scripts/release.py` now refuses to cut a release when there are unconsolidated entries in `changelog/`, printing the exact one-liner that triggers the `changelog-consolidation` schedule on demand.
+- Added: Shell-level integration tests for `scripts/install.sh` (`test_install_script.py`) that run the real script against mock `uv` / `mngr` binaries on a synthetic PATH.
 
 ### Changed
 
@@ -33,6 +38,14 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Changed: minds split the services agent from the initial chat agent — the primary agent runs only bootstrap/services and is hidden; a real chat agent named after the host is created on first boot and every subsequent agent shares its `CLAUDE_CONFIG_DIR`. Existing workspaces must be re-created.
 - Changed: minds "Create a Project" Name field now sets the host name (validated via `HostName` regex); the agent is always `system-services`, and `imbue_cloud` `/hosts/lease` and `/hosts` gain a required `host_name`.
 - Changed: Regenerated CLI docs for `mngr tmr` and `mngr latchkey`.
+- Changed: Minds no longer blocks `minds run` on `mngr latchkey forward` supervisor binding its gateway port — the latchkey gateway client starts lazily on a background thread and callers wait on `ensure_initialized()` themselves on first use.
+- Changed: Refactored single-agent subcommand address resolution into separate "find" and "ensure live" stages — new `resolve_to_started_host_and_agent` / `resolve_to_started_host_and_running_agent` helpers in `imbue.mngr.api.find` replace the `is_start_desired` / `skip_agent_state_check` flags. `push`, `pull`, `provision`, and `rename` now operate on stopped agents directly.
+- Changed: Renamed `HostedLocation` to `HostLocationAddress` to match `HostAddress` / `AgentAddress`, with cascading renames (`parse_hosted_location` → `parse_host_location_address`, `HOSTED_LOCATION` → `HOST_LOCATION_ADDRESS`, Click display name `hosted_location` → `host_location_address`). No behavior change.
+- Changed: `mngr create --type X` now fails fast with `UnknownAgentTypeError` when `X` does not resolve to a registered agent class instead of silently resolving to a generic `BaseAgent`; a bare `[agent_types.X]` block without `parent_type` is also rejected. `--type X -- ...` is no longer a hidden alias for `--type command -- ...`.
+- Changed: `mngr_lima` drops `ssh-keyscan` — each Lima VM gets a pre-generated ed25519 host keypair injected via `provision[mode=system]`, with per-host keys and `known_hosts` stored under `<provider-dir>/keys/hosts/<host_id>/`. `merge_lima_yaml` now extends `provision` and `mounts` instead of replacing them.
+- Changed: TMR run names are now a single compact `YYYYMMDDHHMMSS` timestamp shared across the output directory, agent labels, branches (`mngr-tmr/<run>/<test_name>`), and snapshotter/integrator/host-pool names; a new `tmr_role` label (`testing` / `snapshotter` / `integrator`) replaces name-prefix matching.
+- Changed: TMR HTML report is mirrored to `s3://int8-shared-internal/tmr-reports/<run>.html` on each regeneration (when AWS credentials are set), with the public URL emitted as a `report_url` event and used in the auto-opened PR body.
+- Changed: TMR GitHub Actions workflow defaults `MNGR_USER_ID` to a shared `tmr-ci` namespace and reads inbound-SSH authorized keys from the checked-in `.github/tmr-authorized-keys` file (in addition to the existing `additional_authorized_hosts` input).
 
 ### Removed
 
@@ -42,6 +55,9 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 - Fixed: Cloned claude agent now actually resumes the source agent's conversation — `_adopt_cloned_session` renames the project subdir to the destination's realpath-resolved encoding, drops the stale `sessions-index.json`, writes the real `claude_session_id`, and carries forward `claude_session_id_history`.
 - Fixed: `tmux send-keys -l` and `tmux rename-session` now use the `--` end-of-options separator, so agent commands/messages and rename targets starting with `-` (e.g. `--model gemma`) are no longer misparsed by tmux.
+- Fixed: `mngr connect` no longer falls back to the most-recently-created agent when run non-interactively without an explicit agent — it now matches every other single-agent command.
+- Fixed: Cancelling the interactive agent selector now exits cleanly via `click.Abort` instead of printing nothing and returning silently.
+- Fixed: Lima provider now actually disables guest → host port forwarding — emits explicit ignore rules for both `guestIP: 0.0.0.0` and `guestIP: 127.0.0.1`, and locks `portForwards` against user `--file` overrides. Previously `portForwards: []` did not suppress Lima's auto-appended fallback rule, so guest sockets on any interface leaked to host loopback and collided across coexisting VMs.
 
 ## [v0.2.8] - 2026-05-13
 
