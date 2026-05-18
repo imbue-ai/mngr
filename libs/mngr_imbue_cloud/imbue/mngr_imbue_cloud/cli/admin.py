@@ -579,8 +579,12 @@ def _create_single_pool_host(
     # down so the user's first start gets a fresh chat agent named after
     # their own host name.
     logger.info("  Destroying bootstrap-created chat agent: {}", bootstrap_chat_agent_name)
+    # ``--`` marks the end of ``mngr exec``'s own options so click stops
+    # trying to parse the inner command's flags (``--force``, ``-f``,
+    # etc.) as options to ``mngr exec`` itself. Without it click prints
+    # "No such option: --force" for the inner ``mngr destroy --force``.
     chat_destroy = _run_mngr_command(
-        ["exec", agent_name, "mngr", "destroy", bootstrap_chat_agent_name, "--force"],
+        ["exec", agent_name, "--", "mngr", "destroy", bootstrap_chat_agent_name, "--force"],
         timeout=120,
     )
     if chat_destroy.returncode != 0:
@@ -596,7 +600,7 @@ def _create_single_pool_host(
 
     logger.info("  Removing initial-chat sentinel: {}", _INITIAL_CHAT_SENTINEL_PATH)
     sentinel_rm = _run_mngr_command(
-        ["exec", agent_name, "rm", "-f", _INITIAL_CHAT_SENTINEL_PATH],
+        ["exec", agent_name, "--", "rm", "-f", _INITIAL_CHAT_SENTINEL_PATH],
         timeout=30,
     )
     if sentinel_rm.returncode != 0:
