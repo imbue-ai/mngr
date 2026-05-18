@@ -191,7 +191,7 @@ def test_create_new_host_retries_on_name_conflict(
         nonlocal create_count
         create_count += 1
         if create_count == 1:
-            raise HostNameConflictError(name)
+            raise HostNameConflictError(self.name, name)
         return original_create_host(self, name=name, **kwargs)
 
     test_provider_cls = type(

@@ -288,7 +288,7 @@ class LimaProviderInstance(BaseProviderInstance):
         with log_span("Updating certified host data", host_id=str(host_id)):
             host_record = self._host_store.read_host_record(host_id, use_cache=False)
             if host_record is None:
-                raise HostNotFoundError(host_id)
+                raise HostNotFoundError(self.name, host_id)
             updated_host_record = host_record.model_copy_update(
                 to_update(host_record.field_ref().certified_host_data, certified_data),
             )
@@ -471,7 +471,7 @@ sudo poweroff
                 failure_reason=failure_reason,
                 build_log="",
             )
-            raise LimaHostCreationError(failure_reason) from e
+            raise LimaHostCreationError(self.name, failure_reason) from e
         finally:
             # Clean up the temporary YAML config file
             yaml_path.unlink(missing_ok=True)
@@ -615,7 +615,7 @@ sudo poweroff
 
         host_record = self._host_store.read_host_record(host_id, use_cache=False)
         if host_record is None:
-            raise HostNotFoundError(host_id)
+            raise HostNotFoundError(self.name, host_id)
 
         if host_record.config is None:
             raise MngrError(f"Host {host_id} has no configuration and cannot be started.")
@@ -742,7 +742,7 @@ sudo poweroff
 
         host_record = self._host_store.read_host_record(host_id, use_cache=False)
         if host_record is None:
-            raise HostNotFoundError(host_id)
+            raise HostNotFoundError(self.name, host_id)
 
         if host_record.config is None or host_record.ssh_hostname is None:
             # Failed or offline host
@@ -769,13 +769,13 @@ sudo poweroff
             if record.certified_host_data.host_name == str(name):
                 host_id = HostId(record.certified_host_data.host_id)
                 return self._get_host_by_id(host_id)
-        raise HostNotFoundError(name)
+        raise HostNotFoundError(self.name, name)
 
     def to_offline_host(self, host_id: HostId) -> OfflineHost:
         """Return an offline representation of the given host."""
         host_record = self._host_store.read_host_record(host_id, use_cache=False)
         if host_record is None:
-            raise HostNotFoundError(host_id)
+            raise HostNotFoundError(self.name, host_id)
         return self._create_offline_host(host_record)
 
     def discover_hosts(

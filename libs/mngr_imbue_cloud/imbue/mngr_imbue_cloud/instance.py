@@ -831,7 +831,7 @@ class ImbueCloudProvider(BaseProviderInstance):
                 return self._build_host_object(entry)
             if isinstance(host, HostName) and entry.host_name == str(host):
                 return self._build_host_object(entry)
-        raise HostNotFoundError(host)
+        raise HostNotFoundError(self.name, host)
 
     def to_offline_host(self, host_id: HostId) -> OfflineHost:
         """Build an OfflineHost from the connector's lease metadata.
@@ -843,7 +843,7 @@ class ImbueCloudProvider(BaseProviderInstance):
         """
         lease = self._find_leased(host_id)
         if lease is None:
-            raise HostNotFoundError(host_id)
+            raise HostNotFoundError(self.name, host_id)
         now = datetime.now(timezone.utc)
         certified_host_data = CertifiedHostData(
             host_id=str(host_id),
@@ -1061,7 +1061,7 @@ class ImbueCloudProvider(BaseProviderInstance):
         host_id = host.id if isinstance(host, HostInterface) else host
         leased = self._find_leased(host_id)
         if leased is None:
-            raise HostNotFoundError(host_id)
+            raise HostNotFoundError(self.name, host_id)
         if snapshot_id is not None:
             raise SnapshotsNotSupportedError(self.name)
         with self.outer_host_for(host_id) as outer:
@@ -1177,7 +1177,7 @@ class ImbueCloudProvider(BaseProviderInstance):
         """Stable id for the outer (leased VPS) of host_id, keyed by VPS IP."""
         leased = self._find_leased(host_id)
         if leased is None:
-            raise HostNotFoundError(host_id)
+            raise HostNotFoundError(self.name, host_id)
         return f"outer:{self.name}:{leased.vps_ip}"
 
     @contextmanager
@@ -1189,10 +1189,10 @@ class ImbueCloudProvider(BaseProviderInstance):
         """
         leased = self._find_leased(host_id)
         if leased is None:
-            raise HostNotFoundError(host_id)
+            raise HostNotFoundError(self.name, host_id)
         private_key_path, _ = self._host_keypair_paths(host_id)
         if not private_key_path.exists():
-            raise HostNotFoundError(host_id)
+            raise HostNotFoundError(self.name, host_id)
 
         known_hosts_path = self._host_known_hosts_path(host_id)
         known_hosts_path.parent.mkdir(parents=True, exist_ok=True)
