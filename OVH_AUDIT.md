@@ -121,15 +121,33 @@ the OVH-side expiration date.
 
 ### F3. Two concurrent OVH orders against the same account can race: `_wait_for_new_service_name` picks `sorted(new_names)[0]`
 
-**Verdict: DESIGN RISK (rare in practice). → FIXED in commit on this branch.**
+**Verdict: DESIGN RISK (rare in practice). → FIXED + LIVE-VERIFIED on this branch.**
 
 `order_and_wait_for_vps` no longer diffs `/vps` listings. It captures
-the `orderId` from the checkout response (`order.Order`), then polls
-`GET /me/order/{orderId}/details/{detailId}` until OVH writes the
-assigned serviceName into the `domain` field. Strong correlation
-because every poll is scoped to OUR `orderId`. The checkout response's
-inline `details[].domain` is also checked first (matched by
-`cartItemID`) in case OVH ever populates it pre-delivery.
+the `orderId` from the checkout response (`order.Order`), then walks
+the operations chain to find the assigned serviceName:
+
+```
+GET /me/order/{orderId}/details
+    -> list of detailIds
+For each detailId:
+    GET /me/order/{orderId}/details/{detailId}/extension
+        -> billing.ItemDetail; match on
+           order.plan.code == requested_plan_code AND
+           order.plan.product.name == "virtualPrivateServer"
+           (filters out OS / backup / installation line items)
+    GET /me/order/{orderId}/details/{detailId}/operations
+        -> list of operationIds
+    For each operationId:
+        GET /me/order/{orderId}/details/{detailId}/operations/{opId}
+            -> service.Operation; .resource.name IS the serviceName
+```
+
+**Why not the simpler `billing.OrderDetail.domain` field?** The first
+F3 commit tried that, but a live probe on 2026-05-18 against the
+OVH-US API revealed `domain` is always the literal `"*"` for VPS
+orders -- useless for correlation. The operations chain is the only
+documented path that yields the assigned serviceName.
 
 Post-hoc verify also lands: after fetching the serviceName, the
 function `GET /vps/{serviceName}` and asserts
@@ -137,17 +155,32 @@ function `GET /vps/{serviceName}` and asserts
 case-insensitive substring of `zone`. Defends against any future
 provider that delivers a VPS of the wrong shape.
 
-Pinned by `test_f3_parallel_orders_each_get_their_own_service_name`,
-which spawns two threads against a single shared fake `ovh.Client`,
-arranges for both new serviceNames to be visible during each
-thread's wait window, and asserts both threads return their OWN
-serviceName. The legacy diff approach (still in git history) would
-have failed this test by returning `sorted(...)[0]` for both threads.
-Also pinned: `test_order_post_hoc_verify_catches_wrong_plan`,
-`test_order_post_hoc_verify_catches_wrong_region`,
-`test_order_raises_when_checkout_returns_no_order_id`, and the
-delivery-timeout test now exercises the new `/me/order` polling
-path.
+**End-to-end live verification** (2026-05-18, one live `vps-2025-model1`
+order in `US-EAST-VA`):
+
+| Phase | Result |
+|---|---|
+| Order placed | orderId=7974206, cart=2305cf24-... |
+| serviceName via `order_and_wait_for_vps` (operations chain) | `vps-c4aeb97e.vps.ovh.us` |
+| Time-to-serviceName | ~80 seconds |
+| Independent chain walk (separate script) | same `vps-c4aeb97e.vps.ovh.us` |
+| Post-hoc `GET /vps/{name}` | `model.name="vps-2025-model1"`, `zone="Region OpenStack: os-us-east-va-2"` (matches) |
+| Diff `/vps` before/after | exactly one new VPS: `vps-c4aeb97e.vps.ovh.us` |
+
+The independent chain walk used detail `105339987` (plan.code=`vps-2025-model1`,
+duration=`P1M`), operation `173487777`, `resource.name="vps-c4aeb97e.vps.ovh.us"`.
+The order also produced 5 other details (option-linux, option-auto-backup
+installation + recurring) which the plan-code filter correctly skipped.
+
+Pinned by tests in `ordering_test.py`:
+- `test_order_and_wait_for_vps_success_polled_path`
+- `test_order_and_wait_for_vps_polls_when_order_detail_listing_initially_empty`
+- `test_order_and_wait_for_vps_filters_out_os_subresource_detail`
+- `test_order_post_hoc_verify_catches_wrong_plan`
+- `test_order_post_hoc_verify_catches_wrong_region`
+- `test_order_raises_when_checkout_returns_no_order_id`
+- `test_order_raises_when_delivery_times_out` (exercises the new path)
+- `test_f3_parallel_orders_each_get_their_own_service_name` (two threads, shared fake client, both new serviceNames visible during each thread's wait window; each thread returns its OWN serviceName)
 
 `_wait_for_new_service_name`:
 
@@ -712,6 +745,49 @@ fresh client + fresh cache. Acceptable for a CLI tool.
 
 ---
 
+### F39. `set_renew_at_expiration` fails for ~minutes after a fresh order: "Unable to synchronize l1::Service, subscription is not active yet"
+
+**Verdict: CONFIRMED BUG (discovered during live verification of F3).**
+
+OVH's billing subsystem takes a few minutes to fully activate a
+freshly-ordered VPS subscription. During that window, `PUT
+/vps/{serviceName}/serviceInfos` (the cancellation flag flip) fails
+with HTTP 400 `"Unable to synchronize l1::Service, subscription is
+not active yet"`. Reproduced live on 2026-05-18: a `set_renew_at_expiration(True)`
+call issued immediately after `order_and_wait_for_vps` returned
+failed; the same call ~30 seconds later succeeded.
+
+This affects **two real code paths**:
+
+1. **`OvhProvider._terminate_orphaned_fresh_order`** — fired from the
+   `_provision_vps` `finally` branch when the fresh-order path raises
+   after `order_and_wait_for_vps` succeeded but before the host
+   record is written. The finally branch calls `destroy_instance`
+   which calls `set_renew_at_expiration(True)`. With OVH's billing
+   delay, this call fails 400, the cleanup is logged as "manual
+   cleanup may be needed", and the VPS is **fully leaked** for a
+   month of billing -- the exact failure mode the cleanup was
+   added to prevent (per the function's own docstring).
+
+2. **`recycle.finalize_recycle`** (less common but symmetric) — only
+   triggered if a recycled VPS's un-cancel fails, but the existing
+   `set_renew_at_expiration(False)` call is on a long-lived VPS so
+   it's less prone to this specific race.
+
+The fix: `client.set_renew_at_expiration` should retry with backoff
+on the specific `"subscription is not active yet"` error message
+from OVH. A 30-second initial wait + retry, up to a generous cap (5
+minutes), would have caught both cases. The error message is stable
+in practice (it's an OVH-side billing-API standard).
+
+**Action:** add retry-on-`"subscription is not active yet"` to
+`client.set_renew_at_expiration` (and have `_terminate_orphaned_fresh_order`
+log loud success after the retry completes). Without this, every
+`_provision_vps` failure between fresh-order delivery and host-record
+write leaks a month of billing on the just-ordered VPS.
+
+---
+
 ### F38. `_BAKED_SERVICES_AGENT_NAME = "system-services"` is duplicated across mngr_imbue_cloud and (presumably) minds
 
 **Verdict: MINOR (already in DEPLOY_SAFETY_AUDIT.md's spirit).**
@@ -731,7 +807,8 @@ this PR; worth a shared-constant module long-term.
 |---|---|---|
 | F1: parse_extra_tags_env after order_and_wait_for_vps | **CONFIRMED BUG → FIXED** | Moved + source-position test |
 | F2: recycle finalize failure silently strands the host | **DESIGN RISK** | Don't discard handle until un-cancel succeeds; or raise on finalize failure |
-| F3: concurrent order race picks wrong serviceName | **DESIGN RISK → FIXED** | Order-id correlation + post-hoc plan/region verify + parallel-orders test |
+| F3: concurrent order race picks wrong serviceName | **DESIGN RISK → FIXED + LIVE-VERIFIED** | Operations-chain correlation + post-hoc plan/region verify + parallel-orders test; verified end-to-end against real OVH-US API |
+| F39 (new): `set_renew_at_expiration` 400s for ~minutes after fresh order | **CONFIRMED BUG** | Retry on `"subscription is not active yet"`; affects `_terminate_orphaned_fresh_order` and leaks fresh-order billing |
 | F4: `set_renew_at_expiration` PUTs whole serviceInfos body | **MINOR** | Send only the fields we mutate |
 | F5: `attach_tags` partial-failure leaves mixed tag state | **DESIGN RISK** | Rollback on partial; or document |
 | F6: `_swap_host_id_tag` brief no-host-id window | **NOT AN ISSUE** | — |
@@ -774,7 +851,8 @@ In rough priority order:
 
 1. ~~**F1** (parse_extra_tags_env after order)~~ — **FIXED on this branch.**
 2. **F2 / F36** (recycle finalize silently strands the host) — needs a small design tweak (defer handle discard until un-cancel returns) so failed un-cancels can be retried
-3. ~~**F3** (concurrent order race)~~ — **FIXED on this branch.** Order-id correlation + post-hoc plan/region verify + parallel-orders regression test.
+3. ~~**F3** (concurrent order race)~~ — **FIXED + LIVE-VERIFIED on this branch.** Operations-chain correlation + post-hoc plan/region verify + parallel-orders regression test. End-to-end verified against the real OVH-US API.
+4. **F39 (new)** (`set_renew_at_expiration` 400s on freshly-ordered VPSes) — discovered during the F3 live verification. Affects `_terminate_orphaned_fresh_order`'s cleanup path -- a `_provision_vps` failure between fresh-order delivery and host-record write currently leaks a month of billing on the just-ordered VPS, because the cleanup hits the "subscription not active yet" race and gives up. Needs retry-on-`"subscription is not active yet"` in `client.set_renew_at_expiration`.
 4. **F5** (attach_tags partial failure) — small fix; defends against a future intermittent IAM tag outage
 5. **F9** (wait_for_uncancel 30s no retry) — same family as F2, similar fix
 6. **F13** (connector hardcodes Ed25519) — one-liner, mirrors the OVH-side fix
