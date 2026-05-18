@@ -9,14 +9,19 @@ we test that with :class:`click.testing.CliRunner`.
 
 from pathlib import Path
 
+import click
 import pytest
 from click.testing import CliRunner
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import ed25519
 
 from imbue.minds.cli.pool import build_create_admin_args
 from imbue.minds.cli.pool import build_destroy_admin_args
 from imbue.minds.cli.pool import build_list_admin_args
+from imbue.minds.cli.pool import derive_public_key_from_private
 from imbue.minds.cli.pool import merge_ovh_env_into_subprocess_env
 from imbue.minds.cli.pool import pool
+from imbue.minds.cli.pool import resolved_management_public_key_path
 
 
 @pytest.fixture
@@ -193,6 +198,54 @@ def test_merge_ovh_env_preserves_unrelated_shell_vars() -> None:
     assert merged["PATH"] == "/usr/bin"
     assert merged["FOO"] == "bar"
     assert merged["OVH_APPLICATION_KEY"] == "k"
+
+
+def test_derive_public_key_from_private_round_trips() -> None:
+    """Given a generated ed25519 keypair, derive_public_key_from_private(priv) == priv.public_key().
+
+    Uses ``cryptography`` to mint the keypair so we don't depend on a fixture
+    file. ``ssh-keygen -y`` and ``cryptography``'s OpenSSH formatter both
+    produce the canonical ``"<type> <base64>"`` line (no comment), so the
+    base64 portion of each must match exactly.
+    """
+    private_key = ed25519.Ed25519PrivateKey.generate()
+    private_pem = private_key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.OpenSSH,
+        encryption_algorithm=serialization.NoEncryption(),
+    ).decode()
+    expected_public_line = (
+        private_key.public_key()
+        .public_bytes(
+            encoding=serialization.Encoding.OpenSSH,
+            format=serialization.PublicFormat.OpenSSH,
+        )
+        .decode()
+    )
+
+    derived = derive_public_key_from_private(private_pem)
+    assert derived.startswith("ssh-ed25519 "), derived
+    # Compare type + base64; comments are optional and may differ.
+    derived_type, derived_b64 = derived.split(" ")[:2]
+    expected_type, expected_b64 = expected_public_line.split(" ")[:2]
+    assert (derived_type, derived_b64) == (expected_type, expected_b64)
+
+
+def test_derive_public_key_from_private_rejects_garbage() -> None:
+    """Malformed input surfaces as a ClickException, not an opaque ssh-keygen stderr."""
+    with pytest.raises(click.ClickException, match="ssh-keygen -y"):
+        derive_public_key_from_private("this is not a key\n")
+
+
+def test_resolved_management_public_key_path_explicit_override_yields_path_unchanged(
+    _isolated_env: Path,
+) -> None:
+    """Operator override path bypasses Vault entirely and yields the operator's file as-is."""
+    pub_path = _isolated_env / "operator-key.pub"
+    pub_path.write_text("ssh-ed25519 AAAA... operator@host\n")
+    with resolved_management_public_key_path("dev-x", explicit_path=str(pub_path)) as yielded:
+        assert yielded == str(pub_path)
+        assert Path(yielded).is_file()
 
 
 def test_merge_ovh_env_with_empty_ovh_returns_shell_copy() -> None:

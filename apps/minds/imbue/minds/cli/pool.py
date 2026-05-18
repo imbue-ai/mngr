@@ -5,17 +5,26 @@ Responsibility split:
 * ``mngr imbue_cloud admin pool create`` (in ``libs/mngr_imbue_cloud``) is the
   provider-generic host-creation step. It accepts a required ``--region`` and
   repeatable ``--tag KEY=VALUE`` and knows nothing about minds environments.
-* This module is the env-aware layer: it requires an activated minds env
-  (``MINDS_ROOT_NAME``), derives the env name, injects
-  ``--tag minds_env=<env-name>`` so ``minds env destroy`` can later enumerate
-  + delete every VPS the env owns (via the OVH IAM v2 tag walker in
-  :mod:`imbue.minds.envs.providers.ovh_tags`), AND reads the activated
-  tier's OVH AK/AS/CK from Vault (``<vault_path_prefix>/ovh``) and
-  injects them into the subprocess env so the inner ``mngr create
-  ... --template ovh`` actually has credentials. All other admin flags
-  (``--count`` / ``--attributes`` / ``--workspace-dir`` /
-  ``--management-public-key-file`` / ``--database-url`` / ``--mngr-source``)
-  forward 1:1.
+* This module is the env-aware layer. From the activated minds env
+  (``MINDS_ROOT_NAME``) it:
+    1. injects ``--tag minds_env=<env-name>`` so ``minds env destroy`` can
+       later enumerate + delete every VPS the env owns (via the OVH IAM v2
+       tag walker in :mod:`imbue.minds.envs.providers.ovh_tags`);
+    2. reads the activated tier's OVH AK/AS/CK from Vault
+       (``<vault_path_prefix>/ovh``) and injects them into the admin
+       subprocess env so the inner ``mngr create ... --template ovh`` has
+       credentials;
+    3. derives the management public key from the activated tier's
+       ``<vault_path_prefix>/pool-ssh.POOL_SSH_PRIVATE_KEY`` Vault entry
+       (the connector runs with the SAME private key as a Modal Secret) and
+       passes it to the admin's ``--management-public-key-file`` -- so the
+       key injected on the VPS at bake time always matches the connector's
+       at lease time. This closes the keypair-mismatch class of bake
+       failures that hand-rolled ``--management-public-key-file`` paths used
+       to leak. Operators can still pass ``--management-public-key-file``
+       to force a specific key (escape hatch for one-off / non-vault setups).
+  All other admin flags (``--count`` / ``--attributes`` / ``--workspace-dir``
+  / ``--database-url`` / ``--mngr-source``) forward 1:1.
 
 Transport is subprocess (``mngr imbue_cloud admin pool ...``) to match the
 rest of the minds env CLI's mngr invocations and to keep the minds -> mngr
@@ -26,10 +35,14 @@ click commands so unit tests can verify the env-name injection + flag
 forwarding behaviour without standing up a fake subprocess runner.
 """
 
+import contextlib
 import os
 import shlex
 import sys
+import tempfile
+from collections.abc import Iterator
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Final
 
 import click
@@ -55,6 +68,15 @@ _OVH_REQUIRED_ENV_VARS: Final[tuple[str, ...]] = (
     "OVH_CONSUMER_KEY",
 )
 _OVH_OPTIONAL_ENV_VARS: Final[tuple[str, ...]] = ("OVH_ENDPOINT",)
+
+# Vault key the management SSH private key lives under (per host-pool-setup.md
+# step 2). The connector deploys with this private key pushed to a Modal
+# Secret; the pool VPS's authorized_keys must hold the matching public key.
+_POOL_MGMT_PRIVATE_KEY_VAULT_FIELD: Final[str] = "POOL_SSH_PRIVATE_KEY"
+# How long ``ssh-keygen -y`` should take to derive a public key from a
+# small ed25519/RSA private key. Generous so a contended box doesn't
+# spuriously fail the bake at the very first step.
+_SSH_KEYGEN_DERIVE_TIMEOUT_SECONDS: Final[float] = 10.0
 
 
 def build_create_admin_args(
@@ -155,6 +177,124 @@ def merge_ovh_env_into_subprocess_env(*, shell_env: Mapping[str, str], ovh_env: 
     return merged
 
 
+def derive_public_key_from_private(
+    private_key_pem: str,
+    *,
+    parent_cg: ConcurrencyGroup | None = None,
+) -> str:
+    """Run ``ssh-keygen -y`` to derive the public key from a private key PEM.
+
+    ``ssh-keygen`` only reads from a file (not stdin), so the private key
+    is written to a 0600 temp file for the call and unlinked immediately
+    after. The returned string is the standard ``"<type> <base64>"`` form
+    (without a comment), suitable for an ``authorized_keys`` line.
+
+    Raises ``click.ClickException`` if ``ssh-keygen`` is missing or fails.
+    """
+    cg = (
+        parent_cg.make_concurrency_group(name="ssh-keygen-derive-pub")
+        if parent_cg is not None
+        else ConcurrencyGroup(name="ssh-keygen-derive-pub")
+    )
+    with tempfile.NamedTemporaryFile(mode="w", suffix="_priv", delete=False) as tmp:
+        tmp.write(private_key_pem)
+        if not private_key_pem.endswith("\n"):
+            tmp.write("\n")
+        tmp_path = tmp.name
+    try:
+        os.chmod(tmp_path, 0o600)
+        with cg:
+            result = cg.run_process_to_completion(
+                command=["ssh-keygen", "-y", "-f", tmp_path],
+                timeout=_SSH_KEYGEN_DERIVE_TIMEOUT_SECONDS,
+                is_checked_after=False,
+            )
+    finally:
+        os.unlink(tmp_path)
+    if result.returncode != 0:
+        raise click.ClickException(
+            f"`ssh-keygen -y` failed (exit {result.returncode}) while deriving the management "
+            f"public key from the Vault-stored private key: {result.stderr.strip()}"
+        )
+    derived = result.stdout.strip()
+    if not derived:
+        raise click.ClickException(
+            "`ssh-keygen -y` produced empty output while deriving the management public key; "
+            "the Vault-stored private key may be malformed."
+        )
+    return derived
+
+
+def resolve_management_public_key_from_vault(
+    env_name: str,
+    *,
+    parent_cg: ConcurrencyGroup | None = None,
+) -> str:
+    """Read the activated tier's management private key from Vault, return its public form.
+
+    Looks up the tier for ``env_name``, loads the corresponding deploy
+    config to discover ``vault_path_prefix``, then reads
+    ``<prefix>/pool-ssh.POOL_SSH_PRIVATE_KEY`` via the standard
+    ``read_vault_kv`` shellout. The returned public key is the openssh
+    ``authorized_keys`` line form (no comment), ready to write to the
+    file the inner admin CLI's ``--management-public-key-file`` reads.
+
+    Same Vault entry as the one ``minds env deploy`` pushes into the
+    ``pool-ssh-<tier>`` Modal Secret -- so the bake-time injection and
+    the connector's lease-time SSH auth always come from the same
+    keypair. The original "operator picks a public key by hand" path led
+    to silent mismatches (the operator generated a fresh key, baked a
+    VPS the connector then couldn't talk to); deriving here makes that
+    failure mode unreachable for the minds-side caller.
+
+    Raises ``click.ClickException`` if the Vault entry is missing the
+    required private-key field or if ``ssh-keygen -y`` cannot parse it.
+    Raises ``VaultReadError`` for any underlying Vault read failure.
+    """
+    tier = tier_for_env_name(env_name)
+    deploy_config = load_deploy_config(tier)
+    vault_prefix = str(deploy_config.vault_path_prefix).rstrip("/")
+    secret = read_vault_kv(VaultPath(f"{vault_prefix}/pool-ssh"), parent_concurrency_group=parent_cg)
+    private_key = secret.get(_POOL_MGMT_PRIVATE_KEY_VAULT_FIELD, "")
+    if not private_key:
+        raise click.ClickException(
+            f"Vault entry {vault_prefix}/pool-ssh is missing {_POOL_MGMT_PRIVATE_KEY_VAULT_FIELD!r}; "
+            "see apps/minds/docs/host-pool-setup.md step 2 for the schema."
+        )
+    return derive_public_key_from_private(private_key, parent_cg=parent_cg)
+
+
+@contextlib.contextmanager
+def resolved_management_public_key_path(
+    env_name: str,
+    *,
+    explicit_path: str | None,
+    parent_cg: ConcurrencyGroup | None = None,
+) -> Iterator[str]:
+    """Yield a filesystem path the inner admin CLI can hand to ``--management-public-key-file``.
+
+    Two source-of-truth modes, in precedence order:
+
+    1. ``explicit_path`` (from ``--management-public-key-file``): operator
+       override. Yielded unchanged. Escape hatch for one-off bakes where
+       the operator deliberately wants a non-canonical key.
+    2. Vault (default): :func:`resolve_management_public_key_from_vault`
+       derives the public form from the activated tier's
+       ``<vault_path_prefix>/pool-ssh.POOL_SSH_PRIVATE_KEY`` entry. The
+       derived key is written to a private temp file that's cleaned up
+       when the context exits (so the inner CLI sees ``exists=True`` and
+       no stale public-key files litter the operator's machine).
+    """
+    if explicit_path is not None:
+        yield explicit_path
+        return
+    pub_text = resolve_management_public_key_from_vault(env_name, parent_cg=parent_cg)
+    with tempfile.TemporaryDirectory(prefix="minds-pool-mgmt-pub-") as tmpdir:
+        pub_path = Path(tmpdir) / "id_ed25519.pub"
+        pub_path.write_text(pub_text + "\n")
+        yield str(pub_path)
+
+
 def resolve_ovh_env_from_vault(
     env_name: str,
     *,
@@ -253,9 +393,16 @@ def pool() -> None:
 )
 @click.option(
     "--management-public-key-file",
-    required=True,
+    required=False,
+    default=None,
     type=click.Path(exists=True),
-    help="Path to the management SSH public key",
+    help=(
+        "Override path for the management SSH public key injected on the pool VPS+container. "
+        "Default (omitted): derive from the activated tier's Vault entry "
+        "`<vault_path_prefix>/pool-ssh.POOL_SSH_PRIVATE_KEY` -- the same private key the connector "
+        "loads from its `pool-ssh-<tier>` Modal Secret, which guarantees the lease-time SSH-key "
+        "injection authenticates. Pass this only when bypassing the tier's canonical keypair."
+    ),
 )
 @click.option(
     "--database-url",
@@ -279,7 +426,7 @@ def pool_create(
     region: str,
     attributes_json: str,
     workspace_dir: str,
-    management_public_key_file: str,
+    management_public_key_file: str | None,
     database_url: str | None,
     mngr_source: str | None,
 ) -> None:
@@ -287,26 +434,38 @@ def pool_create(
 
     Reads the activated tier's OVH AK/AS/CK from Vault before invoking the
     admin subcommand and injects them into the subprocess env, so the
-    operator never has to manually export them. The activated env dictates
-    the tier (and therefore the Vault path), which keeps "I'm on dev, I
-    bake against the dev OVH account" the unambiguous default.
+    operator never has to manually export them. Likewise derives the
+    management public key from the tier's ``<vault_path_prefix>/pool-ssh``
+    entry (unless ``--management-public-key-file`` overrides) -- the
+    activated env dictates which tier, which keeps "I'm on dev, I bake
+    against the dev OVH account using the dev management keypair" the
+    unambiguous default and makes the keypair-mismatch class of bake
+    failures unreachable for the standard path.
     """
     env_name = require_activated_env_name()
     try:
         ovh_env = resolve_ovh_env_from_vault(env_name)
     except VaultReadError as exc:
         raise click.ClickException(f"Could not read OVH credentials from Vault for env '{env_name}': {exc}") from exc
-    args = build_create_admin_args(
-        env_name=env_name,
-        count=count,
-        region=region,
-        attributes_json=attributes_json,
-        workspace_dir=workspace_dir,
-        management_public_key_file=management_public_key_file,
-        database_url=database_url,
-        mngr_source=mngr_source,
-    )
-    _raise_on_failure("create", _run_admin_command(args, extra_env=ovh_env))
+    try:
+        with resolved_management_public_key_path(
+            env_name, explicit_path=management_public_key_file
+        ) as effective_mgmt_pub_path:
+            args = build_create_admin_args(
+                env_name=env_name,
+                count=count,
+                region=region,
+                attributes_json=attributes_json,
+                workspace_dir=workspace_dir,
+                management_public_key_file=effective_mgmt_pub_path,
+                database_url=database_url,
+                mngr_source=mngr_source,
+            )
+            _raise_on_failure("create", _run_admin_command(args, extra_env=ovh_env))
+    except VaultReadError as exc:
+        raise click.ClickException(
+            f"Could not read management SSH key from Vault for env '{env_name}': {exc}"
+        ) from exc
 
 
 @pool.command(name="list")
