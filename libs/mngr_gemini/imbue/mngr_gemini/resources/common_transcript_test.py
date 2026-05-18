@@ -100,7 +100,7 @@ class ScriptRunner:
         self.input_file = self.agent_state_dir / "logs" / "gemini_transcript" / "events.jsonl"
         self.output_file = self.agent_state_dir / "events" / "gemini" / "common_transcript" / "events.jsonl"
 
-    def add_session(self, lines: list[str]) -> Path:
+    def seed_input(self, lines: list[str]) -> Path:
         """Seed the raw transcript input file with the given JSONL lines.
 
         The converter reads a flat raw stream produced by ``stream_transcript.sh``;
@@ -157,7 +157,7 @@ def test_no_raw_input_produces_no_output(tmp_path: Path, stub_mngr_log_sh: str) 
 
 def test_converts_user_text_message(tmp_path: Path, stub_mngr_log_sh: str) -> None:
     runner = ScriptRunner(tmp_path, stub_mngr_log_sh)
-    runner.add_session(
+    runner.seed_input(
         [
             _make_session_header("sid-1", "2026-01-01T00:00:00Z"),
             _make_user_event("uuid-1", "2026-01-01T00:00:01Z", "Hello"),
@@ -178,7 +178,7 @@ def test_converts_user_text_message(tmp_path: Path, stub_mngr_log_sh: str) -> No
 
 def test_converts_assistant_message(tmp_path: Path, stub_mngr_log_sh: str) -> None:
     runner = ScriptRunner(tmp_path, stub_mngr_log_sh)
-    runner.add_session(
+    runner.seed_input(
         [
             _make_session_header("sid-1", "2026-01-01T00:00:00Z"),
             _make_gemini_event("uuid-2", "2026-01-01T00:00:02Z", text="Hi there!"),
@@ -211,7 +211,7 @@ def test_converts_tool_calls_and_results(tmp_path: Path, stub_mngr_log_sh: str) 
         "status": "success",
         "timestamp": "2026-01-01T00:00:04Z",
     }
-    runner.add_session(
+    runner.seed_input(
         [
             _make_session_header("sid-1", "2026-01-01T00:00:00Z"),
             _make_gemini_event("uuid-3", "2026-01-01T00:00:03Z", tool_calls=[tool_call]),
@@ -247,7 +247,7 @@ def test_failed_tool_call_marks_is_error(tmp_path: Path, stub_mngr_log_sh: str) 
         "status": "error",
         "timestamp": "2026-01-01T00:00:05Z",
     }
-    runner.add_session(
+    runner.seed_input(
         [
             _make_session_header("sid-1", "2026-01-01T00:00:00Z"),
             _make_gemini_event("uuid-err", "2026-01-01T00:00:04Z", tool_calls=[tool_call]),
@@ -264,7 +264,7 @@ def test_failed_tool_call_marks_is_error(tmp_path: Path, stub_mngr_log_sh: str) 
 
 def test_deduplicates_by_event_id(tmp_path: Path, stub_mngr_log_sh: str) -> None:
     runner = ScriptRunner(tmp_path, stub_mngr_log_sh)
-    runner.add_session(
+    runner.seed_input(
         [
             _make_session_header("sid-1", "2026-01-01T00:00:00Z"),
             _make_user_event("uuid-1", "2026-01-01T00:00:01Z", "Hello"),
@@ -286,7 +286,7 @@ def test_deduplicates_by_event_id(tmp_path: Path, stub_mngr_log_sh: str) -> None
 
 def test_skips_session_header_and_set_events(tmp_path: Path, stub_mngr_log_sh: str) -> None:
     runner = ScriptRunner(tmp_path, stub_mngr_log_sh)
-    runner.add_session(
+    runner.seed_input(
         [
             _make_session_header("sid-1", "2026-01-01T00:00:00Z"),
             _make_set_event("2026-01-01T00:00:01Z"),
@@ -305,7 +305,7 @@ def test_skips_session_header_and_set_events(tmp_path: Path, stub_mngr_log_sh: s
 
 def test_handles_malformed_json(tmp_path: Path, stub_mngr_log_sh: str) -> None:
     runner = ScriptRunner(tmp_path, stub_mngr_log_sh)
-    runner.add_session(
+    runner.seed_input(
         [
             _make_session_header("sid-1", "2026-01-01T00:00:00Z"),
             "not json",
@@ -324,7 +324,7 @@ def test_handles_malformed_json(tmp_path: Path, stub_mngr_log_sh: str) -> None:
 def test_skips_events_without_id(tmp_path: Path, stub_mngr_log_sh: str) -> None:
     runner = ScriptRunner(tmp_path, stub_mngr_log_sh)
     no_id = json.dumps({"type": "user", "timestamp": "2026-01-01T00:00:00Z", "content": [{"text": "hi"}]})
-    runner.add_session([_make_session_header("sid-1", "2026-01-01T00:00:00Z"), no_id])
+    runner.seed_input([_make_session_header("sid-1", "2026-01-01T00:00:00Z"), no_id])
 
     result = runner.run_single_pass()
     assert result.returncode == 0, f"stderr: {result.stderr}"
@@ -342,7 +342,7 @@ def test_truncates_long_tool_input_preview(tmp_path: Path, stub_mngr_log_sh: str
         "status": "success",
         "timestamp": "2026-01-01T00:00:01Z",
     }
-    runner.add_session(
+    runner.seed_input(
         [
             _make_session_header("sid-1", "2026-01-01T00:00:00Z"),
             _make_gemini_event("uuid-long", "2026-01-01T00:00:00Z", tool_calls=[tool_call]),
@@ -368,7 +368,7 @@ def test_truncates_long_tool_output(tmp_path: Path, stub_mngr_log_sh: str) -> No
         "status": "success",
         "timestamp": "2026-01-01T00:00:01Z",
     }
-    runner.add_session(
+    runner.seed_input(
         [
             _make_session_header("sid-1", "2026-01-01T00:00:00Z"),
             _make_gemini_event("uuid-bo", "2026-01-01T00:00:00Z", tool_calls=[tool_call]),
@@ -386,7 +386,7 @@ def test_truncates_long_tool_output(tmp_path: Path, stub_mngr_log_sh: str) -> No
 def test_sorts_by_timestamp(tmp_path: Path, stub_mngr_log_sh: str) -> None:
     """Events should be output sorted by timestamp."""
     runner = ScriptRunner(tmp_path, stub_mngr_log_sh)
-    runner.add_session(
+    runner.seed_input(
         [
             _make_session_header("sid-1", "2026-01-01T00:00:00Z"),
             _make_user_event("uuid-later", "2026-01-01T00:00:02Z", "Later"),
@@ -406,7 +406,7 @@ def test_sorts_by_timestamp(tmp_path: Path, stub_mngr_log_sh: str) -> None:
 def test_cache_read_tokens_captured(tmp_path: Path, stub_mngr_log_sh: str) -> None:
     """Gemini's `cached` token field is mapped to cache_read_tokens in the common schema."""
     runner = ScriptRunner(tmp_path, stub_mngr_log_sh)
-    runner.add_session(
+    runner.seed_input(
         [
             _make_session_header("sid-1", "2026-01-01T00:00:00Z"),
             _make_gemini_event(
@@ -428,7 +428,7 @@ def test_cache_read_tokens_captured(tmp_path: Path, stub_mngr_log_sh: str) -> No
 def test_output_writes_to_correct_path(tmp_path: Path, stub_mngr_log_sh: str) -> None:
     """Output should go to events/gemini/common_transcript/events.jsonl."""
     runner = ScriptRunner(tmp_path, stub_mngr_log_sh)
-    runner.add_session(
+    runner.seed_input(
         [
             _make_session_header("sid-1", "2026-01-01T00:00:00Z"),
             _make_user_event("uuid-1", "2026-01-01T00:00:01Z", "Hello"),
@@ -446,7 +446,7 @@ def test_output_writes_to_correct_path(tmp_path: Path, stub_mngr_log_sh: str) ->
 def test_incremental_conversion(tmp_path: Path, stub_mngr_log_sh: str) -> None:
     """Running twice with new input should append without duplicates."""
     runner = ScriptRunner(tmp_path, stub_mngr_log_sh)
-    input_file = runner.add_session(
+    input_file = runner.seed_input(
         [
             _make_session_header("sid-1", "2026-01-01T00:00:00Z"),
             _make_user_event("uuid-1", "2026-01-01T00:00:01Z", "First"),
@@ -472,7 +472,7 @@ def test_incremental_conversion(tmp_path: Path, stub_mngr_log_sh: str) -> None:
 def test_events_from_multiple_sessions_in_one_raw_stream(tmp_path: Path, stub_mngr_log_sh: str) -> None:
     """The converter reads a flat raw stream, so events from multiple sessions concatenate naturally."""
     runner = ScriptRunner(tmp_path, stub_mngr_log_sh)
-    runner.add_session(
+    runner.seed_input(
         [
             _make_session_header("sid-1", "2026-01-01T00:00:00Z"),
             _make_user_event("uuid-1", "2026-01-01T00:00:01Z", "session A"),
