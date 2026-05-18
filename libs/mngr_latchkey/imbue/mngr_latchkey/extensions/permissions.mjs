@@ -13,15 +13,19 @@
  *       Return the full permissions.json that the gateway applied to
  *       the caller for this request (from the extension context's
  *       ``permissionsConfigPath``). Takes no query parameters.
+ *   GET    /permissions/available
+ *       Return the full permission catalog as a JSON object keyed by
+ *       raw service name. Each value has three fields: ``scope`` (the
+ *       Detent scope schema name as a string), ``display_name`` (a
+ *       human-readable label), and ``permissions`` (an array of Detent
+ *       permission-schema names that may be granted under the scope).
  *   GET    /permissions/available/<service_name>
  *       Return the permission catalog entry for ``<service_name>`` (e.g.
- *       ``slack``, ``google-gmail``). The response is a JSON object
- *       with two fields: ``scope`` (the Detent scope schema name as a
- *       string) and ``permissions`` (an array of Detent permission-
- *       schema names that may be granted under the scope). Returns 404
- *       when the service is unknown. Backed by the ``services.json``
- *       file that ships alongside this extension, which is keyed by
- *       raw service name.
+ *       ``slack``, ``google-gmail``) using the same value shape as the
+ *       collection endpoint. Returns 404 when the service is unknown.
+ *       Both endpoints are backed by the ``services.json`` file that
+ *       ships alongside this extension, which is keyed by raw service
+ *       name.
  *   GET    /permissions/rules?path=<path>&rule_key=<key>
  *       Return the rule whose scope key is <key>.
  *   POST   /permissions/rules?path=<path>&rule_key=<key>
@@ -64,6 +68,7 @@ import { fileURLToPath } from 'node:url';
 
 const COLLECTION_PATH = '/permissions';
 const SELF_PATH = '/permissions/self';
+const AVAILABLE_COLLECTION_PATH = '/permissions/available';
 const AVAILABLE_ITEM_PATH_PREFIX = '/permissions/available/';
 const RULES_COLLECTION_PATH = '/permissions/rules';
 const PERMISSIONS_ROOT_ENV_VAR = 'LATCHKEY_EXTENSION_PERMISSIONS_ROOT';
@@ -329,12 +334,19 @@ function parseRoute(requestUrl) {
   if (pathOnly === SELF_PATH || pathOnly === `${SELF_PATH}/`) {
     return { kind: 'self' };
   }
+  // The collection check must run before the item-prefix check so a
+  // trailing-slash request to ``/permissions/available/`` is routed to
+  // the collection handler instead of being rejected as an empty
+  // service-name segment.
+  if (pathOnly === AVAILABLE_COLLECTION_PATH || pathOnly === `${AVAILABLE_COLLECTION_PATH}/`) {
+    return { kind: 'available-collection' };
+  }
   if (pathOnly.startsWith(AVAILABLE_ITEM_PATH_PREFIX)) {
     const remainder = pathOnly.slice(AVAILABLE_ITEM_PATH_PREFIX.length);
     if (remainder.length === 0 || remainder.includes('/')) {
       return { kind: 'unhandled' };
     }
-    return { kind: 'available', serviceNameFromPath: decodeServiceNameSegment(remainder) };
+    return { kind: 'available-item', serviceNameFromPath: decodeServiceNameSegment(remainder) };
   }
   if (pathOnly === RULES_COLLECTION_PATH || pathOnly === `${RULES_COLLECTION_PATH}/`) {
     return { kind: 'rule' };
@@ -408,8 +420,9 @@ function handleGetCollection(response, filePath) {
  *
  * The file is a JSON object keyed by raw service name (``slack``,
  * ``google-gmail``, ...). Each value is a ``{scope: <schema_name>,
- * permissions: [...]}`` object where ``scope`` is the Detent scope
- * schema name as a plain string.
+ * display_name: <label>, permissions: [...]}`` object where ``scope``
+ * is the Detent scope schema name as a plain string and
+ * ``display_name`` is a human-readable label.
  */
 function readAvailableServices() {
   let raw;
@@ -442,6 +455,11 @@ function readAvailableServices() {
         `entry for '${serviceName}': 'scope' must be a non-empty string`,
       );
     }
+    if (typeof entry.display_name !== 'string' || entry.display_name.length === 0) {
+      throw new AvailableServicesUnavailableError(
+        `entry for '${serviceName}': 'display_name' must be a non-empty string`,
+      );
+    }
     const permissions = entry.permissions;
     if (!Array.isArray(permissions) || !permissions.every((item) => typeof item === 'string')) {
       throw new AvailableServicesUnavailableError(
@@ -450,6 +468,10 @@ function readAvailableServices() {
     }
   }
   return parsed;
+}
+
+function handleGetAvailableCollection(response) {
+  sendJson(response, 200, readAvailableServices());
 }
 
 function handleGetAvailableForService(response, rawServiceName) {
@@ -540,7 +562,11 @@ export default async function permissionsExtension(request, response, context) {
       handleGetSelf(response, context);
       return true;
     }
-    if (route.kind === 'available' && method === 'GET') {
+    if (route.kind === 'available-collection' && method === 'GET') {
+      handleGetAvailableCollection(response);
+      return true;
+    }
+    if (route.kind === 'available-item' && method === 'GET') {
       handleGetAvailableForService(response, route.serviceNameFromPath);
       return true;
     }
