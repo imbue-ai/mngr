@@ -100,15 +100,14 @@ class ScriptRunner:
         self.input_file = self.agent_state_dir / "logs" / "gemini_transcript" / "events.jsonl"
         self.output_file = self.agent_state_dir / "events" / "gemini" / "common_transcript" / "events.jsonl"
 
-    def add_session(self, lines: list[str], project_root: Path | None = None) -> Path:
+    def add_session(self, lines: list[str]) -> Path:
         """Seed the raw transcript input file with the given JSONL lines.
 
-        ``project_root`` is accepted for source-compatibility with older tests
-        but ignored: the streamer is responsible for filtering by
-        ``.project_root``, and this converter reads a flat raw stream.
-        Returns the input file path so tests can append to it.
+        The converter reads a flat raw stream produced by ``stream_transcript.sh``;
+        project-root filtering happens upstream in the streamer, so this helper
+        just appends the given lines to the input file. Returns the input file
+        path so tests can append to it.
         """
-        del project_root
         self.input_file.parent.mkdir(parents=True, exist_ok=True)
         with self.input_file.open("a") as f:
             for line in lines:
