@@ -31,7 +31,15 @@ Same verdict scheme as the deploy-safety audit: **CONFIRMED BUG**,
 
 ### F1. `parse_extra_tags_env` runs AFTER `order_and_wait_for_vps` — typo'd tag leaks a month of billing
 
-**Verdict: CONFIRMED BUG (vs spec).**
+**Verdict: CONFIRMED BUG (vs spec). → FIXED in commit on this branch.**
+
+`OvhProvider._provision_vps` now calls
+`parse_extra_tags_env(os.environ.get("MNGR_VPS_EXTRA_TAGS", ""))` at the
+very top of the method, before `_maybe_claim_recycled_vps` and before
+any state-changing API call. Pinned by source-position test
+`test_f1_extra_tags_parsed_before_recycle_or_order` in
+`backend_test.py` so a future refactor that moves the parse back down
+breaks the test loudly.
 
 The spec is explicit:
 > "Parsing is strict: an entry without `=` is an error and aborts
@@ -113,7 +121,33 @@ the OVH-side expiration date.
 
 ### F3. Two concurrent OVH orders against the same account can race: `_wait_for_new_service_name` picks `sorted(new_names)[0]`
 
-**Verdict: DESIGN RISK (rare in practice).**
+**Verdict: DESIGN RISK (rare in practice). → FIXED in commit on this branch.**
+
+`order_and_wait_for_vps` no longer diffs `/vps` listings. It captures
+the `orderId` from the checkout response (`order.Order`), then polls
+`GET /me/order/{orderId}/details/{detailId}` until OVH writes the
+assigned serviceName into the `domain` field. Strong correlation
+because every poll is scoped to OUR `orderId`. The checkout response's
+inline `details[].domain` is also checked first (matched by
+`cartItemID`) in case OVH ever populates it pre-delivery.
+
+Post-hoc verify also lands: after fetching the serviceName, the
+function `GET /vps/{serviceName}` and asserts
+`model.name == requested_plan` + `requested_datacenter` is a
+case-insensitive substring of `zone`. Defends against any future
+provider that delivers a VPS of the wrong shape.
+
+Pinned by `test_f3_parallel_orders_each_get_their_own_service_name`,
+which spawns two threads against a single shared fake `ovh.Client`,
+arranges for both new serviceNames to be visible during each
+thread's wait window, and asserts both threads return their OWN
+serviceName. The legacy diff approach (still in git history) would
+have failed this test by returning `sorted(...)[0]` for both threads.
+Also pinned: `test_order_post_hoc_verify_catches_wrong_plan`,
+`test_order_post_hoc_verify_catches_wrong_region`,
+`test_order_raises_when_checkout_returns_no_order_id`, and the
+delivery-timeout test now exercises the new `/me/order` polling
+path.
 
 `_wait_for_new_service_name`:
 
@@ -695,9 +729,9 @@ this PR; worth a shared-constant module long-term.
 
 | Finding | Verdict | Action |
 |---|---|---|
-| F1: parse_extra_tags_env after order_and_wait_for_vps | **CONFIRMED BUG** | Move parse to top of `_provision_vps` |
+| F1: parse_extra_tags_env after order_and_wait_for_vps | **CONFIRMED BUG → FIXED** | Moved + source-position test |
 | F2: recycle finalize failure silently strands the host | **DESIGN RISK** | Don't discard handle until un-cancel succeeds; or raise on finalize failure |
-| F3: concurrent order race picks wrong serviceName | **DESIGN RISK (rare)** | Correlate via order id, not by listing diff |
+| F3: concurrent order race picks wrong serviceName | **DESIGN RISK → FIXED** | Order-id correlation + post-hoc plan/region verify + parallel-orders test |
 | F4: `set_renew_at_expiration` PUTs whole serviceInfos body | **MINOR** | Send only the fields we mutate |
 | F5: `attach_tags` partial-failure leaves mixed tag state | **DESIGN RISK** | Rollback on partial; or document |
 | F6: `_swap_host_id_tag` brief no-host-id window | **NOT AN ISSUE** | — |
@@ -738,9 +772,9 @@ this PR; worth a shared-constant module long-term.
 
 In rough priority order:
 
-1. **F1** (parse_extra_tags_env after order) — one-line move, prevents a wasted month of billing on a typo
+1. ~~**F1** (parse_extra_tags_env after order)~~ — **FIXED on this branch.**
 2. **F2 / F36** (recycle finalize silently strands the host) — needs a small design tweak (defer handle discard until un-cancel returns) so failed un-cancels can be retried
-3. **F3** (concurrent order race) — only matters if/when the pool bake parallelises; document the constraint loudly until then
+3. ~~**F3** (concurrent order race)~~ — **FIXED on this branch.** Order-id correlation + post-hoc plan/region verify + parallel-orders regression test.
 4. **F5** (attach_tags partial failure) — small fix; defends against a future intermittent IAM tag outage
 5. **F9** (wait_for_uncancel 30s no retry) — same family as F2, similar fix
 6. **F13** (connector hardcodes Ed25519) — one-liner, mirrors the OVH-side fix
