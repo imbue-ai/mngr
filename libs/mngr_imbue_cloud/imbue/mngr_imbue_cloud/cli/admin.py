@@ -289,8 +289,13 @@ def _run_ssh_command(
     return True
 
 
-def _get_agent_info(agent_name: str, provider: str = "ovh") -> dict[str, Any] | None:
-    """Query mngr list --format json and find the agent by name.
+def _get_agent_info(
+    agent_name: str,
+    *,
+    host_name: str,
+    provider: str = "ovh",
+) -> dict[str, Any] | None:
+    """Query mngr list --format json and find the agent by name + host name.
 
     Scopes to ``--provider <provider>`` (the bake only ever creates on ovh
     today, so the default matches the call site) and passes ``--on-error
@@ -300,6 +305,14 @@ def _get_agent_info(agent_name: str, provider: str = "ovh") -> dict[str, Any] | 
     record. The bake still treats "agent not in output" as a failure: that
     path is handled by the normal "agent_info is None" check at the call
     site, so genuine create failures are not papered over.
+
+    ``host_name`` MUST be the bake's per-bake-unique host name (not the
+    constant agent name). The operator's local mngr state accumulates one
+    ``system-services`` agent per bake (each on a different host), so
+    filtering on agent name alone returns the first match -- which under
+    sequential bakes is some prior bake's stale agent on a different VPS.
+    Disambiguating on ``host.name`` makes the lookup unambiguous because
+    the bake's host name carries a per-bake hex suffix.
     """
     result = _run_mngr_command(
         [
@@ -311,7 +324,7 @@ def _get_agent_info(agent_name: str, provider: str = "ovh") -> dict[str, Any] | 
             "--on-error",
             "continue",
             "--include",
-            f'name == "{agent_name}"',
+            f'name == "{agent_name}" && host.name == "{host_name}"',
         ],
         timeout=60,
     )
@@ -334,7 +347,10 @@ def _get_agent_info(agent_name: str, provider: str = "ovh") -> dict[str, Any] | 
         return None
 
     for agent in agents:
-        if isinstance(agent, dict) and agent.get("name") == agent_name:
+        if not isinstance(agent, dict) or agent.get("name") != agent_name:
+            continue
+        host = agent.get("host")
+        if isinstance(host, dict) and host.get("name") == host_name:
             return agent
     return None
 
@@ -493,7 +509,17 @@ def _create_single_pool_host(
 
     logger.info("  Created agent: {}", agent_name)
 
-    stop_result = _run_mngr_command(["stop", agent_name])
+    # The agent NAME (``system-services``) is constant across every bake,
+    # so the operator's local mngr state can accumulate several
+    # ``system-services`` agents (one per bake, each on a different
+    # host). Subsequent ``mngr stop``/``mngr exec`` calls in this bake
+    # MUST use the per-bake-unique address to target the just-created
+    # agent specifically -- ``mngr stop system-services`` alone is
+    # ambiguous under sequential bakes and can pick the wrong one
+    # (silently, since ``--on-error continue`` is the mngr default).
+    full_address = f"{agent_name}@{host_name}.ovh"
+
+    stop_result = _run_mngr_command(["stop", full_address])
     if stop_result.returncode != 0:
         logger.warning("mngr stop failed (continuing): {}", stop_result.stderr)
 
@@ -502,21 +528,17 @@ def _create_single_pool_host(
     # provider's sshd config): the default ``MaxStartups=10:30:100``
     # caps the pre-auth queue tightly, and the imbue_cloud lease + claim
     # flow plus parallel ``mngr observe`` discovery routinely exceeds it
-    # and loses connections mid-rsync.
+    # and loses connections mid-rsync. ``shlex.join`` packs the whole
+    # sshd invocation into a single ``mngr exec`` COMMAND positional
+    # (mngr exec parses ``AGENTS... COMMAND`` so multi-token commands
+    # have to arrive as one shell-quoted string).
+    sshd_command = shlex.join(["/usr/sbin/sshd", "-o", "MaxSessions=100", "-o", "MaxStartups=100:30:200"])
     _run_mngr_command(
-        [
-            "exec",
-            agent_name,
-            "/usr/sbin/sshd",
-            "-o",
-            "MaxSessions=100",
-            "-o",
-            "MaxStartups=100:30:200",
-        ],
+        ["exec", full_address, sshd_command],
         timeout=30,
     )
 
-    agent_info = _get_agent_info(agent_name)
+    agent_info = _get_agent_info(agent_name, host_name=host_name)
     if agent_info is None:
         logger.error("Could not find agent info for {}", agent_name)
         return False
@@ -565,7 +587,7 @@ def _create_single_pool_host(
     _checked_ssh_command(vps_address, vps_key_path, 22, install_cmd, label="install management key on VPS")
 
     logger.info("  Installing management key in container via mngr exec")
-    container_install = _run_mngr_command(["exec", agent_name, install_cmd], timeout=60)
+    container_install = _run_mngr_command(["exec", full_address, install_cmd], timeout=60)
     if container_install.returncode != 0:
         raise PoolBakeError(
             f"installing management key inside container for {agent_name} failed: {container_install.stderr.strip()}"
@@ -588,7 +610,7 @@ def _create_single_pool_host(
     # the remote sshd parses it back via bash.
     chat_destroy_cmd = shlex.join(["mngr", "destroy", bootstrap_chat_agent_name, "--force"])
     chat_destroy = _run_mngr_command(
-        ["exec", agent_name, chat_destroy_cmd],
+        ["exec", full_address, chat_destroy_cmd],
         timeout=120,
     )
     if chat_destroy.returncode != 0:
@@ -605,7 +627,7 @@ def _create_single_pool_host(
     logger.info("  Removing initial-chat sentinel: {}", _INITIAL_CHAT_SENTINEL_PATH)
     sentinel_rm_cmd = shlex.join(["rm", "-f", _INITIAL_CHAT_SENTINEL_PATH])
     sentinel_rm = _run_mngr_command(
-        ["exec", agent_name, sentinel_rm_cmd],
+        ["exec", full_address, sentinel_rm_cmd],
         timeout=30,
     )
     if sentinel_rm.returncode != 0:
