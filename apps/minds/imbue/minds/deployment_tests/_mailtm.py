@@ -24,6 +24,7 @@ from pydantic import PrivateAttr
 
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.primitives import NonEmptyStr
+from imbue.minds.deployment_tests.primitives import InvalidMailtmAddressError
 from imbue.minds.deployment_tests.primitives import MailtmAddress
 from imbue.minds.deployment_tests.primitives import MailtmFetchError
 from imbue.minds.deployment_tests.primitives import MailtmJwt
@@ -176,7 +177,7 @@ def make_signup_address(account_address: MailtmAddress, suffix: str) -> SignupEm
     :class:`MailtmInbox`.
     """
     if "@" not in str(account_address):
-        raise MailtmFetchError(f"mail.tm account address {account_address!r} is malformed: missing '@'.")
+        raise InvalidMailtmAddressError(f"mail.tm account address {account_address!r} is malformed: missing '@'.")
     local, _, domain = str(account_address).partition("@")
     return SignupEmailAddress(f"{local}+{suffix}@{domain}")
 

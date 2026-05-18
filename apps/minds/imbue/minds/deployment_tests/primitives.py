@@ -89,3 +89,7 @@ class DeploymentTestConfigError(MindError):
 
 class MailtmFetchError(MindError):
     """Raised when polling mail.tm fails (no email arrived in time, or the API errored)."""
+
+
+class InvalidMailtmAddressError(MindError):
+    """Raised when a mail.tm address fails structural validation (e.g. missing ``@``)."""
