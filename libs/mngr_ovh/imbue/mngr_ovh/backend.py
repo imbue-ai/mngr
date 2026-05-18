@@ -21,6 +21,7 @@ from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_ovh import hookimpl
 from imbue.mngr_ovh.bootstrap import bootstrap_root_authorized_keys_via_user
+from imbue.mngr_ovh.bootstrap import install_required_outer_packages
 from imbue.mngr_ovh.bootstrap import pin_host_key_via_tofu
 from imbue.mngr_ovh.bootstrap import verify_root_ssh
 from imbue.mngr_ovh.bootstrap import wait_for_ssh_after_rebuild
@@ -358,6 +359,18 @@ class OvhProvider(VpsDockerProvider):
                     timeout_seconds=self.config.ssh_connect_timeout,
                 )
                 verify_root_ssh(
+                    hostname=service_name,
+                    port=22,
+                    private_key_path=vps_private_key_path,
+                    known_hosts_path=self._vps_known_hosts_path(),
+                    timeout_seconds=self.config.ssh_connect_timeout,
+                )
+                # OVH has no cloud-init, so the Debian 12 - Docker image's
+                # missing ``rsync`` (which the vps_docker build-context
+                # upload needs) has to be installed explicitly. Runs as the
+                # final outer-bootstrap step before the base
+                # VpsDockerProvider takes over.
+                install_required_outer_packages(
                     hostname=service_name,
                     port=22,
                     private_key_path=vps_private_key_path,
