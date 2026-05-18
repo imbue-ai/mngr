@@ -75,20 +75,9 @@ from imbue.mngr_latchkey.core import LATCHKEY_BINARY
 from imbue.mngr_latchkey.core import Latchkey
 from imbue.mngr_latchkey.core import LatchkeyError
 from imbue.mngr_latchkey.forward_supervisor import LatchkeyForwardSupervisor
-from imbue.mngr_latchkey.forward_supervisor import is_forward_info_alive
-from imbue.mngr_latchkey.store import LatchkeyForwardInfo
-from imbue.mngr_latchkey.store import load_forward_info
 
 _DEFAULT_MNGR_FORWARD_PORT: Final[int] = 8421
 _AUTH_ERROR_TYPE: Final[str] = "ImbueCloudAuthError"
-
-# How long minds is willing to wait for ``mngr latchkey forward`` to
-# bind its gateway port and stamp the port onto its on-disk supervisor
-# record. Long enough to tolerate a cold gateway-binary start on a
-# slow box but short enough to keep ``minds run`` from blocking
-# forever if the supervisor never becomes ready.
-_GATEWAY_PORT_WAIT_SECONDS: Final[float] = 30.0
-_GATEWAY_PORT_POLL_INTERVAL_SECONDS: Final[float] = 0.2
 
 
 @click.command()
@@ -146,6 +135,9 @@ def run(
     latchkey = _build_latchkey(data_directory=data_directory)
     latchkey.initialize()
 
+    root_concurrency_group = ConcurrencyGroup(name="minds-run")
+    root_concurrency_group.__enter__()
+
     # Spawn (or adopt) a detached ``mngr latchkey forward`` supervisor.
     # The supervisor owns the shared latchkey gateway + per-agent reverse
     # tunnels; running it as a detached subprocess (rather than the inline
@@ -155,10 +147,9 @@ def run(
     # terminate it on minds shutdown -- mirroring how minds already leaves
     # the gateway running detached so agents in containers/VMs keep working
     # across desktop-client restarts.
-    _ensure_mngr_latchkey_forward_supervisor(latchkey)
-
-    root_concurrency_group = ConcurrencyGroup(name="minds-run")
-    root_concurrency_group.__enter__()
+    root_concurrency_group.start_new_thread(
+        _ensure_mngr_latchkey_forward_supervisor, args=(latchkey,), name="mngr-latchkey-forward-supervisor-setup"
+    )
 
     # Watch our *grandparent* (typically Electron) rather than our immediate
     # parent (the ``uv run`` wrapper, which doesn't propagate Electron's
@@ -169,28 +160,9 @@ def run(
     # orphan tree running across restarts.
     start_grandparent_death_watcher(root_concurrency_group)
 
-    # Block startup until the supervised ``mngr latchkey forward``
-    # binds its gateway port. Without it we cannot mint the admin JWT
-    # (we would not know what to point the URL at) nor consume
-    # permission requests, so failing fast here is preferable to
-    # coming up in a half-wired state. The password is derived
-    # in-process from the user's latchkey encryption key -- it is
-    # never persisted on disk -- so we do not have to wait for it.
-    forward_info = _wait_for_gateway_port(latchkey)
-    try:
-        admin_jwt = latchkey.create_admin_permissions_jwt()
-        gateway_password = latchkey.derive_gateway_password()
-    except LatchkeyError as e:
-        raise click.ClickException(f"Failed to wire up latchkey gateway client: {e}") from e
-    # _wait_for_gateway_port returns only after the supervisor has
-    # stamped a non-None gateway_port; re-assert here so the type
-    # checker can narrow.
-    assert forward_info.gateway_port is not None
-    gateway_client = LatchkeyGatewayClient(
-        base_url=f"http://{latchkey.listen_host}:{forward_info.gateway_port}",
-        password=gateway_password,
-        admin_jwt=admin_jwt,
-    )
+    gateway_client = LatchkeyGatewayClient.from_latchkey(latchkey)
+    # Pre-warm the gateway client in a background thread.
+    root_concurrency_group.start_new_thread(gateway_client.ensure_initialized, name="latchkey-gateway-init")
 
     latchkey_permission_handler = LatchkeyPermissionGrantHandler(
         data_dir=data_directory,
@@ -326,47 +298,6 @@ def run(
         uvicorn.run(app, host=host, port=port, timeout_graceful_shutdown=1)
     finally:
         consumer.terminate()
-
-
-def _wait_for_gateway_port(latchkey: Latchkey) -> LatchkeyForwardInfo:
-    """Block until the supervised ``mngr latchkey forward`` stamps its bound gateway port.
-
-    The supervisor writes its ``LatchkeyForwardInfo`` record with
-    ``gateway_port=None`` at spawn time and updates the record in place
-    once it has bound the shared ``latchkey gateway`` subprocess to a
-    free TCP port. We poll the record until the port becomes non-None
-    (or the timeout expires) so subsequent minds startup steps can
-    build the gateway URL deterministically without racing the
-    supervisor's own startup.
-    """
-    plugin_dir = latchkey.plugin_data_dir
-    deadline = threading.Event()
-    timer = threading.Timer(_GATEWAY_PORT_WAIT_SECONDS, deadline.set)
-    timer.daemon = True
-    timer.start()
-    try:
-        while not deadline.is_set():
-            info = load_forward_info(plugin_dir)
-            if info is not None and not is_forward_info_alive(info):
-                # Supervisor died between spawn and port-bind; bail out
-                # instead of polling a stale record forever.
-                raise click.ClickException(
-                    "The ``mngr latchkey forward`` supervisor we spawned has died before binding its "
-                    f"gateway port; check {plugin_dir}/latchkey_forward.log for details.",
-                )
-            if info is not None and info.gateway_port is not None:
-                return info
-            # Use the same event as the deadline so we wake up promptly
-            # when the timer fires; the wait returns True iff the
-            # deadline was reached during the sleep.
-            if deadline.wait(timeout=_GATEWAY_PORT_POLL_INTERVAL_SECONDS):
-                break
-    finally:
-        timer.cancel()
-    raise click.ClickException(
-        f"Timed out after {_GATEWAY_PORT_WAIT_SECONDS:.1f}s waiting for ``mngr latchkey forward`` to stamp "
-        f"its bound gateway port onto {plugin_dir}; is the supervisor stuck?",
-    )
 
 
 class _StreamedPermissionRequestHandler(FrozenModel):
