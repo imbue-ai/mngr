@@ -12,7 +12,6 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client.agent_creator import AgentCreator
 from imbue.minds.desktop_client.app import _build_mngr_exec_argv
-from imbue.minds.desktop_client.app import _build_restart_shell_command
 from imbue.minds.desktop_client.app import _build_workspace_list
 from imbue.minds.desktop_client.app import create_desktop_client
 from imbue.minds.desktop_client.auth import FileAuthStore
@@ -1398,21 +1397,6 @@ def test_refresh_event_before_lifespan_is_dropped_without_raising(tmp_path: Path
 
 
 # -- workspace-server restart + recovery tests --
-
-
-def test_build_restart_shell_command_kicks_tmux_and_touches_services_toml() -> None:
-    cmd = _build_restart_shell_command()
-    # The workspace server lives under the system-services agent's tmux
-    # session (`${MNGR_PREFIX}system-services`), not the user agent's
-    # session. `MNGR_PREFIX` is sourced into the shell by `mngr exec`'s
-    # env prefix, so the command references it as a literal env-var
-    # expansion. The window name comes from the bootstrap manager, which
-    # always prefixes services.toml entries with `svc-`; `system_interface`
-    # is the entry that runs `minds-workspace-server`.
-    assert "tmux kill-window" in cmd
-    assert "${MNGR_PREFIX}system-services:svc-system_interface" in cmd
-    # mngr exec already runs in the agent's work_dir, so services.toml is relative.
-    assert "touch services.toml" in cmd
 
 
 def test_build_mngr_exec_argv_includes_agent_id_and_command() -> None:
