@@ -284,18 +284,18 @@ def _start_with_restart(
 
         locked_agents = []
         lock_handles: list[io.TextIOWrapper] = []
-        for match in agent_list:
-            lock = _try_acquire_restart_lock(online_host.host_dir, match.agent_id)
-            if lock is not None:
-                locked_agents.append(match)
-                lock_handles.append(lock)
-            else:
-                _output(f"Skipping agent {match.agent_name} -- restart already in progress", output_opts)
-
-        if not locked_agents:
-            continue
-
         try:
+            for match in agent_list:
+                lock = _try_acquire_restart_lock(online_host.host_dir, match.agent_id)
+                if lock is not None:
+                    locked_agents.append(match)
+                    lock_handles.append(lock)
+                else:
+                    _output(f"Skipping agent {match.agent_name} -- restart already in progress", output_opts)
+
+            if not locked_agents:
+                continue
+
             locked_ids = [match.agent_id for match in locked_agents]
 
             with log_span("Stopping {} agent(s) for restart", len(locked_ids)):
