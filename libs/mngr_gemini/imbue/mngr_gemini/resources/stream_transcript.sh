@@ -48,26 +48,16 @@ _MNGR_LOG_SOURCE="logs/stream_transcript"
 _MNGR_LOG_FILE="$AGENT_DATA_DIR/events/logs/stream_transcript/events.jsonl"
 # shellcheck source=mngr_log.sh
 source "$MNGR_AGENT_STATE_DIR/commands/mngr_log.sh"
+# shellcheck source=mngr_transcript_lib.sh
+source "$MNGR_AGENT_STATE_DIR/commands/mngr_transcript_lib.sh"
 
 # Per-session state. Keys are absolute session file paths; values are
 # line counts already emitted from that file.
 declare -A _OFFSET_BY_PATH=()
 
-# id lookup set, built once at startup for offset reconciliation
-declare -A _OUTPUT_IDS=()
-
-# Map an absolute session file path to a filesystem-safe offset key.
-# Uses percent-encoding so the mapping is injective: distinct paths
-# produce distinct keys. A naive '/'-to-'_' substitution would alias
-# paths that already contain underscores (e.g. '/a_b/c' and '/a/b/c'
-# would both encode to '_a_b_c'), silently corrupting offset tracking
-# for any deployment whose paths happen to contain underscores.
-# Order matters: '%' must be escaped before '/', so a literal '%2F' in
-# the input does not get folded together with an encoded '/'.
-_offset_key_for() {
-    local encoded="${1//%/%25}"
-    echo "${encoded//\//%2F}"
-}
+# id lookup set, populated by mngr_transcript_build_id_set and cleared
+# when reconciliation finishes.
+declare -A _MNGR_TRANSCRIPT_ID_SET=()
 
 _line_count() {
     if [ -f "$1" ]; then
@@ -77,9 +67,13 @@ _line_count() {
     fi
 }
 
+# Persisted-offset key per session file. The shared
+# mngr_transcript_percent_encode_path makes the mapping injective so
+# distinct paths produce distinct filenames (a naive '/'-to-'_'
+# substitution would alias paths containing underscores).
 _load_stored_offset() {
     local key
-    key=$(_offset_key_for "$1")
+    key=$(mngr_transcript_percent_encode_path "$1")
     if [ -f "$OFFSET_DIR/$key" ]; then
         cat "$OFFSET_DIR/$key"
     else
@@ -89,76 +83,8 @@ _load_stored_offset() {
 
 _save_offset() {
     local key
-    key=$(_offset_key_for "$1")
+    key=$(mngr_transcript_percent_encode_path "$1")
     echo "$2" > "$OFFSET_DIR/$key"
-}
-
-# Extract the top-level id field from a single JSONL line (no jq, for
-# speed). Gemini writes the top-level "id" first on every persisted
-# message, so the first regex match per line is the message id. Tool-call
-# ids that appear later on the same line (nested inside "toolCalls") are
-# deliberately not returned -- the offset-reconciliation lookup set must
-# only contain message-level ids so that nested tool-call ids cannot be
-# matched against an unrelated session line's top-level id.
-_extract_id() {
-    # Use bash's builtin regex match to avoid spawning grep per line.
-    # Returns 0 unconditionally so callers using $(...) under `set -e`
-    # are not affected by a no-match.
-    if [[ $1 =~ \"id\":\ *\"([^\"]+)\" ]]; then
-        echo "${BASH_REMATCH[1]}"
-    fi
-    return 0
-}
-
-# Build id lookup set from all lines in the output file. Called once at
-# startup and again when a late-appearing file needs reconciliation.
-# Uses _extract_id per line (rather than a single grep over the file) so
-# the set contains exactly the ids _reconcile_offset will look up --
-# i.e. message-level ids only, not nested tool-call ids.
-_build_output_id_set() {
-    _OUTPUT_IDS=()
-    if [ ! -s "$OUTPUT_FILE" ]; then
-        return
-    fi
-    local line id
-    while IFS= read -r line; do
-        id=$(_extract_id "$line")
-        [ -n "$id" ] && _OUTPUT_IDS["$id"]=1
-    done < "$OUTPUT_FILE"
-    log_debug "Built id set with ${#_OUTPUT_IDS[@]} entries"
-}
-
-# Find the true offset for a session file by working backwards from the
-# end to find the last line whose id is already in the output file. This
-# handles crash recovery: if we emitted lines N+1..M but crashed before
-# saving the offset, the backwards scan recovers M rather than trusting
-# the stale stored offset N.
-_reconcile_offset() {
-    local session_file="$1"
-
-    local file_lines
-    file_lines=$(_line_count "$session_file")
-
-    if [ ${#_OUTPUT_IDS[@]} -eq 0 ] || [ "$file_lines" -eq 0 ]; then
-        echo 0
-        return
-    fi
-
-    log_debug "Reconciling offset for $session_file (file_lines=$file_lines)"
-    local reverse_idx=0
-    while IFS= read -r line; do
-        reverse_idx=$((reverse_idx + 1))
-        local id
-        id=$(_extract_id "$line")
-        if [ -n "$id" ] && [ "${_OUTPUT_IDS[$id]+exists}" ]; then
-            local found=$((file_lines - reverse_idx + 1))
-            log_debug "Found last emitted line at $found for $session_file"
-            echo "$found"
-            return
-        fi
-    done < <(tac "$session_file")
-
-    echo 0
 }
 
 # Discover gemini session files belonging to this agent.
@@ -191,12 +117,9 @@ _find_session_files() {
     done
 }
 
-# Append new lines from a session file to the output. Uses sed with a
-# bounded range to avoid a TOCTOU race: wc -l captures the line count at
-# time T1, and sed reads exactly lines offset+1..file_lines. If gemini
-# appends more lines between T1 and the sed read, those extras are NOT
-# emitted here (they'll be picked up on the next poll), and the saved
-# offset accurately reflects what was actually emitted.
+# Append new lines from a session file to the output. The shared
+# mngr_transcript_emit_lines_range uses sed with a bounded range to
+# avoid a TOCTOU race (see mngr_transcript_lib.sh).
 _emit_new_lines() {
     local session_file="$1"
     local offset="${_OFFSET_BY_PATH[$session_file]:-0}"
@@ -209,7 +132,7 @@ _emit_new_lines() {
     fi
 
     local start=$((offset + 1))
-    sed -n "${start},${file_lines}p" "$session_file" >> "$OUTPUT_FILE"
+    mngr_transcript_emit_lines_range "$session_file" "$start" "$file_lines" "$OUTPUT_FILE"
 
     local new_count=$((file_lines - offset))
     _OFFSET_BY_PATH[$session_file]=$file_lines
@@ -220,8 +143,8 @@ _emit_new_lines() {
 
 # Load + reconcile a session file's offset, record it in _OFFSET_BY_PATH,
 # and persist any change. The caller is responsible for ensuring
-# _OUTPUT_IDS is populated (via _build_output_id_set) before the call,
-# because _reconcile_offset depends on it.
+# _MNGR_TRANSCRIPT_ID_SET is populated (via mngr_transcript_build_id_set)
+# before the call, because mngr_transcript_reconcile_offset depends on it.
 #
 # $1: absolute session file path
 # $2: log prefix used to distinguish startup reconciliations from
@@ -233,7 +156,7 @@ _record_session_offset() {
     local stored
     stored=$(_load_stored_offset "$session_file")
     local reconciled
-    reconciled=$(_reconcile_offset "$session_file")
+    reconciled=$(mngr_transcript_reconcile_offset "$session_file" "id")
     local effective="$stored"
     if [ "$reconciled" -gt "$stored" ]; then
         effective="$reconciled"
@@ -246,7 +169,7 @@ _record_session_offset() {
 }
 
 _initialize() {
-    _build_output_id_set
+    mngr_transcript_build_id_set "$OUTPUT_FILE" "id"
 
     local session_file
     while IFS= read -r session_file; do
@@ -256,7 +179,7 @@ _initialize() {
     log_info "Tracked ${#_OFFSET_BY_PATH[@]} session file(s) at startup"
 
     # Free the id set -- not needed until next reconciliation
-    _OUTPUT_IDS=()
+    _MNGR_TRANSCRIPT_ID_SET=()
 }
 
 _run_one_cycle() {
@@ -268,9 +191,9 @@ _run_one_cycle() {
 
     for session_file in "${current_files[@]}"; do
         if [ -z "${_OFFSET_BY_PATH[$session_file]+exists}" ]; then
-            _build_output_id_set
+            mngr_transcript_build_id_set "$OUTPUT_FILE" "id"
             _record_session_offset "$session_file" "Reconciled late-appearing session"
-            _OUTPUT_IDS=()
+            _MNGR_TRANSCRIPT_ID_SET=()
         fi
         _emit_new_lines "$session_file"
     done

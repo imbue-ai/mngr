@@ -13,6 +13,7 @@ from datetime import datetime
 from datetime import timezone
 from pathlib import Path
 from typing import Any
+from typing import ClassVar
 from typing import Iterator
 from typing import Mapping
 from typing import Sequence
@@ -2157,24 +2158,29 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
             with log_span("Calling on_after_provisioning for agent {}", agent.name):
                 agent.on_after_provisioning(host=self, options=options, mngr_ctx=mngr_ctx)
 
+    _SHARED_SHELL_LIB_NAMES: ClassVar[tuple[str, ...]] = ("mngr_log.sh", "mngr_transcript_lib.sh")
+
     def _ensure_mngr_log_sh(self, agent: AgentInterface) -> None:
-        """Write mngr_log.sh to both host-level and agent-level commands directories.
+        """Write the shared shell libraries to host-level and agent-level commands dirs.
 
-        mngr_log.sh provides shared JSONL logging and cross-platform timestamp
-        utilities for all mngr bash scripts.  Two identical copies are maintained:
+        These libraries are sourced by mngr bash scripts and must exist on both
+        levels so host-level (``activity_watcher.sh``) and agent-level
+        (``stream_transcript.sh``, ``chat.sh``) scripts can source them
+        consistently.
 
-        - ``<host_dir>/commands/mngr_log.sh``   (for host-level scripts such as
-          activity_watcher.sh)
-        - ``<agent_state_dir>/commands/mngr_log.sh``  (for agent-level scripts
-          such as stream_transcript.sh, chat.sh)
+        - ``mngr_log.sh`` provides shared JSONL logging and cross-platform
+          timestamp utilities.
+        - ``mngr_transcript_lib.sh`` provides the raw-transcript primitives
+          (field extraction, id-set construction, offset reconciliation,
+          bounded sed-append, percent-encoded path keys) shared by per-agent
+          streamers such as claude's and gemini's ``stream_transcript.sh``.
         """
-        content_bytes = importlib.resources.files(mngr_resources).joinpath("mngr_log.sh").read_text().encode()
-
         host_commands = self.host_dir / "commands"
-        self.write_file(host_commands / "mngr_log.sh", content_bytes, mode="0755")
-
         agent_commands = self._get_agent_state_dir(agent) / "commands"
-        self.write_file(agent_commands / "mngr_log.sh", content_bytes, mode="0755")
+        for name in self._SHARED_SHELL_LIB_NAMES:
+            content_bytes = importlib.resources.files(mngr_resources).joinpath(name).read_text().encode()
+            self.write_file(host_commands / name, content_bytes, mode="0755")
+            self.write_file(agent_commands / name, content_bytes, mode="0755")
 
     def _execute_agent_file_transfers(
         self,

@@ -1,4 +1,5 @@
 import importlib.metadata
+import importlib.resources
 import os
 import shutil
 import subprocess
@@ -23,6 +24,7 @@ from urwid.widget.listbox import SimpleFocusListWalker
 import imbue.mngr.main
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.mngr import resources as mngr_resources
 from imbue.mngr.agents.agent_registry import load_agents_from_plugins
 from imbue.mngr.agents.agent_registry import reset_agent_registry
 from imbue.mngr.api.providers import reset_provider_instances
@@ -127,6 +129,18 @@ def stub_mngr_log_sh() -> str:
         log_warn() { :; }
         log_error() { :; }
     """)
+
+
+@pytest.fixture
+def mngr_transcript_lib_sh() -> str:
+    """Real mngr_transcript_lib.sh contents for shell tests that source it.
+
+    Returns the actual library body (not a stub) because the streamer
+    scripts exercise the shared primitives end-to-end. Tests write this to
+    ``$MNGR_AGENT_STATE_DIR/commands/mngr_transcript_lib.sh`` to mirror the
+    production layout established by ``Host._ensure_mngr_log_sh``.
+    """
+    return importlib.resources.files(mngr_resources).joinpath("mngr_transcript_lib.sh").read_text()
 
 
 @pytest.fixture

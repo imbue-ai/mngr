@@ -25,7 +25,7 @@ from pathlib import Path
 class ScriptRunner:
     """Helper to run gemini stream_transcript.sh in a test environment."""
 
-    def __init__(self, tmp_path: Path, stub_mngr_log_sh: str) -> None:
+    def __init__(self, tmp_path: Path, stub_mngr_log_sh: str, mngr_transcript_lib_sh: str) -> None:
         self.tmp_path = tmp_path
         self.agent_state_dir = tmp_path / "agent_state"
         self.gemini_dir = tmp_path / "gemini"
@@ -40,6 +40,10 @@ class ScriptRunner:
         log_path = self.agent_state_dir / "commands" / "mngr_log.sh"
         log_path.write_text(stub_mngr_log_sh)
         log_path.chmod(0o755)
+
+        lib_path = self.agent_state_dir / "commands" / "mngr_transcript_lib.sh"
+        lib_path.write_text(mngr_transcript_lib_sh)
+        lib_path.chmod(0o755)
 
         self.script_path = Path(__file__).parent / "stream_transcript.sh"
         self.output_file = self.agent_state_dir / "logs" / "gemini_transcript" / "events.jsonl"
@@ -85,15 +89,17 @@ def _user_line(uuid: str, text: str) -> str:
     return json.dumps({"id": uuid, "type": "user", "timestamp": "2026-01-01T00:00:00Z", "content": [{"text": text}]})
 
 
-def test_empty_tmp_dir_produces_no_output(tmp_path: Path, stub_mngr_log_sh: str) -> None:
-    runner = ScriptRunner(tmp_path, stub_mngr_log_sh)
+def test_empty_tmp_dir_produces_no_output(tmp_path: Path, stub_mngr_log_sh: str, mngr_transcript_lib_sh: str) -> None:
+    runner = ScriptRunner(tmp_path, stub_mngr_log_sh, mngr_transcript_lib_sh)
     result = runner.run_single_pass()
     assert result.returncode == 0, f"stderr: {result.stderr}"
     assert runner.get_output_lines() == []
 
 
-def test_session_with_matching_project_root_is_emitted(tmp_path: Path, stub_mngr_log_sh: str) -> None:
-    runner = ScriptRunner(tmp_path, stub_mngr_log_sh)
+def test_session_with_matching_project_root_is_emitted(
+    tmp_path: Path, stub_mngr_log_sh: str, mngr_transcript_lib_sh: str
+) -> None:
+    runner = ScriptRunner(tmp_path, stub_mngr_log_sh, mngr_transcript_lib_sh)
     runner.add_session([_user_line("uuid-1", "hello"), _user_line("uuid-2", "world")])
 
     result = runner.run_single_pass()
@@ -105,8 +111,10 @@ def test_session_with_matching_project_root_is_emitted(tmp_path: Path, stub_mngr
     assert json.loads(lines[1])["id"] == "uuid-2"
 
 
-def test_session_with_mismatched_project_root_is_skipped(tmp_path: Path, stub_mngr_log_sh: str) -> None:
-    runner = ScriptRunner(tmp_path, stub_mngr_log_sh)
+def test_session_with_mismatched_project_root_is_skipped(
+    tmp_path: Path, stub_mngr_log_sh: str, mngr_transcript_lib_sh: str
+) -> None:
+    runner = ScriptRunner(tmp_path, stub_mngr_log_sh, mngr_transcript_lib_sh)
     other_work_dir = tmp_path / "other_work"
     other_work_dir.mkdir()
     runner.add_session([_user_line("uuid-skip", "ignored")], project_root=other_work_dir)
@@ -116,8 +124,10 @@ def test_session_with_mismatched_project_root_is_skipped(tmp_path: Path, stub_mn
     assert runner.get_output_lines() == []
 
 
-def test_session_dir_without_project_root_is_skipped(tmp_path: Path, stub_mngr_log_sh: str) -> None:
-    runner = ScriptRunner(tmp_path, stub_mngr_log_sh)
+def test_session_dir_without_project_root_is_skipped(
+    tmp_path: Path, stub_mngr_log_sh: str, mngr_transcript_lib_sh: str
+) -> None:
+    runner = ScriptRunner(tmp_path, stub_mngr_log_sh, mngr_transcript_lib_sh)
     bad_dir = runner.gemini_dir / "tmp" / "no-marker"
     (bad_dir / "chats").mkdir(parents=True)
     (bad_dir / "chats" / "session-1.jsonl").write_text(_user_line("uuid-x", "x") + "\n")
@@ -127,9 +137,9 @@ def test_session_dir_without_project_root_is_skipped(tmp_path: Path, stub_mngr_l
     assert runner.get_output_lines() == []
 
 
-def test_incremental_emission_via_offset(tmp_path: Path, stub_mngr_log_sh: str) -> None:
+def test_incremental_emission_via_offset(tmp_path: Path, stub_mngr_log_sh: str, mngr_transcript_lib_sh: str) -> None:
     """A second pass should pick up only the newly appended lines, not re-emit old ones."""
-    runner = ScriptRunner(tmp_path, stub_mngr_log_sh)
+    runner = ScriptRunner(tmp_path, stub_mngr_log_sh, mngr_transcript_lib_sh)
     session_file = runner.add_session([_user_line("uuid-1", "first")])
 
     runner.run_single_pass()
@@ -144,9 +154,11 @@ def test_incremental_emission_via_offset(tmp_path: Path, stub_mngr_log_sh: str) 
     assert json.loads(lines[1])["id"] == "uuid-2"
 
 
-def test_late_appearing_session_file_is_picked_up(tmp_path: Path, stub_mngr_log_sh: str) -> None:
+def test_late_appearing_session_file_is_picked_up(
+    tmp_path: Path, stub_mngr_log_sh: str, mngr_transcript_lib_sh: str
+) -> None:
     """A session that appears after the first pass should still be streamed on the next pass."""
-    runner = ScriptRunner(tmp_path, stub_mngr_log_sh)
+    runner = ScriptRunner(tmp_path, stub_mngr_log_sh, mngr_transcript_lib_sh)
     runner.run_single_pass()
     assert runner.get_output_lines() == []
 
@@ -158,9 +170,11 @@ def test_late_appearing_session_file_is_picked_up(tmp_path: Path, stub_mngr_log_
     assert json.loads(lines[0])["id"] == "uuid-late"
 
 
-def test_multiple_session_files_in_same_session_dir(tmp_path: Path, stub_mngr_log_sh: str) -> None:
+def test_multiple_session_files_in_same_session_dir(
+    tmp_path: Path, stub_mngr_log_sh: str, mngr_transcript_lib_sh: str
+) -> None:
     """A session dir with multiple session-*.jsonl files emits all of them."""
-    runner = ScriptRunner(tmp_path, stub_mngr_log_sh)
+    runner = ScriptRunner(tmp_path, stub_mngr_log_sh, mngr_transcript_lib_sh)
     session_dir = runner.gemini_dir / "tmp" / "sess-multi"
     (session_dir / "chats").mkdir(parents=True)
     (session_dir / ".project_root").write_text(str(runner.work_dir))
@@ -173,9 +187,11 @@ def test_multiple_session_files_in_same_session_dir(tmp_path: Path, stub_mngr_lo
     assert ids == {"uuid-A", "uuid-B"}
 
 
-def test_offset_reconciliation_recovers_after_lost_offset(tmp_path: Path, stub_mngr_log_sh: str) -> None:
+def test_offset_reconciliation_recovers_after_lost_offset(
+    tmp_path: Path, stub_mngr_log_sh: str, mngr_transcript_lib_sh: str
+) -> None:
     """If the offset file is removed (simulating crash before save), reconciliation should avoid re-emitting."""
-    runner = ScriptRunner(tmp_path, stub_mngr_log_sh)
+    runner = ScriptRunner(tmp_path, stub_mngr_log_sh, mngr_transcript_lib_sh)
     runner.add_session([_user_line("uuid-1", "first"), _user_line("uuid-2", "second")])
 
     runner.run_single_pass()
