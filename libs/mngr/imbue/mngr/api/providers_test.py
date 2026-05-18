@@ -46,13 +46,19 @@ def test_get_unknown_backend_includes_plugin_install_hint_for_cataloged_backend(
 
 
 def test_get_unknown_backend_uses_generic_hint_for_uncataloged_backend() -> None:
-    """Unknown backend errors for uncataloged names should not fabricate a package name."""
+    """Unknown backend errors for uncataloged names should not fabricate a package name.
+
+    Provider-kind hints must also suppress the agent-type-only escape hatch
+    ('--type command -- <shell command>'), which is the whole reason
+    UnknownBackendError passes kind=PluginKind.PROVIDER.
+    """
     with pytest.raises(UnknownBackendError) as exc_info:
         get_backend("xyzzy")
     formatted = exc_info.value.format_message()
     assert "imbue-mngr-xyzzy" not in formatted
     assert "do not recognize 'xyzzy'" in formatted
     assert "third-party plugin" in formatted
+    assert "--type command" not in formatted
 
 
 def test_get_local_provider_instance(temp_mngr_ctx: MngrContext) -> None:
