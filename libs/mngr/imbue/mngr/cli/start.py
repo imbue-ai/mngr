@@ -250,20 +250,20 @@ def _start_with_restart(
 
     with _in_flight_restarts_lock:
         already_in_flight = [m for m in matched_agents if m.agent_id in _in_flight_restarts]
-        matched_agents = [m for m in matched_agents if m.agent_id not in _in_flight_restarts]
+        agents_to_restart = [m for m in matched_agents if m.agent_id not in _in_flight_restarts]
         for skipped in already_in_flight:
             _output(f"Skipping agent {skipped.agent_name} -- restart already in progress", output_opts)
-        if not matched_agents:
+        if not agents_to_restart:
             return
-        _in_flight_restarts.update(m.agent_id for m in matched_agents)
+        _in_flight_restarts.update(m.agent_id for m in agents_to_restart)
 
-    claimed_ids = {m.agent_id for m in matched_agents}
+    claimed_ids = {m.agent_id for m in agents_to_restart}
     try:
         started_agents: list[str] = []
         last_started_agent = None
         last_started_host = None
 
-        agents_by_host = group_agents_by_host(matched_agents)
+        agents_by_host = group_agents_by_host(agents_to_restart)
 
         for host_key, agent_list in agents_by_host.items():
             host_id_str, _ = host_key.split(":", 1)
