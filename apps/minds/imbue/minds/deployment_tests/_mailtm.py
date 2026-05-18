@@ -21,13 +21,13 @@ from loguru import logger
 from pydantic import BaseModel
 from pydantic import ConfigDict
 from pydantic import PrivateAttr
+from pydantic import SecretStr
 
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.primitives import NonEmptyStr
 from imbue.minds.deployment_tests.primitives import InvalidMailtmAddressError
 from imbue.minds.deployment_tests.primitives import MailtmAddress
 from imbue.minds.deployment_tests.primitives import MailtmFetchError
-from imbue.minds.deployment_tests.primitives import MailtmJwt
 from imbue.minds.deployment_tests.primitives import OneTimeLoginCode
 from imbue.minds.deployment_tests.primitives import SignupEmailAddress
 from imbue.minds.deployment_tests.primitives import VerificationToken
@@ -64,7 +64,7 @@ class MailtmInbox(BaseModel):
 
     address: SignupEmailAddress
     account_address: MailtmAddress
-    jwt: MailtmJwt
+    jwt: SecretStr
 
     _seen_message_ids: set[str] = PrivateAttr(default_factory=set)
 
@@ -131,7 +131,7 @@ class MailtmInbox(BaseModel):
         with httpx.Client(base_url=_MAILTM_API_BASE, timeout=10.0) as client:
             response = client.get(
                 "/messages",
-                headers={"Authorization": f"Bearer {self.jwt}"},
+                headers={"Authorization": f"Bearer {self.jwt.get_secret_value()}"},
                 params={"page": 1},
             )
             response.raise_for_status()
@@ -157,7 +157,7 @@ class MailtmInbox(BaseModel):
         with httpx.Client(base_url=_MAILTM_API_BASE, timeout=10.0) as client:
             response = client.get(
                 f"/messages/{message_id}",
-                headers={"Authorization": f"Bearer {self.jwt}"},
+                headers={"Authorization": f"Bearer {self.jwt.get_secret_value()}"},
             )
             response.raise_for_status()
             data = response.json()

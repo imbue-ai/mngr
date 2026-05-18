@@ -204,7 +204,10 @@ def signup_email() -> Generator[MailtmInbox, None, None]:
     """
     try:
         account_address = MailtmAddress(_require_env_var(MAILTM_ADDRESS_ENV_VAR))
-        jwt = MailtmJwt(_require_env_var(MAILTM_JWT_ENV_VAR))
+        # Validate the JWT as a non-empty primitive before wrapping it in SecretStr
+        # so a stray empty env var still surfaces as a clear DeploymentTestConfigError
+        # rather than a SecretStr-around-empty-string that would only fail later.
+        jwt = SecretStr(MailtmJwt(_require_env_var(MAILTM_JWT_ENV_VAR)))
     except DeploymentTestConfigError as exc:
         pytest.skip(str(exc))
     address = make_signup_address(account_address, suffix=get_short_random_string())
