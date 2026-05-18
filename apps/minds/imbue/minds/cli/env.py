@@ -39,7 +39,10 @@ from imbue.minds.bootstrap import MINDS_ROOT_NAME_ENV_VAR
 from imbue.minds.bootstrap import mngr_host_dir_for
 from imbue.minds.bootstrap import mngr_prefix_for
 from imbue.minds.bootstrap import root_name_for_env_name
+from imbue.minds.cli._activated_env import PRODUCTION_ENV_NAME as _PRODUCTION_ENV_NAME
+from imbue.minds.cli._activated_env import STAGING_ENV_NAME as _STAGING_ENV_NAME
 from imbue.minds.cli._activated_env import require_activated_env_name
+from imbue.minds.cli._activated_env import tier_for_env_name as _tier_for_env_name
 from imbue.minds.config.loader import EnvConfigError
 from imbue.minds.config.loader import load_client_config
 from imbue.minds.config.loader import load_deploy_config
@@ -111,10 +114,12 @@ from imbue.mngr_ovh.iam_tags import IamResource
 # Reserved env names that map to named tiers; everything else is the
 # ``dev`` tier. Mirrors the spec's hard-coded tier mapping and lets
 # ``minds env deploy`` / ``destroy`` dispatch on env name alone.
+# The individual ``_PRODUCTION_ENV_NAME`` / ``_STAGING_ENV_NAME`` /
+# ``_DEV_TIER`` constants + the ``_tier_for_env_name`` mapper live in
+# ``_activated_env.py`` so ``minds pool`` (which also needs to derive
+# the tier for its Vault-scoped OVH credentials read) can share them
+# without an env.py -> pool.py back-reference.
 _RESERVED_TIER_ENV_NAMES: Final[frozenset[str]] = frozenset({"production", "staging"})
-_PRODUCTION_ENV_NAME: Final[str] = "production"
-_STAGING_ENV_NAME: Final[str] = "staging"
-_DEV_TIER: Final[str] = "dev"
 
 # Env vars exported by ``activate`` (and unset by ``deactivate``). The
 # list lives here so the two sides stay in sync.
@@ -133,19 +138,6 @@ _ACTIVATION_ENV_VARS: Final[tuple[str, ...]] = (
     # operate against).
     "MODAL_PROFILE",
 )
-
-
-def _tier_for_env_name(env_name: str) -> str:
-    """Hard-coded env-name -> tier mapping.
-
-    ``production`` -> ``production``; ``staging`` -> ``staging``;
-    everything else (the convention is ``<user>-<suffix>``) -> ``dev``.
-    """
-    if env_name == _PRODUCTION_ENV_NAME:
-        return _PRODUCTION_ENV_NAME
-    if env_name == _STAGING_ENV_NAME:
-        return _STAGING_ENV_NAME
-    return _DEV_TIER
 
 
 def _ensure_modal_env_for_provider(name: DevEnvName, cg: ConcurrencyGroup) -> None:

@@ -15,6 +15,7 @@ from click.testing import CliRunner
 from imbue.minds.cli.pool import build_create_admin_args
 from imbue.minds.cli.pool import build_destroy_admin_args
 from imbue.minds.cli.pool import build_list_admin_args
+from imbue.minds.cli.pool import merge_ovh_env_into_subprocess_env
 from imbue.minds.cli.pool import pool
 
 
@@ -163,3 +164,41 @@ def test_pool_destroy_requires_activated_env(_isolated_env: Path) -> None:
     result = runner.invoke(pool, ["destroy", "abc-123", "--database-url", "postgres://example"])
     assert result.exit_code != 0
     assert "No minds env is activated" in result.output
+
+
+def test_merge_ovh_env_overrides_shell_values() -> None:
+    """Vault-sourced OVH creds win over whatever the operator's shell has set.
+
+    Operator running ``minds pool create`` after activating a specific tier
+    intends to bake against THAT tier's OVH account. A stale
+    ``OVH_APPLICATION_KEY`` from a different tier's session would otherwise
+    silently misroute the bake.
+    """
+    merged = merge_ovh_env_into_subprocess_env(
+        shell_env={"OVH_APPLICATION_KEY": "stale", "HOME": "/home/me"},
+        ovh_env={"OVH_APPLICATION_KEY": "from-vault", "OVH_CONSUMER_KEY": "ck-from-vault"},
+    )
+    assert merged["OVH_APPLICATION_KEY"] == "from-vault"
+    assert merged["OVH_CONSUMER_KEY"] == "ck-from-vault"
+    # Non-OVH shell vars are preserved untouched.
+    assert merged["HOME"] == "/home/me"
+
+
+def test_merge_ovh_env_preserves_unrelated_shell_vars() -> None:
+    """OVH overlay does not perturb unrelated env vars."""
+    merged = merge_ovh_env_into_subprocess_env(
+        shell_env={"PATH": "/usr/bin", "FOO": "bar"},
+        ovh_env={"OVH_APPLICATION_KEY": "k"},
+    )
+    assert merged["PATH"] == "/usr/bin"
+    assert merged["FOO"] == "bar"
+    assert merged["OVH_APPLICATION_KEY"] == "k"
+
+
+def test_merge_ovh_env_with_empty_ovh_returns_shell_copy() -> None:
+    """An empty Vault overlay (e.g. when OVH creds aren't injected) is a no-op."""
+    merged = merge_ovh_env_into_subprocess_env(
+        shell_env={"PATH": "/usr/bin"},
+        ovh_env={},
+    )
+    assert merged == {"PATH": "/usr/bin"}
