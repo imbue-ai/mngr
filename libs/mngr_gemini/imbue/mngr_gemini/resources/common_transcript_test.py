@@ -1,11 +1,16 @@
 """Tests for the gemini common_transcript.sh converter.
 
 Exercises the script's core behaviors by running it with --single-pass in a
-controlled filesystem layout. Each test sets up:
+controlled filesystem layout. The converter reads its input from
+``$MNGR_AGENT_STATE_DIR/logs/gemini_transcript/events.jsonl`` (the raw
+transcript produced by ``stream_transcript.sh``), so tests seed that file
+directly rather than mocking gemini's tmp-dir layout. The streamer's
+project_root filtering and offset reconciliation are covered separately in
+``stream_transcript_test.py``.
+
+Each test sets up:
   - A fake agent state dir
-  - A fake gemini config dir with one or more session dirs, each containing
-    a `.project_root` file pointing at the agent's work dir and a `chats/`
-    subdirectory with session JSONL files
+  - A seeded raw transcript input file at logs/gemini_transcript/events.jsonl
   - A stub mngr_log.sh (no-op logging)
 
 The --single-pass flag makes the script run one conversion pass then exit,
@@ -80,15 +85,10 @@ class ScriptRunner:
     def __init__(self, tmp_path: Path, stub_mngr_log_sh: str) -> None:
         self.tmp_path = tmp_path
         self.agent_state_dir = tmp_path / "agent_state"
-        self.gemini_dir = tmp_path / "gemini"
-        self.work_dir = tmp_path / "work"
 
         # Create directory structure
         self.agent_state_dir.mkdir(parents=True)
         (self.agent_state_dir / "commands").mkdir(parents=True)
-        self.gemini_dir.mkdir(parents=True)
-        (self.gemini_dir / "tmp").mkdir(parents=True)
-        self.work_dir.mkdir(parents=True)
 
         # Write stub mngr_log.sh
         log_path = self.agent_state_dir / "commands" / "mngr_log.sh"
@@ -97,21 +97,23 @@ class ScriptRunner:
 
         # Standard paths
         self.script_path = Path(__file__).parent / "common_transcript.sh"
+        self.input_file = self.agent_state_dir / "logs" / "gemini_transcript" / "events.jsonl"
         self.output_file = self.agent_state_dir / "events" / "gemini" / "common_transcript" / "events.jsonl"
-        self._session_counter = 0
 
     def add_session(self, lines: list[str], project_root: Path | None = None) -> Path:
-        """Create a new gemini session dir with one session file containing the given lines.
+        """Seed the raw transcript input file with the given JSONL lines.
 
-        Returns the session file path so tests can append to it.
+        ``project_root`` is accepted for source-compatibility with older tests
+        but ignored: the streamer is responsible for filtering by
+        ``.project_root``, and this converter reads a flat raw stream.
+        Returns the input file path so tests can append to it.
         """
-        self._session_counter += 1
-        session_dir = self.gemini_dir / "tmp" / f"sess-{self._session_counter}"
-        (session_dir / "chats").mkdir(parents=True)
-        (session_dir / ".project_root").write_text(str(project_root or self.work_dir))
-        session_file = session_dir / "chats" / f"session-{self._session_counter}.jsonl"
-        session_file.write_text("\n".join(lines) + "\n" if lines else "")
-        return session_file
+        del project_root
+        self.input_file.parent.mkdir(parents=True, exist_ok=True)
+        with self.input_file.open("a") as f:
+            for line in lines:
+                f.write(line + "\n")
+        return self.input_file
 
     def append_to_session(self, session_file: Path, lines: list[str]) -> None:
         with session_file.open("a") as f:
@@ -134,8 +136,6 @@ class ScriptRunner:
         env = {
             **os.environ,
             "MNGR_AGENT_STATE_DIR": str(self.agent_state_dir),
-            "MNGR_AGENT_WORK_DIR": str(self.work_dir),
-            "GEMINI_CONFIG_DIR": str(self.gemini_dir),
         }
         return subprocess.run(
             ["bash", str(self.script_path), "--single-pass"],
@@ -149,25 +149,8 @@ class ScriptRunner:
 # -- Tests --
 
 
-def test_no_session_dirs_produces_no_output(tmp_path: Path, stub_mngr_log_sh: str) -> None:
+def test_no_raw_input_produces_no_output(tmp_path: Path, stub_mngr_log_sh: str) -> None:
     runner = ScriptRunner(tmp_path, stub_mngr_log_sh)
-    result = runner.run_single_pass()
-    assert result.returncode == 0, f"stderr: {result.stderr}"
-    assert runner.get_output_events() == []
-
-
-def test_session_with_mismatched_project_root_is_ignored(tmp_path: Path, stub_mngr_log_sh: str) -> None:
-    runner = ScriptRunner(tmp_path, stub_mngr_log_sh)
-    other_work_dir = tmp_path / "other_work"
-    other_work_dir.mkdir()
-    runner.add_session(
-        [
-            _make_session_header("sid-1", "2026-01-01T00:00:00Z"),
-            _make_user_event("uuid-1", "2026-01-01T00:00:01Z", "Hello"),
-        ],
-        project_root=other_work_dir,
-    )
-
     result = runner.run_single_pass()
     assert result.returncode == 0, f"stderr: {result.stderr}"
     assert runner.get_output_events() == []
@@ -487,17 +470,13 @@ def test_incremental_conversion(tmp_path: Path, stub_mngr_log_sh: str) -> None:
     assert events[1]["content"] == "Second"
 
 
-def test_multiple_sessions_in_same_project(tmp_path: Path, stub_mngr_log_sh: str) -> None:
-    """Multiple session dirs matching the agent's work dir should all contribute events."""
+def test_events_from_multiple_sessions_in_one_raw_stream(tmp_path: Path, stub_mngr_log_sh: str) -> None:
+    """The converter reads a flat raw stream, so events from multiple sessions concatenate naturally."""
     runner = ScriptRunner(tmp_path, stub_mngr_log_sh)
     runner.add_session(
         [
             _make_session_header("sid-1", "2026-01-01T00:00:00Z"),
             _make_user_event("uuid-1", "2026-01-01T00:00:01Z", "session A"),
-        ]
-    )
-    runner.add_session(
-        [
             _make_session_header("sid-2", "2026-01-01T00:00:02Z"),
             _make_user_event("uuid-2", "2026-01-01T00:00:03Z", "session B"),
         ]
