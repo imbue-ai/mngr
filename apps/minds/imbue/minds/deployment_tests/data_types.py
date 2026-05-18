@@ -9,7 +9,6 @@ not in this file -- they live in env vars (see ``primitives.py``).
 from pathlib import Path
 
 from pydantic import AnyUrl
-from pydantic import ConfigDict
 from pydantic import Field
 from pydantic import SecretStr
 
@@ -27,8 +26,6 @@ class SharedEnvUrls(FrozenModel):
     env vars prefixed ``MINDS_DEPLOYMENT_TEST_SHARED_<ROLE_UPPER>_`` so
     they never land on disk in the test-results dir.
     """
-
-    model_config = ConfigDict(frozen=True, extra="forbid", arbitrary_types_allowed=False)
 
     role: SharedEnvRole = Field(description="The role name this env serves (e.g. 'default').")
     env_name: DevEnvName = Field(description="The actual dev env name on disk (e.g. 'dev-ci-20260518t140212z').")
@@ -49,8 +46,6 @@ class FctTemplateRef(FrozenModel):
     clone the pushed branch directly. Same fixture, same field, same
     test code.
     """
-
-    model_config = ConfigDict(frozen=True, extra="forbid", arbitrary_types_allowed=False)
 
     worktree_path: Path | None = Field(
         default=None,
@@ -93,8 +88,6 @@ class DeploymentEnvsConfig(FrozenModel):
     a stale field name surfaces as a parse error, not silent drop.
     """
 
-    model_config = ConfigDict(frozen=True, extra="forbid", arbitrary_types_allowed=False)
-
     shared_envs: dict[SharedEnvRole, SharedEnvUrls] = Field(
         description="Role -> shared env URLs. Empty when the orchestrator was invoked in a mode that needs no shared env."
     )
@@ -111,8 +104,6 @@ class SharedEnvHandle(FrozenModel):
     the orchestrator threaded in via env vars.
     """
 
-    model_config = ConfigDict(frozen=True, extra="forbid", arbitrary_types_allowed=False)
-
     urls: SharedEnvUrls
     supertokens_connection_uri: SecretStr
     supertokens_api_key: SecretStr
@@ -126,8 +117,6 @@ class VerifiedUserHandle(FrozenModel):
     A pre-verified user provisioned via the shared env's SuperTokens
     admin API. The fixture deletes the user in teardown.
     """
-
-    model_config = ConfigDict(frozen=True, extra="forbid", arbitrary_types_allowed=False)
 
     email: NonEmptyStr
     password: SecretStr
@@ -144,8 +133,6 @@ class EphemeralEnvHandle(FrozenModel):
     already-destroyed env, so a test that destroys the env itself does
     not double-destroy).
     """
-
-    model_config = ConfigDict(frozen=True, extra="forbid", arbitrary_types_allowed=False)
 
     name: DevEnvName = Field(description="The env name the orchestrator-side deploy minted.")
     connector_url: AnyUrl
