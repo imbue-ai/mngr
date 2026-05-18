@@ -42,7 +42,6 @@ from uuid import uuid4
 import click
 import httpx
 from loguru import logger
-from pydantic import ConfigDict
 from pydantic import Field
 from pydantic import SecretStr
 
@@ -112,8 +111,6 @@ class LedgerEntry(FrozenModel):
     Readers fold all rows for a given ``name`` and pick the latest by
     file order to determine current status.
     """
-
-    model_config = ConfigDict(frozen=True, extra="forbid", arbitrary_types_allowed=False)
 
     kind: LedgerKind
     name: NonEmptyStr = Field(description="Resource-specific identifier (env name, branch name, mail.tm account id).")
