@@ -43,7 +43,7 @@ def test_interrupt_agents_calls_stop_then_start_on_host(
 ) -> None:
     """interrupt_agents must drive host.stop_agents followed by host.start_agents.
 
-    This is the core contract of the new interrupt semantics: kill the agent
+    This is the core contract of the interrupt semantics: kill the agent
     process so any in-flight work and background tasks are gone, then restart
     the agent so it resumes from its saved state.
     """
