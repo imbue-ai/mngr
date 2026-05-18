@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from imbue.mngr.e2e.conftest import MinimalInstallEnv
+from imbue.mngr.conftest import MinimalInstallEnv
 
 
 @pytest.mark.release
