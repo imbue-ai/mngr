@@ -1,14 +1,10 @@
 #!/usr/bin/env bash
 # Common transcript converter for gemini agents.
 #
-# Watches gemini's session JSONL files under
-# $GEMINI_CONFIG_DIR/tmp/<dir>/chats/ and converts semantically important
+# Reads the raw gemini transcript at logs/gemini_transcript/events.jsonl
+# (produced by stream_transcript.sh) and converts semantically important
 # events (user input, model output, tool calls, tool results) into a common,
 # agent-agnostic format at events/gemini/common_transcript/events.jsonl.
-#
-# Sessions are filtered to those whose .project_root file matches the agent's
-# work directory, so multiple gemini agents on the same host produce disjoint
-# transcripts.
 #
 # Noise like session-start headers and $set lastUpdated bookkeeping is dropped.
 #
@@ -21,14 +17,11 @@
 #
 # Environment:
 #   MNGR_AGENT_STATE_DIR  - agent state directory (contains events/, logs/)
-#   MNGR_AGENT_WORK_DIR   - agent's working directory (used to filter sessions)
-#   GEMINI_CONFIG_DIR     - gemini config directory (default ~/.gemini)
 
 set -euo pipefail
 
 AGENT_DATA_DIR="${MNGR_AGENT_STATE_DIR:?MNGR_AGENT_STATE_DIR must be set}"
-WORK_DIR="${MNGR_AGENT_WORK_DIR:?MNGR_AGENT_WORK_DIR must be set}"
-GEMINI_DIR="${GEMINI_CONFIG_DIR:-$HOME/.gemini}"
+INPUT_FILE="$AGENT_DATA_DIR/logs/gemini_transcript/events.jsonl"
 OUTPUT_FILE="$AGENT_DATA_DIR/events/gemini/common_transcript/events.jsonl"
 POLL_INTERVAL=5
 
@@ -41,19 +34,22 @@ source "$MNGR_AGENT_STATE_DIR/commands/mngr_log.sh"
 
 # Convert new gemini transcript events to the common format.
 #
-# Reads all session files whose .project_root matches the agent's work dir
-# and the set of event_ids already in the output file, then appends any new
-# events whose IDs are not yet present. The ID-based dedup ensures correctness
-# even if a session file is replayed.
+# Reads the raw transcript stream (produced by stream_transcript.sh) and the
+# set of event_ids already in the output file, then appends any new events
+# whose IDs are not yet present. The ID-based dedup ensures correctness even
+# if the input is replayed.
 convert_new_events() {
+    if [ ! -f "$INPUT_FILE" ]; then
+        log_debug "Input file not found: $INPUT_FILE"
+        return
+    fi
+
     local convert_stderr
     convert_stderr=$(mktemp)
     local result
-    result=$(_GEMINI_DIR="$GEMINI_DIR" \
-             _WORK_DIR="$WORK_DIR" \
+    result=$(_INPUT_FILE="$INPUT_FILE" \
              _OUTPUT_FILE="$OUTPUT_FILE" \
              python3 << 'CONVERT_SCRIPT' 2>"$convert_stderr" || true
-import glob
 import json
 import os
 
@@ -100,30 +96,8 @@ def _extract_tool_output(result):
     return "\n".join(parts)
 
 
-def _find_session_dirs(gemini_dir, work_dir):
-    """Find gemini tmp dirs whose .project_root matches the agent's work dir."""
-    tmp_dir = os.path.join(gemini_dir, "tmp")
-    if not os.path.isdir(tmp_dir):
-        return []
-    matching = []
-    for entry in sorted(os.listdir(tmp_dir)):
-        session_dir = os.path.join(tmp_dir, entry)
-        project_root_file = os.path.join(session_dir, ".project_root")
-        if not os.path.isfile(project_root_file):
-            continue
-        try:
-            with open(project_root_file) as f:
-                project_root = f.read().strip()
-        except OSError:
-            continue
-        if project_root == work_dir:
-            matching.append(session_dir)
-    return matching
-
-
 def convert():
-    gemini_dir = os.environ["_GEMINI_DIR"]
-    work_dir = os.environ["_WORK_DIR"]
+    input_file = os.environ["_INPUT_FILE"]
     output_file = os.environ["_OUTPUT_FILE"]
 
     # Collect existing event IDs from the output file for dedup
@@ -139,132 +113,122 @@ def convert():
                 except (json.JSONDecodeError, KeyError):
                     continue
 
-    session_dirs = _find_session_dirs(gemini_dir, work_dir)
-    if not session_dirs:
+    if not os.path.isfile(input_file):
         print("0")
         return
 
     new_events = []
 
-    for session_dir in session_dirs:
-        chats_dir = os.path.join(session_dir, "chats")
-        if not os.path.isdir(chats_dir):
-            continue
-        for session_file in sorted(glob.glob(os.path.join(chats_dir, "session-*.jsonl"))):
-            try:
-                f = open(session_file)
-            except OSError:
+    with open(input_file) as f:
+        for line in f:
+            line = line.strip()
+            if not line:
                 continue
-            with f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
+            try:
+                raw = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+
+            event_type = raw.get("type", "")
+            uuid = raw.get("id", "")
+            timestamp = raw.get("timestamp", "")
+
+            # Skip session header ($set updates, kind=main entries with no id/type)
+            if not uuid or not timestamp:
+                continue
+
+            if event_type == "user":
+                event_id = f"{uuid}-user"
+                if event_id in existing_ids:
+                    continue
+                text = _extract_text(raw.get("content"))
+                if not text:
+                    continue
+                event = {
+                    "timestamp": timestamp,
+                    "type": "user_message",
+                    "event_id": event_id,
+                    "source": "gemini/common_transcript",
+                    "role": "user",
+                    "content": text,
+                    "message_uuid": uuid,
+                }
+                new_events.append((timestamp, event))
+
+            elif event_type == "gemini":
+                text = _extract_text(raw.get("content"))
+                tokens_raw = raw.get("tokens", {})
+                usage = None
+                if isinstance(tokens_raw, dict) and tokens_raw:
+                    usage = {
+                        "input_tokens": tokens_raw.get("input", 0),
+                        "output_tokens": tokens_raw.get("output", 0),
+                        "cache_read_tokens": tokens_raw.get("cached"),
+                        "cache_write_tokens": None,
+                    }
+
+                raw_tool_calls = raw.get("toolCalls", [])
+                if not isinstance(raw_tool_calls, list):
+                    raw_tool_calls = []
+
+                tool_calls = []
+                for tc in raw_tool_calls:
+                    if not isinstance(tc, dict):
                         continue
-                    try:
-                        raw = json.loads(line)
-                    except json.JSONDecodeError:
+                    call_id = tc.get("id", "")
+                    tool_name = tc.get("name", "")
+                    args = tc.get("args", {})
+                    input_preview = json.dumps(args, separators=(",", ":"))
+                    if len(input_preview) > _MAX_INPUT_PREVIEW_LENGTH:
+                        input_preview = input_preview[:_MAX_INPUT_PREVIEW_LENGTH] + "..."
+                    tool_calls.append({
+                        "tool_call_id": call_id,
+                        "tool_name": tool_name,
+                        "input_preview": input_preview,
+                    })
+
+                event_id = f"{uuid}-assistant"
+                if event_id not in existing_ids:
+                    event = {
+                        "timestamp": timestamp,
+                        "type": "assistant_message",
+                        "event_id": event_id,
+                        "source": "gemini/common_transcript",
+                        "role": "assistant",
+                        "model": raw.get("model", "unknown"),
+                        "text": text,
+                        "tool_calls": tool_calls,
+                        "stop_reason": None,
+                        "usage": usage,
+                        "message_uuid": uuid,
+                    }
+                    new_events.append((timestamp, event))
+
+                for tc in raw_tool_calls:
+                    if not isinstance(tc, dict):
                         continue
-
-                    event_type = raw.get("type", "")
-                    uuid = raw.get("id", "")
-                    timestamp = raw.get("timestamp", "")
-
-                    # Skip session header ($set updates, kind=main entries with no id/type)
-                    if not uuid or not timestamp:
+                    call_id = tc.get("id", "")
+                    if not call_id:
                         continue
-
-                    if event_type == "user":
-                        event_id = f"{uuid}-user"
-                        if event_id in existing_ids:
-                            continue
-                        text = _extract_text(raw.get("content"))
-                        if not text:
-                            continue
-                        event = {
-                            "timestamp": timestamp,
-                            "type": "user_message",
-                            "event_id": event_id,
-                            "source": "gemini/common_transcript",
-                            "role": "user",
-                            "content": text,
-                            "message_uuid": uuid,
-                        }
-                        new_events.append((timestamp, event))
-
-                    elif event_type == "gemini":
-                        text = _extract_text(raw.get("content"))
-                        tokens_raw = raw.get("tokens", {})
-                        usage = None
-                        if isinstance(tokens_raw, dict) and tokens_raw:
-                            usage = {
-                                "input_tokens": tokens_raw.get("input", 0),
-                                "output_tokens": tokens_raw.get("output", 0),
-                                "cache_read_tokens": tokens_raw.get("cached"),
-                                "cache_write_tokens": None,
-                            }
-
-                        raw_tool_calls = raw.get("toolCalls", [])
-                        if not isinstance(raw_tool_calls, list):
-                            raw_tool_calls = []
-
-                        tool_calls = []
-                        for tc in raw_tool_calls:
-                            if not isinstance(tc, dict):
-                                continue
-                            call_id = tc.get("id", "")
-                            tool_name = tc.get("name", "")
-                            args = tc.get("args", {})
-                            input_preview = json.dumps(args, separators=(",", ":"))
-                            if len(input_preview) > _MAX_INPUT_PREVIEW_LENGTH:
-                                input_preview = input_preview[:_MAX_INPUT_PREVIEW_LENGTH] + "..."
-                            tool_calls.append({
-                                "tool_call_id": call_id,
-                                "tool_name": tool_name,
-                                "input_preview": input_preview,
-                            })
-
-                        event_id = f"{uuid}-assistant"
-                        if event_id not in existing_ids:
-                            event = {
-                                "timestamp": timestamp,
-                                "type": "assistant_message",
-                                "event_id": event_id,
-                                "source": "gemini/common_transcript",
-                                "role": "assistant",
-                                "model": raw.get("model", "unknown"),
-                                "text": text,
-                                "tool_calls": tool_calls,
-                                "stop_reason": None,
-                                "usage": usage,
-                                "message_uuid": uuid,
-                            }
-                            new_events.append((timestamp, event))
-
-                        for tc in raw_tool_calls:
-                            if not isinstance(tc, dict):
-                                continue
-                            call_id = tc.get("id", "")
-                            if not call_id:
-                                continue
-                            tr_event_id = f"{uuid}-tool_result-{call_id}"
-                            if tr_event_id in existing_ids:
-                                continue
-                            output = _extract_tool_output(tc.get("result"))
-                            if len(output) > _MAX_OUTPUT_LENGTH:
-                                output = output[:_MAX_OUTPUT_LENGTH] + "..."
-                            tr_timestamp = tc.get("timestamp", timestamp)
-                            event = {
-                                "timestamp": tr_timestamp,
-                                "type": "tool_result",
-                                "event_id": tr_event_id,
-                                "source": "gemini/common_transcript",
-                                "tool_call_id": call_id,
-                                "tool_name": tc.get("name", "unknown"),
-                                "output": output,
-                                "is_error": tc.get("status", "success") != "success",
-                                "message_uuid": uuid,
-                            }
-                            new_events.append((tr_timestamp, event))
+                    tr_event_id = f"{uuid}-tool_result-{call_id}"
+                    if tr_event_id in existing_ids:
+                        continue
+                    output = _extract_tool_output(tc.get("result"))
+                    if len(output) > _MAX_OUTPUT_LENGTH:
+                        output = output[:_MAX_OUTPUT_LENGTH] + "..."
+                    tr_timestamp = tc.get("timestamp", timestamp)
+                    event = {
+                        "timestamp": tr_timestamp,
+                        "type": "tool_result",
+                        "event_id": tr_event_id,
+                        "source": "gemini/common_transcript",
+                        "tool_call_id": call_id,
+                        "tool_name": tc.get("name", "unknown"),
+                        "output": output,
+                        "is_error": tc.get("status", "success") != "success",
+                        "message_uuid": uuid,
+                    }
+                    new_events.append((tr_timestamp, event))
 
     if not new_events:
         print("0")
@@ -306,8 +270,7 @@ main() {
 
     log_info "Common transcript converter started"
     log_info "  Agent data dir: $AGENT_DATA_DIR"
-    log_info "  Gemini dir: $GEMINI_DIR"
-    log_info "  Work dir: $WORK_DIR"
+    log_info "  Input: $INPUT_FILE"
     log_info "  Output: $OUTPUT_FILE"
     log_info "  Poll interval: ${POLL_INTERVAL}s"
 

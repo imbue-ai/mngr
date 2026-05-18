@@ -162,23 +162,34 @@ def test_assemble_command_clears_stale_sentinel_before_launching_gemini_with_wat
 def test_assemble_command_clears_stale_sentinel_before_launching_gemini_without_watcher(
     gemini_agent_without_transcript: GeminiAgent,
 ) -> None:
-    """Without the watcher, the rm is the head of the command and chains into ``gemini``."""
+    """Without the common watcher, the raw streamer is the head, then ``rm && gemini``."""
     agent = gemini_agent_without_transcript
     command = str(agent.assemble_command(agent.host, (), command_override=None))
-    assert command == _SENTINEL_RM_THEN_GEMINI, command
+    assert command.endswith(_SENTINEL_RM_THEN_GEMINI), command
 
 
 def test_assemble_command_prepends_transcript_watcher_when_enabled(gemini_agent: GeminiAgent) -> None:
     command = str(gemini_agent.assemble_command(gemini_agent.host, (), command_override=None))
     assert "$MNGR_AGENT_STATE_DIR/commands/common_transcript.sh" in command
-    # Watcher subshell must come FIRST so its trailing ``&`` only terminates
-    # the watcher; the sentinel rm and ``gemini`` then run as a foreground
-    # ``&&`` chain (otherwise ``rm && ( watcher ) & gemini`` would push the
-    # rm into the background where it races gemini's startup).
-    assert command.startswith("( bash $MNGR_AGENT_STATE_DIR/commands/common_transcript.sh ) &")
+    # Raw-streamer subshell must come FIRST (it is required by
+    # HasTranscriptMixin and runs even when the common watcher is off), then
+    # the common-watcher subshell, then the foreground ``rm && gemini``
+    # chain. Background subshells before the rm guarantees ``&`` only
+    # terminates each watcher and not the rm itself.
+    assert command.startswith("( bash $MNGR_AGENT_STATE_DIR/commands/stream_transcript.sh ) &")
+    assert "( bash $MNGR_AGENT_STATE_DIR/commands/common_transcript.sh ) &" in command
 
 
-def test_assemble_command_skips_transcript_watcher_when_disabled(
+def test_assemble_command_always_prepends_raw_streamer(
+    gemini_agent_without_transcript: GeminiAgent,
+) -> None:
+    """The raw streamer is required by HasTranscriptMixin and runs even when the common watcher is off."""
+    agent = gemini_agent_without_transcript
+    command = str(agent.assemble_command(agent.host, (), command_override=None))
+    assert command.startswith("( bash $MNGR_AGENT_STATE_DIR/commands/stream_transcript.sh ) &")
+
+
+def test_assemble_command_skips_common_transcript_watcher_when_disabled(
     gemini_agent_without_transcript: GeminiAgent,
 ) -> None:
     agent = gemini_agent_without_transcript
@@ -245,19 +256,52 @@ def test_get_common_transcript_scripts_returns_common_transcript_sh(gemini_agent
     assert "events/gemini/common_transcript/events.jsonl" in body
 
 
-def test_provision_with_emit_disabled_does_not_write_script(
+def test_get_raw_transcript_scripts_returns_stream_transcript_sh(gemini_agent: GeminiAgent) -> None:
+    """The raw-transcript mixin returns the streamer that tails gemini's session JSONL."""
+    scripts = gemini_agent.get_raw_transcript_scripts()
+    assert "stream_transcript.sh" in scripts
+    body = scripts["stream_transcript.sh"]
+    assert body.startswith("#!/usr/bin/env bash")
+    assert "logs/gemini_transcript/events.jsonl" in body
+
+
+def test_provision_with_emit_disabled_does_not_write_common_script(
     gemini_agent_without_transcript: GeminiAgent,
     seeded_empty_user_gemini_dir: Path,
 ) -> None:
+    """Disabling emit_common_transcript suppresses the common watcher, not the raw streamer."""
     agent = gemini_agent_without_transcript
     _provision(agent)
 
-    # No script written because emit was disabled
-    expected_script = agent._get_agent_dir() / "commands" / "common_transcript.sh"
-    assert not expected_script.exists()
+    expected_common = agent._get_agent_dir() / "commands" / "common_transcript.sh"
+    assert not expected_common.exists()
 
 
-def test_provision_with_emit_enabled_writes_transcript_script(
+def test_provision_always_writes_raw_transcript_streamer(
+    gemini_agent: GeminiAgent, seeded_empty_user_gemini_dir: Path
+) -> None:
+    """The raw streamer is required by HasTranscriptMixin and is provisioned unconditionally."""
+    _provision(gemini_agent)
+
+    expected_streamer = gemini_agent._get_agent_dir() / "commands" / "stream_transcript.sh"
+    assert expected_streamer.exists()
+    assert expected_streamer.read_text().startswith("#!/usr/bin/env bash")
+    assert expected_streamer.stat().st_mode & 0o111
+
+
+def test_provision_writes_raw_transcript_streamer_even_when_emit_disabled(
+    gemini_agent_without_transcript: GeminiAgent,
+    seeded_empty_user_gemini_dir: Path,
+) -> None:
+    """Raw capture is not user-gated -- it must run even when the common converter is off."""
+    agent = gemini_agent_without_transcript
+    _provision(agent)
+
+    expected_streamer = agent._get_agent_dir() / "commands" / "stream_transcript.sh"
+    assert expected_streamer.exists()
+
+
+def test_provision_with_emit_enabled_writes_common_transcript_script(
     gemini_agent: GeminiAgent, seeded_empty_user_gemini_dir: Path
 ) -> None:
     """provision should write common_transcript.sh to the agent's commands/ directory."""

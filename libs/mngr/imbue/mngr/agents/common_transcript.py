@@ -1,13 +1,17 @@
-"""Provisioning helpers for agents that satisfy ``HasCommonTranscriptMixin``.
+"""Provisioning helpers for agents that satisfy the transcript mixins.
 
-Two helpers live here:
+Three helpers live here:
 
 - :func:`provision_scripts_to_commands_dir` is a generic primitive that
   uploads any ``{name: content}`` mapping to ``$MNGR_AGENT_STATE_DIR/commands/``
   in parallel. It is reused by per-agent code to upload non-transcript
   helper scripts (e.g. Claude's ``wait_for_stop_hook.sh``).
+- :func:`provision_raw_transcript_scripts` unconditionally provisions the
+  scripts returned by
+  :meth:`HasTranscriptMixin.get_raw_transcript_scripts`. Raw capture is
+  not user-gated because it is the source of truth for the agent session.
 - :func:`maybe_provision_common_transcript_scripts` is the gated
-  transcript-specific entry point: it reads
+  common-transcript entry point: it reads
   :attr:`HasCommonTranscriptMixin.is_common_transcript_enabled` on the
   agent and either provisions the scripts returned by
   :meth:`HasCommonTranscriptMixin.get_common_transcript_scripts` or does
@@ -28,6 +32,7 @@ from imbue.concurrency_group.concurrency_group import InvalidConcurrencyGroupSta
 from imbue.concurrency_group.thread_utils import ObservableThread
 from imbue.imbue_common.logging import log_span
 from imbue.mngr.interfaces.agent import HasCommonTranscriptMixin
+from imbue.mngr.interfaces.agent import HasTranscriptMixin
 from imbue.mngr.interfaces.host import OnlineHostInterface
 
 
@@ -62,6 +67,23 @@ def provision_scripts_to_commands_dir(
 
     for thread in threads:
         thread.join(60.0)
+
+
+def provision_raw_transcript_scripts(
+    agent: HasTranscriptMixin,
+    host: OnlineHostInterface,
+    agent_state_dir: Path,
+    concurrency_group: ConcurrencyGroup,
+) -> None:
+    """Provision the agent's raw-transcript capture scripts.
+
+    Unconditional: raw capture is the source of truth for the agent's
+    session and is not user-gated. Uploads the scripts returned by
+    :meth:`HasTranscriptMixin.get_raw_transcript_scripts` to
+    ``$MNGR_AGENT_STATE_DIR/commands/`` via
+    :func:`provision_scripts_to_commands_dir`.
+    """
+    provision_scripts_to_commands_dir(host, agent_state_dir, agent.get_raw_transcript_scripts(), concurrency_group)
 
 
 def maybe_provision_common_transcript_scripts(

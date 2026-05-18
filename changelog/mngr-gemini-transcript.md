@@ -8,7 +8,14 @@ produce disjoint transcripts because sessions are filtered by `.project_root`.
 
 Set `emit_common_transcript = false` on a gemini agent type to opt out.
 
-Internally, a new `HasCommonTranscriptMixin` on `AgentInterface` formalises the contract
-that any agent emits its events in this format. `ClaudeAgent` and `GeminiAgent` both
-satisfy it; future agent types get `mngr transcript` support for free by implementing
-`get_common_transcript_scripts` and shipping a per-agent converter.
+The gemini plugin also captures the *raw* gemini session JSONL verbatim into
+`logs/gemini_transcript/events.jsonl`. This preserves every field gemini emits (model
+metadata, internal blocks, etc.) and lives inside the agent state dir, so the transcript
+survives cleanup of gemini's own `~/.gemini/tmp/` working directories.
+
+Internally, a new `HasTranscriptMixin` on `AgentInterface` formalises the
+raw-capture contract; `HasCommonTranscriptMixin` extends it with the (gated) common
+converter on top. `ClaudeAgent` and `GeminiAgent` both satisfy both mixins; future agent
+types get `mngr transcript` support for free by implementing
+`get_raw_transcript_scripts` + `get_common_transcript_scripts` and shipping the matching
+per-agent scripts.

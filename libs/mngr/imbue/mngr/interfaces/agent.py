@@ -458,7 +458,43 @@ class NoPermissionsAgentMixin:
     """
 
 
-class HasCommonTranscriptMixin(ABC):
+class HasTranscriptMixin(ABC):
+    """Mixin for agent types that capture a raw, agent-native transcript.
+
+    Subclasses promise to copy their agent's native session JSONL files
+    (whatever schema the agent uses internally) verbatim into
+    ``$MNGR_AGENT_STATE_DIR/logs/<agent_type>_transcript/events.jsonl``.
+    This raw stream is the source of truth: it preserves every field the
+    agent emits, and it lives inside the agent state dir so it is durable
+    against cleanup of the agent's own working directories.
+
+    Raw transcript scripts are **always provisioned** when an agent type
+    implements this mixin -- there is no user-facing opt-out, because the
+    raw bytes are the only thing that lets ``mngr`` reconstruct the
+    session after the agent's native files have been rotated or removed.
+
+    The agent is responsible for launching the script(s) (typically as a
+    backgrounded child of the tmux session in ``assemble_command``, or via
+    a supervisor it provisions separately).
+
+    Agents that also want the friendlier ``mngr transcript`` output should
+    additionally implement :class:`HasCommonTranscriptMixin`, which adds
+    a (gated) converter layer that maps the raw bytes into the
+    agent-agnostic common schema.
+    """
+
+    @abstractmethod
+    def get_raw_transcript_scripts(self) -> Mapping[str, str]:
+        """Return ``{script_name: contents}`` for raw-transcript capture scripts.
+
+        Scripts are written to ``$MNGR_AGENT_STATE_DIR/commands/`` at mode
+        ``0755`` during provisioning by
+        :func:`imbue.mngr.agents.common_transcript.provision_raw_transcript_scripts`.
+        """
+        ...
+
+
+class HasCommonTranscriptMixin(HasTranscriptMixin):
     """Mixin for agent types that emit a common, agent-agnostic transcript.
 
     Subclasses promise to produce a JSONL transcript at
@@ -469,13 +505,17 @@ class HasCommonTranscriptMixin(ABC):
     any such file regardless of agent type, so any agent that satisfies
     this contract gets ``mngr transcript`` support for free.
 
+    Because the common schema is lossy (truncated previews, dropped
+    metadata), the converter always runs on top of the raw transcript
+    captured by :class:`HasTranscriptMixin`. Subclasses therefore inherit
+    from that mixin and must also implement ``get_raw_transcript_scripts``.
+
     Subclasses implement ``get_common_transcript_scripts`` to return the
-    per-agent converter scripts that watch the agent's native transcript
-    files and write to the common path, and ``is_common_transcript_enabled``
-    to report whether the user has opted in for this particular instance.
-    They are responsible for launching those scripts as part of
-    ``assemble_command`` (typically as a backgrounded child of the tmux
-    session).
+    per-agent converter scripts that read the raw transcript and write to
+    the common path, and ``is_common_transcript_enabled`` to report whether
+    the user has opted in for this particular instance. They are
+    responsible for launching those scripts as part of ``assemble_command``
+    (typically as a backgrounded child of the tmux session).
     """
 
     @property
@@ -496,10 +536,9 @@ class HasCommonTranscriptMixin(ABC):
         """Return ``{script_name: contents}`` for the gated transcript converter scripts.
 
         Only scripts that should be **omitted entirely** when
-        ``is_common_transcript_enabled`` is False belong here. Scripts that
-        the agent needs regardless (e.g. a raw-transcript streamer that
-        also feeds other agent infrastructure) should be provisioned via
-        a separate, agent-specific path.
+        ``is_common_transcript_enabled`` is False belong here. Raw-transcript
+        scripts (always provisioned) belong on
+        :meth:`HasTranscriptMixin.get_raw_transcript_scripts`.
 
         Scripts are written to ``$MNGR_AGENT_STATE_DIR/commands/`` at mode
         ``0755`` during provisioning by
