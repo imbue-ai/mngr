@@ -55,7 +55,6 @@ from imbue.mngr_latchkey.core import LatchkeyError
 from imbue.mngr_latchkey.discovery import LatchkeyDestructionHandler
 from imbue.mngr_latchkey.discovery import LatchkeyDiscoveryHandler
 from imbue.mngr_latchkey.discovery_stream import DiscoveryStreamConsumer
-from imbue.mngr_latchkey.encryption_key import load_or_create_encryption_key
 from imbue.mngr_latchkey.forward_supervisor import is_forward_info_alive
 from imbue.mngr_latchkey.ssh_tunnel import SSHTunnelManager
 from imbue.mngr_latchkey.store import LatchkeyForwardInfo
@@ -195,16 +194,14 @@ def _build_initialized_latchkey(
 ) -> Latchkey:
     """Build a :class:`Latchkey`, run ``initialize()``, translate failures to ``ClickException``.
 
-    Loads (or, on first invocation against this latchkey_directory,
-    mints) a per-directory encryption key so the upstream ``latchkey``
-    CLI's credential store works without the operator having to put
-    ``LATCHKEY_ENCRYPTION_KEY`` in their shell profile. Operator's
-    shell var, if set, still wins -- see
-    :func:`load_or_create_encryption_key`.
+    The per-directory encryption key is loaded lazily by ``Latchkey``
+    itself on every subprocess spawn (see :meth:`Latchkey._load_encryption_key`).
+    ``initialize()`` triggers the first such load via ``latchkey --version``,
+    so a missing-or-corrupt key file surfaces here as a
+    :class:`LatchkeyError` and is translated to ``ClickException`` below.
     """
     directory, binary = _resolve_latchkey_settings(mngr_ctx, cli_directory, cli_binary)
-    encryption_key = load_or_create_encryption_key(directory)
-    latchkey = Latchkey(latchkey_binary=binary, latchkey_directory=directory, encryption_key=encryption_key)
+    latchkey = Latchkey(latchkey_binary=binary, latchkey_directory=directory)
     try:
         latchkey.initialize()
     except LatchkeyError as e:
