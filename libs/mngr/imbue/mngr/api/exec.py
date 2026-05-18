@@ -16,6 +16,7 @@ from imbue.mngr.api.find import ensure_host_started
 from imbue.mngr.api.find import find_all_agents
 from imbue.mngr.api.find import find_one_agent
 from imbue.mngr.api.find import group_agents_by_host
+from imbue.mngr.api.find import resolve_to_started_host_and_running_agent
 from imbue.mngr.api.providers import get_provider_instance
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import HostNotFoundError
@@ -118,11 +119,17 @@ def exec_command_on_agent(
 ) -> ExecResult:
     """Execute a shell command on the host where an agent runs.
 
-    Resolves the agent by :class:`AgentAddress`, optionally starts it if
-    stopped, then executes the command on its host (defaulting to the agent's
-    work_dir).
+    Resolves the agent by :class:`AgentAddress`, optionally starts the host
+    and agent if stopped, then executes the command on its host (defaulting
+    to the agent's work_dir).
     """
-    agent, host = find_one_agent(address, mngr_ctx, is_start_desired=is_start_desired)
+    host_ref, agent_ref = find_one_agent(address, mngr_ctx)
+    agent, host = resolve_to_started_host_and_running_agent(
+        host_ref=host_ref,
+        agent_ref=agent_ref,
+        allow_auto_start=is_start_desired,
+        mngr_ctx=mngr_ctx,
+    )
 
     # Determine working directory: explicit --cwd, or agent's work_dir
     effective_cwd = Path(cwd) if cwd is not None else agent.work_dir

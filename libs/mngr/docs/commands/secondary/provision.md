@@ -6,7 +6,7 @@
 **Synopsis:**
 
 ```text
-mngr [provision|prov] [AGENT] [--agent <AGENT>] [--extra-provision-command <CMD>] [--upload-file <LOCAL:REMOTE>] [--env <KEY=VALUE>] [--env-file <FILE>] [--[no-]restart]
+mngr [provision|prov] [AGENT] [--agent <AGENT>] [--extra-provision-command <CMD>] [--upload-file <LOCAL:REMOTE>] [--env <KEY=VALUE>] [--env-file <FILE>] [--start/--no-start] [--[no-]restart]
 ```
 
 Re-run provisioning on an existing agent [experimental].
@@ -55,6 +55,7 @@ mngr provision [OPTIONS] [AGENT]
 | ---- | ---- | ----------- | ------- |
 | `--bootstrap` | choice (`yes` &#x7C; `warn` &#x7C; `no`) | Auto-install missing required tools: yes, warn (install with warning), or no [default: warn on remote, no on local] [future] | None |
 | `--destroy-on-fail`, `--no-destroy-on-fail` | boolean | Destroy the host if provisioning fails [future] | `False` |
+| `--start`, `--no-start` | boolean | Automatically start the host if offline (the agent does not need to be running) | `True` |
 | `--restart`, `--no-restart` | boolean | Restart agent after provisioning (default: restart). Use --no-restart for non-disruptive changes like installing packages | `True` |
 
 ## Agent Provisioning

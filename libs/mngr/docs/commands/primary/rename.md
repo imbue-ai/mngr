@@ -6,7 +6,7 @@
 **Synopsis:**
 
 ```text
-mngr [rename|mv] <CURRENT> <NEW-NAME> [--dry-run] [--host] [-l KEY=VALUE ...]
+mngr [rename|mv] <CURRENT> <NEW-NAME> [--dry-run] [--start/--no-start] [--host] [-l KEY=VALUE ...]
 ```
 
 Rename an agent or host [experimental].
@@ -37,6 +37,7 @@ mngr rename [OPTIONS] CURRENT NEW-NAME
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
 | `--dry-run` | boolean | Show what would be renamed without actually renaming | `False` |
+| `--start`, `--no-start` | boolean | Automatically start the host if offline (the agent does not need to be running) | `True` |
 | `--host` | boolean | Rename a host instead of an agent [future] | `False` |
 
 ## Labels

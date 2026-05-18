@@ -1062,6 +1062,33 @@ def test_build_package_mode_dockerfile_preserves_env_vars() -> None:
     assert "ENV UV_LINK_MODE=copy" in result
 
 
+def test_build_package_mode_dockerfile_recognizes_post_source_setup_sentinel() -> None:
+    """_build_package_mode_dockerfile treats `RUN bash scripts/post-source-setup.sh` as the
+    install-section end sentinel, matching the current mngr Dockerfile shape."""
+    mngr_dockerfile = (
+        "FROM python:3.12-slim\n"
+        "RUN apt-get update && apt-get install -y git\n"
+        "ENV UV_LINK_MODE=copy\n"
+        "WORKDIR /code/mngr/\n"
+        "COPY . /code/mngr/\n"
+        "RUN bash scripts/post-source-setup.sh\n"
+        'CMD ["sh", "-c", "tail -f /dev/null"]\n'
+    )
+    result = _build_package_mode_dockerfile(mngr_dockerfile)
+
+    # The pip install replacement must land in place of the COPY+script block.
+    assert "uv pip install --system mngr mngr-schedule" in result
+    # The script call itself must be stripped along with the install section.
+    assert "scripts/post-source-setup.sh" not in result
+    # COPY must be stripped.
+    assert "COPY . /code/mngr/" not in result
+    # System deps and ENV before the install section must be preserved.
+    assert "apt-get update" in result
+    assert "ENV UV_LINK_MODE=copy" in result
+    # CMD after the install section must be preserved.
+    assert 'CMD ["sh", "-c", "tail -f /dev/null"]' in result
+
+
 def test_build_package_mode_dockerfile_raises_on_missing_sentinel() -> None:
     """_build_package_mode_dockerfile raises if the install section end sentinel is missing."""
     mngr_dockerfile = (
