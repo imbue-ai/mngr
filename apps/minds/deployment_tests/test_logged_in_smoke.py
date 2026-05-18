@@ -11,7 +11,7 @@ endpoint and the ``verified_user`` fixture's SuperTokens admin
 provisioning are both in place.
 """
 
-from typing import Callable
+from collections.abc import Callable
 
 import pytest
 

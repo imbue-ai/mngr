@@ -11,7 +11,7 @@ workspace-creation driver is wired up and the ``verified_user``
 fixture lands.
 """
 
-from typing import Callable
+from collections.abc import Callable
 
 import pytest
 

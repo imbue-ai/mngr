@@ -19,11 +19,11 @@ orchestrator does not crash hard. The expected invocation is always
 """
 
 import os
+from collections.abc import Callable
 from collections.abc import Generator
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
-from typing import Callable
 from uuid import uuid4
 
 import pytest
