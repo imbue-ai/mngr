@@ -57,10 +57,13 @@ def _try_acquire_restart_lock(host_dir: Path, agent_id: AgentId) -> io.TextIOWra
     lock_file = open(lock_path, "w")
     try:
         fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        return lock_file
     except BlockingIOError:
         lock_file.close()
         return None
+    except BaseException:
+        lock_file.close()
+        raise
+    return lock_file
 
 
 class StartCliOptions(CommonCliOptions):
