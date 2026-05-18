@@ -10,7 +10,6 @@ from typing import Any
 import pluggy
 import pytest
 
-from imbue.concurrency_group.concurrency_group import ConcurrencyExceptionGroup
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.model_update import to_update
 from imbue.mngr import hookimpl
@@ -1441,22 +1440,27 @@ def test_list_agents_batch_continue_mode_records_failing_provider_error(
     assert "nonexistent-backend-xyz" in result.errors[0].message
 
 
-def test_list_agents_abort_mode_propagates_top_level_mngr_error(
+@pytest.mark.allow_warnings(match=r"Error discovering agents for provider")
+def test_list_agents_abort_mode_captures_top_level_mngr_error_into_result(
     temp_mngr_ctx: MngrContext,
 ) -> None:
-    """list_agents with ABORT mode re-raises a top-level MngrError.
+    """list_agents with ABORT mode captures top-level MngrError into result.errors.
 
-    The same unknown-backend configuration triggers an error, but in ABORT
-    mode it must propagate rather than be swallowed.
+    Both ABORT and CONTINUE return a populated ListResult; the caller decides
+    success/failure from `result.errors` and the exit code, not from a raise.
+    The semantic difference between modes is internal (per-provider stop-vs-keep)
+    and lets `mngr list --format json --on-error abort` render a valid partial
+    document with errors populated rather than producing empty stdout.
     """
     failing_ctx = _make_broken_provider_ctx(temp_mngr_ctx)
 
-    with pytest.raises(MngrError, match="nonexistent-backend-xyz"):
-        list_agents(
-            mngr_ctx=failing_ctx,
-            is_streaming=False,
-            error_behavior=ErrorBehavior.ABORT,
-        )
+    result = list_agents(
+        mngr_ctx=failing_ctx,
+        is_streaming=False,
+        error_behavior=ErrorBehavior.ABORT,
+    )
+    assert len(result.errors) == 1
+    assert "nonexistent-backend-xyz" in result.errors[0].message
 
 
 # =============================================================================
@@ -1575,25 +1579,26 @@ def test_list_agents_batch_continue_mode_handles_mismatched_provider_name(
         del _provider_config_registry[_MISMATCHED_BACKEND_NAME]
 
 
-def test_list_agents_batch_abort_mode_raises_for_mismatched_provider_name(
+def test_list_agents_batch_abort_mode_captures_mismatched_provider_name_into_result(
     temp_mngr_ctx: MngrContext,
 ) -> None:
-    """list_agents batch mode propagates the error in ABORT mode.
+    """list_agents batch mode captures the error into result.errors in ABORT mode.
 
-    Same scenario as the CONTINUE test, but with ABORT mode the
-    ProviderInstanceNotFoundError must propagate (wrapped by the
-    ConcurrencyGroupExecutor) rather than be swallowed.
+    Same scenario as the CONTINUE test, but with ABORT mode. Since `mngr list
+    --format json/jsonl --on-error abort` needs a valid (partial) document
+    rather than empty stdout, the orchestrator captures the abort-mode error
+    into result.errors instead of letting it propagate as a raise.
     """
     _backend_registry[_MISMATCHED_BACKEND_NAME] = _MismatchedProviderBackend
     _provider_config_registry[_MISMATCHED_BACKEND_NAME] = ProviderInstanceConfig
     try:
-        with pytest.raises(ConcurrencyExceptionGroup) as exc_info:
-            list_agents(
-                mngr_ctx=temp_mngr_ctx,
-                is_streaming=False,
-                error_behavior=ErrorBehavior.ABORT,
-            )
-        assert exc_info.value.only_exception_is_instance_of(MngrError)
+        result = list_agents(
+            mngr_ctx=temp_mngr_ctx,
+            is_streaming=False,
+            error_behavior=ErrorBehavior.ABORT,
+        )
+        assert len(result.errors) >= 1
+        assert any("nonexistent-provider-xyz" in e.message for e in result.errors)
     finally:
         del _backend_registry[_MISMATCHED_BACKEND_NAME]
         del _provider_config_registry[_MISMATCHED_BACKEND_NAME]
