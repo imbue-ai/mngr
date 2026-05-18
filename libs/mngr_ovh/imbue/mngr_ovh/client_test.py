@@ -6,6 +6,7 @@ from unittest.mock import MagicMock
 import ovh
 import pytest
 from ovh.exceptions import APIError
+from ovh.exceptions import BadParametersError
 from ovh.exceptions import ResourceNotFoundError
 
 from imbue.mngr.errors import MngrError
@@ -21,7 +22,35 @@ from imbue.mngr_vps_docker.primitives import VpsSnapshotId
 def _client_with_call(call_side_effect: Any) -> OvhVpsClient:
     mock_client = MagicMock(spec=ovh.Client)
     mock_client.call = MagicMock(side_effect=call_side_effect)
-    return OvhVpsClient(ovh_client=mock_client, subsidiary="US", task_poll_interval=0.0)
+    return OvhVpsClient(
+        ovh_client=mock_client,
+        subsidiary="US",
+        task_poll_interval=0.0,
+        # Zero retry interval makes the F39 retry tests run in <1s
+        # via dependency injection rather than patching module-level
+        # constants -- the project ratchets forbid runtime attribute
+        # rebinding in tests.
+        set_renew_retry_poll_interval_seconds=0.0,
+        # Default retry budget; the budget-exhausted test overrides
+        # this to a tiny value via a dedicated factory below.
+    )
+
+
+def _client_with_call_and_tiny_retry_budget(call_side_effect: Any) -> OvhVpsClient:
+    """Like :func:`_client_with_call` but with a near-zero retry budget.
+
+    Used by the F39 budget-exhausted test so it can exit quickly when
+    OVH keeps returning ``"subscription is not active yet"``.
+    """
+    mock_client = MagicMock(spec=ovh.Client)
+    mock_client.call = MagicMock(side_effect=call_side_effect)
+    return OvhVpsClient(
+        ovh_client=mock_client,
+        subsidiary="US",
+        task_poll_interval=0.0,
+        set_renew_retry_poll_interval_seconds=0.0,
+        set_renew_retry_timeout_seconds=0.05,
+    )
 
 
 class TestOvhVpsClientErrorMapping:
@@ -389,6 +418,90 @@ class TestOvhVpsClientServiceInfo:
         # automatic / renewalType left as-read; OVH flips them server-side.
         assert body["renew"]["automatic"] is True
         assert body["renewalType"] == "automaticV2012"
+
+    def test_f39_set_renew_at_expiration_retries_on_subscription_not_active_yet(self) -> None:
+        """F39: PUT serviceInfos right after a fresh order 400s with 'subscription not active yet'.
+
+        Verified live on 2026-05-18 during the F3 end-to-end probe:
+        ``set_renew_at_expiration(name, True)`` called immediately
+        after ``order_and_wait_for_vps`` returned failed with this
+        exact 400 message; a 30-second retry succeeded.
+
+        The fix retries the PUT (and only the PUT) when OVH responds
+        with this specific message. This test pins that behavior: the
+        first two PUT attempts return the subscription-not-active 400,
+        the third succeeds. The retry interval is set to 0.0 via
+        ``set_renew_retry_poll_interval_seconds`` on the test client so
+        the test runs in well under a second.
+        """
+        put_attempts = {"n": 0}
+
+        def fake(method: str, path: str, body: Any = None, need_auth: bool = True) -> Any:
+            if method == "GET" and path.endswith("/serviceInfos"):
+                return {
+                    "renew": {"deleteAtExpiration": False, "automatic": True, "period": 1},
+                    "expiration": "2026-06-15",
+                    "renewalType": "automaticV2012",
+                }
+            if method == "PUT" and path.endswith("/serviceInfos"):
+                put_attempts["n"] += 1
+                if put_attempts["n"] <= 2:
+                    raise BadParametersError("Unable to synchronize l1::Service, subscription is not active yet")
+                return None
+            raise AssertionError(f"Unexpected {method} {path}")
+
+        client = _client_with_call(fake)
+        # No exception expected -- retry recovers.
+        client.set_renew_at_expiration("vps-x", delete_at_expiration=True)
+        assert put_attempts["n"] == 3, f"expected 3 PUT attempts, got {put_attempts['n']}"
+
+    def test_f39_set_renew_at_expiration_does_not_retry_on_other_400(self) -> None:
+        """A different 400 propagates immediately -- only the subscription-not-active retry is special.
+
+        Guards against the retry loop swallowing unrelated client
+        errors (a bad request body, a stale serviceName, etc.).
+        """
+        put_attempts = {"n": 0}
+
+        def fake(method: str, path: str, body: Any = None, need_auth: bool = True) -> Any:
+            if method == "GET" and path.endswith("/serviceInfos"):
+                return {
+                    "renew": {"deleteAtExpiration": False, "automatic": True},
+                    "renewalType": "automaticV2012",
+                }
+            if method == "PUT" and path.endswith("/serviceInfos"):
+                put_attempts["n"] += 1
+                raise BadParametersError("Invalid renewalType value: 'banana'")
+            raise AssertionError(f"Unexpected {method} {path}")
+
+        client = _client_with_call(fake)
+        with pytest.raises(VpsApiError, match="Invalid renewalType"):
+            client.set_renew_at_expiration("vps-x", delete_at_expiration=True)
+        # Exactly one PUT attempt -- no retry on the unrelated error.
+        assert put_attempts["n"] == 1, f"expected 1 PUT attempt (no retry), got {put_attempts['n']}"
+
+    def test_f39_set_renew_at_expiration_raises_after_retry_budget_exhausted(self) -> None:
+        """If OVH keeps returning subscription-not-active past the budget, we surface a clear error.
+
+        Better than blocking forever in a ``finally`` cleanup. The
+        operator sees the message and can clean up manually. The tiny
+        retry budget on the test client (50ms) makes this test exit
+        quickly.
+        """
+
+        def fake(method: str, path: str, body: Any = None, need_auth: bool = True) -> Any:
+            if method == "GET" and path.endswith("/serviceInfos"):
+                return {
+                    "renew": {"deleteAtExpiration": False, "automatic": True},
+                    "renewalType": "automaticV2012",
+                }
+            if method == "PUT" and path.endswith("/serviceInfos"):
+                raise BadParametersError("Unable to synchronize l1::Service, subscription is not active yet")
+            raise AssertionError(f"Unexpected {method} {path}")
+
+        client = _client_with_call_and_tiny_retry_budget(fake)
+        with pytest.raises(VpsApiError, match="subscription is not active yet"):
+            client.set_renew_at_expiration("vps-x", delete_at_expiration=True)
 
 
 class TestOvhVpsClientSshKeyShim:

@@ -747,7 +747,38 @@ fresh client + fresh cache. Acceptable for a CLI tool.
 
 ### F39. `set_renew_at_expiration` fails for ~minutes after a fresh order: "Unable to synchronize l1::Service, subscription is not active yet"
 
-**Verdict: CONFIRMED BUG (discovered during live verification of F3).**
+**Verdict: CONFIRMED BUG (discovered during live verification of F3). → FIXED on this branch.**
+
+`OvhVpsClient.set_renew_at_expiration` now wraps the PUT in a retry
+loop that matches OVH's transient ``"subscription is not active
+yet"`` 400 message specifically. Other 400s / 404s / 5xxs propagate
+immediately. The retry uses `poll_for_value` from
+`imbue.mngr.utils.polling` with a 5-minute total budget (default,
+matching live observation that the activation typically propagates
+in ~30 seconds) and a 15-second poll interval; both are injectable
+via new `set_renew_retry_timeout_seconds` and
+`set_renew_retry_poll_interval_seconds` fields on `OvhVpsClient` for
+test ergonomics.
+
+Implementation:
+- New module constant `_SUBSCRIPTION_NOT_ACTIVE_MARKER` documents
+  the OVH-side magic string.
+- New module-level callable `_PutServiceInfosAttempt` (FrozenModel,
+  mirrors `_NeonRequestAttempt` in `neon_db.py`) drives a single
+  poll attempt. Returns `True` on success, `None` to trigger a
+  retry, propagates anything else.
+- `_put_service_infos_with_retry` private method orchestrates the
+  loop and raises with a clear "manual cleanup may be needed"
+  message if the budget expires.
+
+Pinned by three tests in `client_test.py`:
+- `test_f39_set_renew_at_expiration_retries_on_subscription_not_active_yet`
+  -- first two PUT attempts fail, third succeeds.
+- `test_f39_set_renew_at_expiration_does_not_retry_on_other_400`
+  -- a different 400 propagates immediately, no retry.
+- `test_f39_set_renew_at_expiration_raises_after_retry_budget_exhausted`
+  -- timeout produces a clear `VpsApiError` with the retry count
+  + elapsed time in the message.
 
 OVH's billing subsystem takes a few minutes to fully activate a
 freshly-ordered VPS subscription. During that window, `PUT
@@ -808,7 +839,7 @@ this PR; worth a shared-constant module long-term.
 | F1: parse_extra_tags_env after order_and_wait_for_vps | **CONFIRMED BUG → FIXED** | Moved + source-position test |
 | F2: recycle finalize failure silently strands the host | **DESIGN RISK** | Don't discard handle until un-cancel succeeds; or raise on finalize failure |
 | F3: concurrent order race picks wrong serviceName | **DESIGN RISK → FIXED + LIVE-VERIFIED** | Operations-chain correlation + post-hoc plan/region verify + parallel-orders test; verified end-to-end against real OVH-US API |
-| F39 (new): `set_renew_at_expiration` 400s for ~minutes after fresh order | **CONFIRMED BUG** | Retry on `"subscription is not active yet"`; affects `_terminate_orphaned_fresh_order` and leaks fresh-order billing |
+| F39 (new): `set_renew_at_expiration` 400s for ~minutes after fresh order | **CONFIRMED BUG → FIXED** | Retry-on-`"subscription is not active yet"` in `OvhVpsClient.set_renew_at_expiration`; 3 ratchet tests |
 | F4: `set_renew_at_expiration` PUTs whole serviceInfos body | **MINOR** | Send only the fields we mutate |
 | F5: `attach_tags` partial-failure leaves mixed tag state | **DESIGN RISK** | Rollback on partial; or document |
 | F6: `_swap_host_id_tag` brief no-host-id window | **NOT AN ISSUE** | — |
@@ -852,7 +883,7 @@ In rough priority order:
 1. ~~**F1** (parse_extra_tags_env after order)~~ — **FIXED on this branch.**
 2. **F2 / F36** (recycle finalize silently strands the host) — needs a small design tweak (defer handle discard until un-cancel returns) so failed un-cancels can be retried
 3. ~~**F3** (concurrent order race)~~ — **FIXED + LIVE-VERIFIED on this branch.** Operations-chain correlation + post-hoc plan/region verify + parallel-orders regression test. End-to-end verified against the real OVH-US API.
-4. **F39 (new)** (`set_renew_at_expiration` 400s on freshly-ordered VPSes) — discovered during the F3 live verification. Affects `_terminate_orphaned_fresh_order`'s cleanup path -- a `_provision_vps` failure between fresh-order delivery and host-record write currently leaks a month of billing on the just-ordered VPS, because the cleanup hits the "subscription not active yet" race and gives up. Needs retry-on-`"subscription is not active yet"` in `client.set_renew_at_expiration`.
+4. ~~**F39 (new)** (`set_renew_at_expiration` 400s on freshly-ordered VPSes)~~ — **FIXED on this branch.** Retry-on-`"subscription is not active yet"` in `OvhVpsClient.set_renew_at_expiration` (5-min budget, 15s poll interval, both injectable). 3 ratchet tests cover the happy retry, the "other 400 doesn't retry" guard, and the budget-exhausted error path.
 4. **F5** (attach_tags partial failure) — small fix; defends against a future intermittent IAM tag outage
 5. **F9** (wait_for_uncancel 30s no retry) — same family as F2, similar fix
 6. **F13** (connector hardcodes Ed25519) — one-liner, mirrors the OVH-side fix
