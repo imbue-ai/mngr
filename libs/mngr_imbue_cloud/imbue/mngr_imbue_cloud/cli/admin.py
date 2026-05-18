@@ -147,6 +147,22 @@ _SSH_COMMAND_TIMEOUT_SECONDS: Final[int] = 60
 _RSYNC_MANUAL_EXCLUDES: Final[tuple[str, ...]] = (".git", "uv.lock")
 _GITIGNORE_RSYNC_FILTER: Final[str] = ":- .gitignore"
 
+# INSERT statement for a freshly-baked pool host row. The column list MUST
+# stay in sync with the ``pool_hosts`` schema declared in
+# ``apps/remote_service_connector/migrations/*.sql``: any NOT NULL column
+# without a DB-side default has to appear here, otherwise the bake
+# succeeds in the cloud (VPS provisioned, image built, key injected)
+# but the final DB write 500s with a NOT NULL violation -- leaving a
+# stranded VPS with no DB row. ``host_name`` was the first such drift
+# (added to the schema; missed in the INSERT until 2026-05). Tested in
+# ``admin_test.py::test_pool_hosts_insert_has_required_columns``.
+_INSERT_POOL_HOST_SQL: Final[str] = (
+    "INSERT INTO pool_hosts "
+    "(id, vps_address, vps_instance_id, agent_id, host_id, host_name, ssh_port, ssh_user, "
+    "container_ssh_port, status, attributes, created_at) "
+    "VALUES (%s, %s, %s, %s, %s, %s, 22, 'root', %s, 'available', %s::jsonb, NOW())"
+)
+
 
 @click.group(name="admin")
 def admin() -> None:
@@ -523,16 +539,14 @@ def _create_single_pool_host(
         with conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    "INSERT INTO pool_hosts "
-                    "(id, vps_address, vps_instance_id, agent_id, host_id, ssh_port, ssh_user, "
-                    "container_ssh_port, status, attributes, created_at) "
-                    "VALUES (%s, %s, %s, %s, %s, 22, 'root', %s, 'available', %s::jsonb, NOW())",
+                    _INSERT_POOL_HOST_SQL,
                     (
                         str(row_id),
                         vps_address,
                         host_id,
                         agent_id,
                         host_id,
+                        host_name,
                         _CONTAINER_SSH_PORT,
                         _json.dumps(attributes),
                     ),

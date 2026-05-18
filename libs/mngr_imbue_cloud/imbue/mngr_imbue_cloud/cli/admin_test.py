@@ -13,6 +13,7 @@ import pytest
 from click.testing import CliRunner
 
 from imbue.mngr_imbue_cloud.cli.admin import _CONTAINER_SSH_PORT
+from imbue.mngr_imbue_cloud.cli.admin import _INSERT_POOL_HOST_SQL
 from imbue.mngr_imbue_cloud.cli.admin import _ufw_provision_commands
 from imbue.mngr_imbue_cloud.cli.admin import build_extra_tags_env_value
 from imbue.mngr_imbue_cloud.cli.admin import pool
@@ -82,6 +83,38 @@ def test_pool_create_requires_region() -> None:
     )
     assert result.exit_code != 0
     assert "Missing option" in result.output and "--region" in result.output
+
+
+def test_pool_hosts_insert_has_required_columns() -> None:
+    """The INSERT must include every pool_hosts NOT-NULL column the schema requires.
+
+    Regression test for the 2026-05 ``host_name`` drift: schema migration
+    added ``host_name NOT NULL`` but the bake's INSERT never picked it up,
+    so every successful VPS provision ended in a stranded VPS + a 500 on
+    the final DB write.
+
+    Asserting the literal column list keeps this test cheap (no fake DB)
+    while still catching any future drop of a required column.
+    """
+    required_columns = (
+        "id",
+        "vps_address",
+        "vps_instance_id",
+        "agent_id",
+        "host_id",
+        "host_name",
+        "ssh_port",
+        "ssh_user",
+        "container_ssh_port",
+        "status",
+        "attributes",
+        "created_at",
+    )
+    for column in required_columns:
+        assert column in _INSERT_POOL_HOST_SQL, (
+            f"Pool host INSERT is missing required column {column!r}; this is the same drift "
+            f"class as the host_name regression. SQL: {_INSERT_POOL_HOST_SQL!r}"
+        )
 
 
 def test_pool_create_rejects_malformed_tag(tmp_path: Any) -> None:
