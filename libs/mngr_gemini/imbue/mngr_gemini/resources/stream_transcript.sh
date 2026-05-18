@@ -193,24 +193,39 @@ _emit_new_lines() {
     log_debug "Emitted $new_count line(s) from $session_file (offset $offset -> $file_lines)"
 }
 
+# Load + reconcile a session file's offset, record it in _OFFSET_BY_PATH,
+# and persist any change. The caller is responsible for ensuring
+# _OUTPUT_IDS is populated (via _build_output_id_set) before the call,
+# because _reconcile_offset depends on it.
+#
+# $1: absolute session file path
+# $2: log prefix used to distinguish startup reconciliations from
+#     reconciliations of files that appeared after startup
+_record_session_offset() {
+    local session_file="$1"
+    local log_prefix="$2"
+
+    local stored
+    stored=$(_load_stored_offset "$session_file")
+    local reconciled
+    reconciled=$(_reconcile_offset "$session_file")
+    local effective="$stored"
+    if [ "$reconciled" -gt "$stored" ]; then
+        effective="$reconciled"
+    fi
+    _OFFSET_BY_PATH[$session_file]=$effective
+    if [ "$effective" != "$stored" ]; then
+        log_info "$log_prefix $session_file: $stored -> $effective"
+        _save_offset "$session_file" "$effective"
+    fi
+}
+
 _initialize() {
     _build_output_id_set
 
     local session_file
     while IFS= read -r session_file; do
-        local stored
-        stored=$(_load_stored_offset "$session_file")
-        local reconciled
-        reconciled=$(_reconcile_offset "$session_file")
-        local effective="$stored"
-        if [ "$reconciled" -gt "$stored" ]; then
-            effective="$reconciled"
-        fi
-        _OFFSET_BY_PATH[$session_file]=$effective
-        if [ "$effective" != "$stored" ]; then
-            log_info "Reconciled offset for $session_file: $stored -> $effective"
-            _save_offset "$session_file" "$effective"
-        fi
+        _record_session_offset "$session_file" "Reconciled offset for"
     done < <(_find_session_files)
 
     log_info "Tracked ${#_OFFSET_BY_PATH[@]} session file(s) at startup"
@@ -229,19 +244,7 @@ _run_one_cycle() {
     for session_file in "${current_files[@]}"; do
         if [ -z "${_OFFSET_BY_PATH[$session_file]+exists}" ]; then
             _build_output_id_set
-            local stored
-            stored=$(_load_stored_offset "$session_file")
-            local reconciled
-            reconciled=$(_reconcile_offset "$session_file")
-            local effective="$stored"
-            if [ "$reconciled" -gt "$stored" ]; then
-                effective="$reconciled"
-            fi
-            _OFFSET_BY_PATH[$session_file]=$effective
-            if [ "$effective" != "$stored" ]; then
-                log_info "Reconciled late-appearing session $session_file: $stored -> $effective"
-                _save_offset "$session_file" "$effective"
-            fi
+            _record_session_offset "$session_file" "Reconciled late-appearing session"
             _OUTPUT_IDS=()
         fi
         _emit_new_lines "$session_file"
