@@ -11,13 +11,14 @@ from imbue.minds.desktop_client.latchkey.permissions import LatchkeyPermissionFl
 from imbue.minds.desktop_client.latchkey.permissions import LatchkeyPermissionGrantHandler
 from imbue.minds.desktop_client.latchkey.permissions import MngrMessageSender
 from imbue.minds.desktop_client.latchkey.services_catalog import ServicePermissionInfo
+from imbue.minds.desktop_client.latchkey.testing import FakeLatchkeyGatewayClient
+from imbue.minds.desktop_client.latchkey.testing import build_fake_gateway_client
 from imbue.minds.desktop_client.request_events import RequestStatus
 from imbue.minds.desktop_client.request_events import create_latchkey_permission_request_event
 from imbue.minds.desktop_client.request_events import load_response_events
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
 from imbue.mngr_latchkey.core import Latchkey
-from imbue.mngr_latchkey.store import load_permissions
 from imbue.mngr_latchkey.store import permissions_path_for_host
 
 
@@ -150,6 +151,7 @@ def _build_handler(
         latchkey=latchkey,
         services_catalog={_SLACK_SERVICE_INFO.name: _SLACK_SERVICE_INFO},
         mngr_message_sender=MngrMessageSender(mngr_binary=str(mngr_binary)),
+        gateway_client=build_fake_gateway_client(),
     )
 
 
@@ -201,8 +203,8 @@ def test_grant_with_valid_credentials_skips_auth_browser_and_writes_permissions(
     # Auth browser must not have been invoked.
     assert not (tmp_path / "auth_latchkey_report.jsonl").exists()
     # Permissions file reflects the new rule and is keyed by host (not agent).
-    config = load_permissions(permissions_path_for_host(tmp_path / "mngr_latchkey", host_id))
-    assert config.rules == ({"slack-api": ["slack-read-all", "slack-write-all"]},)
+    on_disk = json.loads(permissions_path_for_host(tmp_path / "mngr_latchkey", host_id).read_text())
+    assert on_disk == {"rules": [{"slack-api": ["slack-read-all", "slack-write-all"]}]}
     # Response event was written and mngr message sent.
     responses = load_response_events(tmp_path)
     assert len(responses) == 1
@@ -273,6 +275,7 @@ def test_grant_with_unknown_credentials_invokes_auth_browser(tmp_path: Path) -> 
         latchkey=Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(binary)),
         services_catalog={_SLACK_SERVICE_INFO.name: _SLACK_SERVICE_INFO},
         mngr_message_sender=MngrMessageSender(mngr_binary=str(mngr_binary)),
+        gateway_client=build_fake_gateway_client(),
     )
 
     result = handler.grant(
@@ -370,8 +373,8 @@ def test_grant_replaces_existing_rule_for_same_scope(tmp_path: Path) -> None:
         granted_permissions=("slack-read-all", "slack-write-all"),
     )
 
-    config = load_permissions(permissions_path_for_host(tmp_path / "mngr_latchkey", host_id))
-    assert config.rules == ({"slack-api": ["slack-read-all", "slack-write-all"]},)
+    on_disk = json.loads(permissions_path_for_host(tmp_path / "mngr_latchkey", host_id).read_text())
+    assert on_disk == {"rules": [{"slack-api": ["slack-read-all", "slack-write-all"]}]}
 
 
 # -- LatchkeyPermissionGrantHandler.grant: NEEDS_MANUAL_CREDENTIALS path --
@@ -533,6 +536,7 @@ def test_grant_re_checks_credentials_on_second_call_after_manual_setup(tmp_path:
         latchkey=Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(binary)),
         services_catalog={_SLACK_SERVICE_INFO.name: _SLACK_SERVICE_INFO},
         mngr_message_sender=MngrMessageSender(mngr_binary=str(mngr_binary)),
+        gateway_client=build_fake_gateway_client(),
     )
     agent_id = AgentId()
     host_id = HostId()
@@ -670,3 +674,107 @@ def test_deny_sends_mngr_message(tmp_path: Path) -> None:
     argv = mngr_recording[0]["argv"]
     assert isinstance(argv, list)
     assert "denied" in argv[2].lower()
+
+
+def test_grant_calls_gateway_client_set_permission_and_delete_request(tmp_path: Path) -> None:
+    """The handler routes the on-disk write through the gateway extension and clears the pending request."""
+    fake_client = FakeLatchkeyGatewayClient()
+    latchkey = _make_latchkey_with_status(tmp_path, credential_status="valid")
+    mngr_binary = _make_recording_binary(tmp_path, "mngr", exit_code=0)
+    handler = LatchkeyPermissionGrantHandler(
+        data_dir=tmp_path,
+        latchkey=latchkey,
+        services_catalog={_SLACK_SERVICE_INFO.name: _SLACK_SERVICE_INFO},
+        mngr_message_sender=MngrMessageSender(mngr_binary=str(mngr_binary)),
+        gateway_client=fake_client,
+    )
+    host_id = HostId()
+
+    result = handler.grant(
+        request_event_id="evt-xyz",
+        agent_id=AgentId(),
+        host_id=host_id,
+        service_info=_SLACK_SERVICE_INFO,
+        granted_permissions=("slack-read-all",),
+    )
+
+    assert result.outcome == GrantOutcome.GRANTED
+    # One set_permission_rule call per scope, pointed at the canonical
+    # per-host file under the plugin data dir.
+    assert len(fake_client.set_calls) == 1
+    call = fake_client.set_calls[0]
+    assert call.rule_key == "slack-api"
+    assert call.granted_permissions == ("slack-read-all",)
+    assert call.permissions_file_path == permissions_path_for_host(tmp_path / "mngr_latchkey", host_id)
+    # The pending request is removed from the gateway queue exactly once.
+    assert fake_client.deleted_request_ids == ("evt-xyz",)
+
+
+def test_deny_calls_gateway_delete_permission_request_only(tmp_path: Path) -> None:
+    """Deny tears down the pending gateway record but never POSTs permissions."""
+    fake_client = FakeLatchkeyGatewayClient()
+    latchkey = _make_latchkey_with_status(tmp_path, credential_status="valid")
+    mngr_binary = _make_recording_binary(tmp_path, "mngr", exit_code=0)
+    handler = LatchkeyPermissionGrantHandler(
+        data_dir=tmp_path,
+        latchkey=latchkey,
+        services_catalog={_SLACK_SERVICE_INFO.name: _SLACK_SERVICE_INFO},
+        mngr_message_sender=MngrMessageSender(mngr_binary=str(mngr_binary)),
+        gateway_client=fake_client,
+    )
+
+    handler.deny(
+        request_event_id="evt-deny",
+        agent_id=AgentId(),
+        service_info=_SLACK_SERVICE_INFO,
+    )
+
+    assert fake_client.set_calls == ()
+    assert fake_client.deleted_request_ids == ("evt-deny",)
+
+
+def test_grant_preserves_existing_schemas_block_in_permissions_file(tmp_path: Path) -> None:
+    """A grant must rewrite ``rules`` only; the agent baseline ``schemas`` block survives.
+
+    The real gateway extension does ``{...file, rules: <new>}``, so the
+    inline schema definitions the per-agent baseline writes for the
+    ``latchkey-self`` access remain intact across user-driven grants.
+    The fake client mirrors that behaviour; this test pins it.
+    """
+    fake_client = FakeLatchkeyGatewayClient()
+    latchkey = _make_latchkey_with_status(tmp_path, credential_status="valid")
+    mngr_binary = _make_recording_binary(tmp_path, "mngr", exit_code=0)
+    handler = LatchkeyPermissionGrantHandler(
+        data_dir=tmp_path,
+        latchkey=latchkey,
+        services_catalog={_SLACK_SERVICE_INFO.name: _SLACK_SERVICE_INFO},
+        mngr_message_sender=MngrMessageSender(mngr_binary=str(mngr_binary)),
+        gateway_client=fake_client,
+    )
+    host_id = HostId()
+    host_path = permissions_path_for_host(tmp_path / "mngr_latchkey", host_id)
+    host_path.parent.mkdir(parents=True, exist_ok=True)
+    baseline = {
+        "rules": [
+            {
+                "latchkey-self": ["latchkey-self-create-permission-request"],
+            },
+        ],
+        "schemas": {
+            "latchkey-self": {"properties": {"domain": {"const": "latchkey-self.invalid"}}},
+        },
+    }
+    host_path.write_text(json.dumps(baseline))
+
+    handler.grant(
+        request_event_id="evt-pres",
+        agent_id=AgentId(),
+        host_id=host_id,
+        service_info=_SLACK_SERVICE_INFO,
+        granted_permissions=("slack-read-all",),
+    )
+
+    on_disk = json.loads(host_path.read_text())
+    assert on_disk["schemas"] == baseline["schemas"]
+    assert {"latchkey-self": baseline["rules"][0]["latchkey-self"]} in on_disk["rules"]
+    assert {"slack-api": ["slack-read-all"]} in on_disk["rules"]

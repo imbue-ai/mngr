@@ -3,21 +3,18 @@
 import resource
 import time
 import traceback
-from datetime import datetime
-from datetime import timezone
 from pathlib import Path
 from typing import assert_never
 
 import click
 from loguru import logger
 
-from imbue.mngr.api.find import ensure_host_started
-from imbue.mngr.api.providers import get_provider_instance
 from imbue.mngr.cli.common_opts import CommonCliOptions
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
 from imbue.mngr.cli.env_utils import resolve_env_vars
 from imbue.mngr.cli.env_utils import resolve_labels
+from imbue.mngr.cli.headless_runner import get_local_host
 from imbue.mngr.cli.help_formatter import CommandHelpMetadata
 from imbue.mngr.cli.help_formatter import add_pager_help_option
 from imbue.mngr.cli.output_helpers import emit_event
@@ -28,37 +25,34 @@ from imbue.mngr.errors import AgentError
 from imbue.mngr.errors import HostError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import UnknownBackendError
-from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.interfaces.host import AgentEnvironmentOptions
 from imbue.mngr.interfaces.host import AgentLabelOptions
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import AgentTypeName
-from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import LOCAL_PROVIDER_NAME
 from imbue.mngr.primitives import OutputFormat
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import SnapshotName
-from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.registry import get_config_class
-from imbue.mngr_tmr.api import collect_tests
-from imbue.mngr_tmr.api import gather_results
-from imbue.mngr_tmr.api import get_base_commit
-from imbue.mngr_tmr.api import launch_all_test_agents
-from imbue.mngr_tmr.api import launch_and_poll_agents
-from imbue.mngr_tmr.api import launch_integrator_agent
-from imbue.mngr_tmr.api import pull_agent_branch
-from imbue.mngr_tmr.api import pull_agent_outputs
-from imbue.mngr_tmr.api import read_integrator_result
-from imbue.mngr_tmr.api import should_pull_changes
-from imbue.mngr_tmr.api import try_list_agents
-from imbue.mngr_tmr.api import wait_for_integrator
-from imbue.mngr_tmr.data_types import IntegratorResult
+from imbue.mngr_tmr.data_types import AgentKind
+from imbue.mngr_tmr.data_types import AgentMetadata
 from imbue.mngr_tmr.data_types import TestAgentInfo
-from imbue.mngr_tmr.data_types import TestMapReduceResult
-from imbue.mngr_tmr.data_types import TestResult
 from imbue.mngr_tmr.data_types import TmrLaunchConfig
+from imbue.mngr_tmr.launching import launch_all_test_agents
+from imbue.mngr_tmr.launching import launch_integrator_agent
+from imbue.mngr_tmr.mngr_cli import try_list_agents
+from imbue.mngr_tmr.orchestration import launch_and_poll_agents
+from imbue.mngr_tmr.orchestration import wait_for_integrator
+from imbue.mngr_tmr.pulling import pull_agent_branch
+from imbue.mngr_tmr.pulling import pull_agent_outputs
+from imbue.mngr_tmr.pulling import pull_integrator_outputs
 from imbue.mngr_tmr.report import generate_html_report
+from imbue.mngr_tmr.report import list_pullable_branches
+from imbue.mngr_tmr.report_upload import maybe_upload_report
+from imbue.mngr_tmr.utils import collect_tests
+from imbue.mngr_tmr.utils import get_base_commit
+from imbue.mngr_tmr.utils import make_run_name
 
 _DEFAULT_TIMEOUT_SECONDS = 3600.0
 _DEFAULT_INTEGRATOR_TIMEOUT_SECONDS = 3600.0
@@ -122,17 +116,17 @@ class TmrCliOptions(CommonCliOptions):
     prompt_suffix: str | None
     use_snapshot: bool
     snapshot: str | None
-    max_parallel: int
+    max_parallel_launch: int
     agents_per_host: int
-    max_agents: int
+    max_parallel_agents: int
     launch_delay: float
     poll_interval: float
     timeout: float
-    result_check_interval: float
     integrator_timeout: float
-    output_html: str | None
+    output_dir: str | None
     source: str | None
-    reintegrate: str | None
+    reintegrate: bool
+    run_name: str | None
     additional_authorized_keys: tuple[str, ...]
 
 
@@ -205,6 +199,19 @@ def _emit_report_path(path: Path, output_opts: OutputOptions) -> None:
             assert_never(unreachable)
 
 
+def _emit_report_url(url: str | None, output_opts: OutputOptions) -> None:
+    """Emit the public URL of the report mirror, if upload occurred."""
+    if url is None:
+        return
+    match output_opts.output_format:
+        case OutputFormat.JSON | OutputFormat.JSONL:
+            emit_event("report_url", {"url": url}, output_opts.output_format)
+        case OutputFormat.HUMAN:
+            write_human_line("Report URL: {}", url)
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
 def _emit_integrator_branch(branch_name: str | None, output_opts: OutputOptions) -> None:
     """Emit the name of the integrator branch, if one was produced."""
     if branch_name is None:
@@ -229,8 +236,10 @@ def _run_reintegrate(
     Discovers agents by the tmr_run_name label, reads their result files,
     re-runs the integrator, and generates a fresh report.
     """
-    assert opts.reintegrate is not None
-    run_name = opts.reintegrate
+    assert opts.reintegrate
+    if not opts.run_name:
+        raise click.UsageError("--reintegrate requires --run-name <NAME> (the run name to reintegrate).")
+    run_name = opts.run_name
     is_human = output_opts.output_format == OutputFormat.HUMAN
     if is_human:
         write_human_line("Reintegrating run: {}", run_name)
@@ -244,7 +253,8 @@ def _run_reintegrate(
     matching_agents = [
         detail
         for detail in list_result.agents
-        if detail.labels.get("tmr_run_name") == run_name and not str(detail.name).startswith("tmr-integrator-")
+        if detail.labels.get("tmr_run_name") == run_name
+        and detail.labels.get("tmr_role") != AgentKind.INTEGRATOR.value
     ]
     if is_human:
         write_human_line("Found {} agent(s) from run {}", len(matching_agents), run_name)
@@ -254,83 +264,55 @@ def _run_reintegrate(
             write_human_line("No agents found for run name '{}'. Nothing to reintegrate.", run_name)
         return
 
-    # Get local host (needed for local agent host mapping and integrator config)
-    local_provider = get_provider_instance(LOCAL_PROVIDER_NAME, mngr_ctx)
-    local_host_ref = local_provider.get_host(HostName(LOCAL_HOST_NAME))
-    source_host, _ = ensure_host_started(local_host_ref, is_start_desired=True, provider=local_provider)
+    # Get local host (needed by the integrator config built later).
+    source_host = get_local_host(mngr_ctx)
 
-    # Build agent infos and hosts from discovered agents
-    agent_infos: list[TestAgentInfo] = []
-    agent_hosts: dict[str, OnlineHostInterface] = {}
-    final_details: dict[str, AgentDetails] = {}
-
-    for detail in matching_agents:
-        agent_id_str = str(detail.id)
-        info = TestAgentInfo(
-            test_node_id=detail.labels.get("test_node_id", str(detail.name)),
-            agent_id=detail.id,
+    # Build per-agent metadata from discovered agents. Output pulling uses
+    # the volume API directly, so the testing agents' hosts do not need to
+    # be online.
+    test_agent_metadata: list[AgentMetadata] = [
+        AgentMetadata(
+            kind=AgentKind.TESTING_AGENT,
             agent_name=detail.name,
-            work_dir=detail.work_dir,
-            created_at=0.0,
+            test_node_id=detail.labels.get("test_node_id", str(detail.name)),
+            branch_name=detail.initial_branch,
         )
-        agent_infos.append(info)
-        final_details[agent_id_str] = detail
-        if detail.host is not None:
-            is_local = detail.host.provider_name == LOCAL_PROVIDER_NAME
-            if is_local:
-                agent_hosts[agent_id_str] = source_host
-            else:
-                try:
-                    host_provider = get_provider_instance(detail.host.provider_name, mngr_ctx)
-                    host_ref = host_provider.get_host(HostName(detail.host.name))
-                    host, _ = ensure_host_started(host_ref, is_start_desired=True, provider=host_provider)
-                    agent_hosts[agent_id_str] = host
-                except (MngrError, HostError, OSError, BaseExceptionGroup) as exc:
-                    logger.warning("Could not connect to host for agent '{}': {}", detail.name, exc)
+        for detail in matching_agents
+    ]
 
     # Compute output directory
-    if opts.output_html is not None:
-        html_path = Path(opts.output_html)
-        output_dir = html_path.parent
-    else:
-        output_dir = Path(f"tmr_{run_name}_reintegrate")
-        html_path = output_dir / "index.html"
+    output_dir = Path(opts.output_dir) if opts.output_dir is not None else Path(f"tmr_{run_name}_reintegrate")
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Pull outputs (artifacts + result.json) for each agent, then gather results
-    cached_results: dict[str, TestResult] = {}
+    # Pull outputs (artifacts + outcome + branch bundle) for each agent via
+    # the volume API. The host does not need to be online for this step.
     cg = mngr_ctx.concurrency_group
-    for info in agent_infos:
-        agent_id_str = str(info.agent_id)
-        if agent_id_str in agent_hosts:
-            result = pull_agent_outputs(info.agent_id, info.agent_name, agent_hosts[agent_id_str], output_dir, cg)
-            if result is not None:
-                cached_results[agent_id_str] = result
+    for detail in matching_agents:
+        pull_agent_outputs(
+            mngr_ctx=mngr_ctx,
+            provider_name=detail.host.provider_name,
+            host_id=detail.host.id,
+            agent_id=detail.id,
+            agent_name=detail.name,
+            branch_name=detail.initial_branch,
+            destination_dir=output_dir,
+            source_dir=source_dir,
+            cg=cg,
+        )
 
     base_commit = get_base_commit(source_dir, cg)
-    is_remote_provider = any(
-        d.host is not None and d.host.provider_name != LOCAL_PROVIDER_NAME for d in matching_agents
-    )
-    results = gather_results(
-        agents=agent_infos,
-        final_details=final_details,
-        timed_out_ids=set(),
-        hosts=agent_hosts,
-        source_dir=source_dir,
-        cg=cg,
-        base_commit=base_commit if is_remote_provider else None,
-        cached_results=cached_results,
-    )
 
     # Write pre-integrator report
-    generate_html_report(
-        results,
-        html_path,
-        test_artifacts_dir=output_dir,
+    report_path = generate_html_report(
+        test_agent_metadata,
+        output_dir,
         run_commands=_build_run_commands(run_name),
     )
+    _emit_report_url(maybe_upload_report(report_path, run_name), output_opts)
 
-    # Run integrator (include tmr_run_name so it can be discovered alongside test agents)
+    # Run integrator (carry the same tmr_run_name so it shows up in this run's
+    # agent list; the tmr_role label is set automatically by _create_tmr_agent
+    # from AgentKind.INTEGRATOR, which the reintegrate filter above looks for).
     env_options = AgentEnvironmentOptions(env_vars=resolve_env_vars((), opts.env))
     run_labels = dict(resolve_labels(opts.label).labels)
     run_labels["tmr_run_name"] = run_name
@@ -340,6 +322,7 @@ def _run_reintegrate(
     integrator_config = TmrLaunchConfig(
         source_dir=source_dir,
         source_host=source_host,
+        base_commit=base_commit,
         agent_type=AgentTypeName(integrator_agent_type),
         provider_name=ProviderInstanceName(opts.integrator_provider),
         env_options=env_options,
@@ -347,36 +330,40 @@ def _run_reintegrate(
         templates=integrator_templates,
         additional_authorized_keys=opts.additional_authorized_keys,
     )
-    integrator_result = _run_integrator_phase(
-        results, integrator_config, mngr_ctx, opts, output_dir, base_commit=base_commit
+    integrator_meta = _run_integrator_phase(
+        test_agent_metadata, integrator_config, mngr_ctx, opts, output_dir, run_name, base_commit=base_commit
     )
-    integrated_branch = integrator_result.branch_name if integrator_result is not None else None
-    generate_html_report(
-        results,
-        html_path,
-        integrator=integrator_result,
-        test_artifacts_dir=output_dir,
+    integrated_branch = integrator_meta.branch_name if integrator_meta is not None else None
+    report_path = generate_html_report(
+        test_agent_metadata,
+        output_dir,
+        integrator_metadata=integrator_meta,
         run_commands=_build_run_commands(run_name, integrated_branch),
     )
-    _emit_report_path(html_path, output_opts)
+    _emit_report_path(output_dir / "index.html", output_opts)
+    _emit_report_url(maybe_upload_report(report_path, run_name), output_opts)
     _emit_integrator_branch(integrated_branch, output_opts)
     _print_run_commands(run_name, output_opts, integrated_branch)
 
 
 def _run_integrator_phase(
-    results: list[TestMapReduceResult],
+    test_agent_metadata: list[AgentMetadata],
     config: TmrLaunchConfig,
     mngr_ctx: MngrContext,
     opts: TmrCliOptions,
     output_dir: Path,
+    run_name: str,
     base_commit: str | None = None,
-) -> IntegratorResult | None:
+) -> AgentMetadata | None:
     """Launch an integrator agent to cherry-pick all fix branches into a linear stack.
 
     All pullable branches are integrated. Test/doc/tutorial commits are squashed
     into one commit; FIX_IMPL commits are kept separate and stacked by priority.
+    Returns the integrator's metadata (kind=INTEGRATOR) with branch_name set
+    when a branch was produced; the report reads the integrator outcome JSON
+    from disk.
     """
-    fix_branches = [r.branch_name for r in results if should_pull_changes(r) and r.branch_name is not None]
+    fix_branches = list_pullable_branches(test_agent_metadata, output_dir)
     if not fix_branches:
         return None
 
@@ -385,6 +372,7 @@ def _run_integrator_phase(
             fix_branches=fix_branches,
             config=config,
             mngr_ctx=mngr_ctx,
+            run_name=run_name,
         )
     except (MngrError, HostError, AgentError, OSError, BaseExceptionGroup) as exc:
         logger.warning("Failed to launch integrator agent: {}", exc)
@@ -393,41 +381,47 @@ def _run_integrator_phase(
     integrator_deadline = time.monotonic() + opts.integrator_timeout
     integrator_branch = wait_for_integrator(
         integrator=integrator,
-        mngr_ctx=mngr_ctx,
         poll_interval_seconds=opts.poll_interval,
         host=integrator_host,
         deadline=integrator_deadline,
     )
 
-    integrator_result: IntegratorResult | None = None
-    if integrator_branch is not None:
-        is_remote = config.provider_name.lower() != LOCAL_PROVIDER_NAME
-        list_result = try_list_agents(mngr_ctx)
-        for agent_detail in list_result.agents if list_result is not None else []:
-            if str(agent_detail.id) == str(integrator.agent_id):
-                integrator_result = read_integrator_result(
-                    agent_detail, integrator_host, integrator_branch, output_dir, mngr_ctx.concurrency_group
-                )
-                # Only pull branches from remote providers; local worktree branches already exist
-                if is_remote:
-                    pull_agent_branch(
-                        agent_detail.id,
-                        agent_detail.name,
-                        agent_detail.initial_branch,
-                        integrator_host,
-                        config.source_dir,
-                        mngr_ctx.concurrency_group,
-                        base_commit=base_commit,
-                    )
-                break
-
-    if integrator_result is None:
-        integrator_result = IntegratorResult(
+    if integrator_branch is None:
+        return AgentMetadata(
+            kind=AgentKind.INTEGRATOR,
             agent_name=integrator.agent_name,
-            branch_name=integrator_branch,
+            branch_name=None,
+            error_summary="Integrator timed out before producing a branch.",
         )
 
-    return integrator_result
+    # Pull the integrator's outputs into output_dir so the reporter can parse
+    # the integrator outcome JSON from disk.
+    pull_integrator_outputs(
+        integrator.agent_id,
+        integrator.agent_name,
+        integrator_host,
+        output_dir,
+        mngr_ctx.concurrency_group,
+    )
+
+    # Only pull branches from remote providers; local worktree branches already exist
+    is_remote = config.provider_name.lower() != LOCAL_PROVIDER_NAME
+    if is_remote:
+        pull_agent_branch(
+            integrator.agent_id,
+            integrator.agent_name,
+            integrator_branch,
+            integrator_host,
+            config.source_dir,
+            mngr_ctx.concurrency_group,
+            base_commit=base_commit,
+        )
+
+    return AgentMetadata(
+        kind=AgentKind.INTEGRATOR,
+        agent_name=integrator.agent_name,
+        branch_name=integrator_branch,
+    )
 
 
 @click.command("tmr", cls=_TmrCommand, context_settings={"ignore_unknown_options": True})
@@ -494,8 +488,8 @@ def _run_integrator_phase(
     help="Use an existing snapshot/image ID for all agents (skips building; implies --use-snapshot behavior)",
 )
 @click.option(
-    "--max-parallel",
-    default=4,
+    "--max-parallel-launch",
+    default=10,
     show_default=True,
     type=int,
     help="Maximum number of agents to launch concurrently (launch-time parallelism)",
@@ -508,7 +502,7 @@ def _run_integrator_phase(
     help="Number of agents sharing each remote host (ignored for local provider)",
 )
 @click.option(
-    "--max-agents",
+    "--max-parallel-agents",
     default=0,
     show_default=True,
     type=int,
@@ -524,7 +518,7 @@ def _run_integrator_phase(
 )
 @click.option(
     "--poll-interval",
-    default=10.0,
+    default=60.0,
     show_default=True,
     type=float,
     help="Seconds between polling cycles when waiting for agents to finish",
@@ -537,13 +531,6 @@ def _run_integrator_phase(
     help="Maximum seconds each agent can run before being stopped (per-agent timeout)",
 )
 @click.option(
-    "--result-check-interval",
-    default=300.0,
-    show_default=True,
-    type=float,
-    help="Seconds between direct result file checks for agents whose status may be stale",
-)
-@click.option(
     "--integrator-timeout",
     default=_DEFAULT_INTEGRATOR_TIMEOUT_SECONDS,
     show_default=True,
@@ -551,10 +538,11 @@ def _run_integrator_phase(
     help="Maximum seconds to wait for the integrator agent to merge fix branches",
 )
 @click.option(
-    "--output-html",
+    "--output-dir",
     default=None,
     type=click.Path(),
-    help="Path for the HTML report [default: tmr_<timestamp>/index.html]",
+    help="Directory for the run's outputs (HTML report at index.html, per-agent artifacts) "
+    "[default: tmr_<timestamp>/]",
 )
 @click.option(
     "--source",
@@ -564,9 +552,17 @@ def _run_integrator_phase(
 )
 @click.option(
     "--reintegrate",
+    is_flag=True,
+    default=False,
+    help="Re-read outcomes from a previous TMR run, re-run the integrator, and regenerate the report. "
+    "Skips test collection and agent launching. The run to reintegrate is identified by --run-name.",
+)
+@click.option(
+    "--run-name",
     default=None,
-    help="Re-read outcomes from a previous TMR run (by run name), re-run integrator, and regenerate report. "
-    "Skips test collection and agent launching.",
+    help="The run name. For new runs, overrides the auto-generated UTC YYYYMMDDHHMMSS timestamp; "
+    "must not collide with prior runs whose agents are still discoverable, or agent creation will fail. "
+    "For --reintegrate, identifies which previous run to reintegrate (required).",
 )
 @click.option(
     "--additional-authorized-host",
@@ -593,7 +589,7 @@ def tmr(ctx: click.Context, **kwargs: object) -> None:
 
     source_dir = Path(opts.source) if opts.source is not None else Path.cwd()
 
-    if opts.reintegrate is not None:
+    if opts.reintegrate:
         _run_reintegrate(opts, mngr_ctx, output_opts, source_dir)
         return
 
@@ -611,29 +607,34 @@ def tmr(ctx: click.Context, **kwargs: object) -> None:
     _emit_test_count(len(test_node_ids), output_opts)
 
     # Step 3: Get the local host for source_location (tests are collected locally)
-    local_provider = get_provider_instance(LOCAL_PROVIDER_NAME, mngr_ctx)
-    local_host_ref = local_provider.get_host(HostName(LOCAL_HOST_NAME))
-    source_host, _ = ensure_host_started(local_host_ref, is_start_desired=True, provider=local_provider)
+    source_host = get_local_host(mngr_ctx)
 
     # Step 4: Build launch config and launch agents
     env_options = AgentEnvironmentOptions(env_vars=resolve_env_vars((), opts.env))
     label_options = resolve_labels(opts.label)
     provided_snapshot = SnapshotName(opts.snapshot) if opts.snapshot is not None else None
 
-    # Step 5: Generate a shared run name prefix for e2e test output.
-    # Agents append _try_1, _try_2 etc. for each test run.
-    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d_%H-%M-%S")
-    e2e_run_prefix = f"{timestamp}_tmr"
-    testing_flags = testing_flags + ("--mngr-e2e-run-name", e2e_run_prefix)
+    # Step 5: Generate the shared run name (YYYYMMDDHHMMSS, UTC) -- or accept
+    # an explicit override via --run-name. Used as the discriminator in agent
+    # / host / branch names, the output directory, the tmr_run_name label, and
+    # the e2e run-name flag (with a 'tmr_' prefix there to give
+    # .test_output/e2e/tmr_{run}_try_N/ provenance vs. ad-hoc local pytest
+    # runs). Agents append _try_1, _try_2 etc. for each test run.
+    run = opts.run_name if opts.run_name else make_run_name()
+    testing_flags = testing_flags + ("--mngr-e2e-run-name", f"tmr_{run}")
 
-    # Add tmr_run_name label to all testing agents for discovery during reintegrate
+    # Add tmr_run_name so reintegrate can find this run's agents. The
+    # tmr_role label is set automatically by _create_tmr_agent based on
+    # the AgentKind passed at each launch site (so the reintegrate filter
+    # can exclude AgentKind.INTEGRATOR.value).
     run_labels = dict(label_options.labels)
-    run_labels["tmr_run_name"] = e2e_run_prefix
+    run_labels["tmr_run_name"] = run
     label_options = AgentLabelOptions(labels=run_labels)
 
     config = TmrLaunchConfig(
         source_dir=source_dir,
         source_host=source_host,
+        base_commit=base_commit,
         agent_type=AgentTypeName(opts.agent_type),
         provider_name=ProviderInstanceName(opts.provider),
         env_options=env_options,
@@ -651,8 +652,7 @@ def tmr(ctx: click.Context, **kwargs: object) -> None:
             source_dir,
             config,
             testing_flags,
-            timestamp,
-            e2e_run_prefix,
+            run,
             base_commit,
             source_host,
             label_options,
@@ -662,7 +662,7 @@ def tmr(ctx: click.Context, **kwargs: object) -> None:
         )
     except KeyboardInterrupt:
         traceback.print_exc()
-        _print_run_commands(e2e_run_prefix, output_opts, None)
+        _print_run_commands(run, output_opts, None)
         raise
 
 
@@ -673,8 +673,7 @@ def _run_tmr_pipeline(
     source_dir: Path,
     config: TmrLaunchConfig,
     testing_flags: tuple[str, ...],
-    timestamp: str,
-    e2e_run_prefix: str,
+    run: str,
     base_commit: str,
     source_host: OnlineHostInterface,
     label_options: AgentLabelOptions,
@@ -682,26 +681,21 @@ def _run_tmr_pipeline(
     provided_snapshot: SnapshotName | None,
     env_options: AgentEnvironmentOptions,
 ) -> None:
-    """Run the main TMR pipeline (launch, poll, gather, integrate, report)."""
-    # Step 6: Compute output directory and html_path before launching
-    if opts.output_html is not None:
-        html_path = Path(opts.output_html)
-        output_dir = html_path.parent
-    else:
-        output_dir = Path(f"tmr_{timestamp}")
-        html_path = output_dir / "index.html"
+    """Run the main TMR pipeline (launch, poll, integrate, report)."""
+    # Step 6: Compute output directory before launching
+    output_dir = Path(opts.output_dir) if opts.output_dir is not None else Path(f"tmr_{run}")
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # Step 7: Launch and poll agents
-    # When max_agents > 0, agents are launched incrementally as earlier ones finish.
+    # When max_parallel_agents > 0, agents are launched incrementally as earlier ones finish.
     # Otherwise, all agents are launched up front and then polled via the same function.
-    use_batched = opts.max_agents > 0 and opts.max_agents < len(test_node_ids)
+    use_batched = opts.max_parallel_agents > 0 and opts.max_parallel_agents < len(test_node_ids)
 
-    launch_failures: list[TestMapReduceResult] = []
+    launch_failures: list[AgentMetadata] = []
 
     if use_batched:
         if opts.use_snapshot and output_opts.output_format == OutputFormat.HUMAN:
-            write_human_line("WARNING: --use-snapshot is not supported with --max-agents and will be ignored")
+            write_human_line("WARNING: --use-snapshot is not supported with --max-parallel-agents and will be ignored")
         agent_infos: list[TestAgentInfo] = []
         agent_hosts: dict[str, OnlineHostInterface] = {}
         remaining_node_ids = test_node_ids
@@ -713,62 +707,52 @@ def _run_tmr_pipeline(
             mngr_ctx=mngr_ctx,
             pytest_flags=testing_flags,
             launch_failures=launch_failures,
+            run_name=run,
             prompt_suffix=opts.prompt_suffix or "",
             use_snapshot=opts.use_snapshot and provided_snapshot is None,
-            max_parallel=opts.max_parallel,
+            max_parallel=opts.max_parallel_launch,
             launch_delay_seconds=opts.launch_delay,
             agents_per_host=opts.agents_per_host,
-            run_name=e2e_run_prefix,
         )
         _emit_agents_launched(len(agent_infos), output_opts)
         remaining_node_ids = []
 
-    is_remote_provider = ProviderInstanceName(opts.provider).lower() != LOCAL_PROVIDER_NAME
-    final_details, timed_out_ids, cached_results = launch_and_poll_agents(
+    test_agent_metadata = launch_and_poll_agents(
         test_node_ids=remaining_node_ids,
         config=config,
         mngr_ctx=mngr_ctx,
         pytest_flags=testing_flags,
         prompt_suffix=opts.prompt_suffix or "",
-        max_agents=opts.max_agents,
+        max_agents=opts.max_parallel_agents,
         agent_timeout_seconds=opts.timeout,
         poll_interval_seconds=opts.poll_interval,
-        result_check_interval_seconds=opts.result_check_interval,
-        report_path=html_path,
+        output_dir=output_dir,
         all_agents=agent_infos,
         all_hosts=agent_hosts,
         launch_failures=launch_failures,
-        artifact_output_dir=output_dir,
+        run_name=run,
         source_dir=source_dir,
-        base_commit=base_commit if is_remote_provider else None,
     )
 
     if use_batched:
         _emit_agents_launched(len(agent_infos), output_opts)
 
-    # Step 8: Gather final results (branches already pulled during polling for
-    # remote providers; gather_results re-attempts for any that were missed)
-    results = gather_results(
-        agents=agent_infos,
-        final_details=final_details,
-        timed_out_ids=timed_out_ids,
-        hosts=agent_hosts,
-        source_dir=source_dir,
-        cg=mngr_ctx.concurrency_group,
-        base_commit=base_commit if is_remote_provider else None,
-        cached_results=cached_results,
-        launch_failures=launch_failures,
-    )
+    # Step 8: Write the post-polling report (pre-integrator). Artifacts and
+    # branch bundles were already downloaded during per-agent finalization;
+    # the reporter parses outcome JSON from disk.
+    report_path = generate_html_report(test_agent_metadata, output_dir)
+    _emit_report_url(maybe_upload_report(report_path, run), output_opts)
 
-    # Step 9: Write report with final results (artifacts already pulled during polling)
-    generate_html_report(results, html_path, test_artifacts_dir=output_dir)
-
-    # Step 10: Build integrator config (defaults to local provider) and integrate
+    # Step 9: Build integrator config (defaults to local provider) and integrate.
+    # The integrator's tmr_role label is set automatically by _create_tmr_agent
+    # (from AgentKind.INTEGRATOR), distinguishing it from testing agents in
+    # `mngr ls` and during reintegrate.
     integrator_agent_type = opts.integrator_type if opts.integrator_type is not None else opts.agent_type
     integrator_templates = opts.integrator_template if opts.integrator_template else opts.agent_template
     integrator_config = TmrLaunchConfig(
         source_dir=source_dir,
         source_host=source_host,
+        base_commit=base_commit,
         agent_type=AgentTypeName(integrator_agent_type),
         provider_name=ProviderInstanceName(opts.integrator_provider),
         env_options=env_options,
@@ -776,28 +760,28 @@ def _run_tmr_pipeline(
         templates=integrator_templates,
         additional_authorized_keys=opts.additional_authorized_keys,
     )
-    integrator_result = _run_integrator_phase(
-        results, integrator_config, mngr_ctx, opts, output_dir, base_commit=base_commit
+    integrator_meta = _run_integrator_phase(
+        test_agent_metadata, integrator_config, mngr_ctx, opts, output_dir, run, base_commit=base_commit
     )
-    integrated_branch = integrator_result.branch_name if integrator_result is not None else None
-    generate_html_report(
-        results,
-        html_path,
-        integrator=integrator_result,
-        test_artifacts_dir=output_dir,
-        run_commands=_build_run_commands(e2e_run_prefix, integrated_branch),
+    integrated_branch = integrator_meta.branch_name if integrator_meta is not None else None
+    report_path = generate_html_report(
+        test_agent_metadata,
+        output_dir,
+        integrator_metadata=integrator_meta,
+        run_commands=_build_run_commands(run, integrated_branch),
     )
-    _emit_report_path(html_path, output_opts)
+    _emit_report_path(output_dir / "index.html", output_opts)
+    _emit_report_url(maybe_upload_report(report_path, run), output_opts)
     _emit_integrator_branch(integrated_branch, output_opts)
 
-    _print_run_commands(e2e_run_prefix, output_opts, integrated_branch)
+    _print_run_commands(run, output_opts, integrated_branch)
 
 
 def _build_run_commands(run_name: str, integrated_branch: str | None = None) -> list[tuple[str, str]]:
     """Build a list of (label, command) pairs for the run."""
     commands = [
         ("List agents from this run", f"mngr ls --include 'labels.tmr_run_name == \"{run_name}\"'"),
-        ("Reintegrate", f"mngr tmr --reintegrate {run_name}"),
+        ("Reintegrate", f"mngr tmr --reintegrate --run-name {run_name}"),
     ]
     if integrated_branch is not None:
         commands.append(("Push integrated branch", f"git push origin {integrated_branch}"))
@@ -850,7 +834,7 @@ Use --use-snapshot with remote providers to build and provision one host first,
 snapshot it, then launch all remaining agents from the snapshot (much faster).
 Use --env to pass environment variables and --label to tag all agents.
 Use --prompt-suffix to append custom instructions to the agent prompt.
-Use --max-agents to limit how many agents run simultaneously (0 = no limit).
+Use --max-parallel-agents to limit how many agents run simultaneously (0 = no limit).
 
 Each agent writes its result to .test_output/testing_agent_outcome.json (in its work directory)
 with a structured JSON containing: changes (list of kind/status/summary), errored flag,
@@ -862,9 +846,9 @@ tests_passing_before/after booleans, and a markdown summary.""",
         ("Use Docker provider", "mngr tmr --provider docker tests/"),
         ("Modal with snapshot", "mngr tmr --provider modal --use-snapshot tests/"),
         ("Pass env vars and labels", "mngr tmr --env API_KEY=xxx --label batch=run1"),
-        ("Limit to 4 concurrent agents", "mngr tmr --max-agents 4 tests/"),
+        ("Limit to 4 concurrent agents", "mngr tmr --max-parallel-agents 4 tests/"),
         ("Custom poll interval", "mngr tmr --poll-interval 30"),
-        ("Specify output location", "mngr tmr --output-html report.html"),
+        ("Specify output location", "mngr tmr --output-dir reports/run-1"),
     ),
     see_also=(
         ("create", "Create a new agent"),

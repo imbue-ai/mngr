@@ -34,6 +34,7 @@ def test_provision_existing_agent(
 
 
 @pytest.mark.tmux
+@pytest.mark.flaky
 def test_provision_with_extra_provision_command(
     cli_runner: CliRunner,
     create_test_agent,

@@ -55,9 +55,13 @@ class VpsDockerProviderConfig(ProviderInstanceConfig):
         default="vc2-1c-1gb",
         description="Default VPS plan (CPU/RAM specification)",
     )
-    default_os_id: int = Field(
+    default_os_id: int | str = Field(
         default=2136,
-        description="Default VPS OS image ID (2136 = Debian 12 x64)",
+        description=(
+            "Default VPS OS image identifier. Integer image ids are typical "
+            "(e.g. 2136 = Debian 12 x64 on Vultr); providers like OVH classic "
+            "VPS use string image names instead."
+        ),
     )
     default_start_args: tuple[str, ...] = Field(
         default=(),

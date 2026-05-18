@@ -29,6 +29,7 @@ from typing import Final
 
 import click
 import uvicorn
+from fastapi import FastAPI
 from loguru import logger
 from pydantic import Field
 
@@ -52,6 +53,8 @@ from imbue.minds.desktop_client.forward_cli import LocalAgentDiscoveryHandler
 from imbue.minds.desktop_client.forward_cli import MindsApiUrlWriter
 from imbue.minds.desktop_client.forward_cli import start_mngr_forward
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
+from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClient
+from imbue.minds.desktop_client.latchkey.permission_requests_consumer import PermissionRequestsConsumer
 from imbue.minds.desktop_client.latchkey.permissions import LatchkeyPermissionGrantHandler
 from imbue.minds.desktop_client.latchkey.permissions import MngrMessageSender
 from imbue.minds.desktop_client.latchkey.services_catalog import LatchkeyServicesCatalogError
@@ -59,6 +62,7 @@ from imbue.minds.desktop_client.latchkey.services_catalog import ServicePermissi
 from imbue.minds.desktop_client.latchkey.services_catalog import load_services_catalog
 from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.notification import NotificationDispatcher
+from imbue.minds.desktop_client.request_events import LatchkeyPermissionRequestEvent
 from imbue.minds.desktop_client.request_events import RequestInbox
 from imbue.minds.desktop_client.request_events import load_response_events
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
@@ -131,6 +135,9 @@ def run(
     latchkey = _build_latchkey(data_directory=data_directory)
     latchkey.initialize()
 
+    root_concurrency_group = ConcurrencyGroup(name="minds-run")
+    root_concurrency_group.__enter__()
+
     # Spawn (or adopt) a detached ``mngr latchkey forward`` supervisor.
     # The supervisor owns the shared latchkey gateway + per-agent reverse
     # tunnels; running it as a detached subprocess (rather than the inline
@@ -140,10 +147,9 @@ def run(
     # terminate it on minds shutdown -- mirroring how minds already leaves
     # the gateway running detached so agents in containers/VMs keep working
     # across desktop-client restarts.
-    _ensure_mngr_latchkey_forward_supervisor(latchkey)
-
-    root_concurrency_group = ConcurrencyGroup(name="minds-run")
-    root_concurrency_group.__enter__()
+    root_concurrency_group.start_new_thread(
+        _ensure_mngr_latchkey_forward_supervisor, args=(latchkey,), name="mngr-latchkey-forward-supervisor-setup"
+    )
 
     # Watch our *grandparent* (typically Electron) rather than our immediate
     # parent (the ``uv run`` wrapper, which doesn't propagate Electron's
@@ -154,11 +160,16 @@ def run(
     # orphan tree running across restarts.
     start_grandparent_death_watcher(root_concurrency_group)
 
+    gateway_client = LatchkeyGatewayClient.from_latchkey(latchkey)
+    # Pre-warm the gateway client in a background thread.
+    root_concurrency_group.start_new_thread(gateway_client.ensure_initialized, name="latchkey-gateway-init")
+
     latchkey_permission_handler = LatchkeyPermissionGrantHandler(
         data_dir=data_directory,
         latchkey=latchkey,
         services_catalog=_try_load_latchkey_services_catalog(),
         mngr_message_sender=MngrMessageSender(),
+        gateway_client=gateway_client,
     )
     imbue_cloud_cli = ImbueCloudCli(parent_concurrency_group=root_concurrency_group)
     telegram_orchestrator = TelegramSetupOrchestrator(paths=paths)
@@ -269,6 +280,16 @@ def run(
         root_concurrency_group=root_concurrency_group,
     )
 
+    # Wire the permission-requests streaming consumer once the FastAPI
+    # app is built so the on_request callback can mutate ``app.state``
+    # directly. The consumer thread runs for the lifetime of
+    # ``root_concurrency_group``.
+    permission_requests_consumer = PermissionRequestsConsumer(
+        gateway_client=gateway_client,
+        on_request=_StreamedPermissionRequestHandler(app=app, backend_resolver=backend_resolver),
+    )
+    permission_requests_consumer.start(root_concurrency_group)
+
     if not no_browser:
         thread = threading.Thread(target=_sleep_then_open, args=(f"http://{host}:{port}/",), daemon=True)
         thread.start()
@@ -277,6 +298,44 @@ def run(
         uvicorn.run(app, host=host, port=port, timeout_graceful_shutdown=1)
     finally:
         consumer.terminate()
+
+
+class _StreamedPermissionRequestHandler(FrozenModel):
+    """Callable that appends a streamed permission request to the app inbox.
+
+    The handler runs on the permission-requests consumer thread (not
+    the FastAPI event loop), so it only does thread-safe work:
+    appending to the immutable :class:`RequestInbox` produces a new
+    instance per mutation and Python attribute assignment is atomic for
+    our purposes here. Same trick the legacy JSONL
+    ``_handle_request_event_callback`` already uses.
+    """
+
+    app: FastAPI = Field(
+        frozen=True,
+        description="Desktop-client FastAPI instance whose ``state.request_inbox`` is mutated on receipt.",
+    )
+    backend_resolver: MngrCliBackendResolver = Field(
+        frozen=True,
+        description="Resolver whose ``notify_change()`` wakes the chrome SSE so the panel updates promptly.",
+    )
+
+    # ``FastAPI`` and ``MngrCliBackendResolver`` are not pydantic
+    # natives; tolerate them with ``arbitrary_types_allowed``.
+    model_config = {"arbitrary_types_allowed": True, "frozen": True, "extra": "forbid"}
+
+    def __call__(self, event: LatchkeyPermissionRequestEvent) -> None:
+        current: RequestInbox | None = self.app.state.request_inbox
+        if current is None:
+            return
+        self.app.state.request_inbox = current.add_request(event)
+        logger.info(
+            "Streamed latchkey permission request for agent {} (service={}, request_id={})",
+            event.agent_id,
+            event.service_name,
+            event.event_id,
+        )
+        self.backend_resolver.notify_change()
 
 
 def _try_load_latchkey_services_catalog() -> dict[str, ServicePermissionInfo]:
@@ -320,7 +379,7 @@ def _sleep_then_open(url: str, delay: float = 1.0) -> None:
 
 
 def _ensure_mngr_latchkey_forward_supervisor(latchkey: Latchkey) -> None:
-    """Spawn (or adopt) the detached ``mngr latchkey forward`` supervisor.
+    """Restart the detached ``mngr latchkey forward`` supervisor on minds startup.
 
     Reuses ``latchkey``'s already-resolved binary + directory paths so
     the supervisor sees exactly the same latchkey state minds itself
@@ -329,6 +388,15 @@ def _ensure_mngr_latchkey_forward_supervisor(latchkey: Latchkey) -> None:
     PATH alongside the bundled ``latchkey`` (the
     :class:`MngrMessageSender` and ``mngr forward`` subprocess paths
     already make the same assumption).
+
+    Uses :meth:`LatchkeyForwardSupervisor.restart` rather than
+    ``ensure_running`` so that minds upgrades always run with a
+    freshly-spawned supervisor: an older supervisor running stale
+    code from a previous minds version is terminated and replaced
+    on every minds start. A running supervisor that minds is happy
+    to adopt does not exist in practice -- the supervisor's lifetime
+    is tied to the gateway it owns, and the gateway is a minds-only
+    consumer today.
 
     Failures are logged as warnings rather than raised: a broken
     supervisor degrades latchkey to "unreachable from inside agents"
@@ -340,7 +408,7 @@ def _ensure_mngr_latchkey_forward_supervisor(latchkey: Latchkey) -> None:
         latchkey_directory=latchkey.latchkey_directory,
     )
     try:
-        info = supervisor.ensure_running()
+        info = supervisor.restart()
     except LatchkeyError as e:
         logger.warning("Could not start detached mngr latchkey forward supervisor: {}", e)
         return

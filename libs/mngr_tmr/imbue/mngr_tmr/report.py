@@ -1,10 +1,17 @@
 """HTML report generation for the test-mapreduce plugin.
 
-Builds a self-contained HTML page with a TOC sidebar, per-section
-tables, and embedded test artifacts.
+The reporter takes a list of ``AgentMetadata`` from orchestration and
+reads each agent's outcome JSON from ``output_dir/<agent_name>/`` on
+demand. Outcome JSON shape is a contract between the agents and this
+module; orchestration does not parse it. Parsed outcomes are cached
+in-process (test-agent outcomes and the integrator outcome are
+immutable once an agent has published them, so caching is safe).
 """
 
 import html
+import json
+from collections.abc import Iterable
+from collections.abc import Sequence
 from pathlib import Path
 
 from loguru import logger
@@ -15,13 +22,27 @@ from imbue.mngr.utils.detail_renderer import ASCIINEMA_PLAYER_CSS
 from imbue.mngr.utils.detail_renderer import ASCIINEMA_PLAYER_JS
 from imbue.mngr.utils.detail_renderer import DETAIL_CSS
 from imbue.mngr.utils.detail_renderer import render_test_detail
+from imbue.mngr_tmr.data_types import AgentKind
+from imbue.mngr_tmr.data_types import AgentMetadata
 from imbue.mngr_tmr.data_types import Change
 from imbue.mngr_tmr.data_types import ChangeKind
 from imbue.mngr_tmr.data_types import ChangeStatus
 from imbue.mngr_tmr.data_types import IntegratorResult
 from imbue.mngr_tmr.data_types import ReportSection
 from imbue.mngr_tmr.data_types import TestMapReduceResult
+from imbue.mngr_tmr.data_types import TestResult
 from imbue.mngr_tmr.data_types import TestRunInfo
+from imbue.mngr_tmr.prompts import INTEGRATOR_OUTCOME_FILENAME
+from imbue.mngr_tmr.prompts import TESTING_AGENT_OUTCOME_FILENAME
+from imbue.mngr_tmr.utils import should_pull_changes_from_outcome as _should_pull_outcome
+
+_EXTRACTED_TEST_OUTPUT_DIR = "test_output"
+
+# Outcome JSON for a given agent is immutable once present. Cache keyed by
+# agent_name so generate_html_report can be called many times during polling
+# without re-parsing.
+_TESTING_OUTCOME_CACHE: dict[AgentName, TestResult] = {}
+_INTEGRATOR_OUTCOME_CACHE: dict[AgentName, IntegratorResult] = {}
 
 _SECTION_ORDER: list[ReportSection] = [
     ReportSection.NON_IMPL_FIXES,
@@ -55,7 +76,158 @@ _md = MarkdownIt()
 _NON_IMPL_CHANGE_KINDS = frozenset({ChangeKind.FIX_TEST, ChangeKind.IMPROVE_TEST, ChangeKind.FIX_TUTORIAL})
 
 
-def report_section_of(result: TestMapReduceResult) -> ReportSection:
+def _parse_outcome_json(raw: str) -> TestResult:
+    """Parse an outcome JSON string into a TestResult.
+
+    Raises json.JSONDecodeError, KeyError, or ValueError on invalid data.
+    """
+    data = json.loads(raw)
+    raw_changes = data.get("changes", {})
+    changes: dict[ChangeKind, Change] = {
+        ChangeKind(kind_str): Change(
+            status=ChangeStatus(entry["status"]),
+            summary_markdown=entry.get("summary_markdown", entry.get("summary", "")),
+        )
+        for kind_str, entry in raw_changes.items()
+    }
+    raw_runs = data.get("test_runs", [])
+    test_runs = tuple(
+        TestRunInfo(
+            run_name=run_entry.get("run_name", ""),
+            description_markdown=run_entry.get("description_markdown", ""),
+        )
+        for run_entry in raw_runs
+    )
+    return TestResult(
+        changes=changes,
+        errored=data.get("errored", False),
+        tests_passing_before=data.get("tests_passing_before"),
+        tests_passing_after=data.get("tests_passing_after"),
+        summary_markdown=data.get("summary_markdown", ""),
+        test_runs=test_runs,
+    )
+
+
+def _outcome_path_for_testing_agent(output_dir: Path, agent_name: AgentName) -> Path:
+    return output_dir / str(agent_name) / _EXTRACTED_TEST_OUTPUT_DIR / TESTING_AGENT_OUTCOME_FILENAME
+
+
+def _outcome_path_for_integrator(output_dir: Path, agent_name: AgentName) -> Path:
+    # The integrator agent still uses rsync, which drops .test_output's contents
+    # directly under <agent_name>/ (no test_output/ subdir).
+    return output_dir / str(agent_name) / INTEGRATOR_OUTCOME_FILENAME
+
+
+def _load_testing_agent_outcome(agent_name: AgentName, output_dir: Path) -> TestResult | None:
+    """Read and cache a testing agent's outcome from the extracted output dir."""
+    cached = _TESTING_OUTCOME_CACHE.get(agent_name)
+    if cached is not None:
+        return cached
+    path = _outcome_path_for_testing_agent(output_dir, agent_name)
+    try:
+        raw = path.read_text()
+    except (FileNotFoundError, OSError):
+        return None
+    try:
+        outcome = _parse_outcome_json(raw)
+    except (json.JSONDecodeError, KeyError, ValueError) as exc:
+        logger.warning("Failed to parse outcome for agent '{}': {}", agent_name, exc)
+        return None
+    _TESTING_OUTCOME_CACHE[agent_name] = outcome
+    return outcome
+
+
+def _load_integrator_outcome(meta: AgentMetadata, output_dir: Path) -> IntegratorResult:
+    """Read and cache the integrator's outcome, returning an empty result on miss."""
+    empty = IntegratorResult(agent_name=meta.agent_name, branch_name=meta.branch_name)
+    cached = _INTEGRATOR_OUTCOME_CACHE.get(meta.agent_name)
+    if cached is not None:
+        return cached
+    path = _outcome_path_for_integrator(output_dir, meta.agent_name)
+    try:
+        data = json.loads(path.read_text())
+    except (FileNotFoundError, OSError, json.JSONDecodeError) as exc:
+        logger.warning("Failed to read integrator outcome for '{}': {}", meta.agent_name, exc)
+        return empty
+    result = IntegratorResult(
+        agent_name=meta.agent_name,
+        squashed_branches=tuple(data.get("squashed_branches", ())),
+        squashed_commit_hash=data.get("squashed_commit_hash"),
+        impl_priority=tuple(data.get("impl_priority", ())),
+        impl_commit_hashes=data.get("impl_commit_hashes", {}),
+        failed=tuple(data.get("failed", ())),
+        branch_name=meta.branch_name,
+    )
+    _INTEGRATOR_OUTCOME_CACHE[meta.agent_name] = result
+    return result
+
+
+def _row_from_metadata(meta: AgentMetadata, outcome: TestResult | None) -> TestMapReduceResult:
+    """Build a renderable row from per-agent metadata + optional parsed outcome."""
+    if meta.error_summary is not None:
+        return TestMapReduceResult(
+            test_node_id=meta.test_node_id or str(meta.agent_name),
+            agent_name=meta.agent_name,
+            errored=True,
+            summary_markdown=meta.error_summary,
+            branch_name=meta.branch_name,
+        )
+    if outcome is None:
+        return TestMapReduceResult(
+            test_node_id=meta.test_node_id or str(meta.agent_name),
+            agent_name=meta.agent_name,
+            summary_markdown="Agent is still running...",
+            branch_name=meta.branch_name,
+        )
+    return TestMapReduceResult(
+        test_node_id=meta.test_node_id or str(meta.agent_name),
+        agent_name=meta.agent_name,
+        changes=outcome.changes,
+        errored=outcome.errored,
+        tests_passing_before=outcome.tests_passing_before,
+        tests_passing_after=outcome.tests_passing_after,
+        summary_markdown=outcome.summary_markdown,
+        branch_name=meta.branch_name,
+        test_runs=outcome.test_runs,
+    )
+
+
+def _build_rows(agents: Sequence[AgentMetadata], output_dir: Path) -> list[TestMapReduceResult]:
+    """Build renderable rows for all testing agents (one per AgentMetadata).
+
+    Skips the integrator -- it has its own panel in the report, not a row.
+    """
+    rows: list[TestMapReduceResult] = []
+    for meta in agents:
+        if meta.kind is not AgentKind.TESTING_AGENT:
+            continue
+        outcome = _load_testing_agent_outcome(meta.agent_name, output_dir) if meta.error_summary is None else None
+        rows.append(_row_from_metadata(meta, outcome))
+    return rows
+
+
+def list_pullable_branches(agents: Iterable[AgentMetadata], output_dir: Path) -> list[str]:
+    """Return branch names for testing agents whose outcomes qualify for integration.
+
+    Reads the outcome JSON for each agent from disk (cached) and applies the
+    ``should_pull_changes`` predicate. Used by the integrator phase to decide
+    which agent branches to cherry-pick.
+    """
+    branches: list[str] = []
+    for meta in agents:
+        if meta.kind is not AgentKind.TESTING_AGENT:
+            continue
+        if meta.error_summary is not None or meta.branch_name is None:
+            continue
+        outcome = _load_testing_agent_outcome(meta.agent_name, output_dir)
+        if outcome is None:
+            continue
+        if _should_pull_outcome(outcome):
+            branches.append(meta.branch_name)
+    return branches
+
+
+def _report_section_of(result: TestMapReduceResult) -> ReportSection:
     """Derive a report section from a result for report grouping/coloring.
 
     ``errored=True`` indicates an infrastructure failure (launch failed,
@@ -79,32 +251,45 @@ def report_section_of(result: TestMapReduceResult) -> ReportSection:
 
 
 def generate_html_report(
-    results: list[TestMapReduceResult],
-    output_path: Path,
-    integrator: IntegratorResult | None = None,
-    test_artifacts_dir: Path | None = None,
+    agents: Sequence[AgentMetadata],
+    output_dir: Path,
+    *,
+    integrator_metadata: AgentMetadata | None = None,
     run_commands: list[tuple[str, str]] | None = None,
 ) -> Path:
-    """Generate an HTML report summarizing test-mapreduce results."""
+    """Generate an HTML report summarizing the run.
+
+    Walks ``agents`` and reads each testing agent's outcome from
+    ``output_dir/<agent_name>/test_output/``; reads the integrator's
+    outcome (if any) from ``output_dir/<integrator_name>/``. Writes the
+    report to ``output_dir/index.html`` and returns that path.
+
+    Side-effect free except for writing the local file. Mirroring the
+    report to s3 is the caller's responsibility (see
+    ``report_upload.maybe_upload_report``); orchestration calls it from
+    ``_emit_report`` so each regeneration triggers an upload.
+    """
+    rows = _build_rows(agents, output_dir)
+    integrator = _load_integrator_outcome(integrator_metadata, output_dir) if integrator_metadata is not None else None
+
     counts: dict[ReportSection, int] = {}
-    for r in results:
-        sec = report_section_of(r)
+    for r in rows:
+        sec = _report_section_of(r)
         counts[sec] = counts.get(sec, 0) + 1
 
     agent_artifact_runs: dict[str, list[tuple[str, str, Path]]] = {}
-    if test_artifacts_dir is not None:
-        for r in results:
-            try:
-                runs = _find_test_artifact_runs(test_artifacts_dir, r.agent_name, r.test_runs)
-            except OSError as exc:
-                if "Too many open files" in str(exc):
-                    logger.warning("FD exhaustion while scanning artifacts for '{}': {}", r.agent_name, exc)
-                raise
-            if runs:
-                agent_artifact_runs[str(r.agent_name)] = runs
+    for r in rows:
+        try:
+            runs = _find_test_artifact_runs(output_dir, r.agent_name, r.test_runs)
+        except OSError as exc:
+            if "Too many open files" in str(exc):
+                logger.warning("FD exhaustion while scanning artifacts for '{}': {}", r.agent_name, exc)
+            raise
+        if runs:
+            agent_artifact_runs[str(r.agent_name)] = runs
 
     toc_html = _build_toc_sidebar(counts)
-    tables_html = _build_grouped_tables(results, agent_artifact_runs, integrator, run_commands)
+    tables_html = _build_grouped_tables(rows, agent_artifact_runs, integrator, run_commands)
     panels_html = _build_artifact_panels(agent_artifact_runs)
 
     has_artifacts = bool(agent_artifact_runs)
@@ -133,7 +318,7 @@ def generate_html_report(
 {toc_html}
   <div class="main-content">
     <h1>Test Map-Reduce Report</h1>
-    <p class="summary">{len(results)} test(s)</p>
+    <p class="summary">{len(rows)} test(s)</p>
 {_build_run_commands_html(run_commands)}
 {tables_html}
   </div>
@@ -142,7 +327,8 @@ def generate_html_report(
 </body>
 </html>
 """
-    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path = output_dir / "index.html"
+    output_dir.mkdir(parents=True, exist_ok=True)
     output_path.write_text(report_html)
     logger.info("HTML report written to {}", output_path)
     return output_path
@@ -202,7 +388,7 @@ def _build_grouped_tables(
     agent_artifact_runs = agent_artifact_runs or {}
     grouped: dict[ReportSection, list[TestMapReduceResult]] = {}
     for r in results:
-        sec = report_section_of(r)
+        sec = _report_section_of(r)
         grouped.setdefault(sec, []).append(r)
 
     sections = ""
@@ -402,8 +588,10 @@ def _find_test_artifact_runs(
 
     run_descriptions: dict[str, str] = {tr.run_name: tr.description_markdown for tr in test_runs}
 
+    # Extracted layout from outputs.tar.gz: <agent_dir>/test_output/e2e/<run>/...
+    test_output_dir = agent_dir / "test_output"
     found: list[tuple[str, str, Path]] = []
-    for candidate_root in [agent_dir / "e2e", agent_dir]:
+    for candidate_root in [test_output_dir / "e2e", test_output_dir, agent_dir / "e2e", agent_dir]:
         if not candidate_root.is_dir():
             continue
         for run_dir in sorted(candidate_root.iterdir()):

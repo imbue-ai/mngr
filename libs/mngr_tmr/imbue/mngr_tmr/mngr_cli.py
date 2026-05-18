@@ -13,6 +13,7 @@ from pydantic import ValidationError
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.subprocess_utils import FinishedProcess
 from imbue.mngr.api.list import ListResult
+from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import MngrError
 from imbue.mngr.interfaces.data_types import AgentDetails
 
@@ -80,7 +81,7 @@ def _parse_list_json(raw_json: str) -> ListResult:
     return ListResult(agents=agents)
 
 
-def list_agents(
+def _list_agents(
     cg: ConcurrencyGroup,
     timeout: float = _LIST_AGENTS_TIMEOUT_SECONDS,
 ) -> ListResult:
@@ -102,3 +103,12 @@ def list_agents(
             )
         )
     return ListResult()
+
+
+def try_list_agents(mngr_ctx: MngrContext) -> ListResult | None:
+    """Call ``mngr list`` and return None on failure or timeout."""
+    try:
+        return _list_agents(mngr_ctx.concurrency_group)
+    except (CliError, OSError) as exc:
+        logger.warning("mngr list failed: {}", exc)
+        return None

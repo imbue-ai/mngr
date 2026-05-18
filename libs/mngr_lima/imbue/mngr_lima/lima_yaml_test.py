@@ -6,6 +6,25 @@ from imbue.mngr_lima.lima_yaml import merge_lima_yaml
 from imbue.mngr_lima.lima_yaml import parse_build_args_for_yaml_path
 from imbue.mngr_lima.lima_yaml import write_lima_yaml
 
+# Independently spelled out (rather than imported from production) so the
+# assertions still document the expected shape of the disabled-port-forwards
+# rules rather than tautologically echoing the helper.
+_EXPECTED_DISABLED_PORT_FORWARDS = [
+    {
+        "guestIPMustBeZero": True,
+        "guestIP": "0.0.0.0",
+        "proto": "any",
+        "guestPortRange": [1, 65535],
+        "ignore": True,
+    },
+    {
+        "guestIP": "127.0.0.1",
+        "proto": "any",
+        "guestPortRange": [1, 65535],
+        "ignore": True,
+    },
+]
+
 
 def test_generate_default_lima_yaml(tmp_path: Path) -> None:
     volume_path = tmp_path / "volume"
@@ -30,6 +49,8 @@ def test_generate_default_lima_yaml(tmp_path: Path) -> None:
     assert len(config["provision"]) == 1
     assert config["provision"][0]["mode"] == "system"
 
+    assert config["portForwards"] == _EXPECTED_DISABLED_PORT_FORWARDS
+
 
 def test_generate_default_lima_yaml_custom_image(tmp_path: Path) -> None:
     volume_path = tmp_path / "volume"
@@ -42,6 +63,43 @@ def test_generate_default_lima_yaml_custom_image(tmp_path: Path) -> None:
     )
 
     assert config["images"][0]["location"] == "https://example.com/custom.qcow2"
+
+
+def test_generate_default_lima_yaml_without_host_key_omits_key_block(tmp_path: Path) -> None:
+    """When the optional keypair parameters are omitted, the provision script
+    must NOT write any /etc/ssh/ssh_host_* file -- the helper's default leaves
+    the guest's own host key untouched."""
+    volume_path = tmp_path / "volume"
+    volume_path.mkdir()
+    config = generate_default_lima_yaml(volume_host_path=volume_path, host_dir="/mngr")
+    script = config["provision"][0]["script"]
+    assert "/etc/ssh/ssh_host_ed25519_key" not in script
+    assert "MNGR_LIMA_HOST_PRIV_KEY" not in script
+
+
+def test_generate_default_lima_yaml_with_host_key_injects_block(tmp_path: Path) -> None:
+    """When a keypair is provided, the provision script must include both the
+    private-key heredoc and the public-key heredoc, remove rsa/ecdsa keys, and
+    trigger an sshd restart via SSH_KEY_CHANGED=1."""
+    volume_path = tmp_path / "volume"
+    volume_path.mkdir()
+    fake_private = "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC...\n-----END OPENSSH PRIVATE KEY-----\n"
+    fake_public = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPv... mngr-lima@host\n"
+    config = generate_default_lima_yaml(
+        volume_host_path=volume_path,
+        host_dir="/mngr",
+        host_private_key_pem=fake_private,
+        host_public_key_openssh=fake_public,
+    )
+    script = config["provision"][0]["script"]
+    # Both heredocs land in the script.
+    assert "BEGIN OPENSSH PRIVATE KEY" in script
+    assert "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPv" in script
+    # The script removes other key types so sshd only presents our ed25519.
+    assert "rm -f /etc/ssh/ssh_host_rsa_key" in script
+    assert "rm -f /etc/ssh/ssh_host_ecdsa_key" in script
+    # And flags the swap so the trailing restart fires.
+    assert "SSH_KEY_CHANGED=1" in script
 
 
 def test_write_lima_yaml(tmp_path: Path) -> None:
@@ -78,6 +136,40 @@ def test_merge_lima_yaml() -> None:
     assert merged["cpus"] == 8
     assert merged["memory"] == "16GiB"
     assert merged["images"] == [{"location": "default.qcow2"}]
+
+
+def test_merge_lima_yaml_extends_provision_and_mounts_replaces_images() -> None:
+    # provision: a user-supplied list must not silently drop mngr's host-key
+    # injection. mngr's entries come first so its provision script runs before
+    # any user script (Lima executes provision[mode=system] in list order).
+    base = {"provision": [{"mode": "system", "script": "MNGR_HOST_KEY_INJECTION"}]}
+    override = {"provision": [{"mode": "system", "script": "apt-get install -y postgres"}]}
+    merged = merge_lima_yaml(base, override)
+    assert len(merged["provision"]) == 2
+    assert merged["provision"][0]["script"] == "MNGR_HOST_KEY_INJECTION"
+    assert merged["provision"][1]["script"] == "apt-get install -y postgres"
+
+    # mounts: extend with base first; mngr's /mngr mount must survive.
+    base = {"mounts": [{"location": "/host/vol", "mountPoint": "/mngr", "writable": True}]}
+    override = {"mounts": [{"location": "/host/data", "mountPoint": "/data", "writable": False}]}
+    merged = merge_lima_yaml(base, override)
+    assert len(merged["mounts"]) == 2
+    assert merged["mounts"][0]["mountPoint"] == "/mngr"
+    assert merged["mounts"][1]["mountPoint"] == "/data"
+
+    # images: a user supplying images: clearly means to override -- still replace.
+    base = {"images": [{"location": "default.qcow2"}]}
+    override = {"images": [{"location": "custom.qcow2"}]}
+    merged = merge_lima_yaml(base, override)
+    assert merged["images"] == [{"location": "custom.qcow2"}]
+
+
+def test_merge_lima_yaml_forces_port_forwards_disabled() -> None:
+    base = {"portForwards": _EXPECTED_DISABLED_PORT_FORWARDS, "cpus": 4}
+    user_override = {"portForwards": [{"guestPort": 8082, "hostPort": 8082}], "cpus": 8}
+    merged = merge_lima_yaml(base, user_override)
+    assert merged["cpus"] == 8
+    assert merged["portForwards"] == _EXPECTED_DISABLED_PORT_FORWARDS
 
 
 def test_parse_build_args_for_yaml_path() -> None:

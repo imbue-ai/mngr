@@ -52,7 +52,7 @@ mngr exec [OPTIONS] [AGENTS]... COMMAND
 
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
-| `--start`, `--no-start` | boolean | Automatically start the host/agent if stopped | `True` |
+| `--start`, `--no-start` | boolean | Automatically start the host if offline (the agent does not need to be running) | `True` |
 
 ## Error Handling
 
