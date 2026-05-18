@@ -138,7 +138,7 @@ def mngr_transcript_lib_sh() -> str:
     Returns the actual library body (not a stub) because the streamer
     scripts exercise the shared primitives end-to-end. Tests write this to
     ``$MNGR_AGENT_STATE_DIR/commands/mngr_transcript_lib.sh`` to mirror the
-    production layout established by ``Host._ensure_mngr_log_sh``.
+    production layout established by ``Host._ensure_shared_shell_libs``.
     """
     return importlib.resources.files(mngr_resources).joinpath("mngr_transcript_lib.sh").read_text()
 

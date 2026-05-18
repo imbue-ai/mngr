@@ -2110,9 +2110,10 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
             env_vars = self._collect_agent_env_vars(agent, options)
             self._write_agent_env_file(agent, env_vars)
 
-            # Ensure mngr_log.sh exists at both host and agent level so that
-            # all bash scripts can source it for logging and timestamp utilities.
-            ensure_log_thread = concurrency_group.start_new_thread(self._ensure_mngr_log_sh, (agent,))
+            # Ensure the shared shell libraries (mngr_log.sh, mngr_transcript_lib.sh)
+            # exist at both host and agent level so that all bash scripts can source
+            # them for logging, timestamp utilities, and raw-transcript primitives.
+            ensure_shared_libs_thread = concurrency_group.start_new_thread(self._ensure_shared_shell_libs, (agent,))
 
             # files need to be there before provisioning--even making this a thread was just a minor optimization:
             agent_file_transfer_thread.join(60.0)
@@ -2152,7 +2153,7 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
                         raise MngrError(f"Extra provision command failed: {cmd}\nstderr: {result.stderr}")
 
             # should be done by now
-            ensure_log_thread.join(60.0)
+            ensure_shared_libs_thread.join(60.0)
 
             # Call post-provisioning on agent
             with log_span("Calling on_after_provisioning for agent {}", agent.name):
@@ -2160,7 +2161,7 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
 
     _SHARED_SHELL_LIB_NAMES: ClassVar[tuple[str, ...]] = ("mngr_log.sh", "mngr_transcript_lib.sh")
 
-    def _ensure_mngr_log_sh(self, agent: AgentInterface) -> None:
+    def _ensure_shared_shell_libs(self, agent: AgentInterface) -> None:
         """Write the shared shell libraries to host-level and agent-level commands dirs.
 
         These libraries are sourced by mngr bash scripts and must exist on both
