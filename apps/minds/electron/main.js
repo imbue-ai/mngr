@@ -997,7 +997,7 @@ async function runChromeSSELoop() {
 //
 // Always resolves (never rejects) so callers can chain navigation
 // regardless of network outcome.
-const _RESTART_REQUEST_TIMEOUT_MS = 10000;
+const RESTART_REQUEST_TIMEOUT_MS = 10000;
 function postRestartWorkspaceServer(agentId) {
   return new Promise((resolve) => {
     if (!agentId || !backendBaseUrl) {
@@ -1023,10 +1023,10 @@ function postRestartWorkspaceServer(agentId) {
       resolve();
     };
     const timer = setTimeout(() => {
-      console.warn(`[restart] restart API timed out for ${agentId} after ${_RESTART_REQUEST_TIMEOUT_MS}ms`);
+      console.warn(`[restart] restart API timed out for ${agentId} after ${RESTART_REQUEST_TIMEOUT_MS}ms`);
       try { req.abort(); } catch (_) { /* ignore */ }
       settle();
-    }, _RESTART_REQUEST_TIMEOUT_MS);
+    }, RESTART_REQUEST_TIMEOUT_MS);
     req.on('response', (response) => {
       response.on('data', () => {});
       response.on('end', () => {
