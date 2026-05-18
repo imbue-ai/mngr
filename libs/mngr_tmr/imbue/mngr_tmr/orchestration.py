@@ -26,6 +26,7 @@ from imbue.mngr_tmr.pulling import finalize_agent
 from imbue.mngr_tmr.pulling import is_agent_outputs_ready
 from imbue.mngr_tmr.pulling import is_integrator_outputs_ready
 from imbue.mngr_tmr.report import generate_html_report
+from imbue.mngr_tmr.report_upload import maybe_upload_report
 
 
 def _metadata_for(info: TestAgentInfo, error_summary: str | None = None) -> AgentMetadata:
@@ -43,6 +44,7 @@ def _emit_report(
     all_agents: list[TestAgentInfo],
     timed_out_ids: set[str],
     launch_failures: list[AgentMetadata],
+    run_name: str,
 ) -> None:
     if output_dir is None:
         return
@@ -52,7 +54,11 @@ def _emit_report(
             metadata.append(_metadata_for(info, error_summary="Agent was stopped because the timeout was reached."))
         else:
             metadata.append(_metadata_for(info))
-    generate_html_report(metadata, output_dir)
+    report_path = generate_html_report(metadata, output_dir)
+    # Best-effort s3 mirror of the just-written report; skipped silently
+    # when AWS credentials are not configured. Logged on success so an
+    # interactive user gets the URL as soon as the first poll tick fires.
+    maybe_upload_report(report_path, run_name)
 
 
 def launch_and_poll_agents(
@@ -68,6 +74,7 @@ def launch_and_poll_agents(
     all_agents: list[TestAgentInfo],
     all_hosts: dict[str, OnlineHostInterface],
     launch_failures: list[AgentMetadata],
+    run_name: str,
     source_dir: Path | None = None,
 ) -> list[AgentMetadata]:
     """Launch agents incrementally and poll until all finish.
@@ -92,6 +99,10 @@ def launch_and_poll_agents(
     pending_ids: set[str] = set()
     agent_id_to_info: dict[str, TestAgentInfo] = {}
     timed_out_ids: set[str] = set()
+    # Used by launch_agents_up_to_limit (the batched-launch path) to
+    # dedupe sanitized test names across the whole run. The non-batched
+    # path doesn't enter that helper, so the set stays empty there.
+    used_suffixes: set[str] = set()
 
     for info in all_agents:
         agent_id_str = str(info.agent_id)
@@ -110,10 +121,12 @@ def launch_and_poll_agents(
         "all_hosts": all_hosts,
         "agent_id_to_info": agent_id_to_info,
         "launch_failures": launch_failures,
+        "run_name": run_name,
+        "used_suffixes": used_suffixes,
     }
 
     launch_agents_up_to_limit(**launch_kwargs)
-    _emit_report(output_dir, all_agents, timed_out_ids, launch_failures)
+    _emit_report(output_dir, all_agents, timed_out_ids, launch_failures, run_name)
 
     while pending_ids or remaining_tests:
         now = time.monotonic()
@@ -157,7 +170,7 @@ def launch_and_poll_agents(
         launch_agents_up_to_limit(**launch_kwargs)
 
         if changed:
-            _emit_report(output_dir, all_agents, timed_out_ids, launch_failures)
+            _emit_report(output_dir, all_agents, timed_out_ids, launch_failures, run_name)
 
         if not pending_ids and not remaining_tests:
             break
