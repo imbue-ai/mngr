@@ -55,6 +55,12 @@ class ImbueCloudProviderBackend(ProviderBackendInterface):
         mngr_ctx: MngrContext,
         is_for_host_creation: bool = False,
     ) -> ProviderInstanceInterface:
+        """Build an imbue_cloud provider instance.
+
+        ``is_for_host_creation`` is ignored: the imbue_cloud backend has no
+        one-time bootstrap resources to gate on (compare the Modal backend,
+        which uses this flag to authorize creating a missing per-user env).
+        """
         del is_for_host_creation
         if not isinstance(config, ImbueCloudProviderConfig):
             raise MngrError(f"Expected ImbueCloudProviderConfig for instance '{name}', got {type(config).__name__}")

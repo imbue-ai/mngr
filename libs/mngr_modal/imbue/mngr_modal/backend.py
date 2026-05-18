@@ -555,7 +555,7 @@ Supported build arguments for the modal provider:
                 provider_name=name,
                 reason=(
                     f"Modal environment {environment_name!r} does not exist yet. "
-                    "It will be created the first time you run `mngr create @.modal`."
+                    f"It will be created the first time you run `mngr create @.{name}`."
                 ),
             ) from e
         except ModalProxyError as e:
