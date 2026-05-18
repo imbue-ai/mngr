@@ -349,6 +349,11 @@ async def _forward_workspace_http(
             _emit_backend_failure(envelope_writer, agent_id, WorkspaceBackendFailureReason.SSE_EOF, None)
             return Response(status_code=502, content="Backend connection lost")
         except httpx.TimeoutException:
+            # A wedged-but-listening backend produces a TimeoutException
+            # rather than ConnectError. Surface this as CONNECT_ERROR so
+            # the minds-side tracker still ticks the agent toward STUCK,
+            # matching the behaviour for a backend that returns a 504.
+            _emit_backend_failure(envelope_writer, agent_id, WorkspaceBackendFailureReason.CONNECT_ERROR, None)
             return Response(status_code=504, content="Backend stream timed out")
 
         async def _stream() -> AsyncGenerator[bytes, None]:
@@ -390,6 +395,11 @@ async def _forward_workspace_http(
         _emit_backend_failure(envelope_writer, agent_id, WorkspaceBackendFailureReason.SSE_EOF, None)
         return Response(status_code=502, content="Backend connection lost")
     except httpx.TimeoutException:
+        # A wedged-but-listening backend produces a TimeoutException rather
+        # than ConnectError. Surface this as CONNECT_ERROR so the minds-side
+        # tracker still ticks the agent toward STUCK, matching the behaviour
+        # for a backend that returns a 504.
+        _emit_backend_failure(envelope_writer, agent_id, WorkspaceBackendFailureReason.CONNECT_ERROR, None)
         return Response(status_code=504, content="Backend timed out")
 
     if backend_response.status_code in _INFRASTRUCTURE_5XX_STATUSES:
