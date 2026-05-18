@@ -270,17 +270,12 @@ def _record_error(
     exception: MngrError,
     on_error: Callable[[ErrorInfo], None] | None,
 ) -> None:
-    """Append an ErrorInfo derived from `exception` to result.errors and fire on_error.
-
-    Promotes every `ProviderError` to a typed `ProviderErrorInfo` so ABORT-mode
-    output keeps the `provider_name` field. Host/agent-context errors fall back
-    to bare `ErrorInfo` because worker layers wrap them as plain `MngrError`
-    before they reach this catch.
-    """
-    if isinstance(exception, ProviderError):
-        error_info: ErrorInfo = ProviderErrorInfo.build_for_provider(exception, exception.provider_name)
-    else:
-        error_info = ErrorInfo.build(exception)
+    """Append an ErrorInfo derived from `exception` to `result.errors` and fire `on_error`."""
+    match exception:
+        case ProviderError(provider_name=name):
+            error_info: ErrorInfo = ProviderErrorInfo.build_for_provider(exception, name)
+        case _:
+            error_info = ErrorInfo.build(exception)
     result.errors.append(error_info)
     if on_error:
         on_error(error_info)
