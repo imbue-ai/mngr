@@ -30,7 +30,6 @@ def test_backend_build_args_help() -> None:
     help_text = VultrProviderBackend.get_build_args_help()
     assert "--vps-region" in help_text
     assert "--vps-plan" in help_text
-    # --vps-os was dropped: OS image lives on the provider config (default_os_id), not in build args.
     assert "default_os_id" in help_text
 
 

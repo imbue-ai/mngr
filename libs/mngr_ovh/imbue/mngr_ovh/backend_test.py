@@ -29,7 +29,6 @@ def test_backend_build_args_help() -> None:
     help_text = OvhProviderBackend.get_build_args_help()
     assert "--vps-datacenter" in help_text
     assert "--vps-plan" in help_text
-    # --vps-os was dropped: OS image lives on the provider config (default_image_name), not in build args.
     assert "default_image_name" in help_text
 
 
