@@ -101,7 +101,7 @@ class ListResult(MutableModel):
     errors: list[ErrorInfo] = Field(default_factory=list, description="Errors encountered while listing")
 
 
-class _ErrorEmitter(MutableModel):
+class _ErrorEmitter(FrozenModel):
     """Provider-facing callable that records a per-resource ErrorInfo.
 
     Appends to result.errors under results_lock and forwards to on_error
