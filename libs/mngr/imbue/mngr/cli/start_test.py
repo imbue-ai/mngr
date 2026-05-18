@@ -22,6 +22,7 @@ def test_start_cli_options_fields() -> None:
         agent_list=(AgentAddress(agent=AgentName("agent3")),),
         connect=False,
         connect_command=None,
+        restart=False,
         host=(),
         output_format="human",
         quiet=False,
@@ -34,6 +35,7 @@ def test_start_cli_options_fields() -> None:
     assert opts.agents == ("agent1", "agent2")
     assert opts.agent_list == (AgentAddress(agent=AgentName("agent3")),)
     assert opts.connect is False
+    assert opts.restart is False
 
 
 def test_start_requires_agent(

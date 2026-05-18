@@ -6,7 +6,7 @@
 **Synopsis:**
 
 ```text
-mngr start [AGENTS...|-] [--agent <AGENT>] [--host <HOST>] [--connect]
+mngr start [AGENTS...|-] [--agent <AGENT>] [--host <HOST>] [--restart] [--connect]
 ```
 
 Start stopped agent(s).
@@ -17,6 +17,11 @@ session.
 
 If multiple agents share a host, they will all be started together when
 the host starts.
+
+Use --restart to stop any running agents first, ensuring a clean start.
+The resume message is not sent after a restart. Concurrent --restart
+calls for the same agent are deduplicated (the second is a no-op while
+the first is in progress).
 
 Use '-' in place of agent names to read them from stdin, one per line.
 
@@ -44,6 +49,7 @@ mngr start [OPTIONS] [AGENTS]...
 
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
+| `--restart`, `--no-restart` | boolean | Stop the agent first if it is already running, ensuring a clean start. Skips the resume message. A second --restart for the same agent is a no-op while the first is in progress. | `False` |
 | `--connect`, `--no-connect` | boolean | Connect to the agent after starting (only valid for single agent) | `False` |
 | `--connect-command` | text | Command to run instead of the builtin connect. MNGR_AGENT_NAME and MNGR_SESSION_NAME env vars are set. | None |
 
@@ -81,6 +87,12 @@ $ mngr start my-agent
 
 ```bash
 $ mngr start agent1 agent2
+```
+
+**Restart a running agent cleanly**
+
+```bash
+$ mngr start my-agent --restart
 ```
 
 **Start and connect**
