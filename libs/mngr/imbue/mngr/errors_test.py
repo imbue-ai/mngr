@@ -1,7 +1,5 @@
 """Tests for error classes."""
 
-import inspect
-
 import click
 import pytest
 from click.testing import CliRunner
@@ -31,6 +29,7 @@ from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ImageReference
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import SnapshotId
+from imbue.mngr.utils.testing import assert_init_first_param_is_provider_name
 from imbue.mngr.utils.testing import walk_concrete_subclasses
 
 _TEST_PROVIDER = ProviderInstanceName("test-provider")
@@ -301,13 +300,4 @@ def test_provider_error_subclass_takes_provider_name_first(subclass: type) -> No
     Enforces the contract declared on ProviderError: handlers that catch the base
     class can rely on e.provider_name being present.
     """
-    params = list(inspect.signature(subclass.__init__).parameters.values())
-    # First parameter is self; second must be provider_name.
-    assert len(params) >= 2, f"{subclass.__name__}.__init__ has no parameters beyond self"
-    assert params[1].name == "provider_name", (
-        f"{subclass.__name__}.__init__ first parameter is {params[1].name!r}, expected 'provider_name'"
-    )
-    assert params[1].annotation is ProviderInstanceName, (
-        f"{subclass.__name__}.__init__ provider_name annotation is {params[1].annotation!r}, "
-        f"expected ProviderInstanceName"
-    )
+    assert_init_first_param_is_provider_name(subclass)

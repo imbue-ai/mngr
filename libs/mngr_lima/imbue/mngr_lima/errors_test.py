@@ -1,5 +1,3 @@
-import inspect
-
 import pytest
 
 from imbue.mngr.errors import HostCreationError
@@ -7,6 +5,7 @@ from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import ProviderError
 from imbue.mngr.errors import ProviderUnavailableError
 from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr.utils.testing import assert_init_first_param_is_provider_name
 from imbue.mngr.utils.testing import walk_concrete_subclasses
 from imbue.mngr_lima.errors import LimaCommandError
 from imbue.mngr_lima.errors import LimaHostCreationError
@@ -63,12 +62,4 @@ def test_lima_provider_error_subclass_takes_provider_name_first(subclass: type) 
     in mngr/errors_test.py, scoped to subclasses defined in this package so
     handlers that catch ProviderError can rely on e.provider_name.
     """
-    params = list(inspect.signature(subclass.__init__).parameters.values())
-    assert len(params) >= 2, f"{subclass.__name__}.__init__ has no parameters beyond self"
-    assert params[1].name == "provider_name", (
-        f"{subclass.__name__}.__init__ first parameter is {params[1].name!r}, expected 'provider_name'"
-    )
-    assert params[1].annotation is ProviderInstanceName, (
-        f"{subclass.__name__}.__init__ provider_name annotation is {params[1].annotation!r}, "
-        f"expected ProviderInstanceName"
-    )
+    assert_init_first_param_is_provider_name(subclass)

@@ -1545,3 +1545,22 @@ def walk_concrete_subclasses(cls: type) -> list[type]:
             found.append(sub)
         found.extend(walk_concrete_subclasses(sub))
     return found
+
+
+def assert_init_first_param_is_provider_name(subclass: type) -> None:
+    """Assert ``subclass.__init__`` takes ``provider_name: ProviderInstanceName`` as the first parameter after ``self``.
+
+    Shared by parametrized invariant tests across provider packages that enforce
+    the ``ProviderError`` contract: every subclass must accept ``provider_name``
+    first so handlers catching the base class can read ``e.provider_name`` without
+    isinstance narrowing.
+    """
+    params = list(inspect.signature(subclass.__init__).parameters.values())
+    assert len(params) >= 2, f"{subclass.__name__}.__init__ has no parameters beyond self"
+    assert params[1].name == "provider_name", (
+        f"{subclass.__name__}.__init__ first parameter is {params[1].name!r}, expected 'provider_name'"
+    )
+    assert params[1].annotation is ProviderInstanceName, (
+        f"{subclass.__name__}.__init__ provider_name annotation is {params[1].annotation!r}, "
+        f"expected ProviderInstanceName"
+    )
