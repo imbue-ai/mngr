@@ -2,17 +2,17 @@
 
 ## Overview
 
-- New operator-invoked orchestrator (`just minds-test-deployment`) that stands up one or more shared dev environments, runs two parallel offload-Modal batches of pytest tests (one against deployed services, one that mints its own ephemeral envs to exercise the deploy path), and reliably cleans up every resource it creates -- both within the run and across runs.
-- Two new pytest marks split the test surface by launch condition: `minds_deployment` for tests that exercise the deploy process itself (ephemeral env per test), `minds_services` for tests that hit a pre-stood-up shared env's deployed Modal apps + Neon + SuperTokens. The existing acceptance / release offload jobs exclude both marks so the normal CI matrix is unaffected.
+- New operator-invoked orchestrator (`just minds-test-deployment`) that stands up one or more shared dev environments, runs both pytest batches (one against deployed services, one that mints its own ephemeral envs to exercise the deploy path), and reliably cleans up every resource it creates -- both within the run and across runs. Initial implementation runs tests locally via `uv run pytest` (two background pytest subprocesses, one per mark) for fast debug-iterate cycles while the suite is being stabilized. The design is offload-portable -- the two-mark split, per-test isolation, env-var secrets contract, and `deployment_envs.json` indirection are all already what a future offload move would consume -- and the move itself is captured as a follow-up below.
+- Two new pytest marks split the test surface by launch condition: `minds_deployment` for tests that exercise the deploy process itself (ephemeral env per test), `minds_services` for tests that hit a pre-stood-up shared env's deployed Modal apps + Neon + SuperTokens. The existing acceptance / release offload jobs (and the local `just test-unit` / `test-integration` / `test-quick` recipes) exclude both marks so neither the normal CI matrix nor a plain local `pytest` run accidentally collects them.
 - Resource lifecycle uses a real per-run ledger (`.minds/ci-test-deploys.jsonl`) for fast iteration cleanup plus a cross-operator name+age sweep (`ci-<YYYYMMDDTHHMMSSZ>` prefix, 4h staleness) as the authoritative safety net. Same shape as the existing `mngr_modal` and Docker container leak-detection patterns.
-- Defers GitHub Actions integration entirely -- the orchestrator is operator-invoked from a workstation that has already run `vault login`, mirroring `minds env deploy` today. The orchestrator threads `VAULT_TOKEN` (and the resolved per-env secrets bundle) into each offload sandbox so in-sandbox `minds env deploy` calls work without further auth.
+- Defers GitHub Actions integration entirely -- the orchestrator is operator-invoked from a workstation that has already run `vault login`, mirroring `minds env deploy` today. The orchestrator sets up the pytest process's env (`VAULT_TOKEN`, the resolved per-env secrets bundle, the mail.tm credentials, etc.) before invoking pytest, so in-process `minds env deploy` calls work without further auth. The same env-var contract applies when this moves to offload later.
 - Ships an initial suite of three `minds_deployment` tests (full create/destroy round-trip, auto-rollback on broken `/healthcheck`, re-deploy advances version) and three `minds_services` tests (realistic signup + email-verify-via-mail.tm + tunnel lifecycle, logged-in smoke across customer-facing routes, real-LLM-call-through-litellm via a local Docker FCT workspace asserting spend lands in Neon). One bigger pool-host bake/lease/agent/release-plus-user-isolation test is explicitly deferred to a follow-up PR. All plumbing is sized so adding more tests later does not materially grow wall time.
 
 ## Expected Behavior
 
 ### Orchestrator invocations
 
-- `just minds-test-deployment` (default run mode): runs the name+age sweep, pushes the FCT test branch, kicks off the `minds_deployment` offload batch immediately, deploys each configured shared env in parallel, kicks off the `minds_services` offload batch once shared envs are healthy, waits on both batches, tears down everything written to this run's ledger entries, then drops those entries from the ledger file (removing the file entirely if it ends up empty). Exits non-zero on any test failure OR any cleanup failure. Total wall time approximates `max(deployment-batch, shared-env-deploy + services-batch)`.
+- `just minds-test-deployment` (default run mode): runs the name+age sweep, resolves the FCT template ref (defaults to the operator's local `~/project/forever-claude-template` path when running locally; pushes a `ci-<timestamp>` branch when explicitly opted in via `--push-fct-branch` so the same flow is exercised that a future offload-friendly invocation will need), creates the per-run mail.tm account, launches the `minds_deployment` pytest run immediately as a background subprocess (`uv run pytest -m minds_deployment ...`), deploys each configured shared env in parallel, launches the `minds_services` pytest run once shared envs are healthy (`uv run pytest -m minds_services ...`), waits on both pytest processes, tears down everything written to this run's ledger entries, then drops those entries from the ledger file (removing the file entirely if it ends up empty). Exits non-zero on any test failure OR any cleanup failure. Total wall time approximates `max(deployment-batch, shared-env-deploy + services-batch)`.
 - `just minds-test-deployment --keep-on-failure`: same flow, but any test failure flips the test's ephemeral-env ledger entry to `status=leaked` so the end-of-run pass skips it. The operator inspects the deployed state directly; the next `--cleanup` invocation or the next-run age sweep reclaims it.
 - `just minds-test-deployment-cleanup`: walks every ledger entry across all prior runs, tears each down (idempotent against already-destroyed resources), removes the ledger file once drained. Independent of any test run.
 - `just minds-test-deployment-up <role>` / `just minds-test-deployment-down`: local iterate mode. `up` deploys the named shared env, writes its URLs + the FCT branch ref to `.minds/iterate-<role>.json`, prints a ready-to-paste `MINDS_DEPLOYMENT_TEST_ENVS_JSON=... uv run pytest ...` invocation, exits. `down` reads the state file and tears the env down (and deletes its FCT branch).
@@ -22,10 +22,10 @@
 
 - After any orchestrator invocation that touches FCT, the operator's `~/project/forever-claude-template` checkout ends on the same branch + commit it started on, with the same set of tracked-modified and untracked files restored exactly as they were. The `ci-<timestamp>` branch exists only on the FCT remote until cleanup (or the age sweep) deletes it. A mid-flight crash leaves the operator's changes recoverable via `git stash list` -- they are never lost.
 
-### Inside offload sandboxes
+### Inside the test process (local pytest now; offload-portable design)
 
-- Each sandbox starts with `test-results/deployment_envs.json` written by the orchestrator into the sandbox project root, containing the shared-env URL map, the FCT branch ref + remote URL, and the run id. Secrets are threaded in as env vars: per-shared-env Neon DSN + SuperTokens admin key, dev-tier Anthropic key, the per-run mail.tm test account credentials (address + JWT) for signup-flow tests, plus `VAULT_TOKEN` / `VAULT_ADDR` / `VAULT_NAMESPACE`. Tests acquire what they need via five fixtures: `shared_env(role=...)`, `fct_template_ref`, `verified_user`, `ephemeral_env`, `signup_email` (returns a fresh `+<uuid>` address against the shared mail.tm account plus a `wait_for_verification_token()` helper).
-- The `vault` CLI is available inside the sandbox (installed via the shared mngr Dockerfile), so the in-sandbox `minds env deploy` subprocess invoked by the `ephemeral_env` fixture works without additional setup. The `minds_services` offload config additionally enables Docker-in-Docker (`enable_docker = true`, matching `offload-modal-acceptance.toml`) so the litellm-via-workspace test can spin up a local FCT container inside the sandbox.
+- Before each pytest invocation, the orchestrator writes `test-results/deployment_envs.json` to a known path (current working directory locally; sandbox project root when this moves to offload), containing the shared-env URL map, the FCT template ref (local path OR `git@github.com:imbue-ai/forever-claude-template.git#ci-<timestamp>` form -- the fixture abstracts that detail), and the run id. Secrets are exported into the pytest process's env: per-shared-env Neon DSN + SuperTokens admin key, dev-tier Anthropic key, the per-run mail.tm test account credentials (address + JWT), plus `VAULT_TOKEN` / `VAULT_ADDR` / `VAULT_NAMESPACE`. Tests acquire what they need via five fixtures: `shared_env(role=...)`, `fct_template_ref`, `verified_user`, `ephemeral_env`, `signup_email` (returns a fresh `+<uuid>` address against the shared mail.tm account plus `wait_for_verification_token()` and `wait_for_one_time_code()` helpers, since the real sign-in flow also goes through email).
+- The `vault` CLI must already be installed on the operator's machine (the same prerequisite `minds env deploy` carries today). The orchestrator's startup checks this and prints a pointer to `apps/minds/docs/vault-setup.md` if missing. For the future offload move, the shared mngr Dockerfile will gain a `vault` apt install and the `minds_services` offload config will enable Docker-in-Docker so the litellm-via-workspace test can spin up a local FCT container inside the sandbox -- both noted as deferred work, not shipped in this PR.
 
 ### Resource lifecycle
 
@@ -37,7 +37,7 @@
 ### Test-behavior interactions
 
 - The auto-rollback test (`test_deploy_auto_rollback_on_broken_healthcheck`) exercises real auto-rollback wiring rather than the manual `modal app rollback` path. v2 deploys with `MINDS_INJECT_BROKEN_HEALTHCHECK=1` as a per-deploy Modal Secret value, which the deployed `remote_service_connector` checks per request so its `/healthcheck` returns 500 unconditionally; `await_apps_healthy` fails, the deploy step calls `rollback_modal_app`, and the test asserts the Modal app version reverted to v1's id. The test does NOT redeploy a v3 -- the steady-state "redeploy advances version" contract is covered separately by `test_deploy_new_version`. If today's `minds env deploy` does not already call `rollback_modal_app` on `await_apps_healthy` failure, that small wiring change ships in this PR; otherwise no production-code change beyond the connector's `/healthcheck` env-var read.
-- The existing `offload-modal.toml`, `offload-modal-acceptance.toml`, and `offload-modal-release.toml` filter strings gain `and not minds_deployment and not minds_services` so the standard CI matrix never collects these tests (which would fail without the operator-side env setup).
+- The existing `offload-modal.toml`, `offload-modal-acceptance.toml`, and `offload-modal-release.toml` filter strings gain `and not minds_deployment and not minds_services`, and the local `just test-unit` / `test-integration` / `test-quick` recipes' shared `-m` filter gains the same exclusions, so neither the standard CI matrix nor a plain local `pytest` run accidentally collects these tests (which would fail without the operator-side env setup).
 - The `verified_user` fixture's per-test admin-API calls create users in the shape `test-<uuid>@example.test` -- predictable enough that an operator can spot them in the SuperTokens dashboard while debugging without colliding with any real account convention.
 
 ### Initial test inventory
@@ -64,13 +64,13 @@
 #### `minds_services` (three shipped in this PR + one deferred)
 
 - `test_realistic_signup_verify_signin_create_tunnel_signout`
-  - Sign up via the connector's public sign-up endpoint with `signup_email` fixture's fresh `+<uuid>` address against the per-run shared mail.tm account.
-  - Poll mail.tm's HTTP API for the verification email; extract the verify token from the body; POST it to the connector's `/verify-email` endpoint.
-  - Sign in with the credentials; assert session cookie/token returned.
-  - Create a Cloudflare tunnel via the connector's tunnel-management endpoint; assert it exists in Cloudflare (list, filtered by env tag).
-  - Hit the tunnel URL; assert it routes (to a minimal "is-this-on" backend the test stands up locally inside the sandbox, or assert the well-known 4xx shape for an unrouted tunnel).
-  - Delete the tunnel; assert gone from Cloudflare.
-  - Sign out; assert subsequent requests with the same session token return 401.
+  - The full first-time-user flow end-to-end, exercising the only customer-facing path that goes through real email + the desktop client's workspace + tunnel surface in one test. Drives the connector + the desktop client programmatically (in-process `create_desktop_client(...)` -- same pattern as the existing `test_desktop_client_e2e.py` -- plus direct HTTP) rather than through a real Electron instance. Replacing this with Playwright against a packaged Electron is captured in Future Work below.
+  - **Signup:** POST to the connector's public sign-up endpoint with `signup_email` fixture's fresh `+<uuid>` address (rooted at the per-run shared mail.tm account).
+  - **Email verification:** poll mail.tm's HTTP API for the verification email, extract the verify token, POST it to the connector's `/verify-email` endpoint.
+  - **Sign-in (one-time code):** trigger the connector's email-one-time-code sign-in flow (the real sign-in path -- no password); poll mail.tm again for the one-time-code email; submit the code to complete sign-in; assert session cookie/token returned.
+  - **Workspace creation:** drive the in-process desktop client to create a workspace from the FCT template (using `fct_template_ref`); wait for it to reach a running state.
+  - **Forward the system-interface:** drive the desktop client's "forward system-interface" action for that workspace -- this is the user-facing operation that creates the Cloudflare tunnel pointing at the workspace's system-interface port. Assert the tunnel exists in Cloudflare (list, filtered by env tag) AND that the forwarded URL serves the expected response when hit from the test process.
+  - **Teardown:** stop forwarding (assert tunnel gone from Cloudflare), destroy the workspace, sign out, assert subsequent requests with the same session token return 401.
 
 - `test_logged_in_smoke`
   - Minimal smoke that deployed services + routes respond as expected for a logged-in user. Uses the `verified_user` fixture (admin-bypass verification, since the realistic verify-email path is already covered by the signup test).
@@ -79,16 +79,22 @@
 
 - `test_litellm_spend_tracking_via_local_workspace`
   - Real-product test of "minds agent uses imbue_cloud LLM and spend is tracked".
-  - Inside the offload sandbox, `mngr create` a new local Docker container running the FCT template (using the orchestrator-pushed FCT branch ref from `fct_template_ref`), configured with the `imbue_cloud` AI-key option so the agent's LLM calls flow through the shared env's `litellm_proxy_url`.
-  - Use `mngr message` to send a real chat message to claude inside the container.
+  - Uses the `verified_user` fixture (admin-bypass verification + admin-minted session token, so the test does not redo the realistic signup flow).
+  - Drives the in-process desktop client (same shape as test 1 -- programmatic, not Electron/Playwright) to create a local Docker workspace from the FCT template (using `fct_template_ref`) configured with the `imbue_cloud` AI-key option so the agent's LLM calls flow through the shared env's `litellm_proxy_url`.
+  - Use `mngr message` (subprocess) against the running container to send a real chat message to claude inside.
   - Assert: claude responds in the container's transcript within a reasonable timeout (message actually got sent + processed).
   - Query the shared env's Neon `litellm_cost` DB; assert a row exists for this run's litellm key with non-zero spend within the last few seconds.
-  - Requires Docker-in-Docker in the offload sandbox (enabled in `offload-modal-minds-services.toml`).
+  - Runs locally today against the operator's Docker daemon. When this moves to offload, the future `offload-modal-minds-services.toml` enables Docker-in-Docker (mirroring `offload-modal-acceptance.toml`).
 
 - **Deferred to a follow-up PR:** `test_bake_lease_create_agent_release_pool_host_with_user_isolation`
   - Bakes an OVH VPS as a pool host, creates two `verified_user`s, leases the host as user A, creates an FCT agent on it (asserts the agent boots), asserts user B cannot see the host or its agent via the connector's user-facing API (404, not 403), destroys the agent, releases the host. Final fixture teardown destroys the OVH instance.
   - Combines pool-host lifecycle and user-isolation because the host is the only user-facing resource that meaningfully surfaces in the API for the isolation assertion.
   - Deferred because OVH bakes take minutes + cost real money per iteration, so the dev loop is painful while debugging this test for the first time. All shared-env, FCT, and ledger plumbing is built so this is purely an "add the test file" follow-up, not a redesign.
+
+### Future work (designed in, not shipped in this PR)
+
+- **Offload-Modal parallelism.** The orchestrator runs both pytest batches locally today via background `uv run pytest` subprocesses. Moving to offload is a wrapper change: write `offload-modal-minds-deployment.toml` + `offload-modal-minds-services.toml`, add the `vault` apt install + `enable_docker = true` to the shared mngr Dockerfile, and have the orchestrator shell out to `offload run` instead of `uv run pytest`. Postponed until the test count + wall time justify the operational complexity (and until the tests are stable enough that the slower offload feedback loop is acceptable).
+- **Playwright + Electron driving** of `test_realistic_signup_verify_signin_create_tunnel_signout`, `test_litellm_spend_tracking_via_local_workspace`, and the deferred pool-host test. Today they drive the desktop client programmatically (in-process `create_desktop_client` plus direct HTTP). The future version uses Playwright against a packaged Electron instance through the same flows, catching the layer of bugs that only show up in the actual Electron runtime. Out of scope here -- programmatic driving is sufficient to surface the integration bugs we care about for the initial suite.
 
 ### Open questions deferred to follow-ups
 
@@ -119,12 +125,11 @@
 - New `apps/minds/deployment_tests/conftest.py` providing the five shared fixtures (`shared_env(role)`, `fct_template_ref`, `verified_user`, `ephemeral_env`, `signup_email`).
 - Both new marks registered in `libs/imbue_common/imbue/imbue_common/conftest_hooks.py`.
 
-### Offload configs + Dockerfile
+### Test selection (shipped) + offload configs (deferred)
 
-- New `offload-modal-minds-deployment.toml` -- filters `-m minds_deployment`, low `max_parallel` default (single-digit), reuses the shared mngr Dockerfile.
-- New `offload-modal-minds-services.toml` -- filters `-m minds_services`, same shape, plus `enable_docker = true` under `[provider.experimental_options]` and the corresponding `MODAL_IMAGE_BUILDER_VERSION=2025.06` in its `just` recipe so the litellm-via-workspace test can spin up local FCT containers inside the sandbox (mirrors how `offload-modal-acceptance.toml` does it today).
-- The shared `libs/mngr/imbue/mngr/resources/Dockerfile` gains an apt install of the `vault` CLI.
-- The existing `offload-modal.toml`, `offload-modal-acceptance.toml`, `offload-modal-release.toml` filter strings exclude both new marks.
+- The existing `offload-modal.toml`, `offload-modal-acceptance.toml`, `offload-modal-release.toml` filter strings gain `and not minds_deployment and not minds_services` so the standard CI matrix never collects these tests.
+- The local `just test-unit` / `test-integration` / `test-quick` recipes' shared `-m` filter (`_skip_acceptance_and_release` in the justfile) gains the same exclusions, so a plain local `pytest` run does not collect them either.
+- **Deferred to a follow-up PR (per Future work):** the new `offload-modal-minds-deployment.toml` + `offload-modal-minds-services.toml` configs, the `vault` apt install in the shared `libs/mngr/imbue/mngr/resources/Dockerfile`, and the Docker-in-Docker config for the services config. Designed into this spec for portability; not shipped now to keep initial scope debugger-friendly.
 
 ### Possible small production-code wiring
 
@@ -134,7 +139,7 @@
 
 ### External test infrastructure
 
-- mail.tm is added as the verification mailbox for the realistic signup test. The orchestrator creates one disposable mail.tm account per run via the public mail.tm HTTP API, threads its address + JWT into every `minds_services` sandbox as env vars (`MAILTM_ACCOUNT_ADDRESS`, `MAILTM_ACCOUNT_JWT`), and deletes the account in end-of-run cleanup (tracked in the ledger as `kind=mailtm_account` -- extends the schema from `{kind: env|fct_branch, ...}` to `{kind: env|fct_branch|mailtm_account, ...}`). Per-test signups use `+<uuid>` local-part suffixes against that shared address so no per-test mail.tm account creation is needed.
+- mail.tm is added as the verification + one-time-code mailbox for the realistic signup test. The orchestrator creates one disposable mail.tm account per run via the public mail.tm HTTP API, exports its address + JWT into the `minds_services` pytest process's env as `MAILTM_ACCOUNT_ADDRESS` + `MAILTM_ACCOUNT_JWT` (will become per-sandbox env vars in the future offload variant -- same contract), and deletes the account in end-of-run cleanup (tracked in the ledger as `kind=mailtm_account` -- extends the schema from `{kind: env|fct_branch, ...}` to `{kind: env|fct_branch|mailtm_account, ...}`). Per-test signups use `+<uuid>` local-part suffixes against that shared address so no per-test mail.tm account creation is needed.
 - The `signup_email` fixture wraps a tiny mail.tm HTTP client (no SDK -- ~50 lines of `httpx`); placed under `apps/minds/deployment_tests/_mailtm.py` so it can be reused by future signup-flow tests.
 
 ### State files / artifacts (no schema migrations)
