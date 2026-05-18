@@ -4,9 +4,11 @@ This file is entirely self-contained -- it has NO imports from the monorepo.
 Only stdlib, modal, pyyaml, and litellm (installed in the Modal image) are used.
 This keeps deployment simple: ``modal deploy app.py`` ships just this file.
 
-The proxy exposes the Anthropic pass-through endpoint so that Claude Code
-can connect via ANTHROPIC_BASE_URL. All requests go through LiteLLM's
-virtual key system for cost tracking.
+LiteLLM's native ``POST /v1/messages`` route accepts the Anthropic API
+request shape, so the Anthropic SDK / Claude Code can talk to the proxy
+by setting ``ANTHROPIC_BASE_URL`` to the proxy's root URL (no path
+suffix). The SDK appends ``/v1/messages`` itself. All requests go
+through LiteLLM's virtual key system for cost tracking.
 
 Usage:
     # Push secrets to Modal + deploy in one shot:
@@ -14,7 +16,7 @@ Usage:
     uv run minds env deploy --yes-i-mean-production
 
     # Use with claude -p (replace with your virtual key and Modal URL)
-    ANTHROPIC_BASE_URL=https://<workspace>--llm-production-proxy.modal.run/anthropic \\
+    ANTHROPIC_BASE_URL=https://<workspace>--llm-production-proxy.modal.run/ \\
     ANTHROPIC_API_KEY=sk-your-virtual-key \\
     claude -p "hello"
 """

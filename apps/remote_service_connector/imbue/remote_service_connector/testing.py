@@ -884,37 +884,44 @@ class FakeCursor:
                     break
 
         elif (
+            "from pool_hosts" in query_lower
+            and "leased_to_user" in query_lower
+            and "select leased_to_user" in query_lower
+        ):
+            # Release endpoint: lookup by id. The connector stringifies
+            # the UUID before passing it as a bind param (psycopg2 can't
+            # adapt Python ``UUID`` directly), so accept either form.
+            # Returns ``(leased_to_user, status)`` so the route can
+            # distinguish 'already-released' (idempotent 200) from
+            # 'leased' (proceed with update) without a second SELECT.
+            raw_host_id = params[0]
+            host_id = UUID(raw_host_id) if isinstance(raw_host_id, str) else raw_host_id
+            for row in self._backend.pool_rows:
+                if row.host_id == host_id:
+                    self._results = [(row.leased_to_user, row.status)]
+                    break
+
+        elif (
             "from pool_hosts" in query_lower and "status = 'leased'" in query_lower and "leased_to_user" in query_lower
         ):
-            if "select leased_to_user" in query_lower:
-                # Release endpoint: lookup by id. The connector stringifies
-                # the UUID before passing it as a bind param (psycopg2 can't
-                # adapt Python ``UUID`` directly), so accept either form.
-                raw_host_id = params[0]
-                host_id = UUID(raw_host_id) if isinstance(raw_host_id, str) else raw_host_id
-                for row in self._backend.pool_rows:
-                    if row.host_id == host_id and row.status == "leased":
-                        self._results = [(row.leased_to_user,)]
-                        break
-            else:
-                # List endpoint: lookup by user
-                username = params[0]
-                for row in self._backend.pool_rows:
-                    if row.status == "leased" and row.leased_to_user == username:
-                        self._results.append(
-                            (
-                                row.host_id,
-                                row.vps_address,
-                                row.ssh_port,
-                                row.ssh_user,
-                                row.container_ssh_port,
-                                row.agent_id,
-                                row.host_id_str,
-                                row.host_name,
-                                _row_attributes(row),
-                                row.leased_at,
-                            )
+            # List endpoint: lookup by user
+            username = params[0]
+            for row in self._backend.pool_rows:
+                if row.status == "leased" and row.leased_to_user == username:
+                    self._results.append(
+                        (
+                            row.host_id,
+                            row.vps_address,
+                            row.ssh_port,
+                            row.ssh_user,
+                            row.container_ssh_port,
+                            row.agent_id,
+                            row.host_id_str,
+                            row.host_name,
+                            _row_attributes(row),
+                            row.leased_at,
                         )
+                    )
 
         elif "update pool_hosts set status = 'released'" in query_lower:
             raw_host_id = params[0]

@@ -2,9 +2,9 @@
 
 Every successful + every failed deploy follows the same protocol:
 
-1. After preflight succeeds and after the Neon restore-point is created,
-   write a recover-target file atomically (tempfile + rename) at the
-   monorepo root.
+1. After preflight succeeds and after the Neon snapshot branch is
+   created, write a per-env recover-target file atomically (tempfile
+   + rename) at the monorepo root.
 2. Run the rest of the deploy (push secrets, run migrations, modal
    deploy, health check).
 3. On full success: delete the recover-target file.
@@ -17,15 +17,28 @@ is individually idempotent, so re-running ``recover`` after a partial
 recovery converges. The file is deleted only after every reversal step
 has been attempted.
 
-The file lives at the *monorepo root* (not the activated env's data
-root) so a stray recovery from any tier is visible to every command
-the operator might invoke next -- ``activate``, ``deploy``,
-``destroy``, etc. all refuse to run while the file exists.
+Per-env naming: the file lives at the *monorepo root* under
+``.minds-deploy-recover-target-<env-name>.json``. Per-env naming lets
+concurrent deploys against *different* envs proceed independently
+(used by the dev test suite where each test mints its own random env
+name). The activated-env-aware commands (``deploy``, ``destroy``,
+``recover``) operate on the file for THEIR env; the broadly-scoped
+commands (``activate``, ``deactivate``, ``list``) refuse if ANY
+recover-target file exists at the repo root, so an in-flight failed
+deploy for any env is surfaced before the operator does something
+unrelated.
+
+Concurrent deploys against the SAME env are blocked by a per-env
+``flock`` on a sibling ``.minds-deploy-lock-<env-name>.lock`` file,
+held for the entire duration of ``deploy_env`` and ``recover_env``.
 """
 
+import contextlib
+import fcntl
 import json
 import os
 import tempfile
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Final
 from typing import Self
@@ -43,9 +56,15 @@ from imbue.minds.envs.providers.neon_db import restore_branch_from_snapshot
 from imbue.minds.envs.secret_lifecycle import DeployId
 from imbue.minds.errors import MindError
 
-# Filename at the monorepo root. Gitignored via the ``.minds-deploy-*.json``
-# glob in the repo's .gitignore.
-RECOVER_TARGET_FILENAME: Final[str] = ".minds-deploy-recover-target.json"
+# Per-env recover-target filename pattern + the glob used to discover
+# every recover-target file at the monorepo root. Both are gitignored
+# via the ``**/.minds-deploy-*.json`` and ``**/.minds-deploy-lock-*``
+# globs in the repo's .gitignore.
+_RECOVER_TARGET_PREFIX: Final[str] = ".minds-deploy-recover-target-"
+_RECOVER_TARGET_SUFFIX: Final[str] = ".json"
+_RECOVER_TARGET_GLOB: Final[str] = f"{_RECOVER_TARGET_PREFIX}*{_RECOVER_TARGET_SUFFIX}"
+_DEPLOY_LOCK_PREFIX: Final[str] = ".minds-deploy-lock-"
+_DEPLOY_LOCK_SUFFIX: Final[str] = ".lock"
 
 # Marker file used by ``_find_monorepo_root``: every monorepo checkout
 # carries an ``apps/`` directory at its top, so walking up from CWD until
@@ -147,23 +166,75 @@ def find_monorepo_root(*, cwd: Path | None = None) -> Path:
     )
 
 
-def recover_target_path(*, repo_root: Path) -> Path:
-    return repo_root / RECOVER_TARGET_FILENAME
+def recover_target_path(*, repo_root: Path, env_name: str) -> Path:
+    """Per-env recover-target file path at the monorepo root.
+
+    Per-env naming lets concurrent deploys against different envs
+    operate in parallel (used by the dev test suite); see the module
+    docstring for the full rationale.
+    """
+    return repo_root / f"{_RECOVER_TARGET_PREFIX}{env_name}{_RECOVER_TARGET_SUFFIX}"
 
 
-def recover_target_exists(*, repo_root: Path) -> bool:
-    return recover_target_path(repo_root=repo_root).is_file()
+def recover_target_exists(*, repo_root: Path, env_name: str) -> bool:
+    return recover_target_path(repo_root=repo_root, env_name=env_name).is_file()
+
+
+def find_all_recover_target_files(*, repo_root: Path) -> list[Path]:
+    """Return every recover-target file at the monorepo root, sorted.
+
+    Used by env-agnostic CLI commands (``activate``, ``deactivate``,
+    ``list``) that don't have a specific env in mind but still want to
+    refuse-loud if ANY in-flight failed deploy is sitting around.
+    """
+    return sorted(repo_root.glob(_RECOVER_TARGET_GLOB))
+
+
+@contextlib.contextmanager
+def hold_deploy_lock(*, repo_root: Path, env_name: str) -> Iterator[None]:
+    """Take an exclusive ``flock`` on the per-env deploy lock file.
+
+    Held for the entire duration of ``deploy_env`` and ``recover_env``
+    so two concurrent invocations against the SAME env serialize (the
+    second blocks until the first exits, or its process dies). Different
+    envs use different lock files, so cross-env parallelism is
+    unaffected -- which matters for the dev test suite where each test
+    mints its own random env name.
+
+    The lock file persists across runs (cheap, gitignored via
+    ``.minds-deploy-lock-*.lock``). A process crash releases the flock
+    automatically via the kernel-level fd cleanup.
+    """
+    lock_path = repo_root / f"{_DEPLOY_LOCK_PREFIX}{env_name}{_DEPLOY_LOCK_SUFFIX}"
+    fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o644)
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            logger.info(
+                "Another minds env deploy/recover is already holding the lock at {}; waiting for it to finish.",
+                lock_path,
+            )
+            fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
 
 
 def write_recover_target_atomic(target: RecoverTarget, *, repo_root: Path) -> Path:
-    """Write the recover-target file atomically (tempfile + fsync + rename).
+    """Write the per-env recover-target file atomically (tempfile + fsync + rename).
 
-    Refuses if a recover-target file already exists; deploy is supposed
-    to call this AFTER preflight has confirmed there isn't one, but the
-    extra check here defends against a race where two deploys both pass
-    preflight + race to write.
+    The target's ``env_name`` field drives the per-env naming. Refuses
+    if a recover-target file already exists; deploy is supposed to call
+    this AFTER preflight has confirmed there isn't one, but the extra
+    check here defends against a race where two deploys (against the
+    same env, somehow bypassing the deploy lock) both pass preflight
+    and race to write.
     """
-    final_path = recover_target_path(repo_root=repo_root)
+    final_path = recover_target_path(repo_root=repo_root, env_name=target.env_name)
     if final_path.exists():
         raise RecoverTargetAlreadyExistsError(
             f"Recover-target file already exists at {final_path}; refusing to overwrite. "
@@ -175,7 +246,7 @@ def write_recover_target_atomic(target: RecoverTarget, *, repo_root: Path) -> Pa
     with tempfile.NamedTemporaryFile(
         mode="wb",
         dir=repo_root,
-        prefix=f".{RECOVER_TARGET_FILENAME}.tmp.",
+        prefix=f"{final_path.name}.tmp.",
         delete=False,
     ) as tmp:
         tmp.write(target.to_json_bytes())
@@ -186,8 +257,8 @@ def write_recover_target_atomic(target: RecoverTarget, *, repo_root: Path) -> Pa
     return final_path
 
 
-def read_recover_target(*, repo_root: Path) -> RecoverTarget:
-    final_path = recover_target_path(repo_root=repo_root)
+def read_recover_target(*, repo_root: Path, env_name: str) -> RecoverTarget:
+    final_path = recover_target_path(repo_root=repo_root, env_name=env_name)
     if not final_path.is_file():
         raise RecoverTargetMissingError(
             f"No recover-target file at {final_path}; nothing to recover from. "
@@ -196,8 +267,8 @@ def read_recover_target(*, repo_root: Path) -> RecoverTarget:
     return RecoverTarget.from_json_bytes(final_path.read_bytes())
 
 
-def delete_recover_target(*, repo_root: Path) -> None:
-    final_path = recover_target_path(repo_root=repo_root)
+def delete_recover_target(*, repo_root: Path, env_name: str) -> None:
+    final_path = recover_target_path(repo_root=repo_root, env_name=env_name)
     if final_path.exists():
         final_path.unlink()
 
@@ -205,6 +276,7 @@ def delete_recover_target(*, repo_root: Path) -> None:
 def recover_env(
     *,
     repo_root: Path,
+    env_name: str,
     providers,
     credentials,
     parent_cg: ConcurrencyGroup,
@@ -220,26 +292,64 @@ def recover_env(
     Reversal order (matches the deploy order in reverse):
 
     1. ``modal app rollback`` each app to its captured pre-deploy version.
-    2. Neon ``restore_branch_to_named_restore_point`` to the captured
-       restore-point name (only if neon_restore_point_name is set).
+    2. Neon: restore ``target.neon_branch_id`` (the project's default
+       branch) from ``target.neon_snapshot_branch_id`` (the pre-deploy
+       child branch the deploy created), capturing the pre-restore
+       state under ``pre-rollback-<deploy_id>`` so the operator can
+       inspect the broken state via the Neon console if needed. Only
+       runs when all three of ``neon_snapshot_branch_id``,
+       ``neon_project_id``, and ``neon_branch_id`` are populated.
     3. ``modal secret delete <svc>-<tier>-<deploy_id>`` for every
        service in ``deploy_config.secrets.services``.
     4. Delete the recover-target file.
     """
-    target = read_recover_target(repo_root=repo_root)
+    # Hold the per-env deploy lock for the whole recover so a concurrent
+    # ``minds env deploy`` against the same env blocks on us (and vice
+    # versa) -- recover and deploy share the same lock file because
+    # they both rewrite the same per-env cloud + local state.
+    with hold_deploy_lock(repo_root=repo_root, env_name=env_name):
+        _recover_env_locked(
+            repo_root=repo_root,
+            env_name=env_name,
+            providers=providers,
+            credentials=credentials,
+            parent_cg=parent_cg,
+        )
+
+
+def _recover_env_locked(
+    *,
+    repo_root: Path,
+    env_name: str,
+    providers,
+    credentials,
+    parent_cg: ConcurrencyGroup,
+) -> None:
+    target = read_recover_target(repo_root=repo_root, env_name=env_name)
     logger.info("Recovering env {!r} (deploy id was {})", target.env_name, target.deploy_id)
     logger.info("Recover target: {}", target.model_dump_json(indent=2))
 
     errors: list[str] = []
 
-    # Step 1: modal app rollback for each captured app version.
+    # Step 1: revert each captured app to its pre-deploy state.
+    # ``version is None`` means the app didn't exist before this deploy
+    # (first-ever deploy of this env / tier). We can't roll back to
+    # "nothing," but leaving the app deployed with its secrets
+    # subsequently deleted (Step 3) would 500 on every request. Stop
+    # the app instead -- the operator's intent in running recover is
+    # to converge back to the pre-deploy state, which for a first-ever
+    # deploy was "no app at all."
     for app_name, version in target.app_versions_to_restore.items():
         if version is None:
-            logger.warning(
-                "Recover: skipping `modal app rollback {}` -- no captured pre-deploy version "
-                "(first-ever deploy of this app). Leaving the app at its current state.",
-                app_name,
-            )
+            try:
+                with info_span(
+                    "Stopping Modal app {!r} (no prior version to roll back to -- this was a first-ever deploy)",
+                    app_name,
+                ):
+                    providers.stop_modal_app(app_name=app_name, modal_env=target.modal_env, parent_cg=parent_cg)
+            except (ModalDeployError, MindError) as exc:
+                logger.warning("Recover: stop of {!r} failed: {}", app_name, exc)
+                errors.append(f"modal app stop {app_name}: {exc}")
             continue
         try:
             with info_span("Rolling back Modal app {!r} to version {!r}", app_name, version):
@@ -284,10 +394,10 @@ def recover_env(
         raise RecoverFailedError(
             f"Recover for env {target.env_name!r} hit {len(errors)} error(s):\n  - "
             + "\n  - ".join(errors)
-            + f"\nThe recover-target file at {recover_target_path(repo_root=repo_root)} has been left "
+            + f"\nThe recover-target file at {recover_target_path(repo_root=repo_root, env_name=env_name)} has been left "
             "in place; re-run `minds env recover` after addressing the underlying issue."
         )
-    delete_recover_target(repo_root=repo_root)
+    delete_recover_target(repo_root=repo_root, env_name=env_name)
     logger.info(
         "Recover complete. Deleted recover-target file. Env {!r} is back to the pre-deploy state.", target.env_name
     )
@@ -334,13 +444,14 @@ def make_neon_snapshot_branch_name(deploy_id: DeployId) -> str:
 
 __all__ = [
     "NotInMonorepoError",
-    "RECOVER_TARGET_FILENAME",
     "RecoverFailedError",
     "RecoverTarget",
     "RecoverTargetAlreadyExistsError",
     "RecoverTargetMissingError",
     "delete_recover_target",
+    "find_all_recover_target_files",
     "find_monorepo_root",
+    "hold_deploy_lock",
     "make_neon_snapshot_branch_name",
     "read_recover_target",
     "recover_env",

@@ -52,28 +52,21 @@ from imbue.minds.errors import MindError
 # wraps the URL across stdout lines for terminal display reasons.
 _MODAL_DEPLOY_URL_PATTERN: Final[re.Pattern[str]] = re.compile(r"https://[A-Za-z0-9_\-.]+\.modal\.run")
 
-# Services that need a per-env Modal Secret. Order doesn't matter for the
-# pushes themselves, but listing them here in one place keeps the set
-# explicit -- each name corresponds to an entry under
-# ``.minds/template/<name>.sh`` and a Modal Secret ``<name>-<tier>``.
+# Services that need a per-env Modal Secret backed by a Vault entry.
+# Each name corresponds to an entry under ``.minds/template/<name>.sh``
+# and produces a Modal Secret named ``<name>-<tier>-<deploy_id>`` via
+# ``build_per_env_secret_values``. The ``litellm-connector`` Modal
+# Secret is NOT in this list -- it's a code-driven secret (no Vault
+# entry exists or is expected) pushed by ``provisioning.deploy_env``
+# directly; see the corresponding step in that function.
 _PER_ENV_SECRET_SERVICES: Final[tuple[str, ...]] = (
     "litellm",
     "supertokens",
     "cloudflare",
     "neon",
     "pool-ssh",
-    "litellm-connector",
     "paid-accounts",
 )
-
-# Subset of ``_PER_ENV_SECRET_SERVICES`` whose values are constructed
-# entirely at deploy time from other tier secrets + deploy URLs rather
-# than read from a Vault entry. ``build_per_env_secret_values`` skips
-# the Vault read for these so the deploy log doesn't get a misleading
-# "Vault read for litellm-connector failed" warning every time. Keep
-# in sync with anything in provisioning.py that supplies overrides for
-# a service without ever expecting a Vault-backed base.
-_DERIVED_ONLY_SECRET_SERVICES: Final[frozenset[str]] = frozenset({"litellm-connector"})
 
 # Placeholder key written when a Vault entry isn't populated yet. Modal
 # requires at least one KEY=VALUE pair to create a Secret; this gives us
@@ -140,27 +133,33 @@ def _connector_app_file() -> Path:
     return _repo_root() / "apps" / "remote_service_connector" / "imbue" / "remote_service_connector" / "app.py"
 
 
-def per_env_connector_url(name: DevEnvName, modal_workspace: str) -> AnyUrl:
+def per_env_connector_url(name: DevEnvName, modal_workspace: str, *, tier: str) -> AnyUrl:
     """Compute the connector's URL for the given dev env.
 
     Modal asgi apps follow ``<workspace>--<app>-<function>.modal.run``,
     with the env name embedded as ``<workspace>-<env>--<app>-...``
     (Modal's URL convention for non-default envs). The connector's app
-    name is ``rsc-dev`` and its FastAPI function is ``api`` -- short
+    name is ``rsc-<tier>`` and its FastAPI function is ``api`` -- short
     enough that the full hostname always fits under DNS's 63-char
     limit, so the computed URL is exactly what Modal returns (no
     truncation, no fixup pass).
+
+    Today only the dev tier uses ``modal_env_strategy=PER_ENV``, so
+    ``tier`` is effectively always ``"dev"`` in practice; the parameter
+    is here so a future PER_ENV tier (a hypothetical ``staging-dev`` or
+    similar) gets the right ``rsc-<tier>`` segment without further
+    changes.
     """
-    return AnyUrl(f"https://{modal_workspace}-{name}--rsc-dev-api.modal.run")
+    return AnyUrl(f"https://{modal_workspace}-{name}--rsc-{tier}-api.modal.run")
 
 
-def per_env_litellm_proxy_url(name: DevEnvName, modal_workspace: str) -> AnyUrl:
+def per_env_litellm_proxy_url(name: DevEnvName, modal_workspace: str, *, tier: str) -> AnyUrl:
     """Compute the LiteLLM proxy's URL for the given dev env.
 
     Same hostname convention as :func:`per_env_connector_url`; the
-    proxy's app name is ``llm-dev`` and its asgi function is ``proxy``.
+    proxy's app name is ``llm-<tier>`` and its asgi function is ``proxy``.
     """
-    return AnyUrl(f"https://{modal_workspace}-{name}--llm-dev-proxy.modal.run")
+    return AnyUrl(f"https://{modal_workspace}-{name}--llm-{tier}-proxy.modal.run")
 
 
 def tier_connector_url(tier: str, modal_workspace: str) -> AnyUrl:
@@ -188,25 +187,25 @@ def build_per_env_secret_values(
 ) -> dict[str, str]:
     """Read tier-shared values for one service from Vault and layer overrides.
 
-    Services listed in ``_DERIVED_ONLY_SECRET_SERVICES`` skip the Vault
-    read entirely -- their values are 100% derived from ``overrides``
-    (other secrets + deploy URLs), so a Vault entry is intentionally
-    absent and we shouldn't warn about it.
+    Missing Vault entries return an empty dict and emit a warning so
+    the operator can populate them later; the caller is expected to
+    fall back to a placeholder when both the tier-shared values and
+    overrides come up empty.
 
-    For Vault-backed services, missing Vault entries return an empty
-    dict and emit a warning so the operator can populate them later;
-    the caller is expected to fall back to a placeholder when both the
-    tier-shared values and overrides come up empty.
+    This helper is only for genuinely Vault-backed services (every
+    entry in ``_PER_ENV_SECRET_SERVICES``). Code-driven secrets like
+    ``litellm-connector`` go through ``provisioning.deploy_env``'s
+    direct ``push_per_env_modal_secret`` call instead -- they have no
+    Vault entry to read.
     """
     base: dict[str, str] = {}
-    if service not in _DERIVED_ONLY_SECRET_SERVICES:
-        try:
-            base = read_vault_kv(
-                VaultPath(f"{tier_vault_prefix}/{service}"),
-                parent_concurrency_group=parent_cg,
-            )
-        except VaultReadError as exc:
-            logger.warning("Vault read for {} failed ({}); will push placeholder.", service, exc)
+    try:
+        base = read_vault_kv(
+            VaultPath(f"{tier_vault_prefix}/{service}"),
+            parent_concurrency_group=parent_cg,
+        )
+    except VaultReadError as exc:
+        logger.warning("Vault read for {} failed ({}); will push placeholder.", service, exc)
     merged = dict(base)
     merged.update(overrides)
     return {k: v for k, v in merged.items() if v}
@@ -658,6 +657,7 @@ def compute_per_env_overrides(
     name: DevEnvName,
     *,
     modal_workspace: str,
+    tier: str,
     neon_record: NeonProjectRecord,
     supertokens_record: SuperTokensAppRecord,
 ) -> dict[str, dict[str, str]]:
@@ -674,8 +674,8 @@ def compute_per_env_overrides(
     fields (e.g. ``LITELLM_MASTER_KEY``, ``ANTHROPIC_API_KEY``) survive
     the merge into the per-env Modal Secret.
     """
-    connector_url = per_env_connector_url(name, modal_workspace)
-    proxy_url = per_env_litellm_proxy_url(name, modal_workspace)
+    connector_url = per_env_connector_url(name, modal_workspace, tier=tier)
+    proxy_url = per_env_litellm_proxy_url(name, modal_workspace, tier=tier)
     return {
         "supertokens": {
             "SUPERTOKENS_CONNECTION_URI": supertokens_record.connection_uri,

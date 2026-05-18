@@ -30,7 +30,7 @@ For any tier:
 3. **Push new timestamped Modal Secrets** — one `<service>-<tier>-<deploy_id>` per service named in `deploy.toml`'s `[secrets].services`, into the appropriate Modal env.
 4. **Run migrations** — pool-hosts `schema_migrations`-driven runner against the env's `host_pool` DB; Prisma migration against `litellm_cost`.
 5. **`modal deploy` both apps** — into the appropriate Modal env, with `MNGR_DEPLOY_ENV=<tier>` + `MINDS_DEPLOY_ID=<id>` threaded into the subprocess env. The apps read both at module load and call `Secret.from_name(f"<svc>-<tier>-<deploy_id>")`. The `modal deploy` stdout is parsed for the deployed URLs and asserted to match the up-front-computed URLs (`per_env_connector_url`, `per_env_litellm_proxy_url`).
-6. **Health check** — poll `GET <connector_url>/generation` + `GET <litellm_proxy_url>/health` every 2s for up to 30s. Both must hit 200 within the window.
+6. **Health check** — poll `GET <connector_url>/health/liveness` + `GET <litellm_proxy_url>/health/liveness` every 2s for up to 60s. Both must hit 200 within the window. Both endpoints are no-auth liveness probes that return a tiny JSON body when the process is up. (LiteLLM's `/health` requires a master key and pings configured models -- much heavier than we want.)
 7. **Cleanup** — keep the last 10 timestamped Modal Secrets per `<service>-<tier>` (delete older ones); delete the recover-target file. Cleanup failures are logged but never trigger rollback.
 
 On any exception during steps 2-6, the deploy exits non-zero with `"deploy failed at step N: <error>; run `minds env recover` to roll back"`. No inline rollback.
@@ -68,9 +68,10 @@ On any exception during steps 2-6, the deploy exits non-zero with `"deploy faile
 
 ### Neon snapshot / restore
 
-- Every deploy creates a Neon named restore-point `pre-deploy-<deploy_id>` BEFORE touching anything else (after preflight, as part of step 2).
-- Restore-points age out automatically with Neon's PITR retention window (default 24h; configurable on the project). No manual cleanup.
-- Recover always restores (never gates on "did migrations actually run"). Neon's `restore_to_named_restore_point` is a near-no-op when nothing has changed since the restore-point.
+- Every deploy creates a **Neon child branch** named `pre-deploy-<deploy_id>` off the project's default branch BEFORE touching anything else (after preflight, as part of step 2). Branch creation is lazy + copy-on-write, so the snapshot itself is near-free until writes diverge.
+- Recover restores the parent branch from this snapshot branch via `POST .../branches/<id>/restore` (Neon's instant-restore endpoint), captured pre-rollback state under `pre-rollback-<deploy_id>` so the operator can inspect the broken state via the Neon console if needed. Successful deploy deletes the snapshot branch best-effort (cluttering the project otherwise); on any failure between snapshot creation and successful deploy completion, the snapshot branch stays so `recover` can use it.
+- Recover always restores (never gates on "did migrations actually run"). Neon's branch restore is a near-no-op when nothing has changed since the snapshot.
+- **Note:** an earlier draft of this spec described "Neon named restore-points." The implementation pivoted to child branches because Neon's named-restore-point API is org-tier-gated and not available on the dev tier's plan; child branches give us the same instant-restore guarantee on every Neon plan. The recover-target schema and `recover_env` step ordering reflect the branch-based approach.
 
 ### Migration tracking
 
@@ -86,7 +87,7 @@ On any exception during steps 2-6, the deploy exits non-zero with `"deploy faile
 ### Recover-target file
 
 - Path: `.minds-deploy-recover-target.json` at the monorepo root.
-- Created atomically (`tempfile + fsync + rename`) after preflight succeeds and after the Neon restore-point is created, BEFORE any other external mutation.
+- Created atomically (`tempfile + fsync + rename`) after preflight succeeds and after the Neon snapshot branch is created, BEFORE any other external mutation.
 - Schema (all fields required):
   ```json
   {
@@ -97,7 +98,8 @@ On any exception during steps 2-6, the deploy exits non-zero with `"deploy faile
     "modal_workspace": "minds-dev",
     "vault_path_prefix": "secrets/minds/dev",
     "neon_project_id": "raspy-lake-12345678",
-    "neon_restore_point_name": "pre-deploy-20260517T143022Z",
+    "neon_branch_id": "br-old-fire-akygmp0x",
+    "neon_snapshot_branch_id": "br-icy-truth-akf2v98n",
     "app_versions_to_restore": {
       "rsc-dev": "v17",
       "llm-dev": "v23"
@@ -113,7 +115,7 @@ On any exception during steps 2-6, the deploy exits non-zero with `"deploy faile
 - Reads `.minds-deploy-recover-target.json`. Refuses to run if missing.
 - Runs every reversal step in order, regardless of which stage the failed deploy reached:
   1. For each app in `app_versions_to_restore`: `modal app rollback <app> <version>` (skip if value is null; log warning).
-  2. Neon: `POST .../branches/<id>/restore` with `source_named_restore_point=<neon_restore_point_name>` against the captured project id.
+  2. Neon: restore the parent branch from `neon_snapshot_branch_id` via `restore_branch_from_snapshot` (which calls Neon's `POST .../branches/<id>/restore`), capturing the pre-restore state under `pre-rollback-<deploy_id>` for forensic inspection.
   3. For each service in `deploy.toml`'s `[secrets].services`: `modal secret delete <svc>-<tier>-<deploy_id> --env=<modal_env>`. Idempotent (treats "not found" as success — see existing `delete_modal_secret`).
   4. Delete `.minds-deploy-recover-target.json`.
 - Step failures are logged but recover proceeds through every step (best-effort across the whole flow). Exits non-zero if any step failed; operator re-runs.
@@ -122,13 +124,13 @@ On any exception during steps 2-6, the deploy exits non-zero with `"deploy faile
 
 ### Health check
 
-- Polls every 2s for up to 30s.
-- Per-attempt HTTP timeout: 3s.
-- Endpoints: `<connector_url>/generation` (expects 200 with the generation-id-shaped response), `<litellm_proxy_url>/health` (expects 200).
+- Polls every 2s for up to 60s.
+- Per-attempt HTTP timeout: 10s.
+- Endpoints: `<connector_url>/health/liveness` (expects 200; connector's no-auth liveness probe), `<litellm_proxy_url>/health/liveness` (expects 200; LiteLLM's no-auth liveness probe).
 - Categorization:
   - **Success**: both endpoints return 200 with the expected shape at least once during the window. Stop polling at first joint success.
   - **Transient (continue polling)**: connection refused, connection reset, DNS not resolving, socket timeout, HTTP 502/503/504 with empty body, any HTTP 5xx during the first 10 seconds (cold-boot tolerance).
-  - **Definitive (fail immediately)**: HTTP 4xx, HTTP 5xx with a non-empty body after the cold-boot window, malformed response (e.g. `/generation` returning a login redirect), HTTP 200 whose body doesn't parse as the expected JSON shape.
+  - **Definitive (fail immediately)**: HTTP 4xx, HTTP 5xx with a non-empty body after the cold-boot window, malformed response, HTTP 200 whose body doesn't parse as the expected JSON shape.
 - Failure ⇒ exit non-zero with the same "run `minds env recover`" guidance.
 
 ### Preflight

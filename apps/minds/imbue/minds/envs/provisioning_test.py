@@ -21,7 +21,6 @@ from imbue.minds.envs.local_store import read_secrets_file
 from imbue.minds.envs.mngr_agent_cleanup import MngrAgentCleanupError
 from imbue.minds.envs.per_env_deploy import ModalDeployError
 from imbue.minds.envs.primitives import DevEnvName
-from imbue.minds.envs.primitives import DevEnvNotFoundError
 from imbue.minds.envs.providers.modal_env import ModalEnvProviderError
 from imbue.minds.envs.providers.neon_db import NeonProjectRecord
 from imbue.minds.envs.providers.neon_db import NeonProviderError
@@ -487,12 +486,14 @@ def test_deploy_dev_env_pushes_per_env_secrets_into_dev_modal_env(
     )
     pushes = [c for c in call_log["calls"] if c[0] == "push_per_env_modal_secret"]
     # _deploy_config declares only `cloudflare` in its services list, so
-    # only one Modal Secret gets pushed. Production deploy.toml lists
-    # all 7 services and would push 7. Names are timestamped
-    # ``cloudflare-dev-<deploy_id>`` -- check the prefix since the id
-    # varies per run.
+    # one Vault-backed Modal Secret gets pushed. The deploy also pushes
+    # the ``litellm-connector`` Modal Secret separately (its values
+    # are 100% deploy-time-computed; not vault-backed; see the
+    # ``[secrets].services`` comment in tier deploy.tomls). Names are
+    # timestamped ``<prefix>-<deploy_id>`` -- check the prefix since
+    # the id varies per run.
     pushed_secret_prefixes = {c[1].rsplit("-", 1)[0] for c in pushes}
-    assert pushed_secret_prefixes == {"cloudflare-dev"}
+    assert pushed_secret_prefixes == {"cloudflare-dev", "litellm-connector-dev"}
     # All pushes target the same Modal env (the dev env name 'dev-frank') --
     # not the tier's stable 'main' env. Two devs never share one Modal env.
     assert all(c[2] == "dev-frank" for c in pushes)
@@ -693,17 +694,29 @@ def test_destroy_deletes_ovh_instances(_isolated_home: Path, _root_cg: Concurren
     assert delete_call == ("delete_ovh_instances", 2)
 
 
-def test_destroy_missing_env_raises(_isolated_home: Path, _root_cg: ConcurrencyGroup) -> None:
-    providers = _build_fake_providers(_make_call_log())
-    with pytest.raises(DevEnvNotFoundError):
-        destroy_env(
-            DevEnvName("dev-ghost"),
-            tier="dev",
-            deploy_config=_deploy_config(),
-            credentials=_credentials(),
-            providers=providers,
-            parent_concurrency_group=_root_cg,
-        )
+def test_destroy_missing_env_proceeds_with_cloud_cleanup(_isolated_home: Path, _root_cg: ConcurrencyGroup) -> None:
+    """Destroy proceeds with cloud-side cleanup even when the local env root is gone.
+
+    See F22 in MANUAL_DEPLOY_FINDINGS.md -- the previous behaviour was to
+    raise DevEnvNotFoundError, which left orphaned cloud resources
+    unreachable. The cloud resources are keyed off the env name, not
+    the local directory, so destroy can converge without the directory.
+    """
+    call_log = _make_call_log()
+    providers = _build_fake_providers(call_log)
+    destroy_env(
+        DevEnvName("dev-ghost"),
+        tier="dev",
+        deploy_config=_deploy_config(),
+        credentials=_credentials(),
+        providers=providers,
+        parent_concurrency_group=_root_cg,
+    )
+    # Cloud-side steps still fire even though the local root is missing.
+    step_names = [c[0] for c in call_log["calls"]]
+    assert "delete_modal_env" in step_names
+    assert "delete_neon_project" in step_names
+    assert "delete_supertokens_app" in step_names
 
 
 def test_list_dev_envs_returns_summaries_in_sorted_order(_isolated_home: Path, _root_cg: ConcurrencyGroup) -> None:
@@ -733,16 +746,21 @@ def test_list_dev_envs_returns_summaries_in_sorted_order(_isolated_home: Path, _
 def test_list_dev_envs_treats_minds_dir_as_production_row(
     _isolated_home: Path,
 ) -> None:
-    """Production lives at ~/.minds/ and shows up in list_dev_envs as 'production'."""
+    """Production lives at ~/.minds/ and shows up in list_dev_envs as 'production'.
+
+    Per F11, production's client.toml is the committed in-repo file at
+    ``apps/minds/imbue/minds/config/envs/production/client.toml`` -- the
+    list helper falls back to that file for the reserved tier names.
+    """
     (_isolated_home / ".minds").mkdir()
     summaries = list_dev_envs()
     assert any(s.name == "production" for s in summaries)
-    # Production has no per-env client.toml under its root by design --
-    # the URLs live in the in-repo file. So the row carries None for the
-    # connector_url and client_config_path.
     prod = next(s for s in summaries if s.name == "production")
-    assert prod.connector_url is None
-    assert prod.client_config_path is None
+    assert prod.client_config_source == "in_repo"
+    # The committed in-repo file ships with a parseable connector URL.
+    assert prod.client_config_path is not None
+    assert "config/envs/production/client.toml" in prod.client_config_path
+    assert prod.connector_url is not None
 
 
 def test_list_dev_envs_marks_dev_env_without_client_toml_as_no_client(
@@ -795,10 +813,11 @@ def test_deploy_env_shared_tier_pushes_secrets_into_named_modal_env(
         parent_concurrency_group=_root_cg,
     )
     pushes = [c for c in call_log["calls"] if c[0] == "push_per_env_modal_secret"]
-    # _deploy_config declares only `cloudflare` in its services list.
-    # Names are timestamped ``cloudflare-production-<deploy_id>``.
+    # _deploy_config declares only `cloudflare` in its services list,
+    # plus the deploy always pushes a separate ``litellm-connector``
+    # Modal Secret (not vault-backed; values 100% deploy-time-computed).
     pushed_secret_prefixes = {c[1].rsplit("-", 1)[0] for c in pushes}
-    assert pushed_secret_prefixes == {"cloudflare-production"}
+    assert pushed_secret_prefixes == {"cloudflare-production", "litellm-connector-production"}
     # All pushes target the tier's stable Modal env, not a per-dev one.
     assert all(c[2] == "main" for c in pushes)
 
@@ -885,15 +904,19 @@ def test_destroy_env_tier_stops_apps_deletes_secrets_and_removes_env_root(
         ("stop_modal_app", "llm-staging", "main"),
         ("stop_modal_app", "rsc-staging", "main"),
     ]
-    # Deletes every timestamped per-tier Modal Secret (just one for the
-    # `cloudflare` service in this _deploy_config; production has 7).
+    # Deletes every timestamped per-tier Modal Secret. The _deploy_config
+    # only lists `cloudflare` in [secrets].services, but the deploy also
+    # pushes a separate `litellm-connector` Modal Secret (not vault-
+    # backed; values 100% deploy-time-computed), so destroy's
+    # ``gc_old_per_tier_secrets`` sweep deletes both.
     deletes = [c for c in call_log["calls"] if c[0] == "delete_modal_secret"]
-    assert len(deletes) == 1
-    assert deletes[0][1].startswith("cloudflare-staging-")
-    assert deletes[0][2] == "main"
-    # And stop comes BEFORE delete (otherwise the running app loses
-    # its secret out from under it).
-    assert call_log["calls"].index(stops[-1]) < call_log["calls"].index(deletes[0])
+    deleted_prefixes = {c[1].rsplit("-", 1)[0] for c in deletes}
+    assert deleted_prefixes == {"cloudflare-staging", "litellm-connector-staging"}
+    assert all(c[2] == "main" for c in deletes)
+    # And stop comes BEFORE every delete (otherwise the running app
+    # loses its secret out from under it).
+    first_delete_idx = min(call_log["calls"].index(d) for d in deletes)
+    assert call_log["calls"].index(stops[-1]) < first_delete_idx
     # Env root gone -- subsequent activation has to re-create it.
     assert not (_isolated_home / ".minds-staging").exists()
 
@@ -925,25 +948,29 @@ def test_destroy_env_tier_destroys_mngr_agents_first(_isolated_home: Path, _root
     assert last_agent_index < first_app_index
 
 
-def test_destroy_env_tier_refuses_when_env_root_missing(_isolated_home: Path, _root_cg: ConcurrencyGroup) -> None:
-    """Unified destroy raises DevEnvNotFoundError when the env root is missing.
+def test_destroy_env_tier_proceeds_when_env_root_missing(_isolated_home: Path, _root_cg: ConcurrencyGroup) -> None:
+    """Unified destroy proceeds with cloud cleanup even without the env root.
 
-    Mirrors the dev-tier behaviour: the env root is the authoritative
-    "this env exists locally" marker. Without it, destroy has no way
-    to know which env to clean up, so it refuses outright rather than
-    silently no-op'ing.
+    See F22 in MANUAL_DEPLOY_FINDINGS.md: the env root is a convenience
+    pointer, not authoritative -- the cloud-side resources are keyed
+    off the env name (Modal env, Modal apps, Neon, SuperTokens,
+    Cloudflare tags, OVH tags), so destroy can converge purely by
+    name. Refusing on missing-root would orphan cloud state for
+    operators who manually nuke the directory.
     """
     call_log = _make_call_log()
     providers = _build_fake_providers(call_log)
-    with pytest.raises(DevEnvNotFoundError):
-        destroy_env(
-            DevEnvName("staging"),
-            tier="staging",
-            deploy_config=_deploy_config(tier="staging", modal_env="main"),
-            credentials=_credentials(),
-            providers=providers,
-            parent_concurrency_group=_root_cg,
-        )
+    destroy_env(
+        DevEnvName("staging"),
+        tier="staging",
+        deploy_config=_deploy_config(tier="staging", modal_env="main"),
+        credentials=_credentials(),
+        providers=providers,
+        parent_concurrency_group=_root_cg,
+    )
+    # Shared-tier cleanup still fires (stop modal apps + secret GC).
+    step_names = [c[0] for c in call_log["calls"]]
+    assert "stop_modal_app" in step_names
 
 
 def test_destroy_env_tier_leaves_env_root_when_step_fails(_isolated_home: Path, _root_cg: ConcurrencyGroup) -> None:
@@ -1092,9 +1119,14 @@ def test_destroy_env_tier_full_step_order(_isolated_home: Path, _root_cg: Concur
         "read_per_env_secret_values",
         "wipe_neon_db_schema",
         # 6: Modal -- stop + list-then-delete-all-timestamped-secrets path.
+        # Two deletes: ``cloudflare-staging-<id>`` (the one entry in this
+        # _deploy_config's [secrets].services) and ``litellm-connector-
+        # staging-<id>`` (always pushed separately by the deploy as a
+        # non-vault-backed Modal Secret).
         "stop_modal_app",
         "stop_modal_app",
         "list_modal_secrets",
+        "delete_modal_secret",
         "delete_modal_secret",
         # 7: generation id (tier-only).
         "delete_generation_id",

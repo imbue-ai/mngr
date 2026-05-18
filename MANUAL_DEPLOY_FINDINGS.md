@@ -6,6 +6,19 @@ Goal: walk through realistic deployment scenarios against the existing `dev-josh
 environment and the deployed apps; identify bugs and surprising behavior. Not writing
 formal tests; this is a checklist of probes + findings.
 
+## Status board
+
+Updated as findings are resolved. See each finding's body for the exact
+fix; commit hashes are in the git log.
+
+| Status | Findings |
+|--------|----------|
+| **FIXED** | F1, F2, F3, F4, F5, F6, F7, F9, F11, F15, F17, F18, F19, F20, F22, F24, F25, F26, F27 (via F5), F30, F32 |
+| **DEFERRED / IGNORED** | F8, F10, F12, F13, F14, F16, F21, F23, F28, F29, F31 |
+| **OPEN** | (none) |
+
+F5 + F32 each got a dedicated commit + redeploy; the F1/F2/F3/F4/F6/F7/F9/F11/F15/F17/F18/F19/F20/F22/F24/F25/F26/F30 batch landed together. The deployed `dev-josh-1` env predates the F17 + F25 changes (its `host_pool` schema_migrations table already has the pool-hosts rows, and its Modal Secrets carry the old `litellm-connector` flow); the next `minds env deploy` against it will adopt the new shapes idempotently.
+
 ## TL;DR — top findings by severity
 
 **Bugs that break user-visible flows:**

@@ -55,6 +55,9 @@ from imbue.minds.config.data_types import ClientEnvConfig
 from imbue.minds.config.data_types import DeployEnvConfig
 from imbue.minds.config.data_types import DeployLifecycleConfig
 from imbue.minds.config.data_types import ModalEnvStrategy
+from imbue.minds.config.loader import EnvConfigError
+from imbue.minds.config.loader import load_client_config
+from imbue.minds.config.loader import repo_tier_client_config_path
 from imbue.minds.envs.generation import GENERATION_ID_KEY
 from imbue.minds.envs.local_store import client_config_exists
 from imbue.minds.envs.local_store import delete_env_root
@@ -80,7 +83,6 @@ from imbue.minds.envs.per_env_deploy import stop_modal_app
 from imbue.minds.envs.per_env_deploy import tier_connector_url
 from imbue.minds.envs.per_env_deploy import tier_litellm_proxy_url
 from imbue.minds.envs.primitives import DevEnvName
-from imbue.minds.envs.primitives import DevEnvNotFoundError
 from imbue.minds.envs.providers.neon_db import NeonProjectRecord
 from imbue.minds.envs.providers.ovh_tags import OvhCredentials
 from imbue.minds.envs.providers.supertokens_app import SuperTokensAppRecord
@@ -88,6 +90,7 @@ from imbue.minds.envs.providers.supertokens_app import app_id_from_connection_ur
 from imbue.minds.envs.recover import RecoverTarget
 from imbue.minds.envs.recover import delete_recover_target
 from imbue.minds.envs.recover import find_monorepo_root
+from imbue.minds.envs.recover import hold_deploy_lock
 from imbue.minds.envs.recover import make_neon_snapshot_branch_name
 from imbue.minds.envs.recover import recover_target_exists
 from imbue.minds.envs.recover import recover_target_path
@@ -385,21 +388,39 @@ class DeployedEnv(FrozenModel):
 class DevEnvSummary(FrozenModel):
     """One row of :func:`list_dev_envs`.
 
-    ``connector_url`` is None for env roots that have no parseable
-    ``client.toml`` (e.g. a freshly-mkdir'd ``~/.minds-staging/`` whose
-    URLs live in the in-repo file but haven't been activated against
-    yet, or a partial deploy that failed before writing the file).
+    ``client_config_source`` makes the asymmetry between dev envs and
+    reserved tiers visible: dev envs have their ``client.toml`` under
+    the env root; reserved tiers (``production`` / ``staging``) use
+    the committed in-repo ``apps/minds/imbue/minds/config/envs/<tier>/
+    client.toml`` even when the env root exists.
+
+    ``connector_url`` is None only when no ``client.toml`` could be
+    located (a freshly-mkdir'd dev env that hasn't been deployed yet,
+    or a partial deploy that failed before writing the file).
     """
 
     name: str = Field(description="The env name (e.g. 'dev-josh-3'), or 'production' for ~/.minds/.")
     env_root: str = Field(description="Absolute path to the env root directory on disk.")
     client_config_path: str | None = Field(
         default=None,
-        description="Path to the per-env client.toml under env_root, or None if the file is absent.",
+        description=(
+            "Path to the client.toml driving this env. For dev envs, the per-env "
+            "``~/.minds-<env>/client.toml`` (written by ``minds env deploy``). For "
+            "reserved tiers, the committed in-repo "
+            "``apps/minds/imbue/minds/config/envs/<tier>/client.toml``. None when "
+            "neither location holds a parseable client.toml (e.g. unprovisioned dev env)."
+        ),
+    )
+    client_config_source: str | None = Field(
+        default=None,
+        description=(
+            "Where the client.toml lives: 'env_root' for dev envs, 'in_repo' for "
+            "reserved tiers (staging / production). None when there's no client.toml."
+        ),
     )
     connector_url: AnyUrl | None = Field(
         default=None,
-        description="connector_url parsed from the per-env client.toml, or None if no client.toml exists.",
+        description="connector_url parsed from the resolved client.toml, or None if no client.toml exists.",
     )
 
 
@@ -457,22 +478,69 @@ def deploy_env(
     modal_workspace = str(deploy_config.modal_workspace)
     tier_vault_prefix = str(deploy_config.vault_path_prefix).rstrip("/")
     modal_env = _resolve_modal_env(name=name, lifecycle=lifecycle, deploy_config=deploy_config)
-    # Mint a fresh deploy id (UTC ISO-compact timestamp). Used as the
-    # suffix on every Modal Secret pushed below and threaded into the
-    # deployed Modal app's env so it pins to the matching Secret set.
-    deploy_id = make_deploy_id()
-    logger.info("Deploy id for env {!r}: {}", str(name), deploy_id)
 
-    # Preflight: must not be running with a stale recover-target file.
-    # Other minds-env commands also refuse-on-exists, but check here too
-    # so deploy fails fast before any external mutation.
+    # Preflight: must run from within the monorepo (we shell out to
+    # ``modal deploy`` with absolute paths derived from this checkout).
+    # Checked BEFORE we mint a deploy id, log it, or touch any
+    # external state. (The CLI runs this check earlier too so vault
+    # reads also gate behind it; here is the defense-in-depth for
+    # non-CLI callers.)
     repo_root = find_monorepo_root()
-    if recover_target_exists(repo_root=repo_root):
+
+    # Hold the per-env deploy lock for the rest of this function. Two
+    # concurrent ``minds env deploy``s against the SAME env serialize
+    # here; against different envs they each take their own lock and
+    # proceed in parallel. See ``hold_deploy_lock`` for details.
+    with hold_deploy_lock(repo_root=repo_root, env_name=str(name)):
+        return _deploy_env_locked(
+            name=name,
+            tier=tier,
+            deploy_config=deploy_config,
+            credentials=credentials,
+            providers=providers,
+            parent_concurrency_group=parent_concurrency_group,
+            repo_root=repo_root,
+            lifecycle=lifecycle,
+            modal_workspace=modal_workspace,
+            tier_vault_prefix=tier_vault_prefix,
+            modal_env=modal_env,
+        )
+
+
+def _deploy_env_locked(
+    *,
+    name: DevEnvName,
+    tier: str,
+    deploy_config: DeployEnvConfig,
+    credentials: ProviderCredentials,
+    providers: Providers,
+    parent_concurrency_group: ConcurrencyGroup,
+    repo_root: Path,
+    lifecycle: DeployLifecycleConfig,
+    modal_workspace: str,
+    tier_vault_prefix: str,
+    modal_env: str,
+) -> DeployedEnv:
+    """The body of :func:`deploy_env`, run inside the per-env flock."""
+    # Refuse-on-stale-recover-target check now happens INSIDE the lock
+    # so two concurrent deploys against the same env can't both pass
+    # (the second blocks on the flock until the first finishes,
+    # whether it succeeded -- file gone -- or failed -- file present).
+    if recover_target_exists(repo_root=repo_root, env_name=str(name)):
         raise MindError(
-            f"Recover-target file exists at {recover_target_path(repo_root=repo_root)}; "
+            f"Recover-target file exists at {recover_target_path(repo_root=repo_root, env_name=str(name))}; "
             "refusing to start a new deploy until the prior failed deploy is recovered. "
             "Run `minds env recover` first."
         )
+
+    # Mint a fresh deploy id (UTC ISO-compact timestamp). Used as the
+    # suffix on every Modal Secret pushed below and threaded into the
+    # deployed Modal app's env so it pins to the matching Secret set.
+    # Done AFTER preflight so a refuse-on-monorepo-check or refuse-on-
+    # recover-target failure doesn't log a misleading "Deploy id..."
+    # line for a deploy that's about to abort.
+    deploy_id = make_deploy_id()
+    logger.info("Deploy id for env {!r}: {}", str(name), deploy_id)
 
     # Step 1: provider creation -- only when this tier owns the resources.
     neon_record: NeonProjectRecord | None = None
@@ -493,19 +561,30 @@ def deploy_env(
                 credentials.supertokens_api_key,
             )
 
-        # Apply pool-hosts schema migrations against the freshly-created
-        # host_pool DB. The provider implementation wraps
-        # :func:`apply_pool_hosts_migrations` from ``migrations.py``,
-        # which uses the schema_migrations tracking table so repeated
-        # deploys only run new migrations. For a brand-new DB all
-        # migrations are applied; for an existing one the runner finds
-        # them already recorded (or no-ops on the IF NOT EXISTS guards
-        # on the legacy files) and just records them.
-        assert neon_record is not None
-        with info_span("Applying pool-hosts schema migrations to host_pool"):
-            applied = providers.apply_pool_hosts_migrations(neon_record.host_pool_dsn, parent_concurrency_group)
-            if applied:
-                logger.info("Applied {} pool-hosts migration(s): {}", len(applied), [m.name for m in applied])
+    # Apply pool-hosts schema migrations against the host_pool DB.
+    # Runs for EVERY tier (dev + shared) so a new ``.sql`` file shipped
+    # via PR applies to staging / production on their next deploy, not
+    # just to dev. The provider implementation wraps
+    # :func:`apply_pool_hosts_migrations` from ``migrations.py``, which
+    # uses the schema_migrations tracking table so repeated deploys
+    # only run new migrations.
+    # - dev tier (creates_resources=true): targets ``neon_record.host_pool_dsn``,
+    #   the per-env host_pool DB this deploy just (re-)created or adopted.
+    # - shared tier (creates_resources=false): targets ``DATABASE_URL`` from the
+    #   operator-managed ``secrets/minds/<tier>/neon`` Vault entry (single
+    #   shared DB; the schema_migrations table lives alongside the
+    #   pool_hosts table in that DB).
+    host_pool_dsn = _resolve_host_pool_dsn_for_migrations(
+        lifecycle=lifecycle,
+        neon_record=neon_record,
+        tier_vault_prefix=tier_vault_prefix,
+        providers=providers,
+        parent_concurrency_group=parent_concurrency_group,
+    )
+    with info_span("Applying pool-hosts schema migrations to host_pool"):
+        applied = providers.apply_pool_hosts_migrations(host_pool_dsn, parent_concurrency_group)
+        if applied:
+            logger.info("Applied {} pool-hosts migration(s): {}", len(applied), [m.name for m in applied])
 
     # Capture pre-deploy Modal app versions BEFORE any further mutation
     # so the recover-target carries them. None for never-deployed apps
@@ -606,14 +685,11 @@ def deploy_env(
     )
     litellm_master_key = _read_litellm_master_key(tier_vault_prefix, providers, parent_concurrency_group)
     with info_span("Pushing per-env Modal Secrets into env {!r}", modal_env):
+        # Vault-backed services: one Modal Secret per entry in
+        # ``[secrets].services``, base values from Vault + per-service
+        # overrides from ``_compute_secret_overrides``.
         for service in services:
             per_service_overrides = dict(first_pass_overrides.get(service, {}))
-            if service == "litellm-connector":
-                if litellm_master_key:
-                    per_service_overrides.setdefault("LITELLM_MASTER_KEY", litellm_master_key)
-                if generation_id is not None:
-                    per_service_overrides.setdefault(GENERATION_ID_KEY, generation_id)
-                per_service_overrides.setdefault(MINDS_ENV_NAME_KEY, str(name))
             secret_name = timestamped_secret_name(service, tier, deploy_id)
             with info_span("Pushing per-env Modal Secret {!r}", secret_name):
                 values = providers.read_per_env_secret_values(
@@ -628,6 +704,31 @@ def deploy_env(
                     modal_env,
                     parent_concurrency_group,
                 )
+        # The ``litellm-connector`` Modal Secret is NOT vault-backed
+        # (there is no ``secrets/minds/<tier>/litellm-connector`` Vault
+        # entry); its values are 100% deploy-time computed. Push it
+        # as a separately-named step so the user-facing
+        # ``[secrets].services`` list stays "vault-backed only" and
+        # we don't need a "skip-the-Vault-read" carve-out for this
+        # one entry. The GC at ``gc_old_per_tier_secrets`` picks it up
+        # by suffix-match alongside every other ``<svc>-<tier>-<id>``
+        # secret, so no special GC bookkeeping is required.
+        connector_secret_overrides: dict[str, str] = dict(first_pass_overrides.get("litellm-connector", {}))
+        if litellm_master_key:
+            connector_secret_overrides.setdefault("LITELLM_MASTER_KEY", litellm_master_key)
+        if generation_id is not None:
+            connector_secret_overrides.setdefault(GENERATION_ID_KEY, generation_id)
+        connector_secret_overrides.setdefault(MINDS_ENV_NAME_KEY, str(name))
+        connector_secret_name = timestamped_secret_name("litellm-connector", tier, deploy_id)
+        with info_span("Pushing derived Modal Secret {!r}", connector_secret_name):
+            providers.push_per_env_modal_secret(
+                connector_secret_name,
+                # Strip out empty values to mirror ``build_per_env_secret_values``'s
+                # filter; Modal rejects empty-string values.
+                {k: v for k, v in connector_secret_overrides.items() if v},
+                modal_env,
+                parent_concurrency_group,
+            )
 
     # Step 5: modal deploys.
     litellm_proxy_min_containers = int(deploy_config.min_containers.litellm_proxy)
@@ -667,8 +768,19 @@ def deploy_env(
     client_config_path: str | None = None
     secrets_path: str | None = None
     if lifecycle.writes_local_state:
-        assert neon_record is not None, "writes_local_state implies creates_resources for now"
-        assert supertokens_record is not None, "writes_local_state implies creates_resources for now"
+        # Both records are guaranteed populated here: the
+        # ``DeployLifecycleConfig`` model validator rejects
+        # ``writes_local_state=true`` + ``creates_resources=false`` at
+        # deploy.toml parse time, and ``creates_resources=true`` is the
+        # only branch that populates ``neon_record`` / ``supertokens_record``.
+        # The asserts are defense-in-depth for callers that bypass the
+        # parser (tests etc.).
+        assert neon_record is not None, (
+            "writes_local_state implies creates_resources (see DeployLifecycleConfig validator)"
+        )
+        assert supertokens_record is not None, (
+            "writes_local_state implies creates_resources (see DeployLifecycleConfig validator)"
+        )
         public_config = ClientEnvConfig(connector_url=connector_url, litellm_proxy_url=litellm_proxy_url)
         client_config_path = str(write_client_config(public_config, name=name))
         secrets_path = str(
@@ -701,7 +813,7 @@ def deploy_env(
                     exc,
                 )
     with info_span("Deleting recover-target file after successful deploy"):
-        delete_recover_target(repo_root=repo_root)
+        delete_recover_target(repo_root=repo_root, env_name=str(name))
 
     # GC old timestamped Modal Secrets at the end of every successful
     # deploy. Best-effort -- failures here are logged but never re-raise
@@ -745,12 +857,53 @@ def _resolve_modal_env(*, name: DevEnvName, lifecycle: DeployLifecycleConfig, de
             assert_never(unreachable)
 
 
+def _resolve_host_pool_dsn_for_migrations(
+    *,
+    lifecycle: DeployLifecycleConfig,
+    neon_record: NeonProjectRecord | None,
+    tier_vault_prefix: str,
+    providers: Providers,
+    parent_concurrency_group: ConcurrencyGroup,
+) -> SecretStr:
+    """Return the DSN ``apply_pool_hosts_migrations`` should target for this tier.
+
+    Dev tier (``creates_resources=true``): use the per-env host_pool DSN
+    from the freshly-created or adopted Neon project record. Shared
+    tier (``creates_resources=false``): read ``DATABASE_URL`` from the
+    operator-managed ``secrets/minds/<tier>/neon`` Vault entry (single
+    shared DB where pool_hosts + litellm tables co-exist).
+
+    Raises :class:`MindError` if the shared-tier Vault entry is missing
+    or lacks ``DATABASE_URL`` -- we'd otherwise silently skip migrations
+    on shared tiers, which was the F17 bug we're fixing.
+    """
+    if lifecycle.creates_resources:
+        assert neon_record is not None, "creates_resources=true should have populated neon_record"
+        return neon_record.host_pool_dsn
+
+    neon_vault_values = providers.read_per_env_secret_values(
+        "neon",
+        tier_vault_prefix,
+        {},
+        parent_concurrency_group,
+    )
+    database_url = neon_vault_values.get("DATABASE_URL", "")
+    if not database_url:
+        raise MindError(
+            f"Cannot apply pool-hosts migrations: shared-tier Vault entry "
+            f"{tier_vault_prefix}/neon does not have a non-empty DATABASE_URL. "
+            "The host_pool schema migrations need a target DB; populate the Vault "
+            "entry with the tier's Neon DSN and re-run."
+        )
+    return SecretStr(database_url)
+
+
 def _expected_connector_url(
     *, name: DevEnvName, lifecycle: DeployLifecycleConfig, tier: str, modal_workspace: str
 ) -> AnyUrl:
     match lifecycle.modal_env_strategy:
         case ModalEnvStrategy.PER_ENV:
-            return per_env_connector_url(name, modal_workspace)
+            return per_env_connector_url(name, modal_workspace, tier=tier)
         case ModalEnvStrategy.SHARED:
             return tier_connector_url(tier, modal_workspace)
         case _ as unreachable:
@@ -762,7 +915,7 @@ def _expected_litellm_proxy_url(
 ) -> AnyUrl:
     match lifecycle.modal_env_strategy:
         case ModalEnvStrategy.PER_ENV:
-            return per_env_litellm_proxy_url(name, modal_workspace)
+            return per_env_litellm_proxy_url(name, modal_workspace, tier=tier)
         case ModalEnvStrategy.SHARED:
             return tier_litellm_proxy_url(tier, modal_workspace)
         case _ as unreachable:
@@ -857,11 +1010,24 @@ def destroy_env(
        than silently leaking expensive cloud resources because the
        local pointer is gone).
 
-    Raises :class:`DevEnvNotFoundError` if no env root exists -- the
-    operator is asked to confirm the name they meant.
+    Proceeds even when the env root is missing on disk. The local env
+    root is a convenience pointer; the cloud-side resources are keyed
+    off the env *name* (Modal env, Neon project, SuperTokens app,
+    Cloudflare tunnel tags, OVH IAM tags), all of which we can clean
+    up by name without needing the local directory. This makes destroy
+    safe to re-run after an operator who manually ``rm -rf``'d the env
+    root would otherwise be locked out of the cloud cleanup.
     """
-    if not env_root_exists(name):
-        raise DevEnvNotFoundError(f"No env root for env {name!r} at {env_root_dir(name)}; nothing to destroy.")
+    env_root_was_present = env_root_exists(name)
+    if not env_root_was_present:
+        logger.warning(
+            "No env root for env {!r} at {}; proceeding with cloud-side cleanup based on the env name. "
+            "Local state is keyed off the directory, but the cloud resources are keyed off the name -- "
+            "every step below can converge on a missing-local-root env. mngr-agent destroy (step 1) will "
+            "be a no-op since there's nothing under ``mngr/agents/`` to walk.",
+            str(name),
+            env_root_dir(name),
+        )
 
     lifecycle = deploy_config.lifecycle
     tier_vault_prefix = str(deploy_config.vault_path_prefix).rstrip("/")
@@ -1100,29 +1266,49 @@ def list_dev_envs() -> tuple[DevEnvSummary, ...]:
 
     Globs the user's home for every env root, including ``~/.minds/``
     (production) and ``~/.minds-staging/`` if they exist. Each row
-    carries the env name, the absolute env-root path, and -- if the
-    per-env ``client.toml`` is present and parseable -- the
-    ``connector_url`` parsed out of it. Rows for env roots that have
-    no ``client.toml`` (e.g. ``staging`` whose URLs live in the
-    in-repo file, not under the env root) leave ``connector_url`` and
-    ``client_config_path`` as ``None`` -- the CLI renders those as
-    "no client.toml under env_root".
+    carries the env name, the absolute env-root path, the resolved
+    client.toml path (per-env file for dev envs, committed in-repo
+    file for reserved tiers), where that client.toml lives
+    (``client_config_source``), and the ``connector_url`` parsed out
+    of it. Rows that have no client.toml anywhere (an unprovisioned
+    dev env) leave ``connector_url`` / ``client_config_path`` /
+    ``client_config_source`` as ``None``.
     """
     summaries: list[DevEnvSummary] = []
     for env_root in list_env_root_dirs():
         env_name = _env_name_from_root_path(env_root)
         client_path: Path | None = None
+        client_config_source: str | None = None
         connector_url: AnyUrl | None = None
-        if env_name != "production":
+        if env_name in {"production", "staging"}:
+            # Reserved tiers: client.toml is committed in-repo. Fall
+            # back to the repo path so the list output doesn't
+            # mislead the operator into thinking the tier is
+            # unprovisioned.
+            repo_path = repo_tier_client_config_path(env_name)
+            if repo_path.is_file():
+                client_path = repo_path
+                client_config_source = "in_repo"
+                try:
+                    connector_url = load_client_config(repo_path).connector_url
+                except EnvConfigError:
+                    # Malformed in-repo file: leave connector_url None
+                    # rather than blowing up the whole list. The CLI
+                    # surfaces "no client.toml" which prompts the
+                    # operator to fix the committed file.
+                    pass
+        else:
             dev_env_name = DevEnvName(env_name)
             if client_config_exists(dev_env_name):
                 client_path = client_config_file(dev_env_name)
+                client_config_source = "env_root"
                 connector_url = read_client_config_file(dev_env_name).connector_url
         summaries.append(
             DevEnvSummary(
                 name=env_name,
                 env_root=str(env_root),
                 client_config_path=str(client_path) if client_path is not None else None,
+                client_config_source=client_config_source,
                 connector_url=connector_url,
             )
         )
