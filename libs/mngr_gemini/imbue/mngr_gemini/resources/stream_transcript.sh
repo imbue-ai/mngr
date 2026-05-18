@@ -10,7 +10,9 @@
 #   - Multiple session files in a single gemini tmp dir
 #
 # Per-session line offsets are stored in
-# <agent-state-dir>/plugin/gemini/.transcript_offsets/<safe_id> so the
+# <agent-state-dir>/plugin/gemini/.transcript_offsets/<percent_encoded_path>
+# (one file per session file; the filename is the session file's absolute
+# path with '%' and '/' percent-encoded, see _offset_key_for) so the
 # script can resume efficiently. On startup, stored offsets are verified
 # against the output file using id-based lookups -- if the stored offset
 # is wrong (e.g. crash between emit and offset save), the script works
