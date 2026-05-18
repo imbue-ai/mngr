@@ -13,6 +13,17 @@ from imbue.mngr_vps_docker.errors import VpsApiError
 from imbue.mngr_vps_docker.errors import VpsProvisioningError
 from imbue.mngr_vps_docker.primitives import VpsInstanceId
 
+# OVH's ``billing.OrderDetail.domain`` is always the literal ``"*"`` for
+# VPS orders -- empirically verified on 2026-05-18 against the live OVH-US
+# API by walking every detail of a recent order. We never want to treat
+# this as a real serviceName, so spawn sites filter on it explicitly.
+_BILLING_DETAIL_DOMAIN_PLACEHOLDER: str = "*"
+
+# Value of ``billing.ItemDetail.order.plan.product.name`` for a VPS line
+# item, used to disambiguate the VPS detail from the OS / backup /
+# installation line items that appear in the same order.
+_OVH_VPS_PRODUCT_NAME: str = "virtualPrivateServer"
+
 _OVH_DELIVERY_POLL_INTERVAL_SECONDS: float = 10.0
 # Cap on how long the post-delivery `deliverVm` task is allowed to run before
 # we give up. Verified live at ~1-2min on `vps-2025-model1`; 10min leaves
@@ -48,16 +59,20 @@ def order_and_wait_for_vps(
         5. ``POST /order/cart/{id}/checkout`` to place the order. Capture
            the returned ``order.Order.orderId``; this is the link between
            our checkout call and the new VPS.
-        6. Poll ``GET /me/order/{orderId}/details`` for the order's
-           detail-id list, then ``GET /me/order/{orderId}/details/{detailId}``
-           until OVH populates the ``domain`` field with the assigned
-           serviceName. **Strong correlation: no shared-account race**
-           is possible because each in-flight order has its own orderId
-           and OVH only reports OUR order's domain via OUR orderId. The
-           previous implementation diff'd ``GET /vps`` before vs after
-           checkout, which silently picked the wrong serviceName when
-           a concurrent order finished delivering during our wait
-           (F3 in OVH_AUDIT.md).
+        6. Poll the ``/me/order/{orderId}/details`` chain until the VPS
+           detail's operation reports its assigned ``resource.name``.
+           See :func:`_wait_for_service_name_from_order` for the exact
+           polling shape. **Strong correlation: no shared-account race**
+           is possible because every poll is scoped to OUR ``orderId``
+           and OVH only reports OUR order's resources via OUR orderId.
+           The previous implementation diff'd ``GET /vps`` before vs
+           after checkout, which silently picked the wrong serviceName
+           when a concurrent order finished delivering during our wait
+           (F3 in OVH_AUDIT.md). Verified against the live OVH API:
+           the ``billing.OrderDetail.domain`` field is the literal
+           ``"*"`` for VPS orders (useless for correlation); the
+           ``service.Operation.resource.name`` chain is the only
+           OVH-side path that actually yields the assigned serviceName.
         7. Wait for the post-delivery ``deliverVm`` task to drain. The
            serviceName becomes visible in ``GET /vps`` before this task
            finishes; any mutating call (e.g. ``/rebuild``) issued in the
@@ -119,17 +134,18 @@ def order_and_wait_for_vps(
             order_id = _extract_order_id(order_response, cart_id=cart_id)
 
             logger.info("OVH order placed (cart={}, order_id={}); waiting for VPS delivery", cart_id, order_id)
-            # First check the inline ``details`` on the checkout response.
-            # OVH MAY populate the domain inline at checkout (the schema
-            # declares ``order.OrderDetail.domain`` as non-nullable), but
-            # for VPS orders the serviceName is assigned during delivery
-            # so this is usually empty -- in which case we fall through
-            # to the polled /me/order path.
-            service_name = _extract_inline_domain(order_response, cart_item_id=item_id)
-            if not service_name:
-                service_name = _wait_for_service_name_from_order(
-                    client, order_id=order_id, timeout_seconds=deliver_timeout_seconds
-                )
+            # Poll the /me/order/{orderId}/details chain until OVH
+            # assigns this order's VPS a serviceName. The ``domain``
+            # field on the ``billing.OrderDetail`` is always the literal
+            # ``"*"`` for VPS orders (verified live); the assigned
+            # serviceName only appears via the operation's
+            # ``resource.name`` chain.
+            service_name = _wait_for_service_name_from_order(
+                client,
+                order_id=order_id,
+                requested_plan_code=plan_code,
+                timeout_seconds=deliver_timeout_seconds,
+            )
             logger.info("OVH order {} produced serviceName {!r}", order_id, service_name)
 
             client.wait_for_no_active_tasks(
@@ -195,72 +211,60 @@ def _extract_order_id(order_response: Any, *, cart_id: str) -> int:
         ) from exc
 
 
-def _extract_inline_domain(order_response: Any, *, cart_item_id: int) -> str | None:
-    """Find the new VPS's serviceName inline on the checkout response if present.
-
-    Looks at ``order.Order.details[]`` for the entry whose ``cartItemID``
-    matches the cart item we built. Returns the ``domain`` (== serviceName)
-    if it's already populated at checkout time. Returns ``None`` if the
-    field is empty -- which is the common case for VPS orders since the
-    serviceName is assigned during delivery, after checkout returns.
-    """
-    if not isinstance(order_response, dict):
-        return None
-    raw_details = order_response.get("details")
-    if not isinstance(raw_details, list):
-        return None
-    for detail in raw_details:
-        if not isinstance(detail, dict):
-            continue
-        if detail.get("cartItemID") != cart_item_id:
-            continue
-        domain = detail.get("domain")
-        if isinstance(domain, str) and domain:
-            return domain
-    return None
-
-
 def _wait_for_service_name_from_order(
     client: OvhVpsClient,
     *,
     order_id: int,
+    requested_plan_code: str,
     timeout_seconds: float,
 ) -> str:
-    """Poll ``GET /me/order/{orderId}/details/{detailId}`` until ``domain`` populates.
+    """Poll the OVH order/details/operations chain until our VPS's serviceName appears.
 
-    OVH's order processing is asynchronous: the checkout response returns
-    immediately but the VPS's serviceName is only assigned during the
-    delivery phase (typically 30-90s on ``vps-2025-model1``, can take
-    longer on bigger plans or busier regions). This helper polls until
-    OVH writes the serviceName into the order detail's ``domain`` field.
+    OVH's order processing is asynchronous. The checkout response
+    returns immediately but the VPS's serviceName ("vps-XXX.vps.ovh.us")
+    is only assigned during the delivery phase (typically 30-90s on
+    ``vps-2025-model1``, can take longer on bigger plans / busier
+    regions). To find OUR order's serviceName specifically, we walk:
+
+        GET /me/order/{orderId}/details
+            -> list of detailIds
+        For each detailId:
+            GET /me/order/{orderId}/details/{detailId}/extension
+                -> billing.ItemDetail; check
+                   ``order.plan.code == requested_plan_code`` AND
+                   ``order.plan.product.name == "virtualPrivateServer"``
+                   to identify the VPS detail (vs the OS / backup /
+                   installation line items that show up alongside it).
+            GET /me/order/{orderId}/details/{detailId}/operations
+                -> list of operationIds (empty until OVH has assigned
+                   the resource, which happens during delivery).
+            For each operationId:
+                GET /me/order/{orderId}/details/{detailId}/operations/{operationId}
+                    -> service.Operation; ``resource.name`` is the
+                       assigned serviceName.
 
     **Strong correlation:** every poll is scoped to OUR ``orderId``, so
-    a concurrent ``order_and_wait_for_vps`` against the same OVH account
-    sees only ITS order's details. The previous diff-against-``/vps``
-    approach could silently pick up the other order's serviceName when
-    two deliveries finished within the same poll interval (F3 in
-    OVH_AUDIT.md). With this helper, that race is eliminated.
+    a concurrent ``order_and_wait_for_vps`` against the same OVH
+    account sees only ITS order's resources. No race possible.
 
-    Two retryable failure modes during the early window:
+    Verified against the live OVH-US API on 2026-05-18: the
+    ``billing.OrderDetail.domain`` field is always the literal ``"*"``
+    for VPS orders (useless for correlation); the operation's
+    ``resource.name`` IS the serviceName once delivery completes.
 
-    * ``GET /me/order/{orderId}/details`` returns 404 / empty list
-      because OVH hasn't yet materialised the order's details server-side.
-      Keep polling.
-    * ``GET /me/order/{orderId}/details/{detailId}`` returns a detail
-      whose ``domain`` is the empty string because the delivery hasn't
-      run yet. Keep polling.
+    Polling is on a single sleep at the end of each iteration so the
+    per-iteration latency is uniform.
 
     Raises :class:`VpsProvisioningError` on timeout.
     """
     deadline = time.monotonic() + timeout_seconds
     last_log_message: str = "no successful poll yet"
-    # Single sleep at the end of each iteration (vs. one per failure mode)
-    # so the per-iteration latency is uniform and the ratchet on
-    # ``time.sleep`` counts only the one truly-needed call.
     while time.monotonic() < deadline:
-        domain, last_log_message = _try_fetch_order_service_name(client, order_id)
-        if domain:
-            return domain
+        service_name, last_log_message = _try_fetch_order_service_name(
+            client, order_id=order_id, requested_plan_code=requested_plan_code
+        )
+        if service_name:
+            return service_name
         time.sleep(_OVH_DELIVERY_POLL_INTERVAL_SECONDS)
     raise VpsProvisioningError(
         f"OVH order {order_id} did not produce a VPS serviceName within {timeout_seconds}s; "
@@ -268,17 +272,20 @@ def _wait_for_service_name_from_order(
     )
 
 
-def _try_fetch_order_service_name(client: OvhVpsClient, order_id: int) -> tuple[str | None, str]:
-    """Single-shot attempt to read the populated ``domain`` from an OVH order's details.
+def _try_fetch_order_service_name(
+    client: OvhVpsClient, *, order_id: int, requested_plan_code: str
+) -> tuple[str | None, str]:
+    """One sweep through the order/details/extension/operations chain.
 
-    Returns ``(domain, status_message)`` -- ``domain`` is the serviceName
-    when populated, ``None`` otherwise. The status message describes the
-    current state for the timeout error path.
+    Returns ``(service_name, status_message)``. ``service_name`` is the
+    assigned VPS serviceName when found, ``None`` otherwise. The status
+    message is for the timeout error path.
 
-    Iterates every detail (in practice there's exactly one because the
-    cart had exactly one item, but iterates defensively in case OVH ever
-    bundles ancillary items with a VPS order). Returns the first
-    non-empty domain.
+    Skips details whose extension's ``order.plan.code`` doesn't match
+    the requested plan -- a VPS order also produces non-VPS line items
+    ("VPS-1" installation, "Linux" OS, optional "Option Automated
+    Backup Standard - VPS-1") that have their own resources we don't
+    want to confuse with the actual VPS serviceName.
     """
     try:
         raw_detail_ids = client.call_api("GET", f"/me/order/{order_id}/details")
@@ -287,23 +294,107 @@ def _try_fetch_order_service_name(client: OvhVpsClient, order_id: int) -> tuple[
         return None, f"GET /me/order/{order_id}/details failed: {e}"
     if not isinstance(raw_detail_ids, list) or not raw_detail_ids:
         return None, f"GET /me/order/{order_id}/details returned empty list (order not yet materialised)"
+    matched_detail_count = 0
     for detail_id in raw_detail_ids:
-        try:
-            detail = client.call_api("GET", f"/me/order/{order_id}/details/{detail_id}")
-        except VpsApiError as e:
-            logger.debug(
-                "OVH GET /me/order/{}/details/{} failed: {}; trying remaining details", order_id, detail_id, e
-            )
+        if not _detail_extension_matches_plan(
+            client, order_id=order_id, detail_id=detail_id, requested_plan_code=requested_plan_code
+        ):
             continue
-        if not isinstance(detail, dict):
-            continue
-        domain = detail.get("domain")
-        if isinstance(domain, str) and domain:
-            return domain, "ok"
+        matched_detail_count += 1
+        service_name = _fetch_first_operation_resource_name(client, order_id=order_id, detail_id=detail_id)
+        if service_name:
+            return service_name, "ok"
+    if matched_detail_count == 0:
+        return (
+            None,
+            f"GET /me/order/{order_id}/details/* returned {len(raw_detail_ids)} detail(s) "
+            f"but none had extension.order.plan.code == {requested_plan_code!r} (order not yet decomposed)",
+        )
     return (
         None,
-        f"GET /me/order/{order_id}/details/* returned no populated domain yet (saw {len(raw_detail_ids)} detail(s))",
+        f"matched {matched_detail_count} detail(s) for plan {requested_plan_code!r} but none had a populated "
+        "operation.resource.name yet (delivery in progress)",
     )
+
+
+def _detail_extension_matches_plan(
+    client: OvhVpsClient, *, order_id: int, detail_id: int, requested_plan_code: str
+) -> bool:
+    """Return True iff this detail's extension says it's a VPS line item for our plan.
+
+    Matches on both ``order.plan.code == requested_plan_code`` AND
+    ``order.plan.product.name == "virtualPrivateServer"`` to defend
+    against the (unlikely) case that OVH reuses the same plan code
+    across products.
+    """
+    try:
+        extension = client.call_api("GET", f"/me/order/{order_id}/details/{detail_id}/extension")
+    except VpsApiError as e:
+        logger.debug(
+            "OVH GET /me/order/{}/details/{}/extension failed: {}; treating as no match",
+            order_id,
+            detail_id,
+            e,
+        )
+        return False
+    if not isinstance(extension, dict):
+        return False
+    raw_order = extension.get("order")
+    if not isinstance(raw_order, dict):
+        return False
+    plan = raw_order.get("plan") or {}
+    if plan.get("code") != requested_plan_code:
+        return False
+    product = plan.get("product") or {}
+    if isinstance(product, dict):
+        product_name = product.get("name")
+        if isinstance(product_name, str) and product_name and product_name != _OVH_VPS_PRODUCT_NAME:
+            return False
+    return True
+
+
+def _fetch_first_operation_resource_name(client: OvhVpsClient, *, order_id: int, detail_id: int) -> str | None:
+    """Return the first non-empty ``operation.resource.name`` for this detail.
+
+    The recurring billing line of a successful VPS order ends up with
+    exactly one operation whose ``resource.name`` is the assigned
+    serviceName. We iterate defensively in case OVH ever returns
+    multiple operations per detail (e.g. installation + activation
+    split across operations).
+    """
+    try:
+        op_ids = client.call_api("GET", f"/me/order/{order_id}/details/{detail_id}/operations")
+    except VpsApiError as e:
+        logger.debug(
+            "OVH GET /me/order/{}/details/{}/operations failed: {}; not ready",
+            order_id,
+            detail_id,
+            e,
+        )
+        return None
+    if not isinstance(op_ids, list) or not op_ids:
+        return None
+    for op_id in op_ids:
+        try:
+            op = client.call_api("GET", f"/me/order/{order_id}/details/{detail_id}/operations/{op_id}")
+        except VpsApiError as e:
+            logger.debug(
+                "OVH GET /me/order/{}/details/{}/operations/{} failed: {}; trying next",
+                order_id,
+                detail_id,
+                op_id,
+                e,
+            )
+            continue
+        if not isinstance(op, dict):
+            continue
+        resource = op.get("resource") or {}
+        if not isinstance(resource, dict):
+            continue
+        name = resource.get("name")
+        if isinstance(name, str) and name and name != _BILLING_DETAIL_DOMAIN_PLACEHOLDER:
+            return name
+    return None
 
 
 def _verify_vps_matches_order(

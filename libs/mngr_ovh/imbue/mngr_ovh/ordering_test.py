@@ -35,39 +35,39 @@ def _fake_order_router(
     cart_id: str = "cart-1",
     item_id: int = 99,
     order_id: int = 42,
-    detail_id: int = 7,
+    vps_detail_id: int = 7001,
+    linux_detail_id: int = 7002,
+    vps_operation_id: int = 9001,
+    requested_plan: str = "vps-2025-model1",
     service_name: str = "vps-new.vps.ovh.us",
-    inline_domain: str | None = None,
     allowed_datacenters: tuple[str, ...] = ("US-EAST-VA",),
     allowed_os: tuple[str, ...] = ("Debian 12 - Docker",),
     vps_info: dict[str, Any] | None = None,
     detail_listing_first_calls_404: int = 0,
-    domain_populated_after_n_polls: int = 0,
+    resource_populated_after_n_polls: int = 0,
 ) -> Callable[[str, str, Any, bool], Any]:
     """Build a fake ``client.call`` that drives ``order_and_wait_for_vps`` through one happy run.
 
+    The fake models the live OVH API shape verified on 2026-05-18:
+    ``billing.OrderDetail.domain`` is always ``"*"`` and the real
+    serviceName only appears via
+    ``GET /me/order/{id}/details/{detailId}/operations/{opId}.resource.name``.
+
     Knobs:
-    - ``inline_domain``: if set, the checkout response carries the
-      serviceName inline in ``details[].domain`` so the polled
-      /me/order path is skipped.
     - ``detail_listing_first_calls_404``: simulate OVH not having
       materialised the order yet -- /me/order/{id}/details returns []
       this many times before the real list appears.
-    - ``domain_populated_after_n_polls``: number of detail GETs that
-      return an empty ``domain`` before OVH writes the real serviceName.
+    - ``resource_populated_after_n_polls``: number of operation GETs
+      that return an unpopulated resource name (None) before OVH
+      writes the real serviceName.
     """
-    # If the inline_domain is set (i.e. checkout returns the serviceName
-    # immediately) the rest of the flow operates on THAT name, not the
-    # ``service_name`` default. Resolve to a single ``effective_name``
-    # the rest of the router uses for /vps/{name} dispatch.
-    effective_name = inline_domain if inline_domain is not None else service_name
     if vps_info is None:
-        vps_info = _vps_info_for()
+        vps_info = _vps_info_for(plan=requested_plan)
     detail_list_call_count = {"n": 0}
-    detail_get_call_count = {"n": 0}
+    operation_get_call_count = {"n": 0}
 
     def fake(method: str, path: str, body: Any = None, need_auth: bool = True) -> Any:
-        # Cart construction
+        # Cart construction.
         if method == "POST" and path == "/order/cart":
             return {"cartId": cart_id}
         if method == "POST" and path == f"/order/cart/{cart_id}/vps":
@@ -83,58 +83,105 @@ def _fake_order_router(
         if method == "POST" and path == f"/order/cart/{cart_id}/assign":
             return None
         if method == "POST" and path == f"/order/cart/{cart_id}/checkout":
-            response: dict[str, Any] = {"orderId": order_id, "prices": {}, "url": "https://x"}
-            if inline_domain is not None:
-                response["details"] = [{"cartItemID": item_id, "domain": inline_domain}]
-            else:
-                response["details"] = [{"cartItemID": item_id, "domain": ""}]
-            return response
-        # Order-detail polling
+            # billing.OrderDetail.domain is the literal "*" -- our code
+            # MUST ignore it and follow the operations chain instead.
+            return {
+                "orderId": order_id,
+                "prices": {},
+                "url": "https://x",
+                "details": [{"cartItemID": item_id, "domain": "*"}],
+            }
+        # /me/order/{orderId}/details -> list of detailIds. Returns the
+        # VPS detail and the OS-sublineitem detail to mirror the live
+        # OVH shape (the user's first probe saw 6 details for a single
+        # VPS order; here 2 is enough to exercise the per-plan filter).
         if method == "GET" and path == f"/me/order/{order_id}/details":
             detail_list_call_count["n"] += 1
             if detail_list_call_count["n"] <= detail_listing_first_calls_404:
                 return []
-            return [detail_id]
-        if method == "GET" and path == f"/me/order/{order_id}/details/{detail_id}":
-            detail_get_call_count["n"] += 1
-            if detail_get_call_count["n"] <= domain_populated_after_n_polls:
-                return {"orderDetailId": detail_id, "domain": "", "description": "VPS"}
-            return {"orderDetailId": detail_id, "domain": service_name, "description": "VPS"}
-        # Post-delivery task drain
-        if method == "GET" and "/tasks?state=" in path and effective_name in path:
+            return [vps_detail_id, linux_detail_id]
+        # Per-detail extension -- our code matches on
+        # extension.order.plan.code so this is the disambiguation point
+        # between the VPS detail and the OS sublineitem.
+        if method == "GET" and path == f"/me/order/{order_id}/details/{vps_detail_id}/extension":
+            return {
+                "order": {
+                    "action": "installation",
+                    "type": "plan",
+                    "plan": {
+                        "code": requested_plan,
+                        "duration": "P1M",
+                        "pricingMode": "default",
+                        "quantity": 1,
+                        "product": {"name": "virtualPrivateServer"},
+                    },
+                    "configurations": [
+                        {"label": "vps_datacenter", "value": list(allowed_datacenters)[0]},
+                        {"label": "vps_os", "value": list(allowed_os)[0]},
+                    ],
+                },
+            }
+        if method == "GET" and path == f"/me/order/{order_id}/details/{linux_detail_id}/extension":
+            return {
+                "order": {
+                    "action": "installation",
+                    "type": "plan",
+                    "plan": {
+                        "code": "option-linux",
+                        "duration": "P1M",
+                        "product": {"name": "virtualPrivateServer"},
+                    },
+                    "configurations": [],
+                },
+            }
+        # Per-detail operations.
+        if method == "GET" and path == f"/me/order/{order_id}/details/{vps_detail_id}/operations":
+            return [vps_operation_id]
+        if method == "GET" and path == f"/me/order/{order_id}/details/{linux_detail_id}/operations":
+            # OS sub-resource op; has its own resource.name that we
+            # must NOT pick up. The plan-code filter on the extension
+            # call above already excludes this whole detail, so this
+            # branch should never fire in a passing test.
+            return [9999]
+        # The VPS operation, possibly still pre-delivery.
+        if method == "GET" and path == f"/me/order/{order_id}/details/{vps_detail_id}/operations/{vps_operation_id}":
+            operation_get_call_count["n"] += 1
+            if operation_get_call_count["n"] <= resource_populated_after_n_polls:
+                return {"id": vps_operation_id, "status": "doing", "type": "installation", "resource": {}}
+            return {
+                "id": vps_operation_id,
+                "status": "done",
+                "type": "installation",
+                "resource": {"name": service_name, "displayName": service_name, "state": "ok"},
+            }
+        # The OS sub-resource operation. Returns its OWN resource.name,
+        # but our filter on plan.code rejects this detail entirely so
+        # this branch should only fire if the filter is broken.
+        if method == "GET" and path == f"/me/order/{order_id}/details/{linux_detail_id}/operations/9999":
+            return {
+                "id": 9999,
+                "status": "done",
+                "type": "installation",
+                "resource": {"name": f"{service_name}-linux", "displayName": "OS", "state": "ok"},
+            }
+        # Post-delivery task drain.
+        if method == "GET" and "/tasks?state=" in path and service_name in path:
             return []
-        # Post-hoc verify
-        if method == "GET" and path == f"/vps/{effective_name}":
+        # Post-hoc verify.
+        if method == "GET" and path == f"/vps/{service_name}":
             return vps_info
         # Failure-path cleanup -- the post-hoc verify raises into the
         # ``except`` branch which calls ``_safe_delete_cart``.
         if method == "DELETE" and path == f"/order/cart/{cart_id}":
             return None
-        # Anything else is an unexpected call -- fail loudly.
         raise AssertionError(f"unexpected fake OVH call: {method} {path}")
 
     return fake
 
 
 def test_order_and_wait_for_vps_success_polled_path() -> None:
-    """Happy path: checkout returns empty inline domain; serviceName comes from /me/order polling."""
-    client = _client(_fake_order_router(domain_populated_after_n_polls=2))
-    with patch("imbue.mngr_ovh.ordering._OVH_DELIVERY_POLL_INTERVAL_SECONDS", 0.0):
-        result = order_and_wait_for_vps(
-            client,
-            plan_code="vps-2025-model1",
-            datacenter="US-EAST-VA",
-            image_name="Debian 12 - Docker",
-            pricing_mode="default",
-            duration="P1M",
-            deliver_timeout_seconds=10.0,
-        )
-    assert result == "vps-new.vps.ovh.us"
-
-
-def test_order_and_wait_for_vps_uses_inline_domain_when_populated() -> None:
-    """If checkout already populates ``details[].domain``, skip the /me/order poll."""
-    client = _client(_fake_order_router(inline_domain="vps-new.vps.ovh.us"))
+    """Happy path: serviceName arrives via the operations chain after a few polls."""
+    client = _client(_fake_order_router(resource_populated_after_n_polls=2))
     with patch("imbue.mngr_ovh.ordering._OVH_DELIVERY_POLL_INTERVAL_SECONDS", 0.0):
         result = order_and_wait_for_vps(
             client,
@@ -162,6 +209,35 @@ def test_order_and_wait_for_vps_polls_when_order_detail_listing_initially_empty(
             deliver_timeout_seconds=10.0,
         )
     assert result == "vps-new.vps.ovh.us"
+
+
+def test_order_and_wait_for_vps_filters_out_os_subresource_detail() -> None:
+    """The OS sub-resource has its OWN operation+resource; the plan-code filter must skip it.
+
+    The fake's linux_detail_id has plan.code = ``"option-linux"`` and a
+    resource.name of ``"<vps>-linux"`` that is NOT a real VPS service.
+    The fake will raise AssertionError if we ever query its operation
+    branch (vps_detail_id matches plan + has the real serviceName, so
+    we should return after finding it without touching the OS detail's
+    operation). This pins the plan-code filter.
+    """
+    client = _client(_fake_order_router())
+    with patch("imbue.mngr_ovh.ordering._OVH_DELIVERY_POLL_INTERVAL_SECONDS", 0.0):
+        result = order_and_wait_for_vps(
+            client,
+            plan_code="vps-2025-model1",
+            datacenter="US-EAST-VA",
+            image_name="Debian 12 - Docker",
+            pricing_mode="default",
+            duration="P1M",
+            deliver_timeout_seconds=10.0,
+        )
+    assert result == "vps-new.vps.ovh.us"
+    # Sanity: the result is NOT the OS sub-resource ``"<vps>-linux"`` name
+    # the fake exposes on the linux_detail's operation. If the filter were
+    # broken and we iterated by detail id, we'd be at risk of returning
+    # whichever resource.name came first.
+    assert not result.endswith("-linux")
 
 
 def test_order_rejects_unavailable_datacenter() -> None:
@@ -225,8 +301,8 @@ def test_order_rejects_unavailable_os() -> None:
 
 
 def test_order_raises_when_delivery_times_out() -> None:
-    """OVH never populates ``details[].domain`` -- polling exhausts the budget."""
-    detail_fetches = {"n": 0}
+    """OVH never assigns a resource.name -- polling exhausts the budget."""
+    operation_fetches = {"n": 0}
 
     def fake(method: str, path: str, body: Any = None, need_auth: bool = True) -> Any:
         if method == "POST" and path == "/order/cart":
@@ -244,12 +320,25 @@ def test_order_raises_when_delivery_times_out() -> None:
         if method == "POST" and path == "/order/cart/cart-4/assign":
             return None
         if method == "POST" and path == "/order/cart/cart-4/checkout":
-            return {"orderId": 4242, "details": [{"cartItemID": 102, "domain": ""}]}
+            return {"orderId": 4242, "details": [{"cartItemID": 102, "domain": "*"}]}
         if method == "GET" and path == "/me/order/4242/details":
             return [101]
-        if method == "GET" and path == "/me/order/4242/details/101":
-            detail_fetches["n"] += 1
-            return {"orderDetailId": 101, "domain": ""}
+        if method == "GET" and path == "/me/order/4242/details/101/extension":
+            return {
+                "order": {
+                    "plan": {
+                        "code": "vps-2025-model1",
+                        "duration": "P1M",
+                        "product": {"name": "virtualPrivateServer"},
+                    },
+                },
+            }
+        if method == "GET" and path == "/me/order/4242/details/101/operations":
+            return [201]
+        if method == "GET" and path == "/me/order/4242/details/101/operations/201":
+            operation_fetches["n"] += 1
+            # Resource never populated -- OVH delivery stuck.
+            return {"id": 201, "status": "doing", "resource": {}}
         if method == "DELETE" and path == "/order/cart/cart-4":
             return None
         raise AssertionError(f"unexpected call: {method} {path}")
@@ -266,7 +355,7 @@ def test_order_raises_when_delivery_times_out() -> None:
                 duration="P1M",
                 deliver_timeout_seconds=0.05,
             )
-    assert detail_fetches["n"] >= 1
+    assert operation_fetches["n"] >= 1
 
 
 def test_order_raises_when_checkout_returns_no_order_id() -> None:
@@ -309,10 +398,15 @@ def test_order_raises_when_checkout_returns_no_order_id() -> None:
 
 
 def test_order_post_hoc_verify_catches_wrong_plan() -> None:
-    """The post-hoc verify aborts if OVH gave us the wrong plan."""
+    """The post-hoc verify aborts if OVH gave us the wrong plan.
+
+    The fake's operation chain returns the requested serviceName, but
+    the post-hoc GET /vps/{name} returns a DIFFERENT plan than what
+    was requested -- the verify must catch this.
+    """
     client = _client(
         _fake_order_router(
-            inline_domain="vps-wrong-plan.vps.ovh.us",
+            service_name="vps-wrong-plan.vps.ovh.us",
             vps_info={"model": {"name": "vps-2024-larger"}, "zone": "Region OpenStack: os-us-east-va-vps-1"},
         )
     )
@@ -333,7 +427,7 @@ def test_order_post_hoc_verify_catches_wrong_region() -> None:
     """The post-hoc verify aborts if OVH gave us the wrong datacenter."""
     client = _client(
         _fake_order_router(
-            inline_domain="vps-wrong-zone.vps.ovh.us",
+            service_name="vps-wrong-zone.vps.ovh.us",
             vps_info={"model": {"name": "vps-2025-model1"}, "zone": "Region OpenStack: os-us-west-or-vps-1"},
         )
     )
@@ -391,18 +485,60 @@ def test_f3_parallel_orders_each_get_their_own_service_name() -> None:
                 cart_id = path.split("/")[3]
                 thread_n = cart_to_thread[cart_id]
                 order_id = 99 + thread_n
+                # billing.OrderDetail.domain is the literal "*" in the
+                # real OVH API; our code must look up the serviceName
+                # via the operations chain, NOT this field.
                 return {
                     "orderId": order_id,
-                    "details": [{"cartItemID": 10 + thread_n - 1, "domain": ""}],
+                    "details": [{"cartItemID": 10 + thread_n - 1, "domain": "*"}],
                 }
+            # /me/order/{orderId}/details -> [detailId]
             if method == "GET" and path == "/me/order/100/details":
                 return [200]
             if method == "GET" and path == "/me/order/101/details":
                 return [201]
-            if method == "GET" and path == "/me/order/100/details/200":
-                return {"orderDetailId": 200, "domain": "vps-aaa.vps.ovh.us"}
-            if method == "GET" and path == "/me/order/101/details/201":
-                return {"orderDetailId": 201, "domain": "vps-bbb.vps.ovh.us"}
+            # /extension -> billing.ItemDetail. Each order's detail has
+            # the matching plan code.
+            if method == "GET" and path == "/me/order/100/details/200/extension":
+                return {
+                    "order": {
+                        "plan": {
+                            "code": "vps-2025-model1",
+                            "duration": "P1M",
+                            "product": {"name": "virtualPrivateServer"},
+                        },
+                    },
+                }
+            if method == "GET" and path == "/me/order/101/details/201/extension":
+                return {
+                    "order": {
+                        "plan": {
+                            "code": "vps-2025-model1",
+                            "duration": "P1M",
+                            "product": {"name": "virtualPrivateServer"},
+                        },
+                    },
+                }
+            # /operations -> [operationId]
+            if method == "GET" and path == "/me/order/100/details/200/operations":
+                return [3001]
+            if method == "GET" and path == "/me/order/101/details/201/operations":
+                return [3002]
+            # /operations/{opId} -> service.Operation with the assigned
+            # resource.name. THIS is the strong-correlation point:
+            # thread1's orderId never sees thread2's resource.name.
+            if method == "GET" and path == "/me/order/100/details/200/operations/3001":
+                return {
+                    "id": 3001,
+                    "status": "done",
+                    "resource": {"name": "vps-aaa.vps.ovh.us", "state": "ok"},
+                }
+            if method == "GET" and path == "/me/order/101/details/201/operations/3002":
+                return {
+                    "id": 3002,
+                    "status": "done",
+                    "resource": {"name": "vps-bbb.vps.ovh.us", "state": "ok"},
+                }
             if method == "GET" and "/tasks?state=" in path:
                 return []
             if method == "GET" and path == "/vps/vps-aaa.vps.ovh.us":
