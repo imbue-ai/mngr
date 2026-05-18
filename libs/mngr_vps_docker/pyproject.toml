@@ -45,15 +45,13 @@ omit = [
 ]
 
 [tool.coverage.report]
-# Lower than other provider packages (e.g. mngr_vultr at 60%) because
-# this package's `--cov=imbue.mngr_vps_docker` measurement does not
-# include exercise of the base-class API-discovery methods
-# (parallel-SSH fan-out, cache fallback, name/id lookup) that live in
-# VpsDockerProvider. Those methods are covered end-to-end by each
-# concrete provider's release tests, which run outside the offload
-# pipeline that drives this gate. Adding stub-subclass unit tests
-# against the base discovery methods would let us raise this threshold.
-fail_under = 38
+# Lower than concrete provider packages (e.g. mngr_vultr at 60%) because
+# most of `instance.py` is host-lifecycle code (create, snapshot, exec,
+# destroy) that's exercised end-to-end by each concrete provider's release
+# tests rather than at the unit level. The shared cross-VPS discovery flow
+# (parallel-SSH fan-out, cache fallback, name/id lookup) IS covered by
+# instance_discovery_test.py against a concrete VpsDockerProvider subclass.
+fail_under = 42
 omit = [
   "*_test.py",
   "test_*.py",
