@@ -78,18 +78,6 @@ def _start_serial_tailer(cg: ConcurrencyGroup, serial_log_path: str) -> None:
     terminated explicitly via ``_stop_serial_tailer``.
     """
     global _active_serial_tailer
-    # `-F` follows by name AND waits for the file to appear if it doesn't yet
-    # exist, on both BSD and GNU tail. The long-form `--follow=name --retry`
-    # is GNU-only and is rejected by BSD tail (macOS) with "unrecognized
-    # option", which silently loses the serial-log diagnostics during VM boot.
-    #
-    # Sources (linked verbatim quotes):
-    #   - FreeBSD tail(1): "If the file being followed does not (yet) exist
-    #     or if it is removed, tail will keep looking and will display the
-    #     file from the beginning if and when it is created."
-    #     https://man.freebsd.org/cgi/man.cgi?query=tail&sektion=1
-    #   - GNU coreutils tail(1): "-F   same as --follow=name --retry".
-    #     https://www.gnu.org/software/coreutils/manual/html_node/tail-invocation.html
     _active_serial_tailer = cg.run_process_in_background(
         ["tail", "-F", serial_log_path],
         is_checked_by_group=False,
