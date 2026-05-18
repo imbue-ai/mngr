@@ -65,6 +65,7 @@ These fields extend the base `VpsDockerProviderConfig` (see `mngr_vps_docker`):
 | `default_region` | `US-EAST-VA` | Default VPS datacenter |
 | `default_plan` | `vps-2025-model1` | Default plan code (VPS-1, $7.60/mo) |
 | `default_image_name` | `Debian 12 - Docker` | Default OS image (Docker pre-installed) |
+| `bootstrap_ssh_user` | `debian` | Non-root user the OVH image installs the rebuild key for. Only override if you change `default_image_name` to a non-Debian image (e.g. `ubuntu` for Ubuntu images, `almalinux` for AlmaLinux). |
 | `pricing_mode` | `default` | OVH pricing mode (`default`, `upfront6`, `upfront12`) |
 | `duration` | `P1M` | ISO-8601 commitment duration (monthly only) |
 | `vps_boot_timeout` | `600.0` | Seconds to wait for the OVH order to deliver a VPS |
@@ -78,7 +79,7 @@ These fields extend the base `VpsDockerProviderConfig` (see `mngr_vps_docker`):
 - VPSes are tagged with `mngr-provider=<name>` and `mngr-host-id=<id>` via OVH IAM v2 tags on the VPS resource URN
 - Discovery: `GET /v2/iam/resource?resourceType=vps` filtered client-side for matching tags
 - Provisioning: full `/order/cart` flow (`POST /order/cart` → `POST /cart/{id}/vps` → configure datacenter/OS → assign → checkout → poll `/vps` until the new `serviceName` appears)
-- Bootstrap (no cloud-init available): after delivery, `POST /vps/{s}/rebuild` with `publicSshKey` + `doNotSendPassword=true` to pre-install our client key, then SSH in with key auth and pin the host key on first connect (`StrictHostKeyChecking=accept-new` semantics). After pinning, strict checking is enforced.
+- Bootstrap (no cloud-init available): after delivery, `POST /vps/{s}/rebuild` with `publicSshKey` + `doNotSendPassword=true` pre-installs our client key. OVH installs that key for the image's default non-root user (e.g. `debian` on `Debian 12 - Docker`), not for root, so the provider then SSHes in as that user, pins the host key on first connect (`StrictHostKeyChecking=accept-new` semantics), sudo-copies `authorized_keys` into `/root/.ssh/`, and verifies SSH-as-root works before handing off to the rest of the provider. After pinning, strict host-key checking is enforced on every subsequent connection.
 
 ## Security caveat (first connect)
 
@@ -90,7 +91,7 @@ Pinned host keys live under `<profile_dir>/providers/ovh/<provider_name>/known_h
 
 ## Billing caveat
 
-OVH classic VPS is billed monthly (no hourly option). `mngr stop my-agent` halts the Docker container only — the VPS keeps running, and you keep being billed until the next renewal anniversary. `mngr destroy my-agent` triggers termination via `POST /vps/{s}/terminate`, which (per OVH's two-step flow) emails a confirmation token to the admin contact and only fully decommissions the VPS at end of month after that token is acted on. In practice the VPS keeps running and billing until then.
+OVH classic VPS is billed monthly (no hourly option). `mngr stop my-agent` halts the Docker container only — the VPS keeps running, and you keep being billed until the next renewal anniversary. `mngr destroy my-agent` cancels auto-renewal via `PUT /vps/{s}/serviceInfos` (`renew.deleteAtExpiration=true`) — no email confirmation step, no human in the loop. The VPS still keeps running until the OVH-side `expiration` date (OVH does not prorate classic VPS cancellations) and then auto-decommissions. For monthly subscriptions that's the rest of the current month; for `upfront6` / `upfront12` it can be up to 6 / 12 months of prepaid balance respectively. The cancelled-but-still-alive window is what the auto-reuse logic below exploits.
 
 ## Auto-reuse of cancelled VPSes
 
