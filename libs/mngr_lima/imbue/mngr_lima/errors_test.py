@@ -32,8 +32,9 @@ def test_lima_command_error() -> None:
 
 
 def test_lima_host_creation_error() -> None:
-    error = LimaHostCreationError("disk full")
+    error = LimaHostCreationError(ProviderInstanceName("lima"), "disk full")
     assert isinstance(error, HostCreationError)
+    assert error.provider_name == ProviderInstanceName("lima")
     assert "disk full" in str(error)
 
 
