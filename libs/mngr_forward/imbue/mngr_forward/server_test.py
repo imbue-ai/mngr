@@ -679,3 +679,84 @@ def test_subdomain_forward_returns_plain_503_for_non_html_on_connect_failure(tmp
 
     assert response.status_code == 503
     assert "location" not in {k.lower() for k in response.headers}
+
+
+def test_subdomain_forward_emits_workspace_backend_failure_on_sse_startup_timeout(tmp_path: Path) -> None:
+    """``TimeoutException`` on an SSE-startup ``send()`` must emit ``CONNECT_ERROR``.
+
+    Regression test: a wedged-but-listening workspace backend produces a
+    ``httpx.TimeoutException`` (not ``ConnectError``) when ``send(..., stream=True)``
+    waits for response headers that never arrive. Without an envelope on
+    this branch the minds-side tracker would never transition to STUCK
+    for hung-in-user-code backends.
+    """
+    agent_id = AgentId()
+    preauth = "preauth-cookie-sse-timeout"
+    captured: list[httpx.Request] = []
+    app, env_out, mock_client = _make_forward_app_with_capture(
+        tmp_path,
+        captured,
+        agent_id,
+        preauth,
+        raise_error=httpx.ConnectTimeout,
+    )
+
+    with TestClient(app, base_url=f"http://{agent_id}.localhost:18421", follow_redirects=False) as client:
+        app.state.http_client = mock_client
+        response = client.get(
+            "/api/events",
+            headers={
+                "cookie": f"{MNGR_FORWARD_SESSION_COOKIE_NAME}={preauth}",
+                "accept": "text/event-stream",
+            },
+        )
+
+    assert response.status_code == 504
+    lines = _envelope_lines(env_out)
+    assert len(lines) == 1
+    envelope = json.loads(lines[0])
+    assert envelope["stream"] == "forward"
+    assert envelope["agent_id"] == str(agent_id)
+    payload = envelope["payload"]
+    assert payload["type"] == "workspace_backend_failure"
+    assert payload["reason"] == "CONNECT_ERROR"
+
+
+def test_subdomain_forward_emits_workspace_backend_failure_on_non_sse_timeout(tmp_path: Path) -> None:
+    """``TimeoutException`` on a non-SSE backend request must emit ``CONNECT_ERROR``.
+
+    Regression test: covers the non-streaming path counterpart to the
+    SSE-startup timeout case. Both paths previously returned a 504 with
+    no failure envelope, so the chrome health SSE never saw a tick toward
+    STUCK for hung backends.
+    """
+    agent_id = AgentId()
+    preauth = "preauth-cookie-json-timeout"
+    captured: list[httpx.Request] = []
+    app, env_out, mock_client = _make_forward_app_with_capture(
+        tmp_path,
+        captured,
+        agent_id,
+        preauth,
+        raise_error=httpx.ConnectTimeout,
+    )
+
+    with TestClient(app, base_url=f"http://{agent_id}.localhost:18421", follow_redirects=False) as client:
+        app.state.http_client = mock_client
+        response = client.get(
+            "/api/state",
+            headers={
+                "cookie": f"{MNGR_FORWARD_SESSION_COOKIE_NAME}={preauth}",
+                "accept": "application/json",
+            },
+        )
+
+    assert response.status_code == 504
+    lines = _envelope_lines(env_out)
+    assert len(lines) == 1
+    envelope = json.loads(lines[0])
+    assert envelope["stream"] == "forward"
+    assert envelope["agent_id"] == str(agent_id)
+    payload = envelope["payload"]
+    assert payload["type"] == "workspace_backend_failure"
+    assert payload["reason"] == "CONNECT_ERROR"
