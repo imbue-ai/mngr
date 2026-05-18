@@ -7,8 +7,14 @@ isolated from other developers' work in the same dev workspace.
 We shell out to the local ``modal`` CLI because Modal does not publish a
 public Python API for environment management; the CLI is what their docs
 sanction (``modal environment create`` / ``modal environment delete``).
-Authentication piggybacks on whatever ``modal token set`` / ``MODAL_*``
-config the operator already has for the dev tier workspace.
+
+Workspace selection: ``minds env activate`` exports ``MODAL_PROFILE``
+from the activated tier's committed ``modal_workspace``, so every modal
+shellout (here and in ``per_env_deploy``) targets the correct Modal
+account without depending on ``~/.modal.toml``'s ``active = true`` flag.
+The operator must have a matching profile entry in ``~/.modal.toml``
+(run ``modal token set --profile <workspace>`` once per tier they
+operate against).
 """
 
 import shutil

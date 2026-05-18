@@ -24,6 +24,7 @@ connector that consume those values will 500 at request time until the
 Vault entry gets populated and ``minds env deploy`` is re-run.
 """
 
+import json
 import os
 import re
 from pathlib import Path
@@ -33,43 +34,39 @@ from loguru import logger
 from pydantic import AnyUrl
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.imbue_common.logging import info_span
 from imbue.minds.envs.primitives import DevEnvName
 from imbue.minds.envs.primitives import VaultReadError
-from imbue.minds.envs.providers.neon_db import NeonDatabaseRecord
+from imbue.minds.envs.providers.neon_db import NeonProjectRecord
 from imbue.minds.envs.providers.supertokens_app import SuperTokensAppRecord
 from imbue.minds.envs.vault_reader import VaultPath
 from imbue.minds.envs.vault_reader import read_vault_kv
 from imbue.minds.errors import MindError
 
 # Modal's `modal deploy` prints lines like:
-#     Created web function fastapi_app => https://<host>.modal.run
-# When the natural host exceeds DNS's 63-char limit, Modal truncates and
-# appends a 6-hex hash, and may wrap the URL across stdout lines. Collapsing
-# whitespace before regex matching handles both forms.
+#     Created web function api => https://<host>.modal.run
+# Under the shortened app + function names (``rsc-<tier>``/``api`` and
+# ``llm-<tier>``/``proxy``) the natural host always fits under DNS's
+# 63-char limit, so no truncation / 6-hex-suffix surfaces in practice.
+# We still collapse whitespace before regex matching in case Modal
+# wraps the URL across stdout lines for terminal display reasons.
 _MODAL_DEPLOY_URL_PATTERN: Final[re.Pattern[str]] = re.compile(r"https://[A-Za-z0-9_\-.]+\.modal\.run")
 
-# Services that need a per-env Modal Secret. Order doesn't matter for the
-# pushes themselves, but listing them here in one place keeps the set
-# explicit -- each name corresponds to an entry under
-# ``.minds/template/<name>.sh`` and a Modal Secret ``<name>-<tier>``.
+# Services that need a per-env Modal Secret backed by a Vault entry.
+# Each name corresponds to an entry under ``.minds/template/<name>.sh``
+# and produces a Modal Secret named ``<name>-<tier>-<deploy_id>`` via
+# ``build_per_env_secret_values``. The ``litellm-connector`` Modal
+# Secret is NOT in this list -- it's a code-driven secret (no Vault
+# entry exists or is expected) pushed by ``provisioning.deploy_env``
+# directly; see the corresponding step in that function.
 _PER_ENV_SECRET_SERVICES: Final[tuple[str, ...]] = (
     "litellm",
     "supertokens",
     "cloudflare",
     "neon",
     "pool-ssh",
-    "litellm-connector",
     "paid-accounts",
 )
-
-# Subset of ``_PER_ENV_SECRET_SERVICES`` whose values are constructed
-# entirely at deploy time from other tier secrets + deploy URLs rather
-# than read from a Vault entry. ``build_per_env_secret_values`` skips
-# the Vault read for these so the deploy log doesn't get a misleading
-# "Vault read for litellm-connector failed" warning every time. Keep
-# in sync with anything in provisioning.py that supplies overrides for
-# a service without ever expecting a Vault-backed base.
-_DERIVED_ONLY_SECRET_SERVICES: Final[frozenset[str]] = frozenset({"litellm-connector"})
 
 # Placeholder key written when a Vault entry isn't populated yet. Modal
 # requires at least one KEY=VALUE pair to create a Secret; this gives us
@@ -81,6 +78,20 @@ _PLACEHOLDER_VALUE: Final[str] = "unpopulated"
 _MODAL_DEPLOY_TIMEOUT_SECONDS: Final[float] = 600.0
 _MODAL_SECRET_TIMEOUT_SECONDS: Final[float] = 60.0
 _MODAL_ENV_CREATE_TIMEOUT_SECONDS: Final[float] = 60.0
+
+# Env-var names the deployed modal apps read at module load to pin
+# their warm-pool size. Kept here (one name per app) so the deploy
+# side and the app side stay in lockstep -- changing either name in
+# isolation would silently fall back to the in-app default (0).
+CONNECTOR_MIN_CONTAINERS_ENV_VAR: Final[str] = "MINDS_CONNECTOR_MIN_CONTAINERS"
+LITELLM_PROXY_MIN_CONTAINERS_ENV_VAR: Final[str] = "MINDS_LITELLM_PROXY_MIN_CONTAINERS"
+
+# Env-var name the deployed modal apps read at module load to pick
+# which timestamped Modal Secret bundle to attach. Mirrors the same
+# constant in ``secret_lifecycle.py``; kept here (instead of importing
+# from there) because ``per_env_deploy`` predates that module and we
+# avoid the circular import.
+MINDS_DEPLOY_ID_ENV_VAR: Final[str] = "MINDS_DEPLOY_ID"
 
 
 class ModalDeployError(MindError):
@@ -122,18 +133,49 @@ def _connector_app_file() -> Path:
     return _repo_root() / "apps" / "remote_service_connector" / "imbue" / "remote_service_connector" / "app.py"
 
 
-def per_env_connector_url(name: DevEnvName, modal_workspace: str) -> AnyUrl:
+def per_env_connector_url(name: DevEnvName, modal_workspace: str, *, tier: str) -> AnyUrl:
     """Compute the connector's URL for the given dev env.
 
     Modal asgi apps follow ``<workspace>--<app>-<function>.modal.run``,
     with the env name embedded as ``<workspace>-<env>--<app>-...``
-    (Modal's URL convention for non-default envs).
+    (Modal's URL convention for non-default envs). The connector's app
+    name is ``rsc-<tier>`` and its FastAPI function is ``api`` -- short
+    enough that the full hostname always fits under DNS's 63-char
+    limit, so the computed URL is exactly what Modal returns (no
+    truncation, no fixup pass).
+
+    Today only the dev tier uses ``modal_env_strategy=PER_ENV``, so
+    ``tier`` is effectively always ``"dev"`` in practice; the parameter
+    is here so a future PER_ENV tier (a hypothetical ``staging-dev`` or
+    similar) gets the right ``rsc-<tier>`` segment without further
+    changes.
     """
-    return AnyUrl(f"https://{modal_workspace}-{name}--remote-service-connector-dev-fastapi-app.modal.run")
+    return AnyUrl(f"https://{modal_workspace}-{name}--rsc-{tier}-api.modal.run")
 
 
-def per_env_litellm_proxy_url(name: DevEnvName, modal_workspace: str) -> AnyUrl:
-    return AnyUrl(f"https://{modal_workspace}-{name}--litellm-proxy-dev-litellm-app.modal.run")
+def per_env_litellm_proxy_url(name: DevEnvName, modal_workspace: str, *, tier: str) -> AnyUrl:
+    """Compute the LiteLLM proxy's URL for the given dev env.
+
+    Same hostname convention as :func:`per_env_connector_url`; the
+    proxy's app name is ``llm-<tier>`` and its asgi function is ``proxy``.
+    """
+    return AnyUrl(f"https://{modal_workspace}-{name}--llm-{tier}-proxy.modal.run")
+
+
+def tier_connector_url(tier: str, modal_workspace: str) -> AnyUrl:
+    """Compute the connector's URL for a shared-tier deploy (staging / production).
+
+    Shared tiers deploy into Modal's default-named environment (no env
+    name in the URL), so the host shape is
+    ``<workspace>--<app>-<function>.modal.run`` -- one fewer segment
+    than the per-env shape.
+    """
+    return AnyUrl(f"https://{modal_workspace}--rsc-{tier}-api.modal.run")
+
+
+def tier_litellm_proxy_url(tier: str, modal_workspace: str) -> AnyUrl:
+    """Compute the LiteLLM proxy's URL for a shared-tier deploy."""
+    return AnyUrl(f"https://{modal_workspace}--llm-{tier}-proxy.modal.run")
 
 
 def build_per_env_secret_values(
@@ -145,25 +187,25 @@ def build_per_env_secret_values(
 ) -> dict[str, str]:
     """Read tier-shared values for one service from Vault and layer overrides.
 
-    Services listed in ``_DERIVED_ONLY_SECRET_SERVICES`` skip the Vault
-    read entirely -- their values are 100% derived from ``overrides``
-    (other secrets + deploy URLs), so a Vault entry is intentionally
-    absent and we shouldn't warn about it.
+    Missing Vault entries return an empty dict and emit a warning so
+    the operator can populate them later; the caller is expected to
+    fall back to a placeholder when both the tier-shared values and
+    overrides come up empty.
 
-    For Vault-backed services, missing Vault entries return an empty
-    dict and emit a warning so the operator can populate them later;
-    the caller is expected to fall back to a placeholder when both the
-    tier-shared values and overrides come up empty.
+    This helper is only for genuinely Vault-backed services (every
+    entry in ``_PER_ENV_SECRET_SERVICES``). Code-driven secrets like
+    ``litellm-connector`` go through ``provisioning.deploy_env``'s
+    direct ``push_per_env_modal_secret`` call instead -- they have no
+    Vault entry to read.
     """
     base: dict[str, str] = {}
-    if service not in _DERIVED_ONLY_SECRET_SERVICES:
-        try:
-            base = read_vault_kv(
-                VaultPath(f"{tier_vault_prefix}/{service}"),
-                parent_concurrency_group=parent_cg,
-            )
-        except VaultReadError as exc:
-            logger.warning("Vault read for {} failed ({}); will push placeholder.", service, exc)
+    try:
+        base = read_vault_kv(
+            VaultPath(f"{tier_vault_prefix}/{service}"),
+            parent_concurrency_group=parent_cg,
+        )
+    except VaultReadError as exc:
+        logger.warning("Vault read for {} failed ({}); will push placeholder.", service, exc)
     merged = dict(base)
     merged.update(overrides)
     return {k: v for k, v in merged.items() if v}
@@ -238,6 +280,8 @@ def deploy_litellm_proxy(
     *,
     modal_env: str,
     tier: str,
+    min_containers: int,
+    deploy_id: str,
     parent_cg: ConcurrencyGroup,
 ) -> AnyUrl:
     """``modal deploy`` the litellm-proxy app into ``modal_env`` for ``tier``.
@@ -257,27 +301,35 @@ def deploy_litellm_proxy(
     ``modal_env`` is the Modal environment to deploy into: the activated
     dev env's name for dev-tier deploys, or the tier's stable Modal env
     (``main`` by convention) for staging / production deploys.
+
+    ``min_containers`` controls the deployed function's warm-pool size.
+    Threaded into the subprocess env as ``MINDS_LITELLM_PROXY_MIN_CONTAINERS``
+    so the modal app picks it up at module load.
     """
     app_file = _litellm_app_file()
-    logger.info(
-        "Running LiteLLM Prisma schema push against the litellm DATABASE_URL "
-        "(this can take ~30-60s on first run while Modal builds the image, "
-        "~5-15s thereafter; the push itself is idempotent)..."
-    )
-    _run_modal_function(
-        app_file=app_file,
-        function_name="migrate_db",
-        modal_env=modal_env,
-        tier=tier,
-        parent_cg=parent_cg,
-    )
-    return _deploy_modal_app(
-        app_file=app_file,
-        app_name=f"litellm-proxy-{tier}",
-        modal_env=modal_env,
-        tier=tier,
-        parent_cg=parent_cg,
-    )
+    with info_span(
+        "Running LiteLLM Prisma schema migration against {} "
+        "(~30-60s first run while Modal builds the image, ~5-15s thereafter; idempotent)",
+        modal_env,
+    ):
+        _run_modal_function(
+            app_file=app_file,
+            function_name="migrate_db",
+            modal_env=modal_env,
+            tier=tier,
+            deploy_id=deploy_id,
+            parent_cg=parent_cg,
+        )
+    with info_span("modal deploy llm-{} into env {!r}", tier, modal_env):
+        return _deploy_modal_app(
+            app_file=app_file,
+            app_name=f"llm-{tier}",
+            modal_env=modal_env,
+            tier=tier,
+            deploy_id=deploy_id,
+            extra_env={LITELLM_PROXY_MIN_CONTAINERS_ENV_VAR: str(min_containers)},
+            parent_cg=parent_cg,
+        )
 
 
 def delete_modal_secret(
@@ -359,20 +411,32 @@ def deploy_remote_service_connector(
     *,
     modal_env: str,
     tier: str,
+    min_containers: int,
+    deploy_id: str,
     parent_cg: ConcurrencyGroup,
 ) -> AnyUrl:
     """``modal deploy`` the remote_service_connector app into ``modal_env`` for ``tier``.
 
     See :func:`deploy_litellm_proxy` for return-value semantics and the
-    meaning of ``modal_env``.
+    meaning of ``modal_env``. ``min_containers`` is threaded into the
+    subprocess env as ``MINDS_CONNECTOR_MIN_CONTAINERS`` and consumed
+    by the modal app at module load.
+
+    ``deploy_id`` is threaded into the subprocess env as ``MINDS_DEPLOY_ID``
+    so the deployed connector attaches to the matching ``<svc>-<tier>-<id>``
+    Modal Secrets minted by this deploy. Missing the id at the app's module
+    load is a hard failure (the app raises ``DeployIdMissingError``).
     """
-    return _deploy_modal_app(
-        app_file=_connector_app_file(),
-        app_name=f"remote-service-connector-{tier}",
-        modal_env=modal_env,
-        tier=tier,
-        parent_cg=parent_cg,
-    )
+    with info_span("modal deploy rsc-{} into env {!r}", tier, modal_env):
+        return _deploy_modal_app(
+            app_file=_connector_app_file(),
+            app_name=f"rsc-{tier}",
+            modal_env=modal_env,
+            tier=tier,
+            deploy_id=deploy_id,
+            extra_env={CONNECTOR_MIN_CONTAINERS_ENV_VAR: str(min_containers)},
+            parent_cg=parent_cg,
+        )
 
 
 def _parse_deploy_url_from_stdout(stdout: str) -> AnyUrl | None:
@@ -398,6 +462,8 @@ def _deploy_modal_app(
     app_name: str,
     modal_env: str,
     tier: str,
+    deploy_id: str,
+    extra_env: dict[str, str] | None = None,
     parent_cg: ConcurrencyGroup,
 ) -> AnyUrl:
     if not app_file.is_file():
@@ -412,10 +478,19 @@ def _deploy_modal_app(
         str(app_file),
     ]
     subprocess_env = _modal_subprocess_env()
-    # The Modal apps read MNGR_DEPLOY_ENV at module load to pick the
-    # right secret names; tier deploys set this in the shell wrapper, so
-    # mirror that here.
+    # The Modal apps read MNGR_DEPLOY_ENV + MINDS_DEPLOY_ID at module
+    # load to build their ``Secret.from_name(f"<svc>-<tier>-<id>")``
+    # calls. Both are baked into the deployment spec at modal-deploy
+    # serialization time, so threading them in via the subprocess env
+    # is the only way the deployed function spec picks them up.
     subprocess_env["MNGR_DEPLOY_ENV"] = tier
+    subprocess_env[MINDS_DEPLOY_ID_ENV_VAR] = deploy_id
+    # Extra env vars (e.g. per-app ``MINDS_*_MIN_CONTAINERS``) are
+    # baked into the deployment spec at module load -- threading them
+    # in via the subprocess env is the only way modal's deploy-time
+    # serialization sees them.
+    if extra_env is not None:
+        subprocess_env.update(extra_env)
     cg = parent_cg.make_concurrency_group(name=f"modal-deploy-{app_name}")
     with cg:
         result = cg.run_process_to_completion(
@@ -453,6 +528,7 @@ def _run_modal_function(
     function_name: str,
     modal_env: str,
     tier: str,
+    deploy_id: str,
     parent_cg: ConcurrencyGroup,
 ) -> None:
     """Invoke a Modal Function defined in ``app_file`` via ``modal run``.
@@ -461,13 +537,12 @@ def _run_modal_function(
     the proxy deploy. ``modal run`` of an ``@app.function`` does not
     require a prior ``modal deploy``: Modal builds an ephemeral instance
     on demand, so this works on first-time tier bootstrap when no
-    ``litellm-proxy-<tier>`` app yet exists.
+    ``llm-<tier>`` app yet exists.
 
-    ``MNGR_DEPLOY_ENV`` is set in the subprocess env because the Modal
-    app reads it at module load to pick the right per-tier Secret name
-    (``litellm-<tier>``). Without it the function would attach the wrong
-    secret and either fail to find a DATABASE_URL or, worse, migrate
-    against the wrong tier's database.
+    ``MNGR_DEPLOY_ENV`` + ``MINDS_DEPLOY_ID`` are set in the subprocess
+    env so the Modal app reads them at module load and attaches to the
+    correct ``litellm-<tier>-<deploy_id>`` Secret. The just-pushed Secret
+    must exist before this runs.
     """
     if not app_file.is_file():
         raise RepoLayoutError(f"Modal app file not found: {app_file}")
@@ -480,6 +555,7 @@ def _run_modal_function(
     ]
     subprocess_env = _modal_subprocess_env()
     subprocess_env["MNGR_DEPLOY_ENV"] = tier
+    subprocess_env[MINDS_DEPLOY_ID_ENV_VAR] = deploy_id
     cg = parent_cg.make_concurrency_group(name=f"modal-run-{function_name}")
     with cg:
         result = cg.run_process_to_completion(
@@ -495,6 +571,83 @@ def _run_modal_function(
         )
 
 
+def get_modal_app_latest_version(*, app_name: str, modal_env: str, parent_cg: ConcurrencyGroup) -> str | None:
+    """Return the latest deployed version id of ``app_name`` in ``modal_env``, or None.
+
+    Shells out to ``modal app history --env=<env> <app> --json`` and
+    parses the first entry. Returns ``None`` if the app has never been
+    deployed (Modal returns "app not found" on stderr and exits non-zero),
+    so callers can distinguish first-deploy from upgrade-deploy without
+    raising.
+    """
+    command = ["modal", "app", "history", "--env", modal_env, "--json", app_name]
+    cg = parent_cg.make_concurrency_group(name=f"modal-app-history-{app_name}")
+    with cg:
+        result = cg.run_process_to_completion(
+            command=command,
+            timeout=_MODAL_SECRET_TIMEOUT_SECONDS,
+            is_checked_after=False,
+            env=_modal_subprocess_env(),
+        )
+    if result.returncode != 0:
+        message = (result.stderr + result.stdout).lower()
+        # Modal CLI's "no such app" wording: empirically "could not find a
+        # deployed app named '<name>' in the '<env>' environment." Also
+        # handle older variants for forward-compat.
+        if (
+            "could not find" in message
+            or "not found" in message
+            or "no such" in message
+            or "does not exist" in message
+        ):
+            return None
+        stderr = result.stderr.strip() or result.stdout.strip()
+        raise ModalDeployError(
+            f"`modal app history {app_name} --env {modal_env}` failed (exit {result.returncode}): {stderr}"
+        )
+    try:
+        rows = json.loads(result.stdout)
+    except (ValueError, json.JSONDecodeError) as exc:
+        raise ModalDeployError(f"`modal app history --json` returned non-JSON: {exc}") from exc
+    if not isinstance(rows, list) or not rows:
+        return None
+    # Modal sorts history newest-first. Look for a "version" / "Version"
+    # field on the first entry.
+    first = rows[0]
+    if isinstance(first, dict):
+        for key in ("Version", "version"):
+            value = first.get(key)
+            if isinstance(value, str | int):
+                return str(value)
+    return None
+
+
+def rollback_modal_app(*, app_name: str, version: str, modal_env: str, parent_cg: ConcurrencyGroup) -> None:
+    """``modal app rollback <app> <version> --env=<env>``.
+
+    Re-deploys the version that was active at ``version``, including the
+    env vars (notably ``MINDS_DEPLOY_ID``) captured at that deploy time
+    -- which re-attaches the rolled-back app to the matching
+    ``<svc>-<tier>-<id>`` Modal Secrets minted under that prior deploy.
+    Idempotent in the sense that re-running with the same target version
+    is just a no-op redeploy.
+    """
+    command = ["modal", "app", "rollback", "--env", modal_env, app_name, version]
+    cg = parent_cg.make_concurrency_group(name=f"modal-app-rollback-{app_name}")
+    with cg:
+        result = cg.run_process_to_completion(
+            command=command,
+            timeout=_MODAL_DEPLOY_TIMEOUT_SECONDS,
+            is_checked_after=False,
+            env=_modal_subprocess_env(),
+        )
+    if result.returncode != 0:
+        stderr = result.stderr.strip() or result.stdout.strip()
+        raise ModalDeployError(
+            f"`modal app rollback {app_name} {version} --env {modal_env}` failed (exit {result.returncode}): {stderr}"
+        )
+
+
 def per_env_secret_services() -> tuple[str, ...]:
     """Public accessor for the list of services that need per-env Modal Secrets."""
     return _PER_ENV_SECRET_SERVICES
@@ -504,23 +657,35 @@ def compute_per_env_overrides(
     name: DevEnvName,
     *,
     modal_workspace: str,
-    neon_record: NeonDatabaseRecord,
+    tier: str,
+    neon_record: NeonProjectRecord,
     supertokens_record: SuperTokensAppRecord,
 ) -> dict[str, dict[str, str]]:
     """Return per-service Modal Secret value overrides for this dev env.
 
     Keys missing from the result inherit the tier-shared Vault value
     verbatim (or fall through to a placeholder if no tier value exists).
+
+    Both ``neon.DATABASE_URL`` (consumed by the connector for pool host
+    rows) and ``litellm.DATABASE_URL`` (consumed by the LiteLLM proxy
+    for spend tracking + virtual keys) get overridden to point at the
+    per-env Neon project's two databases. The tier-shared vault values
+    for those keys are intentionally bypassed; only their non-DSN
+    fields (e.g. ``LITELLM_MASTER_KEY``, ``ANTHROPIC_API_KEY``) survive
+    the merge into the per-env Modal Secret.
     """
-    connector_url = per_env_connector_url(name, modal_workspace)
-    proxy_url = per_env_litellm_proxy_url(name, modal_workspace)
+    connector_url = per_env_connector_url(name, modal_workspace, tier=tier)
+    proxy_url = per_env_litellm_proxy_url(name, modal_workspace, tier=tier)
     return {
         "supertokens": {
             "SUPERTOKENS_CONNECTION_URI": supertokens_record.connection_uri,
             "AUTH_WEBSITE_DOMAIN": str(connector_url),
         },
         "neon": {
-            "DATABASE_URL": neon_record.pooled_dsn.get_secret_value(),
+            "DATABASE_URL": neon_record.host_pool_dsn.get_secret_value(),
+        },
+        "litellm": {
+            "DATABASE_URL": neon_record.litellm_cost_dsn.get_secret_value(),
         },
         "litellm-connector": {
             "LITELLM_PROXY_URL": str(proxy_url),

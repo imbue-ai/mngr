@@ -90,7 +90,7 @@ class LeasedHost(FrozenModel):
     host_db_id: str
     host_id: str
     agent_id: str
-    vps_ip: str
+    vps_address: str
     ssh_user: str
     ssh_port: int
     container_ssh_port: int

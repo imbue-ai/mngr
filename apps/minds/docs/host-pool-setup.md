@@ -5,42 +5,40 @@ How to set up the infrastructure for the imbue-cloud-leased pool host flow.
 ## Prerequisites
 
 - Neon PostgreSQL database (two connection strings: pooled for runtime, direct for migrations)
-- Vultr API key (for provisioning VPS instances)
+- OVH API credentials (AK / AS / CK) for the endpoint the pool uses
+  (default `ovh-us`). Pool hosts are provisioned via `mngr imbue_cloud
+  admin pool create` against the OVH backend. (The older Vultr-backed
+  path still works for one-off baking but every new pool flow uses
+  OVH; see the `--region` option on `admin pool create`.)
 - Modal account (for deploying the remote_service_connector)
 
 ## Step 1: Create the database schema
 
-Use the **direct** (non-pooled) Neon connection string for schema migrations:
+**For dev envs:** skip this step. `minds env deploy` (against a dev
+env) provisions a brand-new Neon project per env and applies the
+schema automatically by replaying
+`apps/remote_service_connector/migrations/*.sql` against the new
+`host_pool` database.
 
-```sql
-CREATE EXTENSION IF NOT EXISTS pgcrypto;
+**For staging / production:** apply the schema once, by hand, against
+the tier's pre-provisioned `host_pool` database. Use the **direct**
+(non-pooled) Neon connection string:
 
-CREATE TABLE pool_hosts (
-    id UUID PRIMARY KEY,
-    vps_ip TEXT NOT NULL,
-    vps_instance_id TEXT NOT NULL,
-    agent_id TEXT NOT NULL,
-    host_id TEXT NOT NULL,
-    ssh_port INTEGER NOT NULL,
-    ssh_user TEXT NOT NULL,
-    container_ssh_port INTEGER NOT NULL,
-    status TEXT NOT NULL,
-    attributes JSONB NOT NULL DEFAULT '{}'::jsonb,
-    leased_to_user TEXT,
-    leased_at TIMESTAMPTZ,
-    released_at TIMESTAMPTZ,
-    created_at TIMESTAMPTZ NOT NULL
-);
-
-CREATE INDEX pool_hosts_attributes_gin ON pool_hosts USING GIN (attributes);
-```
-
-Run via:
 ```bash
-psql "$NEON_DB_DIRECT" -c "<SQL above>"
+for f in apps/remote_service_connector/migrations/*.sql; do
+    psql "$NEON_DB_DIRECT" -f "$f"
+done
 ```
 
-The `attributes` JSONB column carries whatever shape the operator wants to match leases against (`repo_branch_or_tag`, `cpus`, `memory_gb`, `gpu_count`, etc.); the connector's `/hosts/lease` endpoint matches `attributes @> request_attributes`.
+The migrations are idempotent and apply cleanly to a fresh DB or one
+that already has earlier migrations applied. The `000_initial_schema.sql`
+file is the canonical full schema; `001`-`003` are defensive ALTERs
+that no-op when 000 already laid the table down in its final shape.
+
+The `attributes` JSONB column carries whatever shape the operator wants
+to match leases against (`repo_branch_or_tag`, `cpus`, `memory_gb`,
+`gpu_count`, etc.); the connector's `/hosts/lease` endpoint matches
+`attributes @> request_attributes`.
 
 ## Step 2: Generate the management SSH keypair
 
@@ -79,6 +77,30 @@ vault kv put -mount=secrets kv/minds/production/pool-ssh \
 
 (`@<path>` tells `vault kv put` to read the value from the file -- the
 file itself never leaves the operator's laptop.)
+
+### secrets/minds/<tier>/ovh
+
+The shared per-tier OVH AK/AS/CK trio. Read by `minds env deploy /
+destroy` (to enumerate + delete OVH VPSes belonging to a dev env) and
+by `mngr imbue_cloud admin pool create` (to provision OVH-backed pool
+hosts). NOT pushed to Modal.
+
+Generate the trio once per tier at
+<https://api.us.ovhcloud.com/createApp> (endpoint `ovh-us`; pick
+whichever endpoint matches the pool's `--region`). Use a copy of
+`.minds/template/ovh.sh` to capture the three values, then push to
+Vault:
+
+```bash
+cp .minds/template/ovh.sh /tmp/production-ovh.sh
+$EDITOR /tmp/production-ovh.sh
+uv run scripts/push_vault_from_file.py production ovh /tmp/production-ovh.sh
+shred -u /tmp/production-ovh.sh
+```
+
+The same steps work verbatim for `staging` and `dev` (substitute the
+tier in the path). Dev-tier OVH credentials are shared across all
+per-developer dev envs.
 
 ## Step 4: Push the Vault changes to Modal and redeploy
 
@@ -128,7 +150,7 @@ uv run mngr imbue_cloud admin pool list --database-url "$DATABASE_URL"
 ## Step 6: Verify
 
 ```bash
-psql "$NEON_DB_DIRECT" -c "SELECT id, vps_ip, status, attributes FROM pool_hosts ORDER BY created_at DESC"
+psql "$NEON_DB_DIRECT" -c "SELECT id, vps_address, status, attributes FROM pool_hosts ORDER BY created_at DESC"
 ```
 
 ## Cleanup

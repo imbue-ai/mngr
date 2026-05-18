@@ -43,12 +43,36 @@ secrets/minds/<tier>/supertokens
 
 **Read only by `minds env deploy` on a developer's laptop** (never
 pushed to Modal -- the connector's runtime doesn't need
-create-database / VPS-management permissions):
+create-project / VPS-management permissions):
 
 ```
-secrets/minds/<tier>/neon-admin   # NEON_API_TOKEN, NEON_PROJECT_ID
-secrets/minds/<tier>/vultr        # VULTR_API_KEY
+secrets/minds/<tier>/neon-admin   # NEON_API_TOKEN, NEON_ORG_ID
+secrets/minds/<tier>/vultr        # VULTR_API_KEY (legacy; OVH-backed pools today)
+secrets/minds/<tier>/ovh          # OVH_APPLICATION_KEY, OVH_APPLICATION_SECRET,
+                                  #   OVH_CONSUMER_KEY (shared per-tier OVH AK/AS/CK)
 ```
+
+The dev-tier `neon-admin` token must have *project-create* scope on
+the dev tier's Neon org (not just project-scoped permissions). Every
+`minds env deploy` against a dev env creates a brand-new Neon
+*project* named `minds-<env>` under `NEON_ORG_ID`, with `host_pool`
+and `litellm_cost` databases inside; `minds env destroy` deletes the
+project outright. Staging / production keep a single tier-shared DB
+each (their `secrets/minds/<tier>/neon` and `.../litellm` entries are
+the source of truth for those tiers).
+
+The `ovh` entry is read by `minds env destroy` (to enumerate +
+delete OVH VPSes tagged with the env's `minds_env=<name>` IAM tag) and
+by `mngr imbue_cloud admin pool create` (to provision new OVH-backed
+pool hosts). Generate the AK/AS/CK trio at
+<https://api.us.ovhcloud.com/createApp> for the endpoint the pool uses
+(`ovh-us` by default). The shared per-tier credential is intentionally
+account-wide so a single dev's destroy can clean up any OVH instance
+the connector or pool flows landed in the account on behalf of any
+dev. A missing or empty `ovh` Vault entry surfaces as a `WARNING`
+during deploy (no failure); per-env OVH-touching operations then fail
+later if/when invoked, with a message pointing the operator back at
+the Vault path.
 
 The schema for each `<service>` is the corresponding file under
 `.minds/template/<service>.sh` at the repo root. `minds env deploy`
@@ -88,7 +112,7 @@ eval "$(uv run minds env activate staging)"
 uv run minds env deploy --yes-i-mean-staging
 
 # Dev env deploys (per-developer):
-eval "$(uv run minds env activate <your-user>-dev)"
+eval "$(uv run minds env activate dev-<your-user>)"
 uv run minds env deploy
 ```
 

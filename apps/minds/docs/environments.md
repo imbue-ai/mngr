@@ -20,12 +20,17 @@ pool-management SSH keypair. There is zero cross-tier reach.
 
 Every minds env owns one data root:
 
-| Env name             | Data root             | `MINDS_ROOT_NAME` |
-|----------------------|-----------------------|-------------------|
-| `production`         | `~/.minds/`           | `minds`           |
-| `staging`            | `~/.minds-staging/`   | `minds-staging`   |
-| `<your-user>-dev`    | `~/.minds-<your-user>-dev/` | `minds-<your-user>-dev` |
-| `josh-3` (any dev)   | `~/.minds-josh-3/`    | `minds-josh-3`    |
+| Env name              | Data root                | `MINDS_ROOT_NAME`    |
+|-----------------------|--------------------------|----------------------|
+| `production`          | `~/.minds/`              | `minds`              |
+| `staging`             | `~/.minds-staging/`      | `minds-staging`      |
+| `dev-<your-user>`     | `~/.minds-dev-<your-user>/` | `minds-dev-<your-user>` |
+| `dev-josh-1` (any dev) | `~/.minds-dev-josh-1/`  | `minds-dev-josh-1`   |
+
+By convention dev env names lead with the tier (`dev-`) so the
+`MINDS_ROOT_NAME` always reads tier-first: `minds-dev-<your-user>`,
+`minds-dev-josh-1`, etc. The validation regex (see below) does not
+enforce the prefix, but the docs and command examples assume it.
 
 Each root holds its own mngr profile, agents, auth, logs, and (for
 dev envs) the per-env `client.toml` + chmod-0600 `secrets.toml`. Two
@@ -45,20 +50,29 @@ production root with a warning -- the operator can clean up via
 the rest of the stack at the env's data root:
 
 ```bash
-eval "$(uv run minds env activate <your-user>-dev)"
+eval "$(uv run minds env activate dev-<your-user>)"
 ```
 
 Exported variables:
 
-- `MINDS_ROOT_NAME` -- e.g. `minds-<your-user>-dev` (or just `minds`
+- `MINDS_ROOT_NAME` -- e.g. `minds-dev-<your-user>` (or just `minds`
   for production).
-- `MNGR_HOST_DIR` -- e.g. `$HOME/.minds-<your-user>-dev/mngr`.
-- `MNGR_PREFIX` -- e.g. `minds-<your-user>-dev-`.
+- `MNGR_HOST_DIR` -- e.g. `$HOME/.minds-dev-<your-user>/mngr`.
+- `MNGR_PREFIX` -- e.g. `minds-dev-<your-user>-`.
 - `MINDS_CLIENT_CONFIG_PATH` -- for dev envs, the per-env
   `~/.minds-<name>/client.toml` (written by `minds env deploy`).
   For `staging` / `production`, the in-repo
   `apps/minds/imbue/minds/config/envs/<tier>/client.toml` (committed
   to the repo).
+- `MODAL_PROFILE` -- the tier's `modal_workspace` from
+  `apps/minds/imbue/minds/config/envs/<tier>/deploy.toml`. Pins every
+  subsequent `modal` CLI shellout (`modal deploy`, `modal secret create`,
+  etc.) to the right Modal account regardless of which profile is marked
+  `active = true` in `~/.modal.toml`. **Prerequisite:** the operator
+  must have a matching profile entry in `~/.modal.toml` for each tier
+  they operate against (`modal token set --profile <workspace>` once
+  per tier). Skipped when the tier's `deploy.toml` is missing or its
+  `modal_workspace` is still the literal `CHANGE_ME` placeholder.
 
 To deactivate:
 
@@ -82,7 +96,7 @@ Behaviour by env type:
   in one line:
 
   ```bash
-  eval "$(uv run minds env activate --create <your-user>-dev)"
+  eval "$(uv run minds env activate --create dev-<your-user>)"
   uv run minds env deploy
   ```
 
@@ -152,8 +166,8 @@ What a tier deploy does:
    reads `<vault_path_prefix>/<service>` from Vault and pushes the
    non-empty subset into Modal as `<service>-<tier>` (in the Modal
    environment named by `deploy.toml`'s `modal_env`, default `main`).
-2. Runs `modal deploy` for `litellm-proxy-<tier>` (after running the
-   Prisma schema push) and `remote-service-connector-<tier>`.
+2. Runs `modal deploy` for `llm-<tier>` (after running the
+   Prisma schema push) and `rsc-<tier>`.
 3. Writes **nothing to disk** -- no local file changes, no edits to
    the in-repo `client.toml`. The committed `client.toml` is the
    source of truth; the operator updates it by hand on the rare
@@ -247,20 +261,27 @@ client" below -- the runtime exports `MINDS_ROOT_NAME` and passes
 
 Each developer can stand up their own dev env on top of the shared
 dev tier. Resources created per dev env: a Modal *environment* inside
-the shared dev Modal workspace, a Neon database under the shared dev
-Neon project, and a SuperTokens app under the shared dev SuperTokens
-core. Cloudflare, Vultr, Anthropic, and OAuth clients are dev-tier
-shared.
+the shared dev Modal workspace, a Neon *project* (named
+`minds-<env>`) under the shared dev Neon org -- with `host_pool` and
+`litellm_cost` databases provisioned inside -- and a SuperTokens app
+under the shared dev SuperTokens core. Cloudflare, Vultr, Anthropic,
+and OAuth clients are dev-tier shared.
+
+The per-env Neon project gives every dev env atomic, isolated state
+for pool host rows and LiteLLM spend tracking. `minds env destroy`
+deletes the project outright (everything inside goes with it); no
+cross-dev contamination, no leftover roles to clean up.
 
 Bootstrap a brand-new dev env:
 
 ```bash
 # 1. Activate the env (--create idempotently mkdirs ~/.minds-<name>/ if missing).
-eval "$(uv run minds env activate --create <your-user>-dev)"
+eval "$(uv run minds env activate --create dev-<your-user>)"
 
-# 2. Deploy: provisions the Modal env, Neon DB, SuperTokens app, pushes
-#    per-env Modal Secrets, runs `modal deploy` for both apps, and
-#    writes ~/.minds-<your-user>-dev/{client.toml,secrets.toml}.
+# 2. Deploy: provisions the Modal env, Neon project (with host_pool +
+#    litellm_cost DBs), SuperTokens app, pushes per-env Modal Secrets,
+#    runs `modal deploy` for both apps, and writes
+#    ~/.minds-dev-<your-user>/{client.toml,secrets.toml}.
 uv run minds env deploy
 
 # 3. Launch the desktop client against the new env:
@@ -268,22 +289,22 @@ just minds-start
 ```
 
 (For a one-off env tied to a feature you're working on, replace
-`<your-user>-dev` with e.g. `<your-user>-3`.)
+`dev-<your-user>` with e.g. `dev-<your-user>-3`.)
 
 Re-deploy in place (idempotent -- picks up any new tier-shared Vault
 values and re-deploys both Modal apps):
 
 ```bash
-eval "$(uv run minds env activate <your-user>-dev)"
+eval "$(uv run minds env activate dev-<your-user>)"
 uv run minds env deploy
 ```
 
 Tear it down (cloud resources + the env root):
 
 ```bash
-eval "$(uv run minds env activate <your-user>-dev)"
+eval "$(uv run minds env activate dev-<your-user>)"
 uv run minds env destroy
-# `minds env destroy` rmdir's ~/.minds-<your-user>-dev after success;
+# `minds env destroy` rmdir's ~/.minds-dev-<your-user> after success;
 # clear your shell with `eval "$(uv run minds env deactivate)"`.
 ```
 
@@ -295,12 +316,13 @@ uv run minds env list
 
 ## On-disk file layout per env
 
-For a dev env named `josh-3`:
+For a dev env named `dev-josh-3`:
 
 ```
-~/.minds-josh-3/
+~/.minds-dev-josh-3/
   client.toml         # connector_url, litellm_proxy_url (mode 0644)
-  secrets.toml        # NEON_POOLED_DSN, SUPERTOKENS_*, ... (mode 0600)
+  secrets.toml        # NEON_HOST_POOL_DSN, NEON_LITELLM_DSN,
+                      #   SUPERTOKENS_CONNECTION_URI, SUPERTOKENS_API_KEY (mode 0600)
   mngr/               # this env's mngr profile (MNGR_HOST_DIR)
     agents/...
     profiles/...
@@ -310,6 +332,10 @@ For a dev env named `josh-3`:
     minds-events.jsonl
   ...
 ```
+
+`NEON_HOST_POOL_DSN` is also the DSN `mngr imbue_cloud admin pool
+create` defaults to when invoked from this activated shell -- no need
+to pass `--database-url` explicitly.
 
 For production (`~/.minds/`) or staging (`~/.minds-staging/`): same
 layout *minus* `client.toml` and `secrets.toml` under the env root --

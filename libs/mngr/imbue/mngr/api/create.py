@@ -357,8 +357,11 @@ def resolve_target_host(
 ) -> OnlineHostInterface:
     """Resolve which host to use for the agent."""
     if target_host is not None and isinstance(target_host, NewHostOptions):
-        # Create a new host using the specified provider
-        provider = get_provider_instance(target_host.provider, mngr_ctx)
+        # Create a new host using the specified provider. Pass is_for_host_creation=True
+        # so that backends with one-time bootstrap (Modal's per-user environment) are
+        # allowed to create those resources here -- the create path is the only caller
+        # authorized to do so.
+        provider = get_provider_instance(target_host.provider, mngr_ctx, is_for_host_creation=True)
         is_auto_named = target_host.name is None
         host_name = target_host.name
         if host_name is None:

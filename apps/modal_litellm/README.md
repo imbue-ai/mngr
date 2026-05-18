@@ -7,7 +7,7 @@ A serverless [LiteLLM](https://github.com/BerriAI/litellm) proxy deployed as a M
 - **Modal function** (`app.py`): Self-contained, no monorepo imports. Uses `@modal.asgi_app()` to serve LiteLLM's FastAPI app as a long-lived serverless function.
 - **Database**: Neon PostgreSQL for cost tracking, key management, and spend logs.
 - **Auth**: LiteLLM master key for admin operations; virtual keys for per-user/per-agent cost tracking.
-- **Pass-through**: The `/anthropic/v1/messages` endpoint forwards requests to the real Anthropic API, so Claude Code can use it via `ANTHROPIC_BASE_URL`.
+- **Anthropic SDK compatible**: LiteLLM's native `POST /v1/messages` route accepts the Anthropic API request shape with a virtual key (`x-api-key` or `Authorization: Bearer sk-...`). Setting `ANTHROPIC_BASE_URL` to the proxy URL (no path suffix) routes the Anthropic SDK / Claude Code through the proxy with full cost tracking.
 
 ## Setup
 
@@ -35,12 +35,20 @@ the mandatory safety bar; substitute `--yes-i-mean-staging` (and
 
 On the first cold start, LiteLLM runs ~118 Prisma migrations against the database. This takes ~14 minutes. Subsequent container starts take ~6 seconds.
 
-The `min_containers=1` setting keeps one container alive to avoid cold starts.
+The `min_containers` setting keeps containers warm to avoid cold
+starts. ``minds env deploy`` reads the value from the tier's
+``apps/minds/imbue/minds/config/envs/<tier>/deploy.toml``
+(``[min_containers].litellm_proxy``, default ``0``; staging and
+production ship with ``1``) and threads it into ``modal deploy`` as
+``MINDS_LITELLM_PROXY_MIN_CONTAINERS``. The value is read at module
+load, which is when ``modal deploy`` serializes the function spec.
+To override for a one-off deploy you control directly, export the env
+var before running ``modal deploy`` by hand.
 
 ### 4. Create a virtual key
 
 ```bash
-PROXY_URL="https://<workspace>--litellm-proxy-production-litellm-app.modal.run"
+PROXY_URL="https://<workspace>--llm-production-proxy.modal.run"
 
 curl -s -X POST "$PROXY_URL/key/generate" \
   -H "Authorization: Bearer $LITELLM_MASTER_KEY" \
@@ -51,7 +59,7 @@ curl -s -X POST "$PROXY_URL/key/generate" \
 ### 5. Use with Claude Code
 
 ```bash
-export ANTHROPIC_BASE_URL="https://<workspace>--litellm-proxy-production-litellm-app.modal.run/anthropic"
+export ANTHROPIC_BASE_URL="https://<workspace>--llm-production-proxy.modal.run/"
 export ANTHROPIC_API_KEY="sk-your-virtual-key"
 
 claude -p "hello"

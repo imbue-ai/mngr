@@ -23,7 +23,7 @@ from imbue.minds.desktop_client.conftest import make_session_store_for_test
 from imbue.minds.desktop_client.forward_cli import EnvelopeStreamConsumer
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 
-_ROOT_NAME = "minds-tname"
+_ROOT_NAME = "minds-dev-tname"
 _EMAIL = "alice@example.com"
 _PROVIDER_NAME = "imbue_cloud_alice-example-com"
 _USER_ID = "00000000-0000-0000-0000-000000000001"
@@ -75,7 +75,7 @@ def _seed_settings_toml(tmp_path: Path) -> Path:
     settings_path = settings_dir / "settings.toml"
     set_imbue_cloud_provider_for_account(
         _EMAIL,
-        connector_url="https://test--remote-service-connector-fastapi-app.modal.run",
+        connector_url="https://test--rsc-api.modal.run",
         root_name=_ROOT_NAME,
     )
     return settings_path

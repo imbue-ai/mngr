@@ -4,7 +4,7 @@
 # list of services whose `.minds/template/<service>.sh` schemas must be
 # pulled from Vault and pushed into Modal as `<service>-production`.
 
-modal_workspace = "CHANGE_ME"
+modal_workspace = "minds-production"
 vault_path_prefix = "secrets/minds/production"
 cloudflare_domain = "CHANGE_ME.example.com"
 
@@ -17,13 +17,32 @@ oauth_github_client_id = ""
 # Every service named here must exist as `.minds/template/<service>.sh`
 # (the schema) AND have a corresponding Vault entry at
 # `<vault_path_prefix>/<service>` containing every key the schema declares.
+# The `litellm-connector` Modal Secret is NOT vault-backed; the deploy
+# pushes it as a separately-named step with values derived entirely at
+# deploy time. See dev/deploy.toml for the full explanation.
 [secrets]
 services = [
     "cloudflare",
     "litellm",
-    "litellm-connector",
     "neon",
     "paid-accounts",
     "pool-ssh",
     "supertokens",
 ]
+
+# Tier-shape flags consumed by `minds env deploy` / `destroy`. Production
+# tracks generation for parity with staging (production destroy is hard-
+# refused at the CLI today, so the id is effectively immutable for the
+# lifetime of the tier).
+[lifecycle]
+creates_resources = false
+modal_env_strategy = "SHARED"
+writes_local_state = false
+tracks_generation = true
+
+# Per-app warm-pool sizes. Keep one container of each app alive so the
+# desktop client never pays a cold-boot penalty on auth / lease /
+# tunnel hits. Bump if you want more headroom for spiky traffic.
+[min_containers]
+connector = 1
+litellm_proxy = 1

@@ -22,6 +22,7 @@ import json as _json
 import os
 import shlex
 import sys
+import tomllib
 from pathlib import Path
 from typing import Any
 from typing import Final
@@ -36,6 +37,96 @@ from imbue.concurrency_group.errors import ConcurrencyGroupError
 from imbue.concurrency_group.subprocess_utils import FinishedProcess
 from imbue.mngr_imbue_cloud.cli._common import emit_json
 from imbue.mngr_imbue_cloud.cli._common import fail_with_json
+
+# Env var name a minds-activated shell uses to flag the pool host DSN
+# for the activated env. Mirrors the field name written into
+# ``~/.minds-<env>/secrets.toml`` by ``minds env deploy`` so an operator
+# can also point us at a one-off DSN by exporting it directly.
+_MINDS_HOST_POOL_DSN_ENV_VAR: Final[str] = "MINDS_HOST_POOL_DSN"
+# Env vars the minds bootstrap exports on ``minds env activate`` so we
+# can locate the per-env secrets.toml without importing any minds
+# module (this CLI lives in mngr_imbue_cloud and is intentionally
+# decoupled from the minds package).
+_MINDS_ROOT_NAME_ENV_VAR: Final[str] = "MINDS_ROOT_NAME"
+_MINDS_PREFIX: Final[str] = "minds"
+
+
+def _read_activated_minds_host_pool_dsn() -> str | None:
+    """Return the activated minds env's NEON_HOST_POOL_DSN, or None.
+
+    Walks the same on-disk layout ``minds env deploy`` writes:
+
+        $HOME/.<MINDS_ROOT_NAME>/secrets.toml -> [secrets].NEON_HOST_POOL_DSN
+
+    Returns None when ``MINDS_ROOT_NAME`` is unset, when the env root
+    is production (``MINDS_ROOT_NAME=minds``, no per-env secrets.toml),
+    when the file doesn't exist, or when the field is missing / empty.
+    All of those map to "this CLI has no opinion -- caller must pass
+    ``--database-url`` explicitly or set ``MINDS_HOST_POOL_DSN``."
+    """
+    root_name = os.environ.get(_MINDS_ROOT_NAME_ENV_VAR)
+    if not root_name or root_name == _MINDS_PREFIX:
+        return None
+    secrets_path = Path.home() / f".{root_name}" / "secrets.toml"
+    if not secrets_path.is_file():
+        return None
+    try:
+        raw = tomllib.loads(secrets_path.read_text())
+    except OSError as exc:
+        logger.warning("Could not read {} for pool DSN resolution: {}", secrets_path, exc)
+        return None
+    except tomllib.TOMLDecodeError as exc:
+        logger.warning(
+            "Could not parse {} for pool DSN resolution ({}); pass --database-url explicitly.",
+            secrets_path,
+            exc,
+        )
+        return None
+    secrets_block = raw.get("secrets")
+    if not isinstance(secrets_block, dict):
+        return None
+    dsn = secrets_block.get("NEON_HOST_POOL_DSN")
+    if not isinstance(dsn, str) or not dsn:
+        return None
+    return dsn
+
+
+def _resolve_pool_database_url(explicit: str | None) -> str:
+    """Resolve the pool DSN for an admin pool command.
+
+    Precedence (highest first):
+
+    1. The explicit ``--database-url`` flag, if the operator passed it.
+    2. ``$MINDS_HOST_POOL_DSN`` env var.
+    3. The activated minds env's ``secrets.toml`` ``NEON_HOST_POOL_DSN``
+       field (written by ``minds env deploy`` for dev envs).
+    4. Refuse with a useful error.
+
+    Production / staging operators (or anyone running outside an
+    activated minds env) keep working: explicit ``--database-url`` is
+    still accepted, and ``$DATABASE_URL`` is intentionally NOT consulted
+    here -- it's a generic env var that the operator might have pointed
+    at a totally unrelated DB. ``MINDS_HOST_POOL_DSN`` is the explicit
+    opt-in.
+    """
+    if explicit:
+        return explicit
+    env_value = os.environ.get(_MINDS_HOST_POOL_DSN_ENV_VAR)
+    if env_value:
+        return env_value
+    activated_dsn = _read_activated_minds_host_pool_dsn()
+    if activated_dsn:
+        return activated_dsn
+    fail_with_json(
+        "No pool DSN available. Either pass --database-url explicitly, export "
+        f"{_MINDS_HOST_POOL_DSN_ENV_VAR}=<dsn>, or `minds env activate <dev-env>` "
+        "first (deploys write the DSN into the per-env secrets.toml).",
+        error_class="UsageError",
+    )
+    # ``fail_with_json`` raises; this line is unreachable but satisfies
+    # the type checker.
+    raise AssertionError("unreachable")
+
 
 _CONTAINER_SSH_PORT: Final[int] = 2222
 
@@ -123,7 +214,7 @@ def _run_mngr_command(
 
 
 def _run_ssh_command(
-    vps_ip: str,
+    vps_address: str,
     ssh_key_path: str,
     port: int,
     command: str,
@@ -141,10 +232,10 @@ def _run_ssh_command(
         ssh_key_path,
         "-p",
         str(port),
-        f"root@{vps_ip}",
+        f"root@{vps_address}",
         command,
     ]
-    logger.info("  SSH {}:{}: {}", vps_ip, port, command)
+    logger.info("  SSH {}:{}: {}", vps_address, port, command)
     cg = ConcurrencyGroup(name="pool-ssh")
     with cg:
         result = cg.run_process_to_completion(
@@ -269,15 +360,15 @@ def _ufw_provision_commands(container_ssh_port: int) -> tuple[str, ...]:
     )
 
 
-def _checked_ssh_command(vps_ip: str, ssh_key_path: str, port: int, command: str, *, label: str) -> None:
+def _checked_ssh_command(vps_address: str, ssh_key_path: str, port: int, command: str, *, label: str) -> None:
     """Run an SSH command and raise on non-zero exit.
 
     Used for steps that MUST succeed (ufw install/configure, management key
     install). The bake aborts on failure rather than continuing with a
     half-configured host that would silently land in the pool.
     """
-    if not _run_ssh_command(vps_ip, ssh_key_path, port, command):
-        raise PoolBakeError(f"{label} failed on VPS {vps_ip}; aborting bake")
+    if not _run_ssh_command(vps_address, ssh_key_path, port, command):
+        raise PoolBakeError(f"{label} failed on VPS {vps_address}; aborting bake")
 
 
 class PoolBakeError(RuntimeError):
@@ -386,9 +477,9 @@ def _create_single_pool_host(
         logger.error("No SSH info in host data")
         return False
 
-    vps_ip = ssh.get("host")
-    if not isinstance(vps_ip, str):
-        logger.error("No VPS IP in SSH info")
+    vps_address = ssh.get("host")
+    if not isinstance(vps_address, str):
+        logger.error("No VPS address in SSH info")
         return False
 
     container_key_path = ssh.get("key_path")
@@ -407,9 +498,9 @@ def _create_single_pool_host(
     # Install + configure ufw on the VPS. Each step must succeed; we bail
     # on the whole bake if anything fails (otherwise the host would land
     # in the pool with no firewall and a half-applied policy).
-    logger.info("  Installing + configuring ufw on VPS {}", vps_ip)
+    logger.info("  Installing + configuring ufw on VPS {}", vps_address)
     for ufw_command in _ufw_provision_commands(_CONTAINER_SSH_PORT):
-        _checked_ssh_command(vps_ip, vps_key_path, 22, ufw_command, label=f"ufw step {ufw_command!r}")
+        _checked_ssh_command(vps_address, vps_key_path, 22, ufw_command, label=f"ufw step {ufw_command!r}")
 
     key_line = shlex.quote(management_public_key.strip())
     install_cmd = (
@@ -417,7 +508,7 @@ def _create_single_pool_host(
         + key_line
         + " >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys"
     )
-    _checked_ssh_command(vps_ip, vps_key_path, 22, install_cmd, label="install management key on VPS")
+    _checked_ssh_command(vps_address, vps_key_path, 22, install_cmd, label="install management key on VPS")
 
     logger.info("  Installing management key in container via mngr exec")
     container_install = _run_mngr_command(["exec", agent_name, install_cmd], timeout=60)
@@ -433,12 +524,12 @@ def _create_single_pool_host(
             with conn.cursor() as cur:
                 cur.execute(
                     "INSERT INTO pool_hosts "
-                    "(id, vps_ip, vps_instance_id, agent_id, host_id, ssh_port, ssh_user, "
+                    "(id, vps_address, vps_instance_id, agent_id, host_id, ssh_port, ssh_user, "
                     "container_ssh_port, status, attributes, created_at) "
                     "VALUES (%s, %s, %s, %s, %s, 22, 'root', %s, 'available', %s::jsonb, NOW())",
                     (
                         str(row_id),
-                        vps_ip,
+                        vps_address,
                         host_id,
                         agent_id,
                         host_id,
@@ -449,7 +540,7 @@ def _create_single_pool_host(
     finally:
         conn.close()
 
-    logger.info("  Pool host ready: id={}, agent_id={}, vps_ip={}", row_id, agent_id, vps_ip)
+    logger.info("  Pool host ready: id={}, agent_id={}, vps_address={}", row_id, agent_id, vps_address)
     return True
 
 
@@ -494,10 +585,15 @@ def _create_single_pool_host(
 )
 @click.option(
     "--database-url",
-    required=True,
+    required=False,
+    default=None,
     type=str,
-    envvar="DATABASE_URL",
-    help="Neon PostgreSQL direct connection string",
+    help=(
+        "Neon PostgreSQL direct connection string for the pool DB. Defaults to "
+        "MINDS_HOST_POOL_DSN env var, or the activated minds env's "
+        "secrets.toml NEON_HOST_POOL_DSN field (so `minds env activate <dev-env>` "
+        "is enough). Pass this explicitly when operating outside an activated env."
+    ),
 )
 @click.option(
     "--mngr-source",
@@ -512,10 +608,11 @@ def pool_create(
     attributes_json: str,
     workspace_dir: str,
     management_public_key_file: str,
-    database_url: str,
+    database_url: str | None,
     mngr_source: str | None,
 ) -> None:
     """Create pre-provisioned pool hosts."""
+    resolved_database_url = _resolve_pool_database_url(database_url)
     try:
         parsed_attributes = _json.loads(attributes_json)
     except _json.JSONDecodeError as exc:
@@ -555,7 +652,7 @@ def pool_create(
                 workspace_dir=workspace_path,
                 attributes=parsed_attributes,
                 management_public_key=management_public_key,
-                database_url=database_url,
+                database_url=resolved_database_url,
                 region=region,
                 extra_tags=tags,
             )
@@ -582,18 +679,24 @@ def pool_create(
 @pool.command(name="list")
 @click.option(
     "--database-url",
-    required=True,
+    required=False,
+    default=None,
     type=str,
-    envvar="DATABASE_URL",
-    help="Neon PostgreSQL direct connection string",
+    help=(
+        "Neon PostgreSQL direct connection string for the pool DB. Defaults to "
+        "MINDS_HOST_POOL_DSN env var, or the activated minds env's "
+        "secrets.toml NEON_HOST_POOL_DSN field (so `minds env activate <dev-env>` "
+        "is enough). Pass this explicitly when operating outside an activated env."
+    ),
 )
-def pool_list(database_url: str) -> None:
+def pool_list(database_url: str | None) -> None:
     """List rows in pool_hosts."""
-    conn = psycopg2.connect(database_url)
+    resolved_database_url = _resolve_pool_database_url(database_url)
+    conn = psycopg2.connect(resolved_database_url)
     try:
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT id, vps_ip, agent_id, host_id, status, attributes, "
+                "SELECT id, vps_address, agent_id, host_id, status, attributes, "
                 "leased_to_user, leased_at, released_at, created_at "
                 "FROM pool_hosts ORDER BY created_at DESC"
             )
@@ -604,7 +707,7 @@ def pool_list(database_url: str) -> None:
         [
             {
                 "id": str(row[0]),
-                "vps_ip": row[1],
+                "vps_address": row[1],
                 "agent_id": row[2],
                 "host_id": row[3],
                 "status": row[4],
@@ -623,20 +726,26 @@ def pool_list(database_url: str) -> None:
 @click.argument("pool_host_id")
 @click.option(
     "--database-url",
-    required=True,
+    required=False,
+    default=None,
     type=str,
-    envvar="DATABASE_URL",
-    help="Neon PostgreSQL direct connection string",
+    help=(
+        "Neon PostgreSQL direct connection string for the pool DB. Defaults to "
+        "MINDS_HOST_POOL_DSN env var, or the activated minds env's "
+        "secrets.toml NEON_HOST_POOL_DSN field (so `minds env activate <dev-env>` "
+        "is enough). Pass this explicitly when operating outside an activated env."
+    ),
 )
 @click.option("--force", is_flag=True, help="Drop the row even if status != 'released'")
-def pool_destroy(pool_host_id: str, database_url: str, force: bool) -> None:
+def pool_destroy(pool_host_id: str, database_url: str | None, force: bool) -> None:
     """Remove a pool_hosts row.
 
     Note: this does NOT destroy the underlying OVH VPS; that is intentional
     so an operator can use ``mngr destroy`` themselves and inspect the row
     state first.
     """
-    conn = psycopg2.connect(database_url)
+    resolved_database_url = _resolve_pool_database_url(database_url)
+    conn = psycopg2.connect(resolved_database_url)
     try:
         with conn:
             with conn.cursor() as cur:

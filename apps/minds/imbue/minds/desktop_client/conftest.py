@@ -26,7 +26,7 @@ from imbue.mngr.primitives import ProviderInstanceName
 
 DEFAULT_SERVICE_NAME: ServiceName = ServiceName("web")
 
-FAKE_CONNECTOR_URL: AnyUrl = AnyUrl("https://test--remote-service-connector-fastapi-app.modal.run")
+FAKE_CONNECTOR_URL: AnyUrl = AnyUrl("https://test--rsc-api.modal.run")
 
 
 class FakeImbueCloudCli(ImbueCloudCli):

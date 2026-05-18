@@ -200,10 +200,10 @@ def test_build_vps_tags_emits_baseline_when_extras_empty() -> None:
 
 def test_build_vps_tags_appends_single_extra() -> None:
     """One ``key=value`` extra tag is appended verbatim."""
-    assert build_vps_tags(_HOST_ID, "vultr", "minds_env=josh-dev") == [
+    assert build_vps_tags(_HOST_ID, "vultr", "minds_env=dev-josh") == [
         f"mngr-host-id={_HOST_ID}",
         "mngr-provider=vultr",
-        "minds_env=josh-dev",
+        "minds_env=dev-josh",
     ]
 
 

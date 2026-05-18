@@ -580,7 +580,7 @@ class ImbueCloudProvider(BaseProviderInstance):
         error -- the caller's outer-SSH guard then maps that to the
         lease-only fallback.
         """
-        scanned_key = _scan_ssh_host_key(lease.vps_ip, 22)
+        scanned_key = _scan_ssh_host_key(lease.vps_address, 22)
         if scanned_key is None:
             return
         host_id = HostId(lease.host_id)
@@ -589,13 +589,13 @@ class ImbueCloudProvider(BaseProviderInstance):
             known_hosts_path.parent.mkdir(parents=True, exist_ok=True)
             if not known_hosts_path.exists():
                 known_hosts_path.touch()
-            add_host_to_known_hosts(known_hosts_path, lease.vps_ip, 22, scanned_key)
+            add_host_to_known_hosts(known_hosts_path, lease.vps_address, 22, scanned_key)
         except OSError as exc:
             logger.warning(
                 "imbue_cloud[{}] could not update known_hosts for host {} (vps {}): {}",
                 self.name,
                 host_id,
-                lease.vps_ip,
+                lease.vps_address,
                 exc,
             )
 
@@ -609,10 +609,10 @@ class ImbueCloudProvider(BaseProviderInstance):
         private_key_path, _ = self._host_keypair_paths(host_id)
         return SSHInfo(
             user=lease.ssh_user,
-            host=lease.vps_ip,
+            host=lease.vps_address,
             port=lease.container_ssh_port,
             key_path=private_key_path,
-            command=f"ssh -i {private_key_path} -p {lease.container_ssh_port} {lease.ssh_user}@{lease.vps_ip}",
+            command=f"ssh -i {private_key_path} -p {lease.container_ssh_port} {lease.ssh_user}@{lease.vps_address}",
         )
 
     def _build_offline_details_from_lease(
@@ -788,7 +788,7 @@ class ImbueCloudProvider(BaseProviderInstance):
         host_id = HostId(lease.host_id)
         agent_id = AgentId(lease.agent_id)
         ssh_user = lease.ssh_user
-        vps_ip = lease.vps_ip
+        vps_address = lease.vps_address
         container_ssh_port = lease.container_ssh_port
         host_db_id = str(lease.host_db_id)
 
@@ -806,7 +806,7 @@ class ImbueCloudProvider(BaseProviderInstance):
             known_hosts_path.touch()
 
         pyinfra_host = create_pyinfra_host(
-            hostname=vps_ip,
+            hostname=vps_address,
             port=container_ssh_port,
             private_key_path=private_key_path,
             known_hosts_path=known_hosts_path,
@@ -965,7 +965,7 @@ class ImbueCloudProvider(BaseProviderInstance):
         # Wait for the leased container's sshd to be ready before we hand the
         # host back to mngr's create pipeline (which will SSH in immediately
         # to write the agent env file and start tmux).
-        wait_for_sshd(lease_result.vps_ip, lease_result.container_ssh_port, _SSH_WAIT_TIMEOUT_SECONDS)
+        wait_for_sshd(lease_result.vps_address, lease_result.container_ssh_port, _SSH_WAIT_TIMEOUT_SECONDS)
 
         # Try to scan the container's host key so strict host-key checking
         # succeeds. This is best-effort: if the scan fails we leave the
@@ -974,18 +974,18 @@ class ImbueCloudProvider(BaseProviderInstance):
         known_hosts_path.parent.mkdir(parents=True, exist_ok=True)
         if not known_hosts_path.exists():
             known_hosts_path.touch()
-        scanned_key = _scan_ssh_host_key(lease_result.vps_ip, lease_result.container_ssh_port)
+        scanned_key = _scan_ssh_host_key(lease_result.vps_address, lease_result.container_ssh_port)
         if scanned_key is not None:
             add_host_to_known_hosts(
                 known_hosts_path,
-                lease_result.vps_ip,
+                lease_result.vps_address,
                 lease_result.container_ssh_port,
                 scanned_key,
             )
 
         leased_info = LeasedHostInfo(
             host_db_id=lease_result.host_db_id,
-            vps_ip=lease_result.vps_ip,
+            vps_address=lease_result.vps_address,
             ssh_port=lease_result.ssh_port,
             ssh_user=lease_result.ssh_user,
             container_ssh_port=lease_result.container_ssh_port,
@@ -1073,7 +1073,7 @@ class ImbueCloudProvider(BaseProviderInstance):
             container_id = self._resolve_container_id_on_outer(outer, host_id)
             if container_id is None:
                 raise MngrError(
-                    f"start_host: no docker container with label com.imbue.mngr.host-id={host_id} on {leased.vps_ip}"
+                    f"start_host: no docker container with label com.imbue.mngr.host-id={host_id} on {leased.vps_address}"
                 )
             self._run_outer_docker_command(
                 outer, f"start {shlex.quote(container_id)}", host_id=host_id, label="docker-start"
@@ -1182,11 +1182,11 @@ class ImbueCloudProvider(BaseProviderInstance):
         leased = self._find_leased(host_id)
         if leased is None:
             raise HostNotFoundError(host_id)
-        return f"outer:{self.name}:{leased.vps_ip}"
+        return f"outer:{self.name}:{leased.vps_address}"
 
     @contextmanager
     def outer_host_for(self, host_id: HostId) -> Iterator[OuterHostInterface | None]:
-        """Open the outer host (the leased VPS itself, root@vps_ip:22).
+        """Open the outer host (the leased VPS itself, root@vps_address:22).
 
         Uses the per-host SSH key already on disk (the lease step authorized
         this key on both the container's sshd and the VPS root account).
@@ -1204,7 +1204,7 @@ class ImbueCloudProvider(BaseProviderInstance):
             known_hosts_path.touch()
 
         pyinfra_host = create_pyinfra_host(
-            hostname=leased.vps_ip,
+            hostname=leased.vps_address,
             port=22,
             private_key_path=private_key_path,
             known_hosts_path=known_hosts_path,

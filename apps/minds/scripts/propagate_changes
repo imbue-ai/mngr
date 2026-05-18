@@ -46,7 +46,7 @@ fi
 if [[ -z "${MINDS_ROOT_NAME:-}" ]]; then
     echo "ERROR: MINDS_ROOT_NAME is not set." >&2
     echo "       Run \`eval \"\$(uv run minds env activate <name>)\"\` first" >&2
-    echo "       (e.g. \`<your-user>-dev\` for your personal dev env), then" >&2
+    echo "       (e.g. \`dev-<your-user>\` for your personal dev env), then" >&2
     echo "       re-run propagate_changes from the same shell." >&2
     exit 2
 fi

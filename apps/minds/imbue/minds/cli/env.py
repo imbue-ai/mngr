@@ -19,8 +19,11 @@ logged in to the ``vault`` CLI.
 """
 
 import json
+import os
 import shlex
 import shutil
+import sys
+import time
 from pathlib import Path
 from typing import Final
 
@@ -43,7 +46,9 @@ from imbue.minds.config.loader import load_deploy_config
 from imbue.minds.config.loader import repo_tier_client_config_path
 from imbue.minds.envs.generation import delete_generation_id as real_delete_generation_id
 from imbue.minds.envs.generation import ensure_generation_id as real_ensure_generation_id
+from imbue.minds.envs.health_check import await_apps_healthy as real_await_apps_healthy
 from imbue.minds.envs.local_store import env_root_exists
+from imbue.minds.envs.migrations import apply_pool_hosts_migrations as real_apply_pool_hosts_migrations
 from imbue.minds.envs.mngr_agent_cleanup import real_destroy_mngr_agent
 from imbue.minds.envs.paths import active_env_name_or_none
 from imbue.minds.envs.paths import client_config_file
@@ -53,19 +58,27 @@ from imbue.minds.envs.per_env_deploy import delete_modal_secret as real_delete_m
 from imbue.minds.envs.per_env_deploy import deploy_litellm_proxy as real_deploy_litellm_proxy
 from imbue.minds.envs.per_env_deploy import deploy_remote_service_connector as real_deploy_remote_service_connector
 from imbue.minds.envs.per_env_deploy import ensure_modal_env as real_ensure_modal_env
+from imbue.minds.envs.per_env_deploy import get_modal_app_latest_version as real_get_modal_app_latest_version
 from imbue.minds.envs.per_env_deploy import push_per_env_modal_secret as real_push_per_env_modal_secret
+from imbue.minds.envs.per_env_deploy import rollback_modal_app as real_rollback_modal_app
 from imbue.minds.envs.per_env_deploy import stop_modal_app as real_stop_modal_app
 from imbue.minds.envs.primitives import DevEnvName
 from imbue.minds.envs.primitives import DevEnvNotFoundError
-from imbue.minds.envs.primitives import DevEnvProvisioningError
 from imbue.minds.envs.primitives import InvalidDevEnvNameError
 from imbue.minds.envs.primitives import VaultReadError
 from imbue.minds.envs.providers.cloudflare_tunnels import delete_tunnels as real_delete_cloudflare_tunnels
 from imbue.minds.envs.providers.cloudflare_tunnels import list_tunnels_for_env as real_list_cloudflare_tunnels_for_env
 from imbue.minds.envs.providers.modal_env import delete_modal_env as real_delete_modal_env
-from imbue.minds.envs.providers.neon_db import NeonDatabaseRecord
-from imbue.minds.envs.providers.neon_db import create_neon_database
-from imbue.minds.envs.providers.neon_db import delete_neon_database
+from imbue.minds.envs.providers.neon_db import NeonProjectRecord
+from imbue.minds.envs.providers.neon_db import create_neon_project
+from imbue.minds.envs.providers.neon_db import create_snapshot_branch as real_create_neon_snapshot_branch
+from imbue.minds.envs.providers.neon_db import delete_neon_branch as real_delete_neon_branch
+from imbue.minds.envs.providers.neon_db import delete_neon_project
+from imbue.minds.envs.providers.neon_db import pool_hosts_migrations_dir
+from imbue.minds.envs.providers.neon_db import resolve_default_branch_id as real_resolve_neon_default_branch_id
+from imbue.minds.envs.providers.neon_db import (
+    verify_neon_token_has_restore_scope as real_verify_neon_token_has_restore_scope,
+)
 from imbue.minds.envs.providers.neon_db import wipe_neon_db_schema as real_wipe_neon_db_schema
 from imbue.minds.envs.providers.ovh_tags import OvhCredentials
 from imbue.minds.envs.providers.ovh_tags import delete_instances as delete_ovh_instances
@@ -74,14 +87,21 @@ from imbue.minds.envs.providers.supertokens_app import SuperTokensAppRecord
 from imbue.minds.envs.providers.supertokens_app import create_supertokens_app
 from imbue.minds.envs.providers.supertokens_app import delete_supertokens_app
 from imbue.minds.envs.providers.supertokens_app import wipe_supertokens_app_data as real_wipe_supertokens_app_data
-from imbue.minds.envs.provisioning import DeployedDevEnv
-from imbue.minds.envs.provisioning import DeployedTierEnv
+from imbue.minds.envs.provisioning import DeployedEnv
 from imbue.minds.envs.provisioning import ProviderCredentials
 from imbue.minds.envs.provisioning import Providers
-from imbue.minds.envs.provisioning import deploy_dev_env
-from imbue.minds.envs.provisioning import deploy_tier_env
+from imbue.minds.envs.provisioning import deploy_env
 from imbue.minds.envs.provisioning import destroy_env
 from imbue.minds.envs.provisioning import list_dev_envs
+from imbue.minds.envs.recover import RecoverFailedError
+from imbue.minds.envs.recover import RecoverTargetMissingError
+from imbue.minds.envs.recover import find_all_recover_target_files
+from imbue.minds.envs.recover import find_monorepo_root
+from imbue.minds.envs.recover import read_recover_target
+from imbue.minds.envs.recover import recover_env
+from imbue.minds.envs.recover import recover_target_exists
+from imbue.minds.envs.recover import recover_target_path
+from imbue.minds.envs.secret_lifecycle import list_modal_secrets as real_list_modal_secrets
 from imbue.minds.envs.vault_reader import VaultPath
 from imbue.minds.envs.vault_reader import read_vault_kv
 from imbue.minds.errors import MindError
@@ -104,6 +124,15 @@ _ACTIVATION_ENV_VARS: Final[tuple[str, ...]] = (
     "MNGR_HOST_DIR",
     "MNGR_PREFIX",
     "MINDS_CLIENT_CONFIG_PATH",
+    # Modal CLI workspace selector. Set to the tier's ``modal_workspace``
+    # so every subsequent ``modal`` shellout (``modal deploy``,
+    # ``modal secret create``, ``modal environment create``, etc.) targets
+    # the right Modal account, regardless of which profile is marked
+    # ``active = true`` in ``~/.modal.toml``. The user must have a
+    # matching profile entry in ``~/.modal.toml`` (run
+    # ``modal token set --profile <workspace>`` once per tier they
+    # operate against).
+    "MODAL_PROFILE",
 )
 
 
@@ -128,12 +157,14 @@ def _delete_modal_env_for_provider(name: DevEnvName, cg: ConcurrencyGroup) -> No
     real_delete_modal_env(name, parent_concurrency_group=cg)
 
 
-def _create_neon_for_provider(name: DevEnvName, project_id: str, api_token: SecretStr) -> NeonDatabaseRecord:
-    return create_neon_database(name, project_id=project_id, api_token=api_token)
+def _create_neon_for_provider(
+    name: DevEnvName, org_id: str, api_token: SecretStr, cg: ConcurrencyGroup
+) -> NeonProjectRecord:
+    return create_neon_project(name, org_id=org_id, api_token=api_token, parent_cg=cg)
 
 
-def _delete_neon_for_provider(name: DevEnvName, project_id: str, api_token: SecretStr) -> None:
-    delete_neon_database(name, project_id=project_id, api_token=api_token)
+def _delete_neon_for_provider(name: DevEnvName, org_id: str, api_token: SecretStr) -> None:
+    delete_neon_project(name, org_id=org_id, api_token=api_token)
 
 
 def _create_supertokens_for_provider(name: DevEnvName, core_base_url: str, api_key: SecretStr) -> SuperTokensAppRecord:
@@ -175,12 +206,20 @@ def _push_per_env_modal_secret_for_provider(
     real_push_per_env_modal_secret(secret_name, values, modal_env=modal_env, parent_cg=cg)
 
 
-def _deploy_litellm_proxy_for_provider(modal_env: str, tier: str, cg: ConcurrencyGroup) -> AnyUrl:
-    return real_deploy_litellm_proxy(modal_env=modal_env, tier=tier, parent_cg=cg)
+def _deploy_litellm_proxy_for_provider(
+    modal_env: str, tier: str, min_containers: int, deploy_id: str, cg: ConcurrencyGroup
+) -> AnyUrl:
+    return real_deploy_litellm_proxy(
+        modal_env=modal_env, tier=tier, min_containers=min_containers, deploy_id=deploy_id, parent_cg=cg
+    )
 
 
-def _deploy_connector_for_provider(modal_env: str, tier: str, cg: ConcurrencyGroup) -> AnyUrl:
-    return real_deploy_remote_service_connector(modal_env=modal_env, tier=tier, parent_cg=cg)
+def _deploy_connector_for_provider(
+    modal_env: str, tier: str, min_containers: int, deploy_id: str, cg: ConcurrencyGroup
+) -> AnyUrl:
+    return real_deploy_remote_service_connector(
+        modal_env=modal_env, tier=tier, min_containers=min_containers, deploy_id=deploy_id, parent_cg=cg
+    )
 
 
 def _stop_modal_app_for_provider(app_name: str, modal_env: str, cg: ConcurrencyGroup) -> None:
@@ -189,6 +228,44 @@ def _stop_modal_app_for_provider(app_name: str, modal_env: str, cg: ConcurrencyG
 
 def _delete_modal_secret_for_provider(secret_name: str, modal_env: str, cg: ConcurrencyGroup) -> None:
     real_delete_modal_secret(secret_name=secret_name, modal_env=modal_env, parent_cg=cg)
+
+
+def _list_modal_secrets_for_provider(modal_env: str, cg: ConcurrencyGroup) -> tuple[str, ...]:
+    return real_list_modal_secrets(modal_env=modal_env, parent_cg=cg)
+
+
+def _apply_pool_hosts_migrations_for_provider(host_pool_dsn: SecretStr, cg: ConcurrencyGroup) -> tuple[Path, ...]:
+    return real_apply_pool_hosts_migrations(host_pool_dsn, migrations_dir=pool_hosts_migrations_dir(), parent_cg=cg)
+
+
+def _get_modal_app_latest_version_for_provider(app_name: str, modal_env: str, cg: ConcurrencyGroup) -> str | None:
+    return real_get_modal_app_latest_version(app_name=app_name, modal_env=modal_env, parent_cg=cg)
+
+
+def _rollback_modal_app_for_provider(app_name: str, version: str, modal_env: str, cg: ConcurrencyGroup) -> None:
+    real_rollback_modal_app(app_name=app_name, version=version, modal_env=modal_env, parent_cg=cg)
+
+
+def _create_neon_snapshot_branch_for_provider(
+    project_id: str, parent_branch_id: str, name: str, api_token: SecretStr
+) -> str:
+    return real_create_neon_snapshot_branch(project_id, parent_branch_id, name, api_token=api_token)
+
+
+def _delete_neon_branch_for_provider(project_id: str, branch_id: str, api_token: SecretStr) -> None:
+    real_delete_neon_branch(project_id, branch_id, api_token=api_token)
+
+
+def _resolve_neon_default_branch_id_for_provider(project_id: str, api_token: SecretStr) -> str:
+    return real_resolve_neon_default_branch_id(project_id, api_token=api_token)
+
+
+def _verify_neon_token_has_restore_scope_for_provider(project_id: str, api_token: SecretStr) -> None:
+    real_verify_neon_token_has_restore_scope(project_id, api_token=api_token)
+
+
+def _await_apps_healthy_for_provider(connector_url: AnyUrl, litellm_proxy_url: AnyUrl) -> None:
+    real_await_apps_healthy(connector_url=connector_url, litellm_proxy_url=litellm_proxy_url)
 
 
 def _wipe_supertokens_for_provider(app_id: str, core_base_url: str, api_key: SecretStr) -> None:
@@ -229,8 +306,8 @@ def _build_real_providers() -> Providers:
     return Providers(
         ensure_modal_env=_ensure_modal_env_for_provider,
         delete_modal_env=_delete_modal_env_for_provider,
-        create_neon_db=_create_neon_for_provider,
-        delete_neon_db=_delete_neon_for_provider,
+        create_neon_project=_create_neon_for_provider,
+        delete_neon_project=_delete_neon_for_provider,
         create_supertokens_app=_create_supertokens_for_provider,
         delete_supertokens_app=_delete_supertokens_for_provider,
         list_ovh_instances=_list_ovh_for_provider,
@@ -241,6 +318,15 @@ def _build_real_providers() -> Providers:
         deploy_remote_service_connector=_deploy_connector_for_provider,
         stop_modal_app=_stop_modal_app_for_provider,
         delete_modal_secret=_delete_modal_secret_for_provider,
+        list_modal_secrets=_list_modal_secrets_for_provider,
+        apply_pool_hosts_migrations=_apply_pool_hosts_migrations_for_provider,
+        get_modal_app_latest_version=_get_modal_app_latest_version_for_provider,
+        rollback_modal_app=_rollback_modal_app_for_provider,
+        create_neon_snapshot_branch=_create_neon_snapshot_branch_for_provider,
+        delete_neon_branch=_delete_neon_branch_for_provider,
+        resolve_neon_default_branch_id=_resolve_neon_default_branch_id_for_provider,
+        verify_neon_token_has_restore_scope=_verify_neon_token_has_restore_scope_for_provider,
+        await_apps_healthy=_await_apps_healthy_for_provider,
         destroy_mngr_agent=real_destroy_mngr_agent,
         wipe_supertokens_app_data=_wipe_supertokens_for_provider,
         wipe_neon_db_schema=_wipe_neon_db_schema_for_provider,
@@ -262,7 +348,11 @@ def _load_dev_credentials_from_vault(vault_prefix: str, *, cg: ConcurrencyGroup)
 
     Paths read here (none are pushed to Modal):
 
-    - ``<vault_prefix>/neon-admin`` -- ``NEON_API_TOKEN``, ``NEON_PROJECT_ID``
+    - ``<vault_prefix>/neon-admin`` -- ``NEON_API_TOKEN`` (required),
+      ``NEON_ORG_ID`` (required for dev tier where projects are created),
+      ``NEON_PROJECT_ID`` (required for shared tiers where the operator
+      brings a pre-existing project; used by the deploy's pre-deploy
+      snapshot + recover's restore-from-snapshot calls).
     - ``<vault_prefix>/supertokens`` -- ``SUPERTOKENS_CONNECTION_URI``,
       ``SUPERTOKENS_API_KEY`` (read from the Modal-pushed entry; safe to
       read here because the connector also legitimately needs both keys)
@@ -281,13 +371,26 @@ def _load_dev_credentials_from_vault(vault_prefix: str, *, cg: ConcurrencyGroup)
         logger.warning("No ovh Vault entry yet ({}); proceeding with empty OVH credentials.", exc)
         ovh_secret = {}
 
-    project_id = neon_admin.get("NEON_PROJECT_ID", "")
+    org_id = neon_admin.get("NEON_ORG_ID", "")
     api_token = neon_admin.get("NEON_API_TOKEN", "")
-    if not project_id or not api_token:
+    project_id_raw = neon_admin.get("NEON_PROJECT_ID", "")
+    if not api_token:
         raise VaultReadError(
-            f"Vault entry {vault_prefix}/neon-admin missing NEON_PROJECT_ID or NEON_API_TOKEN; "
+            f"Vault entry {vault_prefix}/neon-admin missing NEON_API_TOKEN; "
             "see .minds/template/neon-admin.sh for the schema."
         )
+    # ``NEON_ORG_ID`` is only required when the deploy creates the Neon
+    # project (dev tier). ``NEON_PROJECT_ID`` is only required when the
+    # deploy adopts an existing one (shared tiers). Either one populated
+    # is enough at the credential-load layer; deploy_env enforces the
+    # right one for its tier via ``deploy_config.lifecycle.creates_resources``.
+    if not org_id and not project_id_raw:
+        raise VaultReadError(
+            f"Vault entry {vault_prefix}/neon-admin missing both NEON_ORG_ID and NEON_PROJECT_ID. "
+            "Dev tier needs NEON_ORG_ID; shared tiers (staging / production) need NEON_PROJECT_ID. "
+            "See .minds/template/neon-admin.sh for the schema."
+        )
+    neon_project_id: str | None = project_id_raw if project_id_raw else None
 
     core_url = supertokens.get("SUPERTOKENS_CONNECTION_URI", "")
     core_api_key = supertokens.get("SUPERTOKENS_API_KEY", "")
@@ -297,8 +400,9 @@ def _load_dev_credentials_from_vault(vault_prefix: str, *, cg: ConcurrencyGroup)
         )
 
     return ProviderCredentials(
-        neon_project_id=project_id,
+        neon_org_id=org_id,
         neon_api_token=SecretStr(api_token),
+        neon_project_id=neon_project_id,
         supertokens_core_url=core_url,
         supertokens_api_key=SecretStr(core_api_key),
         ovh_credentials=OvhCredentials(
@@ -318,18 +422,29 @@ def _emit_json(payload: object, *, output_format: OutputFormat) -> None:
         write_stdout_line(str(payload))
 
 
-def _emit_dev_deploy_result(result: DeployedDevEnv, *, output_format: OutputFormat) -> None:
+def _emit_deploy_result(result: DeployedEnv, *, output_format: OutputFormat) -> None:
     if output_format is OutputFormat.HUMAN:
-        logger.info("Deployed dev env '{}'.", result.name)
-        logger.info("  client.toml:  {}", result.client_config_path)
-        logger.info("  secrets.toml: {}", result.secrets_path)
+        logger.info("Deployed env '{}' (tier '{}') into Modal env '{}'.", result.name, result.tier, result.modal_env)
+        if result.client_config_path is not None:
+            logger.info("  client.toml:  {}", result.client_config_path)
+        if result.secrets_path is not None:
+            logger.info("  secrets.toml: {}", result.secrets_path)
         logger.info("  connector:    {}", result.connector_url)
         logger.info("  litellm:      {}", result.litellm_proxy_url)
-        logger.info("Run `minds run` (with this env still activated) to launch against it.")
+        if result.client_config_path is not None:
+            logger.info("Run `minds run` (with this env still activated) to launch against it.")
+        else:
+            logger.info(
+                "Update `apps/minds/imbue/minds/config/envs/{}/client.toml` if these URLs "
+                "differ from what's committed, and open a PR.",
+                result.tier,
+            )
         return
     _emit_json(
         {
             "name": str(result.name),
+            "tier": result.tier,
+            "modal_env": result.modal_env,
             "client_config_path": result.client_config_path,
             "secrets_path": result.secrets_path,
             "connector_url": str(result.connector_url),
@@ -339,26 +454,100 @@ def _emit_dev_deploy_result(result: DeployedDevEnv, *, output_format: OutputForm
     )
 
 
-def _emit_tier_deploy_result(result: DeployedTierEnv, *, output_format: OutputFormat) -> None:
-    if output_format is OutputFormat.HUMAN:
-        logger.info("Deployed tier '{}' into Modal env '{}'.", result.tier, result.modal_env)
-        logger.info("  connector: {}", result.connector_url)
-        logger.info("  litellm:   {}", result.litellm_proxy_url)
-        logger.info(
-            "Update `apps/minds/imbue/minds/config/envs/{}/client.toml` if these URLs "
-            "differ from what's committed, and open a PR.",
-            result.tier,
-        )
-        return
-    _emit_json(
-        {
-            "tier": result.tier,
-            "modal_env": result.modal_env,
-            "connector_url": str(result.connector_url),
-            "litellm_proxy_url": str(result.litellm_proxy_url),
-        },
-        output_format=output_format,
+_AUTO_ROLLBACK_COUNTDOWN_SECONDS: Final[int] = 5
+
+
+def _exec_into_recover(*, deploy_error: Exception) -> None:
+    """Replace the current process with ``minds env recover``.
+
+    Called from the deploy-failure path so the operator doesn't have to
+    re-type the follow-up command. Uses the process-replacement primitive
+    so the recover process INHERITS our stdout/stderr and exit code --
+    from the operator's shell it looks like one command (``minds env
+    deploy``) that just kept running through the rollback.
+
+    The first argv element comes from ``sys.argv[0]`` so the same
+    minds binary (or ``uv run minds`` wrapper) the operator launched
+    picks up the recover subcommand. Anything currently in the
+    ConcurrencyGroup gets abandoned -- by the time we reach this path
+    the deploy has already hit a definitive failure, so any subprocess
+    work is complete + there's nothing to clean up.
+
+    A short visible countdown gives the operator a chance to Ctrl-C
+    if the failure was something they can fix in place without a full
+    rollback (e.g. a transient cloud blip, a missing Vault entry that
+    they can populate + retry). Ctrl-C during the countdown leaves the
+    recover-target file on disk so the next deploy refuses + the
+    operator can decide whether to run recover manually or delete the
+    file.
+    """
+    logger.error("Deploy failed: {}", deploy_error)
+    logger.error(
+        "Will auto-run `minds env recover` in {} seconds to roll back to the pre-deploy state. "
+        "Press Ctrl-C to cancel + run recover manually (or delete the recover-target file).",
+        _AUTO_ROLLBACK_COUNTDOWN_SECONDS,
     )
+    sys.stderr.flush()
+    for remaining in range(_AUTO_ROLLBACK_COUNTDOWN_SECONDS, 0, -1):
+        logger.warning("Rolling back in {}...", remaining)
+        time.sleep(1)
+    logger.info("Running `minds env recover` now.")
+    # Flush before exec -- otherwise buffered loguru output gets lost.
+    sys.stdout.flush()
+    sys.stderr.flush()
+    argv0 = sys.argv[0]
+    os.execvp(argv0, [argv0, "env", "recover"])
+
+
+def _refuse_if_any_recover_target_exists() -> None:
+    """Block the command if ANY per-env recover-target file sits at the monorepo root.
+
+    Used by env-agnostic commands (``activate``, ``deactivate``,
+    ``list``) -- they don't have a single env in mind, but we still
+    want to surface any in-flight failed deploy that the operator
+    might have forgotten about. Each matching file's env name is
+    listed in the error so the operator knows which env(s) need
+    ``minds env recover``.
+
+    Tolerates ``NotInMonorepoError`` for commands that don't strictly
+    require monorepo context (e.g. ``list`` from $HOME); when we can't
+    find a monorepo root we can't have a recover-target there either.
+    """
+    try:
+        repo_root = find_monorepo_root()
+    except MindError:
+        return
+    files = find_all_recover_target_files(repo_root=repo_root)
+    if not files:
+        return
+    file_list = "\n".join(f"  - {f.name}" for f in files)
+    raise click.ClickException(
+        f"{len(files)} recover-target file(s) sit at {repo_root} -- one or more prior "
+        f"`minds env deploy` runs failed mid-flight:\n{file_list}\n"
+        "Activate each affected env and run `minds env recover` (or delete a known-stale file "
+        "manually) before any other minds env command."
+    )
+
+
+def _refuse_if_this_env_recover_target_exists(env_name: str) -> None:
+    """Block the command if THIS env's recover-target file exists.
+
+    Used by env-scoped commands (``deploy``, ``destroy``) so a
+    leftover recover-target for a DIFFERENT env doesn't block this
+    env's operation -- per-env naming is the whole point of F26's
+    file-rename, supporting test parallelism where each test mints
+    its own env name.
+    """
+    try:
+        repo_root = find_monorepo_root()
+    except MindError:
+        return
+    if recover_target_exists(repo_root=repo_root, env_name=env_name):
+        raise click.ClickException(
+            f"Recover-target file exists at {recover_target_path(repo_root=repo_root, env_name=env_name)} -- "
+            f"a prior `minds env deploy` against env {env_name!r} failed mid-flight. Run `minds env recover` "
+            "(with this env activated) to roll back, or delete the file manually if it's known-stale."
+        )
 
 
 def _emit_destroy_result(env_name: str, *, output_format: OutputFormat) -> None:
@@ -395,6 +584,10 @@ def env() -> None:
 def env_activate(name: str, create: bool) -> None:
     """Print shell exports that activate env ``NAME`` in the calling shell.
 
+    Refuses when a recover-target file exists at the monorepo root --
+    a prior failed deploy must be cleared via ``minds env recover``
+    before any other env command runs.
+
     Designed for ``eval "$(uv run minds env activate <name>)"``: after
     sourcing, ``mngr`` writes to ``~/.minds-<name>/mngr``, ``minds run``
     picks up the per-env client config without a ``--config-file`` flag,
@@ -427,6 +620,8 @@ def env_activate(name: str, create: bool) -> None:
       and proceeds. Without ``--create``, the error message tells the
       operator how to bootstrap a fresh dev env in one line.
     """
+    _refuse_if_any_recover_target_exists()
+
     if name in _RESERVED_TIER_ENV_NAMES or name == _PRODUCTION_ENV_NAME:
         _activate_reserved_env(name)
         return
@@ -458,6 +653,9 @@ def env_activate(name: str, create: bool) -> None:
         "MNGR_PREFIX": mngr_prefix_for(root_name),
         "MINDS_CLIENT_CONFIG_PATH": str(config_path),
     }
+    modal_profile = _modal_profile_for_tier_or_none(_tier_for_env_name(name))
+    if modal_profile is not None:
+        exports["MODAL_PROFILE"] = modal_profile
     # Check the tier generation id + auto-wipe local state on mismatch.
     # Skipped silently when the per-env client.toml doesn't exist yet
     # (fresh `activate --create` before the first deploy) -- the deploy
@@ -503,6 +701,9 @@ def _activate_reserved_env(name: str) -> None:
         "MNGR_PREFIX": mngr_prefix_for(root_name),
         "MINDS_CLIENT_CONFIG_PATH": str(repo_client),
     }
+    modal_profile = _modal_profile_for_tier_or_none(name)
+    if modal_profile is not None:
+        exports["MODAL_PROFILE"] = modal_profile
     # Generation-id check applies to staging (the shared tier where
     # destroy/redeploy by one dev outdates everyone's local state).
     # Production destroy is hard-refused so a mismatch there is
@@ -511,6 +712,38 @@ def _activate_reserved_env(name: str) -> None:
         env_root = mngr_host.parent
         _try_run_generation_check(env_name=name, client_config_path=repo_client, env_root=env_root)
     _print_activation_exports(name=name, exports=exports)
+
+
+def _modal_profile_for_tier_or_none(tier: str) -> str | None:
+    """Return the Modal profile name (``modal_workspace``) for ``tier``, or None.
+
+    Reads ``apps/minds/imbue/minds/config/envs/<tier>/deploy.toml`` and
+    pulls the committed ``modal_workspace`` value. We export this as
+    ``MODAL_PROFILE`` from ``minds env activate`` so every ``modal``
+    CLI shellout (deploy, secret create, environment create, etc.) is
+    pinned to the right workspace regardless of what's marked
+    ``active = true`` in ``~/.modal.toml``.
+
+    Returns ``None`` when the tier has no deploy.toml on disk (e.g.
+    a freshly-checked-out tree before tier config is committed) or
+    the committed value is still the literal ``CHANGE_ME`` placeholder.
+    Activation proceeds without ``MODAL_PROFILE`` in that case so the
+    operator's existing ``modal token set`` setup still works.
+    """
+    try:
+        deploy_config = load_deploy_config(tier)
+    except EnvConfigError as exc:
+        logger.warning(
+            "Could not load deploy.toml for tier {!r} ({}); MODAL_PROFILE will not be exported. "
+            "modal shellouts will fall back to ~/.modal.toml's active profile.",
+            tier,
+            exc,
+        )
+        return None
+    workspace = str(deploy_config.modal_workspace)
+    if not workspace or workspace == "CHANGE_ME":
+        return None
+    return workspace
 
 
 def _print_activation_exports(*, name: str, exports: dict[str, str]) -> None:
@@ -639,6 +872,7 @@ def env_deactivate() -> None:
     activate something, and ``mngr`` falls back to its own
     ``~/.mngr/`` default.
     """
+    _refuse_if_any_recover_target_exists()
     write_stdout_line('# Deactivate the current env. Source via: eval "$(uv run minds env deactivate)"')
     for key in _ACTIVATION_ENV_VARS:
         write_stdout_line(f"unset {key}")
@@ -648,6 +882,7 @@ def env_deactivate() -> None:
 @click.pass_context
 def env_list(ctx: click.Context) -> None:
     """List every minds env on disk (every ``~/.minds*/`` dir)."""
+    _refuse_if_any_recover_target_exists()
     output_format: OutputFormat = ctx.obj.get("output_format", OutputFormat.HUMAN)
     summaries = list_dev_envs()
     active = active_env_name_or_none()
@@ -660,9 +895,12 @@ def env_list(ctx: click.Context) -> None:
         for s in summaries:
             marker = " (active)" if s.name == active else ""
             connector = str(s.connector_url) if s.connector_url is not None else "(no client.toml)"
-            client_loc = (
-                s.client_config_path if s.client_config_path is not None else "(no client.toml under env_root)"
-            )
+            if s.client_config_path is None:
+                client_loc = "(no client.toml — run `minds env deploy`)"
+            elif s.client_config_source == "in_repo":
+                client_loc = f"{s.client_config_path}  (in-repo, committed)"
+            else:
+                client_loc = s.client_config_path
             logger.info("{}{}\t{}\t{}\t{}", s.name, marker, s.env_root, connector, client_loc)
         return
 
@@ -671,6 +909,7 @@ def env_list(ctx: click.Context) -> None:
             "name": s.name,
             "env_root": s.env_root,
             "client_config_path": s.client_config_path,
+            "client_config_source": s.client_config_source,
             "connector_url": str(s.connector_url) if s.connector_url is not None else None,
             "is_active": s.name == active,
         }
@@ -704,6 +943,8 @@ def env_list(ctx: click.Context) -> None:
 def env_deploy(ctx: click.Context, yes_i_mean_production: bool, yes_i_mean_staging: bool) -> None:
     """Provision or upgrade the currently-activated env.
 
+    Refuses when a recover-target file exists at the monorepo root.
+
     Reads the activated env from ``MINDS_ROOT_NAME`` (set by
     ``minds env activate``) and dispatches:
 
@@ -722,6 +963,7 @@ def env_deploy(ctx: click.Context, yes_i_mean_production: bool, yes_i_mean_stagi
     output_format: OutputFormat = ctx.obj.get("output_format", OutputFormat.HUMAN)
     env_name = require_activated_env_name()
     tier = _tier_for_env_name(env_name)
+    _refuse_if_this_env_recover_target_exists(env_name)
 
     if tier == _PRODUCTION_ENV_NAME and not yes_i_mean_production:
         raise click.ClickException(
@@ -737,40 +979,54 @@ def env_deploy(ctx: click.Context, yes_i_mean_production: bool, yes_i_mean_stagi
     except EnvConfigError as exc:
         raise click.ClickException(str(exc)) from exc
 
+    # Preflight the "must run from monorepo" check up front, BEFORE
+    # reading vault credentials or building providers. ``deploy_env``
+    # also re-checks (defense in depth + clean exception surface for
+    # callers that bypass the CLI), but the CLI calling early means a
+    # cd'd-into-/tmp invocation fails immediately with a clean error
+    # rather than wasting a Vault round-trip first.
+    try:
+        find_monorepo_root()
+    except MindError as exc:
+        raise click.ClickException(str(exc)) from exc
+
     providers = _build_real_providers()
 
     with ConcurrencyGroup(name=f"minds-env-deploy-{env_name}") as cg:
-        if tier == _DEV_TIER:
-            try:
-                credentials = _load_dev_credentials_from_vault(str(deploy_config.vault_path_prefix), cg=cg)
-            except VaultReadError as exc:
-                raise click.ClickException(str(exc)) from exc
-            try:
-                dev_result = deploy_dev_env(
-                    DevEnvName(env_name),
-                    tier=tier,
-                    deploy_config=deploy_config,
-                    credentials=credentials,
-                    providers=providers,
-                    parent_concurrency_group=cg,
-                )
-            except DevEnvProvisioningError as exc:
-                raise click.ClickException(str(exc)) from exc
-            _emit_dev_deploy_result(dev_result, output_format=output_format)
-            return
-
-        # Tier deploy (staging / production): no per-env credentials
-        # needed, no rollback, no local state written.
+        # Unified deploy_env runs the same code path for every tier and
+        # picks per-step behavior off ``deploy_config.lifecycle``.
+        # ``ProviderCredentials`` is loaded from Vault for every tier --
+        # tiers without ``creates_resources`` simply don't consult the
+        # neon_org_id / supertokens fields.
         try:
-            tier_result = deploy_tier_env(
+            credentials = _load_dev_credentials_from_vault(str(deploy_config.vault_path_prefix), cg=cg)
+        except VaultReadError as exc:
+            raise click.ClickException(str(exc)) from exc
+        try:
+            result = deploy_env(
+                DevEnvName(env_name),
                 tier=tier,
                 deploy_config=deploy_config,
                 providers=providers,
                 parent_concurrency_group=cg,
+                credentials=credentials,
             )
         except MindError as exc:
+            # If a recover-target file was written before this failure
+            # fired, automatically chain into `minds env recover` -- the
+            # operator's whole point in using recover is to converge back
+            # to the pre-deploy state, and forcing them to copy-paste a
+            # follow-up command on every failure is a footgun.
+            try:
+                repo_root_for_recover = find_monorepo_root()
+            except MindError:
+                repo_root_for_recover = None
+            if repo_root_for_recover is not None and recover_target_exists(
+                repo_root=repo_root_for_recover, env_name=env_name
+            ):
+                _exec_into_recover(deploy_error=exc)
             raise click.ClickException(str(exc)) from exc
-        _emit_tier_deploy_result(tier_result, output_format=output_format)
+        _emit_deploy_result(result, output_format=output_format)
 
 
 @env.command("destroy")
@@ -817,6 +1073,7 @@ def env_destroy(ctx: click.Context, keep_agents: bool, yes_i_mean_staging: bool)
     output_format: OutputFormat = ctx.obj.get("output_format", OutputFormat.HUMAN)
     env_name = require_activated_env_name()
     tier = _tier_for_env_name(env_name)
+    _refuse_if_this_env_recover_target_exists(env_name)
 
     if tier == _PRODUCTION_ENV_NAME:
         raise click.ClickException(
@@ -857,3 +1114,64 @@ def env_destroy(ctx: click.Context, keep_agents: bool, yes_i_mean_staging: bool)
             raise click.ClickException(str(exc)) from exc
 
     _emit_destroy_result(env_name, output_format=output_format)
+
+
+@env.command("recover")
+@click.pass_context
+def env_recover(_ctx: click.Context) -> None:
+    """Roll back to the pre-deploy state captured by a failed `minds env deploy`.
+
+    Reads ``.minds-deploy-recover-target-<env-name>.json`` at the
+    monorepo root for the currently-activated env, runs every reversal
+    step (modal app rollback, Neon restore, orphan secret cleanup) in
+    order, then deletes the file. Each step is idempotent so re-running
+    recover after a partial recovery converges.
+
+    Refuses to run if no recover-target file exists for the activated
+    env. To recover a different env, activate it first.
+    """
+    try:
+        repo_root = find_monorepo_root()
+    except MindError as exc:
+        raise click.ClickException(str(exc)) from exc
+    env_name = require_activated_env_name()
+    if not recover_target_exists(repo_root=repo_root, env_name=env_name):
+        # Help the operator if they have recover-target files for OTHER
+        # envs sitting around (a common mistake when juggling several
+        # dev envs).
+        leftovers = find_all_recover_target_files(repo_root=repo_root)
+        if leftovers:
+            leftover_list = "\n".join(f"  - {f.name}" for f in leftovers)
+            raise click.ClickException(
+                f"No recover-target file for activated env {env_name!r} at "
+                f"{recover_target_path(repo_root=repo_root, env_name=env_name)}. Other recover-target files exist:\n"
+                f"{leftover_list}\nActivate the env you want to recover (e.g. "
+                f'`eval "$(uv run minds env activate <env-name>)"`) and re-run.'
+            )
+        raise click.ClickException(
+            f"No recover-target file at {recover_target_path(repo_root=repo_root, env_name=env_name)}; "
+            "nothing to recover. (Recover is only meaningful after a failed `minds env deploy`.)"
+        )
+
+    providers = _build_real_providers()
+    with ConcurrencyGroup(name="minds-env-recover") as cg:
+        # Load credentials from the tier-vault prefix the recover-target
+        # file recorded. We re-derive the tier here since the recover-
+        # target has env_name + tier already.
+        target = read_recover_target(repo_root=repo_root, env_name=env_name)
+        try:
+            credentials = _load_dev_credentials_from_vault(target.vault_path_prefix, cg=cg)
+        except VaultReadError as exc:
+            raise click.ClickException(str(exc)) from exc
+        try:
+            recover_env(
+                repo_root=repo_root,
+                env_name=env_name,
+                providers=providers,
+                credentials=credentials,
+                parent_cg=cg,
+            )
+        except RecoverTargetMissingError as exc:
+            raise click.ClickException(str(exc)) from exc
+        except RecoverFailedError as exc:
+            raise click.ClickException(str(exc)) from exc
