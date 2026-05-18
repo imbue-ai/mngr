@@ -25,6 +25,12 @@ from imbue.modal_proxy.direct import DirectModalInterface
 
 pytestmark = [pytest.mark.modal]
 
+# All tests in this module touch Modal -- the two HTTP-only error-path
+# tests reach Modal indirectly via the `deployed_snapshot_function`
+# fixture (which deploys the function and, per-test, makes a cheap
+# `modal.App.lookup` call so the resource guard correctly attributes
+# a modal invocation to every test using the fixture; see below).
+
 # =============================================================================
 # Acceptance tests (require Modal network access)
 # =============================================================================
@@ -129,10 +135,13 @@ def _read_host_record_from_volume(app_name: str, host_id: str) -> dict[str, Any]
 
 
 @pytest.fixture(scope="module")
-def deployed_snapshot_function() -> Generator[tuple[str, str], None, None]:
-    """Deploy the snapshot function for testing and clean up after.
+def _deployed_snapshot_url() -> Generator[tuple[str, str], None, None]:
+    """Deploy the snapshot function once per module and clean up after.
 
-    Yields a tuple of (app_name, function_url).
+    Yields a tuple of (app_name, function_url). Module-scoped so the
+    expensive deploy + cold-start warmup runs exactly once per module
+    execution. Tests should depend on the function-scoped wrapper
+    `deployed_snapshot_function` below, not on this directly.
     """
     app_name = _get_test_app_name()
     # The deployed function creates a volume named {app_name}-state
@@ -148,6 +157,33 @@ def deployed_snapshot_function() -> Generator[tuple[str, str], None, None]:
     finally:
         _stop_app(app_name)
         _delete_volume(volume_name)
+
+
+@pytest.fixture
+def deployed_snapshot_function(
+    _deployed_snapshot_url: tuple[str, str],
+) -> tuple[str, str]:
+    """Per-test wrapper that makes one cheap Modal SDK call per test.
+
+    The expensive deploy + warmup lives in the module-scoped
+    `_deployed_snapshot_url` fixture and runs only once per module.
+    But the resource guard for `@pytest.mark.modal` tracks SDK calls
+    per-test (each test gets its own tracking dir set in
+    pytest_runtest_setup). Without this wrapper, only the first test
+    to trigger module-fixture setup would have a modal call attributed
+    to it; every subsequent test using the cached URL via pure
+    `httpx.post` would fail with "marked modal but never invoked it".
+
+    The `modal.App.lookup(create_if_missing=False)` call goes through
+    the gRPC SDK (the wrapper the resource guard monkeypatches), so it
+    counts as a modal invocation in this test's window. It is cheap --
+    one gRPC roundtrip to confirm the already-existing app -- compared
+    to making the deploy itself function-scoped (which would multiply
+    the deploy + cold-start cost by the number of tests).
+    """
+    app_name, _ = _deployed_snapshot_url
+    modal.App.lookup(app_name, create_if_missing=False)
+    return _deployed_snapshot_url
 
 
 @pytest.mark.acceptance
@@ -217,22 +253,16 @@ def test_snapshot_and_shutdown_success(
 
 
 @pytest.mark.acceptance
-@pytest.mark.flaky
 @pytest.mark.timeout(180)
 def test_snapshot_and_shutdown_missing_sandbox_id(
     deployed_snapshot_function: tuple[str, str],
 ) -> None:
     """Test that missing sandbox_id returns 400 error.
 
-    Marked flaky because of a known collection-order interaction with
-    the module-scoped ``deployed_snapshot_function`` fixture and the
-    ``pytestmark = [pytest.mark.modal]`` guard. The fixture makes the
-    in-process modal calls during setup, but the resource guard
-    attributes those calls only to whichever test triggered the setup --
-    sibling HTTP-only tests then look like they "never invoked modal".
-    Pre-existing on main; a permanent fix needs the resource guard to
-    attribute fixture-setup modal calls to every test that uses the
-    fixture (or to drop the module-level modal mark on HTTP-only tests).
+    HTTP-only at the test body level (just one `httpx.post`), but the
+    function-scoped `deployed_snapshot_function` fixture makes one
+    cheap Modal SDK call on this test's behalf so the resource guard
+    correctly attributes a modal invocation to it.
     """
     _, function_url = deployed_snapshot_function
 
@@ -247,19 +277,15 @@ def test_snapshot_and_shutdown_missing_sandbox_id(
 
 
 @pytest.mark.acceptance
-@pytest.mark.flaky
 @pytest.mark.timeout(180)
 def test_snapshot_and_shutdown_missing_host_id(
     deployed_snapshot_function: tuple[str, str],
 ) -> None:
     """Test that missing host_id returns 400 error.
 
-    Marked flaky for the same reason as the sister
-    ``test_snapshot_and_shutdown_missing_sandbox_id`` test: the module's
-    ``pytestmark = [pytest.mark.modal]`` declaration combined with the
-    module-scoped ``deployed_snapshot_function`` fixture causes the
-    "never invoked modal" guard to misfire on HTTP-only tests when they
-    run in a sandbox alone. Pre-existing on main.
+    Same shape as ``test_snapshot_and_shutdown_missing_sandbox_id``:
+    HTTP-only at the test body level; the function-scoped fixture
+    invokes Modal on this test's behalf.
     """
     _, function_url = deployed_snapshot_function
 
