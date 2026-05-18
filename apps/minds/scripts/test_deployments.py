@@ -432,8 +432,8 @@ def _build_pytest_env(
     return env
 
 
-def _invoke_pytest_for_mark(mark: str, *, env: dict[str, str], extra_args: tuple[str, ...] = ()) -> int:
-    """Run ``uv run pytest -m <mark> apps/minds/deployment_tests/ <extra_args>``; return exit code."""
+def _invoke_pytest_for_mark(mark: str, *, env: dict[str, str]) -> int:
+    """Run ``uv run pytest -m <mark> apps/minds/deployment_tests/``; return exit code."""
     cmd = [
         "uv",
         "run",
@@ -444,7 +444,6 @@ def _invoke_pytest_for_mark(mark: str, *, env: dict[str, str], extra_args: tuple
         "-p",
         "no:xdist",
         str(_REPO_ROOT / "apps" / "minds" / "deployment_tests"),
-        *extra_args,
     ]
     logger.info("Running: {}", " ".join(cmd))
     completed = subprocess.run(cmd, env=env, cwd=str(_REPO_ROOT), check=False)
