@@ -1,3 +1,4 @@
+from collections.abc import Callable
 from collections.abc import Mapping
 from collections.abc import Sequence
 from datetime import datetime
@@ -1232,7 +1233,7 @@ class _RaisingDiscoveryProviderInstance(MockProviderInstance):
         self,
         cg: ConcurrencyGroup,
         include_destroyed: bool = False,
-        on_error: Any = None,
+        on_error: Callable[[ErrorInfo], None] | None = None,
     ) -> dict[DiscoveredHost, list[DiscoveredAgent]]:
         raise MngrError("simulated discovery failure from test")
 
@@ -1265,7 +1266,7 @@ class _MismatchedProviderInstance(MockProviderInstance):
         self,
         cg: ConcurrencyGroup,
         include_destroyed: bool = False,
-        on_error: Any = None,
+        on_error: Callable[[ErrorInfo], None] | None = None,
     ) -> dict[DiscoveredHost, list[DiscoveredAgent]]:
         mismatched_host = DiscoveredHost(
             host_id=HostId.generate(),
@@ -2166,7 +2167,7 @@ def test_error_emitter_collects_per_resource_errors_during_discovery(
             self,
             cg: ConcurrencyGroup,
             include_destroyed: bool = False,
-            on_error: Any = None,
+            on_error: Callable[[ErrorInfo], None] | None = None,
         ) -> dict[DiscoveredHost, list[DiscoveredAgent]]:
             if on_error is not None:
                 on_error(emitted_error)
@@ -2204,7 +2205,7 @@ def test_construct_discover_and_emit_for_provider_wires_on_error(
             self,
             cg: ConcurrencyGroup,
             include_destroyed: bool = False,
-            on_error: Any = None,
+            on_error: Callable[[ErrorInfo], None] | None = None,
         ) -> dict[DiscoveredHost, list[DiscoveredAgent]]:
             if on_error is not None:
                 on_error(ProviderErrorInfo.build_for_provider(MngrError("simulated per-resource failure"), self.name))
