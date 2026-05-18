@@ -6,12 +6,11 @@ from typing import assert_never
 import click
 from click_option_group import optgroup
 
-from imbue.mngr.api.discover import discover_by_address
 from imbue.mngr.api.events import EventsTarget
 from imbue.mngr.api.events import discover_event_sources
 from imbue.mngr.api.events import read_event_content
 from imbue.mngr.api.events import resolve_events_target
-from imbue.mngr.api.find import filter_one_agent
+from imbue.mngr.api.find import find_one_agent
 from imbue.mngr.cli.address_params import AGENT_OR_HOST_ADDRESS
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
@@ -49,8 +48,7 @@ def _assert_agent_type_supports_transcripts(address: AgentOrHostAddress, mngr_ct
     """
     if not isinstance(address, AgentAddress):
         return
-    filtered_agents_by_host, _providers = discover_by_address(address, mngr_ctx, include_destroyed=False)
-    _host_ref, agent_ref = filter_one_agent(address.agent, None, filtered_agents_by_host)
+    _host_ref, agent_ref = find_one_agent(address, mngr_ctx)
     agent_type = agent_ref.agent_type
     if agent_type is None:
         # Agent's data.json lacks 'type'; defer to downstream error rather than blocking.
