@@ -107,7 +107,12 @@ class MailtmInbox(BaseModel):
             try:
                 message = self._poll_for_new_message(subject_substring=subject_substring)
                 if message is not None:
-                    return self._fetch_message_body(message.id)
+                    body = self._fetch_message_body(message.id)
+                    # Mark the message id seen only after the body fetch succeeds, so a
+                    # transient fetch failure leaves the message available for the next
+                    # iteration to retry instead of being silently filtered out.
+                    self._seen_message_ids.add(message.id)
+                    return body
             except httpx.HTTPError as exc:
                 last_error = exc
             # Polling a remote HTTP API (mail.tm) for inbound email; time.sleep is
@@ -139,7 +144,6 @@ class MailtmInbox(BaseModel):
                 subject = raw.get("subject", "")
                 if subject_substring.lower() not in subject.lower():
                     continue
-                self._seen_message_ids.add(message_id)
                 return _MailtmMessage(
                     id=NonEmptyStr(message_id),
                     to_addresses=to_addresses,
