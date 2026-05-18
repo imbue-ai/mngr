@@ -87,8 +87,8 @@ class MailtmInbox(BaseModel):
     def wait_for_one_time_code(self, timeout_seconds: float = _DEFAULT_TIMEOUT_SECONDS) -> OneTimeLoginCode:
         """Poll mail.tm for a one-time-code sign-in email and return the extracted code.
 
-        Looks for a numeric or alphanumeric code formatted as the connector
-        emits (digits-only, usually 6-8 chars). Raises
+        Looks for the first 6-10 character case-insensitive alphanumeric
+        token bounded by word boundaries in the email body. Raises
         :class:`MailtmFetchError` on timeout or unrecognized format.
         """
         body = self._wait_for_message_body(timeout_seconds=timeout_seconds, subject_substring="sign")
