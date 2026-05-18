@@ -13,6 +13,7 @@ from pydantic import Field
 from imbue.imbue_common.logging import log_span
 from imbue.mngr import hookimpl
 from imbue.mngr.agents.common_transcript import maybe_provision_common_transcript_scripts
+from imbue.mngr.agents.common_transcript import provision_raw_transcript_scripts
 from imbue.mngr.agents.tui_agent import InteractiveTuiAgent
 from imbue.mngr.agents.tui_utils import send_enter_and_poll_for_cleared_indicator
 from imbue.mngr.config.data_types import AgentTypeConfig
@@ -31,6 +32,7 @@ from imbue.mngr_gemini.gemini_config import merge_hooks_config
 from imbue.mngr_gemini.gemini_config import serialize_gemini_settings
 
 _COMMON_TRANSCRIPT_SCRIPT_NAME: Final[str] = "common_transcript.sh"
+_RAW_TRANSCRIPT_SCRIPT_NAME: Final[str] = "stream_transcript.sh"
 
 # Name of the readiness sentinel file the SessionStart hook touches. Polled by
 # ``GeminiAgent.wait_for_ready_signal`` to detect that the Gemini session has
@@ -192,8 +194,17 @@ class GeminiAgent(InteractiveTuiAgent[GeminiAgentConfig], HasCommonTranscriptMix
     def is_common_transcript_enabled(self) -> bool:
         return self.agent_config.emit_common_transcript
 
+    def get_raw_transcript_scripts(self) -> Mapping[str, str]:
+        """Return the gemini raw-transcript streamer script.
+
+        Always provisioned (per :class:`HasTranscriptMixin`): the raw bytes
+        are the source of truth that the common-transcript converter and
+        any future tooling read from.
+        """
+        return {_RAW_TRANSCRIPT_SCRIPT_NAME: _load_gemini_resource_script(_RAW_TRANSCRIPT_SCRIPT_NAME)}
+
     def get_common_transcript_scripts(self) -> Mapping[str, str]:
-        """Return the gemini transcript converter script."""
+        """Return the gemini common-transcript converter script."""
         return {_COMMON_TRANSCRIPT_SCRIPT_NAME: _load_gemini_resource_script(_COMMON_TRANSCRIPT_SCRIPT_NAME)}
 
     def _get_system_settings_path(self) -> Path:
@@ -226,7 +237,7 @@ class GeminiAgent(InteractiveTuiAgent[GeminiAgentConfig], HasCommonTranscriptMix
         options: CreateAgentOptions,
         mngr_ctx: MngrContext,
     ) -> None:
-        """Install mngr's Gemini settings and (optionally) the transcript watcher.
+        """Install mngr's Gemini settings, raw-transcript streamer, and (optionally) the common-transcript watcher.
 
         The settings file lives at
         ``$MNGR_AGENT_STATE_DIR/plugin/gemini/system_settings.json`` and is
@@ -235,13 +246,24 @@ class GeminiAgent(InteractiveTuiAgent[GeminiAgentConfig], HasCommonTranscriptMix
         scratch every run, so no merge / no clobber-protection is needed. The
         user's workspace and ``~/.gemini/settings.json`` stay untouched.
 
-        The transcript-watcher install delegates the enable-flag check and the
-        upload to :func:`maybe_provision_common_transcript_scripts`; when
-        ``agent_config.emit_common_transcript`` is ``False`` nothing is
-        written and ``assemble_command`` will not prepend the watcher.
+        The raw-transcript streamer is always provisioned (per
+        :class:`HasTranscriptMixin`): it copies Gemini's native session
+        JSONL files into the agent state dir so the bytes survive
+        ``~/.gemini/tmp/`` cleanup. The common-transcript watcher install
+        delegates the enable-flag check to
+        :func:`maybe_provision_common_transcript_scripts`; when
+        ``agent_config.emit_common_transcript`` is ``False`` only the raw
+        streamer is provisioned and ``assemble_command`` does not prepend
+        the common watcher.
         """
         self._install_system_settings(host)
         with mngr_ctx.concurrency_group.make_concurrency_group("gemini_provisioning") as concurrency_group:
+            provision_raw_transcript_scripts(
+                self,
+                host,
+                self._get_agent_dir(),
+                concurrency_group,
+            )
             maybe_provision_common_transcript_scripts(
                 self,
                 host,
@@ -281,7 +303,7 @@ class GeminiAgent(InteractiveTuiAgent[GeminiAgentConfig], HasCommonTranscriptMix
         command_override: CommandString | None,
         initial_message: str | None = None,
     ) -> CommandString:
-        """Assemble the gemini command with stale-sentinel cleanup and the transcript watcher.
+        """Assemble the gemini command with stale-sentinel cleanup, raw streamer, and (optional) common watcher.
 
         Inserts ``rm -f $MNGR_AGENT_STATE_DIR/session_started`` as a
         foreground step that runs to completion before ``gemini`` launches,
@@ -289,28 +311,32 @@ class GeminiAgent(InteractiveTuiAgent[GeminiAgentConfig], HasCommonTranscriptMix
         ``wait_for_ready_signal`` succeed before the new Gemini session has
         actually started (relevant on every restart, not just first launch).
 
-        When ``is_common_transcript_enabled`` is True, also launches the
-        transcript watcher fire-and-forget as a backgrounded subshell
-        (``( bash ... ) &``) placed *before* the ``rm`` step. Placement
+        The raw-transcript streamer is launched unconditionally as a
+        backgrounded subshell -- it is the source of truth for the agent
+        session and is required by :class:`HasTranscriptMixin`. When
+        ``is_common_transcript_enabled`` is True the common-transcript
+        watcher is launched alongside it, reading from the raw stream.
+        Background subshells are placed *before* the ``rm`` step. Placement
         matters: ``A && B & C`` in bash parses as ``( A && B ) &`` followed
         by ``C``, so writing ``rm -f X && ( watcher ) & gemini`` would push
         the ``rm`` into the background where it races gemini's startup.
-        Putting the watcher first -- ``( watcher ) & rm -f X && gemini`` --
-        confines ``&`` to the watcher subshell and leaves the rm in the
-        foreground chain that precedes the agent invocation, matching
-        ``mngr_claude``'s assembled-command shape.
+        Putting the watchers first -- ``( raw ) & ( common ) & rm -f X &&
+        gemini`` -- confines ``&`` to each watcher subshell and leaves the
+        rm in the foreground chain that precedes the agent invocation,
+        matching ``mngr_claude``'s assembled-command shape.
 
         Bash does not propagate SIGHUP to background children of
-        non-interactive shells by default, so the watcher may outlive the
+        non-interactive shells by default, so the watchers may outlive the
         tmux session and continue polling until killed by host teardown or
-        until its session inputs disappear.
+        until their session inputs disappear.
         """
         base_command = super().assemble_command(host, agent_args, command_override, initial_message)
         clear_sentinel = f"rm -f $MNGR_AGENT_STATE_DIR/{_READINESS_SENTINEL_FILENAME}"
+        raw_streamer_cmd = f"( bash $MNGR_AGENT_STATE_DIR/commands/{_RAW_TRANSCRIPT_SCRIPT_NAME} ) &"
         if not self.is_common_transcript_enabled:
-            return CommandString(f"{clear_sentinel} && {base_command}")
-        background_cmd = f"( bash $MNGR_AGENT_STATE_DIR/commands/{_COMMON_TRANSCRIPT_SCRIPT_NAME} ) &"
-        return CommandString(f"{background_cmd} {clear_sentinel} && {base_command}")
+            return CommandString(f"{raw_streamer_cmd} {clear_sentinel} && {base_command}")
+        common_watcher_cmd = f"( bash $MNGR_AGENT_STATE_DIR/commands/{_COMMON_TRANSCRIPT_SCRIPT_NAME} ) &"
+        return CommandString(f"{raw_streamer_cmd} {common_watcher_cmd} {clear_sentinel} && {base_command}")
 
 
 @hookimpl
