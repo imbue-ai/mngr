@@ -21,10 +21,12 @@ Categorization (per response):
 
 The two endpoints checked:
 
-* ``GET <connector_url>/docs`` -- FastAPI's auto-generated docs page
-  (always 200 when the connector is up; doesn't require generation-id
-  configuration, so it works for both ``tracks_generation=true`` and
-  ``tracks_generation=false`` tiers).
+* ``GET <connector_url>/health/liveness`` -- the connector's no-auth
+  liveness probe (mirrors the LiteLLM proxy's surface). Returns 200
+  with a tiny JSON body the poller can match against. We use this
+  instead of ``/docs`` (the FastAPI Swagger UI page) because the
+  Swagger UI returns 4 KB of HTML and is mounted via a separate
+  ASGI sub-app -- noisier and slightly slower during cold-start.
 * ``GET <litellm_proxy_url>/health/liveness`` -- LiteLLM's no-auth
   liveness probe (returns 200 when the process is up). We avoid
   ``/health`` because that endpoint requires a master-key bearer
@@ -44,9 +46,9 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.minds.errors import MindError
 from imbue.mngr.utils.polling import poll_for_value
 
-_DEFAULT_MAX_SECONDS: Final[float] = 30.0
+_DEFAULT_MAX_SECONDS: Final[float] = 60.0
 _DEFAULT_POLL_INTERVAL_SECONDS: Final[float] = 2.0
-_DEFAULT_PER_ATTEMPT_TIMEOUT_SECONDS: Final[float] = 3.0
+_DEFAULT_PER_ATTEMPT_TIMEOUT_SECONDS: Final[float] = 10.0
 _DEFAULT_COLD_BOOT_SECONDS: Final[float] = 10.0
 
 
@@ -229,7 +231,7 @@ def await_apps_healthy(
     Raises :class:`HealthCheckFailedError` on any definitive failure or
     on timeout. Returns ``None`` on success.
     """
-    connector_health_url = f"{str(connector_url).rstrip('/')}/docs"
+    connector_health_url = f"{str(connector_url).rstrip('/')}/health/liveness"
     litellm_health_url = f"{str(litellm_proxy_url).rstrip('/')}/health/liveness"
 
     factory = client_factory if client_factory is not None else httpx.Client

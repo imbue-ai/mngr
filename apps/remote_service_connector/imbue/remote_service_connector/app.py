@@ -346,7 +346,9 @@ class LeaseHostResponse(BaseModel):
 
 
 class ReleaseHostResponse(BaseModel):
-    status: str = Field(description="Release status (e.g. 'released')")
+    status: str = Field(
+        description="Release status: 'released' on first call, 'already_released' on idempotent retries"
+    )
 
 
 class LeasedHostInfo(BaseModel):
@@ -1312,9 +1314,18 @@ def _authenticate_supertokens(
         raise HTTPException(status_code=401, detail="SuperTokens not configured")
 
     try:
+        # Pass ``override_global_claim_validators=lambda *_: []`` so the
+        # session getter does NOT auto-reject unverified-email tokens at
+        # the validator step. We want our own explicit
+        # ``if not is_verified: raise "Email not verified"`` below to
+        # fire instead, so the operator-facing error message tells the
+        # user what to fix (the SDK's default rejection surfaces as a
+        # generic ``SuperTokensSessionError`` → "Invalid token", which
+        # is misleading).
         session = session_getter(
             access_token=token,
             anti_csrf_check=False,
+            override_global_claim_validators=lambda *_args, **_kwargs: [],
         )
     except (ValueError, TypeError, SuperTokensSessionError, SuperTokensGeneralError) as exc:
         raise HTTPException(status_code=401, detail="Invalid token") from exc
@@ -1341,11 +1352,21 @@ def _get_user_id_from_access_token(token: str) -> str:
 
     Raises ``HTTPException(401)`` on any validation failure. Used by auth-proxy
     endpoints that need the full user_id to drive an API call (e.g. revoke).
+
+    Does NOT enforce email-verification at this layer -- callers like
+    ``/auth/session/revoke`` legitimately need to work for unverified
+    users (signing out a session you never finished verifying should
+    still succeed). The endpoints that DO want email-verified callers
+    only go through :func:`_authenticate_supertokens` instead.
     """
     if not os.environ.get("SUPERTOKENS_CONNECTION_URI"):
         raise HTTPException(status_code=401, detail="SuperTokens not configured")
     try:
-        session = get_session_without_request_response(access_token=token, anti_csrf_check=False)
+        session = get_session_without_request_response(
+            access_token=token,
+            anti_csrf_check=False,
+            override_global_claim_validators=lambda *_args, **_kwargs: [],
+        )
     except (ValueError, TypeError, SuperTokensSessionError, SuperTokensGeneralError) as exc:
         raise HTTPException(status_code=401, detail="Invalid token") from exc
     if session is None:
@@ -1521,10 +1542,26 @@ web_app = FastAPI()
 # ``secrets/minds/<tier>/generation``; the per-tier ``litellm-connector-<tier>``
 # Modal Secret carries it into the container. See
 # ``apps/minds/imbue/minds/envs/generation.py`` for the full lifecycle.
-# Empty when the deploy didn't push one (e.g. an older deploy from
-# before this branch landed) so the endpoint is always callable; the
-# client uses an empty string as "no generation tracked yet".
+# An empty string is the **steady state** for any tier whose
+# ``deploy.toml`` has ``[lifecycle].tracks_generation = false`` (dev tier
+# today) -- ``deploy_env`` only mints + pushes a generation id when the
+# flag is true, so the connector sees no value and ``/generation``
+# answers ``{"generation_id": ""}``. The activate-time auto-wipe in
+# ``minds env activate`` skips the wipe on empty, which is the right
+# no-op for untracked tiers. (Empty is also what an older pre-generation-
+# lifecycle deploy would produce, hence the matching legacy fallback.)
 _GENERATION_ID_ENV_VAR = "MINDS_TIER_GENERATION_ID"
+
+
+@web_app.get("/health/liveness")
+def get_health_liveness() -> dict[str, str]:
+    """Lightweight no-auth liveness probe.
+
+    Used by ``minds env deploy``'s post-deploy health check to confirm
+    the connector is reachable. Returns a fixed body so the poller has
+    something to assert on beyond a 200 status.
+    """
+    return {"status": "ok"}
 
 
 @web_app.get("/generation")
@@ -1562,11 +1599,22 @@ def list_tunnels(request: Request) -> list[dict[str, object]]:
 
 @web_app.delete("/tunnels/{tunnel_name}")
 def delete_tunnel(request: Request, tunnel_name: str) -> dict[str, str]:
-    """Delete a tunnel and all its associated DNS records, Access Applications, ingress rules, and KV entries."""
+    """Delete a tunnel and all its associated DNS records, Access Applications, ingress rules, and KV entries.
+
+    Idempotent at the HTTP layer -- a second DELETE on an already-gone
+    tunnel returns 200 with ``status: already_deleted`` rather than
+    404. Clients retrying after a transient error therefore don't have
+    to special-case ``404 Not Found``.
+    """
     with handle_endpoint_errors():
         auth = authenticate_request(request, get_ctx().ops)
         admin = require_admin(auth)
-        get_ctx().delete_tunnel(tunnel_name, admin.username)
+        try:
+            get_ctx().delete_tunnel(tunnel_name, admin.username)
+        except HTTPException as exc:
+            if exc.status_code == 404:
+                return {"status": "already_deleted"}
+            raise
         return {"status": "deleted"}
 
 
@@ -1740,7 +1788,13 @@ def lease_host(request: Request, body: LeaseHostRequest) -> dict[str, object]:
 
 @web_app.post("/hosts/{host_db_id}/release")
 def release_host(request: Request, host_db_id: UUID) -> dict[str, object]:
-    """Release a leased host back to the pool."""
+    """Release a leased host back to the pool.
+
+    Idempotent at the HTTP layer: a second release on an already-
+    released host returns 200 ``status: already_released`` rather than
+    404. Ownership is still enforced -- if some other user leased the
+    row, the call returns 403 regardless of status.
+    """
     with handle_endpoint_errors():
         auth = authenticate_request(request, get_ctx().ops)
         admin = require_admin(auth)
@@ -1752,15 +1806,19 @@ def release_host(request: Request, host_db_id: UUID) -> dict[str, object]:
                 # Python ``UUID`` type that FastAPI parsed from the path
                 # (it raises "can't adapt type 'UUID'").
                 cur.execute(
-                    "SELECT leased_to_user FROM pool_hosts WHERE id = %s AND status = 'leased'",
+                    "SELECT leased_to_user, status FROM pool_hosts WHERE id = %s",
                     (str(host_db_id),),
                 )
                 row = cur.fetchone()
                 if row is None:
-                    raise HTTPException(status_code=404, detail="Leased host not found")
-                leased_to_user = row[0]
+                    raise HTTPException(status_code=404, detail="Host not found")
+                leased_to_user, status = row
+                # Ownership check first: we don't want to leak a status
+                # signal to other users via the response code.
                 if leased_to_user != admin.username:
                     raise HTTPException(status_code=403, detail="You do not own this host lease")
+                if status != "leased":
+                    return ReleaseHostResponse(status="already_released").model_dump()
                 cur.execute(
                     "UPDATE pool_hosts SET status = 'released', released_at = NOW() WHERE id = %s",
                     (str(host_db_id),),

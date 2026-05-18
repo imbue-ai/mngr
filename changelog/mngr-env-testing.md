@@ -1,3 +1,117 @@
+Batch of `minds env deploy` / connector follow-ups from the F-numbered
+findings in `MANUAL_DEPLOY_FINDINGS.md`:
+
+- `_authenticate_supertokens` now passes
+  ``override_global_claim_validators=lambda *_: []`` to the SuperTokens
+  session getter so the explicit ``if not is_verified: raise 401
+  "Email not verified"`` check fires for unverified tokens instead of
+  being shadowed by the SDK's generic ``Invalid token`` rejection. The
+  matching ``_get_user_id_from_access_token`` helper also skips claim
+  validation so flows like ``/auth/session/revoke`` (sign-out) work
+  for unverified users -- they legitimately need to sign out of a
+  session they never finished verifying. (F6)
+- Connector exposes a new no-auth ``GET /health/liveness`` route
+  returning ``{"status": "ok"}``. ``minds env deploy``'s post-deploy
+  health check now polls it instead of ``/docs`` (smaller, faster,
+  symmetric with the LiteLLM proxy's existing liveness probe). The
+  per-attempt HTTP timeout bumped from 3s to 10s and the total budget
+  from 30s to 60s so cold-booting Modal containers have a realistic
+  chance to respond before being declared unhealthy. (F2, F3)
+- ``DELETE /tunnels/{name}`` and ``POST /hosts/{id}/release`` are now
+  idempotent at the HTTP layer: a second call against an already-
+  deleted tunnel or already-released host returns 200 with
+  ``{"status": "already_deleted"}`` / ``{"status": "already_released"}``
+  instead of 404. Clients retrying after a transient error no longer
+  have to special-case 404. (F7, F30)
+- ``DeployLifecycleConfig`` has a new pydantic model validator that
+  rejects ``writes_local_state=true`` + ``creates_resources=false``
+  at deploy.toml parse time. The combination would previously have
+  AssertionError'd partway through deploy AFTER both Modal apps had
+  been deployed; failing at config load is far less surprising. The
+  matching asserts in ``deploy_env`` stay as defense-in-depth for
+  non-CLI callers. (F18)
+- ``minds env deploy`` runs ``apply_pool_hosts_migrations`` for every
+  tier instead of only the dev tier. Shared tiers (staging /
+  production) source the host_pool DSN from ``DATABASE_URL`` in their
+  operator-managed ``secrets/minds/<tier>/neon`` Vault entry. Without
+  this, a new ``.sql`` migration shipped via PR would apply to dev
+  envs immediately but never to staging / production until the
+  operator ran psql manually -- and the two schemas would diverge.
+  (F17)
+- ``minds env destroy`` proceeds with cloud-side cleanup even when the
+  local env root has already been removed by hand. The cloud-side
+  resources are keyed off the env *name*, not the local directory, so
+  an operator who ``rm -rf``'d ``~/.minds-<env>/`` can still re-run
+  destroy by name to clean up Modal apps / Neon / SuperTokens /
+  Cloudflare tunnels / OVH instances. ``destroy_env`` no longer
+  raises ``DevEnvNotFoundError`` for missing-root; it logs a warning
+  and proceeds. Step 1 (``mngr destroy`` per agent) becomes a no-op
+  since the agents directory is gone too. (F22)
+- ``per_env_connector_url`` / ``per_env_litellm_proxy_url`` now take
+  the ``tier`` as a keyword arg. The dev URLs stay shaped as
+  ``rsc-dev`` / ``llm-dev`` so existing per-env deployments keep
+  working without a redeploy, but any future ``PER_ENV`` tier other
+  than dev gets the right ``rsc-<tier>`` segment automatically
+  instead of silently colliding on the hardcoded ``dev`` segment.
+  (F24)
+- ``minds env deploy``'s ``find_monorepo_root`` check happens BEFORE
+  the Vault credential read in the CLI and BEFORE
+  ``make_deploy_id`` inside ``deploy_env``. Running from outside
+  the monorepo now fails immediately with a clean error rather than
+  reading Vault first and logging a misleading "Deploy id: ..."
+  line. (F15)
+- ``minds env list`` resolves the reserved tiers' (``production`` /
+  ``staging``) client.toml to the committed in-repo
+  ``apps/minds/imbue/minds/config/envs/<tier>/client.toml`` instead
+  of showing ``(no client.toml)``. The ``DevEnvSummary`` gains a
+  ``client_config_source: "env_root" | "in_repo" | None`` field so
+  machine consumers can distinguish "per-env file" from "in-repo
+  file" from "unprovisioned." Human-format output now reads
+  ``<path>  (in-repo, committed)`` for reserved tiers and
+  ``(no client.toml -- run `minds env deploy`)`` for unprovisioned
+  dev envs. (F11)
+- The ``litellm-connector`` Modal Secret no longer appears in
+  ``[secrets].services`` -- it was never vault-backed (no
+  ``secrets/minds/<tier>/litellm-connector`` Vault entry exists),
+  and the carve-out (``_DERIVED_ONLY_SECRET_SERVICES``) that
+  suppressed a misleading per-deploy warning was a code smell. The
+  deploy now pushes the secret as a separate code-driven step at
+  the end of the secret-push loop; ``_DERIVED_ONLY_SECRET_SERVICES``
+  is deleted. ``[secrets].services`` in every tier's deploy.toml
+  becomes a truthful "vault-backed only" list. The post-deploy GC
+  picks up ``litellm-connector-<tier>-<deploy_id>`` secrets via the
+  same suffix-match pattern, so no GC bookkeeping changes. (F25)
+- Recover changes: when the captured pre-deploy app version is
+  ``None`` (a first-ever deploy of this env / tier), ``minds env
+  recover`` now ``modal app stop``s the deployed app instead of
+  leaving it running -- otherwise the just-deleted Modal Secrets
+  would leave the app 500'ing on every request. (F19)
+- The recover-target file is per-env: each in-flight deploy gets
+  its own ``.minds-deploy-recover-target-<env>.json`` at the
+  monorepo root, so concurrent deploys against different envs don't
+  refuse each other (useful for parallel test runs). The
+  environment-scoped commands (``deploy`` / ``destroy``) refuse only
+  if THEIR env's file exists; the env-agnostic commands (``activate``
+  / ``deactivate`` / ``list``) still refuse loud if ANY recover-
+  target file exists (listing all in the error). ``deploy_env`` and
+  ``recover_env`` additionally hold a per-env ``flock`` on
+  ``.minds-deploy-lock-<env>.lock`` for their entire process
+  lifecycle, so two concurrent invocations against the same env
+  serialize at the kernel level. (F26)
+- Doc / spec updates: comment on the connector's ``/generation`` env
+  var now explains empty-string is the steady state for
+  ``tracks_generation=false`` tiers (not a legacy artifact). Spec
+  ``specs/minds-deploy-safety-overhaul/spec.md`` updated to use
+  branch-based Neon-snapshot terminology (the implementation pivoted
+  from the spec's original named-restore-point design because Neon's
+  named-restore-point API is org-tier-gated) and to refer to
+  ``/health/liveness`` on both apps. ``modal_litellm``'s README +
+  module docstring drop the wrong ``/anthropic`` suffix from the
+  documented ``ANTHROPIC_BASE_URL`` -- the Anthropic SDK appends
+  ``/v1/messages`` itself, which lands on LiteLLM's native route
+  that already accepts the Anthropic request shape. (F1, F4, F9,
+  F20)
+
 Minds dev-environment fixes:
 
 - Hard-enforces the `dev-<your-user>` naming convention for dev envs:

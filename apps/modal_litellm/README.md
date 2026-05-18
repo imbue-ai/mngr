@@ -7,7 +7,7 @@ A serverless [LiteLLM](https://github.com/BerriAI/litellm) proxy deployed as a M
 - **Modal function** (`app.py`): Self-contained, no monorepo imports. Uses `@modal.asgi_app()` to serve LiteLLM's FastAPI app as a long-lived serverless function.
 - **Database**: Neon PostgreSQL for cost tracking, key management, and spend logs.
 - **Auth**: LiteLLM master key for admin operations; virtual keys for per-user/per-agent cost tracking.
-- **Pass-through**: The `/anthropic/v1/messages` endpoint forwards requests to the real Anthropic API, so Claude Code can use it via `ANTHROPIC_BASE_URL`.
+- **Anthropic SDK compatible**: LiteLLM's native `POST /v1/messages` route accepts the Anthropic API request shape with a virtual key (`x-api-key` or `Authorization: Bearer sk-...`). Setting `ANTHROPIC_BASE_URL` to the proxy URL (no path suffix) routes the Anthropic SDK / Claude Code through the proxy with full cost tracking.
 
 ## Setup
 
@@ -59,7 +59,7 @@ curl -s -X POST "$PROXY_URL/key/generate" \
 ### 5. Use with Claude Code
 
 ```bash
-export ANTHROPIC_BASE_URL="https://<workspace>--llm-production-proxy.modal.run/anthropic"
+export ANTHROPIC_BASE_URL="https://<workspace>--llm-production-proxy.modal.run/"
 export ANTHROPIC_API_KEY="sk-your-virtual-key"
 
 claude -p "hello"

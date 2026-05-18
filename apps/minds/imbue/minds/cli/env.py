@@ -98,6 +98,7 @@ from imbue.minds.envs.provisioning import destroy_env
 from imbue.minds.envs.provisioning import list_dev_envs
 from imbue.minds.envs.recover import RecoverFailedError
 from imbue.minds.envs.recover import RecoverTargetMissingError
+from imbue.minds.envs.recover import find_all_recover_target_files
 from imbue.minds.envs.recover import find_monorepo_root
 from imbue.minds.envs.recover import read_recover_target
 from imbue.minds.envs.recover import recover_env
@@ -490,13 +491,15 @@ def _exec_into_recover(*, deploy_error: Exception) -> None:
     os.execvp(argv0, [argv0, "env", "recover"])
 
 
-def _refuse_if_recover_target_exists() -> None:
-    """Block the command if a recover-target file is sitting at the monorepo root.
+def _refuse_if_any_recover_target_exists() -> None:
+    """Block the command if ANY per-env recover-target file sits at the monorepo root.
 
-    Every minds-env command other than ``recover`` itself refuses to
-    run while the file exists: a prior deploy failed and the operator
-    needs to clear it (via ``minds env recover``, or manually if known-
-    stale) before any new operation against the env can proceed.
+    Used by env-agnostic commands (``activate``, ``deactivate``,
+    ``list``) -- they don't have a single env in mind, but we still
+    want to surface any in-flight failed deploy that the operator
+    might have forgotten about. Each matching file's env name is
+    listed in the error so the operator knows which env(s) need
+    ``minds env recover``.
 
     Tolerates ``NotInMonorepoError`` for commands that don't strictly
     require monorepo context (e.g. ``list`` from $HOME); when we can't
@@ -506,11 +509,36 @@ def _refuse_if_recover_target_exists() -> None:
         repo_root = find_monorepo_root()
     except MindError:
         return
-    if recover_target_exists(repo_root=repo_root):
+    files = find_all_recover_target_files(repo_root=repo_root)
+    if not files:
+        return
+    file_list = "\n".join(f"  - {f.name}" for f in files)
+    raise click.ClickException(
+        f"{len(files)} recover-target file(s) sit at {repo_root} -- one or more prior "
+        f"`minds env deploy` runs failed mid-flight:\n{file_list}\n"
+        "Activate each affected env and run `minds env recover` (or delete a known-stale file "
+        "manually) before any other minds env command."
+    )
+
+
+def _refuse_if_this_env_recover_target_exists(env_name: str) -> None:
+    """Block the command if THIS env's recover-target file exists.
+
+    Used by env-scoped commands (``deploy``, ``destroy``) so a
+    leftover recover-target for a DIFFERENT env doesn't block this
+    env's operation -- per-env naming is the whole point of F26's
+    file-rename, supporting test parallelism where each test mints
+    its own env name.
+    """
+    try:
+        repo_root = find_monorepo_root()
+    except MindError:
+        return
+    if recover_target_exists(repo_root=repo_root, env_name=env_name):
         raise click.ClickException(
-            f"Recover-target file exists at {recover_target_path(repo_root=repo_root)} -- "
-            "a prior `minds env deploy` failed mid-flight. Run `minds env recover` to roll back "
-            "(or delete the file manually if it's known-stale) before any other minds env command."
+            f"Recover-target file exists at {recover_target_path(repo_root=repo_root, env_name=env_name)} -- "
+            f"a prior `minds env deploy` against env {env_name!r} failed mid-flight. Run `minds env recover` "
+            "(with this env activated) to roll back, or delete the file manually if it's known-stale."
         )
 
 
@@ -584,7 +612,7 @@ def env_activate(name: str, create: bool) -> None:
       and proceeds. Without ``--create``, the error message tells the
       operator how to bootstrap a fresh dev env in one line.
     """
-    _refuse_if_recover_target_exists()
+    _refuse_if_any_recover_target_exists()
 
     if name in _RESERVED_TIER_ENV_NAMES or name == _PRODUCTION_ENV_NAME:
         _activate_reserved_env(name)
@@ -836,7 +864,7 @@ def env_deactivate() -> None:
     activate something, and ``mngr`` falls back to its own
     ``~/.mngr/`` default.
     """
-    _refuse_if_recover_target_exists()
+    _refuse_if_any_recover_target_exists()
     write_stdout_line('# Deactivate the current env. Source via: eval "$(uv run minds env deactivate)"')
     for key in _ACTIVATION_ENV_VARS:
         write_stdout_line(f"unset {key}")
@@ -846,7 +874,7 @@ def env_deactivate() -> None:
 @click.pass_context
 def env_list(ctx: click.Context) -> None:
     """List every minds env on disk (every ``~/.minds*/`` dir)."""
-    _refuse_if_recover_target_exists()
+    _refuse_if_any_recover_target_exists()
     output_format: OutputFormat = ctx.obj.get("output_format", OutputFormat.HUMAN)
     summaries = list_dev_envs()
     active = active_env_name_or_none()
@@ -859,9 +887,12 @@ def env_list(ctx: click.Context) -> None:
         for s in summaries:
             marker = " (active)" if s.name == active else ""
             connector = str(s.connector_url) if s.connector_url is not None else "(no client.toml)"
-            client_loc = (
-                s.client_config_path if s.client_config_path is not None else "(no client.toml under env_root)"
-            )
+            if s.client_config_path is None:
+                client_loc = "(no client.toml — run `minds env deploy`)"
+            elif s.client_config_source == "in_repo":
+                client_loc = f"{s.client_config_path}  (in-repo, committed)"
+            else:
+                client_loc = s.client_config_path
             logger.info("{}{}\t{}\t{}\t{}", s.name, marker, s.env_root, connector, client_loc)
         return
 
@@ -870,6 +901,7 @@ def env_list(ctx: click.Context) -> None:
             "name": s.name,
             "env_root": s.env_root,
             "client_config_path": s.client_config_path,
+            "client_config_source": s.client_config_source,
             "connector_url": str(s.connector_url) if s.connector_url is not None else None,
             "is_active": s.name == active,
         }
@@ -920,10 +952,10 @@ def env_deploy(ctx: click.Context, yes_i_mean_production: bool, yes_i_mean_stagi
     Idempotent: re-running picks up any new tier-shared Vault values and
     re-deploys in place.
     """
-    _refuse_if_recover_target_exists()
     output_format: OutputFormat = ctx.obj.get("output_format", OutputFormat.HUMAN)
     env_name = require_activated_env_name()
     tier = _tier_for_env_name(env_name)
+    _refuse_if_this_env_recover_target_exists(env_name)
 
     if tier == _PRODUCTION_ENV_NAME and not yes_i_mean_production:
         raise click.ClickException(
@@ -937,6 +969,17 @@ def env_deploy(ctx: click.Context, yes_i_mean_production: bool, yes_i_mean_stagi
     try:
         deploy_config = load_deploy_config(tier)
     except EnvConfigError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    # Preflight the "must run from monorepo" check up front, BEFORE
+    # reading vault credentials or building providers. ``deploy_env``
+    # also re-checks (defense in depth + clean exception surface for
+    # callers that bypass the CLI), but the CLI calling early means a
+    # cd'd-into-/tmp invocation fails immediately with a clean error
+    # rather than wasting a Vault round-trip first.
+    try:
+        find_monorepo_root()
+    except MindError as exc:
         raise click.ClickException(str(exc)) from exc
 
     providers = _build_real_providers()
@@ -970,7 +1013,9 @@ def env_deploy(ctx: click.Context, yes_i_mean_production: bool, yes_i_mean_stagi
                 repo_root_for_recover = find_monorepo_root()
             except MindError:
                 repo_root_for_recover = None
-            if repo_root_for_recover is not None and recover_target_exists(repo_root=repo_root_for_recover):
+            if repo_root_for_recover is not None and recover_target_exists(
+                repo_root=repo_root_for_recover, env_name=env_name
+            ):
                 _exec_into_recover(deploy_error=exc)
             raise click.ClickException(str(exc)) from exc
         _emit_deploy_result(result, output_format=output_format)
@@ -1017,10 +1062,10 @@ def env_destroy(ctx: click.Context, keep_agents: bool, yes_i_mean_staging: bool)
     resources) and the generation-id removal (only for shared tiers
     that use generation tracking).
     """
-    _refuse_if_recover_target_exists()
     output_format: OutputFormat = ctx.obj.get("output_format", OutputFormat.HUMAN)
     env_name = require_activated_env_name()
     tier = _tier_for_env_name(env_name)
+    _refuse_if_this_env_recover_target_exists(env_name)
 
     if tier == _PRODUCTION_ENV_NAME:
         raise click.ClickException(
@@ -1068,21 +1113,36 @@ def env_destroy(ctx: click.Context, keep_agents: bool, yes_i_mean_staging: bool)
 def env_recover(_ctx: click.Context) -> None:
     """Roll back to the pre-deploy state captured by a failed `minds env deploy`.
 
-    Reads ``.minds-deploy-recover-target.json`` at the monorepo root,
-    runs every reversal step (modal app rollback, Neon restore, orphan
-    secret cleanup) in order, then deletes the file. Each step is
-    idempotent so re-running recover after a partial recovery converges.
+    Reads ``.minds-deploy-recover-target-<env-name>.json`` at the
+    monorepo root for the currently-activated env, runs every reversal
+    step (modal app rollback, Neon restore, orphan secret cleanup) in
+    order, then deletes the file. Each step is idempotent so re-running
+    recover after a partial recovery converges.
 
-    Refuses to run if no recover-target file exists (nothing to do).
+    Refuses to run if no recover-target file exists for the activated
+    env. To recover a different env, activate it first.
     """
     try:
         repo_root = find_monorepo_root()
     except MindError as exc:
         raise click.ClickException(str(exc)) from exc
-    if not recover_target_exists(repo_root=repo_root):
+    env_name = require_activated_env_name()
+    if not recover_target_exists(repo_root=repo_root, env_name=env_name):
+        # Help the operator if they have recover-target files for OTHER
+        # envs sitting around (a common mistake when juggling several
+        # dev envs).
+        leftovers = find_all_recover_target_files(repo_root=repo_root)
+        if leftovers:
+            leftover_list = "\n".join(f"  - {f.name}" for f in leftovers)
+            raise click.ClickException(
+                f"No recover-target file for activated env {env_name!r} at "
+                f"{recover_target_path(repo_root=repo_root, env_name=env_name)}. Other recover-target files exist:\n"
+                f"{leftover_list}\nActivate the env you want to recover (e.g. "
+                f'`eval "$(uv run minds env activate <env-name>)"`) and re-run.'
+            )
         raise click.ClickException(
-            f"No recover-target file at {recover_target_path(repo_root=repo_root)}; nothing to recover. "
-            "(Recover is only meaningful after a failed `minds env deploy`.)"
+            f"No recover-target file at {recover_target_path(repo_root=repo_root, env_name=env_name)}; "
+            "nothing to recover. (Recover is only meaningful after a failed `minds env deploy`.)"
         )
 
     providers = _build_real_providers()
@@ -1090,13 +1150,19 @@ def env_recover(_ctx: click.Context) -> None:
         # Load credentials from the tier-vault prefix the recover-target
         # file recorded. We re-derive the tier here since the recover-
         # target has env_name + tier already.
-        target = read_recover_target(repo_root=repo_root)
+        target = read_recover_target(repo_root=repo_root, env_name=env_name)
         try:
             credentials = _load_dev_credentials_from_vault(target.vault_path_prefix, cg=cg)
         except VaultReadError as exc:
             raise click.ClickException(str(exc)) from exc
         try:
-            recover_env(repo_root=repo_root, providers=providers, credentials=credentials, parent_cg=cg)
+            recover_env(
+                repo_root=repo_root,
+                env_name=env_name,
+                providers=providers,
+                credentials=credentials,
+                parent_cg=cg,
+            )
         except RecoverTargetMissingError as exc:
             raise click.ClickException(str(exc)) from exc
         except RecoverFailedError as exc:

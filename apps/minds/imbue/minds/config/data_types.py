@@ -6,6 +6,7 @@ from typing import Final
 from pydantic import AnyUrl
 from pydantic import ConfigDict
 from pydantic import Field
+from pydantic import model_validator
 
 from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
@@ -148,6 +149,41 @@ class DeployLifecycleConfig(FrozenModel):
             "destroy is a real possibility."
         ),
     )
+
+    @model_validator(mode="after")
+    def _check_writes_local_state_implies_creates_resources(self) -> "DeployLifecycleConfig":
+        """``writes_local_state`` and ``creates_resources`` are coupled today.
+
+        ``deploy_env`` populates the local ``client.toml`` / ``secrets.toml``
+        from the records returned by ``providers.create_neon_project`` and
+        ``providers.create_supertokens_app`` -- both of which only fire
+        when ``creates_resources`` is true. So a tier configured with
+        ``writes_local_state=true`` + ``creates_resources=false`` would
+        AssertionError partway through deploy, AFTER both Modal apps had
+        already been deployed.
+
+        Catching the misconfiguration at ``deploy.toml`` parse time is
+        cheaper than letting the deploy run halfway and then bail. The
+        coupling is intentional rather than fundamental: if a future tier
+        ever needs ``writes_local_state=true`` with operator-managed
+        cloud resources, ``deploy_env``'s "Step 6b: local state" branch
+        would need to source the DSNs + SuperTokens connection URI from
+        Vault (via ``providers.read_per_env_secret_values("neon", ...)``
+        and similar) instead of from the create_* records. That's a
+        straightforward refactor but not done today, so we keep the
+        coupling explicit here.
+        """
+        if self.writes_local_state and not self.creates_resources:
+            raise ValueError(
+                "deploy.toml [lifecycle] writes_local_state=true requires creates_resources=true. "
+                "The combination 'creates_resources=false + writes_local_state=true' is rejected "
+                "because deploy_env writes the local client.toml / secrets.toml from the records "
+                "returned by create_neon_project / create_supertokens_app, both of which only run "
+                "when creates_resources=true. If you need this combination, extend deploy_env's "
+                "'Step 6b: local state' to source the DSNs + SuperTokens URI from Vault, then "
+                "drop this validator. (See the docstring on this model for details.)"
+            )
+        return self
 
 
 class MinContainersConfig(FrozenModel):
