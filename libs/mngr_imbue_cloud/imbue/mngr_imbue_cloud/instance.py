@@ -174,6 +174,82 @@ def _map_docker_status_to_host_state(status: str, exit_code: int) -> tuple[HostS
     return HostState.CRASHED, f"unrecognized docker status {status!r}"
 
 
+def _rewrite_container_host_name(
+    *,
+    vps_address: str,
+    container_ssh_port: int,
+    private_key_path: Path,
+    known_hosts_path: Path,
+    new_host_name: str,
+    data_json_path: str = "/mngr/data.json",
+    connect_timeout_seconds: float = 30.0,
+) -> None:
+    """Rewrite ``data.json``'s ``host_name`` field on the leased container.
+
+    The pool host's ``/mngr/data.json`` was written at bake time with the
+    bake's per-bake unique placeholder host name (``pool-<hex>-host``).
+    The FCT bootstrap reads that file to decide what to name the initial
+    chat agent (see ``forever-claude-template/libs/bootstrap/src/bootstrap/
+    manager.py:_read_host_name``). Without this rewrite, every lease would
+    end up with a chat agent named after the bake's placeholder instead
+    of the user's chosen workspace name.
+
+    Implementation: SFTP download -> mutate the parsed dict -> SFTP upload.
+    Avoids the shell-quoting hazards of an inline ``python3 -c`` over
+    ``exec_command`` (the host name flows through user input ultimately,
+    so single/double-quote escaping has to be 100% airtight).
+
+    Raises ``MngrError`` on any SSH, SFTP, or JSON failure -- a wrong
+    ``host_name`` is exactly the bug this exists to prevent, so a silent
+    fallback would re-introduce it.
+    """
+    client = paramiko.SSHClient()
+    try:
+        client.load_host_keys(str(known_hosts_path))
+    except OSError as exc:
+        raise MngrError(f"failed to load known_hosts {known_hosts_path} for host_name rewrite: {exc}") from exc
+    client.set_missing_host_key_policy(paramiko.RejectPolicy())
+    try:
+        client.connect(
+            hostname=vps_address,
+            port=container_ssh_port,
+            username="root",
+            key_filename=str(private_key_path),
+            allow_agent=False,
+            look_for_keys=False,
+            timeout=connect_timeout_seconds,
+        )
+    except (paramiko.SSHException, OSError) as exc:
+        raise MngrError(
+            f"SSH connect for host_name rewrite on {vps_address}:{container_ssh_port} failed: {exc}"
+        ) from exc
+    try:
+        sftp = client.open_sftp()
+        try:
+            with sftp.open(data_json_path, "r") as remote:
+                raw = remote.read()
+            try:
+                data = json.loads(raw)
+            except json.JSONDecodeError as exc:
+                raise MngrError(f"{data_json_path} on leased host {vps_address} is not valid JSON: {exc}") from exc
+            if not isinstance(data, dict):
+                raise MngrError(f"{data_json_path} on leased host {vps_address} did not parse to an object")
+            data["host_name"] = new_host_name
+            payload = json.dumps(data, indent=2).encode()
+            with sftp.open(data_json_path, "w") as remote:
+                remote.write(payload)
+        finally:
+            try:
+                sftp.close()
+            except (paramiko.SSHException, OSError):
+                pass
+    finally:
+        try:
+            client.close()
+        except (paramiko.SSHException, OSError):
+            pass
+
+
 def _scan_ssh_host_key(host: str, port: int) -> str | None:
     """Best-effort: pull a remote sshd's public key for known_hosts.
 
@@ -982,6 +1058,21 @@ class ImbueCloudProvider(BaseProviderInstance):
                 lease_result.container_ssh_port,
                 scanned_key,
             )
+
+        # The pool host's ``/mngr/data.json`` was written at bake time with
+        # the bake's placeholder ``host_name`` (``pool-<hex>-host``). Rewrite
+        # it now to the user-supplied ``name`` so the FCT bootstrap (which
+        # reads that file to name the initial chat agent) inherits the
+        # user's chosen workspace name on the first start of the adopted
+        # services agent. Done after the host-key scan so strict
+        # host-key checking is enforceable during the SFTP round-trip.
+        _rewrite_container_host_name(
+            vps_address=lease_result.vps_address,
+            container_ssh_port=lease_result.container_ssh_port,
+            private_key_path=final_private_key,
+            known_hosts_path=known_hosts_path,
+            new_host_name=str(name),
+        )
 
         leased_info = LeasedHostInfo(
             host_db_id=lease_result.host_db_id,

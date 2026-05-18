@@ -130,6 +130,30 @@ def _resolve_pool_database_url(explicit: str | None) -> str:
 
 _CONTAINER_SSH_PORT: Final[int] = 2222
 
+# Constant agent name baked onto every pool host. The minds-side
+# adoption code (``ImbueCloudHost.create_agent_state``) explicitly keeps
+# the bake's agent name verbatim -- so the bake must use the same name
+# the user's ``mngr create system-services@<host>.imbue_cloud_<slug>``
+# does, otherwise the user's lease ends up with an agent whose tmux
+# session is named after a per-bake UUID instead of ``system-services``.
+# Tracked at ``libs/mngr_imbue_cloud/imbue/mngr_imbue_cloud/host.py:67-75``
+# (the ``ImbueCloudHost`` docstring spells the contract out).
+_BAKED_SERVICES_AGENT_NAME: Final[str] = "system-services"
+
+# Path inside the pool host's container of the FCT bootstrap's
+# initial-chat sentinel. The bootstrap writes this file after creating
+# the chat agent on first boot, then skips the create on every later
+# boot if it sees the file. Removing it at bake time means the user's
+# first lease + start re-fires the create, this time with the
+# lease-rewritten ``/mngr/data.json`` ``host_name`` (the user's
+# workspace name) so the chat agent inherits the right name. The file
+# lives inside ``runtime/`` which is already a git worktree at bake
+# time, so ``_init_runtime_worktree`` skips on every subsequent
+# bootstrap run and the in-container ``rm`` is enough (no commit or
+# push needed -- the on-disk working-tree state survives all subsequent
+# mngr stop/start cycles inside the same container).
+_INITIAL_CHAT_SENTINEL_PATH: Final[str] = "/code/runtime/initial_chat_created"
+
 # 30 min: the inner ``mngr create ... --template ovh`` builds a fresh
 # Docker image on the leased VPS, which can take 10-20 min (network bound).
 # A previous 10-min cap occasionally killed otherwise-healthy provisions.
@@ -408,9 +432,23 @@ def _create_single_pool_host(
     v2 tags alongside ``mngr-provider`` / ``mngr-host-id``.
     """
     suffix = uuid4().hex
-    agent_name = f"pool-{suffix}"
-    host_name = f"{agent_name}-host"
+    # ``agent_name`` is the contract with ``ImbueCloudHost.create_agent_state``
+    # (see ``host.py`` docstring): adoption preserves the bake's name
+    # verbatim, so this must match the minds-side default agent name
+    # ``system-services`` to give the user's tmux session a sane label
+    # instead of a per-bake UUID. ``host_name`` keeps the suffix so the
+    # operator's local mngr state can distinguish pool hosts across
+    # sequential bakes; the user's chosen workspace name overwrites it at
+    # lease time via ``ImbueCloudProvider.create_host``.
+    agent_name = _BAKED_SERVICES_AGENT_NAME
+    host_name = f"pool-{suffix}-host"
     address = f"{agent_name}@{host_name}.ovh"
+    # The FCT bootstrap's ``_create_initial_chat_agent`` derives the
+    # chat-agent name from ``$MNGR_HOST_DIR/data.json``'s ``host_name``
+    # (see ``forever-claude-template/libs/bootstrap/src/bootstrap/manager.py``
+    # :func:`_build_create_chat_command`). Captured here so the post-bake
+    # cleanup can target it by name for ``mngr destroy``.
+    bootstrap_chat_agent_name = host_name
 
     logger.info("Creating pool host: {} (region={})", address, region)
 
@@ -531,6 +569,39 @@ def _create_single_pool_host(
     if container_install.returncode != 0:
         raise PoolBakeError(
             f"installing management key inside container for {agent_name} failed: {container_install.stderr.strip()}"
+        )
+
+    # During the bake the services agent booted and the FCT bootstrap created
+    # an initial chat agent named after the BAKE's host name. That name is
+    # wrong for the user's eventual workspace (the user picks their own host
+    # name at lease time), and the bootstrap won't recreate the chat agent
+    # on later starts because of the sentinel file it wrote. Tear both
+    # down so the user's first start gets a fresh chat agent named after
+    # their own host name.
+    logger.info("  Destroying bootstrap-created chat agent: {}", bootstrap_chat_agent_name)
+    chat_destroy = _run_mngr_command(
+        ["exec", agent_name, "mngr", "destroy", bootstrap_chat_agent_name, "--force"],
+        timeout=120,
+    )
+    if chat_destroy.returncode != 0:
+        # Don't fail the bake -- the chat agent may have failed to come up
+        # at all (no API key, slow boot, etc) which is fine for our purposes
+        # since we just need it gone. Warn so an operator notices if every
+        # bake hits this path.
+        logger.warning(
+            "Best-effort destroy of bootstrap chat agent {!r} failed (continuing): {}",
+            bootstrap_chat_agent_name,
+            chat_destroy.stderr.strip(),
+        )
+
+    logger.info("  Removing initial-chat sentinel: {}", _INITIAL_CHAT_SENTINEL_PATH)
+    sentinel_rm = _run_mngr_command(
+        ["exec", agent_name, "rm", "-f", _INITIAL_CHAT_SENTINEL_PATH],
+        timeout=30,
+    )
+    if sentinel_rm.returncode != 0:
+        raise PoolBakeError(
+            f"removing initial-chat sentinel {_INITIAL_CHAT_SENTINEL_PATH!r} failed: {sentinel_rm.stderr.strip()}"
         )
 
     row_id = uuid4()
