@@ -135,6 +135,9 @@ def run(
     latchkey = _build_latchkey(data_directory=data_directory)
     latchkey.initialize()
 
+    root_concurrency_group = ConcurrencyGroup(name="minds-run")
+    root_concurrency_group.__enter__()
+
     # Spawn (or adopt) a detached ``mngr latchkey forward`` supervisor.
     # The supervisor owns the shared latchkey gateway + per-agent reverse
     # tunnels; running it as a detached subprocess (rather than the inline
@@ -144,10 +147,7 @@ def run(
     # terminate it on minds shutdown -- mirroring how minds already leaves
     # the gateway running detached so agents in containers/VMs keep working
     # across desktop-client restarts.
-    _ensure_mngr_latchkey_forward_supervisor(latchkey)
-
-    root_concurrency_group = ConcurrencyGroup(name="minds-run")
-    root_concurrency_group.__enter__()
+    root_concurrency_group.start_new_thread(_ensure_mngr_latchkey_forward_supervisor, args=(latchkey,), name="mngr-latchkey-forward-supervisor-setup")
 
     # Watch our *grandparent* (typically Electron) rather than our immediate
     # parent (the ``uv run`` wrapper, which doesn't propagate Electron's
