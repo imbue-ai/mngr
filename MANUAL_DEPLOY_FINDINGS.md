@@ -85,7 +85,7 @@ formal tests; this is a checklist of probes + findings.
 | F29 | Replace hardcoded "Ask Josh" with generic phrasing | `connector/app.py` |
 | F30 | Bundle with F7: release_host returns 200 on already-released | `connector/app.py` |
 | F31 | Defer (low blast radius, document orphan growth) | docstring only |
-| F32 | **NEW** (surfaced during F5 verification): `minds env deploy` redeploy may create a fresh Neon project instead of adopting the existing one — verify before fixing | `neon_db.py` |
+| F32 | **CONFIRMED BUG.** Neon doesn't 409 on duplicate names → 4 orphan `minds-dev-josh-1` projects exist today. Fix: lookup-first in `create_neon_project` + `delete_neon_project`; raise on >1 match. Manual cleanup of 3 existing orphans pending Josh approval | `neon_db.py` |
 
 **Quick stats:** 24 findings get code changes (some bundled into shared PRs), 4 deferred (F8, F23, F28, F31), 3 docs-only (F4, F20, partial F21+F25 docs). 1 (F5) FIXED + 1 (F27) partially fixed via F5.
 
@@ -484,7 +484,7 @@ Each finding has:
 - **Why:** The function does `if final_path.exists(): raise` then `os.replace(tmp_path, final_path)`. Two parallel deploys both pass the `.exists()` check, both write their tmp file, both call `os.replace` — the second silently overwrites the first. The atomicity is per-operation (the file always either is or isn't there) but the **exclusivity** is not enforced.
 - **Why it matters:** Two simultaneous deploys against the same env from two different shells would each succeed in writing a recover-target file (one overwrites the other), each push their own Modal Secrets, each `modal deploy`. The "loser" deploy's recover-target is gone, so its mutations are unreversible. Unlikely (operators don't usually parallelize deploys against the same env) but possible.
 - **Suggested fix:** Use `os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)` for the rename target. Or take a flock on a sentinel path before the check.
-- **Decision:** Replace `os.replace(tmp_path, final_path)` with an `os.open(final_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)` write + fsync, eliminating the TOCTOU. Loses the tempfile-write-then-rename atomicity slightly (a crash mid-write leaves a partial file), so combine with an explicit `RecoverTargetCorruptError` (the F13 fix already handles this case). Soften the now-overconfident comment to reflect the real guarantee.
+- **Decision:** The real problem is that two deploys against the same env at the same time would be a bad idea anyway. Let's rename the recovery json file so that it contains the env name in question (so that this will work out when running tests, because the env names will be random), and then *also* lock that file for the entire duration of deploy (and restore--have both of those functions simply take a lock for their entire process lifecycle.).
 
 ### F27 — Inconsistent error wrapping: sync def endpoints use `handle_endpoint_errors`, async def endpoints don't
 
@@ -504,7 +504,7 @@ Each finding has:
   - `git -C vendor/mngr remote` points at `github.com/imbue-ai/mngr.git` — a separate repo (mngr is its own GitHub repo too).
 - **Why it matters:** Workspaces that minds creates today (via FCT) get the older `vendor/mngr`. Any mngr behavior the desktop client expects to be present (e.g. the ProviderEmptyError-based silent skip of Modal in `mngr list` if a workspace agent ever invokes it against a non-existent env) won't be there. Whether this is exercised in practice depends on whether the workspace agent runs `mngr list` against Modal — likely not, but worth confirming.
 - **Suggested action:** Use the `release-minds` skill to sync `vendor/mngr` to `josh/env_testing` (or wherever the right minds branch is). Add a CI check that asserts FCT `vendor/mngr`'s commit ≥ a documented floor (e.g. the latest tagged minds release).
-- **Decision:** Defer the sync — this is a workflow operation (release-minds skill) that you'll want to run intentionally. **Not a code change.** Action item: confirm with you that the current `josh/env_testing` minds branch is the right floor and then I'll invoke `release-minds`.
+- **Decision:** Ignore this
 
 ### F29 — Hardcoded "Please ask Josh to provision more" in a user-facing 503 error message
 
@@ -524,7 +524,7 @@ Each finding has:
 
 - **Why:** A specific developer's name is baked into the 503. Anyone else who runs `minds env deploy` and exhausts the pool sees a message telling them to "Ask Josh." Even for Josh's team this becomes wrong as soon as someone else takes over pool operations.
 - **Suggested fix:** Replace with a tier-agnostic phrasing ("The host pool is empty; an operator needs to bake more hosts via `mngr imbue_cloud admin pool bake`.") or drive it from a `deploy.toml` field (e.g. `operator_contact = "..."`) so each tier can configure who to message.
-- **Decision:** Hardcoded tier-agnostic replacement: `"No pre-created agents match the requested attributes. Ask your minds operator to bake more hosts (`mngr imbue_cloud admin pool bake`), or relax the attribute filter."` — no `deploy.toml` field for now (avoids adding a new config knob for a 503 message). One-line string change.
+- **Decision:** Ignore
 
 ### F30 — `release_host` is not idempotent (second release of the same host returns 404)
 
@@ -532,7 +532,7 @@ Each finding has:
 - **Where:** `apps/remote_service_connector/imbue/remote_service_connector/app.py:1753-1766`.
 - **Why:** First call sets status=`released`. Second call's `SELECT ... WHERE status='leased'` returns nothing → 404. A client retrying release after a transient network error sees 404 even though their lease is already released.
 - **Suggested fix:** SELECT without the `status='leased'` filter; check status separately, treat already-released as 200.
-- **Decision:** Same shape as F7. SELECT without the `status='leased'` filter; if row exists and `leased_to_user != admin.username` → 403, if status='released' → 200 `{"status":"already_released"}`, if status='leased' → proceed with update. Bundle with F7 into one PR.
+- **Decision:** Same shape as F7. SELECT without the `status='leased'` filter; if row exists and `leased_to_user != admin.username` → 403, if status='released' → 200 `{"status":"already_released"}`, if status='leased' → proceed with update.
 
 ### F31 — `lease_host`'s SSH-key injection failure leaves a partial state on the VPS
 
@@ -541,26 +541,28 @@ Each finding has:
 - **Observed:** Calls `_append_authorized_key` twice in sequence (VPS, then container). If the VPS append succeeds but the container append fails, the VPS now has the user's public key — but the user gets a 502 and the DB row is rolled back to `available`. The next user who leases this host will have their key appended in addition to the orphan, growing `authorized_keys` indefinitely (since the container append might also have orphans).
 - **Why it matters:** Over many leased-then-failed-injection cycles, `authorized_keys` accumulates dead entries. Not a security hole (each user's key is theirs), but a hygiene drift.
 - **Suggested fix:** Either (a) make `_append_authorized_key` idempotent with a marker comment per key so we can prune on lease, or (b) replace `authorized_keys` wholesale on lease (the VPS is single-user anyway).
-- **Decision:** Defer. Low blast radius (each user's own key) and the cleanest fix (option b — replace `authorized_keys` wholesale) needs care so we don't lock out the pool-management key itself. Document the orphan-growth behavior in `_append_authorized_key`'s docstring + add a TODO. Revisit when pool-host hygiene matters more.
+- **Decision:** Ignore
 
-### F32 — `minds env deploy` re-creates the Neon project on a redeploy instead of adopting the existing one (observed during the F5 fix verification)
+### F32 — `create_neon_project` is non-idempotent: Neon does not 409 on duplicate project names; the adopt-on-409 path is dead code
 
-- **Severity:** smell (verify before treating as bug)
-- **Where:** observed in the `minds env deploy dev-josh-1` log on 2026-05-17 after the F5 fix. Code path: `provisioning.py:484-487` calls `providers.create_neon_project(...)`, which is `apps/minds/imbue/minds/envs/providers/neon_db.py:create_neon_project(...)`.
-- **Observed:** redeploying `dev-josh-1` (which already had a deployed env from earlier in the session) printed:
-
-  ```
-  Creating Neon project 'minds-dev-josh-1' under org org-jolly-cell-77900540
-  Creating Neon database 'host_pool' on branch br-old-fire-akygmp0x
-  Creating Neon database 'litellm_cost' on branch br-old-fire-akygmp0x
-  Fetching pooled DSNs for both databases
-  ```
-
-  AND the migrations all ran from scratch ("Applied 4 pool-hosts migration(s): ['000_initial_schema.sql', ...]"), which means the `schema_migrations` table on the freshly-created project was empty. This implies a NEW Neon project was created, not an idempotent adoption of the existing one. The pre-redeploy project (with its existing `host_pool` rows, if any) would now be orphaned in the Neon org.
-- **Why it matters:** Deploy idempotency is a core spec invariant: *"Idempotent: re-running picks up any new tier-shared Vault values and re-deploys in place."* If every dev-tier redeploy creates a new Neon project + leaves the old one as a leak, then (a) operators silently accumulate dead Neon projects over time, (b) any host-pool state in the old project's `host_pool` table is lost (gating lease/release tests via `mngr imbue_cloud admin pool create`), and (c) the `~/.minds-<name>/secrets.toml` DSN file is overwritten by the deploy, so the operator can't trivially get back to the old project.
-- **Repro:** verified once on dev-josh-1; needs a second observation to rule out a one-off (maybe the previous project really had been destroyed earlier in the session and I missed it). Quick check: `vault kv get` on the saved DSN before / after a deploy, OR `neon` CLI list of projects under the org.
-- **Suggested fix:** Investigate `create_neon_project` for an idempotency check — should `GET /projects?name=minds-dev-josh-1` first, return existing record if found, only create if absent.
-- **Decision:** Defer for confirmation. Capture as a finding now; before fixing, run two consecutive `minds env deploy`s against a fresh env and inspect the Neon project IDs returned (should be identical). If they differ, the bug is real; fix as a follow-up to F16 (both relate to deploy invariants).
+- **Severity:** **bug** (high — silently leaks Neon projects per redeploy; can also misroute destroy)
+- **Where:**
+  - `apps/minds/imbue/minds/envs/providers/neon_db.py:325-362` — `create_neon_project` posts to `/projects` and only falls into the `_find_project_by_name` adoption branch on a 409 / "already" string match.
+  - `apps/minds/imbue/minds/envs/providers/neon_db.py:398-419` — `delete_neon_project` calls `_find_project_by_name` and deletes the *first* match, ignoring duplicates.
+  - `apps/minds/imbue/minds/envs/providers/neon_db.py:198-217` — `_find_project_by_name` returns the first match from `GET /projects?org_id=...&limit=400`.
+- **Verified, not just suspected:**
+  - `GET /projects?org_id=<dev org>&limit=50` currently shows **4 Neon projects all named `minds-dev-josh-1`**, created at 2026-05-17 16:17, 20:33, 20:44, 23:53. Each has its own ID and its own host_pool + litellm_cost DBs.
+  - The only one currently referenced by `~/.minds-dev-josh-1/secrets.toml` is the **newest** (`late-butterfly-16683624`, endpoint `ep-snowy-glitter-akilt4hn`). The other 3 are orphans.
+  - The deploy log from my redeploy showed `Creating Neon project 'minds-dev-josh-1' under org ...` (the create path) immediately followed by `Applied 4 pool-hosts migration(s): [...]` (all four migrations ran from scratch on a freshly-created project, confirming the `schema_migrations` table was empty). If the adopt-on-409 path had fired we'd have seen `Adopted pre-existing Neon project ...` instead.
+  - SuperTokens (`create_supertokens_app`) and Modal env (`ensure_modal_env`) both handle adoption correctly via specific "already exists" string detection. Neon is the only provider with this bug.
+- **Second-order bug:** `delete_neon_project` returns the first project matching the name. Today on dev-josh-1, the first match is the *oldest* project (`cool-scene-88886167`) — not the live one. Running `minds env destroy dev-josh-1` right now would delete the wrong project, leaving the live one and 2 orphans stranded plus a misleading "destroy succeeded" message.
+- **Why it matters:** every dev-tier redeploy leaks an entire Neon project (with its own DBs, branches, endpoints). Operators silently accumulate dead projects. Any data the prior project's `host_pool` table held (pool host leases via `mngr imbue_cloud admin pool create`) is invisible to the new deploy. The destroy path is also unsafe under accumulated duplicates.
+- **Decision:**
+  1. **Fix `create_neon_project`** to be lookup-first: call `_find_project_by_name` BEFORE the POST. If 0 matches → POST as today. If exactly 1 match → adopt (existing branch). **If >1 matches → raise `NeonProviderError` listing every matching project ID + `created_at` and pointing the operator at the Neon console for manual cleanup.** Conservative: prevents new orphans, refuses to guess in the presence of duplicates.
+  2. **Fix `delete_neon_project` the same way.** 0 matches → no-op (today's behavior). 1 match → delete it. >1 matches → raise `NeonProviderError` listing all matching IDs. The operator can clean up by hand and re-run destroy.
+  3. **Add a unit test** that drives the multi-match path with a stub `_find_project_by_name` returning 2 matches, asserting `NeonProviderError` with both IDs in the message.
+  4. **Do not retro-modify `delete_neon_project` to delete-all** — too risky if two devs ever land on the same env name (`dev-josh-1` cross-machine). Loud-error is the safer default.
+  5. **One-time manual cleanup** for the existing dev-josh-1 orphans: delete the 3 non-live Neon projects via direct Neon API (`DELETE /projects/{id}` for each of `cool-scene-88886167`, `wispy-dream-81207052`, `wandering-butterfly-91756593`). Coordinate with you first since this is destructive — even though dev-josh-1 is "throwaway," want explicit go-ahead before nuking real cloud resources.
 
 
 
