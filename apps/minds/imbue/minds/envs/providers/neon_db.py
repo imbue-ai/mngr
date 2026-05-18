@@ -109,6 +109,13 @@ class NeonProjectSummary(FrozenModel):
 
     id: str
     name: str
+    # Neon returns an ISO 8601 timestamp. Surfacing it here so the
+    # multi-match error message in :func:`_select_one_or_raise_multi_match`
+    # can sort + display the candidates chronologically -- the operator
+    # almost always wants to keep the newest and delete the rest, and
+    # creation time is the only available signal for "which one is live"
+    # without a separate probe.
+    created_at: str = ""
 
 
 _BRANCH_LIST_ADAPTER: TypeAdapter[list[NeonBranchSummary]] = TypeAdapter(list[NeonBranchSummary])
@@ -195,12 +202,21 @@ def _project_name_for(name: DevEnvName) -> str:
     return f"minds-{name}"
 
 
-def _find_project_by_name(org_id: str, project_name: str, *, api_token: SecretStr) -> NeonProjectSummary | None:
-    """Look up a Neon project by name under ``org_id``. Returns None if not found.
+def _find_projects_by_name(org_id: str, project_name: str, *, api_token: SecretStr) -> list[NeonProjectSummary]:
+    """Look up every Neon project named ``project_name`` under ``org_id``.
 
     We don't persist the project id locally -- destroy on a different
     machine still needs to find the project. Filtering by name + org
     is the canonical lookup pattern for an org-scoped Neon token.
+
+    Returns the empty list when no project matches. Returns a list with
+    more than one element when Neon happens to hold duplicates -- Neon
+    does not enforce unique project names within an organization, and a
+    bug in an earlier ``create_neon_project`` (pre-2026-05) could leave
+    several projects with the same name after repeated deploys. Callers
+    that need a single project should pipe through
+    :func:`_select_one_or_raise_multi_match` so the duplicate case is
+    surfaced loudly rather than guessed at.
     """
     payload = _neon_request("GET", f"/projects?org_id={org_id}&limit=400", api_token=api_token)
     raw_projects = payload.get("projects")
@@ -210,10 +226,88 @@ def _find_project_by_name(org_id: str, project_name: str, *, api_token: SecretSt
         projects = _PROJECT_LIST_ADAPTER.validate_python(raw_projects)
     except ValidationError as exc:
         raise NeonProviderError(f"Neon /projects returned an unexpected shape: {exc}") from exc
-    for project in projects:
-        if project.name == project_name:
-            return project
-    return None
+    return [project for project in projects if project.name == project_name]
+
+
+def _select_one_or_raise_multi_match(
+    projects: list[NeonProjectSummary],
+    project_name: str,
+    *,
+    org_id: str,
+) -> NeonProjectSummary | None:
+    """Validate that at most one Neon project matches the requested name.
+
+    Returns ``None`` when nothing matches, the single match when there is
+    exactly one, and raises :class:`NeonProviderError` with a copy-
+    pasteable cleanup recipe when there are several. We refuse to guess
+    in the multi-match case because:
+
+    * Neon does not enforce unique project names within an organization,
+      so a name collision is real ambiguity rather than just transient
+      duplication.
+    * Picking by "first match" (the historical behaviour) silently
+      destroys the wrong project on ``minds env destroy`` and silently
+      adopts the wrong project on the next ``minds env deploy``. Both
+      failure modes have already happened in practice (see F32 in
+      ``MANUAL_DEPLOY_FINDINGS.md``).
+
+    Pure function -- no I/O. Lives next to the only callers so the
+    error message can be unit-tested without standing up a Neon stub.
+    """
+    if not projects:
+        return None
+    if len(projects) == 1:
+        return projects[0]
+    raise NeonProviderError(_format_multi_match_message(projects, project_name=project_name, org_id=org_id))
+
+
+def _format_multi_match_message(
+    projects: list[NeonProjectSummary],
+    *,
+    project_name: str,
+    org_id: str,
+) -> str:
+    """Render the operator-facing error for the multi-match case.
+
+    Lists every matching project (oldest-first so the most-recent is at
+    the bottom, which is conventionally the one the operator wants to
+    keep), and emits a curl recipe per project plus a one-liner that
+    deletes every project named ``project_name``. The operator picks
+    which to run.
+    """
+    by_age = sorted(projects, key=lambda p: p.created_at)
+    lines = [
+        f"Found {len(projects)} Neon projects named {project_name!r} in org {org_id!r}; refusing to guess which one is "
+        "live. Neon allows duplicate project names within an org, so this state means an earlier deploy created a "
+        "fresh project instead of adopting the existing one. Decide which project to keep (most-recently-created is "
+        "usually the live one referenced by the local ``~/.minds-<env>/secrets.toml``), then delete the others via "
+        "the Neon API:",
+        "",
+        "Matching projects (oldest first):",
+    ]
+    for project in by_age:
+        lines.append(f"  - id={project.id}  created_at={project.created_at}")
+    lines.append("")
+    lines.append("Delete one specific project:")
+    lines.append(
+        "  NEON_TOKEN=$(vault kv get -format=json secrets/minds/<tier>/neon-admin | jq -r .data.data.NEON_API_TOKEN)"
+    )
+    lines.append(
+        '  curl -X DELETE -H "Authorization: Bearer $NEON_TOKEN" "https://console.neon.tech/api/v2/projects/<project-id>"'
+    )
+    lines.append("")
+    lines.append(f"Nuke every project named {project_name!r} (use only if you want to start clean):")
+    lines.append(
+        "  NEON_TOKEN=$(vault kv get -format=json secrets/minds/<tier>/neon-admin | jq -r .data.data.NEON_API_TOKEN)"
+    )
+    lines.append(f"  for PID in {' '.join(p.id for p in by_age)}; do")
+    lines.append(
+        '    curl -X DELETE -H "Authorization: Bearer $NEON_TOKEN" "https://console.neon.tech/api/v2/projects/$PID"'
+    )
+    lines.append("  done")
+    lines.append("")
+    lines.append("After cleanup, re-run the original ``minds env deploy`` / ``minds env destroy``.")
+    return "\n".join(lines)
 
 
 def _resolve_default_branch(project_id: str, *, api_token: SecretStr) -> NeonBranchSummary:
@@ -325,11 +419,23 @@ def create_neon_project(
     """
     project_name = _project_name_for(name)
 
-    # Try to create. On 409 (project name collision), fall through to
-    # the lookup path so a re-deploy adopts the existing project.
-    project_was_pre_existing = False
-    with info_span("Creating Neon project {!r} under org {}", project_name, org_id):
-        try:
+    # Lookup-first. Neon does NOT 409 on duplicate project names within
+    # an org -- POSTing the same name twice creates two distinct
+    # projects with different ids. So we look up by name before posting,
+    # adopt the unique existing project when there is one, and refuse
+    # loudly when several already exist (see
+    # :func:`_select_one_or_raise_multi_match` for the rationale +
+    # operator recipe).
+    with info_span("Looking up existing Neon project {!r} under org {}", project_name, org_id):
+        candidates = _find_projects_by_name(org_id, project_name, api_token=api_token)
+        existing = _select_one_or_raise_multi_match(candidates, project_name, org_id=org_id)
+
+    project_was_pre_existing = existing is not None
+    if existing is not None:
+        project_id = existing.id
+        logger.info("Adopted pre-existing Neon project {!r} (id={})", project_name, project_id)
+    else:
+        with info_span("Creating Neon project {!r} under org {}", project_name, org_id):
             create_payload = _neon_request(
                 "POST",
                 "/projects",
@@ -348,18 +454,6 @@ def create_neon_project(
                 raise NeonProviderError(
                     f"Neon POST /projects returned no project.id for {project_name!r}; got: {create_payload!r}"
                 )
-        except NeonProviderError as exc:
-            if "409" not in str(exc) and "already" not in str(exc).lower():
-                raise
-            existing = _find_project_by_name(org_id, project_name, api_token=api_token)
-            if existing is None:
-                raise NeonProviderError(
-                    f"Neon POST /projects returned 409 for {project_name!r} but the project is not visible "
-                    "via /projects?org_id=...; this should not happen -- check the API token scopes."
-                ) from exc
-            project_id = existing.id
-            project_was_pre_existing = True
-            logger.info("Adopted pre-existing Neon project {!r} (id={})", project_name, project_id)
 
     try:
         branch = _resolve_default_branch(project_id, api_token=api_token)
@@ -408,7 +502,14 @@ def delete_neon_project(
     missing project is treated as success.
     """
     project_name = _project_name_for(name)
-    existing = _find_project_by_name(org_id, project_name, api_token=api_token)
+    candidates = _find_projects_by_name(org_id, project_name, api_token=api_token)
+    # Multi-match: refuse loudly via the same path as create. If the
+    # operator destroys here we'd otherwise pick "the first match" --
+    # which is whichever happens to be returned first by Neon (typically
+    # the OLDEST). That's almost certainly an orphan, not the live
+    # project the operator meant to destroy -- leaves the live one
+    # stranded.
+    existing = _select_one_or_raise_multi_match(candidates, project_name, org_id=org_id)
     if existing is None:
         return
     try:

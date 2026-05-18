@@ -61,6 +61,30 @@ Minds dev-environment fixes:
   `apps/minds/docs/vault-setup.md` and
   `apps/minds/docs/host-pool-setup.md`.
 
+- `minds env deploy` is now actually idempotent against Neon. The
+  Neon REST API does not 409 on duplicate project names within an
+  organization -- POSTing `/projects` with a name that's already in
+  use creates a second, distinct project with the same name and a
+  different id. The previous `create_neon_project` assumed Neon would
+  409 (the adopt-fallback path was never reached), so every dev-tier
+  re-deploy silently leaked an entire Neon project (with its own
+  host_pool + litellm_cost DBs + branches + endpoints). Several
+  attempts at deploying dev-josh-1 during one session today left
+  four projects named `minds-dev-josh-1` in the dev org. The same
+  bug would have caused `minds env destroy` to delete the wrong
+  project (always the first match from the list endpoint, i.e. the
+  oldest, not the live one), leaving the live project stranded.
+  `create_neon_project` and `delete_neon_project` now look up by
+  name first via `_find_projects_by_name`, adopt when there's
+  exactly one match, raise a `NeonProviderError` with every
+  matching project id + creation timestamp + a copy-pasteable
+  cleanup recipe when there are several. Refusing-loud is
+  intentional: silently picking one would risk destroying the wrong
+  project under a real name collision (e.g. two devs using the same
+  env name cross-machine). A new `_select_one_or_raise_multi_match`
+  pure helper carries the decision logic; the operator-facing error
+  message is unit-tested.
+
 - Connector auth endpoints no longer 500 on `/auth/session/revoke`,
   `/auth/email/is-verified`, `/auth/email/send-verification`. The connector's
   twelve `async def` endpoints (plus the `_build_session_tokens` helper)

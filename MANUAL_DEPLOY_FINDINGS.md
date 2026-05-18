@@ -85,7 +85,7 @@ formal tests; this is a checklist of probes + findings.
 | F29 | Replace hardcoded "Ask Josh" with generic phrasing | `connector/app.py` |
 | F30 | Bundle with F7: release_host returns 200 on already-released | `connector/app.py` |
 | F31 | Defer (low blast radius, document orphan growth) | docstring only |
-| F32 | **CONFIRMED BUG.** Neon doesn't 409 on duplicate names → 4 orphan `minds-dev-josh-1` projects exist today. Fix: lookup-first in `create_neon_project` + `delete_neon_project`; raise on >1 match. Manual cleanup of 3 existing orphans pending Josh approval | `neon_db.py` |
+| F32 | **FIXED** — lookup-first in `create_neon_project` + `delete_neon_project`; multi-match raises with copy-pasteable cleanup recipe. 4 unit tests + end-to-end verified on dev-josh-1 (refuse-before-cleanup → cleanup → adopt-on-redeploy, all 3 orphans gone) | `neon_db.py` + new `neon_db_test.py` |
 
 **Quick stats:** 24 findings get code changes (some bundled into shared PRs), 4 deferred (F8, F23, F28, F31), 3 docs-only (F4, F20, partial F21+F25 docs). 1 (F5) FIXED + 1 (F27) partially fixed via F5.
 
@@ -563,6 +563,7 @@ Each finding has:
   3. **Add a unit test** that drives the multi-match path with a stub `_find_project_by_name` returning 2 matches, asserting `NeonProviderError` with both IDs in the message.
   4. **Do not retro-modify `delete_neon_project` to delete-all** — too risky if two devs ever land on the same env name (`dev-josh-1` cross-machine). Loud-error is the safer default.
   5. **One-time manual cleanup** for the existing dev-josh-1 orphans: delete the 3 non-live Neon projects via direct Neon API (`DELETE /projects/{id}` for each of `cool-scene-88886167`, `wispy-dream-81207052`, `wandering-butterfly-91756593`). Coordinate with you first since this is destructive — even though dev-josh-1 is "throwaway," want explicit go-ahead before nuking real cloud resources.
+- **Status: FIXED.** Code change shipped: `create_neon_project` + `delete_neon_project` now lookup-first via `_find_projects_by_name`; multi-match raises `NeonProviderError` with every matching project id + `created_at` + copy-pasteable curl recipe. 4 new unit tests cover the pure helper. 109 existing minds env tests still pass. End-to-end verified on dev-josh-1: (a) before cleanup, `minds env deploy` refused with the new error listing all 4 projects + cleanup recipe; (b) ran the recipe to delete the 3 orphans; (c) re-deployed → logs show `Adopted pre-existing Neon project 'minds-dev-josh-1' (id=late-butterfly-16683624)` + `schema_migrations: no pending migrations to apply` + the `~/.minds-dev-josh-1/secrets.toml` DSN endpoint unchanged (`ep-snowy-glitter-akilt4hn`), proving the live project was preserved.
 
 
 
