@@ -93,22 +93,38 @@ _save_offset() {
     echo "$2" > "$OFFSET_DIR/$key"
 }
 
-# Extract the id field from a single JSONL line (no jq, for speed).
-# Gemini uses a top-level "id": "<uuid>" field on every persisted message.
+# Extract the top-level id field from a single JSONL line (no jq, for
+# speed). Gemini writes the top-level "id" first on every persisted
+# message, so the first regex match per line is the message id. Tool-call
+# ids that appear later on the same line (nested inside "toolCalls") are
+# deliberately not returned -- the offset-reconciliation lookup set must
+# only contain message-level ids so that nested tool-call ids cannot be
+# matched against an unrelated session line's top-level id.
 _extract_id() {
-    grep -o '"id": *"[^"]*"' <<< "$1" 2>/dev/null | head -1 | cut -d'"' -f4
+    # Use bash's builtin regex match to avoid spawning grep per line.
+    # Returns 0 unconditionally so callers using $(...) under `set -e`
+    # are not affected by a no-match.
+    if [[ $1 =~ \"id\":\ *\"([^\"]+)\" ]]; then
+        echo "${BASH_REMATCH[1]}"
+    fi
+    return 0
 }
 
 # Build id lookup set from all lines in the output file. Called once at
 # startup and again when a late-appearing file needs reconciliation.
+# Uses _extract_id per line (rather than a single grep over the file) so
+# the set contains exactly the ids _reconcile_offset will look up --
+# i.e. message-level ids only, not nested tool-call ids.
 _build_output_id_set() {
     _OUTPUT_IDS=()
     if [ ! -s "$OUTPUT_FILE" ]; then
         return
     fi
-    while IFS= read -r id; do
+    local line id
+    while IFS= read -r line; do
+        id=$(_extract_id "$line")
         [ -n "$id" ] && _OUTPUT_IDS["$id"]=1
-    done < <(grep -o '"id": *"[^"]*"' "$OUTPUT_FILE" | cut -d'"' -f4)
+    done < "$OUTPUT_FILE"
     log_debug "Built id set with ${#_OUTPUT_IDS[@]} entries"
 }
 
