@@ -78,7 +78,7 @@ def _make_agent(
     agent = cls.model_construct(
         id=AgentId.generate(),
         name=AgentName("test-headless"),
-        agent_type=AgentTypeName("test_headless"),
+        agent_type=AgentTypeName("generic"),
         work_dir=work_dir,
         create_time=datetime.now(timezone.utc),
         host_id=host.id,

@@ -27,6 +27,7 @@ def test_provision_cli_options_can_be_instantiated() -> None:
         host=None,
         bootstrap=None,
         destroy_on_fail=False,
+        start=True,
         restart=True,
         extra_provision_command=(),
         upload_file=(),

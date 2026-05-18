@@ -1,0 +1,12 @@
+# SSH public keys authorized to connect to TMR CI's modal agents.
+#
+# To add yourself: run
+#   uv run --project libs/mngr_tmr python libs/mngr_tmr/scripts/setup_tmr_ci_debug.py
+# and append the printed public key as a new line below. Open a PR.
+#
+# Lines starting with '#' and blank lines are ignored.
+#
+# To debug after your key is merged:
+#   MNGR_HOST_DIR=~/.mngr-tmr-ci uv run mngr list
+#   MNGR_HOST_DIR=~/.mngr-tmr-ci uv run mngr connect <agent-id>
+ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAACAQDidMGVXTpkwJPZiXRwrrytOD9Mt/QeLOzmC/s/7dQWKclF9VAv/lTfUXNepSF25cNKvdv0CUQcQDT6d5Pal3xHvE7OdoE87GTXV5NLNcNViib6dyAofvIXVqG0wzJ0EGidL5rVF4pKE+IREpwb0mDvUTqVE+SbQrzMJPY1Ny8kg1poXBX09XezSRn7yMGjFiUgUYTE6WAwIgTIKyDbBolLX+QK00e3FHVLC5qKKj52vjUswoN1d16SLI6HlUKCD++aH1c9Z9vv3Od1NhPS9yJ1jLbWxLA+f5cmiLSjA1ghyOyqBr7i1Tp92Qlg+5n3yf5ixFU84n9uC/a8pOAB7OkIpqBReHJeT6czQEt1RDo25exj9+8RscBmpiJaN5uPaqe0gaeHN4S4ydzAvMMwkm68lKQOsQuD8TPD9oCARJmGhTJ+H+3Z+d2m6pwsIzmKaULLEWjEVBdeIqwpPz3Lux/pacD74Scs7nGcb9XpVn5uMkCctDUDGj7HjZBaZquas5uaYAmv0+0x9oMhcmoAU9LAU1Qx+0em1hO+jZvQa/AmPU1sXhH+mDKRZkIiXTov8XHon4JZwpGoXKekwE4IdGGrJB1ao6FxyOlyByvee5jgn3Ft1XNC0QyRgJOserniDUTrDERpAqRZGOINQnErJn87wQRvAXtFeqjLJRo+yQTFyw==

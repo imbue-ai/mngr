@@ -5,10 +5,11 @@ import click
 from click_option_group import optgroup
 from loguru import logger
 
+from imbue.mngr.api.find import resolve_to_started_host_and_agent
 from imbue.mngr.cli.address_params import AGENT_ADDRESS
-from imbue.mngr.cli.address_params import HOSTED_LOCATION
 from imbue.mngr.cli.address_params import HOST_ADDRESS
-from imbue.mngr.cli.agent_utils import find_agent_for_command
+from imbue.mngr.cli.address_params import HOST_LOCATION_ADDRESS
+from imbue.mngr.cli.agent_utils import find_agent_by_address_or_interactively
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
 from imbue.mngr.cli.help_formatter import CommandHelpMetadata
@@ -23,7 +24,7 @@ from imbue.mngr.errors import UserInputError
 from imbue.mngr.primitives import AgentAddress
 from imbue.mngr.primitives import ConflictMode
 from imbue.mngr.primitives import HostAddress
-from imbue.mngr.primitives import HostedLocation
+from imbue.mngr.primitives import HostLocationAddress
 from imbue.mngr.primitives import OutputFormat
 from imbue.mngr.primitives import SyncDirection
 from imbue.mngr.primitives import UncommittedChangesMode
@@ -34,8 +35,8 @@ from imbue.mngr_pair.api import pair_files
 class PairCliOptions(CommonCliOptions):
     """Options passed from the CLI to the pair command."""
 
-    source_pos: HostedLocation | None
-    source: HostedLocation | None
+    source_pos: HostLocationAddress | None
+    source: HostLocationAddress | None
     source_agent: AgentAddress | None
     source_host: HostAddress | None
     source_path: str | None
@@ -80,12 +81,12 @@ def _emit_pair_stopped(output_opts: OutputOptions) -> None:
 
 
 @click.command()
-@click.argument("source_pos", type=HOSTED_LOCATION, default=None, required=False, metavar="SOURCE")
+@click.argument("source_pos", type=HOST_LOCATION_ADDRESS, default=None, required=False, metavar="SOURCE")
 @optgroup.group("Source Selection")
 @optgroup.option(
     "--source",
     "source",
-    type=HOSTED_LOCATION,
+    type=HOST_LOCATION_ADDRESS,
     help="Source specification: AGENT[@HOST[.PROVIDER]][:PATH]",
 )
 @optgroup.option("--source-agent", type=AGENT_ADDRESS, help="Source agent address (NAME[@HOST[.PROVIDER]])")
@@ -147,7 +148,7 @@ def pair(ctx: click.Context, **kwargs) -> None:
     )
 
     # Merge positional and named arguments (named option takes precedence)
-    effective_source_loc: HostedLocation | None = opts.source if opts.source is not None else opts.source_pos
+    effective_source_loc: HostLocationAddress | None = opts.source if opts.source is not None else opts.source_pos
 
     # Build source agent address and sub-path
     source_address: AgentAddress | None = None
@@ -175,15 +176,17 @@ def pair(ctx: click.Context, **kwargs) -> None:
         target_path = git_root if git_root is not None else Path.cwd()
 
     # Find the agent
-    result = find_agent_for_command(
+    host_ref, agent_ref = find_agent_by_address_or_interactively(
         mngr_ctx=mngr_ctx,
         address=source_address,
         host_filter=opts.source_host,
     )
-    if result is None:
-        logger.info("No agent selected")
-        return
-    agent, host = result
+    agent, host = resolve_to_started_host_and_agent(
+        host_ref=host_ref,
+        agent_ref=agent_ref,
+        allow_auto_start=True,
+        mngr_ctx=mngr_ctx,
+    )
 
     # Only local agents are supported right now
     if not host.is_local:

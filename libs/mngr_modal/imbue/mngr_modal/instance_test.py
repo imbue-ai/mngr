@@ -1208,7 +1208,7 @@ def test_persist_agent_data_writes_to_volume(
     agent_data = {
         "id": str(agent_id),
         "name": "test-agent",
-        "type": "test",
+        "type": "generic",
         "command": "echo hello",
     }
 
@@ -1228,7 +1228,7 @@ def test_persist_agent_data_writes_to_volume(
     uploaded_content = json.loads(written_files[expected_path].decode("utf-8"))
     assert uploaded_content["id"] == str(agent_id)
     assert uploaded_content["name"] == "test-agent"
-    assert uploaded_content["type"] == "test"
+    assert uploaded_content["type"] == "generic"
     assert uploaded_content["command"] == "echo hello"
 
 
@@ -1239,7 +1239,7 @@ def test_persist_agent_data_without_id_logs_warning_and_returns(
     host_id = HostId.generate()
     agent_data: dict[str, object] = {
         "name": "test-agent",
-        "type": "test",
+        "type": "generic",
     }
 
     mock_volume = cast(Any, modal_provider.modal_app.volume)
