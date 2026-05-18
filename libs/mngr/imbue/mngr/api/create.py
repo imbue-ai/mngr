@@ -165,13 +165,14 @@ def create(
         with log_span("Calling on_host_created hooks"):
             mngr_ctx.pm.hook.on_host_created(host=host, mngr_ctx=mngr_ctx)
 
-    # The ``pre_baked_agent_id`` attribute on the host (only set by
-    # providers whose ``create_host`` returns a host with a baked-in
-    # agent -- ``ImbueCloudHost`` today) marks a specific agent id that
-    # the host's ``create_agent_state`` knows how to adopt in place when
-    # ``agent_options.name`` matches. Pulled out before the lock so the
-    # duplicate-name check below can recognize the adopt scenario.
-    pre_baked_agent_id: AgentId | None = getattr(host, "pre_baked_agent_id", None)
+    # ``host.pre_baked_agent_id`` (default None on the base Host class,
+    # populated by providers whose ``create_host`` returns a host with a
+    # baked-in agent -- ``ImbueCloudHost`` is the only one today) marks
+    # a specific agent id that ``host.create_agent_state`` knows how to
+    # adopt in place when ``agent_options.name`` matches. Pulled out
+    # before the lock so the duplicate-name check below can recognize
+    # the adopt scenario.
+    pre_baked_agent_id: AgentId | None = host.pre_baked_agent_id
 
     # while we are deploying an agent, lock the host:
     with host.lock_cooperatively():

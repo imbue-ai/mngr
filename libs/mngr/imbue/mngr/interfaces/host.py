@@ -70,6 +70,19 @@ class HostInterface(MutableModel, ABC):
     """Interface for host implementations."""
 
     id: HostId = Field(frozen=True, description="Unique identifier for this host")
+    pre_baked_agent_id: AgentId | None = Field(
+        default=None,
+        frozen=True,
+        description=(
+            "Agent id of an agent that already exists on this host at host-creation "
+            "time and that ``create_agent_state`` is expected to adopt in place "
+            "(rather than treat as a duplicate-name collision). Set by providers "
+            "whose ``create_host`` returns a host with a baked-in agent -- "
+            "``ImbueCloudHost`` is the only example today (the lease surfaces a "
+            "pre-baked ``system-services`` agent). ``None`` for every other "
+            "provider, in which case the standard duplicate-name check applies."
+        ),
+    )
 
     @property
     @abstractmethod
