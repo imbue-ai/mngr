@@ -61,7 +61,12 @@ class MailtmJwt(NonEmptyStr):
 
 
 class SignupEmailAddress(NonEmptyStr):
-    """A ``test-signup-<uuid>+<uuid>@<mailtm-domain>`` address freshly handed out per signup test."""
+    """A ``<account-local>+<suffix>@<mailtm-domain>`` address freshly handed out per signup test.
+
+    The local part comes from the per-run mail.tm account (minted by the
+    orchestrator); the ``+<suffix>`` is a per-test value so concurrent
+    tests do not collide on the same shared inbox.
+    """
 
     ...
 
