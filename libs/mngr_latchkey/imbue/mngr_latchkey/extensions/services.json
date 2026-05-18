@@ -1,9 +1,6 @@
 {
   "slack": {
-    "scope": {
-      "schema_name": "slack-api",
-      "display_name": "Slack"
-    },
+    "scope": "slack-api",
     "permissions": [
       "slack-read-all",
       "slack-write-all",
@@ -27,10 +24,7 @@
     ]
   },
   "discord": {
-    "scope": {
-      "schema_name": "discord-api",
-      "display_name": "Discord"
-    },
+    "scope": "discord-api",
     "permissions": [
       "discord-read-all",
       "discord-write-all",
@@ -44,10 +38,7 @@
     ]
   },
   "github": {
-    "scope": {
-      "schema_name": "github-rest-api",
-      "display_name": "GitHub"
-    },
+    "scope": "github-rest-api",
     "permissions": [
       "github-read-all",
       "github-write-all",
@@ -66,10 +57,7 @@
     ]
   },
   "gitlab": {
-    "scope": {
-      "schema_name": "gitlab-api",
-      "display_name": "GitLab"
-    },
+    "scope": "gitlab-api",
     "permissions": [
       "gitlab-read-all",
       "gitlab-write-all",
@@ -89,10 +77,7 @@
     ]
   },
   "dropbox": {
-    "scope": {
-      "schema_name": "dropbox-api",
-      "display_name": "Dropbox"
-    },
+    "scope": "dropbox-api",
     "permissions": [
       "dropbox-files",
       "dropbox-files-read",
@@ -106,17 +91,11 @@
     ]
   },
   "linear": {
-    "scope": {
-      "schema_name": "linear-api",
-      "display_name": "Linear"
-    },
+    "scope": "linear-api",
     "permissions": []
   },
   "notion": {
-    "scope": {
-      "schema_name": "notion-api",
-      "display_name": "Notion"
-    },
+    "scope": "notion-api",
     "permissions": [
       "notion-read-all",
       "notion-write-all",
@@ -134,10 +113,7 @@
     ]
   },
   "mailchimp": {
-    "scope": {
-      "schema_name": "mailchimp-api",
-      "display_name": "Mailchimp"
-    },
+    "scope": "mailchimp-api",
     "permissions": [
       "mailchimp-read-all",
       "mailchimp-write-all",
@@ -157,10 +133,7 @@
     ]
   },
   "zoom": {
-    "scope": {
-      "schema_name": "zoom-api",
-      "display_name": "Zoom"
-    },
+    "scope": "zoom-api",
     "permissions": [
       "zoom-read-all",
       "zoom-write-all",
@@ -176,10 +149,7 @@
     ]
   },
   "telegram": {
-    "scope": {
-      "schema_name": "telegram-api",
-      "display_name": "Telegram"
-    },
+    "scope": "telegram-api",
     "permissions": [
       "telegram-send-messages",
       "telegram-manage-messages",
@@ -191,10 +161,7 @@
     ]
   },
   "sentry": {
-    "scope": {
-      "schema_name": "sentry-api",
-      "display_name": "Sentry"
-    },
+    "scope": "sentry-api",
     "permissions": [
       "sentry-read-all",
       "sentry-write-all",
@@ -209,10 +176,7 @@
     ]
   },
   "aws": {
-    "scope": {
-      "schema_name": "aws",
-      "display_name": "AWS"
-    },
+    "scope": "aws",
     "permissions": [
       "aws-s3",
       "aws-s3-read",
@@ -244,10 +208,7 @@
     ]
   },
   "stripe": {
-    "scope": {
-      "schema_name": "stripe-api",
-      "display_name": "Stripe"
-    },
+    "scope": "stripe-api",
     "permissions": [
       "stripe-read-all",
       "stripe-write-all",
@@ -272,10 +233,7 @@
     ]
   },
   "figma": {
-    "scope": {
-      "schema_name": "figma-api",
-      "display_name": "Figma"
-    },
+    "scope": "figma-api",
     "permissions": [
       "figma-read-all",
       "figma-write-all",
@@ -294,10 +252,7 @@
     ]
   },
   "calendly": {
-    "scope": {
-      "schema_name": "calendly-api",
-      "display_name": "Calendly"
-    },
+    "scope": "calendly-api",
     "permissions": [
       "calendly-read-all",
       "calendly-write-all",
@@ -319,10 +274,7 @@
     ]
   },
   "yelp": {
-    "scope": {
-      "schema_name": "yelp-api",
-      "display_name": "Yelp"
-    },
+    "scope": "yelp-api",
     "permissions": [
       "yelp-read-all",
       "yelp-write-all",
@@ -336,10 +288,7 @@
     ]
   },
   "coolify": {
-    "scope": {
-      "schema_name": "coolify-api",
-      "display_name": "Coolify"
-    },
+    "scope": "coolify-api",
     "permissions": [
       "coolify-read-all",
       "coolify-write-all",
@@ -358,10 +307,7 @@
     ]
   },
   "umami": {
-    "scope": {
-      "schema_name": "umami-api",
-      "display_name": "Umami"
-    },
+    "scope": "umami-api",
     "permissions": [
       "umami-read-all",
       "umami-write-all",
@@ -376,10 +322,7 @@
     ]
   },
   "google-gmail": {
-    "scope": {
-      "schema_name": "google-gmail-api",
-      "display_name": "Gmail"
-    },
+    "scope": "google-gmail-api",
     "permissions": [
       "google-gmail-read-all",
       "google-gmail-write-all",
@@ -399,10 +342,7 @@
     ]
   },
   "google-calendar": {
-    "scope": {
-      "schema_name": "google-calendar-api",
-      "display_name": "Google Calendar"
-    },
+    "scope": "google-calendar-api",
     "permissions": [
       "google-calendar-read-all",
       "google-calendar-write-all",
@@ -420,10 +360,7 @@
     ]
   },
   "google-drive": {
-    "scope": {
-      "schema_name": "google-drive-api",
-      "display_name": "Google Drive"
-    },
+    "scope": "google-drive-api",
     "permissions": [
       "google-drive-read-all",
       "google-drive-write-all",
@@ -437,10 +374,7 @@
     ]
   },
   "google-docs": {
-    "scope": {
-      "schema_name": "google-docs-api",
-      "display_name": "Google Docs"
-    },
+    "scope": "google-docs-api",
     "permissions": [
       "google-docs-read-all",
       "google-docs-write-all",
@@ -451,10 +385,7 @@
     ]
   },
   "google-sheets": {
-    "scope": {
-      "schema_name": "google-sheets-api",
-      "display_name": "Google Sheets"
-    },
+    "scope": "google-sheets-api",
     "permissions": [
       "google-sheets-read-all",
       "google-sheets-write-all",
@@ -466,10 +397,7 @@
     ]
   },
   "google-people": {
-    "scope": {
-      "schema_name": "google-people-api",
-      "display_name": "Google Contacts"
-    },
+    "scope": "google-people-api",
     "permissions": [
       "google-people-read-all",
       "google-people-write-all",
@@ -482,10 +410,7 @@
     ]
   },
   "google-analytics": {
-    "scope": {
-      "schema_name": "google-analytics-api",
-      "display_name": "Google Analytics"
-    },
+    "scope": "google-analytics-api",
     "permissions": [
       "google-analytics-read-all",
       "google-analytics-write-all",
@@ -499,10 +424,7 @@
     ]
   },
   "google-directions": {
-    "scope": {
-      "schema_name": "google-directions-api",
-      "display_name": "Google Directions"
-    },
+    "scope": "google-directions-api",
     "permissions": [
       "google-directions-read-all",
       "google-directions-write-all",

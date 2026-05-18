@@ -16,12 +16,12 @@
  *   GET    /permissions/available/<service_name>
  *       Return the permission catalog entry for ``<service_name>`` (e.g.
  *       ``slack``, ``google-gmail``). The response is a JSON object
- *       with two fields: ``scope`` (an object with ``schema_name`` and
- *       ``display_name`` strings) and ``permissions`` (an array of
- *       Detent permission-schema names that may be granted under the
- *       scope). Returns 404 when the service is unknown. Backed by
- *       the ``services.json`` file that ships alongside this
- *       extension, which is keyed by raw service name.
+ *       with two fields: ``scope`` (the Detent scope schema name as a
+ *       string) and ``permissions`` (an array of Detent permission-
+ *       schema names that may be granted under the scope). Returns 404
+ *       when the service is unknown. Backed by the ``services.json``
+ *       file that ships alongside this extension, which is keyed by
+ *       raw service name.
  *   GET    /permissions/rules?path=<path>&rule_key=<key>
  *       Return the rule whose scope key is <key>.
  *   POST   /permissions/rules?path=<path>&rule_key=<key>
@@ -407,8 +407,9 @@ function handleGetCollection(response, filePath) {
  * we surface it as HTTP 500.
  *
  * The file is a JSON object keyed by raw service name (``slack``,
- * ``google-gmail``, ...). Each value is a ``{scope: {schema_name,
- * display_name}, permissions: [...]}`` object.
+ * ``google-gmail``, ...). Each value is a ``{scope: <schema_name>,
+ * permissions: [...]}`` object where ``scope`` is the Detent scope
+ * schema name as a plain string.
  */
 function readAvailableServices() {
   let raw;
@@ -436,18 +437,9 @@ function readAvailableServices() {
         `entry for '${serviceName}' must be a JSON object`,
       );
     }
-    const scope = entry.scope;
-    if (
-      typeof scope !== 'object' ||
-      scope === null ||
-      Array.isArray(scope) ||
-      typeof scope.schema_name !== 'string' ||
-      scope.schema_name.length === 0 ||
-      typeof scope.display_name !== 'string' ||
-      scope.display_name.length === 0
-    ) {
+    if (typeof entry.scope !== 'string' || entry.scope.length === 0) {
       throw new AvailableServicesUnavailableError(
-        `entry for '${serviceName}': 'scope' must be an object with non-empty 'schema_name' and 'display_name' strings`,
+        `entry for '${serviceName}': 'scope' must be a non-empty string`,
       );
     }
     const permissions = entry.permissions;
