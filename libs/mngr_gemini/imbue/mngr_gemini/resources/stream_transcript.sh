@@ -12,7 +12,8 @@
 # Per-session line offsets are stored in
 # <agent-state-dir>/plugin/gemini/.transcript_offsets/<percent_encoded_path>
 # (one file per session file; the filename is the session file's absolute
-# path with '%' and '/' percent-encoded, see _offset_key_for) so the
+# path with '%' and '/' percent-encoded via the shared helper
+# mngr_transcript_percent_encode_path in mngr_transcript_lib.sh) so the
 # script can resume efficiently. On startup, stored offsets are verified
 # against the output file using id-based lookups -- if the stored offset
 # is wrong (e.g. crash between emit and offset save), the script works
