@@ -258,11 +258,17 @@ def _delete_fct_test_branch(branch_name: str, *, run_id: RunId) -> None:
 
 
 class _MailtmAccount(FrozenModel):
-    """Per-run disposable mail.tm account."""
+    """Per-run disposable mail.tm account.
+
+    Holds the credentials needed for the orchestrator's own bookkeeping
+    (the ``account_id`` for ledger entries + the JWT for the delete call
+    at end-of-run) plus the ``address`` exported to the pytest process.
+    The account password is consumed once by ``/token`` during creation
+    and not retained -- every later mail.tm API call uses the JWT.
+    """
 
     account_id: NonEmptyStr
     address: NonEmptyStr
-    password: SecretStr
     jwt: SecretStr
 
 
@@ -304,7 +310,6 @@ def _create_mailtm_account(*, run_id: RunId) -> _MailtmAccount:
     account = _MailtmAccount(
         account_id=account_id,
         address=NonEmptyStr(address),
-        password=SecretStr(password),
         jwt=SecretStr(jwt),
     )
     logger.info("Created per-run mail.tm account {}", account.address)
