@@ -19,6 +19,36 @@ fix; commit hashes are in the git log.
 
 F5 + F32 each got a dedicated commit + redeploy; the F1/F2/F3/F4/F6/F7/F9/F11/F15/F17/F18/F19/F20/F22/F24/F25/F26/F30 batch landed together. The deployed `dev-josh-1` env predates the F17 + F25 changes (its `host_pool` schema_migrations table already has the pool-hosts rows, and its Modal Secrets carry the old `litellm-connector` flow); the next `minds env deploy` against it will adopt the new shapes idempotently.
 
+## End-to-end verification (post-batch)
+
+Fresh-env deploy/redeploy/destroy cycle exercised against a randomly-named env
+`dev-test-0d99e756` on 2026-05-17 to confirm the F17 + F25 call-sequence
+changes work end-to-end on a never-before-deployed env (not just against the
+unit-test fakes locking them in):
+
+1. **Fresh `minds env deploy`** — created Modal env, Neon project
+   `minds-dev-test-0d99e756` (id `falling-dust-59250392`), SuperTokens app;
+   applied all 4 pool-hosts migrations to the per-env `host_pool` DB
+   (verified directly via `psql ... -c 'SELECT version FROM
+   schema_migrations'`); pushed 6 vault-backed Modal Secrets + the separate
+   `litellm-connector-dev-<deploy_id>` Modal Secret (F25 hoist); ran the
+   LiteLLM Prisma migration; deployed `llm-dev` and `rsc-dev`; both health
+   checks returned 200; recover-target file deleted; Modal Secret GC ran.
+   Direct hits on `/health/liveness` (both apps) and `/generation` (connector
+   returned `{"generation_id": ""}` matching the dev-tier
+   `tracks_generation=false` steady state).
+2. **Re-deploy** — `create_neon_project` adopted the existing project (F32
+   lookup-first path: "Adopted pre-existing Neon project ... id=falling-dust-59250392");
+   `apply_pool_hosts_migrations` logged "schema_migrations: no pending
+   migrations to apply" (F17 idempotency); secret push + Modal deploy steps
+   ran clean with the new deploy_id; both apps healthy.
+3. **`minds env destroy`** — walked mngr-agents -> OVH -> Cloudflare tunnels
+   -> SuperTokens app -> Neon project -> Modal env in order; no errors.
+
+No leaked Neon projects (verified the project id was the same across both
+deploys; destroy removed it). The full deploy log lives at
+`/tmp/deploy-dev-test-0d99e756.log` for the session.
+
 ## TL;DR — top findings by severity
 
 **Bugs that break user-visible flows:**
