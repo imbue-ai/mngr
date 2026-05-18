@@ -29,10 +29,8 @@ from imbue.mngr.api.providers import list_provider_names_to_load
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import BaseMngrError
 from imbue.mngr.errors import MngrError
-from imbue.mngr.errors import ProviderDiscoveryError
+from imbue.mngr.errors import ProviderError
 from imbue.mngr.errors import ProviderInstanceNotFoundError
-from imbue.mngr.errors import ProviderNotAuthorizedError
-from imbue.mngr.errors import ProviderUnavailableError
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.interfaces.host import OnlineHostInterface
@@ -274,22 +272,12 @@ def _record_error(
 ) -> None:
     """Append an ErrorInfo derived from `exception` to result.errors and fire on_error.
 
-    Preserves the typed `ProviderErrorInfo` when `exception` is one of the
-    `ProviderError` subclasses that always carry a `provider_name`, so
-    ABORT-mode output keeps the `provider_name` field that CONTINUE-mode
-    worker codepaths populate. Other typed contexts (host_id, agent_id) are
-    not recoverable here because worker layers wrap those exceptions to plain
-    `MngrError` before raising; they fall back to bare `ErrorInfo`.
+    Promotes every `ProviderError` to a typed `ProviderErrorInfo` so ABORT-mode
+    output keeps the `provider_name` field. Host/agent-context errors fall back
+    to bare `ErrorInfo` because worker layers wrap them as plain `MngrError`
+    before they reach this catch.
     """
-    if isinstance(
-        exception,
-        (
-            ProviderUnavailableError,
-            ProviderDiscoveryError,
-            ProviderInstanceNotFoundError,
-            ProviderNotAuthorizedError,
-        ),
-    ):
+    if isinstance(exception, ProviderError):
         error_info: ErrorInfo = ProviderErrorInfo.build_for_provider(exception, exception.provider_name)
     else:
         error_info = ErrorInfo.build(exception)
