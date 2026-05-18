@@ -7,6 +7,7 @@ from pydantic import AnyUrl
 from pydantic import SecretStr
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.primitives import NonEmptyStr
 from imbue.imbue_common.primitives import NonNegativeInt
 from imbue.minds.config.data_types import DeployEnvConfig
@@ -32,6 +33,7 @@ from imbue.minds.envs.provisioning import Providers
 from imbue.minds.envs.provisioning import deploy_env
 from imbue.minds.envs.provisioning import destroy_env
 from imbue.minds.envs.provisioning import list_dev_envs
+from imbue.minds.envs.recover import RecoverTargetAlreadyExistsError
 from imbue.minds.errors import MindError
 from imbue.minds.primitives import ServiceName
 from imbue.mngr_ovh.iam_tags import IamResource
@@ -1133,3 +1135,241 @@ def test_destroy_env_tier_full_step_order(_isolated_home: Path, _root_cg: Concur
     ]
     # And env root is gone after the full flow succeeds.
     assert not staging_root.exists()
+
+
+# -- F1 / F2 / F4: deploy-safety ordering invariants --------------------------
+#
+# Each test below pins one of the safety invariants we just (re)established
+# in ``_deploy_env_locked``. Bare position assertions (rather than full
+# step-order snapshots) so the tests don't break on every unrelated reorder.
+
+
+def _step_position(call_log: dict[str, list], step_name: str) -> int:
+    """Index of the first call to ``step_name`` in ``call_log``.
+
+    Raises if the step never fired -- the absence is itself a useful test
+    failure (vs. silently returning ``-1`` and producing a confusing
+    "expected -1 < 0" message).
+    """
+    for idx, call in enumerate(call_log["calls"]):
+        if call[0] == step_name:
+            return idx
+    raise AssertionError(f"step {step_name!r} never fired; calls were: {[c[0] for c in call_log['calls']]}")
+
+
+def test_f1_snapshot_created_before_migrations_run(_isolated_home: Path, _root_cg: ConcurrencyGroup) -> None:
+    """F1 invariant: snapshot + recover-target file write happen BEFORE migrations.
+
+    Pre-fix, migrations ran first, then snapshot. A failed migration left
+    no recover-target on disk + the snapshot captured the post-migration
+    state, so recover could never undo a bad migration. Post-fix, the
+    snapshot captures the pre-migration state and the recover-target file
+    is on disk before the migration runs, so a failed migration is
+    rolled back by ``minds env recover`` along with everything else.
+    """
+    call_log = _make_call_log()
+    providers = _build_fake_providers(call_log)
+    deploy_env(
+        DevEnvName("dev-f1-snapshot-before-migration"),
+        tier="dev",
+        deploy_config=_deploy_config(),
+        credentials=_credentials(),
+        providers=providers,
+        parent_concurrency_group=_root_cg,
+    )
+    snapshot_pos = _step_position(call_log, "create_neon_snapshot_branch")
+    migration_pos = _step_position(call_log, "apply_pool_hosts_migrations")
+    assert snapshot_pos < migration_pos, (
+        f"snapshot must run before migrations (snapshot at {snapshot_pos}, migrations at {migration_pos})"
+    )
+
+
+def test_f1_snapshot_created_before_migrations_run_shared_tier(
+    _isolated_home: Path, _root_cg: ConcurrencyGroup
+) -> None:
+    """F1 holds for shared tiers too -- and matters more there (live-traffic DB)."""
+    call_log = _make_call_log()
+    providers = _build_fake_providers(call_log)
+    deploy_env(
+        DevEnvName("staging"),
+        tier="staging",
+        deploy_config=_deploy_config(tier="staging"),
+        credentials=_credentials(),
+        providers=providers,
+        parent_concurrency_group=_root_cg,
+    )
+    snapshot_pos = _step_position(call_log, "create_neon_snapshot_branch")
+    migration_pos = _step_position(call_log, "apply_pool_hosts_migrations")
+    assert snapshot_pos < migration_pos
+
+
+def test_f2_verify_neon_token_scope_runs_before_snapshot(_isolated_home: Path, _root_cg: ConcurrencyGroup) -> None:
+    """F2 invariant: the Neon token's read-scope is verified BEFORE the snapshot.
+
+    Pre-fix, ``verify_neon_token_has_restore_scope`` was declared on the
+    Providers bundle and wired to the real implementation but never
+    called from the deploy path. A token without read access only failed
+    when ``minds env recover`` actually tried to restore -- after the
+    deploy had already mutated other state.
+    """
+    call_log = _make_call_log()
+    providers = _build_fake_providers(call_log)
+    deploy_env(
+        DevEnvName("dev-f2-verify-scope"),
+        tier="dev",
+        deploy_config=_deploy_config(),
+        credentials=_credentials(),
+        providers=providers,
+        parent_concurrency_group=_root_cg,
+    )
+    verify_pos = _step_position(call_log, "verify_neon_token_has_restore_scope")
+    snapshot_pos = _step_position(call_log, "create_neon_snapshot_branch")
+    assert verify_pos < snapshot_pos, (
+        f"token-scope verify must run before snapshot (verify at {verify_pos}, snapshot at {snapshot_pos})"
+    )
+
+
+def test_f2_verify_neon_token_scope_failure_aborts_before_snapshot(
+    _isolated_home: Path, _root_cg: ConcurrencyGroup
+) -> None:
+    """A Neon-scope failure raises BEFORE the snapshot branch is created.
+
+    Confirms the preflight wiring actually short-circuits the deploy
+    (vs. the broken state where the verify wasn't called at all).
+    """
+    call_log = _make_call_log()
+    base_providers = _build_fake_providers(call_log)
+
+    # Replace verify_neon_token_has_restore_scope with one that raises.
+    # Type-safe model_copy_update + field_ref + to_update per the style
+    # guide's "Type-safe model_copy_update" section (so field renames
+    # break the test, not the runtime).
+    def failing_verify(project_id, api_token):
+        call_log["calls"].append(("verify_neon_token_has_restore_scope", project_id))
+        raise NeonProviderError("neon scope boom")
+
+    providers = base_providers.model_copy_update(
+        to_update(base_providers.field_ref().verify_neon_token_has_restore_scope, failing_verify),
+    )
+
+    with pytest.raises(NeonProviderError, match="neon scope boom"):
+        deploy_env(
+            DevEnvName("dev-f2-scope-failure"),
+            tier="dev",
+            deploy_config=_deploy_config(),
+            credentials=_credentials(),
+            providers=providers,
+            parent_concurrency_group=_root_cg,
+        )
+    step_names = [c[0] for c in call_log["calls"]]
+    assert "verify_neon_token_has_restore_scope" in step_names
+    assert "create_neon_snapshot_branch" not in step_names, (
+        f"snapshot must not run if scope verify failed; call sequence was: {step_names}"
+    )
+    assert "apply_pool_hosts_migrations" not in step_names, (
+        f"migrations must not run if scope verify failed; call sequence was: {step_names}"
+    )
+
+
+def test_f4_snapshot_branch_deleted_when_recover_target_write_fails(
+    _isolated_home: Path, _root_cg: ConcurrencyGroup
+) -> None:
+    """F4 invariant: a failed recover-target file write deletes the just-created snapshot branch.
+
+    Pre-fix, if ``write_recover_target_atomic`` raised after the
+    snapshot branch was created in Neon, the branch was orphaned --
+    no file pointed at it, so the operator had no
+    ``minds env recover`` path to clean it up. Post-fix, the snapshot
+    branch is deleted before the exception re-raises.
+
+    Triggers the failure naturally (no monkeypatch needed) by
+    pre-creating a DIRECTORY at the recover-target path. The early
+    ``recover_target_exists`` check uses ``is_file()`` so a directory
+    bypasses it; ``write_recover_target_atomic``'s own
+    ``if final_path.exists()`` then raises
+    :class:`RecoverTargetAlreadyExistsError` (a MindError +
+    FileExistsError, which our try/except catches).
+    """
+    call_log = _make_call_log()
+    providers = _build_fake_providers(call_log)
+    env_name = "dev-f4-write-failure"
+
+    # Pre-create a directory at exactly the recover-target path. The
+    # early ``recover_target_exists`` check uses ``is_file()`` (returns
+    # False for a dir), so the deploy proceeds through provider creation
+    # + snapshot creation; only when ``write_recover_target_atomic``'s
+    # ``final_path.exists()`` check fires does it raise. Builds the path
+    # the same way the production code does so this test breaks if the
+    # naming convention changes.
+    recover_target_dir = _isolated_home / f".minds-deploy-recover-target-{env_name}.json"
+    recover_target_dir.mkdir()
+
+    with pytest.raises(RecoverTargetAlreadyExistsError):
+        deploy_env(
+            DevEnvName(env_name),
+            tier="dev",
+            deploy_config=_deploy_config(),
+            credentials=_credentials(),
+            providers=providers,
+            parent_concurrency_group=_root_cg,
+        )
+
+    step_names = [c[0] for c in call_log["calls"]]
+    snapshot_pos = step_names.index("create_neon_snapshot_branch")
+    # The snapshot WAS created (we got past that step before the write failed)...
+    assert "create_neon_snapshot_branch" in step_names
+    # ...and then deleted by the F4 best-effort cleanup before the exception re-raised.
+    assert "delete_neon_branch" in step_names[snapshot_pos:], (
+        "delete_neon_branch must fire after the failed write to clean up the just-created snapshot; "
+        f"call sequence after snapshot was: {step_names[snapshot_pos:]}"
+    )
+    # Sanity: no later deploy step ran (the write failure aborted the deploy).
+    assert "apply_pool_hosts_migrations" not in step_names, (
+        f"migrations must not run after the recover-target write failed; calls: {step_names}"
+    )
+    assert "push_per_env_modal_secret" not in step_names
+
+
+def test_f4_recover_target_write_failure_logs_but_propagates_when_cleanup_also_fails(
+    _isolated_home: Path, _root_cg: ConcurrencyGroup
+) -> None:
+    """If snapshot-branch cleanup itself fails, the original write error still propagates.
+
+    The compounded failure is logged as a warning (so the operator
+    knows the snapshot is orphaned), but the user-visible exception is
+    still the RecoverTargetAlreadyExistsError from the write -- the
+    original cause, not the cleanup secondary.
+    """
+    call_log = _make_call_log()
+    base_providers = _build_fake_providers(call_log)
+    env_name = "dev-f4-cleanup-also-fails"
+
+    # Pre-create a directory at the recover-target path (same trick as
+    # the previous test) so write_recover_target_atomic raises naturally.
+    recover_target_dir = _isolated_home / f".minds-deploy-recover-target-{env_name}.json"
+    recover_target_dir.mkdir()
+
+    def failing_delete(project_id, branch_id, api_token):
+        call_log["calls"].append(("delete_neon_branch", project_id, branch_id))
+        raise NeonProviderError("neon delete boom")
+
+    providers = base_providers.model_copy_update(
+        to_update(base_providers.field_ref().delete_neon_branch, failing_delete),
+    )
+
+    # Original RecoverTargetAlreadyExistsError (not the secondary
+    # NeonProviderError) is what propagates -- the user needs the root
+    # cause, not the cleanup noise.
+    with pytest.raises(RecoverTargetAlreadyExistsError):
+        deploy_env(
+            DevEnvName(env_name),
+            tier="dev",
+            deploy_config=_deploy_config(),
+            credentials=_credentials(),
+            providers=providers,
+            parent_concurrency_group=_root_cg,
+        )
+
+    # The cleanup attempt fired even though it ultimately failed.
+    step_names = [c[0] for c in call_log["calls"]]
+    assert "delete_neon_branch" in step_names

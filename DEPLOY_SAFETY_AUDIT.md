@@ -34,7 +34,13 @@ out fine).
 
 ### F1. Migrations run BEFORE Neon snapshot is taken — recover can't undo a bad migration
 
-**Verdict: CONFIRMED BUG.**
+**Verdict: CONFIRMED BUG. → FIXED in commit on this branch.**
+
+`_deploy_env_locked` now: capture app versions → resolve Neon project →
+verify token scope (F2) → snapshot → write recover-target (with F4
+cleanup-on-failure) → **then** migrations. Pinned by
+`test_f1_snapshot_created_before_migrations_run` (dev tier) and
+`test_f1_snapshot_created_before_migrations_run_shared_tier` (staging).
 
 The spec ("Deploy flow") puts snapshot at step 2, migrations at step
 4. The implementation reverses the order:
@@ -70,7 +76,13 @@ file before migrations too. Spec order is the right one.
 
 ### F2. `verify_neon_token_has_restore_scope` preflight is declared but never called
 
-**Verdict: CONFIRMED BUG (or at least: dead spec compliance).**
+**Verdict: CONFIRMED BUG. → FIXED in commit on this branch.**
+
+`providers.verify_neon_token_has_restore_scope(neon_project_id_for_snapshot, credentials.neon_api_token)`
+is now called right after the Neon project resolution, before snapshot
+creation. Pinned by `test_f2_verify_neon_token_scope_runs_before_snapshot`
+(happy path) and `test_f2_verify_neon_token_scope_failure_aborts_before_snapshot`
+(short-circuit: snapshot + migrations never fire on scope failure).
 
 `Providers.verify_neon_token_has_restore_scope` is on the bundle
 (`provisioning.py:308`) and is wired to the real implementation in
@@ -127,7 +139,17 @@ addition to its current reversal steps.
 
 ### F4. Snapshot branch creation + recover-target file write are not atomic with each other
 
-**Verdict: DESIGN RISK (rare in practice).**
+**Verdict: DESIGN RISK (rare in practice). → FIXED in commit on this branch.**
+
+`write_recover_target_atomic` is now wrapped in a `try/except (OSError,
+MindError)` that best-effort deletes the just-created Neon snapshot
+branch before re-raising. Cleanup failure is logged loudly so the
+operator knows the branch is orphaned and the secondary error doesn't
+mask the original. Pinned by
+`test_f4_snapshot_branch_deleted_when_recover_target_write_fails`
+(both succeed) and
+`test_f4_recover_target_write_failure_logs_but_propagates_when_cleanup_also_fails`
+(write fails, cleanup also fails, original exception still surfaces).
 
 `_deploy_env_locked`:
 - L633-638: snapshot branch created (Neon API call succeeds)
@@ -738,10 +760,10 @@ re-uses it.
 
 | Finding | Verdict | Action |
 |---|---|---|
-| F1: migrations before snapshot | **CONFIRMED BUG** | Reorder: snapshot + recover-target before migrations |
-| F2: `verify_neon_token_has_restore_scope` never called | **CONFIRMED BUG** | Wire into preflight |
+| F1: migrations before snapshot | **CONFIRMED BUG → FIXED** | Reordered + 2 ratchet tests |
+| F2: `verify_neon_token_has_restore_scope` never called | **CONFIRMED BUG → FIXED** | Wired into preflight + 2 ratchet tests |
 | F3: step-1 partial-failure leaks Modal env / SuperTokens app | **DESIGN RISK** | Add cleanup or move under recover-target |
-| F4: snapshot + recover-target file write not atomic | **DESIGN RISK** | Wrap, delete snapshot on file-write failure |
+| F4: snapshot + recover-target file write not atomic | **DESIGN RISK → FIXED** | Wrapped + 2 ratchet tests |
 | F5: auto-exec into recover loses CLI flags | **MINOR** | Document or assert no flags |
 | F6: `time.sleep(1)` x5 | **MINOR** | Switch to `Event().wait` |
 | F7: untyped `recover_env` params + `assert SecretStr is not None` | **MINOR (style)** | Break circular import, add types |
@@ -780,12 +802,12 @@ re-uses it.
 
 In rough priority order:
 
-1. **F1** (migrations before snapshot) — corrupts the rollback guarantee
-2. **F30** (Modal env-var preservation) — the rollback design's central assumption
-3. **F2** (preflight not wired) — easy fix, catches a class of failures before mutation
-4. **F29** (no integration test for recover) — without this, the safety net is uncertified
-5. **F4** (snapshot + recover-target file atomicity) — small fix, closes a leak
-6. **F3** (step-1 partial-failure cleanup) — needs more design thought
-7. **F9** (shared-tier blast radius) — documentation + procedural fix
+1. ~~**F1** (migrations before snapshot)~~ — **FIXED on this branch.**
+2. **F30** (Modal env-var preservation) — the rollback design's central assumption. (User opted out: will be smoke-tested separately.)
+3. ~~**F2** (preflight not wired)~~ — **FIXED on this branch.**
+4. **F29** (no integration test for recover) — without this, the safety net is uncertified.
+5. ~~**F4** (snapshot + recover-target file atomicity)~~ — **FIXED on this branch.**
+6. **F3** (step-1 partial-failure cleanup) — needs more design thought.
+7. **F9** (shared-tier blast radius) — documentation + procedural fix.
 
 Everything else is style, performance, or "would-be-nice".
