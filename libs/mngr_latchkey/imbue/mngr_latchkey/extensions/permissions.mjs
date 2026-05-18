@@ -13,14 +13,15 @@
  *       Return the full permissions.json that the gateway applied to
  *       the caller for this request (from the extension context's
  *       ``permissionsConfigPath``). Takes no query parameters.
- *   GET    /permissions/available
- *       Return the catalog of services this gateway knows how to grant
- *       permissions for. The response is a JSON array of objects with
- *       two fields: ``scope`` (an object with ``schema_name`` and
+ *   GET    /permissions/available/<service_name>
+ *       Return the permission catalog entry for ``<service_name>`` (e.g.
+ *       ``slack``, ``google-gmail``). The response is a JSON object
+ *       with two fields: ``scope`` (an object with ``schema_name`` and
  *       ``display_name`` strings) and ``permissions`` (an array of
  *       Detent permission-schema names that may be granted under the
- *       scope). Backed by the ``services.json`` file that ships
- *       alongside this extension. Takes no query parameters.
+ *       scope). Returns 404 when the service is unknown. Backed by
+ *       the ``services.json`` file that ships alongside this
+ *       extension, which is keyed by raw service name.
  *   GET    /permissions/rules?path=<path>&rule_key=<key>
  *       Return the rule whose scope key is <key>.
  *   POST   /permissions/rules?path=<path>&rule_key=<key>
@@ -63,7 +64,7 @@ import { fileURLToPath } from 'node:url';
 
 const COLLECTION_PATH = '/permissions';
 const SELF_PATH = '/permissions/self';
-const AVAILABLE_PATH = '/permissions/available';
+const AVAILABLE_ITEM_PATH_PREFIX = '/permissions/available/';
 const RULES_COLLECTION_PATH = '/permissions/rules';
 const PERMISSIONS_ROOT_ENV_VAR = 'LATCHKEY_EXTENSION_PERMISSIONS_ROOT';
 const AVAILABLE_SERVICES_FILE = 'services.json';
@@ -71,6 +72,10 @@ const AVAILABLE_SERVICES_PATH = resolve(
   dirname(fileURLToPath(import.meta.url)),
   AVAILABLE_SERVICES_FILE,
 );
+// Service names in services.json are URL-path segments; constrain them
+// to lowercase letters, digits, and ``-`` so a caller cannot smuggle
+// path-traversal segments or other surprises into the lookup key.
+const VALID_SERVICE_NAME_PATTERN = /^[a-z0-9][a-z0-9-]*$/;
 
 class PermissionsExtensionError extends Error {
   constructor(statusCode, message) {
@@ -143,6 +148,23 @@ class MissingRuleKeyError extends PermissionsExtensionError {
   constructor() {
     super(400, "Missing required 'rule_key' query parameter.");
     this.name = 'MissingRuleKeyError';
+  }
+}
+
+class InvalidServiceNameError extends PermissionsExtensionError {
+  constructor(rawValue) {
+    super(
+      400,
+      `Invalid service name '${rawValue}': must match /^[a-z0-9][a-z0-9-]*$/.`,
+    );
+    this.name = 'InvalidServiceNameError';
+  }
+}
+
+class ServiceNotFoundError extends PermissionsExtensionError {
+  constructor(serviceName) {
+    super(404, `No permission catalog entry for service '${serviceName}'.`);
+    this.name = 'ServiceNotFoundError';
   }
 }
 
@@ -291,6 +313,14 @@ function parseRequestUrl(requestUrl) {
   return new URL(requestUrl ?? '', 'http://placeholder.invalid');
 }
 
+function decodeServiceNameSegment(rawSegment) {
+  try {
+    return decodeURIComponent(rawSegment);
+  } catch {
+    return rawSegment;
+  }
+}
+
 function parseRoute(requestUrl) {
   const pathOnly = parseRequestUrl(requestUrl).pathname;
   if (pathOnly === COLLECTION_PATH || pathOnly === `${COLLECTION_PATH}/`) {
@@ -299,8 +329,12 @@ function parseRoute(requestUrl) {
   if (pathOnly === SELF_PATH || pathOnly === `${SELF_PATH}/`) {
     return { kind: 'self' };
   }
-  if (pathOnly === AVAILABLE_PATH || pathOnly === `${AVAILABLE_PATH}/`) {
-    return { kind: 'available' };
+  if (pathOnly.startsWith(AVAILABLE_ITEM_PATH_PREFIX)) {
+    const remainder = pathOnly.slice(AVAILABLE_ITEM_PATH_PREFIX.length);
+    if (remainder.length === 0 || remainder.includes('/')) {
+      return { kind: 'unhandled' };
+    }
+    return { kind: 'available', serviceNameFromPath: decodeServiceNameSegment(remainder) };
   }
   if (pathOnly === RULES_COLLECTION_PATH || pathOnly === `${RULES_COLLECTION_PATH}/`) {
     return { kind: 'rule' };
@@ -371,6 +405,10 @@ function handleGetCollection(response, filePath) {
  * verbatim into ``LATCHKEY_DIRECTORY/extensions`` at gateway-spawn time),
  * so a malformed file is a deployment bug rather than a caller error;
  * we surface it as HTTP 500.
+ *
+ * The file is a JSON object keyed by raw service name (``slack``,
+ * ``google-gmail``, ...). Each value is a ``{scope: {schema_name,
+ * display_name}, permissions: [...]}`` object.
  */
 function readAvailableServices() {
   let raw;
@@ -387,12 +425,16 @@ function readAvailableServices() {
     const message = error instanceof Error ? error.message : String(error);
     throw new AvailableServicesUnavailableError(`not valid JSON: ${message}`);
   }
-  if (!Array.isArray(parsed)) {
-    throw new AvailableServicesUnavailableError('top-level value is not an array');
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    throw new AvailableServicesUnavailableError(
+      'top-level value is not a JSON object keyed by service name',
+    );
   }
-  for (const entry of parsed) {
+  for (const [serviceName, entry] of Object.entries(parsed)) {
     if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) {
-      throw new AvailableServicesUnavailableError('every entry must be a JSON object');
+      throw new AvailableServicesUnavailableError(
+        `entry for '${serviceName}' must be a JSON object`,
+      );
     }
     const scope = entry.scope;
     if (
@@ -405,21 +447,34 @@ function readAvailableServices() {
       scope.display_name.length === 0
     ) {
       throw new AvailableServicesUnavailableError(
-        "every entry's 'scope' must be an object with non-empty 'schema_name' and 'display_name' strings",
+        `entry for '${serviceName}': 'scope' must be an object with non-empty 'schema_name' and 'display_name' strings`,
       );
     }
     const permissions = entry.permissions;
     if (!Array.isArray(permissions) || !permissions.every((item) => typeof item === 'string')) {
       throw new AvailableServicesUnavailableError(
-        "every entry's 'permissions' must be an array of strings",
+        `entry for '${serviceName}': 'permissions' must be an array of strings`,
       );
     }
   }
   return parsed;
 }
 
-function handleGetAvailable(response) {
-  sendJson(response, 200, readAvailableServices());
+function handleGetAvailableForService(response, rawServiceName) {
+  if (
+    typeof rawServiceName !== 'string' ||
+    rawServiceName.length === 0 ||
+    !VALID_SERVICE_NAME_PATTERN.test(rawServiceName)
+  ) {
+    throw new InvalidServiceNameError(rawServiceName);
+  }
+  const catalog = readAvailableServices();
+  // Guard against prototype-chain hits (``constructor``, ``__proto__``,
+  // ...) since ``catalog`` is a plain ``JSON.parse`` object literal.
+  if (!Object.prototype.hasOwnProperty.call(catalog, rawServiceName)) {
+    throw new ServiceNotFoundError(rawServiceName);
+  }
+  sendJson(response, 200, catalog[rawServiceName]);
 }
 
 function handleGetSelf(response, context) {
@@ -494,7 +549,7 @@ export default async function permissionsExtension(request, response, context) {
       return true;
     }
     if (route.kind === 'available' && method === 'GET') {
-      handleGetAvailable(response);
+      handleGetAvailableForService(response, route.serviceNameFromPath);
       return true;
     }
     if (route.kind === 'rule') {

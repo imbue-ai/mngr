@@ -302,8 +302,9 @@ def test_start_gateway_drops_bundled_extensions(tmp_path: Path) -> None:
         services_json_path = extensions_dir / "services.json"
         assert services_json_path.is_file()
         services_catalog = json.loads(services_json_path.read_text())
-        assert isinstance(services_catalog, list) and len(services_catalog) > 0
-        for entry in services_catalog:
+        assert isinstance(services_catalog, dict) and len(services_catalog) > 0
+        for service_name, entry in services_catalog.items():
+            assert isinstance(service_name, str) and len(service_name) > 0
             assert set(entry.keys()) == {"scope", "permissions"}
             assert set(entry["scope"].keys()) == {"schema_name", "display_name"}
             assert isinstance(entry["permissions"], list)

@@ -1,5 +1,5 @@
-[
-  {
+{
+  "slack": {
     "scope": {
       "schema_name": "slack-api",
       "display_name": "Slack"
@@ -26,7 +26,7 @@
       "slack-reminders-write"
     ]
   },
-  {
+  "discord": {
     "scope": {
       "schema_name": "discord-api",
       "display_name": "Discord"
@@ -43,7 +43,7 @@
       "discord-read-users"
     ]
   },
-  {
+  "github": {
     "scope": {
       "schema_name": "github-rest-api",
       "display_name": "GitHub"
@@ -65,7 +65,7 @@
       "github-write-notifications"
     ]
   },
-  {
+  "gitlab": {
     "scope": {
       "schema_name": "gitlab-api",
       "display_name": "GitLab"
@@ -88,7 +88,7 @@
       "gitlab-write-groups"
     ]
   },
-  {
+  "dropbox": {
     "scope": {
       "schema_name": "dropbox-api",
       "display_name": "Dropbox"
@@ -105,14 +105,14 @@
       "dropbox-contacts"
     ]
   },
-  {
+  "linear": {
     "scope": {
       "schema_name": "linear-api",
       "display_name": "Linear"
     },
     "permissions": []
   },
-  {
+  "notion": {
     "scope": {
       "schema_name": "notion-api",
       "display_name": "Notion"
@@ -133,7 +133,7 @@
       "notion-search"
     ]
   },
-  {
+  "mailchimp": {
     "scope": {
       "schema_name": "mailchimp-api",
       "display_name": "Mailchimp"
@@ -156,7 +156,7 @@
       "mailchimp-write-ecommerce"
     ]
   },
-  {
+  "zoom": {
     "scope": {
       "schema_name": "zoom-api",
       "display_name": "Zoom"
@@ -175,7 +175,7 @@
       "zoom-write-users"
     ]
   },
-  {
+  "telegram": {
     "scope": {
       "schema_name": "telegram-api",
       "display_name": "Telegram"
@@ -190,7 +190,7 @@
       "telegram-payments"
     ]
   },
-  {
+  "sentry": {
     "scope": {
       "schema_name": "sentry-api",
       "display_name": "Sentry"
@@ -208,7 +208,7 @@
       "sentry-write-releases"
     ]
   },
-  {
+  "aws": {
     "scope": {
       "schema_name": "aws",
       "display_name": "AWS"
@@ -243,7 +243,7 @@
       "aws-kinesis"
     ]
   },
-  {
+  "stripe": {
     "scope": {
       "schema_name": "stripe-api",
       "display_name": "Stripe"
@@ -271,7 +271,7 @@
       "stripe-read-events"
     ]
   },
-  {
+  "figma": {
     "scope": {
       "schema_name": "figma-api",
       "display_name": "Figma"
@@ -293,7 +293,7 @@
       "figma-read-library-analytics"
     ]
   },
-  {
+  "calendly": {
     "scope": {
       "schema_name": "calendly-api",
       "display_name": "Calendly"
@@ -318,7 +318,7 @@
       "calendly-write-data-compliance"
     ]
   },
-  {
+  "yelp": {
     "scope": {
       "schema_name": "yelp-api",
       "display_name": "Yelp"
@@ -335,7 +335,7 @@
       "yelp-ai-chat"
     ]
   },
-  {
+  "coolify": {
     "scope": {
       "schema_name": "coolify-api",
       "display_name": "Coolify"
@@ -357,7 +357,7 @@
       "coolify-read-teams"
     ]
   },
-  {
+  "umami": {
     "scope": {
       "schema_name": "umami-api",
       "display_name": "Umami"
@@ -375,7 +375,7 @@
       "umami-read-me"
     ]
   },
-  {
+  "google-gmail": {
     "scope": {
       "schema_name": "google-gmail-api",
       "display_name": "Gmail"
@@ -398,7 +398,7 @@
       "google-gmail-read-profile"
     ]
   },
-  {
+  "google-calendar": {
     "scope": {
       "schema_name": "google-calendar-api",
       "display_name": "Google Calendar"
@@ -419,7 +419,7 @@
       "google-calendar-read-colors"
     ]
   },
-  {
+  "google-drive": {
     "scope": {
       "schema_name": "google-drive-api",
       "display_name": "Google Drive"
@@ -436,7 +436,7 @@
       "google-drive-read-about"
     ]
   },
-  {
+  "google-docs": {
     "scope": {
       "schema_name": "google-docs-api",
       "display_name": "Google Docs"
@@ -450,7 +450,7 @@
       "google-docs-update-documents"
     ]
   },
-  {
+  "google-sheets": {
     "scope": {
       "schema_name": "google-sheets-api",
       "display_name": "Google Sheets"
@@ -465,7 +465,7 @@
       "google-sheets-write-values"
     ]
   },
-  {
+  "google-people": {
     "scope": {
       "schema_name": "google-people-api",
       "display_name": "Google Contacts"
@@ -481,7 +481,7 @@
       "google-people-write-other-contacts"
     ]
   },
-  {
+  "google-analytics": {
     "scope": {
       "schema_name": "google-analytics-api",
       "display_name": "Google Analytics"
@@ -498,7 +498,7 @@
       "google-analytics-write-data-streams"
     ]
   },
-  {
+  "google-directions": {
     "scope": {
       "schema_name": "google-directions-api",
       "display_name": "Google Directions"
@@ -510,4 +510,4 @@
       "google-directions-compute-route-matrix"
     ]
   }
-]
+}

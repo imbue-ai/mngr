@@ -16,7 +16,8 @@
  *                                            correspond to the Detent scope
  *                                            schema name and permission schema
  *                                            names that are meant to be added.
- *                                            (See the `/permissions/available`
+ *                                            (See the
+ *                                            `/permissions/available/<service_name>`
  *                                            endpoint in `permissions.mjs`.)
  *   GET    /permission-requests              List all pending permission requests as
  *                                            newline-delimited JSON (one object per
