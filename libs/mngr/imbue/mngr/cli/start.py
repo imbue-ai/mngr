@@ -1,5 +1,7 @@
+import fcntl
+import io
 from collections.abc import Sequence
-from threading import Lock
+from pathlib import Path
 from typing import Any
 from typing import assert_never
 
@@ -43,8 +45,22 @@ from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import OutputFormat
 from imbue.mngr.utils.polling import poll_until
 
-_in_flight_restarts: set[AgentId] = set()
-_in_flight_restarts_lock = Lock()
+
+def _try_acquire_restart_lock(host_dir: Path, agent_id: AgentId) -> io.TextIOWrapper | None:
+    """Try to acquire a non-blocking exclusive file lock for an agent restart.
+
+    Returns the open file handle (caller must close to release) or None if
+    the lock is already held by another process.
+    """
+    lock_path = host_dir / "agents" / str(agent_id) / "restart.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_file = open(lock_path, "w")
+    try:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return lock_file
+    except BlockingIOError:
+        lock_file.close()
+        return None
 
 
 class StartCliOptions(CommonCliOptions):
@@ -248,43 +264,46 @@ def _start_with_restart(
         _output("No agents found matching the given addresses", output_opts)
         return
 
-    with _in_flight_restarts_lock:
-        already_in_flight = [m for m in matched_agents if m.agent_id in _in_flight_restarts]
-        agents_to_restart = [m for m in matched_agents if m.agent_id not in _in_flight_restarts]
-        for skipped in already_in_flight:
-            _output(f"Skipping agent {skipped.agent_name} -- restart already in progress", output_opts)
-        if not agents_to_restart:
-            return
-        _in_flight_restarts.update(m.agent_id for m in agents_to_restart)
+    started_agents: list[str] = []
+    last_started_agent = None
+    last_started_host = None
 
-    claimed_ids = {m.agent_id for m in agents_to_restart}
-    try:
-        started_agents: list[str] = []
-        last_started_agent = None
-        last_started_host = None
+    agents_by_host = group_agents_by_host(matched_agents)
 
-        agents_by_host = group_agents_by_host(agents_to_restart)
+    for host_key, agent_list in agents_by_host.items():
+        host_id_str, _ = host_key.split(":", 1)
+        provider_name = agent_list[0].provider_name
 
-        for host_key, agent_list in agents_by_host.items():
-            host_id_str, _ = host_key.split(":", 1)
-            provider_name = agent_list[0].provider_name
+        provider = get_provider_instance(provider_name, mngr_ctx)
+        host = provider.get_host(HostId(host_id_str))
 
-            provider = get_provider_instance(provider_name, mngr_ctx)
-            host = provider.get_host(HostId(host_id_str))
+        online_host, _ = ensure_host_started(host, is_start_desired=True, provider=provider)
 
-            online_host, _ = ensure_host_started(host, is_start_desired=True, provider=provider)
+        locked_agents = []
+        lock_handles: list[io.TextIOWrapper] = []
+        for match in agent_list:
+            lock = _try_acquire_restart_lock(online_host.host_dir, match.agent_id)
+            if lock is not None:
+                locked_agents.append(match)
+                lock_handles.append(lock)
+            else:
+                _output(f"Skipping agent {match.agent_name} -- restart already in progress", output_opts)
 
-            all_ids = [match.agent_id for match in agent_list]
+        if not locked_agents:
+            continue
 
-            with log_span("Stopping {} agent(s) for restart", len(all_ids)):
-                online_host.stop_agents(all_ids)
+        try:
+            locked_ids = [match.agent_id for match in locked_agents]
 
-            with log_span("Starting {} agent(s)", len(all_ids)):
-                online_host.start_agents(all_ids)
+            with log_span("Stopping {} agent(s) for restart", len(locked_ids)):
+                online_host.stop_agents(locked_ids)
+
+            with log_span("Starting {} agent(s)", len(locked_ids)):
+                online_host.start_agents(locked_ids)
 
             emit_discovery_events_for_host(mngr_ctx.config, online_host)
 
-            for match in agent_list:
+            for match in locked_agents:
                 started_agents.append(str(match.agent_name))
                 _output(f"Restarted agent: {match.agent_name}", output_opts)
 
@@ -294,12 +313,12 @@ def _start_with_restart(
                             last_started_agent = agent
                             last_started_host = online_host
                             break
+        finally:
+            for handle in lock_handles:
+                handle.close()
 
-        _output_result(started_agents, output_opts)
-        _maybe_connect(opts, last_started_agent, last_started_host, mngr_ctx)
-    finally:
-        with _in_flight_restarts_lock:
-            _in_flight_restarts.difference_update(claimed_ids)
+    _output_result(started_agents, output_opts)
+    _maybe_connect(opts, last_started_agent, last_started_host, mngr_ctx)
 
 
 def _maybe_connect(
