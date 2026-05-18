@@ -92,7 +92,7 @@ class MailtmInbox(BaseModel):
         :class:`MailtmFetchError` on timeout or unrecognized format.
         """
         body = self._wait_for_message_body(timeout_seconds=timeout_seconds, subject_substring="sign")
-        match = re.search(r"\b([A-Z0-9]{6,10})\b", body)
+        match = re.search(r"\b([A-Z0-9]{6,10})\b", body, re.IGNORECASE)
         if match is None:
             raise MailtmFetchError(
                 f"Sign-in email for {self.address!r} arrived but did not contain a recognizable one-time code: "
