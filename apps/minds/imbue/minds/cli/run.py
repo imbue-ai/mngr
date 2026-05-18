@@ -147,7 +147,9 @@ def run(
     # terminate it on minds shutdown -- mirroring how minds already leaves
     # the gateway running detached so agents in containers/VMs keep working
     # across desktop-client restarts.
-    root_concurrency_group.start_new_thread(_ensure_mngr_latchkey_forward_supervisor, args=(latchkey,), name="mngr-latchkey-forward-supervisor-setup")
+    root_concurrency_group.start_new_thread(
+        _ensure_mngr_latchkey_forward_supervisor, args=(latchkey,), name="mngr-latchkey-forward-supervisor-setup"
+    )
 
     # Watch our *grandparent* (typically Electron) rather than our immediate
     # parent (the ``uv run`` wrapper, which doesn't propagate Electron's
