@@ -14,6 +14,15 @@
   data file that ships alongside the extensions and is materialized
   into `LATCHKEY_DIRECTORY/extensions/` together with the `.mjs` files
   at gateway-spawn time.
+- The default permissions seeded for every new agent are broadened to
+  let the agent read its own current permissions
+  (`GET /permissions/self`) and read the per-service catalog entry
+  (`GET /permissions/available/<service_name>`) in addition to the
+  existing ability to file a new permission request
+  (`POST /permission-requests`). The catalog read is granted under a
+  path-pattern Detent permission schema (matching
+  `/permissions/available/<service_name>` only) so the agent baseline
+  does not also expose the unbounded collection endpoint.
 - The minds desktop client has been adapted to the new request shape:
   `LatchkeyPermissionRequestEvent` now carries `scope` (Detent schema)
   and `permissions` (the agent's requested list) instead of
