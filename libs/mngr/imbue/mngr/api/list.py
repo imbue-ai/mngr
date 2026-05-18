@@ -102,12 +102,10 @@ class ListResult(MutableModel):
 
 
 class _ErrorEmitter(MutableModel):
-    """Per-call emitter providers call to surface a per-resource ErrorInfo.
+    """Provider-facing callable that records a per-resource ErrorInfo.
 
-    Appends to result.errors under the shared results_lock and forwards to
-    params.on_error if provided. Defined as a callable class (not an inline
-    closure) to satisfy the inline-functions ratchet and to keep the type
-    signature explicit at the provider boundary.
+    Appends to result.errors under results_lock and forwards to on_error
+    if provided.
     """
 
     model_config = {"arbitrary_types_allowed": True}
