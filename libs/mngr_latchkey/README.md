@@ -173,7 +173,7 @@ blocked service; UIs (the minds desktop client, your own front-end)
 consume the stream and DELETE on resolution.
 
 * `POST /permission-requests` with body
-  `{"agent_id": "...", "key": "...", "value": ["...", ...], "rationale": "..."}`.
+  `{"agent_id": "...", "scope": "...", "permissions": ["...", ...], "rationale": "..."}`.
   The extension generates a `request_id` server-side and returns the
   full record. Available to agents.
 * `GET /permission-requests` returns the current queue as
@@ -199,6 +199,12 @@ directory; any `path` query parameter that resolves outside that
 root is rejected with HTTP 403.
 
 * `GET /permissions?path=<file>` returns the full permissions file.
+* `GET /permissions/available` returns the catalog of services this
+  gateway knows how to grant permissions for, as a JSON array of
+  `{"scope": {"schema_name": "...", "display_name": "..."},
+  "permissions": ["...", ...]}` objects. The catalog is backed by a
+  `services.json` file that ships alongside the extension; the path
+  query parameter is not consulted.
 * `GET /permissions/rules?path=<file>&rule_key=<scope>` returns the
   rule for `<scope>`, or 404 if absent.
 * `POST /permissions/rules?path=<file>&rule_key=<scope>` with a JSON

@@ -13,6 +13,14 @@
  *       Return the full permissions.json that the gateway applied to
  *       the caller for this request (from the extension context's
  *       ``permissionsConfigPath``). Takes no query parameters.
+ *   GET    /permissions/available
+ *       Return the catalog of services this gateway knows how to grant
+ *       permissions for. The response is a JSON array of objects with
+ *       two fields: ``scope`` (an object with ``schema_name`` and
+ *       ``display_name`` strings) and ``permissions`` (an array of
+ *       Detent permission-schema names that may be granted under the
+ *       scope). Backed by the ``services.json`` file that ships
+ *       alongside this extension. Takes no query parameters.
  *   GET    /permissions/rules?path=<path>&rule_key=<key>
  *       Return the rule whose scope key is <key>.
  *   POST   /permissions/rules?path=<path>&rule_key=<key>
@@ -51,11 +59,18 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { dirname, isAbsolute, resolve, relative } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const COLLECTION_PATH = '/permissions';
 const SELF_PATH = '/permissions/self';
+const AVAILABLE_PATH = '/permissions/available';
 const RULES_COLLECTION_PATH = '/permissions/rules';
 const PERMISSIONS_ROOT_ENV_VAR = 'LATCHKEY_EXTENSION_PERMISSIONS_ROOT';
+const AVAILABLE_SERVICES_FILE = 'services.json';
+const AVAILABLE_SERVICES_PATH = resolve(
+  dirname(fileURLToPath(import.meta.url)),
+  AVAILABLE_SERVICES_FILE,
+);
 
 class PermissionsExtensionError extends Error {
   constructor(statusCode, message) {
@@ -100,6 +115,13 @@ class PermissionsFileMalformedError extends PermissionsExtensionError {
   constructor(filePath, detail) {
     super(500, `permissions.json at ${filePath} is malformed: ${detail}`);
     this.name = 'PermissionsFileMalformedError';
+  }
+}
+
+class AvailableServicesUnavailableError extends PermissionsExtensionError {
+  constructor(detail) {
+    super(500, `Could not load ${AVAILABLE_SERVICES_FILE}: ${detail}`);
+    this.name = 'AvailableServicesUnavailableError';
   }
 }
 
@@ -277,6 +299,9 @@ function parseRoute(requestUrl) {
   if (pathOnly === SELF_PATH || pathOnly === `${SELF_PATH}/`) {
     return { kind: 'self' };
   }
+  if (pathOnly === AVAILABLE_PATH || pathOnly === `${AVAILABLE_PATH}/`) {
+    return { kind: 'available' };
+  }
   if (pathOnly === RULES_COLLECTION_PATH || pathOnly === `${RULES_COLLECTION_PATH}/`) {
     return { kind: 'rule' };
   }
@@ -338,6 +363,63 @@ function sendError(response, statusCode, message) {
 function handleGetCollection(response, filePath) {
   const file = readPermissionsFile(filePath);
   sendJson(response, 200, file);
+}
+
+/**
+ * Read and validate the bundled ``services.json`` catalog. The file is
+ * trusted package data (it ships alongside this extension and is copied
+ * verbatim into ``LATCHKEY_DIRECTORY/extensions`` at gateway-spawn time),
+ * so a malformed file is a deployment bug rather than a caller error;
+ * we surface it as HTTP 500.
+ */
+function readAvailableServices() {
+  let raw;
+  try {
+    raw = readFileSync(AVAILABLE_SERVICES_PATH, 'utf-8');
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new AvailableServicesUnavailableError(`cannot read file: ${message}`);
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new AvailableServicesUnavailableError(`not valid JSON: ${message}`);
+  }
+  if (!Array.isArray(parsed)) {
+    throw new AvailableServicesUnavailableError('top-level value is not an array');
+  }
+  for (const entry of parsed) {
+    if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) {
+      throw new AvailableServicesUnavailableError('every entry must be a JSON object');
+    }
+    const scope = entry.scope;
+    if (
+      typeof scope !== 'object' ||
+      scope === null ||
+      Array.isArray(scope) ||
+      typeof scope.schema_name !== 'string' ||
+      scope.schema_name.length === 0 ||
+      typeof scope.display_name !== 'string' ||
+      scope.display_name.length === 0
+    ) {
+      throw new AvailableServicesUnavailableError(
+        "every entry's 'scope' must be an object with non-empty 'schema_name' and 'display_name' strings",
+      );
+    }
+    const permissions = entry.permissions;
+    if (!Array.isArray(permissions) || !permissions.every((item) => typeof item === 'string')) {
+      throw new AvailableServicesUnavailableError(
+        "every entry's 'permissions' must be an array of strings",
+      );
+    }
+  }
+  return parsed;
+}
+
+function handleGetAvailable(response) {
+  sendJson(response, 200, readAvailableServices());
 }
 
 function handleGetSelf(response, context) {
@@ -409,6 +491,10 @@ export default async function permissionsExtension(request, response, context) {
     }
     if (route.kind === 'self' && method === 'GET') {
       handleGetSelf(response, context);
+      return true;
+    }
+    if (route.kind === 'available' && method === 'GET') {
+      handleGetAvailable(response);
       return true;
     }
     if (route.kind === 'rule') {
