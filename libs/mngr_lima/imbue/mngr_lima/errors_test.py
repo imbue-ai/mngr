@@ -53,6 +53,14 @@ _LIMA_PROVIDER_ERROR_SUBCLASSES = [
     cls for cls in walk_concrete_subclasses(ProviderError) if cls.__module__.startswith("imbue.mngr_lima")
 ]
 
+# Fail loudly at collection time if no Lima ProviderError subclasses were
+# discovered. Otherwise pytest silently parametrizes zero cases and the
+# invariant test passes without enforcing anything.
+assert _LIMA_PROVIDER_ERROR_SUBCLASSES, (
+    "No Lima ProviderError subclasses discovered via walk_concrete_subclasses. "
+    "Ensure the modules defining them are imported by this test file."
+)
+
 
 @pytest.mark.parametrize("subclass", _LIMA_PROVIDER_ERROR_SUBCLASSES, ids=lambda c: c.__name__)
 def test_lima_provider_error_subclass_takes_provider_name_first(subclass: type) -> None:
