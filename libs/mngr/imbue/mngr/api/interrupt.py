@@ -6,13 +6,11 @@ from typing import Any
 from loguru import logger
 from pydantic import Field
 
-from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.logging import log_call
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr.api.cel_context import agent_to_cel_context
 from imbue.mngr.api.discover import discover_hosts_and_agents
-from imbue.mngr.api.start import send_resume_message_if_configured
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import AgentNotFoundOnHostError
 from imbue.mngr.errors import BaseMngrError
@@ -61,9 +59,8 @@ def interrupt_agents(
     Each matched agent's process is stopped (terminating any in-flight work and
     background tasks) and then restarted. Agent types that support session
     resumption (e.g. Claude via ``--resume``) pick up their saved state on
-    restart. If the agent has a configured ``resume_message``, it is sent
-    after restart, mirroring ``mngr start`` behavior. Hosts are processed
-    concurrently so a slow host does not block others.
+    restart. Hosts are processed concurrently so a slow host does not block
+    others.
     """
     result = InterruptResult()
     result_lock = Lock()
@@ -108,7 +105,6 @@ def interrupt_agents(
                     error_behavior=error_behavior,
                     result=result,
                     result_lock=result_lock,
-                    parent_cg=mngr_ctx.concurrency_group,
                     on_success=on_success,
                     on_error=on_error,
                 )
@@ -130,7 +126,6 @@ def _process_host_for_interrupt(
     error_behavior: ErrorBehavior,
     result: InterruptResult,
     result_lock: Lock,
-    parent_cg: ConcurrencyGroup,
     on_success: Callable[[str], None] | None,
     on_error: Callable[[str, str], None] | None,
 ) -> None:
@@ -214,30 +209,12 @@ def _process_host_for_interrupt(
                     raise MngrError(error_msg) from e
                 return
 
-            # Refresh agent objects so subsequent operations see the post-restart state
-            refreshed_agents = host.get_agents()
-            refreshed_by_id = {a.id: a for a in refreshed_agents}
-
-            resume_futures: list[Future[None]] = []
-            with mngr_executor(
-                parent_cg=parent_cg, name=f"interrupt_resume_{host_ref.host_id}", max_workers=32
-            ) as resume_executor:
-                for agent in agents_to_interrupt:
-                    refreshed = refreshed_by_id.get(agent.id, agent)
-                    resume_futures.append(
-                        resume_executor.submit(
-                            _send_resume_message,
-                            agent=refreshed,
-                            result=result,
-                            result_lock=result_lock,
-                            error_behavior=error_behavior,
-                            on_success=on_success,
-                            on_error=on_error,
-                        )
-                    )
-
-            for future in resume_futures:
-                future.result()
+            for agent in agents_to_interrupt:
+                agent_name = str(agent.name)
+                with result_lock:
+                    result.successful_agents.append(agent_name)
+                if on_success:
+                    on_success(agent_name)
         finally:
             with _in_flight_lock:
                 _in_flight_interrupts.difference_update(claimed_ids)
@@ -246,30 +223,3 @@ def _process_host_for_interrupt(
         if error_behavior == ErrorBehavior.ABORT:
             raise
         logger.warning("Error accessing host {}: {}", host_ref.host_id, e)
-
-
-def _send_resume_message(
-    agent: AgentInterface,
-    result: InterruptResult,
-    result_lock: Lock,
-    error_behavior: ErrorBehavior,
-    on_success: Callable[[str], None] | None,
-    on_error: Callable[[str, str], None] | None,
-) -> None:
-    """Send resume_message (if any) and record the agent as successful or failed."""
-    agent_name = str(agent.name)
-    try:
-        with log_span("Sending resume message for interrupted agent {}", agent_name):
-            send_resume_message_if_configured(agent)
-        with result_lock:
-            result.successful_agents.append(agent_name)
-        if on_success:
-            on_success(agent_name)
-    except BaseMngrError as e:
-        error_msg = str(e)
-        with result_lock:
-            result.failed_agents.append((agent_name, error_msg))
-        if on_error:
-            on_error(agent_name, error_msg)
-        if error_behavior == ErrorBehavior.ABORT:
-            raise MngrError(error_msg) from e

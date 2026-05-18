@@ -5,7 +5,6 @@ from unittest.mock import patch
 
 import pytest
 
-from imbue.mngr.agents.base_agent import BaseAgent
 from imbue.mngr.api.create import CreateAgentOptions
 from imbue.mngr.api.interrupt import InterruptResult
 from imbue.mngr.api.interrupt import interrupt_agents
@@ -87,73 +86,6 @@ def test_interrupt_agents_calls_stop_then_start_on_host(
     assert result.failed_agents == []
     assert result.successful_agents == ["interrupt-test"]
     assert call_order == [f"stop:{agent.id}", f"start:{agent.id}"]
-
-
-@pytest.mark.tmux
-def test_interrupt_agents_sends_resume_message_after_restart(
-    temp_work_dir: Path,
-    temp_mngr_ctx: MngrContext,
-    local_provider: LocalProviderInstance,
-) -> None:
-    """interrupt_agents must send the configured resume_message after the restart.
-
-    This is the core contract beyond raw stop+start: after the agent is
-    restarted, its configured resume_message is sent so session-resumable
-    agents pick up where they left off. The send must come after start, not
-    before.
-    """
-    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
-    assert isinstance(host, Host)
-
-    agent = host.create_agent_state(
-        work_dir_path=temp_work_dir,
-        options=CreateAgentOptions(
-            name=AgentName("resume-msg-test"),
-            agent_type=AgentTypeName("generic"),
-            command=CommandString("sleep 847291"),
-            resume_message="please resume",
-            # Short timeout: sleep-based generic agents never enter WAITING, so
-            # send_resume_message_if_configured falls back to sending after timeout.
-            ready_timeout_seconds=0.5,
-        ),
-    )
-    host.start_agents([agent.id])
-
-    call_order: list[str] = []
-    sent_messages: list[str] = []
-
-    real_stop = Host.stop_agents
-    real_start = Host.start_agents
-    real_send = BaseAgent.send_message
-
-    def tracked_stop(self: Host, agent_ids, *args, **kwargs) -> None:
-        call_order.append("stop")
-        real_stop(self, agent_ids, *args, **kwargs)
-
-    def tracked_start(self: Host, agent_ids, *args, **kwargs) -> None:
-        call_order.append("start")
-        real_start(self, agent_ids, *args, **kwargs)
-
-    def tracked_send(self: BaseAgent, message: str) -> None:
-        call_order.append("send_message")
-        sent_messages.append(message)
-        real_send(self, message)
-
-    try:
-        with patch.object(BaseAgent, "send_message", tracked_send):
-            with patch.object(Host, "stop_agents", tracked_stop):
-                with patch.object(Host, "start_agents", tracked_start):
-                    result = interrupt_agents(
-                        mngr_ctx=temp_mngr_ctx,
-                        include_filters=('name == "resume-msg-test"',),
-                    )
-    finally:
-        host.destroy_agent(agent)
-
-    assert result.failed_agents == []
-    assert result.successful_agents == ["resume-msg-test"]
-    assert sent_messages == ["please resume"]
-    assert call_order == ["stop", "start", "send_message"]
 
 
 @pytest.mark.tmux
