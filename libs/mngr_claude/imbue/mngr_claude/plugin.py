@@ -33,6 +33,7 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.pure import pure
 from imbue.mngr.agents.common_transcript import maybe_provision_common_transcript_scripts
+from imbue.mngr.agents.common_transcript import provision_raw_transcript_scripts
 from imbue.mngr.agents.common_transcript import provision_scripts_to_commands_dir
 from imbue.mngr.agents.tui_agent import InteractiveTuiAgent
 from imbue.mngr.agents.tui_utils import send_enter_via_tmux_wait_for_hook
@@ -1074,14 +1075,16 @@ def _load_claude_resource_script(filename: str) -> str:
 # It is omitted from the agent's commands/ dir entirely when the user opts out.
 _CLAUDE_COMMON_TRANSCRIPT_SCRIPT_NAME: Final[str] = "common_transcript.sh"
 
+# The raw-transcript streamer (returned by ClaudeAgent.get_raw_transcript_scripts
+# per HasTranscriptMixin). Always provisioned: it tails Claude's native session
+# JSONL files into logs/claude_transcript/events.jsonl, which is read by the
+# common transcript converter *and* by send_enter_via_tmux_wait_for_hook (the
+# fallback path for the UserPromptSubmit-via-tmux-wait-for hook), so the
+# streamer must keep running even when the common transcript is disabled.
+_CLAUDE_RAW_TRANSCRIPT_SCRIPT_NAME: Final[str] = "stream_transcript.sh"
+
 # Claude-specific scripts that are always provisioned regardless of
 # emit_common_transcript:
-#   - stream_transcript.sh tails Claude's native session JSONL files into
-#     logs/claude_transcript/events.jsonl. The common transcript converter
-#     reads from there, but so does send_enter_via_tmux_wait_for_hook (the
-#     fallback path for the UserPromptSubmit-via-tmux-wait-for hook), so
-#     stream_transcript must keep running even when the common transcript
-#     is disabled.
 #   - claude_background_tasks.sh is the long-running orchestrator launched
 #     by assemble_command. It does activity tracking, supervises
 #     stream_transcript.sh, and launches the common transcript converter
@@ -1089,8 +1092,11 @@ _CLAUDE_COMMON_TRANSCRIPT_SCRIPT_NAME: Final[str] = "common_transcript.sh"
 #     simply by not provisioning common_transcript.sh.
 #   - wait_for_stop_hook.sh and sync_keychain_credentials.py are unrelated
 #     helpers invoked by Claude hooks.
+#
+# The raw-transcript streamer (stream_transcript.sh) is also always provisioned
+# but is provisioned via :func:`provision_raw_transcript_scripts` because it
+# satisfies the :class:`HasTranscriptMixin` contract.
 _CLAUDE_ALWAYS_PROVISIONED_SCRIPT_NAMES: Final[tuple[str, ...]] = (
-    "stream_transcript.sh",
     "claude_background_tasks.sh",
     "wait_for_stop_hook.sh",
     "sync_keychain_credentials.py",
@@ -1104,8 +1110,9 @@ def _provision_claude_always_on_scripts(
 ) -> None:
     """Write Claude's always-on background scripts to $MNGR_AGENT_STATE_DIR/commands/.
 
-    The gated common-transcript converter is provisioned separately via
-    :func:`maybe_provision_common_transcript_scripts`.
+    The raw-transcript streamer is provisioned separately via
+    :func:`provision_raw_transcript_scripts`, and the gated common-transcript
+    converter via :func:`maybe_provision_common_transcript_scripts`.
 
     Note: mngr_log.sh (shared logging library) is provisioned by
     Host.provision_agent() to both host-level and agent-level commands
@@ -1358,15 +1365,28 @@ class ClaudeAgent(InteractiveTuiAgent[ClaudeAgentConfig], HasCommonTranscriptMix
     def is_common_transcript_enabled(self) -> bool:
         return self.agent_config.emit_common_transcript
 
+    def get_raw_transcript_scripts(self) -> Mapping[str, str]:
+        """Return Claude's raw-transcript streamer script.
+
+        Always provisioned (per :class:`HasTranscriptMixin`): the streamer
+        tails Claude's native session JSONL into
+        ``logs/claude_transcript/events.jsonl``, which feeds both the
+        common-transcript converter and
+        ``send_enter_via_tmux_wait_for_hook``'s fallback path. The
+        background orchestrator that supervises this streamer is
+        provisioned separately by ``_provision_claude_always_on_scripts``.
+        """
+        return {_CLAUDE_RAW_TRANSCRIPT_SCRIPT_NAME: _load_claude_resource_script(_CLAUDE_RAW_TRANSCRIPT_SCRIPT_NAME)}
+
     def get_common_transcript_scripts(self) -> Mapping[str, str]:
         """Return only the script gated by ``emit_common_transcript``.
 
         For Claude that's a single converter (``common_transcript.sh``).
-        The raw transcript streamer and the background orchestrator that
-        supervises it are always provisioned -- see
-        ``_provision_claude_always_on_scripts`` -- because the streamer
-        also feeds ``send_enter_via_tmux_wait_for_hook``'s fallback path
-        and is needed regardless of whether the common transcript is on.
+        The raw transcript streamer is on
+        :meth:`get_raw_transcript_scripts` and the background
+        orchestrator that supervises it is in
+        ``_provision_claude_always_on_scripts``; both run regardless of
+        whether the common transcript is on.
         """
         return {
             _CLAUDE_COMMON_TRANSCRIPT_SCRIPT_NAME: _load_claude_resource_script(_CLAUDE_COMMON_TRANSCRIPT_SCRIPT_NAME)
@@ -1983,17 +2003,18 @@ class ClaudeAgent(InteractiveTuiAgent[ClaudeAgentConfig], HasCommonTranscriptMix
 
         with mngr_ctx.concurrency_group.make_concurrency_group("claude_provisioning") as concurrency_group:
             # Provision Claude's always-on background scripts (activity
-            # tracker, raw transcript streamer, hook helpers) and -- when
-            # the user has not opted out -- the gated common-transcript
-            # converter. Splitting the two paths is what makes
-            # emit_common_transcript=False actually take effect on disk:
-            # claude_background_tasks.sh only launches the converter if it
-            # finds it in commands/, and we don't write it there if the
-            # flag is off.
+            # tracker, hook helpers), the always-on raw-transcript streamer
+            # (per HasTranscriptMixin), and -- when the user has not opted
+            # out -- the gated common-transcript converter. Splitting the
+            # three paths is what makes emit_common_transcript=False
+            # actually take effect on disk: claude_background_tasks.sh only
+            # launches the converter if it finds it in commands/, and we
+            # don't write it there if the flag is off.
             provision_backgroun_script_thread = concurrency_group.start_new_thread(
                 _provision_claude_always_on_scripts,
                 (host, self._get_agent_dir(), concurrency_group),
             )
+            provision_raw_transcript_scripts(self, host, self._get_agent_dir(), concurrency_group)
             maybe_provision_common_transcript_scripts(self, host, self._get_agent_dir(), concurrency_group)
 
             if host.is_local and not config.use_env_config_dir:
