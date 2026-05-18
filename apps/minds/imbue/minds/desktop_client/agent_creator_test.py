@@ -164,10 +164,16 @@ def test_build_mngr_create_command_imbue_cloud_targets_account_provider() -> Non
     # create_host to ImbueCloudProvider. The agent name is now the constant
     # ``system-services``; the user's input drives the host name.
     assert "system-services@hello.imbue_cloud_alice-imbue-com" in joined
-    # IMBUE_CLOUD does not pass --reuse / --update (each lease is one-shot)
-    # nor --id (the canonical id is parsed from the JSONL ``created`` event).
+    # IMBUE_CLOUD passes ``--reuse`` because the bake's services agent
+    # is named ``system-services`` too, which mngr's pre-flight "agent
+    # already exists on this host" check would otherwise reject. It
+    # does NOT pass ``--update`` (the adopt path in
+    # ``ImbueCloudHost.create_agent_state`` already patches the agent
+    # in place; ``--update`` would re-run the bake's file-transfer
+    # provisioning unnecessarily). No ``--id`` either: the canonical
+    # id is parsed from the JSONL ``created`` event.
     assert "--id" not in command
-    assert "--reuse" not in command
+    assert "--reuse" in command
     assert "--update" not in command
     assert api_key
     # Lease attributes flow through --build-arg.

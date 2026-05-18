@@ -456,10 +456,21 @@ def _build_mngr_create_command(
 
     match launch_mode:
         case LaunchMode.IMBUE_CLOUD:
-            # Each lease is one-shot, so --reuse / --update would be confusing.
-            # The id is dictated by the pool's pre-baked agent and read back
-            # from the JSONL "created" event below.
-            pass
+            # The pool host already has a baked ``system-services`` agent
+            # (per ``_BAKED_SERVICES_AGENT_NAME`` in
+            # ``mngr_imbue_cloud/cli/admin.py``) which the lease/adopt path
+            # in ``ImbueCloudHost.create_agent_state`` will hydrate in
+            # place. mngr's core create flow runs an "agent already
+            # exists on this host" pre-flight that fires before the
+            # adopt path -- without ``--reuse`` it aborts with
+            # ``An agent named 'system-services' already exists``.
+            # ``--reuse`` tells mngr's pre-flight to expect the existing
+            # agent; the adopt path then keeps the baked id intact.
+            # ``--update`` is intentionally NOT passed: the adopt path
+            # already patches the labels + command in place; running
+            # mngr's standard provisioning on top would re-do the file
+            # transfer + provisioning round the bake already paid for.
+            mngr_command.append("--reuse")
         case _:
             mngr_command.extend(["--reuse", "--update"])
 
