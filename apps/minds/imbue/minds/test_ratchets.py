@@ -33,11 +33,14 @@ def test_prevent_while_true() -> None:
 
 
 def test_prevent_time_sleep() -> None:
-    # Two matches: ``destroying_test.py`` (a real test poll loop) and
+    # Three matches: ``destroying_test.py`` (a real test poll loop),
     # ``cli/env.py::_exec_into_recover`` (the 5-second auto-rollback
     # countdown -- a deliberate user-facing pause so the operator can
-    # Ctrl-C if they want to intervene before recover fires).
-    rc.check_time_sleep(_DIR, snapshot(2))
+    # Ctrl-C if they want to intervene before recover fires), and
+    # ``deployment_tests/_mailtm.py::MailtmInbox._wait_for_message_body``
+    # (polling the mail.tm HTTP API for an inbound email -- no
+    # event-driven alternative without standing up an IMAP listener).
+    rc.check_time_sleep(_DIR, snapshot(3))
 
 
 def test_prevent_global_keyword() -> None:
