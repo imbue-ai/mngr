@@ -95,7 +95,8 @@ mngr tmr [OPTIONS] [PYTEST_ARGS]...
 | `--integrator-timeout` | float | Maximum seconds to wait for the integrator agent to merge fix branches | `3600.0` |
 | `--output-dir` | path | Directory for the run's outputs (HTML report at index.html, per-agent artifacts) [default: tmr_<timestamp>/] | None |
 | `--source` | directory | Source directory for test collection and agent work dirs [default: current directory] | None |
-| `--reintegrate` | text | Re-read outcomes from a previous TMR run (by run name), re-run integrator, and regenerate report. Skips test collection and agent launching. | None |
+| `--reintegrate` | boolean | Re-read outcomes from a previous TMR run, re-run the integrator, and regenerate the report. Skips test collection and agent launching. The run to reintegrate is identified by --run-name. | `False` |
+| `--run-name` | text | The run name. For new runs, overrides the auto-generated UTC YYYYMMDDHHMMSS timestamp; must not collide with prior runs whose agents are still discoverable, or agent creation will fail. For --reintegrate, identifies which previous run to reintegrate (required). | None |
 | `--additional-authorized-host` | text | SSH public key line to install in authorized_keys on each agent host (test agents, integrator, host pool, and snapshotter), allowing inbound SSH [repeatable] | None |
 
 ## See Also

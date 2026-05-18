@@ -35,7 +35,7 @@ mngr capture [OPTIONS] [AGENT]
 
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
-| `--start`, `--no-start` | boolean | Automatically start the host/agent if stopped | `True` |
+| `--start`, `--no-start` | boolean | Automatically start the host and agent if offline/stopped | `True` |
 | `--full`, `--no-full` | boolean | Capture the full scrollback buffer instead of just the visible pane | `False` |
 
 ## Common
