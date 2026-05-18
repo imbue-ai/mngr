@@ -5,7 +5,7 @@
 # by .project_root == $MNGR_AGENT_WORK_DIR) and appends new lines verbatim
 # to logs/gemini_transcript/events.jsonl. Designed to handle:
 #   - Late-appearing session files (re-checks each poll cycle)
-#   - Restarts (per-session offsets are persisted; reconciled via UUID
+#   - Restarts (per-session offsets are persisted; reconciled via id
 #     lookup against the output file)
 #   - Multiple session files in a single gemini tmp dir
 #
