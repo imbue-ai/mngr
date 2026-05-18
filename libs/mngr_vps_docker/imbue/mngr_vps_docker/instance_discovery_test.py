@@ -304,14 +304,19 @@ def test_read_records_from_vps_returns_empty_when_state_container_not_ready(
 def test_discover_host_records_returns_empty_without_calling_ssh_when_no_vpses(
     provider: _DiscoveryTestProvider,
 ) -> None:
-    """No VPSes from the provider listing -> no SSH attempts, empty result."""
-    # per_vps_records left empty; the overridden _read_records_from_vps would
-    # return ([], {}) if reached, but we additionally assert via _make_outer
-    # being unreachable.
+    """No VPSes from the provider listing -> no SSH attempts, empty result.
+
+    Any unexpected call into ``_make_outer_for_vps_ip`` would raise from the
+    override's final ``AssertionError``, so an SSH attempt here would surface
+    as a test failure rather than a silent empty result.
+    """
     records, agent_data = provider._discover_host_records_with_agents()
 
     assert records == []
     assert agent_data == {}
+    # Confirm the no-vpses path was actually exercised (i.e. the listing
+    # hook ran and reported zero hostnames).
+    assert provider._list_hostnames_calls == 1
 
 
 def test_discover_host_records_aggregates_records_across_multiple_vpses(
