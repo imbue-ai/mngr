@@ -208,6 +208,19 @@ class PluginTier(UpperCaseStrEnum):
     DEPENDENT = auto()
 
 
+class PluginKind(UpperCaseStrEnum):
+    """What category of mngr extension a plugin provides.
+
+    Shared by the install-hint helper and (when it lands) the
+    ``mngr plugin list --kind`` CLI filter. Member names match the
+    project's user-facing vocabulary; convert kebab-case CLI strings
+    (``agent-type``, ``provider``) at the CLI boundary.
+    """
+
+    AGENT_TYPE = auto()
+    PROVIDER = auto()
+
+
 # === ID Types ===
 
 
@@ -373,7 +386,7 @@ class AgentAddress(FrozenModel):
 
     The agent component is required; without it, this is not an agent address.
     Use :class:`HostAddress` for ``@HOST.PROVIDER`` (no agent) or
-    :class:`HostedLocation` for ``[NAME[@HOST[.PROVIDER]]][:PATH]`` syntax.
+    :class:`HostLocationAddress` for ``[NAME[@HOST[.PROVIDER]]][:PATH]`` syntax.
     """
 
     agent: AgentNameOrId = Field(description="Agent name or ID (required)")
@@ -422,7 +435,7 @@ class NewAgentLocation(FrozenModel):
     path: Path | None = Field(default=None, description="Optional explicit work-directory path inside the host")
 
 
-class HostedLocation(FrozenModel):
+class HostLocationAddress(FrozenModel):
     """A location that lives on some host: ``[NAME[@HOST[.PROVIDER]]][:PATH]`` or a bare path.
 
     Used wherever a CLI command needs to designate "a place on any host" -- the

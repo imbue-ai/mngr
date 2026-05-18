@@ -22,11 +22,11 @@ from imbue.imbue_common.pure import pure
 from imbue.mngr.api.cleanup import execute_cleanup
 from imbue.mngr.api.cleanup import find_agents_for_cleanup
 from imbue.mngr.api.data_types import CleanupResult
+from imbue.mngr.cli.agent_selector import build_status_text
+from imbue.mngr.cli.agent_selector import filter_agents
+from imbue.mngr.cli.agent_selector import handle_search_key
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
-from imbue.mngr.cli.connect import build_status_text
-from imbue.mngr.cli.connect import filter_agents
-from imbue.mngr.cli.connect import handle_search_key
 from imbue.mngr.cli.help_formatter import CommandHelpMetadata
 from imbue.mngr.cli.help_formatter import add_pager_help_option
 from imbue.mngr.cli.output_helpers import AbortError

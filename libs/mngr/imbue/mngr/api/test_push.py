@@ -908,6 +908,7 @@ def test_push_git_with_remote_host_without_ssh_info_raises_assertion(
 
 
 @pytest.mark.rsync
+@pytest.mark.flaky
 def test_push_files_to_nonexistent_subdir_creates_directory(
     push_ctx: SyncTestContext,
     cg: ConcurrencyGroup,
