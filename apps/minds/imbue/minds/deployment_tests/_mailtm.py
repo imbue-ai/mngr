@@ -18,12 +18,11 @@ from typing import Final
 
 import httpx
 from loguru import logger
-from pydantic import BaseModel
-from pydantic import ConfigDict
 from pydantic import PrivateAttr
 from pydantic import SecretStr
 
 from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.primitives import NonEmptyStr
 from imbue.minds.deployment_tests.primitives import InvalidMailtmAddressError
 from imbue.minds.deployment_tests.primitives import MailtmAddress
@@ -49,7 +48,7 @@ class _MailtmMessage(FrozenModel):
     created_at: datetime
 
 
-class MailtmInbox(BaseModel):
+class MailtmInbox(MutableModel):
     """Pydantic-modeled view of the per-run mail.tm account, scoped to one local-part.
 
     A test holds a :class:`MailtmInbox` for ``signup-<uuid>+<uuid>@<host>``
@@ -59,8 +58,6 @@ class MailtmInbox(BaseModel):
     messages do not collide. Tracks seen-message ids as private state to
     de-duplicate across poll iterations.
     """
-
-    model_config = ConfigDict(frozen=False, extra="forbid", arbitrary_types_allowed=False)
 
     address: SignupEmailAddress
     account_address: MailtmAddress
