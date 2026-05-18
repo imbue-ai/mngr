@@ -43,7 +43,7 @@ class VpsClientInterface(MutableModel, ABC):
         label: str,
         region: str,
         plan: str,
-        os_id: int,
+        os_id: int | str,
         user_data: str,
         ssh_key_ids: Sequence[str],
         tags: Sequence[str],

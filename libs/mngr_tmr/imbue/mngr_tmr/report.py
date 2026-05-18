@@ -263,6 +263,11 @@ def generate_html_report(
     ``output_dir/<agent_name>/test_output/``; reads the integrator's
     outcome (if any) from ``output_dir/<integrator_name>/``. Writes the
     report to ``output_dir/index.html`` and returns that path.
+
+    Side-effect free except for writing the local file. Mirroring the
+    report to s3 is the caller's responsibility (see
+    ``report_upload.maybe_upload_report``); orchestration calls it from
+    ``_emit_report`` so each regeneration triggers an upload.
     """
     rows = _build_rows(agents, output_dir)
     integrator = _load_integrator_outcome(integrator_metadata, output_dir) if integrator_metadata is not None else None
