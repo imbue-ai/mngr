@@ -24,6 +24,7 @@ const mruWindows = []; // most recently focused first
 let appMenuInstalled = false;
 
 let backendBaseUrl = null;
+let mngrForwardBaseUrl = null;
 let workspaceList = []; // [{id, name, account}]
 let isShuttingDown = false;
 let initialBundle = null; // the first window created at startup
@@ -74,8 +75,15 @@ function toAbsoluteUrl(url) {
 // the agent's subdomain and redirects into the workspace's dockview UI.
 // Returns null if the backend hasn't come up yet.
 function workspaceUrlForAgent(agentId) {
-  if (!agentId || !backendBaseUrl) return null;
-  return `${backendBaseUrl}/goto/${encodeURIComponent(agentId)}/`;
+  // `/goto/` lives on the mngr_forward plugin (which owns subdomain
+  // forwarding), not the minds backend. Use mngrForwardBaseUrl when it has
+  // been received; fall back to backendBaseUrl during the startup window
+  // before the mngr_forward_started event arrives (rare -- the user can't
+  // open a workspace in that window).
+  if (!agentId) return null;
+  const origin = mngrForwardBaseUrl || backendBaseUrl;
+  if (!origin) return null;
+  return `${origin}/goto/${encodeURIComponent(agentId)}/`;
 }
 
 function findBundleForWorkspace(agentId) {
@@ -1501,6 +1509,9 @@ async function handleMngrForwardStarted(event) {
     return;
   }
   const url = `http://localhost:${port}`;
+  // Cache the plugin origin so workspaceUrlForAgent() can build /goto/ URLs
+  // against the correct port (the plugin, not minds).
+  mngrForwardBaseUrl = url;
   const baseSpec = {
     url,
     name: 'mngr_forward_session',
