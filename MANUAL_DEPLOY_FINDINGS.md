@@ -32,7 +32,7 @@ formal tests; this is a checklist of probes + findings.
 - **F21**: Recover-target lacks the services list, so `_cleanup_orphan_secrets` uses suffix-match — could catch unrelated names.
 - **F22**: Destroy refuses if the env root was manually `rm -rf`'d — operator can't run `destroy` to clean cloud resources after that.
 - **F24**: `per_env_*_url` hardcodes `dev` as the tier — would break any future non-dev PER_ENV tier.
-- **F25**: Vault entry at `secrets/.../litellm-connector` is silently ignored (the service is in `_DERIVED_ONLY_SECRET_SERVICES`).
+- **F25**: ~~Vault entry at `secrets/.../litellm-connector` silently ignored~~ — **downgraded after re-verification**: no such Vault entry exists or is ever expected (the values are 100% deploy-time-computed). The mechanism is a noise-suppression for a one-element edge case; downgraded to "tiny refactor that hoists litellm-connector out of [secrets].services to make the asymmetry explicit." See F25 body.
 - **F26**: `write_recover_target_atomic` race window between `.exists()` and `os.replace` — defeats the "two parallel deploys both fail safely" claim.
 - **F28**: FCT `vendor/mngr` and minds-side `libs/mngr` are out of sync — workspace agents created today don't have unreleased mngr fixes.
 
@@ -78,7 +78,7 @@ formal tests; this is a checklist of probes + findings.
 | F22 | Add `--force-without-env-root` flag to destroy | `cli/env.py`, `provisioning.py` |
 | F23 | Defer (works correctly; release-test invariant later) | none |
 | F24 | Thread `tier` through `per_env_*_url` helpers | `per_env_deploy.py`, `provisioning.py` |
-| F25 | Drop `_DERIVED_ONLY_SECRET_SERVICES`; read litellm-connector from Vault normally | `per_env_deploy.py` |
+| F25 | **Downgraded: tiny refactor.** Hoist `litellm-connector` out of `[secrets].services` + `_PER_ENV_SECRET_SERVICES`; push its Modal Secret as a separate code-driven step. `_DERIVED_ONLY_SECRET_SERVICES` deletes itself. No behavior change | `per_env_deploy.py`, `provisioning.py`, `envs/*/deploy.toml`, `secret_lifecycle.py` |
 | F26 | Use `os.open(O_CREAT \| O_EXCL)` for recover-target write | `recover.py` |
 | F27 | **PARTIALLY FIXED via F5** — every connector endpoint now wraps in `handle_endpoint_errors`. Defensive `exception_handler(Exception)` not yet added (low priority) | `connector/app.py` |
 | F28 | Defer (run `release-minds` skill intentionally) | workflow op |
@@ -465,13 +465,17 @@ Each finding has:
 - **Suggested fix:** Thread `tier` through to `per_env_*_url`. The naming convention becomes `rsc-{tier}-api`. Today's dev URLs need to match — confirm the deployed Modal app is currently named `rsc-dev` (per our probe of dev-josh-1: yes, the URL is `--rsc-dev-api.modal.run`). After threading `tier`, dev-tier URLs stay `rsc-dev`, future tiers get their own.
 - **Decision:** Add `tier: str` parameter to `per_env_connector_url` and `per_env_litellm_proxy_url`. Update `_expected_*_url` call sites to pass `tier=tier`. Verify dev URLs stay `rsc-dev` / `llm-dev` so dev-josh-1 (and other dev envs) keep working without a redeploy.
 
-### F25 — `_DERIVED_ONLY_SECRET_SERVICES = {"litellm-connector"}` silently shadows any vault entry under that name
+### F25 — `litellm-connector` is a code-special-cased "service" sitting inside a user-facing list of vault-backed services
 
-- **Severity:** smell (operator footgun)
-- **Where:** `apps/minds/imbue/minds/envs/per_env_deploy.py:76`.
-- **Why:** If an operator adds `secrets/minds/<tier>/litellm-connector` to Vault (e.g. to override a specific value), the deploy quietly skips the Vault read and uses only the in-code overrides. The operator's Vault entry is never noticed, and no warning fires (in fact the comment at line 71-75 says the *point* is to suppress the warning). Anyone manually populating `litellm-connector` will silently see their settings ignored.
-- **Suggested fix:** Either (a) document this prominently in the deploy.toml `[secrets].services` block + ensure release notes mention it, or (b) read the Vault entry if it exists (allowing overrides to take precedence over the operator's Vault entry, which is the normal `merged = dict(base); merged.update(overrides)` flow). The current behavior is exactly the inverse of every other service in the list.
-- **Decision:** Option (b) — drop `_DERIVED_ONLY_SECRET_SERVICES` and let `build_per_env_secret_values` read every service's Vault entry normally. If the entry is missing, the existing fallback (placeholder with a warning) still fires. Operator overrides still win since `merged.update(overrides)` runs last. Removes a special case. Update the deploy.toml comment around `[secrets].services` to note that `litellm-connector` is normally empty in Vault but supports per-key overrides.
+- **Severity:** nit / tiny refactor (original "silent shadow" framing was wrong — there is no Vault entry to shadow)
+- **Where:**
+  - `apps/minds/imbue/minds/envs/per_env_deploy.py:65` lists `litellm-connector` inside `_PER_ENV_SECRET_SERVICES`.
+  - `apps/minds/imbue/minds/envs/per_env_deploy.py:76` adds `_DERIVED_ONLY_SECRET_SERVICES = frozenset({"litellm-connector"})` purely to suppress a per-deploy warning log that would otherwise fire when the Vault read returns 404.
+  - `apps/minds/imbue/minds/envs/provisioning.py:611` and `:791` carry the corresponding in-code special-case for `litellm-connector`'s overrides (`LITELLM_PROXY_URL`, `LITELLM_MASTER_KEY`, `MINDS_TIER_GENERATION_ID`, `MINDS_ENV_NAME`).
+  - `apps/minds/imbue/minds/config/envs/dev/deploy.toml` (and staging / production equivalents) declare `litellm-connector` in `[secrets].services` alongside genuinely vault-backed entries (`cloudflare`, `litellm`, `neon`, ...).
+- **Why the original "silent shadow" framing was wrong:** I asserted operator overrides via a `secrets/minds/<tier>/litellm-connector` Vault entry would be ignored. Verified directly: no such Vault entry exists in dev (`vault kv list secrets/minds/dev` returns the 8 known names, none of them `litellm-connector`). The Modal Secret named `litellm-connector-<tier>-<deploy_id>` IS used by the connector (`Secret.from_name(...)` at `connector/app.py:2638`), but its values are 100% deploy-time-computed; no operator would populate a Vault entry there.
+- **What's real:** `_DERIVED_ONLY_SECRET_SERVICES` is a one-element set that exists purely to suppress a misleading "Vault read for litellm-connector failed" warning. It works, but it makes the [secrets].services list a slight lie — readers reasonably assume every entry is vault-backed, then have to discover the asymmetry by code-reading.
+- **Decision:** **Tiny refactor.** Drop `litellm-connector` from `_PER_ENV_SECRET_SERVICES` AND from each `[secrets].services` block in `apps/minds/imbue/minds/config/envs/<tier>/deploy.toml`. Push the `litellm-connector` Modal Secret as a separately-named step inside `deploy_env` (it's already special-cased there anyway at `provisioning.py:611`), driven directly off the override dict. `_DERIVED_ONLY_SECRET_SERVICES` and its 6-line comment delete themselves. Update `secret_lifecycle.gc_old_per_tier_secrets` so the `litellm-connector-<tier>-<deploy_id>` family still gets GC'd (today it's caught up via suffix-match through the same loop — after the refactor we need to either keep it in the GC's "extra" service list, or extend the GC to take an explicit list of bookkept service names). Net: the user-facing `[secrets].services` becomes "vault-backed secrets only," with the asymmetry hoisted to where the values are computed. No behavior change.
 
 ### F26 — `write_recover_target_atomic`'s "defends against a race" comment is overly confident — there's still a TOCTOU window
 
