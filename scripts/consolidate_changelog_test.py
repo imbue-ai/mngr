@@ -9,6 +9,7 @@ from scripts.consolidate_changelog import _collect_entries
 from scripts.consolidate_changelog import _get_entry_added_datetime
 from scripts.consolidate_changelog import _group_entries_by_date
 from scripts.consolidate_changelog import _insert_section_into_changelog
+from scripts.consolidate_changelog import pending_changelog_entries
 
 
 def test_collect_entries_empty_dir(tmp_path: Path) -> None:
@@ -43,6 +44,22 @@ def test_collect_entries_returns_sorted_entries(tmp_path: Path) -> None:
     assert entries[0][1] == "- Bugfix A"
     assert entries[1][0].name == "b-feature.md"
     assert entries[1][1] == "- Feature B"
+
+
+def test_pending_changelog_entries_returns_empty_when_no_changelog_dir(tmp_path: Path) -> None:
+    assert pending_changelog_entries(tmp_path) == []
+
+
+def test_pending_changelog_entries_returns_paths_from_collect_entries(tmp_path: Path) -> None:
+    changelog_dir = tmp_path / "changelog"
+    changelog_dir.mkdir()
+    (changelog_dir / ".gitkeep").touch()
+    (changelog_dir / "notes.txt").write_text("not a changelog entry")
+    (changelog_dir / "empty.md").write_text("   \n")
+    (changelog_dir / "b.md").write_text("- B")
+    (changelog_dir / "a.md").write_text("- A")
+    result = pending_changelog_entries(tmp_path)
+    assert [p.name for p in result] == ["a.md", "b.md"]
 
 
 def test_build_dated_sections_single_date() -> None:
