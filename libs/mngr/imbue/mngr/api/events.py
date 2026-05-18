@@ -25,10 +25,9 @@ from imbue.imbue_common.logging import ROTATED_JSONL_PATTERN
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.pure import pure
-from imbue.mngr.api.discover import discover_by_address
 from imbue.mngr.api.discover import discover_hosts_and_agents
-from imbue.mngr.api.find import filter_one_agent
 from imbue.mngr.api.find import filter_one_host
+from imbue.mngr.api.find import find_one_agent
 from imbue.mngr.api.providers import get_provider_instance
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import MalformedJsonlLineError
@@ -187,9 +186,7 @@ def resolve_events_target(
 
 
 def _resolve_agent_events_target(address: AgentAddress, mngr_ctx: MngrContext) -> EventsTarget:
-    with log_span("Loading agents and hosts"):
-        filtered_agents_by_host, _providers = discover_by_address(address, mngr_ctx, include_destroyed=False)
-    host_ref, agent_ref = filter_one_agent(address.agent, None, filtered_agents_by_host)
+    host_ref, agent_ref = find_one_agent(address, mngr_ctx)
     with log_span("Getting events access for agent {}", agent_ref.agent_name):
         target = try_build_events_target_for_agent(
             mngr_ctx=mngr_ctx,

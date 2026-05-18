@@ -19,6 +19,7 @@ from imbue.mngr.errors import HostError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.interfaces.host import AgentDataOptions
 from imbue.mngr.interfaces.host import AgentGitOptions
+from imbue.mngr.interfaces.host import AgentLabelOptions
 from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.interfaces.host import HostEnvironmentOptions
 from imbue.mngr.interfaces.host import HostLocation
@@ -37,9 +38,9 @@ from imbue.mngr_tmr.data_types import TestAgentInfo
 from imbue.mngr_tmr.data_types import TmrLaunchConfig
 from imbue.mngr_tmr.prompts import build_integrator_prompt
 from imbue.mngr_tmr.prompts import build_test_agent_prompt
+from imbue.mngr_tmr.utils import dedup_name
 from imbue.mngr_tmr.utils import resolve_templates
 from imbue.mngr_tmr.utils import sanitize_test_name_for_agent
-from imbue.mngr_tmr.utils import short_random_id
 from imbue.mngr_tmr.utils import transfer_mode_for_provider
 
 _AGENT_CREATION_TIMEOUT_SECONDS = 600.0
@@ -51,18 +52,19 @@ _AGENT_CREATION_TIMEOUT_SECONDS = 600.0
 _HOST_CODE_DIR = Path("/code")
 
 
-def _make_test_agent_identity(test_node_id: str) -> tuple[AgentName, str]:
+def _make_test_agent_identity(run_name: str, test_node_id: str, used_suffixes: set[str]) -> tuple[AgentName, str]:
     """Generate (agent_name, branch_name) for a test agent.
 
-    Both share a fresh random short_id so they identify the same launch
-    attempt. Callers should generate these once per test and reuse them
-    for both the launch attempt and any failure reporting, so that a
-    failed-launch entry in the report carries the same name the agent
-    would have had if it had succeeded.
+    The names are derived deterministically from ``(run_name,
+    test_node_id)`` so the launch attempt and any failure-report entry
+    share the same name. ``used_suffixes`` is mutated with the suffix
+    chosen for this test; if sanitization-truncation would have collapsed
+    two distinct test node ids onto the same suffix, ``-2`` / ``-3`` /
+    ... is appended to keep names unique within the run.
     """
-    name_suffix = sanitize_test_name_for_agent(test_node_id)
-    short_id = short_random_id()
-    return AgentName(f"tmr-{name_suffix}-{short_id}"), f"mngr-tmr/{name_suffix}-{short_id}"
+    sanitized = sanitize_test_name_for_agent(test_node_id)
+    suffix = dedup_name(sanitized, used_suffixes)
+    return AgentName(f"tmr-{run_name}-{suffix}"), f"mngr-tmr/{run_name}/{suffix}"
 
 
 def _make_launch_failure_metadata(
@@ -100,15 +102,26 @@ def _build_host_environment(config: TmrLaunchConfig) -> HostEnvironmentOptions:
     return HostEnvironmentOptions(authorized_keys=config.additional_authorized_keys)
 
 
+# Server-side label that classifies a TMR-launched agent. The value is
+# always an AgentKind enum value so the in-process kind and the on-server
+# label have a single source of truth -- mngr ls --include
+# 'labels.tmr_role == "INTEGRATOR"' matches the in-process classification.
+_ROLE_LABEL_KEY = "tmr_role"
+
+
 def _build_agent_options(
     agent_name: AgentName,
     branch_name: str,
     config: TmrLaunchConfig,
+    kind: AgentKind,
     initial_message: str | None = None,
     target_path: Path | None = None,
     transfer_mode: TransferMode | None = None,
 ) -> CreateAgentOptions:
     """Build CreateAgentOptions for a tmr agent.
+
+    ``kind`` is stamped onto ``label_options`` as the ``tmr_role`` label,
+    overriding any prior value carried on ``config``.
 
     ``target_path`` overrides where the agent's work_dir is placed on the
     host (used to pin the snapshotter to ``/code``). ``transfer_mode``
@@ -118,6 +131,7 @@ def _build_agent_options(
     if transfer_mode is None:
         transfer_mode = transfer_mode_for_provider(config.provider_name)
     is_remote = config.provider_name.lower() != LOCAL_PROVIDER_NAME
+    label_options = AgentLabelOptions(labels={**config.label_options.labels, _ROLE_LABEL_KEY: kind.value})
     return CreateAgentOptions(
         agent_type=config.agent_type,
         name=agent_name,
@@ -130,7 +144,7 @@ def _build_agent_options(
         ),
         data_options=AgentDataOptions(is_rsync_enabled=False),
         environment=config.env_options,
-        label_options=config.label_options,
+        label_options=label_options,
         ready_timeout_seconds=60.0 if is_remote else 10.0,
     )
 
@@ -140,20 +154,24 @@ def _create_tmr_agent(
     branch_name: str,
     config: TmrLaunchConfig,
     mngr_ctx: MngrContext,
+    kind: AgentKind,
     initial_message: str | None = None,
     existing_host: OnlineHostInterface | None = None,
     host_name: HostName | None = None,
-    is_snapshotter: bool = False,
 ) -> CreateAgentResult:
     """Create an agent on the configured provider with an optional initial message.
+
+    ``kind`` classifies the agent -- it controls the ``tmr_role`` label
+    (set by ``_build_agent_options``) and triggers the snapshotter-specific
+    work_dir pinning when ``kind is AgentKind.SNAPSHOTTER``.
 
     If existing_host is provided, the agent is placed on that host instead of
     creating a new one (used for host sharing in remote providers).
 
-    If is_snapshotter is True, pin the agent's work_dir to ``/code`` so the
-    git repo on the snapshotter's host lives at a known path; subsequent
-    agents created from the snapshot then git-worktree off that path
-    instead of re-uploading the source.
+    Snapshotter agents have their work_dir pinned to ``/code`` so the git
+    repo on the snapshotter's host lives at a known path; subsequent agents
+    created from the snapshot then git-worktree off that path instead of
+    re-uploading the source.
 
     If the agent is being placed on an existing host built from a snapshot
     (``existing_host`` is set and ``config.snapshot`` is set), source from
@@ -178,12 +196,13 @@ def _create_tmr_agent(
             environment=_build_host_environment(config),
         )
 
-    if is_snapshotter:
+    if kind is AgentKind.SNAPSHOTTER:
         source_location = HostLocation(host=config.source_host, path=config.source_dir)
         agent_options = _build_agent_options(
             agent_name,
             branch_name,
             config,
+            kind,
             initial_message=initial_message,
             target_path=_HOST_CODE_DIR,
         )
@@ -193,12 +212,13 @@ def _create_tmr_agent(
             agent_name,
             branch_name,
             config,
+            kind,
             initial_message=initial_message,
             transfer_mode=TransferMode.GIT_WORKTREE,
         )
     else:
         source_location = HostLocation(host=config.source_host, path=config.source_dir)
-        agent_options = _build_agent_options(agent_name, branch_name, config, initial_message=initial_message)
+        agent_options = _build_agent_options(agent_name, branch_name, config, kind, initial_message=initial_message)
 
     return api_create(
         source_location=source_location,
@@ -231,6 +251,7 @@ def _launch_test_agent(
         branch_name=branch_name,
         config=config,
         mngr_ctx=mngr_ctx,
+        kind=AgentKind.TESTING_AGENT,
         initial_message=build_test_agent_prompt(test_node_id, pytest_flags, prompt_suffix),
         existing_host=existing_host,
         host_name=host_name,
@@ -252,18 +273,20 @@ def _launch_test_agent(
 def _create_snapshot_host(
     config: TmrLaunchConfig,
     mngr_ctx: MngrContext,
+    run_name: str,
 ) -> SnapshotName:
     """Launch a dedicated snapshotter agent, snapshot its host, then stop it."""
-    short_id = short_random_id()
-    agent_name = AgentName(f"tmr-snapshotter-{short_id}")
+    agent_name = AgentName(f"tmr-{run_name}-snapshotter")
+    host_name = HostName(f"tmr-{run_name}-snapshotter")
 
     logger.info("Launching snapshotter agent '{}' for provisioning...", agent_name)
     create_result = _create_tmr_agent(
         agent_name=agent_name,
-        branch_name=f"mngr-tmr/snapshotter-{short_id}",
+        branch_name=f"mngr-tmr/{run_name}/snapshotter",
         config=config,
         mngr_ctx=mngr_ctx,
-        is_snapshotter=True,
+        kind=AgentKind.SNAPSHOTTER,
+        host_name=host_name,
     )
 
     snapshotter_host = create_result.host
@@ -307,7 +330,7 @@ def _create_host_pool(
         futures = []
         host_environment = _build_host_environment(config)
         for i in range(host_count):
-            h_name = HostName(f"{run_name}-host-{i}")
+            h_name = HostName(f"tmr-{run_name}-host-{i}")
             new_host_opts = NewHostOptions(
                 provider=config.provider_name,
                 name=h_name,
@@ -331,12 +354,12 @@ def launch_all_test_agents(
     mngr_ctx: MngrContext,
     pytest_flags: tuple[str, ...],
     launch_failures: list[AgentMetadata],
+    run_name: str,
     prompt_suffix: str = "",
     use_snapshot: bool = False,
     max_parallel: int = 4,
     launch_delay_seconds: float = 2.0,
     agents_per_host: int = 4,
-    run_name: str = "tmr",
 ) -> tuple[list[TestAgentInfo], dict[str, OnlineHostInterface], SnapshotName | None]:
     """Launch agents for all collected tests.
 
@@ -355,7 +378,7 @@ def launch_all_test_agents(
         provider = get_provider_instance(config.provider_name, mngr_ctx)
         if provider.supports_snapshots:
             try:
-                snapshot_name = _create_snapshot_host(config, mngr_ctx)
+                snapshot_name = _create_snapshot_host(config, mngr_ctx, run_name)
                 launch_config = config.model_copy_update(to_update(config.field_ref().snapshot, snapshot_name))
             except (MngrError, HostError, OSError, BaseExceptionGroup) as exc:
                 logger.warning("Failed to create snapshot, launching agents without snapshot: {}", exc)
@@ -372,6 +395,7 @@ def launch_all_test_agents(
         if host_count > 0:
             host_pool = _create_host_pool(host_count, launch_config, mngr_ctx, run_name, max_parallel)
 
+    used_suffixes: set[str] = set()
     with ConcurrencyGroupExecutor(
         parent_cg=mngr_ctx.concurrency_group,
         name="tmr_launch",
@@ -382,8 +406,8 @@ def launch_all_test_agents(
             if i > 0 and launch_delay_seconds > 0:
                 time.sleep(launch_delay_seconds)
             existing_host = host_pool[i % len(host_pool)] if host_pool else None
-            h_name = HostName(f"{run_name}-host-{i}") if not is_local and not host_pool else None
-            agent_name, branch_name = _make_test_agent_identity(test_node_id)
+            h_name = HostName(f"tmr-{run_name}-host-{i}") if not is_local and not host_pool else None
+            agent_name, branch_name = _make_test_agent_identity(run_name, test_node_id, used_suffixes)
             futures.append(
                 (
                     executor.submit(
@@ -445,17 +469,19 @@ def launch_agents_up_to_limit(
     all_hosts: dict[str, OnlineHostInterface],
     agent_id_to_info: dict[str, TestAgentInfo],
     launch_failures: list[AgentMetadata],
+    run_name: str,
+    used_suffixes: set[str],
 ) -> None:
     """Launch agents from remaining_tests until we hit max_agents running.
 
     Mutates remaining_tests (pops from front), pending_ids, all_agents,
-    all_hosts, agent_id_to_info, and launch_failures in place. Per-test
-    launch failures are appended to ``launch_failures`` so they can be
-    surfaced in the report.
+    all_hosts, agent_id_to_info, ``used_suffixes``, and launch_failures
+    in place. Per-test launch failures are appended to ``launch_failures``
+    so they can be surfaced in the report.
     """
     while remaining_tests and (max_agents <= 0 or len(pending_ids) < max_agents):
         test_node_id = remaining_tests.pop(0)
-        agent_name, branch_name = _make_test_agent_identity(test_node_id)
+        agent_name, branch_name = _make_test_agent_identity(run_name, test_node_id, used_suffixes)
         try:
             info, host = _launch_with_timeout(
                 test_node_id, agent_name, branch_name, config, mngr_ctx, pytest_flags, prompt_suffix
@@ -485,19 +511,23 @@ def launch_integrator_agent(
     fix_branches: list[str],
     config: TmrLaunchConfig,
     mngr_ctx: MngrContext,
+    run_name: str,
 ) -> tuple[TestAgentInfo, OnlineHostInterface]:
     """Launch an integrator agent that cherry-picks fix branches into a linear stack."""
-    short_id = short_random_id()
-    agent_name = AgentName(f"tmr-integrator-{short_id}")
+    agent_name = AgentName(f"tmr-{run_name}-integrator")
+    branch_name = f"mngr-tmr/{run_name}/integrated"
+    host_name = HostName(f"tmr-{run_name}-integrator")
     prompt = build_integrator_prompt(fix_branches)
 
     logger.info("Launching integrator agent '{}' to integrate {} branches", agent_name, len(fix_branches))
     create_result = _create_tmr_agent(
         agent_name=agent_name,
-        branch_name=f"mngr-tmr/integrated-{short_id}",
+        branch_name=branch_name,
         config=config,
         mngr_ctx=mngr_ctx,
+        kind=AgentKind.INTEGRATOR,
         initial_message=prompt,
+        host_name=host_name,
     )
 
     return (
@@ -506,7 +536,7 @@ def launch_integrator_agent(
             agent_id=create_result.agent.id,
             agent_name=create_result.agent.name,
             work_dir=create_result.agent.work_dir,
-            branch_name=f"mngr-tmr/integrated-{short_id}",
+            branch_name=branch_name,
             created_at=time.monotonic(),
         ),
         create_result.host,

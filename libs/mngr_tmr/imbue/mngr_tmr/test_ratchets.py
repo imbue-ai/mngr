@@ -42,7 +42,12 @@ def test_prevent_global_keyword() -> None:
 
 
 def test_prevent_bare_print() -> None:
-    rc.check_bare_print(_DIR, snapshot(0))
+    # setup_tmr_ci_debug.py is a user-facing CLI utility whose stdout *is* its
+    # output channel (the printed line is the modal SSH public key the user
+    # copies into .github/tmr-authorized-keys). Logger framing isn't right
+    # here, so exclude this script from the rule rather than route output
+    # through a logger just to dodge the regex.
+    rc.check_bare_print(_DIR, snapshot(0), excluded_patterns=("setup_tmr_ci_debug.py",))
 
 
 # --- Exception handling ---

@@ -125,7 +125,7 @@ def test_list_all_host_records_skips_corrupt_files(store: DockerHostStore, tmp_p
 
 def test_persist_agent_data(store: DockerHostStore) -> None:
     host_id = HostId(HOST_ID_A)
-    agent_data = {"id": AGENT_ID_A, "name": "test-agent", "type": "echo"}
+    agent_data = {"id": AGENT_ID_A, "name": "test-agent", "type": "generic"}
 
     store.persist_agent_data(host_id, agent_data)
 

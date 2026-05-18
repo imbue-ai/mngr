@@ -79,7 +79,7 @@ class ExecCliOptions(CommonCliOptions):
     "--start/--no-start",
     default=True,
     show_default=True,
-    help="Automatically start the host/agent if stopped",
+    help="Automatically start the host if offline (the agent does not need to be running)",
 )
 @optgroup.group("Error Handling")
 @optgroup.option(
