@@ -2190,14 +2190,19 @@ def test_error_emitter_collects_per_resource_errors_during_discovery(
     assert captured == [emitted_error]
 
 
+@pytest.mark.parametrize("is_streaming", [True, False])
 def test_construct_discover_and_emit_for_provider_wires_on_error(
     temp_mngr_ctx: MngrContext,
+    is_streaming: bool,
 ) -> None:
-    """End-to-end: streaming discovery routes a provider's on_error to result.errors.
+    """End-to-end: list_agents routes a provider's on_error to result.errors.
 
-    Confirms _construct_discover_and_emit_for_provider builds an _ErrorEmitter and
-    threads it into provider.discover_hosts_and_agents, so a per-resource failure
-    inside a provider lands in result.errors with full attribution.
+    Confirms both pipeline modes build an `_ErrorEmitter` and thread it into
+    `provider.discover_hosts_and_agents`, so a per-resource failure inside a
+    provider lands in `result.errors` with full attribution:
+
+    - ``is_streaming=True`` exercises ``_construct_discover_and_emit_for_provider``
+    - ``is_streaming=False`` exercises ``_construct_and_discover_for_provider``
     """
 
     class _EmittingProvider(MockProviderInstance):
@@ -2211,8 +2216,11 @@ def test_construct_discover_and_emit_for_provider_wires_on_error(
                 on_error(ProviderErrorInfo.build_for_provider(MngrError("simulated per-resource failure"), self.name))
             return {}
 
-    provider_name = ProviderInstanceName("emitting-provider")
-    backend_name = ProviderBackendName("emitting-backend")
+    # Distinct names per parametrization so xdist workers don't collide in
+    # the shared module-level registries.
+    mode_suffix = "streaming" if is_streaming else "batch"
+    provider_name = ProviderInstanceName(f"emitting-provider-{mode_suffix}")
+    backend_name = ProviderBackendName(f"emitting-backend-{mode_suffix}")
 
     class _EmittingBackend(ProviderBackendInterface):
         @staticmethod
@@ -2261,7 +2269,7 @@ def test_construct_discover_and_emit_for_provider_wires_on_error(
         captured: list[ErrorInfo] = []
         result = list_agents(
             mngr_ctx=ctx,
-            is_streaming=True,
+            is_streaming=is_streaming,
             error_behavior=ErrorBehavior.CONTINUE,
             provider_names=(str(provider_name),),
             on_error=captured.append,
