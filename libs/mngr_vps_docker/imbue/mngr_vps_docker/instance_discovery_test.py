@@ -47,6 +47,7 @@ from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_vps_docker.config import VpsDockerProviderConfig
 from imbue.mngr_vps_docker.host_store import VpsDockerHostRecord
+from imbue.mngr_vps_docker.host_store import VpsDockerHostStore
 from imbue.mngr_vps_docker.instance import VpsDockerProvider
 from imbue.mngr_vps_docker.primitives import VpsInstanceId
 from imbue.mngr_vps_docker.primitives import VpsInstanceStatus
@@ -159,18 +160,25 @@ class _DiscoveryTestProvider(VpsDockerProvider):
             return
         raise AssertionError(f"unexpected _make_outer_for_vps_ip call for {vps_ip!r}")
 
-    def _get_existing_host_store(self, outer: OuterHostInterface) -> Any:
+    def _get_existing_host_store(self, outer: OuterHostInterface) -> VpsDockerHostStore | None:
         # Per the test_read_records_from_vps_returns_empty_when_state_container_not_ready
         # scenario: signal "container not running yet" with None, the same
         # value the real implementation returns from _docker_inspect_running
         # when the state container doesn't exist on the VPS.
-        # The vps_ip isn't directly available here, but the only path that
-        # reaches this override has set exactly one entry in state_container_ready.
-        for vps_ip, ready in self.state_container_ready.items():
-            if not ready:
-                return None
+        # The only path that reaches this override has set exactly one entry
+        # in state_container_ready; assert that explicitly rather than relying
+        # on a single-iteration for-loop.
+        if not self.state_container_ready:
+            raise AssertionError("unexpected _get_existing_host_store call")
+        if len(self.state_container_ready) != 1:
+            raise AssertionError(
+                f"_get_existing_host_store stub expects exactly one entry in "
+                f"state_container_ready, got {len(self.state_container_ready)}"
+            )
+        vps_ip, ready = next(iter(self.state_container_ready.items()))
+        if ready:
             raise AssertionError(f"state_container_ready=True for {vps_ip!r} not supported by this stub")
-        raise AssertionError("unexpected _get_existing_host_store call")
+        return None
 
 
 class _DummyOuter:
