@@ -1552,6 +1552,13 @@ web_app = FastAPI()
 # lifecycle deploy would produce, hence the matching legacy fallback.)
 _GENERATION_ID_ENV_VAR = "MINDS_TIER_GENERATION_ID"
 
+# Per-deploy timestamp threaded into the connector's process env by
+# ``minds env deploy``. Read at module-import time below to build the
+# Modal Secret bundle names, and re-read at request time by ``/version``
+# (see ``get_version``); kept in one place so the literal string never
+# drifts between those two call sites.
+_MINDS_DEPLOY_ID_ENV_VAR = "MINDS_DEPLOY_ID"
+
 # Test-only env var honored by ``/health/liveness``. When set to ``"1"``,
 # the liveness probe returns 500 unconditionally so the deployment-test
 # suite can drive the auto-rollback path in ``minds env deploy`` without
@@ -1615,7 +1622,7 @@ def get_version() -> dict[str, str]:
     ``modal app describe``).
     """
     return {
-        "deploy_id": os.environ.get("MINDS_DEPLOY_ID", ""),
+        "deploy_id": os.environ.get(_MINDS_DEPLOY_ID_ENV_VAR, ""),
         "generation_id": os.environ.get(_GENERATION_ID_ENV_VAR, ""),
     }
 
@@ -2602,7 +2609,7 @@ _DEPLOY_ENV = os.environ.get("MNGR_DEPLOY_ENV", "production")
 # any Modal env so a real ``modal deploy`` invocation outside of
 # ``minds env deploy`` will fail with "Secret not found" -- the safety
 # property the timestamped-secret rollback model needs.
-_MINDS_DEPLOY_ID = os.environ.get("MINDS_DEPLOY_ID", "MINDS_DEPLOY_ID_UNSET")
+_MINDS_DEPLOY_ID = os.environ.get(_MINDS_DEPLOY_ID_ENV_VAR, "MINDS_DEPLOY_ID_UNSET")
 
 # Warm-pool size for the deployed function. ``minds env deploy`` reads
 # the tier's ``[min_containers].connector`` from its committed
@@ -2736,7 +2743,7 @@ def _init_supertokens() -> None:
         modal.Secret.from_name(f"pool-ssh-{_DEPLOY_ENV}-{_MINDS_DEPLOY_ID}"),
         modal.Secret.from_name(f"litellm-connector-{_DEPLOY_ENV}-{_MINDS_DEPLOY_ID}"),
         modal.Secret.from_name(f"paid-accounts-{_DEPLOY_ENV}-{_MINDS_DEPLOY_ID}"),
-        modal.Secret.from_dict({"MNGR_DEPLOY_ENV": _DEPLOY_ENV, "MINDS_DEPLOY_ID": _MINDS_DEPLOY_ID}),
+        modal.Secret.from_dict({"MNGR_DEPLOY_ENV": _DEPLOY_ENV, _MINDS_DEPLOY_ID_ENV_VAR: _MINDS_DEPLOY_ID}),
     ],
     # Warm-pool size driven by ``_MIN_CONTAINERS`` at the top of this
     # module: defaults to 1 for production / staging (avoid cold-boot
