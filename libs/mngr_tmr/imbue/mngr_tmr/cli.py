@@ -554,8 +554,8 @@ def _run_integrator_phase(
     "--reintegrate",
     is_flag=True,
     default=False,
-    help="Re-read outcomes from a previous TMR run, re-run the integrator, and regenerate the report. "
-    "Skips test collection and agent launching. The run to reintegrate is identified by --run-name.",
+    help="Re-read outcomes from a previous TMR run (by --run-name), re-run the integrator, and regenerate the report. "
+    "Skips test collection and agent launching.",
 )
 @click.option(
     "--run-name",
