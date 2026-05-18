@@ -69,8 +69,8 @@ class AwsProvider(VpsDockerProvider):
         window even if pytest is killed or the host crashes. Malformed values
         (non-integer, zero, negative) silently fall back to the config value.
         """
-        override = parse_int_env(_TEST_AUTO_SHUTDOWN_ENV_VAR)
-        if override is not None and override > 0:
+        override = parse_int_env(_TEST_AUTO_SHUTDOWN_ENV_VAR, 0)
+        if override > 0:
             return override
         return super()._get_effective_auto_shutdown_minutes()
 
