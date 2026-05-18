@@ -24,6 +24,7 @@ from imbue.mngr.interfaces.host import NewHostOptions
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
 from imbue.mngr.plugins.hookspecs import OnBeforeCreateArgs
+from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import HostName
 from imbue.mngr.utils.env_utils import parse_env_file
@@ -164,6 +165,14 @@ def create(
         with log_span("Calling on_host_created hooks"):
             mngr_ctx.pm.hook.on_host_created(host=host, mngr_ctx=mngr_ctx)
 
+    # The ``pre_baked_agent_id`` attribute on the host (only set by
+    # providers whose ``create_host`` returns a host with a baked-in
+    # agent -- ``ImbueCloudHost`` today) marks a specific agent id that
+    # the host's ``create_agent_state`` knows how to adopt in place when
+    # ``agent_options.name`` matches. Pulled out before the lock so the
+    # duplicate-name check below can recognize the adopt scenario.
+    pre_baked_agent_id: AgentId | None = getattr(host, "pre_baked_agent_id", None)
+
     # while we are deploying an agent, lock the host:
     with host.lock_cooperatively():
         # Prevent duplicate agent names on the same host. The tmux session name
@@ -171,9 +180,17 @@ def create(
         # collide on the same tmux session. This check must be inside the lock to
         # prevent TOCTOU races between concurrent create calls.
         # In update mode, the agent already exists so we skip this check.
+        # Also skip when the existing agent IS the host's pre-baked agent
+        # (imbue_cloud lease-adopt): the bake intentionally seeds the host
+        # with the same agent name the caller is creating, and
+        # ``host.create_agent_state`` will hydrate it in place. Without this
+        # skip the post-lease duplicate check fires immediately and aborts
+        # every fresh imbue_cloud create with ``DuplicateAgentNameError``.
         if agent_options.name is not None and not agent_options.is_update:
             for existing_agent in host.get_agents():
                 if existing_agent.name == agent_options.name:
+                    if pre_baked_agent_id is not None and existing_agent.id == pre_baked_agent_id:
+                        continue
                     raise DuplicateAgentNameError(agent_options.name, existing_agent.id)
 
         # Create the agent's work_dir on the host
