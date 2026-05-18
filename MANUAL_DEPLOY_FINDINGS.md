@@ -11,7 +11,7 @@ formal tests; this is a checklist of probes + findings.
 **Bugs that break user-visible flows:**
 
 - **F5**: Three connector endpoints (`/auth/session/revoke`, `/auth/email/is-verified`, `/auth/email/send-verification`) always return 500 due to syncio SuperTokens helpers called inside `async def`. Onboarding / sign-out flow broken today.
-- **F9**: `POST /anthropic/v1/messages` on the LiteLLM proxy always returns 400 — the documented `ANTHROPIC_BASE_URL=https://.../anthropic` integration is broken because the proxy config has no `pass_through_endpoints` block. Workaround: clients must use `/chat/completions`.
+- **F9**: ~~`POST /anthropic/v1/messages` always 400~~ — **downgraded after re-probe**: the LiteLLM proxy's native `/v1/messages` route handles the Anthropic shape just fine. The documented `ANTHROPIC_BASE_URL` in the README has an erroneous `/anthropic` suffix that lands on a broken (and unneeded) path. Docs-only fix.
 - **F16**: For dev-tier deploys, Modal env / Neon project / SuperTokens app are created BEFORE the recover-target file is written. A failure in those steps leaves cloud resources behind with no rollback path.
 - **F17**: Pool-hosts schema migrations only run for `creates_resources=true` tiers. Staging and production silently skip them — their `pool_hosts` table will drift from dev's schema over time.
 - **F19**: `minds env recover` skips Modal rollback when `version is None` (first-ever deploy) but deletes the Modal Secrets. The deployed app stays running, now pinned to deleted secrets — broken at next request.
@@ -63,7 +63,7 @@ formal tests; this is a checklist of probes + findings.
 | F6 | `override_global_claim_validators=lambda *_: []` so "Email not verified" becomes live | `connector/app.py` |
 | F7 | DELETE tunnel returns 200 on already-gone | `connector/app.py` |
 | F8 | Defer (test-suite fixture concern) | none |
-| F9 | Add `pass_through_endpoints` for anthropic to LiteLLM config | `modal_litellm/app.py` |
+| F9 | **Downgraded: docs-only fix.** Drop the `/anthropic` suffix from documented `ANTHROPIC_BASE_URL` in README + app.py docstring; the native `/v1/messages` route works fine. No redeploy needed. | `modal_litellm/README.md`, `modal_litellm/app.py` (docstring only) |
 | F10 | Connector `/keys/{id}` reads spend from `/spend/keys` | `connector/app.py` |
 | F11 | `minds env list` shows "(in-repo client.toml)" for reserved tiers | `provisioning.py`, `cli/env.py` |
 | F12 | Demote legacy-`MINDS_ROOT_NAME` warning to debug | `bootstrap.py` |
@@ -272,7 +272,8 @@ Each finding has:
 
 - **Why it matters:** Per the README this is THE endpoint Claude Code uses (`ANTHROPIC_BASE_URL=https://.../anthropic`). It's the headline feature of the proxy: a virtual key that Claude Code can use transparently. Anyone wiring this up today will get `400 anthropic-version: header is required` for every prompt. Workaround is to use `/chat/completions` which is OpenAI-shape and works fine — but that requires Claude Code (or any Anthropic SDK client) to be reconfigured.
 - **Suggested fix:** Add a `pass_through_endpoints` block to `LITELLM_CONFIG["general_settings"]` for `anthropic` (and/or pin the LiteLLM proxy to a version whose `/anthropic/v1/messages` auto-pass-through is enabled). Then add a release-time integration test that does one round-trip through it with the `claude` CLI.
-- **Decision:** Add the `pass_through_endpoints` block under `general_settings` with one entry mapping `/anthropic` → `https://api.anthropic.com` and forwarding the `anthropic-version` + `x-api-key` headers. Pin litellm to a known-good version in `pyproject.toml` if 1.85's behavior is the regression. Validate by re-running the F9 probe via this branch's worktree (a redeploy is required — coordinate with you before doing it).
+- **Decision:** ~~Add pass_through_endpoints~~ → **Downgraded: docs-only fix.** Re-verified against dev-josh-1 and the user's old working URL: the LiteLLM proxy's native `POST /v1/messages` route already handles the Anthropic API shape correctly with a virtual key (returns 200 with proper Claude response, both `x-api-key:` and `Authorization: Bearer` work). The Anthropic SDK / Claude Code appends `/v1/messages` to the configured `ANTHROPIC_BASE_URL`, so setting `ANTHROPIC_BASE_URL=https://<workspace>--llm-<tier>-proxy.modal.run/` (NO `/anthropic` suffix) lands on the working route. The 400 I caught originally was on `/anthropic/v1/messages`, which is LiteLLM's optional `pass_through_endpoints` path — that path is unconfigured, but **we don't need it** because the native route works. **Fix:** update `apps/modal_litellm/README.md:62` and `apps/modal_litellm/app.py:10,17` to drop the `/anthropic` suffix from the documented `ANTHROPIC_BASE_URL` (and drop the "Pass-through" bullet that points at the non-working path). No code change to the proxy. Validate by setting the corrected base URL in a `claude` invocation and confirming a roundtrip works. **No redeploy needed.**
+- **Status: NOT FIXED YET** — docs change pending.
 
 ### F10 — `/key/info` returns stale `spend=0` minutes after the actual usage; admin `/spend/keys` has the real value
 
