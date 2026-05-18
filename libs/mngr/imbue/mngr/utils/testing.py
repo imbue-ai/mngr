@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import typing
 from collections.abc import Generator
 from collections.abc import Sequence
 from contextlib import contextmanager
@@ -1560,7 +1561,11 @@ def assert_init_first_param_is_provider_name(subclass: type) -> None:
     assert params[1].name == "provider_name", (
         f"{subclass.__name__}.__init__ first parameter is {params[1].name!r}, expected 'provider_name'"
     )
-    assert params[1].annotation is ProviderInstanceName, (
-        f"{subclass.__name__}.__init__ provider_name annotation is {params[1].annotation!r}, "
+    # Use get_type_hints so string forward references (e.g. from `from __future__
+    # import annotations`) are resolved before comparison.
+    hints = typing.get_type_hints(subclass.__init__)
+    provider_name_hint = hints.get("provider_name")
+    assert provider_name_hint is ProviderInstanceName, (
+        f"{subclass.__name__}.__init__ provider_name annotation is {provider_name_hint!r}, "
         f"expected ProviderInstanceName"
     )
