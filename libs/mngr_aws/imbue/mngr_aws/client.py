@@ -1,5 +1,6 @@
 import time
 from collections.abc import Iterator
+from collections.abc import Mapping
 from collections.abc import Sequence
 from contextlib import contextmanager
 from datetime import datetime
@@ -31,19 +32,6 @@ _STATE_MAP: Final[dict[str, VpsInstanceStatus]] = {
     "shutting-down": VpsInstanceStatus.DESTROYING,
     "terminated": VpsInstanceStatus.DESTROYING,
 }
-
-
-def _parse_kv_tag(raw_tag: str) -> dict[str, str]:
-    """Parse a "key=value" string into an EC2 Tag dict.
-
-    Vultr-style tags arrive as flat ``"key=value"`` strings; EC2 needs
-    ``{"Key": ..., "Value": ...}``. Tags without an ``=`` are stored with
-    an empty value.
-    """
-    if "=" in raw_tag:
-        key, _, value = raw_tag.partition("=")
-        return {"Key": key, "Value": value}
-    return {"Key": raw_tag, "Value": ""}
 
 
 class AwsVpsClient(VpsClientInterface):
@@ -183,7 +171,7 @@ class AwsVpsClient(VpsClientInterface):
         plan: str,
         user_data: str,
         ssh_key_ids: Sequence[str],
-        tags: Sequence[str],
+        tags: Mapping[str, str],
     ) -> VpsInstanceId:
         """Provision an EC2 instance using the client's configured AMI."""
         if region != self.region:
@@ -195,7 +183,7 @@ class AwsVpsClient(VpsClientInterface):
 
         sg_id = self.ensure_security_group()
 
-        tag_specs: list[dict[str, str]] = [_parse_kv_tag(t) for t in tags]
+        tag_specs: list[dict[str, str]] = [{"Key": k, "Value": v} for k, v in tags.items()]
         tag_specs.append({"Key": "Name", "Value": label})
         tag_specs.append({"Key": "mngr-created-at", "Value": datetime.now(timezone.utc).isoformat()})
 

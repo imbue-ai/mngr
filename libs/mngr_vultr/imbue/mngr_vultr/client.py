@@ -1,5 +1,6 @@
 import base64
 import time
+from collections.abc import Mapping
 from collections.abc import Sequence
 from datetime import datetime
 from datetime import timezone
@@ -104,7 +105,7 @@ class VultrVpsClient(VpsClientInterface):
         plan: str,
         user_data: str,
         ssh_key_ids: Sequence[str],
-        tags: Sequence[str],
+        tags: Mapping[str, str],
     ) -> VpsInstanceId:
         # Vultr requires user_data to be base64-encoded
         user_data_b64 = base64.b64encode(user_data.encode()).decode()
@@ -116,7 +117,7 @@ class VultrVpsClient(VpsClientInterface):
             "label": label,
             "user_data": user_data_b64,
             "sshkey_id": list(ssh_key_ids),
-            "tags": list(tags),
+            "tags": [f"{k}={v}" for k, v in tags.items()],
             "backups": "disabled",
             "hostname": label,
         }

@@ -1,5 +1,6 @@
 from abc import ABC
 from abc import abstractmethod
+from collections.abc import Mapping
 from collections.abc import Sequence
 from datetime import datetime
 
@@ -45,7 +46,7 @@ class VpsClientInterface(MutableModel, ABC):
         plan: str,
         user_data: str,
         ssh_key_ids: Sequence[str],
-        tags: Sequence[str],
+        tags: Mapping[str, str],
     ) -> VpsInstanceId:
         """Provision a new VPS instance. Returns the instance ID.
 

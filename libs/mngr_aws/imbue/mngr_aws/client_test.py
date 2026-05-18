@@ -78,7 +78,7 @@ class TestAwsVpsClientInstances:
             plan="t3.small",
             user_data="test-user-data",
             ssh_key_ids=["key-1"],
-            tags=["mngr-provider=test", "mngr-host-id=h1"],
+            tags={"mngr-provider": "test", "mngr-host-id": "h1"},
         )
         assert instance_id == VpsInstanceId("i-0abc123def456")
 
@@ -92,7 +92,7 @@ class TestAwsVpsClientInstances:
                 plan="t3.small",
                 user_data="test",
                 ssh_key_ids=[],
-                tags=[],
+                tags={},
             )
 
     def test_create_instance_cross_region_raises(self, stubbed_client: tuple[AwsVpsClient, Stubber]) -> None:
@@ -104,7 +104,7 @@ class TestAwsVpsClientInstances:
                 plan="t3.small",
                 user_data="test",
                 ssh_key_ids=[],
-                tags=[],
+                tags={},
             )
 
     def test_destroy_instance(self, stubbed_client: tuple[AwsVpsClient, Stubber]) -> None:

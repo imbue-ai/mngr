@@ -88,7 +88,7 @@ class TestVultrVpsClientInstances:
                 plan="vc2-1c-1gb",
                 user_data="test data",
                 ssh_key_ids=["key1"],
-                tags=["tag1"],
+                tags={"tag1": "v1"},
             )
             assert instance_id == VpsInstanceId("inst-abc123")
 
@@ -102,7 +102,7 @@ class TestVultrVpsClientInstances:
                     plan="vc2-1c-1gb",
                     user_data="test",
                     ssh_key_ids=[],
-                    tags=[],
+                    tags={},
                 )
 
     def test_get_instance_status_active_running(self, client: VultrVpsClient) -> None:

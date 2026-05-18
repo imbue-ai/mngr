@@ -955,7 +955,7 @@ class VpsDockerProvider(BaseProviderInstance):
 
         logger.log(LogLevel.BUILD.value, "Creating VPS instance (region: {}, plan: {})...", region, plan, source="vps")
         with log_span("Creating VPS instance"):
-            vps_tags = [f"mngr-host-id={host_id}", f"mngr-provider={self.name}"]
+            vps_tags = {"mngr-host-id": str(host_id), "mngr-provider": str(self.name)}
             vps_instance_id = self.vps_client.create_instance(
                 label=f"mngr-{name}",
                 region=region,
