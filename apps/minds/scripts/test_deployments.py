@@ -267,7 +267,12 @@ class _MailtmAccount(FrozenModel):
 
 
 def _create_mailtm_account(*, run_id: RunId) -> _MailtmAccount:
-    """Create a fresh disposable mail.tm account; return creds + record in ledger."""
+    """Create a fresh disposable mail.tm account; return creds + record in ledger.
+
+    The ledger entry is appended as soon as the account is created on mail.tm,
+    before the JWT is minted, so a failure between account creation and token
+    mint still leaves a trail for ``cleanup`` to find.
+    """
     with httpx.Client(base_url=_MAILTM_API_BASE, timeout=20.0) as client:
         domains_response = client.get("/domains")
         domains_response.raise_for_status()
@@ -280,24 +285,27 @@ def _create_mailtm_account(*, run_id: RunId) -> _MailtmAccount:
         password = uuid4().hex
         account_response = client.post("/accounts", json={"address": address, "password": password})
         account_response.raise_for_status()
-        account_id = account_response.json()["id"]
+        account_id = NonEmptyStr(account_response.json()["id"])
+        # Record the account in the ledger now -- before requesting the JWT --
+        # so a /token failure leaves a recoverable trail rather than orphaning
+        # the account on mail.tm.
+        _append_ledger_entry(
+            LedgerEntry(
+                kind=LedgerKind.MAILTM_ACCOUNT,
+                name=account_id,
+                created_at=datetime.now(timezone.utc),
+                run_id=run_id,
+                status=LedgerStatus.ACTIVE,
+            )
+        )
         token_response = client.post("/token", json={"address": address, "password": password})
         token_response.raise_for_status()
         jwt = token_response.json()["token"]
     account = _MailtmAccount(
-        account_id=NonEmptyStr(account_id),
+        account_id=account_id,
         address=NonEmptyStr(address),
         password=SecretStr(password),
         jwt=SecretStr(jwt),
-    )
-    _append_ledger_entry(
-        LedgerEntry(
-            kind=LedgerKind.MAILTM_ACCOUNT,
-            name=account.account_id,
-            created_at=datetime.now(timezone.utc),
-            run_id=run_id,
-            status=LedgerStatus.ACTIVE,
-        )
     )
     logger.info("Created per-run mail.tm account {}", account.address)
     return account
