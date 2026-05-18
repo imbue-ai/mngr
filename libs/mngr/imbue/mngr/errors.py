@@ -174,13 +174,7 @@ class AgentStartError(AgentError):
 
 
 class ProviderError(MngrError):
-    """Base class for all provider-related errors.
-
-    Every subclass carries ``provider_name``, the name of the provider
-    instance the failure is attributed to. Handlers that catch
-    ``ProviderError`` can rely on ``e.provider_name`` without narrowing
-    to a specific subclass.
-    """
+    """Base class for all provider-related errors."""
 
     provider_name: ProviderInstanceName
 
