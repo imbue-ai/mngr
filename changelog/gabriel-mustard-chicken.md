@@ -25,10 +25,6 @@ Workspace-server restart UX improvements:
   "Workspace server starting..." loader.
 - The recovery page now notes that running agents are not interrupted by a
   workspace-server restart.
-- Fixed a bug where `workspaceUrlForAgent` in Electron's main process built
-  `/goto/<agent>/` URLs against the minds port instead of the mngr_forward
-  plugin port (which owns `/goto/`). This caused 404s after a manual restart
-  from the sidebar context menu and from "Open in new window".
 - Stale failure envelopes arriving immediately after a successful restart
   no longer cause a brief recovery-page flash; the health tracker now
   ignores failures within a short grace window after recovery.
