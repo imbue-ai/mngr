@@ -1,6 +1,9 @@
 """Tests for error classes."""
 
+import inspect
+
 import click
+import pytest
 from click.testing import CliRunner
 
 from imbue.mngr.errors import AgentNotFoundError
@@ -13,6 +16,7 @@ from imbue.mngr.errors import HostNotRunningError
 from imbue.mngr.errors import HostNotStoppedError
 from imbue.mngr.errors import ImageNotFoundError
 from imbue.mngr.errors import MngrError
+from imbue.mngr.errors import ProviderError
 from imbue.mngr.errors import ProviderInstanceNotFoundError
 from imbue.mngr.errors import ProviderNotAuthorizedError
 from imbue.mngr.errors import SendMessageError
@@ -287,3 +291,31 @@ def test_agent_start_error_includes_agent_and_reason() -> None:
     assert error.reason == "session already exists"
     assert "my-agent" in str(error)
     assert "session already exists" in str(error)
+
+
+def _walk_concrete_subclasses(cls: type) -> list[type]:
+    found: list[type] = []
+    for sub in cls.__subclasses__():
+        if not inspect.isabstract(sub):
+            found.append(sub)
+        found.extend(_walk_concrete_subclasses(sub))
+    return found
+
+
+@pytest.mark.parametrize("subclass", _walk_concrete_subclasses(ProviderError), ids=lambda c: c.__name__)
+def test_provider_error_subclass_takes_provider_name_first(subclass: type) -> None:
+    """Every ProviderError subclass must accept provider_name as its first parameter.
+
+    Enforces the contract declared on ProviderError: handlers that catch the base
+    class can rely on e.provider_name being present.
+    """
+    params = list(inspect.signature(subclass.__init__).parameters.values())
+    # First parameter is self; second must be provider_name.
+    assert len(params) >= 2, f"{subclass.__name__}.__init__ has no parameters beyond self"
+    assert params[1].name == "provider_name", (
+        f"{subclass.__name__}.__init__ first parameter is {params[1].name!r}, expected 'provider_name'"
+    )
+    assert params[1].annotation is ProviderInstanceName, (
+        f"{subclass.__name__}.__init__ provider_name annotation is {params[1].annotation!r}, "
+        f"expected ProviderInstanceName"
+    )
