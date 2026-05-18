@@ -10,6 +10,14 @@ _DEFAULT_CAPTURE_PANE_TIMEOUT_SECONDS: Final[float] = 5.0
 # to avoid tmux "command too long" errors. Used by both base_agent.py and host.py.
 LONG_MESSAGE_THRESHOLD: Final[int] = 1024
 
+# Bound the time a single tmux client call (send-keys, load-buffer, paste-buffer,
+# delete-buffer) may run for. These should complete in milliseconds; a multi-second
+# wait means the tmux client is wedged talking to its server, which has happened
+# in practice. Because send_message holds an exclusive flock on the per-agent
+# message lock for the entire send, an unbounded wait here wedges every subsequent
+# send to the same agent until something kills the stuck client.
+TMUX_COMMAND_TIMEOUT_SECONDS: Final[float] = 30.0
+
 
 def build_tmux_capture_pane_command(session_name: str, include_scrollback: bool = False) -> str:
     """Build the tmux command string to capture pane content for a session.

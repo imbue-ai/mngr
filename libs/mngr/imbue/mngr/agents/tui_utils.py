@@ -21,6 +21,7 @@ from loguru import logger
 from imbue.imbue_common.logging import log_span
 from imbue.mngr.agents.base_agent import BaseAgent
 from imbue.mngr.errors import SendMessageError
+from imbue.mngr.hosts.tmux import TMUX_COMMAND_TIMEOUT_SECONDS
 from imbue.mngr.utils.polling import poll_until
 
 _SEND_MESSAGE_TIMEOUT_SECONDS: Final[float] = 15.0
@@ -116,7 +117,7 @@ def _is_paste_visible(agent: BaseAgent[Any], tmux_target: str, message: str) -> 
 def send_enter_keystroke(agent: BaseAgent[Any], tmux_target: str) -> None:
     """Send a single Enter via ``tmux send-keys``; raise SendMessageError on failure."""
     send_enter_cmd = f"tmux send-keys -t '{tmux_target}' Enter"
-    result = agent.host.execute_stateful_command(send_enter_cmd)
+    result = agent.host.execute_stateful_command(send_enter_cmd, timeout_seconds=TMUX_COMMAND_TIMEOUT_SECONDS)
     if not result.success:
         raise SendMessageError(
             str(agent.name),

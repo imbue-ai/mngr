@@ -28,6 +28,7 @@ from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.common import check_agent_type_known
 from imbue.mngr.hosts.common import determine_lifecycle_state
 from imbue.mngr.hosts.tmux import LONG_MESSAGE_THRESHOLD
+from imbue.mngr.hosts.tmux import TMUX_COMMAND_TIMEOUT_SECONDS
 from imbue.mngr.hosts.tmux import capture_tmux_pane_content
 from imbue.mngr.interfaces.agent import AgentConfigT
 from imbue.mngr.interfaces.agent import AgentInterface
@@ -365,7 +366,7 @@ class BaseAgent(AgentInterface[AgentConfigT]):
         """
         if len(message) < LONG_MESSAGE_THRESHOLD:
             send_msg_cmd = f"tmux send-keys -t '{tmux_target}' -l -- {shlex.quote(message)}"
-            result = self.host.execute_stateful_command(send_msg_cmd)
+            result = self.host.execute_stateful_command(send_msg_cmd, timeout_seconds=TMUX_COMMAND_TIMEOUT_SECONDS)
             if not result.success:
                 raise SendMessageError(str(self.name), f"tmux send-keys failed: {result.stderr or result.stdout}")
         else:
@@ -375,20 +376,21 @@ class BaseAgent(AgentInterface[AgentConfigT]):
             try:
                 self.host.write_text_file(tmp_path, message)
                 load_cmd = f"tmux load-buffer -b {quoted_buffer} {quoted_path}"
-                result = self.host.execute_stateful_command(load_cmd)
+                result = self.host.execute_stateful_command(load_cmd, timeout_seconds=TMUX_COMMAND_TIMEOUT_SECONDS)
                 if not result.success:
                     raise SendMessageError(
                         str(self.name), f"tmux load-buffer failed: {result.stderr or result.stdout}"
                     )
                 paste_cmd = f"tmux paste-buffer -b {quoted_buffer} -t '{tmux_target}'"
-                result = self.host.execute_stateful_command(paste_cmd)
+                result = self.host.execute_stateful_command(paste_cmd, timeout_seconds=TMUX_COMMAND_TIMEOUT_SECONDS)
                 if not result.success:
                     raise SendMessageError(
                         str(self.name), f"tmux paste-buffer failed: {result.stderr or result.stdout}"
                     )
             finally:
                 self.host.execute_idempotent_command(
-                    f"tmux delete-buffer -b {quoted_buffer} 2>/dev/null; rm -f {quoted_path}"
+                    f"tmux delete-buffer -b {quoted_buffer} 2>/dev/null; rm -f {quoted_path}",
+                    timeout_seconds=TMUX_COMMAND_TIMEOUT_SECONDS,
                 )
 
     def _send_message_simple(self, tmux_target: str, message: str) -> None:
@@ -396,7 +398,7 @@ class BaseAgent(AgentInterface[AgentConfigT]):
         self._send_tmux_literal_keys(tmux_target, message)
 
         send_enter_cmd = f"tmux send-keys -t '{tmux_target}' Enter"
-        result = self.host.execute_stateful_command(send_enter_cmd)
+        result = self.host.execute_stateful_command(send_enter_cmd, timeout_seconds=TMUX_COMMAND_TIMEOUT_SECONDS)
         if not result.success:
             raise SendMessageError(str(self.name), f"tmux send-keys Enter failed: {result.stderr or result.stdout}")
 

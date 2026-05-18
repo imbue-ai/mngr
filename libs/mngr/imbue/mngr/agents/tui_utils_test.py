@@ -16,6 +16,7 @@ from imbue.mngr.agents.tui_utils import send_enter_keystroke
 from imbue.mngr.agents.tui_utils import send_enter_via_tmux_wait_for_hook
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.errors import SendMessageError
+from imbue.mngr.hosts.tmux import TMUX_COMMAND_TIMEOUT_SECONDS
 from imbue.mngr.interfaces.data_types import CommandResult
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
@@ -99,10 +100,12 @@ class _RecorderHost(pydantic.BaseModel):
     """In-memory host stub: records each command and returns a configurable result."""
 
     captured: list[str] = pydantic.Field(default_factory=list)
+    captured_kwargs: list[dict[str, object]] = pydantic.Field(default_factory=list)
     succeed: bool = True
 
-    def execute_stateful_command(self, command: str, **_: object) -> CommandResult:
+    def execute_stateful_command(self, command: str, **kwargs: object) -> CommandResult:
         self.captured.append(command)
+        self.captured_kwargs.append(dict(kwargs))
         if self.succeed:
             return CommandResult(stdout="", stderr="", success=True)
         return CommandResult(stdout="", stderr="boom", success=False)
@@ -130,6 +133,16 @@ def test_send_enter_keystroke_raises_on_command_failure() -> None:
     agent = _make_probe(command_succeeds=False)
     with pytest.raises(SendMessageError, match="tmux send-keys Enter failed"):
         send_enter_keystroke(agent, "probe-target")
+
+
+def test_send_enter_keystroke_passes_timeout() -> None:
+    """An unbounded Enter can wedge the message lock if the tmux client hangs
+    talking to its server; the call must be timeout-bounded."""
+    agent = _make_probe()
+    send_enter_keystroke(agent, "probe-target")
+    host = agent.host
+    assert isinstance(host, _RecorderHost)
+    assert host.captured_kwargs == [{"timeout_seconds": TMUX_COMMAND_TIMEOUT_SECONDS}]
 
 
 def test_send_enter_best_effort_sends_single_keystroke() -> None:

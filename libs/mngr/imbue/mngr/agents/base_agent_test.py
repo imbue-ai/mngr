@@ -14,6 +14,7 @@ from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import SendMessageError
 from imbue.mngr.errors import UserInputError
+from imbue.mngr.hosts.tmux import TMUX_COMMAND_TIMEOUT_SECONDS
 from imbue.mngr.interfaces.data_types import CommandResult
 from imbue.mngr.interfaces.host import DEFAULT_AGENT_READY_TIMEOUT_SECONDS
 from imbue.mngr.primitives import ActivitySource
@@ -938,10 +939,12 @@ class _StubHost:
         self._command_results = list(command_results) if command_results else []
         self._default_result = default_result
         self.executed_commands: list[str] = []
+        self.executed_command_kwargs: list[dict[str, object]] = []
         self.written_files: list[tuple[Path, str]] = []
 
     def _execute_command(self, command: str, **kwargs: object) -> CommandResult:
         self.executed_commands.append(command)
+        self.executed_command_kwargs.append(dict(kwargs))
         if self._command_results:
             return self._command_results.pop(0)
         return self._default_result
@@ -1078,6 +1081,36 @@ def test_send_tmux_literal_keys_short_message_raises_on_send_keys_failure(
         agent._send_tmux_literal_keys("mngr-test:0", "hello")
 
 
+def test_send_tmux_literal_keys_short_message_passes_timeout(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """A wedged tmux client must not be able to hold the message lock forever,
+    so every tmux client call in the send path must carry a bounded timeout."""
+    stub = _StubHost()
+    agent = _create_agent_with_stub_host(temp_mngr_ctx, stub)
+
+    agent._send_tmux_literal_keys("mngr-test:0", "hello")
+
+    assert len(stub.executed_command_kwargs) == 1
+    assert stub.executed_command_kwargs[0].get("timeout_seconds") == TMUX_COMMAND_TIMEOUT_SECONDS
+
+
+def test_send_tmux_literal_keys_long_message_passes_timeout_to_every_tmux_call(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """The long-message path issues three tmux client calls (load-buffer,
+    paste-buffer, and cleanup delete-buffer); each must carry the bounded
+    timeout so a stuck tmux server can't wedge the message lock."""
+    stub = _StubHost()
+    agent = _create_agent_with_stub_host(temp_mngr_ctx, stub)
+
+    agent._send_tmux_literal_keys("mngr-test:0", "x" * 1024)
+
+    assert len(stub.executed_command_kwargs) == 3
+    for call_kwargs in stub.executed_command_kwargs:
+        assert call_kwargs.get("timeout_seconds") == TMUX_COMMAND_TIMEOUT_SECONDS
+
+
 def test_agent_name_rejects_slash() -> None:
     """AgentName must reject names containing '/' to prevent path issues."""
     with pytest.raises(InvalidName):
@@ -1118,6 +1151,21 @@ def test_send_message_simple_raises_on_enter_failure(
 
     with pytest.raises(SendMessageError, match="send-keys Enter failed"):
         agent._send_message_simple("mngr-test:0", "hello")
+
+
+def test_send_message_simple_enter_passes_timeout(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """The trailing Enter must also carry the bounded timeout; an unbounded
+    Enter can wedge the message lock just as easily as the literal-keys call."""
+    stub = _StubHost()
+    agent = _create_agent_with_stub_host(temp_mngr_ctx, stub)
+
+    agent._send_message_simple("mngr-test:0", "hello")
+
+    assert len(stub.executed_command_kwargs) == 2
+    assert "Enter" in stub.executed_commands[1]
+    assert stub.executed_command_kwargs[1].get("timeout_seconds") == TMUX_COMMAND_TIMEOUT_SECONDS
 
 
 # =========================================================================
