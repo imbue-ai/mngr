@@ -12,21 +12,17 @@ from urwid.widget.listbox import SimpleFocusListWalker
 from urwid.widget.text import Text
 from urwid.widget.wimp import SelectableIcon
 
-from imbue.imbue_common.model_update import to_update
-from imbue.mngr.cli.connect import AgentSelectorState
-from imbue.mngr.cli.connect import ConnectCliOptions
-from imbue.mngr.cli.connect import SelectorInputHandler
-from imbue.mngr.cli.connect import _build_connection_options
-from imbue.mngr.cli.connect import _create_selectable_agent_item
-from imbue.mngr.cli.connect import _handle_selector_input
-from imbue.mngr.cli.connect import _refresh_agent_list
-from imbue.mngr.cli.connect import build_status_text
+from imbue.mngr.cli.agent_selector import AgentSelectorState
+from imbue.mngr.cli.agent_selector import SelectorInputHandler
+from imbue.mngr.cli.agent_selector import _create_selectable_agent_item
+from imbue.mngr.cli.agent_selector import _handle_selector_input
+from imbue.mngr.cli.agent_selector import _refresh_agent_list
+from imbue.mngr.cli.agent_selector import build_status_text
+from imbue.mngr.cli.agent_selector import filter_agents
+from imbue.mngr.cli.agent_selector import handle_search_key
+from imbue.mngr.cli.agent_selector import select_agent_interactively
 from imbue.mngr.cli.connect import connect
-from imbue.mngr.cli.connect import filter_agents
-from imbue.mngr.cli.connect import handle_search_key
-from imbue.mngr.cli.connect import select_agent_interactively
 from imbue.mngr.cli.create import create
-from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.main import cli
 from imbue.mngr.primitives import AgentLifecycleState
@@ -253,89 +249,35 @@ def test_connect_no_start_raises_error_for_stopped_agent(
         cleanup_tmux_session(session_name)
 
 
-# Flaky under heavy CI load: same family as test_destroy_multiple_agents -- the
-# CLI invocation drives tmux subprocesses that can exceed the 10s pytest-timeout
-# when sandboxes are contended. Offload retries flaky tests automatically.
 @pytest.mark.tmux
-@pytest.mark.flaky
-def test_connect_cli_non_interactive_selects_most_recent_agent(
+def test_connect_cli_non_interactive_requires_explicit_agent(
     cli_runner: CliRunner,
     create_test_agent,
     plugin_manager: pluggy.PluginManager,
     intercepted_execvp_calls: list[tuple[str, list[str]]],
 ) -> None:
-    """Test the non-interactive code path selects the most recently created agent.
+    """Test that mngr connect errors out in non-interactive mode when no agent is given.
 
-    When stdin is not a tty (simulated by providing input=""), the connect
-    command should detect non-interactive mode, call list_agents, sort by
-    create_time descending, and select the most recently created agent.
+    Previously the command silently picked the most recently created agent
+    in this case. That implicit fallback was removed; the command now
+    requires an explicit agent or an interactive terminal.
     """
-    agent_name_old = f"test-connect-old-{int(time.time())}"
-    agent_name_new = f"test-connect-new-{int(time.time())}"
-    create_test_agent(agent_name_old, "sleep 192837")
-    session_new = create_test_agent(agent_name_new, "sleep 283746")
+    agent_name = f"test-connect-{int(time.time())}"
+    create_test_agent(agent_name, "sleep 283746")
 
-    cli_runner.invoke(
+    result = cli_runner.invoke(
         connect,
         [],
         obj=plugin_manager,
-        catch_exceptions=False,
+        catch_exceptions=True,
         # Providing input="" makes stdin non-tty, triggering the non-interactive path
         input="",
     )
 
-    # Verify the CLI selected the most recently created agent
-    assert len(intercepted_execvp_calls) == 1
-    assert intercepted_execvp_calls[0] == ("tmux", ["tmux", "attach", "-t", f"={session_new}"])
-
-
-# =============================================================================
-# Tests for _build_connection_options (CLI option to ConnectionOptions mapping)
-# =============================================================================
-
-
-def test_build_connection_options_allow_unknown_host_true(
-    default_connect_cli_opts: ConnectCliOptions,
-    temp_mngr_ctx: MngrContext,
-) -> None:
-    """Test that allow_unknown_host=True produces is_unknown_host_allowed=True."""
-    opts = default_connect_cli_opts.model_copy_update(
-        to_update(default_connect_cli_opts.field_ref().allow_unknown_host, True),
-    )
-
-    connection_opts = _build_connection_options(opts, temp_mngr_ctx)
-
-    assert connection_opts.is_unknown_host_allowed is True
-
-
-def test_build_connection_options_allow_unknown_host_default(
-    default_connect_cli_opts: ConnectCliOptions,
-    temp_mngr_ctx: MngrContext,
-) -> None:
-    """Test that is_unknown_host_allowed defaults to False."""
-    connection_opts = _build_connection_options(default_connect_cli_opts, temp_mngr_ctx)
-
-    assert connection_opts.is_unknown_host_allowed is False
-
-
-def test_build_connection_options_maps_all_fields(
-    default_connect_cli_opts: ConnectCliOptions,
-    temp_mngr_ctx: MngrContext,
-) -> None:
-    """Test that all ConnectCliOptions fields are correctly mapped to ConnectionOptions."""
-    opts = default_connect_cli_opts.model_copy_update(
-        to_update(default_connect_cli_opts.field_ref().reconnect, False),
-        to_update(default_connect_cli_opts.field_ref().session_command, "bash"),
-        to_update(default_connect_cli_opts.field_ref().allow_unknown_host, True),
-    )
-
-    connection_opts = _build_connection_options(opts, temp_mngr_ctx)
-
-    assert connection_opts.is_reconnect is False
-    assert connection_opts.retry_count == temp_mngr_ctx.config.retry.connect_retry_times
-    assert connection_opts.retry_delay == temp_mngr_ctx.config.retry.connect_retry_delay
-    assert connection_opts.session_command == "bash"
-    assert connection_opts.is_unknown_host_allowed is True
+    assert result.exit_code != 0
+    assert "not running in interactive mode" in result.output
+    # No tmux session should have been started.
+    assert intercepted_execvp_calls == []
 
 
 # =============================================================================

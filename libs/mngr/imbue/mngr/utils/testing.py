@@ -973,6 +973,17 @@ def is_claude_installed() -> bool:
     return shutil.which("claude") is not None
 
 
+def write_executable_script(path: Path, content: str) -> None:
+    """Write ``content`` to ``path`` and mark the file executable (mode 0o755).
+
+    Used by tests that need to drop a bash mock onto PATH (e.g. mocking
+    ``uv`` / ``brew`` / ``sudo`` so we can exercise subprocess plumbing
+    without invoking the real tool).
+    """
+    path.write_text(content)
+    path.chmod(0o755)
+
+
 def setup_claude_trust_config_for_subprocess(
     trusted_paths: list[Path],
     root_name: str = "mngr-acceptance-test",

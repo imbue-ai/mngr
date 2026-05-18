@@ -11,7 +11,8 @@ from loguru import logger
 from imbue.mngr.api.create import create as api_create
 from imbue.mngr.api.providers import get_provider_instance
 from imbue.mngr.cli.output_helpers import emit_final_json
-from imbue.mngr.config.agent_class_registry import get_agent_class
+from imbue.mngr.config.agent_config_registry import resolve_agent_type
+from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import BaseMngrError
 from imbue.mngr.errors import MngrError
@@ -29,24 +30,25 @@ from imbue.mngr.primitives import OutputFormat
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 
 
-def is_streaming_headless_agent_type(agent_type: str) -> bool:
+def is_streaming_headless_agent_type(agent_type: str, config: MngrConfig) -> bool:
     """Return True if the given agent type implements StreamingHeadlessAgentMixin.
 
-    Looks up the agent class in the registry and checks its MRO. Used by
-    both the CLI entry point (to branch to the headless flow) and the
-    raising check below.
+    Resolves via ``resolve_agent_type`` so this returns the correct answer
+    for both directly-registered types and TOML-defined custom types that
+    inherit through ``parent_type``. Raises ``UnknownAgentTypeError`` if the
+    type name is not known anywhere.
     """
-    return issubclass(get_agent_class(agent_type), StreamingHeadlessAgentMixin)
+    resolved = resolve_agent_type(AgentTypeName(agent_type), config)
+    return issubclass(resolved.agent_class, StreamingHeadlessAgentMixin)
 
 
-def check_streaming_headless_agent_type(agent_type: str) -> None:
+def check_streaming_headless_agent_type(agent_type: str, config: MngrConfig) -> None:
     """Verify the agent type resolves to a class implementing StreamingHeadlessAgentMixin.
 
-    Looks up the agent class via ``get_agent_class`` (which may fall back
-    to the default agent class for unregistered types) and raises MngrError
+    Raises ``UnknownAgentTypeError`` if the type is not known, or ``MngrError``
     if the resolved class does not implement StreamingHeadlessAgentMixin.
     """
-    if not is_streaming_headless_agent_type(agent_type):
+    if not is_streaming_headless_agent_type(agent_type, config):
         raise MngrError(
             f"The '{agent_type}' agent type does not support streaming headless output. "
             f"Only agent types implementing StreamingHeadlessAgentMixin can be used."
@@ -160,7 +162,7 @@ def headless_agent_output(
     All filesystem operations go through the host interface so this works
     for both local and remote hosts.
     """
-    check_streaming_headless_agent_type(str(agent_type))
+    check_streaming_headless_agent_type(str(agent_type), mngr_ctx.config)
 
     host = source_location.host
     work_path = source_location.path

@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from imbue.mngr.errors import MngrError
-from imbue.mngr_vps_docker.instance import _ParsedVpsBuildOptions
+from imbue.mngr_vps_docker.instance import ParsedVpsBuildOptions
 from imbue.mngr_vps_docker.instance import _parse_build_args
 from imbue.mngr_vps_docker.instance import _remove_host_from_known_hosts
 from imbue.mngr_vps_docker.instance import _resolve_dockerfile_paths
@@ -15,7 +15,7 @@ _DEFAULT_PLAN = "vc2-1c-1gb"
 _DEFAULT_OS_ID = 2136
 
 
-def _parse_with_defaults(build_args: list[str] | None) -> _ParsedVpsBuildOptions:
+def _parse_with_defaults(build_args: list[str] | None) -> ParsedVpsBuildOptions:
     return _parse_build_args(
         build_args,
         default_region=_DEFAULT_REGION,

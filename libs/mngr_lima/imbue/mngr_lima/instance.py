@@ -46,11 +46,11 @@ from imbue.mngr.providers.local.volume import LocalVolume
 from imbue.mngr.providers.ssh_host_setup import build_add_authorized_keys_command
 from imbue.mngr.providers.ssh_host_setup import build_add_known_hosts_command
 from imbue.mngr.providers.ssh_host_setup import build_start_activity_watcher_command
-from imbue.mngr.providers.ssh_utils import add_host_to_known_hosts
-from imbue.mngr.providers.ssh_utils import clear_host_from_known_hosts
 from imbue.mngr.providers.ssh_utils import create_pyinfra_host
+from imbue.mngr.providers.ssh_utils import format_as_known_hosts_address
+from imbue.mngr.providers.ssh_utils import load_or_create_host_keypair
 from imbue.mngr.providers.ssh_utils import wait_for_sshd
-from imbue.mngr.utils.polling import poll_for_value
+from imbue.mngr.utils.file_utils import atomic_write
 from imbue.mngr_lima.config import LimaProviderConfig
 from imbue.mngr_lima.constants import CLOUD_INIT_TIMEOUT_SECONDS
 from imbue.mngr_lima.errors import LimaCommandError
@@ -82,15 +82,8 @@ _LIMA_STATUS_TO_HOST_STATE: dict[str, HostState] = {
     "Unknown": HostState.CRASHED,
 }
 
-# ssh-keyscan tuning. sshd finishes loading host keys slightly after the
-# TCP port becomes reachable, so wait_for_sshd can succeed while keyscan
-# still sees an empty banner. We poll until a key shows up before giving up.
-# _HOST_KEY_SCAN_TIMEOUT_SECONDS bounds a single ssh-keyscan subprocess;
-# _HOST_KEY_SCAN_POLL_TIMEOUT_SECONDS bounds the overall wait for a key to
-# appear; _HOST_KEY_SCAN_POLL_INTERVAL_SECONDS is the gap between scans.
-_HOST_KEY_SCAN_TIMEOUT_SECONDS = 10.0
-_HOST_KEY_SCAN_POLL_TIMEOUT_SECONDS = 10.0
-_HOST_KEY_SCAN_POLL_INTERVAL_SECONDS = 2.0
+# Filename of the pre-injected ed25519 sshd host key stored per host on disk.
+_HOST_KEY_NAME = "ssh_host_ed25519_key"
 
 
 class LimaProviderInstance(BaseProviderInstance):
@@ -161,10 +154,25 @@ class LimaProviderInstance(BaseProviderInstance):
         """Directory for SSH keys."""
         return self._provider_dir / "keys"
 
-    @property
-    def _known_hosts_path(self) -> Path:
-        """Path to the known_hosts file for this provider instance."""
-        return self._keys_dir / "known_hosts"
+    def _host_keys_dir(self, host_id: HostId) -> Path:
+        """Directory holding this host's pre-injected sshd host keypair and matching known_hosts file."""
+        return self._keys_dir / "hosts" / str(host_id)
+
+    def _host_keypair_paths(self, host_id: HostId) -> tuple[Path, Path]:
+        """Return (private_key_path, public_key_path) for this host's pre-injected sshd host key."""
+        host_keys_dir = self._host_keys_dir(host_id)
+        return host_keys_dir / _HOST_KEY_NAME, host_keys_dir / f"{_HOST_KEY_NAME}.pub"
+
+    def _host_known_hosts_path(self, host_id: HostId) -> Path:
+        """Path to this host's per-host known_hosts file, under its keys dir."""
+        return self._host_keys_dir(host_id) / "known_hosts"
+
+    def _ensure_host_keypair(self, host_id: HostId) -> tuple[str, str]:
+        """Generate (or load) this host's ed25519 keypair, returning ``(private_key_pem, public_key_openssh)``."""
+        private_key_path, public_key_openssh = load_or_create_host_keypair(
+            self._host_keys_dir(host_id), _HOST_KEY_NAME
+        )
+        return private_key_path.read_text(), public_key_openssh
 
     @property
     def _tags_dir(self) -> Path:
@@ -241,17 +249,15 @@ class LimaProviderInstance(BaseProviderInstance):
         ssh_config: LimaSshConfig,
     ) -> Host:
         """Create a Host object from SSH connection info."""
-        # Get the host key via ssh-keyscan and add to known_hosts
-        self._keys_dir.mkdir(parents=True, exist_ok=True)
-
-        # Add the host to known_hosts by scanning its key
-        self._scan_and_add_host_key(ssh_config.hostname, ssh_config.port)
+        # Add the host to known_hosts. Re-run on every create/start/get_host
+        # because Lima reassigns the forwarded port across restarts.
+        self._record_pre_injected_host_key(host_id, ssh_config.hostname, ssh_config.port)
 
         pyinfra_host = create_pyinfra_host(
             hostname=ssh_config.hostname,
             port=ssh_config.port,
             private_key_path=ssh_config.identity_file,
-            known_hosts_path=self._known_hosts_path,
+            known_hosts_path=self._host_known_hosts_path(host_id),
             ssh_user=ssh_config.user,
         )
         connector = PyinfraConnector(pyinfra_host)
@@ -267,58 +273,15 @@ class LimaProviderInstance(BaseProviderInstance):
             ),
         )
 
-    def _scan_host_keys_once(self, hostname: str, port: int) -> list[str] | None:
-        """Run ssh-keyscan once and return the parsed ``"<type> <data>"`` entries.
+    def _record_pre_injected_host_key(self, host_id: HostId, hostname: str, port: int) -> None:
+        """Write this host's known_hosts file from its pre-injected public key.
 
-        Returns ``None`` when the scan produced nothing usable -- this is the
-        "condition not yet met" signal for :func:`poll_for_value`. sshd can race
-        with ssh-keyscan during VM bring-up (the TCP port is reachable but sshd
-        has not finished loading host keys), so an empty result just means we
-        should poll again.
+        Uses atomic_write so a concurrent reader never sees a partial file.
         """
-        result = self.mngr_ctx.concurrency_group.run_process_to_completion(
-            ["ssh-keyscan", "-t", "rsa,ecdsa,ed25519", "-p", str(port), hostname],
-            timeout=_HOST_KEY_SCAN_TIMEOUT_SECONDS,
-        )
-        key_entries: list[str] = []
-        if result.returncode == 0 and result.stdout.strip():
-            for line in result.stdout.strip().splitlines():
-                if line and not line.startswith("#"):
-                    parts = line.split(None, 2)
-                    if len(parts) >= 3:
-                        key_entries.append(f"{parts[1]} {parts[2]}")
-        if key_entries:
-            return key_entries
-        logger.info("ssh-keyscan for {}:{} returned no keys; will poll again", hostname, port)
-        return None
-
-    def _scan_and_add_host_key(self, hostname: str, port: int) -> None:
-        """Scan SSH host keys and add all of them to known_hosts.
-
-        First removes any stale keys for this host:port (from previous VMs
-        that may have reused the same port), then adds all key types from
-        ssh-keyscan so paramiko can negotiate any of them.
-
-        sshd can race with ssh-keyscan during VM bring-up: the TCP port is
-        reachable (what wait_for_sshd checks) but sshd has not finished
-        loading host keys, so ssh-keyscan returns empty output. Poll until a
-        key shows up, and raise if none appears within the timeout -- otherwise
-        downstream rsync/ssh fails with a cryptic "host key not known".
-        """
-        clear_host_from_known_hosts(self._known_hosts_path, hostname, port)
-        key_entries, _, _ = poll_for_value(
-            lambda: self._scan_host_keys_once(hostname, port),
-            timeout=_HOST_KEY_SCAN_POLL_TIMEOUT_SECONDS,
-            poll_interval=_HOST_KEY_SCAN_POLL_INTERVAL_SECONDS,
-        )
-        if key_entries is None:
-            raise MngrError(
-                f"ssh-keyscan could not read a host key for {hostname}:{port} within "
-                f"{_HOST_KEY_SCAN_POLL_TIMEOUT_SECONDS}s; the Lima VM may not have "
-                f"finished starting sshd"
-            )
-        for key_type_and_data in key_entries:
-            add_host_to_known_hosts(self._known_hosts_path, hostname, port, key_type_and_data)
+        _, public_key_path = self._host_keypair_paths(host_id)
+        public_key = public_key_path.read_text().strip()
+        host_pattern = format_as_known_hosts_address(hostname, port)
+        atomic_write(self._host_known_hosts_path(host_id), f"{host_pattern} {public_key}\n")
 
     def _on_certified_host_data_updated(self, host_id: HostId, certified_data: CertifiedHostData) -> None:
         """Update the certified host data in the host record."""
@@ -436,6 +399,9 @@ sudo poweroff
         # Create the persistent volume directory
         volume_dir = self._ensure_host_volume_dir(host_id)
 
+        # Generate the sshd host keypair to inject into the VM and record in known_hosts.
+        host_private_key_pem, host_public_key_openssh = self._ensure_host_keypair(host_id)
+
         # Generate or load Lima YAML config
         yaml_path_from_build_args = parse_build_args_for_yaml_path(tuple(build_args or ()))
         if yaml_path_from_build_args is not None:
@@ -445,6 +411,8 @@ sudo poweroff
                 host_dir=str(self.host_dir),
                 config_image_url_aarch64=self.config.default_image_url_aarch64,
                 config_image_url_x86_64=self.config.default_image_url_x86_64,
+                host_private_key_pem=host_private_key_pem,
+                host_public_key_openssh=host_public_key_openssh,
             )
             lima_config = merge_lima_yaml(base_config, user_config)
         else:
@@ -455,6 +423,8 @@ sudo poweroff
                 custom_image_url=image_url,
                 config_image_url_aarch64=self.config.default_image_url_aarch64,
                 config_image_url_x86_64=self.config.default_image_url_x86_64,
+                host_private_key_pem=host_private_key_pem,
+                host_public_key_openssh=host_public_key_openssh,
             )
 
         # Write the YAML config to a temp file
@@ -742,6 +712,12 @@ sudo poweroff
         tags_path = self._tags_path(host_id)
         if tags_path.exists():
             tags_path.unlink(missing_ok=True)
+
+        # Delete the per-host keys directory (holds the pre-injected sshd
+        # keypair and the matching known_hosts file).
+        host_keys_dir = self._host_keys_dir(host_id)
+        if host_keys_dir.exists():
+            shutil.rmtree(host_keys_dir, ignore_errors=True)
 
         self._evict_cached_host(host_id)
 
