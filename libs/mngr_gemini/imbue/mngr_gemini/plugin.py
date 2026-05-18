@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.resources
+import shlex
 from collections.abc import Callable
 from collections.abc import Mapping
 from pathlib import Path
@@ -14,6 +15,7 @@ from imbue.imbue_common.logging import log_span
 from imbue.mngr import hookimpl
 from imbue.mngr.agents.common_transcript import maybe_provision_common_transcript_scripts
 from imbue.mngr.agents.common_transcript import provision_raw_transcript_scripts
+from imbue.mngr.agents.common_transcript import provision_scripts_to_commands_dir
 from imbue.mngr.agents.tui_agent import InteractiveTuiAgent
 from imbue.mngr.agents.tui_utils import send_enter_and_poll_for_cleared_indicator
 from imbue.mngr.config.data_types import AgentTypeConfig
@@ -33,6 +35,14 @@ from imbue.mngr_gemini.gemini_config import serialize_gemini_settings
 
 _COMMON_TRANSCRIPT_SCRIPT_NAME: Final[str] = "common_transcript.sh"
 _RAW_TRANSCRIPT_SCRIPT_NAME: Final[str] = "stream_transcript.sh"
+
+# Supervisor script provisioned to the agent's commands/ dir. Launched once
+# as a backgrounded subshell from ``assemble_command``; it owns both
+# watchers (the raw streamer and, when emit is enabled, the common
+# converter) and restarts them on death. Mirrors mngr_claude's
+# claude_background_tasks.sh pattern but without an activity-tracker (gemini
+# has no UserPromptSubmit-style hook that would write an ``active`` file).
+_BACKGROUND_TASKS_SCRIPT_NAME: Final[str] = "gemini_background_tasks.sh"
 
 # Name of the readiness sentinel file the SessionStart hook touches. Polled by
 # ``GeminiAgent.wait_for_ready_signal`` to detect that the Gemini session has
@@ -237,7 +247,7 @@ class GeminiAgent(InteractiveTuiAgent[GeminiAgentConfig], HasCommonTranscriptMix
         options: CreateAgentOptions,
         mngr_ctx: MngrContext,
     ) -> None:
-        """Install mngr's Gemini settings, raw-transcript streamer, and (optionally) the common-transcript watcher.
+        """Install mngr's Gemini settings, the background-tasks supervisor, the raw-transcript streamer, and (optionally) the common-transcript watcher.
 
         The settings file lives at
         ``$MNGR_AGENT_STATE_DIR/plugin/gemini/system_settings.json`` and is
@@ -253,8 +263,14 @@ class GeminiAgent(InteractiveTuiAgent[GeminiAgentConfig], HasCommonTranscriptMix
         delegates the enable-flag check to
         :func:`maybe_provision_common_transcript_scripts`; when
         ``agent_config.emit_common_transcript`` is ``False`` only the raw
-        streamer is provisioned and ``assemble_command`` does not prepend
-        the common watcher.
+        streamer is provisioned and ``gemini_background_tasks.sh`` skips
+        launching the common watcher via the on-disk ``-x`` check.
+
+        The background-tasks supervisor (``gemini_background_tasks.sh``) is
+        always provisioned and is the only background process launched by
+        ``assemble_command``; it owns the lifecycle of both watchers
+        (pidfile dedup, EXIT-trap cleanup, restart-on-death). Mirrors
+        ``mngr_claude``'s ``claude_background_tasks.sh`` pattern.
         """
         self._install_system_settings(host)
         with mngr_ctx.concurrency_group.make_concurrency_group("gemini_provisioning") as concurrency_group:
@@ -268,6 +284,12 @@ class GeminiAgent(InteractiveTuiAgent[GeminiAgentConfig], HasCommonTranscriptMix
                 self,
                 host,
                 self._get_agent_dir(),
+                concurrency_group,
+            )
+            provision_scripts_to_commands_dir(
+                host,
+                self._get_agent_dir(),
+                {_BACKGROUND_TASKS_SCRIPT_NAME: _load_gemini_resource_script(_BACKGROUND_TASKS_SCRIPT_NAME)},
                 concurrency_group,
             )
 
@@ -296,6 +318,19 @@ class GeminiAgent(InteractiveTuiAgent[GeminiAgentConfig], HasCommonTranscriptMix
 
         host.write_text_file(self._get_system_settings_path(), serialize_gemini_settings(settings))
 
+    def _build_background_tasks_command(self) -> str:
+        """Build the shell command that launches the gemini background-tasks supervisor.
+
+        Mirrors ``ClaudeAgent._build_background_tasks_command``: a single
+        backgrounded subshell that owns the lifecycle of every watcher
+        (raw streamer + optional common watcher). The supervisor's pidfile
+        dedup guarantees that re-running ``assemble_command`` (e.g. on agent
+        restart) does not pile up orphaned watcher processes racing on the
+        same offset files and output file.
+        """
+        script_path = f"$MNGR_AGENT_STATE_DIR/commands/{_BACKGROUND_TASKS_SCRIPT_NAME}"
+        return f"( bash {script_path} {shlex.quote(self.session_name)} ) &"
+
     def assemble_command(
         self,
         host: OnlineHostInterface,
@@ -303,7 +338,7 @@ class GeminiAgent(InteractiveTuiAgent[GeminiAgentConfig], HasCommonTranscriptMix
         command_override: CommandString | None,
         initial_message: str | None = None,
     ) -> CommandString:
-        """Assemble the gemini command with stale-sentinel cleanup, raw streamer, and (optional) common watcher.
+        """Assemble the gemini command with stale-sentinel cleanup and the background-tasks supervisor.
 
         Inserts ``rm -f $MNGR_AGENT_STATE_DIR/session_started`` as a
         foreground step that runs to completion before ``gemini`` launches,
@@ -311,32 +346,30 @@ class GeminiAgent(InteractiveTuiAgent[GeminiAgentConfig], HasCommonTranscriptMix
         ``wait_for_ready_signal`` succeed before the new Gemini session has
         actually started (relevant on every restart, not just first launch).
 
-        The raw-transcript streamer is launched unconditionally as a
-        backgrounded subshell -- it is the source of truth for the agent
-        session and is required by :class:`HasTranscriptMixin`. When
-        ``is_common_transcript_enabled`` is True the common-transcript
-        watcher is launched alongside it, reading from the raw stream.
-        Background subshells are placed *before* the ``rm`` step. Placement
-        matters: ``A && B & C`` in bash parses as ``( A && B ) &`` followed
-        by ``C``, so writing ``rm -f X && ( watcher ) & gemini`` would push
-        the ``rm`` into the background where it races gemini's startup.
-        Putting the watchers first -- ``( raw ) & ( common ) & rm -f X &&
-        gemini`` -- confines ``&`` to each watcher subshell and leaves the
-        rm in the foreground chain that precedes the agent invocation,
-        matching ``mngr_claude``'s assembled-command shape.
+        The background-tasks supervisor is launched as a single backgrounded
+        subshell *before* the ``rm`` step. It owns both watchers (raw
+        streamer, optional common converter) with pidfile dedup and
+        restart-on-death; placing the watchers under a supervisor (rather
+        than firing them directly as separate ``( ... ) &`` subshells)
+        prevents accumulation of orphaned watcher processes across agent
+        restarts, matching the structure of
+        ``mngr_claude``'s ``assemble_command``.
+
+        Placement matters: ``A && B & C`` in bash parses as ``( A && B ) &``
+        followed by ``C``, so writing ``rm -f X && ( supervisor ) & gemini``
+        would push the ``rm`` into the background where it races gemini's
+        startup. Putting the supervisor first confines ``&`` to its subshell
+        and leaves ``rm -f X && gemini`` as a foreground sequential chain.
 
         Bash does not propagate SIGHUP to background children of
-        non-interactive shells by default, so the watchers may outlive the
-        tmux session and continue polling until killed by host teardown or
-        until their session inputs disappear.
+        non-interactive shells by default, so the supervisor may outlive the
+        tmux session; it polls ``tmux has-session`` and exits cleanly once
+        the session is gone.
         """
         base_command = super().assemble_command(host, agent_args, command_override, initial_message)
         clear_sentinel = f"rm -f $MNGR_AGENT_STATE_DIR/{_READINESS_SENTINEL_FILENAME}"
-        raw_streamer_cmd = f"( bash $MNGR_AGENT_STATE_DIR/commands/{_RAW_TRANSCRIPT_SCRIPT_NAME} ) &"
-        if not self.is_common_transcript_enabled:
-            return CommandString(f"{raw_streamer_cmd} {clear_sentinel} && {base_command}")
-        common_watcher_cmd = f"( bash $MNGR_AGENT_STATE_DIR/commands/{_COMMON_TRANSCRIPT_SCRIPT_NAME} ) &"
-        return CommandString(f"{raw_streamer_cmd} {common_watcher_cmd} {clear_sentinel} && {base_command}")
+        background_cmd = self._build_background_tasks_command()
+        return CommandString(f"{background_cmd} {clear_sentinel} && {base_command}")
 
 
 @hookimpl

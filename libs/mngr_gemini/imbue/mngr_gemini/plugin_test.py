@@ -141,60 +141,49 @@ def test_assemble_command_appends_user_agent_args_after_cli_args(gemini_agent: G
 
 
 _SENTINEL_RM_THEN_GEMINI = "rm -f $MNGR_AGENT_STATE_DIR/session_started && gemini"
+_BACKGROUND_TASKS_LAUNCH_PREFIX = "( bash $MNGR_AGENT_STATE_DIR/commands/gemini_background_tasks.sh"
 
 
-def test_assemble_command_clears_stale_sentinel_before_launching_gemini_with_watcher(
+def test_assemble_command_clears_stale_sentinel_before_launching_gemini(
     gemini_agent: GeminiAgent,
 ) -> None:
-    """The sentinel rm must sit between the backgrounded watcher and ``gemini``.
+    """The sentinel rm must sit between the backgrounded supervisor and ``gemini``.
 
     Bash's ``A && B & C`` precedence parses as ``( A && B ) &`` followed by
-    ``C``, so writing ``rm && ( watcher ) & gemini`` would push the rm into
-    the background where it races gemini's startup. Putting the watcher
-    first confines ``&`` to the watcher subshell and leaves
-    ``rm && gemini`` as a foreground sequential chain.
+    ``C``, so writing ``rm && ( supervisor ) & gemini`` would push the rm into
+    the background where it races gemini's startup. Putting the supervisor
+    first confines ``&`` to its subshell and leaves ``rm && gemini`` as a
+    foreground sequential chain.
     """
     command = str(gemini_agent.assemble_command(gemini_agent.host, (), command_override=None))
     assert command.endswith(_SENTINEL_RM_THEN_GEMINI), command
 
 
-def test_assemble_command_clears_stale_sentinel_before_launching_gemini_without_watcher(
+def test_assemble_command_clears_stale_sentinel_when_common_transcript_disabled(
     gemini_agent_without_transcript: GeminiAgent,
 ) -> None:
-    """Without the common watcher, the raw streamer is the head, then ``rm && gemini``."""
+    """Same chain holds when emit_common_transcript=False; the supervisor still leads."""
     agent = gemini_agent_without_transcript
     command = str(agent.assemble_command(agent.host, (), command_override=None))
     assert command.endswith(_SENTINEL_RM_THEN_GEMINI), command
 
 
-def test_assemble_command_prepends_transcript_watcher_when_enabled(gemini_agent: GeminiAgent) -> None:
+def test_assemble_command_launches_background_tasks_supervisor(gemini_agent: GeminiAgent) -> None:
+    """The supervisor is the single background subshell; it owns both watchers."""
     command = str(gemini_agent.assemble_command(gemini_agent.host, (), command_override=None))
-    assert "$MNGR_AGENT_STATE_DIR/commands/common_transcript.sh" in command
-    # Raw-streamer subshell must come FIRST (it is required by
-    # HasTranscriptMixin and runs even when the common watcher is off), then
-    # the common-watcher subshell, then the foreground ``rm && gemini``
-    # chain. Background subshells before the rm guarantees ``&`` only
-    # terminates each watcher and not the rm itself.
-    assert command.startswith("( bash $MNGR_AGENT_STATE_DIR/commands/stream_transcript.sh ) &")
-    assert "( bash $MNGR_AGENT_STATE_DIR/commands/common_transcript.sh ) &" in command
+    assert command.startswith(_BACKGROUND_TASKS_LAUNCH_PREFIX), command
+    # No bare watcher subshells: the supervisor is the single entry point.
+    assert "( bash $MNGR_AGENT_STATE_DIR/commands/stream_transcript.sh ) &" not in command
+    assert "( bash $MNGR_AGENT_STATE_DIR/commands/common_transcript.sh ) &" not in command
 
 
-def test_assemble_command_always_prepends_raw_streamer(
+def test_assemble_command_launches_supervisor_even_when_common_transcript_disabled(
     gemini_agent_without_transcript: GeminiAgent,
 ) -> None:
-    """The raw streamer is required by HasTranscriptMixin and runs even when the common watcher is off."""
+    """The supervisor is unconditional; only the common watcher inside is gated by -x."""
     agent = gemini_agent_without_transcript
     command = str(agent.assemble_command(agent.host, (), command_override=None))
-    assert command.startswith("( bash $MNGR_AGENT_STATE_DIR/commands/stream_transcript.sh ) &")
-
-
-def test_assemble_command_skips_common_transcript_watcher_when_disabled(
-    gemini_agent_without_transcript: GeminiAgent,
-) -> None:
-    agent = gemini_agent_without_transcript
-    command = str(agent.assemble_command(agent.host, (), command_override=None))
-    assert "common_transcript.sh" not in command
-    assert command.endswith("gemini")
+    assert command.startswith(_BACKGROUND_TASKS_LAUNCH_PREFIX), command
 
 
 def test_get_expected_process_name_returns_node(gemini_agent: GeminiAgent) -> None:
@@ -305,6 +294,30 @@ def test_provision_with_emit_enabled_writes_common_transcript_script(gemini_agen
     assert expected_script.read_text().startswith("#!/usr/bin/env bash")
     # Execute permissions are required for the watcher script to run.
     assert expected_script.stat().st_mode & 0o111
+
+
+def test_provision_writes_background_tasks_supervisor(gemini_agent: GeminiAgent) -> None:
+    """The supervisor is unconditionally provisioned -- assemble_command depends on it."""
+    _provision(gemini_agent)
+
+    expected_supervisor = gemini_agent._get_agent_dir() / "commands" / "gemini_background_tasks.sh"
+    assert expected_supervisor.exists()
+    body = expected_supervisor.read_text()
+    assert body.startswith("#!/usr/bin/env bash")
+    assert "stream_transcript.sh" in body
+    assert "common_transcript.sh" in body
+    assert expected_supervisor.stat().st_mode & 0o111
+
+
+def test_provision_writes_supervisor_even_when_common_transcript_disabled(
+    gemini_agent_without_transcript: GeminiAgent,
+) -> None:
+    """The supervisor exists regardless of the common-transcript flag; the flag only gates the converter inside it."""
+    agent = gemini_agent_without_transcript
+    _provision(agent)
+
+    expected_supervisor = agent._get_agent_dir() / "commands" / "gemini_background_tasks.sh"
+    assert expected_supervisor.exists()
 
 
 def test_modify_env_vars_sets_trust_workspace_true(gemini_agent: GeminiAgent) -> None:
