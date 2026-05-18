@@ -108,8 +108,8 @@ class _ErrorEmitter(FrozenModel):
     if provided.
     """
 
-    model_config = {"arbitrary_types_allowed": True}
     result: ListResult
+    # threading.Lock is a factory, not a type, so pydantic can't type-check it.
     results_lock: Any
     on_error: Callable[[ErrorInfo], None] | None
 
