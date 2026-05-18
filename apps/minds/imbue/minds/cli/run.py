@@ -78,7 +78,6 @@ from imbue.mngr.utils.parent_process import start_grandparent_death_watcher
 from imbue.mngr_latchkey.core import LATCHKEY_BINARY
 from imbue.mngr_latchkey.core import Latchkey
 from imbue.mngr_latchkey.core import LatchkeyError
-from imbue.mngr_latchkey.encryption_key import load_or_create_encryption_key
 from imbue.mngr_latchkey.forward_supervisor import LatchkeyForwardSupervisor
 from imbue.mngr_latchkey.forward_supervisor import is_forward_info_alive
 from imbue.mngr_latchkey.store import LatchkeyForwardInfo
@@ -544,17 +543,14 @@ def _build_latchkey(data_directory: Path) -> Latchkey:
         latchkey_directory = Path(directory_override).expanduser()
     else:
         latchkey_directory = data_directory / "latchkey"
-    # Load (or, on first activation against this latchkey directory,
-    # mint) a per-env encryption key for latchkey's credential store.
-    # Operator's ``LATCHKEY_ENCRYPTION_KEY`` shell var, if set, wins;
-    # otherwise we generate + persist a fresh URL-safe base64 32-byte
-    # key at ``<latchkey_directory>/encryption_key`` (chmod 0600) so
-    # the operator never has to set it manually.
-    encryption_key = load_or_create_encryption_key(latchkey_directory)
+    # The per-env encryption key is loaded lazily on every subprocess
+    # spawn inside ``Latchkey`` itself (via ``_load_encryption_key``)
+    # so the secret only lives in parent-process memory for the
+    # duration of a single env-builder + process-spawn call, never
+    # cached as a long-lived attribute on this object.
     return Latchkey(
         latchkey_binary=latchkey_binary,
         latchkey_directory=latchkey_directory,
-        encryption_key=encryption_key,
     )
 
 

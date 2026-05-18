@@ -244,6 +244,23 @@ class OvhProvider(VpsDockerProvider):
 
         public_key = self.ovh_client.get_cached_public_key(vps_ssh_key_id)
 
+        # F1: parse MNGR_VPS_EXTRA_TAGS BEFORE any state-changing call
+        # so a typo / reserved key / missing ``=`` fails before we order
+        # (and pay for) a VPS. ``parse_extra_tags_env`` enforces OVH's
+        # IAM-key regex + the reserved-key list locally, so a 400 from
+        # the IAM tag attach loop -- which would otherwise leak a freshly-
+        # ordered month of billing -- cannot happen. (DEPLOY_SAFETY_AUDIT-
+        # style F1; spec required pre-order parsing.) The recycle path
+        # does not apply extra tags (the recycled VPS already carries
+        # whatever tags it had pre-cancellation, plus its mngr-host-id
+        # gets swapped by ``try_recycle_cancelled_vps``), so the parsed
+        # dict is only consumed in the fresh-order branch below. Parsing
+        # at the top still matters for the recycle path: if recycling
+        # falls through, the same provisioning call ends up ordering a
+        # fresh VPS, and we want to have already validated extra tags
+        # by that point.
+        extra_tags = parse_extra_tags_env(os.environ.get("MNGR_VPS_EXTRA_TAGS", ""))
+
         with log_span("OVH provisioning for host {} ({})", name, host_id):
             recycle_handle = self._maybe_claim_recycled_vps(
                 new_host_id=host_id, requested_plan=plan, requested_region=region
@@ -294,14 +311,13 @@ class OvhProvider(VpsDockerProvider):
                 # redundant POST /tag calls per recycled host.
                 urn = vps_urn_for(service_name, region_code=_iam_region_code(self.ovh_config.endpoint))
                 if recycle_handle is None:
+                    # F1: ``extra_tags`` was parsed at the very top of
+                    # ``_provision_vps`` so a typo / reserved key has
+                    # already failed before we got here. Just merge.
                     # ``MNGR_VPS_EXTRA_TAGS`` mirrors the contract
-                    # ``mngr_vps_docker.build_vps_tags`` honors for Vultr-style
-                    # callers (e.g. the imbue_cloud pool bake setting
-                    # ``minds_env=<name>``). Parsed strictly with local IAM-key
-                    # validation so a typo fails here (before the API call)
-                    # rather than as a 400 partway through the attach loop,
-                    # which would leak the freshly-ordered month of billing.
-                    extra_tags = parse_extra_tags_env(os.environ.get("MNGR_VPS_EXTRA_TAGS", ""))
+                    # ``mngr_vps_docker.build_vps_tags`` honors for
+                    # Vultr-style callers (e.g. the imbue_cloud pool
+                    # bake setting ``minds_env=<name>``).
                     all_tags: dict[str, str] = {
                         MNGR_PROVIDER_TAG_KEY: str(self.name),
                         MNGR_HOST_ID_TAG_KEY: str(host_id),
