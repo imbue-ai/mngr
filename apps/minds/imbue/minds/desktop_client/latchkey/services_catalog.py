@@ -1,31 +1,41 @@
-"""Loads the latchkey-service-to-detent-schema mapping shipped with minds.
+"""Latchkey services catalog, fetched from the gateway's permissions extension.
 
-This catalog is desktop-only -- it tells the permission dialog which
-schemas to render for a given latchkey service name. Agents do not see
-this file; they only emit the service name and a rationale.
+The catalog tells the permission dialog the display name and the legal
+set of permission schemas for a given scope (e.g. ``slack-api``).
+Agents do not see this file; they emit ``{scope, permissions, rationale}``
+and the dialog uses the catalog to render the same scope with a
+human-readable label and a checkbox list.
 
-Defaults are not maintained per-service: every service implicitly defaults
+The catalog is fetched from the latchkey gateway's ``/permissions/available``
+endpoint (which is itself backed by the ``services.json`` data file that
+ships alongside the gateway extension) and cached in-process. Callers
+get a :class:`ServicesCatalog` whose first attribute access triggers the
+HTTP fetch; subsequent accesses are served from the in-memory snapshot.
+
+Defaults are not maintained per-service: every scope implicitly defaults
 to the detent ``any`` schema (matches every request inside the scope), so
 clicking Approve without changing anything yields ``{<scope>: ["any"]}`` --
-unrestricted access for the chosen service. The user can tighten this by
+unrestricted access for the chosen scope. The user can tighten this by
 unticking ``any`` and selecting specific permissions in the dialog.
 """
 
-import tomllib
+import threading
 from collections.abc import Mapping
-from pathlib import Path
 from typing import Final
 
 from loguru import logger
 from pydantic import Field
+from pydantic import PrivateAttr
+from pydantic import ValidationError
 
 from imbue.imbue_common.frozen_model import FrozenModel
-
-_DEFAULT_CATALOG_PATH: Final[Path] = Path(__file__).resolve().parent / "services.toml"
+from imbue.imbue_common.mutable_model import MutableModel
+from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClient
+from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClientError
 
 # The detent ``any`` schema matches every request, so a rule like
 # ``{"slack-api": ["any"]}`` allows all Slack access. We prepend ``any``
-# to every service's permission list (deduplicated) so the dialog can
+# to every scope's permission list (deduplicated) so the dialog can
 # render it as a checkbox, and pre-check it as the implicit default.
 _IMPLICIT_DEFAULT_PERMISSION: Final[str] = "any"
 
@@ -33,100 +43,159 @@ IMPLICIT_DEFAULT_PERMISSIONS: Final[tuple[str, ...]] = (_IMPLICIT_DEFAULT_PERMIS
 
 
 class LatchkeyServicesCatalogError(Exception):
-    """Base exception for catalog parsing/lookup failures."""
+    """Base exception for catalog fetch / parse failures."""
 
 
 class MalformedServicesCatalogError(LatchkeyServicesCatalogError, ValueError):
-    """Raised when the services catalog file is structurally invalid."""
+    """Raised when the gateway's catalog payload is structurally invalid."""
 
 
 class ServicePermissionInfo(FrozenModel):
-    """Description of a single latchkey service's permission surface."""
+    """Description of a single scope's permission surface.
 
-    name: str = Field(description="Latchkey service name (e.g. 'slack', 'google-gmail').")
+    The ``name`` field is the raw service name (e.g. ``slack``) used to
+    key the catalog; ``scope`` is the Detent scope schema name (e.g.
+    ``slack-api``) that the agent's permission request actually carries.
+    """
+
+    name: str = Field(description="Raw service name (e.g. 'slack', 'google-gmail').")
+    scope: str = Field(description="Detent scope schema; matches the request event's ``scope`` field.")
     display_name: str = Field(description="Human-readable label shown in the dialog header.")
-    scope_schemas: tuple[str, ...] = Field(
-        description="Detent scope schemas this service owns; used as keys in latchkey_permissions.json rules.",
-    )
     permission_schemas: tuple[str, ...] = Field(
         description=(
-            "Detent permission schemas the user can grant for this service. The implicit "
+            "Detent permission schemas the user can grant for this scope. The implicit "
             "``any`` default is always present at index 0."
         ),
     )
 
 
-def _build_service_info(name: str, raw: Mapping[str, object]) -> ServicePermissionInfo:
-    """Turn a single TOML table into a ``ServicePermissionInfo``.
+class _RawServiceEntry(FrozenModel):
+    """Internal pydantic shape used to validate a single ``/permissions/available`` entry.
 
-    Raises ``MalformedServicesCatalogError`` for shape violations so the
-    runtime fails fast at startup rather than at request time.
+    Pydantic enforces the field shape (non-empty strings, list-of-strings)
+    so we don't have to hand-roll isinstance checks against
+    ``Mapping[Unknown, Unknown]``-shaped JSON. Validation failures are
+    re-raised as :class:`MalformedServicesCatalogError`.
     """
-    display_name = raw.get("display_name")
-    scope_schemas_raw = raw.get("scope_schemas")
-    permission_schemas_raw = raw.get("permission_schemas")
 
-    if not isinstance(display_name, str) or not display_name:
-        raise MalformedServicesCatalogError(f"Service '{name}' must have a non-empty display_name")
-    if not isinstance(scope_schemas_raw, list) or not all(isinstance(s, str) for s in scope_schemas_raw):
-        raise MalformedServicesCatalogError(f"Service '{name}' scope_schemas must be a list of strings")
-    if not scope_schemas_raw:
-        raise MalformedServicesCatalogError(f"Service '{name}' scope_schemas must be non-empty")
-    if not isinstance(permission_schemas_raw, list) or not all(isinstance(s, str) for s in permission_schemas_raw):
-        raise MalformedServicesCatalogError(
-            f"Service '{name}' permission_schemas must be a list of strings",
-        )
+    scope: str = Field(min_length=1)
+    display_name: str = Field(min_length=1)
+    permissions: tuple[str, ...] = Field(default=())
 
-    scope_schemas: tuple[str, ...] = tuple(str(s) for s in scope_schemas_raw)
+
+def _build_service_info(name: str, raw: object) -> ServicePermissionInfo:
+    """Turn one ``{scope, display_name, permissions}`` entry into a typed info record.
+
+    Takes ``raw`` as ``object`` (rather than ``Mapping[str, object]``)
+    so the function is the sole place that asserts the shape; pydantic
+    does the actual validation. Raises
+    :class:`MalformedServicesCatalogError` on shape violations so a bad
+    gateway response is loud rather than silently dropping the entry.
+    """
+    try:
+        entry = _RawServiceEntry.model_validate(raw)
+    except ValidationError as e:
+        raise MalformedServicesCatalogError(f"Service '{name}' has a malformed entry: {e}") from e
 
     # Always make ``any`` available as the first checkbox, deduplicating in
-    # case a service explicitly lists it (which is harmless but redundant).
-    granular_permissions: tuple[str, ...] = tuple(str(s) for s in permission_schemas_raw)
+    # case the gateway lists it explicitly (harmless but redundant).
     permission_schemas: tuple[str, ...] = (_IMPLICIT_DEFAULT_PERMISSION,) + tuple(
-        p for p in granular_permissions if p != _IMPLICIT_DEFAULT_PERMISSION
+        p for p in entry.permissions if p != _IMPLICIT_DEFAULT_PERMISSION
     )
 
     return ServicePermissionInfo(
         name=name,
-        display_name=display_name,
-        scope_schemas=scope_schemas,
+        scope=entry.scope,
+        display_name=entry.display_name,
         permission_schemas=permission_schemas,
     )
 
 
-def load_services_catalog(toml_path: Path | None = None) -> dict[str, ServicePermissionInfo]:
-    """Load the catalog from disk, validating each entry.
-
-    The default path points at the TOML file shipped with this package.
-    """
-    path = toml_path if toml_path is not None else _DEFAULT_CATALOG_PATH
-    try:
-        raw_bytes = path.read_bytes()
-    except OSError as e:
-        raise LatchkeyServicesCatalogError(f"Cannot read services catalog at {path}: {e}") from e
-
-    try:
-        data = tomllib.loads(raw_bytes.decode("utf-8"))
-    except tomllib.TOMLDecodeError as e:
-        raise MalformedServicesCatalogError(f"Invalid TOML in services catalog at {path}: {e}") from e
-
-    services_section = data.get("services")
-    if not isinstance(services_section, dict):
-        raise MalformedServicesCatalogError(f"Expected a [services] table at the top of {path}")
-
+def _parse_catalog_payload(payload: Mapping[str, object]) -> dict[str, ServicePermissionInfo]:
+    """Validate and convert the raw ``/permissions/available`` JSON object."""
     catalog: dict[str, ServicePermissionInfo] = {}
-    for service_name, raw in services_section.items():
-        if not isinstance(raw, dict):
-            raise MalformedServicesCatalogError(f"Service '{service_name}' must be a table")
+    for service_name, raw in payload.items():
         catalog[service_name] = _build_service_info(service_name, raw)
-
-    logger.debug("Loaded latchkey services catalog with {} entries from {}", len(catalog), path)
     return catalog
 
 
-def get_service_info(
-    catalog: Mapping[str, ServicePermissionInfo],
-    service_name: str,
-) -> ServicePermissionInfo | None:
-    """Return the catalog entry for ``service_name``, or ``None`` if unknown."""
-    return catalog.get(service_name)
+class ServicesCatalog(MutableModel):
+    """Lazy in-memory cache of the gateway's permission catalog.
+
+    The first call to :meth:`get` (or :meth:`get_by_scope`, or
+    :meth:`as_mapping`) issues a single
+    ``GET /permissions/available`` against the gateway; subsequent calls
+    are served from the cached snapshot. A fetch failure is logged and
+    yields an empty catalog so dialog rendering can fall back to a
+    "unknown service" page rather than crash.
+
+    The catalog is effectively static for the lifetime of a desktop
+    client process: the gateway extension is shipped as package data and
+    only changes on a minds upgrade, which restarts this process. We do
+    not implement TTL-based invalidation for that reason.
+    """
+
+    gateway_client: LatchkeyGatewayClient = Field(
+        frozen=True,
+        description="HTTP client used to fetch the catalog from the gateway.",
+    )
+
+    _by_service_name: dict[str, ServicePermissionInfo] | None = PrivateAttr(default=None)
+    _by_scope: dict[str, ServicePermissionInfo] | None = PrivateAttr(default=None)
+    _load_lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
+
+    def _ensure_loaded(self) -> None:
+        """Populate the cache from the gateway exactly once. Thread-safe."""
+        if self._by_service_name is not None:
+            return
+        with self._load_lock:
+            if self._by_service_name is not None:
+                return
+            try:
+                payload = self.gateway_client.get_available_services()
+            except LatchkeyGatewayClientError as e:
+                logger.warning(
+                    "Could not fetch latchkey services catalog from gateway; "
+                    "permission dialogs will fall back to the unknown-service page: {}",
+                    e,
+                )
+                self._by_service_name = {}
+                self._by_scope = {}
+                return
+            try:
+                parsed = _parse_catalog_payload(payload)
+            except MalformedServicesCatalogError as e:
+                logger.warning(
+                    "Gateway returned a malformed services catalog; permission dialogs "
+                    "will fall back to the unknown-service page: {}",
+                    e,
+                )
+                self._by_service_name = {}
+                self._by_scope = {}
+                return
+            self._by_service_name = parsed
+            self._by_scope = {info.scope: info for info in parsed.values()}
+            logger.debug("Loaded latchkey services catalog with {} entries from gateway", len(parsed))
+
+    def get(self, service_name: str) -> ServicePermissionInfo | None:
+        """Return the catalog entry for the raw service name, or ``None``."""
+        self._ensure_loaded()
+        assert self._by_service_name is not None
+        return self._by_service_name.get(service_name)
+
+    def get_by_scope(self, scope: str) -> ServicePermissionInfo | None:
+        """Return the catalog entry whose ``scope`` schema matches, or ``None``.
+
+        The permission request stream carries the scope schema (e.g.
+        ``slack-api``), not the service name, so dialog rendering looks
+        up the matching entry by scope.
+        """
+        self._ensure_loaded()
+        assert self._by_scope is not None
+        return self._by_scope.get(scope)
+
+    def as_mapping(self) -> Mapping[str, ServicePermissionInfo]:
+        """Return the catalog as a read-only mapping keyed by service name."""
+        self._ensure_loaded()
+        assert self._by_service_name is not None
+        return self._by_service_name

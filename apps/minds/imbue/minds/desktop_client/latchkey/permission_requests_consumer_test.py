@@ -24,14 +24,16 @@ def test_streamed_request_to_event_maps_fields_and_uses_request_id_as_event_id()
     streamed = StreamedPermissionRequest(
         request_id="abc123",
         agent_id="agent-9",
-        service_name="slack",
+        scope="slack-api",
+        permissions=("slack-read-all",),
         rationale="needs to read messages",
     )
     event = streamed_request_to_event(streamed)
     assert isinstance(event, LatchkeyPermissionRequestEvent)
     assert str(event.event_id) == "abc123"
     assert event.agent_id == "agent-9"
-    assert event.service_name == "slack"
+    assert event.scope == "slack-api"
+    assert event.permissions == ("slack-read-all",)
     assert event.rationale == "needs to read messages"
     assert event.request_type == str(RequestType.LATCHKEY_PERMISSION)
 
@@ -52,8 +54,20 @@ def test_consumer_dispatches_each_streamed_request_to_on_request() -> None:
     payload = b"".join(
         json.dumps(item).encode("utf-8") + b"\n"
         for item in (
-            {"request_id": "r1", "agent_id": "a1", "service_name": "slack", "rationale": "x"},
-            {"request_id": "r2", "agent_id": "a2", "service_name": "github", "rationale": "y"},
+            {
+                "request_id": "r1",
+                "agent_id": "a1",
+                "scope": "slack-api",
+                "permissions": ["slack-read-all"],
+                "rationale": "x",
+            },
+            {
+                "request_id": "r2",
+                "agent_id": "a2",
+                "scope": "github-rest-api",
+                "permissions": [],
+                "rationale": "y",
+            },
         )
     )
 
@@ -89,4 +103,4 @@ def test_consumer_dispatches_each_streamed_request_to_on_request() -> None:
         finally:
             consumer.stop()
     assert {str(e.event_id) for e in delivered} == {"r1", "r2"}
-    assert {e.service_name for e in delivered} == {"slack", "github"}
+    assert {e.scope for e in delivered} == {"slack-api", "github-rest-api"}

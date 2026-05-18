@@ -29,7 +29,7 @@ def test_inbox_add_request() -> None:
     """Adding a request makes it appear as pending."""
     event = create_latchkey_permission_request_event(
         agent_id="agent-1",
-        service_name="slack",
+        scope="slack-api",
         rationale="post status updates",
     )
     inbox = RequestInbox().add_request(event)
@@ -40,25 +40,25 @@ def test_inbox_add_request() -> None:
 
 def test_inbox_response_only_affects_matched_request() -> None:
     """A response only removes the request it references, not others."""
-    event1 = create_latchkey_permission_request_event(agent_id="agent-1", service_name="slack", rationale="r1")
-    event2 = create_latchkey_permission_request_event(agent_id="agent-1", service_name="github", rationale="r2")
+    event1 = create_latchkey_permission_request_event(agent_id="agent-1", scope="slack-api", rationale="r1")
+    event2 = create_latchkey_permission_request_event(agent_id="agent-1", scope="github-rest-api", rationale="r2")
     response = create_request_response_event(
         request_event_id=str(event1.event_id),
         status=RequestStatus.DENIED,
         agent_id="agent-1",
         request_type=str(RequestType.LATCHKEY_PERMISSION),
-        service_name="slack",
+        scope="slack-api",
     )
     inbox = RequestInbox().add_request(event1).add_request(event2).add_response(response)
     pending = inbox.get_pending_requests()
     assert len(pending) == 1
     assert isinstance(pending[0], LatchkeyPermissionRequestEvent)
-    assert pending[0].service_name == "github"
+    assert pending[0].scope == "github-rest-api"
 
 
 def test_inbox_get_request_by_id() -> None:
     """Can find a request by its event_id."""
-    event = create_latchkey_permission_request_event(agent_id="agent-1", service_name="slack", rationale="r")
+    event = create_latchkey_permission_request_event(agent_id="agent-1", scope="slack-api", rationale="r")
     inbox = RequestInbox().add_request(event)
     found = inbox.get_request_by_id(str(event.event_id))
     assert found is not None
@@ -74,7 +74,7 @@ def test_write_and_load_response_events(tmp_path: Path) -> None:
         status=RequestStatus.GRANTED,
         agent_id="agent-1",
         request_type=str(RequestType.LATCHKEY_PERMISSION),
-        service_name="slack",
+        scope="slack-api",
     )
     append_response_event(tmp_path, response)
     append_response_event(tmp_path, response)
@@ -87,7 +87,7 @@ def test_write_and_load_response_events(tmp_path: Path) -> None:
 def test_write_request_event_to_file(tmp_path: Path) -> None:
     """Request events can be written to a file."""
     events_file = tmp_path / "events" / "requests" / "events.jsonl"
-    event = create_latchkey_permission_request_event(agent_id="agent-1", service_name="slack", rationale="r")
+    event = create_latchkey_permission_request_event(agent_id="agent-1", scope="slack-api", rationale="r")
     write_request_event_to_file(events_file, event)
 
     lines = events_file.read_text().strip().splitlines()
@@ -106,12 +106,12 @@ def test_load_response_events_missing_file(tmp_path: Path) -> None:
 def test_create_latchkey_permission_request_event_populates_all_fields() -> None:
     event = create_latchkey_permission_request_event(
         agent_id="agent-abc",
-        service_name="slack",
+        scope="slack-api",
         rationale="I need to read the team channel to summarize today's discussion.",
     )
 
     assert event.agent_id == "agent-abc"
-    assert event.service_name == "slack"
+    assert event.scope == "slack-api"
     assert event.rationale.startswith("I need to read")
     assert event.request_type == str(RequestType.LATCHKEY_PERMISSION)
     assert str(event.event_id).startswith("evt-")
@@ -121,7 +121,7 @@ def test_create_latchkey_permission_request_event_populates_all_fields() -> None
 def test_parse_request_event_round_trips_latchkey_permission_request() -> None:
     event = create_latchkey_permission_request_event(
         agent_id="agent-xyz",
-        service_name="github",
+        scope="github-rest-api",
         rationale="Need to open a PR.",
     )
 
@@ -129,19 +129,19 @@ def test_parse_request_event_round_trips_latchkey_permission_request() -> None:
     parsed = parse_request_event(line)
 
     assert isinstance(parsed, LatchkeyPermissionRequestEvent)
-    assert parsed.service_name == "github"
+    assert parsed.scope == "github-rest-api"
     assert parsed.rationale == "Need to open a PR."
 
 
 def test_inbox_dedup_includes_latchkey_permission_requests() -> None:
     first = create_latchkey_permission_request_event(
         agent_id="agent-1",
-        service_name="slack",
+        scope="slack-api",
         rationale="first",
     )
     second = create_latchkey_permission_request_event(
         agent_id="agent-1",
-        service_name="slack",
+        scope="slack-api",
         rationale="second",
     )
 
@@ -156,12 +156,12 @@ def test_inbox_dedup_includes_latchkey_permission_requests() -> None:
 def test_inbox_treats_different_services_as_different_requests() -> None:
     slack_request = create_latchkey_permission_request_event(
         agent_id="agent-1",
-        service_name="slack",
+        scope="slack-api",
         rationale="slack",
     )
     github_request = create_latchkey_permission_request_event(
         agent_id="agent-1",
-        service_name="github",
+        scope="github-rest-api",
         rationale="github",
     )
 
@@ -173,7 +173,7 @@ def test_inbox_treats_different_services_as_different_requests() -> None:
 def test_inbox_response_for_latchkey_permission_removes_from_pending() -> None:
     request = create_latchkey_permission_request_event(
         agent_id="agent-1",
-        service_name="slack",
+        scope="slack-api",
         rationale="summary",
     )
     response = create_request_response_event(
@@ -181,7 +181,7 @@ def test_inbox_response_for_latchkey_permission_removes_from_pending() -> None:
         status=RequestStatus.GRANTED,
         agent_id="agent-1",
         request_type=str(RequestType.LATCHKEY_PERMISSION),
-        service_name="slack",
+        scope="slack-api",
     )
 
     inbox = RequestInbox().add_request(request).add_response(response)

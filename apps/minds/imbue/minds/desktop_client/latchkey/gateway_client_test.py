@@ -97,8 +97,20 @@ def test_delete_permission_request_raises_on_other_4xx() -> None:
 def test_iter_permission_requests_parses_jsonl_stream() -> None:
     """``iter_permission_requests`` decodes JSONL into :class:`StreamedPermissionRequest`."""
     requests_payload = [
-        {"request_id": "abc", "agent_id": "a1", "service_name": "slack", "rationale": "why"},
-        {"request_id": "def", "agent_id": "a2", "service_name": "github", "rationale": "test"},
+        {
+            "request_id": "abc",
+            "agent_id": "a1",
+            "scope": "slack-api",
+            "permissions": ["slack-read-all"],
+            "rationale": "why",
+        },
+        {
+            "request_id": "def",
+            "agent_id": "a2",
+            "scope": "github-rest-api",
+            "permissions": [],
+            "rationale": "test",
+        },
     ]
     body = "".join(json.dumps(item) + "\n" for item in requests_payload).encode("utf-8")
 
@@ -111,15 +123,29 @@ def test_iter_permission_requests_parses_jsonl_stream() -> None:
     client = _build_client(_handler)
     items = list(client.iter_permission_requests())
     assert items == [
-        StreamedPermissionRequest(request_id="abc", agent_id="a1", service_name="slack", rationale="why"),
-        StreamedPermissionRequest(request_id="def", agent_id="a2", service_name="github", rationale="test"),
+        StreamedPermissionRequest(
+            request_id="abc",
+            agent_id="a1",
+            scope="slack-api",
+            permissions=("slack-read-all",),
+            rationale="why",
+        ),
+        StreamedPermissionRequest(
+            request_id="def",
+            agent_id="a2",
+            scope="github-rest-api",
+            permissions=(),
+            rationale="test",
+        ),
     ]
 
 
 def test_iter_permission_requests_skips_malformed_lines() -> None:
     """Garbage lines (non-JSON or wrong shape) are dropped with a warning, not raised."""
     payload = (
-        b'not valid json\n{"agent_id": "a1"}\n{"request_id":"x","agent_id":"a2","service_name":"s","rationale":"r"}\n'
+        b'not valid json\n'
+        b'{"agent_id": "a1"}\n'
+        b'{"request_id":"x","agent_id":"a2","scope":"s-api","permissions":["p"],"rationale":"r"}\n'
     )
 
     def _handler(request: httpx.Request) -> httpx.Response:
@@ -129,8 +155,63 @@ def test_iter_permission_requests_skips_malformed_lines() -> None:
     client = _build_client(_handler)
     items = list(client.iter_permission_requests())
     assert items == [
-        StreamedPermissionRequest(request_id="x", agent_id="a2", service_name="s", rationale="r"),
+        StreamedPermissionRequest(
+            request_id="x",
+            agent_id="a2",
+            scope="s-api",
+            permissions=("p",),
+            rationale="r",
+        ),
     ]
+
+
+def test_get_available_services_returns_parsed_payload() -> None:
+    """``get_available_services`` GETs the catalog endpoint and returns the parsed JSON object."""
+    payload = {
+        "slack": {
+            "scope": "slack-api",
+            "display_name": "Slack",
+            "permissions": ["slack-read-all"],
+        },
+    }
+
+    captured: dict[str, object] = {}
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        captured["path"] = request.url.path
+        captured["method"] = request.method
+        captured["auth"] = request.headers.get("X-Latchkey-Gateway-Password")
+        captured["override"] = request.headers.get("X-Latchkey-Gateway-Permissions-Override")
+        return httpx.Response(200, json=payload)
+
+    client = _build_client(_handler)
+    result = client.get_available_services()
+
+    assert result == payload
+    assert captured["method"] == "GET"
+    assert captured["path"] == "/permissions/available"
+    assert captured["auth"] == "hunter2"
+    assert captured["override"] == "admin-jwt-token"
+
+
+def test_get_available_services_raises_on_non_2xx() -> None:
+    def _handler(request: httpx.Request) -> httpx.Response:
+        del request
+        return httpx.Response(500, content=b"boom")
+
+    client = _build_client(_handler)
+    with pytest.raises(LatchkeyGatewayClientError):
+        client.get_available_services()
+
+
+def test_get_available_services_raises_on_non_object_body() -> None:
+    def _handler(request: httpx.Request) -> httpx.Response:
+        del request
+        return httpx.Response(200, json=[1, 2, 3])
+
+    client = _build_client(_handler)
+    with pytest.raises(LatchkeyGatewayClientError):
+        client.get_available_services()
 
 
 def test_get_granted_permissions_unions_matching_scopes() -> None:

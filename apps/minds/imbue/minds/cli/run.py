@@ -61,9 +61,7 @@ from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayCl
 from imbue.minds.desktop_client.latchkey.permission_requests_consumer import PermissionRequestsConsumer
 from imbue.minds.desktop_client.latchkey.permissions import LatchkeyPermissionGrantHandler
 from imbue.minds.desktop_client.latchkey.permissions import MngrMessageSender
-from imbue.minds.desktop_client.latchkey.services_catalog import LatchkeyServicesCatalogError
-from imbue.minds.desktop_client.latchkey.services_catalog import ServicePermissionInfo
-from imbue.minds.desktop_client.latchkey.services_catalog import load_services_catalog
+from imbue.minds.desktop_client.latchkey.services_catalog import ServicesCatalog
 from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.request_events import LatchkeyPermissionRequestEvent
@@ -230,7 +228,7 @@ def run(
     latchkey_permission_handler = LatchkeyPermissionGrantHandler(
         data_dir=data_directory,
         latchkey=latchkey,
-        services_catalog=_try_load_latchkey_services_catalog(),
+        services_catalog=ServicesCatalog(gateway_client=gateway_client),
         mngr_message_sender=MngrMessageSender(),
         gateway_client=gateway_client,
     )
@@ -509,20 +507,12 @@ class _StreamedPermissionRequestHandler(FrozenModel):
             return
         self.app.state.request_inbox = current.add_request(event)
         logger.info(
-            "Streamed latchkey permission request for agent {} (service={}, request_id={})",
+            "Streamed latchkey permission request for agent {} (scope={}, request_id={})",
             event.agent_id,
-            event.service_name,
+            event.scope,
             event.event_id,
         )
         self.backend_resolver.notify_change()
-
-
-def _try_load_latchkey_services_catalog() -> dict[str, ServicePermissionInfo]:
-    try:
-        return load_services_catalog()
-    except LatchkeyServicesCatalogError as e:
-        logger.warning("Could not load latchkey services catalog; permission dialogs disabled: {}", e)
-        return {}
 
 
 def _build_latchkey(data_directory: Path) -> Latchkey:

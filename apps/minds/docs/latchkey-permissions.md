@@ -28,10 +28,11 @@ and how the agent receives the answer.
    request events file via `mngr events --follow`, adds a card to the
    right-side requests inbox panel, and surfaces a notification.
 5. **User opens the dialog.** Clicking the card opens
-   `/requests/<event_id>`, which renders a single-service permission dialog:
+   `/requests/<event_id>`, which renders a single-scope permission dialog:
    * The list of [Detent](https://github.com/imbue-ai/detent) permission
-     schemas the user can grant for that service, sourced from
-     [`apps/minds/imbue/minds/desktop_client/latchkey/services.toml`](../imbue/minds/desktop_client/latchkey/services.toml).
+     schemas the user can grant for that scope, fetched from the latchkey
+     gateway's `GET /permissions/available` endpoint and cached in
+     process for the lifetime of the desktop client.
    * The detent ``any`` schema (matches every request inside the scope) is
      prepended as the first checkbox and pre-checked: clicking Approve
      without changing anything yields ``{<scope>: ["any"]}`` -- unrestricted
@@ -112,31 +113,35 @@ agents on the same machine.
 
 ## Service catalog
 
-The catalog lives at
-[`apps/minds/imbue/minds/desktop_client/latchkey/services.toml`](../imbue/minds/desktop_client/latchkey/services.toml)
-and lists every latchkey service together with:
+The catalog of latchkey services (display name + scope schema + the
+permission schemas the dialog offers) lives alongside the latchkey
+gateway extension at
+[`libs/mngr_latchkey/imbue/mngr_latchkey/extensions/services.json`](../../../libs/mngr_latchkey/imbue/mngr_latchkey/extensions/services.json)
+and is fetched at desktop-client runtime via the gateway's
+`GET /permissions/available` endpoint. Each entry has the shape:
 
+* `scope` -- the detent scope schema the service owns; used as the rule
+  key in `latchkey_permissions.json` and as the value the agent puts
+  in its permission request's `scope` field.
 * `display_name` -- human-readable label shown in the dialog header.
-* `scope_schemas` -- detent scope schemas the service owns; used as
-  rule keys in `latchkey_permissions.json`.
-* `permission_schemas` -- granular detent permission schemas the dialog
-  offers as checkboxes. The implicit ``any`` default is prepended at
-  runtime; do not list it here.
+* `permissions` -- granular detent permission schemas the dialog offers
+  as checkboxes. The implicit ``any`` default is prepended client-side;
+  the gateway file does not list it.
 
-To add a new service, copy an existing entry and swap in the schema names
-listed for that service in detent's
-[`docs/builtin-schemas.md`](https://github.com/imbue-ai/detent/blob/main/docs/builtin-schemas.md).
+The minds desktop client caches the response in-process on first access
+so each request renders without re-fetching. To add a new service,
+edit `services.json` in the gateway extension package (see its README).
 Schemas must already exist in detent; minds does not register custom
-schemas. ``permission_schemas`` may be empty (e.g. for services like
-Linear that have no granular schemas) -- the implicit ``any`` is enough.
+schemas.
 
 ## Agent-side responsibilities
 
 Agents are expected to:
 
 * Detect the three blocked outcomes from the gateway response.
-* Append a `LatchkeyPermissionRequestEvent` (with `service_name` and a
-  short `rationale`) to the agent's own `events/requests/events.jsonl`.
+* POST a permission request to the gateway's `permission-requests`
+  extension (`POST /permission-requests` with `scope`, `permissions`,
+  and `rationale`).
 * Stop the turn and wait. The agent will receive an `mngr message` from
   the desktop with the decision and can decide whether to retry.
 
