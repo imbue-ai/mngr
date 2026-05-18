@@ -224,11 +224,6 @@ class ProviderCredentialsMissingError(ProviderUnavailableError):
     """
 
 
-class ProviderNetworkUnreachableError(ProviderUnavailableError):
-    """The provider's external service is unreachable or returned a transient
-    failure (network error, 5xx, malformed response)."""
-
-
 class ProviderDiscoveryError(ProviderError):
     """Wraps an exception raised inside a single provider's discovery so
     callers can attribute the failure to the offending provider instance.

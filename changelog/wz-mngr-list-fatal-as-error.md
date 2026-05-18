@@ -1,6 +1,6 @@
 Provider error handling for `mngr list` (and the shared discovery boundary) is now uniform: **every provider failure is an error**. There is no separate "warning" severity tier -- the `--on-error` flag is the single mechanism that expresses what the user wants done about failures.
 
-**Typed exception hierarchy (kept).** Providers raise typed exceptions instead of `logger.warning(...) + return []`: `ProviderUnavailableError` (and subclasses `ProviderBinaryMissingError`, `ProviderDaemonNotRunningError`, `ProviderCredentialsMissingError`, `ProviderNetworkUnreachableError`), `ProviderNotAuthorizedError`, `ProviderDiscoveryError`. These remain useful for programmatic discrimination via `ErrorInfo.exception_type`, but they no longer drive a severity decision.
+**Typed exception hierarchy (kept).** Providers raise typed exceptions instead of `logger.warning(...) + return []`: `ProviderUnavailableError` (and subclasses `ProviderBinaryMissingError`, `ProviderDaemonNotRunningError`, `ProviderCredentialsMissingError`), `ProviderNotAuthorizedError`, `ProviderDiscoveryError`. These remain useful for programmatic discrimination via `ErrorInfo.exception_type`, but they no longer drive a severity decision.
 
 **No warning tier.** Removed `WarningInfo` / `ProviderWarningInfo`, `ListResult.warnings`, the `on_warning` callback, and the CLI's warning rendering. `ProviderUnavailableError` is no longer special-cased at the discovery boundary -- it flows through the same path as any other provider failure and lands on `result.errors`.
 
