@@ -1,3 +1,4 @@
+import inspect
 import json
 import os
 import re
@@ -1528,3 +1529,19 @@ def write_discovery_snapshot_to_path(
         "hosts": hosts,
     }
     events_path.write_text(json.dumps(event) + "\n")
+
+
+def walk_concrete_subclasses(cls: type) -> list[type]:
+    """Return every concrete (non-abstract) subclass of ``cls`` reachable via ``__subclasses__``.
+
+    Used by parametrized invariant tests that need to enumerate the full subclass
+    tree. Only subclasses whose defining module has already been imported are
+    visible -- callers that rely on full coverage must import those modules first
+    (typically by importing the relevant subclasses at the top of the test file).
+    """
+    found: list[type] = []
+    for sub in cls.__subclasses__():
+        if not inspect.isabstract(sub):
+            found.append(sub)
+        found.extend(walk_concrete_subclasses(sub))
+    return found

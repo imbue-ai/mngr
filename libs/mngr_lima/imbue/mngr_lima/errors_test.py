@@ -7,6 +7,7 @@ from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import ProviderError
 from imbue.mngr.errors import ProviderUnavailableError
 from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr.utils.testing import walk_concrete_subclasses
 from imbue.mngr_lima.errors import LimaCommandError
 from imbue.mngr_lima.errors import LimaHostCreationError
 from imbue.mngr_lima.errors import LimaHostRenameError
@@ -49,17 +50,8 @@ def test_lima_host_rename_error() -> None:
     assert "cannot be renamed" in str(error)
 
 
-def _walk_concrete_subclasses(cls: type) -> list[type]:
-    found: list[type] = []
-    for sub in cls.__subclasses__():
-        if not inspect.isabstract(sub):
-            found.append(sub)
-        found.extend(_walk_concrete_subclasses(sub))
-    return found
-
-
 _LIMA_PROVIDER_ERROR_SUBCLASSES = [
-    cls for cls in _walk_concrete_subclasses(ProviderError) if cls.__module__.startswith("imbue.mngr_lima")
+    cls for cls in walk_concrete_subclasses(ProviderError) if cls.__module__.startswith("imbue.mngr_lima")
 ]
 
 

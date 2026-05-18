@@ -31,6 +31,7 @@ from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ImageReference
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import SnapshotId
+from imbue.mngr.utils.testing import walk_concrete_subclasses
 
 _TEST_PROVIDER = ProviderInstanceName("test-provider")
 
@@ -293,16 +294,7 @@ def test_agent_start_error_includes_agent_and_reason() -> None:
     assert "session already exists" in str(error)
 
 
-def _walk_concrete_subclasses(cls: type) -> list[type]:
-    found: list[type] = []
-    for sub in cls.__subclasses__():
-        if not inspect.isabstract(sub):
-            found.append(sub)
-        found.extend(_walk_concrete_subclasses(sub))
-    return found
-
-
-@pytest.mark.parametrize("subclass", _walk_concrete_subclasses(ProviderError), ids=lambda c: c.__name__)
+@pytest.mark.parametrize("subclass", walk_concrete_subclasses(ProviderError), ids=lambda c: c.__name__)
 def test_provider_error_subclass_takes_provider_name_first(subclass: type) -> None:
     """Every ProviderError subclass must accept provider_name as its first parameter.
 
