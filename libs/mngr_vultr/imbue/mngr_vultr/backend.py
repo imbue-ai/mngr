@@ -1,3 +1,4 @@
+from collections.abc import Callable
 from typing import Any
 from typing import Final
 
@@ -14,6 +15,8 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import ProviderInstanceConfig
 from imbue.mngr.errors import HostConnectionError
 from imbue.mngr.errors import MngrError
+from imbue.mngr.interfaces.data_types import ErrorInfo
+from imbue.mngr.interfaces.data_types import ProviderErrorInfo
 from imbue.mngr.interfaces.provider_backend import ProviderBackendInterface
 from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
 from imbue.mngr.primitives import HostId
@@ -69,6 +72,7 @@ class VultrProvider(VpsDockerProvider):
     def _read_records_from_vps(
         self,
         vps_ip: str,
+        on_error: Callable[[ErrorInfo], None] | None = None,
     ) -> tuple[list[VpsDockerHostRecord], dict[HostId, list[dict[str, Any]]]]:
         """Read all host records and agent data from a single VPS in one SSH command.
 
@@ -78,7 +82,9 @@ class VultrProvider(VpsDockerProvider):
         empty results. If outer SSH to the VPS fails, fall back to any
         in-process cached records for that VPS so the hosts still appear
         in the listing (with an offline state) instead of disappearing
-        entirely; one bad VPS must not silently drop its hosts.
+        entirely; one bad VPS must not silently drop its hosts. The
+        per-VPS failure is surfaced via on_error so the listing pipeline
+        can record it (and exit non-zero under --on-error abort).
         """
         try:
             with self._make_outer_for_vps_ip(vps_ip) as outer:
@@ -98,10 +104,13 @@ class VultrProvider(VpsDockerProvider):
                 )
             else:
                 logger.warning("Failed to read records from VPS {}: {}", vps_ip, e)
+            if on_error is not None:
+                on_error(ProviderErrorInfo.build_for_provider(e, self.name))
             return cached_records, {}
 
     def _discover_host_records_with_agents(
         self,
+        on_error: Callable[[ErrorInfo], None] | None = None,
     ) -> tuple[list[VpsDockerHostRecord], dict[HostId, list[dict[str, Any]]]]:
         """Discover host records and agent data from all Vultr VPSes.
 
@@ -124,7 +133,7 @@ class VultrProvider(VpsDockerProvider):
                     name="vultr_read_records",
                     max_workers=min(len(vps_ips), 32),
                 ) as executor:
-                    futures = [executor.submit(self._read_records_from_vps, ip) for ip in vps_ips]
+                    futures = [executor.submit(self._read_records_from_vps, ip, on_error) for ip in vps_ips]
 
                 for future in futures:
                     records, agent_data = future.result()

@@ -31,13 +31,15 @@ from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import ProviderInstanceNotFoundError
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.data_types import AgentDetails
+from imbue.mngr.interfaces.data_types import AgentErrorInfo
+from imbue.mngr.interfaces.data_types import ErrorInfo
+from imbue.mngr.interfaces.data_types import HostErrorInfo
+from imbue.mngr.interfaces.data_types import ProviderErrorInfo
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
-from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import DiscoveredHost
 from imbue.mngr.primitives import ErrorBehavior
-from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.utils.cel_utils import apply_compiled_cel_filters
 from imbue.mngr.utils.cel_utils import build_cel_context
@@ -92,71 +94,32 @@ def _is_dict_like(annotation: Any) -> bool:
 _AGENT_SCHEMALESS_PATHS: Final[tuple[tuple[str, ...], ...]] = tuple(_walk_dict_paths(AgentDetails))
 
 
-class ErrorInfo(FrozenModel):
-    """Information about an error encountered during listing.
-
-    This preserves the exception type and message instead of converting to a string immediately.
-    """
-
-    exception_type: str = Field(description="The type name of the exception (e.g., 'RuntimeError')")
-    message: str = Field(description="The error message")
-
-    @classmethod
-    def build(cls, exception: BaseException) -> "ErrorInfo":
-        """Build an ErrorInfo from an exception."""
-        return cls(exception_type=type(exception).__name__, message=str(exception))
-
-
-class ProviderErrorInfo(ErrorInfo):
-    """Error information with provider context."""
-
-    provider_name: ProviderInstanceName = Field(description="Name of the provider where the error occurred")
-
-    @classmethod
-    def build_for_provider(cls, exception: BaseException, provider_name: ProviderInstanceName) -> "ProviderErrorInfo":
-        """Build a ProviderErrorInfo from an exception and provider name."""
-        return cls(
-            exception_type=type(exception).__name__,
-            message=str(exception),
-            provider_name=provider_name,
-        )
-
-
-class HostErrorInfo(ErrorInfo):
-    """Error information with host context."""
-
-    host_id: HostId = Field(description="ID of the host where the error occurred")
-
-    @classmethod
-    def build_for_host(cls, exception: BaseException, host_id: HostId) -> "HostErrorInfo":
-        """Build a HostErrorInfo from an exception and host ID."""
-        return cls(
-            exception_type=type(exception).__name__,
-            message=str(exception),
-            host_id=host_id,
-        )
-
-
-class AgentErrorInfo(ErrorInfo):
-    """Error information with agent context."""
-
-    agent_id: AgentId = Field(description="ID of the agent where the error occurred")
-
-    @classmethod
-    def build_for_agent(cls, exception: BaseException, agent_id: AgentId) -> "AgentErrorInfo":
-        """Build an AgentErrorInfo from an exception and agent ID."""
-        return cls(
-            exception_type=type(exception).__name__,
-            message=str(exception),
-            agent_id=agent_id,
-        )
-
-
 class ListResult(MutableModel):
     """Result of listing agents."""
 
     agents: list[AgentDetails] = Field(default_factory=list, description="List of agents with their full information")
     errors: list[ErrorInfo] = Field(default_factory=list, description="Errors encountered while listing")
+
+
+class _ErrorEmitter(MutableModel):
+    """Per-call emitter providers call to surface a per-resource ErrorInfo.
+
+    Appends to result.errors under the shared results_lock and forwards to
+    params.on_error if provided. Defined as a callable class (not an inline
+    closure) to satisfy the inline-functions ratchet and to keep the type
+    signature explicit at the provider boundary.
+    """
+
+    model_config = {"arbitrary_types_allowed": True}
+    result: ListResult
+    results_lock: Any
+    on_error: Callable[[ErrorInfo], None] | None
+
+    def __call__(self, error_info: ErrorInfo) -> None:
+        with self.results_lock:
+            self.result.errors.append(error_info)
+        if self.on_error:
+            self.on_error(error_info)
 
 
 class _ListAgentsParams(FrozenModel):
@@ -308,7 +271,12 @@ def _construct_and_discover_for_provider(
         provider = get_provider_instance(provider_name, mngr_ctx)
         if reset_caches:
             provider.reset_caches()
-        provider_results = provider.discover_hosts_and_agents(cg=mngr_ctx.concurrency_group, include_destroyed=True)
+        error_emitter = _ErrorEmitter(result=result, results_lock=results_lock, on_error=params.on_error)
+        provider_results = provider.discover_hosts_and_agents(
+            cg=mngr_ctx.concurrency_group,
+            include_destroyed=True,
+            on_error=error_emitter,
+        )
     except Exception as e:
         if params.error_behavior == ErrorBehavior.ABORT:
             if isinstance(e, MngrError):
@@ -498,7 +466,8 @@ def _construct_discover_and_emit_for_provider(
             provider.reset_caches()
 
         # Phase 1: list hosts and get agent refs
-        provider_results = provider.discover_hosts_and_agents(cg=cg, include_destroyed=True)
+        error_emitter = _ErrorEmitter(result=result, results_lock=results_lock, on_error=params.on_error)
+        provider_results = provider.discover_hosts_and_agents(cg=cg, include_destroyed=True, on_error=error_emitter)
 
         # Warn if any host names are duplicated within this provider
         warn_on_duplicate_host_names(provider_results)

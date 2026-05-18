@@ -53,6 +53,7 @@ from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.interfaces.data_types import CpuResources
+from imbue.mngr.interfaces.data_types import ErrorInfo
 from imbue.mngr.interfaces.data_types import HostConfig
 from imbue.mngr.interfaces.data_types import HostDetails
 from imbue.mngr.interfaces.data_types import HostLifecycleOptions
@@ -2361,6 +2362,7 @@ log "=== Shutdown script completed ==="
         self,
         cg: ConcurrencyGroup,
         include_destroyed: bool = False,
+        on_error: Callable[[ErrorInfo], None] | None = None,
     ) -> dict[DiscoveredHost, list[DiscoveredAgent]]:
         """Load hosts and agent references entirely from the state volume and sandbox list.
 

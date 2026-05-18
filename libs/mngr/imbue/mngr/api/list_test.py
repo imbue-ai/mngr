@@ -24,6 +24,7 @@ from imbue.mngr.api.list import HostErrorInfo
 from imbue.mngr.api.list import ListResult
 from imbue.mngr.api.list import ProviderErrorInfo
 from imbue.mngr.api.list import _AGENT_SCHEMALESS_PATHS
+from imbue.mngr.api.list import _ErrorEmitter
 from imbue.mngr.api.list import _ListAgentsParams
 from imbue.mngr.api.list import _apply_cel_filters
 from imbue.mngr.api.list import _collect_and_emit_details_for_host
@@ -1231,6 +1232,7 @@ class _RaisingDiscoveryProviderInstance(MockProviderInstance):
         self,
         cg: ConcurrencyGroup,
         include_destroyed: bool = False,
+        on_error: Any = None,
     ) -> dict[DiscoveredHost, list[DiscoveredAgent]]:
         raise MngrError("simulated discovery failure from test")
 
@@ -1263,6 +1265,7 @@ class _MismatchedProviderInstance(MockProviderInstance):
         self,
         cg: ConcurrencyGroup,
         include_destroyed: bool = False,
+        on_error: Any = None,
     ) -> dict[DiscoveredHost, list[DiscoveredAgent]]:
         mismatched_host = DiscoveredHost(
             host_id=HostId.generate(),
@@ -2115,3 +2118,159 @@ def test_process_host_with_error_handling_abort_mode_propagates_error(
         )
 
     assert result.errors == []
+
+
+# =============================================================================
+# _ErrorEmitter: per-resource on_error plumbing from providers into result.errors
+# =============================================================================
+
+
+def test_error_emitter_appends_to_result_errors() -> None:
+    """The _ErrorEmitter callable appends ErrorInfo records to result.errors."""
+    result = ListResult()
+    lock = Lock()
+    emitter = _ErrorEmitter(result=result, results_lock=lock, on_error=None)
+    error_info = ProviderErrorInfo.build_for_provider(MngrError("vps unreachable"), ProviderInstanceName("vultr-test"))
+    emitter(error_info)
+
+    assert len(result.errors) == 1
+    assert result.errors[0] is error_info
+
+
+def test_error_emitter_invokes_on_error_callback() -> None:
+    """The emitter forwards each error to the params.on_error callback alongside collection."""
+    result = ListResult()
+    lock = Lock()
+    captured: list[ErrorInfo] = []
+    emitter = _ErrorEmitter(result=result, results_lock=lock, on_error=captured.append)
+    error_info = ProviderErrorInfo.build_for_provider(MngrError("vps unreachable"), ProviderInstanceName("vultr-test"))
+    emitter(error_info)
+
+    assert captured == [error_info]
+    assert result.errors == [error_info]
+
+
+def test_error_emitter_collects_per_resource_errors_during_discovery(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """A provider emitting on_error during discovery surfaces ErrorInfo on result.errors.
+
+    Exercises the wire-up from `_construct_discover_and_emit_for_provider` through
+    `_ErrorEmitter` -> `result.errors`, without aborting the listing.
+    """
+    failure = MngrError("VPS 7 unreachable")
+    emitted_error = ProviderErrorInfo.build_for_provider(failure, ProviderInstanceName("per-resource-test"))
+
+    class _PerResourceErrorProvider(MockProviderInstance):
+        def discover_hosts_and_agents(
+            self,
+            cg: ConcurrencyGroup,
+            include_destroyed: bool = False,
+            on_error: Any = None,
+        ) -> dict[DiscoveredHost, list[DiscoveredAgent]]:
+            if on_error is not None:
+                on_error(emitted_error)
+            return {}
+
+    provider = _PerResourceErrorProvider(
+        name=ProviderInstanceName("per-resource-test"),
+        host_dir=temp_mngr_ctx.config.default_host_dir,
+        mngr_ctx=temp_mngr_ctx,
+    )
+
+    result = ListResult()
+    lock = Lock()
+    captured: list[ErrorInfo] = []
+    emitter = _ErrorEmitter(result=result, results_lock=lock, on_error=captured.append)
+
+    provider.discover_hosts_and_agents(cg=temp_mngr_ctx.concurrency_group, on_error=emitter)
+
+    assert result.errors == [emitted_error]
+    assert captured == [emitted_error]
+
+
+def test_construct_discover_and_emit_for_provider_wires_on_error(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """End-to-end: streaming discovery routes a provider's on_error to result.errors.
+
+    Confirms _construct_discover_and_emit_for_provider builds an _ErrorEmitter and
+    threads it into provider.discover_hosts_and_agents, so a per-resource failure
+    inside a provider lands in result.errors with full attribution.
+    """
+
+    class _EmittingProvider(MockProviderInstance):
+        def discover_hosts_and_agents(
+            self,
+            cg: ConcurrencyGroup,
+            include_destroyed: bool = False,
+            on_error: Any = None,
+        ) -> dict[DiscoveredHost, list[DiscoveredAgent]]:
+            if on_error is not None:
+                on_error(ProviderErrorInfo.build_for_provider(MngrError("simulated per-resource failure"), self.name))
+            return {}
+
+    provider_name = ProviderInstanceName("emitting-provider")
+    backend_name = ProviderBackendName("emitting-backend")
+
+    class _EmittingBackend(ProviderBackendInterface):
+        @staticmethod
+        def get_name() -> ProviderBackendName:
+            return backend_name
+
+        @staticmethod
+        def get_description() -> str:
+            return "Test backend whose provider emits an on_error during discovery"
+
+        @staticmethod
+        def get_config_class() -> type[ProviderInstanceConfig]:
+            return ProviderInstanceConfig
+
+        @staticmethod
+        def get_build_args_help() -> str:
+            return ""
+
+        @staticmethod
+        def get_start_args_help() -> str:
+            return ""
+
+        @staticmethod
+        def build_provider_instance(
+            name: ProviderInstanceName,
+            config: ProviderInstanceConfig,
+            mngr_ctx: MngrContext,
+        ) -> ProviderInstanceInterface:
+            return _EmittingProvider(
+                name=name,
+                host_dir=mngr_ctx.config.default_host_dir,
+                mngr_ctx=mngr_ctx,
+            )
+
+    _backend_registry[backend_name] = _EmittingBackend
+    _provider_config_registry[backend_name] = ProviderInstanceConfig
+    try:
+        emitting_config = ProviderInstanceConfig(backend=backend_name)
+        updated_config = temp_mngr_ctx.config.model_copy_update(
+            to_update(temp_mngr_ctx.config.field_ref().providers, {provider_name: emitting_config}),
+        )
+        ctx = temp_mngr_ctx.model_copy_update(
+            to_update(temp_mngr_ctx.field_ref().config, updated_config),
+        )
+
+        captured: list[ErrorInfo] = []
+        result = list_agents(
+            mngr_ctx=ctx,
+            is_streaming=True,
+            error_behavior=ErrorBehavior.CONTINUE,
+            provider_names=(str(provider_name),),
+            on_error=captured.append,
+        )
+    finally:
+        del _backend_registry[backend_name]
+        del _provider_config_registry[backend_name]
+
+    per_resource_errors = [e for e in result.errors if isinstance(e, ProviderErrorInfo)]
+    assert len(per_resource_errors) == 1
+    assert per_resource_errors[0].provider_name == provider_name
+    assert "simulated per-resource failure" in per_resource_errors[0].message
+    assert captured == result.errors

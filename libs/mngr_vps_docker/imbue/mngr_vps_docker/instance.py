@@ -42,6 +42,7 @@ from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.interfaces.data_types import CpuResources
+from imbue.mngr.interfaces.data_types import ErrorInfo
 from imbue.mngr.interfaces.data_types import HostDetails
 from imbue.mngr.interfaces.data_types import HostLifecycleOptions
 from imbue.mngr.interfaces.data_types import HostResources
@@ -1551,6 +1552,7 @@ class VpsDockerProvider(BaseProviderInstance):
         self,
         cg: ConcurrencyGroup,
         include_destroyed: bool = False,
+        on_error: Callable[[ErrorInfo], None] | None = None,
     ) -> dict[DiscoveredHost, list[DiscoveredAgent]]:
         """Load hosts and agent references from state volumes in batched SSH calls.
 
@@ -1559,7 +1561,7 @@ class VpsDockerProvider(BaseProviderInstance):
         per-host SSH calls into containers for agent discovery.
         """
         with log_span("VPS Docker discover_hosts_and_agents for provider={}", self.name):
-            all_records, agent_data_by_host_id = self._discover_host_records_with_agents()
+            all_records, agent_data_by_host_id = self._discover_host_records_with_agents(on_error=on_error)
 
         result: dict[DiscoveredHost, list[DiscoveredAgent]] = {}
         for record in all_records:
@@ -1630,6 +1632,7 @@ class VpsDockerProvider(BaseProviderInstance):
 
     def _discover_host_records_with_agents(
         self,
+        on_error: Callable[[ErrorInfo], None] | None = None,
     ) -> tuple[list[VpsDockerHostRecord], dict[HostId, list[dict[str, Any]]]]:
         """Discover host records and agent data from state volumes.
 

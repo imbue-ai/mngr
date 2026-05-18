@@ -55,6 +55,7 @@ from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.interfaces.data_types import CpuResources
+from imbue.mngr.interfaces.data_types import ErrorInfo
 from imbue.mngr.interfaces.data_types import HostDetails
 from imbue.mngr.interfaces.data_types import HostLifecycleOptions
 from imbue.mngr.interfaces.data_types import HostResources
@@ -385,6 +386,7 @@ class ImbueCloudProvider(BaseProviderInstance):
         self,
         cg: ConcurrencyGroup,
         include_destroyed: bool = False,
+        on_error: Callable[[ErrorInfo], None] | None = None,
     ) -> dict[DiscoveredHost, list[DiscoveredAgent]]:
         leased = self._list_leased_hosts_cached()
         result: dict[DiscoveredHost, list[DiscoveredAgent]] = {}
