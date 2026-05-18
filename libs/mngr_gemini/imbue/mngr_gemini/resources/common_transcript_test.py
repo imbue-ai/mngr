@@ -114,8 +114,8 @@ class ScriptRunner:
                 f.write(line + "\n")
         return self.input_file
 
-    def append_to_session(self, session_file: Path, lines: list[str]) -> None:
-        with session_file.open("a") as f:
+    def append_to_input(self, input_file: Path, lines: list[str]) -> None:
+        with input_file.open("a") as f:
             for line in lines:
                 f.write(line + "\n")
 
@@ -446,7 +446,7 @@ def test_output_writes_to_correct_path(tmp_path: Path, stub_mngr_log_sh: str) ->
 def test_incremental_conversion(tmp_path: Path, stub_mngr_log_sh: str) -> None:
     """Running twice with new input should append without duplicates."""
     runner = ScriptRunner(tmp_path, stub_mngr_log_sh)
-    session_file = runner.add_session(
+    input_file = runner.add_session(
         [
             _make_session_header("sid-1", "2026-01-01T00:00:00Z"),
             _make_user_event("uuid-1", "2026-01-01T00:00:01Z", "First"),
@@ -457,8 +457,8 @@ def test_incremental_conversion(tmp_path: Path, stub_mngr_log_sh: str) -> None:
     assert result.returncode == 0, f"stderr: {result.stderr}"
     assert len(runner.get_output_events()) == 1
 
-    # Append a new event to the session file
-    runner.append_to_session(session_file, [_make_user_event("uuid-2", "2026-01-01T00:00:02Z", "Second")])
+    # Append a new event to the raw input file
+    runner.append_to_input(input_file, [_make_user_event("uuid-2", "2026-01-01T00:00:02Z", "Second")])
 
     result = runner.run_single_pass()
     assert result.returncode == 0, f"stderr: {result.stderr}"
