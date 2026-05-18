@@ -202,8 +202,11 @@ def signup_email() -> Generator[MailtmInbox, None, None]:
     The mail.tm account itself is shared across the whole run (created
     by the orchestrator, torn down at the end).
     """
-    account_address = MailtmAddress(_require_env_var(MAILTM_ADDRESS_ENV_VAR))
-    jwt = MailtmJwt(_require_env_var(MAILTM_JWT_ENV_VAR))
+    try:
+        account_address = MailtmAddress(_require_env_var(MAILTM_ADDRESS_ENV_VAR))
+        jwt = MailtmJwt(_require_env_var(MAILTM_JWT_ENV_VAR))
+    except DeploymentTestConfigError as exc:
+        pytest.skip(str(exc))
     address = make_signup_address(account_address, suffix=get_short_random_string())
     yield MailtmInbox(address=address, account_address=account_address, jwt=jwt)
 
