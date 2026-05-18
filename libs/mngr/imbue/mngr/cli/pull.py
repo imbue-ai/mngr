@@ -2,14 +2,14 @@ from pathlib import Path
 
 import click
 from click_option_group import optgroup
-from loguru import logger
 
+from imbue.mngr.api.find import resolve_to_started_host_and_agent
 from imbue.mngr.api.pull import pull_files
 from imbue.mngr.api.pull import pull_git
 from imbue.mngr.cli.address_params import AGENT_ADDRESS
-from imbue.mngr.cli.address_params import HOSTED_LOCATION
 from imbue.mngr.cli.address_params import HOST_ADDRESS
-from imbue.mngr.cli.agent_utils import find_agent_for_command
+from imbue.mngr.cli.address_params import HOST_LOCATION_ADDRESS
+from imbue.mngr.cli.agent_utils import find_agent_by_address_or_interactively
 from imbue.mngr.cli.agent_utils import stop_agent_after_sync
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
@@ -22,7 +22,7 @@ from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.primitives import AgentAddress
 from imbue.mngr.primitives import HostAddress
-from imbue.mngr.primitives import HostedLocation
+from imbue.mngr.primitives import HostLocationAddress
 from imbue.mngr.primitives import UncommittedChangesMode
 
 
@@ -32,14 +32,15 @@ class PullCliOptions(CommonCliOptions):
     Inherits common options (output_format, quiet, verbose, etc.) from CommonCliOptions.
     """
 
-    source_pos: HostedLocation | None
+    source_pos: HostLocationAddress | None
     destination_pos: str | None
-    source: HostedLocation | None
+    source: HostLocationAddress | None
     source_agent: AgentAddress | None
     source_host: HostAddress | None
     source_path: str | None
     destination: str | None
     dry_run: bool
+    start: bool
     stop: bool
     delete: bool
     sync_mode: str
@@ -47,7 +48,7 @@ class PullCliOptions(CommonCliOptions):
     uncommitted_changes: str
     target_branch: str | None
     # Planned features (not yet implemented)
-    target: HostedLocation | None
+    target: HostLocationAddress | None
     target_agent: AgentAddress | None
     target_host: HostAddress | None
     target_path: str | None
@@ -68,13 +69,13 @@ class PullCliOptions(CommonCliOptions):
 
 
 @click.command()
-@click.argument("source_pos", type=HOSTED_LOCATION, default=None, required=False, metavar="SOURCE")
+@click.argument("source_pos", type=HOST_LOCATION_ADDRESS, default=None, required=False, metavar="SOURCE")
 @click.argument("destination_pos", default=None, required=False, metavar="DESTINATION")
 @optgroup.group("Source Selection")
 @optgroup.option(
     "--source",
     "source",
-    type=HOSTED_LOCATION,
+    type=HOST_LOCATION_ADDRESS,
     help="Source specification: AGENT[@HOST[.PROVIDER]][:PATH]",
 )
 @optgroup.option("--source-agent", type=AGENT_ADDRESS, help="Source agent address (NAME[@HOST[.PROVIDER]])")
@@ -93,6 +94,12 @@ class PullCliOptions(CommonCliOptions):
     is_flag=True,
     default=False,
     help="Show what would be transferred without actually transferring",
+)
+@optgroup.option(
+    "--start/--no-start",
+    default=True,
+    show_default=True,
+    help="Automatically start the host if offline (the agent does not need to be running)",
 )
 @optgroup.option(
     "--stop",
@@ -120,7 +127,7 @@ class PullCliOptions(CommonCliOptions):
 @optgroup.group("Target (for agent-to-agent sync)")
 @optgroup.option(
     "--target",
-    type=HOSTED_LOCATION,
+    type=HOST_LOCATION_ADDRESS,
     help="Target specification: AGENT[@HOST[.PROVIDER]][:PATH] [future]",
 )
 @optgroup.option("--target-agent", type=AGENT_ADDRESS, help="Target agent address [future]")
@@ -189,7 +196,7 @@ def pull(ctx: click.Context, **kwargs) -> None:
     )
 
     # Merge positional and named arguments (named option takes precedence)
-    effective_source_loc: HostedLocation | None = opts.source if opts.source is not None else opts.source_pos
+    effective_source_loc: HostLocationAddress | None = opts.source if opts.source is not None else opts.source_pos
     effective_destination = opts.destination if opts.destination is not None else opts.destination_pos
 
     # Check for unsupported options
@@ -275,15 +282,17 @@ def pull(ctx: click.Context, **kwargs) -> None:
     destination_path = Path(effective_destination) if effective_destination else Path.cwd()
 
     # Find the agent
-    result = find_agent_for_command(
+    host_ref, agent_ref = find_agent_by_address_or_interactively(
         mngr_ctx=mngr_ctx,
         address=source_address,
         host_filter=None,
     )
-    if result is None:
-        logger.info("No agent selected")
-        return
-    agent, host = result
+    agent, host = resolve_to_started_host_and_agent(
+        host_ref=host_ref,
+        agent_ref=agent_ref,
+        allow_auto_start=opts.start,
+        mngr_ctx=mngr_ctx,
+    )
 
     emit_info(f"Pulling from agent: {agent.name}", output_opts.output_format)
 
@@ -349,7 +358,7 @@ def pull(ctx: click.Context, **kwargs) -> None:
 CommandHelpMetadata(
     key="pull",
     one_line_description="Pull files or git commits from an agent to local machine [experimental]",
-    synopsis="mngr pull [SOURCE] [DESTINATION] [--source <SOURCE>] [--source-agent <AGENT>] [--sync-mode <MODE>] [--include PATTERN] [--dry-run] [--stop]",
+    synopsis="mngr pull [SOURCE] [DESTINATION] [--source <SOURCE>] [--source-agent <AGENT>] [--sync-mode <MODE>] [--include PATTERN] [--dry-run] [--start/--no-start] [--stop]",
     description="""Syncs files or git state from an agent's working directory to a local directory.
 Default behavior uses rsync for efficient incremental file transfer.
 Use --sync-mode=git to merge git branches instead of syncing files.
