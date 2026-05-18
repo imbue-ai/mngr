@@ -6,12 +6,20 @@ from enum import auto
 
 from pydantic import Field
 
+from imbue.concurrency_group.concurrency_group import ConcurrencyExceptionGroup
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.errors import ProcessError
 from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.mngr.errors import BinaryNotInstalledError
 from imbue.mngr.errors import MngrError
+
+# ConcurrencyGroup's __exit__ wraps any ProcessError raised inside the `with`
+# block (e.g. by run_process_to_completion when a process exits non-zero) in a
+# ConcurrencyExceptionGroup before re-raising. So the subprocess-runner
+# helpers below must catch the group in addition to the bare ProcessError --
+# either can surface depending on where the failure happens.
+_SUBPROCESS_ERRORS: tuple[type[Exception], ...] = (OSError, ProcessError, ConcurrencyExceptionGroup)
 
 
 class OsName(UpperCaseStrEnum):
@@ -156,7 +164,7 @@ def check_bash_version(minimum: int = 4) -> bool:
             result = cg.run_process_to_completion(["bash", "-c", "echo ${BASH_VERSINFO[0]}"])
         version = int(result.stdout.strip())
         return version >= minimum
-    except (OSError, ProcessError, ValueError):
+    except (*_SUBPROCESS_ERRORS, ValueError):
         return False
 
 
@@ -261,7 +269,7 @@ def _install_via_brew(packages: list[str]) -> bool:
         with ConcurrencyGroup(name="brew-install") as cg:
             cg.run_process_to_completion(["brew", "install", *packages])
         return True
-    except (OSError, ProcessError):
+    except _SUBPROCESS_ERRORS:
         return False
 
 
@@ -274,7 +282,7 @@ def _install_via_apt(packages: list[str]) -> bool:
             cg.run_process_to_completion(["sudo", "apt-get", "update", "-qq"])
             cg.run_process_to_completion(["sudo", "apt-get", "install", "-y", "-qq", *packages])
         return True
-    except (OSError, ProcessError):
+    except _SUBPROCESS_ERRORS:
         return False
 
 
