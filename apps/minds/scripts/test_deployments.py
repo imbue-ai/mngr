@@ -513,7 +513,12 @@ def run(keep_on_failure: bool) -> None:
         shared_env_secrets=shared_env_secrets,
     )
 
-    deployment_rc = _invoke_pytest_for_mark("minds_deployment", env=pytest_env) if deploy_failure is None else 1
+    # minds_deployment tests use only the ephemeral_env fixture (they mint
+    # their own dev-ci-* env per test) and do not depend on the shared envs,
+    # so they run regardless of whether the shared-env stand-up succeeded.
+    # minds_services tests depend on shared_env(role=...) URLs+secrets, so
+    # they are skipped when shared-env deploy failed.
+    deployment_rc = _invoke_pytest_for_mark("minds_deployment", env=pytest_env)
     services_rc = _invoke_pytest_for_mark("minds_services", env=pytest_env) if deploy_failure is None else 1
 
     teardown_failures = _teardown_run(
