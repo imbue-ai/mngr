@@ -55,9 +55,16 @@ declare -A _OFFSET_BY_PATH=()
 declare -A _OUTPUT_IDS=()
 
 # Map an absolute session file path to a filesystem-safe offset key.
-# Replaces '/' with '_' so the file name stays under one path segment.
+# Uses percent-encoding so the mapping is injective: distinct paths
+# produce distinct keys. A naive '/'-to-'_' substitution would alias
+# paths that already contain underscores (e.g. '/a_b/c' and '/a/b/c'
+# would both encode to '_a_b_c'), silently corrupting offset tracking
+# for any deployment whose paths happen to contain underscores.
+# Order matters: '%' must be escaped before '/', so a literal '%2F' in
+# the input does not get folded together with an encoded '/'.
 _offset_key_for() {
-    echo "${1//\//_}"
+    local encoded="${1//%/%25}"
+    echo "${encoded//\//%2F}"
 }
 
 _line_count() {
