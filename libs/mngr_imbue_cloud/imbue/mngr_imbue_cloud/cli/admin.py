@@ -579,12 +579,16 @@ def _create_single_pool_host(
     # down so the user's first start gets a fresh chat agent named after
     # their own host name.
     logger.info("  Destroying bootstrap-created chat agent: {}", bootstrap_chat_agent_name)
-    # ``--`` marks the end of ``mngr exec``'s own options so click stops
-    # trying to parse the inner command's flags (``--force``, ``-f``,
-    # etc.) as options to ``mngr exec`` itself. Without it click prints
-    # "No such option: --force" for the inner ``mngr destroy --force``.
+    # ``mngr exec`` parses ``AGENTS... COMMAND`` -- the LAST positional
+    # goes to ``COMMAND`` and the rest to ``AGENTS``. Passing a multi-
+    # token command as separate argv entries makes click treat all but
+    # the last as agent names ("No agent(s) found matching: destroy,
+    # mngr, pool-..."). Pack the whole remote command into one
+    # shell-quoted string so it lands as a single ``COMMAND`` positional;
+    # the remote sshd parses it back via bash.
+    chat_destroy_cmd = shlex.join(["mngr", "destroy", bootstrap_chat_agent_name, "--force"])
     chat_destroy = _run_mngr_command(
-        ["exec", agent_name, "--", "mngr", "destroy", bootstrap_chat_agent_name, "--force"],
+        ["exec", agent_name, chat_destroy_cmd],
         timeout=120,
     )
     if chat_destroy.returncode != 0:
@@ -599,8 +603,9 @@ def _create_single_pool_host(
         )
 
     logger.info("  Removing initial-chat sentinel: {}", _INITIAL_CHAT_SENTINEL_PATH)
+    sentinel_rm_cmd = shlex.join(["rm", "-f", _INITIAL_CHAT_SENTINEL_PATH])
     sentinel_rm = _run_mngr_command(
-        ["exec", agent_name, "--", "rm", "-f", _INITIAL_CHAT_SENTINEL_PATH],
+        ["exec", agent_name, sentinel_rm_cmd],
         timeout=30,
     )
     if sentinel_rm.returncode != 0:
