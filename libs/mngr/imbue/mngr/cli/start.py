@@ -60,7 +60,7 @@ def _try_acquire_restart_lock(host_dir: Path, agent_id: AgentId) -> io.TextIOWra
     except BlockingIOError:
         lock_file.close()
         return None
-    except BaseException:
+    except Exception:
         lock_file.close()
         raise
     return lock_file
