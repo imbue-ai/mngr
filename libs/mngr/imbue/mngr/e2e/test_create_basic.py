@@ -17,9 +17,12 @@ def test_create_default(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
     # running mngr create is strictly better than running claude!
     # (if you use the alias `mngr c`, it's no more letters to type :-D)
-    # running this command launches claude (Claude Code) immediately *in a new worktree*
+    # running this command launches your default agent immediately *in a new worktree*
     mngr create
-    # the defaults are the following: agent=claude, provider=local, project=current dir
+    # the defaults are the following: agent=your configured default (stored under `[commands.create] type`
+    # in user settings; `scripts/install.sh` interactively prompts you to pick one as part of
+    # `mngr extras -i`, and you can re-run `mngr extras config` later to pick or change it),
+    # provider=local, project=current dir
     """)
     result = e2e.run(
         "mngr create my-task --type command --no-ensure-clean -- sleep 100070",
@@ -29,7 +32,7 @@ def test_create_default(e2e: E2eSession) -> None:
 
     list_result = e2e.run(
         "mngr list --format json",
-        comment="the defaults are the following: agent=claude, provider=local, project=current dir",
+        comment="the defaults are the following: agent=your configured default, provider=local, project=current dir",
     )
     expect(list_result).to_succeed()
     parsed = json.loads(list_result.stdout)
@@ -85,7 +88,9 @@ def test_create_in_place(e2e: E2eSession) -> None:
 @pytest.mark.modal
 def test_create_short_forms(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
-    # you can use a short form for most commands (like create) as well--the above command is the same as these:
+    # you can name the agent type explicitly as a positional argument, or use the short form for the
+    # command itself (`mngr c` is an alias for `mngr create`). For example, when claude is your default
+    # agent type, `mngr c my-task` is equivalent to `mngr create my-task claude`:
     mngr create my-task claude
     mngr c my-task
     """)
@@ -93,7 +98,7 @@ def test_create_short_forms(e2e: E2eSession) -> None:
     # for the real claude agent so the test doesn't need claude installed.
     result_full = e2e.run(
         "mngr create my-task --type command --no-ensure-clean -- sleep 100072",
-        comment="you can use a short form for most commands (like create) as well",
+        comment="you can name the agent type explicitly as a positional argument, or use the short form",
     )
     expect(result_full).to_succeed()
 
@@ -101,7 +106,7 @@ def test_create_short_forms(e2e: E2eSession) -> None:
     # Pinned sleep value distinct from the one above so leaked processes trace back to this call.
     result_short = e2e.run(
         "mngr c my-other-task --type command --no-ensure-clean -- sleep 100117",
-        comment="the above command is the same as these",
+        comment="`mngr c my-task` is equivalent to `mngr create my-task claude` when claude is the default",
     )
     expect(result_short).to_succeed()
 
@@ -153,10 +158,11 @@ def test_create_codex_agent(e2e: E2eSession) -> None:
 @pytest.mark.modal
 def test_create_with_agent_args(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
-    # you can specify the arguments to the *agent* (ie, send args to claude rather than mngr)
+    # you can specify the arguments to the *agent* (ie, send args to the agent rather than mngr)
     # by using `--` to separate the agent arguments from the mngr arguments:
     mngr create my-task -- --model opus
-    # that command launches claude with the "opus" model instead of the default
+    # that command passes the "--model opus" flag to your default agent (e.g. claude, when claude
+    # is configured as the default)
     """)
     # `--` is consumed by _CreateCommand.parse_args the first time it appears,
     # so everything after it becomes agent_args and is joined with spaces into

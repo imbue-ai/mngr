@@ -3,8 +3,6 @@
 import resource
 import time
 import traceback
-from datetime import datetime
-from datetime import timezone
 from pathlib import Path
 from typing import assert_never
 
@@ -51,8 +49,10 @@ from imbue.mngr_tmr.pulling import pull_agent_outputs
 from imbue.mngr_tmr.pulling import pull_integrator_outputs
 from imbue.mngr_tmr.report import generate_html_report
 from imbue.mngr_tmr.report import list_pullable_branches
+from imbue.mngr_tmr.report_upload import maybe_upload_report
 from imbue.mngr_tmr.utils import collect_tests
 from imbue.mngr_tmr.utils import get_base_commit
+from imbue.mngr_tmr.utils import make_run_name
 
 _DEFAULT_TIMEOUT_SECONDS = 3600.0
 _DEFAULT_INTEGRATOR_TIMEOUT_SECONDS = 3600.0
@@ -125,7 +125,8 @@ class TmrCliOptions(CommonCliOptions):
     integrator_timeout: float
     output_dir: str | None
     source: str | None
-    reintegrate: str | None
+    reintegrate: bool
+    run_name: str | None
     additional_authorized_keys: tuple[str, ...]
 
 
@@ -198,6 +199,19 @@ def _emit_report_path(path: Path, output_opts: OutputOptions) -> None:
             assert_never(unreachable)
 
 
+def _emit_report_url(url: str | None, output_opts: OutputOptions) -> None:
+    """Emit the public URL of the report mirror, if upload occurred."""
+    if url is None:
+        return
+    match output_opts.output_format:
+        case OutputFormat.JSON | OutputFormat.JSONL:
+            emit_event("report_url", {"url": url}, output_opts.output_format)
+        case OutputFormat.HUMAN:
+            write_human_line("Report URL: {}", url)
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
 def _emit_integrator_branch(branch_name: str | None, output_opts: OutputOptions) -> None:
     """Emit the name of the integrator branch, if one was produced."""
     if branch_name is None:
@@ -222,8 +236,10 @@ def _run_reintegrate(
     Discovers agents by the tmr_run_name label, reads their result files,
     re-runs the integrator, and generates a fresh report.
     """
-    assert opts.reintegrate is not None
-    run_name = opts.reintegrate
+    assert opts.reintegrate
+    if not opts.run_name:
+        raise click.UsageError("--reintegrate requires --run-name <NAME> (the run name to reintegrate).")
+    run_name = opts.run_name
     is_human = output_opts.output_format == OutputFormat.HUMAN
     if is_human:
         write_human_line("Reintegrating run: {}", run_name)
@@ -237,7 +253,8 @@ def _run_reintegrate(
     matching_agents = [
         detail
         for detail in list_result.agents
-        if detail.labels.get("tmr_run_name") == run_name and not str(detail.name).startswith("tmr-integrator-")
+        if detail.labels.get("tmr_run_name") == run_name
+        and detail.labels.get("tmr_role") != AgentKind.INTEGRATOR.value
     ]
     if is_human:
         write_human_line("Found {} agent(s) from run {}", len(matching_agents), run_name)
@@ -286,13 +303,16 @@ def _run_reintegrate(
     base_commit = get_base_commit(source_dir, cg)
 
     # Write pre-integrator report
-    generate_html_report(
+    report_path = generate_html_report(
         test_agent_metadata,
         output_dir,
         run_commands=_build_run_commands(run_name),
     )
+    _emit_report_url(maybe_upload_report(report_path, run_name), output_opts)
 
-    # Run integrator (include tmr_run_name so it can be discovered alongside test agents)
+    # Run integrator (carry the same tmr_run_name so it shows up in this run's
+    # agent list; the tmr_role label is set automatically by _create_tmr_agent
+    # from AgentKind.INTEGRATOR, which the reintegrate filter above looks for).
     env_options = AgentEnvironmentOptions(env_vars=resolve_env_vars((), opts.env))
     run_labels = dict(resolve_labels(opts.label).labels)
     run_labels["tmr_run_name"] = run_name
@@ -311,16 +331,17 @@ def _run_reintegrate(
         additional_authorized_keys=opts.additional_authorized_keys,
     )
     integrator_meta = _run_integrator_phase(
-        test_agent_metadata, integrator_config, mngr_ctx, opts, output_dir, base_commit=base_commit
+        test_agent_metadata, integrator_config, mngr_ctx, opts, output_dir, run_name, base_commit=base_commit
     )
     integrated_branch = integrator_meta.branch_name if integrator_meta is not None else None
-    generate_html_report(
+    report_path = generate_html_report(
         test_agent_metadata,
         output_dir,
         integrator_metadata=integrator_meta,
         run_commands=_build_run_commands(run_name, integrated_branch),
     )
     _emit_report_path(output_dir / "index.html", output_opts)
+    _emit_report_url(maybe_upload_report(report_path, run_name), output_opts)
     _emit_integrator_branch(integrated_branch, output_opts)
     _print_run_commands(run_name, output_opts, integrated_branch)
 
@@ -331,6 +352,7 @@ def _run_integrator_phase(
     mngr_ctx: MngrContext,
     opts: TmrCliOptions,
     output_dir: Path,
+    run_name: str,
     base_commit: str | None = None,
 ) -> AgentMetadata | None:
     """Launch an integrator agent to cherry-pick all fix branches into a linear stack.
@@ -350,6 +372,7 @@ def _run_integrator_phase(
             fix_branches=fix_branches,
             config=config,
             mngr_ctx=mngr_ctx,
+            run_name=run_name,
         )
     except (MngrError, HostError, AgentError, OSError, BaseExceptionGroup) as exc:
         logger.warning("Failed to launch integrator agent: {}", exc)
@@ -529,9 +552,17 @@ def _run_integrator_phase(
 )
 @click.option(
     "--reintegrate",
+    is_flag=True,
+    default=False,
+    help="Re-read outcomes from a previous TMR run, re-run the integrator, and regenerate the report. "
+    "Skips test collection and agent launching. The run to reintegrate is identified by --run-name.",
+)
+@click.option(
+    "--run-name",
     default=None,
-    help="Re-read outcomes from a previous TMR run (by run name), re-run integrator, and regenerate report. "
-    "Skips test collection and agent launching.",
+    help="The run name. For new runs, overrides the auto-generated UTC YYYYMMDDHHMMSS timestamp; "
+    "must not collide with prior runs whose agents are still discoverable, or agent creation will fail. "
+    "For --reintegrate, identifies which previous run to reintegrate (required).",
 )
 @click.option(
     "--additional-authorized-host",
@@ -558,7 +589,7 @@ def tmr(ctx: click.Context, **kwargs: object) -> None:
 
     source_dir = Path(opts.source) if opts.source is not None else Path.cwd()
 
-    if opts.reintegrate is not None:
+    if opts.reintegrate:
         _run_reintegrate(opts, mngr_ctx, output_opts, source_dir)
         return
 
@@ -583,15 +614,21 @@ def tmr(ctx: click.Context, **kwargs: object) -> None:
     label_options = resolve_labels(opts.label)
     provided_snapshot = SnapshotName(opts.snapshot) if opts.snapshot is not None else None
 
-    # Step 5: Generate a shared run name prefix for e2e test output.
-    # Agents append _try_1, _try_2 etc. for each test run.
-    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d_%H-%M-%S")
-    e2e_run_prefix = f"{timestamp}_tmr"
-    testing_flags = testing_flags + ("--mngr-e2e-run-name", e2e_run_prefix)
+    # Step 5: Generate the shared run name (YYYYMMDDHHMMSS, UTC) -- or accept
+    # an explicit override via --run-name. Used as the discriminator in agent
+    # / host / branch names, the output directory, the tmr_run_name label, and
+    # the e2e run-name flag (with a 'tmr_' prefix there to give
+    # .test_output/e2e/tmr_{run}_try_N/ provenance vs. ad-hoc local pytest
+    # runs). Agents append _try_1, _try_2 etc. for each test run.
+    run = opts.run_name if opts.run_name else make_run_name()
+    testing_flags = testing_flags + ("--mngr-e2e-run-name", f"tmr_{run}")
 
-    # Add tmr_run_name label to all testing agents for discovery during reintegrate
+    # Add tmr_run_name so reintegrate can find this run's agents. The
+    # tmr_role label is set automatically by _create_tmr_agent based on
+    # the AgentKind passed at each launch site (so the reintegrate filter
+    # can exclude AgentKind.INTEGRATOR.value).
     run_labels = dict(label_options.labels)
-    run_labels["tmr_run_name"] = e2e_run_prefix
+    run_labels["tmr_run_name"] = run
     label_options = AgentLabelOptions(labels=run_labels)
 
     config = TmrLaunchConfig(
@@ -615,8 +652,7 @@ def tmr(ctx: click.Context, **kwargs: object) -> None:
             source_dir,
             config,
             testing_flags,
-            timestamp,
-            e2e_run_prefix,
+            run,
             base_commit,
             source_host,
             label_options,
@@ -626,7 +662,7 @@ def tmr(ctx: click.Context, **kwargs: object) -> None:
         )
     except KeyboardInterrupt:
         traceback.print_exc()
-        _print_run_commands(e2e_run_prefix, output_opts, None)
+        _print_run_commands(run, output_opts, None)
         raise
 
 
@@ -637,8 +673,7 @@ def _run_tmr_pipeline(
     source_dir: Path,
     config: TmrLaunchConfig,
     testing_flags: tuple[str, ...],
-    timestamp: str,
-    e2e_run_prefix: str,
+    run: str,
     base_commit: str,
     source_host: OnlineHostInterface,
     label_options: AgentLabelOptions,
@@ -648,7 +683,7 @@ def _run_tmr_pipeline(
 ) -> None:
     """Run the main TMR pipeline (launch, poll, integrate, report)."""
     # Step 6: Compute output directory before launching
-    output_dir = Path(opts.output_dir) if opts.output_dir is not None else Path(f"tmr_{timestamp}")
+    output_dir = Path(opts.output_dir) if opts.output_dir is not None else Path(f"tmr_{run}")
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # Step 7: Launch and poll agents
@@ -672,12 +707,12 @@ def _run_tmr_pipeline(
             mngr_ctx=mngr_ctx,
             pytest_flags=testing_flags,
             launch_failures=launch_failures,
+            run_name=run,
             prompt_suffix=opts.prompt_suffix or "",
             use_snapshot=opts.use_snapshot and provided_snapshot is None,
             max_parallel=opts.max_parallel_launch,
             launch_delay_seconds=opts.launch_delay,
             agents_per_host=opts.agents_per_host,
-            run_name=e2e_run_prefix,
         )
         _emit_agents_launched(len(agent_infos), output_opts)
         remaining_node_ids = []
@@ -695,6 +730,7 @@ def _run_tmr_pipeline(
         all_agents=agent_infos,
         all_hosts=agent_hosts,
         launch_failures=launch_failures,
+        run_name=run,
         source_dir=source_dir,
     )
 
@@ -704,9 +740,13 @@ def _run_tmr_pipeline(
     # Step 8: Write the post-polling report (pre-integrator). Artifacts and
     # branch bundles were already downloaded during per-agent finalization;
     # the reporter parses outcome JSON from disk.
-    generate_html_report(test_agent_metadata, output_dir)
+    report_path = generate_html_report(test_agent_metadata, output_dir)
+    _emit_report_url(maybe_upload_report(report_path, run), output_opts)
 
-    # Step 9: Build integrator config (defaults to local provider) and integrate
+    # Step 9: Build integrator config (defaults to local provider) and integrate.
+    # The integrator's tmr_role label is set automatically by _create_tmr_agent
+    # (from AgentKind.INTEGRATOR), distinguishing it from testing agents in
+    # `mngr ls` and during reintegrate.
     integrator_agent_type = opts.integrator_type if opts.integrator_type is not None else opts.agent_type
     integrator_templates = opts.integrator_template if opts.integrator_template else opts.agent_template
     integrator_config = TmrLaunchConfig(
@@ -721,26 +761,27 @@ def _run_tmr_pipeline(
         additional_authorized_keys=opts.additional_authorized_keys,
     )
     integrator_meta = _run_integrator_phase(
-        test_agent_metadata, integrator_config, mngr_ctx, opts, output_dir, base_commit=base_commit
+        test_agent_metadata, integrator_config, mngr_ctx, opts, output_dir, run, base_commit=base_commit
     )
     integrated_branch = integrator_meta.branch_name if integrator_meta is not None else None
-    generate_html_report(
+    report_path = generate_html_report(
         test_agent_metadata,
         output_dir,
         integrator_metadata=integrator_meta,
-        run_commands=_build_run_commands(e2e_run_prefix, integrated_branch),
+        run_commands=_build_run_commands(run, integrated_branch),
     )
     _emit_report_path(output_dir / "index.html", output_opts)
+    _emit_report_url(maybe_upload_report(report_path, run), output_opts)
     _emit_integrator_branch(integrated_branch, output_opts)
 
-    _print_run_commands(e2e_run_prefix, output_opts, integrated_branch)
+    _print_run_commands(run, output_opts, integrated_branch)
 
 
 def _build_run_commands(run_name: str, integrated_branch: str | None = None) -> list[tuple[str, str]]:
     """Build a list of (label, command) pairs for the run."""
     commands = [
         ("List agents from this run", f"mngr ls --include 'labels.tmr_run_name == \"{run_name}\"'"),
-        ("Reintegrate", f"mngr tmr --reintegrate {run_name}"),
+        ("Reintegrate", f"mngr tmr --reintegrate --run-name {run_name}"),
     ]
     if integrated_branch is not None:
         commands.append(("Push integrated branch", f"git push origin {integrated_branch}"))

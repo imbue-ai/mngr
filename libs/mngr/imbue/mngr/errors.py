@@ -9,6 +9,7 @@ from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ImageReference
+from imbue.mngr.primitives import PluginKind
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import SnapshotId
 
@@ -415,7 +416,7 @@ class UnknownAgentTypeError(ConfigError):
 
     def __init__(self, agent_type: str) -> None:
         self.agent_type = agent_type
-        super().__init__(f"Unknown agent type '{agent_type}' and no default agent class set.")
+        super().__init__(f"Unknown agent type '{agent_type}'.")
         self.user_help_text = get_plugin_install_hint(agent_type)
 
 
@@ -428,7 +429,7 @@ class UnknownBackendError(ConfigError):
         registered_str = ", ".join(self.registered) or "(none)"
         message = f"Unknown provider backend: {backend_name}. Registered backends: {registered_str}"
         super().__init__(message)
-        self.user_help_text = get_plugin_install_hint(backend_name)
+        self.user_help_text = get_plugin_install_hint(backend_name, kind=PluginKind.PROVIDER)
 
 
 class NestedTmuxError(MngrError):

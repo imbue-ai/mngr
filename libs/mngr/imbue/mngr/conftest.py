@@ -42,6 +42,7 @@ from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr.providers.registry import load_local_backend_only
 from imbue.mngr.providers.registry import reset_backend_registry
 from imbue.mngr.utils.deps import CORE_DEPS
+from imbue.mngr.utils.plugin_testing import register_test_placeholder_agent_type
 from imbue.mngr.utils.testing import cleanup_tmux_session
 from imbue.mngr.utils.testing import init_git_repo
 from imbue.mngr.utils.testing import isolate_git
@@ -587,6 +588,7 @@ def plugin_manager(
 
     # Load other registries (agents)
     load_agents_from_plugins(pm)
+    register_test_placeholder_agent_type()
 
     yield pm
 

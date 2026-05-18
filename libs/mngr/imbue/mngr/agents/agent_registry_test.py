@@ -1,8 +1,10 @@
 """Tests for agent registry."""
 
+import pytest
 from pydantic import Field
 
 from imbue.mngr.agents.agent_registry import _register_agent
+from imbue.mngr.agents.agent_registry import list_available_agent_types
 from imbue.mngr.agents.agent_registry import list_registered_agent_types
 from imbue.mngr.agents.base_agent import BaseAgent
 from imbue.mngr.agents.default_plugins.codex_agent import CodexAgentConfig
@@ -12,6 +14,7 @@ from imbue.mngr.config.agent_config_registry import register_agent_config
 from imbue.mngr.config.agent_config_registry import resolve_agent_type
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrConfig
+from imbue.mngr.errors import UnknownAgentTypeError
 from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import CommandString
 
@@ -110,23 +113,26 @@ def test_agent_type_config_merge_cli_args_with_empty_override() -> None:
     assert merged.cli_args == ("--verbose",)
 
 
-def test_get_agent_class_returns_base_agent_for_unknown_type() -> None:
-    """Unknown agent type should return the default BaseAgent class."""
-    agent_class = get_agent_class("unknown-type")
-    assert agent_class == BaseAgent
+def test_get_agent_class_raises_for_unknown_type() -> None:
+    """Unknown agent type should raise UnknownAgentTypeError (no silent BaseAgent fallback)."""
+    with pytest.raises(UnknownAgentTypeError, match="Unknown agent type 'unknown-type-xyz'"):
+        get_agent_class("unknown-type-xyz")
 
 
-def test_resolve_agent_type_returns_base_agent_for_unknown_type() -> None:
-    """Resolving an unknown type should return BaseAgent with base config."""
+def test_resolve_agent_type_raises_for_unknown_type() -> None:
+    """Resolving an unknown type should raise UnknownAgentTypeError."""
     config = MngrConfig()
-    resolved = resolve_agent_type(AgentTypeName("unknown-command"), config)
-
-    assert resolved.agent_class == BaseAgent
-    assert type(resolved.agent_config) is AgentTypeConfig
+    with pytest.raises(UnknownAgentTypeError, match="Unknown agent type 'unknown-command-xyz'"):
+        resolve_agent_type(AgentTypeName("unknown-command-xyz"), config)
 
 
-def test_resolve_agent_type_custom_type_without_parent_uses_base_agent() -> None:
-    """A custom type without parent_type should use BaseAgent."""
+def test_resolve_agent_type_custom_type_without_parent_raises() -> None:
+    """A custom type whose name is not registered and has no parent_type should raise.
+
+    The documented way to declare a TOML-only generic command is to set
+    ``parent_type = "command"``; bare ``[agent_types.X]`` blocks without
+    either a registered class or a parent_type are not a supported shape.
+    """
     custom_config = AgentTypeConfig(
         command=CommandString("my-agent-binary"),
     )
@@ -134,10 +140,8 @@ def test_resolve_agent_type_custom_type_without_parent_uses_base_agent() -> None
         agent_types={AgentTypeName("my_custom"): custom_config},
     )
 
-    resolved = resolve_agent_type(AgentTypeName("my_custom"), config)
-
-    assert resolved.agent_class == BaseAgent
-    assert resolved.agent_config.command == CommandString("my-agent-binary")
+    with pytest.raises(UnknownAgentTypeError, match="Unknown agent type 'my_custom'"):
+        resolve_agent_type(AgentTypeName("my_custom"), config)
 
 
 def test_register_agent_registers_class_and_config() -> None:
@@ -150,3 +154,28 @@ def test_register_agent_registers_class_and_config() -> None:
 
     assert get_agent_class("runtime-test-type") == BaseAgent
     assert get_agent_config_class("runtime-test-type") == AgentTypeConfig
+
+
+def test_list_available_agent_types_unions_registered_and_user_config() -> None:
+    """list_available_agent_types must include both plugin-registered and user-config-defined types.
+
+    Users can define their own agent types under ``[agent_types.X]`` in
+    settings.toml (subclass types that delegate to a registered
+    parent_type). Those must show up in the same list the tab-completion
+    cache and the `mngr plugin list --kind agent-type` filter use, so the
+    user sees them in pickers and error messages.
+    """
+    config = MngrConfig(
+        agent_types={
+            AgentTypeName("my-custom"): AgentTypeConfig(parent_type=AgentTypeName("codex")),
+        },
+    )
+
+    available = list_available_agent_types(config)
+
+    # The codex agent type ships in-tree, so it must always appear.
+    assert "codex" in available
+    # And the user-config-defined name must appear too.
+    assert "my-custom" in available
+    # Output is sorted for stable display.
+    assert available == sorted(available)

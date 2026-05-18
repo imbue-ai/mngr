@@ -68,6 +68,7 @@ SECONDARY_COMMANDS = {
     "limit",
     "message",
     "observe",
+    "ovh",
     "plugin",
     "provision",
     "schedule",
