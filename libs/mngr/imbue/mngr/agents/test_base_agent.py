@@ -505,7 +505,7 @@ def test_base_agent_assemble_command_raises_when_no_base_and_no_args(
         id=agent_id,
         host_id=host_id,
         name=AgentName("test-fallback-cmd"),
-        agent_type=AgentTypeName("my-custom-type"),
+        agent_type=AgentTypeName("generic"),
         agent_config=agent_config,
         work_dir=temp_work_dir,
         create_time=datetime.now(timezone.utc),
@@ -513,7 +513,7 @@ def test_base_agent_assemble_command_raises_when_no_base_and_no_args(
         mngr_ctx=temp_mngr_ctx,
     )
 
-    with pytest.raises(UserInputError, match=r"has no command configured"):
+    with pytest.raises(UserInputError, match=r"has no command to run"):
         agent.assemble_command(host=host, agent_args=(), command_override=None)
 
 

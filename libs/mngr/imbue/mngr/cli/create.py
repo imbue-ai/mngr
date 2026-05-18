@@ -639,7 +639,7 @@ def create(ctx: click.Context, **kwargs) -> None:
             opts.positional_agent_type,
             list_available_agent_types(mngr_ctx.config),
         )
-        is_headless = is_streaming_headless_agent_type(resolved_agent_type)
+        is_headless = is_streaming_headless_agent_type(resolved_agent_type, mngr_ctx.config)
 
         if is_headless and not opts.foreground:
             raise UserInputError(
