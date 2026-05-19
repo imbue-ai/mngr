@@ -9,6 +9,7 @@ import pytest
 
 import imbue.resource_guards.resource_guards as resource_guards
 from imbue.resource_guards.resource_guards import MethodKind
+from imbue.resource_guards.resource_guards import ResourceGuardMisconfiguration
 from imbue.resource_guards.resource_guards import ResourceGuardViolation
 from imbue.resource_guards.resource_guards import _GuardViolation
 from imbue.resource_guards.resource_guards import _GuardViolationKind
@@ -711,13 +712,13 @@ def test_parametrized_tagged_fixture_runs_for_each_param(pytester: pytest.Pytest
 def test_tagged_fixture_override_reports_clean_error_end_to_end(
     pytester: pytest.Pytester, clean_guard_env: None
 ) -> None:
-    """An override of a tagged fixture surfaces the ResourceGuardViolation cleanly.
+    """An override of a tagged fixture surfaces the ResourceGuardMisconfiguration cleanly.
 
     Regression test: _collect_fixture_covered_resources runs during
     _pytest_runtest_setup. When it raises (tagged-fixture override case), the
     per-test guard state must still be initialized so that teardown and
     makereport hooks do not crash with AttributeError -- otherwise the
-    original ResourceGuardViolation would be buried under a cascading
+    original ResourceGuardMisconfiguration would be buried under a cascading
     AttributeError and the user would see a confusing trace instead of the
     "multiple definitions" message.
     """
@@ -765,9 +766,9 @@ def test_tagged_fixture_override_reports_clean_error_end_to_end(
             assert shared_fixture == "override"
     """)
     result = pytester.runpytest_subprocess("-n0", "--no-header", "-p", "no:cacheprovider")
-    # The setup-phase ResourceGuardViolation is reported as an error, and the
-    # message must reach the user without being swallowed by a follow-on
-    # AttributeError in teardown/makereport.
+    # The setup-phase ResourceGuardMisconfiguration is reported as an error,
+    # and the message must reach the user without being swallowed by a
+    # follow-on AttributeError in teardown/makereport.
     result.assert_outcomes(errors=1)
     result.stdout.fnmatch_lines(["*multiple definitions*"])
     assert "AttributeError" not in result.stdout.str()
@@ -1592,7 +1593,7 @@ def test_fixture_uses_resources_errors_on_double_application(isolated_guard_stat
         pass
 
     fixture_uses_resources("modal")(some_fixture)
-    with pytest.raises(ResourceGuardViolation, match="applied more than once"):
+    with pytest.raises(ResourceGuardMisconfiguration, match="applied more than once"):
         fixture_uses_resources("docker")(some_fixture)
 
 
@@ -1603,7 +1604,7 @@ def test_fixture_uses_resources_errors_on_empty_declaration(isolated_guard_state
     fixture-scope hookwrapper short-circuits on an empty resource set), so we
     reject it loudly instead of letting the user think their declaration took.
     """
-    with pytest.raises(ResourceGuardViolation, match="requires at least one resource name"):
+    with pytest.raises(ResourceGuardMisconfiguration, match="requires at least one resource name"):
         fixture_uses_resources()
 
 
@@ -1683,7 +1684,7 @@ def test_collect_fixture_covered_resources_errors_on_tagged_override() -> None:
         }
     )
 
-    with pytest.raises(ResourceGuardViolation, match="multiple definitions"):
+    with pytest.raises(ResourceGuardMisconfiguration, match="multiple definitions"):
         _collect_fixture_covered_resources(item)  # ty: ignore[invalid-argument-type]
 
 
@@ -1985,7 +1986,7 @@ def test_pytest_runtest_setup_defers_closure_violation_until_after_yield(
     isolated_guard_state: None,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A ResourceGuardViolation from closure inspection is held until after inner setup yields."""
+    """A ResourceGuardMisconfiguration from closure inspection is held until after inner setup yields."""
     register_resource_guard("cat")
 
     # _pytest_runtest_setup asserts _guard_wrapper_dir is not None; pretend
@@ -2032,8 +2033,8 @@ def test_pytest_runtest_setup_defers_closure_violation_until_after_yield(
     assert item._guard_state is not None
     assert item._guard_state.tracking_dir.startswith("/")
 
-    # After the inner setup completes (yield resumes), the held violation is raised.
-    with pytest.raises(ResourceGuardViolation, match="multiple definitions"):
+    # After the inner setup completes (yield resumes), the held error is raised.
+    with pytest.raises(ResourceGuardMisconfiguration, match="multiple definitions"):
         with pytest.raises(StopIteration):
             hook.send(None)
 

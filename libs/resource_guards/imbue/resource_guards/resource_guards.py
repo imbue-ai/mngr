@@ -51,16 +51,16 @@ import pytest
 RESOURCE_GUARDS_ENTRY_POINT_GROUP = "resource_guards"
 
 
-class ResourceGuardViolation(Exception):
-    """Raised on any resource guard invariant violation.
+class ResourceGuardError(Exception):
+    """Base for everything the resource guard system raises."""
 
-    Covers runtime violations -- a test or fixture invoking an SDK
-    resource without the required mark, or carrying a mark/declaration
-    for a resource it never invoked -- and misuse of
-    @fixture_uses_resources (empty declaration or double application at
-    decoration time, or applied to an overridden fixture in a test's
-    closure, which is detected when the fixture closure is collected).
-    """
+
+class ResourceGuardViolation(ResourceGuardError):
+    """A test or fixture violated the resource guard invariants at runtime."""
+
+
+class ResourceGuardMisconfiguration(ResourceGuardError):
+    """@fixture_uses_resources was used incorrectly (empty/stacked/overridden)."""
 
 
 @dataclasses.dataclass
@@ -605,14 +605,14 @@ def fixture_uses_resources(*resources: str) -> Callable[[F], F]:
     scoped fixtures share expensive resource-using setup across tests
     without requiring every consuming test to carry the same mark.
 
-    Raises ResourceGuardViolation if applied more than once to the same
-    function -- stacking the decorator is not supported; combine all
+    Raises ResourceGuardMisconfiguration if applied more than once to the
+    same function -- stacking the decorator is not supported; combine all
     resources into the single call instead. Also raises if called with no
     resources -- an empty declaration would silently no-op at runtime and
     defeat the whole point of declaring fixture-level resource usage.
     """
     if not resources:
-        raise ResourceGuardViolation(
+        raise ResourceGuardMisconfiguration(
             "@fixture_uses_resources requires at least one resource name. "
             "An empty declaration is a no-op and would silently disable the "
             "fixture-scope guard; remove the decorator or pass the resources "
@@ -621,7 +621,7 @@ def fixture_uses_resources(*resources: str) -> Callable[[F], F]:
 
     def decorator(func: F) -> F:
         if func in _fixture_resource_marks:
-            raise ResourceGuardViolation(
+            raise ResourceGuardMisconfiguration(
                 f"@fixture_uses_resources applied more than once to '{func.__name__}'. "
                 f"Stacking the decorator is not supported -- combine all resources into "
                 f"a single call, e.g. @fixture_uses_resources('a', 'b')."
@@ -644,11 +644,11 @@ def _collect_fixture_covered_resources(item: pytest.Item) -> set[str]:
     Lazy fixtures retrieved via request.getfixturevalue() are not part of
     the static closure and therefore do not contribute to coverage here.
 
-    Raises ResourceGuardViolation if a fixture name in the closure has
-    multiple FixtureDefs (an override) where any def is tagged. Override
-    semantics for @fixture_uses_resources are deliberately unsupported
-    until we have a real use case -- it is unclear whether an override
-    should inherit, replace, or merge the tag.
+    Raises ResourceGuardMisconfiguration if a fixture name in the closure
+    has multiple FixtureDefs (an override) where any def is tagged.
+    Override semantics for @fixture_uses_resources are deliberately
+    unsupported until we have a real use case -- it is unclear whether an
+    override should inherit, replace, or merge the tag.
     """
     fixture_info = item._fixtureinfo  # ty: ignore[unresolved-attribute]
     covered: set[str] = set()
@@ -661,7 +661,7 @@ def _collect_fixture_covered_resources(item: pytest.Item) -> set[str]:
         if not tagged_decls:
             continue
         if len(fixturedefs) > 1:
-            raise ResourceGuardViolation(
+            raise ResourceGuardMisconfiguration(
                 f"RESOURCE GUARD: Fixture '{name}' has multiple definitions in the test's closure "
                 f"(an override), and at least one is decorated with @fixture_uses_resources. "
                 f"Override semantics for tagged fixtures are not supported -- remove the override "
@@ -866,23 +866,23 @@ def _pytest_runtest_setup(item: pytest.Item) -> Generator[None, None, None]:
     )
     item._guard_state = state  # ty: ignore[unresolved-attribute]
 
-    # Defer any ResourceGuardViolation from closure inspection until *after*
-    # the inner pytest_runtest_setup chain has run. Raising before yield would
-    # short-circuit other plugins' setup (e.g. caplog), which then crash in
-    # their teardown phase and bury the original guard violation. By holding
-    # the exception until after yield, the inner setup completes normally, all
-    # plugins get a chance to install their state, and the violation still
-    # surfaces as a setup-phase error.
-    closure_violation: ResourceGuardViolation | None = None
+    # Defer any ResourceGuardMisconfiguration from closure inspection until
+    # *after* the inner pytest_runtest_setup chain has run. Raising before
+    # yield would short-circuit other plugins' setup (e.g. caplog), which
+    # then crash in their teardown phase and bury the original error. By
+    # holding the exception until after yield, the inner setup completes
+    # normally, all plugins get a chance to install their state, and the
+    # error still surfaces as a setup-phase error.
+    closure_error: ResourceGuardMisconfiguration | None = None
     try:
         state.covered_resources = _collect_fixture_covered_resources(item)
-    except ResourceGuardViolation as exc:
-        closure_violation = exc
+    except ResourceGuardMisconfiguration as exc:
+        closure_error = exc
 
     yield
 
-    if closure_violation is not None:
-        raise closure_violation
+    if closure_error is not None:
+        raise closure_error
 
 
 @pytest.hookimpl(hookwrapper=True)
