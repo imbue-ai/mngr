@@ -24,6 +24,7 @@ from pydantic import PrivateAttr
 
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.mngr.errors import MngrError
+from imbue.mngr.utils.polling import poll_for_value
 from imbue.mngr_ovh._tag_keys import MNGR_RECYCLING_LOCK_TAG_KEY
 from imbue.mngr_ovh.config import OvhProviderConfig
 from imbue.mngr_vps_docker.errors import VpsApiError
@@ -53,6 +54,63 @@ _VPS_STATE_MAP: Final[dict[str, VpsInstanceStatus]] = {
 
 _TASK_TERMINAL_STATES: Final[frozenset[str]] = frozenset({"done", "error", "cancelled", "blocked"})
 _TASK_FAILURE_STATES: Final[frozenset[str]] = frozenset({"error", "cancelled", "blocked"})
+# Only `todo` and `doing` are valid for OVH's `?state=` task filter; other
+# values (e.g. `init`) return HTTP 400 BadParametersError.
+_TASK_ACTIVE_STATE_FILTERS: Final[tuple[str, ...]] = ("todo", "doing")
+
+# OVH's billing subsystem returns this HTTP 400 message for the first
+# few minutes after a fresh VPS order, even though the VPS itself is
+# already running. Verified live on 2026-05-18: ``PUT /vps/{s}/serviceInfos``
+# right after ``order_and_wait_for_vps`` returned failed with this
+# exact message; a 30-second retry succeeded. The string is an
+# OVH-side standard for "subscription state not yet propagated to the
+# billing layer." See F39 in OVH_AUDIT.md.
+_SUBSCRIPTION_NOT_ACTIVE_MARKER: Final[str] = "subscription is not active yet"
+
+# Total retry budget for ``set_renew_at_expiration`` when OVH responds
+# with ``_SUBSCRIPTION_NOT_ACTIVE_MARKER``. Live observation showed
+# the activation propagates in ~30 seconds for a fresh ``vps-2025-model1``
+# order; 5 minutes leaves comfortable headroom for slower billing-side
+# propagation. Cap matters because the cleanup path in
+# ``OvhProvider._terminate_orphaned_fresh_order`` invokes this method
+# from a ``finally`` branch we don't want to block forever.
+_SET_RENEW_RETRY_TIMEOUT_SECONDS: Final[float] = 300.0
+_SET_RENEW_RETRY_POLL_INTERVAL_SECONDS: Final[float] = 15.0
+
+
+class _PutServiceInfosAttempt(FrozenModel):
+    """Single-shot callable for ``OvhVpsClient._put_service_infos_with_retry``.
+
+    ``poll_for_value`` expects a no-arg callable returning ``None``
+    when it should retry, non-``None`` when it has a real value. We
+    return :class:`True` on a successful PUT and ``None`` when the
+    PUT failed with OVH's transient ``"subscription is not active
+    yet"`` 400 message. Anything else propagates.
+
+    Lifted to module scope (vs. an inline ``def`` inside the method)
+    so the project ratchet against inline functions is satisfied and
+    so the call shape is explicitly testable. See F39 in OVH_AUDIT.md.
+    """
+
+    model_config = {"arbitrary_types_allowed": True, "frozen": True}
+
+    client: "OvhVpsClient"
+    path: str
+    info: dict[str, Any]
+
+    def __call__(self) -> bool | None:
+        try:
+            self.client._call("PUT", self.path, **self.info)
+            return True
+        except VpsApiError as e:
+            if e.status_code == 400 and _SUBSCRIPTION_NOT_ACTIVE_MARKER in str(e):
+                logger.info(
+                    "OVH PUT {} returned 'subscription is not active yet'; "
+                    "the billing layer hasn't propagated this VPS's subscription state yet. Will retry.",
+                    self.path,
+                )
+                return None
+            raise
 
 
 class RecycleHandle(FrozenModel):
@@ -109,6 +167,17 @@ class OvhVpsClient(VpsClientInterface):
     task_poll_interval: float = Field(
         default=_DEFAULT_VPS_TASK_POLL_INTERVAL,
         description="Seconds between polls when waiting for a VPS task to complete",
+    )
+    set_renew_retry_timeout_seconds: float = Field(
+        default=_SET_RENEW_RETRY_TIMEOUT_SECONDS,
+        description=(
+            "Total retry budget for ``set_renew_at_expiration`` when OVH responds with "
+            '``"subscription is not active yet"``. See :data:`_SET_RENEW_RETRY_TIMEOUT_SECONDS`.'
+        ),
+    )
+    set_renew_retry_poll_interval_seconds: float = Field(
+        default=_SET_RENEW_RETRY_POLL_INTERVAL_SECONDS,
+        description="Sleep between retries inside ``set_renew_at_expiration``'s subscription-not-active loop.",
     )
     is_unconfigured: bool = Field(
         default=False,
@@ -198,27 +267,41 @@ class OvhVpsClient(VpsClientInterface):
         )
 
     def destroy_instance(self, instance_id: VpsInstanceId) -> None:
-        """Request termination of an OVH VPS (or abort an in-flight recycle).
+        """Cancel an OVH VPS so it stops auto-renewing past its next expiration.
 
-        OVH's termination is asynchronous and billing-anniversary aware:
-        ``POST /vps/{s}/terminate`` registers the request and OVH emails a
-        confirmation token. ``POST /vps/{s}/confirmTermination`` with that
-        token finalizes termination. In practice for mngr's use case, the
-        VPS is logically destroyed at this point even though the service
-        may linger until the end of the billing period.
+        OVH offers two cancellation paths:
+
+        - ``POST /vps/{s}/terminate`` queues termination behind an
+          email confirmation step (``POST /confirmTermination`` with
+          the emailed token). Without that confirmation, the VPS
+          continues to auto-renew indefinitely. This is the right call
+          for an interactive human flow but useless for an unattended
+          CLI.
+        - ``PUT /vps/{s}/serviceInfos`` with ``renew.deleteAtExpiration=True``
+          flips the auto-renewal flag directly, no email needed. OVH
+          then decommissions the VPS at the next ``expiration`` date.
+          Verified live against the OVH-US API.
+
+        We use the serviceInfos path so ``mngr destroy`` actually stops
+        the meter. The remainder of the already-paid period is still
+        forfeit (OVH does not prorate classic VPS cancellations); for
+        monthly subscriptions that is the rest of the current month,
+        for ``UPFRONT6`` / ``UPFRONT12`` it can be up to 6 / 12 months
+        of prepaid balance respectively. The VPS will not auto-renew
+        past the next OVH-side expiration date.
 
         If this VPS is currently mid-recycle (a ``RecycleHandle`` was
         registered via ``register_recycle_handle`` but neither
         ``finalize_recycle`` nor ``abort_recycle`` has run yet), this
         call short-circuits to release the recycle lock only. The VPS
-        is already cancelled, so calling ``/terminate`` again would be
-        a no-op on OVH's side; releasing the lock lets a subsequent
-        ``mngr create`` re-attempt the recycle.
+        is already cancelled in OVH's eyes; flipping the flag again is
+        a no-op and releasing the lock lets a subsequent ``mngr create``
+        re-attempt the recycle.
         """
         service_name = str(instance_id)
         handle = self._pending_recycle_handles.pop(service_name, None)
         if handle is not None:
-            logger.info("OVH VPS {} is mid-recycle; releasing recycle lock instead of re-terminating", service_name)
+            logger.info("OVH VPS {} is mid-recycle; releasing recycle lock instead of re-cancelling", service_name)
             try:
                 self._call("DELETE", f"/v2/iam/resource/{handle.urn}/tag/{MNGR_RECYCLING_LOCK_TAG_KEY}")
             except VpsApiError as e:
@@ -226,10 +309,14 @@ class OvhVpsClient(VpsClientInterface):
                     logger.warning("OVH recycle lock release failed for {}: {}", service_name, e)
             return
         try:
-            self._call("POST", f"/vps/{instance_id}/terminate")
-            logger.info("Requested termination of OVH VPS {} (billing remainder is forfeit)", instance_id)
+            self.set_renew_at_expiration(service_name, True)
+            logger.info(
+                "Cancelled OVH VPS {} (deleteAtExpiration=true; "
+                "decommissions at next OVH expiration date, any already-paid balance is forfeit)",
+                instance_id,
+            )
         except VpsApiError as e:
-            logger.warning("OVH VPS {} termination request failed: {}", instance_id, e)
+            logger.warning("OVH VPS {} cancellation request failed: {}", instance_id, e)
             raise
 
     def get_instance_status(self, instance_id: VpsInstanceId) -> VpsInstanceStatus:
@@ -293,16 +380,66 @@ class OvhVpsClient(VpsClientInterface):
         Performs a read-modify-write on the full ``services.Service`` body to
         avoid clobbering unrelated fields (contact info, renewal type, etc.):
         ``GET /vps/{s}/serviceInfos`` → mutate ``renew.deleteAtExpiration`` →
-        ``PUT /vps/{s}/serviceInfos``. Setting ``False`` is the way to undo a
-        prior cancellation request (no email token required, verified live).
-        Setting ``True`` is equivalent to the user clicking "confirm
-        termination" in the email (also skips the email round-trip).
+        ``PUT /vps/{s}/serviceInfos``. No email token required for either
+        direction (verified live on US-EAST-VA).
+
+        Setting ``True`` only flips ``deleteAtExpiration``; OVH auto-flips
+        ``renew.automatic`` to ``False`` and ``renewalType`` to ``"manual"``
+        as a server-side side effect of the cancellation. Setting ``False``
+        un-cancels, but OVH does **not** auto-restore ``automatic`` /
+        ``renewalType``, so this function explicitly restores both on the
+        un-cancel path; otherwise a recycled VPS would silently fail to
+        renew at the next anniversary even though our flag flip succeeded.
+
+        Retries on the OVH ``"subscription is not active yet"`` 400 error
+        (see :data:`_SUBSCRIPTION_NOT_ACTIVE_MARKER` for full context). The
+        billing subsystem takes a few minutes to propagate a fresh
+        order's subscription state, during which any ``PUT serviceInfos``
+        call fails with that specific message; without the retry, the
+        ``OvhProvider._terminate_orphaned_fresh_order`` cleanup loses
+        the race and silently leaks a freshly-ordered month of billing
+        (F39 in OVH_AUDIT.md). Verified live: a single 30-second-later
+        retry succeeded.
         """
         info = self.get_service_info(service_name)
         renew = dict(info.get("renew") or {})
         renew["deleteAtExpiration"] = delete_at_expiration
+        if not delete_at_expiration:
+            renew["automatic"] = True
+            info["renewalType"] = "automaticV2012"
         info["renew"] = renew
-        self._call("PUT", f"/vps/{service_name}/serviceInfos", **info)
+        self._put_service_infos_with_retry(service_name, info)
+
+    def _put_service_infos_with_retry(self, service_name: str, info: dict[str, Any]) -> None:
+        """``PUT /vps/{s}/serviceInfos`` with retry-on-subscription-not-active-yet.
+
+        Wraps :meth:`_call` so OTHER 400s / 404s / 5xxs propagate
+        immediately. Only the OVH-side ``"subscription is not active
+        yet"`` message triggers retry -- it's a documented transient
+        state the billing system reports for the first few minutes
+        after a fresh order. See F39 in OVH_AUDIT.md.
+        """
+        path = f"/vps/{service_name}/serviceInfos"
+        attempt = _PutServiceInfosAttempt(client=self, path=path, info=info)
+        result, polls, elapsed = poll_for_value(
+            attempt,
+            timeout=self.set_renew_retry_timeout_seconds,
+            poll_interval=self.set_renew_retry_poll_interval_seconds,
+        )
+        if result is None:
+            raise VpsApiError(
+                400,
+                f"OVH {path} kept returning 'subscription is not active yet' after {polls} attempt(s) "
+                f"over {elapsed:.0f}s; the billing layer never propagated the subscription activation. "
+                "Manual cleanup may be needed.",
+            )
+        if polls > 1:
+            logger.info(
+                "OVH PUT {} succeeded after {} attempt(s) in {:.1f}s (billing-layer propagation race)",
+                path,
+                polls,
+                elapsed,
+            )
 
     # =========================================================================
     # Task polling
@@ -343,6 +480,55 @@ class OvhVpsClient(VpsClientInterface):
             f"OVH task {task_id} ({last_payload.get('type', '?')}) on {service_name} "
             f"did not finish within {timeout_seconds}s (last state: {last_payload.get('state', '?')})"
         )
+
+    def wait_for_no_active_tasks(
+        self,
+        service_name: str,
+        timeout_seconds: float,
+    ) -> None:
+        """Block until ``/vps/{s}`` has no tasks in ``todo`` or ``doing`` state.
+
+        OVH's ``order/cart`` flow returns once the new ``serviceName`` is
+        visible in ``GET /vps``, but a background ``deliverVm`` task is
+        typically still running for ~1-2 minutes after that point.
+        Subsequent mutating calls (``/rebuild`` in particular) fail with
+        ``Action not available while there are running tasks on the VPS``
+        until that task drains. This helper polls until both active-state
+        filters return empty.
+
+        Raises ``VpsProvisioningError`` on timeout.
+        """
+        deadline = time.monotonic() + timeout_seconds
+        last_active: list[int] = []
+        last_api_error: VpsApiError | None = None
+        had_successful_poll = False
+        while time.monotonic() < deadline:
+            try:
+                last_active = self._list_active_task_ids(service_name)
+                had_successful_poll = True
+                if not last_active:
+                    return
+            except VpsApiError as e:
+                last_api_error = e
+                logger.warning("Failed to list active OVH tasks for {}: {}", service_name, e)
+            time.sleep(self.task_poll_interval)
+        if had_successful_poll:
+            raise VpsProvisioningError(
+                f"OVH VPS {service_name} still has active tasks {last_active!r} after {timeout_seconds}s; "
+                "subsequent /rebuild would race the in-flight task"
+            )
+        raise VpsProvisioningError(
+            f"OVH VPS {service_name} tasks listing never succeeded within {timeout_seconds}s; "
+            f"cannot confirm whether tasks are active. Last API error: {last_api_error!r}"
+        )
+
+    def _list_active_task_ids(self, service_name: str) -> list[int]:
+        ids: list[int] = []
+        for state in _TASK_ACTIVE_STATE_FILTERS:
+            payload = self._call("GET", f"/vps/{service_name}/tasks?state={state}")
+            if isinstance(payload, list):
+                ids.extend(int(t) for t in payload)
+        return ids
 
     # =========================================================================
     # Snapshot operations (VPS-level)

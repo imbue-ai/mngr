@@ -125,7 +125,6 @@
     if (!row) return;
     var agentId = row.getAttribute('data-agent-id');
     if (!agentId) return;
-    if (agentId === currentWorkspaceId) { e.preventDefault(); return; }
     e.preventDefault();
     if (isElectron && window.minds.showWorkspaceContextMenu) {
       window.minds.showWorkspaceContextMenu(agentId, e.clientX, e.clientY);

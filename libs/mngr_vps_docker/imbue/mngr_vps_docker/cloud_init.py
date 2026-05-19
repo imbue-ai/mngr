@@ -22,6 +22,13 @@ def generate_cloud_init_user_data(
     halts but billing continues until the VPS is destroyed -- still useful
     as a circuit-breaker so an abandoned VPS becomes obviously unreachable
     rather than silently consuming the agent slot.
+
+    ``rsync`` is explicit in the package list because
+    ``mngr_vps_docker._upload_directory_to_outer`` requires it for the
+    build-context push. Standard Debian/Ubuntu cloud images ship rsync
+    by default so this is belt-and-suspenders on cloud-init backends;
+    non-cloud-init backends (e.g. OVH) install it from their own
+    bootstrap path.
     """
     shutdown_block = ""
     if auto_shutdown_minutes is not None:
@@ -40,6 +47,7 @@ package_update: true
 packages:
   - curl
   - ca-certificates
+  - rsync
 runcmd:
   - curl -fsSL https://get.docker.com | sh
   - systemctl enable docker

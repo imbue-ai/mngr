@@ -38,6 +38,7 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import ProviderInstanceConfig
 from imbue.mngr.config.provider_config_registry import _provider_config_registry
 from imbue.mngr.errors import MngrError
+from imbue.mngr.errors import ProviderEmptyError
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.interfaces.data_types import CertifiedHostData
@@ -1309,7 +1310,9 @@ class _MismatchedProviderBackend(ProviderBackendInterface):
         name: ProviderInstanceName,
         config: ProviderInstanceConfig,
         mngr_ctx: MngrContext,
+        is_for_host_creation: bool = False,
     ) -> ProviderInstanceInterface:
+        del is_for_host_creation
         return _MismatchedProviderInstance(
             name=name,
             host_dir=mngr_ctx.config.default_host_dir,
@@ -1348,12 +1351,55 @@ class _RaisingDiscoveryProviderBackend(ProviderBackendInterface):
         name: ProviderInstanceName,
         config: ProviderInstanceConfig,
         mngr_ctx: MngrContext,
+        is_for_host_creation: bool = False,
     ) -> ProviderInstanceInterface:
+        del is_for_host_creation
         return _RaisingDiscoveryProviderInstance(
             name=name,
             host_dir=mngr_ctx.config.default_host_dir,
             mngr_ctx=mngr_ctx,
         )
+
+
+_EMPTY_BACKEND_NAME = ProviderBackendName("test-empty-backend")
+
+
+class _EmptyProviderBackend(ProviderBackendInterface):
+    """Backend whose construction always raises ``ProviderEmptyError``.
+
+    Mirrors the Modal-env-missing situation: the backend is reachable and
+    answers definitively that nothing has been created yet.
+    """
+
+    @staticmethod
+    def get_name() -> ProviderBackendName:
+        return _EMPTY_BACKEND_NAME
+
+    @staticmethod
+    def get_description() -> str:
+        return "Test backend that reports itself empty at construction time"
+
+    @staticmethod
+    def get_config_class() -> type[ProviderInstanceConfig]:
+        return ProviderInstanceConfig
+
+    @staticmethod
+    def get_build_args_help() -> str:
+        return "No arguments supported."
+
+    @staticmethod
+    def get_start_args_help() -> str:
+        return "No arguments supported."
+
+    @staticmethod
+    def build_provider_instance(
+        name: ProviderInstanceName,
+        config: ProviderInstanceConfig,
+        mngr_ctx: MngrContext,
+        is_for_host_creation: bool = False,
+    ) -> ProviderInstanceInterface:
+        del config, mngr_ctx, is_for_host_creation
+        raise ProviderEmptyError(provider_name=name, reason="simulated empty backend from test")
 
 
 def _make_list_params(
@@ -1712,6 +1758,74 @@ def test_construct_discover_and_emit_for_provider_success_path_processes_agents(
     )
 
     assert result.errors == []
+
+
+# =============================================================================
+# ProviderEmptyError: always silently skipped in listing, regardless of mode
+# =============================================================================
+
+
+def _make_empty_provider_ctx(temp_mngr_ctx: MngrContext) -> MngrContext:
+    """Build a MngrContext that has one configured provider that reports empty at construction."""
+    provider_config = ProviderInstanceConfig(backend=_EMPTY_BACKEND_NAME)
+    updated_config = temp_mngr_ctx.config.model_copy_update(
+        to_update(
+            temp_mngr_ctx.config.field_ref().providers,
+            {ProviderInstanceName("empty-provider"): provider_config},
+        ),
+    )
+    return temp_mngr_ctx.model_copy_update(
+        to_update(temp_mngr_ctx.field_ref().config, updated_config),
+    )
+
+
+def test_list_agents_streaming_abort_mode_silently_skips_empty_provider(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """A provider raising ProviderEmptyError at construction is silently dropped
+    from the listing even in ABORT mode, because the provider's state is known
+    to be empty (nothing to list) -- distinct from ProviderUnavailableError
+    which signals unknown state and is allowed to abort.
+
+    Regression for: `mngr list` aborting when the Modal env didn't exist yet.
+    """
+    _backend_registry[_EMPTY_BACKEND_NAME] = _EmptyProviderBackend
+    _provider_config_registry[_EMPTY_BACKEND_NAME] = ProviderInstanceConfig
+    try:
+        mngr_ctx = _make_empty_provider_ctx(temp_mngr_ctx)
+        result = list_agents(
+            mngr_ctx=mngr_ctx,
+            is_streaming=True,
+            error_behavior=ErrorBehavior.ABORT,
+        )
+
+        assert result.errors == []
+    finally:
+        del _backend_registry[_EMPTY_BACKEND_NAME]
+        del _provider_config_registry[_EMPTY_BACKEND_NAME]
+
+
+def test_list_agents_batch_abort_mode_silently_skips_empty_provider(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """Same as the streaming variant: batch mode in ABORT also silently skips
+    an empty provider rather than wrapping the error into a ProviderDiscoveryError
+    that would abort the whole listing.
+    """
+    _backend_registry[_EMPTY_BACKEND_NAME] = _EmptyProviderBackend
+    _provider_config_registry[_EMPTY_BACKEND_NAME] = ProviderInstanceConfig
+    try:
+        mngr_ctx = _make_empty_provider_ctx(temp_mngr_ctx)
+        result = list_agents(
+            mngr_ctx=mngr_ctx,
+            is_streaming=False,
+            error_behavior=ErrorBehavior.ABORT,
+        )
+
+        assert result.errors == []
+    finally:
+        del _backend_registry[_EMPTY_BACKEND_NAME]
+        del _provider_config_registry[_EMPTY_BACKEND_NAME]
 
 
 # =============================================================================

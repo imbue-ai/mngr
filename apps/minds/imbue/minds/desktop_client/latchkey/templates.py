@@ -50,6 +50,7 @@ def render_latchkey_permission_dialog(
         ws_name=ws_name,
         rationale=rationale,
         display_name=service.display_name,
+        scope=service.scope,
         permission_schemas=service.permission_schemas,
         checked_permissions=set(checked_permissions),
         accent=workspace_accent(agent_id),
