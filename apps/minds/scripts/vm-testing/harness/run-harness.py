@@ -468,7 +468,6 @@ def main() -> int:
     message_timeout = env_int("MESSAGE_TIMEOUT", 300)
 
     results: list[StepResult] = []
-    backend_port: int | None = None
     creation_info: dict[str, Any] = {}
 
     results.append(run_step("wipe_minds_state", wipe_minds_state))
