@@ -223,16 +223,20 @@ def _start_stopped(
 
     for host_key, agent_list in agents_by_host.items():
         host_id_str, _ = host_key.split(":", 1)
+        # Get provider from first agent (all agents in list have same provider)
         provider_name = agent_list[0].provider_name
 
         provider = get_provider_instance(provider_name, mngr_ctx)
         host = provider.get_host(HostId(host_id_str))
 
+        # Ensure host is started (always start since this is the start command)
         online_host, _ = ensure_host_started(host, is_start_desired=True, provider=provider)
 
+        # Start each agent on this host
         agent_ids_to_start = [match.agent_id for match in agent_list]
         online_host.start_agents(agent_ids_to_start)
 
+        # Emit discovery events for started agents and host
         emit_discovery_events_for_host(mngr_ctx.config, online_host)
 
         for match in agent_list:
@@ -242,8 +246,10 @@ def _start_stopped(
             # Get the agent object for potential connect and resume message
             for agent in online_host.get_agents():
                 if agent.id == match.agent_id:
+                    # Send resume message if configured
                     _send_resume_message_if_configured(agent, output_opts)
 
+                    # Track for potential connect
                     if opts.connect:
                         last_started_agent = agent
                         last_started_host = online_host
@@ -283,11 +289,13 @@ def _start_with_restart(
 
     for host_key, agent_list in agents_by_host.items():
         host_id_str, _ = host_key.split(":", 1)
+        # Get provider from first agent (all agents in list have same provider)
         provider_name = agent_list[0].provider_name
 
         provider = get_provider_instance(provider_name, mngr_ctx)
         host = provider.get_host(HostId(host_id_str))
 
+        # Ensure host is started (always start since this is the start command)
         online_host, _ = ensure_host_started(host, is_start_desired=True, provider=provider)
 
         # Acquire per-agent file locks to prevent concurrent restarts
@@ -305,6 +313,7 @@ def _start_with_restart(
             if not locked_agents:
                 continue
 
+            # Stop then start each agent on this host
             locked_ids = [match.agent_id for match in locked_agents]
 
             with log_span("Stopping {} agent(s) for restart", len(locked_ids)):
@@ -313,6 +322,7 @@ def _start_with_restart(
             with log_span("Starting {} agent(s)", len(locked_ids)):
                 online_host.start_agents(locked_ids)
 
+            # Emit discovery events for restarted agents and host
             emit_discovery_events_for_host(mngr_ctx.config, online_host)
 
             for match in locked_agents:
