@@ -666,11 +666,7 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
         # gives an order-preserving set so a permission that appears in
         # both ``existing`` and ``requested_permissions`` is checked once.
         requested_set = set(requested_permissions)
-        union = tuple(
-            dict.fromkeys(
-                p for p in service_info.permission_schemas if p in existing or p in requested_set
-            )
-        )
+        union = tuple(dict.fromkeys(p for p in service_info.permission_schemas if p in existing or p in requested_set))
         return union
 
     def _apply_grant_to_permissions_file(
