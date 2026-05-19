@@ -41,6 +41,7 @@ const WORKSPACE_PACKAGES = {
   'imbue-mngr-claude':      'libs/mngr_claude',
   'imbue-mngr-forward':     'libs/mngr_forward',
   'imbue-mngr-imbue-cloud': 'libs/mngr_imbue_cloud',
+  'imbue-mngr-latchkey':    'libs/mngr_latchkey',
   'imbue-mngr-lima':        'libs/mngr_lima',
   'imbue-mngr-modal':       'libs/mngr_modal',
   'imbue-common':           'libs/imbue_common',
@@ -580,8 +581,12 @@ function stageRuntimePyproject(wheelByPackage) {
   }
   const newSources = sourceLines.join('\n') + '\n';
 
-  if (content.match(/\[tool\.uv\.sources\]/)) {
-    content = content.replace(/\[tool\.uv\.sources\][^\[]*/, newSources);
+  // Anchor at start-of-line so the literal "[tool.uv.sources]" substring
+  // inside the file-level docstring (a comment that names the section) is
+  // not mistaken for the section header itself.
+  const sectionRe = /^\[tool\.uv\.sources\][^\[]*/m;
+  if (sectionRe.test(content)) {
+    content = content.replace(sectionRe, newSources);
   } else {
     content = content.trimEnd() + '\n\n' + newSources;
   }
