@@ -878,9 +878,9 @@ def _pytest_runtest_setup(item: pytest.Item) -> Generator[None, None, None]:
     # holding the exception until after yield, the inner setup completes
     # normally, all plugins get a chance to install their state, and the
     # error still surfaces as a setup-phase error.
-    closure_error: ResourceGuardMisconfiguration | None = None
     try:
         state.covered_resources = _collect_fixture_covered_resources(item)
+        closure_error: ResourceGuardMisconfiguration | None = None
     except ResourceGuardMisconfiguration as exc:
         closure_error = exc
 
