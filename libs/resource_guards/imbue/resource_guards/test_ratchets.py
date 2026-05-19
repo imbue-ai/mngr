@@ -69,6 +69,13 @@ def test_prevent_silent_decode_error_catches() -> None:
 # --- Import style ---
 
 
+# The count here is dominated by string-literal misfires, not real inline
+# imports in module bodies: resource_guards_test.py uses pytester to compile
+# small test files at runtime, and the Python source for those files lives
+# inside triple-quoted strings with indented `import` lines that the regex
+# matches the same way it would match a real inline import. Tightening the
+# rule to skip string literals lives in imbue_common, not this package, so
+# the snapshot bump is intentional.
 def test_prevent_inline_imports() -> None:
     rc.check_inline_imports(_DIR, snapshot(66))
 
