@@ -4,45 +4,23 @@ Provides a thread-safe interface for reading and writing user preferences
 that persist across sessions, such as the default account for new workspaces
 and the auto-open behavior for the requests panel.
 
-Also exposes the ``remote_service_connector_url`` (the backend that fronts
-Cloudflare tunnels and the auth backend) used by the desktop client to talk
-to the backing service. The URL follows env > file > default precedence so
-ops can point a local build at a different deployment without editing code.
+The env-selection URL (``connector_url``, ``litellm_proxy_url``) lives in
+the per-tier ``ClientEnvConfig`` loaded via ``--config-file``; this file is
+only for genuinely user-personal preferences and never carries tier state.
 """
 
-import os
 import threading
 from pathlib import Path
 from typing import Final
 
 import tomlkit
-from pydantic import AnyUrl
 from pydantic import Field
 from pydantic import PrivateAttr
-from pydantic import TypeAdapter
-from pydantic import ValidationError
 
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.minds.errors import MindsConfigError
 
-_CONFIG_FILENAME = "config.toml"
-
-DEFAULT_REMOTE_SERVICE_CONNECTOR_URL: Final[str] = (
-    "https://joshalbrecht--remote-service-connector-production-fastapi-app.modal.run"
-)
-
-_REMOTE_SERVICE_CONNECTOR_URL_ENV: Final[str] = "REMOTE_SERVICE_CONNECTOR_URL"
-
-_REMOTE_SERVICE_CONNECTOR_URL_KEY: Final[str] = "remote_service_connector_url"
-
-_URL_VALIDATOR: Final[TypeAdapter[AnyUrl]] = TypeAdapter(AnyUrl)
-
-
-def _validate_url(raw: str, source: str) -> AnyUrl:
-    try:
-        return _URL_VALIDATOR.validate_python(raw)
-    except ValidationError as e:
-        raise MindsConfigError(f"Invalid URL in {source}: {raw!r}") from e
+_CONFIG_FILENAME: Final[str] = "config.toml"
 
 
 class MindsConfig(MutableModel):
@@ -117,37 +95,3 @@ class MindsConfig(MutableModel):
             data = self._read_raw()
             data["auto_open_requests_panel"] = enabled
             self._write_raw(data)
-
-    def _resolve_url_setting(
-        self,
-        *,
-        env_var: str,
-        file_key: str,
-        default: str,
-    ) -> AnyUrl:
-        """Resolve a URL setting with precedence env > file > default.
-
-        Raises MindsConfigError if the env or file value is not a valid URL.
-        The default is assumed well-formed (validated at import time in tests).
-        """
-        env_value = os.environ.get(env_var)
-        if env_value is not None:
-            return _validate_url(env_value, source=f"${env_var}")
-        with self._lock:
-            data = self._read_raw()
-        file_value = data.get(file_key)
-        if isinstance(file_value, str):
-            return _validate_url(file_value, source=f"{self._config_path}:{file_key}")
-        return _validate_url(default, source=f"{file_key} default")
-
-    @property
-    def remote_service_connector_url(self) -> AnyUrl:
-        """Base URL of the remote service connector (Cloudflare tunnel API + auth backend).
-
-        Precedence: ``$REMOTE_SERVICE_CONNECTOR_URL`` > ``config.toml`` > built-in default.
-        """
-        return self._resolve_url_setting(
-            env_var=_REMOTE_SERVICE_CONNECTOR_URL_ENV,
-            file_key=_REMOTE_SERVICE_CONNECTOR_URL_KEY,
-            default=DEFAULT_REMOTE_SERVICE_CONNECTOR_URL,
-        )

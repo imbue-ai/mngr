@@ -5,10 +5,15 @@ from pathlib import Path
 import pytest
 
 from imbue.mngr.errors import MngrError
+from imbue.mngr.primitives import HostId
 from imbue.mngr_vps_docker.instance import ParsedVpsBuildOptions
+from imbue.mngr_vps_docker.instance import _emit_docker_build_output
+from imbue.mngr_vps_docker.instance import _is_retryable_rsync_error
 from imbue.mngr_vps_docker.instance import _parse_build_args
+from imbue.mngr_vps_docker.instance import _redact_secret_env
 from imbue.mngr_vps_docker.instance import _remove_host_from_known_hosts
 from imbue.mngr_vps_docker.instance import _resolve_dockerfile_paths
+from imbue.mngr_vps_docker.instance import build_vps_tags
 
 _DEFAULT_REGION = "ewr"
 _DEFAULT_PLAN = "vc2-1c-1gb"
@@ -180,3 +185,114 @@ def test_resolve_dockerfile_paths_preserves_other_args() -> None:
 def test_resolve_dockerfile_paths_empty_args() -> None:
     result = _resolve_dockerfile_paths([], "/tmp/build")
     assert result == ()
+
+
+_HOST_ID = HostId.generate()
+
+
+def test_build_vps_tags_emits_baseline_when_extras_empty() -> None:
+    """No MNGR_VPS_EXTRA_TAGS -> just the two always-on tags."""
+    assert build_vps_tags(_HOST_ID, "vultr", "") == [
+        f"mngr-host-id={_HOST_ID}",
+        "mngr-provider=vultr",
+    ]
+
+
+def test_build_vps_tags_appends_single_extra() -> None:
+    """One ``key=value`` extra tag is appended verbatim."""
+    assert build_vps_tags(_HOST_ID, "vultr", "minds_env=dev-josh") == [
+        f"mngr-host-id={_HOST_ID}",
+        "mngr-provider=vultr",
+        "minds_env=dev-josh",
+    ]
+
+
+def test_build_vps_tags_appends_multiple_comma_separated_extras() -> None:
+    """Comma-separated extras are split + appended in order."""
+    assert build_vps_tags(_HOST_ID, "vultr", "a=1,b=2,c=3") == [
+        f"mngr-host-id={_HOST_ID}",
+        "mngr-provider=vultr",
+        "a=1",
+        "b=2",
+        "c=3",
+    ]
+
+
+def test_build_vps_tags_strips_whitespace_around_extras() -> None:
+    """Whitespace around each comma-separated entry is trimmed."""
+    assert build_vps_tags(_HOST_ID, "vultr", " a=1 , b=2 ") == [
+        f"mngr-host-id={_HOST_ID}",
+        "mngr-provider=vultr",
+        "a=1",
+        "b=2",
+    ]
+
+
+def test_build_vps_tags_skips_blank_entries_from_trailing_commas() -> None:
+    """Trailing / doubled commas don't emit empty tags."""
+    assert build_vps_tags(_HOST_ID, "vultr", "a=1,,b=2,") == [
+        f"mngr-host-id={_HOST_ID}",
+        "mngr-provider=vultr",
+        "a=1",
+        "b=2",
+    ]
+
+
+def test_build_vps_tags_uses_provided_provider_name() -> None:
+    """The provider name is interpolated, not hard-coded."""
+    assert build_vps_tags(_HOST_ID, "ovh", "") == [
+        f"mngr-host-id={_HOST_ID}",
+        "mngr-provider=ovh",
+    ]
+
+
+def test_redact_secret_env_replaces_known_var_value() -> None:
+    """Known secret env-var assignments have their value redacted."""
+    cmd = "DEPOT_TOKEN=tok-12345 docker build ."
+    assert _redact_secret_env(cmd) == "DEPOT_TOKEN=<redacted> docker build ."
+
+
+def test_redact_secret_env_replaces_single_quoted_value() -> None:
+    """Single-quoted secret values are also redacted."""
+    cmd = "DEPOT_TOKEN='tok with spaces' docker build ."
+    assert _redact_secret_env(cmd) == "DEPOT_TOKEN=<redacted> docker build ."
+
+
+def test_redact_secret_env_leaves_unknown_vars_alone() -> None:
+    """Non-secret env-var assignments are untouched."""
+    cmd = "FOO=bar docker build ."
+    assert _redact_secret_env(cmd) == "FOO=bar docker build ."
+
+
+def test_redact_secret_env_no_op_when_no_match() -> None:
+    """A command with no env-var assignments comes back unchanged."""
+    cmd = "docker build ."
+    assert _redact_secret_env(cmd) == "docker build ."
+
+
+def test_is_retryable_rsync_error_true_on_known_pattern() -> None:
+    """Connection-class rsync stderr strings are flagged retryable."""
+    # Pick from the documented retry patterns; any one of them suffices.
+    assert _is_retryable_rsync_error("rsync: Connection reset by peer")
+
+
+def test_is_retryable_rsync_error_false_on_unknown_pattern() -> None:
+    """Unrelated rsync stderr should not be retried."""
+    assert not _is_retryable_rsync_error("rsync: permission denied")
+
+
+def test_is_retryable_rsync_error_false_on_empty_string() -> None:
+    """No stderr -> nothing to match -> not retryable."""
+    assert not _is_retryable_rsync_error("")
+
+
+def test_emit_docker_build_output_handles_nonempty_line() -> None:
+    """Non-empty lines are logged; the call should not raise."""
+    _emit_docker_build_output("Step 1/5 : FROM debian:bookworm-slim")
+
+
+def test_emit_docker_build_output_skips_whitespace_only() -> None:
+    """Whitespace-only / empty lines are silently dropped."""
+    _emit_docker_build_output("")
+    _emit_docker_build_output("   ")
+    _emit_docker_build_output("\n")

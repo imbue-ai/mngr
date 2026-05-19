@@ -130,13 +130,21 @@ def build_provider_instance(
     backend_name: ProviderBackendName,
     config: ProviderInstanceConfig,
     mngr_ctx: MngrContext,
+    is_for_host_creation: bool = False,
 ) -> BaseProviderInstance:
-    """Build a provider instance using the registered backend."""
+    """Build a provider instance using the registered backend.
+
+    ``is_for_host_creation`` is forwarded to the backend so that backends with
+    one-time bootstrap resources (currently: the Modal backend's per-user
+    environment) can distinguish create-host construction from construction
+    for read-only / existing-host operations.
+    """
     backend_class = get_backend(backend_name)
     obj = backend_class.build_provider_instance(
         name=instance_name,
         config=config,
         mngr_ctx=mngr_ctx,
+        is_for_host_creation=is_for_host_creation,
     )
     if not isinstance(obj, BaseProviderInstance):
         raise ConfigStructureError(
