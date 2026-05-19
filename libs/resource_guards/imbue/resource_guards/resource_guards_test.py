@@ -1449,6 +1449,31 @@ def test_check_guard_violations_reports_every_undeclared_mark_at_once(
     assert "missing @pytest.mark.ls" in longrepr
 
 
+def test_check_guard_violations_reports_blocked_and_undeclared_together(
+    isolated_guard_state: None,
+    tmp_path: Path,
+) -> None:
+    """A test with both a BLOCKED invocation and an undeclared fixture-covered mark gets both messages.
+
+    The undeclared-fixture-coverage check is a static property of the test
+    closure and is independent of the runtime BLOCKED check. Reporting them
+    together lets the user fix both in one pass instead of rediscovering the
+    second across a rerun.
+    """
+    register_resource_guard("cat")
+    register_resource_guard("ls")
+    (tmp_path / "blocked_cat").touch()
+
+    state = _make_state(tmp_path, marks=set(), covered_resources={"ls"})
+    report = _FakeReport(passed=True)
+    _check_guard_violations(state, report)  # ty: ignore[invalid-argument-type]
+
+    assert report.outcome == "failed"
+    longrepr = str(report.longrepr)
+    assert "without @pytest.mark.cat" in longrepr
+    assert "missing @pytest.mark.ls" in longrepr
+
+
 # ---------------------------------------------------------------------------
 # Fixture-scope helpers (unit tests)
 # ---------------------------------------------------------------------------

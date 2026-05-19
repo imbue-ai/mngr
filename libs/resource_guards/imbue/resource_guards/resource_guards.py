@@ -875,19 +875,20 @@ def _check_guard_violations(state: _PerTestGuardState, report: pytest.TestReport
                 report.longrepr = msg
             else:
                 report.longrepr = f"{report.longrepr}\n\n{msg}"
-            return
-
-        report.outcome = "failed"
-        report.longrepr = (
-            f"Test marked with @pytest.mark.{violation.resource} but never invoked {violation.resource}.\n"
-            f"Remove the mark or ensure the test exercises {violation.resource}."
-        )
-        return
+        else:
+            report.outcome = "failed"
+            report.longrepr = (
+                f"Test marked with @pytest.mark.{violation.resource} but never invoked {violation.resource}.\n"
+                f"Remove the mark or ensure the test exercises {violation.resource}."
+            )
 
     undeclared = sorted(state.covered_resources - state.marks)
     if undeclared:
         # Report every missing mark in one message so the user can fix them all
-        # at once instead of rediscovering them one by one across reruns.
+        # at once instead of rediscovering them one by one across reruns. This
+        # check is independent of the runtime BLOCKED/NEVER_INVOKED checks
+        # above (it's a static property of the fixture closure), so it always
+        # runs and appends to whatever longrepr those checks may have set.
         lines = [
             f"RESOURCE GUARD: Test consumes a fixture decorated with @fixture_uses_resources({resource!r}) "
             f"but is missing @pytest.mark.{resource}. Add the mark so that `pytest -m {resource}` selects "
@@ -895,7 +896,7 @@ def _check_guard_violations(state: _PerTestGuardState, report: pytest.TestReport
             for resource in undeclared
         ]
         msg = "\n".join(lines)
-        if report.passed:
+        if report.outcome == "passed":
             report.outcome = "failed"
             report.longrepr = msg
         else:
