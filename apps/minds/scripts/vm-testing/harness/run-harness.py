@@ -51,7 +51,31 @@ from pathlib import Path
 from typing import Any
 
 HOME = Path.home()
-MINDS_DATA_DIR = HOME / ".minds"
+
+
+def _resolve_minds_root_name() -> str:
+    """Match the bundled-or-default lookup that the runtime does.
+
+    Packaged builds embed the chosen MINDS_ROOT_NAME in
+    ``Contents/Resources/pyproject/imbue/minds/config/envs/_bundled/root_name``
+    (staging builds use ``minds-staging``, production uses ``minds``). The
+    runtime exports that value before launching ``minds run``. We read the
+    same file so artifact-capture paths line up with where the backend
+    actually wrote them.
+    """
+    override = os.environ.get("MINDS_ROOT_NAME")
+    if override:
+        return override
+    bundled = Path("/Applications/minds.app/Contents/Resources/pyproject/imbue/minds/config/envs/_bundled/root_name")
+    if bundled.exists():
+        value = bundled.read_text().strip()
+        if value:
+            return value
+    return "minds"
+
+
+MINDS_ROOT_NAME = _resolve_minds_root_name()
+MINDS_DATA_DIR = HOME / f".{MINDS_ROOT_NAME}"
 MINDS_LOG = MINDS_DATA_DIR / "logs" / "minds.log"
 MINDS_EVENTS = MINDS_DATA_DIR / "logs" / "minds-events.jsonl"
 
@@ -340,8 +364,8 @@ def _mngr_env() -> dict[str, str]:
     env["UV_CACHE_DIR"] = str(MINDS_DATA_DIR / ".uv-cache")
     env["UV_PYTHON_INSTALL_DIR"] = str(MINDS_DATA_DIR / ".uv-python")
     env["MNGR_HOST_DIR"] = str(MINDS_DATA_DIR / "mngr")
-    env["MNGR_PREFIX"] = "minds-"
-    env["MINDS_ROOT_NAME"] = "minds"
+    env["MNGR_PREFIX"] = f"{MINDS_ROOT_NAME}-"
+    env["MINDS_ROOT_NAME"] = MINDS_ROOT_NAME
     return env
 
 
