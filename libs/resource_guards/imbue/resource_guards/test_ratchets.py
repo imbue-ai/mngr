@@ -218,6 +218,11 @@ def test_prevent_unittest_mock_imports() -> None:
     rc.check_unittest_mock_imports(_DIR, snapshot(1))
 
 
+# The +1 here is the new `monkeypatch.setattr(resource_guards,
+# "_fixture_resource_marks", {})` line in testing.py::isolate_guard_state.
+# It mirrors the existing pattern of resetting every module-level guard state
+# attribute via monkeypatch so each test gets a clean slate; the new decorator
+# storage needs the same treatment to keep tests isolated.
 def test_prevent_monkeypatch_setattr() -> None:
     rc.check_monkeypatch_setattr(_DIR, snapshot(10))
 
@@ -252,6 +257,13 @@ def test_prevent_if_elif_without_else() -> None:
     rc.check_if_elif_without_else(_DIR, snapshot(0))
 
 
+# The +1 here comes from the new closures introduced by
+# @fixture_uses_resources and _make_guarded_fixture_wrapper in
+# resource_guards.py -- canonical decorator/generator-wrapper patterns
+# (an inner `decorator(func)` returned by the decorator factory and the
+# generator/plain wrappers closed over `fixture_env`). The ratchet flags
+# nested defs uniformly, so the bump is the cost of the feature rather
+# than a structural smell.
 def test_prevent_inline_functions() -> None:
     rc.check_inline_functions(_DIR, snapshot(4))
 
