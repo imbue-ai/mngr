@@ -33,6 +33,7 @@ is printed to stderr.
 
 from __future__ import annotations
 
+import functools
 import json
 import os
 import re
@@ -51,17 +52,27 @@ from pathlib import Path
 from typing import Any
 
 HOME = Path.home()
+# Candidate ``$HOME/.<name>`` dirs the runtime may have written state into.
+# Used by ``wipe_minds_state`` before the bundle is installed, when we
+# cannot yet read the bundled ``root_name`` to know which one applies.
+_MINDS_ROOT_NAME_CANDIDATES = ("minds", "minds-staging")
 
 
-def _resolve_minds_root_name() -> str:
-    """Match the bundled-or-default lookup that the runtime does.
+@functools.lru_cache(maxsize=1)
+def minds_root_name() -> str:
+    """Resolve the runtime's MINDS_ROOT_NAME, matching the bundled lookup.
 
-    Packaged builds embed the chosen MINDS_ROOT_NAME in
+    Packaged builds embed the chosen value in
     ``Contents/Resources/pyproject/imbue/minds/config/envs/_bundled/root_name``
     (staging builds use ``minds-staging``, production uses ``minds``). The
     runtime exports that value before launching ``minds run``. We read the
     same file so artifact-capture paths line up with where the backend
     actually wrote them.
+
+    Resolution happens lazily because ``install_app`` puts the bundle in
+    place inside ``main()``; resolving at module import would always fall
+    back to ``minds`` on a fresh VM. The result is cached so all callers
+    after the first see a stable value.
     """
     override = os.environ.get("MINDS_ROOT_NAME")
     if override:
@@ -74,10 +85,16 @@ def _resolve_minds_root_name() -> str:
     return "minds"
 
 
-MINDS_ROOT_NAME = _resolve_minds_root_name()
-MINDS_DATA_DIR = HOME / f".{MINDS_ROOT_NAME}"
-MINDS_LOG = MINDS_DATA_DIR / "logs" / "minds.log"
-MINDS_EVENTS = MINDS_DATA_DIR / "logs" / "minds-events.jsonl"
+def minds_data_dir() -> Path:
+    return HOME / f".{minds_root_name()}"
+
+
+def minds_log_path() -> Path:
+    return minds_data_dir() / "logs" / "minds.log"
+
+
+def minds_events_path() -> Path:
+    return minds_data_dir() / "logs" / "minds-events.jsonl"
 
 
 @dataclass
@@ -133,14 +150,22 @@ class StepFailure(RuntimeError):
 
 
 def wipe_minds_state() -> dict[str, Any]:
-    if MINDS_DATA_DIR.exists():
-        shutil.rmtree(MINDS_DATA_DIR)
+    # Runs before install_app, so the bundled root_name file is not yet
+    # available. Wipe every candidate ``$HOME/.<name>`` dir so leftover
+    # state from a prior run of either tier (minds / minds-staging) is
+    # cleared, without depending on the lazy resolver.
+    wiped: list[str] = []
+    for candidate in _MINDS_ROOT_NAME_CANDIDATES:
+        path = HOME / f".{candidate}"
+        if path.exists():
+            shutil.rmtree(path)
+            wiped.append(str(path))
     # Also nuke any leftover minds.app from a prior run so we are testing the
     # exact bundle the orchestrator copied in.
     target = Path("/Applications/minds.app")
     if target.exists():
         shutil.rmtree(target)
-    return {"data_dir": str(MINDS_DATA_DIR)}
+    return {"wiped": wiped}
 
 
 def install_app(source: Path) -> dict[str, Any]:
@@ -197,7 +222,7 @@ def launch_app() -> dict[str, Any]:
     # terminal so it survives after this harness invocation exits. stdout/
     # stderr are redirected to launcher_log so we have something to grab if
     # the backend never comes up.
-    launcher_log = MINDS_DATA_DIR / "logs" / "launcher.log"
+    launcher_log = minds_data_dir() / "logs" / "launcher.log"
     launcher_log.parent.mkdir(parents=True, exist_ok=True)
     # Popen dups the fd into the child; release the parent's handle as soon
     # as the spawn returns so we don't leak it for the rest of the harness.
@@ -212,14 +237,15 @@ def launch_app() -> dict[str, Any]:
     log(f"minds pid={proc.pid}")
     # Persist the pid so the cleanup step can find it again even if the
     # harness process gets a fresh shell.
-    (MINDS_DATA_DIR / "harness.pid").write_text(str(proc.pid))
+    (minds_data_dir() / "harness.pid").write_text(str(proc.pid))
     return {"pid": proc.pid}
 
 
 def _read_backend_port_from_log() -> int | None:
-    if not MINDS_LOG.exists():
+    log_path = minds_log_path()
+    if not log_path.exists():
         return None
-    text = MINDS_LOG.read_text(errors="replace")
+    text = log_path.read_text(errors="replace")
     # Extract the dynamic backend port from the ``Bare-origin`` line that
     # ``minds run`` logs once the backend chooses a port.
     m = re.search(r"Bare-origin:\s*http://[^:]+:(\d+)", text)
@@ -361,11 +387,13 @@ def _mngr_env() -> dict[str, str]:
     uv_bin_dir = _resource_path("uv")
     git_bin_dir = _resource_path("git/bin")
     env["PATH"] = f"{uv_bin_dir}:{git_bin_dir}:" + env.get("PATH", "")
-    env["UV_CACHE_DIR"] = str(MINDS_DATA_DIR / ".uv-cache")
-    env["UV_PYTHON_INSTALL_DIR"] = str(MINDS_DATA_DIR / ".uv-python")
-    env["MNGR_HOST_DIR"] = str(MINDS_DATA_DIR / "mngr")
-    env["MNGR_PREFIX"] = f"{MINDS_ROOT_NAME}-"
-    env["MINDS_ROOT_NAME"] = MINDS_ROOT_NAME
+    data_dir = minds_data_dir()
+    root_name = minds_root_name()
+    env["UV_CACHE_DIR"] = str(data_dir / ".uv-cache")
+    env["UV_PYTHON_INSTALL_DIR"] = str(data_dir / ".uv-python")
+    env["MNGR_HOST_DIR"] = str(data_dir / "mngr")
+    env["MNGR_PREFIX"] = f"{root_name}-"
+    env["MINDS_ROOT_NAME"] = root_name
     return env
 
 
@@ -385,7 +413,8 @@ def send_message(host_name: str, prompt: str, expected_response: str, timeout_s:
 
     # Snapshot the events log offset so we only consider events emitted from
     # this point forward when watching for the expected response.
-    initial_offset = MINDS_EVENTS.stat().st_size if MINDS_EVENTS.exists() else 0
+    events_path = minds_events_path()
+    initial_offset = events_path.stat().st_size if events_path.exists() else 0
 
     cmd = [
         str(uv),
@@ -417,11 +446,11 @@ def send_message(host_name: str, prompt: str, expected_response: str, timeout_s:
         # made it through. Continue and verify via events log.
         log(f"mngr message exited nonzero (rc={proc.returncode}); stderr tail:\n{proc.stderr[-500:]}")
 
-    log(f"watching {MINDS_EVENTS} for '{expected_response}' (timeout {timeout_s}s)")
+    log(f"watching {events_path} for '{expected_response}' (timeout {timeout_s}s)")
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
-        if MINDS_EVENTS.exists():
-            with MINDS_EVENTS.open("rb") as fh:
+        if events_path.exists():
+            with events_path.open("rb") as fh:
                 fh.seek(initial_offset)
                 for raw_line in fh:
                     line = raw_line.decode(errors="replace")
@@ -429,19 +458,21 @@ def send_message(host_name: str, prompt: str, expected_response: str, timeout_s:
                         log("expected response found in events log")
                         return {"matched_line_excerpt": line.strip()[:200]}
         time.sleep(2)
-    raise StepFailure(f"expected response '{expected_response}' not seen in {MINDS_EVENTS} within {timeout_s}s")
+    raise StepFailure(f"expected response '{expected_response}' not seen in {events_path} within {timeout_s}s")
 
 
 def capture_artifacts(results_dir: Path) -> dict[str, Any]:
     results_dir.mkdir(parents=True, exist_ok=True)
     out: dict[str, Any] = {}
-    if MINDS_LOG.exists():
-        shutil.copy2(MINDS_LOG, results_dir / "minds.log")
+    log_path = minds_log_path()
+    events_path = minds_events_path()
+    if log_path.exists():
+        shutil.copy2(log_path, results_dir / "minds.log")
         out["minds_log"] = "minds.log"
-    if MINDS_EVENTS.exists():
-        shutil.copy2(MINDS_EVENTS, results_dir / "minds-events.jsonl")
+    if events_path.exists():
+        shutil.copy2(events_path, results_dir / "minds-events.jsonl")
         out["minds_events"] = "minds-events.jsonl"
-    launcher_log = MINDS_DATA_DIR / "logs" / "launcher.log"
+    launcher_log = minds_data_dir() / "logs" / "launcher.log"
     if launcher_log.exists():
         shutil.copy2(launcher_log, results_dir / "launcher.log")
         out["launcher_log"] = "launcher.log"
