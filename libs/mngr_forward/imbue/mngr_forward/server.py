@@ -50,6 +50,8 @@ from imbue.mngr_forward.cookie import create_session_cookie
 from imbue.mngr_forward.cookie import create_subdomain_auth_token
 from imbue.mngr_forward.cookie import verify_session_cookie
 from imbue.mngr_forward.cookie import verify_subdomain_auth_token
+from imbue.mngr_forward.data_types import WorkspaceBackendFailurePayload
+from imbue.mngr_forward.data_types import WorkspaceBackendFailureReason
 from imbue.mngr_forward.envelope import EnvelopeWriter
 from imbue.mngr_forward.primitives import FORWARD_SUBDOMAIN_PATTERN
 from imbue.mngr_forward.primitives import MNGR_FORWARD_SESSION_COOKIE_NAME
@@ -67,6 +69,13 @@ _SUBDOMAIN_AUTH_PATH: Final[str] = "/_subdomain_auth"
 _EXCLUDED_RESPONSE_HEADERS: Final[frozenset[str]] = frozenset(
     {"transfer-encoding", "content-encoding", "content-length"}
 )
+
+# HTTP status codes that the plugin surfaces as ``workspace_backend_failure``
+# events with ``reason=FIVEXX_RESPONSE``. Limiting to the "infrastructure"
+# subset (Bad Gateway / Service Unavailable / Gateway Timeout) avoids
+# surfacing a wedged Python backend's stack-trace 500s as health-recovery
+# events, which would be too aggressive.
+_INFRASTRUCTURE_5XX_STATUSES: Final[frozenset[int]] = frozenset({502, 503, 504})
 
 # WebSocket close-reasons are capped at 123 bytes by RFC 6455. Keep messages
 # short; full diagnostic detail goes to ``logger.warning`` instead.
@@ -296,6 +305,8 @@ async def _forward_workspace_http(
     request: Request,
     backend_url: str,
     http_client: httpx.AsyncClient,
+    agent_id: AgentId,
+    envelope_writer: EnvelopeWriter,
 ) -> Response:
     base = backend_url.rstrip("/")
     path = request.url.path.lstrip("/")
@@ -326,9 +337,23 @@ async def _forward_workspace_http(
         backend_request = http_client.build_request(method=request.method, url=url, headers=headers, content=body)
         try:
             backend_response = await http_client.send(backend_request, stream=True)
-        except httpx.ConnectError:
+        except (httpx.ConnectError, httpx.RemoteProtocolError):
+            # ``RemoteProtocolError`` here means the backend disconnected
+            # before sending headers -- typical when the workspace server
+            # died between the SSH tunnel accepting the unix-socket
+            # connection and the channel-open completing. Same recovery
+            # signal as a connect-time failure.
+            _emit_backend_failure(envelope_writer, agent_id, WorkspaceBackendFailureReason.CONNECT_ERROR, None)
             return _service_unavailable_response(request)
+        except httpx.ReadError:
+            _emit_backend_failure(envelope_writer, agent_id, WorkspaceBackendFailureReason.SSE_EOF, None)
+            return Response(status_code=502, content="Backend connection lost")
         except httpx.TimeoutException:
+            # A wedged-but-listening backend produces a TimeoutException
+            # rather than ConnectError. Surface this as CONNECT_ERROR so
+            # the minds-side tracker still ticks the agent toward STUCK,
+            # matching the behaviour for a backend that returns a 504.
+            _emit_backend_failure(envelope_writer, agent_id, WorkspaceBackendFailureReason.CONNECT_ERROR, None)
             return Response(status_code=504, content="Backend stream timed out")
 
         async def _stream() -> AsyncGenerator[bytes, None]:
@@ -337,6 +362,7 @@ async def _forward_workspace_http(
                     yield chunk
             except (httpx.ReadError, httpx.RemoteProtocolError, httpx.TimeoutException) as e:
                 logger.warning("Backend SSE stream failed for {}: {}", request.url.path, e)
+                _emit_backend_failure(envelope_writer, agent_id, WorkspaceBackendFailureReason.SSE_EOF, None)
             finally:
                 await backend_response.aclose()
 
@@ -356,15 +382,30 @@ async def _forward_workspace_http(
         backend_response = await http_client.request(method=request.method, url=url, headers=headers, content=body)
     except (httpx.ConnectError, httpx.RemoteProtocolError):
         # Workspace-server may not yet be listening, or it may have closed the
-        # connection before sending headers (typical during startup). HTML
-        # navigations get the auto-refreshing retry page so the user lands on
-        # something useful instead of a hard 502; non-HTML callers get a plain
-        # 503 they can interpret programmatically.
+        # connection before sending headers (typical during startup). Surface
+        # a 503 so chrome's health SSE (driven by the failure envelope below)
+        # can navigate the user to the minds-side recovery UI; non-HTML
+        # callers can interpret the 503 programmatically.
+        _emit_backend_failure(envelope_writer, agent_id, WorkspaceBackendFailureReason.CONNECT_ERROR, None)
         return _service_unavailable_response(request)
     except httpx.ReadError:
+        # ReadError fires after the connection was established, so this is a
+        # mid-response failure (same shape as SSE_EOF on the streaming path),
+        # not a connect-time failure.
+        _emit_backend_failure(envelope_writer, agent_id, WorkspaceBackendFailureReason.SSE_EOF, None)
         return Response(status_code=502, content="Backend connection lost")
     except httpx.TimeoutException:
+        # A wedged-but-listening backend produces a TimeoutException rather
+        # than ConnectError. Surface this as CONNECT_ERROR so the minds-side
+        # tracker still ticks the agent toward STUCK, matching the behaviour
+        # for a backend that returns a 504.
+        _emit_backend_failure(envelope_writer, agent_id, WorkspaceBackendFailureReason.CONNECT_ERROR, None)
         return Response(status_code=504, content="Backend timed out")
+
+    if backend_response.status_code in _INFRASTRUCTURE_5XX_STATUSES:
+        _emit_backend_failure(
+            envelope_writer, agent_id, WorkspaceBackendFailureReason.FIVEXX_RESPONSE, backend_response.status_code
+        )
 
     response = Response(content=backend_response.content, status_code=backend_response.status_code)
     for header_key, header_value in backend_response.headers.multi_items():
@@ -374,19 +415,96 @@ async def _forward_workspace_http(
     return response
 
 
+def _emit_backend_failure(
+    envelope_writer: EnvelopeWriter,
+    agent_id: AgentId,
+    reason: WorkspaceBackendFailureReason,
+    status_code: int | None,
+) -> None:
+    """Emit a ``workspace_backend_failure`` envelope on best-effort basis.
+
+    The plugin never lets envelope-emission errors break a forwarded
+    request -- if stdout is gone (parent died) we just log and continue.
+    """
+    try:
+        payload = WorkspaceBackendFailurePayload(agent_id=agent_id, reason=reason, status_code=status_code)
+        envelope_writer.emit_workspace_backend_failure(payload)
+    except (OSError, ValueError) as e:
+        logger.trace("Could not emit workspace_backend_failure envelope for {}: {}", agent_id, e)
+
+
+_SERVICE_UNAVAILABLE_HTML = """\
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8">
+    <meta http-equiv="refresh" content="1">
+    <title>Workspace server starting</title>
+    <style>
+      html, body { height: 100%; margin: 0; }
+      body {
+        background: #fafafa;
+        color: #18181b;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 24px;
+        box-sizing: border-box;
+      }
+      .card {
+        background: #fff;
+        border: 1px solid #e4e4e7;
+        border-radius: 12px;
+        padding: 24px;
+        max-width: 480px;
+        width: 100%;
+        box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
+      }
+      .row { display: flex; align-items: center; gap: 12px; }
+      h1 { font-size: 1.125rem; font-weight: 600; margin: 0 0 6px; color: #18181b; }
+      p { margin: 0; color: #52525b; font-size: 0.875rem; line-height: 1.5; }
+      .spinner {
+        width: 20px;
+        height: 20px;
+        border: 2px solid #e4e4e7;
+        border-top-color: #18181b;
+        border-radius: 50%;
+        animation: spin 1s linear infinite;
+        flex-shrink: 0;
+      }
+      @keyframes spin { to { transform: rotate(360deg); } }
+    </style>
+  </head>
+  <body>
+    <div class="card">
+      <div class="row">
+        <div class="spinner" aria-hidden="true"></div>
+        <div>
+          <h1>Workspace server starting</h1>
+          <p>This page will reload automatically once the workspace is ready.</p>
+        </div>
+      </div>
+    </div>
+  </body>
+</html>
+"""
+
+
 def _service_unavailable_response(request: Request) -> Response:
-    """Return a 503 with the auto-refreshing HTML page for HTML navigations."""
-    if "text/html" in request.headers.get("accept", ""):
-        return HTMLResponse(
-            content=(
-                "<!doctype html><html><head>"
-                '<meta http-equiv="refresh" content="1">'
-                "</head><body>"
-                "<p>Backend not yet available. Retrying...</p>"
-                "</body></html>"
-            ),
-            status_code=503,
-        )
+    """Return a 503 (styled loading page for browsers, plain text otherwise).
+
+    The chrome shell drives recovery navigation off the per-agent health
+    SSE stream emitted by minds (which is fed by the
+    ``workspace_backend_failure`` envelope). That separation keeps the
+    plugin origin-agnostic: it does not need to know where minds is
+    listening. For browsers that hit the plugin directly (including users
+    landing here mid-restart from the minds chrome), we serve a styled
+    auto-refreshing loader so the experience is not a blank flash.
+    """
+    accepts_html = "text/html" in request.headers.get("accept", "")
+    if accepts_html:
+        return HTMLResponse(content=_SERVICE_UNAVAILABLE_HTML, status_code=503)
     return Response(status_code=503, content="Backend not yet available")
 
 
@@ -442,6 +560,7 @@ async def _handle_workspace_forward_http(
     preauth_cookie_value: str | None,
     listen_port: int,
     allow_host_loopback: bool,
+    envelope_writer: EnvelopeWriter,
 ) -> Response:
     host_header = request.headers.get("host", "")
     agent_id = _parse_workspace_subdomain(host_header)
@@ -460,6 +579,7 @@ async def _handle_workspace_forward_http(
 
     target = resolver.resolve(agent_id)
     if target is None:
+        _emit_backend_failure(envelope_writer, agent_id, WorkspaceBackendFailureReason.UNRESOLVED, None)
         return _service_unavailable_response(request)
 
     backend_url = str(target.url)
@@ -493,7 +613,13 @@ async def _handle_workspace_forward_http(
         )
 
     active_client = tunnel_client or http_client
-    return await _forward_workspace_http(request=request, backend_url=backend_url, http_client=active_client)
+    return await _forward_workspace_http(
+        request=request,
+        backend_url=backend_url,
+        http_client=active_client,
+        agent_id=agent_id,
+        envelope_writer=envelope_writer,
+    )
 
 
 async def _handle_workspace_forward_websocket(
@@ -784,6 +910,7 @@ def create_forward_app(
             preauth_cookie_value=preauth_cookie_value,
             listen_port=listen_port,
             allow_host_loopback=allow_host_loopback,
+            envelope_writer=envelope_writer,
         )
 
     @app.get("/login")

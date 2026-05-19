@@ -1,14 +1,40 @@
+from enum import auto
 from typing import Any
 from typing import Literal
 
 from pydantic import Field
 
+from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.primitives import NonEmptyStr
 from imbue.imbue_common.primitives import PositiveInt
 from imbue.mngr.primitives import AgentId
 from imbue.mngr_forward.primitives import ForwardPort
 from imbue.mngr_forward.ssh_tunnel import RemoteSSHInfo
+
+
+class WorkspaceBackendFailureReason(UpperCaseStrEnum):
+    """Why a per-agent backend forward attempt failed.
+
+    Surfaced by the plugin so the minds-side health tracker can decide
+    whether to tick the agent toward STUCK.
+
+    - ``CONNECT_ERROR``: the plugin could not establish a connection to
+      the backend (httpx.ConnectError / RemoteProtocolError before any
+      response bytes).
+    - ``SSE_EOF``: the backend dropped the response stream after some
+      bytes had already been delivered. Despite the name (motivated by
+      the SSE forwarding path that originally surfaced this), it also
+      covers non-SSE mid-response read failures.
+    - ``FIVEXX_RESPONSE``: the backend returned a 502/503/504. Other 5xx
+      codes (e.g. application-layer 500s) are *not* tagged as failures.
+    - ``UNRESOLVED``: the backend resolver had no entry for the agent.
+    """
+
+    CONNECT_ERROR = auto()
+    SSE_EOF = auto()
+    FIVEXX_RESPONSE = auto()
+    UNRESOLVED = auto()
 
 
 class BackendUrl(NonEmptyStr):
@@ -54,7 +80,25 @@ class ReverseTunnelEstablishedPayload(FrozenModel):
     ssh_port: PositiveInt = Field(description="SSH port on ssh_host")
 
 
-ForwardPayload = LoginUrlPayload | ListeningPayload | ReverseTunnelEstablishedPayload
+class WorkspaceBackendFailurePayload(FrozenModel):
+    """Emitted when the plugin observes a per-agent backend failure.
+
+    The plugin's role is observation only: it surfaces the kind of failure
+    it saw (connect error, mid-SSE EOF, 5xx response) so the minds-side
+    ``WorkspaceServerHealthTracker`` can apply policy (e.g. 5s
+    HEALTHY -> STUCK transition).
+    """
+
+    type: Literal["workspace_backend_failure"] = "workspace_backend_failure"
+    agent_id: AgentId = Field(description="Agent whose backend failed")
+    reason: WorkspaceBackendFailureReason = Field(description="Why the forward attempt failed")
+    status_code: int | None = Field(
+        default=None,
+        description="HTTP status code returned by the backend (only set when reason is FIVEXX_RESPONSE)",
+    )
+
+
+ForwardPayload = LoginUrlPayload | ListeningPayload | ReverseTunnelEstablishedPayload | WorkspaceBackendFailurePayload
 
 
 class ForwardEnvelope(FrozenModel):
