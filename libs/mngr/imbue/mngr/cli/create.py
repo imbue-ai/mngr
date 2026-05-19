@@ -263,8 +263,7 @@ def _is_creating_new_host(address: NewAgentLocation, new_host_flag: bool) -> boo
     return new_host_flag or _is_new_host_implied(address)
 
 
-# Backend name used by the imbue_cloud provider plugin. Hardcoded here rather
-# than imported, to keep mngr core free of plugin imports.
+# Backend name of the imbue_cloud provider plugin.
 _IMBUE_CLOUD_BACKEND: Final[str] = "imbue_cloud"
 
 
