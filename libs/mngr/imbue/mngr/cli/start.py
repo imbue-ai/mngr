@@ -50,6 +50,7 @@ class StartCliOptions(CommonCliOptions):
     connect: bool
     connect_command: str | None
     restart: bool
+    no_resume: bool
     # Planned features (not yet implemented)
     host: tuple[HostAddress, ...]
 
@@ -128,7 +129,12 @@ def _send_resume_message_if_configured(agent: AgentInterface, output_opts: Outpu
 @optgroup.option(
     "--restart",
     is_flag=True,
-    help="Stop the agent first if it is already running, ensuring a clean start. Skips the resume message.",
+    help="Stop the agent first if it is already running, ensuring a clean start.",
+)
+@optgroup.option(
+    "--no-resume",
+    is_flag=True,
+    help="Skip sending the resume message after starting.",
 )
 @optgroup.option(
     "--connect/--no-connect",
@@ -176,6 +182,7 @@ def _start_agents(
     opts: StartCliOptions,
 ) -> None:
     is_restart = opts.restart
+    send_resume = not opts.no_resume
 
     # Find agents: STOPPED only for normal start, any state for restart
     target_state = None if is_restart else AgentLifecycleState.STOPPED
@@ -233,8 +240,7 @@ def _start_agents(
             # Get the agent object for potential connect and resume message
             for agent in online_host.get_agents():
                 if agent.id == match.agent_id:
-                    # Send resume message if configured (not for restarts)
-                    if not is_restart:
+                    if send_resume:
                         _send_resume_message_if_configured(agent, output_opts)
 
                     # Track for potential connect
@@ -284,7 +290,7 @@ def _maybe_connect(
 CommandHelpMetadata(
     key="start",
     one_line_description="Start stopped agent(s)",
-    synopsis="mngr start [AGENTS...|-] [--agent <AGENT>] [--host <HOST>] [--restart] [--connect]",
+    synopsis="mngr start [AGENTS...|-] [--agent <AGENT>] [--host <HOST>] [--restart] [--no-resume] [--connect]",
     description="""For remote hosts, this restores from the most recent snapshot and starts
 the container/instance. For local agents, this starts the agent's tmux
 session.
@@ -293,7 +299,7 @@ If multiple agents share a host, they will all be started together when
 the host starts.
 
 Use --restart to stop any running agents first, ensuring a clean start.
-The resume message is not sent after a restart.
+Use --no-resume to skip sending the resume message after starting.
 
 Use '-' in place of agent names to read them from stdin, one per line.
 
