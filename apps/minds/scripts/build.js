@@ -16,6 +16,7 @@ const ROOT = path.resolve(__dirname, '..');
 const RESOURCES_DIR = path.join(ROOT, 'resources');
 
 const UV_VERSION = '0.7.12';
+const LIMA_VERSION = '2.1.1';
 
 function getPlatformArch() {
   const platform = process.platform;
@@ -317,6 +318,41 @@ function bundleLatchkey() {
   );
 }
 
+function getLimaDownloadUrl({ platform, arch }) {
+  // Lima release artifact naming uses Darwin/Linux for the OS label and
+  // arm64/x86_64 for the architecture (note: arm64, not aarch64, even
+  // though uv uses aarch64).
+  const limaArch = arch === 'aarch64' ? 'arm64' : arch;
+  const osLabel = platform === 'darwin' ? 'Darwin' : 'Linux';
+  return `https://github.com/lima-vm/lima/releases/download/v${LIMA_VERSION}/lima-${LIMA_VERSION}-${osLabel}-${limaArch}.tar.gz`;
+}
+
+async function downloadLima({ platform, arch }) {
+  const limaDir = path.join(RESOURCES_DIR, 'lima');
+  fs.mkdirSync(limaDir, { recursive: true });
+
+  const url = getLimaDownloadUrl({ platform, arch });
+  console.log(`Downloading Lima from ${url}...`);
+
+  const tarball = await download(url);
+  const tarPath = path.join(limaDir, 'lima.tar.gz');
+  fs.writeFileSync(tarPath, tarball);
+
+  // The tarball is rooted at ./bin, ./share, etc., so strip the leading
+  // component when extracting. We keep the full layout (bin/ + share/)
+  // because limactl resolves its templates and guest-agent payloads via
+  // paths relative to its own executable.
+  execSync(`tar xzf "${tarPath}" -C "${limaDir}" --strip-components=1`, { stdio: 'inherit' });
+  fs.unlinkSync(tarPath);
+
+  const limactlBinary = path.join(limaDir, 'bin', 'limactl');
+  if (!fs.existsSync(limactlBinary)) {
+    throw new Error(`limactl binary not found at ${limactlBinary} after extraction`);
+  }
+  fs.chmodSync(limactlBinary, 0o755);
+  console.log(`limactl binary installed at ${limactlBinary}`);
+}
+
 async function downloadGit() {
   const gitDir = path.join(RESOURCES_DIR, 'git');
   const binDir = path.join(gitDir, 'bin');
@@ -376,6 +412,7 @@ async function main() {
   // Download binaries and copy pyproject in parallel
   await Promise.all([
     downloadUv({ platform, arch }),
+    downloadLima({ platform, arch }),
     downloadGit(),
   ]);
 

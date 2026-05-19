@@ -188,6 +188,7 @@ function startBackend(onProgress, onNotification, onAuthEvent, onMngrForwardStar
         const uvPath = paths.getUvPath();
         const uvBinDir = paths.getUvBinDir();
         const gitBinDir = paths.getGitBinDir();
+        const limaBinDir = paths.getLimaBinDir();
         const uvCacheDir = paths.getUvCacheDir();
         const uvPythonDir = paths.getUvPythonDir();
         const pyprojectDir = paths.getPyprojectDir();
@@ -205,7 +206,7 @@ function startBackend(onProgress, onNotification, onAuthEvent, onMngrForwardStar
         cwd = pyprojectDir;
         env = {
           ...process.env,
-          PATH: `${uvBinDir}:${gitBinDir}:${process.env.PATH}`,
+          PATH: `${uvBinDir}:${gitBinDir}:${limaBinDir}:${process.env.PATH}`,
           UV_CACHE_DIR: uvCacheDir,
           UV_PYTHON_INSTALL_DIR: uvPythonDir,
           MINDS_ELECTRON: '1',
