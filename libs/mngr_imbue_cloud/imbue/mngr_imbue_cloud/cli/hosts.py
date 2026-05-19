@@ -39,7 +39,7 @@ def list_hosts(account: str | None, connector_url: str | None) -> None:
             "host_db_id": str(entry.host_db_id),
             "host_id": entry.host_id,
             "agent_id": entry.agent_id,
-            "vps_ip": entry.vps_ip,
+            "vps_address": entry.vps_address,
             "ssh_user": entry.ssh_user,
             "ssh_port": entry.ssh_port,
             "container_ssh_port": entry.container_ssh_port,

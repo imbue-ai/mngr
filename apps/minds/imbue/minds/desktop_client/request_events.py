@@ -77,15 +77,26 @@ class PermissionsRequestEvent(RequestEvent):
 
 
 class LatchkeyPermissionRequestEvent(RequestEvent):
-    """A request for the user to authorize the agent to use a latchkey-managed service.
+    """A request for the user to authorize the agent to use a latchkey-managed scope.
 
-    The agent only declares which service it wants and why. The user picks
-    the specific detent permission schemas to grant in the desktop dialog,
-    and the desktop client launches ``latchkey auth browser`` if no
+    The agent declares which Detent scope schema it wants (e.g.
+    ``slack-api``), which permission schemas under that scope it would
+    like, and why. The user picks the final permission set in the
+    desktop dialog (which may broaden or narrow the agent's request);
+    the desktop client launches ``latchkey auth browser`` if no
     credentials exist for the service yet.
     """
 
-    service_name: str = Field(description="Latchkey service name (e.g. 'slack', 'github').")
+    scope: str = Field(
+        description="Detent scope schema the agent wants permissions under (e.g. 'slack-api').",
+    )
+    permissions: tuple[str, ...] = Field(
+        default=(),
+        description=(
+            "Permission schemas the agent requested under the scope; the user may grant a "
+            "different subset in the dialog."
+        ),
+    )
     rationale: str = Field(description="One-paragraph human-readable reason the agent needs this access.")
 
 
@@ -95,17 +106,21 @@ class RequestResponseEvent(EventEnvelope):
     request_event_id: str = Field(description="event_id of the original request")
     status: str = Field(description="Resolution status: 'GRANTED' or 'DENIED'")
     agent_id: str = Field(description="Agent ID the request was for")
-    service_name: str | None = Field(
+    scope: str | None = Field(
         default=None,
-        description="Service name (for request types that scope to a service, e.g. latchkey-permission)",
+        description=(
+            "Detent scope schema (for request types that scope to one, e.g. latchkey-permission). "
+            "Used as part of the dedup key."
+        ),
     )
     request_type: str = Field(description="Type of request that was responded to")
 
 
 def create_latchkey_permission_request_event(
     agent_id: str,
-    service_name: str,
+    scope: str,
     rationale: str,
+    permissions: tuple[str, ...] = (),
     is_user_requested: bool = False,
 ) -> "LatchkeyPermissionRequestEvent":
     """Create a new latchkey-permission request event with auto-generated metadata."""
@@ -117,7 +132,8 @@ def create_latchkey_permission_request_event(
         agent_id=agent_id,
         request_type=str(RequestType.LATCHKEY_PERMISSION),
         is_user_requested=is_user_requested,
-        service_name=service_name,
+        scope=scope,
+        permissions=permissions,
         rationale=rationale,
     )
 
@@ -127,7 +143,7 @@ def create_request_response_event(
     status: RequestStatus,
     agent_id: str,
     request_type: str,
-    service_name: str | None = None,
+    scope: str | None = None,
 ) -> RequestResponseEvent:
     """Create a new request response event."""
     return RequestResponseEvent(
@@ -138,7 +154,7 @@ def create_request_response_event(
         request_event_id=request_event_id,
         status=str(status),
         agent_id=agent_id,
-        service_name=service_name,
+        scope=scope,
         request_type=request_type,
     )
 
@@ -146,10 +162,10 @@ def create_request_response_event(
 def _dedup_key(event: RequestEvent | RequestResponseEvent) -> tuple[str, str | None, str]:
     """Compute the deduplication key for a request or response event."""
     if isinstance(event, (LatchkeyPermissionRequestEvent, RequestResponseEvent)):
-        service_name = event.service_name
+        scope = event.scope
     else:
-        service_name = None
-    return (event.agent_id, service_name, event.request_type)
+        scope = None
+    return (event.agent_id, scope, event.request_type)
 
 
 class RequestInbox(FrozenModel):
@@ -226,12 +242,25 @@ def parse_request_event(line: str) -> RequestEvent | None:
         return None
 
 
+# Field names that older versions of the schema wrote on response
+# events but the current schema no longer accepts. These are stripped
+# from raw JSON before validation so a historical events.jsonl from a
+# previous minds version still loads cleanly. ``scope`` (the modern
+# replacement for ``service_name`` on response events) is informational
+# only -- pending-request filtering uses ``request_event_id`` -- so
+# legacy entries that lose their service identity on the way in are
+# still functionally correct.
+_LEGACY_RESPONSE_EVENT_FIELDS: tuple[str, ...] = ("service_name",)
+
+
 def parse_response_event(line: str) -> RequestResponseEvent | None:
     """Parse a single JSONL line into a RequestResponseEvent, or None on failure."""
     try:
         data = json.loads(line)
         if not isinstance(data, dict):
             return None
+        for legacy_field in _LEGACY_RESPONSE_EVENT_FIELDS:
+            data.pop(legacy_field, None)
         return RequestResponseEvent.model_validate(data)
     except (json.JSONDecodeError, ValueError, TypeError) as e:
         logger.warning("Failed to parse response event: {} (line: {})", e, line[:200])
