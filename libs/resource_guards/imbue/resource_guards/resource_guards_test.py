@@ -1431,6 +1431,24 @@ def test_check_guard_violations_does_not_complain_when_mark_matches_coverage(
     assert report.outcome == "passed"
 
 
+def test_check_guard_violations_reports_every_undeclared_mark_at_once(
+    isolated_guard_state: None,
+    tmp_path: Path,
+) -> None:
+    """When a test misses multiple fixture-covered marks, all of them are reported together."""
+    register_resource_guard("cat")
+    register_resource_guard("ls")
+
+    state = _make_state(tmp_path, marks=set(), covered_resources={"cat", "ls"})
+    report = _FakeReport(passed=True)
+    _check_guard_violations(state, report)  # ty: ignore[invalid-argument-type]
+
+    assert report.outcome == "failed"
+    longrepr = str(report.longrepr)
+    assert "missing @pytest.mark.cat" in longrepr
+    assert "missing @pytest.mark.ls" in longrepr
+
+
 # ---------------------------------------------------------------------------
 # Fixture-scope helpers (unit tests)
 # ---------------------------------------------------------------------------

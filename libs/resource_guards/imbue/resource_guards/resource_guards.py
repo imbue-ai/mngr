@@ -886,12 +886,15 @@ def _check_guard_violations(state: _PerTestGuardState, report: pytest.TestReport
 
     undeclared = sorted(state.covered_resources - state.marks)
     if undeclared:
-        resource = undeclared[0]
-        msg = (
+        # Report every missing mark in one message so the user can fix them all
+        # at once instead of rediscovering them one by one across reruns.
+        lines = [
             f"RESOURCE GUARD: Test consumes a fixture decorated with @fixture_uses_resources({resource!r}) "
             f"but is missing @pytest.mark.{resource}. Add the mark so that `pytest -m {resource}` selects "
             f"this test alongside other {resource}-using tests."
-        )
+            for resource in undeclared
+        ]
+        msg = "\n".join(lines)
         if report.passed:
             report.outcome = "failed"
             report.longrepr = msg
