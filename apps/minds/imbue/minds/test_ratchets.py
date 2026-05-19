@@ -33,18 +33,21 @@ def test_prevent_while_true() -> None:
 
 
 def test_prevent_time_sleep() -> None:
-    # Four matches: ``destroying_test.py`` (a real test poll loop),
+    # Five matches: ``destroying_test.py`` (a real test poll loop),
     # ``cli/env.py::_exec_into_recover`` (the 5-second auto-rollback
     # countdown -- a deliberate user-facing pause so the operator can
     # Ctrl-C if they want to intervene before recover fires),
     # ``deployment_tests/_mailtm.py::MailtmInbox._wait_for_message_body``
     # (polling the mail.tm HTTP API for an inbound email -- no
     # event-driven alternative without standing up an IMAP listener),
-    # and ``deployment_tests/helpers.py::_wait_for_url_alive`` (polling
+    # ``deployment_tests/helpers.py::_wait_for_url_alive`` (polling
     # the connector / litellm-proxy healthcheck URLs with cold-boot
     # tolerance, mirroring what ``envs/health_check.py`` does
-    # deploy-side).
-    rc.check_time_sleep(_DIR, snapshot(4))
+    # deploy-side), and ``deployment_tests/test_deploy_new_version.py::
+    # _poll_for_deploy_id_change`` (polling /version after a redeploy
+    # since Modal can keep routing to the stale container for a short
+    # window after the swap).
+    rc.check_time_sleep(_DIR, snapshot(5))
 
 
 def test_prevent_global_keyword() -> None:

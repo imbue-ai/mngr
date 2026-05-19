@@ -233,6 +233,33 @@ _STALE_TEST_USER_EMAIL_PATTERN = re.compile(r"^test-[0-9a-f]+@example\.test$")
 _STALE_TEST_USER_MAX_AGE_SECONDS = 30 * 60
 
 
+@pytest.fixture(autouse=True)
+def setup_test_mngr_env() -> Generator[None, None, None]:
+    """Override the project-wide autouse mngr-test-isolation fixture for this suite.
+
+    The default ``setup_test_mngr_env`` (from
+    ``imbue.mngr.utils.plugin_testing.register_plugin_test_fixtures``)
+    points ``HOME`` at a per-test tmpdir for filesystem isolation, plus
+    sets ``MNGR_HOST_DIR`` / ``MNGR_PREFIX`` / ``MNGR_ROOT_NAME`` at
+    test-only values. That isolation is wrong for the deployment_tests
+    suite:
+
+    * The subprocess ``minds env deploy`` / ``destroy`` shellouts need
+      the real ``HOME`` so ``vault`` finds ``~/.vault-token``, and so
+      ``~/.minds-<env>/`` is the real env root (not a tmpdir).
+    * Mngr env vars are set per-subprocess by
+      :func:`helpers.build_minds_env_subprocess_env`, so the in-process
+      isolation defaults are not load-bearing here.
+
+    Tests in this directory run against real cloud and write under
+    the operator's real ``~/.minds-<env>/`` directories. The
+    ``ephemeral_env`` fixture's destroy step + the orchestrator's
+    name+age sweep + the per-test uuid in the env name are what
+    bound the blast radius.
+    """
+    yield
+
+
 @pytest.fixture(scope="session", autouse=True)
 def _sweep_stale_test_users(deployment_envs_config: DeploymentEnvsConfig) -> None:
     """Once per pytest session, delete any leftover ``test-*@example.test`` users.

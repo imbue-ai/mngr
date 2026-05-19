@@ -8,11 +8,15 @@ mints a fresh ``MINDS_DEPLOY_ID`` automatically), and asserts the
 live version id moved forward.
 """
 
+import json
+import os
 import subprocess
+import time
 from pathlib import Path
 
 import httpx
 import pytest
+from loguru import logger
 
 from imbue.minds.deployment_tests.data_types import EphemeralEnvHandle
 from imbue.minds.deployment_tests.helpers import build_minds_env_subprocess_env
@@ -33,6 +37,8 @@ _TEST_TIMEOUT_SECONDS = 15 * 60
 
 _REQUEST_TIMEOUT_SECONDS = 30.0
 _REDEPLOY_TIMEOUT_SECONDS = 10 * 60
+_VERSION_POLL_TIMEOUT_SECONDS = 60.0
+_VERSION_POLL_INTERVAL_SECONDS = 2.0
 
 
 @pytest.mark.timeout(_TEST_TIMEOUT_SECONDS)
@@ -74,16 +80,31 @@ def test_deploy_new_version(ephemeral_env: EphemeralEnvHandle) -> None:
         timeout=_REDEPLOY_TIMEOUT_SECONDS,
         check=False,
     )
+    # Always surface v2 deploy stdout/stderr in the test log so a stale
+    # deploy_id read (when v2 minted one but the assertion later doesn't
+    # see it) can be diagnosed without re-running.
+    logger.info("=== v2 deploy stdout ({}) ===\n{}", ephemeral_env.name, completed.stdout)
+    logger.info("=== v2 deploy stderr ({}) ===\n{}", ephemeral_env.name, completed.stderr)
     assert completed.returncode == 0, (
-        f"Second `minds env deploy` for {ephemeral_env.name!r} exited {completed.returncode}.\n"
-        f"--- stdout ---\n{completed.stdout}\n--- stderr ---\n{completed.stderr}"
+        f"Second `minds env deploy` for {ephemeral_env.name!r} exited {completed.returncode}."
     )
 
-    with httpx.Client(timeout=_REQUEST_TIMEOUT_SECONDS) as client:
-        version_v2 = client.get(f"{connector_url}/version")
-    assert version_v2.status_code == 200, version_v2.text
-    v2_deploy_id = version_v2.json()["deploy_id"]
-    assert v2_deploy_id, version_v2.json()
+    # After v2 deploys, Modal can keep routing to the warm v1 container
+    # because each request to /version resets the container's idle
+    # timer. Explicitly stop any running rsc-dev containers in the env
+    # so the next request cold-boots a fresh container at v2's code.
+    _stop_running_modal_containers(
+        app_name="rsc-dev",
+        modal_env=str(ephemeral_env.name),
+        modal_profile="minds-dev",
+    )
+
+    v2_deploy_id = _poll_for_deploy_id_change(
+        connector_url=connector_url,
+        baseline_deploy_id=v1_deploy_id,
+        timeout_seconds=_VERSION_POLL_TIMEOUT_SECONDS,
+    )
+
     assert v2_deploy_id != v1_deploy_id, (v1_deploy_id, v2_deploy_id)
     assert v2_deploy_id > v1_deploy_id, (
         "Deploy id format is lex-sortable (YYYYMMDDTHHMMSSZ); v2 should sort strictly greater than v1.",
@@ -92,3 +113,92 @@ def test_deploy_new_version(ephemeral_env: EphemeralEnvHandle) -> None:
     )
 
     # ephemeral_env fixture teardown will destroy the env unconditionally.
+
+
+def _stop_running_modal_containers(*, app_name: str, modal_env: str, modal_profile: str) -> None:
+    """``modal container list`` + ``modal container stop`` for every running container in ``app_name``.
+
+    Forces the next request to cold-boot a fresh container at the
+    currently-deployed version. Necessary after a redeploy when the
+    prior version's warm container is still alive (with
+    ``min_containers=0`` Modal keeps the warm container around until
+    its idle timer fires, and every request resets that timer).
+
+    ``modal_profile`` is threaded into the subprocess env (vs inherited)
+    because the operator's parent shell may not have ``MODAL_PROFILE``
+    exported and the modal CLI would otherwise target the workspace
+    marked ``active = true`` in ``~/.modal.toml`` -- which can differ
+    from the workspace the env was deployed into.
+    """
+    sub_env = os.environ | {"MODAL_PROFILE": modal_profile}
+    list_result = subprocess.run(
+        ["uv", "run", "modal", "container", "list", "--env", modal_env, "--json"],
+        cwd=str(_REPO_ROOT),
+        env=sub_env,
+        capture_output=True,
+        text=True,
+        timeout=60.0,
+        check=False,
+    )
+    if list_result.returncode != 0:
+        logger.warning(
+            "modal container list for env={!r} returned {}; skipping container stop. stderr={!r}",
+            modal_env,
+            list_result.returncode,
+            list_result.stderr,
+        )
+        return
+    try:
+        containers = json.loads(list_result.stdout)
+    except json.JSONDecodeError as exc:
+        logger.warning("modal container list returned non-JSON ({}): {!r}", exc, list_result.stdout[:200])
+        return
+    container_ids_for_app = [c["Container ID"] for c in containers if c.get("App Name") == app_name]
+    if not container_ids_for_app:
+        logger.info("modal container list: no running containers for app {!r} in env {!r}", app_name, modal_env)
+        return
+    logger.info(
+        "Stopping {} running container(s) for app {!r} in env {!r}: {}",
+        len(container_ids_for_app),
+        app_name,
+        modal_env,
+        container_ids_for_app,
+    )
+    for container_id in container_ids_for_app:
+        stop_result = subprocess.run(
+            ["uv", "run", "modal", "container", "stop", container_id],
+            cwd=str(_REPO_ROOT),
+            env=sub_env,
+            capture_output=True,
+            text=True,
+            timeout=60.0,
+            check=False,
+        )
+        if stop_result.returncode != 0:
+            logger.warning(
+                "modal container stop {!r} returned {}: stderr={!r}",
+                container_id,
+                stop_result.returncode,
+                stop_result.stderr,
+            )
+
+
+def _poll_for_deploy_id_change(*, connector_url: str, baseline_deploy_id: str, timeout_seconds: float) -> str:
+    """Return the connector's reported deploy_id once it differs from ``baseline_deploy_id``.
+
+    Falls back to returning the most recently observed value when the
+    budget elapses (the caller asserts equality so a stale read still
+    surfaces a meaningful failure rather than a misleading timeout).
+    """
+    deadline = time.monotonic() + timeout_seconds
+    last_seen = baseline_deploy_id
+    with httpx.Client(timeout=_REQUEST_TIMEOUT_SECONDS) as client:
+        while time.monotonic() < deadline:
+            resp = client.get(f"{connector_url}/version")
+            resp.raise_for_status()
+            seen = resp.json().get("deploy_id", "")
+            if seen and seen != baseline_deploy_id:
+                return seen
+            last_seen = seen
+            time.sleep(_VERSION_POLL_INTERVAL_SECONDS)
+    return last_seen
