@@ -408,6 +408,109 @@ function copyPyproject() {
   }
 }
 
+/**
+ * Bake an explicit client.toml (and the matching MINDS_ROOT_NAME) into
+ * _bundled/ so the shipped desktop client passes --config-file
+ * explicitly at startup and writes its on-disk state to the right env
+ * root.
+ *
+ * Both env vars are required for any non-dev packaged build:
+ *
+ *   - MINDS_CLIENT_CONFIG_BUNDLE: absolute or relative path to the
+ *     client.toml the build should embed. For staging / production
+ *     builds, this is the in-repo
+ *     apps/minds/imbue/minds/config/envs/<tier>/client.toml. For beta
+ *     builds, it can point anywhere -- the build does not interpret
+ *     the file, just copies it verbatim into _bundled/client.toml.
+ *
+ *   - MINDS_ROOT_NAME_BUNDLE: the MINDS_ROOT_NAME the runtime should
+ *     export before launching `minds run`. Production builds use
+ *     "minds" (so on-disk state lands in ~/.minds/); a staging build
+ *     uses "minds-staging" (so state lands in ~/.minds-staging/ and
+ *     never collides with an installed prod build). Must match the
+ *     minds(-<env-name>)? shape enforced by the runtime bootstrap.
+ *
+ * When both are unset, leaves _bundled/ empty -- this is the
+ * `uv run minds run` / dev-mode case where the user is expected to
+ * activate an env in their shell (`minds env activate <name>`) before
+ * invoking the backend. The packaged Electron startup refuses to run
+ * without a bundled config if it was built without these vars set,
+ * which surfaces the missing build-time config loudly instead of
+ * silently shipping a dev-only artifact.
+ *
+ * Refuses if exactly one of the two is set -- both knobs travel
+ * together (the config path identifies WHICH env's URLs ship; the root
+ * name identifies WHERE the runtime should write its state). A
+ * mismatched build is almost certainly an oversight.
+ */
+function bundleClientConfig() {
+  const configBundle = process.env.MINDS_CLIENT_CONFIG_BUNDLE;
+  const rootNameBundle = process.env.MINDS_ROOT_NAME_BUNDLE;
+  const bundledDir = path.join(
+    ROOT,
+    'imbue',
+    'minds',
+    'config',
+    'envs',
+    '_bundled'
+  );
+  const bundledClient = path.join(bundledDir, 'client.toml');
+  const bundledRootNameFile = path.join(bundledDir, 'root_name');
+
+  // Start from a clean slate so a previous build's artifact doesn't leak
+  // into this one (a developer flipping the bundle vars off should
+  // produce a no-bundled-config build, not yesterday's production URL).
+  for (const stale of [bundledClient, bundledRootNameFile]) {
+    if (fs.existsSync(stale)) {
+      fs.rmSync(stale);
+    }
+  }
+  fs.mkdirSync(bundledDir, { recursive: true });
+
+  if (!configBundle && !rootNameBundle) {
+    console.log(
+      'MINDS_CLIENT_CONFIG_BUNDLE / MINDS_ROOT_NAME_BUNDLE both unset; ' +
+        'leaving _bundled/ empty. Packaged runtime will refuse to start ' +
+        'without an activated env in the user\'s shell -- this is the ' +
+        'dev-build path.'
+    );
+    return;
+  }
+  if (!configBundle || !rootNameBundle) {
+    throw new Error(
+      'MINDS_CLIENT_CONFIG_BUNDLE and MINDS_ROOT_NAME_BUNDLE must both be ' +
+        'set (or both unset); got ' +
+        `MINDS_CLIENT_CONFIG_BUNDLE=${JSON.stringify(configBundle || null)}, ` +
+        `MINDS_ROOT_NAME_BUNDLE=${JSON.stringify(rootNameBundle || null)}.`
+    );
+  }
+
+  // The runtime regex on MINDS_ROOT_NAME is `minds(-<env-name>)?` with
+  // env-name = `[a-z0-9][a-z0-9_-]{0,38}[a-z0-9]`. Validate here so a
+  // bad build env fails loudly at build time instead of producing a
+  // bundle that the runtime then ignores at startup.
+  if (!/^minds(-[a-z0-9][a-z0-9_-]{0,38}[a-z0-9])?$/.test(rootNameBundle)) {
+    throw new Error(
+      `MINDS_ROOT_NAME_BUNDLE=${JSON.stringify(rootNameBundle)} does not match ` +
+        '`minds(-<env-name>)?` (where env-name is the same regex DevEnvName enforces).'
+    );
+  }
+
+  const resolvedConfig = path.isAbsolute(configBundle)
+    ? configBundle
+    : path.resolve(ROOT, configBundle);
+  if (!fs.existsSync(resolvedConfig)) {
+    throw new Error(
+      `MINDS_CLIENT_CONFIG_BUNDLE='${configBundle}' (resolved to '${resolvedConfig}') ` +
+        'does not exist.'
+    );
+  }
+  fs.copyFileSync(resolvedConfig, bundledClient);
+  fs.writeFileSync(bundledRootNameFile, rootNameBundle + '\n');
+  console.log(`Bundled ${resolvedConfig} -> ${bundledClient}`);
+  console.log(`Bundled MINDS_ROOT_NAME=${rootNameBundle} -> ${bundledRootNameFile}`);
+}
+
 async function main() {
   console.log('Building Minds desktop app...\n');
 
@@ -429,6 +532,7 @@ async function main() {
 
   bundleLatchkey();
   copyPyproject();
+  bundleClientConfig();
 
   console.log('\nBuild complete!');
   console.log(`Resources directory: ${RESOURCES_DIR}`);
