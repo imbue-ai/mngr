@@ -4254,7 +4254,7 @@ def test_should_preserve_sessions_false_for_non_claude_agent() -> None:
         agent_id=AgentId.generate(),
         agent_name=AgentName("test"),
         provider_name=ProviderInstanceName("local"),
-        certified_data={"type": "echo"},
+        certified_data={"type": "generic"},
     )
     assert _should_preserve_sessions(ref) is False
 

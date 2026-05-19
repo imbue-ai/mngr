@@ -7,20 +7,13 @@ from pydantic import Field
 from pydantic import PrivateAttr
 from pydantic import SecretStr
 
-from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
-from imbue.concurrency_group.executor import ConcurrencyGroupExecutor
-from imbue.imbue_common.logging import log_span
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import ProviderInstanceConfig
-from imbue.mngr.errors import HostConnectionError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.interfaces.provider_backend import ProviderBackendInterface
 from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
-from imbue.mngr.primitives import HostId
-from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
-from imbue.mngr_vps_docker.host_store import VpsDockerHostRecord
 from imbue.mngr_vps_docker.instance import VpsDockerProvider
 from imbue.mngr_vultr import hookimpl
 from imbue.mngr_vultr.client import VultrVpsClient
@@ -30,7 +23,12 @@ VULTR_BACKEND_NAME: Final[ProviderBackendName] = ProviderBackendName("vultr")
 
 
 class VultrProvider(VpsDockerProvider):
-    """Vultr-specific provider that overrides discovery to use the Vultr API."""
+    """Vultr-specific provider that implements VPS listing via the Vultr API.
+
+    All cross-VPS discovery machinery (parallel SSH reads, caching,
+    per-name lookups) is inherited from ``VpsDockerProvider``; this
+    subclass only contributes the provider-specific tag-based listing.
+    """
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
@@ -50,8 +48,13 @@ class VultrProvider(VpsDockerProvider):
         self._instances_cache = self.vultr_client.list_instances()
         return self._instances_cache
 
-    def _get_tagged_vps_ips(self) -> list[str]:
-        """Get IPs of Vultr instances tagged with this provider's name."""
+    def _list_provider_vps_hostnames(self) -> list[str]:
+        """Return public IPs of Vultr instances tagged with this provider's name.
+
+        Vultr uses raw IPv4 addresses as SSH targets, not DNS names. The
+        return values are strings to satisfy the base-class contract,
+        which accepts either IPs or hostnames.
+        """
         if not self.vultr_client.api_key.get_secret_value():
             logger.warning("Vultr API key not configured, skipping VPS discovery")
             return []
@@ -65,104 +68,6 @@ class VultrProvider(VpsDockerProvider):
             if vps_ip and vps_ip != "0.0.0.0":
                 vps_ips.append(vps_ip)
         return vps_ips
-
-    def _read_records_from_vps(
-        self,
-        vps_ip: str,
-    ) -> tuple[list[VpsDockerHostRecord], dict[HostId, list[dict[str, Any]]]]:
-        """Read all host records and agent data from a single VPS in one SSH command.
-
-        Uses the read-only host store so that discovery never creates the
-        state container. If the container does not exist yet (e.g., the VPS
-        is still being set up by a concurrent ``mngr create``), returns
-        empty results. If outer SSH to the VPS fails, fall back to any
-        in-process cached records for that VPS so the hosts still appear
-        in the listing (with an offline state) instead of disappearing
-        entirely; one bad VPS must not silently drop its hosts.
-        """
-        try:
-            with self._make_outer_for_vps_ip(vps_ip) as outer:
-                host_store = self._get_existing_host_store(outer)
-                if host_store is None:
-                    logger.debug("State container not ready on VPS {}, skipping", vps_ip)
-                    return [], {}
-                return host_store.list_all_host_records_with_agents()
-        except (HostConnectionError, MngrError) as e:
-            cached_records = [r for r in self._host_record_cache.values() if r.vps_ip == vps_ip]
-            if cached_records:
-                logger.warning(
-                    "Failed to read records from VPS {} ({}); surfacing {} cached host record(s) as offline",
-                    vps_ip,
-                    e,
-                    len(cached_records),
-                )
-            else:
-                logger.warning("Failed to read records from VPS {}: {}", vps_ip, e)
-            return cached_records, {}
-
-    def _discover_host_records_with_agents(
-        self,
-    ) -> tuple[list[VpsDockerHostRecord], dict[HostId, list[dict[str, Any]]]]:
-        """Discover host records and agent data from all Vultr VPSes.
-
-        Queries the Vultr API for tagged instances, then SSHes to each VPS
-        in parallel to read host records and agent data in a single command.
-        """
-        vps_ips = self._get_tagged_vps_ips()
-        if not vps_ips:
-            return [], {}
-
-        all_records: list[VpsDockerHostRecord] = []
-        all_agent_data: dict[HostId, list[dict[str, Any]]] = {}
-
-        # SSH to all VPSes in parallel
-        with log_span("Reading records from {} VPS instance(s) in parallel", len(vps_ips)):
-            cg = ConcurrencyGroup(name="vultr-discover")
-            with cg:
-                with ConcurrencyGroupExecutor(
-                    parent_cg=cg,
-                    name="vultr_read_records",
-                    max_workers=min(len(vps_ips), 32),
-                ) as executor:
-                    futures = [executor.submit(self._read_records_from_vps, ip) for ip in vps_ips]
-
-                for future in futures:
-                    records, agent_data = future.result()
-                    all_records.extend(records)
-                    for host_id, agents in agent_data.items():
-                        all_agent_data.setdefault(host_id, []).extend(agents)
-
-        return all_records, all_agent_data
-
-    def _discover_host_records(self) -> list[VpsDockerHostRecord]:
-        """Discover host records by querying the Vultr API for tagged instances."""
-        records, _agent_data = self._discover_host_records_with_agents()
-        return records
-
-    def _find_host_record(self, host: HostId | HostName) -> VpsDockerHostRecord | None:
-        """Find a host record by ID or name, using cache first."""
-        # Check cache first
-        if isinstance(host, HostId) and host in self._host_record_cache:
-            return self._host_record_cache[host]
-        if isinstance(host, HostName):
-            for cached_record in self._host_record_cache.values():
-                if cached_record.certified_host_data.host_name == str(host):
-                    return cached_record
-
-        if not self.vultr_client.api_key.get_secret_value():
-            logger.warning("Vultr API key not configured, cannot resolve host")
-            return None
-
-        # Fall back to full discovery
-        records = self._discover_host_records()
-        for record in records:
-            host_id = HostId(record.certified_host_data.host_id)
-            self._host_record_cache[host_id] = record
-            if isinstance(host, HostId) and record.certified_host_data.host_id == str(host):
-                return record
-            elif isinstance(host, HostName) and record.certified_host_data.host_name == str(host):
-                return record
-        return None
 
 
 class VultrProviderBackend(ProviderBackendInterface):
@@ -202,7 +107,15 @@ class VultrProviderBackend(ProviderBackendInterface):
         name: ProviderInstanceName,
         config: ProviderInstanceConfig,
         mngr_ctx: MngrContext,
+        is_for_host_creation: bool = False,
     ) -> ProviderInstanceInterface:
+        """Build a Vultr provider instance.
+
+        ``is_for_host_creation`` is ignored: the Vultr backend has no one-time
+        bootstrap resources to gate on (compare the Modal backend, which uses
+        this flag to authorize creating a missing per-user env).
+        """
+        del is_for_host_creation
         if not isinstance(config, VultrProviderConfig):
             raise MngrError(f"Expected VultrProviderConfig, got {type(config).__name__}")
 

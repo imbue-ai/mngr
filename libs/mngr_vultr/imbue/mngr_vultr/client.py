@@ -98,11 +98,15 @@ class VultrVpsClient(VpsClientInterface):
         label: str,
         region: str,
         plan: str,
-        os_id: int,
+        os_id: int | str,
         user_data: str,
         ssh_key_ids: Sequence[str],
         tags: Sequence[str],
     ) -> VpsInstanceId:
+        # Vultr expects an integer os_id; reject anything else explicitly so the
+        # mistake surfaces at the boundary instead of as a confusing API error.
+        if not isinstance(os_id, int):
+            raise VpsProvisioningError(f"Vultr os_id must be an int, got {type(os_id).__name__}: {os_id!r}")
         # Vultr requires user_data to be base64-encoded
         user_data_b64 = base64.b64encode(user_data.encode()).decode()
 

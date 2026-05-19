@@ -36,6 +36,7 @@ from packaging.version import InvalidVersion
 from packaging.version import Version
 from pydantic import Field
 from pydantic import PrivateAttr
+from pydantic import SecretStr
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyExceptionGroup
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
@@ -46,6 +47,8 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr_latchkey._spawn import spawn_detached_latchkey_ensure_browser
+from imbue.mngr_latchkey.encryption_key import LatchkeyEncryptionKeyPermissionError
+from imbue.mngr_latchkey.encryption_key import load_or_create_encryption_key
 from imbue.mngr_latchkey.store import LatchkeyPermissionsConfig
 from imbue.mngr_latchkey.store import default_permissions_path
 from imbue.mngr_latchkey.store import ensure_admin_permissions_file
@@ -289,7 +292,25 @@ def _parse_set_credentials_example(payload: Mapping[str, object], service_name: 
     return raw_example
 
 
-def _build_local_latchkey_env(latchkey_directory: Path | None) -> dict[str, str]:
+def _inject_encryption_key(env: dict[str, str], encryption_key: SecretStr | None) -> None:
+    """Set ``LATCHKEY_ENCRYPTION_KEY`` in ``env`` from the per-env key.
+
+    Operator's shell ``LATCHKEY_ENCRYPTION_KEY`` always wins (it's
+    already in ``env`` via ``dict(os.environ)``); the per-env key only
+    fills it in when the operator hasn't set one globally.
+    """
+    if encryption_key is None:
+        return
+    if env.get("LATCHKEY_ENCRYPTION_KEY"):
+        return
+    env["LATCHKEY_ENCRYPTION_KEY"] = encryption_key.get_secret_value()
+
+
+def _build_local_latchkey_env(
+    latchkey_directory: Path | None,
+    *,
+    encryption_key: SecretStr | None = None,
+) -> dict[str, str]:
     """Build an env override for *local* ``latchkey`` invocations.
 
     ``LATCHKEY_GATEWAY`` is explicitly cleared so commands that refuse to
@@ -302,19 +323,26 @@ def _build_local_latchkey_env(latchkey_directory: Path | None) -> dict[str, str]
     env.pop("LATCHKEY_GATEWAY", None)
     if latchkey_directory is not None:
         env["LATCHKEY_DIRECTORY"] = str(latchkey_directory)
+    _inject_encryption_key(env, encryption_key)
     return env
 
 
-def _build_env_with_latchkey_directory(latchkey_directory: Path | None) -> dict[str, str] | None:
+def _build_env_with_latchkey_directory(
+    latchkey_directory: Path | None,
+    *,
+    encryption_key: SecretStr | None = None,
+) -> dict[str, str] | None:
     """Build an env override that pins ``LATCHKEY_DIRECTORY`` for a child process.
 
     Returns ``None`` when no override is requested so the child inherits
     the parent environment unchanged.
     """
-    if latchkey_directory is None:
+    if latchkey_directory is None and encryption_key is None:
         return None
     env = dict(os.environ)
-    env["LATCHKEY_DIRECTORY"] = str(latchkey_directory)
+    if latchkey_directory is not None:
+        env["LATCHKEY_DIRECTORY"] = str(latchkey_directory)
+    _inject_encryption_key(env, encryption_key)
     return env
 
 
@@ -325,6 +353,7 @@ def _build_gateway_env(
     permissions_config_path: Path,
     listen_password: str,
     extension_permissions_root: Path,
+    encryption_key: SecretStr | None = None,
 ) -> dict[str, str]:
     """Build the env dict for the ``latchkey gateway`` subprocess.
 
@@ -344,25 +373,33 @@ def _build_gateway_env(
     env["LATCHKEY_PERMISSIONS_CONFIG"] = str(permissions_config_path)
     env["LATCHKEY_GATEWAY_LISTEN_PASSWORD"] = listen_password
     env[_ENV_EXTENSION_PERMISSIONS_ROOT] = str(extension_permissions_root)
+    _inject_encryption_key(env, encryption_key)
     return env
+
+
+_BUNDLED_EXTENSION_SUFFIXES: Final[tuple[str, ...]] = (".mjs", ".json")
 
 
 def _materialize_bundled_extensions(latchkey_directory: Path) -> Path:
     """Copy this package's bundled gateway extensions into ``LATCHKEY_DIRECTORY/extensions/``.
 
     The upstream ``latchkey gateway`` (>= 2.9.0) auto-loads every
-    ``.mjs`` file in this directory at startup. We rewrite the bundled
-    files unconditionally on every spawn so a package upgrade always
-    wins over a stale on-disk copy. The directory is created with
-    ``mode=0o700`` because it shares the same trust boundary as the
-    rest of ``LATCHKEY_DIRECTORY``.
+    ``.mjs`` file in this directory at startup. We also ship sibling
+    ``.json`` data files (e.g. ``services.json``) that the ``.mjs``
+    extensions read at request time; those are copied next to the
+    ``.mjs`` files so the extensions can locate them via
+    ``import.meta.url``. We rewrite the bundled files unconditionally
+    on every spawn so a package upgrade always wins over a stale
+    on-disk copy. The directory is created with ``mode=0o700`` because
+    it shares the same trust boundary as the rest of
+    ``LATCHKEY_DIRECTORY``.
     """
     extensions_dir = latchkey_directory / _GATEWAY_EXTENSIONS_SUBDIR
     extensions_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
     source_package = resources.files("imbue.mngr_latchkey.extensions")
     for entry in source_package.iterdir():
         name = entry.name
-        if not name.endswith(".mjs"):
+        if not any(name.endswith(suffix) for suffix in _BUNDLED_EXTENSION_SUFFIXES):
             continue
         destination = extensions_dir / name
         destination.write_text(entry.read_text(encoding="utf-8"), encoding="utf-8")
@@ -451,7 +488,9 @@ class Latchkey(MutableModel):
             "subprocesses as ``LATCHKEY_DIRECTORY`` so the upstream ``latchkey`` CLI's "
             "credential / config files live here, and also used as the parent of the "
             "plugin's own metadata subdirectory (``mngr_latchkey/``, accessible via "
-            ":attr:`plugin_data_dir`). Required."
+            ":attr:`plugin_data_dir`). The per-directory encryption key is also rooted "
+            "here -- see :func:`load_or_create_encryption_key` and "
+            ":meth:`_load_encryption_key`. Required."
         ),
     )
 
@@ -684,7 +723,7 @@ class Latchkey(MutableModel):
         ``gateway create-jwt`` in gateway-client mode, and the user
         might have it set in their shell.
         """
-        env = _build_local_latchkey_env(self.latchkey_directory)
+        env = _build_local_latchkey_env(self.latchkey_directory, encryption_key=self._load_encryption_key())
         cg = ConcurrencyGroup(name="latchkey-create-jwt")
         try:
             with cg:
@@ -731,7 +770,7 @@ class Latchkey(MutableModel):
         empty ``auth_options``, so the caller can fall back to its legacy
         behaviour rather than wrongly assuming credentials are valid.
         """
-        env = _build_env_with_latchkey_directory(self.latchkey_directory)
+        env = _build_env_with_latchkey_directory(self.latchkey_directory, encryption_key=self._load_encryption_key())
         cg = ConcurrencyGroup(name="latchkey-services-info")
         try:
             with cg:
@@ -789,7 +828,7 @@ class Latchkey(MutableModel):
         returns ``(False, message)`` where ``message`` carries the latchkey
         stderr (or stdout, or a generic fallback).
         """
-        env = _build_env_with_latchkey_directory(self.latchkey_directory)
+        env = _build_env_with_latchkey_directory(self.latchkey_directory, encryption_key=self._load_encryption_key())
         cg = ConcurrencyGroup(name="latchkey-auth-browser")
         with cg:
             # No timeout: this command waits on a real human completing
@@ -820,6 +859,26 @@ class Latchkey(MutableModel):
                 "Latchkey.initialize() must be called before use",
             )
 
+    def _load_encryption_key(self) -> SecretStr:
+        """Load (or, on first call against this directory, mint) the per-directory encryption key.
+
+        Re-reads the on-disk key on every subprocess-spawn call rather
+        than caching it on ``self`` so the secret only lives in
+        parent-process memory for the duration of a single
+        env-builder + process-spawn call frame. The on-disk file (and
+        the spawned child's own copy of the env var) are the only
+        steady-state holders.
+
+        Re-raises :class:`LatchkeyEncryptionKeyPermissionError` as a
+        :class:`LatchkeyError` so callers catching the latter (e.g.
+        the ``mngr latchkey`` CLI's ``ClickException`` translator)
+        get the friendly path.
+        """
+        try:
+            return load_or_create_encryption_key(self.latchkey_directory)
+        except LatchkeyEncryptionKeyPermissionError as e:
+            raise LatchkeyError(str(e)) from e
+
     def _check_minimum_version(self) -> None:
         """Refuse to initialize if the installed latchkey CLI is too old.
 
@@ -830,7 +889,7 @@ class Latchkey(MutableModel):
         if shutil.which(self.latchkey_binary) is None and not Path(self.latchkey_binary).is_file():
             raise LatchkeyBinaryNotFoundError(f"Latchkey binary not found: {self.latchkey_binary}")
 
-        env = _build_local_latchkey_env(self.latchkey_directory)
+        env = _build_local_latchkey_env(self.latchkey_directory, encryption_key=self._load_encryption_key())
         cg = ConcurrencyGroup(name="latchkey-version")
         try:
             with cg:
@@ -921,6 +980,7 @@ class Latchkey(MutableModel):
             permissions_config_path=default_perms,
             listen_password=password,
             extension_permissions_root=plugin_dir,
+            encryption_key=self._load_encryption_key(),
         )
 
         with log_span(

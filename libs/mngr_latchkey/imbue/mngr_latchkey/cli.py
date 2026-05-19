@@ -192,7 +192,14 @@ def _build_initialized_latchkey(
     cli_directory: str | None,
     cli_binary: str | None,
 ) -> Latchkey:
-    """Build a :class:`Latchkey`, run ``initialize()``, translate failures to ``ClickException``."""
+    """Build a :class:`Latchkey`, run ``initialize()``, translate failures to ``ClickException``.
+
+    The per-directory encryption key is loaded lazily by ``Latchkey``
+    itself on every subprocess spawn (see :meth:`Latchkey._load_encryption_key`).
+    ``initialize()`` triggers the first such load via ``latchkey --version``,
+    so a missing-or-corrupt key file surfaces here as a
+    :class:`LatchkeyError` and is translated to ``ClickException`` below.
+    """
     directory, binary = _resolve_latchkey_settings(mngr_ctx, cli_directory, cli_binary)
     latchkey = Latchkey(latchkey_binary=binary, latchkey_directory=directory)
     try:

@@ -10,9 +10,12 @@ from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr_imbue_cloud.errors import ImbueCloudError
 from imbue.mngr_imbue_cloud.primitives import IMBUE_CLOUD_BACKEND_NAME
 from imbue.mngr_imbue_cloud.primitives import ImbueCloudAccount
-from imbue.mngr_imbue_cloud.primitives import get_default_connector_url
 
 CONNECTOR_URL_ENV_VAR = "MNGR__PROVIDERS__IMBUE_CLOUD__CONNECTOR_URL"
+
+
+class MissingConnectorUrlError(ImbueCloudError):
+    """Raised when the provider's connector URL is unset (no field, no env)."""
 
 
 class ImbueCloudProviderConfig(ProviderInstanceConfig):
@@ -48,9 +51,9 @@ class ImbueCloudProviderConfig(ProviderInstanceConfig):
     connector_url: AnyUrl | None = Field(
         default=None,
         description=(
-            "Override for the remote_service_connector base URL. When None, the plugin uses "
-            "the value of MNGR__PROVIDERS__IMBUE_CLOUD__CONNECTOR_URL if set, otherwise the "
-            "baked-in production default."
+            "Override for the remote_service_connector base URL. When None, the plugin reads "
+            "MNGR__PROVIDERS__IMBUE_CLOUD__CONNECTOR_URL from the environment. There is no "
+            "baked-in default; raise when neither source supplies a value."
         ),
     )
     container_ssh_port: int = Field(
@@ -66,15 +69,19 @@ class ImbueCloudProviderConfig(ProviderInstanceConfig):
         """Resolve the effective connector URL.
 
         Precedence: per-instance ``connector_url`` field >
-        ``MNGR__PROVIDERS__IMBUE_CLOUD__CONNECTOR_URL`` env >
-        baked-in default.
+        ``MNGR__PROVIDERS__IMBUE_CLOUD__CONNECTOR_URL`` env. There is no
+        baked-in default; raises :class:`MissingConnectorUrlError` if
+        neither source is set.
         """
         if self.connector_url is not None:
             return str(self.connector_url).rstrip("/")
         env_value = os.environ.get(CONNECTOR_URL_ENV_VAR)
         if env_value:
             return env_value.rstrip("/")
-        return get_default_connector_url().rstrip("/")
+        raise MissingConnectorUrlError(
+            "No connector URL configured for the imbue_cloud provider: set `connector_url` "
+            f"on the provider config or export ${CONNECTOR_URL_ENV_VAR}."
+        )
 
 
 def get_active_profile_dir(default_host_dir: Path) -> Path:
