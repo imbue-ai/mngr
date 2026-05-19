@@ -199,8 +199,10 @@ Modal-pushed entries (consumed by the deployed apps at runtime):
 
 - [ ] **`secrets/minds/staging/litellm`** -- `ANTHROPIC_API_KEY`,
   `DATABASE_URL` (pooled DSN for the `litellm_cost` DB),
-  `LITELLM_MASTER_KEY`, `LITELLM_PROXY_URL`
-  (`https://minds-staging--llm-staging-proxy.modal.run`).
+  `LITELLM_MASTER_KEY`. The proxy URL the connector hands back to
+  agents is deploy-time-derived (`<workspace>--llm-<tier>-proxy.modal.run`)
+  and lives in the `litellm-connector-<tier>` Modal Secret -- no
+  matching Vault key, no entry to fill in here.
 
 - [ ] **`secrets/minds/staging/neon`** -- `DATABASE_URL` (pooled DSN
   for the `host_pool` DB).
