@@ -6,9 +6,7 @@ LIMA_BACKEND_NAME: Final[ProviderBackendName] = ProviderBackendName("lima")
 
 LIMA_INSTANCE_PREFIX: Final[str] = "mngr-"
 
-# Minimum supported Lima version (major, minor, patch). Matches the version
-# that apps/minds bundles in its desktop build (see apps/minds/scripts/build.js);
-# users who run mngr directly need at least this version too.
+# Minimum Lima version (major, minor, patch) accepted by check_lima_version.
 MINIMUM_LIMA_VERSION: Final[tuple[int, int, int]] = (2, 1, 1)
 
 # Default image URLs for Lima VMs (Ubuntu 24.04 LTS cloud images).
