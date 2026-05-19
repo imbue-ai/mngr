@@ -783,12 +783,16 @@ kill -TERM 1
         # both the sandbox AND sshd inside it, but sbx loses port mappings on stop -- so we also
         # need to re-publish port 22 below and update the host record's ssh_port.
         keeper_pid_before = read_keeper_pid(self._provider_dir, host_id)
-        keeper_was_alive = keeper_pid_before is not None and is_keeper_alive(keeper_pid_before)
         try:
-            ensure_sshd_keeper_alive(self._provider_dir, host_id, sandbox_name)
+            keeper_handle = ensure_sshd_keeper_alive(self._provider_dir, host_id, sandbox_name)
         except SbxCommandError as e:
             logger.debug("Could not revive sshd keeper for sandbox {}: {}", sandbox_name, e)
             return self._create_offline_host(host_record)
+        # A different pid after the call means ensure_sshd_keeper_alive had to spawn a fresh
+        # keeper -- which implies the sandbox auto-stopped, dropping its port mapping. Comparing
+        # before/after pids is strictly more reliable than checking is_keeper_alive separately,
+        # because it observes the actual outcome rather than racing the death window.
+        keeper_was_respawned = keeper_pid_before is None or keeper_handle.pid != keeper_pid_before
 
         try:
             sandboxes = sbx_list(self.mngr_ctx.concurrency_group, self.name)
@@ -805,7 +809,7 @@ kill -TERM 1
         # right port.
         effective_ssh_hostname = host_record.ssh_hostname
         effective_ssh_port = host_record.ssh_port
-        if not keeper_was_alive:
+        if keeper_was_respawned:
             try:
                 host_record = self._refresh_published_ssh_port(host_record)
             except (SbxCommandError, MngrError) as e:
