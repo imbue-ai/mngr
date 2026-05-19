@@ -17,6 +17,7 @@ import asyncio
 import ipaddress
 import socket as socket_module
 import threading
+import time
 from collections.abc import AsyncGenerator
 from collections.abc import Callable
 from collections.abc import Mapping
@@ -338,21 +339,18 @@ async def _forward_workspace_http(
         try:
             backend_response = await http_client.send(backend_request, stream=True)
         except (httpx.ConnectError, httpx.RemoteProtocolError):
-            # ``RemoteProtocolError`` here means the backend disconnected
-            # before sending headers -- typical when the workspace server
-            # died between the SSH tunnel accepting the unix-socket
-            # connection and the channel-open completing. Same recovery
-            # signal as a connect-time failure.
+            # ``RemoteProtocolError`` covers the backend disconnecting before
+            # any response bytes were sent; the recovery action is the same
+            # as a plain connect failure.
             _emit_backend_failure(envelope_writer, agent_id, WorkspaceBackendFailureReason.CONNECT_ERROR, None)
             return _service_unavailable_response(request)
         except httpx.ReadError:
             _emit_backend_failure(envelope_writer, agent_id, WorkspaceBackendFailureReason.SSE_EOF, None)
             return Response(status_code=502, content="Backend connection lost")
         except httpx.TimeoutException:
-            # A wedged-but-listening backend produces a TimeoutException
-            # rather than ConnectError. Surface this as CONNECT_ERROR so
-            # the minds-side tracker still ticks the agent toward STUCK,
-            # matching the behaviour for a backend that returns a 504.
+            # A wedged-but-listening backend raises TimeoutException rather
+            # than ConnectError; surface it as CONNECT_ERROR so the failure
+            # is still attributable to reaching the backend.
             _emit_backend_failure(envelope_writer, agent_id, WorkspaceBackendFailureReason.CONNECT_ERROR, None)
             return Response(status_code=504, content="Backend stream timed out")
 
@@ -381,24 +379,21 @@ async def _forward_workspace_http(
     try:
         backend_response = await http_client.request(method=request.method, url=url, headers=headers, content=body)
     except (httpx.ConnectError, httpx.RemoteProtocolError):
-        # Workspace-server may not yet be listening, or it may have closed the
-        # connection before sending headers (typical during startup). Surface
-        # a 503 so chrome's health SSE (driven by the failure envelope below)
-        # can navigate the user to the minds-side recovery UI; non-HTML
-        # callers can interpret the 503 programmatically.
+        # Workspace-server is not yet listening, or closed the connection
+        # before sending headers. The failure envelope is emitted so the
+        # consumer can drive recovery; the 503 lets non-HTML callers
+        # interpret the situation programmatically.
         _emit_backend_failure(envelope_writer, agent_id, WorkspaceBackendFailureReason.CONNECT_ERROR, None)
         return _service_unavailable_response(request)
     except httpx.ReadError:
-        # ReadError fires after the connection was established, so this is a
-        # mid-response failure (same shape as SSE_EOF on the streaming path),
-        # not a connect-time failure.
+        # Connection was established but the response was cut off mid-flight,
+        # so this is a mid-response failure rather than a connect-time one.
         _emit_backend_failure(envelope_writer, agent_id, WorkspaceBackendFailureReason.SSE_EOF, None)
         return Response(status_code=502, content="Backend connection lost")
     except httpx.TimeoutException:
-        # A wedged-but-listening backend produces a TimeoutException rather
-        # than ConnectError. Surface this as CONNECT_ERROR so the minds-side
-        # tracker still ticks the agent toward STUCK, matching the behaviour
-        # for a backend that returns a 504.
+        # A wedged-but-listening backend raises TimeoutException rather than
+        # ConnectError; surface it as CONNECT_ERROR so the failure is still
+        # attributable to reaching the backend.
         _emit_backend_failure(envelope_writer, agent_id, WorkspaceBackendFailureReason.CONNECT_ERROR, None)
         return Response(status_code=504, content="Backend timed out")
 
@@ -492,20 +487,75 @@ _SERVICE_UNAVAILABLE_HTML = """\
 
 
 def _service_unavailable_response(request: Request) -> Response:
-    """Return a 503 (styled loading page for browsers, plain text otherwise).
+    """Return a 503 (styled auto-refreshing loader for HTML, plain text otherwise).
 
-    The chrome shell drives recovery navigation off the per-agent health
-    SSE stream emitted by minds (which is fed by the
-    ``workspace_backend_failure`` envelope). That separation keeps the
-    plugin origin-agnostic: it does not need to know where minds is
-    listening. For browsers that hit the plugin directly (including users
-    landing here mid-restart from the minds chrome), we serve a styled
-    auto-refreshing loader so the experience is not a blank flash.
+    HTML callers get an auto-refreshing loader so a browser hitting the plugin
+    mid-restart does not flash a blank page. Non-HTML callers get a plain 503
+    body they can interpret programmatically.
     """
     accepts_html = "text/html" in request.headers.get("accept", "")
     if accepts_html:
         return HTMLResponse(content=_SERVICE_UNAVAILABLE_HTML, status_code=503)
     return Response(status_code=503, content="Backend not yet available")
+
+
+# Per-agent rate-limit for `_warn_resolver_miss`: the 503 HTML page above has
+# `<meta http-equiv="refresh" content="1">` so a stuck chat panel polls every
+# 1 second; without throttling we'd log a warning per second per stuck agent.
+_RESOLVER_MISS_WARN_INTERVAL_SECONDS: Final[float] = 30.0
+_resolver_miss_last_warn_at: dict[str, float] = {}
+_resolver_miss_lock: threading.Lock = threading.Lock()
+
+
+def _warn_resolver_miss(agent_id: AgentId, resolver: "ForwardResolver") -> None:
+    """Log a throttled warning when the resolver can't route to ``agent_id``.
+
+    Called from the 503 fall-through paths so a user-visible "Backend not yet
+    available, Retrying..." can be traced to its root cause in one log line.
+    Distinguishes the two distinct miss reasons so a reader can immediately
+    tell whether the issue is host-side discovery or VM-side publishing:
+
+    - "agent not in resolver's known set" -- host-side ``mngr observe`` hasn't
+      told the resolver this agent exists yet (or it's been destroyed).
+    - "agent known but no service URL registered" -- the agent is in the known
+      set but the VM-side ``app-watcher`` hasn't published the service URL via
+      its ``mngr event`` stream.
+
+    Throttled per-agent so the 1Hz refresh on the retry page doesn't flood
+    the log.
+    """
+    aid_str = str(agent_id)
+    now = time.monotonic()
+    with _resolver_miss_lock:
+        last = _resolver_miss_last_warn_at.get(aid_str, 0.0)
+        if now - last < _RESOLVER_MISS_WARN_INTERVAL_SECONDS:
+            return
+        _resolver_miss_last_warn_at[aid_str] = now
+
+    known = resolver.list_known_agent_ids()
+    initial_discovery_done = resolver.has_completed_initial_discovery()
+    if agent_id not in known:
+        reason = (
+            f"agent not in resolver's known set "
+            f"(initial_discovery_done={initial_discovery_done}, "
+            f"{len(known)} agent(s) known)"
+        )
+    else:
+        ssh_info = resolver.get_ssh_info(agent_id)
+        reason = (
+            "agent IS known but the requested service URL is missing -- the "
+            "VM-side app-watcher has likely not published it yet (or its "
+            "`mngr event` stream is wedged). "
+            f"ssh_info={'present' if ssh_info is not None else 'missing'}."
+        )
+    logger.warning(
+        "mngr_forward 503 for agent {}: {}. Returning auto-refreshing "
+        "'Backend not yet available' to the renderer. (Throttled: next "
+        "warning for this agent suppressed for {:.0f}s.)",
+        agent_id,
+        reason,
+        _RESOLVER_MISS_WARN_INTERVAL_SECONDS,
+    )
 
 
 # -- Subdomain handlers ---------------------------------------------------
@@ -579,6 +629,7 @@ async def _handle_workspace_forward_http(
 
     target = resolver.resolve(agent_id)
     if target is None:
+        _warn_resolver_miss(agent_id, resolver)
         _emit_backend_failure(envelope_writer, agent_id, WorkspaceBackendFailureReason.UNRESOLVED, None)
         return _service_unavailable_response(request)
 
@@ -646,6 +697,7 @@ async def _handle_workspace_forward_websocket(
 
     target = resolver.resolve(agent_id)
     if target is None:
+        _warn_resolver_miss(agent_id, resolver)
         await websocket.close(code=1013, reason="Backend not yet available")
         return
 

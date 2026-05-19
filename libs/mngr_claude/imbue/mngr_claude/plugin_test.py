@@ -2653,6 +2653,29 @@ def test_read_macos_keychain_credential_returns_none_on_process_setup_error() ->
     assert result is None
 
 
+def test_read_macos_keychain_credential_returns_none_on_timeout() -> None:
+    """_read_macos_keychain_credential returns None when `security` hangs and gets timed out.
+
+    Regression: a hidden keychain-ACL prompt could block `security find-generic-password`
+    indefinitely, which in turn hung `mngr create` (agent setup stuck at
+    "_setup_per_agent_config_dir" with no further progress).
+    """
+    mock_cg = _make_mock_cg_with_result(
+        FinishedProcess(
+            command=("security",),
+            returncode=-15,
+            stdout="",
+            stderr="",
+            is_timed_out=True,
+            is_output_already_logged=False,
+        )
+    )
+
+    result = _read_macos_keychain_credential("some-label", mock_cg)
+
+    assert result is None
+
+
 @pytest.mark.usefixtures("_no_api_key_in_env", "_local_credentials_file")
 def test_has_api_credentials_detects_credentials_file_on_local(
     credential_check_host: Host,
