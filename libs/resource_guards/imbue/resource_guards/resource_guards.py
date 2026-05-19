@@ -850,19 +850,41 @@ def _pytest_runtest_setup(item: pytest.Item) -> Generator[None, None, None]:
     )
 
     marks = {m.name for m in item.iter_markers()}
-    covered_resources = _collect_fixture_covered_resources(item)
     tracking_dir = tempfile.mkdtemp(prefix="pytest_guard_track_")
     env_patcher = patch.dict(os.environ, _build_guard_env(marks, tracking_dir))
     env_patcher.start()
 
-    item._guard_state = _PerTestGuardState(  # ty: ignore[unresolved-attribute]
+    # Initialize _guard_state BEFORE any code that can raise. _pytest_runtest_teardown
+    # and _pytest_runtest_makereport both unconditionally read item._guard_state, so a
+    # missing state attribute would mask the underlying error with cascading
+    # AttributeError. covered_resources is filled in next; if
+    # _collect_fixture_covered_resources raises (e.g. on a tagged-fixture override),
+    # the empty default keeps state coherent for cleanup.
+    state = _PerTestGuardState(
         tracking_dir=tracking_dir,
         marks=marks,
-        covered_resources=covered_resources,
+        covered_resources=set(),
         env_patcher=env_patcher,
     )
+    item._guard_state = state  # ty: ignore[unresolved-attribute]
+
+    # Defer any ResourceGuardViolation from closure inspection until *after*
+    # the inner pytest_runtest_setup chain has run. Raising before yield would
+    # short-circuit other plugins' setup (e.g. caplog), which then crash in
+    # their teardown phase and bury the original guard violation. By holding
+    # the exception until after yield, the inner setup completes normally, all
+    # plugins get a chance to install their state, and the violation still
+    # surfaces as a setup-phase error.
+    closure_violation: ResourceGuardViolation | None = None
+    try:
+        state.covered_resources = _collect_fixture_covered_resources(item)
+    except ResourceGuardViolation as exc:
+        closure_violation = exc
 
     yield
+
+    if closure_violation is not None:
+        raise closure_violation
 
 
 @pytest.hookimpl(hookwrapper=True)

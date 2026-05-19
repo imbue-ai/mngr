@@ -707,6 +707,72 @@ def test_parametrized_tagged_fixture_runs_for_each_param(pytester: pytest.Pytest
     result.assert_outcomes(passed=2)
 
 
+def test_tagged_fixture_override_reports_clean_error_end_to_end(
+    pytester: pytest.Pytester, clean_guard_env: None
+) -> None:
+    """An override of a tagged fixture surfaces the ResourceGuardViolation cleanly.
+
+    Regression test: _collect_fixture_covered_resources runs during
+    _pytest_runtest_setup. When it raises (tagged-fixture override case), the
+    per-test guard state must still be initialized so that teardown and
+    makereport hooks do not crash with AttributeError -- otherwise the
+    original ResourceGuardViolation would be buried under a cascading
+    AttributeError and the user would see a confusing trace instead of the
+    "multiple definitions" message.
+    """
+    # Root conftest registers the guard and defines a tagged fixture.
+    pytester.makeconftest("""
+        import subprocess
+        import pytest
+
+        from imbue.resource_guards.resource_guards import (
+            fixture_uses_resources,
+            register_resource_guard,
+            start_resource_guards,
+            stop_resource_guards,
+        )
+
+        register_resource_guard("cat")
+
+        def pytest_configure(config):
+            config.addinivalue_line("markers", "cat: test uses cat")
+
+        def pytest_sessionstart(session):
+            start_resource_guards(session)
+
+        def pytest_sessionfinish(session, exitstatus):
+            stop_resource_guards()
+
+        @pytest.fixture
+        @fixture_uses_resources("cat")
+        def shared_fixture():
+            subprocess.run(["cat", "/dev/null"], check=True)
+            yield "base"
+    """)
+    # Test file overrides shared_fixture with an untagged version. The two
+    # FixtureDefs in the closure (base in conftest + override in test file)
+    # trigger _collect_fixture_covered_resources to raise during setup.
+    pytester.makepyfile("""
+        import pytest
+
+        @pytest.fixture
+        def shared_fixture():
+            yield "override"
+
+        @pytest.mark.cat
+        def test_uses_overridden(shared_fixture):
+            assert shared_fixture == "override"
+    """)
+    result = pytester.runpytest_subprocess("-n0", "--no-header", "-p", "no:cacheprovider")
+    # The setup-phase ResourceGuardViolation is reported as an error, and the
+    # message must reach the user without being swallowed by a follow-on
+    # AttributeError in teardown/makereport.
+    result.assert_outcomes(errors=1)
+    result.stdout.fnmatch_lines(["*multiple definitions*"])
+    assert "AttributeError" not in result.stdout.str()
+    assert "_guard_state" not in result.stdout.str()
+
+
 def test_session_scoped_tagged_fixture_spans_multiple_test_files(
     pytester: pytest.Pytester, clean_guard_env: None
 ) -> None:

@@ -77,7 +77,7 @@ def test_prevent_silent_decode_error_catches() -> None:
 # rule to skip string literals lives in imbue_common, not this package, so
 # the snapshot bump is intentional.
 def test_prevent_inline_imports() -> None:
-    rc.check_inline_imports(_DIR, snapshot(66))
+    rc.check_inline_imports(_DIR, snapshot(70))
 
 
 def test_prevent_relative_imports() -> None:
