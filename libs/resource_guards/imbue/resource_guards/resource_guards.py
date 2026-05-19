@@ -710,6 +710,7 @@ def _check_fixture_setup_violations(
     resources: set[str],
     tracking_dir: str,
     setup_failed: bool,
+    setup_exception: BaseException | None = None,
 ) -> None:
     """Validate fixture-scope guard invariants after setup.
 
@@ -717,6 +718,11 @@ def _check_fixture_setup_violations(
     setup outcome, and on a "declared but never invoked" violation only
     when setup succeeded (otherwise the violation may be a downstream
     consequence of the setup failure).
+
+    When raising and ``setup_exception`` is provided, the original setup
+    exception is chained via ``raise ... from setup_exception`` so the
+    underlying failure is preserved in the traceback instead of being
+    silently replaced by the guard violation.
     """
     violation = _detect_guard_violations(resources, tracking_dir, check_never_invoked=not setup_failed)
     if violation is None:
@@ -726,13 +732,13 @@ def _check_fixture_setup_violations(
         raise ResourceGuardViolation(
             f"RESOURCE GUARD: Fixture '{fixture_id}' invoked '{violation.resource}' but did not declare it via "
             f"@fixture_uses_resources({violation.resource!r}). Add the declaration or remove the {violation.resource} usage."
-        )
+        ) from setup_exception
 
     raise ResourceGuardViolation(
         f"RESOURCE GUARD: Fixture '{fixture_id}' declared @fixture_uses_resources({violation.resource!r}) "
         f"but did not invoke {violation.resource} during setup. Remove the declaration "
         f"or ensure the fixture exercises {violation.resource}."
-    )
+    ) from setup_exception
 
 
 class _ResourceGuardPlugin:
@@ -794,12 +800,21 @@ def _pytest_fixture_setup(
     fixturedef.func = _make_guarded_fixture_wrapper(original_func, fixture_env)
 
     setup_failed = False
+    setup_exception: BaseException | None = None
     try:
         outcome = yield
-        setup_failed = outcome.excinfo is not None
+        if outcome.excinfo is not None:
+            setup_failed = True
+            # outcome.excinfo is a (type, value, traceback) triple from pluggy.
+            # Capturing the exception instance lets us chain it onto any
+            # ResourceGuardViolation we raise below, so the underlying setup
+            # failure isn't silently dropped from the traceback.
+            setup_exception = outcome.excinfo[1]
     finally:
         fixturedef.func = original_func
-        _check_fixture_setup_violations(fixture_id, resources_set, tracking_dir, setup_failed)
+        _check_fixture_setup_violations(
+            fixture_id, resources_set, tracking_dir, setup_failed, setup_exception=setup_exception
+        )
         # The tracking dir is intentionally leaked: the wrapper still writes
         # to it during the fixture's teardown phase, which runs after this
         # hook returns. Reaping it correctly would require hooking into the

@@ -1767,6 +1767,27 @@ def test_check_fixture_setup_violations_skips_never_invoked_when_setup_failed(
     _check_fixture_setup_violations("my_fixture", {"cat"}, str(tmp_path), setup_failed=True)
 
 
+def test_check_fixture_setup_violations_chains_setup_exception_on_blocked(
+    isolated_guard_state: None,
+    tmp_path: Path,
+) -> None:
+    """When setup raised and a BLOCKED violation fires, the original exception is preserved as __cause__."""
+    register_resource_guard("cat")
+    (tmp_path / "blocked_cat").touch()
+
+    original = RuntimeError("setup failed for unrelated reason")
+    with pytest.raises(ResourceGuardViolation) as exc_info:
+        _check_fixture_setup_violations(
+            "my_fixture",
+            set(),
+            str(tmp_path),
+            setup_failed=True,
+            setup_exception=original,
+        )
+
+    assert exc_info.value.__cause__ is original
+
+
 def test_pytest_fixture_setup_skips_undeclared_fixture() -> None:
     """An ordinary fixture without @fixture_uses_resources should pass through untouched."""
 
