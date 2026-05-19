@@ -25,6 +25,7 @@ import secrets
 import threading
 import webbrowser
 from pathlib import Path
+from types import FrameType
 from typing import Final
 
 import click
@@ -38,14 +39,17 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.minds.bootstrap import disable_imbue_cloud_provider_for_account
 from imbue.minds.bootstrap import imbue_cloud_provider_name_for_account
 from imbue.minds.bootstrap import minds_data_dir_for
+from imbue.minds.bootstrap import reconcile_imbue_cloud_providers_from_sessions
 from imbue.minds.bootstrap import resolve_minds_root_name
 from imbue.minds.config.data_types import DEFAULT_DESKTOP_CLIENT_HOST
 from imbue.minds.config.data_types import DEFAULT_DESKTOP_CLIENT_PORT
 from imbue.minds.config.data_types import MNGR_BINARY
 from imbue.minds.config.data_types import WorkspacePaths
+from imbue.minds.config.loader import load_client_config
 from imbue.minds.desktop_client.agent_creator import AgentCreator
 from imbue.minds.desktop_client.app import create_desktop_client
 from imbue.minds.desktop_client.auth import FileAuthStore
+from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.forward_cli import EnvelopeStreamConsumer
 from imbue.minds.desktop_client.forward_cli import ForwardSubprocessConfig
@@ -105,6 +109,20 @@ _AUTH_ERROR_TYPE: Final[str] = "ImbueCloudAuthError"
     default=False,
     help="Do not open the minds UI in the system browser",
 )
+@click.option(
+    "--config-file",
+    "config_file",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    default=None,
+    envvar="MINDS_CLIENT_CONFIG_PATH",
+    help=(
+        "Path to the per-env client config TOML. Falls back to the "
+        "MINDS_CLIENT_CONFIG_PATH env var (set by `minds env activate <name>`); "
+        "no implicit default beyond that. Refuses to start when neither is set "
+        '-- run `eval "$(minds env activate <name>)"` first. Bundled Electron '
+        "builds pass this flag explicitly from MINDS_CLIENT_CONFIG_BUNDLE."
+    ),
+)
 @click.pass_context
 def run(
     ctx: click.Context,
@@ -112,12 +130,22 @@ def run(
     port: int,
     mngr_forward_port: int,
     no_browser: bool,
+    config_file: Path | None,
 ) -> None:
     # noqa: PLR0913 — flag count matches the legacy `minds forward` interface
     """Run the minds bare-origin server with `mngr forward` as a subprocess."""
+    if config_file is None:
+        raise click.ClickException(
+            "No client config file is set. Activate an env first: "
+            '`eval "$(uv run minds env activate <name>)"` (e.g. '
+            "`dev-<your-user>`, `staging`, or `production`), then re-run."
+        )
     root_name = resolve_minds_root_name()
     data_directory = minds_data_dir_for(root_name)
     minds_config = MindsConfig(data_dir=data_directory)
+    client_config_path = config_file
+    client_env_config = load_client_config(client_config_path)
+    connector_url_str = str(client_env_config.connector_url).rstrip("/")
     output_format: OutputFormat = ctx.obj.get("output_format", OutputFormat.HUMAN)
 
     logger.info("Starting `minds run`...")
@@ -125,7 +153,13 @@ def run(
     logger.info("  mngr forward: http://127.0.0.1:{}", mngr_forward_port)
     logger.info("  MINDS_ROOT_NAME: {}", root_name)
     logger.info("  Data directory: {}", data_directory)
-    logger.info("  remote_service_connector_url: {}", minds_config.remote_service_connector_url)
+    logger.info("  Config file: {}", client_config_path)
+    logger.info("  connector_url: {}", client_env_config.connector_url)
+    logger.info("  litellm_proxy_url: {}", client_env_config.litellm_proxy_url)
+
+    # Bootstrap couldn't write provider entries without the connector URL,
+    # so the reconcile happens here once we've loaded the client config.
+    reconcile_imbue_cloud_providers_from_sessions(connector_url_str, root_name=root_name)
 
     paths = WorkspacePaths(data_dir=data_directory)
     auth_store = FileAuthStore(data_directory=paths.auth_dir)
@@ -171,7 +205,10 @@ def run(
         mngr_message_sender=MngrMessageSender(),
         gateway_client=gateway_client,
     )
-    imbue_cloud_cli = ImbueCloudCli(parent_concurrency_group=root_concurrency_group)
+    imbue_cloud_cli = ImbueCloudCli(
+        parent_concurrency_group=root_concurrency_group,
+        connector_url=client_env_config.connector_url,
+    )
     telegram_orchestrator = TelegramSetupOrchestrator(paths=paths)
     session_store = MultiAccountSessionStore(data_dir=data_directory, cli=imbue_cloud_cli)
     response_events = load_response_events(data_directory)
@@ -271,6 +308,7 @@ def run(
         envelope_stream_consumer=consumer,
         session_store=session_store,
         minds_config=minds_config,
+        client_env_config=client_env_config,
         request_inbox=request_inbox,
         request_event_handlers=(latchkey_permission_handler,),
         server_port=port,
@@ -289,15 +327,86 @@ def run(
         on_request=_StreamedPermissionRequestHandler(app=app, backend_resolver=backend_resolver),
     )
     permission_requests_consumer.start(root_concurrency_group)
+    # Stash on app.state so the lifespan shutdown can stop() the consumer
+    # before draining the root concurrency group; without this the
+    # consumer thread stays blocked on its follow-stream read=None socket
+    # for the full CG shutdown timeout and the group surfaces a "1 strand
+    # did not finish in time" warning on every clean exit.
+    app.state.permission_requests_consumer = permission_requests_consumer
 
     if not no_browser:
-        thread = threading.Thread(target=_sleep_then_open, args=(f"http://{host}:{port}/",), daemon=True)
+        # Open the URL that carries the one-time code rather than the bare
+        # origin. The bare origin lands on the unauthenticated landing page
+        # ("Use the login URL printed in the terminal"), which is useless
+        # for the user when we already know the code; navigating to
+        # /login?one_time_code=... drops directly into the authenticated
+        # session. If the user already has a valid session cookie, the
+        # /login handler 307-redirects to / instead of consuming the code,
+        # so this is safe across restarts.
+        thread = threading.Thread(target=_sleep_then_open, args=(minds_login_url,), daemon=True)
         thread.start()
 
+    server = _PreShutdownAwareServer(config=uvicorn.Config(app, host=host, port=port, timeout_graceful_shutdown=1))
+    server.pre_shutdown_app = app
+    server.pre_shutdown_resolver = backend_resolver
     try:
-        uvicorn.run(app, host=host, port=port, timeout_graceful_shutdown=1)
+        server.run()
     finally:
         consumer.terminate()
+
+
+class _PreShutdownAwareServer(uvicorn.Server):
+    """A uvicorn Server that flips ``app.state.shutdown_event`` on SIGINT/SIGTERM.
+
+    Without this hook, uvicorn's shutdown order is:
+
+    1. Signal handler sets ``should_exit = True``.
+    2. Main loop notices, calls ``shutdown()``.
+    3. ``shutdown()`` waits ``timeout_graceful_shutdown`` seconds for
+       in-flight connections (SSE streams that the browser is holding
+       open are still in-flight).
+    4. On timeout, cancels every in-flight task with ``CancelledError``
+       -- which surfaces as a noisy starlette/anyio traceback in the
+       log on every clean shutdown.
+    5. THEN calls ``lifespan.shutdown()`` (i.e. our ``_managed_lifespan``
+       finally block).
+
+    Setting ``shutdown_event`` from the lifespan finally is too late --
+    the cancel has already happened. ``handle_exit`` is the earliest
+    hook we have: it fires from the signal handler itself, BEFORE
+    uvicorn starts waiting for connections, so our SSE handlers see
+    the flag set on their next iteration and return their generators
+    cleanly. Once they're done, ``shutdown()``'s wait completes
+    without timing out, no tasks need to be cancelled, no traceback.
+
+    The ``backend_resolver.notify_change()`` poke wakes the chrome SSE
+    out of its 30-second ``change_event.wait()`` immediately, so the
+    SSE handlers don't have to wait out the full poll interval before
+    noticing ``shutdown_event``.
+
+    ``pre_shutdown_app`` and ``pre_shutdown_resolver`` are set by the
+    caller via direct attribute assignment immediately after
+    construction. We can't override ``__init__`` (the project ratchet
+    forbids it on non-exception classes), and the parent's __init__
+    takes only ``config``, so the cleanest way to thread these in is
+    explicit post-construction assignment. ``None`` defaults keep the
+    type checker happy and let the handler no-op gracefully if a future
+    caller forgets to wire them up.
+    """
+
+    pre_shutdown_app: FastAPI | None = None
+    pre_shutdown_resolver: BackendResolverInterface | None = None
+
+    def handle_exit(self, sig: int, frame: FrameType | None) -> None:
+        # Fire BEFORE super(): super().handle_exit sets should_exit,
+        # which begins uvicorn's shutdown sequence. We want shutdown_event
+        # set first so SSE handlers exit before uvicorn starts waiting
+        # on still-in-flight connections.
+        if self.pre_shutdown_app is not None:
+            self.pre_shutdown_app.state.shutdown_event.set()
+        if isinstance(self.pre_shutdown_resolver, MngrCliBackendResolver):
+            self.pre_shutdown_resolver.notify_change()
+        super().handle_exit(sig, frame)
 
 
 class _StreamedPermissionRequestHandler(FrozenModel):
@@ -365,7 +474,15 @@ def _build_latchkey(data_directory: Path) -> Latchkey:
         latchkey_directory = Path(directory_override).expanduser()
     else:
         latchkey_directory = data_directory / "latchkey"
-    return Latchkey(latchkey_binary=latchkey_binary, latchkey_directory=latchkey_directory)
+    # The per-env encryption key is loaded lazily on every subprocess
+    # spawn inside ``Latchkey`` itself (via ``_load_encryption_key``)
+    # so the secret only lives in parent-process memory for the
+    # duration of a single env-builder + process-spawn call, never
+    # cached as a long-lived attribute on this object.
+    return Latchkey(
+        latchkey_binary=latchkey_binary,
+        latchkey_directory=latchkey_directory,
+    )
 
 
 def _sleep_then_open(url: str, delay: float = 1.0) -> None:

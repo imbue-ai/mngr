@@ -1313,6 +1313,7 @@ class _MismatchedProviderBackend(ProviderBackendInterface):
         name: ProviderInstanceName,
         config: ProviderInstanceConfig,
         mngr_ctx: MngrContext,
+        is_for_host_creation: bool = False,
     ) -> ProviderInstanceInterface:
         return _MismatchedProviderInstance(
             name=name,
@@ -1352,6 +1353,7 @@ class _RaisingDiscoveryProviderBackend(ProviderBackendInterface):
         name: ProviderInstanceName,
         config: ProviderInstanceConfig,
         mngr_ctx: MngrContext,
+        is_for_host_creation: bool = False,
     ) -> ProviderInstanceInterface:
         return _RaisingDiscoveryProviderInstance(
             name=name,
@@ -2258,6 +2260,7 @@ def test_list_agents_wires_provider_on_error_to_result_errors(
             name: ProviderInstanceName,
             config: ProviderInstanceConfig,
             mngr_ctx: MngrContext,
+            is_for_host_creation: bool = False,
         ) -> ProviderInstanceInterface:
             return _EmittingProvider(
                 name=name,

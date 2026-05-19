@@ -15,11 +15,26 @@ ALTER TABLE pool_hosts ADD COLUMN IF NOT EXISTS attributes JSONB NOT NULL DEFAUL
 
 -- Backfill existing rows: encode the old version string as {"version": "<v>"}
 -- so that callers passing {"version": "..."} keep matching their existing rows.
-UPDATE pool_hosts
-SET attributes = jsonb_build_object('version', version)
-WHERE jsonb_typeof(attributes) = 'object'
-  AND NOT attributes ? 'version'
-  AND version IS NOT NULL;
+-- Wrapped in a DO block + column-existence check so this migration is
+-- safe to replay against a fresh DB created from 000_initial_schema.sql
+-- (which never had a `version` column). Without the guard, parsing the
+-- UPDATE itself fails with "column version does not exist".
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'pool_hosts' AND column_name = 'version'
+    ) THEN
+        EXECUTE $sql$
+            UPDATE pool_hosts
+            SET attributes = jsonb_build_object('version', version)
+            WHERE jsonb_typeof(attributes) = 'object'
+              AND NOT attributes ? 'version'
+              AND version IS NOT NULL
+        $sql$;
+    END IF;
+END
+$$;
 
 -- Drop the now-redundant version column. (Skip if it's already gone.)
 ALTER TABLE pool_hosts DROP COLUMN IF EXISTS version;

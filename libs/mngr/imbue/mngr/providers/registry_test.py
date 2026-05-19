@@ -39,6 +39,7 @@ class _TestBackendWithSameHelp(ProviderBackendInterface):
         name: ProviderInstanceName,
         config: ProviderInstanceConfig,
         mngr_ctx: MngrContext,
+        is_for_host_creation: bool = False,
     ) -> ProviderInstanceInterface:
         raise NotImplementedError
 

@@ -1,0 +1,9 @@
+# Production tier client config -- read by `minds run`.
+#
+# Contains only the URLs the desktop client itself talks to; no secrets.
+# Operators populate these values once new production infra (Modal account,
+# remote_service_connector, litellm-proxy) is stood up. Until then, the
+# values here may temporarily point at older infra during cutover.
+
+connector_url = "https://minds-production--rsc-production-api.modal.run"
+litellm_proxy_url = "https://minds-production--llm-production-proxy.modal.run"
