@@ -34,9 +34,10 @@ def test_sbx_command_error_records_returncode_and_stderr() -> None:
 
 
 def test_sbx_host_creation_error_inherits_host_creation_error() -> None:
-    error = SbxHostCreationError("could not start sandbox")
+    error = SbxHostCreationError(ProviderInstanceName("sbx"), "could not start sandbox")
     assert isinstance(error, HostCreationError)
     assert "could not start sandbox" in str(error)
+    assert error.provider_name == ProviderInstanceName("sbx")
 
 
 def test_sbx_host_rename_error_inherits_mngr_error() -> None:

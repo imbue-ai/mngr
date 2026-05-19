@@ -328,6 +328,7 @@ class SbxProviderInstance(BaseProviderInstance):
     def _create_host_object(
         self,
         host_id: HostId,
+        host_name: HostName,
         hostname: str,
         host_port: int,
         private_key_path: Path,
@@ -342,6 +343,7 @@ class SbxProviderInstance(BaseProviderInstance):
         connector = PyinfraConnector(pyinfra_host)
         return Host(
             id=host_id,
+            host_name=host_name,
             connector=connector,
             provider_instance=self,
             mngr_ctx=self.mngr_ctx,
@@ -366,7 +368,7 @@ class SbxProviderInstance(BaseProviderInstance):
         with log_span("Updating certified host data", host_id=str(host_id)):
             host_record = self._host_store.read_host_record(host_id, use_cache=False)
             if host_record is None:
-                raise HostNotFoundError(host_id)
+                raise HostNotFoundError(self.name, host_id)
             updated_host_record = host_record.model_copy_update(
                 to_update(host_record.field_ref().certified_host_data, certified_data),
             )
@@ -502,7 +504,7 @@ kill -TERM 1
             failure_reason = str(e)
             logger.error("sbx host creation failed during 'sbx create': {}", failure_reason)
             self._save_failed_host_record(host_id, name, tags, failure_reason)
-            raise SbxHostCreationError(failure_reason) from e
+            raise SbxHostCreationError(self.name, failure_reason) from e
 
         # Step 2: spawn the *setup* keeper (sleep) so the sandbox stays alive while we install
         # sshd. We hand over to the long-lived sshd-keeper below; the setup keeper's lifetime
@@ -522,7 +524,7 @@ kill -TERM 1
             except (SbxCommandError, OSError) as cleanup_err:
                 logger.debug("Failed to clean up sandbox {} after keeper failure: {}", sandbox_name, cleanup_err)
             self._save_failed_host_record(host_id, name, tags, failure_reason)
-            raise SbxHostCreationError(failure_reason) from e
+            raise SbxHostCreationError(self.name, failure_reason) from e
 
         # Step 3: install sshd and write SSH key material into the sandbox, then publish a port.
         try:
@@ -574,7 +576,7 @@ kill -TERM 1
             # keeper now. The sshd-keeper alone holds the sandbox open from here on out.
             kill_keeper_pid(setup_handle.pid)
 
-            host = self._create_host_object(host_id, ssh_hostname, ssh_port, private_key_path)
+            host = self._create_host_object(host_id, name, ssh_hostname, ssh_port, private_key_path)
         except (SbxCommandError, SbxNotAuthorizedError, MngrError, OSError) as e:
             failure_reason = str(e)
             logger.error("sbx sshd bridge setup failed: {}", failure_reason)
@@ -585,7 +587,7 @@ kill -TERM 1
             except (SbxCommandError, OSError) as cleanup_err:
                 logger.debug("Failed to clean up sandbox {} during error recovery: {}", sandbox_name, cleanup_err)
             self._save_failed_host_record(host_id, name, tags, failure_reason)
-            raise SbxHostCreationError(failure_reason) from e
+            raise SbxHostCreationError(self.name, failure_reason) from e
 
         # Step 3: build the certified host data + record.
         lifecycle_options = lifecycle if lifecycle is not None else HostLifecycleOptions()
@@ -757,7 +759,7 @@ kill -TERM 1
 
         host_record = self._host_store.read_host_record(host_id, use_cache=False)
         if host_record is None:
-            raise HostNotFoundError(host_id)
+            raise HostNotFoundError(self.name, host_id)
 
         if (
             host_record.config is None
@@ -782,17 +784,11 @@ kill -TERM 1
         # If the keeper died, the sandbox auto-stops within a few seconds. The sshd-keeper revives
         # both the sandbox AND sshd inside it, but sbx loses port mappings on stop -- so we also
         # need to re-publish port 22 below and update the host record's ssh_port.
-        keeper_pid_before = read_keeper_pid(self._provider_dir, host_id)
         try:
-            keeper_handle = ensure_sshd_keeper_alive(self._provider_dir, host_id, sandbox_name)
+            ensure_sshd_keeper_alive(self._provider_dir, host_id, sandbox_name)
         except SbxCommandError as e:
             logger.debug("Could not revive sshd keeper for sandbox {}: {}", sandbox_name, e)
             return self._create_offline_host(host_record)
-        # A different pid after the call means ensure_sshd_keeper_alive had to spawn a fresh
-        # keeper -- which implies the sandbox auto-stopped, dropping its port mapping. Comparing
-        # before/after pids is strictly more reliable than checking is_keeper_alive separately,
-        # because it observes the actual outcome rather than racing the death window.
-        keeper_was_respawned = keeper_pid_before is None or keeper_handle.pid != keeper_pid_before
 
         try:
             sandboxes = sbx_list(self.mngr_ctx.concurrency_group, self.name)
@@ -804,12 +800,21 @@ kill -TERM 1
         if matching is None or _host_state_from_sbx_status(matching.status) != HostState.RUNNING:
             return self._create_offline_host(host_record)
 
-        # If we just revived the keeper, the sandbox lost its port mapping during auto-stop --
-        # re-publish 22 and update the record + known_hosts so subsequent SSH attempts hit the
-        # right port.
+        # Reconcile against sbx's current view of port 22: if sbx has a different binding than
+        # our stored ssh_port (or no binding at all), re-publish and update the record. Driving
+        # this off `sbx ls --json` ports rather than "did we just respawn the keeper" makes the
+        # check idempotent and resilient -- a previous mngr invocation that crashed mid-refresh
+        # can be recovered by the next one without manual intervention.
         effective_ssh_hostname = host_record.ssh_hostname
         effective_ssh_port = host_record.ssh_port
-        if keeper_was_respawned:
+        current_binding = next(
+            (p for p in matching.ports if p.sandbox_port == _SANDBOX_SSH_PORT and p.protocol.startswith("tcp")),
+            None,
+        )
+        needs_refresh = current_binding is None or (
+            current_binding.host_ip != host_record.ssh_hostname or current_binding.host_port != host_record.ssh_port
+        )
+        if needs_refresh:
             try:
                 host_record = self._refresh_published_ssh_port(host_record)
             except (SbxCommandError, MngrError) as e:
@@ -827,6 +832,7 @@ kill -TERM 1
 
         host_obj = self._create_host_object(
             host_id,
+            host_name=HostName(host_record.certified_host_data.host_name),
             hostname=effective_ssh_hostname,
             host_port=effective_ssh_port,
             private_key_path=Path(ssh_identity_file),
@@ -898,12 +904,12 @@ kill -TERM 1
         for record in self._host_store.list_all_host_records():
             if record.certified_host_data.host_name == str(name):
                 return self._get_host_by_id(HostId(record.certified_host_data.host_id))
-        raise HostNotFoundError(name)
+        raise HostNotFoundError(self.name, name)
 
     def to_offline_host(self, host_id: HostId) -> OfflineHost:
         host_record = self._host_store.read_host_record(host_id, use_cache=False)
         if host_record is None:
-            raise HostNotFoundError(host_id)
+            raise HostNotFoundError(self.name, host_id)
         return self._create_offline_host(host_record)
 
     def discover_hosts(
@@ -1005,13 +1011,13 @@ kill -TERM 1
     def _read_tags(self, host_id: HostId) -> dict[str, str]:
         record = self._host_store.read_host_record(host_id)
         if record is None:
-            raise HostNotFoundError(host_id)
+            raise HostNotFoundError(self.name, host_id)
         return dict(record.certified_host_data.user_tags)
 
     def _write_tags(self, host_id: HostId, tags: Mapping[str, str]) -> None:
         record = self._host_store.read_host_record(host_id, use_cache=False)
         if record is None:
-            raise HostNotFoundError(host_id)
+            raise HostNotFoundError(self.name, host_id)
         updated_certified = record.certified_host_data.model_copy_update(
             to_update(record.certified_host_data.field_ref().user_tags, dict(tags)),
             to_update(record.certified_host_data.field_ref().updated_at, datetime.now(timezone.utc)),

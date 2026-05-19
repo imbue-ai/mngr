@@ -42,9 +42,9 @@ class SbxCommandError(MngrError):
 class SbxHostCreationError(HostCreationError):
     """Raised when creating a Docker sandbox host fails."""
 
-    def __init__(self, reason: str, build_log: str = "") -> None:
+    def __init__(self, provider_name: ProviderInstanceName, reason: str, build_log: str = "") -> None:
         self.build_log = build_log
-        super().__init__(f"Failed to create Docker sandbox: {reason}")
+        super().__init__(provider_name, f"Failed to create Docker sandbox: {reason}")
 
 
 class SbxHostRenameError(MngrError):

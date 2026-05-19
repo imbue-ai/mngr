@@ -60,7 +60,12 @@ Other arguments are passed through to 'sbx create'.
         name: ProviderInstanceName,
         config: ProviderInstanceConfig,
         mngr_ctx: MngrContext,
+        is_for_host_creation: bool = False,
     ) -> ProviderInstanceInterface:
+        # sbx has no one-time backend bootstrap (no equivalent of Modal's environment-create
+        # step); the keeper subprocess and the published port mapping are owned per-host and
+        # already created lazily by create_host itself.
+        del is_for_host_creation
         if not isinstance(config, SbxProviderConfig):
             raise MngrError(f"Expected SbxProviderConfig, got {type(config).__name__}")
 

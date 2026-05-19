@@ -83,6 +83,15 @@ def check_sbx_authenticated(
     raise SbxCommandError("ls", result.returncode, result.stderr or result.stdout)
 
 
+class SbxPortBinding(FrozenModel):
+    """A single host->sandbox port mapping returned by ``sbx ports`` or ``sbx ls --json``."""
+
+    sandbox_port: int = Field(description="Port number inside the sandbox")
+    host_ip: str = Field(description="Host-side IP address")
+    host_port: int = Field(description="Port number on the host")
+    protocol: str = Field(default="tcp", description="Protocol (tcp or udp)")
+
+
 class SbxSandboxInfo(FrozenModel):
     """One row of ``sbx ls --json`` output, mapped to the fields we care about."""
 
@@ -92,6 +101,10 @@ class SbxSandboxInfo(FrozenModel):
     workspaces: tuple[str, ...] = Field(
         default=(),
         description="Workspace paths mounted into the sandbox (sbx returns these as a list)",
+    )
+    ports: tuple[SbxPortBinding, ...] = Field(
+        default=(),
+        description="Currently published host->sandbox port mappings (parsed from sbx ls --json)",
     )
     raw: dict[str, Any] = Field(default_factory=dict, description="Original JSON record from sbx")
 
@@ -145,16 +158,52 @@ def sbx_list(
             workspaces = (workspaces_value,)
         else:
             workspaces = ()
+        ports = _extract_port_bindings_from_record(record)
         sandboxes.append(
             SbxSandboxInfo(
                 name=name_value,
                 agent=str(agent_value),
                 status=str(status_value),
                 workspaces=workspaces,
+                ports=ports,
                 raw=record,
             )
         )
     return sandboxes
+
+
+def _extract_port_bindings_from_record(record: dict[str, Any]) -> tuple[SbxPortBinding, ...]:
+    """Pull the published-ports list out of one ``sbx ls --json`` sandbox record.
+
+    sbx 0.28.x includes a ``ports`` array per sandbox of the form
+    ``[{"host_ip": "127.0.0.1", "host_port": 49162, "sandbox_port": 22, "protocol": "tcp"}]``.
+    Older / minimal output may omit the field entirely.
+    """
+    raw_ports = record.get("ports") or record.get("Ports")
+    if not isinstance(raw_ports, list):
+        return ()
+    bindings: list[SbxPortBinding] = []
+    for entry in raw_ports:
+        if not isinstance(entry, dict):
+            continue
+        try:
+            sandbox_port = int(entry.get("sandbox_port") or entry.get("SandboxPort") or 0)
+            host_port = int(entry.get("host_port") or entry.get("HostPort") or 0)
+        except (TypeError, ValueError):
+            continue
+        if sandbox_port == 0 or host_port == 0:
+            continue
+        host_ip_value = entry.get("host_ip") or entry.get("HostIp") or "127.0.0.1"
+        protocol_value = entry.get("protocol") or entry.get("Protocol") or "tcp"
+        bindings.append(
+            SbxPortBinding(
+                sandbox_port=sandbox_port,
+                host_ip=str(host_ip_value),
+                host_port=host_port,
+                protocol=str(protocol_value),
+            )
+        )
+    return tuple(bindings)
 
 
 def _extract_sandbox_records(parsed: Any, raw_output: str) -> list[dict[str, Any]]:
@@ -284,15 +333,6 @@ def sbx_rm(
         combined = result.stderr + result.stdout
         _raise_if_not_authenticated(provider_name, "rm", combined)
         raise SbxCommandError("rm", result.returncode, combined)
-
-
-class SbxPortBinding(FrozenModel):
-    """A single host->sandbox port mapping returned by ``sbx ports``."""
-
-    sandbox_port: int = Field(description="Port number inside the sandbox")
-    host_ip: str = Field(description="Host-side IP address")
-    host_port: int = Field(description="Port number on the host")
-    protocol: str = Field(default="tcp", description="Protocol (tcp or udp)")
 
 
 def sbx_publish_port(
