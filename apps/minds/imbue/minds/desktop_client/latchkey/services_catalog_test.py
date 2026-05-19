@@ -10,12 +10,7 @@ from imbue.minds.desktop_client.latchkey.testing import FakeLatchkeyGatewayClien
 
 
 def _make_catalog(payload: dict[str, object]) -> ServicesCatalog:
-    client = FakeLatchkeyGatewayClient(
-        base_url="http://gateway.invalid",
-        password="p",
-        admin_jwt="jwt",
-        available_services_payload=payload,
-    )
+    client = FakeLatchkeyGatewayClient(available_services_payload=payload)
     return ServicesCatalog(gateway_client=client)
 
 
@@ -120,9 +115,6 @@ def test_catalog_is_cached_after_first_fetch() -> None:
             return dict(self.available_services_payload)
 
     client = _CountingFakeClient(
-        base_url="http://gateway.invalid",
-        password="p",
-        admin_jwt="jwt",
         available_services_payload={
             "slack": {"scope": "slack-api", "display_name": "Slack", "permissions": []},
         },
@@ -148,7 +140,7 @@ def test_catalog_returns_empty_when_gateway_unreachable() -> None:
         def get_available_services(self) -> dict[str, object]:
             raise LatchkeyGatewayClientError("connection refused")
 
-    client = _FailingClient(base_url="http://gateway.invalid", password="p", admin_jwt="jwt")
+    client = _FailingClient()
     catalog = ServicesCatalog(gateway_client=client)
 
     assert catalog.get("slack") is None

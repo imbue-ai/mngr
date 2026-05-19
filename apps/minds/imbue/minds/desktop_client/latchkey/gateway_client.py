@@ -318,7 +318,8 @@ class LatchkeyGatewayClient(MutableModel):
         Returned as plain ``dict`` because parsing/validation is the
         catalog module's job; this method only handles the HTTP layer.
         """
-        url = f"{self.base_url.rstrip('/')}/permissions/available"
+        self.ensure_initialized()
+        url = f"{self._require_base_url().rstrip('/')}/permissions/available"
         try:
             with self._one_shot_client() as client:
                 response = client.get(url, headers=self._build_headers())
