@@ -74,6 +74,7 @@ class _RecordingHandler(LatchkeyPermissionGrantHandler):
 
     grant_outcome: GrantOutcome = Field(default=GrantOutcome.GRANTED)
     grant_message: str = Field(default="granted")
+    grant_set_credentials_example: str | None = Field(default=None)
     deny_message: str = Field(default="denied")
     grant_calls: list[dict[str, object]] = Field(default_factory=list)
     deny_calls: list[dict[str, object]] = Field(default_factory=list)
@@ -95,6 +96,15 @@ class _RecordingHandler(LatchkeyPermissionGrantHandler):
                 "granted_permissions": tuple(granted_permissions),
             }
         )
+        # NEEDS_MANUAL_CREDENTIALS keeps the request pending and writes
+        # no response event; the other outcomes resolve it.
+        if self.grant_outcome == GrantOutcome.NEEDS_MANUAL_CREDENTIALS:
+            return GrantResult(
+                outcome=self.grant_outcome,
+                message=self.grant_message,
+                response_event=None,
+                set_credentials_example=self.grant_set_credentials_example,
+            )
         status = RequestStatus.GRANTED if self.grant_outcome == GrantOutcome.GRANTED else RequestStatus.DENIED
         response_event = create_request_response_event(
             request_event_id=request_event_id,
@@ -164,6 +174,7 @@ def _make_recording_handler(
     tmp_path: Path,
     grant_outcome: GrantOutcome = GrantOutcome.GRANTED,
     grant_message: str = "granted",
+    grant_set_credentials_example: str | None = None,
 ) -> _RecordingHandler:
     """Build a ``_RecordingHandler`` with stub probes that won't be exercised in routing tests."""
     gateway_client = build_fake_gateway_client()
@@ -176,6 +187,7 @@ def _make_recording_handler(
         gateway_client=gateway_client,
         grant_outcome=grant_outcome,
         grant_message=grant_message,
+        grant_set_credentials_example=grant_set_credentials_example,
     )
 
 
