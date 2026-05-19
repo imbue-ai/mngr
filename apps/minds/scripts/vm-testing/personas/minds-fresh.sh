@@ -12,7 +12,7 @@ echo "[minds-fresh] provisioning..."
 
 # Disable the "App downloaded from the internet" first-launch prompt so the
 # harness can launch minds.app non-interactively. Re-enable per-test by
-# passing --quarantine to the harness.
+# setting APPLY_QUARANTINE=1 when invoking run-test.sh.
 sudo defaults write com.apple.LaunchServices LSQuarantine -bool false || true
 
 # Keep Spotlight from chewing CPU during tests on a freshly populated home.
