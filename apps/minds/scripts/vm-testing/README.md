@@ -63,6 +63,38 @@ apps/minds/scripts/vm-testing/run-test.sh ~/Downloads/minds.app.zip minds-fresh
 apps/minds/scripts/vm-testing/run-test.sh /Applications/minds.app minds-fresh
 ```
 
+### Iterating on a local change
+
+`pnpm build` alone is insufficient for local-iteration testing: it
+downloads the binary resources (`uv`, `git`, `lima`, `latchkey`) and
+bundles the desktop `pyproject.toml`, but the bundled pyproject still
+lists `minds>=0.1.0` and resolves it from PyPI at first launch. Any
+local-only change to the Python backend silently does nothing.
+
+`build-local-app.sh` closes that gap. It builds wheels for every
+workspace package minds depends on, stages them in
+`resources/wheels/`, rewrites the bundled pyproject to point
+`[tool.uv.sources]` at those wheel paths, and invokes
+`@electron/packager`:
+
+```bash
+# Build the .app for a feature branch you have a worktree of.
+MINDS_CLIENT_CONFIG_BUNDLE=imbue/minds/config/envs/staging/client.toml \
+MINDS_ROOT_NAME_BUNDLE=minds-staging \
+    apps/minds/scripts/vm-testing/build-local-app.sh \
+    .external_worktrees/<branch>/apps/minds
+# -> .external_worktrees/<branch>/apps/minds/dist/minds-darwin-arm64/minds.app
+
+# Then verify it inside a fresh VM.
+apps/minds/scripts/vm-testing/run-test.sh \
+    .external_worktrees/<branch>/apps/minds/dist/minds-darwin-arm64/minds.app \
+    minds-fresh
+```
+
+The two `MINDS_*_BUNDLE` env vars are mandatory: without them, `pnpm
+build` skips the `_bundled/` step and the runtime aborts at launch
+unless an env is activated in the user's shell.
+
 For debugging, pass `--keep-vm` and the throwaway VM is left running after
 the harness exits so you can `tart ip` it and `ssh admin@<ip>` (password
 `admin`) for an inspection session:
