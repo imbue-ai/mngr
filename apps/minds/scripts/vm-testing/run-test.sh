@@ -154,6 +154,20 @@ log "tarring minds.app for transport into VM"
 rm -rf "$minds_app_path"
 app_artifact_basename="minds.app.tar"
 
+# If TEMPLATE_GIT_REF is set, materialize a host-side clone of the
+# template repo at that ref into the shared dir. The harness then passes
+# the VM-mounted path as git_url, which pins the test to a known-good
+# revision -- important when the bundled minds.app and the template main
+# branch have drifted.
+template_in_vm=""
+if [[ -n "${TEMPLATE_GIT_REF:-}" ]]; then
+    template_url_src="${TEMPLATE_GIT_URL:-https://github.com/imbue-ai/forever-claude-template.git}"
+    log "cloning $template_url_src at $TEMPLATE_GIT_REF into shared dir"
+    git clone --quiet "$template_url_src" "$share_dir/template"
+    ( cd "$share_dir/template" && git checkout --quiet "$TEMPLATE_GIT_REF" )
+    template_in_vm="/Volumes/My Shared Files/share/template"
+fi
+
 # Stage the harness under the same shared dir so the VM gets the most
 # recent version every run without scp.
 cp -R "$HERE/harness" "$share_dir/harness"
@@ -211,7 +225,7 @@ cat > "$runner" <<EOF
 set -euo pipefail
 export MINDS_APP_PATH="$share_in_vm/$app_artifact_basename"
 export RESULTS_DIR="$results_in_vm"
-export TEMPLATE_GIT_URL="${TEMPLATE_GIT_URL:-https://github.com/imbue-ai/forever-claude-template.git}"
+export TEMPLATE_GIT_URL="${template_in_vm:-${TEMPLATE_GIT_URL:-https://github.com/imbue-ai/forever-claude-template.git}}"
 export LAUNCH_MODE="${LAUNCH_MODE:-LOCAL}"
 export AI_PROVIDER="$ai_provider"
 export ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY:-}"

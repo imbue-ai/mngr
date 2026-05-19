@@ -160,6 +160,14 @@ def launch_app() -> dict[str, Any]:
     log(f"exec'ing {binary} with SKIP_AUTH=1")
     env = os.environ.copy()
     env["SKIP_AUTH"] = "1"
+    # The cirruslabs vanilla VM has no unlocked keychain, so latchkey cannot
+    # derive its credential-store encryption key. Provide a deterministic
+    # one so the gateway initializes cleanly; the value is irrelevant for a
+    # throwaway VM but its absence aborts agent creation.
+    env.setdefault(
+        "LATCHKEY_ENCRYPTION_KEY",
+        "vmtest-deterministic-latchkey-key-do-not-reuse-outside-throwaway-vms",
+    )
     # nohup so the process survives the SSH session it was launched from
     # and stdout/stderr go to a file we can grab if backend never comes up.
     launcher_log = MINDS_DATA_DIR / "logs" / "launcher.log"
