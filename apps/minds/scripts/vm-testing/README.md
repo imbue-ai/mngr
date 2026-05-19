@@ -94,7 +94,10 @@ One persona (`minds-fresh`), one happy path:
 
 1. **wipe_minds_state** -- removes `~/.minds/` and any leftover
    `/Applications/minds.app` so each run starts identically.
-2. **install_app** -- `ditto`s the supplied bundle into `/Applications/`.
+2. **install_app** -- extracts the supplied bundle into `/Applications/`.
+   In practice the orchestrator stages a tarball (virtiofs misreports the
+   Electron framework symlinks as cyclic), so the harness `tar -xf`s it; a
+   plain `.app` directory works too via `ditto` as a fallback.
 3. **launch_app** -- exec's `/Applications/minds.app/Contents/MacOS/minds`
    directly with `SKIP_AUTH=1`. (`open /Applications/minds.app` would not
    propagate env vars because LaunchServices launches fresh.)
