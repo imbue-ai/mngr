@@ -642,10 +642,10 @@ def create(ctx: click.Context, **kwargs) -> None:
 
         # Validate --reuse + --new-host: contradictory by construction. --new-host
         # always provisions a fresh host; --reuse looks up an existing agent on an
-        # existing host. The imbue_cloud provider is exempt: its --new-host path
-        # leases a pool host that surfaces a pre-baked agent, and --reuse bypasses
-        # the duplicate-name pre-flight that fires before the lease/adopt path
-        # can hydrate that agent in place.
+        # existing host. The imbue_cloud provider is exempted: on its fresh-lease
+        # path the leased host is not yet in agents_by_host when _try_reuse runs,
+        # so --reuse is a no-op there rather than contradictory, and rejecting the
+        # combination would break callers that pass both flags for that provider.
         if opts.reuse and opts.new_host and not _is_imbue_cloud_provider(address.provider_name, mngr_ctx):
             raise UserInputError(
                 "--reuse cannot be combined with --new-host: --reuse looks up an existing agent "
