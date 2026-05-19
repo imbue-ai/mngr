@@ -83,7 +83,7 @@ By default, `mngr create` uses the local host. Use the agent address to specify 
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
 | `--provider` | text | Provider for the host (alternative to .PROVIDER in the address, e.g. --provider docker) | None |
-| `--new-host` | boolean | Force creating a new host (requires a provider via address or --provider) | `False` |
+| `--new-host` | boolean | Force creating a new host (requires a provider via address or --provider; incompatible with --reuse) | `False` |
 | `--host-label` | text | Host metadata label KEY=VALUE [repeatable] | None |
 | `--host-name-style` | choice (`coolname` &#x7C; `astronomy` &#x7C; `places` &#x7C; `cities` &#x7C; `fantasy` &#x7C; `scifi` &#x7C; `painters` &#x7C; `authors` &#x7C; `artists` &#x7C; `musicians` &#x7C; `scientists`) | Auto-generated host name style | `coolname` |
 

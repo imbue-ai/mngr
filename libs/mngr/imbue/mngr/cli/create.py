@@ -393,7 +393,7 @@ class _CreateCommand(click.Command):
     "--new-host",
     is_flag=True,
     default=False,
-    help="Force creating a new host (requires a provider via address or --provider)",
+    help="Force creating a new host (requires a provider via address or --provider; incompatible with --reuse)",
 )
 @optgroup.option("--host-label", multiple=True, help="Host metadata label KEY=VALUE [repeatable]")
 @optgroup.option(
