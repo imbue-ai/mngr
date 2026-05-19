@@ -530,7 +530,14 @@ def _build_mngr_create_command(
             # transfer + provisioning round the bake already paid for.
             mngr_command.append("--reuse")
         case _:
-            mngr_command.extend(["--reuse", "--update"])
+            # No ``--reuse`` / ``--update`` for fresh-host modes. Every
+            # create-form submission with a fresh host_name should land
+            # on its own new host. ``--reuse`` matches purely on agent
+            # name (``system-services``) without scoping to host, so it
+            # collides across hosts and tries to "update" an unrelated
+            # running agent on a different VM. ``--new-host`` (set just
+            # below) already covers the "give me a fresh host" intent.
+            pass
 
     # Per-mode template + per-mode runtime flags. All modes use
     # ``--template main --template <mode>``; the per-mode template provides

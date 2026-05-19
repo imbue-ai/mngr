@@ -141,10 +141,13 @@ def test_build_mngr_create_command_uses_main_template_and_omits_message_arg() ->
     # minds no longer pre-generates an agent id; mngr generates one and we
     # parse it out of the JSONL ``created`` event in run_mngr_create.
     assert "--id" not in command
-    # ``--reuse --update`` keeps re-deploys of the same workspace name
-    # idempotent on local-host modes.
-    assert "--reuse" in command
-    assert "--update" in command
+    # Non-IMBUE_CLOUD modes pass neither ``--reuse`` nor ``--update``:
+    # the create form is "give me a new agent on a new host", and
+    # ``--reuse`` matches only on agent name (``system-services``)
+    # without scoping to host, so it collides across hosts. The
+    # ``--new-host`` flag below already covers fresh-host intent.
+    assert "--reuse" not in command
+    assert "--update" not in command
     # We always emit JSONL so the canonical agent id can be parsed from the
     # trailing ``"event": "created"`` line.
     assert "--format" in command
