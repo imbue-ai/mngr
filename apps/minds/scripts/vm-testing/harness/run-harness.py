@@ -168,8 +168,10 @@ def launch_app() -> dict[str, Any]:
         "LATCHKEY_ENCRYPTION_KEY",
         "vmtest-deterministic-latchkey-key-do-not-reuse-outside-throwaway-vms",
     )
-    # nohup so the process survives the SSH session it was launched from
-    # and stdout/stderr go to a file we can grab if backend never comes up.
+    # start_new_session detaches the child from the SSH session's controlling
+    # terminal so it survives after this harness invocation exits. stdout/
+    # stderr are redirected to launcher_log so we have something to grab if
+    # the backend never comes up.
     launcher_log = MINDS_DATA_DIR / "logs" / "launcher.log"
     launcher_log.parent.mkdir(parents=True, exist_ok=True)
     log_fh = launcher_log.open("ab")
