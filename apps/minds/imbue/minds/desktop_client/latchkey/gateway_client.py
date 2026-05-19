@@ -169,6 +169,31 @@ class LatchkeyGatewayClient(MutableModel):
             self._admin_jwt = self._latchkey.create_admin_permissions_jwt()
             self._password = self._latchkey.derive_gateway_password()
 
+    def invalidate_initialization(self) -> None:
+        """Drop cached gateway URL + auth credentials so the next call re-resolves from disk.
+
+        The cached ``_base_url`` is built once from the supervisor's
+        on-disk ``LatchkeyForwardInfo`` record. If the supervisor
+        restarts mid-session -- or if minds startup raced the
+        supervisor restart and cached the previous gateway's port --
+        every subsequent connection attempt will fail with a
+        transport-level error (typically ``[Errno 111] Connection
+        refused``). Calling this method clears the cached state so the
+        next :meth:`ensure_initialized` re-reads the record and
+        rebinds the URL.
+
+        Callers that rely on :meth:`from_credentials` (test fixtures
+        that have no :class:`Latchkey` to re-derive from) should not
+        call this method: subsequent HTTP calls would fail with
+        :class:`LatchkeyGatewayClientNotInitializedError`. In
+        production the client is built via :meth:`from_latchkey` and
+        re-resolution is safe.
+        """
+        with self._init_lock:
+            self._base_url = None
+            self._admin_jwt = None
+            self._password = None
+
     @classmethod
     def from_latchkey(cls, latchkey: Latchkey) -> "LatchkeyGatewayClient":
         client = cls()
@@ -249,6 +274,27 @@ class LatchkeyGatewayClient(MutableModel):
             return httpx.Client(timeout=_ONE_SHOT_TIMEOUT_SECONDS, transport=self._transport)
         return httpx.Client(timeout=_ONE_SHOT_TIMEOUT_SECONDS)
 
+    def _wrap_transport_error(self, e: httpx.HTTPError, context: str) -> LatchkeyGatewayClientError:
+        """Turn an :mod:`httpx` exception into our error type, invalidating cached init on connect-level failures.
+
+        Connect-level errors (:class:`httpx.ConnectError`,
+        :class:`httpx.ConnectTimeout`) strongly suggest the cached
+        gateway URL is pointing at a port that nothing is listening on
+        anymore -- typically because the supervisor restarted on a new
+        port mid-session or because startup raced the supervisor and
+        cached the previous gateway's port. We drop the cached state
+        so the *next* call to :meth:`ensure_initialized` re-reads the
+        supervisor's on-disk record and picks up the current port.
+
+        Non-connect errors (5xx, malformed responses, read errors
+        mid-stream, etc.) are propagated without invalidation: those
+        usually indicate a problem at the gateway end rather than a
+        stale local cache, and re-resolving the URL would not help.
+        """
+        if isinstance(e, (httpx.ConnectError, httpx.ConnectTimeout)):
+            self.invalidate_initialization()
+        return LatchkeyGatewayClientError(f"{context}: {e}")
+
     def _stream_client(self) -> httpx.Client:
         """Return a per-stream :class:`httpx.Client` honouring the optional test transport."""
         if self._transport is not None:
@@ -304,7 +350,7 @@ class LatchkeyGatewayClient(MutableModel):
             # reconnect promptly without backoff.
             return
         except httpx.HTTPError as e:
-            raise LatchkeyGatewayClientError(f"GET /permission-requests stream failed: {e}") from e
+            raise self._wrap_transport_error(e, "GET /permission-requests stream failed") from e
 
     def delete_permission_request(self, request_id: str) -> None:
         """Remove the named pending request from the gateway's queue.
@@ -320,7 +366,7 @@ class LatchkeyGatewayClient(MutableModel):
             with self._one_shot_client() as client:
                 response = client.delete(url, headers=self._build_headers())
         except httpx.HTTPError as e:
-            raise LatchkeyGatewayClientError(f"DELETE {url} failed: {e}") from e
+            raise self._wrap_transport_error(e, f"DELETE {url} failed") from e
         if response.status_code == 404:
             logger.debug("DELETE {} returned 404; request already gone", url)
             return
@@ -352,7 +398,7 @@ class LatchkeyGatewayClient(MutableModel):
             with self._one_shot_client() as client:
                 response = client.get(url, headers=self._build_headers())
         except httpx.HTTPError as e:
-            raise LatchkeyGatewayClientError(f"GET {url} failed: {e}") from e
+            raise self._wrap_transport_error(e, f"GET {url} failed") from e
         if response.status_code >= 400:
             raise LatchkeyGatewayClientError(
                 f"GET {url} returned {response.status_code}: {response.text.strip()}",
@@ -393,7 +439,7 @@ class LatchkeyGatewayClient(MutableModel):
             with self._one_shot_client() as client:
                 response = client.get(url, params=params, headers=self._build_headers())
         except httpx.HTTPError as e:
-            raise LatchkeyGatewayClientError(f"GET {url} failed: {e}") from e
+            raise self._wrap_transport_error(e, f"GET {url} failed") from e
         if response.status_code == 404:
             return frozenset()
         if response.status_code >= 400:
@@ -446,7 +492,7 @@ class LatchkeyGatewayClient(MutableModel):
                     headers=self._build_headers(),
                 )
         except httpx.HTTPError as e:
-            raise LatchkeyGatewayClientError(f"POST {url} failed: {e}") from e
+            raise self._wrap_transport_error(e, f"POST {url} failed") from e
         if response.status_code >= 400:
             raise LatchkeyGatewayClientError(
                 f"POST {url} returned {response.status_code}: {response.text.strip()}",

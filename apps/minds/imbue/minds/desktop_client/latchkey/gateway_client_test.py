@@ -339,3 +339,112 @@ def test_iter_permission_requests_raises_on_http_error() -> None:
     client = _build_client(_handler)
     with pytest.raises(LatchkeyGatewayClientError):
         list(client.iter_permission_requests())
+
+
+# -- Connect-level self-healing -------------------------------------------
+
+
+def test_invalidate_initialization_clears_cached_state() -> None:
+    """After ``invalidate_initialization`` the client behaves as if never initialized.
+
+    A ``from_credentials``-built client has no :class:`Latchkey` to
+    re-derive from, so post-invalidate HTTP calls surface as
+    ``LatchkeyGatewayClientNotInitializedError`` (a subclass of
+    ``LatchkeyGatewayClientError``). The production code path always
+    builds via :meth:`from_latchkey` and re-resolves cleanly; this
+    test pins the contract that invalidation actually clears state.
+    """
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        del request
+        return httpx.Response(200, json={})
+
+    client = _build_client(_handler)
+    # First call works against the cached credentials.
+    client.delete_permission_request("evt-abc")
+
+    client.invalidate_initialization()
+
+    # No ``_latchkey`` to re-resolve from, so the next call refuses to
+    # build a URL at all.
+    with pytest.raises(LatchkeyGatewayClientError):
+        client.delete_permission_request("evt-abc")
+
+
+@pytest.mark.parametrize(
+    "transport_error",
+    [
+        httpx.ConnectError("connection refused"),
+        httpx.ConnectTimeout("connect timeout"),
+    ],
+)
+def test_one_shot_methods_invalidate_on_connect_level_errors(transport_error: httpx.HTTPError) -> None:
+    """Connect-level transport failures clear the cached gateway URL.
+
+    This is the load-bearing self-heal that lets the desktop client
+    recover from a stale cached port (typically observed when the
+    supervisor restarted on a new port after the gateway client
+    cached the previous one).
+    """
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        del request
+        raise transport_error
+
+    client = _build_client(_handler)
+    with pytest.raises(LatchkeyGatewayClientError):
+        client.get_available_services()
+    # ``_require_base_url`` now raises ``LatchkeyGatewayClientNotInitializedError``
+    # (a subclass of ``LatchkeyGatewayClientError``) because the cache
+    # was cleared by the connect-error handler.
+    with pytest.raises(LatchkeyGatewayClientError):
+        client.get_available_services()
+
+
+def test_non_connect_transport_errors_do_not_invalidate() -> None:
+    """Non-connect transport failures (e.g. mid-response ``ReadError``) propagate without invalidating.
+
+    A read-level failure indicates a problem mid-stream rather than a
+    stale local cache. Clearing state on every transient transport
+    hiccup would force an unnecessary supervisor-record re-read; the
+    cached URL is still very likely correct.
+    """
+
+    call_count = {"value": 0}
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        del request
+        call_count["value"] += 1
+        raise httpx.ReadError("server hung up mid-response")
+
+    client = _build_client(_handler)
+    with pytest.raises(LatchkeyGatewayClientError):
+        client.get_available_services()
+    # The cache was *not* cleared, so the second call hits the
+    # transport again (instead of failing fast on the missing
+    # ``base_url``).
+    with pytest.raises(LatchkeyGatewayClientError):
+        client.get_available_services()
+    assert call_count["value"] == 2
+
+
+def test_iter_permission_requests_invalidates_on_connect_error() -> None:
+    """The streaming path also self-heals on connect-level failures.
+
+    This is the one consumers of the stream care most about: the
+    background reconnect loop in ``PermissionRequestsConsumer`` will
+    call ``iter_permission_requests`` again after our exception, and
+    the cleared state means the next call re-resolves the gateway URL
+    from the supervisor record instead of pounding the stale port.
+    """
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        del request
+        raise httpx.ConnectError("connection refused")
+
+    client = _build_client(_handler)
+    with pytest.raises(LatchkeyGatewayClientError):
+        list(client.iter_permission_requests())
+    # State cleared -- next call cannot build a URL.
+    with pytest.raises(LatchkeyGatewayClientError):
+        list(client.iter_permission_requests())

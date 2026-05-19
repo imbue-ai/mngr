@@ -33,6 +33,27 @@
   to look up display names and the legal permission set. The grant
   dialog continues to render the display name ("Slack" etc.) and lets
   the user broaden or narrow the requested permission set.
+- Fixed a startup race where the minds desktop client could cache a
+  stale latchkey gateway port and then fail every subsequent call
+  with ``[Errno 111] Connection refused``. The race occurred because
+  the supervisor restart and the gateway-client pre-warm previously
+  ran on independent background threads at minds startup: the
+  gateway client could observe the previous supervisor's record
+  (still on disk, still alive) before the restart deleted that
+  record and stamped the fresh port. Two fixes:
+  - ``LatchkeyGatewayClient`` now self-heals from a stale cached
+    gateway URL on connect-level transport failures
+    (``httpx.ConnectError`` / ``httpx.ConnectTimeout``): the cached
+    URL is invalidated and the next call re-resolves the port from
+    the supervisor's on-disk record. Non-connect errors (read
+    failures mid-stream, 5xx responses, etc.) continue to propagate
+    without invalidation, since those usually indicate a problem at
+    the gateway end rather than a stale local cache.
+  - The supervisor restart and the gateway-client pre-warm now run
+    sequentially on a single background thread, eliminating the
+    race in the first place. App startup is unaffected: this still
+    runs in a background thread, so the supervisor restart's 10s
+    SIGTERM grace never blocks the foreground startup path.
 - ``LatchkeyGatewayClient.get_available_services`` now returns a typed
   ``dict[str, AvailableServiceEntry]`` (pydantic-validated) instead of
   the previous untyped ``dict[str, object]``. Wire-shape validation

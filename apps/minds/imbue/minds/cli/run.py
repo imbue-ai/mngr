@@ -58,6 +58,7 @@ from imbue.minds.desktop_client.forward_cli import MindsApiUrlWriter
 from imbue.minds.desktop_client.forward_cli import start_mngr_forward
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClient
+from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClientError
 from imbue.minds.desktop_client.latchkey.permission_requests_consumer import PermissionRequestsConsumer
 from imbue.minds.desktop_client.latchkey.permissions import LatchkeyPermissionGrantHandler
 from imbue.minds.desktop_client.latchkey.permissions import MngrMessageSender
@@ -179,8 +180,37 @@ def run(
     # terminate it on minds shutdown -- mirroring how minds already leaves
     # the gateway running detached so agents in containers/VMs keep working
     # across desktop-client restarts.
+    gateway_client = LatchkeyGatewayClient.from_latchkey(latchkey)
+
+    # Restart the detached supervisor and *then* pre-warm the gateway
+    # client, in a single background thread. Pre-warming must come
+    # after the supervisor restart because ``ensure_initialized``
+    # reads the bound gateway port from the supervisor's on-disk
+    # ``LatchkeyForwardInfo`` record: if we pre-warmed in parallel,
+    # the gateway client could observe the previous supervisor's
+    # stale port (still on disk, still alive for a few ms longer)
+    # before the restart deletes that record and the new supervisor
+    # stamps the fresh port. The cached URL would then point at a
+    # port nothing listens on for the lifetime of the process, and
+    # every gateway call would fail with ``Connection refused``.
+    # ``LatchkeyGatewayClient`` also self-heals from this on a
+    # connect-level error by invalidating the cached URL, but we
+    # avoid the wasted retry by ordering startup correctly here.
+    # Crucially this stays in a background thread so the supervisor
+    # restart's 10s SIGTERM grace never blocks app startup.
+    def _restart_supervisor_then_prewarm_gateway_client() -> None:
+        _ensure_mngr_latchkey_forward_supervisor(latchkey)
+        try:
+            gateway_client.ensure_initialized()
+        except LatchkeyGatewayClientError as e:
+            logger.warning(
+                "Could not pre-warm the latchkey gateway client; first request will retry: {}",
+                e,
+            )
+
     root_concurrency_group.start_new_thread(
-        _ensure_mngr_latchkey_forward_supervisor, args=(latchkey,), name="mngr-latchkey-forward-supervisor-setup"
+        _restart_supervisor_then_prewarm_gateway_client,
+        name="mngr-latchkey-supervisor-and-gateway-init",
     )
 
     # Watch our *grandparent* (typically Electron) rather than our immediate
@@ -191,10 +221,6 @@ def run(
     # turn exit cleanly. Without it, a crashed Electron leaves the entire
     # orphan tree running across restarts.
     start_grandparent_death_watcher(root_concurrency_group)
-
-    gateway_client = LatchkeyGatewayClient.from_latchkey(latchkey)
-    # Pre-warm the gateway client in a background thread.
-    root_concurrency_group.start_new_thread(gateway_client.ensure_initialized, name="latchkey-gateway-init")
 
     latchkey_permission_handler = LatchkeyPermissionGrantHandler(
         data_dir=data_directory,
