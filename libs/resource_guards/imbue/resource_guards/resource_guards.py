@@ -620,14 +620,32 @@ def _collect_fixture_covered_resources(item: pytest.Item) -> set[str]:
 
     Lazy fixtures retrieved via request.getfixturevalue() are not part of
     the static closure and therefore do not contribute to coverage here.
+
+    Raises ResourceGuardViolation if a fixture name in the closure has
+    multiple FixtureDefs (an override) where any def is tagged. Override
+    semantics for @fixture_uses_resources are deliberately unsupported
+    until we have a real use case -- it is unclear whether an override
+    should inherit, replace, or merge the tag.
     """
     fixture_info = item._fixtureinfo  # ty: ignore[unresolved-attribute]
     covered: set[str] = set()
-    for fixturedefs in fixture_info.name2fixturedefs.values():
+    for name, fixturedefs in fixture_info.name2fixturedefs.items():
+        tagged_decls: list[set[str]] = []
         for fixturedef in fixturedefs:
             declared = _fixture_resource_marks.get(fixturedef.func)
             if declared:
-                covered |= declared
+                tagged_decls.append(declared)
+        if not tagged_decls:
+            continue
+        if len(fixturedefs) > 1:
+            raise ResourceGuardViolation(
+                f"RESOURCE GUARD: Fixture '{name}' has multiple definitions in the test's closure "
+                f"(an override), and at least one is decorated with @fixture_uses_resources. "
+                f"Override semantics for tagged fixtures are not supported -- remove the override "
+                f"or remove the decorator from all defs."
+            )
+        for declared in tagged_decls:
+            covered |= declared
     return covered
 
 

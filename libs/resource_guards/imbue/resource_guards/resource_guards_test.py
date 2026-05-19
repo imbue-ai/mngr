@@ -1070,6 +1070,56 @@ def test_collect_fixture_covered_resources_returns_empty_when_no_tagged_fixtures
     assert _collect_fixture_covered_resources(item) == set()  # ty: ignore[invalid-argument-type]
 
 
+def test_collect_fixture_covered_resources_errors_on_tagged_override() -> None:
+    """An override of a tagged fixture is ambiguous and should error.
+
+    Whether the override inherits, replaces, or merges the parent's
+    @fixture_uses_resources declaration is undecided -- we have no real
+    use case yet. The helper should refuse instead of silently picking.
+    """
+
+    def base_fixture() -> None:
+        pass
+
+    def override_fixture() -> None:
+        pass
+
+    fixture_uses_resources("cat")(base_fixture)
+
+    item = _FakeItem(
+        {
+            "shared_name": [
+                _FakeFixtureDef(base_fixture, "shared_name"),
+                _FakeFixtureDef(override_fixture, "shared_name"),
+            ],
+        }
+    )
+
+    with pytest.raises(ResourceGuardViolation, match="multiple definitions"):
+        _collect_fixture_covered_resources(item)  # ty: ignore[invalid-argument-type]
+
+
+def test_collect_fixture_covered_resources_allows_override_when_none_tagged() -> None:
+    """Overrides of fully-untagged fixtures are fine -- the helper has no opinion on them."""
+
+    def base_fixture() -> None:
+        pass
+
+    def override_fixture() -> None:
+        pass
+
+    item = _FakeItem(
+        {
+            "shared_name": [
+                _FakeFixtureDef(base_fixture, "shared_name"),
+                _FakeFixtureDef(override_fixture, "shared_name"),
+            ],
+        }
+    )
+
+    assert _collect_fixture_covered_resources(item) == set()  # ty: ignore[invalid-argument-type]
+
+
 def test_detect_guard_violations_returns_blocked_when_present(
     isolated_guard_state: None,
     tmp_path: Path,
