@@ -603,23 +603,14 @@ def fixture_uses_resources(*resources: str) -> Callable[[F], F]:
     During the fixture's setup and teardown, the resource guard treats the
     fixture as an independently-marked scope: resource calls inside the
     fixture are authorized against the fixture's declared resources rather
-    than whichever test happens to trigger setup. This lets module/session-
-    scoped fixtures share expensive resource-using setup across tests
-    without requiring every consuming test to carry the same mark.
+    than whichever test happens to trigger setup. Consuming tests must
+    still carry @pytest.mark.<resource> for each declared resource (the
+    static check in _collect_fixture_covered_resources enforces this).
 
     Raises ResourceGuardMisconfiguration if applied more than once to the
     same function -- stacking the decorator is not supported; combine all
-    resources into the single call instead. Also raises if called with no
-    resources -- an empty declaration would silently no-op at runtime and
-    defeat the whole point of declaring fixture-level resource usage.
+    resources into the single call instead.
     """
-    if not resources:
-        raise ResourceGuardMisconfiguration(
-            "@fixture_uses_resources requires at least one resource name. "
-            "An empty declaration is a no-op and would silently disable the "
-            "fixture-scope guard; remove the decorator or pass the resources "
-            "the fixture invokes, e.g. @fixture_uses_resources('modal')."
-        )
 
     def decorator(func: F) -> F:
         if func in _fixture_resource_marks:
@@ -648,9 +639,7 @@ def _collect_fixture_covered_resources(item: pytest.Item) -> set[str]:
 
     Raises ResourceGuardMisconfiguration if a fixture name in the closure
     has multiple FixtureDefs (an override) where any def is tagged.
-    Override semantics for @fixture_uses_resources are deliberately
-    unsupported until we have a real use case -- it is unclear whether an
-    override should inherit, replace, or merge the tag.
+    Override semantics for @fixture_uses_resources are not supported.
     """
     fixture_info = item._fixtureinfo  # ty: ignore[unresolved-attribute]
     covered: set[str] = set()
