@@ -54,11 +54,12 @@ RESOURCE_GUARDS_ENTRY_POINT_GROUP = "resource_guards"
 class ResourceGuardViolation(Exception):
     """Raised on any resource guard invariant violation.
 
-    Covers both runtime violations -- a test or fixture invoking an SDK
+    Covers runtime violations -- a test or fixture invoking an SDK
     resource without the required mark, or carrying a mark/declaration
-    for a resource it never invoked -- and decoration-time misuse of
-    @fixture_uses_resources (empty declaration, double application,
-    or applied to an overridden fixture name).
+    for a resource it never invoked -- and misuse of
+    @fixture_uses_resources (empty declaration or double application at
+    decoration time, or applied to an overridden fixture in a test's
+    closure, which is detected when the fixture closure is collected).
     """
 
 
