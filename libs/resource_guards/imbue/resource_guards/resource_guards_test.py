@@ -228,14 +228,12 @@ def test_unmarked_test_that_does_not_call_resource_passes(pytester: pytest.Pytes
 # ---------------------------------------------------------------------------
 
 
-def test_fixture_declaring_resource_allows_setup_calls_for_unmarked_consumer(
-    pytester: pytest.Pytester, clean_guard_env: None
-) -> None:
-    """A module-scoped fixture that declares the resource handles its own setup calls.
+def test_fixture_declaring_resource_authorizes_setup_calls(pytester: pytest.Pytester, clean_guard_env: None) -> None:
+    """A tagged module-scoped fixture's setup calls are authorized against its own declaration.
 
-    The consuming test does not need the mark: the fixture's setup-time
-    resource calls are authorized against the fixture's declaration,
-    independent of the consuming test's marks.
+    The consuming test must carry @pytest.mark.cat (since the fixture declares cat),
+    but no longer needs to invoke cat directly -- the fixture's setup-time call
+    satisfies the mark transitively.
     """
     pytester.makeconftest(_PYTESTER_CONFTEST)
     pytester.makepyfile("""
@@ -250,11 +248,40 @@ def test_fixture_declaring_resource_allows_setup_calls_for_unmarked_consumer(
             subprocess.run(["cat", "/dev/null"], check=True)
             yield "value"
 
-        def test_consumer_without_mark(cat_fixture):
+        @pytest.mark.cat
+        def test_consumer_with_mark(cat_fixture):
             assert cat_fixture == "value"
     """)
     result = pytester.runpytest_subprocess("-n0", "--no-header", "-p", "no:cacheprovider")
     result.assert_outcomes(passed=1)
+
+
+def test_unmarked_consumer_of_tagged_fixture_fails(pytester: pytest.Pytester, clean_guard_env: None) -> None:
+    """Consuming a @fixture_uses_resources fixture without the matching mark fails the test.
+
+    The mark is required so that `pytest -m <resource>` reliably selects every
+    test that transitively needs the resource. If you consume a tagged fixture,
+    you must declare the dependency on the consuming test as well.
+    """
+    pytester.makeconftest(_PYTESTER_CONFTEST)
+    pytester.makepyfile("""
+        import subprocess
+        import pytest
+
+        from imbue.resource_guards.resource_guards import fixture_uses_resources
+
+        @pytest.fixture
+        @fixture_uses_resources("cat")
+        def cat_fixture():
+            subprocess.run(["cat", "/dev/null"], check=True)
+            yield "value"
+
+        def test_consumer_without_mark(cat_fixture):
+            assert cat_fixture == "value"
+    """)
+    result = pytester.runpytest_subprocess("-n0", "--no-header", "-p", "no:cacheprovider")
+    result.assert_outcomes(failed=1)
+    result.stdout.fnmatch_lines(["*missing @pytest.mark.cat*"])
 
 
 def test_fixture_declares_resource_but_does_not_use_it_fails(pytester: pytest.Pytester, clean_guard_env: None) -> None:
@@ -340,8 +367,10 @@ def test_fixture_teardown_resource_calls_authorized_against_fixture(
 ) -> None:
     """Fixture teardown calls should also run under the fixture's guard scope.
 
-    If teardown happens during an unmarked test's lifecycle, its resource
-    calls must not be blocked (they belong to the fixture, not the test).
+    Teardown happens during the last consuming test's lifecycle; its resource
+    calls must be authorized against the fixture's declaration, not the test's
+    env. Both consumers carry the mark (required because they consume a
+    tagged fixture).
     """
     pytester.makeconftest(_PYTESTER_CONFTEST)
     pytester.makepyfile("""
@@ -356,12 +385,14 @@ def test_fixture_teardown_resource_calls_authorized_against_fixture(
             subprocess.run(["cat", "/dev/null"], check=True)
             yield "value"
             # Teardown invocation; should not be blocked even when the
-            # last consuming test lacks the mark.
+            # last consuming test lacks any direct cat usage.
             subprocess.run(["cat", "/dev/null"], check=True)
 
+        @pytest.mark.cat
         def test_first_consumer(cat_fixture):
             assert cat_fixture == "value"
 
+        @pytest.mark.cat
         def test_second_consumer(cat_fixture):
             assert cat_fixture == "value"
     """)
@@ -991,6 +1022,51 @@ def test_check_guard_violations_covered_resources_does_not_suppress_blocked(
 
     assert report.outcome == "failed"
     assert "without @pytest.mark.cat" in str(report.longrepr)
+
+
+def test_check_guard_violations_fails_unmarked_consumer_of_tagged_fixture(
+    isolated_guard_state: None,
+    tmp_path: Path,
+) -> None:
+    """A passing test consuming a tagged fixture without the matching mark should be failed."""
+    register_resource_guard("cat")
+
+    state = _make_state(tmp_path, marks=set(), covered_resources={"cat"})
+    report = _FakeReport(passed=True)
+    _check_guard_violations(state, report)  # ty: ignore[invalid-argument-type]
+
+    assert report.outcome == "failed"
+    assert "missing @pytest.mark.cat" in str(report.longrepr)
+
+
+def test_check_guard_violations_appends_undeclared_coverage_to_failing_test(
+    isolated_guard_state: None,
+    tmp_path: Path,
+) -> None:
+    """A failing test that's also missing a mark for a covered fixture gets both messages."""
+    register_resource_guard("cat")
+
+    state = _make_state(tmp_path, marks=set(), covered_resources={"cat"})
+    report = _FakeReport(passed=False, longrepr="original failure")
+    _check_guard_violations(state, report)  # ty: ignore[invalid-argument-type]
+
+    assert report.outcome == "failed"
+    assert "original failure" in str(report.longrepr)
+    assert "missing @pytest.mark.cat" in str(report.longrepr)
+
+
+def test_check_guard_violations_does_not_complain_when_mark_matches_coverage(
+    isolated_guard_state: None,
+    tmp_path: Path,
+) -> None:
+    """When marks fully cover the tagged-fixture resources, no violation should fire."""
+    register_resource_guard("cat")
+
+    state = _make_state(tmp_path, marks={"cat"}, covered_resources={"cat"})
+    report = _FakeReport(passed=True)
+    _check_guard_violations(state, report)  # ty: ignore[invalid-argument-type]
+
+    assert report.outcome == "passed"
 
 
 # ---------------------------------------------------------------------------

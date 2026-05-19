@@ -76,9 +76,9 @@ def deployed_function():
 
 With this in place, `@pytest.mark.modal` on a test is satisfied by *either*:
 - the test body directly invoking modal (the original meaning), OR
-- the test consuming a `@fixture_uses_resources("modal")` fixture in its closure.
+- the test consuming a `@fixture_uses_resources("modal")` fixture in its closure (the fixture's declaration is independently verified to invoke the resource, so the mark stays meaningful).
 
-Tests that only consume `deployed_function` (e.g. to hit its URL over HTTP) don't *need* the mark — the fixture's declaration carries the dependency. But they *may* carry it without triggering the superfluous-mark check, which is useful when you want `pytest -m modal` to select every test that transitively needs modal. The fixture's declaration is independently verified to invoke the resource, so the mark stays meaningful either way.
+But the mark is **required** on every consumer of a tagged fixture, even those that only hit the fixture's output (e.g. HTTPing the URL it yields). This keeps `pytest -m modal` as the canonical "select every test that transitively needs modal" selector — there's no escape hatch where a consuming test silently inherits the dependency without declaring it. A consumer that lacks the matching mark fails with a clear message pointing at the fixture.
 
 The block check (calls without the mark) is unaffected: a test body that directly invokes a resource still needs `@pytest.mark.<resource>` regardless of which fixtures it consumes.
 

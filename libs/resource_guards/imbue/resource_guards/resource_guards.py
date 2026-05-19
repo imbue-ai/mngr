@@ -835,7 +835,7 @@ def _pytest_runtest_teardown(item: pytest.Item) -> Generator[None, None, None]:
 def _check_guard_violations(state: _PerTestGuardState, report: pytest.TestReport) -> None:
     """Check resource guard invariants after the call phase and mutate the report if violated.
 
-    Two checks:
+    Three checks:
     1. Blocked invocations: a test without @pytest.mark.<resource> invoked
        the resource anyway. Checked regardless of pass/fail so the guard
        violation is visible even when the test fails for a downstream reason.
@@ -844,29 +844,47 @@ def _check_guard_violations(state: _PerTestGuardState, report: pytest.TestReport
        is already covered by a @fixture_uses_resources fixture in the test's
        closure are excluded, so the mark is accepted either when the test
        body invokes the resource OR when a tagged fixture transitively does.
+    3. Undeclared fixture coverage: the test consumes a fixture decorated with
+       @fixture_uses_resources(<resource>) but is missing the corresponding
+       @pytest.mark.<resource>. Static analysis of the fixture closure, so
+       reported regardless of runtime outcome -- the mark is required so that
+       `pytest -m <resource>` selects every test that transitively needs it.
     """
     enforce_marks = state.marks - state.covered_resources
     violation = _detect_guard_violations(enforce_marks, state.tracking_dir, check_never_invoked=report.passed)
-    if violation is None:
+    if violation is not None:
+        if violation.kind == _GuardViolationKind.BLOCKED:
+            msg = (
+                f"RESOURCE GUARD: Test invoked '{violation.resource}' without @pytest.mark.{violation.resource}.\n"
+                f"Add @pytest.mark.{violation.resource} to the test, or remove the {violation.resource} usage."
+            )
+            if report.passed:
+                report.outcome = "failed"
+                report.longrepr = msg
+            else:
+                report.longrepr = f"{report.longrepr}\n\n{msg}"
+            return
+
+        report.outcome = "failed"
+        report.longrepr = (
+            f"Test marked with @pytest.mark.{violation.resource} but never invoked {violation.resource}.\n"
+            f"Remove the mark or ensure the test exercises {violation.resource}."
+        )
         return
 
-    if violation.kind == _GuardViolationKind.BLOCKED:
+    undeclared = sorted(state.covered_resources - state.marks)
+    if undeclared:
+        resource = undeclared[0]
         msg = (
-            f"RESOURCE GUARD: Test invoked '{violation.resource}' without @pytest.mark.{violation.resource}.\n"
-            f"Add @pytest.mark.{violation.resource} to the test, or remove the {violation.resource} usage."
+            f"RESOURCE GUARD: Test consumes a fixture decorated with @fixture_uses_resources({resource!r}) "
+            f"but is missing @pytest.mark.{resource}. Add the mark so that `pytest -m {resource}` selects "
+            f"this test alongside other {resource}-using tests."
         )
         if report.passed:
             report.outcome = "failed"
             report.longrepr = msg
         else:
             report.longrepr = f"{report.longrepr}\n\n{msg}"
-        return
-
-    report.outcome = "failed"
-    report.longrepr = (
-        f"Test marked with @pytest.mark.{violation.resource} but never invoked {violation.resource}.\n"
-        f"Remove the mark or ensure the test exercises {violation.resource}."
-    )
 
 
 @pytest.hookimpl(hookwrapper=True)
