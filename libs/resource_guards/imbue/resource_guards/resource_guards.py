@@ -31,7 +31,6 @@ import os
 import shutil
 import stat
 import tempfile
-import weakref
 from collections.abc import Callable
 from collections.abc import Generator
 from collections.abc import Iterable
@@ -574,10 +573,7 @@ def _detect_guard_violations(
 # fixtures keep today's per-test attribution behavior.
 
 
-# Maps a fixture function to the resources it has declared via
-# @fixture_uses_resources. WeakKeyDictionary so registering a decorator on
-# a transient function does not leak the function past its lifetime.
-_fixture_resource_marks: weakref.WeakKeyDictionary[Callable[..., Any], set[str]] = weakref.WeakKeyDictionary()
+_fixture_resource_marks: dict[Callable[..., Any], set[str]] = {}
 
 F = TypeVar("F", bound=Callable[..., Any])
 
