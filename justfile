@@ -173,6 +173,11 @@ minds-test-deployment-down role="default":
 minds-test-services-against env_name *tests:
   uv run python apps/minds/scripts/test_deployments.py services-against "{{env_name}}" {{tests}}
 
+# Run only the minds_deployment pytest batch (each test mints its own ephemeral env).
+# No shared env stand-up, no mail.tm account -- fast iteration for the deploy tests.
+minds-test-deployment-only *tests:
+  uv run python apps/minds/scripts/test_deployments.py deployment-only {{tests}}
+
 # Download the Tailwind Play CDN JS bundle for the minds desktop client.
 # Idempotent and SHA-pinned via apps/minds/scripts/fetch_tailwind.sh -- the
 # same script also runs automatically as a pnpm `postinstall` hook, so

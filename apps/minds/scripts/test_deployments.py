@@ -595,6 +595,42 @@ def cleanup() -> None:
         sys.exit(1)
 
 
+@cli.command(name="deployment-only")
+@click.argument("tests", nargs=-1)
+def deployment_only(tests: tuple[str, ...]) -> None:
+    """Run only the ``minds_deployment`` pytest batch (no shared env stand-up).
+
+    For iterating on the ``minds_deployment`` tests (those that mint
+    their own ephemeral env via the ``ephemeral_env`` fixture) without
+    paying for the shared-env-deploy + mail.tm-account setup that the
+    main ``run`` command does. The FCT worktree is still validated up
+    front so tests that create real minds agents have a template ref to
+    point at; pass test files / nodeids positionally.
+
+    Operator must have ``vault login``-ed (the in-test ``minds env
+    deploy`` subprocess reads tier secrets from Vault).
+    """
+    _validate_fct_worktree()
+    run_id = _mint_run_id()
+
+    pytest_envs_path = _write_deployment_envs_json(
+        shared_envs={},
+        fct=FctTemplateRef(worktree_path=_FCT_WORKTREE_PATH),
+        run_id=run_id,
+    )
+    pytest_env = _build_pytest_env(
+        deployment_envs_json_path=pytest_envs_path,
+        mailtm_address=None,
+        mailtm_jwt=None,
+        shared_env_secrets={},
+    )
+
+    test_targets = tuple(tests) if tests else ()
+    rc = _invoke_pytest_for_mark("minds_deployment", env=pytest_env, extra_args=test_targets)
+    _drop_destroyed_rows_if_drained()
+    sys.exit(rc)
+
+
 @cli.command()
 @click.argument("role", default="default")
 def up(role: str) -> None:

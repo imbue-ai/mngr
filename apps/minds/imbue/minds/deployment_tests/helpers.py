@@ -6,6 +6,7 @@ auto-discovery, not normally imported from). Anything a test body
 ``imports`` should be in a regular module.
 """
 
+import os
 import re
 import time
 from datetime import datetime
@@ -17,13 +18,43 @@ from loguru import logger
 from pydantic import SecretStr
 
 from imbue.imbue_common.primitives import NonEmptyStr
+from imbue.minds.bootstrap import MINDS_ROOT_NAME_ENV_VAR
+from imbue.minds.bootstrap import mngr_host_dir_for
+from imbue.minds.bootstrap import mngr_prefix_for
+from imbue.minds.bootstrap import root_name_for_env_name
 from imbue.minds.deployment_tests.data_types import SharedEnvHandle
+from imbue.minds.envs.paths import client_config_file
+from imbue.minds.envs.primitives import DevEnvName
 from imbue.minds.errors import MindError
 
 _SUPERTOKENS_TENANT_ID: Final[str] = "public"
 _SUPERTOKENS_ADMIN_TIMEOUT_SECONDS: Final[float] = 30.0
 _ENV_READY_TIMEOUT_SECONDS: Final[float] = 60.0
 _ENV_READY_POLL_INTERVAL_SECONDS: Final[float] = 1.0
+# Dev tier's Modal workspace -- ``minds env activate`` exports this as
+# MODAL_PROFILE so every subsequent ``modal`` shellout targets the right
+# workspace. Mirrors apps/minds/imbue/minds/config/envs/dev/deploy.toml.
+_DEV_MODAL_PROFILE: Final[str] = "minds-dev"
+
+
+def build_minds_env_subprocess_env(name: DevEnvName) -> dict[str, str]:
+    """Build the env dict for a ``minds env deploy/destroy`` subprocess targeting ``name``.
+
+    Mirrors what ``minds env activate <name>`` exports (without going
+    through the print-shell-vars indirection): MINDS_ROOT_NAME, MNGR_HOST_DIR,
+    MNGR_PREFIX, MINDS_CLIENT_CONFIG_PATH, and (for dev envs) MODAL_PROFILE.
+    Inherits VAULT_TOKEN / VAULT_ADDR / VAULT_NAMESPACE / ANTHROPIC_API_KEY
+    from the parent process unchanged so the subprocess can read Vault +
+    talk to Anthropic without further wiring.
+    """
+    root_name = root_name_for_env_name(str(name))
+    env = dict(os.environ)
+    env[MINDS_ROOT_NAME_ENV_VAR] = root_name
+    env["MNGR_HOST_DIR"] = str(mngr_host_dir_for(root_name))
+    env["MNGR_PREFIX"] = mngr_prefix_for(root_name)
+    env["MINDS_CLIENT_CONFIG_PATH"] = str(client_config_file(name))
+    env["MODAL_PROFILE"] = _DEV_MODAL_PROFILE
+    return env
 
 
 def wait_for_env_ready(env: SharedEnvHandle, timeout_seconds: float = _ENV_READY_TIMEOUT_SECONDS) -> None:

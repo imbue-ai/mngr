@@ -20,6 +20,7 @@ orchestrator does not crash hard. The expected invocation is always
 
 import os
 import re
+import subprocess
 from collections.abc import Callable
 from collections.abc import Generator
 from datetime import datetime
@@ -34,6 +35,7 @@ from pydantic import AnyUrl
 from pydantic import SecretStr
 
 from imbue.imbue_common.primitives import NonEmptyStr
+from imbue.minds.config.loader import load_client_config
 from imbue.minds.deployment_tests._mailtm import MailtmInbox
 from imbue.minds.deployment_tests._mailtm import make_signup_address
 from imbue.minds.deployment_tests.data_types import DeploymentEnvsConfig
@@ -41,6 +43,7 @@ from imbue.minds.deployment_tests.data_types import EphemeralEnvHandle
 from imbue.minds.deployment_tests.data_types import FctTemplateRef
 from imbue.minds.deployment_tests.data_types import SharedEnvHandle
 from imbue.minds.deployment_tests.data_types import VerifiedUserHandle
+from imbue.minds.deployment_tests.helpers import build_minds_env_subprocess_env
 from imbue.minds.deployment_tests.helpers import delete_user_via_admin_api
 from imbue.minds.deployment_tests.helpers import sweep_stale_users
 from imbue.minds.deployment_tests.primitives import DEPLOYMENT_ENVS_JSON_ENV_VAR
@@ -51,6 +54,8 @@ from imbue.minds.deployment_tests.primitives import MailtmAddress
 from imbue.minds.deployment_tests.primitives import MailtmJwt
 from imbue.minds.deployment_tests.primitives import SHARED_ENV_SECRET_ENV_VAR_PREFIX
 from imbue.minds.deployment_tests.primitives import SharedEnvRole
+from imbue.minds.envs.paths import client_config_file
+from imbue.minds.envs.paths import env_root_dir
 from imbue.minds.envs.primitives import DevEnvName
 from imbue.minds.errors import MindError
 from imbue.mngr.utils.testing import get_short_random_string
@@ -291,32 +296,91 @@ def _mint_ephemeral_env_name() -> DevEnvName:
     return DevEnvName(f"dev-ci-{stamp}-{short}")
 
 
-def _deploy_ephemeral_env(*, name: DevEnvName, run_id: str) -> EphemeralEnvHandle:
-    """Run ``uv run minds env deploy`` for a fresh dev env and return its URLs.
+_MINDS_DEPLOY_TIMEOUT_SECONDS = 15 * 60
+_MINDS_DESTROY_TIMEOUT_SECONDS = 10 * 60
+# ``minds env deploy/destroy`` validate that they're being run from
+# inside the monorepo (they write a ``.minds-deploy-recover-target-<env>.json``
+# at the repo root). Pytest changes cwd to a tmpdir for each test, so
+# the subprocess inherits that tmpdir and would fail the check. Pin
+# cwd to the repo root explicitly.
+_REPO_ROOT_FOR_SUBPROCESS = Path(__file__).resolve().parents[3]
 
-    Stub: real implementation needs to drive ``minds env activate``
-    + ``minds env deploy``, parse the resulting client.toml, and append
-    the env to the orchestrator ledger. All currently-shipped
-    ``minds_deployment`` tests are skipped, so this stub is not yet
-    exercised; iterating on it is the next implementation step.
+
+def _deploy_ephemeral_env(*, name: DevEnvName, run_id: str) -> EphemeralEnvHandle:
+    """``mkdir -p <env-root>`` + ``uv run minds env deploy``; parse client.toml; return handle.
+
+    Shells out to the same ``minds env deploy`` CLI an operator would
+    run, with the activation env vars set (so the subprocess targets
+    ``<name>`` without needing a prior ``eval activate``). Captures
+    output to the test's stdout via ``check_output``. On failure,
+    surfaces stdout/stderr in the raised exception so the test author
+    can see what went wrong without scraping pytest logs.
+
+    The ``run_id`` is unused at the function-arg level today (the env
+    name already encodes it) but kept in the signature so future code
+    that ledgers the ephemeral env can stamp the run id without a
+    plumbing change.
     """
-    pytest.skip(
-        f"ephemeral_env provisioning for {name!r} (run {run_id!r}) is not implemented yet -- "
-        "see specs/minds-deployment-tests.md."
+    _ = run_id
+    target = env_root_dir(name)
+    target.mkdir(parents=True, exist_ok=True)
+    sub_env = build_minds_env_subprocess_env(name)
+    logger.info("ephemeral_env: deploying {!r}", name)
+    completed = subprocess.run(
+        ["uv", "run", "minds", "env", "deploy"],
+        env=sub_env,
+        cwd=str(_REPO_ROOT_FOR_SUBPROCESS),
+        capture_output=True,
+        text=True,
+        timeout=_MINDS_DEPLOY_TIMEOUT_SECONDS,
+        check=False,
+    )
+    if completed.returncode != 0:
+        raise MindError(
+            f"`minds env deploy` for {name!r} exited {completed.returncode}.\n"
+            f"--- stdout ---\n{completed.stdout}\n--- stderr ---\n{completed.stderr}"
+        )
+    client_toml = client_config_file(name)
+    if not client_toml.is_file():
+        raise MindError(
+            f"`minds env deploy` for {name!r} completed but did not write {client_toml}. "
+            "This usually means the deploy succeeded the modal side but failed the local-state write step."
+        )
+    client_config = load_client_config(client_toml)
+    return EphemeralEnvHandle(
+        name=name,
+        connector_url=client_config.connector_url,
+        litellm_proxy_url=client_config.litellm_proxy_url,
     )
 
 
 def _destroy_ephemeral_env(*, name: DevEnvName) -> None:
-    """Run ``uv run minds env destroy`` for the named env. Idempotent against missing state.
+    """``uv run minds env destroy`` for ``name``. Idempotent against missing env root.
 
-    Stub today; the orchestrator-side name+age sweep is the safety net
-    until this is wired up.
+    Returns silently if the env root doesn't exist (already destroyed
+    or never created). Otherwise shells out to ``minds env destroy``
+    which is itself idempotent per-resource. Any non-zero exit raises
+    so the caller can log + log a leak warning.
     """
-    logger.warning(
-        "ephemeral_env destroy for {!r} is not implemented yet; relying on the orchestrator's "
-        "name+age sweep to reclaim the env later.",
-        name,
+    if not env_root_dir(name).is_dir():
+        logger.info("ephemeral_env: {!r} has no env root on disk -- destroy is a no-op", name)
+        return
+    sub_env = build_minds_env_subprocess_env(name)
+    logger.info("ephemeral_env: destroying {!r}", name)
+    completed = subprocess.run(
+        ["uv", "run", "minds", "env", "destroy"],
+        env=sub_env,
+        cwd=str(_REPO_ROOT_FOR_SUBPROCESS),
+        capture_output=True,
+        text=True,
+        timeout=_MINDS_DESTROY_TIMEOUT_SECONDS,
+        check=False,
     )
+    if completed.returncode != 0:
+        raise MindError(
+            f"`minds env destroy` for {name!r} exited {completed.returncode}.\n"
+            f"--- stdout ---\n{completed.stdout}\n--- stderr ---\n{completed.stderr}"
+        )
 
 
 _SUPERTOKENS_TENANT_ID = "public"
