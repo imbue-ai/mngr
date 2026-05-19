@@ -329,10 +329,13 @@ def test_destroy_prints_errors_if_any_identifier_not_found(
 
 # Flaky under heavy CI load: wait_for(tmux_session_exists(...)) calls a tmux
 # subprocess that can exceed the 10s pytest-timeout when sandboxes are
-# contended. Offload retries flaky tests automatically; the underlying
-# tmux-subprocess slowness should be addressed separately.
+# contended. Bumping the per-test timeout gives the polling loop enough room
+# to make progress; offload still retries via @pytest.mark.flaky if it slips
+# further. The underlying tmux-subprocess slowness should be addressed
+# separately.
 @pytest.mark.tmux
 @pytest.mark.flaky
+@pytest.mark.timeout(60)
 def test_destroy_multiple_agents(
     cli_runner: CliRunner,
     temp_work_dir: Path,
@@ -803,6 +806,7 @@ def test_destroy_transfer_none_standalone_keeps_user_worktree(
 
 @pytest.mark.tmux
 @pytest.mark.flaky
+@pytest.mark.timeout(60)
 def test_destroy_via_stdin(
     cli_runner: CliRunner,
     temp_work_dir: Path,
