@@ -31,7 +31,6 @@ from collections.abc import Generator
 from http.server import BaseHTTPRequestHandler
 from http.server import ThreadingHTTPServer
 from pathlib import Path
-from typing import Any
 from typing import Final
 
 import pytest
@@ -92,12 +91,13 @@ def _make_fake_minds_api(state: _FakeMindsApiState) -> ThreadingHTTPServer:
     """Build a ``ThreadingHTTPServer`` that records requests and replies from ``state``."""
 
     class _Handler(BaseHTTPRequestHandler):
-        # Silence the default per-request stderr log; the test prints
-        # its own assertions if anything goes wrong. The base class
-        # signature uses ``*args: Any``, so we match it verbatim --
-        # narrower types here would violate LSP.
-        def log_message(self, format: str, *args: Any) -> None:  # noqa: A002 -- match base signature
-            del format, args
+        # We deliberately do not override ``log_message`` to silence
+        # per-request stderr noise: the project type checker rejects
+        # any signature whose first param name is not the base's
+        # literal ``format`` (since that name is keyword-callable),
+        # and matching ``format`` would shadow a builtin. Pytest
+        # captures stderr per test anyway, so the noise is invisible
+        # unless the test fails.
 
         def _handle(self) -> None:
             content_length_raw = self.headers.get("Content-Length")
@@ -397,7 +397,10 @@ def test_proxy_returns_503_when_env_var_unset(
     fake_minds_api: tuple[ThreadingHTTPServer, _FakeMindsApiState, str],
 ) -> None:
     """Without ``LATCHKEY_EXTENSION_MINDS_API_URL``, the proxy must 503 deterministically."""
-    del fake_minds_api  # fixture is requested only to ensure node binary is available
+    # The ``fake_minds_api`` fixture is requested only to share the
+    # skip-when-node-missing gate; the upstream server it stands up is
+    # irrelevant to this test (the proxy must 503 before contacting it).
+    del fake_minds_api
     assert _NODE_BINARY is not None
     script = _build_node_driver_script()
     process = subprocess.Popen(
