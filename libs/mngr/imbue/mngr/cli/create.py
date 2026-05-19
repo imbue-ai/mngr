@@ -94,6 +94,7 @@ from imbue.mngr.primitives import LogLevel
 from imbue.mngr.primitives import NewAgentLocation
 from imbue.mngr.primitives import OutputFormat
 from imbue.mngr.primitives import Permission
+from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import SnapshotName
 from imbue.mngr.primitives import TransferMode
@@ -264,7 +265,7 @@ def _is_creating_new_host(address: NewAgentLocation, new_host_flag: bool) -> boo
 
 
 # Backend name of the imbue_cloud provider plugin.
-_IMBUE_CLOUD_BACKEND: Final[str] = "imbue_cloud"
+_IMBUE_CLOUD_BACKEND: Final[ProviderBackendName] = ProviderBackendName("imbue_cloud")
 
 
 def _is_imbue_cloud_provider(provider_name: ProviderInstanceName | None, mngr_ctx: MngrContext) -> bool:
