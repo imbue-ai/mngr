@@ -176,6 +176,12 @@ class AgentStartError(AgentError):
 class ProviderError(MngrError):
     """Base class for all provider-related errors."""
 
+    provider_name: ProviderInstanceName
+
+    def __init__(self, provider_name: ProviderInstanceName, message: str) -> None:
+        self.provider_name = provider_name
+        super().__init__(message)
+
 
 class ProviderUnavailableError(ProviderError):
     """Provider backend is not reachable (e.g. Docker daemon not running).
@@ -186,10 +192,10 @@ class ProviderUnavailableError(ProviderError):
     """
 
     def __init__(self, provider_name: ProviderInstanceName, reason: str) -> None:
-        self.provider_name = provider_name
         super().__init__(
+            provider_name,
             f"Provider '{provider_name}' is not available: {reason}. "
-            f"Any agents managed by this provider could not be reached."
+            f"Any agents managed by this provider could not be reached.",
         )
         self.user_help_text = (
             f"Ensure the provider backend is running (e.g. start Docker), or disable the provider:\n"
@@ -225,9 +231,8 @@ class ProviderDiscoveryError(ProviderError):
     """
 
     def __init__(self, provider_name: ProviderInstanceName, cause: BaseException) -> None:
-        self.provider_name = provider_name
         self.cause = cause
-        super().__init__(f"Discovery failed for provider '{provider_name}': {cause}")
+        super().__init__(provider_name, f"Discovery failed for provider '{provider_name}': {cause}")
 
 
 class ProviderInstanceNotFoundError(ProviderError):
@@ -238,19 +243,17 @@ class ProviderInstanceNotFoundError(ProviderError):
     )
 
     def __init__(self, provider_name: ProviderInstanceName) -> None:
-        self.provider_name = provider_name
-        super().__init__(f"Provider {provider_name} not found")
+        super().__init__(provider_name, f"Provider {provider_name} not found")
 
 
 class ProviderNotAuthorizedError(ProviderError):
     """Provider instance is not authorized/authenticated."""
 
     def __init__(self, provider_name: ProviderInstanceName, auth_help: str | None = None) -> None:
-        self.provider_name = provider_name
         message = f"Provider '{provider_name}' is not authorized."
         if auth_help:
             message = f"{message} {auth_help}"
-        super().__init__(message)
+        super().__init__(provider_name, message)
         self.user_help_text = (
             f"To disable this provider, run:\n"
             f"  mngr config set --scope user providers.{provider_name}.is_enabled false\n"
@@ -263,9 +266,9 @@ class HostNotFoundError(ProviderError):
 
     user_help_text = "Use 'mngr list' to see available hosts and agents."
 
-    def __init__(self, host: HostId | HostName) -> None:
+    def __init__(self, provider_name: ProviderInstanceName, host: HostId | HostName) -> None:
         self.host = host
-        super().__init__(f"Host not found: {host}")
+        super().__init__(provider_name, f"Host not found: {host}")
 
 
 class HostCreationError(ProviderError):
@@ -275,9 +278,9 @@ class HostCreationError(ProviderError):
 class ImageNotFoundError(HostCreationError):
     """The specified image does not exist or is invalid."""
 
-    def __init__(self, image: ImageReference) -> None:
+    def __init__(self, provider_name: ProviderInstanceName, image: ImageReference) -> None:
         self.image = image
-        super().__init__(f"Image not found: {image}")
+        super().__init__(provider_name, f"Image not found: {image}")
 
 
 class ResourceAllocationError(HostCreationError):
@@ -288,9 +291,11 @@ class DockerBuildTimeoutError(HostCreationError):
     """Raised when `docker build` exceeds the configured build timeout."""
 
     def __init__(self, provider_name: ProviderInstanceName, timeout_seconds: int) -> None:
-        self.provider_name = provider_name
         self.timeout_seconds = timeout_seconds
-        super().__init__(f"docker build timed out after {timeout_seconds} seconds for provider '{provider_name}'.")
+        super().__init__(
+            provider_name,
+            f"docker build timed out after {timeout_seconds} seconds for provider '{provider_name}'.",
+        )
         self.user_help_text = (
             f"Increase build_timeout_seconds for this provider, e.g.:\n"
             f"  mngr config set --scope user providers.{provider_name}.build_timeout_seconds 1800"
@@ -302,9 +307,9 @@ class HostNameConflictError(ProviderError):
 
     user_help_text = "Choose a different host name, or destroy the existing host first with 'mngr destroy'."
 
-    def __init__(self, name: HostName) -> None:
+    def __init__(self, provider_name: ProviderInstanceName, name: HostName) -> None:
         self.name = name
-        super().__init__(f"Host name already exists: {name}")
+        super().__init__(provider_name, f"Host name already exists: {name}")
 
 
 class HostNotRunningError(ProviderError):
@@ -312,10 +317,10 @@ class HostNotRunningError(ProviderError):
 
     user_help_text = "Start the host first with 'mngr start <host>'."
 
-    def __init__(self, host_id: HostId, state: HostState) -> None:
+    def __init__(self, provider_name: ProviderInstanceName, host_id: HostId, state: HostState) -> None:
         self.host_id = host_id
         self.state = state
-        super().__init__(f"Host {host_id} is not running (state: {state})")
+        super().__init__(provider_name, f"Host {host_id} is not running (state: {state})")
 
 
 class HostNotStoppedError(ProviderError):
@@ -323,10 +328,10 @@ class HostNotStoppedError(ProviderError):
 
     user_help_text = "Stop the host first with 'mngr stop <host>'."
 
-    def __init__(self, host_id: HostId, state: HostState) -> None:
+    def __init__(self, provider_name: ProviderInstanceName, host_id: HostId, state: HostState) -> None:
         self.host_id = host_id
         self.state = state
-        super().__init__(f"Host {host_id} is not stopped (state: {state})")
+        super().__init__(provider_name, f"Host {host_id} is not stopped (state: {state})")
 
 
 class SnapshotError(ProviderError):
@@ -338,9 +343,9 @@ class SnapshotNotFoundError(SnapshotError):
 
     user_help_text = "Use 'mngr snapshot list <host>' to see available snapshots."
 
-    def __init__(self, snapshot_id: SnapshotId) -> None:
+    def __init__(self, provider_name: ProviderInstanceName, snapshot_id: SnapshotId) -> None:
         self.snapshot_id = snapshot_id
-        super().__init__(f"Snapshot not found: {snapshot_id}")
+        super().__init__(provider_name, f"Snapshot not found: {snapshot_id}")
 
 
 class SnapshotsNotSupportedError(SnapshotError):
@@ -351,31 +356,30 @@ class SnapshotsNotSupportedError(SnapshotError):
     )
 
     def __init__(self, provider_name: ProviderInstanceName) -> None:
-        self.provider_name = provider_name
-        super().__init__(f"Provider {provider_name} does not support snapshots")
+        super().__init__(provider_name, f"Provider {provider_name} does not support snapshots")
 
 
 class TagLimitExceededError(ProviderError):
     """Tags exceed provider's storage limit."""
 
-    def __init__(self, limit: int, actual: int) -> None:
+    def __init__(self, provider_name: ProviderInstanceName, limit: int, actual: int) -> None:
         self.limit = limit
         self.actual = actual
-        super().__init__(f"Tag limit exceeded: {actual} tags (limit: {limit})")
+        super().__init__(provider_name, f"Tag limit exceeded: {actual} tags (limit: {limit})")
 
 
 class LocalHostNotStoppableError(ProviderError):
     """Raised when attempting to stop the local host."""
 
-    def __init__(self) -> None:
-        super().__init__("Cannot stop the local host - it is your local computer")
+    def __init__(self, provider_name: ProviderInstanceName) -> None:
+        super().__init__(provider_name, "Cannot stop the local host - it is your local computer")
 
 
 class LocalHostNotDestroyableError(ProviderError):
     """Raised when attempting to destroy the local host."""
 
-    def __init__(self) -> None:
-        super().__init__("Cannot destroy the local host - it is your local computer")
+    def __init__(self, provider_name: ProviderInstanceName) -> None:
+        super().__init__(provider_name, "Cannot destroy the local host - it is your local computer")
 
 
 class PluginSpecifierError(BaseMngrError, ValueError):
