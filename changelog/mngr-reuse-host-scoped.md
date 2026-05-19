@@ -6,10 +6,12 @@ address whenever the host was being newly provisioned. A fresh-host create with
 `--reuse --update` could accidentally adopt an unrelated same-named agent on a
 different host, push the new work tree onto it, and fail with
 `refusing to update checked out branch`. The match is now scoped to the host
-component of the address (`HostId` matches exactly; `HostName` matches by name
-with the provider as a tiebreaker), so the reuse path stays anchored to the
-host the user actually asked for. The bare-name form (`--reuse` without a host
-in the address) keeps its documented "any host" behavior.
+component of the address (`HostId` matches exactly; `HostName` matches by name,
+and when the address also pins a provider the host's provider must match too,
+so same-named hosts on different providers cannot cross-match), so the reuse
+path stays anchored to the host the user actually asked for. The bare-name
+form (`--reuse` without a host in the address) keeps its documented "any host"
+behavior.
 
 `mngr create` also rejects `--reuse --new-host` with a `UserInputError`:
 `--new-host` always provisions a fresh host, while `--reuse` looks up an
