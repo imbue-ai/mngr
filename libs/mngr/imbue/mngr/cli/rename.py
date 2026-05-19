@@ -6,6 +6,7 @@ from click_option_group import optgroup
 from loguru import logger
 
 from imbue.mngr.api.discovery_events import emit_agent_discovered
+from imbue.mngr.api.find import ensure_host_started
 from imbue.mngr.api.find import find_one_agent_and_agents_by_host
 from imbue.mngr.api.providers import get_provider_instance
 from imbue.mngr.cli.address_params import AGENT_ADDRESS
@@ -21,6 +22,7 @@ from imbue.mngr.cli.output_helpers import write_human_line
 from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.config.data_types import OutputOptions
 from imbue.mngr.errors import UserInputError
+from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import AgentAddress
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import OutputFormat
@@ -32,6 +34,7 @@ class RenameCliOptions(CommonCliOptions):
     current: AgentAddress
     new_name: AgentName
     dry_run: bool
+    start: bool
     label: tuple[str, ...] = ()
     # Planned features (not yet implemented)
     host: bool
@@ -74,6 +77,17 @@ def _output_result(
     "--dry-run",
     is_flag=True,
     help="Show what would be renamed without actually renaming",
+)
+@optgroup.option(
+    "--start/--no-start",
+    default=False,
+    show_default=True,
+    help=(
+        "If the host is offline, start it before renaming so the tmux "
+        "session and on-host env file are updated alongside data.json. "
+        "Default: do not start; rename only edits the provider's persisted "
+        "agent data."
+    ),
 )
 @optgroup.option(
     "--host",
@@ -141,8 +155,12 @@ def rename(ctx: click.Context, **kwargs: Any) -> None:
 
     # Online and offline hosts both implement rename_agent; the offline
     # variant only edits the provider's persisted data (no tmux/env updates).
+    # With --start, force the host online first so tmux and env files are
+    # updated too; otherwise rename whichever host kind we end up with.
     provider = get_provider_instance(host_ref.provider_name, mngr_ctx)
     host = provider.get_host(host_ref.host_id)
+    if opts.start and not isinstance(host, OnlineHostInterface):
+        host, _ = ensure_host_started(host, is_start_desired=True, provider=provider)
     updated_ref = host.rename_agent(agent_ref, new_agent_name, labels_to_merge=labels_to_merge or None)
 
     # Only the renamed agent's metadata changed; the host and other agents
@@ -166,7 +184,7 @@ def rename(ctx: click.Context, **kwargs: Any) -> None:
 CommandHelpMetadata(
     key="rename",
     one_line_description="Rename an agent or host [experimental]",
-    synopsis="mngr [rename|mv] <CURRENT> <NEW-NAME> [--dry-run] [--host] [-l KEY=VALUE ...]",
+    synopsis="mngr [rename|mv] <CURRENT> <NEW-NAME> [--dry-run] [--start/--no-start] [--host] [-l KEY=VALUE ...]",
     arguments_description="- `CURRENT`: Current name or ID of the agent to rename\n- `NEW-NAME`: New name for the agent",
     description="""Updates the agent's name in its data.json and renames the tmux session
 if the agent is currently running. Git branch names are not renamed.
@@ -174,7 +192,8 @@ if the agent is currently running. Git branch names are not renamed.
 If the host is offline, the rename is applied to the provider's
 persisted agent data without starting the host; tmux and env-file
 updates are skipped (data.json remains the source of truth for the
-agent's name).
+agent's name). Pass --start to force the host online first so tmux
+and the env file are updated alongside data.json.
 
 If a previous rename was interrupted (e.g., the tmux session was renamed
 but data.json was not updated), re-running the command will attempt
