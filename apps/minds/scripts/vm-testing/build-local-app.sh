@@ -92,7 +92,6 @@ mkdir -p "$wheels_dir"
 
 for entry in "${WORKSPACE_PACKAGES[@]}"; do
     pkg_dir="${entry%%:*}"
-    pkg_name="${entry##*:}"
     [[ -d "$repo_root/$pkg_dir" ]] || die "workspace package not found: $repo_root/$pkg_dir"
     log "  uv build $pkg_dir"
     uv build --quiet --wheel --out-dir "$wheels_dir" "$repo_root/$pkg_dir"
