@@ -1,8 +1,9 @@
 /**
  * Build script for Minds desktop app.
  *
- * Downloads platform-specific uv and git binaries, copies the standalone
- * pyproject.toml + lockfile into the resources directory for packaging.
+ * Downloads platform-specific uv, git, and Lima binaries, copies the
+ * standalone pyproject.toml + lockfile into the resources directory for
+ * packaging.
  */
 
 const fs = require('fs');
