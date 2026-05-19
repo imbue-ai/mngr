@@ -271,7 +271,7 @@ def test_prevent_init_methods_in_non_exception_classes() -> None:
 
 
 def test_prevent_cast_usage() -> None:
-    rc.check_cast_usage(_DIR, snapshot(8))
+    rc.check_cast_usage(_DIR, snapshot(9))
 
 
 def test_prevent_assert_isinstance() -> None:
