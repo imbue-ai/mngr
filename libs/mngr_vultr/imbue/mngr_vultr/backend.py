@@ -107,7 +107,15 @@ class VultrProviderBackend(ProviderBackendInterface):
         name: ProviderInstanceName,
         config: ProviderInstanceConfig,
         mngr_ctx: MngrContext,
+        is_for_host_creation: bool = False,
     ) -> ProviderInstanceInterface:
+        """Build a Vultr provider instance.
+
+        ``is_for_host_creation`` is ignored: the Vultr backend has no one-time
+        bootstrap resources to gate on (compare the Modal backend, which uses
+        this flag to authorize creating a missing per-user env).
+        """
+        del is_for_host_creation
         if not isinstance(config, VultrProviderConfig):
             raise MngrError(f"Expected VultrProviderConfig, got {type(config).__name__}")
 

@@ -79,7 +79,7 @@ def _start_serial_tailer(cg: ConcurrencyGroup, serial_log_path: str) -> None:
     """
     global _active_serial_tailer
     _active_serial_tailer = cg.run_process_in_background(
-        ["tail", "--follow=name", "--retry", serial_log_path],
+        ["tail", "-F", serial_log_path],
         is_checked_by_group=False,
         on_output=_log_boot_output,
     )
