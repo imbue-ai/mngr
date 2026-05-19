@@ -212,12 +212,13 @@ def test_encryption_key_path_is_under_directory(tmp_path: Path) -> None:
 
 
 def test_fresh_mint_persists_to_disk_with_owner_only_mode(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """The race-safe ``O_EXCL`` write path also installs 0600 perms (matches the chmod-explicit test).
+    """The atomic-link write path also installs 0600 perms (matches the chmod-explicit test).
 
-    Belt-and-suspenders: even when the umask is permissive, the
-    ``mode=`` arg to ``os.open`` (masked by umask) is *not* the only
-    safeguard -- the next load would reject the file if it ended up
-    with group/other bits set.
+    Belt-and-suspenders: even when the umask is permissive, the temp
+    file is created with mode 0600 (via :func:`tempfile.mkstemp`,
+    which ignores umask) and the on-disk file inherits that mode
+    through ``os.link``. The next load would reject the file if it
+    ended up with group/other bits set.
     """
     _disable_operator_override(monkeypatch)
     # Even a permissive umask must not produce a group/other-readable

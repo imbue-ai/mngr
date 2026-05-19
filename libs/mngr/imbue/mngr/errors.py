@@ -216,8 +216,7 @@ class ProviderEmptyError(ProviderError):
     """
 
     def __init__(self, provider_name: ProviderInstanceName, reason: str) -> None:
-        self.provider_name = provider_name
-        super().__init__(f"Provider '{provider_name}' has no state yet: {reason}")
+        super().__init__(provider_name, f"Provider '{provider_name}' has no state yet: {reason}")
 
 
 class ProviderDiscoveryError(ProviderError):
