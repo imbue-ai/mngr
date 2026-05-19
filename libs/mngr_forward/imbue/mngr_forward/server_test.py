@@ -738,7 +738,7 @@ def test_subdomain_forward_returns_plain_503_for_non_html_on_connect_failure(tmp
     """Non-HTML callers (API clients) get the plain 503 with no location header."""
     agent_id = AgentId()
     preauth = "preauth-cookie-json"
-    app, env_out, mock_client = _make_forward_app_with_mock_backend(
+    app, _env_out, mock_client = _make_forward_app_with_mock_backend(
         tmp_path,
         agent_id,
         preauth,
