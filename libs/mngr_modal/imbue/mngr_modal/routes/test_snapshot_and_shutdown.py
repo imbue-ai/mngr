@@ -128,7 +128,7 @@ def _read_host_record_from_volume(app_name: str, host_id: str) -> dict[str, Any]
         return None
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture
 def deployed_snapshot_function() -> Generator[tuple[str, str], None, None]:
     """Deploy the snapshot function for testing and clean up after.
 
