@@ -22,6 +22,8 @@ out of the box for everyone else.
 import os
 import secrets
 import stat
+import tempfile
+from contextlib import suppress
 from pathlib import Path
 from typing import Final
 
@@ -82,9 +84,13 @@ def load_or_create_encryption_key(latchkey_directory: Path) -> SecretStr:
        return.
 
     Idempotent: re-calls return the same key as long as the file is
-    intact. Cross-process safe: the ``open(..., "x")`` exclusive create
-    avoids two simultaneous minds runs racing to mint different keys
-    (loser falls through to the read path).
+    intact. Cross-process safe via an atomic ``os.link``-based publish:
+    the key is fully written and ``fsync``ed into a temp file first,
+    then linked into the final path. The final path therefore only
+    ever exists with complete contents, so a concurrent reader that
+    sees it can never observe an empty or partially-written key. The
+    link itself fails with ``FileExistsError`` if another process
+    already published, in which case we read that version.
 
     Raises:
         LatchkeyEncryptionKeyPermissionError: when an existing key file
@@ -99,25 +105,64 @@ def load_or_create_encryption_key(latchkey_directory: Path) -> SecretStr:
 
     key_path = encryption_key_path(latchkey_directory)
     if key_path.is_file():
+        # Safe to read: the atomic-link publish below means ``key_path``
+        # only appears once its contents are complete.
         _validate_key_file_permissions(key_path)
         return SecretStr(key_path.read_text(encoding="utf-8").strip())
 
     latchkey_directory.mkdir(parents=True, exist_ok=True)
     fresh_key = secrets.token_urlsafe(_ENCRYPTION_KEY_BYTES)
-    # Race-safe write: ``x`` mode raises FileExistsError if another
-    # process beat us to it -- in which case we fall through and read
-    # the loser-of-the-race version (whose permissions we then validate
-    # for the same reason we'd validate any other pre-existing file).
+    return _atomically_publish_key(key_path, fresh_key)
+
+
+def _atomically_publish_key(key_path: Path, fresh_key: str) -> SecretStr:
+    """Write ``fresh_key`` into a sibling temp file and ``os.link`` it to ``key_path``.
+
+    The temp file is created with mode 0600 (via :func:`tempfile.mkstemp`),
+    fully written, ``fsync``ed, and closed *before* the link. ``os.link``
+    is atomic and fails with :class:`FileExistsError` if ``key_path``
+    already exists -- so:
+
+    * On link success, no reader could have observed ``key_path`` in an
+      intermediate state: it sprang into existence already complete.
+    * On link failure, the loser of the race unlinks its temp file and
+      reads the winner's (also complete) key. The winner's file is
+      guaranteed complete by the same argument applied to *their* link
+      call.
+
+    This replaces an earlier ``O_EXCL`` open + write-to-final-path
+    scheme that left a window during which the final path existed but
+    was empty, allowing a concurrent caller to read ``""`` as the key.
+    """
+    # ``mkstemp`` creates the file with mode 0600 and returns an open
+    # fd. Keeping the temp file in the same directory as ``key_path``
+    # is required for ``os.link`` (same filesystem) and is also what
+    # makes the link atomic.
+    tmp_fd, tmp_path_str = tempfile.mkstemp(
+        prefix=f".{ENCRYPTION_KEY_FILENAME}.", suffix=".tmp", dir=str(key_path.parent)
+    )
+    tmp_path = Path(tmp_path_str)
     try:
-        fd = os.open(str(key_path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, stat.S_IRUSR | stat.S_IWUSR)
-    except FileExistsError:
-        _validate_key_file_permissions(key_path)
-        return SecretStr(key_path.read_text(encoding="utf-8").strip())
-    try:
-        os.write(fd, fresh_key.encode("utf-8"))
+        try:
+            os.write(tmp_fd, fresh_key.encode("utf-8"))
+            # fsync before the link so a crash between link and the
+            # data hitting disk can't leave a zero-length final file.
+            os.fsync(tmp_fd)
+        finally:
+            os.close(tmp_fd)
+        try:
+            os.link(str(tmp_path), str(key_path))
+        except FileExistsError:
+            # Another process published first. Their file is complete
+            # (same argument, applied to their link call), so read it.
+            _validate_key_file_permissions(key_path)
+            return SecretStr(key_path.read_text(encoding="utf-8").strip())
+        return SecretStr(fresh_key)
     finally:
-        os.close(fd)
-    return SecretStr(fresh_key)
+        # Always remove the temp file: on success it's a redundant
+        # second link to the same inode; on failure it's debris.
+        with suppress(FileNotFoundError):
+            tmp_path.unlink()
 
 
 def _validate_key_file_permissions(key_path: Path) -> None:
