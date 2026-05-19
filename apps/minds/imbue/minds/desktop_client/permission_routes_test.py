@@ -382,6 +382,67 @@ def test_post_permission_grant_rejects_empty_permissions(tmp_path: Path) -> None
     assert final_inbox.get_pending_count() == 1
 
 
+def test_post_permission_grant_with_failed_signin_returns_denied_outcome(tmp_path: Path) -> None:
+    agent_id = AgentId()
+    request = create_latchkey_permission_request_event(
+        agent_id=str(agent_id),
+        scope="slack-api",
+        rationale="reason",
+    )
+    inbox = RequestInbox().add_request(request)
+    handler = _make_recording_handler(
+        tmp_path,
+        grant_outcome=GrantOutcome.DENIED,
+        grant_message="Your sign-in flow did not finish. Reason: user cancelled.",
+    )
+    client = _build_authenticated_client(tmp_path, handler, inbox, agent_id=agent_id)
+
+    response = client.post(
+        f"/requests/{request.event_id}/grant",
+        data={"permissions": ["slack-read-all"]},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    # No separate AUTH_FAILED status: a failed sign-in is reported as DENIED
+    # with a distinct message so the agent can tell the user what happened.
+    assert payload["outcome"] == "DENIED"
+    assert "user cancelled" in payload["message"]
+
+
+def test_post_permission_grant_with_manual_credentials_keeps_request_pending(tmp_path: Path) -> None:
+    """NEEDS_MANUAL_CREDENTIALS must echo the example command and not resolve the inbox."""
+    agent_id = AgentId()
+    request = create_latchkey_permission_request_event(
+        agent_id=str(agent_id),
+        scope="slack-api",
+        rationale="reason",
+    )
+    inbox = RequestInbox().add_request(request)
+    expected_example = 'latchkey auth set slack -H "Authorization: Bearer xoxb-..."'
+    handler = _make_recording_handler(
+        tmp_path,
+        grant_outcome=GrantOutcome.NEEDS_MANUAL_CREDENTIALS,
+        grant_message="Slack does not support browser sign-in.",
+        grant_set_credentials_example=expected_example,
+    )
+    client = _build_authenticated_client(tmp_path, handler, inbox, agent_id=agent_id)
+
+    response = client.post(
+        f"/requests/{request.event_id}/grant",
+        data={"permissions": ["slack-read-all"]},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["outcome"] == "NEEDS_MANUAL_CREDENTIALS"
+    assert payload["set_credentials_example"] == expected_example
+    # The request must remain pending so the user can click Approve again
+    # after running the suggested command.
+    final_inbox = _get_app_request_inbox(client)
+    assert final_inbox.get_pending_count() == 1
+
+
 def test_post_permission_deny_calls_handler_and_resolves_inbox(tmp_path: Path) -> None:
     agent_id = AgentId()
     request = create_latchkey_permission_request_event(
