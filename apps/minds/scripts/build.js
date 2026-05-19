@@ -58,28 +58,43 @@ function download(url) {
   });
 }
 
-async function downloadUv({ platform, arch }) {
-  const uvDir = path.join(RESOURCES_DIR, 'uv');
-  fs.mkdirSync(uvDir, { recursive: true });
-
-  const url = getUvDownloadUrl({ platform, arch });
-  console.log(`Downloading uv from ${url}...`);
+/**
+ * Download a gzipped tarball to ``destDir`` and extract it in place with
+ * ``--strip-components=1``, then verify and chmod the named binary.
+ *
+ * Used for binaries that ship as a single self-contained tarball rooted one
+ * level deep (e.g. uv, Lima). ``label`` is used only for log lines and error
+ * messages; ``archiveName`` is the on-disk filename for the downloaded
+ * tarball (deleted after extraction); ``binaryPath`` is the absolute path
+ * the caller expects the extracted binary to live at.
+ */
+async function downloadAndExtractTarball({ destDir, url, archiveName, binaryPath, label }) {
+  fs.mkdirSync(destDir, { recursive: true });
+  console.log(`Downloading ${label} from ${url}...`);
 
   const tarball = await download(url);
-  const tarPath = path.join(uvDir, 'uv.tar.gz');
+  const tarPath = path.join(destDir, archiveName);
   fs.writeFileSync(tarPath, tarball);
 
-  // Extract the tarball
-  execSync(`tar xzf "${tarPath}" -C "${uvDir}" --strip-components=1`, { stdio: 'inherit' });
+  execSync(`tar xzf "${tarPath}" -C "${destDir}" --strip-components=1`, { stdio: 'inherit' });
   fs.unlinkSync(tarPath);
 
-  // Verify the binary exists
-  const uvBinary = path.join(uvDir, 'uv');
-  if (!fs.existsSync(uvBinary)) {
-    throw new Error(`uv binary not found at ${uvBinary} after extraction`);
+  if (!fs.existsSync(binaryPath)) {
+    throw new Error(`${label} binary not found at ${binaryPath} after extraction`);
   }
-  fs.chmodSync(uvBinary, 0o755);
-  console.log(`uv binary installed at ${uvBinary}`);
+  fs.chmodSync(binaryPath, 0o755);
+  console.log(`${label} binary installed at ${binaryPath}`);
+}
+
+async function downloadUv({ platform, arch }) {
+  const uvDir = path.join(RESOURCES_DIR, 'uv');
+  await downloadAndExtractTarball({
+    destDir: uvDir,
+    url: getUvDownloadUrl({ platform, arch }),
+    archiveName: 'uv.tar.gz',
+    binaryPath: path.join(uvDir, 'uv'),
+    label: 'uv',
+  });
 }
 
 /**
@@ -336,29 +351,17 @@ function getLimaDownloadUrl({ platform, arch }) {
 }
 
 async function downloadLima({ platform, arch }) {
+  // We keep the full extracted layout (bin/ + share/ + libexec/) because
+  // limactl resolves its templates and guest-agent payloads via paths
+  // relative to its own executable.
   const limaDir = path.join(RESOURCES_DIR, 'lima');
-  fs.mkdirSync(limaDir, { recursive: true });
-
-  const url = getLimaDownloadUrl({ platform, arch });
-  console.log(`Downloading Lima from ${url}...`);
-
-  const tarball = await download(url);
-  const tarPath = path.join(limaDir, 'lima.tar.gz');
-  fs.writeFileSync(tarPath, tarball);
-
-  // The tarball is rooted at ./bin, ./share, etc., so strip the leading
-  // component when extracting. We keep the full layout (bin/ + share/)
-  // because limactl resolves its templates and guest-agent payloads via
-  // paths relative to its own executable.
-  execSync(`tar xzf "${tarPath}" -C "${limaDir}" --strip-components=1`, { stdio: 'inherit' });
-  fs.unlinkSync(tarPath);
-
-  const limactlBinary = path.join(limaDir, 'bin', 'limactl');
-  if (!fs.existsSync(limactlBinary)) {
-    throw new Error(`limactl binary not found at ${limactlBinary} after extraction`);
-  }
-  fs.chmodSync(limactlBinary, 0o755);
-  console.log(`limactl binary installed at ${limactlBinary}`);
+  await downloadAndExtractTarball({
+    destDir: limaDir,
+    url: getLimaDownloadUrl({ platform, arch }),
+    archiveName: 'lima.tar.gz',
+    binaryPath: path.join(limaDir, 'bin', 'limactl'),
+    label: 'Lima',
+  });
 }
 
 async function downloadGit() {
