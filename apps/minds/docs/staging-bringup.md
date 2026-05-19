@@ -138,18 +138,19 @@ become Vault entries in step 4.
 ## 2. Fill in the committed staging `deploy.toml`
 
 `apps/minds/imbue/minds/config/envs/staging/deploy.toml` ships with
-two known placeholders -- update them in this branch and commit:
+one known placeholder -- update it in this branch and commit:
 
 - [ ] `cloudflare_domain = "CHANGE_ME.example.com"` -> the real staging
   zone (e.g. `"staging.minds.example.com"`). Read by the connector at
   runtime and used by tunnel creation.
-- [ ] `oauth_google_client_id = ""` -> the staging Google client id
-  (the secret stays in Vault under `supertokens`).
-- [ ] `oauth_github_client_id = ""` -> the staging GitHub client id.
 
 The other fields (`modal_workspace`, `vault_path_prefix`, the
 `[secrets]` services list, `[lifecycle]`, `[min_containers]`) are
 already correct for staging. Do not edit them.
+
+OAuth provider client ids + secrets live exclusively in
+`secrets/minds/<tier>/supertokens` (see step 4); there's no
+corresponding `deploy.toml` field to mirror them.
 
 `apps/minds/imbue/minds/config/envs/staging/client.toml` already
 contains the deterministic Modal URLs
