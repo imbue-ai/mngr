@@ -196,8 +196,8 @@ def _read_backend_port_from_log() -> int | None:
     if not MINDS_LOG.exists():
         return None
     text = MINDS_LOG.read_text(errors="replace")
-    # Extract the dynamic backend port from the ``Bare-origin`` line the
-    # forward supervisor writes once it starts listening.
+    # Extract the dynamic backend port from the ``Bare-origin`` line that
+    # ``minds run`` logs once the backend chooses a port.
     m = re.search(r"Bare-origin:\s*http://[^:]+:(\d+)", text)
     if m:
         return int(m.group(1))
