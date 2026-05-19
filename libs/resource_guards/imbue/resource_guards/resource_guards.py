@@ -791,8 +791,14 @@ def _pytest_fixture_setup(
     finally:
         fixturedef.func = original_func
         _check_fixture_setup_violations(fixture_id, resources_set, tracking_dir, setup_failed)
-        # Tracking dir is left in /tmp; the wrapper's teardown still writes to
-        # it, and the OS cleans tempfiles. Not worth the bookkeeping to delete.
+        # The tracking dir is intentionally leaked: the wrapper still writes
+        # to it during the fixture's teardown phase, which runs after this
+        # hook returns. Reaping it correctly would require hooking into the
+        # fixture's scope finalizer (function/module/session) to time the
+        # deletion against the last teardown write -- more plumbing than the
+        # leak is worth. Each tagged fixture instantiation leaves behind one
+        # small empty-ish directory under the OS temp dir for the rest of
+        # the session; cleanup is left to the user/OS between sessions.
 
 
 @pytest.hookimpl(hookwrapper=True)
