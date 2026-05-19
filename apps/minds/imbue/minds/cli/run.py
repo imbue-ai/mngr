@@ -182,34 +182,13 @@ def run(
     # across desktop-client restarts.
     gateway_client = LatchkeyGatewayClient.from_latchkey(latchkey)
 
-    # Restart the detached supervisor and *then* pre-warm the gateway
-    # client, in a single background thread. Pre-warming must come
-    # after the supervisor restart because ``ensure_initialized``
-    # reads the bound gateway port from the supervisor's on-disk
-    # ``LatchkeyForwardInfo`` record: if we pre-warmed in parallel,
-    # the gateway client could observe the previous supervisor's
-    # stale port (still on disk, still alive for a few ms longer)
-    # before the restart deletes that record and the new supervisor
-    # stamps the fresh port. The cached URL would then point at a
-    # port nothing listens on for the lifetime of the process, and
-    # every gateway call would fail with ``Connection refused``.
-    # ``LatchkeyGatewayClient`` also self-heals from this on a
-    # connect-level error by invalidating the cached URL, but we
-    # avoid the wasted retry by ordering startup correctly here.
-    # Crucially this stays in a background thread so the supervisor
-    # restart's 10s SIGTERM grace never blocks app startup.
-    def _restart_supervisor_then_prewarm_gateway_client() -> None:
-        _ensure_mngr_latchkey_forward_supervisor(latchkey)
-        try:
-            gateway_client.ensure_initialized()
-        except LatchkeyGatewayClientError as e:
-            logger.warning(
-                "Could not pre-warm the latchkey gateway client; first request will retry: {}",
-                e,
-            )
-
+    # Background thread: supervisor restart must complete before the
+    # gateway-client pre-warm reads the on-disk forward record, or it
+    # caches the previous supervisor's stale port for the rest of the
+    # process lifetime.
     root_concurrency_group.start_new_thread(
         _restart_supervisor_then_prewarm_gateway_client,
+        args=(latchkey, gateway_client),
         name="mngr-latchkey-supervisor-and-gateway-init",
     )
 
@@ -509,6 +488,26 @@ def _sleep_then_open(url: str, delay: float = 1.0) -> None:
     """
     threading.Event().wait(timeout=delay)
     webbrowser.open(url)
+
+
+def _restart_supervisor_then_prewarm_gateway_client(
+    latchkey: Latchkey,
+    gateway_client: LatchkeyGatewayClient,
+) -> None:
+    """Restart the latchkey supervisor, then pre-warm the gateway client.
+
+    Order matters: the gateway client's ``ensure_initialized`` reads
+    the bound port from the supervisor's on-disk record, so it must
+    run after the supervisor restart has stamped the fresh port.
+    """
+    _ensure_mngr_latchkey_forward_supervisor(latchkey)
+    try:
+        gateway_client.ensure_initialized()
+    except LatchkeyGatewayClientError as e:
+        logger.warning(
+            "Could not pre-warm the latchkey gateway client; first request will retry: {}",
+            e,
+        )
 
 
 def _ensure_mngr_latchkey_forward_supervisor(latchkey: Latchkey) -> None:
