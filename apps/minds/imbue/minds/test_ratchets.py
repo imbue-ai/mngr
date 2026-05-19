@@ -154,11 +154,11 @@ def test_prevent_num_prefix() -> None:
 
 
 def test_prevent_trailing_comments() -> None:
-    # ``forward_cli.py`` carries one ``# noqa: S603`` next to the
-    # ``subprocess.Popen`` call that spawns ``mngr forward``. The S603
-    # suppression must be on the same line as the call for ruff to
-    # recognize it; ``# noqa`` is intentionally not in the trailing-
-    # comment exempt list.
+    # ``forward_cli.py`` carries one ``noqa: S603`` suppression next to
+    # the ``subprocess.Popen`` call that spawns ``mngr forward``. The
+    # S603 suppression must be on the same line as the call for ruff to
+    # recognize it; the noqa marker is intentionally not in the
+    # trailing-comment exempt list.
     rc.check_trailing_comments(_DIR, snapshot(1))
 
 
