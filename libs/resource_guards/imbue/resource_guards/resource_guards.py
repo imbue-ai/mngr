@@ -34,12 +34,14 @@ import tempfile
 from collections.abc import Callable
 from collections.abc import Generator
 from collections.abc import Iterable
+from contextlib import contextmanager
 from enum import StrEnum
 from enum import auto
 from functools import wraps
 from pathlib import Path
 from typing import Any
 from typing import TypeVar
+from typing import assert_never
 from unittest.mock import patch
 from uuid import uuid4
 
@@ -736,17 +738,20 @@ def _check_fixture_setup_violations(
     if violation is None:
         return
 
-    if violation.kind == _GuardViolationKind.BLOCKED:
-        raise ResourceGuardViolation(
-            f"RESOURCE GUARD: Fixture '{fixture_id}' invoked '{violation.resource}' but did not declare it via "
-            f"@fixture_uses_resources({violation.resource!r}). Add the declaration or remove the {violation.resource} usage."
-        ) from setup_exception
-
-    raise ResourceGuardViolation(
-        f"RESOURCE GUARD: Fixture '{fixture_id}' declared @fixture_uses_resources({violation.resource!r}) "
-        f"but did not invoke {violation.resource} during setup. Remove the declaration "
-        f"or ensure the fixture exercises {violation.resource}."
-    ) from setup_exception
+    match violation.kind:
+        case _GuardViolationKind.BLOCKED:
+            raise ResourceGuardViolation(
+                f"RESOURCE GUARD: Fixture '{fixture_id}' invoked '{violation.resource}' but did not declare it via "
+                f"@fixture_uses_resources({violation.resource!r}). Add the declaration or remove the {violation.resource} usage."
+            ) from setup_exception
+        case _GuardViolationKind.NEVER_INVOKED:
+            raise ResourceGuardViolation(
+                f"RESOURCE GUARD: Fixture '{fixture_id}' declared @fixture_uses_resources({violation.resource!r}) "
+                f"but did not invoke {violation.resource} during setup. Remove the declaration "
+                f"or ensure the fixture exercises {violation.resource}."
+            ) from setup_exception
+        case _:  # pragma: no cover
+            assert_never(violation.kind)
 
 
 class _ResourceGuardPlugin:
@@ -783,6 +788,17 @@ class _ResourceGuardPlugin:
         yield from _pytest_fixture_setup(fixturedef, request)
 
 
+@contextmanager
+def _swapped_fixturedef_func(fixturedef: Any, new_func: Callable[..., Any]) -> Generator[None, None, None]:
+    """Temporarily replace fixturedef.func, restoring the original on exit."""
+    original = fixturedef.func
+    fixturedef.func = new_func
+    try:
+        yield
+    finally:
+        fixturedef.func = original
+
+
 @pytest.hookimpl(hookwrapper=True)
 def _pytest_fixture_setup(
     fixturedef: Any,
@@ -808,25 +824,22 @@ def _pytest_fixture_setup(
     fixture_env = _build_guard_env(resources_set, tracking_dir)
     fixture_id = fixturedef.argname
 
-    original_func = fixturedef.func
-    fixturedef.func = _make_guarded_fixture_wrapper(original_func, fixture_env)
-
     setup_failed = False
     setup_exception: BaseException | None = None
-    try:
-        outcome = yield
-        if outcome.excinfo is not None:
-            setup_failed = True
-            # outcome.excinfo is a (type, value, traceback) triple from pluggy.
-            # Capturing the exception instance lets us chain it onto any
-            # ResourceGuardViolation we raise below, so the underlying setup
-            # failure isn't silently dropped from the traceback.
-            setup_exception = outcome.excinfo[1]
-    finally:
-        fixturedef.func = original_func
-        _check_fixture_setup_violations(
-            fixture_id, resources_set, tracking_dir, setup_failed, setup_exception=setup_exception
-        )
+    with _swapped_fixturedef_func(fixturedef, _make_guarded_fixture_wrapper(fixturedef.func, fixture_env)):
+        try:
+            outcome = yield
+            if outcome.excinfo is not None:
+                setup_failed = True
+                # outcome.excinfo is a (type, value, traceback) triple from pluggy.
+                # Capturing the exception instance lets us chain it onto any
+                # ResourceGuardViolation we raise below, so the underlying setup
+                # failure isn't silently dropped from the traceback.
+                setup_exception = outcome.excinfo[1]
+        finally:
+            _check_fixture_setup_violations(
+                fixture_id, resources_set, tracking_dir, setup_failed, setup_exception=setup_exception
+            )
 
 
 @pytest.hookimpl(hookwrapper=True)
@@ -852,12 +865,15 @@ def _pytest_runtest_setup(item: pytest.Item) -> Generator[None, None, None]:
     env_patcher = patch.dict(os.environ, _build_guard_env(marks, tracking_dir))
     env_patcher.start()
 
-    # Initialize _guard_state BEFORE any code that can raise. _pytest_runtest_teardown
-    # and _pytest_runtest_makereport both unconditionally read item._guard_state, so a
-    # missing state attribute would mask the underlying error with cascading
-    # AttributeError. covered_resources is filled in next; if
-    # _collect_fixture_covered_resources raises (e.g. on a tagged-fixture override),
-    # the empty default keeps state coherent for cleanup.
+    # Assign _guard_state before any code that can raise: teardown and
+    # makereport both unconditionally read item._guard_state, and raising
+    # before assignment would mask the underlying error with a cascading
+    # AttributeError. covered_resources starts as an empty placeholder and
+    # is filled in below; if _collect_fixture_covered_resources raises, the
+    # test enters the "setup failed" path and _check_guard_violations (the
+    # only consumer of covered_resources, runs on call-phase makereport
+    # only) never executes on it -- so the placeholder is never actually
+    # consulted on the failure path.
     state = _PerTestGuardState(
         tracking_dir=tracking_dir,
         marks=marks,
@@ -915,22 +931,25 @@ def _check_guard_violations(state: _PerTestGuardState, report: pytest.TestReport
     enforce_marks = state.marks - state.covered_resources
     violation = _detect_guard_violations(enforce_marks, state.tracking_dir, check_never_invoked=report.passed)
     if violation is not None:
-        if violation.kind == _GuardViolationKind.BLOCKED:
-            msg = (
-                f"RESOURCE GUARD: Test invoked '{violation.resource}' without @pytest.mark.{violation.resource}.\n"
-                f"Add @pytest.mark.{violation.resource} to the test, or remove the {violation.resource} usage."
-            )
-            if report.passed:
+        match violation.kind:
+            case _GuardViolationKind.BLOCKED:
+                msg = (
+                    f"RESOURCE GUARD: Test invoked '{violation.resource}' without @pytest.mark.{violation.resource}.\n"
+                    f"Add @pytest.mark.{violation.resource} to the test, or remove the {violation.resource} usage."
+                )
+                if report.passed:
+                    report.outcome = "failed"
+                    report.longrepr = msg
+                else:
+                    report.longrepr = f"{report.longrepr}\n\n{msg}"
+            case _GuardViolationKind.NEVER_INVOKED:
                 report.outcome = "failed"
-                report.longrepr = msg
-            else:
-                report.longrepr = f"{report.longrepr}\n\n{msg}"
-        else:
-            report.outcome = "failed"
-            report.longrepr = (
-                f"Test marked with @pytest.mark.{violation.resource} but never invoked {violation.resource}.\n"
-                f"Remove the mark or ensure the test exercises {violation.resource}."
-            )
+                report.longrepr = (
+                    f"Test marked with @pytest.mark.{violation.resource} but never invoked {violation.resource}.\n"
+                    f"Remove the mark or ensure the test exercises {violation.resource}."
+                )
+            case _:  # pragma: no cover
+                assert_never(violation.kind)
 
     undeclared = sorted(state.covered_resources - state.marks)
     if undeclared:

@@ -152,8 +152,12 @@ def test_prevent_num_prefix() -> None:
 # --- Documentation ---
 
 
+# The +1 here is `# pragma: no cover` after the `case _:` exhaustiveness
+# sentinels in _check_fixture_setup_violations / _check_guard_violations.
+# The pragma has to be on the same line as the case clause; moving it
+# above would silently disable the directive.
 def test_prevent_trailing_comments() -> None:
-    rc.check_trailing_comments(_DIR, snapshot(1))
+    rc.check_trailing_comments(_DIR, snapshot(3))
 
 
 def test_prevent_init_docstrings() -> None:
