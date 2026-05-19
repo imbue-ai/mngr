@@ -158,6 +158,22 @@ PY
 log "generating uv.lock against the wheel sources"
 ( cd "$pyproject_dir" && uv lock --quiet )
 
+# electron/paths.js::getBundledConfigDir() looks for
+# <pyproject_dir>/imbue/minds/config/envs/_bundled/{client.toml,root_name}
+# in packaged mode. build.js writes those files into the source tree but
+# does not stage them under resources/pyproject/, which is fine for the
+# stock ToDesktop build (which copies the imbue tree there itself) but
+# leaves @electron/packager output without them. Mirror that staging step
+# explicitly so the packaged runtime can find the client config.
+bundled_src="$minds_dir/imbue/minds/config/envs/_bundled"
+if [[ -f "$bundled_src/client.toml" ]]; then
+    bundled_dst="$pyproject_dir/imbue/minds/config/envs/_bundled"
+    log "staging $bundled_src -> $bundled_dst"
+    mkdir -p "$bundled_dst"
+    cp "$bundled_src/client.toml" "$bundled_dst/client.toml"
+    [[ -f "$bundled_src/root_name" ]] && cp "$bundled_src/root_name" "$bundled_dst/root_name"
+fi
+
 # electron-packager's pnpm support follows symlinks into the global store
 # and chokes on transitive deps. Swap to a flat npm install just for the
 # packaging step. We restore the pnpm install at the end so dev mode keeps
