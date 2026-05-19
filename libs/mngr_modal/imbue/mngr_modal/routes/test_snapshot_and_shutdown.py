@@ -218,6 +218,7 @@ def test_snapshot_and_shutdown_success(
 
 
 @pytest.mark.acceptance
+@pytest.mark.modal
 @pytest.mark.timeout(180)
 def test_snapshot_and_shutdown_missing_sandbox_id(
     deployed_snapshot_function: tuple[str, str],
@@ -236,6 +237,7 @@ def test_snapshot_and_shutdown_missing_sandbox_id(
 
 
 @pytest.mark.acceptance
+@pytest.mark.modal
 @pytest.mark.timeout(180)
 def test_snapshot_and_shutdown_missing_host_id(
     deployed_snapshot_function: tuple[str, str],

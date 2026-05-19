@@ -16,6 +16,7 @@ from imbue.resource_guards.resource_guards import _PerTestGuardState
 from imbue.resource_guards.resource_guards import _build_guard_env
 from imbue.resource_guards.resource_guards import _check_fixture_setup_violations
 from imbue.resource_guards.resource_guards import _check_guard_violations
+from imbue.resource_guards.resource_guards import _collect_fixture_covered_resources
 from imbue.resource_guards.resource_guards import _detect_guard_violations
 from imbue.resource_guards.resource_guards import _fixture_resource_marks
 from imbue.resource_guards.resource_guards import _make_guarded_fixture_wrapper
@@ -302,14 +303,16 @@ def test_fixture_uses_resource_without_declaring_it_fails(pytester: pytest.Pytes
     result.stdout.fnmatch_lines(["*did not declare it*"])
 
 
-def test_fixture_resource_calls_do_not_leak_into_consumer_tracking(
+def test_marked_consumer_of_tagged_fixture_passes_without_direct_use(
     pytester: pytest.Pytester, clean_guard_env: None
 ) -> None:
-    """Fixture setup's resource calls must not satisfy the consuming test's mark.
+    """A test may carry @pytest.mark.<resource> when a tagged fixture covers it.
 
-    A test marked @pytest.mark.cat that only consumes a fixture (and never
-    calls cat in its body) should still fail with "never invoked cat" --
-    the fixture's calls belong to the fixture's scope, not the test's.
+    The fixture's @fixture_uses_resources("cat") declaration is independently
+    verified to actually invoke cat during setup, so @pytest.mark.cat on a
+    consuming test is meaningful even when the test body never calls cat
+    directly. This lets `pytest -m cat` select all tests that transitively
+    need cat without the mark becoming a NEVER_INVOKED violation.
     """
     pytester.makeconftest(_PYTESTER_CONFTEST)
     pytester.makepyfile("""
@@ -329,8 +332,7 @@ def test_fixture_resource_calls_do_not_leak_into_consumer_tracking(
             assert cat_fixture == "value"
     """)
     result = pytester.runpytest_subprocess("-n0", "--no-header", "-p", "no:cacheprovider")
-    result.assert_outcomes(failed=1)
-    result.stdout.fnmatch_lines(["*never invoked cat*"])
+    result.assert_outcomes(passed=1)
 
 
 def test_fixture_teardown_resource_calls_authorized_against_fixture(
@@ -847,11 +849,17 @@ class _FakeReport:
         return self.outcome == "passed"
 
 
-def _make_state(tmp_path: Path, marks: set[str]) -> _PerTestGuardState:
+def _make_state(
+    tmp_path: Path,
+    marks: set[str],
+    *,
+    covered_resources: set[str] | None = None,
+) -> _PerTestGuardState:
     tracking_dir = str(tmp_path)
     return _PerTestGuardState(
         tracking_dir=tracking_dir,
         marks=marks,
+        covered_resources=covered_resources or set(),
         env_patcher=None,
     )
 
@@ -950,6 +958,41 @@ def test_check_guard_violations_skips_superfluous_check_on_failing_test(
     assert report.longrepr == "real failure"
 
 
+def test_check_guard_violations_skips_superfluous_check_when_mark_is_fixture_covered(
+    isolated_guard_state: None,
+    tmp_path: Path,
+) -> None:
+    """A passing test whose mark is satisfied by a tagged fixture in its closure should pass."""
+    register_resource_guard("cat")
+
+    state = _make_state(tmp_path, marks={"cat"}, covered_resources={"cat"})
+    report = _FakeReport(passed=True)
+    _check_guard_violations(state, report)  # ty: ignore[invalid-argument-type]
+
+    assert report.outcome == "passed"
+
+
+def test_check_guard_violations_covered_resources_does_not_suppress_blocked(
+    isolated_guard_state: None,
+    tmp_path: Path,
+) -> None:
+    """Fixture coverage relaxes only the NEVER_INVOKED check, never BLOCKED.
+
+    A blocked invocation by the test body must still be reported even when
+    a tagged fixture covers the same resource -- the test body's calls are
+    governed by the test's own marks, not the fixture's declaration.
+    """
+    register_resource_guard("cat")
+    (tmp_path / "blocked_cat").touch()
+
+    state = _make_state(tmp_path, marks=set(), covered_resources={"cat"})
+    report = _FakeReport(passed=True)
+    _check_guard_violations(state, report)  # ty: ignore[invalid-argument-type]
+
+    assert report.outcome == "failed"
+    assert "without @pytest.mark.cat" in str(report.longrepr)
+
+
 # ---------------------------------------------------------------------------
 # Fixture-scope helpers (unit tests)
 # ---------------------------------------------------------------------------
@@ -974,6 +1017,57 @@ def test_fixture_uses_resources_accumulates_across_calls() -> None:
     fixture_uses_resources("modal")(some_fixture)
     fixture_uses_resources("docker")(some_fixture)
     assert _fixture_resource_marks[some_fixture] == {"modal", "docker"}
+
+
+class _FakeFixtureInfo:
+    """Minimal stand-in for pytest's FuncFixtureInfo."""
+
+    def __init__(self, name2fixturedefs: dict[str, list[Any]]) -> None:
+        self.name2fixturedefs = name2fixturedefs
+
+
+class _FakeItem:
+    """Minimal stand-in for a pytest.Function item with a fixture closure."""
+
+    def __init__(self, name2fixturedefs: dict[str, list[Any]]) -> None:
+        self._fixtureinfo = _FakeFixtureInfo(name2fixturedefs)
+
+
+def test_collect_fixture_covered_resources_unions_across_closure() -> None:
+    """Resources declared by any tagged fixture in the closure should be returned."""
+
+    def tagged_fixture_a() -> None:
+        pass
+
+    def tagged_fixture_b() -> None:
+        pass
+
+    def untagged_fixture() -> None:
+        pass
+
+    fixture_uses_resources("modal")(tagged_fixture_a)
+    fixture_uses_resources("docker")(tagged_fixture_b)
+
+    item = _FakeItem(
+        {
+            "tagged_a": [_FakeFixtureDef(tagged_fixture_a, "tagged_a")],
+            "tagged_b": [_FakeFixtureDef(tagged_fixture_b, "tagged_b")],
+            "plain": [_FakeFixtureDef(untagged_fixture, "plain")],
+        }
+    )
+
+    covered = _collect_fixture_covered_resources(item)  # ty: ignore[invalid-argument-type]
+    assert covered == {"modal", "docker"}
+
+
+def test_collect_fixture_covered_resources_returns_empty_when_no_tagged_fixtures() -> None:
+    """A closure of only untagged fixtures should produce an empty covered set."""
+
+    def plain_fixture() -> None:
+        pass
+
+    item = _FakeItem({"plain": [_FakeFixtureDef(plain_fixture, "plain")]})
+    assert _collect_fixture_covered_resources(item) == set()  # ty: ignore[invalid-argument-type]
 
 
 def test_detect_guard_violations_returns_blocked_when_present(

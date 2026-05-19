@@ -74,7 +74,13 @@ def deployed_function():
     stop_function(...)
 ```
 
-With this in place, `@pytest.mark.modal` on a test means "this test body directly invokes modal." Tests that only consume `deployed_function` (e.g. to hit its URL over HTTP) don't need the mark — the fixture's declaration carries the dependency.
+With this in place, `@pytest.mark.modal` on a test is satisfied by *either*:
+- the test body directly invoking modal (the original meaning), OR
+- the test consuming a `@fixture_uses_resources("modal")` fixture in its closure.
+
+Tests that only consume `deployed_function` (e.g. to hit its URL over HTTP) don't *need* the mark — the fixture's declaration carries the dependency. But they *may* carry it without triggering the superfluous-mark check, which is useful when you want `pytest -m modal` to select every test that transitively needs modal. The fixture's declaration is independently verified to invoke the resource, so the mark stays meaningful either way.
+
+The block check (calls without the mark) is unaffected: a test body that directly invokes a resource still needs `@pytest.mark.<resource>` regardless of which fixtures it consumes.
 
 The decorator must go *below* `@pytest.fixture` so it sees the underlying function before pytest captures it. Opt-in: untagged fixtures are unaffected.
 

@@ -86,7 +86,7 @@ def test_prevent_importlib_import_module() -> None:
 
 
 def test_prevent_getattr() -> None:
-    rc.check_getattr(_DIR, snapshot(2))
+    rc.check_getattr(_DIR, snapshot(1))
 
 
 def test_prevent_setattr() -> None:
@@ -246,7 +246,7 @@ def test_prevent_if_elif_without_else() -> None:
 
 
 def test_prevent_inline_functions() -> None:
-    rc.check_inline_functions(_DIR, snapshot(5))
+    rc.check_inline_functions(_DIR, snapshot(4))
 
 
 def test_prevent_underscore_imports() -> None:

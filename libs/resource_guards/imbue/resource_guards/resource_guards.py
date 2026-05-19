@@ -62,6 +62,7 @@ class _PerTestGuardState:
 
     tracking_dir: str
     marks: set[str]
+    covered_resources: set[str]
     env_patcher: patch.dict  # ty: ignore[invalid-type-form]
 
 
@@ -608,6 +609,28 @@ def fixture_uses_resources(*resources: str) -> Callable[[F], F]:
     return decorator
 
 
+def _collect_fixture_covered_resources(item: pytest.Item) -> set[str]:
+    """Resources declared via @fixture_uses_resources by any fixture in item's closure.
+
+    A test's @pytest.mark.<resource> is considered satisfied by transitive use
+    if a fixture in the test's closure declared that resource via
+    @fixture_uses_resources -- the fixture's setup is independently verified
+    to actually invoke the resource, so the mark on the consuming test is
+    meaningful even when the test body never calls the resource directly.
+
+    Lazy fixtures retrieved via request.getfixturevalue() are not part of
+    the static closure and therefore do not contribute to coverage here.
+    """
+    fixture_info = item._fixtureinfo  # ty: ignore[unresolved-attribute]
+    covered: set[str] = set()
+    for fixturedefs in fixture_info.name2fixturedefs.values():
+        for fixturedef in fixturedefs:
+            declared = _fixture_resource_marks.get(fixturedef.func)
+            if declared:
+                covered |= declared
+    return covered
+
+
 def _make_guarded_fixture_wrapper(
     original_func: Callable[..., Any],
     fixture_env: dict[str, str],
@@ -767,6 +790,7 @@ def _pytest_runtest_setup(item: pytest.Item) -> Generator[None, None, None]:
     )
 
     marks = {m.name for m in item.iter_markers()}
+    covered_resources = _collect_fixture_covered_resources(item)
     tracking_dir = tempfile.mkdtemp(prefix="pytest_guard_track_")
     env_patcher = patch.dict(os.environ, _build_guard_env(marks, tracking_dir))
     env_patcher.start()
@@ -774,6 +798,7 @@ def _pytest_runtest_setup(item: pytest.Item) -> Generator[None, None, None]:
     item._guard_state = _PerTestGuardState(  # ty: ignore[unresolved-attribute]
         tracking_dir=tracking_dir,
         marks=marks,
+        covered_resources=covered_resources,
         env_patcher=env_patcher,
     )
 
@@ -797,9 +822,13 @@ def _check_guard_violations(state: _PerTestGuardState, report: pytest.TestReport
        the resource anyway. Checked regardless of pass/fail so the guard
        violation is visible even when the test fails for a downstream reason.
     2. Superfluous marks: a test has @pytest.mark.<resource> but the resource
-       was never invoked. Only checked on passing tests.
+       was never invoked. Only checked on passing tests. Marks whose resource
+       is already covered by a @fixture_uses_resources fixture in the test's
+       closure are excluded, so the mark is accepted either when the test
+       body invokes the resource OR when a tagged fixture transitively does.
     """
-    violation = _detect_guard_violations(state.marks, state.tracking_dir, check_never_invoked=report.passed)
+    enforce_marks = state.marks - state.covered_resources
+    violation = _detect_guard_violations(enforce_marks, state.tracking_dir, check_never_invoked=report.passed)
     if violation is None:
         return
 
