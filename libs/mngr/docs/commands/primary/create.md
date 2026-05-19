@@ -251,6 +251,17 @@ Provider: modal
                           ARG during the image build. Can be specified multiple times.
   No start arguments are supported for the modal provider.
 
+Provider: ovh
+  VPS-specific args (consumed by provider, not passed to docker):
+    --vps-datacenter=DC   OVH datacenter (e.g. US-EAST-VA, US-WEST-OR)
+    --vps-plan=PLAN       OVH plan code (default: vps-2025-model1 = VPS-1)
+    --vps-os=NAME         OVH image name (default: 'Debian 12 - Docker')
+    --git-depth=N         Shallow-clone build context to depth N before upload
+
+  All other build args are passed to 'docker build' on the VPS.
+  Example: -b --vps-plan=vps-2025-model1 -b --file=Dockerfile -b .
+  Start args are passed directly to 'docker run'. Run 'docker run --help' for details.
+
 Provider: ssh
   The SSH provider does not support creating hosts dynamically.
   Hosts must be pre-configured in the mngr config file.
