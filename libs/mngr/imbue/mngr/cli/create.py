@@ -644,13 +644,10 @@ def create(ctx: click.Context, **kwargs) -> None:
 
         # Validate --reuse + --new-host: contradictory by construction. --new-host
         # always provisions a fresh host; --reuse looks up an existing agent on an
-        # existing host. The imbue_cloud lease/adopt flow is the lone documented
-        # exception: ``--new-host`` triggers a pool-host lease that surfaces a
-        # pre-baked agent which the create flow adopts in place, and ``--reuse``
-        # is what older minds builds rely on to suppress the duplicate-name check.
-        # The exemption is explicit (not silent) so this branch is reviewable; if
-        # the imbue_cloud minds caller is updated to drop ``--reuse``, this branch
-        # can be removed.
+        # existing host. The imbue_cloud provider is exempt: its --new-host path
+        # leases a pool host that surfaces a pre-baked agent, and --reuse bypasses
+        # the duplicate-name pre-flight that fires before the lease/adopt path
+        # can hydrate that agent in place.
         if opts.reuse and opts.new_host and not _is_imbue_cloud_provider(address.provider_name, mngr_ctx):
             raise UserInputError(
                 "--reuse cannot be combined with --new-host: --reuse looks up an existing agent "
