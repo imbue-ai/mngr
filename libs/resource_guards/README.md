@@ -55,7 +55,7 @@ def test_agent_creates_tmux_session():
 
 ## Fixture-level resource declarations
 
-`@fixture_uses_resources(...)` is the fixture-level analogue of the regular per-test resource mark: it declares which resources a fixture itself uses, and is independently verified — the fixture must actually invoke each declared resource during setup, just like a marked test must actually invoke each marked resource. With that in place, the mark on consuming tests stays meaningful regardless of whether the consumer hits the resource directly or only transitively through the fixture.
+`@fixture_uses_resources(...)` is the fixture-level analogue of the regular per-test resource mark: it declares which resources a fixture itself uses, and is independently verified — the fixture must actually invoke each declared resource during setup, just like a marked test must actually invoke each marked resource.
 
 By default, resource calls during fixture setup/teardown are attributed to whichever test happens to drive that lifecycle. That's fine for function-scoped fixtures but breaks down for module/session-scoped fixtures shared across multiple tests: the fixture's resource calls land in only one test's tracking dir, and siblings end up either failing the superfluous-mark check or having their fixture call blocked.
 
