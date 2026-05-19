@@ -7,11 +7,8 @@ with SHA-256 hash lookup.
 
 import json
 import shlex
-from typing import Annotated
 
 from fastapi import APIRouter
-from fastapi import Depends
-from fastapi import HTTPException
 from fastapi import Request
 from fastapi.responses import Response
 from loguru import logger
@@ -19,8 +16,9 @@ from loguru import logger
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.minds.config.data_types import MNGR_BINARY
 from imbue.minds.config.data_types import WorkspacePaths
-from imbue.minds.desktop_client.api_key_store import find_agent_by_api_key
+from imbue.minds.desktop_client.api_key_auth import CallerAgentIdDep
 from imbue.minds.desktop_client.deps import BackendResolverDep
+from imbue.minds.desktop_client.file_server import register_file_server_routes
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.notification import NotificationRequest
 from imbue.minds.desktop_client.notification import NotificationUrgency
@@ -28,31 +26,6 @@ from imbue.minds.telegram.credential_store import load_agent_bot_credentials
 from imbue.minds.telegram.setup import TelegramSetupOrchestrator
 from imbue.minds.telegram.setup import TelegramSetupStatus
 from imbue.mngr.primitives import AgentId
-
-
-def _authenticate_api_key(request: Request) -> AgentId:
-    """Extract and validate the Bearer token from the Authorization header.
-
-    Returns the AgentId of the caller. Raises HTTPException with 401 if the
-    token is missing, malformed, or does not match any stored API key hash.
-    """
-    auth_header = request.headers.get("authorization", "")
-    if not auth_header.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="Missing or malformed Authorization header")
-
-    token = auth_header[len("Bearer ") :]
-    if not token:
-        raise HTTPException(status_code=401, detail="Empty Bearer token")
-
-    paths: WorkspacePaths = request.app.state.api_v1_paths
-    agent_id = find_agent_by_api_key(paths.data_dir, token)
-    if agent_id is None:
-        raise HTTPException(status_code=401, detail="Invalid API key")
-
-    return agent_id
-
-
-CallerAgentIdDep = Annotated[AgentId, Depends(_authenticate_api_key)]
 
 
 def inject_tunnel_token_into_agent(agent_id: AgentId, token: str) -> None:
@@ -226,5 +199,8 @@ def create_api_v1_router() -> APIRouter:
     router.post(
         "/notifications",
     )(_handle_notification)
+
+    # File server (read / list / stat / write under /api/v1/file-server)
+    register_file_server_routes(router)
 
     return router
