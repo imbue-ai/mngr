@@ -24,8 +24,19 @@ create a workspace through the Electron dev shell".
 ## 0. One-time prerequisites on the operator's machine
 
 - [ ] `vault` CLI installed; logged in against the imbue HCP cluster
-  (`VAULT_ADDR=...`, `VAULT_NAMESPACE=admin`, `vault login -method=oidc`).
-  See `vault-setup.md` for the cluster URL.
+  (`VAULT_ADDR=...`, `VAULT_NAMESPACE=admin`) with the right OIDC
+  role for the tier you're bringing up:
+  ```bash
+  # For staging work:
+  vault login -method=oidc role=minds_staging
+  # For production work:
+  vault login -method=oidc role=minds_production
+  ```
+  The default `vault login -method=oidc` (no `role=`) lands on the
+  `employee` role, which is denied on `secrets/minds/{staging,production}/*`.
+  See [Vault access control](#vault-access-control-recap) below for the
+  policy layout and how to add a teammate to the per-tier allowlist.
+  Cluster URL is in `vault-setup.md`.
 - [ ] `modal` CLI installed.
 - [ ] `psql` available locally (for the optional sanity check in step 5).
 - [ ] Logged in to `gh` (for FCT-template clone during the pool bake).
@@ -368,3 +379,56 @@ uv run minds env destroy --yes-i-mean-staging
 The `.minds/staging/pool_management_key/` directory should NOT land
 in the commit (it's covered by the existing `.minds/` gitignore, but
 double-check `git status` before pushing).
+
+---
+
+## Vault access control recap
+
+Three Vault ACL policies gate access to the minds tiers:
+
+- **`employee`** -- bound by the default `employee` OIDC role.
+  Every signed-in employee lands here. Denies
+  `secrets/{data,metadata}/minds/{staging,production}/*`; allows the
+  rest of `secrets/*`.
+- **`minds_staging`** -- bound by the `minds_staging` OIDC role.
+  Grants CRUDL on `secrets/{data,metadata}/minds/staging/*`.
+- **`minds_production`** -- bound by the `minds_production` OIDC role.
+  Grants CRUDL on `secrets/{data,metadata}/minds/production/*`.
+
+The policy text is committed under `.minds/policies/`; push edits with
+`vault policy write <name> .minds/policies/<name>.hcl`.
+
+Each tier role's allowlist is a `bound_claims.email` list on the OIDC
+role. Adding a teammate to staging:
+
+```bash
+VAULT_ADDR='...' VAULT_NAMESPACE='admin' vault write auth/oidc/role/minds_staging - <<'EOF'
+{
+  "user_claim": "email",
+  "bound_audiences": ["848426076477-10ceo4ek7i9m1p3gm7vkb3gautms9ma2.apps.googleusercontent.com"],
+  "oidc_scopes": ["email"],
+  "bound_claims": {"email": ["josh@imbue.com", "alice@imbue.com"]},
+  "bound_claims_type": "string",
+  "allowed_redirect_uris": [
+    "https://vault-cluster-public-vault-df29b16f.9b573ab7.z1.hashicorp.cloud:8200/ui/vault/auth/oidc/oidc/callback",
+    "http://localhost:8250/oidc/callback"
+  ],
+  "token_policies": ["minds_staging"],
+  "token_ttl": "168h",
+  "token_explicit_max_ttl": "168h"
+}
+EOF
+```
+
+(The CLI's `key=value` parsing can't represent the map-shaped
+`bound_claims`; piping a JSON body via `- <<EOF` is the supported
+workaround.)
+
+Rotating an OIDC role's allowlist is non-destructive -- existing
+sessions keep their tokens (TTL 168h) until they expire. To force
+a re-auth, revoke matching tokens via
+`vault list auth/token/accessors` + `vault token revoke -accessor=...`.
+
+The four operators on `employee_unrestricted` / `employee_all_secrets`
+retain full access regardless; those overlay roles are for break-glass
+debugging, not routine deploys.
