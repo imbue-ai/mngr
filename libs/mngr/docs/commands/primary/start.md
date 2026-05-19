@@ -19,9 +19,7 @@ If multiple agents share a host, they will all be started together when
 the host starts.
 
 Use --restart to stop any running agents first, ensuring a clean start.
-The resume message is not sent after a restart. Concurrent --restart
-calls for the same agent are deduplicated (the second is a no-op while
-the first is in progress).
+The resume message is not sent after a restart.
 
 Use '-' in place of agent names to read them from stdin, one per line.
 

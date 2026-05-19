@@ -2129,23 +2129,6 @@ def test_host_lock_cooperatively_acquires_and_releases(
     assert host.is_lock_held() is False
 
 
-def test_host_lock_cooperatively_with_custom_lock_name(
-    local_host: Host,
-) -> None:
-    """lock_cooperatively with a custom lock_name creates the lock at the expected path."""
-    host = local_host
-    lock_name = "agents/test-agent-id/restart_lock"
-    expected_path = host.host_dir / lock_name
-
-    assert not expected_path.exists()
-
-    with host.lock_cooperatively(timeout_seconds=5.0, lock_name=lock_name):
-        assert expected_path.exists()
-
-    # Host-level lock should not be affected
-    assert not host.is_lock_held()
-
-
 def test_host_get_reported_lock_time_returns_none_when_no_lock(
     local_host: Host,
 ) -> None:

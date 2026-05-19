@@ -12,7 +12,6 @@ from imbue.mngr.api.connect import resolve_connect_command
 from imbue.mngr.api.connect import run_connect_command
 from imbue.mngr.api.data_types import ConnectionOptions
 from imbue.mngr.api.discovery_events import emit_discovery_events_for_host
-from imbue.mngr.api.find import AgentMatch
 from imbue.mngr.api.find import ensure_host_started
 from imbue.mngr.api.find import find_all_agents
 from imbue.mngr.api.find import group_agents_by_host
@@ -33,7 +32,6 @@ from imbue.mngr.cli.stdin_utils import expand_stdin_placeholder
 from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import OutputOptions
-from imbue.mngr.errors import LockNotHeldError
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import AgentAddress
@@ -108,10 +106,6 @@ def _send_resume_message_if_configured(agent: AgentInterface, output_opts: Outpu
         )
     agent.send_message(resume_message)
     logger.debug("Sent resume message to agent {}", agent.name)
-
-
-def _restart_lock_name(match: AgentMatch) -> str:
-    return f"agents/{match.agent_id}/restart_lock"
 
 
 @click.command(name="start")
@@ -217,54 +211,37 @@ def _start_agents(
         # Ensure host is started (always start since this is the start command)
         online_host, _ = ensure_host_started(host, is_start_desired=True, provider=provider)
 
+        agent_ids = [match.agent_id for match in agent_list]
+
+        # Stop agents first when restarting
         if is_restart:
-            # Restart each agent individually under a cooperative lock
-            for match in agent_list:
-                try:
-                    with online_host.lock_cooperatively(
-                        timeout_seconds=0,
-                        lock_name=_restart_lock_name(match),
-                    ):
-                        with log_span("Stopping agent {} for restart", match.agent_name):
-                            online_host.stop_agents([match.agent_id])
-                        with log_span("Starting agent {}", match.agent_name):
-                            online_host.start_agents([match.agent_id])
+            with log_span("Stopping {} agent(s) for restart", len(agent_ids)):
+                online_host.stop_agents(agent_ids)
 
-                        started_agents.append(str(match.agent_name))
-                        _output(f"Restarted agent: {match.agent_name}", output_opts)
-
-                        # Track for potential connect
-                        if opts.connect:
-                            for agent in online_host.get_agents():
-                                if agent.id == match.agent_id:
-                                    last_started_agent = agent
-                                    last_started_host = online_host
-                                    break
-                except LockNotHeldError:
-                    _output(f"Skipping agent {match.agent_name} -- restart already in progress", output_opts)
-        else:
-            # Start all stopped agents on this host in one batch
-            agent_ids_to_start = [match.agent_id for match in agent_list]
-            online_host.start_agents(agent_ids_to_start)
-
-            for match in agent_list:
-                started_agents.append(str(match.agent_name))
-                _output(f"Started agent: {match.agent_name}", output_opts)
-
-                # Get the agent object for potential connect and resume message
-                for agent in online_host.get_agents():
-                    if agent.id == match.agent_id:
-                        # Send resume message if configured
-                        _send_resume_message_if_configured(agent, output_opts)
-
-                        # Track for potential connect
-                        if opts.connect:
-                            last_started_agent = agent
-                            last_started_host = online_host
-                        break
+        # Start agents on this host
+        with log_span("Starting {} agent(s)", len(agent_ids)):
+            online_host.start_agents(agent_ids)
 
         # Emit discovery events for agents and host
         emit_discovery_events_for_host(mngr_ctx.config, online_host)
+
+        for match in agent_list:
+            verb = "Restarted" if is_restart else "Started"
+            started_agents.append(str(match.agent_name))
+            _output(f"{verb} agent: {match.agent_name}", output_opts)
+
+            # Get the agent object for potential connect and resume message
+            for agent in online_host.get_agents():
+                if agent.id == match.agent_id:
+                    # Send resume message if configured (not for restarts)
+                    if not is_restart:
+                        _send_resume_message_if_configured(agent, output_opts)
+
+                    # Track for potential connect
+                    if opts.connect:
+                        last_started_agent = agent
+                        last_started_host = online_host
+                    break
 
     # Output final result
     _output_result(started_agents, output_opts, is_restart=is_restart)
@@ -316,9 +293,7 @@ If multiple agents share a host, they will all be started together when
 the host starts.
 
 Use --restart to stop any running agents first, ensuring a clean start.
-The resume message is not sent after a restart. Concurrent --restart
-calls for the same agent are deduplicated (the second is a no-op while
-the first is in progress).
+The resume message is not sent after a restart.
 
 Use '-' in place of agent names to read them from stdin, one per line.
 
