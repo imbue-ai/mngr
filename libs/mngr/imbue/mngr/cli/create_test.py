@@ -21,6 +21,7 @@ from imbue.mngr.cli.create import _apply_host_labels
 from imbue.mngr.cli.create import _check_source_does_not_contain_state_dir
 from imbue.mngr.cli.create import _editor_cleanup_scope
 from imbue.mngr.cli.create import _get_source_remote_url
+from imbue.mngr.cli.create import _host_ref_matches_address
 from imbue.mngr.cli.create import _is_creating_new_host
 from imbue.mngr.cli.create import _parse_agent_opts
 from imbue.mngr.cli.create import _parse_branch_flag
@@ -396,11 +397,30 @@ def test_try_reuse_existing_agent_filters_by_address_host_name(temp_mngr_ctx: Mn
     assert result is None
 
 
-def test_try_reuse_existing_agent_address_host_name_provider_tiebreaker(temp_mngr_ctx: MngrContext) -> None:
-    """When two hosts share a name, the address's provider scopes the match.
+def test_host_ref_matches_address_provider_tiebreaker_with_same_named_hosts() -> None:
+    """When two hosts share a name across providers, the pinned provider picks one.
 
-    Without the provider tiebreaker, a same-named agent on a different provider's
-    host would match; with it, only the address-provider host wins.
+    Direct unit test for the tiebreaker branch of ``_host_ref_matches_address``:
+    when ``address_host`` is a :class:`HostName` and ``provider_name`` is set,
+    a host whose name matches but whose provider does not must be rejected,
+    and the matching-provider host must be accepted.
+    """
+    host_local = _make_discovered_host(host_id=TEST_HOST_ID_1, host_name="shared", provider="local")
+    host_modal = _make_discovered_host(host_id=TEST_HOST_ID_2, host_name="shared", provider="modal")
+
+    assert _host_ref_matches_address(host_local, HostName("shared"), ProviderInstanceName("local")) is True
+    assert _host_ref_matches_address(host_modal, HostName("shared"), ProviderInstanceName("local")) is False
+
+
+def test_try_reuse_existing_agent_address_host_name_without_provider_raises_on_collision(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """Without the provider tiebreaker, same-named hosts on different providers both match.
+
+    With ``provider_name=None`` the tiebreaker branch in ``_host_ref_matches_address``
+    is bypassed, so both same-named hosts pass the filter and
+    ``_try_reuse_existing_agent`` ends up with multiple candidates -- the
+    documented disambiguation error fires.
     """
     host_local = _make_discovered_host(host_id=TEST_HOST_ID_1, host_name="shared", provider="local")
     agent_local = _make_discovered_agent(
@@ -411,7 +431,6 @@ def test_try_reuse_existing_agent_address_host_name_provider_tiebreaker(temp_mng
         agent_id=TEST_AGENT_ID_2, agent_name="test-agent", host_id=TEST_HOST_ID_2, provider="modal"
     )
 
-    # No provider pinned: both hosts match the name, multiple matches -> UserInputError
     with pytest.raises(UserInputError, match="Multiple agents found"):
         _try_reuse_existing_agent(
             agent_name=AgentName("test-agent"),
