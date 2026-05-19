@@ -1386,7 +1386,6 @@ def _make_list_params(
         compiled_exclude_filters=compiled_exclude,
         error_behavior=error_behavior,
         on_agent=on_agent,
-        on_error=on_error,
         error_emitter=_ErrorEmitter(result=bound_result, results_lock=bound_lock, on_error=on_error),
     )
 
