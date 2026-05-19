@@ -22,6 +22,7 @@ import asyncio
 import html as html_module
 import json
 import shlex
+import subprocess
 from collections.abc import Sequence
 from enum import auto
 from pathlib import Path
@@ -195,34 +196,81 @@ def _resolve_workspace_name(
     return info.agent_name if info else fallback
 
 
+_MNGR_LIST_FALLBACK_TIMEOUT_SECONDS: Final[float] = 15.0
+
+
+def _resolve_host_id_via_mngr_list(agent_id: AgentId) -> HostId | None:
+    """Authoritative agent_id -> host_id lookup via ``mngr list --format json``.
+
+    Used as a cache-miss fallback for the in-memory discovery view, which
+    can lag for agents created after stream start. Uses ``--on-error
+    continue`` so a single unreachable provider does not collapse the
+    answer for agents on the providers that are reachable.
+    """
+    try:
+        completed = subprocess.run(
+            [MNGR_BINARY, "list", "--format", "json", "--on-error", "continue"],
+            capture_output=True,
+            text=True,
+            timeout=_MNGR_LIST_FALLBACK_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as e:
+        logger.warning("mngr list fallback for agent {} failed: {}", agent_id, e)
+        return None
+    if completed.returncode != 0:
+        logger.warning(
+            "mngr list fallback for agent {} exited {}: {}",
+            agent_id,
+            completed.returncode,
+            completed.stderr.strip()[-500:],
+        )
+        return None
+    try:
+        payload = json.loads(completed.stdout)
+    except json.JSONDecodeError as e:
+        logger.warning("mngr list fallback for agent {} returned non-JSON: {}", agent_id, e)
+        return None
+    target = str(agent_id)
+    for agent in payload.get("agents", ()):
+        if agent.get("id") != target:
+            continue
+        host = agent.get("host") or {}
+        raw_host_id = host.get("id")
+        if not isinstance(raw_host_id, str):
+            return None
+        try:
+            return HostId(raw_host_id)
+        except ValueError:
+            return None
+    return None
+
+
 def _resolve_host_id(
     backend_resolver: BackendResolverInterface,
     agent_id: AgentId,
 ) -> HostId | None:
-    """Resolve the host an agent runs on, or ``None`` when discovery hasn't caught up.
+    """Resolve the host an agent runs on, or ``None`` when no provider knows it.
 
     Latchkey permissions are stored per-host (see :func:`permissions_path_for_host`):
     every agent on the same host shares the same gateway wiring and the
     same ``latchkey_permissions.json``. The handler maps the incoming
     agent_id (carried by the permission request event) to its host_id
     via the backend resolver, which has the discovery-stream view of
-    which agents live on which hosts. Returns ``None`` when the host
-    id isn't known yet (e.g. agent freshly created and discovery
-    stream hasn't pushed an update) or when the resolver reports the
-    placeholder ``"localhost"`` string used by static / in-memory
-    backend resolvers in tests.
+    which agents live on which hosts. On a cache miss (the stream lags
+    for agents created after subscription), fall back to ``mngr list
+    --format json`` for an authoritative answer; this is the same data
+    source the stream is built from. Static / in-memory resolvers used
+    by tests report a non-``HostId`` placeholder; that is treated as
+    unknown so callers skip the existing-grants lookup rather than
+    crash on every dialog render.
     """
     info = backend_resolver.get_agent_display_info(agent_id)
     if info is None:
-        return None
+        return _resolve_host_id_via_mngr_list(agent_id)
     try:
         return HostId(info.host_id)
     except ValueError:
-        # Static / in-memory resolvers (e.g. ``StaticBackendResolver``
-        # used by tests) report ``"localhost"`` here; that does not
-        # match the ``host-<32 hex>`` HostId format. Treat it as
-        # "unknown host" so callers skip the existing-grants lookup
-        # rather than crash on every dialog render.
         logger.debug(
             "Backend resolver reported non-HostId host {!r} for agent {}; treating as unknown",
             info.host_id,
