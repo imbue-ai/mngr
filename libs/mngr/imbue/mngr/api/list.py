@@ -212,9 +212,7 @@ def list_agents(
         if error_behavior == ErrorBehavior.ABORT:
             raise
         error_info = ErrorInfo.build(e)
-        result.errors.append(error_info)
-        if on_error:
-            on_error(error_info)
+        _ErrorEmitter(result=result, results_lock=results_lock, on_error=on_error)(error_info)
 
     _maybe_write_full_discovery_snapshot(mngr_ctx, result, provider_names, include_filters, exclude_filters)
     return result
