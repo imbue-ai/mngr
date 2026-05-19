@@ -197,6 +197,7 @@ function startBackend(onProgress, onNotification, onAuthEvent, onMngrForwardStar
         const uvPath = paths.getUvPath();
         const uvBinDir = paths.getUvBinDir();
         const gitBinDir = paths.getGitBinDir();
+        const limaBinDir = paths.getLimaBinDir();
         const uvCacheDir = paths.getUvCacheDir();
         const uvPythonDir = paths.getUvPythonDir();
         const pyprojectDir = paths.getPyprojectDir();
@@ -223,10 +224,9 @@ function startBackend(onProgress, onNotification, onAuthEvent, onMngrForwardStar
         ];
         cwd = pyprojectDir;
         // LaunchServices-started apps inherit a minimal PATH without
-        // /opt/homebrew/bin or /usr/local/bin, so user-installed tools
-        // cannot be resolved. Prepend our lazy-installed lima dir and
-        // the common macOS Homebrew bin dirs so mngr's lima provider
-        // finds limactl regardless of how the user installed it.
+        // /opt/homebrew/bin or /usr/local/bin. Prepend the bundled lima
+        // bin dir and the common macOS Homebrew bin dirs so user-installed
+        // tools (and the bundled limactl) are reachable.
         const systemPath = process.env.PATH || '';
         const homebrewPaths = ['/opt/homebrew/bin', '/usr/local/bin'].filter(
           (p) => !systemPath.split(':').includes(p)
@@ -234,7 +234,6 @@ function startBackend(onProgress, onNotification, onAuthEvent, onMngrForwardStar
         const augmentedSystemPath = homebrewPaths
           ? `${systemPath}:${homebrewPaths}`
           : systemPath;
-        const limaBinDir = paths.getLimaBinDir();
         env = {
           ...process.env,
           PATH: `${uvBinDir}:${gitBinDir}:${limaBinDir}:${augmentedSystemPath}`,

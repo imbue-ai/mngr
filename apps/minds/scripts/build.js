@@ -1,27 +1,24 @@
 /**
  * Build script for Minds desktop app.
  *
- * Downloads platform-specific uv and git binaries, builds workspace Python
- * packages as wheels, and stages a pyproject.toml + lockfile in the resources
- * directory for packaging. On the user's first launch, `uv sync` installs the
- * bundled wheels (plus their PyPI deps) into a venv.
- *
- * Binary downloads are handled by download-binaries.js (shared with the
- * todesktop:beforeInstall hook for cross-platform builds).
- *
- * Requirements:
- * - `uv` must be on PATH (used for `uv build` and `uv lock`)
- * - Node 18+ (for fs.rmSync and modern child_process semantics)
- * - Network access at build time (uv lock re-resolves PyPI deps)
+ * Downloads platform-specific uv, git, and Lima binaries, copies the
+ * standalone pyproject.toml + lockfile into the resources directory for
+ * packaging.
  */
 
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const https = require('https');
+const http = require('http');
 const { execSync, execFileSync } = require('child_process');
 
 const ROOT = path.resolve(__dirname, '..');
 const RESOURCES_DIR = path.join(ROOT, 'resources');
+
+const UV_VERSION = '0.7.12';
+const LIMA_VERSION = '2.1.1';
+
 const MONOREPO_ROOT = path.resolve(ROOT, '../..');
 
 /**
@@ -90,6 +87,85 @@ function buildWorkspaceWheels() {
     console.log(`Built wheel for ${name}: ${matches[0]}`);
   }
   return wheelByPackage;
+}
+
+
+function getPlatformArch() {
+  const platform = process.platform;
+  const arch = process.arch;
+
+  if (platform === 'darwin' && arch === 'arm64') return { platform: 'darwin', arch: 'aarch64' };
+  if (platform === 'darwin' && arch === 'x64') return { platform: 'darwin', arch: 'x86_64' };
+  if (platform === 'linux' && arch === 'x64') return { platform: 'linux', arch: 'x86_64' };
+  throw new Error(`Unsupported platform/arch: ${platform}/${arch}`);
+}
+
+function getUvDownloadUrl({ platform, arch }) {
+  const target = platform === 'darwin'
+    ? `uv-${arch}-apple-darwin`
+    : `uv-${arch}-unknown-linux-gnu`;
+  return `https://github.com/astral-sh/uv/releases/download/${UV_VERSION}/${target}.tar.gz`;
+}
+
+function download(url) {
+  return new Promise((resolve, reject) => {
+    const client = url.startsWith('https') ? https : http;
+    client.get(url, { headers: { 'User-Agent': 'minds-build' } }, (res) => {
+      if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+        res.resume(); // Drain the redirect response to free the connection
+        download(res.headers.location).then(resolve).catch(reject);
+        return;
+      }
+      if (res.statusCode !== 200) {
+        res.resume(); // Drain the error response to free the connection
+        reject(new Error(`HTTP ${res.statusCode} for ${url}`));
+        return;
+      }
+      const chunks = [];
+      res.on('data', (chunk) => chunks.push(chunk));
+      res.on('end', () => resolve(Buffer.concat(chunks)));
+      res.on('error', reject);
+    }).on('error', reject);
+  });
+}
+
+/**
+ * Download a gzipped tarball to ``destDir`` and extract it in place with
+ * ``--strip-components=1``, then verify and chmod the named binary.
+ *
+ * Used for binaries that ship as a single self-contained tarball rooted one
+ * level deep (e.g. uv, Lima). ``label`` is used only for log lines and error
+ * messages; ``archiveName`` is the on-disk filename for the downloaded
+ * tarball (deleted after extraction); ``binaryPath`` is the absolute path
+ * the caller expects the extracted binary to live at.
+ */
+async function downloadAndExtractTarball({ destDir, url, archiveName, binaryPath, label }) {
+  fs.mkdirSync(destDir, { recursive: true });
+  console.log(`Downloading ${label} from ${url}...`);
+
+  const tarball = await download(url);
+  const tarPath = path.join(destDir, archiveName);
+  fs.writeFileSync(tarPath, tarball);
+
+  execSync(`tar xzf "${tarPath}" -C "${destDir}" --strip-components=1`, { stdio: 'inherit' });
+  fs.unlinkSync(tarPath);
+
+  if (!fs.existsSync(binaryPath)) {
+    throw new Error(`${label} binary not found at ${binaryPath} after extraction`);
+  }
+  fs.chmodSync(binaryPath, 0o755);
+  console.log(`${label} binary installed at ${binaryPath}`);
+}
+
+async function downloadUv({ platform, arch }) {
+  const uvDir = path.join(RESOURCES_DIR, 'uv');
+  await downloadAndExtractTarball({
+    destDir: uvDir,
+    url: getUvDownloadUrl({ platform, arch }),
+    archiveName: 'uv.tar.gz',
+    binaryPath: path.join(uvDir, 'uv'),
+    label: 'uv',
+  });
 }
 
 /**
@@ -329,47 +405,52 @@ function bundleLatchkey() {
   );
 }
 
-/**
- * Write `resources/pyproject/pyproject.toml` and regenerate `uv.lock`.
- *
- * Starts from `electron/pyproject/pyproject.toml` (the dev-time pyproject),
- * replaces `[tool.uv.sources]` with entries pointing at the bundled wheels,
- * and then runs `uv lock` in-place so the lockfile matches the rewritten
- * pyproject. This re-resolves PyPI deps from scratch, which is fine -- they're
- * the same deps, just locked against the new workspace source definitions.
- */
-function stageRuntimePyproject(wheelByPackage) {
-  const srcDir = path.join(ROOT, 'electron', 'pyproject');
-  const destDir = path.join(RESOURCES_DIR, 'pyproject');
-  fs.mkdirSync(destDir, { recursive: true });
-
-  const pyprojectSrc = path.join(srcDir, 'pyproject.toml');
-  if (!fs.existsSync(pyprojectSrc)) {
-    throw new Error(`Source pyproject.toml not found at ${pyprojectSrc}`);
-  }
-  let content = fs.readFileSync(pyprojectSrc, 'utf-8');
-
-  const sourceLines = ['[tool.uv.sources]'];
-  for (const [name, whlFile] of Object.entries(wheelByPackage)) {
-    sourceLines.push(`${name} = { path = "../wheels/${whlFile}" }`);
-  }
-  const newSources = sourceLines.join('\n') + '\n';
-
-  if (content.match(/\[tool\.uv\.sources\]/)) {
-    content = content.replace(/\[tool\.uv\.sources\][^\[]*/, newSources);
+function getLimaDownloadUrl({ platform, arch }) {
+  // Lima release tarballs are named lima-<version>-<OsLabel>-<archLabel>.tar.gz.
+  // The OS label is title-cased (Darwin/Linux). The arch label differs by OS:
+  // Darwin uses arm64, Linux uses aarch64; both use x86_64 for Intel.
+  const osLabel = platform === 'darwin' ? 'Darwin' : 'Linux';
+  let archLabel;
+  if (arch === 'x86_64') {
+    archLabel = 'x86_64';
+  } else if (arch === 'aarch64') {
+    archLabel = platform === 'darwin' ? 'arm64' : 'aarch64';
   } else {
-    content = content.trimEnd() + '\n\n' + newSources;
+    throw new Error(`Unsupported Lima arch: ${arch}`);
   }
-  fs.writeFileSync(path.join(destDir, 'pyproject.toml'), content);
-  console.log(`Staged pyproject.toml at ${destDir}`);
-
-  // Regenerate the lockfile against the rewritten pyproject. This is simpler
-  // and more robust than string-surgery on the dev-time uv.lock: uv emits the
-  // exact right shape for wheel-path sources itself.
-  execSync('uv lock', { cwd: destDir, stdio: 'inherit' });
-  console.log(`Regenerated uv.lock at ${destDir}`);
+  return `https://github.com/lima-vm/lima/releases/download/v${LIMA_VERSION}/lima-${LIMA_VERSION}-${osLabel}-${archLabel}.tar.gz`;
 }
 
+async function downloadLima({ platform, arch }) {
+  // We keep the full extracted layout (bin/ + share/ + libexec/) because
+  // limactl resolves its templates and guest-agent payloads via paths
+  // relative to its own executable.
+  const limaDir = path.join(RESOURCES_DIR, 'lima');
+  await downloadAndExtractTarball({
+    destDir: limaDir,
+    url: getLimaDownloadUrl({ platform, arch }),
+    archiveName: 'lima.tar.gz',
+    binaryPath: path.join(limaDir, 'bin', 'limactl'),
+    label: 'Lima',
+  });
+}
+
+async function downloadGit() {
+  const gitDir = path.join(RESOURCES_DIR, 'git');
+  const binDir = path.join(gitDir, 'bin');
+  fs.mkdirSync(binDir, { recursive: true });
+
+  // Copy the system git binary into the resources directory.
+  const systemGit = execSync('which git', { encoding: 'utf-8' }).trim();
+  if (!systemGit) {
+    throw new Error('git not found on system -- install git first');
+  }
+
+  const destGit = path.join(binDir, 'git');
+  fs.copyFileSync(systemGit, destGit);
+  fs.chmodSync(destGit, 0o755);
+  console.log(`git binary copied to ${destGit}`);
+}
 /**
  * Bake an explicit client.toml (and the matching MINDS_ROOT_NAME) into
  * _bundled/ so the shipped desktop client passes --config-file
@@ -473,32 +554,65 @@ function bundleClientConfig() {
   console.log(`Bundled MINDS_ROOT_NAME=${rootNameBundle} -> ${bundledRootNameFile}`);
 }
 
+/**
+ * Write `resources/pyproject/pyproject.toml` and regenerate `uv.lock`.
+ *
+ * Starts from `electron/pyproject/pyproject.toml` (the dev-time pyproject),
+ * replaces `[tool.uv.sources]` with entries pointing at the bundled wheels,
+ * and then runs `uv lock` in-place so the lockfile matches the rewritten
+ * pyproject. This re-resolves PyPI deps from scratch, which is fine -- they're
+ * the same deps, just locked against the new workspace source definitions.
+ */
+function stageRuntimePyproject(wheelByPackage) {
+  const srcDir = path.join(ROOT, 'electron', 'pyproject');
+  const destDir = path.join(RESOURCES_DIR, 'pyproject');
+  fs.mkdirSync(destDir, { recursive: true });
+
+  const pyprojectSrc = path.join(srcDir, 'pyproject.toml');
+  if (!fs.existsSync(pyprojectSrc)) {
+    throw new Error(`Source pyproject.toml not found at ${pyprojectSrc}`);
+  }
+  let content = fs.readFileSync(pyprojectSrc, 'utf-8');
+
+  const sourceLines = ['[tool.uv.sources]'];
+  for (const [name, whlFile] of Object.entries(wheelByPackage)) {
+    sourceLines.push(`${name} = { path = "../wheels/${whlFile}" }`);
+  }
+  const newSources = sourceLines.join('\n') + '\n';
+
+  if (content.match(/\[tool\.uv\.sources\]/)) {
+    content = content.replace(/\[tool\.uv\.sources\][^\[]*/, newSources);
+  } else {
+    content = content.trimEnd() + '\n\n' + newSources;
+  }
+  fs.writeFileSync(path.join(destDir, 'pyproject.toml'), content);
+  console.log(`Staged pyproject.toml at ${destDir}`);
+
+  // Regenerate the lockfile against the rewritten pyproject. This is simpler
+  // and more robust than string-surgery on the dev-time uv.lock: uv emits the
+  // exact right shape for wheel-path sources itself.
+  execSync('uv lock', { cwd: destDir, stdio: 'inherit' });
+  console.log(`Regenerated uv.lock at ${destDir}`);
+}
+
 async function main() {
   console.log('Building Minds desktop app...\n');
 
-  // Fetch Tailwind CDN bundle. Used to live in package.json's `postinstall`
-  // hook, but newer pnpm (11.x, what ToDesktop's `npx pnpm@latest install`
-  // pulls) treats `ERR_PNPM_IGNORED_BUILDS` for transitive deps (electron,
-  // protobufjs, dtrace-provider, @firebase/util) as fatal at install time
-  // when an additional postinstall is present. Pulling tailwind here keeps
-  // pnpm install side-effect-free and unblocks the ToDesktop pipeline.
-  console.log('Fetching Tailwind...');
-  execSync(`bash "${path.join(__dirname, 'fetch_tailwind.sh')}"`, {
-    cwd: ROOT, stdio: 'inherit',
-  });
-
+  // Clean resources directory
   if (fs.existsSync(RESOURCES_DIR)) {
     fs.rmSync(RESOURCES_DIR, { recursive: true });
   }
   fs.mkdirSync(RESOURCES_DIR, { recursive: true });
 
-  // Download platform-specific binaries (uv, git) for the current platform.
-  // On ToDesktop build servers, the beforeInstall hook re-runs this for the
-  // target platform, replacing these with the correct binaries.
-  console.log('Downloading platform-specific binaries...');
-  execSync(`node "${path.join(__dirname, 'download-binaries.js')}" "${RESOURCES_DIR}"`, {
-    stdio: 'inherit',
-  });
+  const { platform, arch } = getPlatformArch();
+  console.log(`Platform: ${platform}, Architecture: ${arch}\n`);
+
+  // Download binaries and copy pyproject in parallel
+  await Promise.all([
+    downloadUv({ platform, arch }),
+    downloadLima({ platform, arch }),
+    downloadGit(),
+  ]);
 
   bundleLatchkey();
   const wheelByPackage = buildWorkspaceWheels();

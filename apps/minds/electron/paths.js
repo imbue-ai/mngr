@@ -35,6 +35,14 @@ function getGitBinDir() {
   return path.dirname(getGitPath());
 }
 
+function getLimaPath() {
+  return path.join(getResourcesDir(), 'lima', 'bin', 'limactl');
+}
+
+function getLimaBinDir() {
+  return path.dirname(getLimaPath());
+}
+
 /**
  * Path to the Latchkey CLI shipped as an npm dependency of this app.
  *
@@ -183,22 +191,6 @@ function getVenvDir() {
   return path.join(getDataDir(), '.venv');
 }
 
-function getLimaHomeDir() {
-  return path.join(getDataDir(), 'lima');
-}
-
-function getLimaBinDir() {
-  return path.join(getLimaHomeDir(), 'bin');
-}
-
-function getLimaBinaryPath() {
-  return path.join(getLimaBinDir(), 'limactl');
-}
-
-function getLimaVersionFile() {
-  return path.join(getLimaHomeDir(), 'VERSION');
-}
-
 function getPyprojectDir() {
   if (isDev()) {
     return path.join(__dirname, 'pyproject');
@@ -218,6 +210,8 @@ module.exports = {
   getUvBinDir,
   getGitPath,
   getGitBinDir,
+  getLimaPath,
+  getLimaBinDir,
   getLatchkeyPath,
   getLatchkeyDirectory,
   getMindsRootName,
@@ -230,10 +224,6 @@ module.exports = {
   getVenvDir,
   getPyprojectDir,
   getMonorepoRoot,
-  getLimaHomeDir,
-  getLimaBinDir,
-  getLimaBinaryPath,
-  getLimaVersionFile,
   getBundledClientConfigPath,
   getBundledMindsRootName,
 };

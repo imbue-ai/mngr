@@ -5,7 +5,6 @@ const fs = require('fs');
 const paths = require('./paths');
 const { runEnvSetup } = require('./env-setup');
 const { startBackend, shutdown, getBackendProcess } = require('./backend');
-const limaInstall = require('./lima-install');
 
 // Use ToDesktop's default auto-update behavior: it checks on launch +
 // on an interval, downloads in the background, and shows its own
@@ -246,8 +245,6 @@ function createBundleWebContentsViews(win) {
   });
   const contentView = new WebContentsView({
     webPreferences: {
-      // Preload on the content view so the create form can invoke
-      // ensure-lima / is-lima-available IPC during LIMA lazy install.
       preload: path.join(__dirname, 'preload.js'),
       partition: CONTENT_PARTITION,
       contextIsolation: true,
@@ -1814,28 +1811,6 @@ ipcMain.on('close-workspace-windows', (_event, agentId) => {
 ipcMain.on('open-log-file', () => {
   const logPath = path.join(paths.getLogDir(), 'minds.log');
   shell.openPath(logPath);
-});
-
-// -- Lima lazy install --
-// The renderer (create form) calls ensure-lima when the user picks LIMA
-// mode. We emit lima-progress events during download so the form can
-// show an inline progress pill. Resolves immediately if limactl is
-// already cached or installed on the system PATH.
-ipcMain.handle('ensure-lima', async (event) => {
-  try {
-    const result = await limaInstall.ensureLima((pct) => {
-      if (!event.sender.isDestroyed()) {
-        event.sender.send('lima-progress', pct);
-      }
-    });
-    return { ok: true, source: result.source };
-  } catch (err) {
-    return { ok: false, error: err.message };
-  }
-});
-
-ipcMain.handle('is-lima-available', async () => {
-  return { available: limaInstall.isLimaAvailable() };
 });
 
 ipcMain.on('window-minimize', (event) => {
