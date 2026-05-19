@@ -7,10 +7,12 @@ surfaces using ``starlette.testclient.TestClient``.
 """
 
 import io
+import json
 from pathlib import Path
 
 import httpx
 import pytest
+from fastapi import FastAPI
 from starlette.testclient import TestClient
 
 from imbue.mngr.primitives import AgentId
@@ -497,7 +499,264 @@ def test_subdomain_forward_returns_retry_page_on_backend_connect_error(tmp_path:
     # HTML navigations get the auto-refresh retry page so the user lands on
     # something useful instead of a hard 502.
     assert html_response.status_code == 503
-    assert "Retrying" in html_response.text
+    assert "Workspace server starting" in html_response.text
     assert 'http-equiv="refresh"' in html_response.text
     # Non-HTML callers get a plain 503 they can interpret programmatically.
     assert json_response.status_code == 503
+
+
+# -- workspace_backend_failure envelope + recovery redirect tests --
+
+
+def _make_forward_app_with_capture(
+    tmp_path: Path,
+    capture: list[httpx.Request],
+    agent_id: AgentId,
+    preauth: str,
+    *,
+    backend_status: int = 200,
+    raise_error: type[Exception] | None = None,
+) -> tuple[FastAPI, io.StringIO, httpx.AsyncClient]:
+    auth_store = FileAuthStore(data_directory=tmp_path)
+    resolver = ForwardResolver(strategy=ForwardServiceStrategy(service_name="system_interface"))
+    resolver.add_known_agent(agent_id)
+    resolver.update_services(agent_id, {"system_interface": "http://stub-backend"})
+    tunnel_manager = SSHTunnelManager()
+    envelope_output = io.StringIO()
+    envelope_writer = EnvelopeWriter(output=envelope_output)
+    app = create_forward_app(
+        auth_store=auth_store,
+        resolver=resolver,
+        tunnel_manager=tunnel_manager,
+        envelope_writer=envelope_writer,
+        listen_host="127.0.0.1",
+        listen_port=18421,
+        preauth_cookie_value=preauth,
+    )
+
+    async def _capture(request: httpx.Request) -> httpx.Response:
+        capture.append(request)
+        if raise_error is not None:
+            raise raise_error("simulated failure")
+        return httpx.Response(backend_status, content=b"hi")
+
+    mock_client = httpx.AsyncClient(transport=httpx.MockTransport(_capture), follow_redirects=False)
+    return app, envelope_output, mock_client
+
+
+def _envelope_lines(envelope_output: io.StringIO) -> list[str]:
+    return [line for line in envelope_output.getvalue().splitlines() if line.strip()]
+
+
+def test_subdomain_forward_emits_workspace_backend_failure_on_5xx(tmp_path: Path) -> None:
+    """A 502/503/504 backend response triggers a ``workspace_backend_failure`` envelope."""
+    agent_id = AgentId()
+    preauth = "preauth-cookie-1"
+    captured: list[httpx.Request] = []
+    app, env_out, mock_client = _make_forward_app_with_capture(
+        tmp_path,
+        captured,
+        agent_id,
+        preauth,
+        backend_status=503,
+    )
+
+    with TestClient(app, base_url=f"http://{agent_id}.localhost:18421", follow_redirects=False) as client:
+        app.state.http_client = mock_client
+        response = client.get(
+            "/api/state",
+            headers={
+                "cookie": f"{MNGR_FORWARD_SESSION_COOKIE_NAME}={preauth}",
+                "accept": "application/json",
+            },
+        )
+
+    assert response.status_code == 503
+    lines = _envelope_lines(env_out)
+    assert len(lines) == 1
+    envelope = json.loads(lines[0])
+    assert envelope["stream"] == "forward"
+    assert envelope["agent_id"] == str(agent_id)
+    payload = envelope["payload"]
+    assert payload["type"] == "workspace_backend_failure"
+    assert payload["reason"] == "FIVEXX_RESPONSE"
+    assert payload["status_code"] == 503
+
+
+def test_subdomain_forward_does_not_emit_failure_on_2xx(tmp_path: Path) -> None:
+    """A successful backend response must not produce a failure envelope."""
+    agent_id = AgentId()
+    preauth = "preauth-cookie-ok"
+    captured: list[httpx.Request] = []
+    app, env_out, mock_client = _make_forward_app_with_capture(
+        tmp_path,
+        captured,
+        agent_id,
+        preauth,
+        backend_status=200,
+    )
+
+    with TestClient(app, base_url=f"http://{agent_id}.localhost:18421", follow_redirects=False) as client:
+        app.state.http_client = mock_client
+        response = client.get(
+            "/api/state",
+            headers={
+                "cookie": f"{MNGR_FORWARD_SESSION_COOKIE_NAME}={preauth}",
+                "accept": "application/json",
+            },
+        )
+
+    assert response.status_code == 200
+    assert _envelope_lines(env_out) == []
+
+
+def test_subdomain_forward_emits_workspace_backend_failure_on_sse_startup_disconnect(tmp_path: Path) -> None:
+    """``RemoteProtocolError`` on an SSE-startup ``send()`` must emit ``CONNECT_ERROR``.
+
+    Regression test: previously, an SSE-style request (``Accept: text/event-stream``)
+    whose backend died between SSH-tunnel accept and channel-open would surface
+    ``httpx.RemoteProtocolError`` from ``http_client.send(..., stream=True)``.
+    That exception was not caught by the SSE branch (only ``ConnectError``
+    and ``TimeoutException`` were), so it bubbled up through starlette as a
+    500 and no failure envelope was emitted -- meaning the minds-side health
+    tracker never transitioned to STUCK and the chrome never navigated to
+    the recovery page.
+    """
+    agent_id = AgentId()
+    preauth = "preauth-cookie-sse-startup"
+    captured: list[httpx.Request] = []
+    app, env_out, mock_client = _make_forward_app_with_capture(
+        tmp_path,
+        captured,
+        agent_id,
+        preauth,
+        raise_error=httpx.RemoteProtocolError,
+    )
+
+    with TestClient(app, base_url=f"http://{agent_id}.localhost:18421", follow_redirects=False) as client:
+        app.state.http_client = mock_client
+        response = client.get(
+            "/api/events",
+            headers={
+                "cookie": f"{MNGR_FORWARD_SESSION_COOKIE_NAME}={preauth}",
+                "accept": "text/event-stream",
+            },
+        )
+
+    assert response.status_code == 503
+    lines = _envelope_lines(env_out)
+    assert len(lines) == 1
+    envelope = json.loads(lines[0])
+    assert envelope["stream"] == "forward"
+    assert envelope["agent_id"] == str(agent_id)
+    payload = envelope["payload"]
+    assert payload["type"] == "workspace_backend_failure"
+    assert payload["reason"] == "CONNECT_ERROR"
+
+
+def test_subdomain_forward_returns_plain_503_for_non_html_on_connect_failure(tmp_path: Path) -> None:
+    """Non-HTML callers (API clients) get the plain 503 with no location header."""
+    agent_id = AgentId()
+    preauth = "preauth-cookie-json"
+    captured: list[httpx.Request] = []
+    app, env_out, mock_client = _make_forward_app_with_capture(
+        tmp_path,
+        captured,
+        agent_id,
+        preauth,
+        raise_error=httpx.ConnectError,
+    )
+
+    with TestClient(app, base_url=f"http://{agent_id}.localhost:18421", follow_redirects=False) as client:
+        app.state.http_client = mock_client
+        response = client.get(
+            "/api/state",
+            headers={
+                "cookie": f"{MNGR_FORWARD_SESSION_COOKIE_NAME}={preauth}",
+                "accept": "application/json",
+            },
+        )
+
+    assert response.status_code == 503
+    assert "location" not in {k.lower() for k in response.headers}
+
+
+def test_subdomain_forward_emits_workspace_backend_failure_on_sse_startup_timeout(tmp_path: Path) -> None:
+    """``TimeoutException`` on an SSE-startup ``send()`` must emit ``CONNECT_ERROR``.
+
+    Regression test: a wedged-but-listening workspace backend produces a
+    ``httpx.TimeoutException`` (not ``ConnectError``) when ``send(..., stream=True)``
+    waits for response headers that never arrive. Without an envelope on
+    this branch the minds-side tracker would never transition to STUCK
+    for hung-in-user-code backends.
+    """
+    agent_id = AgentId()
+    preauth = "preauth-cookie-sse-timeout"
+    captured: list[httpx.Request] = []
+    app, env_out, mock_client = _make_forward_app_with_capture(
+        tmp_path,
+        captured,
+        agent_id,
+        preauth,
+        raise_error=httpx.ConnectTimeout,
+    )
+
+    with TestClient(app, base_url=f"http://{agent_id}.localhost:18421", follow_redirects=False) as client:
+        app.state.http_client = mock_client
+        response = client.get(
+            "/api/events",
+            headers={
+                "cookie": f"{MNGR_FORWARD_SESSION_COOKIE_NAME}={preauth}",
+                "accept": "text/event-stream",
+            },
+        )
+
+    assert response.status_code == 504
+    lines = _envelope_lines(env_out)
+    assert len(lines) == 1
+    envelope = json.loads(lines[0])
+    assert envelope["stream"] == "forward"
+    assert envelope["agent_id"] == str(agent_id)
+    payload = envelope["payload"]
+    assert payload["type"] == "workspace_backend_failure"
+    assert payload["reason"] == "CONNECT_ERROR"
+
+
+def test_subdomain_forward_emits_workspace_backend_failure_on_non_sse_timeout(tmp_path: Path) -> None:
+    """``TimeoutException`` on a non-SSE backend request must emit ``CONNECT_ERROR``.
+
+    Regression test: covers the non-streaming path counterpart to the
+    SSE-startup timeout case. Both paths previously returned a 504 with
+    no failure envelope, so the chrome health SSE never saw a tick toward
+    STUCK for hung backends.
+    """
+    agent_id = AgentId()
+    preauth = "preauth-cookie-json-timeout"
+    captured: list[httpx.Request] = []
+    app, env_out, mock_client = _make_forward_app_with_capture(
+        tmp_path,
+        captured,
+        agent_id,
+        preauth,
+        raise_error=httpx.ConnectTimeout,
+    )
+
+    with TestClient(app, base_url=f"http://{agent_id}.localhost:18421", follow_redirects=False) as client:
+        app.state.http_client = mock_client
+        response = client.get(
+            "/api/state",
+            headers={
+                "cookie": f"{MNGR_FORWARD_SESSION_COOKIE_NAME}={preauth}",
+                "accept": "application/json",
+            },
+        )
+
+    assert response.status_code == 504
+    lines = _envelope_lines(env_out)
+    assert len(lines) == 1
+    envelope = json.loads(lines[0])
+    assert envelope["stream"] == "forward"
+    assert envelope["agent_id"] == str(agent_id)
+    payload = envelope["payload"]
+    assert payload["type"] == "workspace_backend_failure"
+    assert payload["reason"] == "CONNECT_ERROR"
