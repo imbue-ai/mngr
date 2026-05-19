@@ -2160,7 +2160,7 @@ def test_error_emitter_collects_per_resource_errors_during_discovery(
     confirms the provider's per-resource emission lands on both
     `result.errors` and the forwarded on_error callback. The full pipeline
     wire-up (via `_construct_discover_and_emit_for_provider`) is exercised
-    separately by `test_construct_discover_and_emit_for_provider_wires_on_error`.
+    separately by `test_list_agents_wires_provider_on_error_to_result_errors`.
     """
     failure = MngrError("VPS 7 unreachable")
     emitted_error = ProviderErrorInfo.build_for_provider(failure, ProviderInstanceName("per-resource-test"))
@@ -2194,7 +2194,7 @@ def test_error_emitter_collects_per_resource_errors_during_discovery(
 
 
 @pytest.mark.parametrize("is_streaming", [True, False])
-def test_construct_discover_and_emit_for_provider_wires_on_error(
+def test_list_agents_wires_provider_on_error_to_result_errors(
     temp_mngr_ctx: MngrContext,
     is_streaming: bool,
 ) -> None:
