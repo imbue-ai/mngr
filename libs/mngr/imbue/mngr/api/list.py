@@ -127,12 +127,9 @@ class _ListAgentsParams(FrozenModel):
     compiled_exclude_filters: list[Any]
     error_behavior: ErrorBehavior
     on_agent: Callable[[AgentDetails], None] | None
-    # Shared per-call emitter: callable that appends an ErrorInfo to
-    # result.errors under results_lock and forwards to the caller's
-    # on_error. Constructed once in list_agents() and reused by every
-    # per-resource catch site so they don't each rebuild the same 3-arg
-    # incantation. The caller's on_error lives on error_emitter.on_error;
-    # the parent struct does not store its own copy.
+    # Per-resource error emitter shared across all catch sites in this
+    # call. Records each ErrorInfo on result.errors under results_lock and
+    # forwards to the caller's on_error.
     error_emitter: _ErrorEmitter
     field_generators: dict[str, dict[str, Callable[[AgentInterface, OnlineHostInterface], Any]]] = Field(
         default_factory=dict,
