@@ -1486,7 +1486,7 @@ def test_fixture_uses_resources_records_declaration(isolated_guard_state: None) 
 
     fixture_uses_resources("modal")(some_fixture)
     # Look up via the module attribute rather than the directly-imported name,
-    # so that isolated_guard_state's monkeypatch.setattr rebind is observed.
+    # so that isolated_guard_state's rebind of the dict is observed here.
     assert resource_guards._fixture_resource_marks[some_fixture] == {"modal"}
 
 
@@ -1498,7 +1498,7 @@ def test_fixture_uses_resources_supports_multiple_resources_in_one_call(isolated
 
     fixture_uses_resources("modal", "docker")(some_fixture)
     # Look up via the module attribute rather than the directly-imported name,
-    # so that isolated_guard_state's monkeypatch.setattr rebind is observed.
+    # so that isolated_guard_state's rebind of the dict is observed here.
     assert resource_guards._fixture_resource_marks[some_fixture] == {"modal", "docker"}
 
 
