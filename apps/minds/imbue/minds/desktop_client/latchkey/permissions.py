@@ -42,7 +42,6 @@ from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClient
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClientError
-from imbue.minds.desktop_client.latchkey.services_catalog import IMPLICIT_DEFAULT_PERMISSIONS
 from imbue.minds.desktop_client.latchkey.services_catalog import ServicePermissionInfo
 from imbue.minds.desktop_client.latchkey.services_catalog import ServicesCatalog
 from imbue.minds.desktop_client.latchkey.templates import render_latchkey_permission_dialog
@@ -227,8 +226,8 @@ def _resolve_host_id(
         # Static / in-memory resolvers (e.g. ``StaticBackendResolver``
         # used by tests) report ``"localhost"`` here; that does not
         # match the ``host-<32 hex>`` HostId format. Treat it as
-        # "unknown host" so callers fall back to the implicit default
-        # path rather than crash on every dialog render.
+        # "unknown host" so callers skip the existing-grants lookup
+        # rather than crash on every dialog render.
         logger.debug(
             "Backend resolver reported non-HostId host {!r} for agent {}; treating as unknown",
             info.host_id,
@@ -628,20 +627,25 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
     ) -> tuple[str, ...]:
         """Pick the initial checkbox state for the dialog.
 
-        Precedence:
+        The pre-check is the union of (a) permissions already granted
+        for this scope on this host (so the dialog doubles as a revoke
+        UI) and (b) the permissions the agent requested, both
+        intersected with the catalog's known permission schemas for the
+        scope. Approving without modification grants exactly that union.
 
-        1. If any permissions are already granted for this scope on this
-           host, those are used so the dialog doubles as a revoke UI.
-        2. Otherwise, if the agent asked for a specific permission set
-           (``requested_permissions`` intersected with the catalog), use
-           that so the dialog reflects what the agent actually needs.
-        3. Otherwise fall back to the implicit catch-all default (``any``).
+        The catch-all ``any`` schema is intentionally not in the
+        pre-check: the user must opt into it explicitly. If both the
+        existing grants and the agent's request are empty (or fall
+        entirely outside the catalog), the pre-check is empty and the
+        Approve button stays disabled until the user ticks something.
 
         ``host_id`` is ``None`` when the agent's host cannot be resolved
-        (transient discovery gap); in that case we skip step 1 rather
-        than fail the page render -- the user can still click Approve,
-        which re-resolves the host before writing the grant.
+        (transient discovery gap); in that case we skip the existing-
+        grants lookup rather than fail the page render -- the user can
+        still click Approve, which re-resolves the host before writing
+        the grant.
         """
+        existing: tuple[str, ...] = ()
         if host_id is not None:
             path = permissions_path_for_host(self.latchkey.plugin_data_dir, host_id)
             try:
@@ -651,18 +655,23 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
                 )
             except LatchkeyGatewayClientError as e:
                 logger.warning(
-                    "Could not load permissions for host {} via the gateway extension; using request defaults: {}",
+                    "Could not load permissions for host {} via the gateway extension; pre-check will "
+                    "reflect only the agent's request: {}",
                     host_id,
                     e,
                 )
             else:
-                granted_in_catalog = tuple(p for p in service_info.permission_schemas if p in granted)
-                if granted_in_catalog:
-                    return granted_in_catalog
-        requested_in_catalog = tuple(p for p in service_info.permission_schemas if p in requested_permissions)
-        if requested_in_catalog:
-            return requested_in_catalog
-        return IMPLICIT_DEFAULT_PERMISSIONS
+                existing = tuple(p for p in service_info.permission_schemas if p in granted)
+        # Preserve catalog order and deduplicate. ``dict.fromkeys``
+        # gives an order-preserving set so a permission that appears in
+        # both ``existing`` and ``requested_permissions`` is checked once.
+        requested_set = set(requested_permissions)
+        union = tuple(
+            dict.fromkeys(
+                p for p in service_info.permission_schemas if p in existing or p in requested_set
+            )
+        )
+        return union
 
     def _apply_grant_to_permissions_file(
         self,

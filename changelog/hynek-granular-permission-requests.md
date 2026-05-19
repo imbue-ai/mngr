@@ -33,3 +33,15 @@
   to look up display names and the legal permission set. The grant
   dialog continues to render the display name ("Slack" etc.) and lets
   the user broaden or narrow the requested permission set.
+- The latchkey permission dialog no longer pre-checks the catch-all
+  ``any`` permission as an implicit default. ``any`` is still offered
+  as the first checkbox so the user can opt into unrestricted access
+  explicitly, but the initial check state is now the union of (a)
+  permissions already granted for the scope on the agent's host and
+  (b) the permissions the agent declared in the request event.
+  Approving without modification therefore grants exactly that union
+  (matching the user's mental model of "give the agent what it's
+  asking for, on top of what it already has"). Previously, existing
+  grants alone seeded the pre-check and the agent's new ask was
+  ignored unless the user actively ticked it; under the new behavior
+  an unmodified Approve actually delivers the requested permissions.

@@ -252,11 +252,17 @@ def _build_authenticated_client(
     return client
 
 
-def test_get_permission_request_page_renders_dialog_with_default_checks(tmp_path: Path) -> None:
+def test_get_permission_request_page_pre_checks_agent_requested_permissions(tmp_path: Path) -> None:
+    """With no existing grants, the dialog pre-checks exactly what the agent asked for.
+
+    The catch-all ``any`` schema is *not* pre-checked even though it is
+    listed as an available option; the user must opt into it explicitly.
+    """
     agent_id = AgentId()
     request = create_latchkey_permission_request_event(
         agent_id=str(agent_id),
         scope="slack-api",
+        permissions=("slack-read-all",),
         rationale="I need to read the team channel to summarize today's discussion.",
     )
     inbox = RequestInbox().add_request(request)
@@ -269,10 +275,57 @@ def test_get_permission_request_page_renders_dialog_with_default_checks(tmp_path
     body = response.text
     assert "Slack" in body
     assert "I need to read" in body
-    # Default-checked permissions appear with checked attribute.
-    assert 'value="slack-read-all"' in body
-    assert "checked" in body
-    # Approve must be disabled in initial markup.
+    # The agent-requested permission appears checked.
+    read_idx = body.find('value="slack-read-all"')
+    assert read_idx != -1
+    tag_start = body.rfind("<input", 0, read_idx)
+    tag_end = body.find(">", read_idx)
+    assert "checked" in body[tag_start:tag_end]
+    # ``any`` is offered as a checkbox but must not be pre-checked.
+    any_idx = body.find('value="any"')
+    assert any_idx != -1
+    any_tag_start = body.rfind("<input", 0, any_idx)
+    any_tag_end = body.find(">", any_idx)
+    assert "checked" not in body[any_tag_start:any_tag_end]
+    # Approve must be disabled in initial markup (JS enables it once the
+    # user confirms / interacts with the form).
+    assert 'id="permissions-approve-btn"' in body
+    assert "disabled" in body
+
+
+def test_get_permission_request_page_renders_no_pre_checks_when_request_and_existing_are_empty(
+    tmp_path: Path,
+) -> None:
+    """Empty agent request + no existing grants -> nothing pre-checked.
+
+    The catch-all ``any`` is no longer treated as an implicit default,
+    so the user must actively tick a permission before they can approve.
+    """
+    agent_id = AgentId()
+    request = create_latchkey_permission_request_event(
+        agent_id=str(agent_id),
+        scope="slack-api",
+        rationale="reason",
+    )
+    inbox = RequestInbox().add_request(request)
+    handler = _make_recording_handler(tmp_path)
+    client = _build_authenticated_client(tmp_path, handler, inbox)
+
+    response = client.get(f"/requests/{request.event_id}")
+
+    assert response.status_code == 200
+    body = response.text
+    # No input element should carry the ``checked`` attribute.
+    for value_marker in ('value="any"', 'value="slack-read-all"', 'value="slack-write-all"'):
+        idx = body.find(value_marker)
+        assert idx != -1
+        tag_start = body.rfind("<input", 0, idx)
+        tag_end = body.find(">", idx)
+        assert "checked" not in body[tag_start:tag_end], (
+            f"unexpected pre-check on {value_marker}: {body[tag_start : tag_end + 1]}"
+        )
+    # Approve stays disabled in the initial markup -- the JS re-enables
+    # it as soon as the user ticks any checkbox.
     assert 'id="permissions-approve-btn"' in body
     assert "disabled" in body
 
@@ -463,6 +516,52 @@ def test_get_permission_request_page_pre_checks_existing_grants(tmp_path: Path) 
     tag_start = body.rfind("<input", 0, chat_read_idx)
     tag_end = body.find(">", chat_read_idx)
     assert "checked" in body[tag_start:tag_end]
+
+
+def test_get_permission_request_page_pre_checks_union_of_existing_and_requested(tmp_path: Path) -> None:
+    """When the agent asks for a permission that isn't yet granted, the dialog pre-checks the union.
+
+    Approving without modification grants the union, which is the
+    intuitive behavior for "give the agent what it's asking for, on top
+    of what it already has". A previous design pre-checked only the
+    existing grants, which silently turned Approve into a no-op against
+    the agent's new request.
+    """
+    agent_id = AgentId()
+    host_id = HostId()
+    save_permissions(
+        permissions_path_for_host(tmp_path / "mngr_latchkey", host_id),
+        LatchkeyPermissionsConfig(rules=({"slack-api": ["slack-chat-read"]},)),
+    )
+    request = create_latchkey_permission_request_event(
+        agent_id=str(agent_id),
+        scope="slack-api",
+        permissions=("slack-write-all",),
+        rationale="reason",
+    )
+    inbox = RequestInbox().add_request(request)
+    handler = _make_recording_handler(tmp_path)
+    client = _build_authenticated_client(tmp_path, handler, inbox, agent_id=agent_id, host_id=host_id)
+
+    response = client.get(f"/requests/{request.event_id}")
+
+    assert response.status_code == 200
+    body = response.text
+    for expected_checked in ("slack-chat-read", "slack-write-all"):
+        idx = body.find(f'value="{expected_checked}"')
+        assert idx != -1, f"checkbox for {expected_checked} missing from dialog"
+        tag_start = body.rfind("<input", 0, idx)
+        tag_end = body.find(">", idx)
+        assert "checked" in body[tag_start:tag_end], (
+            f"expected {expected_checked} to be pre-checked: {body[tag_start : tag_end + 1]}"
+        )
+    # ``slack-read-all`` is in the catalog but neither requested nor
+    # previously granted, so it must not be pre-checked.
+    read_all_idx = body.find('value="slack-read-all"')
+    assert read_all_idx != -1
+    read_all_tag_start = body.rfind("<input", 0, read_all_idx)
+    read_all_tag_end = body.find(">", read_all_idx)
+    assert "checked" not in body[read_all_tag_start:read_all_tag_end]
 
 
 def test_post_permission_grant_returns_503_when_host_not_yet_discovered(tmp_path: Path) -> None:

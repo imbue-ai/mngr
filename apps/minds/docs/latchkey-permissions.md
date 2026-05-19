@@ -34,14 +34,17 @@ and how the agent receives the answer.
      gateway's `GET /permissions/available` endpoint and cached in
      process for the lifetime of the desktop client.
    * The detent ``any`` schema (matches every request inside the scope) is
-     prepended as the first checkbox and pre-checked: clicking Approve
-     without changing anything yields ``{<scope>: ["any"]}`` -- unrestricted
-     access for the chosen service.
-   * Granular permission schemas are listed below ``any`` and can be ticked
-     after un-ticking ``any`` if the user wants to scope down.
-   * Already-granted permissions for that service replace the implicit
-     ``any`` pre-check, so the dialog also acts as a revocation UI.
-   * The Approve button stays disabled while zero boxes are checked.
+     prepended as the first checkbox so the user can opt into unrestricted
+     access if they want. It is **not** pre-checked.
+   * The dialog pre-checks the union of (a) permissions already granted
+     for that scope on the agent's host and (b) the permissions the agent
+     declared in the request event. Approving without changes grants
+     exactly that union; ticking more broadens it, unticking narrows or
+     revokes. The dialog therefore doubles as a revocation UI.
+   * The Approve button stays disabled while zero boxes are checked,
+     so if the agent submitted an empty ``permissions`` tuple and the
+     user has no prior grants for the scope, the user must actively
+     pick something before approving.
 6. **User approves.** The desktop client:
    1. Runs `latchkey services info <service>` to read `credentialStatus`,
       `authOptions`, and `setCredentialsExample`.
@@ -125,8 +128,9 @@ and is fetched at desktop-client runtime via the gateway's
   in its permission request's `scope` field.
 * `display_name` -- human-readable label shown in the dialog header.
 * `permissions` -- granular detent permission schemas the dialog offers
-  as checkboxes. The implicit ``any`` default is prepended client-side;
-  the gateway file does not list it.
+  as checkboxes. The catch-all ``any`` schema is prepended client-side
+  as an available option (the gateway file does not list it); the
+  dialog never pre-checks it, but the user can opt into it explicitly.
 
 The minds desktop client caches the response in-process on first access
 so each request renders without re-fetching. To add a new service,

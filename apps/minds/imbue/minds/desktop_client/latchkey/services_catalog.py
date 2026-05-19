@@ -12,11 +12,13 @@ ships alongside the gateway extension) and cached in-process. Callers
 get a :class:`ServicesCatalog` whose first attribute access triggers the
 HTTP fetch; subsequent accesses are served from the in-memory snapshot.
 
-Defaults are not maintained per-service: every scope implicitly defaults
-to the detent ``any`` schema (matches every request inside the scope), so
-clicking Approve without changing anything yields ``{<scope>: ["any"]}`` --
-unrestricted access for the chosen scope. The user can tighten this by
-unticking ``any`` and selecting specific permissions in the dialog.
+The detent ``any`` schema (matches every request inside the scope) is
+not listed in the gateway's per-service ``permissions`` array but is
+always injected as the first available checkbox so the user can choose
+to grant unrestricted access. It is *not* pre-checked: the dialog's
+initial state is the union of already-granted permissions for the
+scope and the permissions the agent requested, so clicking Approve
+without changes grants exactly those.
 """
 
 import threading
@@ -36,10 +38,10 @@ from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayCl
 # The detent ``any`` schema matches every request, so a rule like
 # ``{"slack-api": ["any"]}`` allows all Slack access. We prepend ``any``
 # to every scope's permission list (deduplicated) so the dialog can
-# render it as a checkbox, and pre-check it as the implicit default.
-_IMPLICIT_DEFAULT_PERMISSION: Final[str] = "any"
-
-IMPLICIT_DEFAULT_PERMISSIONS: Final[tuple[str, ...]] = (_IMPLICIT_DEFAULT_PERMISSION,)
+# render it as a checkbox the user may opt into. The dialog does not
+# pre-check it; see :class:`LatchkeyPermissionGrantHandler` for the
+# union-based pre-check policy.
+_ALWAYS_AVAILABLE_PERMISSION: Final[str] = "any"
 
 
 class LatchkeyServicesCatalogError(Exception):
@@ -63,8 +65,9 @@ class ServicePermissionInfo(FrozenModel):
     display_name: str = Field(description="Human-readable label shown in the dialog header.")
     permission_schemas: tuple[str, ...] = Field(
         description=(
-            "Detent permission schemas the user can grant for this scope. The implicit "
-            "``any`` default is always present at index 0."
+            "Detent permission schemas the user can grant for this scope. The catch-all "
+            "``any`` schema is always injected at index 0 as an available option (not "
+            "pre-checked) so the user can opt into unrestricted access if they want."
         ),
     )
 
@@ -98,9 +101,10 @@ def _build_service_info(name: str, raw: object) -> ServicePermissionInfo:
         raise MalformedServicesCatalogError(f"Service '{name}' has a malformed entry: {e}") from e
 
     # Always make ``any`` available as the first checkbox, deduplicating in
-    # case the gateway lists it explicitly (harmless but redundant).
-    permission_schemas: tuple[str, ...] = (_IMPLICIT_DEFAULT_PERMISSION,) + tuple(
-        p for p in entry.permissions if p != _IMPLICIT_DEFAULT_PERMISSION
+    # case the gateway lists it explicitly (harmless but redundant). The
+    # dialog renders it as an opt-in choice, not a pre-checked default.
+    permission_schemas: tuple[str, ...] = (_ALWAYS_AVAILABLE_PERMISSION,) + tuple(
+        p for p in entry.permissions if p != _ALWAYS_AVAILABLE_PERMISSION
     )
 
     return ServicePermissionInfo(

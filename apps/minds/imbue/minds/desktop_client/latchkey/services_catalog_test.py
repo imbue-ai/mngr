@@ -4,7 +4,6 @@ import pytest
 
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClient
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClientError
-from imbue.minds.desktop_client.latchkey.services_catalog import IMPLICIT_DEFAULT_PERMISSIONS
 from imbue.minds.desktop_client.latchkey.services_catalog import ServicesCatalog
 from imbue.minds.desktop_client.latchkey.testing import FakeLatchkeyGatewayClient
 
@@ -12,10 +11,6 @@ from imbue.minds.desktop_client.latchkey.testing import FakeLatchkeyGatewayClien
 def _make_catalog(payload: dict[str, object]) -> ServicesCatalog:
     client = FakeLatchkeyGatewayClient(available_services_payload=payload)
     return ServicesCatalog(gateway_client=client)
-
-
-def test_implicit_default_permissions_is_just_any() -> None:
-    assert IMPLICIT_DEFAULT_PERMISSIONS == ("any",)
 
 
 def test_catalog_get_returns_entry_for_known_service() -> None:
@@ -35,7 +30,8 @@ def test_catalog_get_returns_entry_for_known_service() -> None:
     assert info.name == "slack"
     assert info.scope == "slack-api"
     assert info.display_name == "Slack"
-    # ``any`` is always first; granular schemas follow.
+    # ``any`` is always injected at index 0 as an available option; it is
+    # not pre-checked by the dialog, but the user can opt into it.
     assert info.permission_schemas[0] == "any"
     assert "slack-read-all" in info.permission_schemas
     assert "slack-write-all" in info.permission_schemas
@@ -86,7 +82,7 @@ def test_catalog_dedups_explicit_any_in_permissions() -> None:
 
 
 def test_catalog_handles_empty_permissions_list() -> None:
-    """Services with no granular permissions still get the implicit ``any`` default."""
+    """Services with no granular permissions still expose ``any`` as an available option."""
     catalog = _make_catalog(
         {
             "linear": {
