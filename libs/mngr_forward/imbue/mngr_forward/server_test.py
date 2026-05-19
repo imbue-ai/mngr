@@ -595,9 +595,8 @@ def test_warn_resolver_miss_throttle_is_per_agent_not_global() -> None:
 # -- workspace_backend_failure envelope + recovery redirect tests --
 
 
-def _make_forward_app_with_capture(
+def _make_forward_app_with_mock_backend(
     tmp_path: Path,
-    capture: list[httpx.Request],
     agent_id: AgentId,
     preauth: str,
     *,
@@ -621,13 +620,13 @@ def _make_forward_app_with_capture(
         preauth_cookie_value=preauth,
     )
 
-    async def _capture(request: httpx.Request) -> httpx.Response:
-        capture.append(request)
+    async def _handler(request: httpx.Request) -> httpx.Response:
+        del request
         if raise_error is not None:
             raise raise_error("simulated failure")
         return httpx.Response(backend_status, content=b"hi")
 
-    mock_client = httpx.AsyncClient(transport=httpx.MockTransport(_capture), follow_redirects=False)
+    mock_client = httpx.AsyncClient(transport=httpx.MockTransport(_handler), follow_redirects=False)
     return app, envelope_output, mock_client
 
 
@@ -639,10 +638,8 @@ def test_subdomain_forward_emits_workspace_backend_failure_on_5xx(tmp_path: Path
     """A 502/503/504 backend response triggers a ``workspace_backend_failure`` envelope."""
     agent_id = AgentId()
     preauth = "preauth-cookie-1"
-    captured: list[httpx.Request] = []
-    app, env_out, mock_client = _make_forward_app_with_capture(
+    app, env_out, mock_client = _make_forward_app_with_mock_backend(
         tmp_path,
-        captured,
         agent_id,
         preauth,
         backend_status=503,
@@ -674,10 +671,8 @@ def test_subdomain_forward_does_not_emit_failure_on_2xx(tmp_path: Path) -> None:
     """A successful backend response must not produce a failure envelope."""
     agent_id = AgentId()
     preauth = "preauth-cookie-ok"
-    captured: list[httpx.Request] = []
-    app, env_out, mock_client = _make_forward_app_with_capture(
+    app, env_out, mock_client = _make_forward_app_with_mock_backend(
         tmp_path,
-        captured,
         agent_id,
         preauth,
         backend_status=200,
@@ -711,10 +706,8 @@ def test_subdomain_forward_emits_workspace_backend_failure_on_sse_startup_discon
     """
     agent_id = AgentId()
     preauth = "preauth-cookie-sse-startup"
-    captured: list[httpx.Request] = []
-    app, env_out, mock_client = _make_forward_app_with_capture(
+    app, env_out, mock_client = _make_forward_app_with_mock_backend(
         tmp_path,
-        captured,
         agent_id,
         preauth,
         raise_error=httpx.RemoteProtocolError,
@@ -745,10 +738,8 @@ def test_subdomain_forward_returns_plain_503_for_non_html_on_connect_failure(tmp
     """Non-HTML callers (API clients) get the plain 503 with no location header."""
     agent_id = AgentId()
     preauth = "preauth-cookie-json"
-    captured: list[httpx.Request] = []
-    app, env_out, mock_client = _make_forward_app_with_capture(
+    app, env_out, mock_client = _make_forward_app_with_mock_backend(
         tmp_path,
-        captured,
         agent_id,
         preauth,
         raise_error=httpx.ConnectError,
@@ -779,10 +770,8 @@ def test_subdomain_forward_emits_workspace_backend_failure_on_sse_startup_timeou
     """
     agent_id = AgentId()
     preauth = "preauth-cookie-sse-timeout"
-    captured: list[httpx.Request] = []
-    app, env_out, mock_client = _make_forward_app_with_capture(
+    app, env_out, mock_client = _make_forward_app_with_mock_backend(
         tmp_path,
-        captured,
         agent_id,
         preauth,
         raise_error=httpx.ConnectTimeout,
@@ -819,10 +808,8 @@ def test_subdomain_forward_emits_workspace_backend_failure_on_non_sse_timeout(tm
     """
     agent_id = AgentId()
     preauth = "preauth-cookie-json-timeout"
-    captured: list[httpx.Request] = []
-    app, env_out, mock_client = _make_forward_app_with_capture(
+    app, env_out, mock_client = _make_forward_app_with_mock_backend(
         tmp_path,
-        captured,
         agent_id,
         preauth,
         raise_error=httpx.ConnectTimeout,
