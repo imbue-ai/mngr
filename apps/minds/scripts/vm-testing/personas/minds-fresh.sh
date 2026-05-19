@@ -38,7 +38,7 @@ if ! xcode-select -p >/dev/null 2>&1; then
     if [[ -n "$product" ]]; then
         sudo softwareupdate -i "$product" --verbose
     else
-        echo "[minds-fresh] WARNING: no Command Line Tools update offered; git inside minds.app may fail"
+        echo "[minds-fresh] ERROR: no Command Line Tools update offered; cannot install developer tools" >&2
     fi
     # softwareupdate can exit 0 even when the install didn't actually land
     # (network blips, partial installs). Confirm the developer dir exists so
