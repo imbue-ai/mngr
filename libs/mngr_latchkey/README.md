@@ -146,8 +146,8 @@ written directly via `imbue.mngr_latchkey.store.save_permissions`.
 
 ## Gateway HTTP extensions
 
-`mngr latchkey forward` drops two `.mjs` extensions into
-`<latchkey-directory>/extensions/`. Both expose plain HTTP endpoints
+`mngr latchkey forward` drops three `.mjs` extensions into
+`<latchkey-directory>/extensions/`. All expose plain HTTP endpoints
 on the gateway's listen port and authenticate the caller via two
 headers:
 
@@ -189,6 +189,32 @@ Pending requests are stored as one JSON file per request under
 `<latchkey-directory>/permission_requests/v1/`. The `v1` segment is
 part of the on-disk schema version, so any pre-v1 files that happen
 to live in the parent directory are ignored.
+
+### `minds-api-proxy` extension
+
+Transparent HTTP reverse proxy from the gateway to an embedder-supplied
+"Minds API" base URL.
+
+* `ANY /extensions/minds-api-proxy` forwards to `<minds-api>/`.
+* `ANY /extensions/minds-api-proxy/<rest>...` forwards to
+  `<minds-api>/<rest>...`, preserving the inbound method, query
+  string, headers (minus hop-by-hop entries and the gateway-internal
+  password / permissions-override headers), and body. The upstream
+  response status, headers, and body stream straight back.
+
+The upstream base URL is read from the
+`LATCHKEY_EXTENSION_MINDS_API_URL` env var on every request. If the
+var is unset/empty/unparseable the proxy responds 503 with a JSON
+error body. There is no in-process cache to invalidate: an embedder
+that needs to repoint the proxy at a new upstream simply respawns
+the gateway (or the `mngr latchkey forward` supervisor that owns it)
+with a fresh value for the env var.
+
+The extension performs no authentication of its own beyond the
+gateway's normal permission check (against the synthetic
+`latchkey-self.invalid` URL). Restricting which paths an agent can
+reach through the proxy is therefore a job for the agent's
+`latchkey_permissions.json`.
 
 ### `permissions` extension
 
