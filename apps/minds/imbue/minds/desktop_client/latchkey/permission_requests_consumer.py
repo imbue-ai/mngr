@@ -70,7 +70,8 @@ def streamed_request_to_event(streamed: StreamedPermissionRequest) -> LatchkeyPe
         agent_id=streamed.agent_id,
         request_type=str(RequestType.LATCHKEY_PERMISSION),
         is_user_requested=False,
-        service_name=streamed.service_name,
+        scope=streamed.scope,
+        permissions=streamed.permissions,
         rationale=streamed.rationale,
     )
 
