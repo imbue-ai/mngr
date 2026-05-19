@@ -214,8 +214,8 @@ def _deploy_connector_for_provider(
     )
 
 
-def _stop_modal_app_for_provider(app_name: str, modal_env: str, cg: ConcurrencyGroup) -> None:
-    real_stop_modal_app(app_name=app_name, modal_env=modal_env, parent_cg=cg)
+def _stop_modal_app_for_provider(app_name: str, modal_env: str, parent_cg: ConcurrencyGroup) -> None:
+    real_stop_modal_app(app_name=app_name, modal_env=modal_env, parent_cg=parent_cg)
 
 
 def _delete_modal_secret_for_provider(secret_name: str, modal_env: str, cg: ConcurrencyGroup) -> None:
@@ -234,8 +234,8 @@ def _get_modal_app_latest_version_for_provider(app_name: str, modal_env: str, cg
     return real_get_modal_app_latest_version(app_name=app_name, modal_env=modal_env, parent_cg=cg)
 
 
-def _rollback_modal_app_for_provider(app_name: str, version: str, modal_env: str, cg: ConcurrencyGroup) -> None:
-    real_rollback_modal_app(app_name=app_name, version=version, modal_env=modal_env, parent_cg=cg)
+def _rollback_modal_app_for_provider(app_name: str, version: str, modal_env: str, parent_cg: ConcurrencyGroup) -> None:
+    real_rollback_modal_app(app_name=app_name, version=version, modal_env=modal_env, parent_cg=parent_cg)
 
 
 def _create_neon_snapshot_branch_for_provider(
