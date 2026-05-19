@@ -1,3 +1,4 @@
+import inspect
 import json
 import os
 import re
@@ -10,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import typing
 from collections.abc import Generator
 from collections.abc import Sequence
 from contextlib import contextmanager
@@ -973,6 +975,17 @@ def is_claude_installed() -> bool:
     return shutil.which("claude") is not None
 
 
+def write_executable_script(path: Path, content: str) -> None:
+    """Write ``content`` to ``path`` and mark the file executable (mode 0o755).
+
+    Used by tests that need to drop a bash mock onto PATH (e.g. mocking
+    ``uv`` / ``brew`` / ``sudo`` so we can exercise subprocess plumbing
+    without invoking the real tool).
+    """
+    path.write_text(content)
+    path.chmod(0o755)
+
+
 def setup_claude_trust_config_for_subprocess(
     trusted_paths: list[Path],
     root_name: str = "mngr-acceptance-test",
@@ -1517,3 +1530,42 @@ def write_discovery_snapshot_to_path(
         "hosts": hosts,
     }
     events_path.write_text(json.dumps(event) + "\n")
+
+
+def walk_concrete_subclasses(cls: type) -> list[type]:
+    """Return every concrete (non-abstract) subclass of ``cls`` reachable via ``__subclasses__``.
+
+    Used by parametrized invariant tests that need to enumerate the full subclass
+    tree. Only subclasses whose defining module has already been imported are
+    visible -- callers that rely on full coverage must import those modules first
+    (typically by importing the relevant subclasses at the top of the test file).
+    """
+    found: list[type] = []
+    for sub in cls.__subclasses__():
+        if not inspect.isabstract(sub):
+            found.append(sub)
+        found.extend(walk_concrete_subclasses(sub))
+    return found
+
+
+def assert_init_first_param_is_provider_name(subclass: type) -> None:
+    """Assert ``subclass.__init__`` takes ``provider_name: ProviderInstanceName`` as the first parameter after ``self``.
+
+    Shared by parametrized invariant tests across provider packages that enforce
+    the ``ProviderError`` contract: every subclass must accept ``provider_name``
+    first so handlers catching the base class can read ``e.provider_name`` without
+    isinstance narrowing.
+    """
+    params = list(inspect.signature(subclass.__init__).parameters.values())
+    assert len(params) >= 2, f"{subclass.__name__}.__init__ has no parameters beyond self"
+    assert params[1].name == "provider_name", (
+        f"{subclass.__name__}.__init__ first parameter is {params[1].name!r}, expected 'provider_name'"
+    )
+    # Use get_type_hints so string forward references (e.g. from `from __future__
+    # import annotations`) are resolved before comparison.
+    hints = typing.get_type_hints(subclass.__init__)
+    provider_name_hint = hints.get("provider_name")
+    assert provider_name_hint is ProviderInstanceName, (
+        f"{subclass.__name__}.__init__ provider_name annotation is {provider_name_hint!r}, "
+        f"expected ProviderInstanceName"
+    )

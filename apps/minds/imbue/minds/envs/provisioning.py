@@ -561,31 +561,6 @@ def _deploy_env_locked(
                 credentials.supertokens_api_key,
             )
 
-    # Apply pool-hosts schema migrations against the host_pool DB.
-    # Runs for EVERY tier (dev + shared) so a new ``.sql`` file shipped
-    # via PR applies to staging / production on their next deploy, not
-    # just to dev. The provider implementation wraps
-    # :func:`apply_pool_hosts_migrations` from ``migrations.py``, which
-    # uses the schema_migrations tracking table so repeated deploys
-    # only run new migrations.
-    # - dev tier (creates_resources=true): targets ``neon_record.host_pool_dsn``,
-    #   the per-env host_pool DB this deploy just (re-)created or adopted.
-    # - shared tier (creates_resources=false): targets ``DATABASE_URL`` from the
-    #   operator-managed ``secrets/minds/<tier>/neon`` Vault entry (single
-    #   shared DB; the schema_migrations table lives alongside the
-    #   pool_hosts table in that DB).
-    host_pool_dsn = _resolve_host_pool_dsn_for_migrations(
-        lifecycle=lifecycle,
-        neon_record=neon_record,
-        tier_vault_prefix=tier_vault_prefix,
-        providers=providers,
-        parent_concurrency_group=parent_concurrency_group,
-    )
-    with info_span("Applying pool-hosts schema migrations to host_pool"):
-        applied = providers.apply_pool_hosts_migrations(host_pool_dsn, parent_concurrency_group)
-        if applied:
-            logger.info("Applied {} pool-hosts migration(s): {}", len(applied), [m.name for m in applied])
-
     # Capture pre-deploy Modal app versions BEFORE any further mutation
     # so the recover-target carries them. None for never-deployed apps
     # (first-ever deploy of this env / tier) -- recover skips rollback
@@ -597,10 +572,7 @@ def _deploy_env_locked(
     }
     logger.info("Captured pre-deploy app versions: {}", app_versions_to_restore)
 
-    # Snapshot the Neon project's default branch by creating a child
-    # branch off of it. On rollback, recover does an instant restore
-    # of the parent from this snapshot. Both DBs on the branch (host_pool
-    # + litellm_cost) come back atomically. Works for every tier:
+    # Resolve which Neon project + branch to snapshot. For every tier:
     # - creates_resources=true (dev): use the just-provisioned project + branch
     # - creates_resources=false (staging/prod): use the operator-managed
     #   project from ``credentials.neon_project_id`` and look up the
@@ -623,6 +595,21 @@ def _deploy_env_locked(
             "Neon console and re-run."
         )
 
+    # F2: verify the Neon token can read the project the upcoming
+    # snapshot + restore calls will target. Catches a stale or
+    # misconfigured token at the cheapest possible probe
+    # (``GET /projects/{id}``) BEFORE we create the snapshot branch or
+    # mutate anything else. Without this, a token without read access
+    # would only surface at recover time -- after the deploy had
+    # already mutated other state and the operator was relying on
+    # recover to roll it back.
+    with info_span("Preflight: verifying Neon token can read project {!r}", neon_project_id_for_snapshot):
+        providers.verify_neon_token_has_restore_scope(neon_project_id_for_snapshot, credentials.neon_api_token)
+
+    # Snapshot the Neon project's default branch by creating a child
+    # branch off of it. On rollback, recover does an instant restore
+    # of the parent from this snapshot. Both DBs on the branch (host_pool
+    # + litellm_cost) come back atomically.
     snapshot_name = make_neon_snapshot_branch_name(deploy_id)
     with info_span(
         "Creating Neon snapshot branch {!r} off project {} branch {}",
@@ -637,10 +624,13 @@ def _deploy_env_locked(
             credentials.neon_api_token,
         )
 
-    # Write the recover-target file atomically. If anything after this
-    # point fails, the operator runs ``minds env recover`` to converge
-    # the cloud back to the captured state. Successful deploy deletes
-    # the file as its very last step.
+    # F4: the snapshot branch now exists in Neon; if writing the
+    # recover-target file fails (disk full, permission denied, fsync
+    # error, ENOSPC, etc.), the snapshot is orphaned -- no file
+    # points at it, so the operator has no ``minds env recover`` path
+    # to clean it up. Best-effort delete the branch before re-raising
+    # so a local-write failure doesn't compound into "and now there's
+    # an orphan Neon branch I have to find + delete manually."
     recover_target = RecoverTarget(
         deploy_id=deploy_id,
         env_name=str(name),
@@ -653,8 +643,58 @@ def _deploy_env_locked(
         neon_snapshot_branch_id=neon_snapshot_branch_id,
         app_versions_to_restore=app_versions_to_restore,
     )
-    with info_span("Writing recover-target file at monorepo root"):
-        write_recover_target_atomic(recover_target, repo_root=repo_root)
+    try:
+        with info_span("Writing recover-target file at monorepo root"):
+            write_recover_target_atomic(recover_target, repo_root=repo_root)
+    except (OSError, MindError):
+        try:
+            providers.delete_neon_branch(
+                neon_project_id_for_snapshot, neon_snapshot_branch_id, credentials.neon_api_token
+            )
+        except MindError as cleanup_exc:
+            logger.warning(
+                "Recover-target file write failed AND best-effort cleanup of the just-created "
+                "Neon snapshot branch {!r} in project {!r} also failed: {} -- the branch is "
+                "orphaned and must be deleted manually via the Neon console.",
+                neon_snapshot_branch_id,
+                neon_project_id_for_snapshot,
+                cleanup_exc,
+            )
+        raise
+
+    # F1: migrations run AFTER snapshot + recover-target file write so
+    # ``minds env recover`` can restore the pre-migration state on
+    # failure. With the snapshot in hand and the recover-target file
+    # on disk, a failed (or merely partially-applied) migration is
+    # rolled back along with any other deploy state. The earlier
+    # pre-snapshot ordering would have left a failed migration
+    # silently applied to the DB with no recover-target file to undo
+    # it -- especially bad for shared tiers where the DB is
+    # operator-managed and likely has live traffic.
+    #
+    # Runs for EVERY tier (dev + shared) so a new ``.sql`` file
+    # shipped via PR applies to staging / production on their next
+    # deploy, not just to dev. The provider implementation wraps
+    # :func:`apply_pool_hosts_migrations` from ``migrations.py``,
+    # which uses the schema_migrations tracking table so repeated
+    # deploys only run new migrations.
+    # - dev tier (creates_resources=true): targets ``neon_record.host_pool_dsn``,
+    #   the per-env host_pool DB this deploy just (re-)created or adopted.
+    # - shared tier (creates_resources=false): targets ``DATABASE_URL`` from the
+    #   operator-managed ``secrets/minds/<tier>/neon`` Vault entry (single
+    #   shared DB; the schema_migrations table lives alongside the
+    #   pool_hosts table in that DB).
+    host_pool_dsn = _resolve_host_pool_dsn_for_migrations(
+        lifecycle=lifecycle,
+        neon_record=neon_record,
+        tier_vault_prefix=tier_vault_prefix,
+        providers=providers,
+        parent_concurrency_group=parent_concurrency_group,
+    )
+    with info_span("Applying pool-hosts schema migrations to host_pool"):
+        applied = providers.apply_pool_hosts_migrations(host_pool_dsn, parent_concurrency_group)
+        if applied:
+            logger.info("Applied {} pool-hosts migration(s): {}", len(applied), [m.name for m in applied])
 
     # Step 2: tier generation id -- only when this tier exposes one.
     generation_id: str | None = None

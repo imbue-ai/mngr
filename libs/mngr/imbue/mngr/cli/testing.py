@@ -17,6 +17,8 @@ from imbue.mngr.primitives import CommandString
 from imbue.mngr.primitives import HostName
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
+from imbue.mngr.utils.plugin_testing import PLACEHOLDER_AGENT_TYPE
+from imbue.mngr.utils.plugin_testing import register_placeholder_agent_type
 from imbue.mngr.utils.testing import get_short_random_string
 
 
@@ -28,6 +30,7 @@ def create_test_agent(
     *,
     extra_data: Mapping[str, Any] | None,
     agent_class: type[BaseAgent[AgentTypeConfig]],
+    is_type_registered: bool = True,
 ) -> BaseAgent[AgentTypeConfig]:
     """Create a test agent backed by a real local host filesystem.
 
@@ -38,12 +41,20 @@ def create_test_agent(
 
     ``extra_data`` is merged into the agent's ``data.json`` after the default
     fields, so callers can inject things like ``ready_timeout_seconds``.
+
+    By default the agent's type is registered as ``BaseAgent`` on the fly so
+    that downstream resolution (e.g. ``check_agent_type_known``) treats it
+    as a known type. Set ``is_type_registered=False`` to keep the type
+    deliberately unregistered -- needed by tests that exercise the
+    ``RUNNING_UNKNOWN_AGENT_TYPE`` lifecycle branch.
     """
     host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
 
     agent_id = AgentId.generate()
     agent_name = AgentName(f"test-agent-{get_short_random_string()}")
-    resolved_type = agent_type or AgentTypeName("test")
+    resolved_type = agent_type or AgentTypeName(PLACEHOLDER_AGENT_TYPE)
+    if is_type_registered:
+        register_placeholder_agent_type(str(resolved_type))
     resolved_config = agent_config or AgentTypeConfig(command=CommandString("sleep 1000"))
     create_time = datetime.now(timezone.utc)
 
@@ -85,9 +96,11 @@ def create_test_agent_state(host: Host, work_dir: Path, name: str) -> AgentInter
     creating a tmux session or starting the agent process. Useful for tests
     that need an agent to exist but don't need it running.
     """
+    agent_type = AgentTypeName(PLACEHOLDER_AGENT_TYPE)
+    register_placeholder_agent_type(str(agent_type))
     options = CreateAgentOptions(
         name=AgentName(name),
-        agent_type=AgentTypeName("generic"),
+        agent_type=agent_type,
         command=CommandString("sleep 1"),
     )
     return host.create_agent_state(work_dir, options)
@@ -97,7 +110,7 @@ def create_agent_with_events_dir(
     per_host_dir: Path,
     agent_name: str,
     events_source: str | None = None,
-    agent_type: str = "generic",
+    agent_type: str = PLACEHOLDER_AGENT_TYPE,
 ) -> tuple[AgentId, Path]:
     """Create a minimal agent directory with an events subdirectory.
 

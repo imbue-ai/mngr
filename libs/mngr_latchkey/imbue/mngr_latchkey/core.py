@@ -47,6 +47,8 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr_latchkey._spawn import spawn_detached_latchkey_ensure_browser
+from imbue.mngr_latchkey.encryption_key import LatchkeyEncryptionKeyPermissionError
+from imbue.mngr_latchkey.encryption_key import load_or_create_encryption_key
 from imbue.mngr_latchkey.store import LatchkeyPermissionsConfig
 from imbue.mngr_latchkey.store import default_permissions_path
 from imbue.mngr_latchkey.store import ensure_admin_permissions_file
@@ -486,19 +488,9 @@ class Latchkey(MutableModel):
             "subprocesses as ``LATCHKEY_DIRECTORY`` so the upstream ``latchkey`` CLI's "
             "credential / config files live here, and also used as the parent of the "
             "plugin's own metadata subdirectory (``mngr_latchkey/``, accessible via "
-            ":attr:`plugin_data_dir`). Required."
-        ),
-    )
-    encryption_key: SecretStr | None = Field(
-        default=None,
-        frozen=True,
-        description=(
-            "Per-``latchkey_directory`` encryption key for the upstream credential store. "
-            "When set, injected as ``LATCHKEY_ENCRYPTION_KEY`` into every spawned "
-            "``latchkey`` subprocess's env (unless the operator already has the var set "
-            "globally, in which case the operator's value wins). ``None`` means the "
-            "caller has not loaded/created a per-env key -- subprocesses fall back to "
-            "whatever's in the parent shell, matching the historical behavior."
+            ":attr:`plugin_data_dir`). The per-directory encryption key is also rooted "
+            "here -- see :func:`load_or_create_encryption_key` and "
+            ":meth:`_load_encryption_key`. Required."
         ),
     )
 
@@ -731,7 +723,7 @@ class Latchkey(MutableModel):
         ``gateway create-jwt`` in gateway-client mode, and the user
         might have it set in their shell.
         """
-        env = _build_local_latchkey_env(self.latchkey_directory, encryption_key=self.encryption_key)
+        env = _build_local_latchkey_env(self.latchkey_directory, encryption_key=self._load_encryption_key())
         cg = ConcurrencyGroup(name="latchkey-create-jwt")
         try:
             with cg:
@@ -778,7 +770,7 @@ class Latchkey(MutableModel):
         empty ``auth_options``, so the caller can fall back to its legacy
         behaviour rather than wrongly assuming credentials are valid.
         """
-        env = _build_env_with_latchkey_directory(self.latchkey_directory, encryption_key=self.encryption_key)
+        env = _build_env_with_latchkey_directory(self.latchkey_directory, encryption_key=self._load_encryption_key())
         cg = ConcurrencyGroup(name="latchkey-services-info")
         try:
             with cg:
@@ -836,7 +828,7 @@ class Latchkey(MutableModel):
         returns ``(False, message)`` where ``message`` carries the latchkey
         stderr (or stdout, or a generic fallback).
         """
-        env = _build_env_with_latchkey_directory(self.latchkey_directory, encryption_key=self.encryption_key)
+        env = _build_env_with_latchkey_directory(self.latchkey_directory, encryption_key=self._load_encryption_key())
         cg = ConcurrencyGroup(name="latchkey-auth-browser")
         with cg:
             # No timeout: this command waits on a real human completing
@@ -867,6 +859,26 @@ class Latchkey(MutableModel):
                 "Latchkey.initialize() must be called before use",
             )
 
+    def _load_encryption_key(self) -> SecretStr:
+        """Load (or, on first call against this directory, mint) the per-directory encryption key.
+
+        Re-reads the on-disk key on every subprocess-spawn call rather
+        than caching it on ``self`` so the secret only lives in
+        parent-process memory for the duration of a single
+        env-builder + process-spawn call frame. The on-disk file (and
+        the spawned child's own copy of the env var) are the only
+        steady-state holders.
+
+        Re-raises :class:`LatchkeyEncryptionKeyPermissionError` as a
+        :class:`LatchkeyError` so callers catching the latter (e.g.
+        the ``mngr latchkey`` CLI's ``ClickException`` translator)
+        get the friendly path.
+        """
+        try:
+            return load_or_create_encryption_key(self.latchkey_directory)
+        except LatchkeyEncryptionKeyPermissionError as e:
+            raise LatchkeyError(str(e)) from e
+
     def _check_minimum_version(self) -> None:
         """Refuse to initialize if the installed latchkey CLI is too old.
 
@@ -877,7 +889,7 @@ class Latchkey(MutableModel):
         if shutil.which(self.latchkey_binary) is None and not Path(self.latchkey_binary).is_file():
             raise LatchkeyBinaryNotFoundError(f"Latchkey binary not found: {self.latchkey_binary}")
 
-        env = _build_local_latchkey_env(self.latchkey_directory, encryption_key=self.encryption_key)
+        env = _build_local_latchkey_env(self.latchkey_directory, encryption_key=self._load_encryption_key())
         cg = ConcurrencyGroup(name="latchkey-version")
         try:
             with cg:
@@ -968,7 +980,7 @@ class Latchkey(MutableModel):
             permissions_config_path=default_perms,
             listen_password=password,
             extension_permissions_root=plugin_dir,
-            encryption_key=self.encryption_key,
+            encryption_key=self._load_encryption_key(),
         )
 
         with log_span(

@@ -17,13 +17,20 @@ from imbue.minds.desktop_client.latchkey.gateway_client import StreamedPermissio
 
 
 def _build_client(handler: Callable[[httpx.Request], httpx.Response]) -> LatchkeyGatewayClient:
-    """Build a :class:`LatchkeyGatewayClient` whose transport is the handler."""
-    return LatchkeyGatewayClient(
+    """Build a pre-initialized :class:`LatchkeyGatewayClient` whose transport is the handler.
+
+    The credential attrs are private and populated in production by
+    :meth:`LatchkeyGatewayClient.ensure_initialized` reading from a
+    :class:`Latchkey`. Tests skip that lazy-init path entirely by
+    pre-populating the credentials directly on the instance.
+    """
+    client = LatchkeyGatewayClient.from_credentials(
         base_url="http://gateway.invalid:1989",
         password="hunter2",
         admin_jwt="admin-jwt-token",
         transport=httpx.MockTransport(handler),
     )
+    return client
 
 
 def test_set_permission_rule_sends_expected_headers_body_and_url() -> None:

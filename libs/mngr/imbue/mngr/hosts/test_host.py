@@ -3065,7 +3065,7 @@ def test_provision_agent_applies_agent_type_provisioning_fields(
     """
     host, temp_dir = host_with_temp_dir
 
-    agent_type_name = AgentTypeName("my-custom-type")
+    agent_type_name = AgentTypeName("generic")
     marker_file = temp_dir / "agent_type_provision" / "marker.txt"
     env_output_file = temp_dir / "agent_type_provision" / "env_output.txt"
 
@@ -3115,7 +3115,7 @@ def test_provision_agent_type_provisioning_stacks_with_cli(
     """
     host, temp_dir = host_with_temp_dir
 
-    agent_type_name = AgentTypeName("stacking-type")
+    agent_type_name = AgentTypeName("generic")
     output_file = temp_dir / "stacking_test" / "order.txt"
 
     agent_type_config = AgentTypeConfig(
