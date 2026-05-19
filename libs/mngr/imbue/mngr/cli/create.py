@@ -271,10 +271,10 @@ def _is_imbue_cloud_provider(provider_name: ProviderInstanceName | None, mngr_ct
     """Return True when ``provider_name`` resolves to the imbue_cloud backend.
 
     Used by the ``--reuse + --new-host`` validator to permit the lease/adopt
-    flow that the minds caller still relies on. Resolves the backend the same
-    way ``get_provider_instance`` does -- via the provider config's backend
-    field, falling back to the instance name itself -- but without building
-    the provider.
+    flow that the minds caller still relies on. Resolves the backend from the
+    provider config's ``backend`` field, or falls back to treating the
+    instance name itself as the backend when the name is not in the config.
+    This does not build the provider.
     """
     if provider_name is None:
         return False
