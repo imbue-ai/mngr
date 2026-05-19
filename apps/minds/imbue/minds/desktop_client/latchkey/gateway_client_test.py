@@ -11,6 +11,7 @@ from pathlib import Path
 import httpx
 import pytest
 
+from imbue.minds.desktop_client.latchkey.gateway_client import AvailableServiceEntry
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClient
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClientError
 from imbue.minds.desktop_client.latchkey.gateway_client import StreamedPermissionRequest
@@ -104,8 +105,20 @@ def test_delete_permission_request_raises_on_other_4xx() -> None:
 def test_iter_permission_requests_parses_jsonl_stream() -> None:
     """``iter_permission_requests`` decodes JSONL into :class:`StreamedPermissionRequest`."""
     requests_payload = [
-        {"request_id": "abc", "agent_id": "a1", "service_name": "slack", "rationale": "why"},
-        {"request_id": "def", "agent_id": "a2", "service_name": "github", "rationale": "test"},
+        {
+            "request_id": "abc",
+            "agent_id": "a1",
+            "scope": "slack-api",
+            "permissions": ["slack-read-all"],
+            "rationale": "why",
+        },
+        {
+            "request_id": "def",
+            "agent_id": "a2",
+            "scope": "github-rest-api",
+            "permissions": [],
+            "rationale": "test",
+        },
     ]
     body = "".join(json.dumps(item) + "\n" for item in requests_payload).encode("utf-8")
 
@@ -118,15 +131,29 @@ def test_iter_permission_requests_parses_jsonl_stream() -> None:
     client = _build_client(_handler)
     items = list(client.iter_permission_requests())
     assert items == [
-        StreamedPermissionRequest(request_id="abc", agent_id="a1", service_name="slack", rationale="why"),
-        StreamedPermissionRequest(request_id="def", agent_id="a2", service_name="github", rationale="test"),
+        StreamedPermissionRequest(
+            request_id="abc",
+            agent_id="a1",
+            scope="slack-api",
+            permissions=("slack-read-all",),
+            rationale="why",
+        ),
+        StreamedPermissionRequest(
+            request_id="def",
+            agent_id="a2",
+            scope="github-rest-api",
+            permissions=(),
+            rationale="test",
+        ),
     ]
 
 
 def test_iter_permission_requests_skips_malformed_lines() -> None:
     """Garbage lines (non-JSON or wrong shape) are dropped with a warning, not raised."""
     payload = (
-        b'not valid json\n{"agent_id": "a1"}\n{"request_id":"x","agent_id":"a2","service_name":"s","rationale":"r"}\n'
+        b"not valid json\n"
+        b'{"agent_id": "a1"}\n'
+        b'{"request_id":"x","agent_id":"a2","scope":"s-api","permissions":["p"],"rationale":"r"}\n'
     )
 
     def _handler(request: httpx.Request) -> httpx.Response:
@@ -136,8 +163,118 @@ def test_iter_permission_requests_skips_malformed_lines() -> None:
     client = _build_client(_handler)
     items = list(client.iter_permission_requests())
     assert items == [
-        StreamedPermissionRequest(request_id="x", agent_id="a2", service_name="s", rationale="r"),
+        StreamedPermissionRequest(
+            request_id="x",
+            agent_id="a2",
+            scope="s-api",
+            permissions=("p",),
+            rationale="r",
+        ),
     ]
+
+
+def test_get_available_services_returns_typed_entries() -> None:
+    """``get_available_services`` GETs the catalog endpoint and returns validated entries."""
+    payload = {
+        "slack": {
+            "scope": "slack-api",
+            "display_name": "Slack",
+            "permissions": ["slack-read-all"],
+        },
+        "linear": {
+            "scope": "linear-api",
+            "display_name": "Linear",
+            "permissions": [],
+        },
+    }
+
+    captured: dict[str, object] = {}
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        captured["path"] = request.url.path
+        captured["method"] = request.method
+        captured["auth"] = request.headers.get("X-Latchkey-Gateway-Password")
+        captured["override"] = request.headers.get("X-Latchkey-Gateway-Permissions-Override")
+        return httpx.Response(200, json=payload)
+
+    client = _build_client(_handler)
+    result = client.get_available_services()
+
+    assert result == {
+        "slack": AvailableServiceEntry(
+            scope="slack-api",
+            display_name="Slack",
+            permissions=("slack-read-all",),
+        ),
+        "linear": AvailableServiceEntry(
+            scope="linear-api",
+            display_name="Linear",
+            permissions=(),
+        ),
+    }
+    assert captured["method"] == "GET"
+    assert captured["path"] == "/permissions/available"
+    assert captured["auth"] == "hunter2"
+    assert captured["override"] == "admin-jwt-token"
+
+
+def test_get_available_services_raises_on_non_2xx() -> None:
+    def _handler(request: httpx.Request) -> httpx.Response:
+        del request
+        return httpx.Response(500, content=b"boom")
+
+    client = _build_client(_handler)
+    with pytest.raises(LatchkeyGatewayClientError):
+        client.get_available_services()
+
+
+def test_get_available_services_raises_on_non_object_body() -> None:
+    def _handler(request: httpx.Request) -> httpx.Response:
+        del request
+        return httpx.Response(200, json=[1, 2, 3])
+
+    client = _build_client(_handler)
+    with pytest.raises(LatchkeyGatewayClientError):
+        client.get_available_services()
+
+
+@pytest.mark.parametrize(
+    "bad_entry",
+    [
+        # Missing scope.
+        {"display_name": "X", "permissions": []},
+        # Missing display_name.
+        {"scope": "x-api", "permissions": []},
+        # Empty scope (violates min_length=1).
+        {"scope": "", "display_name": "X", "permissions": []},
+        # Empty display_name (violates min_length=1).
+        {"scope": "x-api", "display_name": "", "permissions": []},
+        # Non-string scope.
+        {"scope": 0, "display_name": "X", "permissions": []},
+        # Non-list permissions.
+        {"scope": "x-api", "display_name": "X", "permissions": "not a list"},
+        # List with a non-string element.
+        {"scope": "x-api", "display_name": "X", "permissions": ["valid", 7]},
+        # Top-level is not an object.
+        "definitely not a service entry",
+    ],
+)
+def test_get_available_services_raises_on_malformed_entry(bad_entry: object) -> None:
+    """Any structural defect in a single entry surfaces as ``LatchkeyGatewayClientError``.
+
+    The client is the single place that validates the wire shape; the
+    catalog module that consumes the result depends on this validation
+    so it can work with typed entries instead of ``dict[str, object]``.
+    """
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        del request
+        return httpx.Response(200, json={"broken": bad_entry})
+
+    client = _build_client(_handler)
+    with pytest.raises(LatchkeyGatewayClientError) as exc_info:
+        client.get_available_services()
+    assert "broken" in str(exc_info.value)
 
 
 def test_get_granted_permissions_unions_matching_scopes() -> None:
@@ -200,5 +337,114 @@ def test_iter_permission_requests_raises_on_http_error() -> None:
         return httpx.Response(500, content=b"explode")
 
     client = _build_client(_handler)
+    with pytest.raises(LatchkeyGatewayClientError):
+        list(client.iter_permission_requests())
+
+
+# -- Connect-level self-healing -------------------------------------------
+
+
+def test_invalidate_initialization_clears_cached_state() -> None:
+    """After ``invalidate_initialization`` the client behaves as if never initialized.
+
+    A ``from_credentials``-built client has no :class:`Latchkey` to
+    re-derive from, so post-invalidate HTTP calls surface as
+    ``LatchkeyGatewayClientNotInitializedError`` (a subclass of
+    ``LatchkeyGatewayClientError``). The production code path always
+    builds via :meth:`from_latchkey` and re-resolves cleanly; this
+    test pins the contract that invalidation actually clears state.
+    """
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        del request
+        return httpx.Response(200, json={})
+
+    client = _build_client(_handler)
+    # First call works against the cached credentials.
+    client.delete_permission_request("evt-abc")
+
+    client.invalidate_initialization()
+
+    # No ``_latchkey`` to re-resolve from, so the next call refuses to
+    # build a URL at all.
+    with pytest.raises(LatchkeyGatewayClientError):
+        client.delete_permission_request("evt-abc")
+
+
+@pytest.mark.parametrize(
+    "transport_error",
+    [
+        httpx.ConnectError("connection refused"),
+        httpx.ConnectTimeout("connect timeout"),
+    ],
+)
+def test_one_shot_methods_invalidate_on_connect_level_errors(transport_error: httpx.HTTPError) -> None:
+    """Connect-level transport failures clear the cached gateway URL.
+
+    This is the load-bearing self-heal that lets the desktop client
+    recover from a stale cached port (typically observed when the
+    supervisor restarted on a new port after the gateway client
+    cached the previous one).
+    """
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        del request
+        raise transport_error
+
+    client = _build_client(_handler)
+    with pytest.raises(LatchkeyGatewayClientError):
+        client.get_available_services()
+    # ``_require_base_url`` now raises ``LatchkeyGatewayClientNotInitializedError``
+    # (a subclass of ``LatchkeyGatewayClientError``) because the cache
+    # was cleared by the connect-error handler.
+    with pytest.raises(LatchkeyGatewayClientError):
+        client.get_available_services()
+
+
+def test_non_connect_transport_errors_do_not_invalidate() -> None:
+    """Non-connect transport failures (e.g. mid-response ``ReadError``) propagate without invalidating.
+
+    A read-level failure indicates a problem mid-stream rather than a
+    stale local cache. Clearing state on every transient transport
+    hiccup would force an unnecessary supervisor-record re-read; the
+    cached URL is still very likely correct.
+    """
+
+    call_count = {"value": 0}
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        del request
+        call_count["value"] += 1
+        raise httpx.ReadError("server hung up mid-response")
+
+    client = _build_client(_handler)
+    with pytest.raises(LatchkeyGatewayClientError):
+        client.get_available_services()
+    # The cache was *not* cleared, so the second call hits the
+    # transport again (instead of failing fast on the missing
+    # ``base_url``).
+    with pytest.raises(LatchkeyGatewayClientError):
+        client.get_available_services()
+    assert call_count["value"] == 2
+
+
+def test_iter_permission_requests_invalidates_on_connect_error() -> None:
+    """The streaming path also self-heals on connect-level failures.
+
+    This is the one consumers of the stream care most about: the
+    background reconnect loop in ``PermissionRequestsConsumer`` will
+    call ``iter_permission_requests`` again after our exception, and
+    the cleared state means the next call re-resolves the gateway URL
+    from the supervisor record instead of pounding the stale port.
+    """
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        del request
+        raise httpx.ConnectError("connection refused")
+
+    client = _build_client(_handler)
+    with pytest.raises(LatchkeyGatewayClientError):
+        list(client.iter_permission_requests())
+    # State cleared -- next call cannot build a URL.
     with pytest.raises(LatchkeyGatewayClientError):
         list(client.iter_permission_requests())
