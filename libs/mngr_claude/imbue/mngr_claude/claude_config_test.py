@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from imbue.mngr.errors import UserInputError
 from imbue.mngr_claude.claude_config import ClaudeDirectoryNotTrustedError
 from imbue.mngr_claude.claude_config import ClaudeEffortCalloutNotDismissedError
 from imbue.mngr_claude.claude_config import acknowledge_cost_threshold
@@ -22,6 +23,7 @@ from imbue.mngr_claude.claude_config import get_claude_config_dir
 from imbue.mngr_claude.claude_config import get_user_claude_config_dir
 from imbue.mngr_claude.claude_config import is_source_directory_trusted
 from imbue.mngr_claude.claude_config import remove_claude_trust_for_path
+from imbue.mngr_claude.claude_config import resolve_shared_claude_config_dir
 
 
 def test_find_project_config_exact_match() -> None:
@@ -752,6 +754,29 @@ def test_get_user_claude_config_dir_credentials_fallback_resolves_to_per_agent_c
 
     assert resolved.exists()
     assert resolved.read_text() == '{"token": "abc"}'
+
+
+# Tests for resolve_shared_claude_config_dir
+
+
+def test_resolve_shared_claude_config_dir_returns_env_value(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """With CLAUDE_CONFIG_DIR set to a non-empty path, returns it as a Path."""
+    target = tmp_path / "shared-claude"
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(target))
+    assert resolve_shared_claude_config_dir() == target
+
+
+def test_resolve_shared_claude_config_dir_raises_when_unset() -> None:
+    """Without CLAUDE_CONFIG_DIR, raises UserInputError naming the flag."""
+    with pytest.raises(UserInputError, match="use_env_config_dir"):
+        resolve_shared_claude_config_dir()
+
+
+def test_resolve_shared_claude_config_dir_raises_when_empty(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Empty CLAUDE_CONFIG_DIR is treated the same as unset."""
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", "")
+    with pytest.raises(UserInputError, match="use_env_config_dir"):
+        resolve_shared_claude_config_dir()
 
 
 # Tests for find_user_claude_config

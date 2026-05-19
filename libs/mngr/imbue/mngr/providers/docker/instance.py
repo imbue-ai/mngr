@@ -498,6 +498,7 @@ class DockerProviderInstance(BaseProviderInstance):
 
         host = Host(
             id=host_id,
+            host_name=host_name,
             connector=connector,
             provider_instance=self,
             mngr_ctx=self.mngr_ctx,
@@ -555,7 +556,7 @@ kill -TERM 1
         with log_span("Updating certified host data", host_id=str(host_id)):
             host_record = self._host_store.read_host_record(host_id, use_cache=False)
             if host_record is None:
-                raise HostNotFoundError(host_id)
+                raise HostNotFoundError(self.name, host_id)
             updated_host_record = host_record.model_copy_update(
                 to_update(host_record.field_ref().certified_host_data, certified_data),
             )
@@ -857,6 +858,7 @@ kill -TERM 1
 
         return Host(
             id=host_id,
+            host_name=name,
             connector=connector,
             provider_instance=self,
             mngr_ctx=self.mngr_ctx,
@@ -1129,7 +1131,7 @@ kill -TERM 1
             self._evict_cached_host(host_id)
 
             if host_record is None:
-                raise HostNotFoundError(host_id)
+                raise HostNotFoundError(self.name, host_id)
 
             config = host_record.config
             if config is None:
@@ -1152,7 +1154,7 @@ kill -TERM 1
 
         # No container found, try snapshot restore
         if host_record is None:
-            raise HostNotFoundError(host_id)
+            raise HostNotFoundError(self.name, host_id)
 
         if not host_record.certified_host_data.snapshots:
             raise MngrError(
@@ -1174,7 +1176,7 @@ kill -TERM 1
         if host_record is None:
             host_record = self._host_store.read_host_record(host_id, use_cache=False)
         if host_record is None:
-            raise HostNotFoundError(host_id)
+            raise HostNotFoundError(self.name, host_id)
 
         snapshot_data: SnapshotRecord | None = None
         for snap in host_record.certified_host_data.snapshots:
@@ -1183,7 +1185,7 @@ kill -TERM 1
                 break
 
         if snapshot_data is None:
-            raise SnapshotNotFoundError(snapshot_id)
+            raise SnapshotNotFoundError(self.name, snapshot_id)
 
         config = host_record.config
         if config is None:
@@ -1305,7 +1307,7 @@ kill -TERM 1
         """Return an offline representation of the given host for use when it is unreachable."""
         host_record = self._host_store.read_host_record(host_id, use_cache=False)
         if host_record is None:
-            raise HostNotFoundError(host_id)
+            raise HostNotFoundError(self.name, host_id)
 
         return self._create_host_from_host_record(host_record)
 
@@ -1351,7 +1353,7 @@ kill -TERM 1
             self._evict_cached_host(host_obj.id, replacement=host_obj)
             return host_obj
 
-        raise HostNotFoundError(host)
+        raise HostNotFoundError(self.name, host)
 
     def discover_hosts(
         self,
@@ -1480,7 +1482,7 @@ kill -TERM 1
 
         container = self._find_container_by_host_id(host_id)
         if container is None:
-            raise HostNotFoundError(host_id)
+            raise HostNotFoundError(self.name, host_id)
 
         if not self._is_container_running(container):
             raise MngrError(f"Cannot snapshot stopped container {host_id}")
@@ -1516,7 +1518,7 @@ kill -TERM 1
         # Update host record with new snapshot
         host_record = self._host_store.read_host_record(host_id, use_cache=False)
         if host_record is None:
-            raise HostNotFoundError(host_id)
+            raise HostNotFoundError(self.name, host_id)
 
         updated_certified_data = host_record.certified_host_data.model_copy_update(
             to_update(
@@ -1568,13 +1570,13 @@ kill -TERM 1
         with log_span("Deleting snapshot", snapshot_id=str(snapshot_id), host_id=str(host_id)):
             host_record = self._host_store.read_host_record(host_id, use_cache=False)
             if host_record is None:
-                raise HostNotFoundError(host_id)
+                raise HostNotFoundError(self.name, host_id)
 
             snapshot_id_str = str(snapshot_id)
             updated_snapshots = [s for s in host_record.certified_host_data.snapshots if s.id != snapshot_id_str]
 
             if len(updated_snapshots) == len(host_record.certified_host_data.snapshots):
-                raise SnapshotNotFoundError(snapshot_id)
+                raise SnapshotNotFoundError(self.name, snapshot_id)
 
             # Remove Docker image
             try:
@@ -1673,7 +1675,7 @@ kill -TERM 1
         if host_record is not None:
             return dict(host_record.certified_host_data.user_tags)
 
-        raise HostNotFoundError(host_id)
+        raise HostNotFoundError(self.name, host_id)
 
     def set_host_tags(
         self,
@@ -1726,7 +1728,7 @@ kill -TERM 1
 
         host_record = self._host_store.read_host_record(host_id)
         if host_record is None:
-            raise HostNotFoundError(host_id)
+            raise HostNotFoundError(self.name, host_id)
 
         if host_record.ssh_host is None or host_record.ssh_port is None or host_record.ssh_host_public_key is None:
             raise MngrError(f"Cannot get connector for host {host_id}: host has no SSH info (likely a failed host)")
@@ -1787,7 +1789,7 @@ kill -TERM 1
     def outer_host_id_for(self, host_id: HostId) -> str | None:
         """Stable id for the outer of `host_id` -- shared across all containers on this daemon."""
         if self._host_store.read_host_record(host_id, use_cache=False) is None:
-            raise HostNotFoundError(host_id)
+            raise HostNotFoundError(self.name, host_id)
         machine = self._outer_machine_id()
         if machine is None:
             return None
@@ -1805,7 +1807,7 @@ kill -TERM 1
         Raises HostNotFoundError if host_id is unknown to this provider.
         """
         if self._host_store.read_host_record(host_id, use_cache=False) is None:
-            raise HostNotFoundError(host_id)
+            raise HostNotFoundError(self.name, host_id)
 
         outer = self._build_outer_host(host_id)
         try:

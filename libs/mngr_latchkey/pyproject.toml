@@ -1,0 +1,69 @@
+[project]
+name = "imbue-mngr-latchkey"
+version = "0.1.0"
+description = "Latchkey integration plugin for mngr - manages a shared latchkey gateway and per-agent permissions"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "imbue-mngr==0.2.6",
+    # Source of the bidirectional socket/channel relay used by the
+    # reverse-tunnel paramiko handler; sharing the upstream copy keeps
+    # the half-closed-channel fix in a single place.
+    "imbue-mngr-forward==0.1.0",
+    "imbue-common==0.1.15",
+    "concurrency-group==0.1.15",
+    "click>=8.0",
+    "loguru>=0.7",
+    "paramiko>=3.0",
+    "pluggy>=1.0",
+    "psutil>=5.9",
+    "pydantic>=2.0",
+]
+
+[project.entry-points.mngr]
+latchkey = "imbue.mngr_latchkey.plugin"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["imbue"]
+exclude = ["*_test.py", "test_*.py", "**/conftest.py", "**/testing.py"]
+# ``.mjs`` files under ``imbue/mngr_latchkey/extensions/`` are picked up
+# by hatchling's default file selection (the package dir is included
+# verbatim modulo ``exclude``). They are copied into the spawned latchkey
+# gateway's extension directory at runtime by ``Latchkey._spawn_gateway``.
+
+[tool.uv.sources]
+imbue-mngr = { workspace = true }
+imbue-mngr-forward = { workspace = true }
+imbue-common = { workspace = true }
+concurrency-group = { workspace = true }
+
+[tool.pyright]
+venvPath = "../.."
+venv = ".venv"
+pythonVersion = "3.12"
+strict = ["**/*.py"]
+
+[tool.pytest.ini_options]
+timeout_func_only = true
+pythonpath = ["."]
+testpaths = ["."]
+addopts = [
+    "--cov=imbue.mngr_latchkey",
+    "--cov-report=term-missing",
+    "--timeout=30",
+]
+
+[tool.coverage.run]
+source = ["imbue.mngr_latchkey"]
+omit = [
+    "*_test.py",
+    "test_*.py",
+    "*/conftest.py",
+]
+
+[tool.coverage.report]
+fail_under = 80

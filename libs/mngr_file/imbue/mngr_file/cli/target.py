@@ -9,8 +9,8 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.pure import pure
 from imbue.mngr.api.discover import discover_hosts_and_agents
-from imbue.mngr.api.find import find_all_matching_agents
-from imbue.mngr.api.find import find_all_matching_hosts
+from imbue.mngr.api.find import filter_one_host
+from imbue.mngr.api.find import find_one_agent
 from imbue.mngr.api.providers import get_provider_instance
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import MngrError
@@ -18,7 +18,9 @@ from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.host import get_agent_state_dir_path
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.interfaces.volume import Volume
+from imbue.mngr.primitives import AgentAddress
 from imbue.mngr.primitives import AgentId
+from imbue.mngr.primitives import AgentOrHostAddress
 from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import DiscoveredHost
 from imbue.mngr.primitives import HostId
@@ -127,86 +129,52 @@ class ResolveFileTargetResult(FrozenModel):
 
 
 def resolve_file_target(
-    target_identifier: str,
+    target: AgentOrHostAddress,
     mngr_ctx: MngrContext,
     relative_to: PathRelativeTo,
 ) -> ResolveFileTargetResult:
     """Resolve a TARGET argument to a host/volume and base path for file operations.
 
-    Tries agent resolution first, then host resolution. If both match, raises
-    an error requiring disambiguation. If neither matches, raises an error.
+    Whether the target is an agent or a host is determined by ``target``'s
+    runtime type (parsed by the standard ``AGENT_OR_HOST_ADDRESS`` Click
+    param type, which uses :func:`parse_agent_or_host_address`). To target a
+    host whose name shares the shape of a :class:`SafeName`, write ``@host``
+    on the command line so the parser picks the host arm.
 
     When the target host is online, direct host access is used. When offline,
     falls back to volume access for paths under the host directory.
+
+    Note that, unlike the standard single-agent flow used by connect/push/etc.,
+    this resolver does **not** call into ``ensure_host_*`` after finding the
+    agent: ``mngr file`` is allowed to operate against an offline host
+    through the provider's volume backend, and forcing the host online would
+    silently strip that capability.
     """
-    with log_span("Discovering hosts and agents"):
-        agents_by_host, _ = discover_hosts_and_agents(
-            mngr_ctx,
-            provider_names=None,
-            agent_identifiers=(target_identifier,),
-            include_destroyed=False,
-            reset_caches=False,
-        )
-
-    all_hosts = list(agents_by_host.keys())
-
-    # Find all matching agents and hosts
-    matching_agents = find_all_matching_agents(target_identifier, agents_by_host)
-    matching_hosts = find_all_matching_hosts(target_identifier, all_hosts)
-
-    # Check for ambiguity within each type
-    if len(matching_agents) > 1:
-        raise UserInputError(
-            f"Multiple agents found matching '{target_identifier}'. "
-            f"Use the full agent ID to disambiguate.\n\n"
-            f"To see all agent IDs, run:\n"
-            f"  mngr list --fields id,name,host"
-        )
-    if len(matching_hosts) > 1:
-        raise UserInputError(
-            f"Multiple hosts found matching '{target_identifier}'. "
-            f"Use the full host ID to disambiguate.\n\n"
-            f"To see all IDs, run:\n"
-            f"  mngr list --fields id,name,host"
-        )
-
-    has_agent_match = len(matching_agents) == 1
-    has_host_match = len(matching_hosts) == 1
-
-    # Check for cross-type ambiguity
-    if has_agent_match and has_host_match:
-        raise UserInputError(
-            f"'{target_identifier}' matches both an agent and a host. "
-            f"Use the full ID to disambiguate.\n\n"
-            f"To see all IDs, run:\n"
-            f"  mngr list --fields id,name,host"
-        )
-
-    # Neither matched
-    if not has_agent_match and not has_host_match:
-        raise UserInputError(
-            f"No agent or host found matching: {target_identifier}\n\nTo see available agents, run:\n  mngr list"
-        )
-
-    # Agent matched
-    if has_agent_match:
-        discovered_host, discovered_agent = matching_agents[0]
+    if isinstance(target, AgentAddress):
+        host_ref, agent_ref = find_one_agent(target, mngr_ctx)
         return _resolve_agent_target(
-            discovered_host=discovered_host,
-            discovered_agent=discovered_agent,
+            discovered_host=host_ref,
+            discovered_agent=agent_ref,
             mngr_ctx=mngr_ctx,
             relative_to=relative_to,
         )
 
-    # Host matched
-    discovered_host = matching_hosts[0]
+    # Host target. filter_one_host raises if zero or multiple hosts match.
     if relative_to != PathRelativeTo.HOST and relative_to != PathRelativeTo.WORK:
         raise UserInputError(
             f"--relative-to {relative_to.value.lower()} is only valid for agent targets. "
             f"Host targets always use MNGR_HOST_DIR as the base path."
         )
+    agents_by_host, _ = discover_hosts_and_agents(
+        mngr_ctx,
+        provider_names=None,
+        agent_identifiers=None,
+        include_destroyed=False,
+        reset_caches=False,
+    )
+    host_ref = filter_one_host(target, list(agents_by_host.keys()))
     return _resolve_host_target(
-        discovered_host=discovered_host,
+        discovered_host=host_ref,
         mngr_ctx=mngr_ctx,
     )
 

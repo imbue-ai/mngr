@@ -6,7 +6,8 @@ set -euo pipefail
 # running this is the way to redeploy after editing the prompt or this
 # script.
 #
-# The scheduled agent runs at midnight PST as a headless_claude agent. The
+# The scheduled agent runs nightly at 08:00 UTC (midnight or 1 AM Pacific,
+# depending on DST) as a headless_claude agent. The
 # orchestration steps live in scripts/changelog_consolidation_prompt.md and
 # are executed by claude itself (running consolidate_changelog.py, summarizing
 # the new section, committing, pushing a branch, opening a PR). Claude's
@@ -22,9 +23,13 @@ set -euo pipefail
 #   ANTHROPIC_API_KEY - used by claude inside the cron container.
 #
 # Optional environment:
-#   CHANGELOG_PROVIDER - Provider to use (default: "modal").
 #   CHANGELOG_VERIFY   - Verification mode (default: "none"). Set to "quick"
 #                        or "full" to run the agent once during deploy.
+#
+# The provider is read from the shared `PROVIDER` constant in
+# scripts/trigger_changelog_consolidation.py so release.py's printed
+# on-demand command targets the same deployment. To change providers,
+# edit that constant and re-run this script.
 #
 # To trigger a fire on demand and read its JSON outcome (status / pr_url / notes):
 #   env -u MNGR_HOST_DIR -u MNGR_PREFIX MNGR_ROOT_NAME=mngr-changelog-schedule \
@@ -36,9 +41,9 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$REPO_ROOT"
 
 TRIGGER_NAME="changelog-consolidation"
-# Midnight PST (UTC-8) = 08:00 UTC.
+# 08:00 UTC nightly (midnight or 1 AM Pacific, depending on DST).
 SCHEDULE="0 8 * * *"
-PROVIDER="${CHANGELOG_PROVIDER:-modal}"
+PROVIDER=$(uv run python "${REPO_ROOT}/scripts/trigger_changelog_consolidation.py" --print-provider)
 VERIFY="${CHANGELOG_VERIFY:-none}"
 
 # Use an isolated mngr config namespace so we don't load the repo's
@@ -60,14 +65,10 @@ done
 # inside the Modal container.
 export IS_SANDBOX=1
 
-# Compute --disable-plugin args for every installed plugin EXCEPT the
-# minimum set the scheduled run needs.
-DISABLE_PLUGIN_ARGS=$(uv run python -c "
-import importlib.metadata
-enabled = {'schedule', 'modal', 'headless_claude', 'claude', 'file'}
-names = sorted({ep.name for ep in importlib.metadata.entry_points(group='mngr')} - enabled)
-print(' '.join(f'--disable-plugin {n}' for n in names))
-")
+# Compute --disable-plugin args via the shared helper so the deploy and
+# the on-demand trigger (scripts/release.py) stay in sync about which
+# plugins must be disabled around `mngr schedule` invocations.
+DISABLE_PLUGIN_ARGS=$(uv run python "${REPO_ROOT}/scripts/trigger_changelog_consolidation.py" --print-disable-plugin-args)
 
 # Always remove an existing trigger before recreating, so the deployed
 # schedule reflects the current source no matter what was deployed before.
@@ -124,7 +125,8 @@ uv run mngr schedule add "$TRIGGER_NAME" \
     --provider "$PROVIDER" \
     --verify "$VERIFY" \
     --full-copy \
-    --no-auto-merge \
+    --auto-merge \
+    --auto-merge-branch main \
     --exclude-user-settings \
     --exclude-project-settings \
     --pass-env GH_TOKEN \

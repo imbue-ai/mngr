@@ -6,8 +6,11 @@ import click
 from click_option_group import optgroup
 from loguru import logger
 
+from imbue.mngr.api.find import resolve_to_started_host_and_agent
 from imbue.mngr.api.provision import provision_agent
-from imbue.mngr.cli.agent_utils import find_agent_for_command
+from imbue.mngr.cli.address_params import AGENT_ADDRESS
+from imbue.mngr.cli.address_params import HOST_ADDRESS
+from imbue.mngr.cli.agent_utils import find_agent_by_address_or_interactively
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
 from imbue.mngr.cli.env_utils import resolve_env_vars
@@ -21,18 +24,21 @@ from imbue.mngr.errors import UserInputError
 from imbue.mngr.interfaces.host import AgentEnvironmentOptions
 from imbue.mngr.interfaces.host import AgentProvisioningOptions
 from imbue.mngr.interfaces.host import UploadFileSpec
+from imbue.mngr.primitives import AgentAddress
+from imbue.mngr.primitives import HostAddress
 from imbue.mngr.primitives import OutputFormat
 
 
 class ProvisionCliOptions(CommonCliOptions):
     """Options passed from the CLI to the provision command."""
 
-    agent: str | None
-    agent_option: str | None
-    host: str | None
+    agent: AgentAddress | None
+    agent_option: AgentAddress | None
+    host: HostAddress | None
     # Behavior options
     bootstrap: str | None
     destroy_on_fail: bool
+    start: bool
     restart: bool
     # Provisioning options
     extra_provision_command: tuple[str, ...]
@@ -58,16 +64,18 @@ def _output_result(agent_name: str, output_opts: OutputOptions) -> None:
 
 
 @click.command(name="provision")
-@click.argument("agent", required=False, default=None)
+@click.argument("agent", type=AGENT_ADDRESS, required=False, default=None)
 @optgroup.group("Target Selection")
 @optgroup.option(
     "--agent",
     "agent_option",
-    help="Agent name or ID to provision (alternative to positional argument)",
+    type=AGENT_ADDRESS,
+    help="Agent address (NAME[@HOST[.PROVIDER]]) to provision (alternative to positional argument)",
 )
 @optgroup.option(
     "--host",
-    help="Filter by host name or ID [future]",
+    type=HOST_ADDRESS,
+    help="Filter by host address (HOST[.PROVIDER]) [future]",
 )
 @optgroup.group("Behavior")
 @optgroup.option(
@@ -81,6 +89,12 @@ def _output_result(agent_name: str, output_opts: OutputOptions) -> None:
     "destroy_on_fail",
     default=False,
     help="Destroy the host if provisioning fails [future]",
+)
+@optgroup.option(
+    "--start/--no-start",
+    default=True,
+    show_default=True,
+    help="Automatically start the host if offline (the agent does not need to be running)",
 )
 @optgroup.option(
     "--restart/--no-restart",
@@ -136,31 +150,24 @@ def provision(ctx: click.Context, **kwargs: Any) -> None:
     if opts.destroy_on_fail:
         raise NotImplementedError("--destroy-on-fail is not implemented yet")
 
-    # Resolve agent identifier from positional argument or --agent option
-    agent_identifier: str | None
+    # Resolve agent address from positional argument or --agent option
     if opts.agent is not None and opts.agent_option is not None:
         raise UserInputError("Cannot specify both positional agent and --agent option")
-    elif opts.agent is not None:
-        agent_identifier = opts.agent
-    elif opts.agent_option is not None:
-        agent_identifier = opts.agent_option
-    else:
-        agent_identifier = None
+    address: AgentAddress | None = opts.agent if opts.agent is not None else opts.agent_option
 
-    # Find the agent (start the host if needed, but don't require the agent to be running)
-    result = find_agent_for_command(
+    # Find the agent (provision needs the host online but manages the agent's
+    # state itself via --restart, so the agent process state is not required).
+    host_ref, agent_ref = find_agent_by_address_or_interactively(
         mngr_ctx=mngr_ctx,
-        agent_identifier=agent_identifier,
-        command_usage="provision",
+        address=address,
         host_filter=None,
-        is_start_desired=True,
-        skip_agent_state_check=True,
     )
-    if result is None:
-        logger.info("No agent selected")
-        return
-
-    agent, host = result
+    agent, host = resolve_to_started_host_and_agent(
+        host_ref=host_ref,
+        agent_ref=agent_ref,
+        allow_auto_start=opts.start,
+        mngr_ctx=mngr_ctx,
+    )
 
     # Parse provisioning options
     provisioning = AgentProvisioningOptions(
@@ -195,7 +202,7 @@ def provision(ctx: click.Context, **kwargs: Any) -> None:
 CommandHelpMetadata(
     key="provision",
     one_line_description="Re-run provisioning on an existing agent [experimental]",
-    synopsis="mngr [provision|prov] [AGENT] [--agent <AGENT>] [--extra-provision-command <CMD>] [--upload-file <LOCAL:REMOTE>] [--env <KEY=VALUE>] [--env-file <FILE>] [--[no-]restart]",
+    synopsis="mngr [provision|prov] [AGENT] [--agent <AGENT>] [--extra-provision-command <CMD>] [--upload-file <LOCAL:REMOTE>] [--env <KEY=VALUE>] [--env-file <FILE>] [--start/--no-start] [--[no-]restart]",
     description="""This re-runs the provisioning steps (plugin lifecycle hooks, file transfers,
 custom commands, env vars) on an agent that has already been created. Useful for
 syncing configuration, authentication, and installing additional packages. Most

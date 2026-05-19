@@ -36,9 +36,9 @@ mngr pair [OPTIONS] SOURCE
 
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
-| `--source` | text | Source specification: AGENT, AGENT:PATH, or PATH | None |
-| `--source-agent` | text | Source agent name or ID | None |
-| `--source-host` | text | Source host name or ID | None |
+| `--source` | host_location_address | Source specification: AGENT[@HOST[.PROVIDER]][:PATH] | None |
+| `--source-agent` | agent_address | Source agent address (NAME[@HOST[.PROVIDER]]) | None |
+| `--source-host` | host_address | Source host address (HOST[.PROVIDER]) | None |
 | `--source-path` | text | Path within the agent's work directory | None |
 
 ## Target

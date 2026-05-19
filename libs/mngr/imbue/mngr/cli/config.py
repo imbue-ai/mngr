@@ -747,7 +747,7 @@ Configuration is stored in TOML files:
     examples=(
         ("List all configuration values", "mngr config list"),
         ("Get a specific value", "mngr config get provider.docker.image"),
-        ("Set a value at user scope", "mngr config set --user provider.docker.image my-image:latest"),
+        ("Set a value at user scope", "mngr config set --scope user provider.docker.image my-image:latest"),
         ("Edit config in your editor", "mngr config edit"),
         ("Show config file paths", "mngr config path"),
     ),

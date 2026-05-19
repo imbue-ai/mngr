@@ -15,6 +15,7 @@ from loguru import logger
 
 from imbue.imbue_common.pure import pure
 from imbue.mngr.errors import ConfigError
+from imbue.mngr.errors import UserInputError
 from imbue.mngr.utils.file_utils import atomic_write
 
 
@@ -110,6 +111,24 @@ def get_user_claude_config_dir() -> Path:
     if original and Path(original).is_dir():
         return Path(original)
     return get_claude_config_dir()
+
+
+def resolve_shared_claude_config_dir() -> Path:
+    """Return the value of $CLAUDE_CONFIG_DIR. Raises UserInputError if unset or empty.
+
+    Used by the ``use_env_config_dir`` mode of ``ClaudeAgentConfig`` where mngr
+    delegates the claude config dir to whatever the user has in their shell env
+    rather than provisioning a per-agent dir. The flag is meaningless unless
+    the env var is set, so this helper makes the failure mode explicit.
+    """
+    env_dir = os.environ.get("CLAUDE_CONFIG_DIR")
+    if not env_dir:
+        raise UserInputError(
+            "use_env_config_dir=True requires $CLAUDE_CONFIG_DIR to be set in the parent "
+            "process environment, but it is unset (or empty). Either set CLAUDE_CONFIG_DIR "
+            "to the directory you want claude agents to share, or set use_env_config_dir=False."
+        )
+    return Path(env_dir)
 
 
 def find_user_claude_config() -> Path:
@@ -491,7 +510,7 @@ def encode_claude_project_dir_name(path: Path) -> str:
 
 # Guard prefix for readiness hook commands: exit gracefully if this is not the
 # main Claude session (e.g. a reviewer sub-agent that resumed a session).
-_SESSION_GUARD: Final[str] = '[ -z "$MAIN_CLAUDE_SESSION_ID" ] && exit 0; '
+SESSION_GUARD: Final[str] = '[ -z "$MAIN_CLAUDE_SESSION_ID" ] && exit 0; '
 
 
 @pure
@@ -539,17 +558,17 @@ def build_readiness_hooks_config() -> dict[str, Any]:
                     "hooks": [
                         {
                             "type": "command",
-                            "command": _SESSION_GUARD + 'touch "$MNGR_AGENT_STATE_DIR/session_started"',
+                            "command": SESSION_GUARD + 'touch "$MNGR_AGENT_STATE_DIR/session_started"',
                         },
                         {
                             "type": "command",
-                            "command": _SESSION_GUARD
+                            "command": SESSION_GUARD
                             + 'echo "The base branch for this work is: ${MNGR_GIT_BASE_BRANCH:-main}"',
                         },
                         {
                             "type": "command",
                             "command": (
-                                _SESSION_GUARD + "_MNGR_HOOK_INPUT=$(cat);"
+                                SESSION_GUARD + "_MNGR_HOOK_INPUT=$(cat);"
                                 ' _MNGR_NEW_SID=$(echo "$_MNGR_HOOK_INPUT" | jq -r ".session_id // empty");'
                                 ' if [ -z "$_MNGR_NEW_SID" ]; then'
                                 ' echo "mngr: SessionStart hook failed to extract session_id from hook input: $_MNGR_HOOK_INPUT" >&2;'
@@ -571,7 +590,7 @@ def build_readiness_hooks_config() -> dict[str, Any]:
                             # don't fire stale signals.
                             "type": "command",
                             "command": (
-                                _SESSION_GUARD + "_MNGR_HOOK_INPUT=$(cat);"
+                                SESSION_GUARD + "_MNGR_HOOK_INPUT=$(cat);"
                                 ' _MNGR_SOURCE=$(echo "$_MNGR_HOOK_INPUT" | jq -r ".source // empty");'
                                 ' case "$_MNGR_SOURCE" in clear|compact)'
                                 " tmux wait-for -S \"mngr-submit-$(tmux display-message -p '#S')\" 2>/dev/null || true ;;"
@@ -586,12 +605,12 @@ def build_readiness_hooks_config() -> dict[str, Any]:
                     "hooks": [
                         {
                             "type": "command",
-                            "command": _SESSION_GUARD
+                            "command": SESSION_GUARD
                             + """touch "$MNGR_AGENT_STATE_DIR/active" && rm -f "$MNGR_AGENT_STATE_DIR/permissions_waiting" && mkdir -p $MNGR_HOST_DIR/events/mngr/activity && echo '{"source": "mngr/activity", "type": "activity", "event_id": "'"evt-$(head -c 16 /dev/urandom | xxd -p)"'", "timestamp": "'"$(date -u +"%Y-%m-%dT%H:%M:%S.000000000Z")"'"}' >> $MNGR_HOST_DIR/events/mngr/activity/events.jsonl""",
                         },
                         {
                             "type": "command",
-                            "command": _SESSION_GUARD
+                            "command": SESSION_GUARD
                             + "tmux wait-for -S \"mngr-submit-$(tmux display-message -p '#S')\" 2>/dev/null || true",
                         },
                     ]
@@ -602,7 +621,7 @@ def build_readiness_hooks_config() -> dict[str, Any]:
                     "hooks": [
                         {
                             "type": "command",
-                            "command": _SESSION_GUARD + 'touch "$MNGR_AGENT_STATE_DIR/permissions_waiting"',
+                            "command": SESSION_GUARD + 'touch "$MNGR_AGENT_STATE_DIR/permissions_waiting"',
                         },
                     ],
                 }
@@ -612,7 +631,7 @@ def build_readiness_hooks_config() -> dict[str, Any]:
                     "hooks": [
                         {
                             "type": "command",
-                            "command": _SESSION_GUARD + 'rm -f "$MNGR_AGENT_STATE_DIR/permissions_waiting"',
+                            "command": SESSION_GUARD + 'rm -f "$MNGR_AGENT_STATE_DIR/permissions_waiting"',
                         },
                     ],
                 }
@@ -622,7 +641,7 @@ def build_readiness_hooks_config() -> dict[str, Any]:
                     "hooks": [
                         {
                             "type": "command",
-                            "command": _SESSION_GUARD + 'rm -f "$MNGR_AGENT_STATE_DIR/permissions_waiting"',
+                            "command": SESSION_GUARD + 'rm -f "$MNGR_AGENT_STATE_DIR/permissions_waiting"',
                         },
                     ],
                 }
@@ -633,7 +652,7 @@ def build_readiness_hooks_config() -> dict[str, Any]:
                     "hooks": [
                         {
                             "type": "command",
-                            "command": _SESSION_GUARD
+                            "command": SESSION_GUARD
                             + """rm -f "$MNGR_AGENT_STATE_DIR/active" "$MNGR_AGENT_STATE_DIR/permissions_waiting" && mkdir -p $MNGR_HOST_DIR/events/mngr/activity && echo '{"source": "mngr/activity", "type": "activity", "event_id": "'"evt-$(head -c 16 /dev/urandom | xxd -p)"'", "timestamp": "'"$(date -u +"%Y-%m-%dT%H:%M:%S.000000000Z")"'"}' >> $MNGR_HOST_DIR/events/mngr/activity/events.jsonl""",
                         },
                     ],
@@ -644,7 +663,7 @@ def build_readiness_hooks_config() -> dict[str, Any]:
                     "hooks": [
                         {
                             "type": "command",
-                            "command": _SESSION_GUARD + 'bash "$MNGR_AGENT_STATE_DIR/commands/wait_for_stop_hook.sh"',
+                            "command": SESSION_GUARD + 'bash "$MNGR_AGENT_STATE_DIR/commands/wait_for_stop_hook.sh"',
                         },
                     ],
                 }

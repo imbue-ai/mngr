@@ -46,10 +46,11 @@ from imbue.mngr.providers.local.volume import LocalVolume
 from imbue.mngr.providers.ssh_host_setup import build_add_authorized_keys_command
 from imbue.mngr.providers.ssh_host_setup import build_add_known_hosts_command
 from imbue.mngr.providers.ssh_host_setup import build_start_activity_watcher_command
-from imbue.mngr.providers.ssh_utils import add_host_to_known_hosts
-from imbue.mngr.providers.ssh_utils import clear_host_from_known_hosts
 from imbue.mngr.providers.ssh_utils import create_pyinfra_host
+from imbue.mngr.providers.ssh_utils import format_as_known_hosts_address
+from imbue.mngr.providers.ssh_utils import load_or_create_host_keypair
 from imbue.mngr.providers.ssh_utils import wait_for_sshd
+from imbue.mngr.utils.file_utils import atomic_write
 from imbue.mngr_lima.config import LimaProviderConfig
 from imbue.mngr_lima.constants import CLOUD_INIT_TIMEOUT_SECONDS
 from imbue.mngr_lima.errors import LimaCommandError
@@ -80,6 +81,9 @@ _LIMA_STATUS_TO_HOST_STATE: dict[str, HostState] = {
     "Broken": HostState.CRASHED,
     "Unknown": HostState.CRASHED,
 }
+
+# Filename of the pre-injected ed25519 sshd host key stored per host on disk.
+_HOST_KEY_NAME = "ssh_host_ed25519_key"
 
 
 class LimaProviderInstance(BaseProviderInstance):
@@ -150,10 +154,25 @@ class LimaProviderInstance(BaseProviderInstance):
         """Directory for SSH keys."""
         return self._provider_dir / "keys"
 
-    @property
-    def _known_hosts_path(self) -> Path:
-        """Path to the known_hosts file for this provider instance."""
-        return self._keys_dir / "known_hosts"
+    def _host_keys_dir(self, host_id: HostId) -> Path:
+        """Directory holding this host's pre-injected sshd host keypair and matching known_hosts file."""
+        return self._keys_dir / "hosts" / str(host_id)
+
+    def _host_keypair_paths(self, host_id: HostId) -> tuple[Path, Path]:
+        """Return (private_key_path, public_key_path) for this host's pre-injected sshd host key."""
+        host_keys_dir = self._host_keys_dir(host_id)
+        return host_keys_dir / _HOST_KEY_NAME, host_keys_dir / f"{_HOST_KEY_NAME}.pub"
+
+    def _host_known_hosts_path(self, host_id: HostId) -> Path:
+        """Path to this host's per-host known_hosts file, under its keys dir."""
+        return self._host_keys_dir(host_id) / "known_hosts"
+
+    def _ensure_host_keypair(self, host_id: HostId) -> tuple[str, str]:
+        """Generate (or load) this host's ed25519 keypair, returning ``(private_key_pem, public_key_openssh)``."""
+        private_key_path, public_key_openssh = load_or_create_host_keypair(
+            self._host_keys_dir(host_id), _HOST_KEY_NAME
+        )
+        return private_key_path.read_text(), public_key_openssh
 
     @property
     def _tags_dir(self) -> Path:
@@ -226,26 +245,26 @@ class LimaProviderInstance(BaseProviderInstance):
     def _create_host_object(
         self,
         host_id: HostId,
+        host_name: HostName,
         ssh_config: LimaSshConfig,
     ) -> Host:
         """Create a Host object from SSH connection info."""
-        # Get the host key via ssh-keyscan and add to known_hosts
-        self._keys_dir.mkdir(parents=True, exist_ok=True)
-
-        # Add the host to known_hosts by scanning its key
-        self._scan_and_add_host_key(ssh_config.hostname, ssh_config.port)
+        # Add the host to known_hosts. Re-run on every create/start/get_host
+        # because Lima reassigns the forwarded port across restarts.
+        self._record_pre_injected_host_key(host_id, ssh_config.hostname, ssh_config.port)
 
         pyinfra_host = create_pyinfra_host(
             hostname=ssh_config.hostname,
             port=ssh_config.port,
             private_key_path=ssh_config.identity_file,
-            known_hosts_path=self._known_hosts_path,
+            known_hosts_path=self._host_known_hosts_path(host_id),
             ssh_user=ssh_config.user,
         )
         connector = PyinfraConnector(pyinfra_host)
 
         return Host(
             id=host_id,
+            host_name=host_name,
             connector=connector,
             provider_instance=self,
             mngr_ctx=self.mngr_ctx,
@@ -254,37 +273,22 @@ class LimaProviderInstance(BaseProviderInstance):
             ),
         )
 
-    def _scan_and_add_host_key(self, hostname: str, port: int) -> None:
-        """Scan SSH host keys and add all of them to known_hosts.
+    def _record_pre_injected_host_key(self, host_id: HostId, hostname: str, port: int) -> None:
+        """Write this host's known_hosts file from its pre-injected public key.
 
-        First removes any stale keys for this host:port (from previous VMs
-        that may have reused the same port), then adds all key types from
-        ssh-keyscan so paramiko can negotiate any of them.
+        Uses atomic_write so a concurrent reader never sees a partial file.
         """
-        clear_host_from_known_hosts(self._known_hosts_path, hostname, port)
-        result = self.mngr_ctx.concurrency_group.run_process_to_completion(
-            ["ssh-keyscan", "-t", "rsa,ecdsa,ed25519", "-p", str(port), hostname],
-            timeout=10.0,
-        )
-        if result.returncode == 0 and result.stdout.strip():
-            added_any = False
-            for line in result.stdout.strip().splitlines():
-                if line and not line.startswith("#"):
-                    parts = line.split(None, 2)
-                    if len(parts) >= 3:
-                        key_type_and_data = f"{parts[1]} {parts[2]}"
-                        add_host_to_known_hosts(self._known_hosts_path, hostname, port, key_type_and_data)
-                        added_any = True
-            if added_any:
-                return
-        logger.warning("Could not scan SSH host key for {}:{}", hostname, port)
+        _, public_key_path = self._host_keypair_paths(host_id)
+        public_key = public_key_path.read_text().strip()
+        host_pattern = format_as_known_hosts_address(hostname, port)
+        atomic_write(self._host_known_hosts_path(host_id), f"{host_pattern} {public_key}\n")
 
     def _on_certified_host_data_updated(self, host_id: HostId, certified_data: CertifiedHostData) -> None:
         """Update the certified host data in the host record."""
         with log_span("Updating certified host data", host_id=str(host_id)):
             host_record = self._host_store.read_host_record(host_id, use_cache=False)
             if host_record is None:
-                raise HostNotFoundError(host_id)
+                raise HostNotFoundError(self.name, host_id)
             updated_host_record = host_record.model_copy_update(
                 to_update(host_record.field_ref().certified_host_data, certified_data),
             )
@@ -395,6 +399,9 @@ sudo poweroff
         # Create the persistent volume directory
         volume_dir = self._ensure_host_volume_dir(host_id)
 
+        # Generate the sshd host keypair to inject into the VM and record in known_hosts.
+        host_private_key_pem, host_public_key_openssh = self._ensure_host_keypair(host_id)
+
         # Generate or load Lima YAML config
         yaml_path_from_build_args = parse_build_args_for_yaml_path(tuple(build_args or ()))
         if yaml_path_from_build_args is not None:
@@ -404,6 +411,8 @@ sudo poweroff
                 host_dir=str(self.host_dir),
                 config_image_url_aarch64=self.config.default_image_url_aarch64,
                 config_image_url_x86_64=self.config.default_image_url_x86_64,
+                host_private_key_pem=host_private_key_pem,
+                host_public_key_openssh=host_public_key_openssh,
             )
             lima_config = merge_lima_yaml(base_config, user_config)
         else:
@@ -414,6 +423,8 @@ sudo poweroff
                 custom_image_url=image_url,
                 config_image_url_aarch64=self.config.default_image_url_aarch64,
                 config_image_url_x86_64=self.config.default_image_url_x86_64,
+                host_private_key_pem=host_private_key_pem,
+                host_public_key_openssh=host_public_key_openssh,
             )
 
         # Write the YAML config to a temp file
@@ -441,7 +452,7 @@ sudo poweroff
                 wait_for_sshd(ssh_config.hostname, ssh_config.port, self.config.ssh_connect_timeout)
 
             # Create the Host object
-            host = self._create_host_object(host_id, ssh_config)
+            host = self._create_host_object(host_id, name, ssh_config)
 
         except (LimaCommandError, MngrError, OSError) as e:
             failure_reason = str(e)
@@ -460,7 +471,7 @@ sudo poweroff
                 failure_reason=failure_reason,
                 build_log="",
             )
-            raise LimaHostCreationError(failure_reason) from e
+            raise LimaHostCreationError(self.name, failure_reason) from e
         finally:
             # Clean up the temporary YAML config file
             yaml_path.unlink(missing_ok=True)
@@ -604,7 +615,7 @@ sudo poweroff
 
         host_record = self._host_store.read_host_record(host_id, use_cache=False)
         if host_record is None:
-            raise HostNotFoundError(host_id)
+            raise HostNotFoundError(self.name, host_id)
 
         if host_record.config is None:
             raise MngrError(f"Host {host_id} has no configuration and cannot be started.")
@@ -627,7 +638,7 @@ sudo poweroff
         with log_span("Waiting for SSH to be ready..."):
             wait_for_sshd(ssh_config.hostname, ssh_config.port, self.config.ssh_connect_timeout)
 
-        host_obj = self._create_host_object(host_id, ssh_config)
+        host_obj = self._create_host_object(host_id, HostName(host_record.certified_host_data.host_name), ssh_config)
 
         # Update SSH info in host record (port may change after restart)
         updated_record = host_record.model_copy_update(
@@ -702,6 +713,12 @@ sudo poweroff
         if tags_path.exists():
             tags_path.unlink(missing_ok=True)
 
+        # Delete the per-host keys directory (holds the pre-injected sshd
+        # keypair and the matching known_hosts file).
+        host_keys_dir = self._host_keys_dir(host_id)
+        if host_keys_dir.exists():
+            shutil.rmtree(host_keys_dir, ignore_errors=True)
+
         self._evict_cached_host(host_id)
 
     def on_connection_error(self, host_id: HostId) -> None:
@@ -725,7 +742,7 @@ sudo poweroff
 
         host_record = self._host_store.read_host_record(host_id, use_cache=False)
         if host_record is None:
-            raise HostNotFoundError(host_id)
+            raise HostNotFoundError(self.name, host_id)
 
         if host_record.config is None or host_record.ssh_hostname is None:
             # Failed or offline host
@@ -741,7 +758,7 @@ sudo poweroff
 
         # Instance is running -- create online host
         ssh_config = self._get_ssh_config(instance_name)
-        host_obj = self._create_host_object(host_id, ssh_config)
+        host_obj = self._create_host_object(host_id, HostName(host_record.certified_host_data.host_name), ssh_config)
         self._evict_cached_host(host_id, replacement=host_obj)
         return host_obj
 
@@ -752,13 +769,13 @@ sudo poweroff
             if record.certified_host_data.host_name == str(name):
                 host_id = HostId(record.certified_host_data.host_id)
                 return self._get_host_by_id(host_id)
-        raise HostNotFoundError(name)
+        raise HostNotFoundError(self.name, name)
 
     def to_offline_host(self, host_id: HostId) -> OfflineHost:
         """Return an offline representation of the given host."""
         host_record = self._host_store.read_host_record(host_id, use_cache=False)
         if host_record is None:
-            raise HostNotFoundError(host_id)
+            raise HostNotFoundError(self.name, host_id)
         return self._create_offline_host(host_record)
 
     def discover_hosts(

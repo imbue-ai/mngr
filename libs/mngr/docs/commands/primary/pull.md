@@ -6,7 +6,7 @@
 **Synopsis:**
 
 ```text
-mngr pull [SOURCE] [DESTINATION] [--source <SOURCE>] [--source-agent <AGENT>] [--sync-mode <MODE>] [--include PATTERN] [--dry-run] [--stop]
+mngr pull [SOURCE] [DESTINATION] [--source <SOURCE>] [--source-agent <AGENT>] [--sync-mode <MODE>] [--include PATTERN] [--dry-run] [--start/--no-start] [--stop]
 ```
 
 Pull files or git commits from an agent to local machine [experimental].
@@ -33,9 +33,9 @@ mngr pull [OPTIONS] SOURCE DESTINATION
 
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
-| `--source` | text | Source specification: AGENT, AGENT:PATH, or PATH | None |
-| `--source-agent` | text | Source agent name or ID | None |
-| `--source-host` | text | Source host name or ID [future] | None |
+| `--source` | host_location_address | Source specification: AGENT[@HOST[.PROVIDER]][:PATH] | None |
+| `--source-agent` | agent_address | Source agent address (NAME[@HOST[.PROVIDER]]) | None |
+| `--source-host` | host_address | Source host address (HOST[.PROVIDER]) [future] | None |
 | `--source-path` | text | Path within the agent's work directory | None |
 
 ## Destination
@@ -49,6 +49,7 @@ mngr pull [OPTIONS] SOURCE DESTINATION
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
 | `--dry-run` | boolean | Show what would be transferred without actually transferring | `False` |
+| `--start`, `--no-start` | boolean | Automatically start the host if offline (the agent does not need to be running) | `True` |
 | `--stop` | boolean | Stop the agent after pulling (for state consistency) | `False` |
 | `--delete`, `--no-delete` | boolean | Delete files in destination that don't exist in source | `False` |
 | `--sync-mode` | choice (`files` &#x7C; `git` &#x7C; `full`) | What to sync: files (working directory via rsync), git (merge git branches), or full (everything) [future] | `files` |
@@ -58,9 +59,9 @@ mngr pull [OPTIONS] SOURCE DESTINATION
 
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
-| `--target` | text | Target specification: AGENT, AGENT@HOST, AGENT@HOST.PROVIDER:PATH, or @HOST:PATH [future] | None |
-| `--target-agent` | text | Target agent name or ID [future] | None |
-| `--target-host` | text | Target host name or ID [future] | None |
+| `--target` | host_location_address | Target specification: AGENT[@HOST[.PROVIDER]][:PATH] [future] | None |
+| `--target-agent` | agent_address | Target agent address [future] | None |
+| `--target-host` | host_address | Target host address [future] | None |
 | `--target-path` | text | Path within target to sync to [future] | None |
 
 ## Multi-source

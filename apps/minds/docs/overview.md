@@ -53,7 +53,7 @@ The `global` flag indicates whether the agent wants Cloudflare forwarding enable
 
 ## Cloudflare tunnel integration
 
-The remote service connector URL comes from `MindsConfig.remote_service_connector_url`, loaded from `~/.<MINDS_ROOT_NAME>/config.toml` or the `REMOTE_SERVICE_CONNECTOR_URL` environment variable (env overrides file), with a dev-deployed default baked in. Every tunnel request authenticates with the signed-in user's SuperTokens session -- no Basic-auth credentials or `OWNER_EMAIL` need to be configured on the client. Once signed in:
+The remote service connector URL comes from the per-tier `client.toml` loaded via `minds run --config-file <path>` (see `apps/minds/docs/environments.md`). When `--config-file` is not passed, the default resolves to `apps/minds/imbue/minds/config/envs/_bundled/client.toml` (written by the Electron production build), then falls back to `apps/minds/imbue/minds/config/envs/dev/client.toml` shipped with the wheel. Every tunnel request authenticates with the signed-in user's SuperTokens session -- no Basic-auth credentials or `OWNER_EMAIL` need to be configured on the client. Once signed in:
 
 1. A tunnel is created automatically after each agent is created
 2. The tunnel token is injected into the agent's `runtime/secrets`

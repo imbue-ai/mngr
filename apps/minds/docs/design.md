@@ -17,6 +17,10 @@ Workspaces are built on top of `mngr` and should interact with it exclusively th
 
 Each workspace is created from a template repository (or local directory). The repo's own `.mngr/settings.toml` drives all configuration -- agent types, templates, environment variables, and other settings. There is no `minds.toml`, vendoring, or parent tracking.
 
+Within a workspace, the "primary" agent (carrying `is_primary=true`) is dedicated to running the bootstrap and background services -- its window-0 command is `sleep infinity && claude`, so claude never actually starts there. The user's chat agents are separate `mngr` agents; the bootstrap creates the first one on initial container boot and writes `CLAUDE_CONFIG_DIR` to the host env file so every agent (chat, worktree, worker) shares the services agent's Claude config dir (auth, plugins, marketplaces, sessions). The services agent is hidden from the UI agent list and the workspace_server destroy endpoint refuses to tear it down. See [the swap-primary-agent spec](../../../specs/swap-primary-agent/spec.md) for the design rationale.
+
+Some workspace dependencies (currently Playwright's Chromium browser + its apt system libraries) are intentionally installed *after* container boot via a `deferred-install` entry in the FCT `services.toml`, gated by a per-package marker file. This keeps the Docker image build fast: nothing required to start the chat agent or any boot-time service depends on the deferred packages. See the forever-claude-template's `libs/bootstrap/README.md` for the deferral contract.
+
 ## Configuration
 
 All configuration lives in the template repository's `.mngr/settings.toml`. The desktop client passes `--template main` plus a mode-specific template (`--template docker` for LOCAL, `--template lima` for LIMA, `--template vultr` for CLOUD, or `--template imbue_cloud` for IMBUE_CLOUD) when running `mngr create`. The template's settings file defines everything the agent needs.
@@ -46,7 +50,7 @@ Agent creation is also available via the `/api/create-agent` API endpoint, which
 
 ### Cloudflare tunnel integration
 
-The remote service connector URL comes from `MindsConfig.remote_service_connector_url`, loaded from `~/.<MINDS_ROOT_NAME>/config.toml` or the `REMOTE_SERVICE_CONNECTOR_URL` environment variable (env overrides file), with a dev-deployed default baked in. Every tunnel request authenticates with the signed-in user's SuperTokens session: the JWT is sent as a Bearer token, and the session's email becomes the default Cloudflare Access policy for new services. No client-side Basic-auth credentials or `OWNER_EMAIL` need to be configured. Once a user is signed in, the desktop client creates a Cloudflare tunnel per new agent that provides global access to the agent's services gated on that user's email.
+The remote service connector URL comes from the per-tier `client.toml` selected by `minds run --config-file <path>` (see `apps/minds/docs/environments.md`). When `--config-file` is not passed, the default resolves to `apps/minds/imbue/minds/config/envs/_bundled/client.toml` (written by the Electron production build) and falls back to `apps/minds/imbue/minds/config/envs/dev/client.toml` shipped with the wheel. Every tunnel request authenticates with the signed-in user's SuperTokens session: the JWT is sent as a Bearer token, and the session's email becomes the default Cloudflare Access policy for new services. No client-side Basic-auth credentials or `OWNER_EMAIL` need to be configured. Once a user is signed in, the desktop client creates a Cloudflare tunnel per new agent that provides global access to the agent's services gated on that user's email.
 
 Within each workspace's dockview UI, a Share action per service opens a modal that surfaces the global Cloudflare link and provides toggle controls for enabling/disabling global forwarding per service.
 

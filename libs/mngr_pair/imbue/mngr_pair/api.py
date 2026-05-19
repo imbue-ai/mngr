@@ -146,6 +146,7 @@ class UnisonSyncer(MutableModel):
         self._running_process = self.cg.run_process_in_background(
             cmd,
             on_output=self._on_output,
+            is_checked_by_group=False,
         )
 
         logger.info("Started continuous sync between {} and {}", self.source_path, self.target_path)

@@ -18,6 +18,7 @@ def test_push_cli_options_can_be_instantiated() -> None:
         target_path=None,
         source=None,
         dry_run=False,
+        start=True,
         stop=False,
         delete=False,
         sync_mode="files",

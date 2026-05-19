@@ -23,6 +23,7 @@ from imbue.mngr.api.list import ErrorInfo
 from imbue.mngr.api.list import HostErrorInfo
 from imbue.mngr.api.list import ListResult
 from imbue.mngr.api.list import ProviderErrorInfo
+from imbue.mngr.api.list import _AGENT_SCHEMALESS_PATHS
 from imbue.mngr.api.list import _ListAgentsParams
 from imbue.mngr.api.list import _apply_cel_filters
 from imbue.mngr.api.list import _collect_and_emit_details_for_host
@@ -31,11 +32,13 @@ from imbue.mngr.api.list import _handle_listing_error
 from imbue.mngr.api.list import _maybe_write_full_discovery_snapshot
 from imbue.mngr.api.list import _process_host_with_error_handling
 from imbue.mngr.api.list import agent_details_to_cel_context
+from imbue.mngr.api.list import build_agent_cel_context
 from imbue.mngr.api.list import list_agents
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import ProviderInstanceConfig
 from imbue.mngr.config.provider_config_registry import _provider_config_registry
 from imbue.mngr.errors import MngrError
+from imbue.mngr.errors import ProviderEmptyError
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.interfaces.data_types import CertifiedHostData
@@ -63,6 +66,7 @@ from imbue.mngr.primitives import SSHInfo
 from imbue.mngr.providers.mock_provider_test import MockProviderInstance
 from imbue.mngr.providers.mock_provider_test import make_offline_host
 from imbue.mngr.providers.registry import _backend_registry
+from imbue.mngr.utils.cel_utils import TolerantMapType
 from imbue.mngr.utils.cel_utils import compile_cel_filters
 from imbue.mngr.utils.testing import capture_loguru
 
@@ -511,6 +515,108 @@ def test_agent_details_to_cel_context_idle_uses_most_recent_activity() -> None:
     # SSH activity (10 min ago) is the most recent, so idle should be ~600s.
     assert "idle" in context
     assert 580 < context["idle"] < 620
+
+
+@pytest.mark.parametrize(
+    "exclude_expr",
+    [
+        'labels.mngr_subagent_proxy == "child"',
+        'plugin.some_plugin_field == "x"',
+        'host.tags.foo == "x"',
+        'host.plugin.some_plugin_field == "x"',
+    ],
+)
+def test_apply_cel_filters_no_warning_for_missing_key_on_schemaless_field(exclude_expr: str) -> None:
+    """Filtering on a missing key under any schemaless field must not warn.
+
+    `labels`, `plugin`, `host.tags`, `host.plugin` are all schemaless dicts,
+    and `_apply_cel_filters` must apply tolerance uniformly across all of
+    them so that an `--exclude 'labels.X == "Y"'`-style filter quietly
+    evaluates to false on agents without that key, rather than logging a
+    per-agent warning.
+    """
+    agent = _make_agent_details("test-agent", _make_host_details())
+    # All four schemaless fields default to empty dict, so the missing key
+    # in the filter is genuinely missing.
+    assert agent.labels == {}
+    assert agent.plugin == {}
+    assert agent.host.tags == {}
+    assert agent.host.plugin == {}
+
+    include_filters, exclude_filters = compile_cel_filters(
+        include_filters=(),
+        exclude_filters=(exclude_expr,),
+    )
+    with capture_loguru(level="WARNING") as log_output:
+        result = _apply_cel_filters(agent, include_filters, exclude_filters)
+    assert result is True
+    assert "Error evaluating" not in log_output.getvalue()
+
+
+@pytest.mark.parametrize("path", list(_AGENT_SCHEMALESS_PATHS))
+def test_apply_cel_filters_wraps_each_schemaless_path_with_tolerant_map(path: tuple[str, ...]) -> None:
+    """The agent CEL context built by `build_agent_cel_context` has TolerantMapType
+    at each schemaless path; siblings stay strict.
+    """
+    agent = _make_agent_details("test-agent", _make_host_details())
+    cel_context = build_agent_cel_context(agent)
+
+    target: Any = cel_context
+    for step in path:
+        target = target[step]
+    assert isinstance(target, TolerantMapType)
+
+
+@pytest.mark.parametrize(
+    "exclude_expr",
+    [
+        'host.providr == "local"',
+        'host.providr.contains("local")',
+        "host.providr > 5",
+    ],
+)
+def test_apply_cel_filters_warns_on_typoed_strict_field(exclude_expr: str) -> None:
+    """A typoed strict-field path surfaces a warning so users can see the typo.
+
+    Counterpart to test_apply_cel_filters_no_warning_for_missing_key_on_schemaless_field:
+    schemaless fields stay quiet on missing keys, but a missing-strict-field
+    access -- whether via equality, method call, or ordered comparison -- raises
+    out of the filter loop's evaluate() call and is logged.
+    """
+    agent = _make_agent_details("test-agent", _make_host_details())
+    include_filters, exclude_filters = compile_cel_filters(
+        include_filters=(),
+        exclude_filters=(exclude_expr,),
+    )
+    with capture_loguru(level="WARNING") as log_output:
+        result = _apply_cel_filters(agent, include_filters, exclude_filters)
+    # Exclude filter errored, so the agent is still included.
+    assert result is True
+    assert "Error evaluating" in log_output.getvalue()
+
+
+def test_apply_cel_filters_has_macro_correctly_reports_label_presence() -> None:
+    """`has(labels.X)` must return True only when X is actually set on the agent.
+
+    Without this, `--include 'has(labels.foo)'` would silently match every agent.
+    """
+    host_details = _make_host_details()
+    base_with = _make_agent_details("with-label", host_details)
+    agent_with_label = base_with.model_copy_update(
+        to_update(base_with.field_ref().labels, {"project": "mngr"}),
+    )
+    agent_without_label = _make_agent_details("without-label", host_details)
+
+    include_filters, exclude_filters = compile_cel_filters(
+        include_filters=("has(labels.project)",),
+        exclude_filters=(),
+    )
+    with capture_loguru(level="WARNING") as log_output:
+        result_with = _apply_cel_filters(agent_with_label, include_filters, exclude_filters)
+        result_without = _apply_cel_filters(agent_without_label, include_filters, exclude_filters)
+    assert result_with is True
+    assert result_without is False
+    assert "Error evaluating" not in log_output.getvalue()
 
 
 def test_agent_details_to_cel_context_exposes_host_provider_under_both_names() -> None:
@@ -1204,7 +1310,9 @@ class _MismatchedProviderBackend(ProviderBackendInterface):
         name: ProviderInstanceName,
         config: ProviderInstanceConfig,
         mngr_ctx: MngrContext,
+        is_for_host_creation: bool = False,
     ) -> ProviderInstanceInterface:
+        del is_for_host_creation
         return _MismatchedProviderInstance(
             name=name,
             host_dir=mngr_ctx.config.default_host_dir,
@@ -1243,12 +1351,55 @@ class _RaisingDiscoveryProviderBackend(ProviderBackendInterface):
         name: ProviderInstanceName,
         config: ProviderInstanceConfig,
         mngr_ctx: MngrContext,
+        is_for_host_creation: bool = False,
     ) -> ProviderInstanceInterface:
+        del is_for_host_creation
         return _RaisingDiscoveryProviderInstance(
             name=name,
             host_dir=mngr_ctx.config.default_host_dir,
             mngr_ctx=mngr_ctx,
         )
+
+
+_EMPTY_BACKEND_NAME = ProviderBackendName("test-empty-backend")
+
+
+class _EmptyProviderBackend(ProviderBackendInterface):
+    """Backend whose construction always raises ``ProviderEmptyError``.
+
+    Mirrors the Modal-env-missing situation: the backend is reachable and
+    answers definitively that nothing has been created yet.
+    """
+
+    @staticmethod
+    def get_name() -> ProviderBackendName:
+        return _EMPTY_BACKEND_NAME
+
+    @staticmethod
+    def get_description() -> str:
+        return "Test backend that reports itself empty at construction time"
+
+    @staticmethod
+    def get_config_class() -> type[ProviderInstanceConfig]:
+        return ProviderInstanceConfig
+
+    @staticmethod
+    def get_build_args_help() -> str:
+        return "No arguments supported."
+
+    @staticmethod
+    def get_start_args_help() -> str:
+        return "No arguments supported."
+
+    @staticmethod
+    def build_provider_instance(
+        name: ProviderInstanceName,
+        config: ProviderInstanceConfig,
+        mngr_ctx: MngrContext,
+        is_for_host_creation: bool = False,
+    ) -> ProviderInstanceInterface:
+        del config, mngr_ctx, is_for_host_creation
+        raise ProviderEmptyError(provider_name=name, reason="simulated empty backend from test")
 
 
 def _make_list_params(
@@ -1607,6 +1758,74 @@ def test_construct_discover_and_emit_for_provider_success_path_processes_agents(
     )
 
     assert result.errors == []
+
+
+# =============================================================================
+# ProviderEmptyError: always silently skipped in listing, regardless of mode
+# =============================================================================
+
+
+def _make_empty_provider_ctx(temp_mngr_ctx: MngrContext) -> MngrContext:
+    """Build a MngrContext that has one configured provider that reports empty at construction."""
+    provider_config = ProviderInstanceConfig(backend=_EMPTY_BACKEND_NAME)
+    updated_config = temp_mngr_ctx.config.model_copy_update(
+        to_update(
+            temp_mngr_ctx.config.field_ref().providers,
+            {ProviderInstanceName("empty-provider"): provider_config},
+        ),
+    )
+    return temp_mngr_ctx.model_copy_update(
+        to_update(temp_mngr_ctx.field_ref().config, updated_config),
+    )
+
+
+def test_list_agents_streaming_abort_mode_silently_skips_empty_provider(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """A provider raising ProviderEmptyError at construction is silently dropped
+    from the listing even in ABORT mode, because the provider's state is known
+    to be empty (nothing to list) -- distinct from ProviderUnavailableError
+    which signals unknown state and is allowed to abort.
+
+    Regression for: `mngr list` aborting when the Modal env didn't exist yet.
+    """
+    _backend_registry[_EMPTY_BACKEND_NAME] = _EmptyProviderBackend
+    _provider_config_registry[_EMPTY_BACKEND_NAME] = ProviderInstanceConfig
+    try:
+        mngr_ctx = _make_empty_provider_ctx(temp_mngr_ctx)
+        result = list_agents(
+            mngr_ctx=mngr_ctx,
+            is_streaming=True,
+            error_behavior=ErrorBehavior.ABORT,
+        )
+
+        assert result.errors == []
+    finally:
+        del _backend_registry[_EMPTY_BACKEND_NAME]
+        del _provider_config_registry[_EMPTY_BACKEND_NAME]
+
+
+def test_list_agents_batch_abort_mode_silently_skips_empty_provider(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """Same as the streaming variant: batch mode in ABORT also silently skips
+    an empty provider rather than wrapping the error into a ProviderDiscoveryError
+    that would abort the whole listing.
+    """
+    _backend_registry[_EMPTY_BACKEND_NAME] = _EmptyProviderBackend
+    _provider_config_registry[_EMPTY_BACKEND_NAME] = ProviderInstanceConfig
+    try:
+        mngr_ctx = _make_empty_provider_ctx(temp_mngr_ctx)
+        result = list_agents(
+            mngr_ctx=mngr_ctx,
+            is_streaming=False,
+            error_behavior=ErrorBehavior.ABORT,
+        )
+
+        assert result.errors == []
+    finally:
+        del _backend_registry[_EMPTY_BACKEND_NAME]
+        del _provider_config_registry[_EMPTY_BACKEND_NAME]
 
 
 # =============================================================================

@@ -11,10 +11,18 @@ on:
         description: "Pytest args after `--` (must be valid bash; quote values containing spaces, e.g. `-m \"foo and bar\"`)"
         required: true
         default: "-m release"
-      agent_type:
-        description: "Agent type (e.g. yolo, claude)"
-        required: true
-        default: "yolo"
+      mngr_user_id:
+        description: "Override MNGR_USER_ID for the orchestrator. Leave blank to use the shared 'tmr-ci' namespace, which lets any teammate with their key in .github/tmr-authorized-keys debug the CI-created modal agents (see libs/mngr_tmr/scripts/setup_tmr_ci_debug.py)."
+        required: false
+        default: ""
+      additional_authorized_hosts:
+        description: "Extra SSH public keys to install in authorized_keys on each agent host (one per line). Appended to the keys in .github/tmr-authorized-keys."
+        required: false
+        default: ""
+      run_name:
+        description: "Override the auto-generated run name (default: a UTC YYYYMMDDHHMMSS timestamp). The reintegrate workflow uses this name to rediscover this run's agents."
+        required: false
+        default: ""
 
 jobs:
   tmr:
@@ -26,36 +34,24 @@ jobs:
     env:
       MODAL_TOKEN_ID: ${{ vars.MODAL_TOKEN_ID }}
       MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
+      MNGR_USER_ID: ${{ inputs.mngr_user_id != '' && inputs.mngr_user_id || 'tmr-ci' }}
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # AWS creds enable mirroring the HTML report to s3://int8-shared-internal/tmr-reports/.
+      # Optional -- the orchestrator silently skips upload when these are absent.
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
 
     steps:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
-      - name: Set up Python
-        uses: actions/setup-python@v6
-        with:
-          python-version: '3.12'
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v7
-        with:
-          version: "latest"
-
-      - name: Install Python dependencies
-        run: uv sync --all-packages
-
-      - name: Install Claude Code CLI
-        run: npm install -g @anthropic-ai/claude-code@2.1.116
-
-      - name: Configure git identity
-        run: |
-          git config user.email "dev@imbue.com"
-          git config user.name "imbue-dev"
+      - uses: ./.github/actions/tmr-setup
 
       - name: Run TMR orchestrator
+        env:
+          ADDITIONAL_AUTHORIZED_HOSTS: ${{ inputs.additional_authorized_hosts }}
         run: |
           mkdir -p tmr-report
           # The "yolo" agent type is normally defined in the user's personal
@@ -63,16 +59,46 @@ jobs:
           # `-S` overrides. parent_type=claude inherits the claude defaults,
           # and cli_args adds --dangerously-skip-permissions so non-interactive
           # agents do not hang on per-tool permission prompts.
+          #
+          # Authorized SSH keys come from two sources: the checked-in
+          # .github/tmr-authorized-keys file (one key per teammate, for
+          # periodic-run debugging) plus any extra lines passed via the
+          # additional_authorized_hosts workflow input (for ad-hoc runs).
+          authorized_host_args=()
+          add_authorized_key() {
+            line="$1"
+            # Strip leading/trailing whitespace; skip blanks and comments.
+            trimmed="$(echo "$line" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+            case "$trimmed" in
+              ''|'#'*) return ;;
+            esac
+            authorized_host_args+=(--additional-authorized-host "$trimmed")
+          }
+          if [ -f .github/tmr-authorized-keys ]; then
+            while IFS= read -r line || [ -n "$line" ]; do
+              add_authorized_key "$line"
+            done < .github/tmr-authorized-keys
+          fi
+          while IFS= read -r line; do
+            add_authorized_key "$line"
+          done <<< "${ADDITIONAL_AUTHORIZED_HOSTS}"
+          run_name_args=()
+          if [ -n "${{ inputs.run_name }}" ]; then
+            run_name_args+=(--run-name "${{ inputs.run_name }}")
+          fi
           uv run --project libs/mngr_tmr mngr tmr -vv \
             -S 'agent_types.yolo.parent_type="claude"' \
             -S 'agent_types.yolo.cli_args=["--dangerously-skip-permissions"]' \
-            --agent-type "${{ inputs.agent_type }}" \
+            --agent-type yolo \
             --provider modal \
+            --use-snapshot \
             --env "MODAL_TOKEN_ID=${MODAL_TOKEN_ID}" \
             --env "MODAL_TOKEN_SECRET=${MODAL_TOKEN_SECRET}" \
             --env "ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}" \
-            --output-html tmr-report/index.html \
-            --output-format jsonl \
+            "${authorized_host_args[@]}" \
+            "${run_name_args[@]}" \
+            --output-dir tmr-report \
+            --format jsonl \
             ${{ inputs.test_paths }} \
             -- ${{ inputs.pytest_args }} \
             | tee tmr-report/events.jsonl
@@ -97,11 +123,17 @@ jobs:
           echo "Integrator branch: $branch"
           git push --set-upstream origin "$branch"
           run_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          report_url=$(jq -r 'select(.event == "report_url") | .url' < tmr-report/events.jsonl | tail -n 1)
+          if [ -n "$report_url" ]; then
+            report_line="HTML report: $report_url (also attached as the \`tmr-report\` artifact on the workflow run)."
+          else
+            report_line="HTML report: attached as the \`tmr-report\` artifact on the workflow run; download and open \`index.html\`. (AWS credentials missing, so no s3 mirror was published.)"
+          fi
           gh pr create \
-            --base main \
+            --base "${{ github.ref_name }}" \
             --head "$branch" \
             --title "TMR: $branch" \
             --body "Automated PR from TMR workflow run [#${{ github.run_id }}]($run_url).
 
-          The HTML report is attached as the \`tmr-report\` artifact on that run; download and open \`index.html\` in a browser." \
+          $report_line" \
             --draft

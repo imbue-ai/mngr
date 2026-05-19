@@ -5,19 +5,20 @@ detection, and helpers used by the install wizard and test fixtures.
 """
 
 from typing import Final
+from typing import assert_never
 
 from pydantic import Field
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.errors import ProcessError
 from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.mngr.primitives import PluginKind
 from imbue.mngr.primitives import PluginTier
 
 # Packages not yet published on PyPI. Excluded from the install wizard.
 # Remove entries from here as they get published.
 UNPUBLISHED_PACKAGES: Final[frozenset[str]] = frozenset(
     {
-        "imbue-mngr-schedule",
         "imbue-mngr-tmr",
     }
 )
@@ -47,6 +48,12 @@ class OpenCodeSignalCheck(SignalCheck):
     command: tuple[str, ...] = ("opencode", "--version")
 
 
+class GeminiSignalCheck(SignalCheck):
+    """Detects whether the Gemini CLI is installed."""
+
+    command: tuple[str, ...] = ("gemini", "--version")
+
+
 class PiSignalCheck(SignalCheck):
     """Detects whether the Pi coding agent CLI is installed."""
 
@@ -68,6 +75,7 @@ class LimaSignalCheck(SignalCheck):
 # Shared instances for use across catalog entries.
 _CLAUDE_SIGNAL: Final[ClaudeSignalCheck] = ClaudeSignalCheck()
 _OPENCODE_SIGNAL: Final[OpenCodeSignalCheck] = OpenCodeSignalCheck()
+_GEMINI_SIGNAL: Final[GeminiSignalCheck] = GeminiSignalCheck()
 _PI_SIGNAL: Final[PiSignalCheck] = PiSignalCheck()
 _MODAL_SIGNAL: Final[ModalSignalCheck] = ModalSignalCheck()
 _LIMA_SIGNAL: Final[LimaSignalCheck] = LimaSignalCheck()
@@ -105,6 +113,14 @@ PLUGIN_CATALOG: Final[tuple[CatalogEntry, ...]] = (
         description="OpenCode agent type plugin for mngr",
         tier=PluginTier.INDEPENDENT,
         signal=_OPENCODE_SIGNAL,
+        is_recommended=True,
+    ),
+    CatalogEntry(
+        entry_point_name="gemini",
+        package_name="imbue-mngr-gemini",
+        description="Gemini agent type plugin for mngr",
+        tier=PluginTier.INDEPENDENT,
+        signal=_GEMINI_SIGNAL,
         is_recommended=True,
     ),
     CatalogEntry(
@@ -278,21 +294,41 @@ def _format_install_hint(entry: CatalogEntry) -> str:
     )
 
 
-def get_plugin_install_hint(name: str) -> str:
+def get_plugin_install_hint(
+    name: str,
+    kind: PluginKind = PluginKind.AGENT_TYPE,
+) -> str:
     """Return user-facing help text for a missing plugin entry point.
 
     If the name appears in the catalog, names the actual PyPI package and
     description. Otherwise returns a generic prompt to check installed
     plugins, since fabricating a package name for an unknown name would be
     misleading.
+
+    When ``kind`` is ``PluginKind.AGENT_TYPE`` (the default), the fallback
+    also points at ``--type command -- <shell command>`` for callers who
+    actually just want to run a shell command. That tip is suppressed for
+    ``PluginKind.PROVIDER``, where it would be irrelevant (provider backends
+    have no equivalent shell-command escape hatch).
     """
     entry = get_catalog_entry(name)
     if entry is not None:
         return _format_install_hint(entry)
-    return (
+    fallback = (
         f"We do not recognize '{name}'. If it is provided by a third-party"
         " plugin, install that package and ensure the plugin is enabled."
     )
+    match kind:
+        case PluginKind.AGENT_TYPE:
+            fallback += (
+                " To run an arbitrary shell command without registering a type,"
+                " use `--type command -- <shell command>` instead."
+            )
+        case PluginKind.PROVIDER:
+            pass
+        case _:
+            assert_never(kind)
+    return fallback
 
 
 def get_install_hint_for_cli_command(command_name: str) -> str | None:

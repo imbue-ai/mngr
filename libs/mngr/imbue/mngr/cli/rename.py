@@ -5,9 +5,11 @@ import click
 from click_option_group import optgroup
 from loguru import logger
 
-from imbue.mngr.api.agent_addr import discover_by_address
 from imbue.mngr.api.discovery_events import emit_discovery_events_for_host
-from imbue.mngr.api.find import find_and_maybe_start_agent_by_name_or_id
+from imbue.mngr.api.find import find_one_agent_and_agents_by_host
+from imbue.mngr.api.find import resolve_to_started_host_and_agent
+from imbue.mngr.cli.address_params import AGENT_ADDRESS
+from imbue.mngr.cli.address_params import AGENT_NAME
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
 from imbue.mngr.cli.help_formatter import CommandHelpMetadata
@@ -19,6 +21,7 @@ from imbue.mngr.cli.output_helpers import write_human_line
 from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.config.data_types import OutputOptions
 from imbue.mngr.errors import UserInputError
+from imbue.mngr.primitives import AgentAddress
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import OutputFormat
 
@@ -26,9 +29,10 @@ from imbue.mngr.primitives import OutputFormat
 class RenameCliOptions(CommonCliOptions):
     """Options passed from the CLI to the rename command."""
 
-    current: str
-    new_name: str
+    current: AgentAddress
+    new_name: AgentName
     dry_run: bool
+    start: bool
     label: tuple[str, ...] = ()
     # Planned features (not yet implemented)
     host: bool
@@ -64,13 +68,19 @@ def _output_result(
 
 
 @click.command(name="rename")
-@click.argument("current")
-@click.argument("new_name", metavar="NEW-NAME")
+@click.argument("current", type=AGENT_ADDRESS)
+@click.argument("new_name", type=AGENT_NAME, metavar="NEW-NAME")
 @optgroup.group("Behavior")
 @optgroup.option(
     "--dry-run",
     is_flag=True,
     help="Show what would be renamed without actually renaming",
+)
+@optgroup.option(
+    "--start/--no-start",
+    default=True,
+    show_default=True,
+    help="Automatically start the host if offline (the agent does not need to be running)",
 )
 @optgroup.option(
     "--host",
@@ -103,11 +113,7 @@ def rename(ctx: click.Context, **kwargs: Any) -> None:
     if opts.host:
         raise NotImplementedError("--host is not implemented yet. Currently only agent renaming is supported.")
 
-    # Validate new name
-    try:
-        new_agent_name = AgentName(opts.new_name)
-    except ValueError as e:
-        raise UserInputError(f"Invalid new name: {e}") from None
+    new_agent_name = opts.new_name
 
     # Parse any --label KEY=VALUE pairs to merge in the same write as the rename.
     labels_to_merge: dict[str, str] = {}
@@ -115,10 +121,15 @@ def rename(ctx: click.Context, **kwargs: Any) -> None:
         key, value = parse_label_string(label_str)
         labels_to_merge[key] = value
 
-    # Resolve the agent (without requiring the agent process to be running)
-    plain_id, agents_by_host, _ = discover_by_address(opts.current, mngr_ctx)
-    agent, host = find_and_maybe_start_agent_by_name_or_id(
-        plain_id, agents_by_host, mngr_ctx, "rename", skip_agent_state_check=True
+    # Resolve the agent (without requiring the agent process to be running).
+    # Use the sibling find function so the full discovery result is available
+    # for the name-conflict check below without a second discovery pass.
+    host_ref, agent_ref, agents_by_host = find_one_agent_and_agents_by_host(opts.current, mngr_ctx)
+    agent, host = resolve_to_started_host_and_agent(
+        host_ref=host_ref,
+        agent_ref=agent_ref,
+        allow_auto_start=opts.start,
+        mngr_ctx=mngr_ctx,
     )
 
     old_name = str(agent.name)
@@ -164,7 +175,7 @@ def rename(ctx: click.Context, **kwargs: Any) -> None:
 CommandHelpMetadata(
     key="rename",
     one_line_description="Rename an agent or host [experimental]",
-    synopsis="mngr [rename|mv] <CURRENT> <NEW-NAME> [--dry-run] [--host] [-l KEY=VALUE ...]",
+    synopsis="mngr [rename|mv] <CURRENT> <NEW-NAME> [--dry-run] [--start/--no-start] [--host] [-l KEY=VALUE ...]",
     arguments_description="- `CURRENT`: Current name or ID of the agent to rename\n- `NEW-NAME`: New name for the agent",
     description="""Updates the agent's name in its data.json and renames the tmux session
 if the agent is currently running. Git branch names are not renamed.

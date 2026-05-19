@@ -24,11 +24,14 @@ from imbue.imbue_common.primitives import NonNegativeInt
 from imbue.mngr.errors import InvalidRelativePathError
 from imbue.mngr.errors import ParseSpecError
 from imbue.mngr.primitives import ActivitySource
+from imbue.mngr.primitives import AgentAddress
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import CommandString
+from imbue.mngr.primitives import HostAddress
 from imbue.mngr.primitives import HostId
+from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import IdleMode
 from imbue.mngr.primitives import ProviderInstanceName
@@ -429,7 +432,15 @@ class BuildCacheInfo(FrozenModel):
 
 
 class HostDetails(FrozenModel):
-    """Full host information collected by connecting to the host."""
+    """Full host information collected by connecting to the host.
+
+    Note for anyone adding fields: `dict[...]`-typed fields here are treated
+    as *schemaless* by the CEL filter / sort code path (missing keys evaluate
+    to a clean False rather than warning per agent), via the auto-derived
+    `_AGENT_SCHEMALESS_PATHS` in `imbue.mngr.api.list`. If you add a dict
+    field whose keys are actually schemaful and typos should still warn,
+    that's a new case that needs an explicit opt-out -- flag it.
+    """
 
     id: HostId = Field(description="Host ID")
     name: str = Field(description="Host name")
@@ -459,11 +470,24 @@ class HostDetails(FrozenModel):
         description="Reason for failure if the host failed during creation",
     )
 
+    @cached_property
+    def address(self) -> HostAddress:
+        return HostAddress(host=HostName(self.name), provider=self.provider_name)
+
 
 class AgentDetails(FrozenModel):
     """Full agent information collected by connecting to the host.
 
     This combines certified and reported data from the agent with host information.
+
+    Note for anyone adding fields: `dict[...]`-typed fields here (and on the
+    nested `HostDetails`) are treated as *schemaless* by the CEL filter / sort
+    code path -- missing keys evaluate to a clean False rather than warning
+    per agent. The set is auto-derived from this type via
+    `_AGENT_SCHEMALESS_PATHS` in `imbue.mngr.api.list`, so adding a new dict
+    field opts it into tolerance automatically. If you add a dict field whose
+    keys are actually schemaful and typos should still warn, that's a new
+    case that needs an explicit opt-out -- flag it.
     """
 
     resource_type: Literal["agent"] = "agent"
@@ -496,6 +520,10 @@ class AgentDetails(FrozenModel):
     host: HostDetails = Field(description="Host information")
 
     plugin: dict[str, Any] = Field(default_factory=dict, description="Plugin-specific fields")
+
+    @cached_property
+    def address(self) -> AgentAddress:
+        return AgentAddress(agent=self.id, host=self.host.address)
 
 
 class RelativePath(PurePosixPath):

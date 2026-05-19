@@ -34,12 +34,42 @@ def _get_arch_string() -> str:
     return "x86_64"
 
 
+def _disable_port_forwards_rules() -> list[dict]:
+    """Lima portForwards entries that disable all guest -> host port forwarding.
+
+    Lima always appends a fallback rule that forwards any guest TCP/UDP
+    socket to host loopback; an empty list does not suppress it. User
+    rules match the guest bind address literally (Lima 2.1.1), so a
+    single `guestIP: 0.0.0.0` rule does not catch `127.0.0.1`-bound
+    sockets and vice versa. We supply one rule for each so neither
+    leaks. SSH uses Lima's separate ssh.localPort mechanism and is
+    unaffected.
+    """
+    return [
+        {
+            "guestIPMustBeZero": True,
+            "guestIP": "0.0.0.0",
+            "proto": "any",
+            "guestPortRange": [1, 65535],
+            "ignore": True,
+        },
+        {
+            "guestIP": "127.0.0.1",
+            "proto": "any",
+            "guestPortRange": [1, 65535],
+            "ignore": True,
+        },
+    ]
+
+
 def generate_default_lima_yaml(
     volume_host_path: Path,
     host_dir: str,
     custom_image_url: str | None = None,
     config_image_url_aarch64: str | None = None,
     config_image_url_x86_64: str | None = None,
+    host_private_key_pem: str | None = None,
+    host_public_key_openssh: str | None = None,
 ) -> dict:
     """Generate the default Lima YAML configuration.
 
@@ -49,6 +79,12 @@ def generate_default_lima_yaml(
         custom_image_url: Optional override for the image URL (takes highest priority).
         config_image_url_aarch64: Config-level override for aarch64 image URL.
         config_image_url_x86_64: Config-level override for x86_64 image URL.
+        host_private_key_pem: Optional pre-generated SSH host private key (OpenSSH PEM format).
+            When provided alongside host_public_key_openssh, the guest's sshd is configured
+            to use this key as its ed25519 host key, eliminating the ssh-keyscan race during
+            VM bring-up.
+        host_public_key_openssh: Optional matching public key (single-line OpenSSH format,
+            e.g. ``ssh-ed25519 AAAA...``).
     """
     image_url = custom_image_url or _get_default_image_url(config_image_url_aarch64, config_image_url_x86_64)
     arch = _get_arch_string()
@@ -67,13 +103,12 @@ def generate_default_lima_yaml(
                 "writable": True,
             },
         ],
-        # Disable port forwarding -- use SSH for everything
-        "portForwards": [],
+        "portForwards": _disable_port_forwards_rules(),
         # Provision required packages if not in the image
         "provision": [
             {
                 "mode": "system",
-                "script": _build_provisioning_script(),
+                "script": _build_provisioning_script(host_private_key_pem, host_public_key_openssh),
             },
         ],
     }
@@ -81,9 +116,13 @@ def generate_default_lima_yaml(
     return config
 
 
-def _build_provisioning_script() -> str:
-    """Build the cloud-init provisioning script that ensures required packages are installed."""
-    return """\
+def _build_provisioning_script(
+    host_private_key_pem: str | None = None,
+    host_public_key_openssh: str | None = None,
+) -> str:
+    """Build the Lima ``provision[mode=system]`` script that installs required packages, configures sshd, and (when a keypair is supplied) installs it as the guest's ed25519 sshd host key."""
+    host_key_block = _build_host_key_block(host_private_key_pem, host_public_key_openssh)
+    return f"""\
 #!/bin/bash
 set -eux -o pipefail
 
@@ -108,19 +147,55 @@ mkdir -p /run/sshd
 # Lima VMs run as a regular user, not root, so /code must be pre-created.
 mkdir -p /code && chmod 777 /code
 
+# Install the caller-provided sshd host key (when given).
+SSH_KEY_CHANGED=0
+{host_key_block}
+
 # Increase SSH limits so pyinfra can open enough concurrent channels and
 # connections. The defaults (MaxSessions=10, MaxStartups=10:30:100) cause
 # "channel open FAILED" and "no more sessions" errors during provisioning.
 # Docker and Modal providers pass -o MaxSessions=100 when starting sshd
 # directly; Lima VMs run sshd via systemd so we configure sshd_config.
+SSHD_CONFIG_CHANGED=0
 if ! grep -q '^MaxSessions' /etc/ssh/sshd_config 2>/dev/null; then
     cat >> /etc/ssh/sshd_config <<SSHD_EOF
 MaxSessions 100
 MaxStartups 100:30:200
 SSHD_EOF
+    SSHD_CONFIG_CHANGED=1
+fi
+
+if [ "$SSH_KEY_CHANGED" = "1" ] || [ "$SSHD_CONFIG_CHANGED" = "1" ]; then
     systemctl restart sshd 2>/dev/null || service ssh restart 2>/dev/null || true
 fi
 """
+
+
+def _build_host_key_block(
+    host_private_key_pem: str | None,
+    host_public_key_openssh: str | None,
+) -> str:
+    """Return a bash block that installs the given keypair as the guest's ed25519 sshd host key, or an inert comment when either argument is ``None``."""
+    if host_private_key_pem is None or host_public_key_openssh is None:
+        return "# (no pre-injected host key)"
+    return f"""\
+umask 077
+cat > /etc/ssh/ssh_host_ed25519_key <<'MNGR_LIMA_HOST_PRIV_KEY'
+{host_private_key_pem.rstrip()}
+MNGR_LIMA_HOST_PRIV_KEY
+chmod 600 /etc/ssh/ssh_host_ed25519_key
+chown root:root /etc/ssh/ssh_host_ed25519_key
+umask 022
+cat > /etc/ssh/ssh_host_ed25519_key.pub <<'MNGR_LIMA_HOST_PUB_KEY'
+{host_public_key_openssh.strip()}
+MNGR_LIMA_HOST_PUB_KEY
+chmod 644 /etc/ssh/ssh_host_ed25519_key.pub
+chown root:root /etc/ssh/ssh_host_ed25519_key.pub
+# Remove other host-key types so sshd presents only the pre-trusted ed25519.
+rm -f /etc/ssh/ssh_host_rsa_key /etc/ssh/ssh_host_rsa_key.pub
+rm -f /etc/ssh/ssh_host_ecdsa_key /etc/ssh/ssh_host_ecdsa_key.pub
+rm -f /etc/ssh/ssh_host_dsa_key /etc/ssh/ssh_host_dsa_key.pub
+SSH_KEY_CHANGED=1"""
 
 
 def write_lima_yaml(config: dict, output_path: Path | None = None) -> Path:
@@ -148,14 +223,32 @@ def load_user_lima_yaml(yaml_path: Path) -> dict:
     return config
 
 
+_LIST_EXTEND_KEYS = frozenset({"provision", "mounts"})
+_LOCKED_KEYS = frozenset({"portForwards"})
+
+
 def merge_lima_yaml(base: dict, override: dict) -> dict:
     """Merge a user-provided YAML config with the base config.
 
-    User-provided values override base values. Lists are replaced, not merged.
+    Most keys are replaced by the user's value. For `provision` and `mounts`,
+    the user's list is appended after the base's (base entries first) so mngr's
+    load-bearing entries -- the host-key injection in `provision`, the `/mngr`
+    volume mount in `mounts` -- are not silently dropped by a user who only
+    meant to add their own. Lima runs `provision[mode=system]` scripts in list
+    order, so base-first means mngr's host-key swap runs before any user
+    script. Keys in `_LOCKED_KEYS` (currently `portForwards`) are retained
+    from the base so a user `--file` YAML cannot reopen security-sensitive
+    defaults.
     """
     merged = dict(base)
     for key, value in override.items():
-        merged[key] = value
+        if key in _LOCKED_KEYS:
+            logger.trace("Ignoring locked key {!r} in user Lima YAML", key)
+            continue
+        if key in _LIST_EXTEND_KEYS and isinstance(value, list) and isinstance(merged.get(key), list):
+            merged[key] = list(merged[key]) + list(value)
+        else:
+            merged[key] = value
     return merged
 
 

@@ -208,6 +208,19 @@ class PluginTier(UpperCaseStrEnum):
     DEPENDENT = auto()
 
 
+class PluginKind(UpperCaseStrEnum):
+    """What category of mngr extension a plugin provides.
+
+    Shared by the install-hint helper and (when it lands) the
+    ``mngr plugin list --kind`` CLI filter. Member names match the
+    project's user-facing vocabulary; convert kebab-case CLI strings
+    (``agent-type``, ``provider``) at the CLI boundary.
+    """
+
+    AGENT_TYPE = auto()
+    PROVIDER = auto()
+
+
 # === ID Types ===
 
 
@@ -308,26 +321,143 @@ class AgentName(SafeName):
     """Human-readable name for an agent."""
 
 
-class HostName(NonEmptyStr):
+class HostName(SafeName):
     """Human-readable name for a host.
 
-    Supports the format ``host_name.provider_name``. Not validated with
-    SafeName because host names can be IP addresses or other formats.
+    Host names never contain dots: the dot is reserved as the deterministic
+    separator in ``HOST.PROVIDER`` host addresses (see ``api/addresses.py``).
     """
 
-    @property
-    def provider_name(self) -> ProviderInstanceName | None:
-        """Extract the provider name if specified as 'host_name.provider_name'."""
-        parts = self.split(".")
-        if len(parts) == 2:
-            return ProviderInstanceName(parts[1])
-        return None
 
-    @property
-    def short_name(self) -> str:
-        """Get the short host name without the provider suffix."""
-        parts = self.split(".")
-        return parts[0]
+# A "name or id" reference where the parser couldn't disambiguate at parse time;
+# downstream code matches by ID first, then falls back to name.
+# IDs are listed first so pydantic's union resolution prefers the more specific
+# type when validating string inputs that already match an ID prefix.
+AgentNameOrId = AgentId | AgentName
+HostNameOrId = HostId | HostName
+
+
+# === Parsed address types ===
+#
+# These FrozenModel shapes are produced by the parsers in
+# ``api/addresses.py`` and consumed across the codebase, including by
+# ``config/data_types.py``. They live here in ``primitives`` because the
+# config layer needs to type its CLI option fields with them, and the import
+# layering does not allow ``config`` to depend on ``api``.
+
+
+class HostAddress(FrozenModel):
+    """A parsed ``HOST[.PROVIDER]`` string.
+
+    The host component is required. The bare ``.PROVIDER`` form -- which
+    appears only in ``mngr create NAME@.PROVIDER`` to mean "create a new host
+    on this provider" -- is represented by the flat fields on
+    :class:`NewAgentLocation` instead, not by a HostAddress with no host.
+    """
+
+    host: HostNameOrId = Field(description="Host name or ID")
+    provider: ProviderInstanceName | None = Field(
+        default=None, description="Provider instance name (the ``.PROVIDER`` qualifier)"
+    )
+
+    def matches(self, other: "HostAddress") -> bool:
+        """True if every component of ``self`` matches the corresponding component of ``other``.
+
+        ``self`` is read as a constraint (e.g. parsed from a ``--host`` flag);
+        ``other`` is the concrete address being tested. Provider matching is
+        only enforced when ``self.provider`` is set, so a constraint of just
+        ``HOST`` matches every concrete host with that name regardless of
+        provider.
+        """
+        if self.host != other.host:
+            return False
+        if self.provider is not None and self.provider != other.provider:
+            return False
+        return True
+
+    def __str__(self) -> str:
+        if self.provider is not None:
+            return f"{self.host}.{self.provider}"
+        return str(self.host)
+
+
+class AgentAddress(FrozenModel):
+    """A parsed ``NAME[@HOST[.PROVIDER]]`` string.
+
+    The agent component is required; without it, this is not an agent address.
+    Use :class:`HostAddress` for ``@HOST.PROVIDER`` (no agent) or
+    :class:`HostLocationAddress` for ``[NAME[@HOST[.PROVIDER]]][:PATH]`` syntax.
+    """
+
+    agent: AgentNameOrId = Field(description="Agent name or ID (required)")
+    host: HostAddress | None = Field(default=None, description="Optional host disambiguator")
+
+    def __str__(self) -> str:
+        if self.host is None:
+            return str(self.agent)
+        return f"{self.agent}@{self.host}"
+
+
+# A text-disambiguated agent-or-host argument. The textual rules are:
+# - A leading "@" forces host parsing.
+# - An identifier with HostId shape (``host-...``) is treated as a host.
+# - Otherwise the input is tried as an agent first, then as a host.
+# Used by commands whose top-level positional may refer to either kind of
+# entity: ``mngr event``, ``mngr transcript``, ``mngr snapshot create``,
+# ``mngr snapshot list``, ``mngr wait``. See
+# :func:`imbue.mngr.api.address_parsers.parse_agent_or_host_address`.
+AgentOrHostAddress = AgentAddress | HostAddress
+
+
+class NewAgentLocation(FrozenModel):
+    """A parsed ``[NAME][@[HOST][.PROVIDER]][:PATH]`` string.
+
+    Used as the positional argument of ``mngr create``. The agent name is
+    optional (omitted means "auto-generate"). The host and provider components
+    are flat-optional rather than a nested :class:`HostAddress`, because
+    ``mngr create`` is the only context in which the bare ``.PROVIDER`` form
+    is meaningful -- it means "create a new host on this provider with an
+    auto-generated name". When the user types ``HOST.PROVIDER``, both fields
+    are set; ``HOST`` alone sets just ``host_name``; ``.PROVIDER`` alone sets
+    just ``provider_name``. The trailing ``:PATH`` overrides the agent's
+    default work-directory location.
+
+    ``name`` is :class:`AgentName`, not :class:`AgentNameOrId` -- the agent
+    doesn't yet exist when ``mngr create`` runs, so referring to it by ID is
+    meaningless.
+    """
+
+    name: AgentName | None = Field(default=None, description="Optional explicit agent name")
+    host_name: HostNameOrId | None = Field(default=None, description="Optional host name or ID")
+    provider_name: ProviderInstanceName | None = Field(
+        default=None, description="Optional provider instance name (the ``.PROVIDER`` qualifier)"
+    )
+    path: Path | None = Field(default=None, description="Optional explicit work-directory path inside the host")
+
+
+class HostLocationAddress(FrozenModel):
+    """A location that lives on some host: ``[NAME[@HOST[.PROVIDER]]][:PATH]`` or a bare path.
+
+    Used wherever a CLI command needs to designate "a place on any host" -- the
+    source for ``mngr create --from``/``mngr pair``, or the target for
+    ``mngr push``/``mngr pull``. The host may be local or remote; "hosted"
+    captures both.
+
+    Every component is optional. The four meaningful shapes (in addition to a
+    bare path string) are:
+
+    - ``AGENT`` -> agent's host + agent's work_dir
+    - ``AGENT:PATH`` -> agent's host + explicit ``PATH``
+    - ``@HOST[.PROVIDER]:PATH`` -> explicit host + ``PATH``
+    - ``:PATH`` -> local path
+
+    A bare path string starting with ``/``, ``./``, ``~/``, or ``../`` is also
+    parsed directly into ``path`` as a convenience.
+    """
+
+    agent: AgentNameOrId | None = Field(default=None, description="Optional agent name or ID")
+    host: HostAddress | None = Field(default=None, description="Optional host")
+    path: Path | None = Field(default=None, description="Optional path")
 
 
 class AgentTypeName(SafeName):

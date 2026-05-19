@@ -1,7 +1,33 @@
+import json
 import os
 import stat
 import tempfile
 from pathlib import Path
+from typing import Any
+
+from loguru import logger
+
+
+def read_json_dict(path: Path) -> dict[str, Any]:
+    """Read ``path`` as a JSON object dict, returning ``{}`` if missing/malformed/non-dict.
+
+    The "safe read" pattern several plugins want when consulting an optional
+    user-managed config file like ``.claude/settings.json``: a typo in the
+    file shouldn't break agent provisioning. Missing file -> ``{}``.
+    Unparseable JSON -> log a warning and ``{}``. Non-object JSON (top-level
+    list, string, etc.) -> ``{}``.
+
+    For a host-aware variant that reads via ``OnlineHostInterface``, see
+    ``mngr.hosts.host.read_json_dict_via_host``.
+    """
+    if not path.is_file():
+        return {}
+    try:
+        loaded = json.loads(path.read_text())
+    except json.JSONDecodeError as e:
+        logger.warning("Could not parse {} as JSON ({}); treating as empty.", path, e)
+        return {}
+    return loaded if isinstance(loaded, dict) else {}
 
 
 def atomic_write(path: Path, content: str) -> None:

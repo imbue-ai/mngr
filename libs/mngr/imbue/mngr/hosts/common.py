@@ -10,7 +10,7 @@ from typing import Final
 from loguru import logger
 
 from imbue.imbue_common.pure import pure
-from imbue.mngr.config.agent_class_registry import is_agent_class_registered
+from imbue.mngr.config.agent_config_registry import is_known_agent_type
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import ActivitySource
@@ -141,15 +141,15 @@ def check_agent_type_known(
     agent_type: str,
     config: MngrConfig,
 ) -> bool:
-    """Check whether an agent type is recognized (has a registered agent class).
+    """Check whether an agent type is recognized via any registry or user config.
 
     Resolves through parent_type in config so that custom types inheriting
     from a known type (e.g., my-claude -> claude) are also considered known.
 
-    Not marked @pure because it reads from the global agent class registry.
+    Not marked @pure because it reads from the global agent registries.
     """
     effective_type = _resolve_effective_agent_type(agent_type, config)
-    return is_agent_class_registered(effective_type)
+    return is_known_agent_type(effective_type, config)
 
 
 def seconds_since(activity_time: datetime | None) -> float | None:

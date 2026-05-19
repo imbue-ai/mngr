@@ -37,6 +37,7 @@ from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import HostId
+from imbue.mngr.primitives import HostName
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 
 
@@ -168,6 +169,7 @@ def _make_ssh_host(
 
     return Host(
         id=HostId(f"host-{uuid4().hex}"),
+        host_name=HostName("test"),
         connector=connector,
         provider_instance=local_provider,
         mngr_ctx=temp_mngr_ctx,
@@ -195,7 +197,7 @@ def _make_remote_agent(
     return _TestAgent(
         id=AgentId(f"agent-{uuid4().hex}"),
         name=AgentName(agent_name),
-        agent_type=AgentTypeName("test"),
+        agent_type=AgentTypeName("generic"),
         work_dir=Path("/tmp/work"),
         create_time=datetime.now(timezone.utc),
         host_id=host.id,
@@ -605,6 +607,7 @@ def _make_local_host_and_agent(
     """Create a local host and agent for testing connect_to_agent."""
     host = Host(
         id=HostId(f"host-{uuid4().hex}"),
+        host_name=HostName("test"),
         connector=PyinfraConnector(local_provider._create_local_pyinfra_host()),
         provider_instance=local_provider,
         mngr_ctx=mngr_ctx,
@@ -612,7 +615,7 @@ def _make_local_host_and_agent(
     agent = _TestAgent(
         id=AgentId(f"agent-{uuid4().hex}"),
         name=AgentName(agent_name),
-        agent_type=AgentTypeName("test"),
+        agent_type=AgentTypeName("generic"),
         work_dir=Path("/tmp/work"),
         create_time=datetime.now(timezone.utc),
         host_id=host.id,

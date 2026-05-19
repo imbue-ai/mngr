@@ -13,9 +13,9 @@ from imbue.mngr import hookimpl
 from imbue.mngr.api.create import create
 from imbue.mngr.api.providers import get_provider_instance
 from imbue.mngr.config.data_types import MngrContext
-from imbue.mngr.hosts.host import HostLocation
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.host import CreateAgentOptions
+from imbue.mngr.interfaces.host import HostLocation
 from imbue.mngr.interfaces.host import NewHostOptions
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import AgentName
@@ -123,7 +123,7 @@ def test_create_hooks_fire_in_order_with_existing_host(
             source_location=HostLocation(host=host, path=temp_work_dir),
             target_host=host,
             agent_options=CreateAgentOptions(
-                agent_type=AgentTypeName("echo"),
+                agent_type=AgentTypeName("generic"),
                 name=agent_name,
                 command=CommandString("sleep 482917"),
             ),
@@ -164,7 +164,7 @@ def test_create_hooks_fire_in_order_with_new_host(
                 name=HostName(LOCAL_HOST_NAME),
             ),
             agent_options=CreateAgentOptions(
-                agent_type=AgentTypeName("echo"),
+                agent_type=AgentTypeName("generic"),
                 name=agent_name,
                 command=CommandString("sleep 719283"),
             ),
@@ -206,7 +206,7 @@ def test_create_hooks_receive_correct_data(
                 name=HostName(LOCAL_HOST_NAME),
             ),
             agent_options=CreateAgentOptions(
-                agent_type=AgentTypeName("echo"),
+                agent_type=AgentTypeName("generic"),
                 name=agent_name,
                 command=CommandString("sleep 391847"),
             ),
@@ -243,7 +243,7 @@ def test_create_without_work_dir_skips_file_copy_hooks(
             source_location=HostLocation(host=host, path=temp_work_dir),
             target_host=host,
             agent_options=CreateAgentOptions(
-                agent_type=AgentTypeName("echo"),
+                agent_type=AgentTypeName("generic"),
                 name=agent_name,
                 command=CommandString("sleep 284719"),
             ),
@@ -282,7 +282,7 @@ def test_destroy_agent_hooks_fire_in_order(
             source_location=HostLocation(host=host, path=temp_work_dir),
             target_host=host,
             agent_options=CreateAgentOptions(
-                agent_type=AgentTypeName("echo"),
+                agent_type=AgentTypeName("generic"),
                 name=agent_name,
                 command=CommandString("sleep 573918"),
             ),

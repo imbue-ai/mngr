@@ -5,30 +5,33 @@ import click
 from click_option_group import optgroup
 from loguru import logger
 
-from imbue.mngr.cli.agent_utils import find_agent_for_command
+from imbue.mngr.api.find import resolve_to_started_host_and_running_agent
+from imbue.mngr.cli.address_params import AGENT_ADDRESS
+from imbue.mngr.cli.agent_utils import find_agent_by_address_or_interactively
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
 from imbue.mngr.cli.help_formatter import CommandHelpMetadata
 from imbue.mngr.cli.help_formatter import add_pager_help_option
 from imbue.mngr.config.data_types import CommonCliOptions
+from imbue.mngr.primitives import AgentAddress
 
 
 class CaptureCliOptions(CommonCliOptions):
     """Options passed from the CLI to the capture command."""
 
-    agent: str | None
+    agent: AgentAddress | None
     start: bool
     full: bool
 
 
 @click.command()
-@click.argument("agent", default=None, required=False)
+@click.argument("agent", type=AGENT_ADDRESS, default=None, required=False)
 @optgroup.group("General")
 @optgroup.option(
     "--start/--no-start",
     default=True,
     show_default=True,
-    help="Automatically start the host/agent if stopped",
+    help="Automatically start the host and agent if offline/stopped",
 )
 @optgroup.option(
     "--full/--no-full",
@@ -45,17 +48,17 @@ def capture(ctx: click.Context, **kwargs: Any) -> None:
         command_class=CaptureCliOptions,
     )
 
-    result = find_agent_for_command(
+    host_ref, agent_ref = find_agent_by_address_or_interactively(
         mngr_ctx=mngr_ctx,
-        agent_identifier=opts.agent,
-        command_usage="capture",
+        address=opts.agent,
         host_filter=None,
-        is_start_desired=opts.start,
     )
-    if result is None:
-        return
-
-    agent, _host = result
+    agent, _host = resolve_to_started_host_and_running_agent(
+        host_ref=host_ref,
+        agent_ref=agent_ref,
+        allow_auto_start=opts.start,
+        mngr_ctx=mngr_ctx,
+    )
 
     logger.debug("Capturing pane content for agent: {}", agent.name)
     content = agent.capture_pane_content(include_scrollback=opts.full)

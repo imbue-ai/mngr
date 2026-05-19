@@ -170,6 +170,7 @@ class LocalProviderInstance(BaseProviderInstance):
 
         return Host(
             id=host_id,
+            host_name=name,
             connector=connector,
             provider_instance=self,
             mngr_ctx=self.mngr_ctx,
@@ -223,7 +224,7 @@ class LocalProviderInstance(BaseProviderInstance):
         Always raises LocalHostNotStoppableError because the local computer
         cannot be stopped by mngr.
         """
-        raise LocalHostNotStoppableError()
+        raise LocalHostNotStoppableError(self.name)
 
     def start_host(
         self,
@@ -245,7 +246,7 @@ class LocalProviderInstance(BaseProviderInstance):
         Always raises LocalHostNotDestroyableError because the local computer
         cannot be destroyed by mngr.
         """
-        raise LocalHostNotDestroyableError()
+        raise LocalHostNotDestroyableError(self.name)
 
     def delete_host(self, host: HostInterface) -> None:
         raise Exception("delete_host should not be called for LocalProviderInstance since hosts are never offline")
@@ -272,10 +273,10 @@ class LocalProviderInstance(BaseProviderInstance):
             case HostId():
                 if host != host_id:
                     logger.trace("Failed to find host with id={} (local host id={})", host, host_id)
-                    raise HostNotFoundError(host)
+                    raise HostNotFoundError(self.name, host)
             case HostName():
                 if str(host) != LOCAL_HOST_NAME:
-                    raise HostNotFoundError(host)
+                    raise HostNotFoundError(self.name, host)
             case _ as unreachable:
                 assert_never(unreachable)
 

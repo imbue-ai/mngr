@@ -78,7 +78,7 @@ def _make_agent(
     agent = cls.model_construct(
         id=AgentId.generate(),
         name=AgentName("test-headless"),
-        agent_type=AgentTypeName("test_headless"),
+        agent_type=AgentTypeName("generic"),
         work_dir=work_dir,
         create_time=datetime.now(timezone.utc),
         host_id=host.id,
@@ -115,24 +115,6 @@ def test_send_message_raises(
     agent = _make_agent(local_host, temp_mngr_ctx, tmp_path)
     with pytest.raises(SendMessageError, match="do not accept interactive messages"):
         agent.send_message("hello")
-
-
-def test_uses_paste_detection_send_returns_false(
-    local_host: Host,
-    temp_mngr_ctx: MngrContext,
-    tmp_path: Path,
-) -> None:
-    agent = _make_agent(local_host, temp_mngr_ctx, tmp_path)
-    assert agent.uses_paste_detection_send() is False
-
-
-def test_get_tui_ready_indicator_returns_none(
-    local_host: Host,
-    temp_mngr_ctx: MngrContext,
-    tmp_path: Path,
-) -> None:
-    agent = _make_agent(local_host, temp_mngr_ctx, tmp_path)
-    assert agent.get_tui_ready_indicator() is None
 
 
 def test_is_agent_finished_when_stopped(

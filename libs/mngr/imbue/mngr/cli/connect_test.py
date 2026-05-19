@@ -1,11 +1,10 @@
 """Unit tests for the connect CLI command."""
 
+from imbue.mngr.cli.agent_selector import build_status_text
+from imbue.mngr.cli.agent_selector import filter_agents
+from imbue.mngr.cli.agent_selector import handle_search_key
 from imbue.mngr.cli.connect import ConnectCliOptions
-from imbue.mngr.cli.connect import _build_connection_options
-from imbue.mngr.cli.connect import build_status_text
-from imbue.mngr.cli.connect import filter_agents
-from imbue.mngr.cli.connect import handle_search_key
-from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.primitives import AgentAddress
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.utils.testing import make_test_agent_details
@@ -16,7 +15,7 @@ from imbue.mngr.utils.testing import make_test_agent_details
 
 
 def _make_connect_opts(
-    agent: str | None = "my-agent",
+    agent: AgentAddress | None = None,
     start: bool = True,
     reconnect: bool = True,
     session_command: str | None = None,
@@ -53,8 +52,9 @@ def _make_connect_opts(
 
 def test_connect_cli_options_can_be_instantiated() -> None:
     """Test that ConnectCliOptions can be instantiated with all required fields."""
-    opts = _make_connect_opts()
-    assert opts.agent == "my-agent"
+    address = AgentAddress(agent=AgentName("my-agent"))
+    opts = _make_connect_opts(agent=address)
+    assert opts.agent == address
     assert opts.start is True
     assert opts.reconnect is True
 
@@ -190,37 +190,6 @@ def test_handle_search_key_printable_but_no_character() -> None:
     new_query, should_refresh = handle_search_key("tab", True, None, "test")
     assert new_query == "test"
     assert should_refresh is False
-
-
-# =============================================================================
-# Tests for _build_connection_options
-# =============================================================================
-
-
-def test_build_connection_options_default_values(temp_mngr_ctx: MngrContext) -> None:
-    """_build_connection_options should create ConnectionOptions from CLI options and config."""
-    opts = _make_connect_opts()
-    conn_opts = _build_connection_options(opts, temp_mngr_ctx)
-    assert conn_opts.is_reconnect is True
-    assert conn_opts.retry_count == temp_mngr_ctx.config.retry.connect_retry_times
-    assert conn_opts.retry_delay == temp_mngr_ctx.config.retry.connect_retry_delay
-    assert conn_opts.session_command is None
-    assert conn_opts.is_unknown_host_allowed is False
-
-
-def test_build_connection_options_custom_values(temp_mngr_ctx: MngrContext) -> None:
-    """_build_connection_options should map custom CLI values correctly."""
-    opts = _make_connect_opts(
-        reconnect=False,
-        session_command="ssh user@host",
-        allow_unknown_host=True,
-    )
-    conn_opts = _build_connection_options(opts, temp_mngr_ctx)
-    assert conn_opts.is_reconnect is False
-    assert conn_opts.retry_count == temp_mngr_ctx.config.retry.connect_retry_times
-    assert conn_opts.retry_delay == temp_mngr_ctx.config.retry.connect_retry_delay
-    assert conn_opts.session_command == "ssh user@host"
-    assert conn_opts.is_unknown_host_allowed is True
 
 
 # =============================================================================

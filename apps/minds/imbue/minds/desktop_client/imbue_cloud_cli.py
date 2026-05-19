@@ -13,6 +13,7 @@ parses those into typed pydantic objects.
 """
 
 import json as _json
+import os
 from collections.abc import Mapping
 from collections.abc import Sequence
 from typing import Any
@@ -32,6 +33,12 @@ _MNGR_BINARY = "mngr"
 _DEFAULT_TIMEOUT_SECONDS = 60.0
 _LEASE_TIMEOUT_SECONDS = 300.0
 _KEY_OP_TIMEOUT_SECONDS = 90.0
+
+# Env var consumed by the imbue_cloud plugin's CLI + provider config to
+# discover the connector URL. Mirrored in libs/mngr_imbue_cloud/.../config.py;
+# kept duplicated here to avoid pulling the plugin's config module into the
+# desktop client.
+_CONNECTOR_URL_SUBPROCESS_ENV: str = "MNGR__PROVIDERS__IMBUE_CLOUD__CONNECTOR_URL"
 
 # Mirrors ``apps/remote_service_connector/.../app.py`` -- the connector uses
 # the first 16 hex chars of the agent UUID (after stripping ``"agent-"``) as
@@ -83,7 +90,7 @@ class LeasedHost(FrozenModel):
     host_db_id: str
     host_id: str
     agent_id: str
-    vps_ip: str
+    vps_address: str
     ssh_user: str
     ssh_port: int
     container_ssh_port: int
@@ -121,6 +128,14 @@ class ImbueCloudCli(MutableModel):
             "so subprocesses are tied to the desktop client's overall lifetime."
         ),
     )
+    connector_url: AnyUrl = Field(
+        frozen=True,
+        description=(
+            "Base URL of the `remote_service_connector` for this environment. Passed into every "
+            "`mngr imbue_cloud …` subprocess via the MNGR__PROVIDERS__IMBUE_CLOUD__CONNECTOR_URL "
+            "env var; the plugin has no baked-in default."
+        ),
+    )
 
     def _run(
         self,
@@ -131,6 +146,12 @@ class ImbueCloudCli(MutableModel):
         on_output: Any = None,
     ) -> FinishedProcess:
         full_command = [_MNGR_BINARY, "imbue_cloud", *args]
+        # Inherit the parent env so subprocesses still see HOME / PATH /
+        # MNGR_HOST_DIR etc.; layer the connector URL on top so the
+        # `mngr imbue_cloud` plugin reaches the right backend without
+        # a baked-in default.
+        env = dict(os.environ)
+        env[_CONNECTOR_URL_SUBPROCESS_ENV] = str(self.connector_url).rstrip("/")
         cg = self.parent_concurrency_group.make_concurrency_group(name=cg_name)
         with cg:
             return cg.run_process_to_completion(
@@ -138,6 +159,7 @@ class ImbueCloudCli(MutableModel):
                 timeout=float(timeout_seconds),
                 is_checked_after=False,
                 on_output=on_output,
+                env=env,
             )
 
     def _expect_success(

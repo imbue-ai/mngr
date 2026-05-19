@@ -13,12 +13,14 @@ jobs:
     runs-on: ubuntu-latest
     # `checks: write` is required by the report-flaky-aware-tests composite
     # action: both its `mikepenz/action-junit-report@v5` invocations and its
-    # `gh api POST /repos/.../check-runs` call need it. `contents: read` is
-    # the minimum needed by actions/checkout. Declaring permissions
-    # explicitly avoids depending on the repo-level default, which may be
-    # restricted (contents: read only).
+    # `gh api POST /repos/.../check-runs` call need it. `contents: write` is
+    # required so offload can `git push` its image-cache git notes back to
+    # `refs/notes/offload-images`; without it, every run is a cache miss and
+    # rebuilds the base image from scratch (~150 s wasted per run).
+    # Declaring permissions explicitly avoids depending on the repo-level
+    # default, which may be restricted (contents: read only).
     permissions:
-      contents: read
+      contents: write
       checks: write
     env:
       MODAL_TOKEN_ID: ${{ vars.MODAL_TOKEN_ID }}
@@ -57,12 +59,12 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             ~/.cargo/bin/offload
-          key: cargo-offload-0.9.2-${{ runner.os }}
+          key: cargo-offload-0.9.5-${{ runner.os }}
 
       - name: Install offload
         run: |
-          if ! command -v offload &> /dev/null || ! offload --version | grep -q '0.9.2'; then
-            cargo install offload@0.9.2 --force
+          if ! command -v offload &> /dev/null || ! offload --version | grep -q '0.9.5'; then
+            cargo install offload@0.9.5 --force
           fi
 
       - name: Restore offload test durations from previous run
@@ -210,13 +212,12 @@ jobs:
   test-offload-acceptance:
     if: github.ref != 'refs/heads/release'
     runs-on: ubuntu-latest
-    # See note on `test-offload` above: the report-flaky-aware-tests
-    # composite action needs `checks: write` both for the annotate-only
-    # `mikepenz/action-junit-report@v5` step (per-failure annotations)
-    # and for its `gh api POST /repos/.../check-runs` call, which posts
-    # the unified check-run (success / neutral / failure).
+    # See note on `test-offload` above: `checks: write` is required by the
+    # report-flaky-aware-tests composite action, and `contents: write` is
+    # required so offload can push its image-cache git notes back to
+    # `refs/notes/offload-images` (otherwise every run is a cache miss).
     permissions:
-      contents: read
+      contents: write
       checks: write
     env:
       MODAL_TOKEN_ID: ${{ vars.MODAL_TOKEN_ID }}
@@ -255,12 +256,12 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             ~/.cargo/bin/offload
-          key: cargo-offload-0.9.2-${{ runner.os }}
+          key: cargo-offload-0.9.5-${{ runner.os }}
 
       - name: Install offload
         run: |
-          if ! command -v offload &> /dev/null || ! offload --version | grep -q '0.9.2'; then
-            cargo install offload@0.9.2 --force
+          if ! command -v offload &> /dev/null || ! offload --version | grep -q '0.9.5'; then
+            cargo install offload@0.9.5 --force
           fi
 
       - name: Restore offload test durations from previous run
@@ -384,7 +385,7 @@ jobs:
         run: uv sync --all-packages
 
       - name: Install Claude Code CLI
-        run: npm install -g @anthropic-ai/claude-code@2.1.116
+        run: npm install -g @anthropic-ai/claude-code@2.1.141
 
       - name: Run Docker release tests
         run: PYTEST_MAX_DURATION_SECONDS=900 uv run pytest -n 0 --timeout 600 --no-cov --cov-fail-under=0 -v --tb=short -m '(docker or docker_sdk) and release'
@@ -422,7 +423,7 @@ jobs:
         run: brew install tmux unison
 
       - name: Install Claude Code CLI
-        run: npm install -g @anthropic-ai/claude-code@2.1.116
+        run: npm install -g @anthropic-ai/claude-code@2.1.141
 
       - name: Configure Docker Hub mirror
         if: runner.os == 'Linux'

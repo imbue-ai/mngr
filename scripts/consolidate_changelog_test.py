@@ -1,10 +1,15 @@
+import os
+import subprocess
 from pathlib import Path
 
 import pytest
 
-from scripts.consolidate_changelog import _build_new_section
+from scripts.consolidate_changelog import _build_dated_sections
 from scripts.consolidate_changelog import _collect_entries
+from scripts.consolidate_changelog import _get_entry_added_datetime
+from scripts.consolidate_changelog import _group_entries_by_date
 from scripts.consolidate_changelog import _insert_section_into_changelog
+from scripts.consolidate_changelog import pending_changelog_entries
 
 
 def test_collect_entries_empty_dir(tmp_path: Path) -> None:
@@ -41,18 +46,47 @@ def test_collect_entries_returns_sorted_entries(tmp_path: Path) -> None:
     assert entries[1][1] == "- Feature B"
 
 
-def test_build_new_section_single_entry() -> None:
-    entries = [(Path("a.md"), "- Added feature X")]
-    result = _build_new_section("2026-04-02", entries)
+def test_pending_changelog_entries_returns_empty_when_no_changelog_dir(tmp_path: Path) -> None:
+    assert pending_changelog_entries(tmp_path) == []
+
+
+def test_pending_changelog_entries_returns_paths_from_collect_entries(tmp_path: Path) -> None:
+    changelog_dir = tmp_path / "changelog"
+    changelog_dir.mkdir()
+    (changelog_dir / ".gitkeep").touch()
+    (changelog_dir / "notes.txt").write_text("not a changelog entry")
+    (changelog_dir / "empty.md").write_text("   \n")
+    (changelog_dir / "b.md").write_text("- B")
+    (changelog_dir / "a.md").write_text("- A")
+    result = pending_changelog_entries(tmp_path)
+    assert [p.name for p in result] == ["a.md", "b.md"]
+
+
+def test_build_dated_sections_single_date() -> None:
+    by_date = {"2026-04-02": [(Path("a.md"), "- Added feature X")]}
+    result = _build_dated_sections(by_date)
     assert result == "## 2026-04-02\n\n- Added feature X\n"
 
 
-def test_build_new_section_multiple_entries() -> None:
-    entries = [
-        (Path("a.md"), "- Feature A"),
-        (Path("b.md"), "- Feature B"),
-    ]
-    result = _build_new_section("2026-04-02", entries)
+def test_build_dated_sections_multiple_dates_newest_first() -> None:
+    by_date = {
+        "2026-04-01": [(Path("a.md"), "- Feature A")],
+        "2026-04-03": [(Path("c.md"), "- Feature C")],
+        "2026-04-02": [(Path("b.md"), "- Feature B")],
+    }
+    result = _build_dated_sections(by_date)
+    # Newest date first; sections separated by a blank line
+    assert result == "## 2026-04-03\n\n- Feature C\n\n## 2026-04-02\n\n- Feature B\n\n## 2026-04-01\n\n- Feature A\n"
+
+
+def test_build_dated_sections_multiple_entries_per_date() -> None:
+    by_date = {
+        "2026-04-02": [
+            (Path("a.md"), "- Feature A"),
+            (Path("b.md"), "- Feature B"),
+        ],
+    }
+    result = _build_dated_sections(by_date)
     assert result == "## 2026-04-02\n\n- Feature A\n\n- Feature B\n"
 
 
@@ -102,3 +136,166 @@ def test_insert_section_preserves_multiple_existing_sections(tmp_path: Path) -> 
     idx_mid = result.index("## 2026-04-01")
     idx_old = result.index("## 2026-03-31")
     assert idx_new < idx_mid < idx_old
+
+
+def _git_env() -> dict[str, str]:
+    return {
+        **os.environ,
+        "GIT_AUTHOR_NAME": "test",
+        "GIT_AUTHOR_EMAIL": "test@test",
+        "GIT_COMMITTER_NAME": "test",
+        "GIT_COMMITTER_EMAIL": "test@test",
+    }
+
+
+def _init_git_repo_with_files(repo: Path, files_with_dates: list[tuple[str, str, str]]) -> None:
+    """Init a temp git repo and commit each file at its given committer date.
+
+    files_with_dates: list of (rel_path, content, iso_date) tuples. Each entry
+    is added in its own commit on the (linear) main branch.
+    """
+    env = _git_env()
+    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=repo, check=True, env=env)
+    for rel_path, content, iso_date in files_with_dates:
+        path = repo / rel_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content)
+        subprocess.run(["git", "add", rel_path], cwd=repo, check=True, env=env)
+        commit_env = {**env, "GIT_AUTHOR_DATE": iso_date, "GIT_COMMITTER_DATE": iso_date}
+        subprocess.run(
+            ["git", "commit", "-q", "-m", f"add {rel_path}"],
+            cwd=repo,
+            check=True,
+            env=commit_env,
+        )
+
+
+def test_get_entry_added_datetime_uses_committer_date(tmp_path: Path) -> None:
+    """The helper returns the committer date of the commit that added the file, in PT."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _init_git_repo_with_files(
+        repo,
+        [
+            # 2026-05-08T18:00:00Z = 2026-05-08T11:00:00 PT (PDT, UTC-7)
+            ("changelog/foo.md", "- entry foo\n", "2026-05-08T18:00:00Z"),
+        ],
+    )
+    dt = _get_entry_added_datetime(repo / "changelog" / "foo.md", repo)
+    assert dt.strftime("%Y-%m-%d") == "2026-05-08"
+    assert dt.strftime("%H") == "11"
+
+
+def test_get_entry_added_datetime_returns_merge_commit_date(tmp_path: Path) -> None:
+    """For files merged in via a merge commit, return the merge commit's date,
+    not the feature-branch commit's date.
+    """
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    env = _git_env()
+    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=repo, check=True, env=env)
+    # Seed main with an unrelated commit so we have a non-empty first-parent line.
+    (repo / "README.md").write_text("# repo\n")
+    subprocess.run(["git", "add", "README.md"], cwd=repo, check=True, env=env)
+    seed_env = {**env, "GIT_AUTHOR_DATE": "2026-05-01T00:00:00Z", "GIT_COMMITTER_DATE": "2026-05-01T00:00:00Z"}
+    subprocess.run(["git", "commit", "-q", "-m", "seed"], cwd=repo, check=True, env=seed_env)
+
+    # Branch off main, add the entry on the feature branch with an early author/committer date.
+    subprocess.run(["git", "checkout", "-q", "-b", "feature"], cwd=repo, check=True, env=env)
+    (repo / "changelog").mkdir()
+    (repo / "changelog" / "foo.md").write_text("- entry foo\n")
+    subprocess.run(["git", "add", "changelog/foo.md"], cwd=repo, check=True, env=env)
+    feat_env = {**env, "GIT_AUTHOR_DATE": "2026-05-03T12:00:00Z", "GIT_COMMITTER_DATE": "2026-05-03T12:00:00Z"}
+    subprocess.run(["git", "commit", "-q", "-m", "add foo"], cwd=repo, check=True, env=feat_env)
+
+    # Merge feature into main with a later committer date (the "PR merged" time).
+    # Author date is deliberately set to the feature-branch date so the test
+    # would fail if the helper read %aI instead of %cI.
+    subprocess.run(["git", "checkout", "-q", "main"], cwd=repo, check=True, env=env)
+    # 2026-05-08T18:00:00Z = 2026-05-08T11:00:00 PT (committer/PR-merge time)
+    # 2026-05-03T12:00:00Z = 2026-05-03 PT (author time, would map to wrong day)
+    merge_env = {**env, "GIT_AUTHOR_DATE": "2026-05-03T12:00:00Z", "GIT_COMMITTER_DATE": "2026-05-08T18:00:00Z"}
+    subprocess.run(
+        ["git", "merge", "-q", "--no-ff", "-m", "merge feature", "feature"],
+        cwd=repo,
+        check=True,
+        env=merge_env,
+    )
+
+    dt = _get_entry_added_datetime(repo / "changelog" / "foo.md", repo)
+    assert dt.strftime("%Y-%m-%d") == "2026-05-08"
+    assert dt.strftime("%H") == "11"
+
+
+def test_get_entry_added_datetime_raises_when_file_not_in_history(tmp_path: Path) -> None:
+    """If the file has no commit introducing it on the first-parent line, raise."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _init_git_repo_with_files(repo, [("placeholder.txt", "x\n", "2026-05-01T00:00:00Z")])
+    untracked = repo / "changelog" / "fresh.md"
+    untracked.parent.mkdir()
+    untracked.write_text("- new\n")
+    with pytest.raises(RuntimeError, match="no commit found"):
+        _get_entry_added_datetime(untracked, repo)
+
+
+def test_group_entries_by_date_groups_by_committed_pt_date(tmp_path: Path) -> None:
+    """Entries with different commit dates land in separate per-date buckets."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _init_git_repo_with_files(
+        repo,
+        [
+            ("changelog/old.md", "- old entry\n", "2026-05-01T12:00:00Z"),
+            ("changelog/mid.md", "- mid entry\n", "2026-05-05T12:00:00Z"),
+            ("changelog/new.md", "- new entry\n", "2026-05-08T12:00:00Z"),
+        ],
+    )
+    entries = _collect_entries(repo / "changelog")
+    by_date = _group_entries_by_date(entries, repo)
+    assert sorted(by_date.keys()) == ["2026-05-01", "2026-05-05", "2026-05-08"]
+    assert [p.name for p, _ in by_date["2026-05-08"]] == ["new.md"]
+
+
+def test_group_entries_by_date_combines_same_day(tmp_path: Path) -> None:
+    """Two entries written the same PT date end up in one bucket, sorted by filename."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _init_git_repo_with_files(
+        repo,
+        [
+            ("changelog/b.md", "- b entry\n", "2026-05-08T11:00:00Z"),
+            ("changelog/a.md", "- a entry\n", "2026-05-08T17:00:00Z"),
+        ],
+    )
+    entries = _collect_entries(repo / "changelog")
+    by_date = _group_entries_by_date(entries, repo)
+    assert list(by_date.keys()) == ["2026-05-08"]
+    assert [p.name for p, _ in by_date["2026-05-08"]] == ["a.md", "b.md"]
+
+
+def test_group_entries_by_date_uses_pacific_timezone(tmp_path: Path) -> None:
+    """A UTC entry past midnight that's still 'yesterday' in PT lands under the PT date."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _init_git_repo_with_files(
+        repo,
+        [
+            # 2026-05-09T03:00:00Z = 2026-05-08T20:00:00 PT (PDT, UTC-7)
+            ("changelog/late.md", "- late\n", "2026-05-09T03:00:00Z"),
+        ],
+    )
+    entries = _collect_entries(repo / "changelog")
+    by_date = _group_entries_by_date(entries, repo)
+    assert list(by_date.keys()) == ["2026-05-08"]
+
+
+def test_get_entry_added_datetime_raises_when_not_a_git_repo(tmp_path: Path) -> None:
+    """If the directory isn't a git repo at all, the helper raises RuntimeError."""
+    not_a_repo = tmp_path / "not_a_repo"
+    not_a_repo.mkdir()
+    stray = not_a_repo / "changelog" / "stray.md"
+    stray.parent.mkdir()
+    stray.write_text("- stray\n")
+    with pytest.raises(RuntimeError, match="git log failed"):
+        _get_entry_added_datetime(stray, not_a_repo)

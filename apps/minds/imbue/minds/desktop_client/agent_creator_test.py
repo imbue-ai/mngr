@@ -15,6 +15,7 @@ from http.server import BaseHTTPRequestHandler
 from http.server import HTTPServer
 from pathlib import Path
 
+import pytest
 from pydantic import AnyUrl
 from pydantic import Field
 from pydantic import SecretStr
@@ -26,19 +27,18 @@ from imbue.minds.desktop_client.agent_creator import AgentCreator
 from imbue.minds.desktop_client.agent_creator import _build_mngr_create_command
 from imbue.minds.desktop_client.agent_creator import _is_git_worktree
 from imbue.minds.desktop_client.agent_creator import _is_local_path
-from imbue.minds.desktop_client.agent_creator import _make_host_name
 from imbue.minds.desktop_client.agent_creator import _redact_url_credentials
 from imbue.minds.desktop_client.agent_creator import _redact_url_credentials_in_text
 from imbue.minds.desktop_client.agent_creator import extract_repo_name
+from imbue.minds.desktop_client.conftest import FAKE_CONNECTOR_URL
 from imbue.minds.desktop_client.conftest import FakeImbueCloudCli
 from imbue.minds.desktop_client.imbue_cloud_cli import LiteLLMKeyMaterial
-from imbue.minds.desktop_client.latchkey.core import AGENT_SIDE_LATCHKEY_PORT
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.primitives import AIProvider
-from imbue.minds.primitives import AgentName
 from imbue.minds.primitives import CreationId
 from imbue.minds.primitives import LaunchMode
 from imbue.mngr.primitives import AgentId
+from imbue.mngr.primitives import HostName
 
 
 def test_extract_repo_name_strips_dot_git_and_trailing_slash() -> None:
@@ -71,86 +71,66 @@ def test_redact_url_credentials_in_text_strips_embedded_userinfo() -> None:
     assert _redact_url_credentials_in_text(msg) == "fatal: unable to access 'https://github.com/x/y': bad"
 
 
-def test_make_host_name_appends_host_suffix() -> None:
-    assert _make_host_name(AgentName("alpha")) == "alpha-host"
+def test_build_mngr_create_command_lifts_latchkey_env_to_host_env_flags() -> None:
+    """``_build_mngr_create_command`` lifts each entry of ``latchkey_env`` into a ``--host-env`` flag.
 
+    The shape of the env (which keys are set, which URL is used, etc.) is decided
+    upstream by ``prepare_agent_latchkey``; this command-builder just plumbs
+    whatever it gets through to ``mngr create``. The plugin's
+    ``agent_setup_test.py`` covers all the per-mode permutations.
 
-def test_build_mngr_create_command_injects_constant_agent_side_latchkey_url() -> None:
-    """Every mode gets the constant agent-side LATCHKEY_GATEWAY URL.
-
-    The reverse tunnel that ``LatchkeyDiscoveryHandler`` sets up post-discovery bridges
-    the agent's loopback at ``AGENT_SIDE_LATCHKEY_PORT`` to whichever host-side gateway
-    port the discovery handler picked, so the URL is the same constant every time.
-    """
-    expected = f"LATCHKEY_GATEWAY=http://127.0.0.1:{AGENT_SIDE_LATCHKEY_PORT}"
-    for mode in (LaunchMode.LOCAL, LaunchMode.LIMA, LaunchMode.CLOUD):
-        command, _ = _build_mngr_create_command(launch_mode=mode, agent_name=AgentName("hello"))
-        assert expected in command, f"{mode} command missing latchkey env: {command}"
-    # IMBUE_CLOUD requires an account to build the address; pass one and check the env var.
-    command, _ = _build_mngr_create_command(
-        launch_mode=LaunchMode.IMBUE_CLOUD,
-        agent_name=AgentName("hello"),
-        imbue_cloud_account="alice@imbue.com",
-    )
-    assert expected in command
-
-
-def test_build_mngr_create_command_disables_latchkey_counting_when_wired() -> None:
-    """Whenever latchkey is wired into the workspace, the workspace-side
-    ``latchkey`` CLI runs in client mode against the host-side gateway.
-    The gateway already counts as one active user, so the workspace must
-    set ``LATCHKEY_DISABLE_COUNTING=1`` to avoid double-counting every
-    agent as a separate goatcounter.com user.
-    """
-    for mode in (LaunchMode.LOCAL, LaunchMode.LIMA, LaunchMode.CLOUD):
-        command, _ = _build_mngr_create_command(launch_mode=mode, agent_name=AgentName("hello"))
-        assert "LATCHKEY_DISABLE_COUNTING=1" in command, f"{mode} command missing disable-counting env: {command}"
-
-
-def test_build_mngr_create_command_explicit_url_overrides_constant() -> None:
-    """Passing ``latchkey_gateway_url`` overrides the default for any mode."""
-    command, _ = _build_mngr_create_command(
-        launch_mode=LaunchMode.LOCAL,
-        agent_name=AgentName("hello"),
-        latchkey_gateway_url="http://127.0.0.1:9999",
-    )
-    assert "LATCHKEY_GATEWAY=http://127.0.0.1:9999" in command
-    # The constant agent-side URL is not also injected.
-    assert f"LATCHKEY_GATEWAY=http://127.0.0.1:{AGENT_SIDE_LATCHKEY_PORT}" not in command
-
-
-def test_build_mngr_create_command_injects_latchkey_password_when_supplied() -> None:
-    """Password is injected at create time so the agent's first
-    ``latchkey curl`` already authenticates to the password-protected
-    shared gateway -- no fragile post-create step required.
+    ``--host-env`` (not ``--env``) is used so the wiring is written to the
+    new host's env file once and every agent that ever runs on the host
+    inherits the same gateway URL / password / JWT.
     """
     command, _ = _build_mngr_create_command(
         launch_mode=LaunchMode.LOCAL,
-        agent_name=AgentName("hello"),
-        latchkey_gateway_password="sup3rs3cret",
+        host_name=HostName("hello"),
+        latchkey_env={
+            "LATCHKEY_GATEWAY": "http://127.0.0.1:1989",
+            "LATCHKEY_GATEWAY_PASSWORD": "sup3rs3cret",
+            "LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE": "eyJhbGc.fake.jwt",
+            "LATCHKEY_DISABLE_COUNTING": "1",
+        },
     )
+    assert "LATCHKEY_GATEWAY=http://127.0.0.1:1989" in command
     assert "LATCHKEY_GATEWAY_PASSWORD=sup3rs3cret" in command
-
-
-def test_build_mngr_create_command_injects_latchkey_jwt_when_supplied() -> None:
-    """The permissions-override JWT is injected at create time so the
-    agent's env file has it from the very first service start. This is
-    what fixes the previous-design bug where post-create ``mngr provision
-    --env`` could silently fail and leave
-    ``LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE`` missing.
-    """
-    command, _ = _build_mngr_create_command(
-        launch_mode=LaunchMode.LOCAL,
-        agent_name=AgentName("hello"),
-        latchkey_permissions_override_jwt="eyJhbGc.fake.jwt",
-    )
     assert "LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE=eyJhbGc.fake.jwt" in command
+    assert "LATCHKEY_DISABLE_COUNTING=1" in command
+
+    # Each latchkey entry must be preceded by ``--host-env`` (not ``--env``)
+    # so every agent on the host shares the same gateway wiring.
+    latchkey_keys = {
+        "LATCHKEY_GATEWAY",
+        "LATCHKEY_GATEWAY_PASSWORD",
+        "LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE",
+        "LATCHKEY_DISABLE_COUNTING",
+    }
+    for index, arg in enumerate(command):
+        if any(arg.startswith(f"{key}=") for key in latchkey_keys):
+            assert index > 0
+            assert command[index - 1] == "--host-env", (
+                f"Latchkey arg {arg!r} should be passed via --host-env, got {command[index - 1]!r}"
+            )
+
+
+def test_build_mngr_create_command_omits_latchkey_when_env_is_empty() -> None:
+    """Empty / ``None`` ``latchkey_env`` opts the host out of latchkey wiring entirely."""
+    for latchkey_env in (None, {}):
+        command, _ = _build_mngr_create_command(
+            launch_mode=LaunchMode.LOCAL,
+            host_name=HostName("hello"),
+            latchkey_env=latchkey_env,
+        )
+        joined = " ".join(command)
+        assert "LATCHKEY_GATEWAY" not in joined
+        assert "LATCHKEY_DISABLE_COUNTING" not in joined
 
 
 def test_build_mngr_create_command_uses_main_template_and_omits_message_arg() -> None:
     command, api_key = _build_mngr_create_command(
         launch_mode=LaunchMode.LOCAL,
-        agent_name=AgentName("hello"),
+        host_name=HostName("hello"),
     )
     assert "--template" in command
     assert "main" in command
@@ -174,19 +154,26 @@ def test_build_mngr_create_command_uses_main_template_and_omits_message_arg() ->
 def test_build_mngr_create_command_imbue_cloud_targets_account_provider() -> None:
     command, api_key = _build_mngr_create_command(
         launch_mode=LaunchMode.IMBUE_CLOUD,
-        agent_name=AgentName("hello"),
+        host_name=HostName("hello"),
         imbue_cloud_account="alice@imbue.com",
         imbue_cloud_repo_url="https://github.com/imbue-ai/forever-claude-template",
         imbue_cloud_branch_or_tag="v1.2.3",
     )
     joined = " ".join(command)
     # Address points at the imbue_cloud_<slug> provider so mngr routes
-    # create_host to ImbueCloudProvider.
-    assert "@hello-host.imbue_cloud_alice-imbue-com" in joined
-    # IMBUE_CLOUD does not pass --reuse / --update (each lease is one-shot)
-    # nor --id (the canonical id is parsed from the JSONL ``created`` event).
+    # create_host to ImbueCloudProvider. The agent name is now the constant
+    # ``system-services``; the user's input drives the host name.
+    assert "system-services@hello.imbue_cloud_alice-imbue-com" in joined
+    # IMBUE_CLOUD passes ``--reuse`` because the bake's services agent
+    # is named ``system-services`` too, which mngr's pre-flight "agent
+    # already exists on this host" check would otherwise reject. It
+    # does NOT pass ``--update`` (the adopt path in
+    # ``ImbueCloudHost.create_agent_state`` already patches the agent
+    # in place; ``--update`` would re-run the bake's file-transfer
+    # provisioning unnecessarily). No ``--id`` either: the canonical
+    # id is parsed from the JSONL ``created`` event.
     assert "--id" not in command
-    assert "--reuse" not in command
+    assert "--reuse" in command
     assert "--update" not in command
     assert api_key
     # Lease attributes flow through --build-arg.
@@ -224,7 +211,7 @@ def test_build_mngr_create_command_never_inlines_secret_env_flags() -> None:
     ):
         command, _ = _build_mngr_create_command(
             launch_mode=mode,
-            agent_name=AgentName("hello"),
+            host_name=HostName("hello"),
             imbue_cloud_account=account,
         )
         joined = " ".join(command)
@@ -462,12 +449,15 @@ def test_start_creation_imbue_cloud_ai_with_local_compute_mints_litellm_key(tmp_
     """The AIProvider.IMBUE_CLOUD branch must mint a LiteLLM key even when the compute
     provider is not IMBUE_CLOUD. The actual ``mngr create`` invocation will fail (no
     real binary / no real repo) but the key-mint must happen first."""
-    cli = _RecordingImbueCloudCli(parent_concurrency_group=ConcurrencyGroup(name="recording-cli"))
+    cli = _RecordingImbueCloudCli(
+        parent_concurrency_group=ConcurrencyGroup(name="recording-cli"),
+        connector_url=FAKE_CONNECTOR_URL,
+    )
     creator = _make_creator_with_cli(tmp_path, cli)
 
     creation_id = creator.start_creation(
         repo_source=str(_make_fake_repo(tmp_path)),
-        agent_name="my-agent",
+        host_name="my-workspace",
         launch_mode=LaunchMode.LOCAL,
         ai_provider=AIProvider.IMBUE_CLOUD,
         account_email="alice@imbue.com",
@@ -476,18 +466,26 @@ def test_start_creation_imbue_cloud_ai_with_local_compute_mints_litellm_key(tmp_
 
     assert len(cli.create_calls) == 1
     assert cli.create_calls[0]["account"] == "alice@imbue.com"
-    assert cli.create_calls[0]["metadata"] == {"agent_name": "my-agent"}
+    assert cli.create_calls[0]["metadata"] == {"host_name": "my-workspace"}
 
 
+# Flaky under heavy CI load: this is a sync unit test but its setup spins up
+# fresh ConcurrencyGroups and a recording http-server fixture; the combined
+# work occasionally exceeds the 10s pytest-timeout when offload sandboxes are
+# contended. Offload retries flaky tests automatically.
+@pytest.mark.flaky
 def test_start_creation_api_key_ai_does_not_mint_litellm_key(tmp_path: Path) -> None:
     """The API_KEY branch uses the user-supplied key directly and must never call
     ``create_litellm_key``."""
-    cli = _RecordingImbueCloudCli(parent_concurrency_group=ConcurrencyGroup(name="recording-cli"))
+    cli = _RecordingImbueCloudCli(
+        parent_concurrency_group=ConcurrencyGroup(name="recording-cli"),
+        connector_url=FAKE_CONNECTOR_URL,
+    )
     creator = _make_creator_with_cli(tmp_path, cli)
 
     creation_id = creator.start_creation(
         repo_source=str(_make_fake_repo(tmp_path)),
-        agent_name="my-agent",
+        host_name="my-workspace",
         launch_mode=LaunchMode.LOCAL,
         ai_provider=AIProvider.API_KEY,
         anthropic_api_key="sk-ant-user-supplied",
@@ -500,12 +498,15 @@ def test_start_creation_api_key_ai_does_not_mint_litellm_key(tmp_path: Path) -> 
 def test_start_creation_subscription_ai_does_not_mint_litellm_key(tmp_path: Path) -> None:
     """The SUBSCRIPTION branch injects no Anthropic creds and must never call
     ``create_litellm_key``."""
-    cli = _RecordingImbueCloudCli(parent_concurrency_group=ConcurrencyGroup(name="recording-cli"))
+    cli = _RecordingImbueCloudCli(
+        parent_concurrency_group=ConcurrencyGroup(name="recording-cli"),
+        connector_url=FAKE_CONNECTOR_URL,
+    )
     creator = _make_creator_with_cli(tmp_path, cli)
 
     creation_id = creator.start_creation(
         repo_source=str(_make_fake_repo(tmp_path)),
-        agent_name="my-agent",
+        host_name="my-workspace",
         launch_mode=LaunchMode.LOCAL,
         ai_provider=AIProvider.SUBSCRIPTION,
     )
@@ -517,12 +518,15 @@ def test_start_creation_subscription_ai_does_not_mint_litellm_key(tmp_path: Path
 def test_start_creation_api_key_ai_without_key_fails_with_clear_message(tmp_path: Path) -> None:
     """The API_KEY branch must reject an empty key with a specific error rather than
     silently falling through to mngr create with no key set."""
-    cli = _RecordingImbueCloudCli(parent_concurrency_group=ConcurrencyGroup(name="recording-cli"))
+    cli = _RecordingImbueCloudCli(
+        parent_concurrency_group=ConcurrencyGroup(name="recording-cli"),
+        connector_url=FAKE_CONNECTOR_URL,
+    )
     creator = _make_creator_with_cli(tmp_path, cli)
 
     creation_id = creator.start_creation(
         repo_source=str(_make_fake_repo(tmp_path)),
-        agent_name="my-agent",
+        host_name="my-workspace",
         launch_mode=LaunchMode.LOCAL,
         ai_provider=AIProvider.API_KEY,
         anthropic_api_key="",

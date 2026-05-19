@@ -165,6 +165,7 @@ class SSHProviderInstance(BaseProviderInstance):
 
         return Host(
             id=host_id,
+            host_name=HostName(host_name),
             connector=connector,
             provider_instance=self,
             mngr_ctx=self.mngr_ctx,
@@ -236,12 +237,12 @@ class SSHProviderInstance(BaseProviderInstance):
             for host_name, host_config in all_hosts.items():
                 if self._host_id_for_name(host_name) == host:
                     return self._create_host_object(host_name, host_config)
-            raise HostNotFoundError(host)
+            raise HostNotFoundError(self.name, host)
 
         # Search by name
         name_str = str(host)
         if name_str not in all_hosts:
-            raise HostNotFoundError(host)
+            raise HostNotFoundError(self.name, host)
 
         return self._create_host_object(name_str, all_hosts[name_str])
 
@@ -364,7 +365,7 @@ class SSHProviderInstance(BaseProviderInstance):
             if self._host_id_for_name(host_name) == host_id:
                 return self._create_pyinfra_host(host_config)
 
-        raise HostNotFoundError(host_id)
+        raise HostNotFoundError(self.name, host_id)
 
     # =========================================================================
     # Lifecycle Methods
