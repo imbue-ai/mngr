@@ -283,10 +283,10 @@ def run(
         _ImbueCloudAuthErrorDisabler(consumer=consumer, session_store=session_store)
     )
 
-    # Workspace-server health tracker: feeds on backend failures observed by
-    # the plugin. Constructed here (instead of inside create_desktop_client)
-    # so the envelope-failure callback is registered before consumer.start()
-    # below; otherwise early failures would dispatch against an empty list.
+    # Workspace-server health tracker: receives backend failures observed by
+    # the plugin. The envelope-failure callback must be registered before
+    # ``consumer.start()`` below, or early failures dispatch against an empty
+    # callback list and are dropped.
     workspace_health_tracker = WorkspaceServerHealthTracker()
     consumer.add_on_workspace_backend_failure_callback(
         lambda agent_id, _reason, _status: workspace_health_tracker.record_failure(agent_id)
@@ -345,9 +345,7 @@ def run(
     )
 
     # Background probe loop: flips STUCK/RESTARTING agents back to HEALTHY
-    # once the plugin probe sees a 200. Started here (not inside
-    # ``create_desktop_client``) so test factories that build the app can
-    # skip the probe thread by simply not calling this function.
+    # once the plugin probe sees a 200.
     start_workspace_health_probe_loop(
         tracker=workspace_health_tracker,
         backend_resolver=backend_resolver,
