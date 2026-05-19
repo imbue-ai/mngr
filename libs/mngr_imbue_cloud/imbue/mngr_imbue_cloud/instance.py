@@ -340,11 +340,7 @@ class ImbueCloudProvider(BaseProviderInstance):
             return self._leased_hosts_cache
         account = self._require_account()
         token = self._get_access_token(account)
-        try:
-            self._leased_hosts_cache = self.client.list_hosts(token)
-        except MngrError as exc:
-            logger.warning("imbue_cloud[{}] list_hosts failed: {}", self.name, exc)
-            self._leased_hosts_cache = []
+        self._leased_hosts_cache = self.client.list_hosts(token)
         return self._leased_hosts_cache
 
     def discover_hosts(

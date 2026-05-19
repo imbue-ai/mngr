@@ -1,7 +1,6 @@
 from typing import Any
 from typing import Final
 
-from loguru import logger
 from pydantic import ConfigDict
 from pydantic import Field
 from pydantic import PrivateAttr
@@ -10,6 +9,7 @@ from pydantic import SecretStr
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import ProviderInstanceConfig
 from imbue.mngr.errors import MngrError
+from imbue.mngr.errors import ProviderCredentialsMissingError
 from imbue.mngr.interfaces.provider_backend import ProviderBackendInterface
 from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
 from imbue.mngr.primitives import ProviderBackendName
@@ -56,8 +56,14 @@ class VultrProvider(VpsDockerProvider):
         which accepts either IPs or hostnames.
         """
         if not self.vultr_client.api_key.get_secret_value():
-            logger.warning("Vultr API key not configured, skipping VPS discovery")
-            return []
+            # No API key configured: raise a typed error so the discovery
+            # boundary records it on ListResult.errors as a provider failure.
+            # (401/403 responses from the Vultr API surface separately as
+            # VpsApiError.)
+            raise ProviderCredentialsMissingError(
+                self.name,
+                "Vultr API key not configured. Set VULTR_API_KEY or providers.<name>.api_key.",
+            )
         provider_tag = f"mngr-provider={self.name}"
         instances = self._list_instances_cached()
         vps_ips: list[str] = []
@@ -114,9 +120,9 @@ class VultrProviderBackend(ProviderBackendInterface):
         try:
             api_key = config.get_api_key()
         except ValueError:
-            # No API key configured -- create with empty key.
-            # The provider will be discoverable but discovery operations will
-            # return empty results and log a warning when the API is called.
+            # Build with an empty key so the provider object can still be
+            # registered. Any code path that actually hits the Vultr API
+            # (e.g. discovery) raises ProviderCredentialsMissingError.
             api_key = ""
         vultr_client = VultrVpsClient(api_key=SecretStr(api_key))
 

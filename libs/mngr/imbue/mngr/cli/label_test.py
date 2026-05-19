@@ -230,7 +230,7 @@ def test_label_json_output(
     )
     assert result.exit_code == 0
 
-    output = json.loads(result.output.strip())
+    output = json.loads(result.stdout.strip())
     assert output["count"] == 1
     assert output["changes"][0]["labels"]["key"] == "value"
 

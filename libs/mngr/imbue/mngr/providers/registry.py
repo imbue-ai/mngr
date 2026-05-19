@@ -44,13 +44,13 @@ def reset_backend_registry() -> None:
     _registry_state["backends_loaded"] = False
 
 
-# Provider backends that require credentials at registration time (e.g.
-# Modal SDK auth, Vultr API key) or at first ``discover_hosts`` (e.g. an
-# imbue_cloud session). Tests use ``load_local_backend_only`` to skip
-# these. Lima is intentionally excluded: its backend defers limactl
-# checks to first use, so registering it is safe even without limactl
-# installed.
-_REMOTE_BACKEND_NAMES: frozenset[str] = frozenset({"modal", "vultr", "imbue_cloud"})
+# Provider backends that need an external prerequisite to function -- SDK
+# credentials (Modal), an API key (Vultr), a session (imbue_cloud), or a CLI
+# binary (Lima's ``limactl``). Their discovery raises ``ProviderUnavailableError``
+# when the prerequisite is absent, so ``load_local_backend_only`` skips them to
+# keep the default (local-only) test environment from tripping over providers
+# it cannot exercise.
+_EXTERNAL_BACKEND_NAMES: frozenset[str] = frozenset({"modal", "vultr", "imbue_cloud", "lima"})
 
 
 def _load_backends(pm: pluggy.PluginManager, *, include_docker: bool, include_remote: bool) -> None:
@@ -76,7 +76,7 @@ def _load_backends(pm: pluggy.PluginManager, *, include_docker: bool, include_re
         if registration is not None:
             backend_class, config_class = registration
             backend_name = backend_class.get_name()
-            if not include_remote and str(backend_name) in _REMOTE_BACKEND_NAMES:
+            if not include_remote and str(backend_name) in _EXTERNAL_BACKEND_NAMES:
                 continue
             _backend_registry[backend_name] = backend_class
             register_provider_config(str(backend_name), config_class)

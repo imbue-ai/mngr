@@ -17,6 +17,7 @@ from typing import Mapping
 from typing import ParamSpec
 from typing import Sequence
 from typing import TypeVar
+from typing import cast
 
 from dockerfile_parse import DockerfileParser
 from loguru import logger
@@ -241,7 +242,13 @@ def handle_modal_auth_error(func: Callable[P, T]) -> Callable[P, T]:
         try:
             return func(*args, **kwargs)
         except ModalProxyAuthError as e:
-            raise ModalAuthError() from e
+            # args[0] is the ModalProviderInstance (the decorator is only
+            # applied to its methods). Cast for typed attribute access
+            # without tripping the no-getattr ratchet; fall back to
+            # "modal" if the decorator is misapplied.
+            instance = cast("ModalProviderInstance", args[0]) if args else None
+            provider_name = instance.name if instance is not None else ProviderInstanceName("modal")
+            raise ModalAuthError(provider_name) from e
 
     return wrapper
 
@@ -2190,7 +2197,7 @@ log "=== Shutdown script completed ==="
             sandboxes = sandboxes_future.result()
             all_host_records = host_records_future.result()
         except ModalProxyAuthError as e:
-            raise ModalAuthError() from e
+            raise ModalAuthError(self.name) from e
 
         # Map running sandboxes by host_id
         running_sandbox_by_host_id: dict[HostId, SandboxInterface] = {}
@@ -2386,7 +2393,7 @@ log "=== Shutdown script completed ==="
                     running_host_ids = running_ids_future.result()
                     all_host_records, agent_data_by_host_id = host_and_agent_future.result()
             except ModalProxyAuthError as e:
-                raise ModalAuthError() from e
+                raise ModalAuthError(self.name) from e
             logger.debug(
                 "Modal discovery: {} running host(s), {} host record(s), {} host(s) with agent data",
                 len(running_host_ids),

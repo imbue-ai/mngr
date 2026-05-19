@@ -19,6 +19,8 @@ from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.pure import pure
 from imbue.mngr.agents.agent_registry import list_registered_agent_types
 from imbue.mngr.api.list import ErrorInfo
+from imbue.mngr.api.list import ListResult
+from imbue.mngr.api.list import ProviderErrorInfo
 from imbue.mngr.api.list import build_agent_cel_context
 from imbue.mngr.api.list import list_agents as api_list_agents
 from imbue.mngr.cli.common_opts import add_common_options
@@ -375,9 +377,8 @@ def _list_jsonl(
         on_error=_emit_jsonl_error,
         is_streaming=False,
     )
-    # Exit with non-zero code if there were errors (per error_handling.md spec)
-    if result.errors:
-        ctx.exit(1)
+    _render_errors_to_stderr(result.errors)
+    _exit_for_errors(ctx, error_behavior, result)
 
 
 def _list_streaming_human(
@@ -410,10 +411,8 @@ def _list_streaming_human(
     finally:
         renderer.finish()
 
-    if result.errors:
-        for error in result.errors:
-            logger.warning("{}: {}", error.exception_type, error.message)
-        ctx.exit(1)
+    _render_errors_to_stderr(result.errors)
+    _exit_for_errors(ctx, error_behavior, result)
 
 
 def _list_streaming_template(
@@ -439,10 +438,8 @@ def _list_streaming_template(
         is_streaming=True,
     )
 
-    if result.errors:
-        for error in result.errors:
-            logger.warning("{}: {}", error.exception_type, error.message)
-        ctx.exit(1)
+    _render_errors_to_stderr(result.errors)
+    _exit_for_errors(ctx, error_behavior, result)
 
 
 class _LimitedJsonlEmitter(MutableModel):
@@ -694,10 +691,6 @@ def _run_list_iteration(params: _ListIterationParams, ctx: click.Context) -> Non
         is_streaming=False,
     )
 
-    if result.errors:
-        for error in result.errors:
-            logger.warning("{}: {}", error.exception_type, error.message)
-
     # Apply sorting to results
     agents_to_display = _sort_agents_by_cel(result.agents, params.compiled_sort_keys)
 
@@ -712,33 +705,34 @@ def _run_list_iteration(params: _ListIterationParams, ctx: click.Context) -> Non
         elif params.output_opts.output_format == OutputFormat.HUMAN:
             write_human_line("No agents found")
         elif params.output_opts.output_format == OutputFormat.JSON:
-            emit_final_json({"agents": [], "errors": result.errors})
+            _emit_json_output([], result.errors)
         else:
             # JSONL is handled above with streaming, so this should be unreachable
             raise AssertionError(f"Unexpected output format: {params.output_opts.output_format}")
-        # Exit with non-zero code if there were errors (per error_handling.md spec)
-        if result.errors:
-            ctx.exit(1)
-        return
-
-    # Template output takes precedence over format-based dispatch
-    if params.format_template is not None:
-        _emit_template_output(agents_to_display, params.format_template, output=sys.stdout)
-    elif params.output_opts.output_format == OutputFormat.HUMAN:
-        _emit_human_output(agents_to_display, params.fields, params.custom_headers)
-    elif params.output_opts.output_format == OutputFormat.JSON:
-        _emit_json_output(agents_to_display, result.errors)
     else:
-        # JSONL is handled above with streaming, so this should be unreachable
-        raise AssertionError(f"Unexpected output format: {params.output_opts.output_format}")
+        # Template output takes precedence over format-based dispatch
+        if params.format_template is not None:
+            _emit_template_output(agents_to_display, params.format_template, output=sys.stdout)
+        elif params.output_opts.output_format == OutputFormat.HUMAN:
+            _emit_human_output(agents_to_display, params.fields, params.custom_headers)
+        elif params.output_opts.output_format == OutputFormat.JSON:
+            _emit_json_output(agents_to_display, result.errors)
+        else:
+            # JSONL is handled above with streaming, so this should be unreachable
+            raise AssertionError(f"Unexpected output format: {params.output_opts.output_format}")
 
-    # Exit with non-zero code if there were errors (per error_handling.md spec)
-    if result.errors:
-        ctx.exit(1)
+    # stderr always carries the human-readable error summary; the output
+    # format only controls stdout. --quiet still drops these because it
+    # removes the loguru console handler that backs the rendering.
+    _render_errors_to_stderr(result.errors)
+    _exit_for_errors(ctx, params.error_behavior, result)
 
 
-def _emit_json_output(agents: list[AgentDetails], errors: list[ErrorInfo]) -> None:
-    """Emit JSON output with all agents."""
+def _emit_json_output(
+    agents: list[AgentDetails],
+    errors: list[ErrorInfo],
+) -> None:
+    """Emit JSON output with all agents and errors."""
     agents_data = [agent.model_dump(mode="json") for agent in agents]
     errors_data = [error.model_dump(mode="json") for error in errors]
     output_data = {
@@ -758,6 +752,32 @@ def _emit_jsonl_error(error: ErrorInfo) -> None:
     """Emit a single error as a JSONL line (streaming callback)."""
     error_data = {"event": "error", **error.model_dump(mode="json")}
     emit_final_json(error_data)
+
+
+def _render_errors_to_stderr(errors: list[ErrorInfo]) -> None:
+    """Render ErrorInfo entries to stderr at ERROR level (red prefix).
+
+    Prefixes the line with the provider name when the entry is a
+    ``ProviderErrorInfo``; bare ``ErrorInfo`` entries render without
+    a prefix.
+    """
+    for error in errors:
+        prefix = f"{error.provider_name}: " if isinstance(error, ProviderErrorInfo) else ""
+        logger.error("{}{}: {}", prefix, error.exception_type, error.message)
+
+
+def _exit_for_errors(ctx: click.Context, error_behavior: ErrorBehavior, result: ListResult) -> None:
+    """Gate exit code on collected ``result.errors``.
+
+    - ``--on-error abort`` (default): exit 1 if ``result.errors`` is non-empty.
+    - ``--on-error continue``: no exit here; caller inspects ``result.errors``.
+
+    Internal bugs and other non-provider exceptions (CEL compile failures,
+    AbortError, etc.) propagate around this helper and produce exit 1
+    regardless of mode.
+    """
+    if error_behavior == ErrorBehavior.ABORT and result.errors:
+        ctx.exit(1)
 
 
 def _emit_human_output(

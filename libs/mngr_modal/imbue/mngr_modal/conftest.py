@@ -393,10 +393,15 @@ def modal_subprocess_env(
     """Create a subprocess test environment with session-scoped Modal environment."""
     prefix = f"{modal_test_session_env_name}-"
     host_dir = modal_test_session_host_dir
+    # A Modal sandbox only has the `local` and `modal` backends -- no Docker
+    # daemon, no limactl, no Vultr/imbue_cloud credentials. Restrict the
+    # subprocess mngr to those so discovery does not exit non-zero on a
+    # provider it cannot reach.
     env = get_subprocess_test_env(
         root_name="mngr-acceptance-test",
         prefix=prefix,
         host_dir=host_dir,
+        enabled_backends=("local", "modal"),
     )
     env["MNGR_USER_ID"] = modal_test_session_user_id
     yield ModalSubprocessTestEnv(env=env, prefix=prefix, host_dir=host_dir)

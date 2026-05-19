@@ -32,7 +32,7 @@ from imbue.imbue_common.model_update import to_update
 from imbue.mngr.errors import DockerBuildTimeoutError
 from imbue.mngr.errors import HostNotFoundError
 from imbue.mngr.errors import MngrError
-from imbue.mngr.errors import ProviderUnavailableError
+from imbue.mngr.errors import ProviderDaemonNotRunningError
 from imbue.mngr.errors import SnapshotNotFoundError
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.hosts.offline_host import OfflineHost
@@ -264,16 +264,17 @@ class DockerProviderInstance(BaseProviderInstance):
         via DOCKER_HOST, then the active Docker context, then the platform
         default.
 
-        Raises ProviderUnavailableError (a MngrError subclass) instead of
-        DockerException when the daemon is unreachable, so callers that catch
-        MngrError handle the failure gracefully.
+        Raises ``ProviderDaemonNotRunningError`` (a ``ProviderUnavailableError``)
+        when the daemon is unreachable so the discovery boundary records it on
+        ``ListResult.errors`` as a provider failure instead of letting a raw
+        ``DockerException`` escape.
         """
         try:
             if self.config.host:
                 return docker.DockerClient(base_url=self.config.host)
             return create_docker_client()
         except docker.errors.DockerException as e:
-            raise ProviderUnavailableError(self.name, str(e)) from e
+            raise ProviderDaemonNotRunningError(self.name, str(e)) from e
 
     @cached_property
     def _state_volume(self) -> DockerVolume:
@@ -1363,12 +1364,14 @@ kill -TERM 1
         """Discover all Docker container hosts."""
         processed_host_ids: set[HostId] = set()
 
+        # Surface every DockerException reaching this method as
+        # ProviderDaemonNotRunningError so the listing-pipeline boundary
+        # has a single typed unavailability class to classify.
         try:
             containers = self._list_containers()
             all_host_records = self._host_store.list_all_host_records()
-        except (MngrError, docker.errors.DockerException) as e:
-            logger.warning("Cannot list Docker hosts (Docker daemon unavailable?): {}", e)
-            return []
+        except docker.errors.DockerException as e:
+            raise ProviderDaemonNotRunningError(self.name, str(e)) from e
 
         # Map running containers by host_id, and harvest host names from labels.
         # We use this map below instead of h.get_name() so building DiscoveredHosts

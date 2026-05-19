@@ -678,7 +678,7 @@ def test_list_command_with_running_filter_alias(
             obj=plugin_manager,
             catch_exceptions=False,
         )
-        data = json.loads(json_result.output)
+        data = json.loads(json_result.stdout)
         agents = data["agents"]
         agent_id = next(a["id"] for a in agents if a["name"] == agent_name)
         # The host_dir is the mngr data directory directly

@@ -13,6 +13,7 @@ from loguru import logger
 from pydantic import BaseModel
 from pydantic import Field
 
+from imbue.concurrency_group.concurrency_group import ConcurrencyExceptionGroup
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import log_call
 from imbue.imbue_common.logging import log_span
@@ -28,6 +29,7 @@ from imbue.mngr.api.providers import list_provider_names_to_load
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import BaseMngrError
 from imbue.mngr.errors import MngrError
+from imbue.mngr.errors import ProviderError
 from imbue.mngr.errors import ProviderInstanceNotFoundError
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.data_types import AgentDetails
@@ -248,15 +250,35 @@ def list_agents(
             )
 
     except MngrError as e:
-        if error_behavior == ErrorBehavior.ABORT:
-            raise
-        error_info = ErrorInfo.build(e)
-        result.errors.append(error_info)
-        if on_error:
-            on_error(error_info)
+        _record_error(result, e, on_error)
+    except ConcurrencyExceptionGroup as eg:
+        # Unwrap `with mngr_executor` worker errors, capture MngrErrors into result.errors, and re-raise anything else.
+        domain_errors: list[MngrError] = []
+        for exc in eg.exceptions:
+            if not isinstance(exc, MngrError):
+                raise
+            domain_errors.append(exc)
+        for inner in domain_errors:
+            _record_error(result, inner, on_error)
 
     _maybe_write_full_discovery_snapshot(mngr_ctx, result, provider_names, include_filters, exclude_filters)
     return result
+
+
+def _record_error(
+    result: ListResult,
+    exception: MngrError,
+    on_error: Callable[[ErrorInfo], None] | None,
+) -> None:
+    """Append an ErrorInfo derived from `exception` to `result.errors` and fire `on_error`."""
+    match exception:
+        case ProviderError(provider_name=name):
+            error_info: ErrorInfo = ProviderErrorInfo.build_for_provider(exception, name)
+        case _:
+            error_info = ErrorInfo.build(exception)
+    result.errors.append(error_info)
+    if on_error:
+        on_error(error_info)
 
 
 def _maybe_write_full_discovery_snapshot(
