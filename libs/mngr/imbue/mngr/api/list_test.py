@@ -1315,6 +1315,7 @@ class _MismatchedProviderBackend(ProviderBackendInterface):
         mngr_ctx: MngrContext,
         is_for_host_creation: bool = False,
     ) -> ProviderInstanceInterface:
+        del is_for_host_creation
         return _MismatchedProviderInstance(
             name=name,
             host_dir=mngr_ctx.config.default_host_dir,
@@ -1355,6 +1356,7 @@ class _RaisingDiscoveryProviderBackend(ProviderBackendInterface):
         mngr_ctx: MngrContext,
         is_for_host_creation: bool = False,
     ) -> ProviderInstanceInterface:
+        del is_for_host_creation
         return _RaisingDiscoveryProviderInstance(
             name=name,
             host_dir=mngr_ctx.config.default_host_dir,
@@ -2262,6 +2264,7 @@ def test_list_agents_wires_provider_on_error_to_result_errors(
             mngr_ctx: MngrContext,
             is_for_host_creation: bool = False,
         ) -> ProviderInstanceInterface:
+            del is_for_host_creation
             return _EmittingProvider(
                 name=name,
                 host_dir=mngr_ctx.config.default_host_dir,
