@@ -58,12 +58,11 @@ from imbue.minds.desktop_client.forward_cli import MindsApiUrlWriter
 from imbue.minds.desktop_client.forward_cli import start_mngr_forward
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClient
+from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClientError
 from imbue.minds.desktop_client.latchkey.permission_requests_consumer import PermissionRequestsConsumer
 from imbue.minds.desktop_client.latchkey.permissions import LatchkeyPermissionGrantHandler
 from imbue.minds.desktop_client.latchkey.permissions import MngrMessageSender
-from imbue.minds.desktop_client.latchkey.services_catalog import LatchkeyServicesCatalogError
-from imbue.minds.desktop_client.latchkey.services_catalog import ServicePermissionInfo
-from imbue.minds.desktop_client.latchkey.services_catalog import load_services_catalog
+from imbue.minds.desktop_client.latchkey.services_catalog import ServicesCatalog
 from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.request_events import LatchkeyPermissionRequestEvent
@@ -181,8 +180,16 @@ def run(
     # terminate it on minds shutdown -- mirroring how minds already leaves
     # the gateway running detached so agents in containers/VMs keep working
     # across desktop-client restarts.
+    gateway_client = LatchkeyGatewayClient.from_latchkey(latchkey)
+
+    # Background thread: supervisor restart must complete before the
+    # gateway-client pre-warm reads the on-disk forward record, or it
+    # caches the previous supervisor's stale port for the rest of the
+    # process lifetime.
     root_concurrency_group.start_new_thread(
-        _ensure_mngr_latchkey_forward_supervisor, args=(latchkey,), name="mngr-latchkey-forward-supervisor-setup"
+        _restart_supervisor_then_prewarm_gateway_client,
+        args=(latchkey, gateway_client),
+        name="mngr-latchkey-supervisor-and-gateway-init",
     )
 
     # Watch our *grandparent* (typically Electron) rather than our immediate
@@ -194,14 +201,10 @@ def run(
     # orphan tree running across restarts.
     start_grandparent_death_watcher(root_concurrency_group)
 
-    gateway_client = LatchkeyGatewayClient.from_latchkey(latchkey)
-    # Pre-warm the gateway client in a background thread.
-    root_concurrency_group.start_new_thread(gateway_client.ensure_initialized, name="latchkey-gateway-init")
-
     latchkey_permission_handler = LatchkeyPermissionGrantHandler(
         data_dir=data_directory,
         latchkey=latchkey,
-        services_catalog=_try_load_latchkey_services_catalog(),
+        services_catalog=ServicesCatalog(gateway_client=gateway_client),
         mngr_message_sender=MngrMessageSender(),
         gateway_client=gateway_client,
     )
@@ -437,22 +440,23 @@ class _StreamedPermissionRequestHandler(FrozenModel):
         current: RequestInbox | None = self.app.state.request_inbox
         if current is None:
             return
+        # The gateway re-emits every still-pending request on each
+        # stream reconnect (and the consumer reconnects every couple of
+        # seconds when idle, see ``_FOLLOW_READ_TIMEOUT``). Once we've
+        # ingested a given ``event_id`` the redeliveries carry no new
+        # information, so we no-op rather than append a duplicate to
+        # the requests list (it would grow unbounded), log again, and
+        # wake the SSE for nothing.
+        if current.get_request_by_id(str(event.event_id)) is not None:
+            return
         self.app.state.request_inbox = current.add_request(event)
         logger.info(
-            "Streamed latchkey permission request for agent {} (service={}, request_id={})",
+            "Streamed latchkey permission request for agent {} (scope={}, request_id={})",
             event.agent_id,
-            event.service_name,
+            event.scope,
             event.event_id,
         )
         self.backend_resolver.notify_change()
-
-
-def _try_load_latchkey_services_catalog() -> dict[str, ServicePermissionInfo]:
-    try:
-        return load_services_catalog()
-    except LatchkeyServicesCatalogError as e:
-        logger.warning("Could not load latchkey services catalog; permission dialogs disabled: {}", e)
-        return {}
 
 
 def _build_latchkey(data_directory: Path) -> Latchkey:
@@ -493,6 +497,26 @@ def _sleep_then_open(url: str, delay: float = 1.0) -> None:
     """
     threading.Event().wait(timeout=delay)
     webbrowser.open(url)
+
+
+def _restart_supervisor_then_prewarm_gateway_client(
+    latchkey: Latchkey,
+    gateway_client: LatchkeyGatewayClient,
+) -> None:
+    """Restart the latchkey supervisor, then pre-warm the gateway client.
+
+    Order matters: the gateway client's ``ensure_initialized`` reads
+    the bound port from the supervisor's on-disk record, so it must
+    run after the supervisor restart has stamped the fresh port.
+    """
+    _ensure_mngr_latchkey_forward_supervisor(latchkey)
+    try:
+        gateway_client.ensure_initialized()
+    except LatchkeyGatewayClientError as e:
+        logger.warning(
+            "Could not pre-warm the latchkey gateway client; first request will retry: {}",
+            e,
+        )
 
 
 def _ensure_mngr_latchkey_forward_supervisor(latchkey: Latchkey) -> None:

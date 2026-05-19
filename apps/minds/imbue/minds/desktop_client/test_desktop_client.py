@@ -1220,7 +1220,7 @@ def test_requests_panel_card_routes_via_minds_bridge(tmp_path: Path) -> None:
     # TestClient and still have a concretely-typed handle to app.state.
     agent_id = str(AgentId())
     event = create_latchkey_permission_request_event(
-        agent_id=agent_id, service_name="slack", rationale="Need to post status updates"
+        agent_id=agent_id, scope="slack-api", rationale="Need to post status updates"
     )
     auth_store = FileAuthStore(data_directory=tmp_path / "auth")
     session_store = make_session_store_for_test(tmp_path)
