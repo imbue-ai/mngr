@@ -1099,38 +1099,3 @@ def test_auth_browser_uses_auth_browser_subcommand(tmp_path: Path) -> None:
     line = report_path.read_text().strip()
     record = json.loads(line)
     assert record == {"argv": ["auth", "browser", "slack"], "env_LATCHKEY_DIRECTORY": str(tmp_path)}
-
-
-def test_auth_browser_prepare_reports_success_on_zero_exit(tmp_path: Path) -> None:
-    binary = _make_recording_binary(tmp_path, exit_code=0)
-    latchkey = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(binary))
-
-    is_success, detail = latchkey.auth_browser_prepare("google-gmail")
-
-    assert is_success is True
-    assert detail == ""
-
-
-def test_auth_browser_prepare_reports_failure_on_non_zero_exit(tmp_path: Path) -> None:
-    binary = _make_recording_binary(tmp_path, exit_code=1, stderr="prepare aborted")
-    latchkey = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(binary))
-
-    is_success, detail = latchkey.auth_browser_prepare("google-gmail")
-
-    assert is_success is False
-    assert detail == "prepare aborted"
-
-
-def test_auth_browser_prepare_uses_browser_prepare_subcommand(tmp_path: Path) -> None:
-    binary = _make_recording_binary(tmp_path, exit_code=0)
-    latchkey = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(binary))
-
-    latchkey.auth_browser_prepare("google-gmail")
-
-    report_path = tmp_path / "latchkey_report.jsonl"
-    line = report_path.read_text().strip()
-    record = json.loads(line)
-    assert record == {
-        "argv": ["auth", "browser-prepare", "google-gmail"],
-        "env_LATCHKEY_DIRECTORY": str(tmp_path),
-    }

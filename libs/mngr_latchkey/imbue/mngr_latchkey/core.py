@@ -851,35 +851,6 @@ class Latchkey(MutableModel):
         )
         return False, message
 
-    def auth_browser_prepare(self, service_name: str) -> tuple[bool, str]:
-        """Run ``latchkey auth browser-prepare <service>`` and report outcome.
-
-        Some services (notably ``google-*``) require a one-time
-        preparation step that provisions an OAuth client in the user's
-        own GCP project before ``auth browser`` will work. This wraps
-        that step with the same interface as :meth:`auth_browser`.
-        """
-        env = _build_env_with_latchkey_directory(self.latchkey_directory)
-        cg = ConcurrencyGroup(name="latchkey-auth-browser-prepare")
-        with cg:
-            result = cg.run_process_to_completion(
-                command=[self.latchkey_binary, "auth", "browser-prepare", service_name],
-                timeout=None,
-                is_checked_after=False,
-                env=env,
-            )
-        if result.returncode == 0:
-            logger.info("latchkey auth browser-prepare {} succeeded", service_name)
-            return True, ""
-        message = result.stderr.strip() or result.stdout.strip() or "latchkey auth browser-prepare failed"
-        logger.warning(
-            "latchkey auth browser-prepare {} exited {}: {}",
-            service_name,
-            result.returncode,
-            message,
-        )
-        return False, message
-
     # -- Internals -----------------------------------------------------------
 
     def _require_initialized_locked(self) -> None:
