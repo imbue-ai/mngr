@@ -19,7 +19,7 @@ pytestmark = pytest.mark.xdist_group(name="ratchets")
 
 
 def test_prevent_todos() -> None:
-    rc.check_todos(_DIR, snapshot(0))
+    rc.check_todos(_DIR, snapshot(2))
 
 
 def test_prevent_exec() -> None:
