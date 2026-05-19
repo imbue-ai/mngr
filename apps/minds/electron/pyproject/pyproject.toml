@@ -16,6 +16,7 @@ dependencies = [
     "imbue-mngr-claude>=0.2.0",
     "imbue-mngr-forward>=0.1.0",
     "imbue-mngr-imbue-cloud>=0.1.0",
+    "imbue-mngr-latchkey>=0.1.0",
     "imbue-mngr-lima>=0.1.0",
     "imbue-mngr-modal>=0.2.0",
     "imbue-common>=0.1.0",
@@ -30,6 +31,7 @@ imbue-mngr = { path = "../../../../libs/mngr", editable = true }
 imbue-mngr-claude = { path = "../../../../libs/mngr_claude", editable = true }
 imbue-mngr-forward = { path = "../../../../libs/mngr_forward", editable = true }
 imbue-mngr-imbue-cloud = { path = "../../../../libs/mngr_imbue_cloud", editable = true }
+imbue-mngr-latchkey = { path = "../../../../libs/mngr_latchkey", editable = true }
 imbue-mngr-lima = { path = "../../../../libs/mngr_lima", editable = true }
 imbue-mngr-modal = { path = "../../../../libs/mngr_modal", editable = true }
 imbue-common = { path = "../../../../libs/imbue_common", editable = true }

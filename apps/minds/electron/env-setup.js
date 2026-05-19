@@ -48,6 +48,7 @@ function runEnvSetup(onProgress) {
       'imbue-mngr-claude',
       'imbue-mngr-forward',
       'imbue-mngr-imbue-cloud',
+      'imbue-mngr-latchkey',
       'imbue-mngr-lima',
       'imbue-mngr-modal',
       'imbue-common',
