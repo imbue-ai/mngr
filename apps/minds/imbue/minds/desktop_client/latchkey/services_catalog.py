@@ -12,13 +12,20 @@ ships alongside the gateway extension) and cached in-process. Callers
 get a :class:`ServicesCatalog` whose first attribute access triggers the
 HTTP fetch; subsequent accesses are served from the in-memory snapshot.
 
-The detent ``any`` schema (matches every request inside the scope) is
-not listed in the gateway's per-service ``permissions`` array but is
-always injected as the first available checkbox so the user can choose
-to grant unrestricted access. It is *not* pre-checked: the dialog's
-initial state is the union of already-granted permissions for the
-scope and the permissions the agent requested, so clicking Approve
-without changes grants exactly those.
+Shape validation of the gateway response lives in
+:class:`LatchkeyGatewayClient.get_available_services`, which returns a
+typed ``dict[str, AvailableServiceEntry]``. This module only translates
+those typed entries into the dialog-facing :class:`ServicePermissionInfo`
+records, which differ in two ways:
+
+* a ``name`` field carrying the raw service name (the key in the
+  gateway's response), so the rest of the desktop client can pass a
+  single value around instead of a ``(name, entry)`` pair;
+* the catch-all ``any`` schema is injected as the first available
+  permission schema. The gateway never lists it (every scope implicitly
+  admits it); the dialog renders it as an opt-in checkbox, not a
+  pre-checked default. See :class:`LatchkeyPermissionGrantHandler` for
+  the union-based pre-check policy.
 """
 
 import threading
@@ -28,10 +35,10 @@ from typing import Final
 from loguru import logger
 from pydantic import Field
 from pydantic import PrivateAttr
-from pydantic import ValidationError
 
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
+from imbue.minds.desktop_client.latchkey.gateway_client import AvailableServiceEntry
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClient
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClientError
 
@@ -42,14 +49,6 @@ from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayCl
 # pre-check it; see :class:`LatchkeyPermissionGrantHandler` for the
 # union-based pre-check policy.
 _ALWAYS_AVAILABLE_PERMISSION: Final[str] = "any"
-
-
-class LatchkeyServicesCatalogError(Exception):
-    """Base exception for catalog fetch / parse failures."""
-
-
-class MalformedServicesCatalogError(LatchkeyServicesCatalogError, ValueError):
-    """Raised when the gateway's catalog payload is structurally invalid."""
 
 
 class ServicePermissionInfo(FrozenModel):
@@ -72,55 +71,23 @@ class ServicePermissionInfo(FrozenModel):
     )
 
 
-class _RawServiceEntry(FrozenModel):
-    """Internal pydantic shape used to validate a single ``/permissions/available`` entry.
+def _service_info_from_entry(name: str, entry: AvailableServiceEntry) -> ServicePermissionInfo:
+    """Translate a gateway-validated :class:`AvailableServiceEntry` into a dialog-facing record.
 
-    Pydantic enforces the field shape (non-empty strings, list-of-strings)
-    so we don't have to hand-roll isinstance checks against
-    ``Mapping[Unknown, Unknown]``-shaped JSON. Validation failures are
-    re-raised as :class:`MalformedServicesCatalogError`.
+    Prepends the catch-all ``any`` schema as the first available option,
+    deduplicating in case the gateway lists it explicitly (harmless but
+    redundant). The dialog renders it as an opt-in choice, not a
+    pre-checked default.
     """
-
-    scope: str = Field(min_length=1)
-    display_name: str = Field(min_length=1)
-    permissions: tuple[str, ...] = Field(default=())
-
-
-def _build_service_info(name: str, raw: object) -> ServicePermissionInfo:
-    """Turn one ``{scope, display_name, permissions}`` entry into a typed info record.
-
-    Takes ``raw`` as ``object`` (rather than ``Mapping[str, object]``)
-    so the function is the sole place that asserts the shape; pydantic
-    does the actual validation. Raises
-    :class:`MalformedServicesCatalogError` on shape violations so a bad
-    gateway response is loud rather than silently dropping the entry.
-    """
-    try:
-        entry = _RawServiceEntry.model_validate(raw)
-    except ValidationError as e:
-        raise MalformedServicesCatalogError(f"Service '{name}' has a malformed entry: {e}") from e
-
-    # Always make ``any`` available as the first checkbox, deduplicating in
-    # case the gateway lists it explicitly (harmless but redundant). The
-    # dialog renders it as an opt-in choice, not a pre-checked default.
     permission_schemas: tuple[str, ...] = (_ALWAYS_AVAILABLE_PERMISSION,) + tuple(
         p for p in entry.permissions if p != _ALWAYS_AVAILABLE_PERMISSION
     )
-
     return ServicePermissionInfo(
         name=name,
         scope=entry.scope,
         display_name=entry.display_name,
         permission_schemas=permission_schemas,
     )
-
-
-def _parse_catalog_payload(payload: Mapping[str, object]) -> dict[str, ServicePermissionInfo]:
-    """Validate and convert the raw ``/permissions/available`` JSON object."""
-    catalog: dict[str, ServicePermissionInfo] = {}
-    for service_name, raw in payload.items():
-        catalog[service_name] = _build_service_info(service_name, raw)
-    return catalog
 
 
 class ServicesCatalog(MutableModel):
@@ -131,7 +98,9 @@ class ServicesCatalog(MutableModel):
     ``GET /permissions/available`` against the gateway; subsequent calls
     are served from the cached snapshot. A fetch failure is logged and
     yields an empty catalog so dialog rendering can fall back to a
-    "unknown service" page rather than crash.
+    "unknown service" page rather than crash. The gateway client is
+    responsible for validating the wire payload, so anything the
+    catalog receives is already typed and well-formed.
 
     The catalog is effectively static for the lifetime of a desktop
     client process: the gateway extension is shipped as package data and
@@ -156,8 +125,12 @@ class ServicesCatalog(MutableModel):
             if self._by_service_name is not None:
                 return
             try:
-                payload = self.gateway_client.get_available_services()
+                entries = self.gateway_client.get_available_services()
             except LatchkeyGatewayClientError as e:
+                # Both transport-level failures and per-entry validation
+                # errors surface as ``LatchkeyGatewayClientError`` from
+                # the client; the catalog treats every one of them as
+                # "no catalog" and lets the unknown-scope page render.
                 logger.warning(
                     "Could not fetch latchkey services catalog from gateway; "
                     "permission dialogs will fall back to the unknown-service page: {}",
@@ -166,17 +139,7 @@ class ServicesCatalog(MutableModel):
                 self._by_service_name = {}
                 self._by_scope = {}
                 return
-            try:
-                parsed = _parse_catalog_payload(payload)
-            except MalformedServicesCatalogError as e:
-                logger.warning(
-                    "Gateway returned a malformed services catalog; permission dialogs "
-                    "will fall back to the unknown-service page: {}",
-                    e,
-                )
-                self._by_service_name = {}
-                self._by_scope = {}
-                return
+            parsed = {name: _service_info_from_entry(name, entry) for name, entry in entries.items()}
             self._by_service_name = parsed
             self._by_scope = {info.scope: info for info in parsed.values()}
             logger.debug("Loaded latchkey services catalog with {} entries from gateway", len(parsed))

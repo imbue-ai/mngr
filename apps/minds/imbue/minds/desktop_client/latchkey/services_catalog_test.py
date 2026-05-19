@@ -1,7 +1,6 @@
 """Unit tests for the lazily-fetched services catalog."""
 
-import pytest
-
+from imbue.minds.desktop_client.latchkey.gateway_client import AvailableServiceEntry
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClient
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClientError
 from imbue.minds.desktop_client.latchkey.services_catalog import ServicesCatalog
@@ -105,10 +104,12 @@ def test_catalog_is_cached_after_first_fetch() -> None:
     class _CountingFakeClient(FakeLatchkeyGatewayClient):
         fetch_count: int = 0
 
-        def get_available_services(self) -> dict[str, object]:
-            # Bump the counter then return the configured payload.
+        def get_available_services(self) -> dict[str, AvailableServiceEntry]:
+            # Bump the counter then defer to the base implementation,
+            # which validates the configured payload the same way the
+            # real client would.
             self.fetch_count += 1
-            return dict(self.available_services_payload)
+            return super().get_available_services()
 
     client = _CountingFakeClient(
         available_services_payload={
@@ -133,7 +134,7 @@ def test_catalog_returns_empty_when_gateway_unreachable() -> None:
     """
 
     class _FailingClient(LatchkeyGatewayClient):
-        def get_available_services(self) -> dict[str, object]:
+        def get_available_services(self) -> dict[str, AvailableServiceEntry]:
             raise LatchkeyGatewayClientError("connection refused")
 
     client = _FailingClient()
@@ -144,24 +145,15 @@ def test_catalog_returns_empty_when_gateway_unreachable() -> None:
     assert dict(catalog.as_mapping()) == {}
 
 
-@pytest.mark.parametrize(
-    "bad_entry",
-    [
-        # Missing scope.
-        {"display_name": "X", "permissions": []},
-        # Missing display_name.
-        {"scope": "x-api", "permissions": []},
-        # Non-string scope.
-        {"scope": 0, "display_name": "X", "permissions": []},
-        # Non-list permissions.
-        {"scope": "x-api", "display_name": "X", "permissions": "not a list"},
-        # List with a non-string element.
-        {"scope": "x-api", "display_name": "X", "permissions": ["valid", 7]},
-    ],
-)
-def test_catalog_returns_empty_when_payload_is_malformed(bad_entry: dict[str, object]) -> None:
-    """A malformed gateway payload must degrade to an empty catalog with a warning, not raise."""
-    catalog = _make_catalog({"broken": bad_entry})
+def test_catalog_returns_empty_when_payload_is_malformed() -> None:
+    """A malformed gateway payload must degrade to an empty catalog with a warning, not raise.
+
+    Per-field validation lives in :class:`LatchkeyGatewayClient` (see
+    ``gateway_client_test.py`` for the exhaustive shape cases); this
+    test only pins that *any* validation error from the client surfaces
+    as the unknown-scope fallback rather than crashing the dialog.
+    """
+    catalog = _make_catalog({"broken": {"display_name": "X", "permissions": []}})
 
     assert catalog.get("broken") is None
     assert dict(catalog.as_mapping()) == {}

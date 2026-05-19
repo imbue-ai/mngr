@@ -37,6 +37,7 @@ import httpx
 from loguru import logger
 from pydantic import Field
 from pydantic import PrivateAttr
+from pydantic import ValidationError
 
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
@@ -100,6 +101,27 @@ class StreamedPermissionRequest(FrozenModel):
         ),
     )
     rationale: str = Field(description="One-paragraph human-readable rationale supplied by the agent.")
+
+
+class AvailableServiceEntry(FrozenModel):
+    """Single entry returned by ``GET /permissions/available``.
+
+    Mirrors the wire shape that the gateway extension's bundled
+    ``services.json`` advertises: one detent scope schema, a
+    human-readable display name, and the list of detent permission
+    schemas under that scope that the user may grant. The ``any``
+    catch-all is intentionally absent here -- the gateway never lists
+    it because every scope implicitly admits it; the dialog layer
+    (:mod:`services_catalog`) injects it client-side as an opt-in
+    choice.
+    """
+
+    scope: str = Field(min_length=1, description="Detent scope schema name (e.g. ``slack-api``).")
+    display_name: str = Field(min_length=1, description="Human-readable label shown in the dialog header.")
+    permissions: tuple[str, ...] = Field(
+        default=(),
+        description="Detent permission schemas the user can grant for this scope.",
+    )
 
 
 class LatchkeyGatewayClient(MutableModel):
@@ -307,13 +329,22 @@ class LatchkeyGatewayClient(MutableModel):
                 f"DELETE {url} returned {response.status_code}: {response.text.strip()}",
             )
 
-    def get_available_services(self) -> dict[str, object]:
+    def get_available_services(self) -> dict[str, AvailableServiceEntry]:
         """Fetch the ``/permissions/available`` catalog from the gateway.
 
-        The catalog is a JSON object keyed by raw service name (e.g.
-        ``slack``); each value carries ``{scope, display_name, permissions}``.
-        Returned as plain ``dict`` because parsing/validation is the
-        catalog module's job; this method only handles the HTTP layer.
+        Returns a mapping keyed by raw service name (e.g. ``slack``)
+        with one validated :class:`AvailableServiceEntry` per value.
+        HTTP failures, non-JSON bodies, non-object top-level values,
+        and entries that fail :class:`AvailableServiceEntry` validation
+        all raise :class:`LatchkeyGatewayClientError` so callers have a
+        single error type to catch.
+
+        The entry-level validation lives here (rather than in the
+        catalog module that consumes the result) because the wire shape
+        of ``/permissions/available`` is the gateway's contract; making
+        this method the sole place that asserts it lets every consumer
+        of the catalog work with a typed mapping instead of
+        ``dict[str, object]``.
         """
         self.ensure_initialized()
         url = f"{self._require_base_url().rstrip('/')}/permissions/available"
@@ -332,7 +363,15 @@ class LatchkeyGatewayClient(MutableModel):
             raise LatchkeyGatewayClientError(f"GET {url} returned non-JSON body: {e}") from e
         if not isinstance(payload, dict):
             raise LatchkeyGatewayClientError(f"GET {url} returned non-object JSON: {payload!r}")
-        return payload
+        validated: dict[str, AvailableServiceEntry] = {}
+        for service_name, raw_entry in payload.items():
+            try:
+                validated[service_name] = AvailableServiceEntry.model_validate(raw_entry)
+            except ValidationError as e:
+                raise LatchkeyGatewayClientError(
+                    f"GET {url} entry for service {service_name!r} has an invalid shape: {e}",
+                ) from e
+        return validated
 
     def get_granted_permissions_for_scopes(
         self,

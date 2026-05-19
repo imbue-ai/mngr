@@ -11,6 +11,7 @@ from pathlib import Path
 import httpx
 import pytest
 
+from imbue.minds.desktop_client.latchkey.gateway_client import AvailableServiceEntry
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClient
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClientError
 from imbue.minds.desktop_client.latchkey.gateway_client import StreamedPermissionRequest
@@ -172,13 +173,18 @@ def test_iter_permission_requests_skips_malformed_lines() -> None:
     ]
 
 
-def test_get_available_services_returns_parsed_payload() -> None:
-    """``get_available_services`` GETs the catalog endpoint and returns the parsed JSON object."""
+def test_get_available_services_returns_typed_entries() -> None:
+    """``get_available_services`` GETs the catalog endpoint and returns validated entries."""
     payload = {
         "slack": {
             "scope": "slack-api",
             "display_name": "Slack",
             "permissions": ["slack-read-all"],
+        },
+        "linear": {
+            "scope": "linear-api",
+            "display_name": "Linear",
+            "permissions": [],
         },
     }
 
@@ -194,7 +200,18 @@ def test_get_available_services_returns_parsed_payload() -> None:
     client = _build_client(_handler)
     result = client.get_available_services()
 
-    assert result == payload
+    assert result == {
+        "slack": AvailableServiceEntry(
+            scope="slack-api",
+            display_name="Slack",
+            permissions=("slack-read-all",),
+        ),
+        "linear": AvailableServiceEntry(
+            scope="linear-api",
+            display_name="Linear",
+            permissions=(),
+        ),
+    }
     assert captured["method"] == "GET"
     assert captured["path"] == "/permissions/available"
     assert captured["auth"] == "hunter2"
@@ -219,6 +236,45 @@ def test_get_available_services_raises_on_non_object_body() -> None:
     client = _build_client(_handler)
     with pytest.raises(LatchkeyGatewayClientError):
         client.get_available_services()
+
+
+@pytest.mark.parametrize(
+    "bad_entry",
+    [
+        # Missing scope.
+        {"display_name": "X", "permissions": []},
+        # Missing display_name.
+        {"scope": "x-api", "permissions": []},
+        # Empty scope (violates min_length=1).
+        {"scope": "", "display_name": "X", "permissions": []},
+        # Empty display_name (violates min_length=1).
+        {"scope": "x-api", "display_name": "", "permissions": []},
+        # Non-string scope.
+        {"scope": 0, "display_name": "X", "permissions": []},
+        # Non-list permissions.
+        {"scope": "x-api", "display_name": "X", "permissions": "not a list"},
+        # List with a non-string element.
+        {"scope": "x-api", "display_name": "X", "permissions": ["valid", 7]},
+        # Top-level is not an object.
+        "definitely not a service entry",
+    ],
+)
+def test_get_available_services_raises_on_malformed_entry(bad_entry: object) -> None:
+    """Any structural defect in a single entry surfaces as ``LatchkeyGatewayClientError``.
+
+    The client is the single place that validates the wire shape; the
+    catalog module that consumes the result depends on this validation
+    so it can work with typed entries instead of ``dict[str, object]``.
+    """
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        del request
+        return httpx.Response(200, json={"broken": bad_entry})
+
+    client = _build_client(_handler)
+    with pytest.raises(LatchkeyGatewayClientError) as exc_info:
+        client.get_available_services()
+    assert "broken" in str(exc_info.value)
 
 
 def test_get_granted_permissions_unions_matching_scopes() -> None:

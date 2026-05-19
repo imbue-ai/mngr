@@ -11,9 +11,12 @@ from typing import Final
 
 from pydantic import Field
 from pydantic import PrivateAttr
+from pydantic import ValidationError
 
 from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.minds.desktop_client.latchkey.gateway_client import AvailableServiceEntry
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClient
+from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClientError
 
 # Default catalog returned by :meth:`FakeLatchkeyGatewayClient.get_available_services`.
 # Mirrors a single Slack-shaped entry from the gateway's real services.json so tests
@@ -75,9 +78,23 @@ class FakeLatchkeyGatewayClient(LatchkeyGatewayClient):
         """Request ids the test code asked to delete, in arrival order."""
         return tuple(self._deleted_request_ids)
 
-    def get_available_services(self) -> dict[str, object]:
-        """Return the configured payload verbatim."""
-        return dict(self.available_services_payload)
+    def get_available_services(self) -> dict[str, AvailableServiceEntry]:
+        """Validate and return the configured payload.
+
+        Mirrors the real client: structural failures (missing fields,
+        wrong types) raise :class:`LatchkeyGatewayClientError`, so tests
+        that point :attr:`available_services_payload` at malformed data
+        exercise the same code path as production.
+        """
+        validated: dict[str, AvailableServiceEntry] = {}
+        for service_name, raw_entry in self.available_services_payload.items():
+            try:
+                validated[service_name] = AvailableServiceEntry.model_validate(raw_entry)
+            except ValidationError as e:
+                raise LatchkeyGatewayClientError(
+                    f"Configured fake payload entry for {service_name!r} is invalid: {e}",
+                ) from e
+        return validated
 
     def get_granted_permissions_for_scopes(
         self,

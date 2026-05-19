@@ -33,6 +33,14 @@
   to look up display names and the legal permission set. The grant
   dialog continues to render the display name ("Slack" etc.) and lets
   the user broaden or narrow the requested permission set.
+- ``LatchkeyGatewayClient.get_available_services`` now returns a typed
+  ``dict[str, AvailableServiceEntry]`` (pydantic-validated) instead of
+  the previous untyped ``dict[str, object]``. Wire-shape validation
+  (missing fields, wrong types, empty strings) now happens inside the
+  client and surfaces as ``LatchkeyGatewayClientError``; the catalog
+  module that consumes the result has been simplified accordingly
+  and no longer maintains its own parallel ``_RawServiceEntry`` /
+  ``MalformedServicesCatalogError`` validation layer.
 - The latchkey permission dialog no longer pre-checks the catch-all
   ``any`` permission as an implicit default. ``any`` is still offered
   as the first checkbox so the user can opt into unrestricted access
