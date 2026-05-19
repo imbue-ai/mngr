@@ -162,11 +162,6 @@ def _fallback_set_credentials_example(service_name: str) -> str:
     return f'latchkey auth set {service_name} -H "Authorization: Bearer <token>"'
 
 
-def _resolve_service_info(catalog: ServicesCatalog, scope: str) -> ServicePermissionInfo | None:
-    """Look up the catalog entry whose scope schema matches ``scope``."""
-    return catalog.get_by_scope(scope)
-
-
 def _prepend_latchkey_directory(command: str, latchkey_directory: Path) -> str:
     """Prefix ``command`` with ``LATCHKEY_DIRECTORY=<dir>`` so the credential
     the user writes from their terminal lands in the same store the
@@ -458,7 +453,7 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
         """
         if not isinstance(req_event, LatchkeyPermissionRequestEvent):
             return ""
-        info = _resolve_service_info(self.services_catalog, req_event.scope)
+        info = self.services_catalog.get_by_scope(req_event.scope)
         return info.display_name if info is not None else req_event.scope
 
     def render_request_page(
@@ -474,7 +469,7 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
         """
         if not isinstance(req_event, LatchkeyPermissionRequestEvent):
             return HTMLResponse(content="<p>Unsupported request type</p>", status_code=500)
-        service_info = _resolve_service_info(self.services_catalog, req_event.scope)
+        service_info = self.services_catalog.get_by_scope(req_event.scope)
         if service_info is None:
             return _render_unknown_scope_page(
                 request_id=str(req_event.event_id),
@@ -520,7 +515,7 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
         """Drive the grant flow from the dialog form submission."""
         if not isinstance(req_event, LatchkeyPermissionRequestEvent):
             return _json_error("Unsupported request type", status_code=500)
-        service_info = _resolve_service_info(self.services_catalog, req_event.scope)
+        service_info = self.services_catalog.get_by_scope(req_event.scope)
         if service_info is None:
             return _json_error(
                 f"Scope '{req_event.scope}' is not in the gateway catalog",
@@ -594,7 +589,7 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
         """Drive the deny flow from the dialog form submission."""
         if not isinstance(req_event, LatchkeyPermissionRequestEvent):
             return _json_error("Unsupported request type", status_code=500)
-        service_info = _resolve_service_info(self.services_catalog, req_event.scope)
+        service_info = self.services_catalog.get_by_scope(req_event.scope)
         if service_info is None:
             return _json_error(
                 f"Scope '{req_event.scope}' is not in the gateway catalog",
