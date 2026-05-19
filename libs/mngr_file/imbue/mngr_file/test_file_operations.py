@@ -2,6 +2,7 @@
 
 from pathlib import Path
 
+from imbue.mngr.api.address_parsers import parse_agent_or_host_address
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr_file.cli.list import list_files_on_host
 from imbue.mngr_file.cli.target import resolve_file_target
@@ -12,7 +13,7 @@ from imbue.mngr_file.data_types import PathRelativeTo
 def test_list_files_on_localhost(temp_mngr_ctx: MngrContext) -> None:
     """List files on the local host via the host interface."""
     resolved = resolve_file_target(
-        target_identifier="localhost",
+        target=parse_agent_or_host_address("@localhost"),
         mngr_ctx=temp_mngr_ctx,
         relative_to=PathRelativeTo.HOST,
     )
@@ -29,7 +30,7 @@ def test_list_files_on_localhost(temp_mngr_ctx: MngrContext) -> None:
 def test_put_and_get_file_on_localhost(temp_mngr_ctx: MngrContext, tmp_path: Path) -> None:
     """Write a file to the local host dir and read it back."""
     resolved = resolve_file_target(
-        target_identifier="localhost",
+        target=parse_agent_or_host_address("@localhost"),
         mngr_ctx=temp_mngr_ctx,
         relative_to=PathRelativeTo.HOST,
     )
@@ -65,7 +66,7 @@ def test_put_and_get_file_on_localhost(temp_mngr_ctx: MngrContext, tmp_path: Pat
 def test_list_files_recursive_on_localhost(temp_mngr_ctx: MngrContext) -> None:
     """List files recursively on the local host dir."""
     resolved = resolve_file_target(
-        target_identifier="localhost",
+        target=parse_agent_or_host_address("@localhost"),
         mngr_ctx=temp_mngr_ctx,
         relative_to=PathRelativeTo.HOST,
     )

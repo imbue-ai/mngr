@@ -1,0 +1,59 @@
+name: 'TMR setup'
+description: |
+  Common setup for TMR workflows: Python, uv, project deps, Claude Code CLI,
+  git identity, and pre-trusting the checkout for Claude. Caller must have
+  already run actions/checkout.
+
+runs:
+  using: composite
+  steps:
+    - name: Set up Python
+      uses: actions/setup-python@v6
+      with:
+        python-version: '3.12'
+
+    - name: Install uv
+      uses: astral-sh/setup-uv@v7
+      with:
+        version: "latest"
+
+    - name: Install Python dependencies
+      shell: bash
+      run: uv sync --all-packages
+
+    - name: Install Claude Code CLI
+      shell: bash
+      run: npm install -g @anthropic-ai/claude-code@2.1.141
+
+    - name: Configure git identity
+      shell: bash
+      run: |
+        git config user.email "dev@imbue.com"
+        git config user.name "imbue-dev"
+
+    - name: Pre-trust checkout for Claude
+      # The integrator agent runs on the local host, where mngr_claude's
+      # provisioning path goes through Claude Code's trust dialog (see
+      # mngr_claude/plugin.py:interactively_dismiss_claude_dialogs). In CI
+      # there is no human to accept the dialog and no prior ~/.claude.json
+      # entry to inherit, so without seeding trust the integrator either
+      # raises ClaudeDirectoryNotTrustedError or hangs waiting on the
+      # dialog. Pre-seed the global ~/.claude.json with trust for the
+      # checkout plus the other dialogs the plugin gates on; the per-agent
+      # integrator config then inherits the trust via the plugin's
+      # copy_project_config_from path.
+      shell: bash
+      run: |
+        uv run --project libs/mngr_claude python - <<'EOF'
+        from pathlib import Path
+        from imbue.mngr_claude.claude_config import (
+            add_claude_trust_for_path,
+            complete_onboarding,
+            dismiss_effort_callout,
+            find_user_claude_config,
+        )
+        config_path = find_user_claude_config()
+        add_claude_trust_for_path(config_path, Path.cwd().resolve())
+        dismiss_effort_callout(config_path)
+        complete_onboarding(config_path)
+        EOF

@@ -1,6 +1,8 @@
 """Utility functions for the test-mapreduce plugin."""
 
-import secrets
+import itertools
+from datetime import datetime
+from datetime import timezone
 from pathlib import Path
 
 from loguru import logger
@@ -15,7 +17,32 @@ from imbue.mngr.primitives import TransferMode
 from imbue.mngr_tmr.data_types import ChangeStatus
 from imbue.mngr_tmr.data_types import TestResult
 
-_SHORT_ID_LENGTH = 6
+
+def make_run_name() -> str:
+    """Compact timestamp identifying a TMR run, e.g. '20260514184215'.
+
+    14 chars, all digits, sortable by alphabetical comparison. UTC.
+    """
+    return datetime.now(tz=timezone.utc).strftime("%Y%m%d%H%M%S")
+
+
+def dedup_name(base: str, used: set[str]) -> str:
+    """Return ``base`` if unused, else ``base-2``, ``base-3``, ... .
+
+    Mutates ``used`` to include the returned value. Used to keep agent /
+    branch names unique within a single TMR run after sanitization
+    truncation may have collapsed two distinct test node ids onto the
+    same suffix.
+    """
+    if base not in used:
+        used.add(base)
+        return base
+    for counter in itertools.count(2):
+        candidate = f"{base}-{counter}"
+        if candidate not in used:
+            used.add(candidate)
+            return candidate
+    raise AssertionError("itertools.count is infinite; loop must return")
 
 
 def should_pull_changes_from_outcome(outcome: TestResult) -> bool:
@@ -53,11 +80,6 @@ def resolve_templates(
             if v is not None:
                 merged[k] = v
     return merged
-
-
-def short_random_id() -> str:
-    """Generate a short random hex suffix for agent name uniqueness."""
-    return secrets.token_hex(_SHORT_ID_LENGTH // 2)
 
 
 class CollectTestsError(MngrError, RuntimeError):
