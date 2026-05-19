@@ -48,6 +48,7 @@ from pydantic import SecretStr
 from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.primitives import NonEmptyStr
+from imbue.minds.config.loader import load_client_config
 from imbue.minds.deployment_tests.data_types import DeploymentEnvsConfig
 from imbue.minds.deployment_tests.data_types import FctTemplateRef
 from imbue.minds.deployment_tests.data_types import SharedEnvUrls
@@ -57,6 +58,7 @@ from imbue.minds.deployment_tests.primitives import MAILTM_JWT_ENV_VAR
 from imbue.minds.deployment_tests.primitives import RunId
 from imbue.minds.deployment_tests.primitives import SHARED_ENV_SECRET_ENV_VAR_PREFIX
 from imbue.minds.deployment_tests.primitives import SharedEnvRole
+from imbue.minds.envs.local_store import read_secrets_file
 from imbue.minds.envs.primitives import DevEnvName
 from imbue.minds.errors import MindError
 from imbue.minds.utils.output import write_stdout_line
@@ -679,9 +681,6 @@ def services_against(env_name: str, tests: tuple[str, ...], no_fct_push: bool) -
             f"No secrets.toml found at {target_secrets_toml} for env {env_name!r}. "
             "Per-dev-env secrets are written by `minds env deploy`; re-run a deploy if this file is missing."
         )
-
-    from imbue.minds.config.loader import load_client_config
-    from imbue.minds.envs.local_store import read_secrets_file
 
     client_config = load_client_config(target_client_toml)
     secrets_model = read_secrets_file(dev_env_name)

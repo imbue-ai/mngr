@@ -14,13 +14,20 @@ import pytest
 
 from imbue.minds.deployment_tests.data_types import SharedEnvHandle
 from imbue.minds.deployment_tests.data_types import VerifiedUserHandle
+from imbue.minds.deployment_tests.helpers import wait_for_env_ready
 
 pytestmark = pytest.mark.minds_services
 
 
 _REQUEST_TIMEOUT_SECONDS = 30.0
+# Generous per-test timeout so the wait_for_env_ready cold-boot poll (up
+# to 60s for the connector + 60s for the litellm proxy) plus the actual
+# HTTP assertions all fit. Overrides the pyproject-wide 10s default,
+# which is sized for in-process unit tests, not live-env HTTP calls.
+_TEST_TIMEOUT_SECONDS = 180
 
 
+@pytest.mark.timeout(_TEST_TIMEOUT_SECONDS)
 def test_logged_in_smoke(
     shared_env: Callable[[str], SharedEnvHandle],
     verified_user: VerifiedUserHandle,
@@ -41,6 +48,12 @@ def test_logged_in_smoke(
     when this test fails the heavier tests' failures are noise.
     """
     env = shared_env("default")
+    # Defensive: wait until the env is reachable before any assertions, so
+    # cold-boot / stale-container windows don't surface as test flakes.
+    # The session-autouse fixture has already swept stale test-*@example.test
+    # users from this env's SuperTokens app by the time we reach this line.
+    wait_for_env_ready(env)
+
     connector_url = str(env.urls.connector_url).rstrip("/")
     litellm_proxy_url = str(env.urls.litellm_proxy_url).rstrip("/")
 

@@ -18,6 +18,7 @@ import pytest
 from imbue.minds.deployment_tests.data_types import FctTemplateRef
 from imbue.minds.deployment_tests.data_types import SharedEnvHandle
 from imbue.minds.deployment_tests.data_types import VerifiedUserHandle
+from imbue.minds.deployment_tests.helpers import wait_for_env_ready
 
 pytestmark = pytest.mark.minds_services
 
@@ -37,8 +38,15 @@ def test_litellm_spend_tracking_via_local_workspace(
 ) -> None:
     """Drive a real local FCT workspace + assert spend lands in Neon ``litellm_cost``.
 
+    Defensive preamble (do this before any other step in every test
+    body in this suite): wait for the env to be reachable so cold-boot
+    / stale-container windows don't surface as flakes. The session-
+    autouse fixture has already swept stale ``test-*@example.test``
+    users by the time we reach this line.
+
     Planned flow:
 
+    0. **Wait for env ready.** ``wait_for_env_ready(shared_env("default"))``.
     1. Drive the in-process desktop client (same shape as
        ``test_realistic_signup_verify_signin_create_tunnel_signout``)
        to create a workspace from ``fct_template_ref.as_mngr_template_arg()``
@@ -57,4 +65,6 @@ def test_litellm_spend_tracking_via_local_workspace(
     to offload, the future ``offload-modal-minds-services.toml`` will
     enable Docker-in-Docker (mirroring ``offload-modal-acceptance.toml``).
     """
+    wait_for_env_ready(shared_env("default"))
+    _ = (verified_user, fct_template_ref)
     raise AssertionError("not implemented yet -- see skip reason")

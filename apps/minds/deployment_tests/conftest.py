@@ -19,6 +19,7 @@ orchestrator does not crash hard. The expected invocation is always
 """
 
 import os
+import re
 from collections.abc import Callable
 from collections.abc import Generator
 from datetime import datetime
@@ -40,6 +41,8 @@ from imbue.minds.deployment_tests.data_types import EphemeralEnvHandle
 from imbue.minds.deployment_tests.data_types import FctTemplateRef
 from imbue.minds.deployment_tests.data_types import SharedEnvHandle
 from imbue.minds.deployment_tests.data_types import VerifiedUserHandle
+from imbue.minds.deployment_tests.helpers import delete_user_via_admin_api
+from imbue.minds.deployment_tests.helpers import sweep_stale_users
 from imbue.minds.deployment_tests.primitives import DEPLOYMENT_ENVS_JSON_ENV_VAR
 from imbue.minds.deployment_tests.primitives import DeploymentTestConfigError
 from imbue.minds.deployment_tests.primitives import MAILTM_ADDRESS_ENV_VAR
@@ -155,15 +158,15 @@ def verified_user(
         )
     finally:
         try:
-            _delete_user_via_admin_api(
+            delete_user_via_admin_api(
                 connection_uri=handle.supertokens_connection_uri,
                 api_key=handle.supertokens_api_key,
                 user_id=user_id,
             )
         except (MindError, httpx.HTTPError) as exc:
             logger.warning(
-                "Failed to delete verified-user fixture user {!r} ({}); the shared env's "
-                "SuperTokens app teardown at run-end is the safety net.",
+                "Failed to delete verified-user fixture user {!r} ({}); the session-scoped "
+                "sweep + the shared env's SuperTokens app teardown at run-end are the safety nets.",
                 email,
                 exc,
             )
@@ -217,8 +220,49 @@ def signup_email() -> Generator[MailtmInbox, None, None]:
     yield MailtmInbox(address=address, account_address=account_address, jwt=jwt)
 
 
+# Email-pattern + age threshold the session-scoped sweep uses to delete
+# leftover test users from a prior crashed run. Bounded conservatively:
+# 30 minutes is well beyond any single test run, so the sweep cannot
+# delete a user a concurrent run is actively using.
+_STALE_TEST_USER_EMAIL_PATTERN = re.compile(r"^test-[0-9a-f]+@example\.test$")
+_STALE_TEST_USER_MAX_AGE_SECONDS = 30 * 60
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _sweep_stale_test_users(deployment_envs_config: DeploymentEnvsConfig) -> None:
+    """Once per pytest session, delete any leftover ``test-*@example.test`` users.
+
+    Defensive cleanup against state leaked by a prior run that crashed
+    before its ``verified_user`` teardown fired. Only deletes users
+    older than ``_STALE_TEST_USER_MAX_AGE_SECONDS`` so a concurrent run
+    creating its own users right now is safe.
+
+    Skipped silently for runs that don't have a ``default`` shared env
+    configured (e.g. a ``minds_deployment``-only run, once those tests
+    exist) -- those tests don't use ``verified_user`` so there's
+    nothing to sweep against.
+    """
+    if SharedEnvRole("default") not in deployment_envs_config.shared_envs:
+        return
+    env_prefix = f"{SHARED_ENV_SECRET_ENV_VAR_PREFIX}DEFAULT_"
+    try:
+        connection_uri = SecretStr(_require_env_var(f"{env_prefix}SUPERTOKENS_CONNECTION_URI"))
+        api_key = SecretStr(_require_env_var(f"{env_prefix}SUPERTOKENS_API_KEY"))
+    except DeploymentTestConfigError as exc:
+        logger.warning("Skipping stale-test-user sweep: {}", exc)
+        return
+    deleted = sweep_stale_users(
+        connection_uri=connection_uri,
+        api_key=api_key,
+        email_pattern=_STALE_TEST_USER_EMAIL_PATTERN,
+        max_age_seconds=_STALE_TEST_USER_MAX_AGE_SECONDS,
+    )
+    if deleted:
+        logger.info("Stale-test-user sweep deleted {} user(s)", deleted)
+
+
 # ---------------------------------------------------------------------------
-# helpers
+# Internal helpers
 # ---------------------------------------------------------------------------
 
 
@@ -355,14 +399,3 @@ def _create_verified_user_via_admin_api(
             raise MindError(f"Connector /auth/signin for {email!r} returned non-OK: {signin_json!r}")
         access_token = signin_json["tokens"]["access_token"]
         return user_id, SecretStr(access_token)
-
-
-def _delete_user_via_admin_api(*, connection_uri: SecretStr, api_key: SecretStr, user_id: NonEmptyStr) -> None:
-    """Delete a SuperTokens user via the core's ``/user/remove`` endpoint."""
-    base = str(connection_uri.get_secret_value()).rstrip("/")
-    headers = {"api-key": api_key.get_secret_value()}
-    with httpx.Client(timeout=_SUPERTOKENS_ADMIN_TIMEOUT_SECONDS) as client:
-        resp = client.post(f"{base}/user/remove", headers=headers, json={"userId": str(user_id)})
-        # SuperTokens returns 200 for both "deleted" and "user never existed",
-        # so we treat any 2xx as success. A non-2xx is a real error worth surfacing.
-        resp.raise_for_status()
