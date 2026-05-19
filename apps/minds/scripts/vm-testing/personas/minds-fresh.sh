@@ -36,6 +36,13 @@ if ! xcode-select -p >/dev/null 2>&1; then
         echo "[minds-fresh] WARNING: no Command Line Tools update offered; git inside minds.app may fail"
     fi
     sudo rm -f /tmp/.com.apple.dt.CommandLineTools.installondemand.in-progress
+    # softwareupdate can exit 0 even when the install didn't actually land
+    # (network blips, partial installs). Confirm the developer dir exists so
+    # we never snapshot a persona image that still hits the SIGKILL path.
+    if ! xcode-select -p >/dev/null 2>&1; then
+        echo "[minds-fresh] ERROR: Command Line Tools install did not complete; aborting persona build" >&2
+        exit 1
+    fi
 fi
 
 echo "[minds-fresh] done."
