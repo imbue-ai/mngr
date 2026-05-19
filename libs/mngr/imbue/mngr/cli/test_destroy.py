@@ -327,15 +327,14 @@ def test_destroy_prints_errors_if_any_identifier_not_found(
         assert tmux_session_exists(session_name), "Existing agent should not be destroyed when some identifiers fail"
 
 
-# Two-agent setup + parallel destroy can edge over the global 10s pytest-timeout
-# on contended CI runners (see PR #1652 where the now-fixed sibling
-# test_destroy_via_stdin exhausted all 5 flaky retries with the same shape).
-# The multi-agent shape is the point of this test, so we cannot shrink the
-# workload the way we did for that sibling. A poll_interval bump on the
-# wait_for calls was measured locally and made no difference (the polled
-# condition is true on the first iteration), so the only reliable lever is a
-# per-test timeout. Matches the precedent on
-# test_destroy_transfer_none_keeps_shared_worktree.
+# Flaky under heavy CI load: the multi-agent shape means twice the create and
+# destroy work, plus three wait_for(tmux_session_exists) polling loops that
+# call a tmux subprocess on every iteration. Under contention this can exceed
+# the global 10s pytest-timeout. The multi-agent behaviour is the point of
+# this test, so the workload itself cannot be shrunk; bumping the per-test
+# timeout gives the test enough room when the sandbox is slow, and offload
+# still retries via @pytest.mark.flaky if it slips further. Matches the
+# precedent on test_destroy_transfer_none_keeps_shared_worktree.
 @pytest.mark.tmux
 @pytest.mark.flaky
 @pytest.mark.timeout(60)
