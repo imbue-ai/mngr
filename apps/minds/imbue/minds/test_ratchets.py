@@ -37,7 +37,12 @@ def test_prevent_time_sleep() -> None:
     # ``cli/env.py::_exec_into_recover`` (the 5-second auto-rollback
     # countdown -- a deliberate user-facing pause so the operator can
     # Ctrl-C if they want to intervene before recover fires).
-    rc.check_time_sleep(_DIR, snapshot(2))
+    #
+    # Four more come from ``scripts/vm-testing/harness/run-harness.py``,
+    # which polls the backend / agent-creation status from inside a fresh
+    # macOS VM with only stdlib on the path. ``wait_for`` is not available
+    # in that runtime context.
+    rc.check_time_sleep(_DIR, snapshot(6))
 
 
 def test_prevent_global_keyword() -> None:
@@ -45,7 +50,11 @@ def test_prevent_global_keyword() -> None:
 
 
 def test_prevent_bare_print() -> None:
-    rc.check_bare_print(_DIR, snapshot(13))
+    # Two of the matches come from ``scripts/vm-testing/harness/run-harness.py``,
+    # which has to write progress to stderr from inside a fresh VM with only
+    # stdlib available -- ``logger`` from the monorepo's logging stack is
+    # not reachable in that runtime context.
+    rc.check_bare_print(_DIR, snapshot(15))
 
 
 # --- Exception handling ---
@@ -56,7 +65,11 @@ def test_prevent_bare_except() -> None:
 
 
 def test_prevent_broad_exception_catch() -> None:
-    rc.check_broad_exception_catch(_DIR, snapshot(0))
+    # One match in ``scripts/vm-testing/harness/run-harness.py``'s top-level
+    # step runner: the harness is required to capture *any* unhandled
+    # exception per step and report it as a structured junit failure rather
+    # than crash, which is the entire point of that catch.
+    rc.check_broad_exception_catch(_DIR, snapshot(1))
 
 
 def test_prevent_base_exception_catch() -> None:
@@ -68,7 +81,11 @@ def test_prevent_builtin_exception_raises() -> None:
 
 
 def test_prevent_silent_decode_error_catches() -> None:
-    rc.check_silent_decode_error_catches(_DIR, snapshot(10))
+    # One additional match in ``scripts/vm-testing/harness/run-harness.py``,
+    # which uses ``decode(errors='replace')`` when reading subprocess output
+    # captured from inside a fresh VM -- garbled bytes there must not abort
+    # the harness mid-run.
+    rc.check_silent_decode_error_catches(_DIR, snapshot(11))
 
 
 # --- Import style ---
@@ -113,7 +130,9 @@ def test_prevent_pandas_import() -> None:
 
 
 def test_prevent_dataclasses_import() -> None:
-    rc.check_dataclasses_import(_DIR, snapshot(0))
+    # Two matches in ``scripts/vm-testing/harness/run-harness.py``, which is
+    # a standalone in-VM harness with only stdlib available (no pydantic).
+    rc.check_dataclasses_import(_DIR, snapshot(2))
 
 
 def test_prevent_namedtuple() -> None:
@@ -159,7 +178,12 @@ def test_prevent_trailing_comments() -> None:
     # suppression must be on the same line as the call for ruff to
     # recognize it; ``# noqa`` is intentionally not in the trailing-
     # comment exempt list.
-    rc.check_trailing_comments(_DIR, snapshot(1))
+    #
+    # Five more come from ``scripts/vm-testing/harness/run-harness.py``,
+    # which carries ``# noqa: S603`` / ``# noqa: S310`` / ``# noqa: BLE001``
+    # suppressions on subprocess and urlopen calls; same constraint --
+    # ruff only honours those when they are trailing.
+    rc.check_trailing_comments(_DIR, snapshot(6))
 
 
 def test_prevent_init_docstrings() -> None:
@@ -263,6 +287,11 @@ def test_prevent_direct_subprocess() -> None:
     excluded = TEST_FILE_PATTERNS + (
         "testing.py",
         "scripts/*.py",
+        # The Tart-based VM test harness runs inside a fresh macOS VM with
+        # only stdlib on the path: ConcurrencyGroup is not reachable. Same
+        # exclusion category as ``scripts/*.py``, just for a subtree of
+        # standalone diagnostic scripts.
+        "scripts/vm-testing/**/*.py",
         "*/latchkey/_spawn.py",
         "*/desktop_client/forward_cli.py",
         # ``destroying.py`` spawns a detached ``bash -c '<mngr destroy ...>'``
