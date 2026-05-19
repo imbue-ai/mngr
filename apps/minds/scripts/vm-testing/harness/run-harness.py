@@ -210,14 +210,13 @@ def _read_backend_port_from_ps() -> int | None:
         check=False,
     ).stdout
     for line in out.splitlines():
-        if "minds" in line and "forward" in line:
-            m = re.search(r"--port\s+(\d+)", line)
-            if m:
-                return int(m.group(1))
-        if "minds" in line and "run" in line:
-            m = re.search(r"--port\s+(\d+)", line)
-            if m:
-                return int(m.group(1))
+        if "minds" not in line:
+            continue
+        if not any(kw in line for kw in ("forward", "run")):
+            continue
+        m = re.search(r"--port\s+(\d+)", line)
+        if m:
+            return int(m.group(1))
     return None
 
 
