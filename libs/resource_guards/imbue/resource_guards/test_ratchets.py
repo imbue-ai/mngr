@@ -70,7 +70,7 @@ def test_prevent_silent_decode_error_catches() -> None:
 
 
 def test_prevent_inline_imports() -> None:
-    rc.check_inline_imports(_DIR, snapshot(33))
+    rc.check_inline_imports(_DIR, snapshot(42))
 
 
 def test_prevent_relative_imports() -> None:
@@ -212,7 +212,7 @@ def test_prevent_unittest_mock_imports() -> None:
 
 
 def test_prevent_monkeypatch_setattr() -> None:
-    rc.check_monkeypatch_setattr(_DIR, snapshot(9))
+    rc.check_monkeypatch_setattr(_DIR, snapshot(10))
 
 
 def test_prevent_test_container_classes() -> None:

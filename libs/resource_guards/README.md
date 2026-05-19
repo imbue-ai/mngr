@@ -57,16 +57,16 @@ def test_agent_creates_tmux_session():
 
 By default, resource calls during fixture setup/teardown are attributed to whichever test happens to drive that lifecycle. That's fine for function-scoped fixtures but breaks down for module/session-scoped fixtures shared across multiple tests: the fixture's resource calls land in only one test's tracking dir, and siblings end up either failing the superfluous-mark check or having their fixture call blocked.
 
-Opt a fixture into its own guard scope with `@fixture_uses_resources(...)`:
+Opt a fixture into its own guard scope with `@fixture_uses_resources(...)`. Pass every resource the fixture invokes in a single call — stacking the decorator twice on the same fixture is rejected:
 
 ```python
 import pytest
 from imbue.resource_guards.resource_guards import fixture_uses_resources
 
 @pytest.fixture(scope="module")
-@fixture_uses_resources("modal")
+@fixture_uses_resources("modal", "docker")
 def deployed_function():
-    # Setup runs under the fixture's own guard scope: modal calls here
+    # Setup runs under the fixture's own guard scope: modal/docker calls here
     # are authorized against this declaration, not the consuming test's marks.
     deploy_function(...)
     yield url

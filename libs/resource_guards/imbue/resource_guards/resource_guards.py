@@ -582,10 +582,11 @@ def fixture_uses_resources(*resources: str) -> Callable[[F], F]:
     """Declare which guarded resources a pytest fixture uses.
 
     Apply BELOW @pytest.fixture so the underlying function is registered
-    before pytest captures it as a FixtureDef::
+    before pytest captures it as a FixtureDef. Pass every resource the
+    fixture invokes in a single call::
 
         @pytest.fixture(scope="module")
-        @fixture_uses_resources("modal")
+        @fixture_uses_resources("modal", "docker")
         def deployed_function() -> Generator[...]:
             ...
 
@@ -595,11 +596,20 @@ def fixture_uses_resources(*resources: str) -> Callable[[F], F]:
     than whichever test happens to trigger setup. This lets module/session-
     scoped fixtures share expensive resource-using setup across tests
     without requiring every consuming test to carry the same mark.
+
+    Raises ResourceGuardViolation if applied more than once to the same
+    function -- stacking the decorator is not supported; combine all
+    resources into the single call instead.
     """
 
     def decorator(func: F) -> F:
-        existing = _fixture_resource_marks.get(func, set())
-        _fixture_resource_marks[func] = existing | set(resources)
+        if func in _fixture_resource_marks:
+            raise ResourceGuardViolation(
+                f"@fixture_uses_resources applied more than once to '{func.__name__}'. "
+                f"Stacking the decorator is not supported -- combine all resources into "
+                f"a single call, e.g. @fixture_uses_resources('a', 'b')."
+            )
+        _fixture_resource_marks[func] = set(resources)
         return func
 
     return decorator

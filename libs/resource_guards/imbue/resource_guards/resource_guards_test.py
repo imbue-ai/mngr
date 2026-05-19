@@ -65,6 +65,30 @@ def pytest_sessionfinish(session, exitstatus):
     stop_resource_guards()
 """
 
+# Variant of the pytester conftest that registers two guards. Used by the
+# multi-resource fixture tests; both cat and ls are guarded so a single
+# fixture can declare both via @fixture_uses_resources("cat", "ls").
+_PYTESTER_CONFTEST_TWO_GUARDS = """\
+from imbue.resource_guards.resource_guards import (
+    register_resource_guard,
+    start_resource_guards,
+    stop_resource_guards,
+)
+
+register_resource_guard("cat")
+register_resource_guard("ls")
+
+def pytest_configure(config):
+    config.addinivalue_line("markers", "cat: test uses cat")
+    config.addinivalue_line("markers", "ls: test uses ls")
+
+def pytest_sessionstart(session):
+    start_resource_guards(session)
+
+def pytest_sessionfinish(session, exitstatus):
+    stop_resource_guards()
+"""
+
 pytest_plugins = ["pytester"]
 
 
@@ -398,6 +422,88 @@ def test_fixture_teardown_resource_calls_authorized_against_fixture(
     """)
     result = pytester.runpytest_subprocess("-n0", "--no-header", "-p", "no:cacheprovider")
     result.assert_outcomes(passed=2)
+
+
+def test_fixture_declaring_multiple_resources_authorizes_each(
+    pytester: pytest.Pytester, clean_guard_env: None
+) -> None:
+    """A fixture declaring two resources may invoke either during setup; consumer needs both marks."""
+    pytester.makeconftest(_PYTESTER_CONFTEST_TWO_GUARDS)
+    pytester.makepyfile("""
+        import subprocess
+        import pytest
+
+        from imbue.resource_guards.resource_guards import fixture_uses_resources
+
+        @pytest.fixture
+        @fixture_uses_resources("cat", "ls")
+        def multi_fixture():
+            subprocess.run(["cat", "/dev/null"], check=True)
+            subprocess.run(["ls", "/"], check=True, capture_output=True)
+            yield "value"
+
+        @pytest.mark.cat
+        @pytest.mark.ls
+        def test_consumer_with_both_marks(multi_fixture):
+            assert multi_fixture == "value"
+    """)
+    result = pytester.runpytest_subprocess("-n0", "--no-header", "-p", "no:cacheprovider")
+    result.assert_outcomes(passed=1)
+
+
+def test_consumer_missing_one_of_multiple_fixture_marks_fails(
+    pytester: pytest.Pytester, clean_guard_env: None
+) -> None:
+    """When a fixture declares two resources, the consumer must carry both marks."""
+    pytester.makeconftest(_PYTESTER_CONFTEST_TWO_GUARDS)
+    pytester.makepyfile("""
+        import subprocess
+        import pytest
+
+        from imbue.resource_guards.resource_guards import fixture_uses_resources
+
+        @pytest.fixture
+        @fixture_uses_resources("cat", "ls")
+        def multi_fixture():
+            subprocess.run(["cat", "/dev/null"], check=True)
+            subprocess.run(["ls", "/"], check=True, capture_output=True)
+            yield "value"
+
+        @pytest.mark.cat
+        def test_consumer_missing_ls_mark(multi_fixture):
+            assert multi_fixture == "value"
+    """)
+    result = pytester.runpytest_subprocess("-n0", "--no-header", "-p", "no:cacheprovider")
+    result.assert_outcomes(failed=1)
+    result.stdout.fnmatch_lines(["*missing @pytest.mark.ls*"])
+
+
+def test_multi_resource_fixture_must_invoke_each_declared_resource(
+    pytester: pytest.Pytester, clean_guard_env: None
+) -> None:
+    """A fixture declaring two resources but invoking only one fails the NEVER_INVOKED check on the other."""
+    pytester.makeconftest(_PYTESTER_CONFTEST_TWO_GUARDS)
+    pytester.makepyfile("""
+        import subprocess
+        import pytest
+
+        from imbue.resource_guards.resource_guards import fixture_uses_resources
+
+        @pytest.fixture
+        @fixture_uses_resources("cat", "ls")
+        def half_used_fixture():
+            subprocess.run(["cat", "/dev/null"], check=True)
+            # Never invokes ls -- the fixture-scope check should catch this.
+            yield "value"
+
+        @pytest.mark.cat
+        @pytest.mark.ls
+        def test_consumer(half_used_fixture):
+            assert half_used_fixture == "value"
+    """)
+    result = pytester.runpytest_subprocess("-n0", "--no-header", "-p", "no:cacheprovider")
+    result.assert_outcomes(errors=1)
+    result.stdout.fnmatch_lines(["*did not invoke ls during setup*"])
 
 
 # ---------------------------------------------------------------------------
@@ -1084,15 +1190,25 @@ def test_fixture_uses_resources_records_declaration() -> None:
     assert _fixture_resource_marks[some_fixture] == {"modal"}
 
 
-def test_fixture_uses_resources_accumulates_across_calls() -> None:
-    """Stacking the decorator should union the declared resource sets."""
+def test_fixture_uses_resources_supports_multiple_resources_in_one_call() -> None:
+    """A single call accepts multiple resources and records them as a set."""
+
+    def some_fixture() -> None:
+        pass
+
+    fixture_uses_resources("modal", "docker")(some_fixture)
+    assert _fixture_resource_marks[some_fixture] == {"modal", "docker"}
+
+
+def test_fixture_uses_resources_errors_on_double_application(isolated_guard_state: None) -> None:
+    """Applying the decorator twice to the same function should raise."""
 
     def some_fixture() -> None:
         pass
 
     fixture_uses_resources("modal")(some_fixture)
-    fixture_uses_resources("docker")(some_fixture)
-    assert _fixture_resource_marks[some_fixture] == {"modal", "docker"}
+    with pytest.raises(ResourceGuardViolation, match="applied more than once"):
+        fixture_uses_resources("docker")(some_fixture)
 
 
 class _FakeFixtureInfo:
