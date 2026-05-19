@@ -289,10 +289,7 @@ def _construct_and_discover_for_provider(
             provider_name=str(provider_name),
         )
         error_info = ProviderErrorInfo.build_for_provider(e, provider_name)
-        with results_lock:
-            result.errors.append(error_info)
-        if params.on_error:
-            params.on_error(error_info)
+        _ErrorEmitter(result=result, results_lock=results_lock, on_error=params.on_error)(error_info)
         return
 
     with providers_lock:
@@ -382,10 +379,7 @@ def _list_agents_batch(
                 if params.error_behavior == ErrorBehavior.ABORT:
                     raise exception
                 error_info = ProviderErrorInfo.build_for_provider(exception, host_ref.provider_name)
-                with results_lock:
-                    result.errors.append(error_info)
-                if params.on_error:
-                    params.on_error(error_info)
+                _ErrorEmitter(result=result, results_lock=results_lock, on_error=params.on_error)(error_info)
                 continue
 
             futures.append(
@@ -507,10 +501,7 @@ def _construct_discover_and_emit_for_provider(
             provider_name=str(provider_name),
         )
         error_info = ProviderErrorInfo.build_for_provider(e, provider_name)
-        with results_lock:
-            result.errors.append(error_info)
-        if params.on_error:
-            params.on_error(error_info)
+        _ErrorEmitter(result=result, results_lock=results_lock, on_error=params.on_error)(error_info)
 
 
 def _handle_listing_error(
@@ -527,10 +518,7 @@ def _handle_listing_error(
         error_info = AgentErrorInfo.build_for_agent(exception, source.agent_id)
     else:
         error_info = HostErrorInfo.build_for_host(exception, source.host_id)
-    with results_lock:
-        result.errors.append(error_info)
-    if params.on_error:
-        params.on_error(error_info)
+    _ErrorEmitter(result=result, results_lock=results_lock, on_error=params.on_error)(error_info)
 
 
 def _collect_and_emit_details_for_host(
@@ -595,10 +583,7 @@ def _process_host_with_error_handling(
             provider_name=str(provider.name),
         )
         error_info = HostErrorInfo.build_for_host(e, host_ref.host_id)
-        with results_lock:
-            result.errors.append(error_info)
-        if params.on_error:
-            params.on_error(error_info)
+        _ErrorEmitter(result=result, results_lock=results_lock, on_error=params.on_error)(error_info)
 
 
 @pure
