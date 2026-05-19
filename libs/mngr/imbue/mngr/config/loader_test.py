@@ -843,6 +843,7 @@ def test_load_config_threads_every_field_from_toml(
     assert ProviderBackendName("local") in config.enabled_backends
     assert ".venv" in config.work_dir_extra_paths
     assert ".test_output" in config.work_dir_extra_paths
+    assert config.allow_settings_key_assignment_narrowing is True
 
 
 # Sample values used by the regression tests above. When adding a new field to
@@ -871,6 +872,7 @@ _SAMPLE_CONFIG_VALUES: dict[str, Any] = {
     "default_destroyed_host_persisted_seconds": 12345.0,
     "default_min_online_host_age_seconds": 600.0,
     "agent_ready_timeout": 15.0,
+    "allow_settings_key_assignment_narrowing": True,
 }
 
 _SAMPLE_TOML = """\
@@ -888,6 +890,7 @@ is_allowed_in_pytest = true
 default_destroyed_host_persisted_seconds = 12345.0
 default_min_online_host_age_seconds = 600.0
 agent_ready_timeout = 15.0
+allow_settings_key_assignment_narrowing = true
 
 [commands.create]
 name = "test"
@@ -1807,3 +1810,97 @@ def test_parse_config_rejects_sibling_lowercase_collision_within_block() -> None
         match=r"collapse to the same env-var segment 'CLI_ARGS'",
     ):
         parse_config(raw, disabled_plugins=frozenset())
+
+
+# =============================================================================
+# Tests for the allow_settings_key_assignment_narrowing safety net
+# =============================================================================
+
+
+def _write_two_layer_narrowing_config(tmp_path: Path, allow_narrowing: bool | None) -> Path:
+    """Set up a tmp_path with project and local settings whose merge would narrow
+    ``commands.create.env``. Returns ``tmp_path`` so the caller can pass it as
+    the project config dir.
+
+    ``allow_narrowing=None`` leaves the field unset (default False);
+    ``True``/``False`` writes it into the user config so the loader sees the
+    same value the final config will resolve to.
+    """
+    settings_path = tmp_path / "settings.toml"
+    settings_path.write_text('[commands.create]\nenv = ["X=4"]\n')
+    local_path = tmp_path / "settings.local.toml"
+    local_path.write_text('[commands.create]\nenv = ["X=5"]\n')
+    if allow_narrowing is not None:
+        opt_in_value = "true" if allow_narrowing else "false"
+        settings_path.write_text(
+            f'allow_settings_key_assignment_narrowing = {opt_in_value}\n[commands.create]\nenv = ["X=4"]\n'
+        )
+    return tmp_path
+
+
+def test_load_config_narrowing_raises_by_default(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, cg: ConcurrencyGroup
+) -> None:
+    """Two settings layers that assign over a non-empty list raise without the opt-in.
+
+    Mirrors the user's documented example: project ``env = ["X=4"]`` and local
+    ``env = ["X=5"]`` would merge to just ``["X=5"]`` under assign-by-default,
+    silently dropping ``X=4``. The safety net catches this and tells the user
+    how to opt in (or switch to ``__extend``).
+    """
+    pm = pluggy.PluginManager("mngr")
+    pm.add_hookspecs(hookspecs)
+    load_all_registries(pm)
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("MNGR_PREFIX", raising=False)
+    monkeypatch.delenv("MNGR_HOST_DIR", raising=False)
+    monkeypatch.delenv("MNGR_ROOT_NAME", raising=False)
+    _write_two_layer_narrowing_config(tmp_path, allow_narrowing=None)
+    monkeypatch.setenv("MNGR_PROJECT_CONFIG_DIR", str(tmp_path))
+
+    with pytest.raises(ConfigParseError, match="narrowing"):
+        load_config(pm=pm, context_dir=tmp_path, concurrency_group=cg)
+
+
+def test_load_config_narrowing_allowed_when_opted_in(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, cg: ConcurrencyGroup
+) -> None:
+    """Setting ``allow_settings_key_assignment_narrowing = true`` silences the safety net."""
+    pm = pluggy.PluginManager("mngr")
+    pm.add_hookspecs(hookspecs)
+    load_all_registries(pm)
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("MNGR_PREFIX", raising=False)
+    monkeypatch.delenv("MNGR_HOST_DIR", raising=False)
+    monkeypatch.delenv("MNGR_ROOT_NAME", raising=False)
+    _write_two_layer_narrowing_config(tmp_path, allow_narrowing=True)
+    monkeypatch.setenv("MNGR_PROJECT_CONFIG_DIR", str(tmp_path))
+
+    mngr_ctx = load_config(pm=pm, context_dir=tmp_path, concurrency_group=cg)
+    # local layer's env wins -- ["X=4"] was dropped, which the user explicitly opted into.
+    assert mngr_ctx.config.commands["create"].defaults["env"] == ["X=5"]
+
+
+def test_load_config_extend_avoids_narrowing_without_opt_in(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, cg: ConcurrencyGroup
+) -> None:
+    """Using ``env__extend`` in the higher-precedence layer preserves base entries
+    and never trips the narrowing guard. The merged value contains both layers'
+    entries in precedence order.
+    """
+    pm = pluggy.PluginManager("mngr")
+    pm.add_hookspecs(hookspecs)
+    load_all_registries(pm)
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("MNGR_PREFIX", raising=False)
+    monkeypatch.delenv("MNGR_HOST_DIR", raising=False)
+    monkeypatch.delenv("MNGR_ROOT_NAME", raising=False)
+    (tmp_path / "settings.toml").write_text('[commands.create]\nenv = ["X=4"]\n')
+    (tmp_path / "settings.local.toml").write_text('[commands.create]\nenv__extend = ["X=5"]\n')
+    monkeypatch.setenv("MNGR_PROJECT_CONFIG_DIR", str(tmp_path))
+
+    mngr_ctx = load_config(pm=pm, context_dir=tmp_path, concurrency_group=cg)
+    assert mngr_ctx.config.commands["create"].defaults["env"] == ["X=4", "X=5"]

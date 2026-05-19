@@ -202,6 +202,42 @@ def test_apply_config_defaults_non_empty_string_replaces_tuple_param(mngr_test_p
     assert result["extra_window"] == ["cmd1", "cmd2"]
 
 
+def test_apply_config_defaults_cli_flag_extends_non_empty_config(mngr_test_prefix: str) -> None:
+    """A CLI tuple flag extends (config-then-CLI) the merged settings value.
+
+    With the new assign-by-default merge for settings files, a single non-empty
+    ``commands.create.env`` ends up in the merged config (e.g. ``["X=5"]`` from
+    the local layer wiping the project layer's ``["X=4"]``). The CLI flag must
+    still extend that result; otherwise the user's ``--env X=6`` would silently
+    replace ``["X=5"]`` instead of appending. Order is ``config + CLI`` so the
+    CLI value reads as the user's final word at the tail of the list.
+    """
+    ctx = _make_click_context(
+        params={"env": ("X=6",), "other_param": "value"},
+        source_by_param_name={"env": ParameterSource.COMMANDLINE},
+    )
+    config = MngrConfig(
+        prefix=mngr_test_prefix,
+        commands={"create": CommandDefaults(defaults={"env": ["X=5"]})},
+    )
+    result = apply_config_defaults(ctx, config, "create")
+    assert result["env"] == ("X=5", "X=6")
+
+
+def test_apply_config_defaults_cli_flag_extends_multiple_values(mngr_test_prefix: str) -> None:
+    """Multiple CLI flag invocations all append after the config-supplied entries."""
+    ctx = _make_click_context(
+        params={"env": ("X=6", "X=7"), "other_param": "value"},
+        source_by_param_name={"env": ParameterSource.COMMANDLINE},
+    )
+    config = MngrConfig(
+        prefix=mngr_test_prefix,
+        commands={"create": CommandDefaults(defaults={"env": ["X=5"]})},
+    )
+    result = apply_config_defaults(ctx, config, "create")
+    assert result["env"] == ("X=5", "X=6", "X=7")
+
+
 def test_apply_config_defaults_empty_string_does_not_affect_non_tuple_params(mngr_test_prefix: str) -> None:
     """apply_config_defaults should not convert empty string for non-tuple params."""
     ctx = _make_click_context(
@@ -873,11 +909,15 @@ def test_apply_settings_to_config_replaces_existing_command_defaults(mngr_test_p
     """Assign-by-default: --setting on a command param replaces the whole defaults map.
 
     To preserve other keys, the user would explicitly write ``defaults__extend``
-    or repeat each key in the --setting list.
+    or repeat each key in the --setting list. The narrowing guard is opted out
+    of via ``allow_settings_key_assignment_narrowing=True`` so the test exercises
+    the assign-by-default behavior directly; without the opt-in this would raise
+    a ConfigParseError (see ``test_apply_settings_to_config_narrowing_raises``).
     """
     config = MngrConfig(
         prefix=mngr_test_prefix,
         commands={"create": CommandDefaults(defaults={"branch": "main:agent/*"})},
+        allow_settings_key_assignment_narrowing=True,
     )
     result = apply_settings_to_config(
         config,
@@ -886,6 +926,91 @@ def test_apply_settings_to_config_replaces_existing_command_defaults(mngr_test_p
     )
     # Only the new setting's key is present; the prior "branch" entry was wiped.
     assert result.commands["create"].defaults == {"connect": False}
+
+
+def test_apply_settings_to_config_narrowing_raises_by_default(mngr_test_prefix: str) -> None:
+    """Without the opt-in, a --setting that would drop earlier entries raises ConfigParseError.
+
+    Mirrors the test above but uses the default ``allow_settings_key_assignment_narrowing=False``,
+    which is the safety net for users who haven't migrated to the new assign-by-default behavior.
+    """
+    config = MngrConfig(
+        prefix=mngr_test_prefix,
+        commands={"create": CommandDefaults(defaults={"branch": "main:agent/*"})},
+    )
+    with pytest.raises(ConfigParseError, match="narrowing"):
+        apply_settings_to_config(
+            config,
+            ("commands.create.connect=false",),
+            frozenset(),
+        )
+
+
+def test_apply_settings_to_config_clear_then_cli_flag_replaces(mngr_test_prefix: str) -> None:
+    """``--setting commands.create.env=[]`` clears the merged value; a later CLI
+    ``--env X=6`` then has nothing to extend and becomes the only entry.
+
+    Order in setup_command_context: ``apply_settings_to_config`` runs first
+    (turning ``commands.create.env`` into ``[]`` via assign), then
+    ``apply_config_defaults`` sees an empty config value and falls through to
+    the CLI value. Empty config value never extends, so ``["X=6"]`` is the result.
+    """
+    config = MngrConfig(
+        prefix=mngr_test_prefix,
+        commands={"create": CommandDefaults(defaults={"env": ["X=5"]})},
+    )
+    cleared = apply_settings_to_config(
+        config,
+        ("commands.create.env=[]",),
+        frozenset(),
+    )
+    assert cleared.commands["create"].defaults["env"] == []
+    ctx = _make_click_context(
+        params={"env": ("X=6",)},
+        source_by_param_name={"env": ParameterSource.COMMANDLINE},
+    )
+    result = apply_config_defaults(ctx, cleared, "create")
+    assert result["env"] == ("X=6",)
+
+
+def test_apply_settings_to_config_extend_then_cli_flag_appends(mngr_test_prefix: str) -> None:
+    """``--setting commands.create.env__extend=["X=7"] --env X=6`` produces
+    ``["X=5", "X=7", "X=6"]``: setting extends first, then CLI appends."""
+    config = MngrConfig(
+        prefix=mngr_test_prefix,
+        commands={"create": CommandDefaults(defaults={"env": ["X=5"]})},
+    )
+    extended = apply_settings_to_config(
+        config,
+        ('commands.create.env__extend=["X=7"]',),
+        frozenset(),
+    )
+    assert extended.commands["create"].defaults["env"] == ["X=5", "X=7"]
+    ctx = _make_click_context(
+        params={"env": ("X=6",)},
+        source_by_param_name={"env": ParameterSource.COMMANDLINE},
+    )
+    result = apply_config_defaults(ctx, extended, "create")
+    assert result["env"] == ("X=5", "X=7", "X=6")
+
+
+def test_apply_settings_to_config_extend_through_command_defaults(mngr_test_prefix: str) -> None:
+    """``--setting commands.<name>.<param>__extend=...`` extends through the CommandDefaults wrapper.
+
+    Without the resolver's CommandDefaults transparency, ``__extend`` would silently
+    fall through to ``None`` for ``commands.<name>.<param>`` paths and become a
+    plain assign, defeating the user's intent to extend the merged value.
+    """
+    config = MngrConfig(
+        prefix=mngr_test_prefix,
+        commands={"create": CommandDefaults(defaults={"env": ["X=5"]})},
+    )
+    result = apply_settings_to_config(
+        config,
+        ('commands.create.env__extend=["X=7"]',),
+        frozenset(),
+    )
+    assert result.commands["create"].defaults["env"] == ["X=5", "X=7"]
 
 
 def test_apply_settings_to_config_extends_list_field(mngr_test_prefix: str) -> None:

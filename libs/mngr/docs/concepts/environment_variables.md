@@ -52,6 +52,21 @@ The same `__extend` suffix is recognised in TOML, in `--setting`, and in `mngr c
 
 `__extend` on a scalar field raises `ConfigParseError`. A shape mismatch (e.g. a string value used to extend a list field) also raises.
 
+### Assignment narrowing safety net
+
+Assign-by-default makes it easy to accidentally drop earlier entries when a higher-precedence layer writes the same key. For example, with `commands.create.env = ["X=4"]` in `.mngr/settings.toml` and `commands.create.env = ["X=5"]` in `.mngr/settings.local.toml`, the merged value silently becomes `["X=5"]` — the `X=4` from the project layer is lost.
+
+To prevent silent data loss during the migration, mngr raises `ConfigParseError` when a higher-precedence settings layer would assign over a non-empty list/tuple/dict/set value. The error tells you how to fix it:
+
+1. Switch the specific key to `__extend` to keep the additive behavior (e.g. `env__extend = ["X=5"]` in the local layer).
+2. Set `allow_settings_key_assignment_narrowing = true` (a top-level field on `MngrConfig`) to opt into the assign-by-default behavior globally.
+
+Empty overrides (`env = []`, `--setting commands.create.env=[]`, etc.) are treated as deliberate clears and never trip the safety net — only non-empty assignments that drop earlier entries do.
+
+The default value of `allow_settings_key_assignment_narrowing` is expected to change to `true` in a future version, and support for `false` may be removed entirely. Migrate your configs ahead of the flip so the eventual default change is a no-op.
+
+CLI flags that supply tuple/list values (e.g. `--env X=6`) always extend the merged settings value rather than replace it — the result is `<config values> + <CLI values>`. The safety net only applies to the settings-file / env-var / `--setting` merge, not to CLI flag merging.
+
 ### Precedence
 
 Lowest to highest:

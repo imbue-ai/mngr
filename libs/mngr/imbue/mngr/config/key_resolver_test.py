@@ -4,6 +4,7 @@ from typing import Any
 
 import pytest
 
+from imbue.mngr.config.data_types import CommandDefaults
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import WorkDirExtraPathMode
 from imbue.mngr.config.key_resolver import EXTEND_SUFFIX
@@ -159,3 +160,19 @@ def test_resolve_extends_recurses_into_nested_dicts() -> None:
     )
     # No __extend keys -- the override passes through unchanged.
     assert resolved == {"logging": {"console_level": "TRACE"}}
+
+
+def test_resolve_extends_walks_through_command_defaults() -> None:
+    """``commands.<name>.<param>__extend`` extends against the merged value stored
+    in ``CommandDefaults.defaults[<param>]`` rather than looking for a non-existent
+    attribute on the model. Without this transparency, the extend would silently
+    act as an assign (since the lookup would return ``None``).
+    """
+    base = MngrConfig(
+        commands={"create": CommandDefaults(defaults={"env": ["X=5"]})},
+    )
+    resolved = resolve_extends(
+        base,
+        {"commands": {"create": {"env__extend": ["X=7"]}}},
+    )
+    assert resolved == {"commands": {"create": {"env": ["X=5", "X=7"]}}}

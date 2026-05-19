@@ -18,6 +18,7 @@ from imbue.mngr.config.data_types import PluginConfig
 from imbue.mngr.config.data_types import ProviderInstanceConfig
 from imbue.mngr.config.data_types import RetryConfig
 from imbue.mngr.config.data_types import WorkDirExtraPathMode
+from imbue.mngr.config.data_types import detect_settings_narrowing
 from imbue.mngr.config.data_types import get_or_create_user_id
 from imbue.mngr.config.data_types import split_cli_args_string
 from imbue.mngr.config.loader import parse_config
@@ -1018,6 +1019,70 @@ def test_mngr_config_connect_command_defaults_to_none(mngr_test_prefix: str) -> 
 # =============================================================================
 
 
+# =============================================================================
+# Tests for detect_settings_narrowing
+# =============================================================================
+
+
+def test_detect_settings_narrowing_flags_list_replacement(mngr_test_prefix: str) -> None:
+    """Replacing a non-empty list with a different non-empty list is flagged."""
+    base = MngrConfig(prefix=mngr_test_prefix, unset_vars=["BASE"])
+    override = MngrConfig(prefix=mngr_test_prefix, unset_vars=["OTHER"])
+    assert detect_settings_narrowing(base, override) == ["unset_vars"]
+
+
+def test_detect_settings_narrowing_allows_superset_list(mngr_test_prefix: str) -> None:
+    """A list override that contains every base entry (e.g. from __extend) is not narrowing."""
+    base = MngrConfig(prefix=mngr_test_prefix, unset_vars=["BASE"])
+    override = MngrConfig(prefix=mngr_test_prefix, unset_vars=["BASE", "EXTRA"])
+    assert detect_settings_narrowing(base, override) == []
+
+
+def test_detect_settings_narrowing_allows_empty_override(mngr_test_prefix: str) -> None:
+    """An explicit empty override (e.g. ``--setting unset_vars=[]``) is treated as a deliberate clear."""
+    base = MngrConfig(prefix=mngr_test_prefix, unset_vars=["BASE"])
+    override = MngrConfig(prefix=mngr_test_prefix, unset_vars=[])
+    assert detect_settings_narrowing(base, override) == []
+
+
+def test_detect_settings_narrowing_recurses_into_command_defaults(mngr_test_prefix: str) -> None:
+    """Per-key recursion through ``commands`` (a container dict) and ``CommandDefaults.defaults``
+    flags the deepest path where data is actually lost.
+    """
+    base = MngrConfig(
+        prefix=mngr_test_prefix,
+        commands={"create": CommandDefaults(defaults={"env": ["X=4"], "branch": "main"})},
+    )
+    override = MngrConfig(
+        prefix=mngr_test_prefix,
+        commands={"create": CommandDefaults(defaults={"env": ["X=4"], "branch": "main", "extra": "x"})},
+    )
+    # Override is a superset -- no narrowing.
+    assert detect_settings_narrowing(base, override) == []
+
+    override_drops_branch = MngrConfig(
+        prefix=mngr_test_prefix,
+        commands={"create": CommandDefaults(defaults={"env": ["X=4"]})},
+    )
+    # Override drops the "branch" key from defaults -- flagged at the defaults level.
+    assert detect_settings_narrowing(base, override_drops_branch) == ["commands.create.defaults"]
+
+
+def test_detect_settings_narrowing_flags_nested_value_replacement(mngr_test_prefix: str) -> None:
+    """When a shared dict key's value is itself a non-empty aggregate being replaced,
+    the deeper path is flagged.
+    """
+    base = MngrConfig(
+        prefix=mngr_test_prefix,
+        commands={"create": CommandDefaults(defaults={"env": ["X=4"]})},
+    )
+    override = MngrConfig(
+        prefix=mngr_test_prefix,
+        commands={"create": CommandDefaults(defaults={"env": ["X=5"]})},
+    )
+    assert detect_settings_narrowing(base, override) == ["commands.create.defaults.env"]
+
+
 def _build_fully_populated_mngr_config(mngr_test_prefix: str) -> MngrConfig:
     """Construct a MngrConfig with every field set to a non-default value.
 
@@ -1048,6 +1113,7 @@ def _build_fully_populated_mngr_config(mngr_test_prefix: str) -> MngrConfig:
         default_destroyed_host_persisted_seconds=98765.0,
         default_min_online_host_age_seconds=4321.0,
         agent_ready_timeout=42.0,
+        allow_settings_key_assignment_narrowing=True,
     )
 
 

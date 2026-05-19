@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import shlex
+from collections.abc import Mapping
 from enum import auto
 from pathlib import Path
 from typing import Any
@@ -11,6 +12,7 @@ from typing import TypeVar
 from uuid import uuid4
 
 import pluggy
+from pydantic import BaseModel
 from pydantic import Field
 from pydantic import GetCoreSchemaHandler
 from pydantic import field_validator
@@ -101,6 +103,130 @@ def _merge_container_dict(
         else:
             merged[key] = base[key]
     return merged
+
+
+# The top-level container dicts on ``MngrConfig`` whose merge is per-key
+# (instead of assign-by-default). Listed here in one place so narrowing
+# detection can recurse into each entry rather than treating the dict as a
+# single aggregate to flag.
+_CONTAINER_DICT_FIELDS: Final[frozenset[str]] = frozenset(
+    {"agent_types", "providers", "plugins", "commands", "create_templates"}
+)
+
+
+def detect_settings_narrowing(base: Any, override: Any) -> list[str]:
+    """Return dotted paths where ``override`` would silently drop entries from
+    a non-empty aggregate value in ``base`` (``list``, ``tuple``, ``dict``,
+    ``set``, ``frozenset``).
+
+    Used by the loader to surface accidental data loss when the new
+    assign-by-default merge semantics replace a previous additive merge. The
+    check is recursive: container dicts (``agent_types``, ``providers``,
+    ``plugins``, ``commands``, ``create_templates``) traverse per key so only
+    the actually-narrowing sub-fields are flagged. Sub-models recurse by
+    their own ``model_fields_set`` so untouched fields are ignored.
+
+    "Narrowing" is defined as the override losing at least one base entry
+    (a missing list/set element, or a missing dict key). An override whose
+    value is a superset of the base (the result of an ``__extend`` operation,
+    or an explicit assign that happens to include every prior entry) does
+    not narrow, so it does not flag. Value mutations at a shared dict key
+    recurse instead of flagging at the parent.
+
+    Returns dotted paths like ``commands.create.defaults.env``. The list is
+    empty when there are no narrowing assignments.
+    """
+    violations: list[str] = []
+    _walk_for_narrowing(base, override, path=(), violations=violations)
+    return violations
+
+
+def _walk_for_narrowing(
+    base: Any,
+    override: Any,
+    path: tuple[str, ...],
+    violations: list[str],
+) -> None:
+    if isinstance(override, BaseModel):
+        explicitly_set = override.model_fields_set
+        for field_name in override.__class__.model_fields:
+            if field_name not in explicitly_set:
+                continue
+            override_value = getattr(override, field_name)
+            # ``None`` mirrors the ``if override.<field> is not None`` test used
+            # throughout MngrConfig.merge_with: parse_config sets every kwarg
+            # (often to ``None``) so model_fields_set alone over-reports which
+            # fields the layer actually touched. A ``None`` value means the
+            # layer did not write the field, so it cannot narrow anything.
+            if override_value is None:
+                continue
+            base_value = getattr(base, field_name, None) if isinstance(base, BaseModel) else None
+            sub_path = path + (field_name,)
+            if field_name in _CONTAINER_DICT_FIELDS:
+                # Per-key recurse for container dicts (agent_types, etc.)
+                _walk_for_narrowing(base_value, override_value, sub_path, violations)
+                continue
+            _check_narrowing(base_value, override_value, sub_path, violations)
+        return
+    if isinstance(override, Mapping):
+        # Container dict (e.g. ``commands``) -- recurse per key against
+        # whatever the base has at that key. Keys present only in override
+        # are pure additions and never narrow.
+        for key, sub_override in override.items():
+            sub_base = base.get(key) if isinstance(base, Mapping) else None
+            if sub_base is None:
+                continue
+            _walk_for_narrowing(sub_base, sub_override, path + (str(key),), violations)
+
+
+def _check_narrowing(
+    base_value: Any,
+    override_value: Any,
+    path: tuple[str, ...],
+    violations: list[str],
+) -> None:
+    """Check a single field for narrowing, recursing into nested aggregates.
+
+    Sub-models recurse into their explicitly-set fields; aggregates check
+    whether every base entry survives in the override. For dicts the check
+    is two-pass: missing keys are flagged at this level (the dict has been
+    truncated), while shared keys recurse so a value mutation inside a
+    nested aggregate surfaces at the deeper path rather than at the parent.
+
+    An empty override aggregate (``[]``, ``{}``, ``set()``) is treated as an
+    explicit "clear" -- the user typed the empty container themselves, so the
+    intent is unambiguous and no warning is needed. The silent-loss hazard
+    only exists when the override is itself a non-empty value that happens to
+    drop a subset of the base entries.
+    """
+    if isinstance(base_value, BaseModel) and isinstance(override_value, BaseModel):
+        _walk_for_narrowing(base_value, override_value, path, violations)
+        return
+    if not isinstance(base_value, (list, tuple, dict, set, frozenset)) or not base_value:
+        return
+    if isinstance(override_value, (list, tuple, dict, set, frozenset)) and not override_value:
+        # Explicit clear -- the override is an empty aggregate of the same shape;
+        # no silent loss to warn about.
+        return
+    if isinstance(base_value, (list, tuple)):
+        if isinstance(override_value, (list, tuple)) and all(entry in override_value for entry in base_value):
+            return
+        violations.append(".".join(path))
+        return
+    if isinstance(base_value, (set, frozenset)):
+        if isinstance(override_value, (set, frozenset, list, tuple)) and set(base_value) <= set(override_value):
+            return
+        violations.append(".".join(path))
+        return
+    # base_value is a non-empty dict
+    if not isinstance(override_value, dict):
+        violations.append(".".join(path))
+        return
+    if any(key not in override_value for key in base_value):
+        violations.append(".".join(path))
+        return
+    for key, sub_base in base_value.items():
+        _check_narrowing(sub_base, override_value[key], path + (str(key),), violations)
 
 
 # === Enums ===
@@ -547,6 +673,19 @@ class MngrConfig(FrozenModel):
         description="Max seconds to wait for an agent to signal readiness before sending messages. "
         "Hook-based polling returns early; this is an upper bound, not an unconditional delay.",
     )
+    allow_settings_key_assignment_narrowing: bool = Field(
+        default=False,
+        description=(
+            "When False (the default), it is an error for a higher-precedence settings layer "
+            "(project local, env vars, --setting, etc.) to assign over a non-empty list/tuple/"
+            "dict/set value coming from a lower-precedence layer. This guards against silently "
+            "losing entries when a settings file is loaded with the new assign-by-default merge "
+            "behavior; the user is told to either use the __extend suffix to opt into the prior "
+            "additive behavior or to set this field to True. The default for this field is "
+            "expected to change to True in a future version, and support for False may be "
+            "removed entirely once the migration is complete."
+        ),
+    )
 
     def merge_with(self, override: Self) -> Self:
         """Merge this config with an override config.
@@ -625,6 +764,10 @@ class MngrConfig(FrozenModel):
                 override.default_min_online_host_age_seconds,
             ),
             agent_ready_timeout=_assign_scalar(self.agent_ready_timeout, override.agent_ready_timeout),
+            allow_settings_key_assignment_narrowing=_assign_scalar(
+                self.allow_settings_key_assignment_narrowing,
+                override.allow_settings_key_assignment_narrowing,
+            ),
         )
 
 

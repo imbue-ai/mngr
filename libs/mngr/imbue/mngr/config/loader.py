@@ -28,6 +28,7 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import PluginConfig
 from imbue.mngr.config.data_types import ProviderInstanceConfig
 from imbue.mngr.config.data_types import RetryConfig
+from imbue.mngr.config.data_types import detect_settings_narrowing
 from imbue.mngr.config.data_types import split_cli_args_string
 from imbue.mngr.config.host_dir import read_default_host_dir
 from imbue.mngr.config.key_resolver import EXTEND_SUFFIX
@@ -145,22 +146,28 @@ def load_config(
     if strict is None:
         strict = resolve_strict_from_env()
 
-    # Load and merge config files in precedence order (user, project, local)
-    for raw in (
-        try_load_toml(get_user_config_path(profile_dir)),
-        load_project_config(context_dir, root_name, concurrency_group),
-        load_local_config(context_dir, root_name, concurrency_group),
+    # Load and merge config files in precedence order (user, project, local).
+    # Narrowing violations -- a higher-precedence layer assigning over a non-
+    # empty aggregate value from a lower-precedence layer -- are collected as
+    # we go, then turned into a single error after all layers are merged (when
+    # the final ``allow_settings_key_assignment_narrowing`` resolves to False).
+    narrowing_violations: list[tuple[str, str]] = []
+    for raw, source_label in (
+        (try_load_toml(get_user_config_path(profile_dir)), "user settings"),
+        (load_project_config(context_dir, root_name, concurrency_group), "project settings"),
+        (load_local_config(context_dir, root_name, concurrency_group), "project local settings"),
     ):
         if raw is not None:
-            config = config.merge_with(
-                _parse_config_with_extends(
-                    raw,
-                    base_config=config,
-                    disabled_plugins=config_disabled_plugins,
-                    strict=strict,
-                    silent=silent_unknown_fields,
-                )
+            parsed_layer = _parse_config_with_extends(
+                raw,
+                base_config=config,
+                disabled_plugins=config_disabled_plugins,
+                strict=strict,
+                silent=silent_unknown_fields,
             )
+            for violation in detect_settings_narrowing(config, parsed_layer):
+                narrowing_violations.append((source_label, violation))
+            config = config.merge_with(parsed_layer)
 
     # Apply ``MNGR__*`` env-var overrides plus the preserved-alias env vars
     # (MNGR_PREFIX, MNGR_HOST_DIR, MNGR_HEADLESS). These all flow through the
@@ -169,15 +176,22 @@ def load_config(
     # form raise ConfigParseError.
     env_override_raw = _collect_env_overrides(os.environ)
     if env_override_raw:
-        config = config.merge_with(
-            _parse_config_with_extends(
-                env_override_raw,
-                base_config=config,
-                disabled_plugins=config_disabled_plugins,
-                strict=strict,
-                silent=silent_unknown_fields,
-            )
+        parsed_env_layer = _parse_config_with_extends(
+            env_override_raw,
+            base_config=config,
+            disabled_plugins=config_disabled_plugins,
+            strict=strict,
+            silent=silent_unknown_fields,
         )
+        for violation in detect_settings_narrowing(config, parsed_env_layer):
+            narrowing_violations.append(("MNGR__* env vars", violation))
+        config = config.merge_with(parsed_env_layer)
+
+    # Raise on collected narrowing assignments unless the user has opted in.
+    # Done before further config_dict mutation so the error surfaces with the
+    # actual settings-file paths in the message.
+    if narrowing_violations and not config.allow_settings_key_assignment_narrowing:
+        raise _build_narrowing_error(narrowing_violations)
 
     # Build a dict with non-None values for final validation.
     config_dict: dict[str, Any] = {}
@@ -226,6 +240,7 @@ def load_config(
     config_dict["default_destroyed_host_persisted_seconds"] = config.default_destroyed_host_persisted_seconds
     config_dict["default_min_online_host_age_seconds"] = config.default_min_online_host_age_seconds
     config_dict["agent_ready_timeout"] = config.agent_ready_timeout
+    config_dict["allow_settings_key_assignment_narrowing"] = config.allow_settings_key_assignment_narrowing
 
     # Allow plugins to modify config_dict before validation
     pm.hook.on_load_config(config_dict=config_dict)
@@ -307,6 +322,31 @@ def get_or_create_profile_dir(base_dir: Path) -> Path:
 # =============================================================================
 # Config Loading
 # =============================================================================
+
+
+def _build_narrowing_error(violations: Sequence[tuple[str, str]]) -> ConfigParseError:
+    """Construct the user-facing error raised when a higher-precedence layer
+    silently narrows a non-empty aggregate value.
+
+    Lists every offending source-and-key pair, explains how to opt in to the
+    new assign-by-default semantics, points at the ``__extend`` operator for
+    additive opt-out, and warns that the safety net itself is temporary.
+    """
+    detail_lines = [f"  {source}: {key}" for source, key in violations]
+    return ConfigParseError(
+        "Settings narrowing detected: a higher-precedence settings layer would assign over "
+        "a non-empty list/tuple/dict/set value from a lower-precedence layer, silently "
+        "dropping the earlier entries.\n" + "\n".join(detail_lines) + "\n"
+        "To opt into this assign-by-default behavior (and silence this error), set "
+        "`allow_settings_key_assignment_narrowing = true` in your settings.toml (or "
+        "MNGR__ALLOW_SETTINGS_KEY_ASSIGNMENT_NARROWING=true, or --setting "
+        "allow_settings_key_assignment_narrowing=true).\n"
+        "To keep the additive behavior for a specific key, use the `__extend` suffix on the "
+        'key in the higher-precedence layer (e.g. `env__extend = ["X=5"]`).\n'
+        "NOTE: the default for `allow_settings_key_assignment_narrowing` will change to True "
+        "in a future version, and support for False may be removed entirely. Migrate now so "
+        "the eventual default flip is a no-op for your config."
+    )
 
 
 def resolve_strict_from_env() -> bool:
@@ -833,6 +873,7 @@ def parse_config(
     kwargs["default_destroyed_host_persisted_seconds"] = raw.pop("default_destroyed_host_persisted_seconds", None)
     kwargs["default_min_online_host_age_seconds"] = raw.pop("default_min_online_host_age_seconds", None)
     kwargs["agent_ready_timeout"] = raw.pop("agent_ready_timeout", None)
+    kwargs["allow_settings_key_assignment_narrowing"] = raw.pop("allow_settings_key_assignment_narrowing", None)
 
     if len(raw) > 0:
         if strict:
