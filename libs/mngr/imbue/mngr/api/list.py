@@ -129,6 +129,11 @@ class _ListAgentsParams(FrozenModel):
     error_behavior: ErrorBehavior
     on_agent: Callable[[AgentDetails], None] | None
     on_error: Callable[[ErrorInfo], None] | None
+    # Shared per-call emitter: callable that appends an ErrorInfo to
+    # result.errors under results_lock and forwards to on_error. Constructed
+    # once in list_agents() and reused by every per-resource catch site so
+    # they don't each rebuild the same 3-arg incantation.
+    error_emitter: _ErrorEmitter
     field_generators: dict[str, dict[str, Callable[[AgentInterface, OnlineHostInterface], Any]]] = Field(
         default_factory=dict,
     )
@@ -167,9 +172,10 @@ def list_agents(
         with log_span("Compiling CEL filters", include_filters=include_filters, exclude_filters=exclude_filters):
             compiled_include_filters, compiled_exclude_filters = compile_cel_filters(include_filters, exclude_filters)
 
-    try:
-        results_lock = Lock()
+    results_lock = Lock()
+    error_emitter = _ErrorEmitter(result=result, results_lock=results_lock, on_error=on_error)
 
+    try:
         field_generators: dict[str, dict[str, Callable[[AgentInterface, OnlineHostInterface], Any]]] = {}
         for hook_result in mngr_ctx.pm.hook.agent_field_generators():
             if hook_result is not None:
@@ -182,6 +188,7 @@ def list_agents(
             error_behavior=error_behavior,
             on_agent=on_agent,
             on_error=on_error,
+            error_emitter=error_emitter,
             field_generators=field_generators,
         )
 
@@ -212,7 +219,7 @@ def list_agents(
         if error_behavior == ErrorBehavior.ABORT:
             raise
         error_info = ErrorInfo.build(e)
-        _ErrorEmitter(result=result, results_lock=results_lock, on_error=on_error)(error_info)
+        error_emitter(error_info)
 
     _maybe_write_full_discovery_snapshot(mngr_ctx, result, provider_names, include_filters, exclude_filters)
     return result
@@ -267,11 +274,10 @@ def _construct_and_discover_for_provider(
         provider = get_provider_instance(provider_name, mngr_ctx)
         if reset_caches:
             provider.reset_caches()
-        error_emitter = _ErrorEmitter(result=result, results_lock=results_lock, on_error=params.on_error)
         provider_results = provider.discover_hosts_and_agents(
             cg=mngr_ctx.concurrency_group,
             include_destroyed=True,
-            on_error=error_emitter,
+            on_error=params.error_emitter,
         )
     except Exception as e:
         if params.error_behavior == ErrorBehavior.ABORT:
@@ -287,7 +293,7 @@ def _construct_and_discover_for_provider(
             provider_name=str(provider_name),
         )
         error_info = ProviderErrorInfo.build_for_provider(e, provider_name)
-        _ErrorEmitter(result=result, results_lock=results_lock, on_error=params.on_error)(error_info)
+        params.error_emitter(error_info)
         return
 
     with providers_lock:
@@ -377,7 +383,7 @@ def _list_agents_batch(
                 if params.error_behavior == ErrorBehavior.ABORT:
                     raise exception
                 error_info = ProviderErrorInfo.build_for_provider(exception, host_ref.provider_name)
-                _ErrorEmitter(result=result, results_lock=results_lock, on_error=params.on_error)(error_info)
+                params.error_emitter(error_info)
                 continue
 
             futures.append(
@@ -456,8 +462,9 @@ def _construct_discover_and_emit_for_provider(
             provider.reset_caches()
 
         # Phase 1: list hosts and get agent refs
-        error_emitter = _ErrorEmitter(result=result, results_lock=results_lock, on_error=params.on_error)
-        provider_results = provider.discover_hosts_and_agents(cg=cg, include_destroyed=True, on_error=error_emitter)
+        provider_results = provider.discover_hosts_and_agents(
+            cg=cg, include_destroyed=True, on_error=params.error_emitter
+        )
 
         # Warn if any host names are duplicated within this provider
         warn_on_duplicate_host_names(provider_results)
@@ -499,15 +506,13 @@ def _construct_discover_and_emit_for_provider(
             provider_name=str(provider_name),
         )
         error_info = ProviderErrorInfo.build_for_provider(e, provider_name)
-        _ErrorEmitter(result=result, results_lock=results_lock, on_error=params.on_error)(error_info)
+        params.error_emitter(error_info)
 
 
 def _handle_listing_error(
     source: DiscoveredAgent | DiscoveredHost,
     exception: BaseException,
     params: _ListAgentsParams,
-    result: ListResult,
-    results_lock: Lock,
 ) -> None:
     """Handle an error during detail collection for an agent or host."""
     if params.error_behavior == ErrorBehavior.ABORT:
@@ -516,7 +521,7 @@ def _handle_listing_error(
         error_info = AgentErrorInfo.build_for_agent(exception, source.agent_id)
     else:
         error_info = HostErrorInfo.build_for_host(exception, source.host_id)
-    _ErrorEmitter(result=result, results_lock=results_lock, on_error=params.on_error)(error_info)
+    params.error_emitter(error_info)
 
 
 def _collect_and_emit_details_for_host(
@@ -531,7 +536,7 @@ def _collect_and_emit_details_for_host(
         host_ref,
         agent_refs,
         params.field_generators,
-        lambda source, exc: _handle_listing_error(source, exc, params, result, results_lock),
+        lambda source, exc: _handle_listing_error(source, exc, params),
     )
     for agent_details in agent_details_list:
         # Apply CEL filters if provided
@@ -581,7 +586,7 @@ def _process_host_with_error_handling(
             provider_name=str(provider.name),
         )
         error_info = HostErrorInfo.build_for_host(e, host_ref.host_id)
-        _ErrorEmitter(result=result, results_lock=results_lock, on_error=params.on_error)(error_info)
+        params.error_emitter(error_info)
 
 
 @pure

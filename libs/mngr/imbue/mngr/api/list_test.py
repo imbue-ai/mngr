@@ -1366,18 +1366,28 @@ def _make_list_params(
     on_agent: Any = None,
     include_filters: tuple[str, ...] = (),
     exclude_filters: tuple[str, ...] = (),
+    result: ListResult | None = None,
+    results_lock: Any = None,
 ) -> _ListAgentsParams:
-    """Build a _ListAgentsParams for testing, with optional CEL filters."""
+    """Build a _ListAgentsParams for testing, with optional CEL filters.
+
+    The embedded ``error_emitter`` is wired to the same ``result`` /
+    ``results_lock`` that the test holds, so per-resource errors land on
+    the test's result.
+    """
     compiled_include: list[Any] = []
     compiled_exclude: list[Any] = []
     if include_filters or exclude_filters:
         compiled_include, compiled_exclude = compile_cel_filters(include_filters, exclude_filters)
+    bound_result = result if result is not None else ListResult()
+    bound_lock = results_lock if results_lock is not None else Lock()
     return _ListAgentsParams(
         compiled_include_filters=compiled_include,
         compiled_exclude_filters=compiled_exclude,
         error_behavior=error_behavior,
         on_agent=on_agent,
         on_error=on_error,
+        error_emitter=_ErrorEmitter(result=bound_result, results_lock=bound_lock, on_error=on_error),
     )
 
 
@@ -1642,6 +1652,8 @@ def test_construct_discover_and_emit_for_provider_continue_mode_records_error(
         params = _make_list_params(
             error_behavior=ErrorBehavior.CONTINUE,
             on_error=lambda e: captured_errors.append(e),
+            result=result,
+            results_lock=lock,
         )
 
         _construct_discover_and_emit_for_provider(
@@ -1674,7 +1686,7 @@ def test_construct_discover_and_emit_for_provider_abort_mode_propagates_error(
         mngr_ctx = _make_raising_provider_ctx(temp_mngr_ctx)
         result = ListResult()
         lock = Lock()
-        params = _make_list_params(error_behavior=ErrorBehavior.ABORT)
+        params = _make_list_params(error_behavior=ErrorBehavior.ABORT, result=result, results_lock=lock)
 
         with pytest.raises(MngrError, match="simulated discovery failure from test"):
             _construct_discover_and_emit_for_provider(
@@ -1704,7 +1716,7 @@ def test_construct_discover_and_emit_for_provider_success_path_processes_agents(
     """
     result = ListResult()
     lock = Lock()
-    params = _make_list_params(error_behavior=ErrorBehavior.CONTINUE)
+    params = _make_list_params(error_behavior=ErrorBehavior.CONTINUE, result=result, results_lock=lock)
 
     _construct_discover_and_emit_for_provider(
         provider_name=ProviderInstanceName("local"),
@@ -1735,14 +1747,12 @@ def test_handle_listing_error_continue_with_discovered_agent_creates_agent_error
     exception = MngrError("simulated agent lookup failure from test")
     result = ListResult()
     lock = Lock()
-    params = _make_list_params(error_behavior=ErrorBehavior.CONTINUE)
+    params = _make_list_params(error_behavior=ErrorBehavior.CONTINUE, result=result, results_lock=lock)
 
     _handle_listing_error(
         source=agent_ref,
         exception=exception,
         params=params,
-        result=result,
-        results_lock=lock,
     )
 
     assert len(result.errors) == 1
@@ -1761,14 +1771,12 @@ def test_handle_listing_error_continue_with_discovered_host_creates_host_error()
     exception = MngrError("simulated host unreachable from test")
     result = ListResult()
     lock = Lock()
-    params = _make_list_params(error_behavior=ErrorBehavior.CONTINUE)
+    params = _make_list_params(error_behavior=ErrorBehavior.CONTINUE, result=result, results_lock=lock)
 
     _handle_listing_error(
         source=host_ref,
         exception=exception,
         params=params,
-        result=result,
-        results_lock=lock,
     )
 
     assert len(result.errors) == 1
@@ -1793,14 +1801,14 @@ def test_handle_listing_error_continue_calls_on_error_callback() -> None:
     params = _make_list_params(
         error_behavior=ErrorBehavior.CONTINUE,
         on_error=lambda e: captured.append(e),
+        result=result,
+        results_lock=lock,
     )
 
     _handle_listing_error(
         source=agent_ref,
         exception=exception,
         params=params,
-        result=result,
-        results_lock=lock,
     )
 
     assert len(captured) == 1
@@ -1817,15 +1825,13 @@ def test_handle_listing_error_abort_mode_raises() -> None:
     exception = MngrError("simulated abort error from test")
     result = ListResult()
     lock = Lock()
-    params = _make_list_params(error_behavior=ErrorBehavior.ABORT)
+    params = _make_list_params(error_behavior=ErrorBehavior.ABORT, result=result, results_lock=lock)
 
     with pytest.raises(MngrError, match="simulated abort error from test"):
         _handle_listing_error(
             source=host_ref,
             exception=exception,
             params=params,
-            result=result,
-            results_lock=lock,
         )
 
     assert result.errors == []
@@ -2063,6 +2069,8 @@ def test_process_host_with_error_handling_continue_mode_records_host_error(
     params = _make_list_params(
         error_behavior=ErrorBehavior.CONTINUE,
         on_error=lambda e: captured_errors.append(e),
+        result=result,
+        results_lock=lock,
     )
 
     _process_host_with_error_handling(
@@ -2106,7 +2114,7 @@ def test_process_host_with_error_handling_abort_mode_propagates_error(
 
     result = ListResult()
     lock = Lock()
-    params = _make_list_params(error_behavior=ErrorBehavior.ABORT)
+    params = _make_list_params(error_behavior=ErrorBehavior.ABORT, result=result, results_lock=lock)
 
     with pytest.raises(MngrError, match="simulated detail retrieval failure from test"):
         _process_host_with_error_handling(
