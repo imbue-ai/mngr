@@ -151,8 +151,7 @@ def _send_resume_message_if_configured(agent: AgentInterface, output_opts: Outpu
 @optgroup.option(
     "--restart/--no-restart",
     default=False,
-    help="Stop the agent first if it is already running, ensuring a clean start. "
-    "Skips the resume message. A second --restart for the same agent is a no-op while the first is in progress.",
+    help="Stop the agent first if it is already running, ensuring a clean start. Skips the resume message.",
 )
 @optgroup.option(
     "--connect/--no-connect",
