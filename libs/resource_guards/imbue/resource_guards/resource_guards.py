@@ -793,6 +793,12 @@ def _pytest_fixture_setup(
 
     resources_set = set(resources)
     tracking_dir = tempfile.mkdtemp(prefix="pytest_guard_fixture_")
+    # Register cleanup as a fixture-scope finalizer so the tracking dir is
+    # removed after the fixture's teardown phase completes (the wrapper still
+    # writes to it during teardown, which runs after this hook returns).
+    # Finalizers fire in the fixture's own scope (function/module/session),
+    # so the timing is correct without per-scope plumbing here.
+    request.addfinalizer(lambda: shutil.rmtree(tracking_dir, ignore_errors=True))
     fixture_env = _build_guard_env(resources_set, tracking_dir)
     fixture_id = fixturedef.argname
 
@@ -815,14 +821,6 @@ def _pytest_fixture_setup(
         _check_fixture_setup_violations(
             fixture_id, resources_set, tracking_dir, setup_failed, setup_exception=setup_exception
         )
-        # The tracking dir is intentionally leaked: the wrapper still writes
-        # to it during the fixture's teardown phase, which runs after this
-        # hook returns. Reaping it correctly would require hooking into the
-        # fixture's scope finalizer (function/module/session) to time the
-        # deletion against the last teardown write -- more plumbing than the
-        # leak is worth. Each tagged fixture instantiation leaves behind one
-        # small empty-ish directory under the OS temp dir for the rest of
-        # the session; cleanup is left to the user/OS between sessions.
 
 
 @pytest.hookimpl(hookwrapper=True)

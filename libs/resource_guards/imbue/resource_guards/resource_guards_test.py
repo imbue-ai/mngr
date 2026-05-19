@@ -1271,6 +1271,20 @@ class _FakeOutcome:
         self.excinfo = excinfo
 
 
+class _FakeFixtureRequest:
+    """Minimal stand-in for pytest.FixtureRequest used by _pytest_fixture_setup.
+
+    Only addfinalizer is exercised by the hook -- finalizers are collected
+    here so tests can assert cleanup behavior if needed.
+    """
+
+    def __init__(self) -> None:
+        self.finalizers: list[Callable[[], None]] = []
+
+    def addfinalizer(self, finalizer: Callable[[], None]) -> None:
+        self.finalizers.append(finalizer)
+
+
 def test_check_guard_violations_blocked_invocation_fails_passing_test(
     isolated_guard_state: None,
     tmp_path: Path,
@@ -1798,7 +1812,8 @@ def test_pytest_fixture_setup_skips_undeclared_fixture() -> None:
         return "value"
 
     fixturedef = _FakeFixtureDef(func=some_fixture, argname="some_fixture")
-    hook = _pytest_fixture_setup(fixturedef, request=None)  # ty: ignore[invalid-argument-type]
+    request = _FakeFixtureRequest()
+    hook = _pytest_fixture_setup(fixturedef, request=request)  # ty: ignore[invalid-argument-type]
 
     # Hookwrapper yields once.
     next(hook)
@@ -1806,6 +1821,8 @@ def test_pytest_fixture_setup_skips_undeclared_fixture() -> None:
         hook.send(_FakeOutcome(excinfo=None))  # ty: ignore[invalid-argument-type]
 
     assert fixturedef.func is some_fixture
+    # An untagged fixture should not register any tracking-dir finalizer.
+    assert request.finalizers == []
 
 
 def test_pytest_fixture_setup_wraps_declared_fixture_and_restores_on_exit(
@@ -1821,7 +1838,8 @@ def test_pytest_fixture_setup_wraps_declared_fixture_and_restores_on_exit(
         yield "value"
 
     fixturedef = _FakeFixtureDef(func=some_fixture, argname="some_fixture")
-    hook = _pytest_fixture_setup(fixturedef, request=None)  # ty: ignore[invalid-argument-type]
+    request = _FakeFixtureRequest()
+    hook = _pytest_fixture_setup(fixturedef, request=request)  # ty: ignore[invalid-argument-type]
 
     next(hook)
     # fixturedef.func has been replaced with the wrapper. Drive it to exercise setup.
@@ -1835,6 +1853,10 @@ def test_pytest_fixture_setup_wraps_declared_fixture_and_restores_on_exit(
     with pytest.raises(StopIteration):
         hook.send(_FakeOutcome(excinfo=None))  # ty: ignore[invalid-argument-type]
     assert fixturedef.func is some_fixture
+    # A tracking-dir cleanup finalizer should have been registered. Run it
+    # to confirm it removes the directory without erroring.
+    assert len(request.finalizers) == 1
+    request.finalizers[0]()
 
 
 def test_pytest_fixture_setup_raises_on_undeclared_fixture_call(
@@ -1849,7 +1871,8 @@ def test_pytest_fixture_setup_raises_on_undeclared_fixture_call(
         yield "value"
 
     fixturedef = _FakeFixtureDef(func=some_fixture, argname="some_fixture")
-    hook = _pytest_fixture_setup(fixturedef, request=None)  # ty: ignore[invalid-argument-type]
+    request = _FakeFixtureRequest()
+    hook = _pytest_fixture_setup(fixturedef, request=request)  # ty: ignore[invalid-argument-type]
 
     next(hook)
     gen = fixturedef.func()
