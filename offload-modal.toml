@@ -5,6 +5,13 @@ test_timeout_secs = 300
 stream_output = true
 sandbox_project_root = "/code/mngr"
 
+# Run scripts/post-source-setup.sh after offload applies its thin diff
+# to the cached checkpoint image. The same script is the final RUN step
+# in libs/mngr/imbue/mngr/resources/Dockerfile, so the offload-cached
+# environment matches a from-scratch Dockerfile build (uv sync rerun,
+# image_commit_hash refreshed, .git normalized for the new HEAD).
+post_patch_cmd = "bash scripts/post-source-setup.sh"
+
 [provider]
 type = "modal"
 dockerfile = "libs/mngr/imbue/mngr/resources/Dockerfile"

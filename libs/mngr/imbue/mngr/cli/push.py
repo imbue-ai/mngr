@@ -2,14 +2,14 @@ from pathlib import Path
 
 import click
 from click_option_group import optgroup
-from loguru import logger
 
+from imbue.mngr.api.find import resolve_to_started_host_and_agent
 from imbue.mngr.api.push import push_files
 from imbue.mngr.api.push import push_git
 from imbue.mngr.cli.address_params import AGENT_ADDRESS
-from imbue.mngr.cli.address_params import HOSTED_LOCATION
 from imbue.mngr.cli.address_params import HOST_ADDRESS
-from imbue.mngr.cli.agent_utils import find_agent_for_command
+from imbue.mngr.cli.address_params import HOST_LOCATION_ADDRESS
+from imbue.mngr.cli.agent_utils import find_agent_by_address_or_interactively
 from imbue.mngr.cli.agent_utils import stop_agent_after_sync
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
@@ -22,7 +22,7 @@ from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.primitives import AgentAddress
 from imbue.mngr.primitives import HostAddress
-from imbue.mngr.primitives import HostedLocation
+from imbue.mngr.primitives import HostLocationAddress
 from imbue.mngr.primitives import UncommittedChangesMode
 
 
@@ -32,14 +32,15 @@ class PushCliOptions(CommonCliOptions):
     Inherits common options (output_format, quiet, verbose, etc.) from CommonCliOptions.
     """
 
-    target_pos: HostedLocation | None
+    target_pos: HostLocationAddress | None
     source_pos: str | None
-    target: HostedLocation | None
+    target: HostLocationAddress | None
     target_agent: AgentAddress | None
     target_host: HostAddress | None
     target_path: str | None
     source: str | None
     dry_run: bool
+    start: bool
     stop: bool
     delete: bool
     sync_mode: str
@@ -51,13 +52,13 @@ class PushCliOptions(CommonCliOptions):
 
 
 @click.command()
-@click.argument("target_pos", type=HOSTED_LOCATION, default=None, required=False, metavar="TARGET")
+@click.argument("target_pos", type=HOST_LOCATION_ADDRESS, default=None, required=False, metavar="TARGET")
 @click.argument("source_pos", default=None, required=False, metavar="SOURCE")
 @optgroup.group("Target Selection")
 @optgroup.option(
     "--target",
     "target",
-    type=HOSTED_LOCATION,
+    type=HOST_LOCATION_ADDRESS,
     help="Target specification: AGENT[@HOST[.PROVIDER]][:PATH]",
 )
 @optgroup.option("--target-agent", type=AGENT_ADDRESS, help="Target agent address (NAME[@HOST[.PROVIDER]])")
@@ -71,6 +72,12 @@ class PushCliOptions(CommonCliOptions):
     is_flag=True,
     default=False,
     help="Show what would be transferred without actually transferring",
+)
+@optgroup.option(
+    "--start/--no-start",
+    default=True,
+    show_default=True,
+    help="Automatically start the host if offline (the agent does not need to be running)",
 )
 @optgroup.option(
     "--stop",
@@ -129,7 +136,7 @@ def push(ctx: click.Context, **kwargs) -> None:
     )
 
     # Merge positional and named arguments (named option takes precedence)
-    effective_target_loc: HostedLocation | None = opts.target if opts.target is not None else opts.target_pos
+    effective_target_loc: HostLocationAddress | None = opts.target if opts.target is not None else opts.target_pos
     effective_source = opts.source if opts.source is not None else opts.source_pos
 
     # Check for unsupported options
@@ -185,15 +192,17 @@ def push(ctx: click.Context, **kwargs) -> None:
     source_path = Path(effective_source) if effective_source else Path.cwd()
 
     # Find the agent
-    result = find_agent_for_command(
+    host_ref, agent_ref = find_agent_by_address_or_interactively(
         mngr_ctx=mngr_ctx,
         address=target_address,
         host_filter=None,
     )
-    if result is None:
-        logger.info("No agent selected")
-        return
-    agent, host = result
+    agent, host = resolve_to_started_host_and_agent(
+        host_ref=host_ref,
+        agent_ref=agent_ref,
+        allow_auto_start=opts.start,
+        mngr_ctx=mngr_ctx,
+    )
 
     emit_info(f"Pushing to agent: {agent.name}", output_opts.output_format)
 
@@ -259,7 +268,7 @@ def push(ctx: click.Context, **kwargs) -> None:
 CommandHelpMetadata(
     key="push",
     one_line_description="Push files or git commits from local machine to an agent [experimental]",
-    synopsis="mngr push [TARGET] [SOURCE] [--target <TARGET>] [--source <DIR>] [--target-agent <AGENT>] [--sync-mode <MODE>] [--mirror] [--dry-run] [--stop]",
+    synopsis="mngr push [TARGET] [SOURCE] [--target <TARGET>] [--source <DIR>] [--target-agent <AGENT>] [--sync-mode <MODE>] [--mirror] [--dry-run] [--start/--no-start] [--stop]",
     description="""Syncs files or git state from a local directory to an agent's working directory.
 Default behavior uses rsync for efficient incremental file transfer.
 Use --sync-mode=git to push git branches instead of syncing files.

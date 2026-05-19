@@ -72,7 +72,7 @@ class MockProviderInstance(BaseProviderInstance):
         for h in self.mock_hosts:
             if h.id == host or h.get_name() == host:
                 return h
-        raise HostNotFoundError(host)
+        raise HostNotFoundError(self.name, host)
 
     def stop_host(
         self, host: HostInterface | HostId, create_snapshot: bool = True, timeout_seconds: float = 60.0
@@ -107,7 +107,7 @@ class MockProviderInstance(BaseProviderInstance):
         offline = self.mock_offline_hosts.get(str(host_id))
         if offline is not None and isinstance(offline, OfflineHost):
             return offline
-        raise HostNotFoundError(host_id)
+        raise HostNotFoundError(self.name, host_id)
 
     def get_host_resources(self, host: HostInterface) -> HostResources:
         raise NotImplementedError()

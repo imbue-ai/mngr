@@ -81,7 +81,13 @@ class LeaseResult(FrozenModel):
     """Server response from POST /hosts/lease."""
 
     host_db_id: LeaseDbId = Field(description="Database id of the leased host (UUID)")
-    vps_ip: str = Field(description="Public IPv4 of the VPS")
+    vps_address: str = Field(
+        description=(
+            "SSH-reachable address of the VPS. May be a public IPv4 (Vultr-backed rows) "
+            "or a DNS hostname (OVH-backed rows return the OVH serviceName like "
+            "``vps-eec8860b.vps.ovh.us``)."
+        )
+    )
     ssh_port: int = Field(description="SSH port for the VPS itself (root)")
     ssh_user: str = Field(description="SSH username on the VPS")
     container_ssh_port: int = Field(description="Port that maps to the docker container's sshd")
@@ -95,7 +101,12 @@ class LeasedHostInfo(FrozenModel):
     """One entry from GET /hosts."""
 
     host_db_id: LeaseDbId
-    vps_ip: str
+    vps_address: str = Field(
+        description=(
+            "SSH-reachable address of the VPS. Public IPv4 for Vultr-backed rows, "
+            "DNS hostname (e.g. ``vps-eec8860b.vps.ovh.us``) for OVH-backed rows."
+        )
+    )
     ssh_port: int
     ssh_user: str
     container_ssh_port: int

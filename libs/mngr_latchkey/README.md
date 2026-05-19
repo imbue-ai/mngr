@@ -173,7 +173,7 @@ blocked service; UIs (the minds desktop client, your own front-end)
 consume the stream and DELETE on resolution.
 
 * `POST /permission-requests` with body
-  `{"agent_id": "...", "service_name": "...", "rationale": "..."}`.
+  `{"agent_id": "...", "scope": "...", "permissions": ["...", ...], "rationale": "..."}`.
   The extension generates a `request_id` server-side and returns the
   full record. Available to agents.
 * `GET /permission-requests` returns the current queue as
@@ -186,7 +186,9 @@ consume the stream and DELETE on resolution.
   the admin.
 
 Pending requests are stored as one JSON file per request under
-`<latchkey-directory>/permission_requests/`.
+`<latchkey-directory>/permission_requests/v1/`. The `v1` segment is
+part of the on-disk schema version, so any pre-v1 files that happen
+to live in the parent directory are ignored.
 
 ### `permissions` extension
 
@@ -197,6 +199,16 @@ directory; any `path` query parameter that resolves outside that
 root is rejected with HTTP 403.
 
 * `GET /permissions?path=<file>` returns the full permissions file.
+* `GET /permissions/available` returns the full permission catalog as
+  a JSON object keyed by raw service name. Each value has the shape
+  `{"scope": "<schema_name>", "display_name": "...", "permissions":
+  ["...", ...]}`.
+* `GET /permissions/available/<service_name>` returns the permission
+  catalog entry for `<service_name>` (e.g. `slack`, `google-gmail`)
+  using the same value shape, or 404 if the service is unknown. Both
+  endpoints are backed by a `services.json` file (keyed by raw
+  service name) that ships alongside the extension; the path query
+  parameter is not consulted.
 * `GET /permissions/rules?path=<file>&rule_key=<scope>` returns the
   rule for `<scope>`, or 404 if absent.
 * `POST /permissions/rules?path=<file>&rule_key=<scope>` with a JSON

@@ -23,7 +23,6 @@ from imbue.mngr_imbue_cloud.config import get_active_profile_dir
 from imbue.mngr_imbue_cloud.config import get_sessions_dir
 from imbue.mngr_imbue_cloud.errors import ImbueCloudError
 from imbue.mngr_imbue_cloud.primitives import ImbueCloudAccount
-from imbue.mngr_imbue_cloud.primitives import get_default_connector_url
 from imbue.mngr_imbue_cloud.session_store import ImbueCloudSessionStore
 
 _DEFAULT_HOST_DIR_ENV_VAR = "MNGR_HOST_DIR"
@@ -53,13 +52,23 @@ def make_session_store() -> ImbueCloudSessionStore:
 
 
 def resolve_connector_url(override: str | None) -> str:
-    """Resolve the connector URL: explicit flag > env var > baked default."""
+    """Resolve the connector URL: explicit flag > env var.
+
+    There is no baked-in default; callers must either pass ``--connector-url``
+    or set ``MNGR__PROVIDERS__IMBUE_CLOUD__CONNECTOR_URL`` in the environment.
+    minds always passes the env var via the ImbueCloudCli wrapper, so this
+    only fires when someone invokes the CLI directly without setting up.
+    """
     if override:
         return override.rstrip("/")
     env_value = os.environ.get(CONNECTOR_URL_ENV_VAR)
     if env_value:
         return env_value.rstrip("/")
-    return get_default_connector_url().rstrip("/")
+    fail_with_json(
+        f"No connector URL configured: pass --connector-url <url> or set ${CONNECTOR_URL_ENV_VAR}.",
+        error_class="UsageError",
+        exit_code=2,
+    )
 
 
 def make_connector_client(connector_url: str | None) -> ImbueCloudConnectorClient:

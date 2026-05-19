@@ -10,7 +10,12 @@ from imbue.mngr.primitives import AgentTypeName
 # =============================================================================
 
 _agent_class_registry: dict[AgentTypeName, type] = {}
-_default_agent_class: type | None = None
+
+# Used by the on-disk load path when an agent's recorded type is no longer
+# registered (e.g. the plugin was uninstalled). Set by the agents layer at
+# plugin-load time so the hosts layer can degrade gracefully without
+# importing concretely from agents (which the import-linter forbids).
+_orphan_agent_class: type | None = None
 
 
 def register_agent_class(
@@ -21,28 +26,19 @@ def register_agent_class(
     _agent_class_registry[AgentTypeName(agent_type)] = agent_class
 
 
-def set_default_agent_class(agent_class: type) -> None:
-    """Set the default agent class returned when a type is not registered."""
-    global _default_agent_class
-    _default_agent_class = agent_class
-
-
 def get_agent_class(agent_type: str) -> type:
     """Get the agent class for an agent type.
 
-    Returns the default agent class if no specific type is registered.
-    Raises UnknownAgentTypeError if no default has been set.
+    Raises UnknownAgentTypeError if no class is registered for this type.
     """
     key = AgentTypeName(agent_type)
     if key in _agent_class_registry:
         return _agent_class_registry[key]
-    if _default_agent_class is not None:
-        return _default_agent_class
     raise UnknownAgentTypeError(agent_type)
 
 
 def is_agent_class_registered(agent_type: str) -> bool:
-    """Check if an agent class is registered for the given type (not counting the default fallback)."""
+    """Check if an agent class is registered for the given type."""
     return AgentTypeName(agent_type) in _agent_class_registry
 
 
@@ -51,8 +47,25 @@ def list_registered_agent_class_types() -> list[str]:
     return sorted(str(k) for k in _agent_class_registry.keys())
 
 
+def set_orphan_agent_class(agent_class: type) -> None:
+    """Set the class to use when loading an agent whose type is no longer registered.
+
+    Consulted only by the on-disk load path in the hosts layer, so commands
+    like ``mngr destroy`` keep working after a plugin is uninstalled. New
+    agents created via ``resolve_agent_type`` are unaffected -- they still
+    require a registered type or a valid ``parent_type`` chain.
+    """
+    global _orphan_agent_class
+    _orphan_agent_class = agent_class
+
+
+def get_orphan_agent_class() -> type | None:
+    """Return the orphan fallback class set by ``set_orphan_agent_class``, or None."""
+    return _orphan_agent_class
+
+
 def reset_agent_class_registry() -> None:
     """Reset the registry. Used for test isolation."""
-    global _default_agent_class
+    global _orphan_agent_class
     _agent_class_registry.clear()
-    _default_agent_class = None
+    _orphan_agent_class = None
