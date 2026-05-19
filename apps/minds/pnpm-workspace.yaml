@@ -1,2 +1,10 @@
+allowBuilds:
+  '@firebase/util': true
+  dtrace-provider: true
+  electron: true
+  protobufjs: true
 onlyBuiltDependencies:
   - electron
+  - '@firebase/util'
+  - dtrace-provider
+  - protobufjs

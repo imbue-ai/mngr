@@ -1,0 +1,1 @@
+Approve native-build scripts for `@firebase/util`, `dtrace-provider`, and `protobufjs` in `apps/minds/pnpm-workspace.yaml` so `just minds-start` / `just devminds-start` no longer fail on pnpm 11 (which treats unapproved build scripts as a hard error during the `pnpm start` deps-status check). The `allowBuilds` placeholder values were also replaced with explicit booleans.
