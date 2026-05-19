@@ -327,12 +327,18 @@ def test_destroy_prints_errors_if_any_identifier_not_found(
         assert tmux_session_exists(session_name), "Existing agent should not be destroyed when some identifiers fail"
 
 
-# wait_for(tmux_session_exists(...)) calls a tmux subprocess every poll
-# iteration, which dominates the test's wall-clock under contended CI. Raising
-# poll_interval to 1.0s cuts the per-wait subprocess call count ~10x. @flaky
-# remains as a safety net for outlier load.
+# Two-agent setup + parallel destroy can edge over the global 10s pytest-timeout
+# on contended CI runners (see PR #1652 where the now-fixed sibling
+# test_destroy_via_stdin exhausted all 5 flaky retries with the same shape).
+# The multi-agent shape is the point of this test, so we cannot shrink the
+# workload the way we did for that sibling. A poll_interval bump on the
+# wait_for calls was measured locally and made no difference (the polled
+# condition is true on the first iteration), so the only reliable lever is a
+# per-test timeout. Matches the precedent on
+# test_destroy_transfer_none_keeps_shared_worktree.
 @pytest.mark.tmux
 @pytest.mark.flaky
+@pytest.mark.timeout(60)
 def test_destroy_multiple_agents(
     cli_runner: CliRunner,
     temp_work_dir: Path,
@@ -374,12 +380,10 @@ def test_destroy_multiple_agents(
 
         wait_for(
             lambda: tmux_session_exists(session_name1),
-            poll_interval=1.0,
             error_message=f"Expected tmux session {session_name1} to exist",
         )
         wait_for(
             lambda: tmux_session_exists(session_name2),
-            poll_interval=1.0,
             error_message=f"Expected tmux session {session_name2} to exist",
         )
 
@@ -394,7 +398,6 @@ def test_destroy_multiple_agents(
 
         wait_for(
             lambda: not tmux_session_exists(session_name1) and not tmux_session_exists(session_name2),
-            poll_interval=1.0,
             error_message="Expected both tmux sessions to be destroyed",
         )
 
@@ -844,7 +847,6 @@ def test_destroy_via_stdin(
 
         wait_for(
             lambda: tmux_session_exists(session_name),
-            poll_interval=1.0,
             error_message=f"Expected tmux session {session_name} to exist",
         )
 
@@ -860,6 +862,5 @@ def test_destroy_via_stdin(
 
         wait_for(
             lambda: not tmux_session_exists(session_name),
-            poll_interval=1.0,
             error_message=f"Expected tmux session {session_name} to be destroyed",
         )
