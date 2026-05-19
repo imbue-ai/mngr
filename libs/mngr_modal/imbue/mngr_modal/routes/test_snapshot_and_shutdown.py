@@ -24,6 +24,12 @@ from imbue.mngr_modal.routes.deployment import deploy_function
 from imbue.modal_proxy.direct import DirectModalInterface
 from imbue.resource_guards.resource_guards import fixture_uses_resources
 
+# Every test in this module touches Modal (directly or transitively through
+# the deployed_snapshot_function fixture, which is decorated with
+# @fixture_uses_resources("modal")). Apply the mark once at module scope
+# rather than repeating it on each test.
+pytestmark = [pytest.mark.modal]
+
 # =============================================================================
 # Acceptance tests (require Modal network access)
 # =============================================================================
@@ -156,7 +162,6 @@ def deployed_snapshot_function() -> Generator[tuple[str, str], None, None]:
 
 
 @pytest.mark.acceptance
-@pytest.mark.modal
 @pytest.mark.timeout(180)
 def test_snapshot_and_shutdown_success(
     deployed_snapshot_function: tuple[str, str],
@@ -223,7 +228,6 @@ def test_snapshot_and_shutdown_success(
 
 
 @pytest.mark.acceptance
-@pytest.mark.modal
 @pytest.mark.timeout(180)
 def test_snapshot_and_shutdown_missing_sandbox_id(
     deployed_snapshot_function: tuple[str, str],
@@ -242,7 +246,6 @@ def test_snapshot_and_shutdown_missing_sandbox_id(
 
 
 @pytest.mark.acceptance
-@pytest.mark.modal
 @pytest.mark.timeout(180)
 def test_snapshot_and_shutdown_missing_host_id(
     deployed_snapshot_function: tuple[str, str],
@@ -261,7 +264,6 @@ def test_snapshot_and_shutdown_missing_host_id(
 
 
 @pytest.mark.acceptance
-@pytest.mark.modal
 @pytest.mark.timeout(180)
 def test_snapshot_and_shutdown_nonexistent_sandbox(
     deployed_snapshot_function: tuple[str, str],
@@ -287,7 +289,6 @@ def test_snapshot_and_shutdown_nonexistent_sandbox(
 
 
 @pytest.mark.acceptance
-@pytest.mark.modal
 @pytest.mark.timeout(180)
 def test_snapshot_and_shutdown_nonexistent_host_record(
     deployed_snapshot_function: tuple[str, str],
