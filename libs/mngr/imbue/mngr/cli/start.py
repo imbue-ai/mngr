@@ -1,7 +1,4 @@
-import fcntl
-import io
 from collections.abc import Sequence
-from pathlib import Path
 from typing import Any
 from typing import assert_never
 
@@ -15,6 +12,7 @@ from imbue.mngr.api.connect import resolve_connect_command
 from imbue.mngr.api.connect import run_connect_command
 from imbue.mngr.api.data_types import ConnectionOptions
 from imbue.mngr.api.discovery_events import emit_discovery_events_for_host
+from imbue.mngr.api.find import AgentMatch
 from imbue.mngr.api.find import ensure_host_started
 from imbue.mngr.api.find import find_all_agents
 from imbue.mngr.api.find import group_agents_by_host
@@ -35,35 +33,15 @@ from imbue.mngr.cli.stdin_utils import expand_stdin_placeholder
 from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import OutputOptions
+from imbue.mngr.errors import LockNotHeldError
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import AgentAddress
-from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import HostAddress
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import OutputFormat
 from imbue.mngr.utils.polling import poll_until
-
-
-def _try_acquire_restart_lock(host_dir: Path, agent_id: AgentId) -> io.TextIOWrapper | None:
-    """Try to acquire a non-blocking exclusive file lock for an agent restart.
-
-    Returns the open file handle (caller must close to release) or None if
-    the lock is already held by another process.
-    """
-    lock_path = host_dir / "agents" / str(agent_id) / "restart.lock"
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    lock_file = open(lock_path, "w")
-    try:
-        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError:
-        lock_file.close()
-        return None
-    except OSError:
-        lock_file.close()
-        raise
-    return lock_file
 
 
 class StartCliOptions(CommonCliOptions):
@@ -131,6 +109,10 @@ def _send_resume_message_if_configured(agent: AgentInterface, output_opts: Outpu
     logger.debug("Sent resume message to agent {}", agent.name)
 
 
+def _restart_lock_name(match: AgentMatch) -> str:
+    return f"agents/{match.agent_id}/restart_lock"
+
+
 @click.command(name="start")
 @click.argument("agents", nargs=-1, required=False)
 @optgroup.group("Target Selection")
@@ -189,95 +171,31 @@ def start(ctx: click.Context, **kwargs: Any) -> None:
     if opts.connect and len(agent_addresses) > 1:
         raise click.UsageError("--connect can only be used with a single agent")
 
-    if opts.restart:
-        _start_with_restart(agent_addresses, mngr_ctx, output_opts, opts)
-    else:
-        _start_stopped(agent_addresses, mngr_ctx, output_opts, opts)
+    _start_agents(agent_addresses, mngr_ctx, output_opts, opts)
 
 
-def _start_stopped(
+def _start_agents(
     agent_addresses: list[AgentAddress],
     mngr_ctx: MngrContext,
     output_opts: OutputOptions,
     opts: StartCliOptions,
 ) -> None:
-    # Find agents to start (STOPPED agents)
-    agents_to_start = find_all_agents(
-        addresses=agent_addresses,
-        filter_all=False,
-        target_state=AgentLifecycleState.STOPPED,
-        mngr_ctx=mngr_ctx,
-    )
+    is_restart = opts.restart
 
-    if not agents_to_start:
-        _output("No stopped agents found to start", output_opts)
-        return
-
-    # Start each agent
-    started_agents: list[str] = []
-    last_started_agent = None
-    last_started_host = None
-
-    # Group agents by host to avoid starting the same host multiple times
-    agents_by_host = group_agents_by_host(agents_to_start)
-
-    for host_key, agent_list in agents_by_host.items():
-        host_id_str, _ = host_key.split(":", 1)
-        # Get provider from first agent (all agents in list have same provider)
-        provider_name = agent_list[0].provider_name
-
-        provider = get_provider_instance(provider_name, mngr_ctx)
-        host = provider.get_host(HostId(host_id_str))
-
-        # Ensure host is started (always start since this is the start command)
-        online_host, _ = ensure_host_started(host, is_start_desired=True, provider=provider)
-
-        # Start each agent on this host
-        agent_ids_to_start = [match.agent_id for match in agent_list]
-        online_host.start_agents(agent_ids_to_start)
-
-        # Emit discovery events for started agents and host
-        emit_discovery_events_for_host(mngr_ctx.config, online_host)
-
-        for match in agent_list:
-            started_agents.append(str(match.agent_name))
-            _output(f"Started agent: {match.agent_name}", output_opts)
-
-            # Get the agent object for potential connect and resume message
-            for agent in online_host.get_agents():
-                if agent.id == match.agent_id:
-                    # Send resume message if configured
-                    _send_resume_message_if_configured(agent, output_opts)
-
-                    # Track for potential connect
-                    if opts.connect:
-                        last_started_agent = agent
-                        last_started_host = online_host
-                    break
-
-    # Output final result
-    _output_result(started_agents, output_opts)
-
-    # Connect if requested and we started exactly one agent
-    _maybe_connect(opts, last_started_agent, last_started_host, mngr_ctx)
-
-
-def _start_with_restart(
-    agent_addresses: list[AgentAddress],
-    mngr_ctx: MngrContext,
-    output_opts: OutputOptions,
-    opts: StartCliOptions,
-) -> None:
-    # Find agents regardless of state
+    # Find agents: STOPPED only for normal start, any state for restart
+    target_state = None if is_restart else AgentLifecycleState.STOPPED
     matched_agents = find_all_agents(
         addresses=agent_addresses,
         filter_all=False,
-        target_state=None,
+        target_state=target_state,
         mngr_ctx=mngr_ctx,
     )
 
     if not matched_agents:
-        _output("No agents found matching the given addresses", output_opts)
+        if is_restart:
+            _output("No agents found matching the given addresses", output_opts)
+        else:
+            _output("No stopped agents found to start", output_opts)
         return
 
     started_agents: list[str] = []
@@ -298,48 +216,59 @@ def _start_with_restart(
         # Ensure host is started (always start since this is the start command)
         online_host, _ = ensure_host_started(host, is_start_desired=True, provider=provider)
 
-        # Acquire per-agent file locks to prevent concurrent restarts
-        locked_agents = []
-        lock_handles: list[io.TextIOWrapper] = []
-        try:
+        if is_restart:
+            # Restart each agent individually under a cooperative lock
             for match in agent_list:
-                lock = _try_acquire_restart_lock(online_host.host_dir, match.agent_id)
-                if lock is not None:
-                    locked_agents.append(match)
-                    lock_handles.append(lock)
-                else:
+                try:
+                    with online_host.lock_cooperatively(
+                        timeout_seconds=0,
+                        lock_name=_restart_lock_name(match),
+                    ):
+                        with log_span("Stopping agent {} for restart", match.agent_name):
+                            online_host.stop_agents([match.agent_id])
+                        with log_span("Starting agent {}", match.agent_name):
+                            online_host.start_agents([match.agent_id])
+
+                        started_agents.append(str(match.agent_name))
+                        _output(f"Restarted agent: {match.agent_name}", output_opts)
+
+                        # Track for potential connect
+                        if opts.connect:
+                            for agent in online_host.get_agents():
+                                if agent.id == match.agent_id:
+                                    last_started_agent = agent
+                                    last_started_host = online_host
+                                    break
+                except LockNotHeldError:
                     _output(f"Skipping agent {match.agent_name} -- restart already in progress", output_opts)
+        else:
+            # Start all stopped agents on this host in one batch
+            agent_ids_to_start = [match.agent_id for match in agent_list]
+            online_host.start_agents(agent_ids_to_start)
 
-            if not locked_agents:
-                continue
-
-            # Stop then start each agent on this host
-            locked_ids = [match.agent_id for match in locked_agents]
-
-            with log_span("Stopping {} agent(s) for restart", len(locked_ids)):
-                online_host.stop_agents(locked_ids)
-
-            with log_span("Starting {} agent(s)", len(locked_ids)):
-                online_host.start_agents(locked_ids)
-
-            # Emit discovery events for restarted agents and host
-            emit_discovery_events_for_host(mngr_ctx.config, online_host)
-
-            for match in locked_agents:
+            for match in agent_list:
                 started_agents.append(str(match.agent_name))
-                _output(f"Restarted agent: {match.agent_name}", output_opts)
+                _output(f"Started agent: {match.agent_name}", output_opts)
 
-                if opts.connect:
-                    for agent in online_host.get_agents():
-                        if agent.id == match.agent_id:
+                # Get the agent object for potential connect and resume message
+                for agent in online_host.get_agents():
+                    if agent.id == match.agent_id:
+                        # Send resume message if configured
+                        _send_resume_message_if_configured(agent, output_opts)
+
+                        # Track for potential connect
+                        if opts.connect:
                             last_started_agent = agent
                             last_started_host = online_host
-                            break
-        finally:
-            for handle in lock_handles:
-                handle.close()
+                        break
 
+        # Emit discovery events for agents and host
+        emit_discovery_events_for_host(mngr_ctx.config, online_host)
+
+    # Output final result
     _output_result(started_agents, output_opts)
+
+    # Connect if requested and we started exactly one agent
     _maybe_connect(opts, last_started_agent, last_started_host, mngr_ctx)
 
 

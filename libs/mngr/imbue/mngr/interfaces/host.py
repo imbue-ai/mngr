@@ -397,8 +397,14 @@ class OnlineHostInterface(HostInterface, OuterHostInterface, ABC):
 
     @abstractmethod
     @contextmanager
-    def lock_cooperatively(self, timeout_seconds: float = 30.0) -> Iterator[None]:
-        """Context manager for acquiring and releasing the host lock."""
+    def lock_cooperatively(self, timeout_seconds: float = 30.0, lock_name: str = "host_lock") -> Iterator[None]:
+        """Context manager for acquiring and releasing a cooperative lock.
+
+        The lock is advisory: it only works if all participants check it.
+        Defaults to the host-level lock used to serialize provisioning and
+        prevent idle shutdown during operations. Pass a different lock_name
+        for scoped locks (e.g. ``f"agents/{agent_id}/restart_lock"``).
+        """
         ...
 
     @abstractmethod
