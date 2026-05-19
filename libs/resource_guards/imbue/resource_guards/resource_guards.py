@@ -800,13 +800,11 @@ def _pytest_fixture_setup(
         return
 
     resources_set = set(resources)
-    tracking_dir = tempfile.mkdtemp(prefix="pytest_guard_fixture_")
-    # Register cleanup as a fixture-scope finalizer so the tracking dir is
-    # removed after the fixture's teardown phase completes (the wrapper still
-    # writes to it during teardown, which runs after this hook returns).
-    # Finalizers fire in the fixture's own scope (function/module/session),
-    # so the timing is correct without per-scope plumbing here.
-    request.addfinalizer(lambda: shutil.rmtree(tracking_dir, ignore_errors=True))
+    # Use pytest's session-scoped tmp_path_factory so the tracking dir lives
+    # under pytest's own /tmp/pytest-of-<user>/pytest-N/ tree. Pytest rotates
+    # those between sessions, so we don't need our own finalizer.
+    tmp_path_factory = request.getfixturevalue("tmp_path_factory")
+    tracking_dir = str(tmp_path_factory.mktemp("guard_fixture", numbered=True))
     fixture_env = _build_guard_env(resources_set, tracking_dir)
     fixture_id = fixturedef.argname
 

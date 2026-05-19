@@ -20,6 +20,7 @@ from imbue.resource_guards.resource_guards import _collect_fixture_covered_resou
 from imbue.resource_guards.resource_guards import _detect_guard_violations
 from imbue.resource_guards.resource_guards import _make_guarded_fixture_wrapper
 from imbue.resource_guards.resource_guards import _pytest_fixture_setup
+from imbue.resource_guards.resource_guards import _pytest_runtest_setup
 from imbue.resource_guards.resource_guards import cleanup_resource_guard_wrappers
 from imbue.resource_guards.resource_guards import cleanup_sdk_resource_guards
 from imbue.resource_guards.resource_guards import create_resource_guard_wrappers
@@ -1340,15 +1341,17 @@ class _FakeOutcome:
 class _FakeFixtureRequest:
     """Minimal stand-in for pytest.FixtureRequest used by _pytest_fixture_setup.
 
-    Only addfinalizer is exercised by the hook -- finalizers are collected
-    here so tests can assert cleanup behavior if needed.
+    The hook calls request.getfixturevalue("tmp_path_factory") to get pytest's
+    session-scoped tmp dir factory. Tests pass the real fixture in here so the
+    hook gets a working factory.
     """
 
-    def __init__(self) -> None:
-        self.finalizers: list[Callable[[], None]] = []
+    def __init__(self, tmp_path_factory: pytest.TempPathFactory | None = None) -> None:
+        self._tmp_path_factory = tmp_path_factory
 
-    def addfinalizer(self, finalizer: Callable[[], None]) -> None:
-        self.finalizers.append(finalizer)
+    def getfixturevalue(self, name: str) -> Any:
+        assert name == "tmp_path_factory", f"_FakeFixtureRequest only supports tmp_path_factory, got {name!r}"
+        return self._tmp_path_factory
 
 
 def test_check_guard_violations_blocked_invocation_fails_passing_test(
@@ -1887,12 +1890,11 @@ def test_pytest_fixture_setup_skips_undeclared_fixture() -> None:
         hook.send(_FakeOutcome(excinfo=None))  # ty: ignore[invalid-argument-type]
 
     assert fixturedef.func is some_fixture
-    # An untagged fixture should not register any tracking-dir finalizer.
-    assert request.finalizers == []
 
 
 def test_pytest_fixture_setup_wraps_declared_fixture_and_restores_on_exit(
     isolated_guard_state: None,
+    tmp_path_factory: pytest.TempPathFactory,
 ) -> None:
     """A declared fixture should be wrapped during setup and restored after the hookwrapper exits."""
     register_resource_guard("cat")
@@ -1904,7 +1906,7 @@ def test_pytest_fixture_setup_wraps_declared_fixture_and_restores_on_exit(
         yield "value"
 
     fixturedef = _FakeFixtureDef(func=some_fixture, argname="some_fixture")
-    request = _FakeFixtureRequest()
+    request = _FakeFixtureRequest(tmp_path_factory=tmp_path_factory)
     hook = _pytest_fixture_setup(fixturedef, request=request)  # ty: ignore[invalid-argument-type]
 
     next(hook)
@@ -1919,14 +1921,11 @@ def test_pytest_fixture_setup_wraps_declared_fixture_and_restores_on_exit(
     with pytest.raises(StopIteration):
         hook.send(_FakeOutcome(excinfo=None))  # ty: ignore[invalid-argument-type]
     assert fixturedef.func is some_fixture
-    # A tracking-dir cleanup finalizer should have been registered. Run it
-    # to confirm it removes the directory without erroring.
-    assert len(request.finalizers) == 1
-    request.finalizers[0]()
 
 
 def test_pytest_fixture_setup_raises_on_undeclared_fixture_call(
     isolated_guard_state: None,
+    tmp_path_factory: pytest.TempPathFactory,
 ) -> None:
     """A declared fixture that invokes an undeclared resource should raise on hookwrapper close."""
     register_resource_guard("cat")
@@ -1937,7 +1936,7 @@ def test_pytest_fixture_setup_raises_on_undeclared_fixture_call(
         yield "value"
 
     fixturedef = _FakeFixtureDef(func=some_fixture, argname="some_fixture")
-    request = _FakeFixtureRequest()
+    request = _FakeFixtureRequest(tmp_path_factory=tmp_path_factory)
     hook = _pytest_fixture_setup(fixturedef, request=request)  # ty: ignore[invalid-argument-type]
 
     next(hook)
@@ -1948,6 +1947,98 @@ def test_pytest_fixture_setup_raises_on_undeclared_fixture_call(
 
     with pytest.raises(ResourceGuardViolation, match="did not declare it"):
         hook.send(_FakeOutcome(excinfo=None))  # ty: ignore[invalid-argument-type]
+
+
+def test_pytest_fixture_setup_captures_setup_exception_for_chaining(
+    isolated_guard_state: None,
+    tmp_path_factory: pytest.TempPathFactory,
+) -> None:
+    """When the inner setup raised, the hook captures the exception to chain it onto a guard violation."""
+    register_resource_guard("cat")
+
+    @fixture_uses_resources("cat")
+    def some_fixture() -> Generator[str, None, None]:
+        # Simulate the blocked-during-setup case: tracking file is present,
+        # AND the inner fixture setup raised (excinfo non-None).
+        Path(os.environ["_PYTEST_GUARD_TRACKING_DIR"]).joinpath("blocked_cat").touch()
+        yield "value"
+
+    fixturedef = _FakeFixtureDef(func=some_fixture, argname="some_fixture")
+    request = _FakeFixtureRequest(tmp_path_factory=tmp_path_factory)
+    hook = _pytest_fixture_setup(fixturedef, request=request)  # ty: ignore[invalid-argument-type]
+
+    next(hook)
+    gen = fixturedef.func()
+    next(gen)
+    for _ in gen:
+        pass
+
+    original = RuntimeError("inner setup boom")
+    outcome = _FakeOutcome(excinfo=(type(original), original, None))
+    with pytest.raises(ResourceGuardViolation) as exc_info:
+        hook.send(outcome)  # ty: ignore[invalid-argument-type]
+    # The captured setup_exception should be chained as __cause__.
+    assert exc_info.value.__cause__ is original
+
+
+def test_pytest_runtest_setup_defers_closure_violation_until_after_yield(
+    isolated_guard_state: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A ResourceGuardViolation from closure inspection is held until after inner setup yields."""
+    register_resource_guard("cat")
+
+    # _pytest_runtest_setup asserts _guard_wrapper_dir is not None; pretend
+    # the wrapper directory was created.
+    monkeypatch.setattr(resource_guards, "_guard_wrapper_dir", "/tmp/fake-wrapper-dir")
+
+    # Build an item whose fixture closure forces _collect_fixture_covered_resources
+    # to raise: an override (two FixtureDefs under the same name) where one is tagged.
+    def tagged_fixture() -> None:
+        pass
+
+    def override_fixture() -> None:
+        pass
+
+    fixture_uses_resources("cat")(tagged_fixture)
+
+    fixture_info = _FakeFixtureInfo(
+        {
+            "shared": [
+                _FakeFixtureDef(tagged_fixture, "shared"),
+                _FakeFixtureDef(override_fixture, "shared"),
+            ],
+        }
+    )
+
+    class _FakeMarker:
+        name = "cat"
+
+    class _FakeItem:
+        def __init__(self) -> None:
+            self._fixtureinfo = fixture_info
+            self._guard_state: _PerTestGuardState | None = None
+
+        def iter_markers(self) -> list[_FakeMarker]:
+            return [_FakeMarker()]
+
+    item = _FakeItem()
+    hook = _pytest_runtest_setup(item)  # ty: ignore[invalid-argument-type]
+
+    # The hook should yield without raising even though the closure walk raised.
+    next(hook)
+
+    # Guard state should be initialized so teardown/makereport don't crash.
+    assert item._guard_state is not None
+    assert item._guard_state.tracking_dir.startswith("/")
+
+    # After the inner setup completes (yield resumes), the held violation is raised.
+    with pytest.raises(ResourceGuardViolation, match="multiple definitions"):
+        with pytest.raises(StopIteration):
+            hook.send(None)
+
+    # Clean up the env patcher we started.
+    item._guard_state.env_patcher.stop()
 
 
 # ---------------------------------------------------------------------------

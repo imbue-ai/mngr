@@ -223,8 +223,12 @@ def test_prevent_unittest_mock_imports() -> None:
 # It mirrors the existing pattern of resetting every module-level guard state
 # attribute via monkeypatch so each test gets a clean slate; the new decorator
 # storage needs the same treatment to keep tests isolated.
+# The +1 after that is the new unit test for _pytest_runtest_setup that needs
+# to pretend the session-level guard wrapper directory exists; it sets the
+# module-level _guard_wrapper_dir via monkeypatch.setattr for the same reason
+# isolate_guard_state does.
 def test_prevent_monkeypatch_setattr() -> None:
-    rc.check_monkeypatch_setattr(_DIR, snapshot(10))
+    rc.check_monkeypatch_setattr(_DIR, snapshot(11))
 
 
 def test_prevent_test_container_classes() -> None:
