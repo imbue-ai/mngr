@@ -132,7 +132,12 @@ def _read_host_record_from_volume(app_name: str, host_id: str) -> dict[str, Any]
 def deployed_snapshot_function() -> Generator[tuple[str, str], None, None]:
     """Deploy the snapshot function for testing and clean up after.
 
-    Yields a tuple of (app_name, function_url).
+    Yields a tuple of (app_name, function_url). Module-scoped so the
+    expensive deploy + cold-start warmup runs exactly once per module
+    execution. The fixture-scope resource guard authorizes the modal
+    calls inside setup/teardown against the fixture's own declaration,
+    so siblings sharing the cached URL don't need per-test modal calls
+    of their own.
     """
     app_name = _get_test_app_name()
     # The deployed function creates a volume named {app_name}-state
