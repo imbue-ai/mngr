@@ -44,6 +44,8 @@ const WORKSPACE_PACKAGES = {
   'imbue-mngr-latchkey':    'libs/mngr_latchkey',
   'imbue-mngr-lima':        'libs/mngr_lima',
   'imbue-mngr-modal':       'libs/mngr_modal',
+  'imbue-mngr-ovh':         'libs/mngr_ovh',
+  'imbue-mngr-vps-docker':  'libs/mngr_vps_docker',
   'imbue-common':           'libs/imbue_common',
   'concurrency-group':      'libs/concurrency_group',
   'resource-guards':        'libs/resource_guards',
