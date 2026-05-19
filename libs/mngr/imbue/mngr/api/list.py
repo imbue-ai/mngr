@@ -123,7 +123,6 @@ class _ErrorEmitter(FrozenModel):
 class _ListAgentsParams(FrozenModel):
     """Shared parameters for the internal agent listing pipeline."""
 
-    model_config = {"arbitrary_types_allowed": True}
     compiled_include_filters: list[Any]
     compiled_exclude_filters: list[Any]
     error_behavior: ErrorBehavior
