@@ -3,16 +3,15 @@
 This module owns everything that happens between a
 ``LatchkeyPermissionRequestEvent`` arriving on the inbox and the user's
 decision being applied: rendering the dialog HTML, parsing the form
-submission, writing the per-host permission rule (via the latchkey
-gateway), appending the response event, and notifying the waiting agent
-via ``mngr message``.
+submission, probing credential status, running ``latchkey auth browser``
+when needed, rewriting the per-agent ``latchkey_permissions.json``, appending the
+response event, and notifying the waiting agent via ``mngr message``.
 
-The dialog grants *scope* only. Credential acquisition (``latchkey auth
-browser`` / ``browser-prepare``) is no longer driven from here: the
-agent inside the VM runs those commands itself via the gateway's
-``/latchkey/`` RPC, which is gated by the gateway password only (not by
-per-scope permissions), so the host pops the sign-in Chrome window on
-demand when the agent next hits a 401.
+Services that latchkey reports as not supporting browser sign-in fall
+back to a manual flow: the grant is refused (the request stays pending),
+the user is shown the suggested ``latchkey auth set`` invocation, and a
+fresh Approve click re-runs ``latchkey services info`` to check whether
+credentials have since become valid.
 
 The route layer in ``app.py`` is intentionally thin: it authenticates,
 looks up the request event by id, and dispatches by request type. All
@@ -22,7 +21,7 @@ the latchkey-specific work lives here.
 import asyncio
 import html as html_module
 import json
-from collections.abc import Mapping
+import shlex
 from collections.abc import Sequence
 from enum import auto
 from pathlib import Path
@@ -43,9 +42,8 @@ from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClient
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClientError
-from imbue.minds.desktop_client.latchkey.services_catalog import IMPLICIT_DEFAULT_PERMISSIONS
 from imbue.minds.desktop_client.latchkey.services_catalog import ServicePermissionInfo
-from imbue.minds.desktop_client.latchkey.services_catalog import get_service_info
+from imbue.minds.desktop_client.latchkey.services_catalog import ServicesCatalog
 from imbue.minds.desktop_client.latchkey.templates import render_latchkey_permission_dialog
 from imbue.minds.desktop_client.request_events import LatchkeyPermissionRequestEvent
 from imbue.minds.desktop_client.request_events import RequestEvent
@@ -71,14 +69,32 @@ class GrantOutcome(UpperCaseStrEnum):
 
     GRANTED = auto()
     DENIED = auto()
+    NEEDS_MANUAL_CREDENTIALS = auto()
 
 
 class GrantResult(FrozenModel):
     """Outcome of ``LatchkeyPermissionGrantHandler.grant``."""
 
     outcome: GrantOutcome = Field(description="Which branch the grant flow took.")
-    message: str = Field(description="Plain-text user/agent-facing message; delivered via ``mngr message``.")
-    response_event: RequestResponseEvent = Field(description="The freshly-appended response event.")
+    message: str = Field(
+        description=(
+            "Plain-text user/agent-facing message. For ``GRANTED``/``DENIED`` it has "
+            "already been delivered to the agent via ``mngr message``; for "
+            "``NEEDS_MANUAL_CREDENTIALS`` it is shown only to the user."
+        ),
+    )
+    response_event: RequestResponseEvent | None = Field(
+        description=(
+            "The freshly-appended response event when the request was resolved. "
+            "``None`` for ``NEEDS_MANUAL_CREDENTIALS`` because the request stays pending."
+        ),
+    )
+    set_credentials_example: str | None = Field(
+        description=(
+            "Suggested ``latchkey auth set`` invocation to show the user. Only set "
+            "when ``outcome == NEEDS_MANUAL_CREDENTIALS``."
+        ),
+    )
 
 
 class LatchkeyPermissionFlowError(Exception):
@@ -129,6 +145,36 @@ def _format_denied_message(service_display_name: str) -> str:
     return f"Your permission request for {service_display_name} was denied. Do not retry the blocked call."
 
 
+def _format_auth_failed_message(service_display_name: str, detail: str) -> str:
+    suffix = f" Reason: {detail}" if detail else ""
+    return (
+        f"Your permission request for {service_display_name} could not be completed because the user's "
+        f"sign-in flow did not finish.{suffix} Do not retry yet; report this to the user."
+    )
+
+
+def _format_manual_credentials_message(service_display_name: str) -> str:
+    return f"{service_display_name} does not support browser sign-in; manual credentials are required."
+
+
+def _fallback_set_credentials_example(service_name: str) -> str:
+    """Return a generic ``latchkey auth set`` invocation when latchkey didn't supply one."""
+    return f'latchkey auth set {service_name} -H "Authorization: Bearer <token>"'
+
+
+def _prepend_latchkey_directory(command: str, latchkey_directory: Path) -> str:
+    """Prefix ``command`` with ``LATCHKEY_DIRECTORY=<dir>`` so the credential
+    the user writes from their terminal lands in the same store the
+    desktop client uses.
+
+    Without the prefix the user's terminal-run ``latchkey`` would write
+    credentials to its own default (``~/.latchkey``) and the desktop
+    client (which runs latchkey with ``LATCHKEY_DIRECTORY`` set) would
+    never see them.
+    """
+    return f"LATCHKEY_DIRECTORY={shlex.quote(str(latchkey_directory))} {command}"
+
+
 def _json_error(message: str, status_code: int) -> Response:
     return Response(
         content=json.dumps({"error": message}),
@@ -175,8 +221,8 @@ def _resolve_host_id(
         # Static / in-memory resolvers (e.g. ``StaticBackendResolver``
         # used by tests) report ``"localhost"`` here; that does not
         # match the ``host-<32 hex>`` HostId format. Treat it as
-        # "unknown host" so callers fall back to the implicit default
-        # path rather than crash on every dialog render.
+        # "unknown host" so callers skip the existing-grants lookup
+        # rather than crash on every dialog render.
         logger.debug(
             "Backend resolver reported non-HostId host {!r} for agent {}; treating as unknown",
             info.host_id,
@@ -185,17 +231,17 @@ def _resolve_host_id(
         return None
 
 
-def _render_unknown_service_page(request_id: str, service_name: str) -> Response:
-    """Render a deny-only page when the service isn't in the catalog.
+def _render_unknown_scope_page(request_id: str, scope: str) -> Response:
+    """Render a deny-only page when the requested scope isn't in the catalog.
 
     No catalog entry means we have no permissions to offer the user; the
     only sensible action is to send the request straight to deny.
     """
     body = (
-        "<!DOCTYPE html><html><body><h1>Unknown service</h1>"
-        f"<p>The agent requested permission for <code>{html_module.escape(service_name)}</code>, "
-        "but this service is not in the minds permission catalog. The request can only be denied "
-        "from here.</p>"
+        "<!DOCTYPE html><html><body><h1>Unknown scope</h1>"
+        f"<p>The agent requested permissions under scope <code>{html_module.escape(scope)}</code>, "
+        "but this scope is not in the latchkey gateway's permission catalog. The request can only "
+        "be denied from here.</p>"
         f'<form method="POST" action="/requests/{html_module.escape(request_id, quote=True)}/deny">'
         '<button type="submit">Deny</button></form>'
         "</body></html>"
@@ -217,20 +263,32 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
     * A ``GRANTED`` response event has been appended for ``request_event_id``.
     * ``mngr message`` has been attempted (failures logged).
 
-    Credential acquisition (``latchkey auth browser`` / ``browser-prepare``)
-    is not driven from here -- the agent runs those itself via the
-    gateway's ``/latchkey/`` RPC, which is gated by the gateway password
-    only, so the host opens the sign-in Chrome window on demand when the
-    agent next hits a 401. The dialog grants scope only.
+    When ``grant`` returns ``GrantOutcome.DENIED`` (failed browser sign-in):
+
+    * ``latchkey_permissions.json`` is unchanged.
+    * A ``DENIED`` response event has been appended (the agent is told the
+      reason via the message, not via a distinct status).
+    * ``mngr message`` has been attempted.
+
+    When ``grant`` returns ``GrantOutcome.NEEDS_MANUAL_CREDENTIALS`` (the
+    service has no valid credentials and latchkey doesn't expose a browser
+    flow for it):
+
+    * ``latchkey_permissions.json`` is unchanged.
+    * No response event has been written; the request stays pending so the
+      user can run the suggested ``latchkey auth set`` command and click
+      Approve again.
+    * No ``mngr message`` has been sent.
 
     ``deny`` writes a ``DENIED`` response and notifies; nothing else.
     """
 
     data_dir: Path = Field(frozen=True, description="Minds data directory (typically ~/.minds).")
-    latchkey: Latchkey = Field(description="Latchkey wrapper; used to probe credential status for the dialog notice.")
-    services_catalog: Mapping[str, ServicePermissionInfo] = Field(
+    latchkey: Latchkey = Field(description="Latchkey wrapper used to probe credentials and run sign-in flows.")
+    services_catalog: ServicesCatalog = Field(
         description=(
-            "Catalog mapping latchkey service names to detent permission info. Empty if loading failed at startup."
+            "Lazy in-memory snapshot of the latchkey services catalog fetched from the "
+            "gateway's ``/permissions/available`` endpoint. Empty when the fetch failed."
         ),
     )
     mngr_message_sender: MngrMessageSender = Field(description="Sends mngr message to the waiting agent.")
@@ -251,27 +309,24 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
         service_info: ServicePermissionInfo,
         granted_permissions: Sequence[str],
     ) -> GrantResult:
-        """Apply a permission grant: write the scope rule, resolve the request.
+        """Apply a grant, falling back to a manual-credentials flow when needed.
 
         ``host_id`` is the agent's host: latchkey permissions are stored
         per-host (every agent on the host shares one
         ``latchkey_permissions.json``) so the grant updates the file at
-        :func:`permissions_path_for_host` via the gateway. ``agent_id``
-        is still needed for the response event and the ``mngr message``
-        nudge.
+        :func:`permissions_path_for_host`. ``agent_id`` is still needed
+        for the response event and the ``mngr message`` nudge.
 
-        The dialog grants scope only. Credential acquisition (``latchkey
-        auth browser`` / ``browser-prepare``) is no longer driven from
-        here -- the agent runs those itself via the gateway's
-        ``/latchkey/`` RPC, so the host opens the sign-in Chrome window
-        on demand when the agent next hits a 401. Doing it eagerly here
-        would duplicate that work and couple us to latchkey's CLI error
-        copy.
+        ``service_info`` is the catalog entry resolved from the request's
+        ``scope`` schema (e.g. ``slack-api`` -> ``ServicePermissionInfo``
+        for ``slack``). It supplies the human-readable display name, the
+        latchkey service name for ``services_info`` / ``auth_browser``,
+        and the legal permission set used to validate the dialog form.
 
-        The HTTP layer mirrors ``response_event`` into the in-memory
-        inbox so it doesn't have to reload from disk, and surfaces
-        ``message`` to both the agent (via ``mngr message``) and the
-        dialog UI.
+        The HTTP layer mirrors any non-None ``response_event`` into the
+        in-memory inbox so it doesn't have to reload from disk, and
+        surfaces ``message`` to both the agent (via ``mngr message``) and
+        the dialog UI.
         """
         if not granted_permissions:
             raise LatchkeyPermissionFlowError(
@@ -287,12 +342,65 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
                 f"Granted permissions not in catalog for service '{service_info.name}': {invalid}",
             )
 
+        latchkey_service_info = self.latchkey.services_info(service_info.name)
+        if latchkey_service_info.credential_status != CredentialStatus.VALID:
+            # If latchkey advertises a browser flow (or returned no
+            # ``authOptions`` at all and we don't actually know), keep the
+            # legacy behaviour and run it. Otherwise refuse the grant and
+            # ask the user to set credentials manually -- the request
+            # stays pending so a follow-up Approve click re-checks status.
+            is_browser_supported = (
+                LATCHKEY_AUTH_OPTION_BROWSER in latchkey_service_info.auth_options
+                or not latchkey_service_info.auth_options
+            )
+            if not is_browser_supported:
+                logger.info(
+                    "Credentials for {} reported as {}; latchkey does not advertise a browser flow, "
+                    "asking user to run 'latchkey auth set'",
+                    service_info.name,
+                    latchkey_service_info.credential_status,
+                )
+                return GrantResult(
+                    outcome=GrantOutcome.NEEDS_MANUAL_CREDENTIALS,
+                    message=_format_manual_credentials_message(service_info.display_name),
+                    response_event=None,
+                    set_credentials_example=_prepend_latchkey_directory(
+                        latchkey_service_info.set_credentials_example
+                        or _fallback_set_credentials_example(service_info.name),
+                        self.latchkey.latchkey_directory,
+                    ),
+                )
+            logger.info(
+                "Credentials for {} reported as {}; running latchkey auth browser",
+                service_info.name,
+                latchkey_service_info.credential_status,
+            )
+            is_success, detail = self.latchkey.auth_browser(service_info.name)
+            if not is_success:
+                # No separate AUTH_FAILED status: a failed sign-in is
+                # surfaced as DENIED with a distinct message so the agent
+                # can tell the user something went wrong.
+                message = _format_auth_failed_message(service_info.display_name, detail)
+                response_event = self._write_response_and_notify(
+                    request_event_id=request_event_id,
+                    agent_id=agent_id,
+                    service_info=service_info,
+                    status=RequestStatus.DENIED,
+                    message=message,
+                )
+                return GrantResult(
+                    outcome=GrantOutcome.DENIED,
+                    message=message,
+                    response_event=response_event,
+                    set_credentials_example=None,
+                )
+
         # Apply the grant to latchkey_permissions.json before writing the response
         # event so the agent can never observe a GRANTED response without
         # the corresponding rule being in effect.
         self._apply_grant_to_permissions_file(
             host_id=host_id,
-            scope_schemas=service_info.scope_schemas,
+            scope=service_info.scope,
             granted_permissions=granted_permissions,
         )
 
@@ -308,6 +416,7 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
             outcome=GrantOutcome.GRANTED,
             message=granted_message,
             response_event=response_event,
+            set_credentials_example=None,
         )
 
     def deny(
@@ -338,14 +447,14 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
     def display_name_for_event(self, req_event: RequestEvent) -> str:
         """Friendly service name for the requests-panel card.
 
-        Falls back to the raw service name when the service isn't in
-        the loaded catalog (or when the event is somehow not a latchkey
-        permission request, which shouldn't happen given the dispatcher).
+        Falls back to the raw scope schema when no catalog entry matches
+        (or when the event is somehow not a latchkey permission request,
+        which shouldn't happen given the dispatcher).
         """
         if not isinstance(req_event, LatchkeyPermissionRequestEvent):
             return ""
-        info = get_service_info(self.services_catalog, req_event.service_name)
-        return info.display_name if info is not None else req_event.service_name
+        info = self.services_catalog.get_by_scope(req_event.scope)
+        return info.display_name if info is not None else req_event.scope
 
     def render_request_page(
         self,
@@ -360,17 +469,17 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
         """
         if not isinstance(req_event, LatchkeyPermissionRequestEvent):
             return HTMLResponse(content="<p>Unsupported request type</p>", status_code=500)
-        service_info = get_service_info(self.services_catalog, req_event.service_name)
+        service_info = self.services_catalog.get_by_scope(req_event.scope)
         if service_info is None:
-            return _render_unknown_service_page(
+            return _render_unknown_scope_page(
                 request_id=str(req_event.event_id),
-                service_name=req_event.service_name,
+                scope=req_event.scope,
             )
 
         parsed_id = AgentId(req_event.agent_id)
         ws_name = _resolve_workspace_name(backend_resolver, parsed_id, fallback=req_event.agent_id)
         host_id = _resolve_host_id(backend_resolver, parsed_id)
-        pre_checked = self._initial_checked_permissions(host_id, service_info)
+        pre_checked = self._initial_checked_permissions(host_id, service_info, req_event.permissions)
 
         # Match ``grant()``: ``latchkey auth browser`` runs only when
         # credentials are not VALID AND the service either advertises a
@@ -406,10 +515,10 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
         """Drive the grant flow from the dialog form submission."""
         if not isinstance(req_event, LatchkeyPermissionRequestEvent):
             return _json_error("Unsupported request type", status_code=500)
-        service_info = get_service_info(self.services_catalog, req_event.service_name)
+        service_info = self.services_catalog.get_by_scope(req_event.scope)
         if service_info is None:
             return _json_error(
-                f"Service '{req_event.service_name}' is not in the catalog",
+                f"Scope '{req_event.scope}' is not in the gateway catalog",
                 status_code=400,
             )
 
@@ -453,16 +562,20 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
                 status_code=502,
             )
 
-        # The grant call appended a response event to
+        # The grant call may have appended a response event to
         # ~/.minds/events/requests/events.jsonl; mirror it into the
         # in-memory inbox so the requests panel reflects the resolution
-        # without needing a desktop-client restart.
-        self._mirror_response_into_inbox(request, grant_result.response_event)
+        # without needing a desktop-client restart. The manual-credentials
+        # branch leaves the request pending, so there is nothing to mirror.
+        if grant_result.response_event is not None:
+            self._mirror_response_into_inbox(request, grant_result.response_event)
 
         response_payload: dict[str, str] = {
             "outcome": str(grant_result.outcome),
             "message": grant_result.message,
         }
+        if grant_result.set_credentials_example is not None:
+            response_payload["set_credentials_example"] = grant_result.set_credentials_example
         return Response(
             content=json.dumps(response_payload),
             media_type="application/json",
@@ -476,10 +589,10 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
         """Drive the deny flow from the dialog form submission."""
         if not isinstance(req_event, LatchkeyPermissionRequestEvent):
             return _json_error("Unsupported request type", status_code=500)
-        service_info = get_service_info(self.services_catalog, req_event.service_name)
+        service_info = self.services_catalog.get_by_scope(req_event.scope)
         if service_info is None:
             return _json_error(
-                f"Service '{req_event.service_name}' is not in the catalog",
+                f"Scope '{req_event.scope}' is not in the gateway catalog",
                 status_code=400,
             )
 
@@ -505,59 +618,70 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
         self,
         host_id: HostId | None,
         service_info: ServicePermissionInfo,
+        requested_permissions: Sequence[str],
     ) -> tuple[str, ...]:
         """Pick the initial checkbox state for the dialog.
 
-        If any permissions are already granted for this service on this
-        host, those are used so the dialog doubles as a revoke UI;
-        otherwise the implicit catch-all default (``any``) is
-        pre-checked. ``host_id`` is ``None`` when the agent's host
-        cannot be resolved (transient discovery gap); in that case we
-        fall back to the implicit default rather than fail the page
-        render -- the user can still click Approve, which re-resolves
-        the host before writing the grant.
+        The pre-check is the union of (a) permissions already granted
+        for this scope on this host (so the dialog doubles as a revoke
+        UI) and (b) the permissions the agent requested, both
+        intersected with the catalog's known permission schemas for the
+        scope. Approving without modification grants exactly that union.
+
+        The catch-all ``any`` schema is intentionally not in the
+        pre-check: the user must opt into it explicitly. If both the
+        existing grants and the agent's request are empty (or fall
+        entirely outside the catalog), the pre-check is empty and the
+        Approve button stays disabled until the user ticks something.
+
+        ``host_id`` is ``None`` when the agent's host cannot be resolved
+        (transient discovery gap); in that case we skip the existing-
+        grants lookup rather than fail the page render -- the user can
+        still click Approve, which re-resolves the host before writing
+        the grant.
         """
-        if host_id is None:
-            return IMPLICIT_DEFAULT_PERMISSIONS
-        path = permissions_path_for_host(self.latchkey.plugin_data_dir, host_id)
-        try:
-            granted = self.gateway_client.get_granted_permissions_for_scopes(
-                path,
-                service_info.scope_schemas,
-            )
-        except LatchkeyGatewayClientError as e:
-            logger.warning(
-                "Could not load permissions for host {} via the gateway extension; using implicit defaults: {}",
-                host_id,
-                e,
-            )
-            return IMPLICIT_DEFAULT_PERMISSIONS
-        granted_in_catalog = tuple(p for p in service_info.permission_schemas if p in granted)
-        if granted_in_catalog:
-            return granted_in_catalog
-        return IMPLICIT_DEFAULT_PERMISSIONS
+        existing: tuple[str, ...] = ()
+        if host_id is not None:
+            path = permissions_path_for_host(self.latchkey.plugin_data_dir, host_id)
+            try:
+                granted = self.gateway_client.get_granted_permissions_for_scopes(
+                    path,
+                    (service_info.scope,),
+                )
+            except LatchkeyGatewayClientError as e:
+                logger.warning(
+                    "Could not load permissions for host {} via the gateway extension; pre-check will "
+                    "reflect only the agent's request: {}",
+                    host_id,
+                    e,
+                )
+            else:
+                existing = tuple(p for p in service_info.permission_schemas if p in granted)
+        # Preserve catalog order and deduplicate. ``dict.fromkeys``
+        # gives an order-preserving set so a permission that appears in
+        # both ``existing`` and ``requested_permissions`` is checked once.
+        requested_set = set(requested_permissions)
+        union = tuple(dict.fromkeys(p for p in service_info.permission_schemas if p in existing or p in requested_set))
+        return union
 
     def _apply_grant_to_permissions_file(
         self,
         host_id: HostId,
-        scope_schemas: Sequence[str],
+        scope: str,
         granted_permissions: Sequence[str],
     ) -> None:
         """Apply a grant by POSTing through the gateway's ``permissions`` extension.
 
         The extension owns the actual write to
         ``<plugin_data_dir>/hosts/<host_id>/latchkey_permissions.json``;
-        we just tell it which scopes to upsert. Iterating per scope
-        mirrors the previous in-process loop semantics and keeps the
-        wire shape (one rule key per request) trivial.
+        we just tell it which scope to upsert.
         """
         path = permissions_path_for_host(self.latchkey.plugin_data_dir, host_id)
-        for scope in scope_schemas:
-            self.gateway_client.set_permission_rule(
-                permissions_file_path=path,
-                rule_key=scope,
-                granted_permissions=granted_permissions,
-            )
+        self.gateway_client.set_permission_rule(
+            permissions_file_path=path,
+            rule_key=scope,
+            granted_permissions=granted_permissions,
+        )
 
     def _write_response_and_notify(
         self,
@@ -597,7 +721,7 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
             status=status,
             agent_id=str(agent_id),
             request_type=str(RequestType.LATCHKEY_PERMISSION),
-            service_name=service_info.name,
+            scope=service_info.scope,
         )
         append_response_event(self.data_dir, response_event)
         self.mngr_message_sender.send(agent_id, message)

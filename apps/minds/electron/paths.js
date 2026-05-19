@@ -1,3 +1,4 @@
+const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const { app } = require('electron');
@@ -66,14 +67,92 @@ function getLatchkeyDirectory() {
   return path.join(getDataDir(), 'latchkey');
 }
 
-function getMindsRootName() {
-  const name = process.env.MINDS_ROOT_NAME || 'minds';
-  if (!/^[a-z0-9_-]+$/.test(name)) {
+/**
+ * Path to the bundled config dir (apps/minds/imbue/minds/config/envs/_bundled/).
+ *
+ * Build-time bundleClientConfig() writes two files here when the build
+ * env had MINDS_CLIENT_CONFIG_BUNDLE + MINDS_ROOT_NAME_BUNDLE set:
+ * `client.toml` (the embedded per-env config) and `root_name` (the
+ * MINDS_ROOT_NAME the runtime should export). When the build did NOT
+ * set those (i.e. a dev-mode `pnpm start` / unflagged packaged build),
+ * neither file exists and the runtime refuses to start without the
+ * user activating an env in their shell first.
+ *
+ * Dev mode resolves to the source tree; packaged mode resolves under
+ * the extra-resources pyproject dir that build.js syncs alongside the
+ * pyproject.
+ */
+function getBundledConfigDir() {
+  if (isDev()) {
+    return path.join(__dirname, '..', 'imbue', 'minds', 'config', 'envs', '_bundled');
+  }
+  // In a packaged build, the entire `imbue/` tree is copied under the
+  // pyproject staging dir by build.js, so `_bundled/` lives under the
+  // resources path that backs `getPyprojectDir()`.
+  return path.join(getPyprojectDir(), 'imbue', 'minds', 'config', 'envs', '_bundled');
+}
+
+/**
+ * Return the absolute path to the bundled client.toml if the build
+ * embedded one, otherwise null.
+ */
+function getBundledClientConfigPath() {
+  const candidate = path.join(getBundledConfigDir(), 'client.toml');
+  return fs.existsSync(candidate) ? candidate : null;
+}
+
+/**
+ * Return the bundled MINDS_ROOT_NAME the runtime should export, or null
+ * if the build did not embed one. Validated against the runtime regex
+ * (`minds(-<env-name>)?`) so a corrupted bundle fails loudly here
+ * instead of confusing the Python bootstrap.
+ */
+function getBundledMindsRootName() {
+  const candidate = path.join(getBundledConfigDir(), 'root_name');
+  if (!fs.existsSync(candidate)) {
+    return null;
+  }
+  const raw = fs.readFileSync(candidate, 'utf8').trim();
+  if (!/^minds(-[a-z0-9][a-z0-9_-]{0,38}[a-z0-9])?$/.test(raw)) {
     throw new Error(
-      `MINDS_ROOT_NAME must match [a-z0-9_-]+; got ${JSON.stringify(name)}`
+      `bundled root_name file ${candidate} contains ${JSON.stringify(raw)}, which does not match ` +
+        '`minds(-<env-name>)?`. Rebuild with a valid MINDS_ROOT_NAME_BUNDLE.'
     );
   }
-  return name;
+  return raw;
+}
+
+/**
+ * Resolve the MINDS_ROOT_NAME the runtime should run as.
+ *
+ * Precedence:
+ *   1. The bundled root_name file (built into the app via
+ *      MINDS_ROOT_NAME_BUNDLE) -- the production / staging / beta
+ *      packaged-build case. Always wins so a user with a stale
+ *      MINDS_ROOT_NAME export from a parent shell can't accidentally
+ *      misdirect a packaged build.
+ *   2. The process env MINDS_ROOT_NAME (the dev-mode `minds env activate`
+ *      case). Validated against the runtime regex.
+ *   3. Default to 'minds' (production) for the case where dev mode
+ *      runs without activation (the Python backend will then refuse to
+ *      start unless --config-file is passed -- by design).
+ */
+function getMindsRootName() {
+  const bundled = getBundledMindsRootName();
+  if (bundled) {
+    return bundled;
+  }
+  const fromEnv = process.env.MINDS_ROOT_NAME;
+  if (fromEnv) {
+    if (!/^minds(-[a-z0-9][a-z0-9_-]{0,38}[a-z0-9])?$/.test(fromEnv)) {
+      throw new Error(
+        `MINDS_ROOT_NAME=${JSON.stringify(fromEnv)} does not match \`minds(-<env-name>)?\`. ` +
+          'Activate a valid env via `eval "$(minds env activate <name>)"` or unset the var.'
+      );
+    }
+    return fromEnv;
+  }
+  return 'minds';
 }
 
 function getDataDir() {
@@ -155,4 +234,6 @@ module.exports = {
   getLimaBinDir,
   getLimaBinaryPath,
   getLimaVersionFile,
+  getBundledClientConfigPath,
+  getBundledMindsRootName,
 };

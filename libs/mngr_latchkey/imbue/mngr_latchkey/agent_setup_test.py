@@ -75,8 +75,17 @@ def test_prepare_full_wiring_tunneled(tmp_path: Path) -> None:
     assert setup.opaque_permissions_path is not None
     assert setup.opaque_permissions_path.parent == opaque_permissions_dir(fake.plugin_data_dir)
     on_disk = json.loads(setup.opaque_permissions_path.read_text())
+    # Every new agent gets three baseline permissions under the
+    # ``latchkey-self`` scope: create a permission request, read its own
+    # current permissions, and read the per-service permissions catalog.
     assert on_disk["rules"] == [
-        {"latchkey-self": ["latchkey-self-create-permission-request"]},
+        {
+            "latchkey-self": [
+                "latchkey-self-create-permission-request",
+                "latchkey-self-read-self-permissions",
+                "latchkey-self-read-available-permissions",
+            ],
+        },
     ]
     schemas = on_disk["schemas"]
     assert schemas["latchkey-self"]["properties"]["domain"] == {"const": "latchkey-self.invalid"}
@@ -84,7 +93,18 @@ def test_prepare_full_wiring_tunneled(tmp_path: Path) -> None:
         "method": {"const": "POST"},
         "path": {"const": "/permission-requests"},
     }
-    assert "latchkey-self-read-permissions" not in schemas
+    assert schemas["latchkey-self-read-self-permissions"]["properties"] == {
+        "method": {"const": "GET"},
+        "path": {"const": "/permissions/self"},
+    }
+    # The available-catalog permission uses a path pattern so the agent
+    # can read any service's entry; it must not be a ``const`` (which
+    # would pin it to one service).
+    available_path_schema = schemas["latchkey-self-read-available-permissions"]["properties"]["path"]
+    assert available_path_schema == {
+        "type": "string",
+        "pattern": r"^/permissions/available/[a-z0-9][a-z0-9-]*$",
+    }
 
 
 def test_prepare_full_wiring_on_host_uses_live_port(tmp_path: Path) -> None:

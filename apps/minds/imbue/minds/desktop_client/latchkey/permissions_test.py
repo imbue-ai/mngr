@@ -1,4 +1,5 @@
 import json
+import shlex
 from pathlib import Path
 
 import pytest
@@ -10,6 +11,7 @@ from imbue.minds.desktop_client.latchkey.permissions import LatchkeyPermissionFl
 from imbue.minds.desktop_client.latchkey.permissions import LatchkeyPermissionGrantHandler
 from imbue.minds.desktop_client.latchkey.permissions import MngrMessageSender
 from imbue.minds.desktop_client.latchkey.services_catalog import ServicePermissionInfo
+from imbue.minds.desktop_client.latchkey.services_catalog import ServicesCatalog
 from imbue.minds.desktop_client.latchkey.testing import FakeLatchkeyGatewayClient
 from imbue.minds.desktop_client.latchkey.testing import build_fake_gateway_client
 from imbue.minds.desktop_client.request_events import RequestStatus
@@ -59,8 +61,8 @@ def _read_recording(report_path: Path) -> list[dict[str, list[str] | str]]:
 
 _SLACK_SERVICE_INFO = ServicePermissionInfo(
     name="slack",
+    scope="slack-api",
     display_name="Slack",
-    scope_schemas=("slack-api",),
     permission_schemas=(
         "any",
         "slack-read-all",
@@ -70,40 +72,77 @@ _SLACK_SERVICE_INFO = ServicePermissionInfo(
 )
 
 
+_SLACK_AVAILABLE_PAYLOAD: dict[str, object] = {
+    "slack": {
+        "scope": "slack-api",
+        "display_name": "Slack",
+        "permissions": [
+            "slack-read-all",
+            "slack-write-all",
+            "slack-chat-read",
+        ],
+    },
+}
+
+
+def _build_slack_services_catalog(
+    gateway_client: FakeLatchkeyGatewayClient | None = None,
+) -> ServicesCatalog:
+    """Return a :class:`ServicesCatalog` pre-seeded with the Slack fixture.
+
+    Uses the gateway client's ``available_services_payload`` hook so we
+    don't depend on the real ``services.json`` data file.
+    """
+    client = gateway_client if gateway_client is not None else build_fake_gateway_client()
+    client.available_services_payload = dict(_SLACK_AVAILABLE_PAYLOAD)
+    return ServicesCatalog(gateway_client=client)
+
+
 _DEFAULT_AUTH_OPTIONS_JSON: str = json.dumps(["browser", "set"])
+_DEFAULT_SET_EXAMPLE: str = 'latchkey auth set slack -H "Authorization: Bearer xoxb-your-token"'
 
 
 def _make_latchkey_with_status(
     tmp_path: Path,
     *,
     credential_status: str,
+    auth_browser_exit: int = 0,
+    auth_browser_stderr: str = "",
     auth_options_json: str = _DEFAULT_AUTH_OPTIONS_JSON,
+    set_credentials_example: str = _DEFAULT_SET_EXAMPLE,
     latchkey_directory: Path | None = None,
 ) -> Latchkey:
-    """Build a ``Latchkey`` backed by a fake ``latchkey`` binary.
+    """Build a ``Latchkey`` that uses two fake binaries.
 
-    The fake binary only needs to answer ``services info`` -- the grant
-    flow no longer runs ``auth browser`` (the agent drives auth itself
-    via the gateway), and the dialog's ``render_request_page`` probes
-    ``services info`` to decide whether to warn the user about a Chrome
-    sign-in window. ``auth_options_json`` controls the ``authOptions``
-    array; pass ``json.dumps(["set"])`` to simulate a service that
-    doesn't advertise browser sign-in.
+    Both ``services info`` and ``auth browser`` call the same fake binary
+    via ``latchkey_binary``. The binary inspects ``argv[0]`` (``services``
+    or ``auth``) and either prints a JSON payload or appends to the
+    auth-browser recording. ``auth_options_json`` controls the
+    ``authOptions`` array latchkey reports; pass ``json.dumps(["set"])``
+    to simulate a service that doesn't support browser sign-in.
     """
     binary = tmp_path / "latchkey"
+    auth_recording = tmp_path / "auth_latchkey_report.jsonl"
     services_payload = json.dumps(
         {
             "credentialStatus": credential_status,
             "authOptions": json.loads(auth_options_json),
+            "setCredentialsExample": set_credentials_example,
         }
     )
     binary.write_text(
         "#!/usr/bin/env python3\n"
-        "import sys\n"
+        "import json, os, sys\n"
         "argv = sys.argv[1:]\n"
         "if argv[:2] == ['services', 'info']:\n"
         f"    print({services_payload!r})\n"
         "    sys.exit(0)\n"
+        "elif argv[:2] == ['auth', 'browser']:\n"
+        f"    with open({str(auth_recording)!r}, 'a') as f:\n"
+        "        f.write(json.dumps({'argv': argv, 'env_LATCHKEY_DIRECTORY': os.environ.get('LATCHKEY_DIRECTORY', '')}) + '\\n')\n"
+        f"    if {auth_browser_stderr!r}:\n"
+        f"        sys.stderr.write({auth_browser_stderr!r})\n"
+        f"    sys.exit({auth_browser_exit})\n"
         "else:\n"
         "    sys.stderr.write('unexpected argv: ' + repr(argv))\n"
         "    sys.exit(99)\n"
@@ -118,24 +157,28 @@ def _build_handler(
     tmp_path: Path,
     *,
     credential_status: str,
+    auth_browser_exit: int = 0,
+    auth_browser_stderr: str = "",
     auth_options_json: str = _DEFAULT_AUTH_OPTIONS_JSON,
+    set_credentials_example: str = _DEFAULT_SET_EXAMPLE,
     latchkey_directory: Path | None = None,
-    gateway_client: FakeLatchkeyGatewayClient | None = None,
 ) -> LatchkeyPermissionGrantHandler:
-    """Build a handler for tests; pass ``gateway_client`` to assert on its recorded calls."""
     latchkey = _make_latchkey_with_status(
         tmp_path,
         credential_status=credential_status,
+        auth_browser_exit=auth_browser_exit,
+        auth_browser_stderr=auth_browser_stderr,
         auth_options_json=auth_options_json,
+        set_credentials_example=set_credentials_example,
         latchkey_directory=latchkey_directory,
     )
     mngr_binary = _make_recording_binary(tmp_path, "mngr", exit_code=0)
     return LatchkeyPermissionGrantHandler(
         data_dir=tmp_path,
         latchkey=latchkey,
-        services_catalog={_SLACK_SERVICE_INFO.name: _SLACK_SERVICE_INFO},
+        services_catalog=_build_slack_services_catalog(),
         mngr_message_sender=MngrMessageSender(mngr_binary=str(mngr_binary)),
-        gateway_client=gateway_client if gateway_client is not None else build_fake_gateway_client(),
+        gateway_client=build_fake_gateway_client(),
     )
 
 
@@ -168,42 +211,142 @@ def test_mngr_message_sender_does_not_raise_on_failure(tmp_path: Path) -> None:
 # -- LatchkeyPermissionGrantHandler.grant --
 
 
-def test_grant_writes_scope_to_per_host_file_regardless_of_credential_status(tmp_path: Path) -> None:
-    """Cred acquisition is agent-driven now; the grant flow writes the scope and exits.
+def test_grant_with_valid_credentials_skips_auth_browser_and_writes_permissions(tmp_path: Path) -> None:
+    handler = _build_handler(tmp_path, credential_status="valid")
+    agent_id = AgentId()
+    host_id = HostId()
 
-    Smoke across all four credential states latchkey can report -- they
-    should all produce ``GRANTED`` since the handler no longer runs
-    ``auth browser``. The scope rule lands in the per-host
-    ``latchkey_permissions.json`` (every agent on the host shares it).
-    """
-    for status in ("valid", "missing", "invalid", "unknown"):
-        per_run_dir = tmp_path / status
-        per_run_dir.mkdir()
-        handler = _build_handler(per_run_dir, credential_status=status)
-        host_id = HostId()
+    result = handler.grant(
+        request_event_id="evt-abc",
+        agent_id=agent_id,
+        host_id=host_id,
+        service_info=_SLACK_SERVICE_INFO,
+        granted_permissions=("slack-read-all", "slack-write-all"),
+    )
 
-        result = handler.grant(
-            request_event_id="evt-abc",
-            agent_id=AgentId(),
-            host_id=host_id,
-            service_info=_SLACK_SERVICE_INFO,
-            granted_permissions=("slack-read-all", "slack-write-all"),
-        )
+    assert result.outcome == GrantOutcome.GRANTED
+    assert "granted" in result.message.lower()
+    assert result.set_credentials_example is None
+    # Auth browser must not have been invoked.
+    assert not (tmp_path / "auth_latchkey_report.jsonl").exists()
+    # Permissions file reflects the new rule and is keyed by host (not agent).
+    on_disk = json.loads(permissions_path_for_host(tmp_path / "mngr_latchkey", host_id).read_text())
+    assert on_disk == {"rules": [{"slack-api": ["slack-read-all", "slack-write-all"]}]}
+    # Response event was written and mngr message sent.
+    responses = load_response_events(tmp_path)
+    assert len(responses) == 1
+    assert responses[0].status == str(RequestStatus.GRANTED)
+    mngr_recording = _read_recording(tmp_path / "mngr_report.jsonl")
+    assert len(mngr_recording) == 1
+    argv = mngr_recording[0]["argv"]
+    assert isinstance(argv, list)
+    assert argv[0] == "message"
 
-        assert result.outcome == GrantOutcome.GRANTED, f"status={status}"
-        assert "granted" in result.message.lower(), f"status={status}"
-        # Scope grant landed in the per-host permissions file.
-        on_disk = json.loads(permissions_path_for_host(per_run_dir / "mngr_latchkey", host_id).read_text())
-        assert on_disk == {"rules": [{"slack-api": ["slack-read-all", "slack-write-all"]}]}, f"status={status}"
-        # Response event was written and mngr message sent.
-        responses = load_response_events(per_run_dir)
-        assert len(responses) == 1, f"status={status}"
-        assert responses[0].status == str(RequestStatus.GRANTED), f"status={status}"
-        mngr_recording = _read_recording(per_run_dir / "mngr_report.jsonl")
-        assert len(mngr_recording) == 1, f"status={status}"
-        argv = mngr_recording[0]["argv"]
-        assert isinstance(argv, list)
-        assert argv[0] == "message", f"status={status}"
+
+def test_grant_with_missing_credentials_invokes_auth_browser(tmp_path: Path) -> None:
+    handler = _build_handler(tmp_path, credential_status="missing", auth_browser_exit=0)
+    agent_id = AgentId()
+
+    result = handler.grant(
+        request_event_id="evt-abc",
+        agent_id=agent_id,
+        host_id=HostId(),
+        service_info=_SLACK_SERVICE_INFO,
+        granted_permissions=("slack-read-all",),
+    )
+
+    assert result.outcome == GrantOutcome.GRANTED
+    auth_recording = _read_recording(tmp_path / "auth_latchkey_report.jsonl")
+    assert len(auth_recording) == 1
+    assert auth_recording[0]["argv"] == ["auth", "browser", "slack"]
+
+
+def test_grant_with_invalid_credentials_also_invokes_auth_browser(tmp_path: Path) -> None:
+    handler = _build_handler(tmp_path, credential_status="invalid", auth_browser_exit=0)
+
+    result = handler.grant(
+        request_event_id="evt-abc",
+        agent_id=AgentId(),
+        host_id=HostId(),
+        service_info=_SLACK_SERVICE_INFO,
+        granted_permissions=("slack-read-all",),
+    )
+
+    assert result.outcome == GrantOutcome.GRANTED
+    auth_recording = _read_recording(tmp_path / "auth_latchkey_report.jsonl")
+    assert len(auth_recording) == 1
+
+
+def test_grant_with_unknown_credentials_invokes_auth_browser(tmp_path: Path) -> None:
+    # services info exits 0 but with no recognized status -> UNKNOWN.
+    # No authOptions either, so the grant falls back to the legacy browser
+    # behaviour rather than refusing.
+    binary = tmp_path / "latchkey"
+    auth_recording = tmp_path / "auth_latchkey_report.jsonl"
+    binary.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, os, sys\n"
+        "argv = sys.argv[1:]\n"
+        "if argv[:2] == ['services', 'info']:\n"
+        "    print('not json')\n"
+        "    sys.exit(0)\n"
+        "elif argv[:2] == ['auth', 'browser']:\n"
+        f"    with open({str(auth_recording)!r}, 'a') as f:\n"
+        "        f.write(json.dumps({'argv': argv, 'env_LATCHKEY_DIRECTORY': os.environ.get('LATCHKEY_DIRECTORY', '')}) + '\\n')\n"
+        "    sys.exit(0)\n"
+    )
+    binary.chmod(0o755)
+    mngr_binary = _make_recording_binary(tmp_path, "mngr", exit_code=0)
+    handler = LatchkeyPermissionGrantHandler(
+        data_dir=tmp_path,
+        latchkey=Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(binary)),
+        services_catalog=_build_slack_services_catalog(),
+        mngr_message_sender=MngrMessageSender(mngr_binary=str(mngr_binary)),
+        gateway_client=build_fake_gateway_client(),
+    )
+
+    result = handler.grant(
+        request_event_id="evt-abc",
+        agent_id=AgentId(),
+        host_id=HostId(),
+        service_info=_SLACK_SERVICE_INFO,
+        granted_permissions=("slack-read-all",),
+    )
+
+    assert result.outcome == GrantOutcome.GRANTED
+    assert len(_read_recording(auth_recording)) == 1
+
+
+def test_grant_treats_failed_browser_flow_as_deny_with_distinct_message(tmp_path: Path) -> None:
+    handler = _build_handler(
+        tmp_path,
+        credential_status="missing",
+        auth_browser_exit=1,
+        auth_browser_stderr="user cancelled",
+    )
+    agent_id = AgentId()
+    host_id = HostId()
+
+    result = handler.grant(
+        request_event_id="evt-abc",
+        agent_id=agent_id,
+        host_id=host_id,
+        service_info=_SLACK_SERVICE_INFO,
+        granted_permissions=("slack-read-all",),
+    )
+
+    assert result.outcome == GrantOutcome.DENIED
+    assert "sign-in" in result.message.lower()
+    assert "user cancelled" in result.message
+    # latchkey_permissions.json must NOT have been written.
+    assert not permissions_path_for_host(tmp_path / "mngr_latchkey", host_id).exists()
+    # A DENIED response event was appended (no separate AUTH_FAILED status).
+    responses = load_response_events(tmp_path)
+    assert len(responses) == 1
+    assert responses[0].status == str(RequestStatus.DENIED)
+    # mngr message was still sent (the agent needs to be unblocked).
+    mngr_recording = _read_recording(tmp_path / "mngr_report.jsonl")
+    assert len(mngr_recording) == 1
 
 
 def test_grant_rejects_empty_granted_permissions(tmp_path: Path) -> None:
@@ -261,6 +404,193 @@ def test_grant_replaces_existing_rule_for_same_scope(tmp_path: Path) -> None:
     assert on_disk == {"rules": [{"slack-api": ["slack-read-all", "slack-write-all"]}]}
 
 
+# -- LatchkeyPermissionGrantHandler.grant: NEEDS_MANUAL_CREDENTIALS path --
+
+
+def test_grant_refuses_when_browser_auth_unsupported_and_returns_set_example(tmp_path: Path) -> None:
+    base_example = 'latchkey auth set coolify -H "Authorization: Bearer <token>"'
+    handler = _build_handler(
+        tmp_path,
+        credential_status="missing",
+        auth_options_json=json.dumps(["set"]),
+        set_credentials_example=base_example,
+    )
+    agent_id = AgentId()
+    host_id = HostId()
+
+    result = handler.grant(
+        request_event_id="evt-abc",
+        agent_id=agent_id,
+        host_id=host_id,
+        service_info=_SLACK_SERVICE_INFO,
+        granted_permissions=("slack-read-all",),
+    )
+
+    assert result.outcome == GrantOutcome.NEEDS_MANUAL_CREDENTIALS
+    # ``latchkey_directory`` is required on ``Latchkey`` now so the
+    # ``LATCHKEY_DIRECTORY=`` prefix is always added so the user's
+    # terminal-run ``latchkey auth set`` writes credentials into the same
+    # store the desktop client uses.
+    assert result.set_credentials_example is not None
+    assert result.set_credentials_example.startswith("LATCHKEY_DIRECTORY=")
+    assert result.set_credentials_example.endswith(f" {base_example}")
+    assert result.response_event is None
+    # The browser flow must not have been invoked.
+    assert not (tmp_path / "auth_latchkey_report.jsonl").exists()
+    # The request must remain pending: no response event, no permissions
+    # file, no mngr message.
+    assert load_response_events(tmp_path) == []
+    assert not permissions_path_for_host(tmp_path / "mngr_latchkey", host_id).exists()
+    assert not (tmp_path / "mngr_report.jsonl").exists()
+
+
+def test_grant_falls_back_to_generic_example_when_latchkey_omits_one(tmp_path: Path) -> None:
+    handler = _build_handler(
+        tmp_path,
+        credential_status="missing",
+        auth_options_json=json.dumps(["set"]),
+        set_credentials_example="",
+    )
+
+    result = handler.grant(
+        request_event_id="evt-abc",
+        agent_id=AgentId(),
+        host_id=HostId(),
+        service_info=_SLACK_SERVICE_INFO,
+        granted_permissions=("slack-read-all",),
+    )
+
+    assert result.outcome == GrantOutcome.NEEDS_MANUAL_CREDENTIALS
+    assert result.set_credentials_example is not None
+    assert "latchkey auth set slack" in result.set_credentials_example
+
+
+def test_grant_prefixes_set_example_with_latchkey_directory_when_pinned(tmp_path: Path) -> None:
+    """User-facing command must write into the same store the desktop client uses.
+
+    The desktop client passes ``LATCHKEY_DIRECTORY`` to all its own latchkey
+    invocations; if we don't tell the user to do the same, ``latchkey auth
+    set`` writes credentials into ``~/.latchkey`` while the desktop client
+    keeps reading from the pinned directory and the second Approve click
+    still reports ``MISSING``.
+    """
+    pinned = tmp_path / "pinned latchkey dir"
+    pinned.mkdir()
+    base_example = 'latchkey auth set slack -H "Authorization: Bearer <token>"'
+    handler = _build_handler(
+        tmp_path,
+        credential_status="missing",
+        auth_options_json=json.dumps(["set"]),
+        set_credentials_example=base_example,
+        latchkey_directory=pinned,
+    )
+
+    result = handler.grant(
+        request_event_id="evt-abc",
+        agent_id=AgentId(),
+        host_id=HostId(),
+        service_info=_SLACK_SERVICE_INFO,
+        granted_permissions=("slack-read-all",),
+    )
+
+    assert result.outcome == GrantOutcome.NEEDS_MANUAL_CREDENTIALS
+    assert result.set_credentials_example is not None
+    # The directory contains a space, so the path must be shell-quoted to
+    # survive a copy-paste into a terminal.
+    expected_prefix = f"LATCHKEY_DIRECTORY={shlex.quote(str(pinned))} "
+    assert result.set_credentials_example.startswith(expected_prefix)
+    assert result.set_credentials_example.endswith(base_example)
+
+
+def test_grant_prefixes_set_example_with_pinned_latchkey_directory(tmp_path: Path) -> None:
+    """The suggested command always carries the pinned ``LATCHKEY_DIRECTORY=``.
+
+    ``Latchkey`` requires a ``latchkey_directory``, so the user's
+    terminal-run ``latchkey auth set`` must point at the same store
+    the desktop client uses; otherwise upstream latchkey would write
+    credentials to its own default ``~/.latchkey`` and the desktop
+    client would never see them.
+    """
+    base_example = 'latchkey auth set slack -H "Authorization: Bearer <token>"'
+    pinned = tmp_path / "shared-latchkey"
+    handler = _build_handler(
+        tmp_path,
+        credential_status="missing",
+        auth_options_json=json.dumps(["set"]),
+        set_credentials_example=base_example,
+        latchkey_directory=pinned,
+    )
+
+    result = handler.grant(
+        request_event_id="evt-abc",
+        agent_id=AgentId(),
+        host_id=HostId(),
+        service_info=_SLACK_SERVICE_INFO,
+        granted_permissions=("slack-read-all",),
+    )
+
+    assert result.outcome == GrantOutcome.NEEDS_MANUAL_CREDENTIALS
+    assert result.set_credentials_example == f"LATCHKEY_DIRECTORY={pinned} {base_example}"
+
+
+def test_grant_re_checks_credentials_on_second_call_after_manual_setup(tmp_path: Path) -> None:
+    """Simulate the user running ``latchkey auth set`` between two Approve clicks.
+
+    The fake binary flips ``credentialStatus`` from ``missing`` to ``valid``
+    after a sentinel file appears, modelling the user running the suggested
+    command. The first ``grant`` call must return
+    ``NEEDS_MANUAL_CREDENTIALS`` and the second call (after the sentinel
+    is written) must return ``GRANTED``.
+    """
+    binary = tmp_path / "latchkey"
+    sentinel = tmp_path / "creds_set"
+    binary.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, os, sys\n"
+        f"sentinel = {str(sentinel)!r}\n"
+        "argv = sys.argv[1:]\n"
+        "if argv[:2] == ['services', 'info']:\n"
+        "    status = 'valid' if os.path.exists(sentinel) else 'missing'\n"
+        "    print(json.dumps({'credentialStatus': status, 'authOptions': ['set'], 'setCredentialsExample': 'latchkey auth set slack ...'}))\n"
+        "    sys.exit(0)\n"
+        "sys.stderr.write('unexpected argv: ' + repr(argv))\n"
+        "sys.exit(99)\n"
+    )
+    binary.chmod(0o755)
+    mngr_binary = _make_recording_binary(tmp_path, "mngr", exit_code=0)
+    handler = LatchkeyPermissionGrantHandler(
+        data_dir=tmp_path,
+        latchkey=Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(binary)),
+        services_catalog=_build_slack_services_catalog(),
+        mngr_message_sender=MngrMessageSender(mngr_binary=str(mngr_binary)),
+        gateway_client=build_fake_gateway_client(),
+    )
+    agent_id = AgentId()
+    host_id = HostId()
+
+    first = handler.grant(
+        request_event_id="evt-abc",
+        agent_id=agent_id,
+        host_id=host_id,
+        service_info=_SLACK_SERVICE_INFO,
+        granted_permissions=("slack-read-all",),
+    )
+    assert first.outcome == GrantOutcome.NEEDS_MANUAL_CREDENTIALS
+
+    # User runs the suggested command -- modelled by writing the sentinel.
+    sentinel.write_text("")
+
+    second = handler.grant(
+        request_event_id="evt-abc",
+        agent_id=agent_id,
+        host_id=host_id,
+        service_info=_SLACK_SERVICE_INFO,
+        granted_permissions=("slack-read-all",),
+    )
+    assert second.outcome == GrantOutcome.GRANTED
+    assert second.response_event is not None
+
+
 # -- LatchkeyPermissionGrantHandler.render_request_page --
 
 
@@ -268,7 +598,7 @@ def _render_dialog_html(handler: LatchkeyPermissionGrantHandler) -> str:
     """Run ``render_request_page`` for a fixed Slack request and return its HTML."""
     request = create_latchkey_permission_request_event(
         agent_id=str(AgentId()),
-        service_name=_SLACK_SERVICE_INFO.name,
+        scope=_SLACK_SERVICE_INFO.scope,
         rationale="need slack access",
     )
     backend_resolver = StaticBackendResolver(url_by_agent_and_service={})
@@ -375,8 +705,16 @@ def test_deny_sends_mngr_message(tmp_path: Path) -> None:
 
 def test_grant_calls_gateway_client_set_permission_and_delete_request(tmp_path: Path) -> None:
     """The handler routes the on-disk write through the gateway extension and clears the pending request."""
-    fake_client = build_fake_gateway_client()
-    handler = _build_handler(tmp_path, credential_status="valid", gateway_client=fake_client)
+    fake_client = FakeLatchkeyGatewayClient()
+    latchkey = _make_latchkey_with_status(tmp_path, credential_status="valid")
+    mngr_binary = _make_recording_binary(tmp_path, "mngr", exit_code=0)
+    handler = LatchkeyPermissionGrantHandler(
+        data_dir=tmp_path,
+        latchkey=latchkey,
+        services_catalog=_build_slack_services_catalog(fake_client),
+        mngr_message_sender=MngrMessageSender(mngr_binary=str(mngr_binary)),
+        gateway_client=fake_client,
+    )
     host_id = HostId()
 
     result = handler.grant(
@@ -401,8 +739,16 @@ def test_grant_calls_gateway_client_set_permission_and_delete_request(tmp_path: 
 
 def test_deny_calls_gateway_delete_permission_request_only(tmp_path: Path) -> None:
     """Deny tears down the pending gateway record but never POSTs permissions."""
-    fake_client = build_fake_gateway_client()
-    handler = _build_handler(tmp_path, credential_status="valid", gateway_client=fake_client)
+    fake_client = FakeLatchkeyGatewayClient()
+    latchkey = _make_latchkey_with_status(tmp_path, credential_status="valid")
+    mngr_binary = _make_recording_binary(tmp_path, "mngr", exit_code=0)
+    handler = LatchkeyPermissionGrantHandler(
+        data_dir=tmp_path,
+        latchkey=latchkey,
+        services_catalog=_build_slack_services_catalog(fake_client),
+        mngr_message_sender=MngrMessageSender(mngr_binary=str(mngr_binary)),
+        gateway_client=fake_client,
+    )
 
     handler.deny(
         request_event_id="evt-deny",
@@ -422,8 +768,16 @@ def test_grant_preserves_existing_schemas_block_in_permissions_file(tmp_path: Pa
     ``latchkey-self`` access remain intact across user-driven grants.
     The fake client mirrors that behaviour; this test pins it.
     """
-    fake_client = build_fake_gateway_client()
-    handler = _build_handler(tmp_path, credential_status="valid", gateway_client=fake_client)
+    fake_client = FakeLatchkeyGatewayClient()
+    latchkey = _make_latchkey_with_status(tmp_path, credential_status="valid")
+    mngr_binary = _make_recording_binary(tmp_path, "mngr", exit_code=0)
+    handler = LatchkeyPermissionGrantHandler(
+        data_dir=tmp_path,
+        latchkey=latchkey,
+        services_catalog=_build_slack_services_catalog(fake_client),
+        mngr_message_sender=MngrMessageSender(mngr_binary=str(mngr_binary)),
+        gateway_client=fake_client,
+    )
     host_id = HostId()
     host_path = permissions_path_for_host(tmp_path / "mngr_latchkey", host_id)
     host_path.parent.mkdir(parents=True, exist_ok=True)

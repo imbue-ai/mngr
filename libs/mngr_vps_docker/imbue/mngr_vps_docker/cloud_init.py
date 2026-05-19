@@ -12,6 +12,13 @@ def generate_cloud_init_user_data(
     default 10:30:100 pre-auth cap and lose connections mid-transfer.
     Mirrors the equivalent ``MaxSessions=100`` / ``MaxStartups=100:30:200``
     knob the lima provider applies to its VMs.
+
+    ``rsync`` is explicit in the package list because
+    ``mngr_vps_docker._upload_directory_to_outer`` requires it for the
+    build-context push. Standard Debian/Ubuntu cloud images ship rsync
+    by default so this is belt-and-suspenders on cloud-init backends;
+    non-cloud-init backends (e.g. OVH) install it from their own
+    bootstrap path.
     """
     return f"""#cloud-config
 ssh_deletekeys: true
@@ -24,6 +31,7 @@ package_update: true
 packages:
   - curl
   - ca-certificates
+  - rsync
 runcmd:
   - curl -fsSL https://get.docker.com | sh
   - systemctl enable docker

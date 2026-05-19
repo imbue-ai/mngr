@@ -4,6 +4,7 @@ import html
 import json
 import os
 import queue
+import threading
 from collections.abc import AsyncGenerator
 from collections.abc import Mapping
 from contextlib import asynccontextmanager
@@ -26,6 +27,7 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyExceptionGroup
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.minds.bootstrap import is_imbue_cloud_provider_enabled_for_account
+from imbue.minds.config.data_types import ClientEnvConfig
 from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client.agent_creator import AgentCreationStatus
 from imbue.minds.desktop_client.agent_creator import AgentCreator
@@ -154,12 +156,9 @@ async def _managed_lifespan(
 ) -> AsyncGenerator[None, None]:
     """Manage the httpx client lifecycle and capture the running event loop.
 
-    Subprocess lifecycles (``mngr forward``, ``mngr observe`` / ``mngr event``
-    grandchildren) live in ``EnvelopeStreamConsumer`` and are torn down by
-    ``cli/run.py`` after ``uvicorn.run`` returns. SSH tunnels (forward + reverse)
-    live in ``cli/run.py``'s ``SSHTunnelManager``, which is solely used by the
-    surviving Latchkey discovery callback and is also cleaned up by
-    ``cli/run.py``.
+    SSH tunnels (forward + reverse) live in ``cli/run.py``'s
+    ``SSHTunnelManager``, which is solely used by the surviving Latchkey
+    discovery callback and is cleaned up by ``cli/run.py``.
     """
     if not is_externally_managed_client:
         inner_app.state.http_client = httpx.AsyncClient(
@@ -173,12 +172,51 @@ async def _managed_lifespan(
     try:
         yield
     finally:
+        # Signal SSE handlers to exit before anything else. Setting the
+        # event alone isn't enough -- the chrome SSE blocks on a
+        # ``change_event.wait()`` with a 30s timeout, so it'd take up to
+        # 30s to notice the shutdown. Poke the backend resolver's
+        # change callback (which fires the same change_event) to wake
+        # every chrome SSE handler immediately; they then see the
+        # shutdown event set and return cleanly from their generators.
+        inner_app.state.shutdown_event.set()
+        backend_resolver = inner_app.state.backend_resolver
+        if isinstance(backend_resolver, MngrCliBackendResolver):
+            backend_resolver.notify_change()
         # Clear the captured loop reference first so background callbacks that
         # race with shutdown see None and drop their events instead of trying
         # to schedule on a loop that is about to close.
         inner_app.state.event_loop = None
         if not is_externally_managed_client:
             await inner_app.state.http_client.aclose()
+        # Stop every long-lived strand that's blocked on external I/O
+        # BEFORE draining the concurrency group. The CG's __exit__ just
+        # joins threads with a timeout; threads blocked on subprocess
+        # pipes or socket reads with no read timeout can't unblock on
+        # their own. If we drain the CG while they're still wedged, it
+        # times out waiting for them and surfaces "N strands did not
+        # finish in time" warnings on every clean shutdown.
+        #
+        # Order matters within this block only to the extent that each
+        # stop() returns quickly; their effects (terminate subprocess,
+        # close httpx connection) all unblock threads independently.
+        # Redundant cleanup calls in ``cli/run.py``'s finally block
+        # remain as fallbacks for startup-error paths that never reach
+        # this lifespan teardown.
+        envelope_stream_consumer = inner_app.state.envelope_stream_consumer
+        if envelope_stream_consumer is not None:
+            # SIGTERMs the mngr forward subprocess; closes its pipes so
+            # the three mngr-forward-{stdout,stderr,lifecycle} reader
+            # threads exit their for-line loops.
+            envelope_stream_consumer.terminate()
+        permission_requests_consumer = inner_app.state.permission_requests_consumer
+        if permission_requests_consumer is not None:
+            # Sets the consumer's stop event AND closes the in-flight
+            # follow-stream httpx client so the latchkey-permission-
+            # requests-consumer thread unblocks from its iter_lines read
+            # (which uses read=None timeout and otherwise blocks forever
+            # waiting for the gateway to push the next request).
+            permission_requests_consumer.stop()
         # Exit the root ConcurrencyGroup. ``__exit__`` waits up to
         # ``shutdown_timeout_seconds`` for any still-in-flight strands (e.g.
         # a detached tunnel-setup task) to finish.
@@ -408,6 +446,14 @@ class _OnCreatedCallbackFactory(MutableModel):
         frozen=True,
         description="Dispatcher for surfacing tunnel-setup failures as OS notifications.",
     )
+    backend_resolver: BackendResolverInterface = Field(
+        frozen=True,
+        description=(
+            "Backend resolver pinged via notify_change() after the association write so the "
+            "chrome SSE workspace list refreshes its 'account' field without waiting for the "
+            "next 30s discovery heartbeat."
+        ),
+    )
     account_id: str = Field(
         frozen=True,
         default="",
@@ -424,6 +470,12 @@ class _OnCreatedCallbackFactory(MutableModel):
         # this is what later ``get_account_for_workspace`` lookups (e.g. for
         # the destruction handler) expect to find.
         self.session_store.associate_workspace(self.account_id, str(agent_id))
+        # Wake the chrome SSE so the workspace tile picks up its new
+        # 'account' field immediately. Without this, the chrome shows
+        # the workspace as unassociated until the next discovery cycle
+        # (~30s+) writes an unrelated change.
+        if isinstance(self.backend_resolver, MngrCliBackendResolver):
+            self.backend_resolver.notify_change()
         account = self.session_store.get_account_for_workspace(str(agent_id))
         if account is None:
             # The account vanished between selection and now (logout?). The
@@ -465,6 +517,7 @@ def _build_on_created_callback(
     imbue_cloud_cli: ImbueCloudCli | None = request.app.state.imbue_cloud_cli
     root_concurrency_group: ConcurrencyGroup | None = request.app.state.root_concurrency_group
     notification_dispatcher: NotificationDispatcher | None = request.app.state.notification_dispatcher
+    backend_resolver: BackendResolverInterface = request.app.state.backend_resolver
 
     if (
         session_store is None
@@ -479,6 +532,7 @@ def _build_on_created_callback(
         imbue_cloud_cli=imbue_cloud_cli,
         root_concurrency_group=root_concurrency_group,
         notification_dispatcher=notification_dispatcher,
+        backend_resolver=backend_resolver,
         account_id=account_id,
     )
 
@@ -817,10 +871,17 @@ async def _stream_creation_logs(
     log_queue: queue.Queue[str],
     agent_creator: AgentCreator,
     creation_id: CreationId,
+    shutdown_event: threading.Event,
 ) -> AsyncGenerator[str, None]:
-    """Async generator that yields SSE events from a creation log queue."""
+    """Async generator that yields SSE events from a creation log queue.
+
+    Exits cleanly when ``shutdown_event`` is set so the server's
+    graceful-shutdown deadline doesn't have to cancel us mid-stream.
+    """
     streaming = True
     while streaming:
+        if shutdown_event.is_set():
+            return
         try:
             line = await asyncio.get_running_loop().run_in_executor(None, log_queue.get, True, 1.0)
         except (queue.Empty, TimeoutError, OSError):
@@ -866,7 +927,7 @@ async def _handle_creation_logs_sse(
         return Response(status_code=404, content="Unknown agent creation")
 
     return StreamingResponse(
-        _stream_creation_logs(log_queue, agent_creator, creation_id),
+        _stream_creation_logs(log_queue, agent_creator, creation_id, request.app.state.shutdown_event),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -1241,14 +1302,23 @@ async def _handle_chrome_events(
             )
 
             # Wait for changes and push updates until client disconnects
+            shutdown_event: threading.Event = request.app.state.shutdown_event
             connected = not await request.is_disconnected()
-            while connected:
+            while connected and not shutdown_event.is_set():
                 # Wait for a change signal or timeout (timeout for disconnect checks)
                 change_event.clear()
                 try:
                     await asyncio.wait_for(change_event.wait(), timeout=30.0)
                 except TimeoutError:
                     pass
+
+                # Server-side shutdown signalled (via lifespan teardown
+                # calling backend_resolver.notify_change() right after
+                # setting shutdown_event). Exit the generator cleanly so
+                # uvicorn's graceful-shutdown deadline doesn't have to
+                # cancel us mid-stream.
+                if shutdown_event.is_set():
+                    break
 
                 connected = not await request.is_disconnected()
                 if not connected:
@@ -1422,6 +1492,14 @@ async def _handle_workspace_associate(
     session_store: MultiAccountSessionStore | None = request.app.state.session_store
     if session_store and user_id:
         session_store.associate_workspace(user_id, agent_id)
+        # Wake the chrome SSE so the workspace tile picks up its new
+        # 'account' field immediately rather than at the next 30s SSE
+        # heartbeat. Without this, the user clicks Associate, the page
+        # reloads via 303, but the chrome panel still shows the old
+        # unassociated state for ~half a minute.
+        backend_resolver: BackendResolverInterface = request.app.state.backend_resolver
+        if isinstance(backend_resolver, MngrCliBackendResolver):
+            backend_resolver.notify_change()
     location = redirect_url if redirect_url else f"/workspace/{agent_id}/settings"
     return Response(status_code=303, headers={"Location": location})
 
@@ -1449,6 +1527,12 @@ async def _handle_workspace_disassociate(
                 except ImbueCloudCliError as e:
                     logger.warning("Failed to delete tunnel during disassociation: {}", e)
             session_store.disassociate_workspace(str(account.user_id), agent_id)
+            # Mirror the associate handler: poke the chrome SSE so the
+            # tile flips back to unassociated immediately instead of
+            # waiting out the 30s heartbeat.
+            backend_resolver: BackendResolverInterface = request.app.state.backend_resolver
+            if isinstance(backend_resolver, MngrCliBackendResolver):
+                backend_resolver.notify_change()
     return Response(status_code=303, headers={"Location": f"/workspace/{agent_id}/settings"})
 
 
@@ -1474,14 +1558,14 @@ def _handle_requests_panel(
         handler = find_handler_for_event(handlers, req)
         if handler is not None:
             kind_label = handler.kind_label()
-            service_name = handler.display_name_for_event(req)
+            display_label = handler.display_name_for_event(req)
         else:
             # Fall through: unknown request type. Should never happen in
             # practice -- a request without a registered handler can't be
             # rendered or resolved -- but we still surface it in the
             # panel so the user sees something is wrong.
             kind_label = "request"
-            service_name = ""
+            display_label = ""
         parsed_id = AgentId(req.agent_id)
         ws_name = backend_resolver.get_workspace_name(parsed_id) or ""
         if not ws_name:
@@ -1499,7 +1583,7 @@ def _handle_requests_panel(
         cards.append(
             f'<div class="req-card" onclick="navigateToRequest({event_id_attr}, {agent_id_attr})">'
             f'<div style="font-size:13px;color:#e2e8f0;font-weight:500;">{kind_label}: {ws_name}</div>'
-            f'<div style="font-size:12px;color:#64748b;margin-top:2px;">{service_name}</div></div>'
+            f'<div style="font-size:12px;color:#64748b;margin-top:2px;">{display_label}</div></div>'
         )
 
     html_content = (
@@ -2043,6 +2127,7 @@ def create_desktop_client(
     notification_dispatcher: NotificationDispatcher | None = None,
     paths: WorkspacePaths | None = None,
     minds_config: MindsConfig | None = None,
+    client_env_config: ClientEnvConfig | None = None,
     envelope_stream_consumer: EnvelopeStreamConsumer | None = None,
     session_store: MultiAccountSessionStore | None = None,
     request_inbox: RequestInbox | None = None,
@@ -2095,12 +2180,25 @@ def create_desktop_client(
     app.state.auth_store = auth_store
     app.state.backend_resolver = backend_resolver
     app.state.envelope_stream_consumer = envelope_stream_consumer
+    # Placeholder so the lifespan teardown can read this slot
+    # unconditionally; ``cli/run.py`` overwrites it with the running
+    # consumer right after starting it.
+    app.state.permission_requests_consumer = None
+    # Cross-thread flag the SSE handlers poll to exit cleanly on
+    # process shutdown. ``threading.Event`` (not ``asyncio.Event``) so
+    # tests that exercise the endpoints without invoking the lifespan
+    # context manager still see a valid, settable object on app.state
+    # -- and because the lifespan teardown setter runs in the asyncio
+    # event loop's thread but the SSE handlers read it from the same
+    # thread, so awaitability buys us nothing here.
+    app.state.shutdown_event = threading.Event()
     app.state.agent_creator = agent_creator
     app.state.imbue_cloud_cli = imbue_cloud_cli
     app.state.telegram_orchestrator = telegram_orchestrator
     app.state.notification_dispatcher = notification_dispatcher
     app.state.session_store = session_store
     app.state.minds_config = minds_config
+    app.state.client_env_config = client_env_config
     app.state.request_inbox = request_inbox
     app.state.request_event_handlers = request_event_handlers
     app.state.auth_server_port = server_port

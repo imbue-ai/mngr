@@ -296,6 +296,19 @@ def test_start_gateway_drops_bundled_extensions(tmp_path: Path) -> None:
         # ship the .mjs payloads.
         for name in mjs_files:
             assert (extensions_dir / name).read_text().startswith("/**")
+        # ``services.json`` ships alongside the .mjs files and must also
+        # be materialized so the permissions extension can read it at
+        # request time.
+        services_json_path = extensions_dir / "services.json"
+        assert services_json_path.is_file()
+        services_catalog = json.loads(services_json_path.read_text())
+        assert isinstance(services_catalog, dict) and len(services_catalog) > 0
+        for service_name, entry in services_catalog.items():
+            assert isinstance(service_name, str) and len(service_name) > 0
+            assert set(entry.keys()) == {"scope", "display_name", "permissions"}
+            assert isinstance(entry["scope"], str) and len(entry["scope"]) > 0
+            assert isinstance(entry["display_name"], str) and len(entry["display_name"]) > 0
+            assert isinstance(entry["permissions"], list)
         manager.stop_gateway()
 
 
