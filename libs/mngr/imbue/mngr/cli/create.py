@@ -1197,12 +1197,12 @@ def _try_reuse_existing_agent(
     host component of the address (when present). ``address_host`` is the
     address's ``host_name`` field straight from ``NewAgentLocation``: a
     :class:`HostId` produces an exact match on ``host_id``; a :class:`HostName`
-    matches on ``host_name`` and -- to mirror :func:`_find_existing_host` --
-    uses ``provider_name`` as a tiebreaker when multiple hosts share the same
-    name. ``None`` keeps the documented "any host" behavior used by the
-    bare-name reuse path. If found, ensures the agent is started and returns
-    it along with its host. If not found, returns None so the caller can
-    proceed with creating a new agent.
+    matches on ``host_name``, and when ``provider_name`` is also set the
+    host's provider must match too (so same-named hosts on different
+    providers cannot cross-match). ``None`` keeps the documented "any host"
+    behavior used by the bare-name reuse path. If found, ensures the agent is
+    started and returns it along with its host. If not found, returns None so
+    the caller can proceed with creating a new agent.
     """
     agents_by_host = agent_and_host_loader()
 
@@ -1725,9 +1725,8 @@ def _host_ref_matches_address(
     "any host" semantics apply and every host is a match. A :class:`HostId`
     matches on ``host_id`` (IDs are unique). A :class:`HostName` matches on
     ``host_name``; when a provider was also pinned, the host's
-    ``provider_name`` must match too -- this mirrors the disambiguation in
-    :func:`_find_existing_host` and prevents same-named hosts on different
-    providers from cross-matching.
+    ``provider_name`` must match too, preventing same-named hosts on
+    different providers from cross-matching.
     """
     if address_host is None:
         return True
