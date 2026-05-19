@@ -64,13 +64,18 @@ def generate_management_key(output_dir: str) -> None:
     logger.info("")
     logger.info("Next steps:")
     logger.info("")
-    logger.info("  1. Upload the private key to Modal as a secret:")
+    logger.info("  1. Upload the private key to HCP Vault:")
     logger.info("")
-    logger.info("     Create a .minds/<env>/pool-ssh.sh file with:")
-    logger.info('       export POOL_SSH_PRIVATE_KEY="$(cat {})"', private_key_path)
+    logger.info("     Push to secrets/minds/<tier>/pool-ssh with POOL_SSH_PRIVATE_KEY:")
+    logger.info(
+        '       echo "POOL_SSH_PRIVATE_KEY=$(cat {})" | uv run scripts/push_vault_from_file.py <tier> pool-ssh /dev/stdin',
+        private_key_path,
+    )
     logger.info("")
-    logger.info("     Then push it:")
-    logger.info("       uv run scripts/push_modal_secrets.py <env>")
+    logger.info(
+        "     Vault is the source of truth; `minds env deploy` (with that tier"
+        " activated) pushes the value into the `pool-ssh-<tier>` Modal Secret.",
+    )
     logger.info("")
     logger.info("  2. Pass the public key file to the pool bake command:")
     logger.info("     uv run mngr imbue_cloud admin pool create \\")

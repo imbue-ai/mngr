@@ -52,7 +52,7 @@ def cleanup_released_hosts(database_url: str, dry_run: bool) -> None:
     # Fetch all released hosts
     try:
         with conn.cursor() as cur:
-            cur.execute("SELECT id, agent_id, host_id, vps_ip FROM pool_hosts WHERE status = 'released'")
+            cur.execute("SELECT id, agent_id, host_id, vps_address FROM pool_hosts WHERE status = 'released'")
             released_rows = cur.fetchall()
     except psycopg2.Error:
         conn.close()
@@ -66,13 +66,13 @@ def cleanup_released_hosts(database_url: str, dry_run: bool) -> None:
     logger.info("Found {} released host(s).", len(released_rows))
     if dry_run:
         for row in released_rows:
-            db_id, agent_id, host_id, vps_ip = row
+            db_id, agent_id, host_id, vps_address = row
             logger.info(
-                "  id={} agent_id={} host_id={} vps_ip={}",
+                "  id={} agent_id={} host_id={} vps_address={}",
                 db_id,
                 agent_id,
                 host_id,
-                vps_ip,
+                vps_address,
             )
         conn.close()
         return
@@ -81,8 +81,8 @@ def cleanup_released_hosts(database_url: str, dry_run: bool) -> None:
     failure_count = 0
 
     for row in released_rows:
-        db_id, agent_id, host_id, vps_ip = row
-        logger.info("Destroying host id={} agent_id={} vps_ip={}", db_id, agent_id, vps_ip)
+        db_id, agent_id, host_id, vps_address = row
+        logger.info("Destroying host id={} agent_id={} vps_address={}", db_id, agent_id, vps_address)
 
         try:
             result = _run_mngr_destroy(agent_id)

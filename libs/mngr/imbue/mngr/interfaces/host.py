@@ -70,6 +70,19 @@ class HostInterface(MutableModel, ABC):
     """Interface for host implementations."""
 
     id: HostId = Field(frozen=True, description="Unique identifier for this host")
+    pre_baked_agent_id: AgentId | None = Field(
+        default=None,
+        frozen=True,
+        description=(
+            "Agent id of an agent that already exists on this host at host-creation "
+            "time and that ``create_agent_state`` is expected to adopt in place "
+            "(rather than treat as a duplicate-name collision). Set by providers "
+            "whose ``create_host`` returns a host with a baked-in agent -- "
+            "``ImbueCloudHost`` is the only example today (the lease surfaces a "
+            "pre-baked ``system-services`` agent). ``None`` for every other "
+            "provider, in which case the standard duplicate-name check applies."
+        ),
+    )
 
     @property
     @abstractmethod
@@ -211,8 +224,16 @@ class OuterHostInterface(MutableModel, ABC):
         ...
 
     @abstractmethod
-    def get_name(self) -> HostName:
-        """Return the human-readable name of this host."""
+    def get_name(self) -> str:
+        """Return the connector's display name (e.g. SSH hostname or IP).
+
+        Returns ``str`` -- not ``HostName`` -- because an outer host's name
+        is the literal connection target, which is commonly a dotted IPv4
+        address (``192.0.2.10``) or DNS name (``vps-x.vps.ovh.us``);
+        ``HostName`` forbids dots since it doubles as a CLI address token.
+        The ``Host`` subclass overrides this and returns a ``HostName``,
+        which is a ``str`` subclass and so satisfies the wider type here.
+        """
         ...
 
     @abstractmethod
