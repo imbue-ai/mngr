@@ -1537,14 +1537,14 @@ def _handle_requests_panel(
         handler = find_handler_for_event(handlers, req)
         if handler is not None:
             kind_label = handler.kind_label()
-            service_name = handler.display_name_for_event(req)
+            display_label = handler.display_name_for_event(req)
         else:
             # Fall through: unknown request type. Should never happen in
             # practice -- a request without a registered handler can't be
             # rendered or resolved -- but we still surface it in the
             # panel so the user sees something is wrong.
             kind_label = "request"
-            service_name = ""
+            display_label = ""
         parsed_id = AgentId(req.agent_id)
         ws_name = backend_resolver.get_workspace_name(parsed_id) or ""
         if not ws_name:
@@ -1562,7 +1562,7 @@ def _handle_requests_panel(
         cards.append(
             f'<div class="req-card" onclick="navigateToRequest({event_id_attr}, {agent_id_attr})">'
             f'<div style="font-size:13px;color:#e2e8f0;font-weight:500;">{kind_label}: {ws_name}</div>'
-            f'<div style="font-size:12px;color:#64748b;margin-top:2px;">{service_name}</div></div>'
+            f'<div style="font-size:12px;color:#64748b;margin-top:2px;">{display_label}</div></div>'
         )
 
     html_content = (
