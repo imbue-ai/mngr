@@ -150,7 +150,7 @@ def test_iter_permission_requests_parses_jsonl_stream() -> None:
 def test_iter_permission_requests_skips_malformed_lines() -> None:
     """Garbage lines (non-JSON or wrong shape) are dropped with a warning, not raised."""
     payload = (
-        b'not valid json\n'
+        b"not valid json\n"
         b'{"agent_id": "a1"}\n'
         b'{"request_id":"x","agent_id":"a2","scope":"s-api","permissions":["p"],"rationale":"r"}\n'
     )

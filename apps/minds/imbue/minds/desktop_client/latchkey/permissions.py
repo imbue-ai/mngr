@@ -651,8 +651,7 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
                 )
             except LatchkeyGatewayClientError as e:
                 logger.warning(
-                    "Could not load permissions for host {} via the gateway extension; "
-                    "using request defaults: {}",
+                    "Could not load permissions for host {} via the gateway extension; using request defaults: {}",
                     host_id,
                     e,
                 )
@@ -660,9 +659,7 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
                 granted_in_catalog = tuple(p for p in service_info.permission_schemas if p in granted)
                 if granted_in_catalog:
                     return granted_in_catalog
-        requested_in_catalog = tuple(
-            p for p in service_info.permission_schemas if p in requested_permissions
-        )
+        requested_in_catalog = tuple(p for p in service_info.permission_schemas if p in requested_permissions)
         if requested_in_catalog:
             return requested_in_catalog
         return IMPLICIT_DEFAULT_PERMISSIONS

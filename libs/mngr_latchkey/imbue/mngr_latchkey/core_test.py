@@ -307,9 +307,7 @@ def test_start_gateway_drops_bundled_extensions(tmp_path: Path) -> None:
             assert isinstance(service_name, str) and len(service_name) > 0
             assert set(entry.keys()) == {"scope", "display_name", "permissions"}
             assert isinstance(entry["scope"], str) and len(entry["scope"]) > 0
-            assert (
-                isinstance(entry["display_name"], str) and len(entry["display_name"]) > 0
-            )
+            assert isinstance(entry["display_name"], str) and len(entry["display_name"]) > 0
             assert isinstance(entry["permissions"], list)
         manager.stop_gateway()
 
