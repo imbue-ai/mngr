@@ -132,8 +132,8 @@ def _restart_lock_name(match: AgentMatch) -> str:
 )
 @optgroup.group("Behavior")
 @optgroup.option(
-    "--restart/--no-restart",
-    default=False,
+    "--restart",
+    is_flag=True,
     help="Stop the agent first if it is already running, ensuring a clean start. Skips the resume message.",
 )
 @optgroup.option(
