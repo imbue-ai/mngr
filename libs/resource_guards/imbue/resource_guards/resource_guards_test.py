@@ -18,7 +18,6 @@ from imbue.resource_guards.resource_guards import _check_fixture_setup_violation
 from imbue.resource_guards.resource_guards import _check_guard_violations
 from imbue.resource_guards.resource_guards import _collect_fixture_covered_resources
 from imbue.resource_guards.resource_guards import _detect_guard_violations
-from imbue.resource_guards.resource_guards import _fixture_resource_marks
 from imbue.resource_guards.resource_guards import _make_guarded_fixture_wrapper
 from imbue.resource_guards.resource_guards import _pytest_fixture_setup
 from imbue.resource_guards.resource_guards import cleanup_resource_guard_wrappers
@@ -1479,24 +1478,28 @@ def test_check_guard_violations_reports_blocked_and_undeclared_together(
 # ---------------------------------------------------------------------------
 
 
-def test_fixture_uses_resources_records_declaration() -> None:
+def test_fixture_uses_resources_records_declaration(isolated_guard_state: None) -> None:
     """The decorator should record the function's declared resources."""
 
     def some_fixture() -> None:
         pass
 
     fixture_uses_resources("modal")(some_fixture)
-    assert _fixture_resource_marks[some_fixture] == {"modal"}
+    # Look up via the module attribute rather than the directly-imported name,
+    # so that isolated_guard_state's monkeypatch.setattr rebind is observed.
+    assert resource_guards._fixture_resource_marks[some_fixture] == {"modal"}
 
 
-def test_fixture_uses_resources_supports_multiple_resources_in_one_call() -> None:
+def test_fixture_uses_resources_supports_multiple_resources_in_one_call(isolated_guard_state: None) -> None:
     """A single call accepts multiple resources and records them as a set."""
 
     def some_fixture() -> None:
         pass
 
     fixture_uses_resources("modal", "docker")(some_fixture)
-    assert _fixture_resource_marks[some_fixture] == {"modal", "docker"}
+    # Look up via the module attribute rather than the directly-imported name,
+    # so that isolated_guard_state's monkeypatch.setattr rebind is observed.
+    assert resource_guards._fixture_resource_marks[some_fixture] == {"modal", "docker"}
 
 
 def test_fixture_uses_resources_errors_on_double_application(isolated_guard_state: None) -> None:
@@ -1510,7 +1513,7 @@ def test_fixture_uses_resources_errors_on_double_application(isolated_guard_stat
         fixture_uses_resources("docker")(some_fixture)
 
 
-def test_fixture_uses_resources_errors_on_empty_declaration() -> None:
+def test_fixture_uses_resources_errors_on_empty_declaration(isolated_guard_state: None) -> None:
     """Calling the decorator with no resources should raise at decoration time.
 
     An empty @fixture_uses_resources() would silently no-op at runtime (the
