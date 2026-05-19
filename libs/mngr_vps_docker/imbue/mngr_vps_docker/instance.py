@@ -1730,23 +1730,25 @@ class VpsDockerProvider(BaseProviderInstance):
         (provider-specific), then SSHes to each in parallel to read host
         records and agent data in a single command per VPS.
         """
-        vps_ips = self._list_provider_vps_hostnames()
-        if not vps_ips:
+        vps_hostnames = self._list_provider_vps_hostnames()
+        if not vps_hostnames:
             return [], {}
 
         all_records: list[VpsDockerHostRecord] = []
         all_agent_data: dict[HostId, list[dict[str, Any]]] = {}
 
         cg_name = f"{type(self).__name__}-discover"
-        with log_span("Reading records from {} VPS instance(s) in parallel", len(vps_ips)):
+        with log_span("Reading records from {} VPS instance(s) in parallel", len(vps_hostnames)):
             cg = ConcurrencyGroup(name=cg_name)
             with cg:
                 with ConcurrencyGroupExecutor(
                     parent_cg=cg,
                     name=f"{cg_name}_read_records",
-                    max_workers=min(len(vps_ips), 32),
+                    max_workers=min(len(vps_hostnames), 32),
                 ) as executor:
-                    futures = [executor.submit(self._read_records_from_vps, ip, on_error) for ip in vps_ips]
+                    futures = [
+                        executor.submit(self._read_records_from_vps, hostname, on_error) for hostname in vps_hostnames
+                    ]
 
                 for future in futures:
                     records, agent_data = future.result()
