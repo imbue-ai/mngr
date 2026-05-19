@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -195,8 +196,6 @@ def _read_backend_port_from_log() -> int | None:
     text = MINDS_LOG.read_text(errors="replace")
     # Look for ``Bare-origin: http://127.0.0.1:<port>``. Fall back to the
     # process command line if logs do not have it yet (race during startup).
-    import re
-
     m = re.search(r"Bare-origin:\s*http://[^:]+:(\d+)", text)
     if m:
         return int(m.group(1))
@@ -210,8 +209,6 @@ def _read_backend_port_from_ps() -> int | None:
         text=True,
         check=False,
     ).stdout
-    import re
-
     for line in out.splitlines():
         if "minds" in line and "forward" in line:
             m = re.search(r"--port\s+(\d+)", line)
