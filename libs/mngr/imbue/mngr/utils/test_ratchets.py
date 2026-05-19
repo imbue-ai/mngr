@@ -89,7 +89,7 @@ def test_prevent_importlib_import_module() -> None:
 
 
 def test_prevent_getattr() -> None:
-    rc.check_getattr(_DIR, snapshot(9))
+    rc.check_getattr(_DIR, snapshot(10))
 
 
 def test_prevent_setattr() -> None:
@@ -218,7 +218,7 @@ def test_prevent_unittest_mock_imports() -> None:
 
 
 def test_prevent_monkeypatch_setattr() -> None:
-    rc.check_monkeypatch_setattr(_DIR, snapshot(35))
+    rc.check_monkeypatch_setattr(_DIR, snapshot(36))
 
 
 def test_prevent_test_container_classes() -> None:

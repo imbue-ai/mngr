@@ -50,7 +50,6 @@ _DEFAULT_MIN_ONLINE_HOST_AGE_SECONDS: Final[float] = 60.0 * 10.0
 
 # === Helper Functions ===
 
-T = TypeVar("T")
 PluginConfigT = TypeVar("PluginConfigT", bound="PluginConfig")
 
 
@@ -73,32 +72,35 @@ def split_cli_args_string(cli_args: str) -> tuple[str, ...]:
     return tuple(lexer)
 
 
-@pure
-def merge_tuples(base: tuple[str, ...], override: tuple[str, ...]) -> tuple[str, ...]:
-    """Merge tuples by concatenation, returning base unchanged if override is empty."""
-    if override:
-        return base + override
-    return base
+def _assign_scalar(base_value: Any, override_value: Any) -> Any:
+    """Return ``override_value`` when it is not None; otherwise fall back to ``base_value``.
+
+    Used inside ``MngrConfig.merge_with`` to express the "override wins if
+    explicitly set" rule for scalar fields without duplicating the conditional
+    at every call site.
+    """
+    return override_value if override_value is not None else base_value
 
 
-@pure
-def merge_list_fields(base: list[T], override: list[T] | None) -> list[T]:
-    """Merge list fields, concatenating if override is not None."""
-    if override is not None:
-        return list(base) + list(override)
-    return base
+def _merge_container_dict(
+    base: dict[Any, Any],
+    override: dict[Any, Any],
+) -> dict[Any, Any]:
+    """Per-key additive merge for the top-level container dicts on ``MngrConfig``.
 
-
-K = TypeVar("K")
-V = TypeVar("V")
-
-
-@pure
-def merge_dict_fields(base: dict[K, V], override: dict[K, V] | None) -> dict[K, V]:
-    """Merge dict fields, with override keys taking precedence."""
-    if override is not None:
-        return {**base, **override}
-    return base
+    Keys present in only one side are preserved. Keys present in both are
+    merged via the value's ``merge_with`` method. This is the explicit
+    carveout from the otherwise assign-by-default rule.
+    """
+    merged: dict[Any, Any] = {}
+    for key in set(base.keys()) | set(override.keys()):
+        if key in base and key in override:
+            merged[key] = base[key].merge_with(override[key])
+        elif key in override:
+            merged[key] = override[key]
+        else:
+            merged[key] = base[key]
+    return merged
 
 
 # === Enums ===
@@ -152,18 +154,6 @@ class HookDefinition(FrozenModel):
 
 
 # === Config Types ===
-
-
-AGENT_TYPE_CONCAT_TUPLE_FIELDS: Final[frozenset[str]] = frozenset(
-    {
-        "cli_args",
-        "extra_provision_command",
-        "upload_file",
-        "create_directory",
-        "env",
-        "env_file",
-    }
-)
 
 
 class AgentTypeConfig(FrozenModel):
@@ -221,15 +211,14 @@ class AgentTypeConfig(FrozenModel):
     def merge_with(self, override: Self) -> Self:
         """Merge this config with an override config.
 
-        Important note: despite the type signatures, any of these fields may be None in the override--this means that they were NOT set in the toml (and thus should be ignored)
-
         Uses model_fields_set to determine which fields were explicitly set in
         the override config, so that subclass-specific fields (e.g., ClaudeAgentConfig's
         auto_dismiss_dialogs) are correctly preserved during merges.
 
-        Scalar fields: override wins if explicitly set
-        Tuple fields (see AGENT_TYPE_CONCAT_TUPLE_FIELDS): concatenate
-        Lists (permissions): concatenate if explicitly set
+        All aggregate fields flip to assign-by-default: a list/tuple/dict/set
+        value in the override replaces the base value entirely. Use the
+        ``field__extend`` operator in TOML / ``--setting`` / env vars to get
+        additive behavior.
         """
         # Allow override to be the same class or a base class of self (e.g., when
         # a secondary config file defines the same custom type without repeating
@@ -242,18 +231,8 @@ class AgentTypeConfig(FrozenModel):
         if not explicitly_set:
             return self
 
-        base_values = self.model_dump()
         override_values = override.model_dump()
-        updates: list[tuple[str, Any]] = []
-
-        for field_name in explicitly_set:
-            if field_name in AGENT_TYPE_CONCAT_TUPLE_FIELDS:
-                updates.append((field_name, merge_tuples(base_values[field_name], override_values[field_name])))
-            elif field_name == "permissions":
-                updates.append((field_name, merge_list_fields(self.permissions, override_values[field_name])))
-            else:
-                updates.append((field_name, override_values[field_name]))
-
+        updates: list[tuple[str, Any]] = [(field_name, override_values[field_name]) for field_name in explicitly_set]
         return self.model_copy_update(*updates)
 
 
@@ -286,36 +265,24 @@ class ProviderInstanceConfig(FrozenModel):
     def merge_with(self, override: "ProviderInstanceConfig") -> "ProviderInstanceConfig":
         """Merge this config with an override config.
 
-        Important note: despite the type signatures, any of these fields may be None in the override--this means that they were NOT set in the toml (and thus should be ignored)
-
-        Scalar fields: override wins if not None
-        List fields: concatenate both lists
-        Dict fields: merge keys, with override keys taking precedence
+        All fields flip to assign-by-default: override wins if not None.
+        Lists / dicts / sets are replaced rather than appended; use the
+        ``field__extend`` operator to opt into additive behavior.
         """
         # Ensure override is same type as self
         if not isinstance(override, self.__class__):
             raise ConfigParseError(f"Cannot merge {self.__class__.__name__} with different provider config type")
 
-        # Merge all fields: for each field, use appropriate merge strategy based on type
-        # Backend always comes from override
+        base_values = self.model_dump()
+        override_values = override.model_dump()
         merged_values: dict[str, Any] = {}
         for field_name in self.__class__.model_fields:
             if field_name == "backend":
-                merged_values[field_name] = override.backend
-            else:
-                base_value = getattr(self, field_name)
-                override_value = getattr(override, field_name)
-                if isinstance(base_value, list):
-                    # Lists: concatenate
-                    merged_values[field_name] = merge_list_fields(base_value, override_value)
-                elif isinstance(base_value, dict):
-                    # Dicts: merge keys with override taking precedence
-                    merged_values[field_name] = merge_dict_fields(base_value, override_value)
-                elif override_value is not None:
-                    # Scalars: override wins if not None
-                    merged_values[field_name] = override_value
-                else:
-                    merged_values[field_name] = base_value
+                # Backend identifies the config class itself; always take it from override.
+                merged_values[field_name] = override_values[field_name]
+                continue
+            override_value = override_values[field_name]
+            merged_values[field_name] = override_value if override_value is not None else base_values[field_name]
         return self.__class__(**merged_values)
 
 
@@ -330,12 +297,15 @@ class PluginConfig(FrozenModel):
     def merge_with(self, override: "PluginConfig") -> "PluginConfig":
         """Merge this config with an override config.
 
-        Important note: despite the type signatures, any of these fields may be None in the override--this means that they were NOT set in the toml (and thus should be ignored)
-
-        Scalar fields: override wins if not None
+        Uses ``model_fields_set`` so plugin subclasses that add extra fields
+        get correct assign-by-default semantics on those fields too.
         """
-        merged_enabled = override.enabled if override.enabled is not None else self.enabled
-        return self.__class__(enabled=merged_enabled)
+        explicitly_set = override.model_fields_set
+        if not explicitly_set:
+            return self
+        override_values = override.model_dump()
+        updates: list[tuple[str, Any]] = [(field_name, override_values[field_name]) for field_name in explicitly_set]
+        return self.model_copy_update(*updates)
 
 
 class CommandDefaults(FrozenModel):
@@ -360,14 +330,18 @@ class CommandDefaults(FrozenModel):
     def merge_with(self, override: Self) -> Self:
         """Merge this config with an override config.
 
-        Important note: despite the type signatures, any of these fields may be None in the override--this means that they were NOT set in the toml (and thus should be ignored)
-
-        For command defaults, later configs completely override earlier ones.
-        default_subcommand: scalar, override wins if not None.
+        Uses ``model_fields_set`` so a layer that touches only
+        ``default_subcommand`` (without writing any per-param defaults) leaves
+        the base's ``defaults`` intact. When the override does touch
+        ``defaults``, assign-by-default applies — the whole map replaces. Use
+        ``defaults__extend = { ... }`` to opt into key-merge.
         """
-        merged_defaults = {**self.defaults, **override.defaults}
+        explicitly_set = override.model_fields_set
+        if not explicitly_set:
+            return self
+        merged_defaults = override.defaults if "defaults" in explicitly_set else self.defaults
         merged_default_subcommand = (
-            override.default_subcommand if override.default_subcommand is not None else self.default_subcommand
+            override.default_subcommand if "default_subcommand" in explicitly_set else self.default_subcommand
         )
         return self.__class__(defaults=merged_defaults, default_subcommand=merged_default_subcommand)
 
@@ -413,11 +387,15 @@ class CreateTemplate(FrozenModel):
     def merge_with(self, override: Self) -> Self:
         """Merge this template with an override template.
 
-        Important note: despite the type signatures, any of these fields may be None in the override--this means that they were NOT set in the toml (and thus should be ignored)
-
-        For templates, later configs override earlier ones on a per-key basis.
+        Uses ``model_fields_set`` so a layer that doesn't touch ``options``
+        leaves the base intact. When the override does touch ``options``,
+        assign-by-default applies — the whole map replaces. Use
+        ``options__extend`` to opt into key-merge.
         """
-        merged_options = {**self.options, **override.options}
+        explicitly_set = override.model_fields_set
+        if not explicitly_set:
+            return self
+        merged_options = override.options if "options" in explicitly_set else self.options
         return self.__class__(options=merged_options)
 
 
@@ -564,186 +542,89 @@ class MngrConfig(FrozenModel):
         description="Default minimum age (in seconds) before GC will destroy an online host with no agents. "
         "Can be overridden per provider via min_online_host_age_seconds in the provider config.",
     )
+    agent_ready_timeout: float = Field(
+        default=10.0,
+        description="Max seconds to wait for an agent to signal readiness before sending messages. "
+        "Hook-based polling returns early; this is an upper bound, not an unconditional delay.",
+    )
 
     def merge_with(self, override: Self) -> Self:
         """Merge this config with an override config.
 
-        Important note: despite the type signatures, any of these fields may be None in the override--this means that they were NOT set in the toml (and thus should be ignored)
+        Assign-by-default for every aggregate field (list, tuple, dict,
+        frozenset). The override's value replaces the base value entirely
+        when explicitly set (non-None / non-empty). Use the ``__extend``
+        suffix on the override's TOML key (or ``--setting`` / env var) to
+        get additive behavior — that resolution happens before merge_with
+        is invoked.
 
-        Scalar fields: override wins if not None
-        Dicts: merge keys, with per-key merge for nested config objects
-        Lists: concatenate both lists
+        Carveout: the top-level *container* dicts (``agent_types``,
+        ``providers``, ``plugins``, ``commands``, ``create_templates``)
+        keep their per-key additive merge — adding ``[agent_types.foo]``
+        at one scope does not drop another scope's ``[agent_types.bar]``.
+        For keys that appear in both, the sub-class's ``merge_with`` is
+        invoked, where leaf fields again use assign-by-default.
         """
-        # Merge prefix (scalar - override wins if not None)
-        merged_prefix = self.prefix
-        if override.prefix is not None:
-            merged_prefix = override.prefix
+        merged_agent_types = _merge_container_dict(self.agent_types, override.agent_types)
+        merged_providers = _merge_container_dict(self.providers, override.providers)
+        merged_plugins = _merge_container_dict(self.plugins, override.plugins)
+        merged_commands = _merge_container_dict(self.commands, override.commands)
+        merged_create_templates = _merge_container_dict(self.create_templates, override.create_templates)
 
-        # Merge default_host_dir (scalar - override wins if not None)
-        merged_default_host_dir = self.default_host_dir
-        if override.default_host_dir is not None:
-            merged_default_host_dir = override.default_host_dir
-
-        # Merge pager (scalar - override wins if not None)
-        merged_pager = override.pager if override.pager is not None else self.pager
-
-        # Merge unset_vars (list - concatenate if override is not None)
-        merged_unset_vars = merge_list_fields(self.unset_vars, override.unset_vars)
-
-        # Merge work_dir_extra_paths (dict - override keys take precedence)
-        merged_work_dir_extra_paths = merge_dict_fields(self.work_dir_extra_paths, override.work_dir_extra_paths)
-
-        # Merge enabled_backends (list - override wins if not None/empty, otherwise keep base)
-        merged_enabled_backends = override.enabled_backends if override.enabled_backends else self.enabled_backends
-
-        # Merge agent_types (dict - merge keys, with per-key merge)
-        merged_agent_types: dict[AgentTypeName, AgentTypeConfig] = {}
-        all_type_keys = set(self.agent_types.keys()) | set(override.agent_types.keys())
-        for key in all_type_keys:
-            if key in self.agent_types and key in override.agent_types:
-                # Both have this key - merge the configs
-                merged_agent_types[key] = self.agent_types[key].merge_with(override.agent_types[key])
-            elif key in override.agent_types:
-                # Only override has this key
-                merged_agent_types[key] = override.agent_types[key]
-            else:
-                # Only base has this key
-                merged_agent_types[key] = self.agent_types[key]
-
-        # Merge providers (dict - merge keys, with per-key merge)
-        merged_providers: dict[ProviderInstanceName, ProviderInstanceConfig] = {}
-        all_provider_keys = set(self.providers.keys()) | set(override.providers.keys())
-        for key in all_provider_keys:
-            if key in self.providers and key in override.providers:
-                # Both have this key - merge the configs
-                merged_providers[key] = self.providers[key].merge_with(override.providers[key])
-            elif key in override.providers:
-                # Only override has this key
-                merged_providers[key] = override.providers[key]
-            else:
-                # Only base has this key
-                merged_providers[key] = self.providers[key]
-
-        # Merge plugins (dict - merge keys, with per-key merge)
-        merged_plugins: dict[PluginName, PluginConfig] = {}
-        all_plugin_keys = set(self.plugins.keys()) | set(override.plugins.keys())
-        for key in all_plugin_keys:
-            if key in self.plugins and key in override.plugins:
-                # Both have this key - merge the configs
-                merged_plugins[key] = self.plugins[key].merge_with(override.plugins[key])
-            elif key in override.plugins:
-                # Only override has this key
-                merged_plugins[key] = override.plugins[key]
-            else:
-                # Only base has this key
-                merged_plugins[key] = self.plugins[key]
-
-        # Merge disabled_plugins (union of both sets)
-        merged_disabled_plugins = self.disabled_plugins | override.disabled_plugins
-
-        # Merge commands (dict - merge keys, with per-key merge)
-        merged_commands: dict[str, CommandDefaults] = {}
-        all_command_keys = set(self.commands.keys()) | set(override.commands.keys())
-        for key in all_command_keys:
-            if key in self.commands and key in override.commands:
-                # Both have this key - merge the configs
-                merged_commands[key] = self.commands[key].merge_with(override.commands[key])
-            elif key in override.commands:
-                # Only override has this key
-                merged_commands[key] = override.commands[key]
-            else:
-                # Only base has this key
-                merged_commands[key] = self.commands[key]
-
-        # Merge create_templates (dict - merge keys, with per-key merge)
-        merged_create_templates: dict[CreateTemplateName, CreateTemplate] = {}
-        all_template_keys = set(self.create_templates.keys()) | set(override.create_templates.keys())
-        for key in all_template_keys:
-            if key in self.create_templates and key in override.create_templates:
-                # Both have this key - merge the templates
-                merged_create_templates[key] = self.create_templates[key].merge_with(override.create_templates[key])
-            elif key in override.create_templates:
-                # Only override has this key
-                merged_create_templates[key] = override.create_templates[key]
-            else:
-                # Only base has this key
-                merged_create_templates[key] = self.create_templates[key]
-
-        # Merge pre_command_scripts (dict - override keys take precedence)
-        merged_pre_command_scripts = merge_dict_fields(self.pre_command_scripts, override.pre_command_scripts)
-
-        is_remote_agent_installation_allowed = self.is_remote_agent_installation_allowed
-        if override.is_remote_agent_installation_allowed is not None:
-            is_remote_agent_installation_allowed = override.is_remote_agent_installation_allowed
-
-        # Merge connect_command (scalar - override wins if not None)
-        merged_connect_command = (
-            override.connect_command if override.connect_command is not None else self.connect_command
-        )
-
-        # Merge is_nested_tmux_allowed (scalar - override wins if not None)
-        merged_is_nested_tmux_allowed = self.is_nested_tmux_allowed
-        if override.is_nested_tmux_allowed is not None:
-            merged_is_nested_tmux_allowed = override.is_nested_tmux_allowed
-
-        # Merge headless (scalar - override wins if not None)
-        merged_headless = self.headless
-        if override.headless is not None:
-            merged_headless = override.headless
-
-        # Merge is_error_reporting_enabled (scalar - override wins if not None)
-        merged_is_error_reporting_enabled = self.is_error_reporting_enabled
-        if override.is_error_reporting_enabled is not None:
-            merged_is_error_reporting_enabled = override.is_error_reporting_enabled
-
-        is_allowed_in_pytest = self.is_allowed_in_pytest
-        if override.is_allowed_in_pytest is not None:
-            is_allowed_in_pytest = override.is_allowed_in_pytest
-
-        # Merge default_destroyed_host_persisted_seconds (scalar - override wins if not None)
-        default_destroyed_host_persisted_seconds = self.default_destroyed_host_persisted_seconds
-        if override.default_destroyed_host_persisted_seconds is not None:
-            default_destroyed_host_persisted_seconds = override.default_destroyed_host_persisted_seconds
-
-        # Merge default_min_online_host_age_seconds (scalar - override wins if not None)
-        default_min_online_host_age_seconds = self.default_min_online_host_age_seconds
-        if override.default_min_online_host_age_seconds is not None:
-            default_min_online_host_age_seconds = override.default_min_online_host_age_seconds
-
-        # Merge retry (nested config - use merge_with if override.retry is not None)
-        merged_retry = self.retry
-        if override.retry is not None:
-            merged_retry = self.retry.merge_with(override.retry)
-
-        # Merge logging (nested config - use merge_with if override.logging is not None)
-        merged_logging = self.logging
-        if override.logging is not None:
-            merged_logging = self.logging.merge_with(override.logging)
+        merged_retry = self.retry.merge_with(override.retry) if override.retry is not None else self.retry
+        merged_logging = self.logging.merge_with(override.logging) if override.logging is not None else self.logging
 
         return self.__class__(
-            prefix=merged_prefix,
-            default_host_dir=merged_default_host_dir,
-            pager=merged_pager,
-            unset_vars=merged_unset_vars,
-            work_dir_extra_paths=merged_work_dir_extra_paths,
-            enabled_backends=merged_enabled_backends,
+            prefix=_assign_scalar(self.prefix, override.prefix),
+            default_host_dir=_assign_scalar(self.default_host_dir, override.default_host_dir),
+            pager=_assign_scalar(self.pager, override.pager),
+            unset_vars=override.unset_vars if override.unset_vars is not None else self.unset_vars,
+            work_dir_extra_paths=override.work_dir_extra_paths
+            if override.work_dir_extra_paths is not None
+            else self.work_dir_extra_paths,
+            enabled_backends=override.enabled_backends
+            if override.enabled_backends is not None
+            else self.enabled_backends,
             agent_types=merged_agent_types,
             providers=merged_providers,
             plugins=merged_plugins,
-            disabled_plugins=merged_disabled_plugins,
+            # disabled_plugins is a deliberate carveout from the assign-by-default
+            # rule: it is populated by CLI ``--disable-plugin`` flags via
+            # ``_apply_plugin_overrides`` *after* layers have been merged, and
+            # individual TOML layers do not normally write to it. An override
+            # with an empty frozenset is indistinguishable from "not set", so we
+            # preserve the base value instead of wiping it. Users wanting to
+            # disable a specific plugin per-scope should use
+            # ``[plugins.<name>] enabled = false`` rather than this field.
+            disabled_plugins=override.disabled_plugins if override.disabled_plugins else self.disabled_plugins,
             commands=merged_commands,
             create_templates=merged_create_templates,
-            pre_command_scripts=merged_pre_command_scripts,
-            is_remote_agent_installation_allowed=is_remote_agent_installation_allowed,
-            connect_command=merged_connect_command,
+            pre_command_scripts=override.pre_command_scripts
+            if override.pre_command_scripts is not None
+            else self.pre_command_scripts,
+            is_remote_agent_installation_allowed=_assign_scalar(
+                self.is_remote_agent_installation_allowed,
+                override.is_remote_agent_installation_allowed,
+            ),
+            connect_command=_assign_scalar(self.connect_command, override.connect_command),
             retry=merged_retry,
             logging=merged_logging,
-            is_nested_tmux_allowed=merged_is_nested_tmux_allowed,
-            headless=merged_headless,
-            is_error_reporting_enabled=merged_is_error_reporting_enabled,
-            is_allowed_in_pytest=is_allowed_in_pytest,
-            default_destroyed_host_persisted_seconds=default_destroyed_host_persisted_seconds,
-            default_min_online_host_age_seconds=default_min_online_host_age_seconds,
+            is_nested_tmux_allowed=_assign_scalar(self.is_nested_tmux_allowed, override.is_nested_tmux_allowed),
+            headless=_assign_scalar(self.headless, override.headless),
+            is_error_reporting_enabled=_assign_scalar(
+                self.is_error_reporting_enabled,
+                override.is_error_reporting_enabled,
+            ),
+            is_allowed_in_pytest=_assign_scalar(self.is_allowed_in_pytest, override.is_allowed_in_pytest),
+            default_destroyed_host_persisted_seconds=_assign_scalar(
+                self.default_destroyed_host_persisted_seconds,
+                override.default_destroyed_host_persisted_seconds,
+            ),
+            default_min_online_host_age_seconds=_assign_scalar(
+                self.default_min_online_host_age_seconds,
+                override.default_min_online_host_age_seconds,
+            ),
+            agent_ready_timeout=_assign_scalar(self.agent_ready_timeout, override.agent_ready_timeout),
         )
 
 

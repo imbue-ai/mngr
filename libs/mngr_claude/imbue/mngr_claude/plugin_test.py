@@ -297,14 +297,14 @@ def test_claude_agent_config_merge_overrides_command() -> None:
     assert merged.command == CommandString("custom-claude")
 
 
-def test_claude_agent_config_merge_concatenates_cli_args() -> None:
-    """Claude agent config should concatenate cli_args."""
+def test_claude_agent_config_merge_replaces_cli_args() -> None:
+    """ClaudeAgentConfig assigns cli_args from override (no concat under assign-by-default)."""
     base = ClaudeAgentConfig(cli_args=("--verbose",))
     override = ClaudeAgentConfig(cli_args=("--model", "sonnet"))
 
     merged = base.merge_with(override)
 
-    assert merged.cli_args == ("--verbose", "--model", "sonnet")
+    assert merged.cli_args == ("--model", "sonnet")
 
 
 def test_claude_agent_config_merge_uses_override_cli_args_when_base_empty() -> None:

@@ -11,19 +11,18 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mngr.config.agent_config_registry import register_agent_config
 from imbue.mngr.config.agent_config_registry import reset_agent_config_registry
 from imbue.mngr.config.data_types import AgentTypeConfig
-from imbue.mngr.config.data_types import CommandDefaults
 from imbue.mngr.config.data_types import CreateTemplateName
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import PluginConfig
 from imbue.mngr.config.data_types import get_or_create_user_id
 from imbue.mngr.config.loader import _apply_plugin_overrides
-from imbue.mngr.config.loader import _merge_command_defaults
+from imbue.mngr.config.loader import _collect_env_overrides
 from imbue.mngr.config.loader import _normalize_tuple_fields_for_construct
 from imbue.mngr.config.loader import _parse_agent_types
-from imbue.mngr.config.loader import _parse_command_env_vars
 from imbue.mngr.config.loader import _parse_commands
 from imbue.mngr.config.loader import _parse_create_templates
 from imbue.mngr.config.loader import _parse_logging_config
+from imbue.mngr.config.loader import _parse_mngr_env_overrides
 from imbue.mngr.config.loader import _parse_plugins
 from imbue.mngr.config.loader import _parse_providers
 from imbue.mngr.config.loader import block_disabled_plugins
@@ -46,147 +45,154 @@ hookimpl = pluggy.HookimplMarker("mngr")
 
 
 # =============================================================================
-# Tests for _parse_command_env_vars
+# Tests for _parse_mngr_env_overrides / _collect_env_overrides
 # =============================================================================
 
 
-def test_parse_command_env_vars_single_param() -> None:
-    """Test parsing a single command param from env var."""
-    environ = {"MNGR_COMMANDS_CREATE_BRANCH": "main:mngr/*"}
-    result = _parse_command_env_vars(environ)
-
-    assert "create" in result
-    assert result["create"].defaults["branch"] == "main:mngr/*"
+def test_parse_mngr_env_overrides_builds_nested_dict() -> None:
+    """A MNGR__X__Y env var lands at the nested path x.y in the raw dict."""
+    environ = {"MNGR__COMMANDS__CREATE__BRANCH": "main:mngr/*"}
+    raw = _parse_mngr_env_overrides(environ)
+    assert raw == {"commands": {"create": {"branch": "main:mngr/*"}}}
 
 
-def test_parse_command_env_vars_multiple_params_same_command() -> None:
-    """Test parsing multiple params for the same command."""
+def test_parse_mngr_env_overrides_json_parses_value() -> None:
+    """Values are JSON-parsed first with raw-string fallback (matches --setting)."""
     environ = {
-        "MNGR_COMMANDS_CREATE_BRANCH": "main:mngr/*",
-        "MNGR_COMMANDS_CREATE_CONNECT": "false",
+        "MNGR__COMMANDS__CREATE__CONNECT": "false",
+        "MNGR__COMMANDS__CREATE__RETRY": "5",
+        "MNGR__COMMANDS__CREATE__NAME": "myagent",
     }
-    result = _parse_command_env_vars(environ)
-
-    assert "create" in result
-    assert result["create"].defaults["branch"] == "main:mngr/*"
-    # Values are kept as strings - type conversion happens in click/pydantic
-    assert result["create"].defaults["connect"] == "false"
+    raw = _parse_mngr_env_overrides(environ)
+    assert raw["commands"]["create"]["connect"] is False
+    assert raw["commands"]["create"]["retry"] == 5
+    assert raw["commands"]["create"]["name"] == "myagent"
 
 
-def test_parse_command_env_vars_multiple_commands() -> None:
-    """Test parsing params for different commands."""
+def test_parse_mngr_env_overrides_skips_unrelated_vars() -> None:
+    """Vars not matching the MNGR__ prefix are skipped."""
     environ = {
-        "MNGR_COMMANDS_CREATE_NAME": "myagent",
-        "MNGR_COMMANDS_LIST_FORMAT": "json",
-    }
-    result = _parse_command_env_vars(environ)
-
-    assert "create" in result
-    assert result["create"].defaults["name"] == "myagent"
-    assert "list" in result
-    assert result["list"].defaults["format"] == "json"
-
-
-def test_parse_command_env_vars_ignores_non_matching_vars() -> None:
-    """Test that non-matching env vars are ignored."""
-    environ = {
-        "MNGR_COMMANDS_CREATE_NAME": "myagent",
+        "MNGR__COMMANDS__CREATE__NAME": "myagent",
         "MNGR_PREFIX": "test-",
         "PATH": "/usr/bin",
-        "HOME": "/home/user",
     }
-    result = _parse_command_env_vars(environ)
-
-    assert "create" in result
-    assert len(result) == 1
+    raw = _parse_mngr_env_overrides(environ)
+    assert raw == {"commands": {"create": {"name": "myagent"}}}
 
 
-def test_parse_command_env_vars_ignores_no_underscore_after_command() -> None:
-    """Test that vars without underscore after command prefix are ignored."""
-    environ = {"MNGR_COMMANDS_CREATE": "ignored"}
-    result = _parse_command_env_vars(environ)
-
-    assert len(result) == 0
-
-
-def test_parse_command_env_vars_lowercases_command_and_param() -> None:
-    """Test that command and param names are lowercased."""
-    environ = {"MNGR_COMMANDS_CREATE_BRANCH": "main:mngr/*"}
-    result = _parse_command_env_vars(environ)
-
-    assert "create" in result
-    assert "branch" in result["create"].defaults
+def test_parse_mngr_env_overrides_rejects_mixed_case() -> None:
+    """Lowercase letters in the segment portion mean the var is not recognized."""
+    environ = {"MNGR__commands__create__name": "lowercase"}
+    raw = _parse_mngr_env_overrides(environ)
+    assert raw == {}
 
 
-def test_parse_command_env_vars_empty_environ() -> None:
-    """Test parsing empty environ returns empty dict."""
-    result = _parse_command_env_vars({})
-    assert result == {}
+def test_parse_mngr_env_overrides_handles_extend_suffix() -> None:
+    """A trailing __EXTEND collapses into a key__extend suffix at the leaf."""
+    environ = {"MNGR__AGENT_TYPES__MY_CLAUDE__CLI_ARGS__EXTEND": '["--foo"]'}
+    raw = _parse_mngr_env_overrides(environ)
+    assert raw == {"agent_types": {"my_claude": {"cli_args__extend": ["--foo"]}}}
 
 
-def test_parse_command_env_vars_preserves_values_as_strings() -> None:
-    """Test that all values are preserved as strings.
+def test_parse_mngr_env_overrides_empty_environ() -> None:
+    """Empty environ produces an empty dict."""
+    assert _parse_mngr_env_overrides({}) == {}
 
-    Type conversion happens downstream in click/pydantic where the
-    actual type information is available.
+
+def test_parse_mngr_env_overrides_skips_empty_segments() -> None:
+    """The pattern's ``[A-Z0-9_]+`` lets shapes like ``MNGR__X__`` (trailing __)
+    or ``MNGR____X`` (leading empty segment) slip through. Those produce an
+    empty segment after ``split('__')``; the parser must skip them rather than
+    silently materialising an unnamed key in the raw config dict.
     """
     environ = {
-        "MNGR_COMMANDS_CREATE_CONNECT": "true",
-        "MNGR_COMMANDS_CREATE_RETRY": "5",
-        "MNGR_COMMANDS_CREATE_NAME": "myagent",
+        "MNGR__X__": "trailing-double-underscore",
+        "MNGR____X": "leading-double-underscore",
+        "MNGR__COMMANDS__CREATE__": "trailing-in-middle",
     }
-    result = _parse_command_env_vars(environ)
-
-    # All values should be strings
-    assert result["create"].defaults["connect"] == "true"
-    assert result["create"].defaults["retry"] == "5"
-    assert result["create"].defaults["name"] == "myagent"
-    assert all(isinstance(v, str) for v in result["create"].defaults.values())
+    raw = _parse_mngr_env_overrides(environ)
+    assert raw == {}
 
 
-# =============================================================================
-# Tests for _merge_command_defaults
-# =============================================================================
+def test_collect_env_overrides_synthesizes_preserved_aliases() -> None:
+    """Preserved aliases (MNGR_PREFIX, MNGR_HOST_DIR, MNGR_HEADLESS) flow into the same raw dict."""
+    environ = {
+        "MNGR_PREFIX": "alias-",
+        "MNGR_HOST_DIR": "/tmp/host",
+        "MNGR_HEADLESS": "true",
+    }
+    raw = _collect_env_overrides(environ)
+    assert raw["prefix"] == "alias-"
+    assert raw["default_host_dir"] == "/tmp/host"
+    assert raw["headless"] is True
 
 
-def test_merge_command_defaults_empty_base() -> None:
-    """Test merging into empty base."""
-    base: dict[str, CommandDefaults] = {}
-    override = {"create": CommandDefaults(defaults={"name": "test"})}
-    result = _merge_command_defaults(base, override)
-
-    assert "create" in result
-    assert result["create"].defaults["name"] == "test"
-
-
-def test_merge_command_defaults_empty_override() -> None:
-    """Test merging empty override."""
-    base = {"create": CommandDefaults(defaults={"name": "test"})}
-    override: dict[str, CommandDefaults] = {}
-    result = _merge_command_defaults(base, override)
-
-    assert "create" in result
-    assert result["create"].defaults["name"] == "test"
+def test_collect_env_overrides_raises_on_alias_canonical_conflict() -> None:
+    """If both an alias and its canonical MNGR__* form are set with different values, raise."""
+    environ = {
+        "MNGR_PREFIX": "alias-",
+        "MNGR__PREFIX": "canonical-",
+    }
+    with pytest.raises(ConfigParseError, match="Conflict: MNGR_PREFIX"):
+        _collect_env_overrides(environ)
 
 
-def test_merge_command_defaults_combines_different_commands() -> None:
-    """Test merging with different commands."""
-    base = {"create": CommandDefaults(defaults={"name": "test"})}
-    override = {"list": CommandDefaults(defaults={"format": "json"})}
-    result = _merge_command_defaults(base, override)
+def test_collect_env_overrides_allows_alias_and_canonical_with_same_value() -> None:
+    """Same value on both forms is fine (just redundant)."""
+    environ = {
+        "MNGR_HEADLESS": "true",
+        "MNGR__HEADLESS": "true",
+    }
+    raw = _collect_env_overrides(environ)
+    assert raw["headless"] is True
 
-    assert "create" in result
-    assert "list" in result
+
+@pytest.mark.parametrize(
+    ("alias_value", "canonical_value"),
+    [
+        ("yes", "yes"),
+        ("yes", "true"),
+        ("1", "true"),
+        ("no", "false"),
+    ],
+)
+def test_collect_env_overrides_accepts_semantically_equal_headless_spellings(
+    alias_value: str, canonical_value: str
+) -> None:
+    """MNGR_HEADLESS and MNGR__HEADLESS that mean the same thing don't raise.
+
+    The two env-var forms historically use different parsers (parse_bool_env
+    vs JSON-with-string-fallback), so a raw string-equality check would
+    treat e.g. MNGR_HEADLESS=yes and MNGR__HEADLESS=yes as conflicting even
+    though they intend the same boolean. The conflict check normalises both
+    sides through the alias parser before comparison.
+    """
+    environ = {
+        "MNGR_HEADLESS": alias_value,
+        "MNGR__HEADLESS": canonical_value,
+    }
+    raw = _collect_env_overrides(environ)
+    expected = alias_value.lower() in {"1", "true", "yes"}
+    assert raw["headless"] is expected
 
 
-def test_merge_command_defaults_override_wins_same_command() -> None:
-    """Test that override wins for same command params."""
-    base = {"create": CommandDefaults(defaults={"name": "old", "other": "base"})}
-    override = {"create": CommandDefaults(defaults={"name": "new"})}
-    result = _merge_command_defaults(base, override)
+@pytest.mark.parametrize("value", ["yes", "1", "True", "TRUE"])
+def test_collect_env_overrides_preserves_mngr_headless_truthy_spellings(value: str) -> None:
+    """MNGR_HEADLESS keeps parse_bool_env semantics for backwards compatibility.
 
-    assert result["create"].defaults["name"] == "new"
-    assert result["create"].defaults["other"] == "base"
+    Pre-existing scripts that set MNGR_HEADLESS=yes / =1 / =True must continue to
+    yield headless=True; only the canonical MNGR__HEADLESS uses the
+    JSON-parsed-with-string-fallback shape shared by the rest of MNGR__*.
+    """
+    raw = _collect_env_overrides({"MNGR_HEADLESS": value})
+    assert raw["headless"] is True
+
+
+@pytest.mark.parametrize("value", ["no", "false", "0", "", "anything-else"])
+def test_collect_env_overrides_mngr_headless_falsy_values(value: str) -> None:
+    """Anything not in parse_bool_env's truthy set resolves to headless=False."""
+    raw = _collect_env_overrides({"MNGR_HEADLESS": value})
+    assert raw["headless"] is False
 
 
 # =============================================================================
@@ -864,6 +870,7 @@ _SAMPLE_CONFIG_VALUES: dict[str, Any] = {
     "is_allowed_in_pytest": True,
     "default_destroyed_host_persisted_seconds": 12345.0,
     "default_min_online_host_age_seconds": 600.0,
+    "agent_ready_timeout": 15.0,
 }
 
 _SAMPLE_TOML = """\
@@ -880,6 +887,7 @@ is_error_reporting_enabled = false
 is_allowed_in_pytest = true
 default_destroyed_host_persisted_seconds = 12345.0
 default_min_online_host_age_seconds = 600.0
+agent_ready_timeout = 15.0
 
 [commands.create]
 name = "test"
@@ -1435,22 +1443,20 @@ def test_normalize_tuple_fields_wraps_string_in_tuple() -> None:
 
 
 # =============================================================================
-# Tests for _parse_command_env_vars edge cases
+# Tests for _parse_mngr_env_overrides edge cases
 # =============================================================================
 
 
-def test_parse_command_env_vars_empty_suffix_after_prefix() -> None:
-    """_parse_command_env_vars should skip when env key is exactly the prefix with nothing after."""
-    environ = {"MNGR_COMMANDS_": "value"}
-    result = _parse_command_env_vars(environ)
-    assert result == {}
+def test_parse_mngr_env_overrides_skips_bare_prefix() -> None:
+    """Env key exactly equal to the prefix is skipped (no segments to parse)."""
+    environ = {"MNGR__": "value"}
+    assert _parse_mngr_env_overrides(environ) == {}
 
 
-def test_parse_command_env_vars_empty_command_name() -> None:
-    """_parse_command_env_vars should skip when command name is empty (leading underscore)."""
-    environ = {"MNGR_COMMANDS__PARAM": "value"}
-    result = _parse_command_env_vars(environ)
-    assert result == {}
+def test_parse_mngr_env_overrides_skips_old_command_form() -> None:
+    """The old MNGR_COMMANDS_* form is no longer recognized; it's ignored."""
+    environ = {"MNGR_COMMANDS_CREATE_BRANCH": "main"}
+    assert _parse_mngr_env_overrides(environ) == {}
 
 
 # =============================================================================
@@ -1509,10 +1515,10 @@ def test_load_config_allows_pytest_with_explicit_opt_in(
 # =============================================================================
 
 
-def test_load_config_applies_env_command_overrides(
+def test_load_config_applies_mngr_env_overrides(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, cg: ConcurrencyGroup
 ) -> None:
-    """load_config should merge env command overrides into the final config."""
+    """load_config should merge ``MNGR__*`` env overrides into the final config."""
     pm = pluggy.PluginManager("mngr")
     pm.add_hookspecs(hookspecs)
     load_all_registries(pm)
@@ -1521,12 +1527,13 @@ def test_load_config_applies_env_command_overrides(
     monkeypatch.delenv("MNGR_PREFIX", raising=False)
     monkeypatch.delenv("MNGR_HOST_DIR", raising=False)
     monkeypatch.delenv("MNGR_ROOT_NAME", raising=False)
-    monkeypatch.setenv("MNGR_COMMANDS_CREATE_CONNECT", "false")
+    monkeypatch.setenv("MNGR__COMMANDS__CREATE__CONNECT", "false")
 
     mngr_ctx = load_config(pm=pm, concurrency_group=cg, context_dir=tmp_path)
 
     assert "create" in mngr_ctx.config.commands
-    assert mngr_ctx.config.commands["create"].defaults.get("connect") == "false"
+    # JSON-parsed: "false" becomes the boolean False.
+    assert mngr_ctx.config.commands["create"].defaults.get("connect") is False
 
 
 def test_load_config_headless_default_is_false(
@@ -1748,3 +1755,55 @@ def test_parse_config_silent_does_not_warn_on_unknown_top_level_field(log_warnin
     raw = {"future_top_level_field": "x"}
     parse_config(raw, disabled_plugins=frozenset(), strict=False, silent=True)
     assert not any("future_top_level_field" in msg for msg in log_warnings), log_warnings
+
+
+# =============================================================================
+# Tests for _normalize_field_keys invariants (env-var path safety)
+# =============================================================================
+
+
+def test_parse_config_rejects_field_name_with_double_underscore() -> None:
+    """A field name containing '__' (other than the trailing __extend suffix)
+    is rejected at config-load time. The double-underscore segment separator
+    is reserved for env-var encoding, so a key like ``foo__bar`` would be
+    indistinguishable from a nested ``foo.bar`` in MNGR__FOO__BAR form.
+    """
+    raw = {"foo__bar": 1}
+    with pytest.raises(ConfigParseError, match=r"containing '__' in its field name"):
+        parse_config(raw, disabled_plugins=frozenset())
+
+
+def test_parse_config_accepts_extend_suffix_on_field_name() -> None:
+    """The trailing __extend suffix is the one place '__' is allowed in a key.
+
+    The suffix is stripped before the field-name shape check, so an extend
+    write on an aggregate field doesn't trigger the double-underscore
+    rejection. The resolver would normally apply the suffix before
+    ``parse_config`` is invoked; passing it through here directly exercises
+    the normalisation path in isolation.
+    """
+    # ``cli_args__extend`` on an agent-type block normalises OK and is
+    # forwarded as an unknown field to the agent-type parser; the surrounding
+    # parse_config call must not raise from _normalize_field_keys.
+    raw = {"agent_types": {"my_agent": {"cli_args__extend": ["--debug"]}}}
+    # Strict mode would reject the unknown ``cli_args__extend`` field on the
+    # agent-type config, but the failure point we care about is the top-level
+    # name shape check, which must pass. Use strict=False so the agent-type
+    # parser drops the unknown field with a warning instead of raising.
+    parse_config(raw, disabled_plugins=frozenset(), strict=False, silent=True)
+
+
+def test_parse_config_rejects_sibling_lowercase_collision_within_block() -> None:
+    """Two sibling keys *within a single block* that lowercase-collapse to the
+    same env-var segment are ambiguous in MNGR__* lookups and are rejected.
+
+    Example: an agent-type block with both ``Cli-Args`` and ``cli_args`` keys
+    would resolve to the same ``CLI_ARGS`` env-var segment, so the loader
+    raises rather than silently choosing one.
+    """
+    raw = {"agent_types": {"my_agent": {"Cli-Args": ["--foo"], "cli_args": ["--bar"]}}}
+    with pytest.raises(
+        ConfigParseError,
+        match=r"collapse to the same env-var segment 'CLI_ARGS'",
+    ):
+        parse_config(raw, disabled_plugins=frozenset())

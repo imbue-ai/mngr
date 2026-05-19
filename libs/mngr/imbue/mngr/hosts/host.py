@@ -577,7 +577,7 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         For local hosts, uses flock for process-level locking.
         For remote hosts, writes/removes a lock file to prevent the idle shutdown script
         from triggering during operations. On error, the lock file is removed by default
-        so the host can idle-shutdown; set MNGR_RETAIN_LOCK_FOR_FAILED_HOSTS_DURING_CREATE=1
+        so the host can idle-shutdown; set MNGR_DEBUG_RETAIN_LOCK_FOR_FAILED_HOSTS_DURING_CREATE=1
         to retain it for debugging.
         """
         lock_file_path = self.host_dir / "host_lock"
@@ -590,14 +590,14 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
             except BaseException:
                 # On error, remove the lock file so the host can idle-shutdown normally,
                 # unless the user wants to retain it for debugging
-                is_retain_lock = os.environ.get("MNGR_RETAIN_LOCK_FOR_FAILED_HOSTS_DURING_CREATE") == "1"
+                is_retain_lock = os.environ.get("MNGR_DEBUG_RETAIN_LOCK_FOR_FAILED_HOSTS_DURING_CREATE") == "1"
                 if is_retain_lock:
                     logger.debug(
-                        "Retaining host lock file for debugging (MNGR_RETAIN_LOCK_FOR_FAILED_HOSTS_DURING_CREATE=1)"
+                        "Retaining host lock file for debugging (MNGR_DEBUG_RETAIN_LOCK_FOR_FAILED_HOSTS_DURING_CREATE=1)"
                     )
                 else:
                     logger.debug(
-                        "Removing host lock file on error to allow idle shutdown (set MNGR_RETAIN_LOCK_FOR_FAILED_HOSTS_DURING_CREATE=1 to prevent this and debug)"
+                        "Removing host lock file on error to allow idle shutdown (set MNGR_DEBUG_RETAIN_LOCK_FOR_FAILED_HOSTS_DURING_CREATE=1 to prevent this and debug)"
                     )
                     try:
                         self.execute_idempotent_command(f"rm -f '{lock_file_path}'")

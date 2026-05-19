@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 import shlex
 from abc import ABC
 from abc import abstractmethod
@@ -9,7 +8,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 from typing import Callable
-from typing import Final
 from typing import Iterator
 from typing import Mapping
 from typing import Sequence
@@ -21,7 +19,6 @@ from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr.config.data_types import EnvVar
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import ParseSpecError
-from imbue.mngr.errors import UserInputError
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.data_types import ActivityConfig
 from imbue.mngr.interfaces.data_types import CertifiedHostData
@@ -44,26 +41,6 @@ from imbue.mngr.primitives import Permission
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import SnapshotName
 from imbue.mngr.primitives import TransferMode
-
-# Default timeout for waiting for agent readiness before sending messages.
-# With hook-based polling, we return early when the agent signals readiness,
-# so this is a max wait time, not an unconditional delay.
-# Can be overridden via the MNGR_AGENT_READY_TIMEOUT environment variable.
-DEFAULT_AGENT_READY_TIMEOUT_SECONDS: Final[float] = 10.0
-
-
-def get_agent_ready_timeout() -> float:
-    """Return the agent ready timeout, respecting MNGR_AGENT_READY_TIMEOUT env var.
-
-    Falls back to DEFAULT_AGENT_READY_TIMEOUT_SECONDS if the env var is not set.
-    """
-    env_val = os.environ.get("MNGR_AGENT_READY_TIMEOUT")
-    if env_val is not None:
-        try:
-            return float(env_val)
-        except ValueError as e:
-            raise UserInputError(f"MNGR_AGENT_READY_TIMEOUT must be a number, got: {env_val!r}") from e
-    return DEFAULT_AGENT_READY_TIMEOUT_SECONDS
 
 
 class HostInterface(MutableModel, ABC):
@@ -911,9 +888,10 @@ class CreateAgentOptions(FrozenModel):
         default=None,
         description="Message to send when the agent is started (resumed) after being stopped",
     )
-    ready_timeout_seconds: float = Field(
-        default_factory=get_agent_ready_timeout,
-        description="Timeout in seconds to wait for agent readiness before sending initial message",
+    ready_timeout_seconds: float | None = Field(
+        default=None,
+        description="Timeout in seconds to wait for agent readiness before sending initial message. "
+        "When None, falls back to MngrConfig.agent_ready_timeout at consumption time.",
     )
     git: AgentGitOptions | None = Field(
         default=None,

@@ -1,4 +1,3 @@
-import json
 import string
 import sys
 import uuid
@@ -27,6 +26,9 @@ from imbue.mngr.config.data_types import CreateTemplateName
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import OutputOptions
+from imbue.mngr.config.key_resolver import parse_scalar_value
+from imbue.mngr.config.key_resolver import resolve_extends
+from imbue.mngr.config.key_resolver import set_at_path
 from imbue.mngr.config.loader import block_disabled_plugins
 from imbue.mngr.config.loader import load_config
 from imbue.mngr.config.loader import parse_config
@@ -64,7 +66,9 @@ def add_common_options(command: TDecorated) -> TDecorated:
     - --headless: Disable all interactive behavior
     - --plugin: Enable plugins
     - --disable-plugin: Disable plugins
-    - -S, --setting: Override config settings for this invocation (KEY=VALUE, dot-separated paths)
+    - -S, --setting: Override config settings for this invocation (KEY=VALUE, dot-separated
+      paths; a trailing ``__extend`` on the leaf key opts into the list/dict/set extend
+      operator)
     """
     # Apply decorators in reverse order (bottom to top)
     # These are wrapped in the "Common" option group
@@ -72,7 +76,10 @@ def add_common_options(command: TDecorated) -> TDecorated:
         "-S",
         "--setting",
         multiple=True,
-        help="Override a config setting for this invocation (KEY=VALUE, dot-separated paths) [repeatable]",
+        help=(
+            "Override a config setting for this invocation (KEY=VALUE, dot-separated paths; "
+            "append __extend to the leaf key to extend list/dict/set fields) [repeatable]"
+        ),
     )(command)
     command = optgroup.option("--disable-plugin", multiple=True, help="Disable a plugin [repeatable]")(command)
     command = optgroup.option("--plugin", "--enable-plugin", multiple=True, help="Enable a plugin [repeatable]")(
@@ -340,6 +347,7 @@ def parse_output_options(
         is_logging_commands=is_log_commands,
         is_logging_command_output=config.logging.is_logging_command_output,
         is_logging_env_vars=config.logging.is_logging_env_vars,
+        enable_paramiko_logging=config.logging.enable_paramiko_logging,
     )
 
     output_opts = OutputOptions(
@@ -377,30 +385,6 @@ def _process_template_escapes(template: str) -> str:
 
 
 @pure
-def _parse_setting_value(value_str: str) -> Any:
-    """Parse a setting value string into the appropriate Python type.
-
-    Tries JSON first (for booleans, numbers, arrays, objects), then falls back
-    to treating the value as a plain string.
-    """
-    try:
-        return json.loads(value_str)
-    except json.JSONDecodeError:
-        return value_str
-
-
-def _set_nested_dict_value(data: dict[str, Any], key_path: str, value: Any) -> None:
-    """Set a value in a nested dict using dot-separated key path, creating intermediate dicts as needed."""
-    keys = key_path.split(".")
-    current = data
-    for key in keys[:-1]:
-        if key not in current or not isinstance(current[key], dict):
-            current[key] = {}
-        current = current[key]
-    current[keys[-1]] = value
-
-
-@pure
 def apply_settings_to_config(
     config: MngrConfig,
     settings: Sequence[str],
@@ -408,14 +392,16 @@ def apply_settings_to_config(
 ) -> MngrConfig:
     """Apply --setting KEY=VALUE overrides to a loaded config.
 
-    Parses each setting string, builds a raw config dict, parses it through the
-    config system, and merges it with the existing config. This gives --setting
-    the same semantics as config file values but at a higher precedence.
+    Parses each setting string into a raw dict, resolves any ``__extend``
+    suffixes against ``config`` via the shared key resolver, parses the
+    resolved dict through ``parse_config``, and merges with ``config``. This
+    gives --setting the same semantics as config file values but at a higher
+    precedence, with assign-vs-extend behavior unified across TOML, env vars,
+    --setting, and ``mngr config``.
     """
     if not settings:
         return config
 
-    # Build a raw config dict from the setting strings
     raw: dict[str, Any] = {}
     for setting_str in settings:
         if "=" not in setting_str:
@@ -427,11 +413,11 @@ def apply_settings_to_config(
         key_path = key_path.strip()
         if not key_path:
             raise UserInputError("Invalid --setting: key cannot be empty")
-        parsed_value = _parse_setting_value(value_str)
-        _set_nested_dict_value(raw, key_path, parsed_value)
+        parsed_value = parse_scalar_value(value_str)
+        set_at_path(raw, key_path.split("."), parsed_value)
 
-    # Parse through the config system and merge with the existing config
-    settings_config = parse_config(raw, disabled_plugins=disabled_plugins, strict=True)
+    resolved = resolve_extends(config, raw)
+    settings_config = parse_config(resolved, disabled_plugins=disabled_plugins, strict=True)
     return config.merge_with(settings_config)
 
 
@@ -449,7 +435,7 @@ def apply_config_defaults(
 
     Special handling for tuple/list parameters:
     - An empty string value ("") clears the list (sets it to an empty tuple)
-    - This allows env vars like MNGR_COMMANDS_CREATE_ADD_COMMAND= to clear config defaults
+    - This allows env vars like MNGR__COMMANDS__CREATE__ADD_COMMAND= to clear config defaults
 
     When strict=True, raises ConfigParseError for unknown parameter names; when
     strict=False, logs a warning and skips them. Callers should resolve the

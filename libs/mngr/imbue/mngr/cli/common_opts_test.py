@@ -10,11 +10,9 @@ from click.core import ParameterSource
 from click.testing import CliRunner
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
-from imbue.mngr.cli.common_opts import _parse_setting_value
 from imbue.mngr.cli.common_opts import _process_template_escapes
 from imbue.mngr.cli.common_opts import _run_pre_command_scripts
 from imbue.mngr.cli.common_opts import _run_single_script
-from imbue.mngr.cli.common_opts import _set_nested_dict_value
 from imbue.mngr.cli.common_opts import _split_known_and_plugin_params
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import apply_config_defaults
@@ -27,6 +25,7 @@ from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.config.data_types import CreateTemplate
 from imbue.mngr.config.data_types import CreateTemplateName
 from imbue.mngr.config.data_types import MngrConfig
+from imbue.mngr.config.key_resolver import set_at_path
 from imbue.mngr.errors import ConfigParseError
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.plugins import hookspecs
@@ -803,60 +802,40 @@ def test_headless_flag_sets_is_interactive_false_via_setup_command_context(
 
 
 # =============================================================================
-# Tests for _parse_setting_value
+# Tests for the shared set_at_path helper used by --setting parsing
+#
+# Value-parsing semantics (boolean, integer, JSON array, etc.) are exercised in
+# the dedicated key_resolver_test suite that owns ``parse_scalar_value``; we
+# don't re-test them here since ``apply_settings_to_config`` now calls that
+# shared helper directly rather than through a per-callsite wrapper.
 # =============================================================================
 
 
-@pytest.mark.parametrize(
-    ("input_str", "expected", "expected_type"),
-    [
-        pytest.param("false", False, bool, id="boolean_false"),
-        pytest.param("true", True, bool, id="boolean_true"),
-        pytest.param("42", 42, int, id="integer"),
-        pytest.param("3.14", 3.14, float, id="float"),
-        pytest.param("hello", "hello", str, id="plain_string"),
-        pytest.param("FOO=bar", "FOO=bar", str, id="string_with_equals"),
-        pytest.param('["a", "b"]', ["a", "b"], list, id="json_array"),
-        pytest.param("", "", str, id="empty_string"),
-    ],
-)
-def test_parse_setting_value(input_str: str, expected: Any, expected_type: type) -> None:
-    """_parse_setting_value should parse values as the appropriate Python type."""
-    result = _parse_setting_value(input_str)
-    assert result == expected
-    assert isinstance(result, expected_type)
-
-
-# =============================================================================
-# Tests for _set_nested_dict_value
-# =============================================================================
-
-
-def test_set_nested_dict_value_single_key() -> None:
-    """_set_nested_dict_value should set a top-level key."""
+def test_set_at_path_single_segment() -> None:
+    """set_at_path should set a top-level key."""
     data: dict[str, Any] = {}
-    _set_nested_dict_value(data, "prefix", "my-")
+    set_at_path(data, ["prefix"], "my-")
     assert data == {"prefix": "my-"}
 
 
-def test_set_nested_dict_value_nested_key() -> None:
-    """_set_nested_dict_value should create intermediate dicts for nested keys."""
+def test_set_at_path_nested_segments() -> None:
+    """set_at_path should create intermediate dicts for nested segment paths."""
     data: dict[str, Any] = {}
-    _set_nested_dict_value(data, "commands.create.connect", False)
+    set_at_path(data, ["commands", "create", "connect"], False)
     assert data == {"commands": {"create": {"connect": False}}}
 
 
-def test_set_nested_dict_value_preserves_existing() -> None:
-    """_set_nested_dict_value should preserve existing sibling keys."""
+def test_set_at_path_preserves_existing_siblings() -> None:
+    """set_at_path should preserve existing sibling keys at each level."""
     data: dict[str, Any] = {"commands": {"create": {"branch": "main"}}}
-    _set_nested_dict_value(data, "commands.create.connect", False)
+    set_at_path(data, ["commands", "create", "connect"], False)
     assert data == {"commands": {"create": {"branch": "main", "connect": False}}}
 
 
-def test_set_nested_dict_value_overwrites_non_dict() -> None:
-    """_set_nested_dict_value should overwrite a non-dict intermediate with a dict."""
+def test_set_at_path_overwrites_non_dict_intermediate() -> None:
+    """set_at_path should replace a non-dict intermediate value with a fresh dict."""
     data: dict[str, Any] = {"commands": "not-a-dict"}
-    _set_nested_dict_value(data, "commands.create.connect", False)
+    set_at_path(data, ["commands", "create", "connect"], False)
     assert data == {"commands": {"create": {"connect": False}}}
 
 
@@ -890,8 +869,12 @@ def test_apply_settings_to_config_sets_command_defaults(mngr_test_prefix: str) -
     assert result.commands["create"].defaults["connect"] is False
 
 
-def test_apply_settings_to_config_merges_with_existing_command_defaults(mngr_test_prefix: str) -> None:
-    """apply_settings_to_config should merge settings with existing command defaults."""
+def test_apply_settings_to_config_replaces_existing_command_defaults(mngr_test_prefix: str) -> None:
+    """Assign-by-default: --setting on a command param replaces the whole defaults map.
+
+    To preserve other keys, the user would explicitly write ``defaults__extend``
+    or repeat each key in the --setting list.
+    """
     config = MngrConfig(
         prefix=mngr_test_prefix,
         commands={"create": CommandDefaults(defaults={"branch": "main:agent/*"})},
@@ -901,9 +884,30 @@ def test_apply_settings_to_config_merges_with_existing_command_defaults(mngr_tes
         ("commands.create.connect=false",),
         frozenset(),
     )
-    # Both the existing default and the new setting should be present
-    assert result.commands["create"].defaults["branch"] == "main:agent/*"
-    assert result.commands["create"].defaults["connect"] is False
+    # Only the new setting's key is present; the prior "branch" entry was wiped.
+    assert result.commands["create"].defaults == {"connect": False}
+
+
+def test_apply_settings_to_config_extends_list_field(mngr_test_prefix: str) -> None:
+    """``--setting unset_vars__extend=...`` appends to the base list without wiping it."""
+    config = MngrConfig(prefix=mngr_test_prefix, unset_vars=["BASE_VAR"])
+    result = apply_settings_to_config(
+        config,
+        ('unset_vars__extend=["FROM_SETTING"]',),
+        frozenset(),
+    )
+    assert result.unset_vars == ["BASE_VAR", "FROM_SETTING"]
+
+
+def test_apply_settings_to_config_extend_on_scalar_raises(mngr_test_prefix: str) -> None:
+    """``__extend`` is not valid on a scalar field; the resolver raises ConfigParseError."""
+    config = MngrConfig(prefix=mngr_test_prefix)
+    with pytest.raises(ConfigParseError, match="__extend on field 'prefix'"):
+        apply_settings_to_config(
+            config,
+            ("prefix__extend=oops",),
+            frozenset(),
+        )
 
 
 def test_apply_settings_to_config_multiple_settings(mngr_test_prefix: str) -> None:
