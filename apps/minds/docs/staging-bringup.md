@@ -343,6 +343,13 @@ The bake also needs OVH credentials on the operator's machine -- either
 already configured under `mngr`'s OVH provider, or as env vars exported
 from the tier's Vault entry as shown above.
 
+Common first-bake failure: ``OVH API POST /order/cart/.../checkout
+returned error: You do not have preferred payment method``. The OVH
+account needs a default payment method configured before any VPS order
+can go through. Set one in the OVH manager UI (Billing -> Payment
+methods -> add -> mark as default) and re-run. The bake script cleans
+up the half-provisioned VPS on this failure, so it's safe to retry.
+
 - [ ] `mngr imbue_cloud admin pool list --database-url "$DATABASE_URL"`
   shows the row.
 
