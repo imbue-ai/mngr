@@ -59,7 +59,6 @@ from imbue.mngr.errors import MngrError
 from imbue.mngr.hosts.common import LOCAL_CONNECTOR_NAME
 from imbue.mngr.interfaces.data_types import CommandResult
 from imbue.mngr.interfaces.host import OuterHostInterface
-from imbue.mngr.primitives import HostName
 
 
 def create_local_pyinfra_host() -> PyinfraHost:
@@ -218,16 +217,22 @@ class OuterHost(OuterHostInterface):
         """Check if this host uses the local connector."""
         return self.connector.connector_cls_name == LOCAL_CONNECTOR_NAME
 
-    def get_name(self) -> HostName:
-        """Return the human-readable name of this host."""
+    def get_name(self) -> str:
+        """Return the connector's display name (typically the SSH hostname or IP).
+
+        See ``OuterHostInterface.get_name`` for why this returns ``str``
+        rather than ``HostName`` -- IPv4 addresses and DNS-style names
+        like ``vps-x.vps.ovh.us`` contain dots and are rejected by
+        ``HostName``'s validator.
+        """
         return self.get_connector_host_name()
 
-    def get_connector_host_name(self) -> HostName:
+    def get_connector_host_name(self) -> str:
         """Return the literal hostname/address used by the pyinfra connector."""
         name = self.connector.name
         if name.startswith("@"):
             name = name[1:]
-        return HostName(name)
+        return name
 
     @contextmanager
     def _notify_on_connection_error(self) -> Iterator[None]:

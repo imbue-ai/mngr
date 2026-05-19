@@ -4,7 +4,9 @@ from typing import Any
 from unittest.mock import MagicMock
 
 import ovh
+import pytest
 
+from imbue.mngr.errors import MngrError
 from imbue.mngr_ovh.client import OvhVpsClient
 from imbue.mngr_ovh.iam_tags import MNGR_HOST_ID_TAG_KEY
 from imbue.mngr_ovh.iam_tags import MNGR_PROVIDER_TAG_KEY
@@ -13,6 +15,7 @@ from imbue.mngr_ovh.iam_tags import attach_tags
 from imbue.mngr_ovh.iam_tags import delete_tag
 from imbue.mngr_ovh.iam_tags import list_vps_resources
 from imbue.mngr_ovh.iam_tags import list_vps_resources_for_provider
+from imbue.mngr_ovh.iam_tags import parse_extra_tags_env
 from imbue.mngr_ovh.iam_tags import vps_urn_for
 
 
@@ -144,3 +147,72 @@ def test_list_vps_resources_skips_malformed_entries() -> None:
 
     client = _client(fake)
     assert [r.name for r in list_vps_resources(client)] == ["b"]
+
+
+def test_parse_extra_tags_env_empty_returns_empty_dict() -> None:
+    assert parse_extra_tags_env("") == {}
+    assert parse_extra_tags_env("   ") == {}
+    assert parse_extra_tags_env(",,,") == {}
+
+
+def test_parse_extra_tags_env_single_entry() -> None:
+    assert parse_extra_tags_env("minds_env=alice") == {"minds_env": "alice"}
+
+
+def test_parse_extra_tags_env_multiple_entries() -> None:
+    assert parse_extra_tags_env("minds_env=alice,pool-owner=bob") == {
+        "minds_env": "alice",
+        "pool-owner": "bob",
+    }
+
+
+def test_parse_extra_tags_env_strips_whitespace() -> None:
+    assert parse_extra_tags_env(" minds_env = alice , pool-owner = bob ") == {
+        "minds_env": "alice",
+        "pool-owner": "bob",
+    }
+
+
+def test_parse_extra_tags_env_rejects_entry_without_equals() -> None:
+    with pytest.raises(MngrError, match="missing '='"):
+        parse_extra_tags_env("minds_env=alice,nosgn")
+
+
+def test_parse_extra_tags_env_rejects_uppercase_key() -> None:
+    with pytest.raises(MngrError, match="MindsEnv"):
+        parse_extra_tags_env("MindsEnv=alice")
+
+
+def test_parse_extra_tags_env_rejects_key_starting_with_digit() -> None:
+    with pytest.raises(MngrError, match="1bad"):
+        parse_extra_tags_env("1bad=value")
+
+
+def test_parse_extra_tags_env_rejects_key_with_illegal_symbol() -> None:
+    with pytest.raises(MngrError, match=r"bad\.key"):
+        parse_extra_tags_env("bad.key=value")
+
+
+def test_parse_extra_tags_env_accepts_empty_value() -> None:
+    # Empty value is fine; OVH IAM tag values are unconstrained (the
+    # ``minds_env=`` shape isn't actually useful, but we don't want to
+    # reject it here either).
+    assert parse_extra_tags_env("minds_env=") == {"minds_env": ""}
+
+
+def test_parse_extra_tags_env_rejects_reserved_provider_key() -> None:
+    """The ``mngr-provider`` tag backs discovery -- overwriting it via env breaks list/find."""
+    with pytest.raises(MngrError, match="reserved by mngr internals"):
+        parse_extra_tags_env("mngr-provider=hijack")
+
+
+def test_parse_extra_tags_env_rejects_reserved_host_id_key() -> None:
+    """``mngr-host-id`` ties the OVH VPS back to the mngr host record."""
+    with pytest.raises(MngrError, match="reserved by mngr internals"):
+        parse_extra_tags_env("mngr-host-id=spoofed")
+
+
+def test_parse_extra_tags_env_rejects_reserved_recycle_lock_key() -> None:
+    """``mngr-recycling-by`` is the cooperative recycle lock; do not let callers spoof it."""
+    with pytest.raises(MngrError, match="reserved by mngr internals"):
+        parse_extra_tags_env("mngr-recycling-by=other-process")

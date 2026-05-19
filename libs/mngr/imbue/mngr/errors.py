@@ -197,6 +197,23 @@ class ProviderUnavailableError(ProviderError):
         )
 
 
+class ProviderEmptyError(ProviderError):
+    """Provider was reached and definitively reports that nothing has been
+    created yet (e.g. the Modal per-user environment does not exist).
+
+    Distinct from ``ProviderUnavailableError``: there, the backend's state is
+    *unknown* (we couldn't reach it, agents may still exist), so silently
+    skipping risks hiding real data. Here, the backend's state is *known to
+    be empty*, so read paths (``mngr list`` / ``mngr gc`` / discovery) can
+    always safely skip this provider -- the resulting listing is correct
+    (zero of zero), not misleading.
+    """
+
+    def __init__(self, provider_name: ProviderInstanceName, reason: str) -> None:
+        self.provider_name = provider_name
+        super().__init__(f"Provider '{provider_name}' has no state yet: {reason}")
+
+
 class ProviderDiscoveryError(ProviderError):
     """Wraps an exception raised inside a single provider's discovery so
     callers can attribute the failure to the offending provider instance.

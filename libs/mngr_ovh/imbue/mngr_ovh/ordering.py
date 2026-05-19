@@ -13,6 +13,16 @@ from imbue.mngr_vps_docker.errors import VpsApiError
 from imbue.mngr_vps_docker.errors import VpsProvisioningError
 
 _OVH_DELIVERY_POLL_INTERVAL_SECONDS: float = 10.0
+# Cap on how long the post-delivery `deliverVm` task is allowed to run before
+# we give up. Verified live at ~1-2min on `vps-2025-model1`; 10min leaves
+# comfortable headroom for slower install paths.
+_OVH_POST_DELIVERY_TASK_DRAIN_TIMEOUT_SECONDS: float = 600.0
+# Shorter sanity-check drain immediately before /rebuild. The fresh-order
+# path has already waited at the end of order_and_wait_for_vps, so this is
+# usually a single round-trip that returns immediately; it exists to cover
+# the recycle path and to defend against a task slipping in after the
+# initial wait.
+_OVH_REBUILD_PREFLIGHT_DRAIN_SECONDS: float = 180.0
 
 
 def order_and_wait_for_vps(
@@ -37,6 +47,11 @@ def order_and_wait_for_vps(
         5. ``POST /order/cart/{id}/checkout`` to place the order.
         6. Poll ``GET /vps`` until the new serviceName appears (the snapshot taken
            before checkout is the diff baseline).
+        7. Wait for the post-delivery ``deliverVm`` task to drain. The
+           serviceName becomes visible in ``GET /vps`` before this task
+           finishes; any mutating call (e.g. ``/rebuild``) issued in the
+           interim fails with "Action not available while there are
+           running tasks on the VPS".
 
     Returns the new VPS's serviceName. Raises ``VpsProvisioningError`` on
     timeout or any step failure.
@@ -86,7 +101,12 @@ def order_and_wait_for_vps(
             client.call_api("POST", f"/order/cart/{cart_id}/checkout", autoPayWithPreferredPaymentMethod=True)
 
             logger.info("OVH order placed (cart={}); waiting for VPS delivery", cart_id)
-            return _wait_for_new_service_name(client, existing_before, deliver_timeout_seconds)
+            service_name = _wait_for_new_service_name(client, existing_before, deliver_timeout_seconds)
+            client.wait_for_no_active_tasks(
+                service_name,
+                timeout_seconds=_OVH_POST_DELIVERY_TASK_DRAIN_TIMEOUT_SECONDS,
+            )
+            return service_name
         except (MngrError, VpsApiError, VpsProvisioningError):
             _safe_delete_cart(client, cart_id)
             raise
@@ -143,11 +163,18 @@ def rebuild_vps_with_public_key(
 ) -> None:
     """Trigger ``POST /vps/{s}/rebuild`` with our SSH pubkey, then wait for it to finish.
 
-    Pre-installs ``public_ssh_key`` for the root user via the OVH-side
-    rebuild flow, sets ``doNotSendPassword=true`` so OVH does not generate
-    or email a root password, and waits for the rebuild task to reach a
-    terminal state.
+    Pre-installs ``public_ssh_key`` (registered for the OVH image's
+    default user; ``debian`` on the Debian 12 - Docker image) via the
+    OVH-side rebuild flow, sets ``doNotSendPassword=true`` so OVH does
+    not generate or email a root password, and waits for the rebuild
+    task to reach a terminal state.
+
+    OVH rejects ``/rebuild`` with HTTP 400 if any task is in flight on
+    the VPS, so we first drain any active tasks. In the fresh-order path
+    ``order_and_wait_for_vps`` already waited; this call is the canonical
+    chokepoint that also protects the recycle path.
     """
+    client.wait_for_no_active_tasks(service_name, timeout_seconds=_OVH_REBUILD_PREFLIGHT_DRAIN_SECONDS)
     body: Mapping[str, Any] = {
         "imageId": image_id,
         "publicSshKey": public_ssh_key,

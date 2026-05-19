@@ -36,6 +36,7 @@ from packaging.version import InvalidVersion
 from packaging.version import Version
 from pydantic import Field
 from pydantic import PrivateAttr
+from pydantic import SecretStr
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyExceptionGroup
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
@@ -289,7 +290,25 @@ def _parse_set_credentials_example(payload: Mapping[str, object], service_name: 
     return raw_example
 
 
-def _build_local_latchkey_env(latchkey_directory: Path | None) -> dict[str, str]:
+def _inject_encryption_key(env: dict[str, str], encryption_key: SecretStr | None) -> None:
+    """Set ``LATCHKEY_ENCRYPTION_KEY`` in ``env`` from the per-env key.
+
+    Operator's shell ``LATCHKEY_ENCRYPTION_KEY`` always wins (it's
+    already in ``env`` via ``dict(os.environ)``); the per-env key only
+    fills it in when the operator hasn't set one globally.
+    """
+    if encryption_key is None:
+        return
+    if env.get("LATCHKEY_ENCRYPTION_KEY"):
+        return
+    env["LATCHKEY_ENCRYPTION_KEY"] = encryption_key.get_secret_value()
+
+
+def _build_local_latchkey_env(
+    latchkey_directory: Path | None,
+    *,
+    encryption_key: SecretStr | None = None,
+) -> dict[str, str]:
     """Build an env override for *local* ``latchkey`` invocations.
 
     ``LATCHKEY_GATEWAY`` is explicitly cleared so commands that refuse to
@@ -302,19 +321,26 @@ def _build_local_latchkey_env(latchkey_directory: Path | None) -> dict[str, str]
     env.pop("LATCHKEY_GATEWAY", None)
     if latchkey_directory is not None:
         env["LATCHKEY_DIRECTORY"] = str(latchkey_directory)
+    _inject_encryption_key(env, encryption_key)
     return env
 
 
-def _build_env_with_latchkey_directory(latchkey_directory: Path | None) -> dict[str, str] | None:
+def _build_env_with_latchkey_directory(
+    latchkey_directory: Path | None,
+    *,
+    encryption_key: SecretStr | None = None,
+) -> dict[str, str] | None:
     """Build an env override that pins ``LATCHKEY_DIRECTORY`` for a child process.
 
     Returns ``None`` when no override is requested so the child inherits
     the parent environment unchanged.
     """
-    if latchkey_directory is None:
+    if latchkey_directory is None and encryption_key is None:
         return None
     env = dict(os.environ)
-    env["LATCHKEY_DIRECTORY"] = str(latchkey_directory)
+    if latchkey_directory is not None:
+        env["LATCHKEY_DIRECTORY"] = str(latchkey_directory)
+    _inject_encryption_key(env, encryption_key)
     return env
 
 
@@ -325,6 +351,7 @@ def _build_gateway_env(
     permissions_config_path: Path,
     listen_password: str,
     extension_permissions_root: Path,
+    encryption_key: SecretStr | None = None,
 ) -> dict[str, str]:
     """Build the env dict for the ``latchkey gateway`` subprocess.
 
@@ -344,6 +371,7 @@ def _build_gateway_env(
     env["LATCHKEY_PERMISSIONS_CONFIG"] = str(permissions_config_path)
     env["LATCHKEY_GATEWAY_LISTEN_PASSWORD"] = listen_password
     env[_ENV_EXTENSION_PERMISSIONS_ROOT] = str(extension_permissions_root)
+    _inject_encryption_key(env, encryption_key)
     return env
 
 
@@ -452,6 +480,18 @@ class Latchkey(MutableModel):
             "credential / config files live here, and also used as the parent of the "
             "plugin's own metadata subdirectory (``mngr_latchkey/``, accessible via "
             ":attr:`plugin_data_dir`). Required."
+        ),
+    )
+    encryption_key: SecretStr | None = Field(
+        default=None,
+        frozen=True,
+        description=(
+            "Per-``latchkey_directory`` encryption key for the upstream credential store. "
+            "When set, injected as ``LATCHKEY_ENCRYPTION_KEY`` into every spawned "
+            "``latchkey`` subprocess's env (unless the operator already has the var set "
+            "globally, in which case the operator's value wins). ``None`` means the "
+            "caller has not loaded/created a per-env key -- subprocesses fall back to "
+            "whatever's in the parent shell, matching the historical behavior."
         ),
     )
 
@@ -684,7 +724,7 @@ class Latchkey(MutableModel):
         ``gateway create-jwt`` in gateway-client mode, and the user
         might have it set in their shell.
         """
-        env = _build_local_latchkey_env(self.latchkey_directory)
+        env = _build_local_latchkey_env(self.latchkey_directory, encryption_key=self.encryption_key)
         cg = ConcurrencyGroup(name="latchkey-create-jwt")
         try:
             with cg:
@@ -731,7 +771,7 @@ class Latchkey(MutableModel):
         empty ``auth_options``, so the caller can fall back to its legacy
         behaviour rather than wrongly assuming credentials are valid.
         """
-        env = _build_env_with_latchkey_directory(self.latchkey_directory)
+        env = _build_env_with_latchkey_directory(self.latchkey_directory, encryption_key=self.encryption_key)
         cg = ConcurrencyGroup(name="latchkey-services-info")
         try:
             with cg:
@@ -789,7 +829,7 @@ class Latchkey(MutableModel):
         returns ``(False, message)`` where ``message`` carries the latchkey
         stderr (or stdout, or a generic fallback).
         """
-        env = _build_env_with_latchkey_directory(self.latchkey_directory)
+        env = _build_env_with_latchkey_directory(self.latchkey_directory, encryption_key=self.encryption_key)
         cg = ConcurrencyGroup(name="latchkey-auth-browser")
         with cg:
             # No timeout: this command waits on a real human completing
@@ -830,7 +870,7 @@ class Latchkey(MutableModel):
         if shutil.which(self.latchkey_binary) is None and not Path(self.latchkey_binary).is_file():
             raise LatchkeyBinaryNotFoundError(f"Latchkey binary not found: {self.latchkey_binary}")
 
-        env = _build_local_latchkey_env(self.latchkey_directory)
+        env = _build_local_latchkey_env(self.latchkey_directory, encryption_key=self.encryption_key)
         cg = ConcurrencyGroup(name="latchkey-version")
         try:
             with cg:
@@ -921,6 +961,7 @@ class Latchkey(MutableModel):
             permissions_config_path=default_perms,
             listen_password=password,
             extension_permissions_root=plugin_dir,
+            encryption_key=self.encryption_key,
         )
 
         with log_span(

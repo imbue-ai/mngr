@@ -74,14 +74,11 @@ class ImbueCloudHost(Host):
     bake wrote (typically a constant such as ``system-services``).
     """
 
-    pre_baked_agent_id: AgentId | None = Field(
-        default=None,
-        frozen=True,
-        description=(
-            "Agent id of the agent that was pre-provisioned on this pool host. "
-            "Set by the provider when the host is created via lease."
-        ),
-    )
+    # ``pre_baked_agent_id`` is inherited from the base ``Host`` class
+    # (default None on every other provider's hosts; this provider's
+    # ``create_host`` populates it from the lease). Keeping it on the base
+    # lets ``api/create.py``'s duplicate-name check recognize the adopt
+    # scenario without a getattr-on-host shim.
     lease_db_id: str | None = Field(
         default=None,
         frozen=True,
