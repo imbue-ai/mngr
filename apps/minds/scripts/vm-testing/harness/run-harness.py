@@ -175,14 +175,16 @@ def launch_app() -> dict[str, Any]:
     # the backend never comes up.
     launcher_log = MINDS_DATA_DIR / "logs" / "launcher.log"
     launcher_log.parent.mkdir(parents=True, exist_ok=True)
-    log_fh = launcher_log.open("ab")
-    proc = subprocess.Popen(  # noqa: S603 -- absolute path, fixed args, trusted env
-        [str(binary)],
-        env=env,
-        stdout=log_fh,
-        stderr=subprocess.STDOUT,
-        start_new_session=True,
-    )
+    # Popen dups the fd into the child; release the parent's handle as soon
+    # as the spawn returns so we don't leak it for the rest of the harness.
+    with launcher_log.open("ab") as log_fh:
+        proc = subprocess.Popen(  # noqa: S603 -- absolute path, fixed args, trusted env
+            [str(binary)],
+            env=env,
+            stdout=log_fh,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
     log(f"minds pid={proc.pid}")
     # Persist the pid so the cleanup step can find it again even if the
     # harness process gets a fresh shell.
