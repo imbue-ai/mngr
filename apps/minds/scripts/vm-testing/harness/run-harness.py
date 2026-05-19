@@ -24,8 +24,8 @@ host orchestrator (run-test.sh):
     BACKEND_READY_TIMEOUT, CREATE_TIMEOUT, MESSAGE_TIMEOUT (seconds, ints):
                         per-step timeouts.
 
-The harness writes ``junit.xml``, ``summary.json``, ``minds.log``, and
-``minds-events.jsonl`` to ``RESULTS_DIR``.
+The harness writes ``junit.xml``, ``summary.json``, ``minds.log``,
+``minds-events.jsonl``, and ``launcher.log`` to ``RESULTS_DIR``.
 
 Exit code: 0 on full success, 1 on any failed step. The failed step's name
 is printed to stderr.
