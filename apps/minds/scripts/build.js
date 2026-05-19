@@ -319,12 +319,19 @@ function bundleLatchkey() {
 }
 
 function getLimaDownloadUrl({ platform, arch }) {
-  // Lima release artifact naming uses Darwin/Linux for the OS label and
-  // arm64/x86_64 for the architecture (note: arm64, not aarch64, even
-  // though uv uses aarch64).
-  const limaArch = arch === 'aarch64' ? 'arm64' : arch;
+  // Lima release tarballs are named lima-<version>-<OsLabel>-<archLabel>.tar.gz.
+  // The OS label is title-cased (Darwin/Linux). The arch label differs by OS:
+  // Darwin uses arm64, Linux uses aarch64; both use x86_64 for Intel.
   const osLabel = platform === 'darwin' ? 'Darwin' : 'Linux';
-  return `https://github.com/lima-vm/lima/releases/download/v${LIMA_VERSION}/lima-${LIMA_VERSION}-${osLabel}-${limaArch}.tar.gz`;
+  let archLabel;
+  if (arch === 'x86_64') {
+    archLabel = 'x86_64';
+  } else if (arch === 'aarch64') {
+    archLabel = platform === 'darwin' ? 'arm64' : 'aarch64';
+  } else {
+    throw new Error(`Unsupported Lima arch: ${arch}`);
+  }
+  return `https://github.com/lima-vm/lima/releases/download/v${LIMA_VERSION}/lima-${LIMA_VERSION}-${osLabel}-${archLabel}.tar.gz`;
 }
 
 async function downloadLima({ platform, arch }) {
