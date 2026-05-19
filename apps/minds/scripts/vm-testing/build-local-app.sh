@@ -35,6 +35,7 @@ require_cmd uv
 require_cmd pnpm
 require_cmd node
 require_cmd npx
+require_cmd python3
 
 # Workspace packages that production bundles. Each entry is the package
 # directory (relative to the repo root) and the project name as it appears
