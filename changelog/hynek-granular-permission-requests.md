@@ -33,6 +33,17 @@
   to look up display names and the legal permission set. The grant
   dialog continues to render the display name ("Slack" etc.) and lets
   the user broaden or narrow the requested permission set.
+- The minds desktop client now tolerates legacy response events on
+  disk. Older versions wrote a ``service_name`` field on each
+  ``RequestResponseEvent``; the current schema replaced it with
+  ``scope``. Without a migration the historical events.jsonl emitted
+  a pydantic-extras warning per legacy line at every minds startup
+  and the corresponding request would not be marked resolved. The
+  loader now drops ``service_name`` before validating, so historical
+  responses load cleanly and their requests are correctly filtered
+  out of the pending list. The dropped ``service_name`` is
+  informational only -- pending-request filtering uses
+  ``request_event_id`` -- so no functional information is lost.
 - The streamed-permission-request handler now dedupes redeliveries by
   ``event_id``. The gateway re-emits every still-pending request on
   each stream reconnect (every couple of seconds when idle), but the

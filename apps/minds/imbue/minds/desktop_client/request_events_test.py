@@ -103,6 +103,46 @@ def test_load_response_events_missing_file(tmp_path: Path) -> None:
     assert loaded == []
 
 
+def test_load_response_events_drops_legacy_service_name_field(tmp_path: Path) -> None:
+    """Response events written by an older schema (with ``service_name``) still load.
+
+    The pre-branch schema stored the raw service name on response
+    events as ``service_name``; the current schema uses ``scope``
+    instead. Historical events.jsonl files mix the two shapes -- we
+    drop the legacy field on read so the entire file loads cleanly
+    instead of every old line emitting a pydantic-extras warning at
+    startup.
+    """
+    events_file = tmp_path / "events" / "requests" / "events.jsonl"
+    events_file.parent.mkdir(parents=True)
+    legacy_line = json.dumps(
+        {
+            "timestamp": "2026-05-06T14:59:58.015442Z",
+            "type": "request_response",
+            "event_id": "evt-legacy",
+            "source": "requests",
+            "request_event_id": "evt-original",
+            "status": "GRANTED",
+            "agent_id": "agent-1",
+            "request_type": str(RequestType.LATCHKEY_PERMISSION),
+            "service_name": "slack",
+        }
+    )
+    events_file.write_text(legacy_line + "\n")
+
+    loaded = load_response_events(tmp_path)
+
+    assert len(loaded) == 1
+    assert loaded[0].event_id == "evt-legacy"
+    assert loaded[0].request_event_id == "evt-original"
+    assert loaded[0].agent_id == "agent-1"
+    # ``service_name`` is dropped; the modern ``scope`` field is
+    # absent in the legacy entry, so it defaults to ``None``. That's
+    # OK because pending-request filtering uses ``request_event_id``,
+    # not ``scope``.
+    assert loaded[0].scope is None
+
+
 def test_create_latchkey_permission_request_event_populates_all_fields() -> None:
     event = create_latchkey_permission_request_event(
         agent_id="agent-abc",

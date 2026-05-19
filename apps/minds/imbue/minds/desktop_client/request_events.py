@@ -242,12 +242,25 @@ def parse_request_event(line: str) -> RequestEvent | None:
         return None
 
 
+# Field names that older versions of the schema wrote on response
+# events but the current schema no longer accepts. These are stripped
+# from raw JSON before validation so a historical events.jsonl from a
+# previous minds version still loads cleanly. ``scope`` (the modern
+# replacement for ``service_name`` on response events) is informational
+# only -- pending-request filtering uses ``request_event_id`` -- so
+# legacy entries that lose their service identity on the way in are
+# still functionally correct.
+_LEGACY_RESPONSE_EVENT_FIELDS: tuple[str, ...] = ("service_name",)
+
+
 def parse_response_event(line: str) -> RequestResponseEvent | None:
     """Parse a single JSONL line into a RequestResponseEvent, or None on failure."""
     try:
         data = json.loads(line)
         if not isinstance(data, dict):
             return None
+        for legacy_field in _LEGACY_RESPONSE_EVENT_FIELDS:
+            data.pop(legacy_field, None)
         return RequestResponseEvent.model_validate(data)
     except (json.JSONDecodeError, ValueError, TypeError) as e:
         logger.warning("Failed to parse response event: {} (line: {})", e, line[:200])
