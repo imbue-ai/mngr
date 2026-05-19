@@ -386,6 +386,37 @@ def test_marked_consumer_of_tagged_fixture_passes_without_direct_use(
     result.assert_outcomes(passed=1)
 
 
+def test_marked_consumer_of_tagged_fixture_may_also_invoke_resource_directly(
+    pytester: pytest.Pytester, clean_guard_env: None
+) -> None:
+    """A consumer with the mark may both consume a tagged fixture and call the resource directly.
+
+    The mark authorizes the test body's direct invocation (block check),
+    and the fixture's declaration covers the transitive use; the test
+    passing satisfies both reasons simultaneously without conflict.
+    """
+    pytester.makeconftest(_PYTESTER_CONFTEST)
+    pytester.makepyfile("""
+        import subprocess
+        import pytest
+
+        from imbue.resource_guards.resource_guards import fixture_uses_resources
+
+        @pytest.fixture
+        @fixture_uses_resources("cat")
+        def cat_fixture():
+            subprocess.run(["cat", "/dev/null"], check=True)
+            yield "value"
+
+        @pytest.mark.cat
+        def test_consumer_also_uses_cat_directly(cat_fixture):
+            subprocess.run(["cat", "/dev/null"], check=True)
+            assert cat_fixture == "value"
+    """)
+    result = pytester.runpytest_subprocess("-n0", "--no-header", "-p", "no:cacheprovider")
+    result.assert_outcomes(passed=1)
+
+
 def test_fixture_teardown_resource_calls_authorized_against_fixture(
     pytester: pytest.Pytester, clean_guard_env: None
 ) -> None:
