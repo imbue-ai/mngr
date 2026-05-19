@@ -7,6 +7,8 @@ Resource guards catch two classes of bugs:
 - **Missing marks**: a test calls an external resource without the corresponding `@pytest.mark.<resource>`. The guard fails the test with a clear message.
 - **Superfluous marks**: a test carries a resource mark but never actually invokes the resource. The guard fails the test so the mark doesn't rot.
 
+These two checks together enforce a single design invariant: **for any (test, guarded resource) pair, there is exactly one correct mark state.** A test that exercises the resource (directly or via a tagged fixture in its closure) must carry the mark; a test that doesn't must not. Allowing a test to pass both with and without the mark would defeat the point of the system, since `pytest -m <resource>` would no longer reliably select every test that needs the resource. Every rule that follows is in service of this invariant.
+
 ## How it works
 
 There are two guard mechanisms, covering CLI binaries and Python SDKs respectively.
