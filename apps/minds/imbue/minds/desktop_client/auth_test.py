@@ -2,6 +2,7 @@ from pathlib import Path
 
 import pytest
 
+from imbue.minds.desktop_client.auth import ApiTokenError
 from imbue.minds.desktop_client.auth import FileAuthStore
 from imbue.minds.errors import SigningKeyError
 from imbue.minds.primitives import OneTimeCode
@@ -133,6 +134,51 @@ def test_get_signing_key_raises_on_write_error(tmp_path: Path) -> None:
     store = FileAuthStore(data_directory=auth_path)
     with pytest.raises(SigningKeyError):
         store.get_signing_key()
+
+
+def test_get_api_token_generates_token_on_first_access(tmp_path: Path) -> None:
+    store = _make_auth_store(tmp_path)
+    token = store.get_api_token()
+    assert len(token.get_secret_value()) > 32
+
+
+def test_get_api_token_returns_same_token_on_subsequent_access(tmp_path: Path) -> None:
+    store = _make_auth_store(tmp_path)
+    first = store.get_api_token()
+    second = store.get_api_token()
+    assert first.get_secret_value() == second.get_secret_value()
+
+
+def test_get_api_token_persists_across_instances(tmp_path: Path) -> None:
+    auth_dir = tmp_path / "auth"
+    token_a = FileAuthStore(data_directory=auth_dir).get_api_token()
+    token_b = FileAuthStore(data_directory=auth_dir).get_api_token()
+    assert token_a.get_secret_value() == token_b.get_secret_value()
+
+
+def test_get_api_token_file_has_restricted_permissions(tmp_path: Path) -> None:
+    store = _make_auth_store(tmp_path)
+    store.get_api_token()
+    token_path = tmp_path / "auth" / "api_token"
+    permissions = token_path.stat().st_mode & 0o777
+    assert permissions == 0o600
+
+
+def test_get_api_token_raises_for_empty_token_file(tmp_path: Path) -> None:
+    auth_dir = tmp_path / "auth"
+    auth_dir.mkdir(parents=True)
+    (auth_dir / "api_token").write_text("")
+    store = FileAuthStore(data_directory=auth_dir)
+    with pytest.raises(ApiTokenError):
+        store.get_api_token()
+
+
+def test_api_token_is_distinct_from_signing_key(tmp_path: Path) -> None:
+    """The two secrets are stored in separate files and rotated independently."""
+    store = _make_auth_store(tmp_path)
+    signing = store.get_signing_key().get_secret_value()
+    token = store.get_api_token().get_secret_value()
+    assert signing != token
 
 
 def test_validate_code_returns_false_on_json_decode_error(tmp_path: Path) -> None:

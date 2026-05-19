@@ -457,5 +457,10 @@
       "google-directions-compute-routes",
       "google-directions-compute-route-matrix"
     ]
+  },
+  "minds": {
+    "scope": "mind-creation",
+    "display_name": "Spawn a peer mind",
+    "permissions": []
   }
 }

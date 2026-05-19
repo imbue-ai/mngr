@@ -74,6 +74,7 @@ from imbue.minds.primitives import OutputFormat
 from imbue.minds.telegram.setup import TelegramSetupOrchestrator
 from imbue.minds.utils.output import emit_event
 from imbue.mngr.utils.parent_process import start_grandparent_death_watcher
+from imbue.mngr_latchkey.agent_setup import ensure_mind_creation_schema_in_existing_host_files
 from imbue.mngr_latchkey.core import LATCHKEY_BINARY
 from imbue.mngr_latchkey.core import Latchkey
 from imbue.mngr_latchkey.core import LatchkeyError
@@ -167,6 +168,31 @@ def run(
     backend_resolver = MngrCliBackendResolver()
     latchkey = _build_latchkey(data_directory=data_directory)
     latchkey.initialize()
+
+    # Make the desktop client's create-agent API reachable from inside
+    # any agent: register ``minds`` as a latchkey service and stash the
+    # bearer token in latchkey's encrypted credential store. The agent's
+    # ``latchkey curl http://127.0.0.1:<port>/api/create-agent`` resolves
+    # to this host because curl is spawned by the gateway (host-side);
+    # see apps/minds/docs/latchkey-permissions.md.
+    #
+    # Must run before the gateway is restarted (below) so the freshly
+    # registered service is in the registry the gateway loads. We also
+    # migrate any pre-existing per-host permissions file to include the
+    # new ``mind-creation`` schema, again before the gateway is up so
+    # there is no race with the ``permissions.mjs`` extension.
+    migrated_count = ensure_mind_creation_schema_in_existing_host_files(latchkey.plugin_data_dir)
+    if migrated_count > 0:
+        logger.info("Injected mind-creation schema into {} existing per-host permissions file(s)", migrated_count)
+    minds_api_token = auth_store.get_api_token().get_secret_value()
+    try:
+        latchkey.register_service("minds", f"http://127.0.0.1:{port}")
+        latchkey.auth_set_header("minds", f"Authorization: Bearer {minds_api_token}")
+    except LatchkeyError as exc:
+        # Don't fail the whole desktop client over a single CLI hiccup --
+        # the rest of the app still works, just without the spawn-peer
+        # capability. Surface the failure prominently in the log.
+        logger.warning("Could not wire latchkey 'minds' service: {}", exc)
 
     root_concurrency_group = ConcurrencyGroup(name="minds-run")
     root_concurrency_group.__enter__()

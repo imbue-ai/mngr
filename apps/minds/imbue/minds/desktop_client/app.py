@@ -4,6 +4,7 @@ import html
 import json
 import os
 import queue
+import secrets
 import threading
 from collections.abc import AsyncGenerator
 from collections.abc import Mapping
@@ -144,6 +145,30 @@ def _is_authenticated(
         cookie_value=cookie_value,
         signing_key=signing_key,
     )
+
+
+def _is_api_authenticated(
+    request: Request,
+    auth_store: AuthStoreInterface,
+) -> bool:
+    """Authenticate an API request via either the session cookie or a bearer token.
+
+    The bearer token is the per-installation minds API token persisted
+    under the auth data dir and registered with latchkey via ``latchkey
+    auth set minds``. Lets a peer mind drive ``/api/create-agent`` (and
+    its status/logs siblings) without ever seeing the credential itself
+    -- latchkey injects the ``Authorization`` header at request time.
+    """
+    if _is_authenticated(cookies=request.cookies, auth_store=auth_store):
+        return True
+    auth_header = request.headers.get("authorization", "")
+    if not auth_header.lower().startswith("bearer "):
+        return False
+    presented = auth_header[len("bearer ") :].strip()
+    if not presented:
+        return False
+    expected = auth_store.get_api_token().get_secret_value()
+    return secrets.compare_digest(presented, expected)
 
 
 # -- Lifespan --
@@ -673,8 +698,11 @@ async def _handle_create_agent_api(request: Request, auth_store: AuthStoreDep) -
     """API endpoint for creating an agent (POST /api/create-agent).
 
     Accepts JSON body with git_url. Returns JSON with agent_id and status.
+
+    Authenticates via either the desktop-client session cookie (browser
+    callers) or a bearer token (latchkey-mediated agent callers).
     """
-    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
+    if not _is_api_authenticated(request=request, auth_store=auth_store):
         return Response(status_code=403, content='{"error": "Not authenticated"}', media_type="application/json")
 
     agent_creator: AgentCreator | None = request.app.state.agent_creator
@@ -781,7 +809,7 @@ def _handle_creation_status_api(
     auth_store: AuthStoreDep,
 ) -> Response:
     """API endpoint for checking agent creation status."""
-    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
+    if not _is_api_authenticated(request=request, auth_store=auth_store):
         return Response(status_code=403, content='{"error": "Not authenticated"}', media_type="application/json")
 
     agent_creator: AgentCreator | None = request.app.state.agent_creator
@@ -891,7 +919,7 @@ async def _handle_creation_logs_sse(
     auth_store: AuthStoreDep,
 ) -> Response:
     """SSE endpoint that streams creation logs for an agent."""
-    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
+    if not _is_api_authenticated(request=request, auth_store=auth_store):
         return Response(status_code=403, content="Not authenticated")
 
     agent_creator: AgentCreator | None = request.app.state.agent_creator

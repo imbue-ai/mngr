@@ -35,10 +35,12 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Final
 
+from loguru import logger
 from pydantic import Field
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.imbue_common.model_update import to_update
 from imbue.mngr.primitives import HostId
 from imbue.mngr_latchkey.core import AGENT_SIDE_LATCHKEY_PORT
 from imbue.mngr_latchkey.core import Latchkey
@@ -78,6 +80,18 @@ _PERM_READ_AVAILABLE_PERMISSIONS: Final[str] = "latchkey-self-read-available-per
 # up the per-service catalog endpoint.
 _AVAILABLE_PERMISSIONS_PATH_PATTERN: Final[str] = r"^/permissions/available/[a-z0-9][a-z0-9-]*$"
 
+# Inline detent schema for the minds desktop client's create-agent
+# endpoint. Defining it in every per-agent permissions file (rather than
+# upstreaming it to detent's built-in catalog) keeps the schema
+# self-contained: a user grant of ``{"mind-creation": ["any"]}`` will
+# match exactly this endpoint, on whatever port the desktop client picked
+# this session. The schema is materialized but NOT pre-granted -- agents
+# go through the standard permission-request dialog before their first
+# spawn, and subsequent spawns reuse the rule the user wrote on approval.
+_SCOPE_MIND_CREATION: Final[str] = "mind-creation"
+_MINDS_HOST: Final[str] = "127.0.0.1"
+_MINDS_CREATE_AGENT_PATH: Final[str] = "/api/create-agent"
+
 _AGENT_BASELINE_PERMISSIONS: Final[LatchkeyPermissionsConfig] = LatchkeyPermissionsConfig(
     rules=(
         {
@@ -116,6 +130,14 @@ _AGENT_BASELINE_PERMISSIONS: Final[LatchkeyPermissionsConfig] = LatchkeyPermissi
                 },
             },
             "required": ["method", "path"],
+        },
+        _SCOPE_MIND_CREATION: {
+            "properties": {
+                "domain": {"const": _MINDS_HOST},
+                "path": {"const": _MINDS_CREATE_AGENT_PATH},
+                "method": {"const": "POST"},
+            },
+            "required": ["domain", "path", "method"],
         },
     },
 )
@@ -261,3 +283,56 @@ def finalize_host_permissions(
     if opaque_permissions_path is None:
         return
     link_opaque_permissions_to_host(latchkey.plugin_data_dir, opaque_permissions_path, host_id)
+
+
+def ensure_mind_creation_schema_in_existing_host_files(plugin_data_dir: Path) -> int:
+    """Inject the ``mind-creation`` schema into existing host permissions files.
+
+    Agents created before this feature shipped have a host
+    ``latchkey_permissions.json`` that lacks the ``mind-creation`` scope
+    schema. Without the schema, detent cannot match a
+    ``{"mind-creation": [...]}`` rule that the user grants via the
+    dialog, so the spawn-a-peer-mind request would be silently denied.
+
+    This idempotent migration walks every
+    ``<plugin_data_dir>/hosts/<host_id>/latchkey_permissions.json``,
+    parses it, and rewrites it with the schema added if absent. Files
+    that already have the schema (or that contain a non-dict ``schemas``,
+    which we leave alone) are skipped.
+
+    Must run *before* the shared gateway starts so the gateway's
+    ``permissions.mjs`` extension does not race with us. Returns the
+    number of files actually rewritten.
+    """
+    hosts_dir = plugin_data_dir / "hosts"
+    if not hosts_dir.is_dir():
+        return 0
+    expected_schema = _AGENT_BASELINE_PERMISSIONS.schemas[_SCOPE_MIND_CREATION]
+    migrated = 0
+    for host_dir in hosts_dir.iterdir():
+        if not host_dir.is_dir():
+            continue
+        path = host_dir / "latchkey_permissions.json"
+        if not path.is_file():
+            continue
+        try:
+            raw = path.read_text()
+        except OSError as e:
+            logger.warning("Could not read {} during mind-creation schema migration: {}", path, e)
+            continue
+        try:
+            parsed = LatchkeyPermissionsConfig.model_validate_json(raw)
+        except ValueError as e:
+            logger.warning(
+                "Skipping {} during mind-creation schema migration; cannot parse as LatchkeyPermissionsConfig: {}",
+                path,
+                e,
+            )
+            continue
+        if parsed.schemas.get(_SCOPE_MIND_CREATION) == expected_schema:
+            continue
+        new_schemas = {**parsed.schemas, _SCOPE_MIND_CREATION: expected_schema}
+        updated = parsed.model_copy_update(to_update(parsed.field_ref().schemas, new_schemas))
+        save_permissions(path, updated)
+        migrated += 1
+    return migrated

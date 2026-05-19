@@ -15,13 +15,22 @@ from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.minds.errors import SigningKeyError
 from imbue.minds.primitives import CookieSigningKey
+from imbue.minds.primitives import MindsApiToken
 from imbue.minds.primitives import OneTimeCode
 
 _SIGNING_KEY_LENGTH: Final[int] = 64
 
+_API_TOKEN_LENGTH: Final[int] = 48
+
 _SIGNING_KEY_FILENAME: Final[str] = "signing_key"
 
+_API_TOKEN_FILENAME: Final[str] = "api_token"
+
 _CODES_FILENAME: Final[str] = "one_time_codes.json"
+
+
+class ApiTokenError(Exception):
+    """Raised when the persisted minds API token cannot be read or written."""
 
 
 class OneTimeCodeStatus(UpperCaseStrEnum):
@@ -52,6 +61,10 @@ class AuthStoreInterface(MutableModel, ABC):
     @abstractmethod
     def get_signing_key(self) -> CookieSigningKey:
         """Return the cookie signing key, generating one if it does not exist."""
+
+    @abstractmethod
+    def get_api_token(self) -> MindsApiToken:
+        """Return the minds API bearer token, generating one if it does not exist."""
 
     @abstractmethod
     def add_one_time_code(
@@ -119,6 +132,27 @@ class FileAuthStore(AuthStoreInterface):
             except OSError as e:
                 raise SigningKeyError(f"Cannot write signing key to {key_path}") from e
             return CookieSigningKey(new_key)
+
+    def get_api_token(self) -> MindsApiToken:
+        token_path = self.data_directory / _API_TOKEN_FILENAME
+        if token_path.exists():
+            try:
+                token_value = token_path.read_text().strip()
+            except OSError as e:
+                raise ApiTokenError(f"Cannot read API token from {token_path}") from e
+            if not token_value:
+                raise ApiTokenError(f"API token file is empty: {token_path}")
+            return MindsApiToken(token_value)
+
+        with log_span("Generating new minds API token"):
+            new_token = secrets.token_urlsafe(_API_TOKEN_LENGTH)
+            try:
+                self.data_directory.mkdir(parents=True, exist_ok=True)
+                token_path.write_text(new_token)
+                token_path.chmod(0o600)
+            except OSError as e:
+                raise ApiTokenError(f"Cannot write API token to {token_path}") from e
+            return MindsApiToken(new_token)
 
     def add_one_time_code(
         self,

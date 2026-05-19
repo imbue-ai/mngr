@@ -75,6 +75,17 @@ class CookieSigningKey(SecretStr):
     ...
 
 
+class MindsApiToken(SecretStr):
+    """Bearer token authenticating non-browser callers of the minds desktop-client API.
+
+    Persisted under the auth data directory and shared with the latchkey
+    gateway via ``latchkey auth set minds`` so agents can spawn peer
+    minds without ever seeing the token themselves.
+    """
+
+    ...
+
+
 class ServiceName(NonEmptyStr):
     """Name of a service run by an agent (e.g. 'web', 'api')."""
 

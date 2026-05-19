@@ -1391,3 +1391,79 @@ def test_refresh_event_before_lifespan_is_dropped_without_raising(tmp_path: Path
     resolver._fire_on_refresh(str(agent_id), raw_line)
 
     assert received == []
+
+
+def test_create_agent_api_accepts_valid_bearer_token(tmp_path: Path) -> None:
+    """POST /api/create-agent with a matching ``Authorization: Bearer ...`` succeeds without a cookie."""
+    backend_resolver = StaticBackendResolver(url_by_agent_and_service={})
+    client, auth_store = _create_test_desktop_client(
+        tmp_path=tmp_path,
+        backend_resolver=backend_resolver,
+        http_client=None,
+    )
+    token = auth_store.get_api_token().get_secret_value()
+
+    response = client.post(
+        "/api/create-agent",
+        json={"git_url": "file:///nonexistent-repo"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    # 501 (no agent creator wired in this test) is the success path here --
+    # auth was accepted; the request reached the creator-check.
+    assert response.status_code == 501
+
+
+def test_create_agent_api_rejects_bearer_token_mismatch(tmp_path: Path) -> None:
+    """A wrong bearer token (and no cookie) still gets 403."""
+    backend_resolver = StaticBackendResolver(url_by_agent_and_service={})
+    client, _auth_store = _create_test_desktop_client(
+        tmp_path=tmp_path,
+        backend_resolver=backend_resolver,
+        http_client=None,
+    )
+
+    response = client.post(
+        "/api/create-agent",
+        json={"git_url": "file:///nonexistent-repo"},
+        headers={"Authorization": "Bearer not-the-right-token"},
+    )
+
+    assert response.status_code == 403
+
+
+def test_create_agent_api_rejects_empty_bearer_token(tmp_path: Path) -> None:
+    """An ``Authorization: Bearer`` header with no token value gets 403."""
+    backend_resolver = StaticBackendResolver(url_by_agent_and_service={})
+    client, _ = _create_test_desktop_client(
+        tmp_path=tmp_path,
+        backend_resolver=backend_resolver,
+        http_client=None,
+    )
+
+    response = client.post(
+        "/api/create-agent",
+        json={"git_url": "file:///nonexistent-repo"},
+        headers={"Authorization": "Bearer "},
+    )
+
+    assert response.status_code == 403
+
+
+def test_creation_status_api_accepts_valid_bearer_token(tmp_path: Path) -> None:
+    """GET /api/create-agent/{id}/status accepts a valid bearer token."""
+    backend_resolver = StaticBackendResolver(url_by_agent_and_service={})
+    client, auth_store = _create_test_desktop_client(
+        tmp_path=tmp_path,
+        backend_resolver=backend_resolver,
+        http_client=None,
+    )
+    token = auth_store.get_api_token().get_secret_value()
+
+    response = client.get(
+        "/api/create-agent/{}/status".format(AgentId()),
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    # 501 = passed auth, no agent_creator configured (this test).
+    assert response.status_code == 501

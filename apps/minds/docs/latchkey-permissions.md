@@ -152,3 +152,82 @@ Agents are expected to:
 The detection-and-wait logic for Claude Code lives in the
 `forever-claude-template` repository's latchkey skill, not in this
 monorepo.
+
+## Spawning peer minds
+
+Agents can create new peer minds (siblings, not children) through the
+same latchkey curl pipeline they use for third-party services:
+
+```bash
+latchkey curl -X POST 'http://127.0.0.1:9100/api/create-agent' \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "git_url": "https://github.com/example/template",
+    "launch_mode": "LOCAL",
+    "ai_provider": "SUBSCRIPTION"
+  }'
+```
+
+Latchkey injects the agent-invisible `Authorization: Bearer ...` header
+itself. The agent must never see the token directly. Three pieces wire
+this together; all are set up by `minds run` at startup:
+
+* **The `minds` service is registered with latchkey** against the
+  desktop client's base URL (`http://127.0.0.1:<port>`). `minds run`
+  calls `latchkey services register minds --base-api-url ...` and
+  re-registers when the port changes across restarts.
+* **A bearer token is persisted** at `<minds-data-dir>/auth/api_token`
+  with mode 0o600 and stored in latchkey's encrypted credential store
+  via `latchkey auth set minds -H 'Authorization: Bearer <token>'`. The
+  desktop client's `/api/create-agent`, `/api/create-agent/{id}/status`,
+  and `/api/create-agent/{id}/logs` endpoints accept the token as an
+  alternative to the browser session cookie.
+* **A detent scope schema named `mind-creation`** is materialized
+  inline in every per-agent `latchkey_permissions.json` baseline
+  (defined in `libs/mngr_latchkey/imbue/mngr_latchkey/agent_setup.py`).
+  The schema matches exactly `POST http://127.0.0.1:<any>/api/create-agent`
+  -- not added to detent's built-in catalog so the rule stays
+  self-contained and minds owns the schema definition.
+
+Because the `latchkey gateway` itself spawns curl on the desktop host
+(see "End-to-end flow" above), `127.0.0.1` in the request URL resolves
+to the desktop's loopback regardless of which compute backend the
+calling agent runs on. The string `http://127.0.0.1:<minds-port>` is
+identical for Docker, LIMA, Vultr, and IMBUE_CLOUD agents.
+
+### First-spawn flow
+
+On a fresh install, the first peer-spawn attempt hits the standard
+permission-request dialog:
+
+1. Agent runs `latchkey curl -X POST 'http://127.0.0.1:9100/api/create-agent' ...`.
+2. Gateway evaluates the request against the agent's permissions file.
+   No `mind-creation` rule yet, so detent denies. Gateway returns 403
+   with `Request not permitted by the user.`.
+3. Agent submits `POST /permission-requests` with `scope=mind-creation`
+   and a rationale ("I want to spawn a peer mind to explore X").
+4. Desktop client surfaces a card titled "Spawn a peer mind". The
+   user approves with `any` (the only checkbox -- the `permissions`
+   field in `services.json` is empty by design).
+5. Desktop writes `{"mind-creation": ["any"]}` into the agent's
+   permissions file via the gateway's `permissions` extension.
+6. Agent retries the curl. Detent now matches; gateway looks up the
+   `minds` service, injects the bearer header, and forwards. Minds
+   validates the token and returns `{"agent_id": "<creation_id>", "status": "CLONING"}`.
+7. Agent polls `GET /api/create-agent/<creation_id>/status` (same bearer
+   auth) until `agent_id` is populated. The new mind appears in the UI
+   agent list as a peer of the creating mind.
+
+Subsequent spawns from the same agent go through without a dialog --
+the rule persists in the host's permissions file. Revoke by deleting
+the rule from the same dialog.
+
+### Adding the schema to existing installs
+
+Agents created before this feature shipped have a host permissions
+file without the inline `mind-creation` schema, so detent cannot match
+the rule even after the user grants it. `minds run` runs an idempotent
+migration at startup that injects the schema into any existing
+`hosts/<host_id>/latchkey_permissions.json` that is missing it. The
+migration happens *before* the gateway is restarted to avoid a race
+with the `permissions.mjs` extension.

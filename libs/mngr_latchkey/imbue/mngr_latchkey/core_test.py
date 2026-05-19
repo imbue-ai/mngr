@@ -1099,3 +1099,138 @@ def test_auth_browser_uses_auth_browser_subcommand(tmp_path: Path) -> None:
     line = report_path.read_text().strip()
     record = json.loads(line)
     assert record == {"argv": ["auth", "browser", "slack"], "env_LATCHKEY_DIRECTORY": str(tmp_path)}
+
+
+# -- register_service / auth_set_header --
+
+
+def _make_registry_binary(
+    tmp_path: Path,
+    *,
+    existing_base_api_url: str | None = None,
+    register_exit_code: int = 0,
+    register_stderr: str = "",
+) -> Path:
+    """Stub ``latchkey`` that emulates ``services info`` / ``services register`` / ``auth set`` / ``auth clear`` / ``services deregister``.
+
+    Records the argv of every invocation to ``latchkey_report.jsonl``.
+    The reported ``services info`` payload is driven by
+    ``existing_base_api_url`` (None => return a missing-service error, mimicking
+    latchkey when the service is not registered).
+    """
+    script = tmp_path / "latchkey"
+    report_path = tmp_path / "latchkey_report.jsonl"
+    existing_payload_literal = (
+        "None"
+        if existing_base_api_url is None
+        else repr({"baseApiUrls": [existing_base_api_url], "credentialStatus": "valid"})
+    )
+    script.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, os, sys\n"
+        f"with open({str(report_path)!r}, 'a') as f:\n"
+        "    f.write(json.dumps({'argv': sys.argv[1:]}) + '\\n')\n"
+        "if sys.argv[1:3] == ['services', 'info']:\n"
+        f"    payload = {existing_payload_literal}\n"
+        "    if payload is None:\n"
+        "        sys.stderr.write('Unknown service.\\n')\n"
+        "        sys.exit(1)\n"
+        "    print(json.dumps(payload))\n"
+        "    sys.exit(0)\n"
+        "if sys.argv[1:3] == ['services', 'register']:\n"
+        f"    if {register_stderr!r}:\n"
+        f"        sys.stderr.write({register_stderr!r})\n"
+        f"    sys.exit({register_exit_code})\n"
+        "if sys.argv[1:3] == ['services', 'deregister']:\n"
+        "    sys.exit(0)\n"
+        "if sys.argv[1:3] == ['auth', 'set']:\n"
+        "    sys.exit(0)\n"
+        "if sys.argv[1:3] == ['auth', 'clear']:\n"
+        "    sys.exit(0)\n"
+        "sys.stderr.write(f'unexpected argv: {sys.argv!r}')\n"
+        "sys.exit(99)\n"
+    )
+    script.chmod(0o755)
+    return script
+
+
+def _read_recorded_argv(tmp_path: Path) -> list[list[str]]:
+    report_path = tmp_path / "latchkey_report.jsonl"
+    if not report_path.exists():
+        return []
+    return [json.loads(line)["argv"] for line in report_path.read_text().splitlines() if line.strip()]
+
+
+def test_register_service_registers_new_service(tmp_path: Path) -> None:
+    binary = _make_registry_binary(tmp_path, existing_base_api_url=None)
+    latchkey = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(binary))
+
+    latchkey.register_service("minds", "http://127.0.0.1:9100")
+
+    argvs = _read_recorded_argv(tmp_path)
+    assert ["services", "register", "minds", "--base-api-url", "http://127.0.0.1:9100"] in argvs
+
+
+def test_register_service_is_noop_when_already_registered_at_same_url(tmp_path: Path) -> None:
+    binary = _make_registry_binary(tmp_path, existing_base_api_url="http://127.0.0.1:9100")
+    latchkey = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(binary))
+
+    latchkey.register_service("minds", "http://127.0.0.1:9100")
+
+    argvs = _read_recorded_argv(tmp_path)
+    assert all(argv[:2] != ["services", "register"] for argv in argvs)
+
+
+def test_register_service_re_registers_when_url_changed(tmp_path: Path) -> None:
+    binary = _make_registry_binary(tmp_path, existing_base_api_url="http://127.0.0.1:8000")
+    latchkey = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(binary))
+
+    latchkey.register_service("minds", "http://127.0.0.1:9100")
+
+    argvs = _read_recorded_argv(tmp_path)
+    register_calls = [argv for argv in argvs if argv[:2] == ["services", "register"]]
+    deregister_calls = [argv for argv in argvs if argv[:2] == ["services", "deregister"]]
+    assert deregister_calls, f"expected deregister, got {argvs}"
+    assert register_calls and register_calls[-1][4] == "http://127.0.0.1:9100"
+
+
+def test_register_service_tolerates_already_registered_race(tmp_path: Path) -> None:
+    binary = _make_registry_binary(
+        tmp_path,
+        existing_base_api_url=None,
+        register_exit_code=1,
+        register_stderr="Error: A service named 'minds' is already registered.\n",
+    )
+    latchkey = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(binary))
+    latchkey.register_service("minds", "http://127.0.0.1:9100")
+
+
+def test_register_service_raises_on_unknown_error(tmp_path: Path) -> None:
+    binary = _make_registry_binary(
+        tmp_path,
+        existing_base_api_url=None,
+        register_exit_code=1,
+        register_stderr="Error: backend on fire.\n",
+    )
+    latchkey = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(binary))
+    with pytest.raises(LatchkeyError):
+        latchkey.register_service("minds", "http://127.0.0.1:9100")
+
+
+def test_auth_set_header_passes_header_through(tmp_path: Path) -> None:
+    binary = _make_registry_binary(tmp_path)
+    latchkey = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(binary))
+
+    latchkey.auth_set_header("minds", "Authorization: Bearer abc.def")
+
+    argvs = _read_recorded_argv(tmp_path)
+    assert ["auth", "set", "minds", "-H", "Authorization: Bearer abc.def"] in argvs
+
+
+def test_auth_set_header_raises_on_non_zero_exit(tmp_path: Path) -> None:
+    binary = tmp_path / "latchkey"
+    binary.write_text("#!/usr/bin/env python3\nimport sys\nsys.stderr.write('nope')\nsys.exit(2)\n")
+    binary.chmod(0o755)
+    latchkey = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(binary))
+    with pytest.raises(LatchkeyError):
+        latchkey.auth_set_header("minds", "Authorization: Bearer abc.def")
