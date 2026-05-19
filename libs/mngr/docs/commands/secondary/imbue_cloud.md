@@ -519,10 +519,12 @@ mngr imbue_cloud admin pool create [OPTIONS]
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
 | `--count` | integer | Number of pool hosts to create | None |
+| `--region` | text | OVH datacenter code for the new pool VPSes (e.g. ``US-EAST-VA``, ``US-WEST-OR``). Validated by OVH at order time; failure surfaces as a 'datacenter not allowed for this plan' error. | None |
+| `--tag` | text | Repeatable ``KEY=VALUE`` tag attached to every freshly-provisioned VPS via the OVH IAM v2 tag system. Forwarded to the inner ``mngr create`` as ``MNGR_VPS_EXTRA_TAGS=k1=v1,k2=v2``. Example: ``--tag minds_env=alice --tag pool-owner=bob``. | None |
 | `--attributes` | text | Lease-attributes JSON for the new pool rows (e.g. '{"version":"v1.2.3","cpus":2,"memory_gb":4}') | None |
 | `--workspace-dir` | path | Path to the template repo checkout | None |
 | `--management-public-key-file` | path | Path to the management SSH public key | None |
-| `--database-url` | text | Neon PostgreSQL direct connection string | None |
+| `--database-url` | text | Neon PostgreSQL direct connection string for the pool DB. Defaults to MINDS_HOST_POOL_DSN env var, or the activated minds env's secrets.toml NEON_HOST_POOL_DSN field (so `minds env activate <dev-env>` is enough). Pass this explicitly when operating outside an activated env. | None |
 | `--mngr-source` | path | Path to the mngr monorepo root. If provided, rsyncs into the template's vendor/mngr/ before creating hosts. | None |
 
 ## mngr imbue_cloud admin pool list
@@ -538,7 +540,7 @@ mngr imbue_cloud admin pool list [OPTIONS]
 
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
-| `--database-url` | text | Neon PostgreSQL direct connection string | None |
+| `--database-url` | text | Neon PostgreSQL direct connection string for the pool DB. Defaults to MINDS_HOST_POOL_DSN env var, or the activated minds env's secrets.toml NEON_HOST_POOL_DSN field (so `minds env activate <dev-env>` is enough). Pass this explicitly when operating outside an activated env. | None |
 
 ## mngr imbue_cloud admin pool destroy
 
@@ -553,5 +555,5 @@ mngr imbue_cloud admin pool destroy [OPTIONS] POOL_HOST_ID
 
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
-| `--database-url` | text | Neon PostgreSQL direct connection string | None |
+| `--database-url` | text | Neon PostgreSQL direct connection string for the pool DB. Defaults to MINDS_HOST_POOL_DSN env var, or the activated minds env's secrets.toml NEON_HOST_POOL_DSN field (so `minds env activate <dev-env>` is enough). Pass this explicitly when operating outside an activated env. | None |
 | `--force` | boolean | Drop the row even if status != 'released' | `False` |
