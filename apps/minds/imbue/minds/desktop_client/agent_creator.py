@@ -72,6 +72,64 @@ from imbue.mngr_latchkey.store import LatchkeyStoreError
 _MNGR_FORWARD_SESSION_COOKIE_NAME: Final[str] = "mngr_forward_session"
 
 
+def make_workspace_probe_client(preauth_cookie: str, probe_timeout_seconds: float) -> httpx.Client:
+    """Construct a reusable httpx.Client preconfigured for workspace probes.
+
+    Callers that probe in a tight poll loop should construct one of these and
+    pass it to ``probe_workspace_through_plugin`` on each iteration, instead
+    of letting the helper construct a one-shot client per call.
+    """
+    return httpx.Client(
+        timeout=probe_timeout_seconds,
+        follow_redirects=False,
+        cookies={_MNGR_FORWARD_SESSION_COOKIE_NAME: preauth_cookie},
+    )
+
+
+def _probe_once(probe_client: httpx.Client, probe_url: str) -> int | None:
+    """Issue a single GET through ``probe_client`` and return the status code.
+
+    Returns ``None`` if the probe failed at the transport layer (connect
+    error, mid-stream EOF, read timeout). Module-private helper used by
+    ``probe_workspace_through_plugin``; hoisted out to satisfy the minds
+    project's no-inner-functions ratchet.
+    """
+    try:
+        response = probe_client.get(probe_url)
+    except (httpx.ConnectError, httpx.RemoteProtocolError, httpx.ReadError, httpx.TimeoutException):
+        return None
+    return response.status_code
+
+
+def probe_workspace_through_plugin(
+    mngr_forward_port: int,
+    preauth_cookie: str,
+    agent_id: AgentId,
+    probe_timeout_seconds: float,
+    client: httpx.Client | None = None,
+) -> int | None:
+    """Issue a single probe through the plugin to the agent's workspace_server.
+
+    Returns the HTTP status code observed (any 200 means ready), or ``None``
+    if the probe failed at the transport layer (connect error, mid-stream
+    EOF, read timeout). Shared by ``_wait_for_workspace_ready`` (creation
+    flow) and the workspace-health tracker's background probe loop so both
+    paths agree on what "ready" means.
+
+    Pass a pre-constructed ``client`` (via ``make_workspace_probe_client``)
+    to reuse the connection pool across a tight poll loop. When omitted, a
+    one-shot client is constructed for this single probe -- fine for
+    one-off / sporadic callers but wasteful in a loop.
+    """
+    probe_url = f"http://{agent_id}.localhost:{mngr_forward_port}/"
+    if client is not None:
+        return _probe_once(client, probe_url)
+    with make_workspace_probe_client(
+        preauth_cookie=preauth_cookie, probe_timeout_seconds=probe_timeout_seconds
+    ) as one_shot:
+        return _probe_once(one_shot, probe_url)
+
+
 def _make_child_cg(name: str, parent: ConcurrencyGroup | None) -> ConcurrencyGroup:
     """Create a ``ConcurrencyGroup`` named ``name`` that is a child of ``parent``.
 
@@ -1331,40 +1389,35 @@ class AgentCreator(MutableModel):
             logger.debug("Workspace readiness probe disabled (port=0 or empty preauth); skipping")
             return
 
-        probe_url = f"http://{agent_id}.localhost:{self.mngr_forward_port}/"
         deadline = time.monotonic() + self.workspace_ready_timeout_seconds
         log_queue.put("[minds] Waiting for workspace server to be ready...")
         last_status: int | None = None
-        last_error: str | None = None
         attempt = 0
-        with httpx.Client(
-            timeout=self.workspace_ready_probe_timeout_seconds,
-            follow_redirects=False,
-            cookies={_MNGR_FORWARD_SESSION_COOKIE_NAME: self.mngr_forward_preauth_cookie},
-        ) as client:
+        with make_workspace_probe_client(
+            preauth_cookie=self.mngr_forward_preauth_cookie,
+            probe_timeout_seconds=self.workspace_ready_probe_timeout_seconds,
+        ) as probe_client:
             while time.monotonic() < deadline:
                 attempt += 1
-                try:
-                    response = client.get(probe_url)
-                    last_status = response.status_code
-                    if response.status_code == 200:
-                        logger.debug(
-                            "Workspace ready for {} after {} probe(s)",
-                            agent_id,
-                            attempt,
-                        )
+                status = probe_workspace_through_plugin(
+                    mngr_forward_port=self.mngr_forward_port,
+                    preauth_cookie=self.mngr_forward_preauth_cookie,
+                    agent_id=agent_id,
+                    probe_timeout_seconds=self.workspace_ready_probe_timeout_seconds,
+                    client=probe_client,
+                )
+                if status is not None:
+                    last_status = status
+                    if status == 200:
+                        logger.debug("Workspace ready for {} after {} probe(s)", agent_id, attempt)
                         log_queue.put("[minds] Workspace server is ready.")
                         return
-                except (httpx.ConnectError, httpx.RemoteProtocolError, httpx.ReadError, httpx.TimeoutException) as e:
-                    last_error = f"{type(e).__name__}: {e}"
                 threading.Event().wait(timeout=self.workspace_ready_poll_interval_seconds)
         logger.warning(
-            "Workspace readiness probe for {} timed out after {:.0f}s "
-            "(last status={}, last error={}); publishing redirect anyway",
+            "Workspace readiness probe for {} timed out after {:.0f}s (last status={}); publishing redirect anyway",
             agent_id,
             self.workspace_ready_timeout_seconds,
             last_status,
-            last_error,
         )
         log_queue.put(
             "[minds] Warning: workspace did not become ready within "
