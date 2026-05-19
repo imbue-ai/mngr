@@ -263,6 +263,29 @@ def _is_creating_new_host(address: NewAgentLocation, new_host_flag: bool) -> boo
     return new_host_flag or _is_new_host_implied(address)
 
 
+# Backend name used by the imbue_cloud provider plugin. Hardcoded here (rather
+# than imported) to keep mngr core free of plugin imports; kept in sync with
+# ``IMBUE_CLOUD_BACKEND_NAME`` in ``imbue.mngr_imbue_cloud.primitives``.
+_IMBUE_CLOUD_BACKEND: Final[str] = "imbue_cloud"
+
+
+def _is_imbue_cloud_provider(provider_name: ProviderInstanceName | None, mngr_ctx: MngrContext) -> bool:
+    """Return True when ``provider_name`` resolves to the imbue_cloud backend.
+
+    Used by the ``--reuse + --new-host`` validator to permit the lease/adopt
+    flow that the minds caller still relies on. Resolves the backend the same
+    way ``get_provider_instance`` does -- via the provider config's backend
+    field, falling back to the instance name itself -- but without building
+    the provider.
+    """
+    if provider_name is None:
+        return False
+    provider_config = mngr_ctx.config.providers.get(provider_name)
+    if provider_config is not None:
+        return str(provider_config.backend) == _IMBUE_CLOUD_BACKEND
+    return str(provider_name) == _IMBUE_CLOUD_BACKEND
+
+
 @pure
 def _make_name_style_choices() -> list[str]:
     """Get lowercase name style choices."""
@@ -619,6 +642,21 @@ def create(ctx: click.Context, **kwargs) -> None:
         if opts.update and not opts.reuse:
             raise UserInputError("--update requires --reuse. Use --reuse --update together.")
 
+        # Validate --reuse + --new-host: contradictory by construction. --new-host
+        # always provisions a fresh host; --reuse looks up an existing agent on an
+        # existing host. The imbue_cloud lease/adopt flow is the lone documented
+        # exception: ``--new-host`` triggers a pool-host lease that surfaces a
+        # pre-baked agent which the create flow adopts in place, and ``--reuse``
+        # is what older minds builds rely on to suppress the duplicate-name check.
+        # The exemption is explicit (not silent) so this branch is reviewable; if
+        # the imbue_cloud minds caller is updated to drop ``--reuse``, this branch
+        # can be removed.
+        if opts.reuse and opts.new_host and not _is_imbue_cloud_provider(address.provider_name, mngr_ctx):
+            raise UserInputError(
+                "--reuse cannot be combined with --new-host: --reuse looks up an existing agent "
+                "on an existing host, --new-host always provisions a fresh host. Drop one."
+            )
+
         # Validate conflicting agent types early (before the headless path
         # returns). This is the single check; the resolution helper below
         # (and _parse_agent_opts, which receives the resolved value) assume
@@ -854,7 +892,7 @@ def _create_agent(
         reuse_result = _try_reuse_existing_agent(
             agent_name=agent_opts.name,
             provider_name=address.provider_name,
-            target_host_ref=target_host if isinstance(target_host, DiscoveredHost) else None,
+            address_host=address.host_name,
             mngr_ctx=mngr_ctx,
             agent_and_host_loader=setup.agent_and_host_loader,
         )
@@ -1154,15 +1192,22 @@ def _parse_project_name(
 def _try_reuse_existing_agent(
     agent_name: AgentName,
     provider_name: ProviderInstanceName | None,
-    target_host_ref: DiscoveredHost | None,
+    address_host: HostName | HostId | None,
     mngr_ctx: MngrContext,
     agent_and_host_loader: Callable[[], dict[DiscoveredHost, list[DiscoveredAgent]]],
 ) -> tuple[AgentInterface, OnlineHostInterface] | None:
     """Try to find and start an existing agent with the given name.
 
-    Searches for an agent matching the name, scoped by provider and host if specified.
-    If found, ensures the agent is started and returns it along with its host.
-    If not found, returns None so the caller can proceed with creating a new agent.
+    Searches for an agent matching the name, scoped by provider and by the
+    host component of the address (when present). ``address_host`` is the
+    address's ``host_name`` field straight from ``NewAgentLocation``: a
+    :class:`HostId` produces an exact match on ``host_id``; a :class:`HostName`
+    matches on ``host_name`` and -- to mirror :func:`_find_existing_host` --
+    uses ``provider_name`` as a tiebreaker when multiple hosts share the same
+    name. ``None`` keeps the documented "any host" behavior used by the
+    bare-name reuse path. If found, ensures the agent is started and returns
+    it along with its host. If not found, returns None so the caller can
+    proceed with creating a new agent.
     """
     agents_by_host = agent_and_host_loader()
 
@@ -1173,8 +1218,8 @@ def _try_reuse_existing_agent(
         if provider_name is not None and host_ref.provider_name != provider_name:
             continue
 
-        # Skip hosts that don't match the target host filter (if specified)
-        if target_host_ref is not None and host_ref.host_id != target_host_ref.host_id:
+        # Skip hosts that don't match the address's host component (if specified)
+        if not _host_ref_matches_address(host_ref, address_host, provider_name):
             continue
 
         for agent_ref in agent_refs:
@@ -1671,6 +1716,33 @@ def _parse_target_host(
         raise UserInputError(f"Could not find host: {address.host_name}")
 
     return host_ref
+
+
+@pure
+def _host_ref_matches_address(
+    host_ref: DiscoveredHost,
+    address_host: HostName | HostId | None,
+    provider_name: ProviderInstanceName | None,
+) -> bool:
+    """Whether ``host_ref`` matches the host component of the create address.
+
+    ``None`` means the user did not pin a host in the address; the caller's
+    "any host" semantics apply and every host is a match. A :class:`HostId`
+    matches on ``host_id`` (IDs are unique). A :class:`HostName` matches on
+    ``host_name``; when a provider was also pinned, the host's
+    ``provider_name`` must match too -- this mirrors the disambiguation in
+    :func:`_find_existing_host` and prevents same-named hosts on different
+    providers from cross-matching.
+    """
+    if address_host is None:
+        return True
+    if isinstance(address_host, HostId):
+        return host_ref.host_id == address_host
+    if host_ref.host_name != address_host:
+        return False
+    if provider_name is not None and host_ref.provider_name != provider_name:
+        return False
+    return True
 
 
 def _find_existing_host(

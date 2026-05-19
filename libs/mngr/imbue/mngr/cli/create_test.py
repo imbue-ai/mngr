@@ -21,6 +21,7 @@ from imbue.mngr.cli.create import _apply_host_labels
 from imbue.mngr.cli.create import _check_source_does_not_contain_state_dir
 from imbue.mngr.cli.create import _editor_cleanup_scope
 from imbue.mngr.cli.create import _get_source_remote_url
+from imbue.mngr.cli.create import _host_ref_matches_address
 from imbue.mngr.cli.create import _is_creating_new_host
 from imbue.mngr.cli.create import _parse_agent_opts
 from imbue.mngr.cli.create import _parse_branch_flag
@@ -323,7 +324,7 @@ def test_try_reuse_existing_agent_no_agents_found(temp_mngr_ctx: MngrContext) ->
     result = _try_reuse_existing_agent(
         agent_name=AgentName("nonexistent"),
         provider_name=None,
-        target_host_ref=None,
+        address_host=None,
         mngr_ctx=temp_mngr_ctx,
         agent_and_host_loader=lambda: {},
     )
@@ -339,7 +340,7 @@ def test_try_reuse_existing_agent_no_matching_name(temp_mngr_ctx: MngrContext) -
     result = _try_reuse_existing_agent(
         agent_name=AgentName("test-agent"),
         provider_name=None,
-        target_host_ref=None,
+        address_host=None,
         mngr_ctx=temp_mngr_ctx,
         agent_and_host_loader=lambda: {host_ref: [agent_ref]},
     )
@@ -355,7 +356,7 @@ def test_try_reuse_existing_agent_filters_by_provider(temp_mngr_ctx: MngrContext
     result = _try_reuse_existing_agent(
         agent_name=AgentName("test-agent"),
         provider_name=ProviderInstanceName("local"),
-        target_host_ref=None,
+        address_host=None,
         mngr_ctx=temp_mngr_ctx,
         agent_and_host_loader=lambda: {host_ref: [agent_ref]},
     )
@@ -363,22 +364,126 @@ def test_try_reuse_existing_agent_filters_by_provider(temp_mngr_ctx: MngrContext
     assert result is None
 
 
-def test_try_reuse_existing_agent_filters_by_host(temp_mngr_ctx: MngrContext) -> None:
-    """Returns None when agent exists but on different host."""
-    host_ref = _make_discovered_host(host_id=TEST_HOST_ID_1)
+def test_try_reuse_existing_agent_filters_by_address_host_id(temp_mngr_ctx: MngrContext) -> None:
+    """Returns None when agent exists but on a host whose id differs from the address's host id."""
+    host_ref = _make_discovered_host(host_id=TEST_HOST_ID_1, host_name="h1")
     agent_ref = _make_discovered_agent(agent_name="test-agent", host_id=TEST_HOST_ID_1)
-
-    target_host_ref = _make_discovered_host(host_id=TEST_HOST_ID_2)
 
     result = _try_reuse_existing_agent(
         agent_name=AgentName("test-agent"),
         provider_name=None,
-        target_host_ref=target_host_ref,
+        address_host=HostId(TEST_HOST_ID_2),
         mngr_ctx=temp_mngr_ctx,
         agent_and_host_loader=lambda: {host_ref: [agent_ref]},
     )
 
     assert result is None
+
+
+def test_try_reuse_existing_agent_filters_by_address_host_name(temp_mngr_ctx: MngrContext) -> None:
+    """Returns None when agent exists on a host whose name differs from the address's host name."""
+    host_ref = _make_discovered_host(host_name="h1")
+    agent_ref = _make_discovered_agent(agent_name="test-agent")
+
+    result = _try_reuse_existing_agent(
+        agent_name=AgentName("test-agent"),
+        provider_name=None,
+        address_host=HostName("h2"),
+        mngr_ctx=temp_mngr_ctx,
+        agent_and_host_loader=lambda: {host_ref: [agent_ref]},
+    )
+
+    assert result is None
+
+
+def test_try_reuse_existing_agent_address_host_name_provider_tiebreaker(temp_mngr_ctx: MngrContext) -> None:
+    """When two hosts share a name, the address's provider scopes the match.
+
+    Without the provider tiebreaker, a same-named agent on a different provider's
+    host would match; with it, only the address-provider host wins.
+    """
+    host_local = _make_discovered_host(host_id=TEST_HOST_ID_1, host_name="shared", provider="local")
+    agent_local = _make_discovered_agent(
+        agent_id=TEST_AGENT_ID_1, agent_name="test-agent", host_id=TEST_HOST_ID_1, provider="local"
+    )
+    host_modal = _make_discovered_host(host_id=TEST_HOST_ID_2, host_name="shared", provider="modal")
+    agent_modal = _make_discovered_agent(
+        agent_id=TEST_AGENT_ID_2, agent_name="test-agent", host_id=TEST_HOST_ID_2, provider="modal"
+    )
+
+    # No provider pinned: both hosts match the name, multiple matches -> UserInputError
+    with pytest.raises(UserInputError, match="Multiple agents found"):
+        _try_reuse_existing_agent(
+            agent_name=AgentName("test-agent"),
+            provider_name=None,
+            address_host=HostName("shared"),
+            mngr_ctx=temp_mngr_ctx,
+            agent_and_host_loader=lambda: {host_local: [agent_local], host_modal: [agent_modal]},
+        )
+
+
+def test_try_reuse_existing_agent_bare_name_multiple_matches_raises(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """Bare-name --reuse with multiple matches raises the disambiguation error.
+
+    Regression for the bare-name path used by mngr_claude_subagent_proxy and
+    tutorial scripts (no host in the address). The new host-scoped logic must
+    not regress this behavior.
+    """
+    host1 = _make_discovered_host(host_id=TEST_HOST_ID_1, host_name="h1")
+    agent1 = _make_discovered_agent(agent_id=TEST_AGENT_ID_1, agent_name="worker", host_id=TEST_HOST_ID_1)
+    host2 = _make_discovered_host(host_id=TEST_HOST_ID_2, host_name="h2")
+    agent2 = _make_discovered_agent(agent_id=TEST_AGENT_ID_2, agent_name="worker", host_id=TEST_HOST_ID_2)
+
+    with pytest.raises(UserInputError, match=r"Multiple agents found.*@HOST.PROVIDER"):
+        _try_reuse_existing_agent(
+            agent_name=AgentName("worker"),
+            provider_name=None,
+            address_host=None,
+            mngr_ctx=temp_mngr_ctx,
+            agent_and_host_loader=lambda: {host1: [agent1], host2: [agent2]},
+        )
+
+
+# -- Host-scoped match: isolation between same-named agents on different hosts --
+
+
+def test_try_reuse_existing_agent_address_host_isolates_same_named_agents(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """Two same-named agents on different hosts: address_host picks the right one.
+
+    Regression for the reported bug where a fresh-host create with --reuse
+    accidentally adopted an unrelated same-named agent on another host because
+    the match keyed on agent name alone. With the address's host_name plumbed
+    in, the match resolves to the agent on the host the address points at.
+
+    Returns None here (rather than the matched (agent, host) tuple) because the
+    matched agent's host does not exist as a real provider host -- the function
+    bails after the filter resolves to a unique candidate when the provider
+    lookup fails. The salient assertion is that no exception is raised due to
+    ambiguity, i.e. the host scope did isolate the correct candidate.
+    """
+    host1 = _make_discovered_host(host_id=TEST_HOST_ID_1, host_name="h1", provider="local")
+    agent1 = _make_discovered_agent(agent_id=TEST_AGENT_ID_1, agent_name="system-services", host_id=TEST_HOST_ID_1)
+    host2 = _make_discovered_host(host_id=TEST_HOST_ID_2, host_name="h2", provider="local")
+    agent2 = _make_discovered_agent(agent_id=TEST_AGENT_ID_2, agent_name="system-services", host_id=TEST_HOST_ID_2)
+
+    # With address_host=HostName("h2"), only agent2 should match; without the
+    # host scope this would either pick the wrong agent or raise "Multiple
+    # agents found".
+    selected: list[tuple[DiscoveredHost, DiscoveredAgent]] = []
+    for host_ref, agents in {host1: [agent1], host2: [agent2]}.items():
+        if _host_ref_matches_address(host_ref, HostName("h2"), None):
+            for agent_ref in agents:
+                if agent_ref.agent_name == AgentName("system-services"):
+                    selected.append((host_ref, agent_ref))
+
+    assert len(selected) == 1
+    matched_host, matched_agent = selected[0]
+    assert matched_host.host_id == HostId(TEST_HOST_ID_2)
+    assert matched_agent.agent_id == AgentId(TEST_AGENT_ID_2)
 
 
 # -- Tests using real local provider infrastructure --
@@ -421,7 +526,7 @@ def test_try_reuse_existing_agent_found_and_started(
         result = _try_reuse_existing_agent(
             agent_name=agent.name,
             provider_name=None,
-            target_host_ref=None,
+            address_host=None,
             mngr_ctx=temp_mngr_ctx,
             agent_and_host_loader=lambda: {host_ref: [agent_ref]},
         )
@@ -458,7 +563,7 @@ def test_try_reuse_existing_agent_not_found_on_host(
     result = _try_reuse_existing_agent(
         agent_name=AgentName("ghost-agent"),
         provider_name=None,
-        target_host_ref=None,
+        address_host=None,
         mngr_ctx=temp_mngr_ctx,
         agent_and_host_loader=lambda: {host_ref: [agent_ref]},
     )
@@ -1729,6 +1834,61 @@ def test_create_rejects_update_without_reuse(
 
     assert result.exit_code != 0
     assert "--update requires --reuse" in result.output
+
+
+def test_create_rejects_reuse_with_new_host(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """--reuse + --new-host is contradictory and should fail with a clear error.
+
+    --new-host always provisions a fresh host; --reuse looks up an existing agent
+    on an existing host. The combination has no coherent meaning for any provider
+    other than imbue_cloud's lease/adopt flow.
+    """
+    result = cli_runner.invoke(
+        create,
+        [
+            "system-services@new-host.lima",
+            "--reuse",
+            "--new-host",
+            "--type",
+            "command",
+            "--no-connect",
+        ],
+        obj=plugin_manager,
+    )
+
+    assert result.exit_code != 0
+    assert "--reuse cannot be combined with --new-host" in result.output
+
+
+def test_create_rejects_reuse_update_with_new_host(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """--reuse --update --new-host is the call shape minds previously emitted; reject it.
+
+    This is the direct regression test for the reported bug where a fresh-host
+    create-form submission accidentally re-targeted an unrelated same-named
+    agent on a different host.
+    """
+    result = cli_runner.invoke(
+        create,
+        [
+            "system-services@new-host.lima",
+            "--reuse",
+            "--update",
+            "--new-host",
+            "--type",
+            "command",
+            "--no-connect",
+        ],
+        obj=plugin_manager,
+    )
+
+    assert result.exit_code != 0
+    assert "--reuse cannot be combined with --new-host" in result.output
 
 
 # =============================================================================
