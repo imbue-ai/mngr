@@ -18,4 +18,24 @@ sudo defaults write com.apple.LaunchServices LSQuarantine -bool false || true
 # Keep Spotlight from chewing CPU during tests on a freshly populated home.
 sudo mdutil -i off / 2>/dev/null || true
 
+# Install Xcode Command Line Tools. The bundled `git` inside minds.app is
+# /usr/bin/git, which on macOS is an xcselect stub that delegates to the
+# Xcode-CLT-shipped real git. Without CLT installed, invoking it sends
+# SIGKILL to the caller (-9 exit status; the same path that triggers the
+# "No developer tools were found" GUI prompt for interactive shells).
+# Trigger the headless install path via the on-demand sentinel that
+# softwareupdate recognises.
+if ! xcode-select -p >/dev/null 2>&1; then
+    echo "[minds-fresh] installing Xcode Command Line Tools..."
+    sudo touch /tmp/.com.apple.dt.CommandLineTools.installondemand.in-progress
+    product="$(softwareupdate -l 2>/dev/null \
+        | awk -F': ' '/\*.*Command Line Tools/ {print $2; exit}')"
+    if [[ -n "$product" ]]; then
+        sudo softwareupdate -i "$product" --verbose
+    else
+        echo "[minds-fresh] WARNING: no Command Line Tools update offered; git inside minds.app may fail"
+    fi
+    sudo rm -f /tmp/.com.apple.dt.CommandLineTools.installondemand.in-progress
+fi
+
 echo "[minds-fresh] done."
