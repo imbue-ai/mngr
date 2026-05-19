@@ -258,7 +258,6 @@ def _construct_and_discover_for_provider(
     provider_name: ProviderInstanceName,
     mngr_ctx: MngrContext,
     params: _ListAgentsParams,
-    result: ListResult,
     results_lock: Lock,
     reset_caches: bool,
     agents_by_host: dict[DiscoveredHost, list[DiscoveredAgent]],
@@ -306,7 +305,6 @@ def _construct_and_discover_all_providers(
     mngr_ctx: MngrContext,
     provider_names: tuple[str, ...] | None,
     params: _ListAgentsParams,
-    result: ListResult,
     results_lock: Lock,
     reset_caches: bool,
 ) -> tuple[dict[DiscoveredHost, list[DiscoveredAgent]], list[ProviderInstanceInterface]]:
@@ -330,7 +328,6 @@ def _construct_and_discover_all_providers(
                     name,
                     mngr_ctx,
                     params,
-                    result,
                     results_lock,
                     reset_caches,
                     agents_by_host,
@@ -361,7 +358,6 @@ def _list_agents_batch(
         mngr_ctx=mngr_ctx,
         provider_names=provider_names,
         params=params,
-        result=result,
         results_lock=results_lock,
         reset_caches=reset_caches,
     )
