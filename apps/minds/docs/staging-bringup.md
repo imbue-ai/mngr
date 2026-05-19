@@ -319,14 +319,29 @@ without any pool hosts.
 ```bash
 export DATABASE_URL=$(vault kv get -mount=secrets -field=DATABASE_URL minds/staging/neon)
 export ANTHROPIC_API_KEY=$(vault kv get -mount=secrets -field=ANTHROPIC_API_KEY minds/staging/litellm)
+export OVH_APPLICATION_KEY=$(vault kv get -mount=secrets -field=OVH_APPLICATION_KEY minds/staging/ovh)
+export OVH_APPLICATION_SECRET=$(vault kv get -mount=secrets -field=OVH_APPLICATION_SECRET minds/staging/ovh)
+export OVH_CONSUMER_KEY=$(vault kv get -mount=secrets -field=OVH_CONSUMER_KEY minds/staging/ovh)
 
 uv run mngr imbue_cloud admin pool create \
     --count 1 \
+    --region US-WEST-OR \
+    --tag minds_env=staging \
     --attributes '{"repo_branch_or_tag": "main"}' \
     --workspace-dir ~/project/forever-claude-template \
     --management-public-key-file .minds/staging/pool_management_key/id_ed25519.pub \
     --database-url "$DATABASE_URL"
 ```
+
+`--region` is required by OVH (use any OVH datacenter code that's valid
+for the VPS plan; `US-WEST-OR` and `US-EAST-VA` are the routine picks).
+`--tag minds_env=staging` is what `minds env destroy` greps for when
+enumerating OVH hosts to tear down on a staging wipe, so omitting it
+would leak the VPS on destroy.
+
+The bake also needs OVH credentials on the operator's machine -- either
+already configured under `mngr`'s OVH provider, or as env vars exported
+from the tier's Vault entry as shown above.
 
 - [ ] `mngr imbue_cloud admin pool list --database-url "$DATABASE_URL"`
   shows the row.
