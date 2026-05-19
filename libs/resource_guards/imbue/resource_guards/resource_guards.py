@@ -599,8 +599,17 @@ def fixture_uses_resources(*resources: str) -> Callable[[F], F]:
 
     Raises ResourceGuardViolation if applied more than once to the same
     function -- stacking the decorator is not supported; combine all
-    resources into the single call instead.
+    resources into the single call instead. Also raises if called with no
+    resources -- an empty declaration would silently no-op at runtime and
+    defeat the whole point of declaring fixture-level resource usage.
     """
+    if not resources:
+        raise ResourceGuardViolation(
+            "@fixture_uses_resources requires at least one resource name. "
+            "An empty declaration is a no-op and would silently disable the "
+            "fixture-scope guard; remove the decorator or pass the resources "
+            "the fixture invokes, e.g. @fixture_uses_resources('modal')."
+        )
 
     def decorator(func: F) -> F:
         if func in _fixture_resource_marks:

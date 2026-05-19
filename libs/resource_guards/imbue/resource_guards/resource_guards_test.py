@@ -1510,6 +1510,17 @@ def test_fixture_uses_resources_errors_on_double_application(isolated_guard_stat
         fixture_uses_resources("docker")(some_fixture)
 
 
+def test_fixture_uses_resources_errors_on_empty_declaration() -> None:
+    """Calling the decorator with no resources should raise at decoration time.
+
+    An empty @fixture_uses_resources() would silently no-op at runtime (the
+    fixture-scope hookwrapper short-circuits on an empty resource set), so we
+    reject it loudly instead of letting the user think their declaration took.
+    """
+    with pytest.raises(ResourceGuardViolation, match="requires at least one resource name"):
+        fixture_uses_resources()
+
+
 class _FakeFixtureInfo:
     """Minimal stand-in for pytest's FuncFixtureInfo."""
 
