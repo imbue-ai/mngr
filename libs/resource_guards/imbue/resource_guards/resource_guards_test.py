@@ -537,6 +537,231 @@ def test_multi_resource_fixture_must_invoke_each_declared_resource(
     result.stdout.fnmatch_lines(["*did not invoke ls during setup*"])
 
 
+def test_consumer_of_two_distinct_tagged_fixtures_requires_each_mark(
+    pytester: pytest.Pytester, clean_guard_env: None
+) -> None:
+    """A test consuming two fixtures, each tagged for a different resource, requires both marks."""
+    pytester.makeconftest(_PYTESTER_CONFTEST_TWO_GUARDS)
+    pytester.makepyfile("""
+        import subprocess
+        import pytest
+
+        from imbue.resource_guards.resource_guards import fixture_uses_resources
+
+        @pytest.fixture
+        @fixture_uses_resources("cat")
+        def cat_fixture():
+            subprocess.run(["cat", "/dev/null"], check=True)
+            yield "cat"
+
+        @pytest.fixture
+        @fixture_uses_resources("ls")
+        def ls_fixture():
+            subprocess.run(["ls", "/"], check=True, capture_output=True)
+            yield "ls"
+
+        @pytest.mark.cat
+        @pytest.mark.ls
+        def test_consumes_both(cat_fixture, ls_fixture):
+            assert (cat_fixture, ls_fixture) == ("cat", "ls")
+    """)
+    result = pytester.runpytest_subprocess("-n0", "--no-header", "-p", "no:cacheprovider")
+    result.assert_outcomes(passed=1)
+
+
+def test_consumer_of_two_distinct_tagged_fixtures_missing_one_mark_fails(
+    pytester: pytest.Pytester, clean_guard_env: None
+) -> None:
+    """Each tagged fixture in the closure independently requires its mark on the consumer."""
+    pytester.makeconftest(_PYTESTER_CONFTEST_TWO_GUARDS)
+    pytester.makepyfile("""
+        import subprocess
+        import pytest
+
+        from imbue.resource_guards.resource_guards import fixture_uses_resources
+
+        @pytest.fixture
+        @fixture_uses_resources("cat")
+        def cat_fixture():
+            subprocess.run(["cat", "/dev/null"], check=True)
+            yield "cat"
+
+        @pytest.fixture
+        @fixture_uses_resources("ls")
+        def ls_fixture():
+            subprocess.run(["ls", "/"], check=True, capture_output=True)
+            yield "ls"
+
+        @pytest.mark.cat
+        def test_only_marks_cat(cat_fixture, ls_fixture):
+            assert (cat_fixture, ls_fixture) == ("cat", "ls")
+    """)
+    result = pytester.runpytest_subprocess("-n0", "--no-header", "-p", "no:cacheprovider")
+    result.assert_outcomes(failed=1)
+    result.stdout.fnmatch_lines(["*missing @pytest.mark.ls*"])
+
+
+def test_nested_tagged_fixtures_contribute_their_resources_to_consumer(
+    pytester: pytest.Pytester, clean_guard_env: None
+) -> None:
+    """A tagged fixture that depends on another tagged fixture surfaces both resources in the closure.
+
+    Pytest's static closure for the consumer includes every fixture in
+    the dependency chain, so the helper picks up both decorations and
+    the consumer must carry marks for each.
+    """
+    pytester.makeconftest(_PYTESTER_CONFTEST_TWO_GUARDS)
+    pytester.makepyfile("""
+        import subprocess
+        import pytest
+
+        from imbue.resource_guards.resource_guards import fixture_uses_resources
+
+        @pytest.fixture
+        @fixture_uses_resources("cat")
+        def inner_cat_fixture():
+            subprocess.run(["cat", "/dev/null"], check=True)
+            yield "cat"
+
+        @pytest.fixture
+        @fixture_uses_resources("ls")
+        def outer_ls_fixture(inner_cat_fixture):
+            subprocess.run(["ls", "/"], check=True, capture_output=True)
+            yield (inner_cat_fixture, "ls")
+
+        @pytest.mark.cat
+        @pytest.mark.ls
+        def test_consumes_outer(outer_ls_fixture):
+            assert outer_ls_fixture == ("cat", "ls")
+    """)
+    result = pytester.runpytest_subprocess("-n0", "--no-header", "-p", "no:cacheprovider")
+    result.assert_outcomes(passed=1)
+
+
+def test_tagged_fixture_in_parent_conftest_used_by_subdir_test(
+    pytester: pytest.Pytester, clean_guard_env: None
+) -> None:
+    """A tagged fixture defined in a parent conftest must reach tests in a subdirectory."""
+    pytester.makeconftest("""
+        import subprocess
+        import pytest
+
+        from imbue.resource_guards.resource_guards import (
+            fixture_uses_resources,
+            register_resource_guard,
+            start_resource_guards,
+            stop_resource_guards,
+        )
+
+        register_resource_guard("cat")
+
+        def pytest_configure(config):
+            config.addinivalue_line("markers", "cat: test uses cat")
+
+        def pytest_sessionstart(session):
+            start_resource_guards(session)
+
+        def pytest_sessionfinish(session, exitstatus):
+            stop_resource_guards()
+
+        @pytest.fixture
+        @fixture_uses_resources("cat")
+        def parent_cat_fixture():
+            subprocess.run(["cat", "/dev/null"], check=True)
+            yield "value"
+    """)
+    pytester.makepyfile(
+        **{
+            "subdir/test_subdir": """
+                import pytest
+
+                @pytest.mark.cat
+                def test_consumes_parent_fixture(parent_cat_fixture):
+                    assert parent_cat_fixture == "value"
+            """,
+        }
+    )
+    result = pytester.runpytest_subprocess("-n0", "--no-header", "-p", "no:cacheprovider")
+    result.assert_outcomes(passed=1)
+
+
+def test_parametrized_tagged_fixture_runs_for_each_param(pytester: pytest.Pytester, clean_guard_env: None) -> None:
+    """Parametrization on a tagged fixture should not trigger the multi-FixtureDef override error."""
+    pytester.makeconftest(_PYTESTER_CONFTEST)
+    pytester.makepyfile("""
+        import subprocess
+        import pytest
+
+        from imbue.resource_guards.resource_guards import fixture_uses_resources
+
+        @pytest.fixture(params=["a", "b"])
+        @fixture_uses_resources("cat")
+        def param_cat_fixture(request):
+            subprocess.run(["cat", "/dev/null"], check=True)
+            yield request.param
+
+        @pytest.mark.cat
+        def test_uses_param_fixture(param_cat_fixture):
+            assert param_cat_fixture in ("a", "b")
+    """)
+    result = pytester.runpytest_subprocess("-n0", "--no-header", "-p", "no:cacheprovider")
+    result.assert_outcomes(passed=2)
+
+
+def test_session_scoped_tagged_fixture_spans_multiple_test_files(
+    pytester: pytest.Pytester, clean_guard_env: None
+) -> None:
+    """A session-scoped tagged fixture is set up once and shared across multiple files."""
+    pytester.makeconftest("""
+        import subprocess
+        import pytest
+
+        from imbue.resource_guards.resource_guards import (
+            fixture_uses_resources,
+            register_resource_guard,
+            start_resource_guards,
+            stop_resource_guards,
+        )
+
+        register_resource_guard("cat")
+
+        def pytest_configure(config):
+            config.addinivalue_line("markers", "cat: test uses cat")
+
+        def pytest_sessionstart(session):
+            start_resource_guards(session)
+
+        def pytest_sessionfinish(session, exitstatus):
+            stop_resource_guards()
+
+        @pytest.fixture(scope="session")
+        @fixture_uses_resources("cat")
+        def session_cat_fixture():
+            subprocess.run(["cat", "/dev/null"], check=True)
+            yield "value"
+    """)
+    pytester.makepyfile(
+        **{
+            "test_one": """
+                import pytest
+
+                @pytest.mark.cat
+                def test_in_file_one(session_cat_fixture):
+                    assert session_cat_fixture == "value"
+            """,
+            "test_two": """
+                import pytest
+
+                @pytest.mark.cat
+                def test_in_file_two(session_cat_fixture):
+                    assert session_cat_fixture == "value"
+            """,
+        }
+    )
+    result = pytester.runpytest_subprocess("-n0", "--no-header", "-p", "no:cacheprovider")
+    result.assert_outcomes(passed=2)
+
+
 # ---------------------------------------------------------------------------
 # Session lifecycle
 # ---------------------------------------------------------------------------
