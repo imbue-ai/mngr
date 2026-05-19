@@ -26,8 +26,10 @@ from datetime import timezone
 from pathlib import Path
 from uuid import uuid4
 
+import httpx
 import pytest
 from loguru import logger
+from pydantic import AnyUrl
 from pydantic import SecretStr
 
 from imbue.imbue_common.primitives import NonEmptyStr
@@ -140,6 +142,7 @@ def verified_user(
     user_id, session_token = _create_verified_user_via_admin_api(
         connection_uri=handle.supertokens_connection_uri,
         api_key=handle.supertokens_api_key,
+        connector_url=handle.urls.connector_url,
         email=email,
         password=password,
     )
@@ -157,7 +160,7 @@ def verified_user(
                 api_key=handle.supertokens_api_key,
                 user_id=user_id,
             )
-        except MindError as exc:
+        except (MindError, httpx.HTTPError) as exc:
             logger.warning(
                 "Failed to delete verified-user fixture user {!r} ({}); the shared env's "
                 "SuperTokens app teardown at run-end is the safety net.",
@@ -272,28 +275,94 @@ def _destroy_ephemeral_env(*, name: DevEnvName) -> None:
     )
 
 
+_SUPERTOKENS_TENANT_ID = "public"
+_SUPERTOKENS_ADMIN_TIMEOUT_SECONDS = 30.0
+
+
 def _create_verified_user_via_admin_api(
     *,
     connection_uri: SecretStr,
     api_key: SecretStr,
+    connector_url: AnyUrl,
     email: NonEmptyStr,
     password: SecretStr,
 ) -> tuple[NonEmptyStr, SecretStr]:
-    """Call SuperTokens admin API: create user, mark email verified, mint session.
+    """Create a user via the SuperTokens admin API, mark email verified, sign in.
 
-    Stub: real implementation needs the SuperTokens admin endpoints.
-    Returns ``(user_id, session_token)``. Tests that use this fixture
-    are skipped today, so this stub is unreached.
+    Three HTTP round-trips against the SuperTokens core (auth'd with the
+    ``api-key`` header, matches what supertokens-python's recipe
+    implementations do internally), plus one signin call against the
+    deployed connector to mint a real session JWT:
+
+    1. ``POST <core>/<tenant>/recipe/signup`` -- creates the
+       emailpassword user, returns the user id.
+    2. ``POST <core>/<tenant>/recipe/user/email/verify/token`` --
+       generates a verification token for that user.
+    3. ``POST <core>/<tenant>/recipe/user/email/verify`` -- consumes
+       the token to mark the email verified (so the connector's
+       ``REQUIRED`` email-verification gate is satisfied).
+    4. ``POST <connector_url>/auth/signin`` -- signs in via the
+       connector's public endpoint to receive a SuperTokens session
+       JWT that downstream test calls can use as ``Authorization: Bearer``.
+
+    Returns ``(user_id, access_token)``. The session refresh path is
+    not used by tests today, so we deliberately only thread the
+    access_token through.
     """
-    pytest.skip(
-        f"verified_user provisioning for {email!r} is not implemented yet -- see specs/minds-deployment-tests.md."
-    )
+    headers = {"api-key": api_key.get_secret_value(), "rid": "emailpassword"}
+    base = str(connection_uri.get_secret_value()).rstrip("/")
+    with httpx.Client(timeout=_SUPERTOKENS_ADMIN_TIMEOUT_SECONDS) as client:
+        signup = client.post(
+            f"{base}/{_SUPERTOKENS_TENANT_ID}/recipe/signup",
+            headers=headers,
+            json={"email": str(email), "password": password.get_secret_value()},
+        )
+        signup.raise_for_status()
+        signup_json = signup.json()
+        if signup_json.get("status") != "OK":
+            raise MindError(f"SuperTokens admin signup for {email!r} returned non-OK: {signup_json!r}")
+        user_id = NonEmptyStr(signup_json["recipeUserId"])
+
+        verify_headers = {"api-key": api_key.get_secret_value(), "rid": "emailverification"}
+        token_resp = client.post(
+            f"{base}/{_SUPERTOKENS_TENANT_ID}/recipe/user/email/verify/token",
+            headers=verify_headers,
+            json={"userId": str(user_id), "email": str(email)},
+        )
+        token_resp.raise_for_status()
+        token_json = token_resp.json()
+        if token_json.get("status") != "OK":
+            raise MindError(f"SuperTokens admin verify-token mint for {email!r} returned non-OK: {token_json!r}")
+        verification_token = token_json["token"]
+
+        verify_resp = client.post(
+            f"{base}/{_SUPERTOKENS_TENANT_ID}/recipe/user/email/verify",
+            headers=verify_headers,
+            json={"method": "token", "token": verification_token},
+        )
+        verify_resp.raise_for_status()
+        verify_json = verify_resp.json()
+        if verify_json.get("status") != "OK":
+            raise MindError(f"SuperTokens admin email-verify for {email!r} returned non-OK: {verify_json!r}")
+
+        signin_resp = client.post(
+            f"{str(connector_url).rstrip('/')}/auth/signin",
+            json={"email": str(email), "password": password.get_secret_value()},
+        )
+        signin_resp.raise_for_status()
+        signin_json = signin_resp.json()
+        if signin_json.get("status") != "OK":
+            raise MindError(f"Connector /auth/signin for {email!r} returned non-OK: {signin_json!r}")
+        access_token = signin_json["tokens"]["access_token"]
+        return user_id, SecretStr(access_token)
 
 
 def _delete_user_via_admin_api(*, connection_uri: SecretStr, api_key: SecretStr, user_id: NonEmptyStr) -> None:
-    """Call SuperTokens admin API: delete a user by id (stub today)."""
-    logger.warning(
-        "verified_user teardown for user_id={!r} is not implemented yet; relying on shared env's "
-        "SuperTokens app teardown at run end to reclaim the user.",
-        user_id,
-    )
+    """Delete a SuperTokens user via the core's ``/user/remove`` endpoint."""
+    base = str(connection_uri.get_secret_value()).rstrip("/")
+    headers = {"api-key": api_key.get_secret_value()}
+    with httpx.Client(timeout=_SUPERTOKENS_ADMIN_TIMEOUT_SECONDS) as client:
+        resp = client.post(f"{base}/user/remove", headers=headers, json={"userId": str(user_id)})
+        # SuperTokens returns 200 for both "deleted" and "user never existed",
+        # so we treat any 2xx as success. A non-2xx is a real error worth surfacing.
+        resp.raise_for_status()

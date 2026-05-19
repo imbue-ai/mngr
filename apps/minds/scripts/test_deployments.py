@@ -434,8 +434,20 @@ def _build_pytest_env(
     return env
 
 
-def _invoke_pytest_for_mark(mark: str, *, env: dict[str, str]) -> int:
-    """Run ``uv run pytest -m <mark> apps/minds/deployment_tests/``; return exit code."""
+def _invoke_pytest_for_mark(
+    mark: str,
+    *,
+    env: dict[str, str],
+    extra_args: tuple[str, ...] = (),
+) -> int:
+    """Run ``uv run pytest -m <mark> <targets>``; return exit code.
+
+    ``extra_args`` lets ``services-against`` override the default test
+    target (the whole deployment_tests/ dir) with whichever specific
+    test files / nodeids the operator passed on the command line. The
+    default ``run`` flow leaves it empty so the full directory is collected.
+    """
+    targets = list(extra_args) if extra_args else [str(_REPO_ROOT / "apps" / "minds" / "deployment_tests")]
     cmd = [
         "uv",
         "run",
@@ -445,7 +457,7 @@ def _invoke_pytest_for_mark(mark: str, *, env: dict[str, str]) -> int:
         "--no-cov",
         "-p",
         "no:xdist",
-        str(_REPO_ROOT / "apps" / "minds" / "deployment_tests"),
+        *targets,
     ]
     logger.info("Running: {}", " ".join(cmd))
     completed = subprocess.run(cmd, env=env, cwd=str(_REPO_ROOT), check=False)
@@ -635,19 +647,86 @@ def down(role: str) -> None:
 @click.argument("tests", nargs=-1)
 @click.option("--no-fct-push", is_flag=True, default=False, help="Skip the FCT branch push (purely backend tests).")
 def services_against(env_name: str, tests: tuple[str, ...], no_fct_push: bool) -> None:
-    """Point minds_services tests at an already-deployed dev env (e.g. dev-josh)."""
-    run_id = _mint_run_id()
+    """Point minds_services tests at an already-deployed dev env (e.g. dev-josh).
+
+    Loads ``~/.minds-<env>/client.toml`` for the URLs + ``~/.minds-<env>/secrets.toml``
+    for the per-env SuperTokens + Neon secrets, builds a one-role
+    ``deployment_envs.json`` against the ``default`` role, exports the
+    per-shared-env secret env vars + the mail.tm credentials (created
+    fresh for this run), and shells out to ``uv run pytest -m minds_services``
+    with whichever test paths the operator passed.
+
+    Does not touch the target env's cloud state -- no create, no
+    destroy, no recover. The FCT worktree push runs by default so
+    tests that create real minds agents can reach the prepared
+    template ref; ``--no-fct-push`` opts out for purely backend tests.
+    """
+    dev_env_name = DevEnvName(env_name)
     _validate_fct_worktree()
-    if not no_fct_push:
-        _push_fct_test_branch(run_id=run_id)
-    # The shared_env fixture needs URLs + secrets for the target env; we
-    # surface a clear error here until the helper that reads the local
-    # client.toml + secrets.toml for an existing dev env lands.
-    raise click.ClickException(
-        f"services-against {env_name!r} is not implemented yet: needs the helper that loads "
-        "an existing env's client.toml + secrets.toml into the deployment_envs.json shape. "
-        f"Iterating next; the rest of the orchestrator scaffolding is in place. tests={tests!r}"
+    run_id = _mint_run_id()
+    _push_fct_test_branch(run_id=run_id) if not no_fct_push else None
+
+    target_env_root = Path.home() / f".minds-{dev_env_name}"
+    target_client_toml = target_env_root / "client.toml"
+    target_secrets_toml = target_env_root / "secrets.toml"
+    if not target_client_toml.is_file():
+        raise click.ClickException(
+            f"No client.toml found at {target_client_toml} for env {env_name!r}. "
+            f'Activate + deploy the env first: `eval "$(uv run minds env activate {env_name})" && uv run minds env deploy`.'
+        )
+    if not target_secrets_toml.is_file():
+        raise click.ClickException(
+            f"No secrets.toml found at {target_secrets_toml} for env {env_name!r}. "
+            "Per-dev-env secrets are written by `minds env deploy`; re-run a deploy if this file is missing."
+        )
+
+    from imbue.minds.config.loader import load_client_config
+    from imbue.minds.envs.local_store import read_secrets_file
+
+    client_config = load_client_config(target_client_toml)
+    secrets_model = read_secrets_file(dev_env_name)
+
+    default_role = SharedEnvRole("default")
+    shared_env_urls = SharedEnvUrls(
+        role=default_role,
+        env_name=dev_env_name,
+        connector_url=client_config.connector_url,
+        litellm_proxy_url=client_config.litellm_proxy_url,
     )
+    shared_env_secrets: dict[SharedEnvRole, dict[str, SecretStr]] = {
+        default_role: {key: value for key, value in secrets_model.secrets.items()}
+    }
+
+    mailtm = _create_mailtm_account(run_id=run_id)
+
+    pytest_envs_path = _write_deployment_envs_json(
+        shared_envs={default_role: shared_env_urls},
+        fct=FctTemplateRef(worktree_path=_FCT_WORKTREE_PATH),
+        run_id=run_id,
+    )
+    pytest_env = _build_pytest_env(
+        deployment_envs_json_path=pytest_envs_path,
+        mailtm_address=str(mailtm.address),
+        mailtm_jwt=mailtm.jwt,
+        shared_env_secrets=shared_env_secrets,
+    )
+
+    test_targets = list(tests) if tests else [str(_REPO_ROOT / "apps" / "minds" / "deployment_tests")]
+    pytest_argv: tuple[str, ...] = tuple(test_targets)
+    rc = _invoke_pytest_for_mark("minds_services", env=pytest_env, extra_args=pytest_argv)
+
+    # Teardown: only the mail.tm account + (if pushed) the FCT branch
+    # need cleanup -- we never created the target dev env.
+    teardown_failures = _teardown_run(
+        run_id=run_id,
+        mailtm_account=mailtm,
+        fct_branch=NonEmptyStr(f"ci-{run_id}") if not no_fct_push else NonEmptyStr("noop"),
+        keep_on_failure=False,
+        tests_failed=(rc != 0),
+    )
+    _drop_destroyed_rows_if_drained()
+
+    sys.exit(1 if rc != 0 or teardown_failures else 0)
 
 
 # ---------------------------------------------------------------------------
