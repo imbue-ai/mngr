@@ -1820,11 +1820,12 @@ def test_parse_config_rejects_sibling_lowercase_collision_within_block() -> None
 def _write_two_layer_narrowing_config(tmp_path: Path, allow_narrowing: bool | None) -> Path:
     """Set up a tmp_path with project and local settings whose merge would narrow
     ``commands.create.env``. Returns ``tmp_path`` so the caller can pass it as
-    the project config dir.
+    the project config dir (the calling tests expose it via ``MNGR_PROJECT_CONFIG_DIR``).
 
     ``allow_narrowing=None`` leaves the field unset (default False);
-    ``True``/``False`` writes it into the user config so the loader sees the
-    same value the final config will resolve to.
+    ``True``/``False`` writes it into the project ``settings.toml`` (the same
+    file used as the lower-precedence ``env = ["X=4"]`` layer) so the loader
+    sees the same opt-in value the final merged config will resolve to.
     """
     settings_path = tmp_path / "settings.toml"
     settings_path.write_text('[commands.create]\nenv = ["X=4"]\n')
