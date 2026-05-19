@@ -201,6 +201,7 @@ def _start_stopped(
     output_opts: OutputOptions,
     opts: StartCliOptions,
 ) -> None:
+    # Find agents to start (STOPPED agents)
     agents_to_start = find_all_agents(
         addresses=agent_addresses,
         filter_all=False,
@@ -212,10 +213,12 @@ def _start_stopped(
         _output("No stopped agents found to start", output_opts)
         return
 
+    # Start each agent
     started_agents: list[str] = []
     last_started_agent = None
     last_started_host = None
 
+    # Group agents by host to avoid starting the same host multiple times
     agents_by_host = group_agents_by_host(agents_to_start)
 
     for host_key, agent_list in agents_by_host.items():
@@ -236,6 +239,7 @@ def _start_stopped(
             started_agents.append(str(match.agent_name))
             _output(f"Started agent: {match.agent_name}", output_opts)
 
+            # Get the agent object for potential connect and resume message
             for agent in online_host.get_agents():
                 if agent.id == match.agent_id:
                     _send_resume_message_if_configured(agent, output_opts)
@@ -245,7 +249,10 @@ def _start_stopped(
                         last_started_host = online_host
                     break
 
+    # Output final result
     _output_result(started_agents, output_opts)
+
+    # Connect if requested and we started exactly one agent
     _maybe_connect(opts, last_started_agent, last_started_host, mngr_ctx)
 
 
@@ -255,6 +262,7 @@ def _start_with_restart(
     output_opts: OutputOptions,
     opts: StartCliOptions,
 ) -> None:
+    # Find agents regardless of state
     matched_agents = find_all_agents(
         addresses=agent_addresses,
         filter_all=False,
@@ -270,6 +278,7 @@ def _start_with_restart(
     last_started_agent = None
     last_started_host = None
 
+    # Group agents by host to avoid starting the same host multiple times
     agents_by_host = group_agents_by_host(matched_agents)
 
     for host_key, agent_list in agents_by_host.items():
@@ -281,6 +290,7 @@ def _start_with_restart(
 
         online_host, _ = ensure_host_started(host, is_start_desired=True, provider=provider)
 
+        # Acquire per-agent file locks to prevent concurrent restarts
         locked_agents = []
         lock_handles: list[io.TextIOWrapper] = []
         try:
