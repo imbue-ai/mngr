@@ -97,10 +97,17 @@ class TestAgentInfo(FrozenModel):
 
 
 class AgentKind(UpperCaseStrEnum):
-    """What flavor of tmr agent a directory under the output dir holds."""
+    """What flavor of tmr agent a directory under the output dir holds.
+
+    The string value of each variant is also used verbatim as the
+    ``tmr_role`` label that ``_create_tmr_agent`` stamps on every
+    launched agent, so that ``mngr ls --include 'labels.tmr_role ==
+    "..."'`` matches the in-process classification.
+    """
 
     TESTING_AGENT = auto()
     INTEGRATOR = auto()
+    SNAPSHOTTER = auto()
 
 
 class AgentMetadata(FrozenModel):

@@ -70,7 +70,13 @@ def test_prevent_silent_decode_error_catches() -> None:
 
 
 def test_prevent_inline_imports() -> None:
-    rc.check_inline_imports(_DIR, snapshot(2))
+    # The litellm + prisma packages are installed only inside the Modal
+    # image, not in the monorepo's local uv env. The deploy CLI loads
+    # `app.py` at module import time, so the runtime-only deps have to
+    # be imported inside the @app.function bodies (litellm.proxy in
+    # litellm_app + migrate_db; yaml in _write_config_file). Count
+    # bumps when a new such function is added.
+    rc.check_inline_imports(_DIR, snapshot(3))
 
 
 def test_prevent_relative_imports() -> None:
@@ -235,7 +241,14 @@ def test_prevent_bare_urwid_tty_signal_keys() -> None:
 
 
 def test_prevent_direct_subprocess() -> None:
-    rc.check_direct_subprocess(_DIR, snapshot(0))
+    # The migrate_db @app.function shells out to the `prisma` CLI to push
+    # the LiteLLM schema. ConcurrencyGroup.run_process_to_completion (the
+    # rule's suggested alternative) lives in the monorepo and would break
+    # this file's "no monorepo imports" invariant from the module
+    # docstring. The function runs inside a single Modal container as a
+    # one-shot CLI invocation, so the ConcurrencyGroup lifecycle the
+    # rule guards against has no analogue here.
+    rc.check_direct_subprocess(_DIR, snapshot(1))
 
 
 # --- AST-based ratchets ---

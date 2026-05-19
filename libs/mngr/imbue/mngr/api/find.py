@@ -30,9 +30,9 @@ from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import DiscoveredHost
 from imbue.mngr.primitives import HostAddress
 from imbue.mngr.primitives import HostId
+from imbue.mngr.primitives import HostLocationAddress
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import HostNameOrId
-from imbue.mngr.primitives import HostedLocation
 from imbue.mngr.primitives import LOCAL_PROVIDER_NAME
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.providers.base_provider import BaseProviderInstance
@@ -164,8 +164,8 @@ def _filter_one_agent(
     return matches[0]
 
 
-class ResolvedHostedLocation(FrozenModel):
-    """Result of resolving a :class:`HostedLocation`, including the discovered agent when available."""
+class ResolvedHostLocationAddress(FrozenModel):
+    """Result of resolving a :class:`HostLocationAddress`, including the discovered agent when available."""
 
     model_config = {"arbitrary_types_allowed": True}
 
@@ -174,14 +174,14 @@ class ResolvedHostedLocation(FrozenModel):
 
 
 @log_call
-def resolve_hosted_location(
-    parsed: HostedLocation,
+def resolve_host_location_address(
+    parsed: HostLocationAddress,
     agents_by_host: Mapping[DiscoveredHost, Sequence[DiscoveredAgent]],
     mngr_ctx: MngrContext,
     *,
     is_start_desired: bool = True,
-) -> ResolvedHostedLocation:
-    """Resolve a :class:`HostedLocation` to a concrete host, path, and optional agent.
+) -> ResolvedHostLocationAddress:
+    """Resolve a :class:`HostLocationAddress` to a concrete host, path, and optional agent.
 
     Resolves agent/host references against the discovered hosts and agents.
     If the resolved host is offline, it will be started if ``is_start_desired``
@@ -235,7 +235,7 @@ def resolve_hosted_location(
         agent_work_dir_if_available=agent_work_dir,
     )
 
-    return ResolvedHostedLocation(
+    return ResolvedHostLocationAddress(
         location=HostLocation(host=online_host, path=resolved_path),
         agent=resolved_agent,
     )

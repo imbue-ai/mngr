@@ -1,0 +1,7 @@
+# Staging tier client config -- read by `minds run`.
+#
+# Staging is shape-identical to production. Operators populate these values
+# once the staging Modal workspace + connector + litellm-proxy are stood up.
+
+connector_url = "https://minds-staging--rsc-staging-api.modal.run"
+litellm_proxy_url = "https://minds-staging--llm-staging-proxy.modal.run"

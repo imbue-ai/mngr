@@ -1492,7 +1492,7 @@ def test_gc_single_host_work_dir_skips_host_offline_error(
 
     host_ref = DiscoveredHost(
         host_id=erroring_host.id,
-        host_name=erroring_host.get_connector_host_name(),
+        host_name=HostName(erroring_host.get_connector_host_name()),
         provider_name=provider.name,
         host_state=HostState.RUNNING,
     )
@@ -1521,7 +1521,7 @@ def test_gc_single_host_work_dir_skips_host_auth_error(
 
     host_ref = DiscoveredHost(
         host_id=erroring_host.id,
-        host_name=erroring_host.get_connector_host_name(),
+        host_name=HostName(erroring_host.get_connector_host_name()),
         provider_name=provider.name,
         host_state=HostState.RUNNING,
     )

@@ -1,0 +1,44 @@
+# Dev tier deploy config -- read by `minds env deploy` for any dev env.
+#
+# `modal_workspace` is the dev tier's Modal workspace. The dev tier has
+# no shared Modal environment of its own -- every dev iterates against
+# a *per-developer* Modal environment that takes the activated dev env's
+# name. The `modal_env` field below is unused for dev-tier deploys:
+# `minds env deploy` (with a dev env activated) always pins the Modal
+# env to the activated dev env name. Staging / production deploys are
+# the ones that consume `modal_env`; we leave it at its default ("main")
+# for shape consistency.
+
+modal_workspace = "minds-dev"
+vault_path_prefix = "secrets/minds/dev"
+cloudflare_domain = "minds-dev.com"
+
+oauth_google_client_id = ""
+oauth_github_client_id = ""
+
+# Vault-backed per-env Modal Secrets. Each name corresponds to a
+# Vault entry at `<vault_path_prefix>/<name>` -- the deploy reads that
+# entry, adds any deploy-time-computed overrides (URLs, DSNs, app
+# ids), and pushes the merged dict as Modal Secret
+# `<name>-<tier>-<deploy_id>`. The `litellm-connector` Modal Secret
+# is NOT vault-backed; the deploy pushes it as a separately-named
+# step with values derived entirely at deploy time (LITELLM_PROXY_URL,
+# LITELLM_MASTER_KEY from the `litellm` secret, MINDS_TIER_GENERATION_ID,
+# MINDS_ENV_NAME).
+[secrets]
+services = [
+    "cloudflare",
+    "litellm",
+    "neon",
+    "paid-accounts",
+    "pool-ssh",
+    "supertokens",
+]
+
+# Tier-shape flags consumed by `minds env deploy` / `destroy`. All four
+# are required (no defaults) so a misconfigured tier fails fast on load.
+[lifecycle]
+creates_resources = true
+modal_env_strategy = "PER_ENV"
+writes_local_state = true
+tracks_generation = false

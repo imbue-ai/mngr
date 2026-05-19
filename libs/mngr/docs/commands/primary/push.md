@@ -36,7 +36,7 @@ mngr push [OPTIONS] TARGET SOURCE
 
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
-| `--target` | hosted_location | Target specification: AGENT[@HOST[.PROVIDER]][:PATH] | None |
+| `--target` | host_location_address | Target specification: AGENT[@HOST[.PROVIDER]][:PATH] | None |
 | `--target-agent` | agent_address | Target agent address (NAME[@HOST[.PROVIDER]]) | None |
 | `--target-host` | host_address | Target host address (HOST[.PROVIDER]) [future] | None |
 | `--target-path` | text | Path within the agent's work directory | None |

@@ -23,6 +23,7 @@ from pydantic import PrivateAttr
 from pyinfra.api import Host as PyinfraHost
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.concurrency_group.executor import ConcurrencyGroupExecutor
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import log_span
 from imbue.mngr.errors import HostConnectionError
@@ -103,12 +104,17 @@ def _remove_host_from_known_hosts(known_hosts_path: Path, hostname: str, port: i
     known_hosts_path.write_text("".join(filtered))
 
 
-class _ParsedVpsBuildOptions(FrozenModel):
+class ParsedVpsBuildOptions(FrozenModel):
     """Result of parsing VPS-specific build args from Docker build args."""
 
     region: str = Field(description="VPS region")
     plan: str = Field(description="VPS plan")
-    os_id: int = Field(description="VPS OS image ID")
+    os_id: int | str = Field(
+        description=(
+            "VPS OS image identifier. Most providers use an integer image id; "
+            "providers that catalog images by name (e.g. OVH classic VPS) use a string."
+        ),
+    )
     git_depth: int | None = Field(
         default=None, description="Git clone depth for build context, or None for full clone"
     )
@@ -120,17 +126,22 @@ def _parse_build_args(
     *,
     default_region: str,
     default_plan: str,
-    default_os_id: int,
-) -> _ParsedVpsBuildOptions:
+    default_os_id: int | str,
+) -> ParsedVpsBuildOptions:
     """Parse build args, separating VPS provisioning args from Docker build args.
 
     VPS-specific args use the --vps- prefix (e.g., --vps-region=ewr).
     ``--git-depth=N`` controls the git clone depth for the build context.
     Everything else is passed through to docker build on the VPS.
+
+    ``--vps-os=`` values are cast to ``int`` only when ``default_os_id`` is
+    itself an integer (preserving Vultr's existing semantics). When the
+    default is a string the parsed value is kept as a string -- providers
+    like OVH classic VPS use string image names rather than integer ids.
     """
     region = default_region
     plan = default_plan
-    os_id = default_os_id
+    os_id: int | str = default_os_id
     git_depth: int | None = None
     docker_build_args: list[str] = []
 
@@ -141,7 +152,8 @@ def _parse_build_args(
             elif arg.startswith("--vps-plan="):
                 plan = arg.split("=", 1)[1]
             elif arg.startswith("--vps-os="):
-                os_id = int(arg.split("=", 1)[1])
+                raw_os = arg.split("=", 1)[1]
+                os_id = int(raw_os) if isinstance(default_os_id, int) else raw_os
             elif arg.startswith("--git-depth="):
                 git_depth = int(arg.split("=", 1)[1])
             elif arg.startswith("--vps-"):
@@ -151,7 +163,7 @@ def _parse_build_args(
             else:
                 docker_build_args.append(arg)
 
-    return _ParsedVpsBuildOptions(
+    return ParsedVpsBuildOptions(
         region=region,
         plan=plan,
         os_id=os_id,
@@ -249,6 +261,28 @@ _RETRYABLE_RSYNC_PATTERNS: Final[tuple[str, ...]] = (
     "kex_exchange_identification",
     "Network is unreachable",
 )
+
+
+def build_vps_tags(host_id: HostId, provider_name: str, extra_tags_raw: str) -> list[str]:
+    """Compose the tag list passed to the VPS create call.
+
+    Always emits ``mngr-host-id=<id>`` and ``mngr-provider=<name>``. The
+    ``extra_tags_raw`` string is a comma-separated list of ``key=value``
+    tags that the spawning caller wants attached at create time -- e.g.
+    minds-side pool-bake sets ``MNGR_VPS_EXTRA_TAGS=minds_env=<name>``
+    so the env's destroy can later find + delete the instance via the
+    Vultr tag filter. Empty / whitespace-only entries are skipped so
+    trailing commas don't produce blank tags.
+
+    Pulled out to module scope so the comma-splitting behaviour is unit
+    testable without standing up an entire provisioning flow.
+    """
+    tags = [f"mngr-host-id={host_id}", f"mngr-provider={provider_name}"]
+    for tag in extra_tags_raw.split(","):
+        stripped = tag.strip()
+        if stripped:
+            tags.append(stripped)
+    return tags
 
 
 def _redact_secret_env(remote_command: str) -> str:
@@ -940,7 +974,7 @@ class VpsDockerProvider(BaseProviderInstance):
         name: HostName,
         region: str,
         plan: str,
-        os_id: int,
+        os_id: int | str,
         vps_host_key_path: Path,
         vps_host_public_key: str,
         vps_ssh_key_id: str,
@@ -957,7 +991,7 @@ class VpsDockerProvider(BaseProviderInstance):
 
         logger.log(LogLevel.BUILD.value, "Creating VPS instance (region: {}, plan: {})...", region, plan, source="vps")
         with log_span("Creating VPS instance"):
-            vps_tags = [f"mngr-host-id={host_id}", f"mngr-provider={self.name}"]
+            vps_tags = build_vps_tags(host_id, self.name, os.environ.get("MNGR_VPS_EXTRA_TAGS", ""))
             vps_instance_id = self.vps_client.create_instance(
                 label=f"mngr-{name}",
                 region=region,
@@ -1089,7 +1123,7 @@ class VpsDockerProvider(BaseProviderInstance):
         lifecycle: HostLifecycleOptions | None,
         region: str,
         plan: str,
-        os_id: int,
+        os_id: int | str,
         vps_instance_id: VpsInstanceId,
         vps_ssh_key_id: str,
         vps_host_public_key: str,
@@ -1154,7 +1188,25 @@ class VpsDockerProvider(BaseProviderInstance):
         # a stale instance list that doesn't include the VPS we just created.
         self._host_record_cache[host_id] = host_record
 
+        self._on_host_finalized(host_id=host_id, vps_ip=vps_ip)
+
         return host
+
+    def _on_host_finalized(self, *, host_id: HostId, vps_ip: str) -> None:
+        """Hook called at the very end of ``_finalize_host_creation``.
+
+        Fires after the host record has been written to the state volume
+        and is therefore the "point of no return" for ``create_host``.
+        Subclasses can override to commit any deferred provisioning side
+        effects that must only become durable once the host is fully
+        usable -- e.g. OVH classic VPS un-cancellation, which must wait
+        until container setup has succeeded so that a failure earlier in
+        the flow lets the VPS auto-decommission instead of leaking
+        a still-billing orphan.
+
+        Default no-op. Must not raise; any errors should be caught and
+        logged by the override.
+        """
 
     def _wait_for_container_sshd(self, vps_ip: str) -> None:
         """Wait for sshd in the container to be reachable via the VPS's exposed port."""
@@ -1299,7 +1351,7 @@ class VpsDockerProvider(BaseProviderInstance):
         host.write_file(commands_dir / "shutdown.sh", shutdown_script.encode())
         host.execute_idempotent_command(f"chmod +x {commands_dir / 'shutdown.sh'}")
 
-    def _parse_build_args(self, build_args: Sequence[str] | None) -> _ParsedVpsBuildOptions:
+    def _parse_build_args(self, build_args: Sequence[str] | None) -> ParsedVpsBuildOptions:
         """Parse build args, separating VPS provisioning args from Docker build args."""
         return _parse_build_args(
             build_args,
@@ -1321,7 +1373,7 @@ class VpsDockerProvider(BaseProviderInstance):
         host_id = host.id if isinstance(host, HostInterface) else host
         host_record = self._find_host_record(host_id)
         if host_record is None or host_record.config is None or host_record.vps_ip is None:
-            raise HostNotFoundError(host_id)
+            raise HostNotFoundError(self.name, host_id)
 
         if create_snapshot:
             try:
@@ -1361,7 +1413,7 @@ class VpsDockerProvider(BaseProviderInstance):
         host_id = host.id if isinstance(host, HostInterface) else host
         host_record = self._find_host_record(host_id)
         if host_record is None or host_record.config is None or host_record.vps_ip is None:
-            raise HostNotFoundError(host_id)
+            raise HostNotFoundError(self.name, host_id)
 
         with self._make_outer_for_vps_ip(host_record.vps_ip) as outer:
             with log_span("Starting container on VPS"):
@@ -1392,7 +1444,7 @@ class VpsDockerProvider(BaseProviderInstance):
 
         host_record = self._find_host_record(host_id)
         if host_record is None or host_record.config is None:
-            raise HostNotFoundError(host_id)
+            raise HostNotFoundError(self.name, host_id)
 
         vps_config = host_record.config
         vps_ip = host_record.vps_ip
@@ -1459,7 +1511,7 @@ class VpsDockerProvider(BaseProviderInstance):
         """Stable id for the outer (the VPS) of host_id, keyed by VPS IP."""
         host_record = self._find_host_record(host_id)
         if host_record is None:
-            raise HostNotFoundError(host_id)
+            raise HostNotFoundError(self.name, host_id)
         if host_record.vps_ip is None:
             return None
         return f"outer:{self.name}:{host_record.vps_ip}"
@@ -1473,7 +1525,7 @@ class VpsDockerProvider(BaseProviderInstance):
         """
         host_record = self._find_host_record(host_id)
         if host_record is None or host_record.vps_ip is None:
-            raise HostNotFoundError(host_id)
+            raise HostNotFoundError(self.name, host_id)
         with self._make_outer_for_vps_ip(host_record.vps_ip) as outer:
             yield outer
 
@@ -1489,7 +1541,7 @@ class VpsDockerProvider(BaseProviderInstance):
         # For now, we iterate all host records
         host_record = self._find_host_record(host)
         if host_record is None:
-            raise HostNotFoundError(host)
+            raise HostNotFoundError(self.name, host)
 
         host_id = HostId(host_record.certified_host_data.host_id)
         vps_ip = host_record.vps_ip
@@ -1507,7 +1559,7 @@ class VpsDockerProvider(BaseProviderInstance):
     def to_offline_host(self, host_id: HostId) -> OfflineHost:
         host_record = self._find_host_record(host_id)
         if host_record is None:
-            raise HostNotFoundError(host_id)
+            raise HostNotFoundError(self.name, host_id)
         return self._create_offline_host(host_record)
 
     def discover_hosts(
@@ -1628,39 +1680,117 @@ class VpsDockerProvider(BaseProviderInstance):
 
         return result
 
+    def _list_provider_vps_hostnames(self) -> list[str]:
+        """Return SSH-reachable hostnames for VPSes owned by this provider instance.
+
+        Each entry is whatever the provider hands back as the SSH target
+        for one of its VPSes -- a public IPv4 (Vultr) or a provider DNS
+        name (OVH classic VPS like ``vps-eec8860b.vps.ovh.us``). The
+        discovery machinery below treats it as an opaque ``hostname``
+        passed to paramiko.
+
+        Concrete subclasses implement this by querying their provider's
+        listing API (e.g. by tag) and resolving the matching instances'
+        SSH targets. The remaining discovery machinery -- parallel SSH
+        into each VPS, reading host records and agent data from the
+        state volume, caching -- is shared and lives in this base class.
+
+        Default returns ``[]`` so test doubles and providers without a
+        listing API can opt out without overriding.
+        """
+        return []
+
+    def _read_records_from_vps(
+        self,
+        vps_ip: str,
+    ) -> tuple[list[VpsDockerHostRecord], dict[HostId, list[dict[str, Any]]]]:
+        """Read all host records and agent data from a single VPS in one SSH command.
+
+        Uses the read-only host store so that discovery never creates the
+        state container. If the container does not exist yet (e.g., the VPS
+        is still being set up by a concurrent ``mngr create``), returns
+        empty results. If outer SSH to the VPS fails, fall back to any
+        in-process cached records for that VPS so the hosts still appear
+        in the listing (with an offline state) instead of disappearing
+        entirely; one bad VPS must not silently drop its hosts.
+        """
+        try:
+            with self._make_outer_for_vps_ip(vps_ip) as outer:
+                host_store = self._get_existing_host_store(outer)
+                if host_store is None:
+                    logger.debug("State container not ready on VPS {}, skipping", vps_ip)
+                    return [], {}
+                return host_store.list_all_host_records_with_agents()
+        except (HostConnectionError, MngrError) as e:
+            cached_records = [r for r in self._host_record_cache.values() if r.vps_ip == vps_ip]
+            if cached_records:
+                logger.warning(
+                    "Failed to read records from VPS {} ({}); surfacing {} cached host record(s) as offline",
+                    vps_ip,
+                    e,
+                    len(cached_records),
+                )
+            else:
+                logger.warning("Failed to read records from VPS {}: {}", vps_ip, e)
+            return cached_records, {}
+
     def _discover_host_records_with_agents(
         self,
     ) -> tuple[list[VpsDockerHostRecord], dict[HostId, list[dict[str, Any]]]]:
-        """Discover host records and agent data from state volumes.
+        """Discover host records and agent data from all VPSes for this provider.
 
-        Calls _discover_host_records() for host records, and reads agent data
-        from the state volume in the same batched SSH call. Concrete subclasses
-        override this to include API-based discovery.
+        Calls ``_list_provider_vps_hostnames`` to enumerate VPSes
+        (provider-specific), then SSHes to each in parallel to read host
+        records and agent data in a single command per VPS.
         """
-        return [], {}
+        vps_ips = self._list_provider_vps_hostnames()
+        if not vps_ips:
+            return [], {}
+
+        all_records: list[VpsDockerHostRecord] = []
+        all_agent_data: dict[HostId, list[dict[str, Any]]] = {}
+
+        cg_name = f"{type(self).__name__}-discover"
+        with log_span("Reading records from {} VPS instance(s) in parallel", len(vps_ips)):
+            cg = ConcurrencyGroup(name=cg_name)
+            with cg:
+                with ConcurrencyGroupExecutor(
+                    parent_cg=cg,
+                    name=f"{cg_name}_read_records",
+                    max_workers=min(len(vps_ips), 32),
+                ) as executor:
+                    futures = [executor.submit(self._read_records_from_vps, ip) for ip in vps_ips]
+
+                for future in futures:
+                    records, agent_data = future.result()
+                    all_records.extend(records)
+                    for host_id, agents in agent_data.items():
+                        all_agent_data.setdefault(host_id, []).extend(agents)
+
+        return all_records, all_agent_data
 
     def _discover_host_records(self) -> list[VpsDockerHostRecord]:
-        """Discover host records by iterating known VPS instances."""
-        # For each VPS instance that has our provider tag, SSH in and read
-        # the state volume for host records
-        all_records: list[VpsDockerHostRecord] = []
-
-        # VpsClientInterface doesn't expose list_instances, so this base
-        # implementation returns empty. Concrete subclasses override this
-        # to query their provider API for tagged instances.
-
-        # Since we can't easily list all VPS instances from the abstract interface,
-        # we'll iterate host records from the state volumes of known VPSes.
-        # This requires us to know at least one VPS IP to read from.
-
-        # Approach: use the vps_client to list instances if it supports it,
-        # otherwise return empty. Concrete implementations will override discover_hosts.
-        return all_records
+        """Discover host records by enumerating this provider's VPSes."""
+        records, _agent_data = self._discover_host_records_with_agents()
+        return records
 
     def _find_host_record(self, host: HostId | HostName) -> VpsDockerHostRecord | None:
-        """Find a host record by ID or name across all known VPSes."""
-        # For now, we need to iterate through VPS instances
-        # This is a placeholder that concrete subclasses should improve
+        """Find a host record by ID or name, using cache first."""
+        if isinstance(host, HostId) and host in self._host_record_cache:
+            return self._host_record_cache[host]
+        if isinstance(host, HostName):
+            for cached_record in self._host_record_cache.values():
+                if cached_record.certified_host_data.host_name == str(host):
+                    return cached_record
+
+        records = self._discover_host_records()
+        for record in records:
+            host_id = HostId(record.certified_host_data.host_id)
+            self._host_record_cache[host_id] = record
+            if isinstance(host, HostId) and record.certified_host_data.host_id == str(host):
+                return record
+            elif isinstance(host, HostName) and record.certified_host_data.host_name == str(host):
+                return record
         return None
 
     # =========================================================================
@@ -1913,7 +2043,7 @@ class VpsDockerProvider(BaseProviderInstance):
         host_id = host.id if isinstance(host, HostInterface) else host
         host_record = self._find_host_record(host_id)
         if host_record is None or host_record.config is None or host_record.vps_ip is None:
-            raise HostNotFoundError(host_id)
+            raise HostNotFoundError(self.name, host_id)
 
         snapshot_name = name or SnapshotName(f"mngr-snapshot-{host_id}-{int(time.time())}")
         image_tag = f"mngr-snapshot-{host_id.get_uuid().hex}-{int(time.time())}"
@@ -1951,7 +2081,7 @@ class VpsDockerProvider(BaseProviderInstance):
         host_id = host.id if isinstance(host, HostInterface) else host
         host_record = self._find_host_record(host_id)
         if host_record is None:
-            raise HostNotFoundError(host_id)
+            raise HostNotFoundError(self.name, host_id)
 
         snapshots = host_record.certified_host_data.snapshots
         return [
@@ -1967,7 +2097,7 @@ class VpsDockerProvider(BaseProviderInstance):
         host_id = host.id if isinstance(host, HostInterface) else host
         host_record = self._find_host_record(host_id)
         if host_record is None or host_record.vps_ip is None:
-            raise HostNotFoundError(host_id)
+            raise HostNotFoundError(self.name, host_id)
 
         with self._make_outer_for_vps_ip(host_record.vps_ip) as outer:
             try:
@@ -1983,7 +2113,7 @@ class VpsDockerProvider(BaseProviderInstance):
         host_id = host.id if isinstance(host, HostInterface) else host
         host_record = self._find_host_record(host_id)
         if host_record is None:
-            raise HostNotFoundError(host_id)
+            raise HostNotFoundError(self.name, host_id)
         return dict(host_record.certified_host_data.user_tags)
 
     def set_host_tags(self, host: HostInterface | HostId, tags: Mapping[str, str]) -> None:
@@ -1999,7 +2129,7 @@ class VpsDockerProvider(BaseProviderInstance):
         host_id = host.id if isinstance(host, HostInterface) else host
         host_record = self._find_host_record(host_id)
         if host_record is None:
-            raise HostNotFoundError(host_id)
+            raise HostNotFoundError(self.name, host_id)
 
         updated_data = host_record.certified_host_data.model_copy(
             update={"host_name": str(name), "updated_at": datetime.now(timezone.utc)}
@@ -2054,7 +2184,7 @@ class VpsDockerProvider(BaseProviderInstance):
     def list_persisted_agent_data_for_host(self, host_id: HostId) -> list[dict]:
         host_record = self._find_host_record(host_id)
         if host_record is None or host_record.vps_ip is None:
-            raise HostNotFoundError(host_id)
+            raise HostNotFoundError(self.name, host_id)
 
         with self._make_outer_for_vps_ip(host_record.vps_ip) as outer:
             host_store = self._get_existing_host_store(outer)
@@ -2065,7 +2195,7 @@ class VpsDockerProvider(BaseProviderInstance):
     def persist_agent_data(self, host_id: HostId, agent_data: Mapping[str, object]) -> None:
         host_record = self._find_host_record(host_id)
         if host_record is None or host_record.vps_ip is None:
-            raise HostNotFoundError(host_id)
+            raise HostNotFoundError(self.name, host_id)
 
         with self._make_outer_for_vps_ip(host_record.vps_ip) as outer:
             host_store = self._get_existing_host_store(outer)
@@ -2076,7 +2206,7 @@ class VpsDockerProvider(BaseProviderInstance):
     def remove_persisted_agent_data(self, host_id: HostId, agent_id: AgentId) -> None:
         host_record = self._find_host_record(host_id)
         if host_record is None or host_record.vps_ip is None:
-            raise HostNotFoundError(host_id)
+            raise HostNotFoundError(self.name, host_id)
 
         with self._make_outer_for_vps_ip(host_record.vps_ip) as outer:
             host_store = self._get_existing_host_store(outer)
