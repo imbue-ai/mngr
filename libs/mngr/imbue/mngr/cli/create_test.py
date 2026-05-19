@@ -21,7 +21,6 @@ from imbue.mngr.cli.create import _apply_host_labels
 from imbue.mngr.cli.create import _check_source_does_not_contain_state_dir
 from imbue.mngr.cli.create import _editor_cleanup_scope
 from imbue.mngr.cli.create import _get_source_remote_url
-from imbue.mngr.cli.create import _host_ref_matches_address
 from imbue.mngr.cli.create import _is_creating_new_host
 from imbue.mngr.cli.create import _parse_agent_opts
 from imbue.mngr.cli.create import _parse_branch_flag
@@ -39,6 +38,7 @@ from imbue.mngr.cli.create import create
 from imbue.mngr.config.data_types import CreateCliOptions
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.loader import get_or_create_profile_dir
+from imbue.mngr.errors import HostNotFoundError
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.interfaces.data_types import HostLifecycleOptions
 from imbue.mngr.interfaces.host import CreateAgentOptions
@@ -457,33 +457,30 @@ def test_try_reuse_existing_agent_address_host_isolates_same_named_agents(
     Regression for the reported bug where a fresh-host create with --reuse
     accidentally adopted an unrelated same-named agent on another host because
     the match keyed on agent name alone. With the address's host_name plumbed
-    in, the match resolves to the agent on the host the address points at.
+    in, the match must resolve to the agent on the host the address points at.
 
-    Returns None here (rather than the matched (agent, host) tuple) because the
-    matched agent's host does not exist as a real provider host -- the function
-    bails after the filter resolves to a unique candidate when the provider
-    lookup fails. The salient assertion is that no exception is raised due to
-    ambiguity, i.e. the host scope did isolate the correct candidate.
+    Both hosts are bogus (their ids do not exist in any real provider), so once
+    the filter resolves to a single candidate the provider lookup downstream
+    raises ``HostNotFoundError``. The salient property is that the failure is
+    NOT ``UserInputError("Multiple agents found ...")`` -- i.e. the host scope
+    did isolate to the right candidate before the lookup.
     """
     host1 = _make_discovered_host(host_id=TEST_HOST_ID_1, host_name="h1", provider="local")
     agent1 = _make_discovered_agent(agent_id=TEST_AGENT_ID_1, agent_name="system-services", host_id=TEST_HOST_ID_1)
     host2 = _make_discovered_host(host_id=TEST_HOST_ID_2, host_name="h2", provider="local")
     agent2 = _make_discovered_agent(agent_id=TEST_AGENT_ID_2, agent_name="system-services", host_id=TEST_HOST_ID_2)
 
-    # With address_host=HostName("h2"), only agent2 should match; without the
-    # host scope this would either pick the wrong agent or raise "Multiple
-    # agents found".
-    selected: list[tuple[DiscoveredHost, DiscoveredAgent]] = []
-    for host_ref, agents in {host1: [agent1], host2: [agent2]}.items():
-        if _host_ref_matches_address(host_ref, HostName("h2"), None):
-            for agent_ref in agents:
-                if agent_ref.agent_name == AgentName("system-services"):
-                    selected.append((host_ref, agent_ref))
-
-    assert len(selected) == 1
-    matched_host, matched_agent = selected[0]
-    assert matched_host.host_id == HostId(TEST_HOST_ID_2)
-    assert matched_agent.agent_id == AgentId(TEST_AGENT_ID_2)
+    # Filter resolves to the agent on h2, then ``provider.get_host(host_id_2)``
+    # fails because that id is not the real local host -- HostNotFoundError, not
+    # the multi-match disambiguation error.
+    with pytest.raises(HostNotFoundError):
+        _try_reuse_existing_agent(
+            agent_name=AgentName("system-services"),
+            provider_name=None,
+            address_host=HostName("h2"),
+            mngr_ctx=temp_mngr_ctx,
+            agent_and_host_loader=lambda: {host1: [agent1], host2: [agent2]},
+        )
 
 
 # -- Tests using real local provider infrastructure --
