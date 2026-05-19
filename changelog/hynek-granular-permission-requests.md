@@ -33,6 +33,15 @@
   to look up display names and the legal permission set. The grant
   dialog continues to render the display name ("Slack" etc.) and lets
   the user broaden or narrow the requested permission set.
+- The streamed-permission-request handler now dedupes redeliveries by
+  ``event_id``. The gateway re-emits every still-pending request on
+  each stream reconnect (every couple of seconds when idle), but the
+  handler used to append a fresh entry to the in-memory request inbox
+  and emit an INFO log line + an SSE wake-up for every redelivery. The
+  ``requests`` list therefore grew unbounded for as long as a request
+  stayed pending, and the desktop log filled with duplicate ``Streamed
+  latchkey permission request ...`` lines. The handler now checks the
+  inbox for the incoming ``event_id`` first and no-ops on a match.
 - Fixed a startup race where the minds desktop client could cache a
   stale latchkey gateway port and then fail every subsequent call
   with ``[Errno 111] Connection refused``. The race occurred because

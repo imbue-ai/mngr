@@ -440,6 +440,15 @@ class _StreamedPermissionRequestHandler(FrozenModel):
         current: RequestInbox | None = self.app.state.request_inbox
         if current is None:
             return
+        # The gateway re-emits every still-pending request on each
+        # stream reconnect (and the consumer reconnects every couple of
+        # seconds when idle, see ``_FOLLOW_READ_TIMEOUT``). Once we've
+        # ingested a given ``event_id`` the redeliveries carry no new
+        # information, so we no-op rather than append a duplicate to
+        # the requests list (it would grow unbounded), log again, and
+        # wake the SSE for nothing.
+        if current.get_request_by_id(str(event.event_id)) is not None:
+            return
         self.app.state.request_inbox = current.add_request(event)
         logger.info(
             "Streamed latchkey permission request for agent {} (scope={}, request_id={})",
