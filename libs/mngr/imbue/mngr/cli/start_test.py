@@ -83,6 +83,14 @@ def test_output_result_human_with_agents(capsys: pytest.CaptureFixture[str]) -> 
     assert "Successfully started 2 agent(s)" in captured.out
 
 
+def test_output_result_human_with_restarted_agents(capsys: pytest.CaptureFixture[str]) -> None:
+    """Test _output_result in HUMAN format with restarted agents uses 'restarted' verb."""
+    output_opts = OutputOptions(output_format=OutputFormat.HUMAN)
+    _output_result(["agent-1"], output_opts, is_restart=True)
+    captured = capsys.readouterr()
+    assert "Successfully restarted 1 agent(s)" in captured.out
+
+
 def test_output_result_json_format(capsys: pytest.CaptureFixture[str]) -> None:
     """Test _output_result in JSON format."""
     output_opts = OutputOptions(output_format=OutputFormat.JSON)

@@ -62,7 +62,7 @@ def _output(message: str, output_opts: OutputOptions) -> None:
         write_human_line(message)
 
 
-def _output_result(started_agents: Sequence[str], output_opts: OutputOptions) -> None:
+def _output_result(started_agents: Sequence[str], output_opts: OutputOptions, *, is_restart: bool = False) -> None:
     """Output the final result."""
     if output_opts.format_template is not None:
         items = [{"name": name} for name in started_agents]
@@ -76,7 +76,8 @@ def _output_result(started_agents: Sequence[str], output_opts: OutputOptions) ->
             emit_event("start_result", result_data, OutputFormat.JSONL)
         case OutputFormat.HUMAN:
             if started_agents:
-                write_human_line("Successfully started {} agent(s)", len(started_agents))
+                verb = "restarted" if is_restart else "started"
+                write_human_line("Successfully {} {} agent(s)", verb, len(started_agents))
         case _ as unreachable:
             assert_never(unreachable)
 
@@ -266,7 +267,7 @@ def _start_agents(
         emit_discovery_events_for_host(mngr_ctx.config, online_host)
 
     # Output final result
-    _output_result(started_agents, output_opts)
+    _output_result(started_agents, output_opts, is_restart=is_restart)
 
     # Connect if requested and we started exactly one agent
     _maybe_connect(opts, last_started_agent, last_started_host, mngr_ctx)
