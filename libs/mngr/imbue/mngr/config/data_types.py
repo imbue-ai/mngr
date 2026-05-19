@@ -126,12 +126,17 @@ def detect_settings_narrowing(base: Any, override: Any) -> list[str]:
     the actually-narrowing sub-fields are flagged. Sub-models recurse by
     their own ``model_fields_set`` so untouched fields are ignored.
 
-    "Narrowing" is defined as the override losing at least one base entry
-    (a missing list/set element, or a missing dict key). An override whose
-    value is a superset of the base (the result of an ``__extend`` operation,
-    or an explicit assign that happens to include every prior entry) does
-    not narrow, so it does not flag. Value mutations at a shared dict key
-    recurse instead of flagging at the parent.
+    "Narrowing" is defined as the override losing at least one base entry --
+    a missing list/set element, a missing dict key, or an explicit empty
+    aggregate over a non-empty base. Only no-ops (override equals base) and
+    supersets (every base entry survives, e.g. an ``__extend`` result) pass
+    without flagging. Value mutations at a shared dict key recurse instead
+    of flagging at the parent.
+
+    Layers that didn't write the field (override value is ``None``, since
+    ``parse_config`` defaults missing fields to ``None``) are skipped by
+    ``_walk_for_narrowing`` so an unrelated layer's omission never counts
+    as a narrowing assignment.
 
     Returns dotted paths like ``commands.create.defaults.env``. The list is
     empty when there are no narrowing assignments.
@@ -193,20 +198,18 @@ def _check_narrowing(
     truncated), while shared keys recurse so a value mutation inside a
     nested aggregate surfaces at the deeper path rather than at the parent.
 
-    An empty override aggregate (``[]``, ``{}``, ``set()``) is treated as an
-    explicit "clear" -- the user typed the empty container themselves, so the
-    intent is unambiguous and no warning is needed. The silent-loss hazard
-    only exists when the override is itself a non-empty value that happens to
-    drop a subset of the base entries.
+    Clearing a non-empty aggregate (``env = []`` over ``env = ["X=5"]``) is
+    treated as narrowing too: it drops every prior entry, which is the most
+    extreme form of data loss the safety net is meant to catch. To clear,
+    the user must set ``allow_settings_key_assignment_narrowing = true``.
+    The only assignments that pass without warning are no-ops (override
+    equals base) and supersets (every base entry survives, e.g. ``__extend``
+    results or additive assigns that happen to include every prior value).
     """
     if isinstance(base_value, BaseModel) and isinstance(override_value, BaseModel):
         _walk_for_narrowing(base_value, override_value, path, violations)
         return
     if not isinstance(base_value, (list, tuple, dict, set, frozenset)) or not base_value:
-        return
-    if isinstance(override_value, (list, tuple, dict, set, frozenset)) and not override_value:
-        # Explicit clear -- the override is an empty aggregate of the same shape;
-        # no silent loss to warn about.
         return
     if isinstance(base_value, (list, tuple)):
         if isinstance(override_value, (list, tuple)) and all(entry in override_value for entry in base_value):

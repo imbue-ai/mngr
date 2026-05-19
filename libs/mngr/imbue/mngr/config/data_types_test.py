@@ -1038,10 +1038,37 @@ def test_detect_settings_narrowing_allows_superset_list(mngr_test_prefix: str) -
     assert detect_settings_narrowing(base, override) == []
 
 
-def test_detect_settings_narrowing_allows_empty_override(mngr_test_prefix: str) -> None:
-    """An explicit empty override (e.g. ``--setting unset_vars=[]``) is treated as a deliberate clear."""
+def test_detect_settings_narrowing_flags_empty_override_clearing_non_empty_base(mngr_test_prefix: str) -> None:
+    """Clearing a non-empty value with an explicit empty override is the most
+    extreme narrowing case (every base entry is dropped) and must be flagged
+    unless the user opts in via ``allow_settings_key_assignment_narrowing``.
+
+    The earlier behavior exempted empty overrides as "deliberate clears", but
+    that loophole defeats the safety net for users whose base values come from
+    defaults (a freshly-applied empty override would silently wipe them).
+    """
     base = MngrConfig(prefix=mngr_test_prefix, unset_vars=["BASE"])
     override = MngrConfig(prefix=mngr_test_prefix, unset_vars=[])
+    assert detect_settings_narrowing(base, override) == ["unset_vars"]
+
+
+def test_detect_settings_narrowing_ignores_empty_override_over_empty_base(mngr_test_prefix: str) -> None:
+    """An empty override over an empty base is a no-op and not flagged."""
+    base = MngrConfig(prefix=mngr_test_prefix, unset_vars=[])
+    override = MngrConfig(prefix=mngr_test_prefix, unset_vars=[])
+    assert detect_settings_narrowing(base, override) == []
+
+
+def test_detect_settings_narrowing_ignores_unwritten_layer_field(mngr_test_prefix: str) -> None:
+    """A layer that doesn't write a field (``parse_config`` defaults it to None)
+    never narrows the base, even when the base is non-empty.
+
+    Regression test for the "defaults silently clear earlier layers" concern.
+    """
+    base = MngrConfig(prefix=mngr_test_prefix, unset_vars=["BASE_VAR"])
+    # A layer that touches only an unrelated field -- parse_config leaves
+    # unset_vars at None so the merge can fall back to base.
+    override = parse_config({"prefix": "other-"}, disabled_plugins=frozenset())
     assert detect_settings_narrowing(base, override) == []
 
 

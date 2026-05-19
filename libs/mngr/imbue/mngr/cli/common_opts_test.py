@@ -946,9 +946,30 @@ def test_apply_settings_to_config_narrowing_raises_by_default(mngr_test_prefix: 
         )
 
 
-def test_apply_settings_to_config_clear_then_cli_flag_replaces(mngr_test_prefix: str) -> None:
-    """``--setting commands.create.env=[]`` clears the merged value; a later CLI
-    ``--env X=6`` then has nothing to extend and becomes the only entry.
+def test_apply_settings_to_config_clear_raises_without_opt_in(mngr_test_prefix: str) -> None:
+    """``--setting commands.create.env=[]`` over a non-empty base raises by default.
+
+    Clearing is the most extreme form of data loss (every prior entry is dropped),
+    so the narrowing guard treats it the same as any other assign that loses
+    entries. The user must set ``allow_settings_key_assignment_narrowing=True``
+    (or switch to ``__extend``) to make the loss explicit.
+    """
+    config = MngrConfig(
+        prefix=mngr_test_prefix,
+        commands={"create": CommandDefaults(defaults={"env": ["X=5"]})},
+    )
+    with pytest.raises(ConfigParseError, match="narrowing"):
+        apply_settings_to_config(
+            config,
+            ("commands.create.env=[]",),
+            frozenset(),
+        )
+
+
+def test_apply_settings_to_config_clear_then_cli_flag_replaces_with_opt_in(mngr_test_prefix: str) -> None:
+    """With the opt-in, ``--setting commands.create.env=[]`` clears the merged
+    value; a later CLI ``--env X=6`` then has nothing to extend and becomes the
+    only entry.
 
     Order in setup_command_context: ``apply_settings_to_config`` runs first
     (turning ``commands.create.env`` into ``[]`` via assign), then
@@ -958,6 +979,7 @@ def test_apply_settings_to_config_clear_then_cli_flag_replaces(mngr_test_prefix:
     config = MngrConfig(
         prefix=mngr_test_prefix,
         commands={"create": CommandDefaults(defaults={"env": ["X=5"]})},
+        allow_settings_key_assignment_narrowing=True,
     )
     cleared = apply_settings_to_config(
         config,
