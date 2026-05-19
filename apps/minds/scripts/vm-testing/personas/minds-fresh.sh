@@ -27,7 +27,12 @@ sudo mdutil -i off / 2>/dev/null || true
 # softwareupdate recognises.
 if ! xcode-select -p >/dev/null 2>&1; then
     echo "[minds-fresh] installing Xcode Command Line Tools..."
-    sudo touch /tmp/.com.apple.dt.CommandLineTools.installondemand.in-progress
+    sentinel=/tmp/.com.apple.dt.CommandLineTools.installondemand.in-progress
+    sudo touch "$sentinel"
+    # Guarantee the sentinel is cleared on any exit path; otherwise a
+    # softwareupdate failure (set -e) would leave the host stuck in
+    # installondemand mode.
+    trap 'sudo rm -f "$sentinel"' EXIT
     product="$(softwareupdate -l 2>/dev/null \
         | awk -F': ' '/\*.*Command Line Tools/ {print $2; exit}')"
     if [[ -n "$product" ]]; then
@@ -35,7 +40,6 @@ if ! xcode-select -p >/dev/null 2>&1; then
     else
         echo "[minds-fresh] WARNING: no Command Line Tools update offered; git inside minds.app may fail"
     fi
-    sudo rm -f /tmp/.com.apple.dt.CommandLineTools.installondemand.in-progress
     # softwareupdate can exit 0 even when the install didn't actually land
     # (network blips, partial installs). Confirm the developer dir exists so
     # we never snapshot a persona image that still hits the SIGKILL path.
