@@ -2154,10 +2154,13 @@ def test_error_emitter_invokes_on_error_callback() -> None:
 def test_error_emitter_collects_per_resource_errors_during_discovery(
     temp_mngr_ctx: MngrContext,
 ) -> None:
-    """A provider emitting on_error during discovery surfaces ErrorInfo on result.errors.
+    """An _ErrorEmitter passed as on_error captures provider-emitted errors during discovery.
 
-    Exercises the wire-up from `_construct_discover_and_emit_for_provider` through
-    `_ErrorEmitter` -> `result.errors`, without aborting the listing.
+    Wires the emitter directly into `provider.discover_hosts_and_agents` and
+    confirms the provider's per-resource emission lands on both
+    `result.errors` and the forwarded on_error callback. The full pipeline
+    wire-up (via `_construct_discover_and_emit_for_provider`) is exercised
+    separately by `test_construct_discover_and_emit_for_provider_wires_on_error`.
     """
     failure = MngrError("VPS 7 unreachable")
     emitted_error = ProviderErrorInfo.build_for_provider(failure, ProviderInstanceName("per-resource-test"))
