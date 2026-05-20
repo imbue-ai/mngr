@@ -1577,7 +1577,7 @@ def test_recovery_page_redirects_to_return_to_when_agent_already_healthy(tmp_pat
     chrome JS navigates to /recovery, but the background probe loop flips
     the tracker back to HEALTHY in the brief window before the GET lands.
     Without the redirect, ``initial_status="healthy"`` would render the
-    "Workspace server not responding" page and the JS would never auto-
+    "System interface not responding" page and the JS would never auto-
     reload (the SSE doesn't push events for HEALTHY agents).
     """
     tracker = SystemInterfaceHealthTracker()
