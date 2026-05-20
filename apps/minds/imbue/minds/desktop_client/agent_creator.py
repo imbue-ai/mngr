@@ -429,14 +429,12 @@ def _build_mngr_create_command(
         the lease's baked name); ``imbue_cloud_*`` arguments encode the
         lease attributes (--build-arg).
 
-    Every mode creates a separate host, so the agent address uses
-    ``system-services@<host_name>`` -- the agent name is constant across
-    every minds workspace; the host name (the user's input from the
-    create-project form) is the workspace identifier. ``--reuse`` and
-    ``--update`` are passed for the non-IMBUE_CLOUD modes so re-deploying
-    resets the agent on the same host instead of failing on a duplicate
-    name (IMBUE_CLOUD's lease flow is one-shot per pool host, so reuse
-    is not meaningful there).
+    Every mode creates a separate host (all pass ``--new-host``), so the
+    agent address uses ``system-services@<host_name>`` -- the agent name is
+    constant across every minds workspace; the host name (the user's input
+    from the create-project form) is the workspace identifier. No mode
+    passes ``--reuse``/``--update``: a fresh host has no agent to reuse, and
+    mngr rejects ``--reuse`` together with ``--new-host``.
 
     Secrets (``ANTHROPIC_API_KEY``, ``ANTHROPIC_BASE_URL``, ``GH_TOKEN``)
     are forwarded by the FCT template's own ``pass_(host_)env`` declarations,
@@ -511,12 +509,6 @@ def _build_mngr_create_command(
         "--label",
         "is_primary=true",
     ]
-
-    # LOCAL/LIMA/CLOUD pass --reuse --update so re-deploying the same workspace
-    # resets the agent in place. IMBUE_CLOUD must not: it leases a fresh host
-    # via --new-host every time, and mngr rejects --reuse together with --new-host.
-    if launch_mode != LaunchMode.IMBUE_CLOUD:
-        mngr_command.extend(["--reuse", "--update"])
 
     # Per-mode template + per-mode runtime flags. All modes use
     # ``--template main --template <mode>``; the per-mode template provides

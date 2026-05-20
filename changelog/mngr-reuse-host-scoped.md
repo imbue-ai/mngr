@@ -17,8 +17,9 @@ behavior.
 `--new-host` always provisions a fresh host, while `--reuse` looks up an
 existing agent on an existing host, which a fresh host cannot have.
 
-The minds IMBUE_CLOUD launch path no longer passes `--reuse`. It was a
-no-op there -- the leased pool host is not discoverable when the reuse
-lookup runs -- and the baked `system-services` agent's name collision is
-already handled by the `pre_baked_agent_id` exemption in the duplicate-name
-check, not by `--reuse`.
+The minds create-project launch path no longer passes `--reuse`/`--update`
+for any launch mode. Every mode provisions a fresh host with `--new-host`,
+so there is no existing agent to reuse, and the combination is now an
+error. This also removes the original wrong-host adoption bug, where a
+minds `--reuse --update --new-host` create on a fresh host name adopted an
+unrelated same-named agent on a different host.

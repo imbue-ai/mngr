@@ -141,10 +141,10 @@ def test_build_mngr_create_command_uses_main_template_and_omits_message_arg() ->
     # minds no longer pre-generates an agent id; mngr generates one and we
     # parse it out of the JSONL ``created`` event in run_mngr_create.
     assert "--id" not in command
-    # ``--reuse --update`` keeps re-deploys of the same workspace name
-    # idempotent on local-host modes.
-    assert "--reuse" in command
-    assert "--update" in command
+    # No mode passes --reuse/--update: every mode passes --new-host, and
+    # mngr rejects --reuse together with --new-host.
+    assert "--reuse" not in command
+    assert "--update" not in command
     # We always emit JSONL so the canonical agent id can be parsed from the
     # trailing ``"event": "created"`` line.
     assert "--format" in command
@@ -164,13 +164,9 @@ def test_build_mngr_create_command_imbue_cloud_targets_account_provider() -> Non
     # create_host to ImbueCloudProvider. The agent name is now the constant
     # ``system-services``; the user's input drives the host name.
     assert "system-services@hello.imbue_cloud_alice-imbue-com" in joined
-    # IMBUE_CLOUD passes neither ``--reuse`` nor ``--update``. The leased
-    # pool host's baked ``system-services`` agent is adopted in place by
-    # ``ImbueCloudHost.create_agent_state``; its name collision is handled
-    # by mngr's ``pre_baked_agent_id`` exemption in the duplicate-name
-    # check, not by ``--reuse`` (which mngr rejects alongside ``--new-host``
-    # anyway). No ``--id`` either: the canonical id is parsed from the JSONL
-    # ``created`` event.
+    # No mode passes --reuse/--update: every mode passes --new-host, and
+    # mngr rejects --reuse together with --new-host. No --id either: the
+    # canonical id is parsed from the JSONL "created" event.
     assert "--id" not in command
     assert "--reuse" not in command
     assert "--update" not in command
