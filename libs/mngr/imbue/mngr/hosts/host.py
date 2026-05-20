@@ -13,6 +13,7 @@ from datetime import datetime
 from datetime import timezone
 from pathlib import Path
 from typing import Any
+from typing import ClassVar
 from typing import Iterator
 from typing import Mapping
 from typing import Sequence
@@ -2131,9 +2132,10 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
             env_vars = self._collect_agent_env_vars(agent, options)
             self._write_agent_env_file(agent, env_vars)
 
-            # Ensure mngr_log.sh exists at both host and agent level so that
-            # all bash scripts can source it for logging and timestamp utilities.
-            ensure_log_thread = concurrency_group.start_new_thread(self._ensure_mngr_log_sh, (agent,))
+            # Ensure the shared shell libraries (mngr_log.sh, mngr_transcript_lib.sh)
+            # exist at both host and agent level so that all bash scripts can source
+            # them for logging, timestamp utilities, and raw-transcript primitives.
+            ensure_shared_libs_thread = concurrency_group.start_new_thread(self._ensure_shared_shell_libs, (agent,))
 
             # files need to be there before provisioning--even making this a thread was just a minor optimization:
             agent_file_transfer_thread.join(60.0)
@@ -2173,30 +2175,35 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
                         raise MngrError(f"Extra provision command failed: {cmd}\nstderr: {result.stderr}")
 
             # should be done by now
-            ensure_log_thread.join(60.0)
+            ensure_shared_libs_thread.join(60.0)
 
             # Call post-provisioning on agent
             with log_span("Calling on_after_provisioning for agent {}", agent.name):
                 agent.on_after_provisioning(host=self, options=options, mngr_ctx=mngr_ctx)
 
-    def _ensure_mngr_log_sh(self, agent: AgentInterface) -> None:
-        """Write mngr_log.sh to both host-level and agent-level commands directories.
+    _SHARED_SHELL_LIB_NAMES: ClassVar[tuple[str, ...]] = ("mngr_log.sh", "mngr_transcript_lib.sh")
 
-        mngr_log.sh provides shared JSONL logging and cross-platform timestamp
-        utilities for all mngr bash scripts.  Two identical copies are maintained:
+    def _ensure_shared_shell_libs(self, agent: AgentInterface) -> None:
+        """Write the shared shell libraries to host-level and agent-level commands dirs.
 
-        - ``<host_dir>/commands/mngr_log.sh``   (for host-level scripts such as
-          activity_watcher.sh)
-        - ``<agent_state_dir>/commands/mngr_log.sh``  (for agent-level scripts
-          such as stream_transcript.sh, chat.sh)
+        These libraries are sourced by mngr bash scripts and must exist on both
+        levels so host-level (``activity_watcher.sh``) and agent-level
+        (``stream_transcript.sh``, ``chat.sh``) scripts can source them
+        consistently.
+
+        - ``mngr_log.sh`` provides shared JSONL logging and cross-platform
+          timestamp utilities.
+        - ``mngr_transcript_lib.sh`` provides the raw-transcript primitives
+          (field extraction, id-set construction, offset reconciliation,
+          bounded sed-append, percent-encoded path keys) shared by per-agent
+          streamers such as claude's and gemini's ``stream_transcript.sh``.
         """
-        content_bytes = importlib.resources.files(mngr_resources).joinpath("mngr_log.sh").read_text().encode()
-
         host_commands = self.host_dir / "commands"
-        self.write_file(host_commands / "mngr_log.sh", content_bytes, mode="0755")
-
         agent_commands = self._get_agent_state_dir(agent) / "commands"
-        self.write_file(agent_commands / "mngr_log.sh", content_bytes, mode="0755")
+        for name in self._SHARED_SHELL_LIB_NAMES:
+            content_bytes = importlib.resources.files(mngr_resources).joinpath(name).read_text().encode()
+            self.write_file(host_commands / name, content_bytes, mode="0755")
+            self.write_file(agent_commands / name, content_bytes, mode="0755")
 
     def _execute_agent_file_transfers(
         self,
