@@ -339,18 +339,21 @@ async def _forward_workspace_http(
         try:
             backend_response = await http_client.send(backend_request, stream=True)
         except (httpx.ConnectError, httpx.RemoteProtocolError):
-            # ``RemoteProtocolError`` covers the backend disconnecting before
-            # any response bytes were sent; the recovery action is the same
-            # as a plain connect failure.
+            # ``RemoteProtocolError`` here means the backend disconnected
+            # before sending headers -- typical when the workspace server
+            # died between the SSH tunnel accepting the unix-socket
+            # connection and the channel-open completing. Same recovery
+            # signal as a connect-time failure.
             _emit_backend_failure(envelope_writer, agent_id, WorkspaceBackendFailureReason.CONNECT_ERROR, None)
             return _service_unavailable_response(request)
         except httpx.ReadError:
             _emit_backend_failure(envelope_writer, agent_id, WorkspaceBackendFailureReason.SSE_EOF, None)
             return Response(status_code=502, content="Backend connection lost")
         except httpx.TimeoutException:
-            # A wedged-but-listening backend raises TimeoutException rather
-            # than ConnectError; surface it as CONNECT_ERROR so the failure
-            # is still attributable to reaching the backend.
+            # A wedged-but-listening backend produces a TimeoutException
+            # rather than ConnectError. Surface this as CONNECT_ERROR so
+            # the minds-side tracker still ticks the agent toward STUCK,
+            # matching the behaviour for a backend that returns a 504.
             _emit_backend_failure(envelope_writer, agent_id, WorkspaceBackendFailureReason.CONNECT_ERROR, None)
             return Response(status_code=504, content="Backend stream timed out")
 
@@ -379,21 +382,24 @@ async def _forward_workspace_http(
     try:
         backend_response = await http_client.request(method=request.method, url=url, headers=headers, content=body)
     except (httpx.ConnectError, httpx.RemoteProtocolError):
-        # Workspace-server is not yet listening, or closed the connection
-        # before sending headers. The failure envelope is emitted so the
-        # consumer can drive recovery; the 503 lets non-HTML callers
-        # interpret the situation programmatically.
+        # Workspace-server may not yet be listening, or it may have closed the
+        # connection before sending headers (typical during startup). Surface
+        # a 503 so chrome's health SSE (driven by the failure envelope below)
+        # can navigate the user to the minds-side recovery UI; non-HTML
+        # callers can interpret the 503 programmatically.
         _emit_backend_failure(envelope_writer, agent_id, WorkspaceBackendFailureReason.CONNECT_ERROR, None)
         return _service_unavailable_response(request)
     except httpx.ReadError:
-        # Connection was established but the response was cut off mid-flight,
-        # so this is a mid-response failure rather than a connect-time one.
+        # ReadError fires after the connection was established, so this is a
+        # mid-response failure (same shape as SSE_EOF on the streaming path),
+        # not a connect-time failure.
         _emit_backend_failure(envelope_writer, agent_id, WorkspaceBackendFailureReason.SSE_EOF, None)
         return Response(status_code=502, content="Backend connection lost")
     except httpx.TimeoutException:
-        # A wedged-but-listening backend raises TimeoutException rather than
-        # ConnectError; surface it as CONNECT_ERROR so the failure is still
-        # attributable to reaching the backend.
+        # A wedged-but-listening backend produces a TimeoutException rather
+        # than ConnectError. Surface this as CONNECT_ERROR so the minds-side
+        # tracker still ticks the agent toward STUCK, matching the behaviour
+        # for a backend that returns a 504.
         _emit_backend_failure(envelope_writer, agent_id, WorkspaceBackendFailureReason.CONNECT_ERROR, None)
         return Response(status_code=504, content="Backend timed out")
 
@@ -487,11 +493,15 @@ _SERVICE_UNAVAILABLE_HTML = """\
 
 
 def _service_unavailable_response(request: Request) -> Response:
-    """Return a 503 (styled auto-refreshing loader for HTML, plain text otherwise).
+    """Return a 503 (styled loading page for browsers, plain text otherwise).
 
-    HTML callers get an auto-refreshing loader so a browser hitting the plugin
-    mid-restart does not flash a blank page. Non-HTML callers get a plain 503
-    body they can interpret programmatically.
+    The chrome shell drives recovery navigation off the per-agent health
+    SSE stream emitted by minds (which is fed by the
+    ``workspace_backend_failure`` envelope). That separation keeps the
+    plugin origin-agnostic: it does not need to know where minds is
+    listening. For browsers that hit the plugin directly (including users
+    landing here mid-restart from the minds chrome), we serve a styled
+    auto-refreshing loader so the experience is not a blank flash.
     """
     accepts_html = "text/html" in request.headers.get("accept", "")
     if accepts_html:

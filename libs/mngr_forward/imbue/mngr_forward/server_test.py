@@ -693,12 +693,16 @@ def test_subdomain_forward_does_not_emit_failure_on_2xx(tmp_path: Path) -> None:
 
 
 def test_subdomain_forward_emits_workspace_backend_failure_on_sse_startup_disconnect(tmp_path: Path) -> None:
-    """``RemoteProtocolError`` on an SSE-startup ``send()`` returns 503 and emits CONNECT_ERROR.
+    """``RemoteProtocolError`` on an SSE-startup ``send()`` must emit ``CONNECT_ERROR``.
 
-    Covers the SSE branch of ``_forward_workspace_http``: an SSE-style request
-    (``Accept: text/event-stream``) whose backend disconnects before any
-    response bytes must produce a 503 and exactly one
-    ``workspace_backend_failure`` envelope with ``reason=CONNECT_ERROR``.
+    Regression test: previously, an SSE-style request (``Accept: text/event-stream``)
+    whose backend died between SSH-tunnel accept and channel-open would surface
+    ``httpx.RemoteProtocolError`` from ``http_client.send(..., stream=True)``.
+    That exception was not caught by the SSE branch (only ``ConnectError``
+    and ``TimeoutException`` were), so it bubbled up through starlette as a
+    500 and no failure envelope was emitted -- meaning the minds-side health
+    tracker never transitioned to STUCK and the chrome never navigated to
+    the recovery page.
     """
     agent_id = AgentId()
     preauth = "preauth-cookie-sse-startup"
@@ -756,13 +760,13 @@ def test_subdomain_forward_returns_plain_503_for_non_html_on_connect_failure(tmp
 
 
 def test_subdomain_forward_emits_workspace_backend_failure_on_sse_startup_timeout(tmp_path: Path) -> None:
-    """``TimeoutException`` on an SSE-startup ``send()`` returns 504 and emits CONNECT_ERROR.
+    """``TimeoutException`` on an SSE-startup ``send()`` must emit ``CONNECT_ERROR``.
 
-    A wedged-but-listening workspace backend raises ``httpx.TimeoutException``
-    when ``send(..., stream=True)`` waits for headers that never arrive; this
-    must produce a 504 plus exactly one ``workspace_backend_failure`` envelope
-    tagged ``CONNECT_ERROR`` so the failure is attributable to reaching the
-    backend rather than to the stream itself.
+    Regression test: a wedged-but-listening workspace backend produces a
+    ``httpx.TimeoutException`` (not ``ConnectError``) when ``send(..., stream=True)``
+    waits for response headers that never arrive. Without an envelope on
+    this branch the minds-side tracker would never transition to STUCK
+    for hung-in-user-code backends.
     """
     agent_id = AgentId()
     preauth = "preauth-cookie-sse-timeout"
@@ -795,12 +799,12 @@ def test_subdomain_forward_emits_workspace_backend_failure_on_sse_startup_timeou
 
 
 def test_subdomain_forward_emits_workspace_backend_failure_on_non_sse_timeout(tmp_path: Path) -> None:
-    """``TimeoutException`` on a non-SSE backend request returns 504 and emits CONNECT_ERROR.
+    """``TimeoutException`` on a non-SSE backend request must emit ``CONNECT_ERROR``.
 
-    Covers the non-streaming branch of ``_forward_workspace_http``: when the
-    backend hangs without ever sending a response, the request must produce a
-    504 plus exactly one ``workspace_backend_failure`` envelope tagged
-    ``CONNECT_ERROR``.
+    Regression test: covers the non-streaming path counterpart to the
+    SSE-startup timeout case. Both paths previously returned a 504 with
+    no failure envelope, so the chrome health SSE never saw a tick toward
+    STUCK for hung backends.
     """
     agent_id = AgentId()
     preauth = "preauth-cookie-json-timeout"
