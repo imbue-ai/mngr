@@ -66,8 +66,8 @@ from imbue.minds.desktop_client.latchkey.permissions import MngrMessageSender
 from imbue.minds.desktop_client.latchkey.services_catalog import ServicesCatalog
 from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.notification import NotificationDispatcher
-from imbue.minds.desktop_client.request_events import FileSharingPermissionRequestEvent
-from imbue.minds.desktop_client.request_events import LatchkeyPermissionRequestEvent
+from imbue.minds.desktop_client.request_events import LatchkeyFileSharingPermissionRequestEvent
+from imbue.minds.desktop_client.request_events import LatchkeyPredefinedPermissionRequestEvent
 from imbue.minds.desktop_client.request_events import RequestEvent
 from imbue.minds.desktop_client.request_events import RequestInbox
 from imbue.minds.desktop_client.request_events import load_response_events
@@ -467,14 +467,14 @@ class _StreamedPermissionRequestHandler(FrozenModel):
         if current.get_request_by_id(str(event.event_id)) is not None:
             return
         self.app.state.request_inbox = current.add_request(event)
-        if isinstance(event, LatchkeyPermissionRequestEvent):
+        if isinstance(event, LatchkeyPredefinedPermissionRequestEvent):
             logger.info(
                 "Streamed latchkey permission request for agent {} (scope={}, request_id={})",
                 event.agent_id,
                 event.scope,
                 event.event_id,
             )
-        elif isinstance(event, FileSharingPermissionRequestEvent):
+        elif isinstance(event, LatchkeyFileSharingPermissionRequestEvent):
             logger.info(
                 "Streamed file-sharing permission request for agent {} (path={}, request_id={})",
                 event.agent_id,

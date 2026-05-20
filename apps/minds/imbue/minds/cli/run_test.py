@@ -24,7 +24,7 @@ from imbue.minds.desktop_client.conftest import make_fake_imbue_cloud_cli
 from imbue.minds.desktop_client.conftest import make_session_store_for_test
 from imbue.minds.desktop_client.forward_cli import EnvelopeStreamConsumer
 from imbue.minds.desktop_client.request_events import RequestInbox
-from imbue.minds.desktop_client.request_events import create_latchkey_permission_request_event
+from imbue.minds.desktop_client.request_events import create_latchkey_predefined_permission_request_event
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 
 _ROOT_NAME = "minds-dev-tname"
@@ -201,7 +201,9 @@ def _make_streamed_permission_handler() -> tuple[
 
 def test_streamed_permission_handler_records_first_delivery() -> None:
     handler, app, _, notify_counts = _make_streamed_permission_handler()
-    event = create_latchkey_permission_request_event(agent_id="agent-abc", scope="slack-api", rationale="why")
+    event = create_latchkey_predefined_permission_request_event(
+        agent_id="agent-abc", scope="slack-api", rationale="why"
+    )
 
     handler(event)
 
@@ -220,7 +222,9 @@ def test_streamed_permission_handler_dedupes_redelivery_by_event_id() -> None:
     the chrome SSE would wake up repeatedly for no reason.
     """
     handler, app, _, notify_counts = _make_streamed_permission_handler()
-    event = create_latchkey_permission_request_event(agent_id="agent-abc", scope="slack-api", rationale="why")
+    event = create_latchkey_predefined_permission_request_event(
+        agent_id="agent-abc", scope="slack-api", rationale="why"
+    )
 
     for _ in range(5):
         handler(event)
@@ -236,8 +240,12 @@ def test_streamed_permission_handler_dedupes_redelivery_by_event_id() -> None:
 def test_streamed_permission_handler_records_distinct_events() -> None:
     """Different ``event_id``s are distinct requests even if other fields collide."""
     handler, app, _, notify_counts = _make_streamed_permission_handler()
-    first = create_latchkey_permission_request_event(agent_id="agent-abc", scope="slack-api", rationale="why")
-    second = create_latchkey_permission_request_event(agent_id="agent-abc", scope="slack-api", rationale="why")
+    first = create_latchkey_predefined_permission_request_event(
+        agent_id="agent-abc", scope="slack-api", rationale="why"
+    )
+    second = create_latchkey_predefined_permission_request_event(
+        agent_id="agent-abc", scope="slack-api", rationale="why"
+    )
     assert first.event_id != second.event_id
 
     handler(first)
@@ -257,7 +265,9 @@ def test_streamed_permission_handler_noop_when_inbox_not_initialised() -> None:
     notify_counts: list[int] = []
     resolver.add_on_change_callback(lambda: notify_counts.append(1))
     handler = _StreamedPermissionRequestHandler(app=app, backend_resolver=resolver)
-    event = create_latchkey_permission_request_event(agent_id="agent-abc", scope="slack-api", rationale="why")
+    event = create_latchkey_predefined_permission_request_event(
+        agent_id="agent-abc", scope="slack-api", rationale="why"
+    )
 
     handler(event)
 

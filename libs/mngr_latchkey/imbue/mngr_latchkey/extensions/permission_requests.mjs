@@ -54,11 +54,9 @@
  * Each pending request is stored as a single JSON file at
  * ``<latchkey-directory>/permission_requests/v2/<request_id>.json``,
  * where ``<latchkey-directory>`` is ``LATCHKEY_DIRECTORY`` if set,
- * otherwise ``~/.latchkey``. The ``v2`` segment is part of the on-disk
- * schema version: files from the pre-v2 schema (``permission_requests/v1``)
- * live in a sibling directory and are simply not visited. Migrating in
- * place is intentionally out of scope -- pending requests survive at
- * worst until the user re-issues them.
+ * otherwise ``~/.latchkey``. The ``v2`` segment is the on-disk schema
+ * version; future shape changes get a new directory rather than
+ * trying to migrate files in place.
  *
  * NOTE: extension requests still go through the gateway's permission
  * check, so callers must have a rule that allows them to talk to

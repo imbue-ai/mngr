@@ -4,7 +4,7 @@ Spawned at desktop-client startup, owns a daemon thread that holds a
 long-lived ``GET /permission-requests?follow=true`` connection open
 against the shared latchkey gateway. Each pending request streamed
 over that connection is translated into a
-:class:`LatchkeyPermissionRequestEvent` and appended to the in-memory
+:class:`LatchkeyPredefinedPermissionRequestEvent` and appended to the in-memory
 :class:`RequestInbox` exactly the way agent-written JSONL events used
 to be (before latchkey 2.9.0 grew the extension layer).
 
@@ -39,8 +39,8 @@ from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayCl
 from imbue.minds.desktop_client.latchkey.gateway_client import REQUEST_TYPE_FILE_SHARING
 from imbue.minds.desktop_client.latchkey.gateway_client import REQUEST_TYPE_PREDEFINED
 from imbue.minds.desktop_client.latchkey.gateway_client import StreamedPermissionRequest
-from imbue.minds.desktop_client.request_events import FileSharingPermissionRequestEvent
-from imbue.minds.desktop_client.request_events import LatchkeyPermissionRequestEvent
+from imbue.minds.desktop_client.request_events import LatchkeyFileSharingPermissionRequestEvent
+from imbue.minds.desktop_client.request_events import LatchkeyPredefinedPermissionRequestEvent
 from imbue.minds.desktop_client.request_events import REQUESTS_EVENT_SOURCE_NAME
 from imbue.minds.desktop_client.request_events import RequestEvent
 from imbue.minds.desktop_client.request_events import RequestType
@@ -76,15 +76,15 @@ def streamed_request_to_event(streamed: StreamedPermissionRequest) -> RequestEve
     the two systems on a single identifier.
 
     Dispatches on ``request_type``: ``predefined`` requests become
-    :class:`LatchkeyPermissionRequestEvent` (the legacy scope/perm
+    :class:`LatchkeyPredefinedPermissionRequestEvent` (the legacy scope/perm
     grant flow); ``file-sharing`` requests become
-    :class:`FileSharingPermissionRequestEvent` (rendered as a single
+    :class:`LatchkeyFileSharingPermissionRequestEvent` (rendered as a single
     per-path yes/no dialog whose grant path goes through
     ``POST /permission-requests/approve/<id>``).
     """
     if streamed.request_type == REQUEST_TYPE_PREDEFINED:
         predefined = streamed.as_predefined_payload()
-        return LatchkeyPermissionRequestEvent(
+        return LatchkeyPredefinedPermissionRequestEvent(
             timestamp=_now_iso(),
             type=EventType("latchkey_permission_request"),
             event_id=EventId(streamed.request_id),
@@ -98,7 +98,7 @@ def streamed_request_to_event(streamed: StreamedPermissionRequest) -> RequestEve
         )
     if streamed.request_type == REQUEST_TYPE_FILE_SHARING:
         file_sharing = streamed.as_file_sharing_payload()
-        return FileSharingPermissionRequestEvent(
+        return LatchkeyFileSharingPermissionRequestEvent(
             timestamp=_now_iso(),
             type=EventType("file_sharing_permission_request"),
             event_id=EventId(streamed.request_id),
@@ -131,8 +131,8 @@ class PermissionRequestsConsumer(MutableModel):
         description=(
             "Callback invoked from the consumer thread for each streamed permission request "
             "after translation into the inbox event shape. Receives either a "
-            ":class:`LatchkeyPermissionRequestEvent` (for ``type=predefined``) or a "
-            ":class:`FileSharingPermissionRequestEvent` (for ``type=file-sharing``)."
+            ":class:`LatchkeyPredefinedPermissionRequestEvent` (for ``type=predefined``) or a "
+            ":class:`LatchkeyFileSharingPermissionRequestEvent` (for ``type=file-sharing``)."
         ),
     )
 

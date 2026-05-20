@@ -205,8 +205,8 @@ consume the stream and approve/delete on resolution.
 
 Pending requests are stored as one JSON file per request under
 `<latchkey-directory>/permission_requests/v2/`. The `v2` segment is
-part of the on-disk schema version (pre-v2 files in a sibling
-directory are ignored).
+the on-disk schema version; future shape changes get a new directory
+rather than trying to migrate files in place.
 
 ### `minds-api-proxy` extension
 

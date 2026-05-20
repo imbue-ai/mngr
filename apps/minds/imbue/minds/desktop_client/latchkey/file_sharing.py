@@ -33,7 +33,7 @@ from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClient
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClientError
 from imbue.minds.desktop_client.latchkey.permissions import MngrMessageSender
-from imbue.minds.desktop_client.request_events import FileSharingPermissionRequestEvent
+from imbue.minds.desktop_client.request_events import LatchkeyFileSharingPermissionRequestEvent
 from imbue.minds.desktop_client.request_events import RequestEvent
 from imbue.minds.desktop_client.request_events import RequestInbox
 from imbue.minds.desktop_client.request_events import RequestResponseEvent
@@ -243,7 +243,7 @@ class FileSharingGrantHandler(RequestEventHandler):
         return _KIND_LABEL
 
     def display_name_for_event(self, req_event: RequestEvent) -> str:
-        if not isinstance(req_event, FileSharingPermissionRequestEvent):
+        if not isinstance(req_event, LatchkeyFileSharingPermissionRequestEvent):
             return ""
         return req_event.path
 
@@ -253,7 +253,7 @@ class FileSharingGrantHandler(RequestEventHandler):
         backend_resolver: BackendResolverInterface,
         mngr_forward_origin: str,
     ) -> Response:
-        if not isinstance(req_event, FileSharingPermissionRequestEvent):
+        if not isinstance(req_event, LatchkeyFileSharingPermissionRequestEvent):
             return HTMLResponse(content="<p>Unsupported request type</p>", status_code=500)
         parsed_agent_id = AgentId(req_event.agent_id)
         ws_name = _resolve_workspace_name(backend_resolver, parsed_agent_id, fallback=req_event.agent_id)
@@ -272,7 +272,7 @@ class FileSharingGrantHandler(RequestEventHandler):
         request: Request,
         req_event: RequestEvent,
     ) -> Response:
-        if not isinstance(req_event, FileSharingPermissionRequestEvent):
+        if not isinstance(req_event, LatchkeyFileSharingPermissionRequestEvent):
             return _json_error("Unsupported request type", status_code=500)
         request_event_id = str(req_event.event_id)
         parsed_agent_id = AgentId(req_event.agent_id)
@@ -311,7 +311,7 @@ class FileSharingGrantHandler(RequestEventHandler):
         request: Request,
         req_event: RequestEvent,
     ) -> Response:
-        if not isinstance(req_event, FileSharingPermissionRequestEvent):
+        if not isinstance(req_event, LatchkeyFileSharingPermissionRequestEvent):
             return _json_error("Unsupported request type", status_code=500)
         request_event_id = str(req_event.event_id)
         parsed_agent_id = AgentId(req_event.agent_id)

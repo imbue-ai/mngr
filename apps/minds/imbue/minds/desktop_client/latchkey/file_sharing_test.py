@@ -21,11 +21,11 @@ from imbue.minds.desktop_client.cookie_manager import create_session_cookie
 from imbue.minds.desktop_client.latchkey.file_sharing import FileSharingGrantHandler
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClient
 from imbue.minds.desktop_client.latchkey.permissions import MngrMessageSender
-from imbue.minds.desktop_client.request_events import FileSharingPermissionRequestEvent
+from imbue.minds.desktop_client.request_events import LatchkeyFileSharingPermissionRequestEvent
 from imbue.minds.desktop_client.request_events import RequestEvent
 from imbue.minds.desktop_client.request_events import RequestInbox
 from imbue.minds.desktop_client.request_events import RequestType
-from imbue.minds.desktop_client.request_events import create_file_sharing_permission_request_event
+from imbue.minds.desktop_client.request_events import create_latchkey_file_sharing_permission_request_event
 from imbue.minds.desktop_client.request_events import load_response_events
 from imbue.mngr.primitives import AgentId
 
@@ -99,7 +99,7 @@ def test_handler_claims_file_sharing_request_type(tmp_path: Path) -> None:
 
 def test_display_name_returns_path(tmp_path: Path) -> None:
     handler, _sender = _make_file_sharing_handler(tmp_path, lambda r: httpx.Response(200))
-    event = create_file_sharing_permission_request_event(
+    event = create_latchkey_file_sharing_permission_request_event(
         agent_id=str(AgentId()),
         path="/home/user/data.txt",
         rationale="need data",
@@ -112,7 +112,7 @@ def test_display_name_returns_path(tmp_path: Path) -> None:
 
 def test_render_request_page_shows_path_and_rationale(tmp_path: Path) -> None:
     handler, _sender = _make_file_sharing_handler(tmp_path, lambda r: httpx.Response(200))
-    event = create_file_sharing_permission_request_event(
+    event = create_latchkey_file_sharing_permission_request_event(
         agent_id=str(AgentId()),
         path="/home/user/important.txt",
         rationale="summarize the doc",
@@ -135,7 +135,7 @@ def test_render_request_page_shows_path_and_rationale(tmp_path: Path) -> None:
 
 def test_render_request_page_escapes_html_in_inputs(tmp_path: Path) -> None:
     handler, _sender = _make_file_sharing_handler(tmp_path, lambda r: httpx.Response(200))
-    event = create_file_sharing_permission_request_event(
+    event = create_latchkey_file_sharing_permission_request_event(
         agent_id=str(AgentId()),
         path="/tmp/<script>alert(1)</script>.txt",
         rationale="<img src=x onerror=alert(2)>",
@@ -165,7 +165,7 @@ def test_grant_calls_gateway_approve_writes_response_notifies_agent(tmp_path: Pa
 
     handler, sender = _make_file_sharing_handler(tmp_path, _gateway_handler)
     agent_id = AgentId()
-    event = create_file_sharing_permission_request_event(
+    event = create_latchkey_file_sharing_permission_request_event(
         agent_id=str(agent_id),
         path="/home/user/data.txt",
         rationale="need data",
@@ -199,7 +199,7 @@ def test_grant_returns_502_when_gateway_rejects(tmp_path: Path) -> None:
         return httpx.Response(500, json={"error": "boom"})
 
     handler, sender = _make_file_sharing_handler(tmp_path, _gateway_handler)
-    event = create_file_sharing_permission_request_event(
+    event = create_latchkey_file_sharing_permission_request_event(
         agent_id=str(AgentId()),
         path="/home/user/data.txt",
         rationale="need data",
@@ -227,7 +227,7 @@ def test_deny_calls_gateway_delete_writes_response_notifies_agent(tmp_path: Path
         return httpx.Response(204)
 
     handler, sender = _make_file_sharing_handler(tmp_path, _gateway_handler)
-    event = create_file_sharing_permission_request_event(
+    event = create_latchkey_file_sharing_permission_request_event(
         agent_id=str(AgentId()),
         path="/home/user/secret.txt",
         rationale="please",
@@ -267,7 +267,7 @@ def test_deny_still_writes_response_when_gateway_delete_fails(tmp_path: Path) ->
         return httpx.Response(500, json={"error": "gateway down"})
 
     handler, sender = _make_file_sharing_handler(tmp_path, _gateway_handler)
-    event = create_file_sharing_permission_request_event(
+    event = create_latchkey_file_sharing_permission_request_event(
         agent_id=str(AgentId()),
         path="/home/user/secret.txt",
         rationale="please",
@@ -288,7 +288,7 @@ def test_deny_still_writes_response_when_gateway_delete_fails(tmp_path: Path) ->
 def test_request_page_route_dispatches_to_handler(tmp_path: Path) -> None:
     """GET /requests/<id> for a file-sharing event routes to FileSharingGrantHandler."""
     handler, _sender = _make_file_sharing_handler(tmp_path, lambda r: httpx.Response(200))
-    event = create_file_sharing_permission_request_event(
+    event = create_latchkey_file_sharing_permission_request_event(
         agent_id=str(AgentId()),
         path="/home/user/x.txt",
         rationale="r",
@@ -303,4 +303,4 @@ def test_request_page_route_dispatches_to_handler(tmp_path: Path) -> None:
 
 # Inputs used by the FastAPI route dispatcher tests above are unused
 # here; ruff-lint flags the imports if we don't reference them.
-_ = (FastAPI, Request, Response, RequestEvent, FileSharingPermissionRequestEvent)
+_ = (FastAPI, Request, Response, RequestEvent, LatchkeyFileSharingPermissionRequestEvent)

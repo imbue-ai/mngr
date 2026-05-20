@@ -1,7 +1,7 @@
 """Latchkey-specific permission grant/deny flow.
 
 This module owns everything that happens between a
-``LatchkeyPermissionRequestEvent`` arriving on the inbox and the user's
+``LatchkeyPredefinedPermissionRequestEvent`` arriving on the inbox and the user's
 decision being applied: rendering the dialog HTML, parsing the form
 submission, probing credential status, running ``latchkey auth browser``
 when needed, rewriting the per-agent ``latchkey_permissions.json``, appending the
@@ -45,7 +45,7 @@ from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayCl
 from imbue.minds.desktop_client.latchkey.services_catalog import ServicePermissionInfo
 from imbue.minds.desktop_client.latchkey.services_catalog import ServicesCatalog
 from imbue.minds.desktop_client.latchkey.templates import render_latchkey_permission_dialog
-from imbue.minds.desktop_client.request_events import LatchkeyPermissionRequestEvent
+from imbue.minds.desktop_client.request_events import LatchkeyPredefinedPermissionRequestEvent
 from imbue.minds.desktop_client.request_events import RequestEvent
 from imbue.minds.desktop_client.request_events import RequestInbox
 from imbue.minds.desktop_client.request_events import RequestResponseEvent
@@ -250,7 +250,7 @@ def _render_unknown_scope_page(request_id: str, scope: str) -> Response:
 
 
 class LatchkeyPermissionGrantHandler(RequestEventHandler):
-    """Top-level orchestrator for ``LatchkeyPermissionRequestEvent`` handling.
+    """Top-level orchestrator for ``LatchkeyPredefinedPermissionRequestEvent`` handling.
 
     Owns the latchkey services catalog and exposes both pure-logic methods
     (``grant`` / ``deny``, easy to unit-test) and the HTTP-aware
@@ -451,7 +451,7 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
         (or when the event is somehow not a latchkey permission request,
         which shouldn't happen given the dispatcher).
         """
-        if not isinstance(req_event, LatchkeyPermissionRequestEvent):
+        if not isinstance(req_event, LatchkeyPredefinedPermissionRequestEvent):
             return ""
         info = self.services_catalog.get_by_scope(req_event.scope)
         return info.display_name if info is not None else req_event.scope
@@ -467,7 +467,7 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
         Falls back to a deny-only page when the requested service is not
         in the catalog, since there are no permissions to offer.
         """
-        if not isinstance(req_event, LatchkeyPermissionRequestEvent):
+        if not isinstance(req_event, LatchkeyPredefinedPermissionRequestEvent):
             return HTMLResponse(content="<p>Unsupported request type</p>", status_code=500)
         service_info = self.services_catalog.get_by_scope(req_event.scope)
         if service_info is None:
@@ -513,7 +513,7 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
         req_event: RequestEvent,
     ) -> Response:
         """Drive the grant flow from the dialog form submission."""
-        if not isinstance(req_event, LatchkeyPermissionRequestEvent):
+        if not isinstance(req_event, LatchkeyPredefinedPermissionRequestEvent):
             return _json_error("Unsupported request type", status_code=500)
         service_info = self.services_catalog.get_by_scope(req_event.scope)
         if service_info is None:
@@ -587,7 +587,7 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
         req_event: RequestEvent,
     ) -> Response:
         """Drive the deny flow from the dialog form submission."""
-        if not isinstance(req_event, LatchkeyPermissionRequestEvent):
+        if not isinstance(req_event, LatchkeyPredefinedPermissionRequestEvent):
             return _json_error("Unsupported request type", status_code=500)
         service_info = self.services_catalog.get_by_scope(req_event.scope)
         if service_info is None:

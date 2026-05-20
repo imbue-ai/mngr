@@ -77,7 +77,7 @@ class PermissionsRequestEvent(RequestEvent):
     description: str = Field(default="", description="Human-readable description of the request")
 
 
-class LatchkeyPermissionRequestEvent(RequestEvent):
+class LatchkeyPredefinedPermissionRequestEvent(RequestEvent):
     """A request for the user to authorize the agent to use a latchkey-managed scope.
 
     The agent declares which Detent scope schema it wants (e.g.
@@ -101,7 +101,7 @@ class LatchkeyPermissionRequestEvent(RequestEvent):
     rationale: str = Field(description="One-paragraph human-readable reason the agent needs this access.")
 
 
-class FileSharingPermissionRequestEvent(RequestEvent):
+class LatchkeyFileSharingPermissionRequestEvent(RequestEvent):
     """A request for the user to grant the agent access to a single file path.
 
     Delivered to the inbox when an agent submits a ``type=file-sharing``
@@ -134,15 +134,15 @@ class RequestResponseEvent(EventEnvelope):
     request_type: str = Field(description="Type of request that was responded to")
 
 
-def create_latchkey_permission_request_event(
+def create_latchkey_predefined_permission_request_event(
     agent_id: str,
     scope: str,
     rationale: str,
     permissions: tuple[str, ...] = (),
     is_user_requested: bool = False,
-) -> "LatchkeyPermissionRequestEvent":
+) -> "LatchkeyPredefinedPermissionRequestEvent":
     """Create a new latchkey-permission request event with auto-generated metadata."""
-    return LatchkeyPermissionRequestEvent(
+    return LatchkeyPredefinedPermissionRequestEvent(
         timestamp=_now_iso(),
         type=EventType("latchkey_permission_request"),
         event_id=_generate_event_id(),
@@ -156,14 +156,14 @@ def create_latchkey_permission_request_event(
     )
 
 
-def create_file_sharing_permission_request_event(
+def create_latchkey_file_sharing_permission_request_event(
     agent_id: str,
     path: str,
     rationale: str,
     is_user_requested: bool = False,
-) -> "FileSharingPermissionRequestEvent":
+) -> "LatchkeyFileSharingPermissionRequestEvent":
     """Create a new file-sharing permission request event with auto-generated metadata."""
-    return FileSharingPermissionRequestEvent(
+    return LatchkeyFileSharingPermissionRequestEvent(
         timestamp=_now_iso(),
         type=EventType("file_sharing_permission_request"),
         event_id=_generate_event_id(),
@@ -208,9 +208,9 @@ def _dedup_key(event: RequestEvent | RequestResponseEvent) -> tuple[str, str | N
     the same path collapses to one card while different paths stay
     separate.
     """
-    if isinstance(event, LatchkeyPermissionRequestEvent):
+    if isinstance(event, LatchkeyPredefinedPermissionRequestEvent):
         scope_or_path = event.scope
-    elif isinstance(event, FileSharingPermissionRequestEvent):
+    elif isinstance(event, LatchkeyFileSharingPermissionRequestEvent):
         scope_or_path = event.path
     elif isinstance(event, RequestResponseEvent):
         scope_or_path = event.scope
@@ -285,9 +285,9 @@ def parse_request_event(line: str) -> RequestEvent | None:
         if request_type == str(RequestType.PERMISSIONS):
             return PermissionsRequestEvent.model_validate(data)
         elif request_type == str(RequestType.LATCHKEY_PERMISSION):
-            return LatchkeyPermissionRequestEvent.model_validate(data)
+            return LatchkeyPredefinedPermissionRequestEvent.model_validate(data)
         elif request_type == str(RequestType.FILE_SHARING_PERMISSION):
-            return FileSharingPermissionRequestEvent.model_validate(data)
+            return LatchkeyFileSharingPermissionRequestEvent.model_validate(data)
         else:
             return RequestEvent.model_validate(data)
     except (json.JSONDecodeError, ValueError, TypeError) as e:

@@ -12,8 +12,8 @@ from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayCl
 from imbue.minds.desktop_client.latchkey.gateway_client import StreamedPermissionRequest
 from imbue.minds.desktop_client.latchkey.permission_requests_consumer import PermissionRequestsConsumer
 from imbue.minds.desktop_client.latchkey.permission_requests_consumer import streamed_request_to_event
-from imbue.minds.desktop_client.request_events import FileSharingPermissionRequestEvent
-from imbue.minds.desktop_client.request_events import LatchkeyPermissionRequestEvent
+from imbue.minds.desktop_client.request_events import LatchkeyFileSharingPermissionRequestEvent
+from imbue.minds.desktop_client.request_events import LatchkeyPredefinedPermissionRequestEvent
 from imbue.minds.desktop_client.request_events import RequestEvent
 from imbue.minds.desktop_client.request_events import RequestType
 
@@ -57,9 +57,9 @@ def _make_streamed_file_sharing(
 
 
 def test_streamed_request_to_event_maps_predefined_fields() -> None:
-    """Predefined-type streamed records translate to LatchkeyPermissionRequestEvent."""
+    """Predefined-type streamed records translate to LatchkeyPredefinedPermissionRequestEvent."""
     event = streamed_request_to_event(_make_streamed_predefined())
-    assert isinstance(event, LatchkeyPermissionRequestEvent)
+    assert isinstance(event, LatchkeyPredefinedPermissionRequestEvent)
     assert str(event.event_id) == "abc123"
     assert event.agent_id == "agent-9"
     assert event.scope == "slack-api"
@@ -69,9 +69,9 @@ def test_streamed_request_to_event_maps_predefined_fields() -> None:
 
 
 def test_streamed_request_to_event_maps_file_sharing_fields() -> None:
-    """File-sharing-type streamed records translate to FileSharingPermissionRequestEvent."""
+    """File-sharing-type streamed records translate to LatchkeyFileSharingPermissionRequestEvent."""
     event = streamed_request_to_event(_make_streamed_file_sharing())
-    assert isinstance(event, FileSharingPermissionRequestEvent)
+    assert isinstance(event, LatchkeyFileSharingPermissionRequestEvent)
     assert str(event.event_id) == "def456"
     assert event.agent_id == "agent-7"
     assert event.path == "/home/user/data.txt"
@@ -148,7 +148,7 @@ def test_consumer_dispatches_each_streamed_request_to_on_request() -> None:
         finally:
             consumer.stop()
     assert {str(e.event_id) for e in delivered} == {"r1", "r2"}
-    predefined = next(e for e in delivered if isinstance(e, LatchkeyPermissionRequestEvent))
-    file_sharing = next(e for e in delivered if isinstance(e, FileSharingPermissionRequestEvent))
+    predefined = next(e for e in delivered if isinstance(e, LatchkeyPredefinedPermissionRequestEvent))
+    file_sharing = next(e for e in delivered if isinstance(e, LatchkeyFileSharingPermissionRequestEvent))
     assert predefined.scope == "slack-api"
     assert file_sharing.path == "/home/user/log.txt"

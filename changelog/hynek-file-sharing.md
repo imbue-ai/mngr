@@ -20,9 +20,11 @@ request schema and a new approve endpoint:
   absolute-only, no `..` segments).
 * Each pending request is persisted with the additional `target`
   (the extension's per-request `permissionsConfigPath`) and `effect`
-  (a precomputed `{rules?, schemas?}` patch) fields. The on-disk
-  schema version bumps from `permission_requests/v1` to
-  `permission_requests/v2`; the gateway ignores stray v1 files.
+  (a precomputed `{rules?, schemas?}` patch) fields. Pending requests
+  live under `<latchkey-directory>/permission_requests/v2/` -- the
+  `v2` segment is the on-disk schema version so future shape changes
+  can land in a fresh directory rather than trying to migrate files
+  in place.
 * `POST /permission-requests/approve/<request_id>` is new. It reads
   the pending request, merges its `effect.rules` (union by scope
   key) and `effect.schemas` (overwrite by name) into the stored
@@ -36,11 +38,13 @@ request schema and a new approve endpoint:
 The minds desktop client side learns to render and resolve both
 request types:
 
-* `LatchkeyPermissionRequestEvent` continues to drive the existing
-  per-permission checkbox dialog for `predefined` requests.
-* A new `FileSharingPermissionRequestEvent` (and accompanying
-  `FileSharingGrantHandler`) renders a single yes/no dialog per
-  absolute file path. Approval calls
+* `LatchkeyPermissionRequestEvent` was renamed to
+  `LatchkeyPredefinedPermissionRequestEvent` to mirror the wire
+  `type=predefined` and to distinguish it from the new file-sharing
+  event (both flow through Latchkey).
+* A new `LatchkeyFileSharingPermissionRequestEvent` (and
+  accompanying `FileSharingGrantHandler`) renders a single yes/no
+  dialog per absolute file path. Approval calls
   `POST /permission-requests/approve/<id>` on the gateway; denial
   uses the existing DELETE path. There is no UI to revoke or edit
   an existing file-sharing grant -- the user has to edit

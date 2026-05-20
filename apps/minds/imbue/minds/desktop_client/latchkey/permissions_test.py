@@ -15,7 +15,7 @@ from imbue.minds.desktop_client.latchkey.services_catalog import ServicesCatalog
 from imbue.minds.desktop_client.latchkey.testing import FakeLatchkeyGatewayClient
 from imbue.minds.desktop_client.latchkey.testing import build_fake_gateway_client
 from imbue.minds.desktop_client.request_events import RequestStatus
-from imbue.minds.desktop_client.request_events import create_latchkey_permission_request_event
+from imbue.minds.desktop_client.request_events import create_latchkey_predefined_permission_request_event
 from imbue.minds.desktop_client.request_events import load_response_events
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
@@ -596,7 +596,7 @@ def test_grant_re_checks_credentials_on_second_call_after_manual_setup(tmp_path:
 
 def _render_dialog_html(handler: LatchkeyPermissionGrantHandler) -> str:
     """Run ``render_request_page`` for a fixed Slack request and return its HTML."""
-    request = create_latchkey_permission_request_event(
+    request = create_latchkey_predefined_permission_request_event(
         agent_id=str(AgentId()),
         scope=_SLACK_SERVICE_INFO.scope,
         rationale="need slack access",
