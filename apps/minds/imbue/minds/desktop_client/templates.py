@@ -157,13 +157,12 @@ def render_create_form(
     value is intentionally not exposed (it's secret); the base URL value
     is shown so the user can sanity-check the endpoint before opting in.
 
-    ``use_env_anthropic_api_key`` / ``use_env_anthropic_base_url`` carry the
-    user's submitted checkbox state through a validation-error re-render so
-    an explicit opt-in (or opt-out) survives the round trip. ``None`` (the
-    default) means "no submitted value yet, use the client-side defaults";
-    a concrete ``True`` / ``False`` is treated by the client-side JS as a
-    user choice that should not be overwritten by the per-provider default
-    when the user later switches AI providers.
+    ``use_env_anthropic_api_key`` / ``use_env_anthropic_base_url`` set the
+    ``checked`` attribute on the corresponding env-toggle checkboxes. Their
+    sole purpose is to carry the user's submitted state through a
+    validation-error re-render so an explicit opt-in (or opt-out) survives
+    the round trip. Treated as a boolean: ``None`` and ``False`` both render
+    unchecked, ``True`` renders checked.
     """
     effective_url = git_url if git_url else _DEFAULT_GIT_URL
     effective_name = host_name if host_name else _DEFAULT_HOST_NAME
