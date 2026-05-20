@@ -348,7 +348,7 @@ def test_wait_for_workspace_ready_calls_record_success_on_ready(tmp_path) -> Non
     """Regression: a successful readiness probe must propagate to the health tracker.
 
     Without the ``record_success`` call, a HEALTHY->STUCK timer armed by an
-    earlier ``workspace_backend_failure`` envelope would fire AFTER readiness
+    earlier ``system_interface_backend_failure`` envelope would fire AFTER readiness
     returned, the chrome SSE would receive ``status=stuck``, and the user
     would land on the workspace-recovery page seconds after their freshly
     created agent appeared healthy. See ``system_interface_health.py`` for
