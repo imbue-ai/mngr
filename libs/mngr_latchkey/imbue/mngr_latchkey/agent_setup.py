@@ -347,8 +347,10 @@ def ensure_minds_schema_in_existing_host_files(plugin_data_dir: Path) -> int:
     ``<plugin_data_dir>/hosts/<host_id>/latchkey_permissions.json``,
     parses it, and rewrites it whenever any of the four ``minds`` schema
     keys is missing or stale. Files whose schemas already match are
-    skipped, as are files containing a non-dict ``schemas`` block (which
-    we leave alone).
+    skipped. Files that cannot be parsed as a
+    :class:`LatchkeyPermissionsConfig` (malformed JSON, or a shape that
+    fails model validation -- e.g. a non-dict ``schemas`` block) are
+    logged at warning level and left untouched.
 
     Must run *before* the shared gateway starts so the gateway's
     ``permissions.mjs`` extension does not race with us. Returns the
