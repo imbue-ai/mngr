@@ -116,14 +116,13 @@
 
 ### Pytest suite
 
-- New directory `apps/minds/deployment_tests/` holding the six initial test files:
+- New directory `apps/minds/deployment_tests/` holding the five initial test files:
   - `test_deploy_round_trip.py` (`minds_deployment`)
   - `test_deploy_rollback.py` (`minds_deployment`)
   - `test_deploy_new_version.py` (`minds_deployment`)
   - `test_signup_tunnel.py` (`minds_services`)
   - `test_logged_in_smoke.py` (`minds_services`)
-  - `test_litellm_via_workspace.py` (`minds_services`)
-  Each file declares `pytestmark = pytest.mark.minds_deployment` or `pytest.mark.minds_services`.
+  Each file declares `pytestmark = pytest.mark.minds_deployment` or `pytest.mark.minds_services`. `test_litellm_via_workspace.py` is described in the initial test inventory above but is deferred -- it lands once the orchestrator wires the per-env Neon DSNs through `SharedEnvHandle` so the spend-tracking assertion has something to query.
 - New `apps/minds/deployment_tests/conftest.py` providing the five shared fixtures (`shared_env(role)`, `fct_template_ref`, `verified_user`, `ephemeral_env`, `signup_email`).
 - Both new marks registered in `libs/imbue_common/imbue/imbue_common/conftest_hooks.py`.
 
