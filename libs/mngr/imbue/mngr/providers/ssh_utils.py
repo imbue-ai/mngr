@@ -124,6 +124,17 @@ def load_or_create_host_keypair(key_dir: Path, key_name: str = "host_key") -> tu
     return private_key_path, public_key_openssh
 
 
+def format_as_known_hosts_address(hostname: str, port: int) -> str:
+    """Format a host:port pair as the leading field of an OpenSSH known_hosts line.
+
+    OpenSSH expects a bare hostname for the default SSH port and a ``[host]:port``
+    bracketed form for any non-default port.
+    """
+    if port == 22:
+        return hostname
+    return f"[{hostname}]:{port}"
+
+
 def clear_host_from_known_hosts(
     known_hosts_path: Path,
     hostname: str,
@@ -131,16 +142,15 @@ def clear_host_from_known_hosts(
 ) -> None:
     """Remove all entries for a host:port from the known_hosts file.
 
-    Called before scanning a newly created host to ensure stale keys
-    from a previous VM that reused the same port are removed.
+    If the file does not exist, returns without error. Otherwise, takes an
+    exclusive lock on the file, drops any line whose leading host pattern
+    matches the given host:port, and rewrites the file in place if any line
+    was removed.
     """
     if not known_hosts_path.exists():
         return
 
-    if port == 22:
-        host_pattern = hostname
-    else:
-        host_pattern = f"[{hostname}]:{port}"
+    host_pattern = format_as_known_hosts_address(hostname, port)
 
     with open(known_hosts_path, "a+") as f:
         fcntl.flock(f.fileno(), fcntl.LOCK_EX)
@@ -171,11 +181,7 @@ def add_host_to_known_hosts(
     """
     known_hosts_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # Format the host entry - use [host]:port format for non-standard ports
-    if port == 22:
-        host_pattern = hostname
-    else:
-        host_pattern = f"[{hostname}]:{port}"
+    host_pattern = format_as_known_hosts_address(hostname, port)
 
     # The public key should already be in OpenSSH format: "ssh-ed25519 AAAA..."
     entry = f"{host_pattern} {public_key}\n"

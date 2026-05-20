@@ -1,13 +1,7 @@
-# Build stage: compile the offload binary so the final image can apply
-# thin diffs at sandbox-prepare time. Offload >=0.9.0 expects to invoke
-# `offload apply-diff` inside the sandbox image; without the binary present,
-# offload falls back to a full image rebuild on every run, defeating the
-# checkpoint cache. Keep this version pinned in sync with the offload
-# version pinned in .github/workflows/ci.yml.
-FROM rust:1-bookworm AS offload-builder
-ARG OFFLOAD_VERSION=0.9.2
-RUN cargo install offload@${OFFLOAD_VERSION} --locked --root /opt/offload
-
+# Single-stage Dockerfile. mngr's Modal image builder rejects multi-stage
+# Dockerfiles (libs/mngr_modal/imbue/mngr_modal/instance.py: assert not
+# dfp.is_multistage), so the offload binary is built inside this stage
+# rather than COPY'd from a separate builder stage.
 FROM python:3.12-slim
 
 # Install system dependencies including tini for proper signal handling
@@ -32,6 +26,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     wget \
     xxd \
     && rm -rf /var/lib/apt/lists/*
+
+# --system writes to /etc/gitconfig so the exemption survives tests that
+# redirect HOME to a tmp dir (isolate_home). Tests that also set
+# GIT_CONFIG_NOSYSTEM=1 still need a per-test-home .gitconfig, which
+# isolate_home and isolate_git both now provide.
+RUN git config --system --add safe.directory '*'
 
 # Install ttyd binary from GitHub releases (not available via apt).
 # Retry with backoff because github.com releases intermittently reset the
@@ -67,78 +67,86 @@ ENV PATH="/root/.local/bin:$PATH"
 # .mngr/settings.toml pin (`[agent_types.claude].version`). The release-test
 # `test_claude_code_version_matches_forever_claude_template_pin` enforces the
 # sync; bump both together when rolling a new claude release.
-ARG CLAUDE_CODE_VERSION="2.1.116"
+ARG CLAUDE_CODE_VERSION="2.1.141"
 RUN curl -fsSL https://claude.ai/install.sh > /tmp/install_claude.sh && ( if [ -n "$CLAUDE_CODE_VERSION" ]; then cat /tmp/install_claude.sh | bash -s "$CLAUDE_CODE_VERSION"; else cat /tmp/install_claude.sh | bash; fi && test -x /root/.local/bin/claude ) || ( cat /tmp/install_claude.sh && exit 1 )
 ENV CLAUDE_CODE_VERSION=${CLAUDE_CODE_VERSION}
 
 # without this, there are some annoying bugs on modal's side with snapshotting
 ENV UV_LINK_MODE=copy
 
-# offload binary, used by `offload apply-diff` during sandbox prepare to
-# layer thin diffs over the cached checkpoint image (see the offload-builder
-# stage above for the version pin and rationale).
-COPY --from=offload-builder /opt/offload/bin/offload /usr/local/bin/offload
+# Install the offload binary in the final image. Offload >=0.9.0 expects
+# to invoke `offload apply-diff` inside the sandbox image; without the
+# binary present, offload falls back to a full image rebuild on every run,
+# defeating the checkpoint cache. Keep OFFLOAD_VERSION in sync with the
+# offload version pinned in .github/workflows/ci.yml.
+#
+# rustup is fetched, used once for `cargo install offload`, and then both
+# the rustup toolchain and the cargo cache are deleted -- offload is the
+# only cargo-installed tool in the image, so the toolchain has no further
+# purpose. If a future tool needs to be cargo-installed, install it in
+# this same RUN before the cleanup line.
+# OFFLOAD_VERSION is exported inline (not a Dockerfile ARG) because mngr_modal
+# ships each Dockerfile instruction to Modal as its own `dockerfile_commands`
+# call (per-layer caching, see `_build_image_from_dockerfile_contents`). ARGs
+# don't carry across separate calls, so an ARG above would expand to empty in
+# the RUN below and `cargo install offload@` would error.
+RUN export OFFLOAD_VERSION=0.9.5 \
+    && curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+        | sh -s -- -y --default-toolchain stable --profile minimal --no-modify-path \
+    && /root/.cargo/bin/cargo install offload@${OFFLOAD_VERSION} --locked --root /opt/offload \
+    && cp /opt/offload/bin/offload /usr/local/bin/offload \
+    && rm -rf /opt/offload /root/.cargo /root/.rustup
 
-# copy in all of our code (offload exports the repo tree as the build context;
-# mngr_schedule unpacks its packaged tarball producer-side via
-# unpack_current_tarball_in_place; local docker builds use the working tree
-# directly). All three deliver a real source tree at /code/mngr/.
+# Set working directory to the project root before the COPY so the post-
+# source-setup script (and any user shells) start at the same path that
+# `mngr schedule` and offload's post_patch_cmd assume.
+WORKDIR /code/mngr/
+
+# Copy the build context. Two shapes are supported (the shape is
+# detected and normalized inside scripts/post-source-setup.sh below):
+#   - Real source tree (offload's exported repo, mngr_schedule's
+#     producer-side-extracted tree, the test_modal_create release
+#     test's unpacked tree, local docker builds).
+#   - .mngr/dev/build/ keyframe directory containing only
+#     current.tar.gz + a .checkpoint marker (typical end-user flow via
+#     .mngr/settings.toml's pre_command_scripts hook + create_templates).
 # COPY lands files owned by root:root by default, so no chown is needed.
 COPY . /code/mngr/
 
-# --system writes to /etc/gitconfig so the exemption survives tests that
-# redirect HOME to a tmp dir (isolate_home). Tests that also set
-# GIT_CONFIG_NOSYSTEM=1 still need a per-test-home .gitconfig, which
-# isolate_home and isolate_git both now provide.
-RUN git config --system --add safe.directory '*'
-# Normalize /code/mngr/.git to a real in-image git directory. Three input
-# shapes must be handled:
+# Bootstrap the source tree for the keyframe shape: if the COPY above
+# only carried current.tar.gz + a .checkpoint marker (the keyframe
+# shape produced by scripts/make_tar_of_repo.sh), extract the tarball
+# inline so the post-COPY RUN below can find the script it's trying
+# to invoke. We delete the tarball + checkpoint afterwards so the
+# script's own equivalent extraction step is a no-op when it runs
+# next. No-op for the real-source-tree shape where current.tar.gz
+# isn't present.
 #
-# 1. `.git` is a *file* (worktree checkout): contains `gitdir: /host/.git/
-#    worktrees/<name>` which does not exist inside the sandbox. Drop it
-#    and re-init.
-# 2. `.git` is missing entirely: happens when the image build context is a
-#    tarball produced by `git archive` (e.g. mngr_schedule release tests
-#    deploy a scheduled task via `mngr schedule add`, which packages the
-#    target repo via git-archive and then rebuilds from that). Init a
-#    fresh repo so the rest of this step (and downstream tooling like
-#    `git ls-files`) works.
-# 3. `.git` is already a directory: leave it alone.
-#
-# Without this normalization, `git rev-parse --show-toplevel` and
-# friends fail from /code/mngr with "not a git repository", which
-# breaks ratchet tests and the mngr CLI's repo-discovery paths.
-#
-# Also ensure an `origin` remote is present -- offload's export_tree
-# invokes `git init` + `git fetch --depth=1` against a file:// URL, which
-# does NOT register an origin. Downstream mngr_schedule release tests
-# shell out via `make_tar_of_repo.sh` which calls `git remote get-url
-# origin`. The URL value itself is only used to derive a GitHub base for
-# the packaged tarball, so the precise string doesn't matter -- it just
-# has to exist and point at a plausible github.com URL.
-RUN if [ -f /code/mngr/.git ]; then \
-        echo "Normalizing worktree-style /code/mngr/.git -> fresh in-image .git" ; \
-        rm /code/mngr/.git && cd /code/mngr && git init -q . && \
-        git add -A && \
-        git -c user.email=ci@local -c user.name=ci commit -q -m 'sandbox-init' ; \
-    elif [ ! -d /code/mngr/.git ]; then \
-        echo "No /code/mngr/.git at all -> fresh in-image .git" ; \
-        cd /code/mngr && git init -q . && \
-        git add -A && \
-        git -c user.email=ci@local -c user.name=ci commit -q -m 'sandbox-init' ; \
-    fi && \
-    cd /code/mngr && \
-    (git remote get-url origin >/dev/null 2>&1 || \
-        git remote add origin https://github.com/imbue-ai/mngr.git) && \
-    mkdir -p /code/mngr/.mngr && \
-    echo "$(git rev-parse HEAD)" > /code/mngr/.mngr/image_commit_hash
+# The condition is phrased "if tarball present" rather than "if script
+# absent" so this RUN doesn't trip the mngr_schedule PACKAGE-mode
+# install-section-end sentinel (which matches on the substring
+# "scripts/post-source-setup.sh").
+RUN if [ -f /code/mngr/current.tar.gz ]; then \
+        cd /code/mngr && tar xzf current.tar.gz && rm -f current.tar.gz *.checkpoint; \
+    fi
 
-# set working directory to the project root -- this is where `mngr schedule`
-# will copy project deploy files and where scheduled commands will run
-WORKDIR /code/mngr/
-
-# install python dependencies
-RUN unset UV_INDEX_URL && uv sync --all-packages && uv tool install -e /code/mngr/libs/mngr --with-editable /code/mngr/libs/mngr_modal --with-editable /code/mngr/libs/mngr_schedule --with-editable /code/mngr/libs/mngr_claude && uv tool install modal
+# THE single, only post-COPY RUN. All source-dependent setup
+# (current.tar.gz extraction, .git normalization, image_commit_hash,
+# uv sync, editable installs) lives in scripts/post-source-setup.sh.
+# That same script also runs as offload's post_patch_cmd in
+# offload-modal*.toml so offload's checkpoint+thin-diff path produces
+# the same image state as a from-scratch Dockerfile build. Adding any
+# other RUN step below this line causes drift between the two paths.
+# Don't.
+#
+# The script path is absolute so this RUN works regardless of WORKDIR
+# inheritance. mngr_modal's `_build_image_from_dockerfile_contents`
+# ships each Dockerfile instruction to Modal as its own per-layer
+# `dockerfile_commands` call (FROM base + instruction), and WORKDIR
+# set in an earlier layer does NOT carry through into the next
+# layer's RUN cwd -- it defaults to /. The script itself `cd`s into
+# /code/mngr first thing, so this only matters for finding the script.
+RUN bash /code/mngr/scripts/post-source-setup.sh
 
 # Run idly forever while being responsive to SIGTERM.
 # PID 1 must explicitly install signal handlers in order to respect signals.

@@ -12,14 +12,12 @@ from imbue.mngr.api.address_parsers import parse_host_address
 from imbue.mngr.api.find import AgentMatch
 from imbue.mngr.api.find import _address_matches_agent_match
 from imbue.mngr.api.find import _post_filter_matches_by_addresses
-from imbue.mngr.cli.agent_utils import filter_agents_by_host
 from imbue.mngr.cli.stop import stop
 from imbue.mngr.errors import AgentNotFoundError
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.primitives import AgentAddress
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
-from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import DiscoveredHost
 from imbue.mngr.primitives import HostAddress
 from imbue.mngr.primitives import HostId
@@ -227,33 +225,6 @@ def test_address_matches_agent_match_by_host_name() -> None:
 
     assert _address_matches_agent_match(address, _make_match(host_name="myhost")) is True
     assert _address_matches_agent_match(address, _make_match(host_name="other")) is False
-
-
-# =============================================================================
-# filter_agents_by_host tests
-# =============================================================================
-
-
-def test_filter_agents_by_host_keeps_matching_host() -> None:
-    """Filter keeps only hosts matching the host filter."""
-    host1 = _make_host("h1", "local")
-    host2 = _make_host("h2", "local")
-    agents_by_host: dict[DiscoveredHost, list[DiscoveredAgent]] = {host1: [], host2: []}
-
-    host_filter = HostAddress(host=HostName("h1"))
-    result = filter_agents_by_host(agents_by_host, host_filter)
-    assert len(result) == 1
-    assert host1 in result
-
-
-def test_filter_agents_by_host_raises_when_no_match() -> None:
-    """Filter raises UserInputError when no hosts match."""
-    host1 = _make_host("h1", "local")
-    agents_by_host: dict[DiscoveredHost, list[DiscoveredAgent]] = {host1: []}
-
-    host_filter = HostAddress(host=HostName("nonexistent"))
-    with pytest.raises(UserInputError):
-        filter_agents_by_host(agents_by_host, host_filter)
 
 
 # =============================================================================

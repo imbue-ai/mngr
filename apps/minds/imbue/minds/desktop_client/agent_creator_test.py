@@ -30,9 +30,12 @@ from imbue.minds.desktop_client.agent_creator import _is_local_path
 from imbue.minds.desktop_client.agent_creator import _redact_url_credentials
 from imbue.minds.desktop_client.agent_creator import _redact_url_credentials_in_text
 from imbue.minds.desktop_client.agent_creator import extract_repo_name
+from imbue.minds.desktop_client.conftest import FAKE_CONNECTOR_URL
 from imbue.minds.desktop_client.conftest import FakeImbueCloudCli
 from imbue.minds.desktop_client.imbue_cloud_cli import LiteLLMKeyMaterial
 from imbue.minds.desktop_client.notification import NotificationDispatcher
+from imbue.minds.desktop_client.system_interface_health import AgentHealth
+from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
 from imbue.minds.primitives import AIProvider
 from imbue.minds.primitives import CreationId
 from imbue.minds.primitives import LaunchMode
@@ -163,10 +166,16 @@ def test_build_mngr_create_command_imbue_cloud_targets_account_provider() -> Non
     # create_host to ImbueCloudProvider. The agent name is now the constant
     # ``system-services``; the user's input drives the host name.
     assert "system-services@hello.imbue_cloud_alice-imbue-com" in joined
-    # IMBUE_CLOUD does not pass --reuse / --update (each lease is one-shot)
-    # nor --id (the canonical id is parsed from the JSONL ``created`` event).
+    # IMBUE_CLOUD passes ``--reuse`` because the bake's services agent
+    # is named ``system-services`` too, which mngr's pre-flight "agent
+    # already exists on this host" check would otherwise reject. It
+    # does NOT pass ``--update`` (the adopt path in
+    # ``ImbueCloudHost.create_agent_state`` already patches the agent
+    # in place; ``--update`` would re-run the bake's file-transfer
+    # provisioning unnecessarily). No ``--id`` either: the canonical
+    # id is parsed from the JSONL ``created`` event.
     assert "--id" not in command
-    assert "--reuse" not in command
+    assert "--reuse" in command
     assert "--update" not in command
     assert api_key
     # Lease attributes flow through --build-arg.
@@ -229,6 +238,7 @@ def _make_test_creator(
     timeout_seconds: float = 1.0,
     poll_interval_seconds: float = 0.05,
     probe_timeout_seconds: float = 0.5,
+    system_interface_health_tracker: SystemInterfaceHealthTracker | None = None,
 ) -> AgentCreator:
     paths = WorkspacePaths(data_dir=tmp_path)
     cg = ConcurrencyGroup(name="agent-creator-test")
@@ -242,6 +252,7 @@ def _make_test_creator(
         workspace_ready_timeout_seconds=timeout_seconds,
         workspace_ready_poll_interval_seconds=poll_interval_seconds,
         workspace_ready_probe_timeout_seconds=probe_timeout_seconds,
+        system_interface_health_tracker=system_interface_health_tracker or SystemInterfaceHealthTracker(),
     )
 
 
@@ -329,8 +340,46 @@ def test_wait_for_workspace_ready_returns_when_probe_succeeds(tmp_path) -> None:
     drained: list[str] = []
     while not log_q.empty():
         drained.append(log_q.get_nowait())
-    assert any("Waiting for workspace" in line for line in drained)
+    assert any("Waiting for system interface" in line for line in drained)
     assert any("ready" in line.lower() for line in drained)
+
+
+def test_wait_for_workspace_ready_calls_record_success_on_ready(tmp_path) -> None:
+    """Regression: a successful readiness probe must propagate to the health tracker.
+
+    Without the ``record_success`` call, a HEALTHY->STUCK timer armed by an
+    earlier ``system_interface_backend_failure`` envelope would fire AFTER readiness
+    returned, the chrome SSE would receive ``status=stuck``, and the user
+    would land on the workspace-recovery page seconds after their freshly
+    created agent appeared healthy. See ``system_interface_health.py`` for
+    the timer's lifecycle.
+    """
+    tracker = SystemInterfaceHealthTracker()
+    aid = AgentId.generate()
+    # Pre-arm the STUCK timer the way an in-flight warmup failure would.
+    # The agent stays HEALTHY until the 5s timer fires; we want to verify
+    # ``record_success`` cancels the timer before that.
+    tracker.record_failure(aid)
+    assert tracker.get_health(aid) == AgentHealth.HEALTHY
+    server, _thread, port = _start_scripted_server(not_ready_count=0)
+    try:
+        creator = _make_test_creator(
+            tmp_path,
+            mngr_forward_port=port,
+            preauth_cookie="any-preauth",
+            timeout_seconds=2.0,
+            poll_interval_seconds=0.02,
+            probe_timeout_seconds=0.5,
+            system_interface_health_tracker=tracker,
+        )
+        creator._wait_for_workspace_ready(aid, queue.Queue())
+    finally:
+        server.shutdown()
+    # ``record_success`` cancelled the timer + cleared first_failure_at, so
+    # any subsequent record_failure would arm a fresh timer (i.e. the
+    # tracker is no longer mid-failing-run for this agent).
+    assert tracker.get_health(aid) == AgentHealth.HEALTHY
+    assert aid not in tracker.snapshot_all()
 
 
 def test_wait_for_workspace_ready_publishes_anyway_on_timeout(tmp_path) -> None:
@@ -424,6 +473,7 @@ def _make_creator_with_cli(tmp_path: Path, cli: _RecordingImbueCloudCli) -> Agen
         root_concurrency_group=cg,
         notification_dispatcher=NotificationDispatcher.create(is_electron=False, tkinter_module=None, is_macos=False),
         imbue_cloud_cli=cli,
+        system_interface_health_tracker=SystemInterfaceHealthTracker(),
     )
 
 
@@ -442,7 +492,10 @@ def test_start_creation_imbue_cloud_ai_with_local_compute_mints_litellm_key(tmp_
     """The AIProvider.IMBUE_CLOUD branch must mint a LiteLLM key even when the compute
     provider is not IMBUE_CLOUD. The actual ``mngr create`` invocation will fail (no
     real binary / no real repo) but the key-mint must happen first."""
-    cli = _RecordingImbueCloudCli(parent_concurrency_group=ConcurrencyGroup(name="recording-cli"))
+    cli = _RecordingImbueCloudCli(
+        parent_concurrency_group=ConcurrencyGroup(name="recording-cli"),
+        connector_url=FAKE_CONNECTOR_URL,
+    )
     creator = _make_creator_with_cli(tmp_path, cli)
 
     creation_id = creator.start_creation(
@@ -467,7 +520,10 @@ def test_start_creation_imbue_cloud_ai_with_local_compute_mints_litellm_key(tmp_
 def test_start_creation_api_key_ai_does_not_mint_litellm_key(tmp_path: Path) -> None:
     """The API_KEY branch uses the user-supplied key directly and must never call
     ``create_litellm_key``."""
-    cli = _RecordingImbueCloudCli(parent_concurrency_group=ConcurrencyGroup(name="recording-cli"))
+    cli = _RecordingImbueCloudCli(
+        parent_concurrency_group=ConcurrencyGroup(name="recording-cli"),
+        connector_url=FAKE_CONNECTOR_URL,
+    )
     creator = _make_creator_with_cli(tmp_path, cli)
 
     creation_id = creator.start_creation(
@@ -485,7 +541,10 @@ def test_start_creation_api_key_ai_does_not_mint_litellm_key(tmp_path: Path) -> 
 def test_start_creation_subscription_ai_does_not_mint_litellm_key(tmp_path: Path) -> None:
     """The SUBSCRIPTION branch injects no Anthropic creds and must never call
     ``create_litellm_key``."""
-    cli = _RecordingImbueCloudCli(parent_concurrency_group=ConcurrencyGroup(name="recording-cli"))
+    cli = _RecordingImbueCloudCli(
+        parent_concurrency_group=ConcurrencyGroup(name="recording-cli"),
+        connector_url=FAKE_CONNECTOR_URL,
+    )
     creator = _make_creator_with_cli(tmp_path, cli)
 
     creation_id = creator.start_creation(
@@ -502,7 +561,10 @@ def test_start_creation_subscription_ai_does_not_mint_litellm_key(tmp_path: Path
 def test_start_creation_api_key_ai_without_key_fails_with_clear_message(tmp_path: Path) -> None:
     """The API_KEY branch must reject an empty key with a specific error rather than
     silently falling through to mngr create with no key set."""
-    cli = _RecordingImbueCloudCli(parent_concurrency_group=ConcurrencyGroup(name="recording-cli"))
+    cli = _RecordingImbueCloudCli(
+        parent_concurrency_group=ConcurrencyGroup(name="recording-cli"),
+        connector_url=FAKE_CONNECTOR_URL,
+    )
     creator = _make_creator_with_cli(tmp_path, cli)
 
     creation_id = creator.start_creation(

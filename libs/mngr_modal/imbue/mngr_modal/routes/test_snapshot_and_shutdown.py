@@ -22,8 +22,7 @@ from imbue.mngr.utils.testing import register_modal_test_volume
 from imbue.mngr_modal.constants import MODAL_TEST_APP_PREFIX
 from imbue.mngr_modal.routes.deployment import deploy_function
 from imbue.modal_proxy.direct import DirectModalInterface
-
-pytestmark = [pytest.mark.modal]
+from imbue.resource_guards.resource_guards import fixture_uses_resources
 
 # =============================================================================
 # Acceptance tests (require Modal network access)
@@ -129,10 +128,14 @@ def _read_host_record_from_volume(app_name: str, host_id: str) -> dict[str, Any]
 
 
 @pytest.fixture(scope="module")
+@fixture_uses_resources("modal")
 def deployed_snapshot_function() -> Generator[tuple[str, str], None, None]:
     """Deploy the snapshot function for testing and clean up after.
 
-    Yields a tuple of (app_name, function_url).
+    Yields a tuple of (app_name, function_url). Module-scoped so the
+    expensive deploy + cold-start warmup runs exactly once per module
+    execution. The fixture-scope resource guard authorizes the modal
+    calls inside setup/teardown against the fixture's own declaration.
     """
     app_name = _get_test_app_name()
     # The deployed function creates a volume named {app_name}-state
@@ -151,6 +154,7 @@ def deployed_snapshot_function() -> Generator[tuple[str, str], None, None]:
 
 
 @pytest.mark.acceptance
+@pytest.mark.modal
 @pytest.mark.timeout(180)
 def test_snapshot_and_shutdown_success(
     deployed_snapshot_function: tuple[str, str],
@@ -217,7 +221,9 @@ def test_snapshot_and_shutdown_success(
 
 
 @pytest.mark.acceptance
+@pytest.mark.modal
 @pytest.mark.timeout(180)
+@pytest.mark.flaky
 def test_snapshot_and_shutdown_missing_sandbox_id(
     deployed_snapshot_function: tuple[str, str],
 ) -> None:
@@ -235,6 +241,7 @@ def test_snapshot_and_shutdown_missing_sandbox_id(
 
 
 @pytest.mark.acceptance
+@pytest.mark.modal
 @pytest.mark.timeout(180)
 def test_snapshot_and_shutdown_missing_host_id(
     deployed_snapshot_function: tuple[str, str],
@@ -253,6 +260,7 @@ def test_snapshot_and_shutdown_missing_host_id(
 
 
 @pytest.mark.acceptance
+@pytest.mark.modal
 @pytest.mark.timeout(180)
 def test_snapshot_and_shutdown_nonexistent_sandbox(
     deployed_snapshot_function: tuple[str, str],
@@ -278,6 +286,7 @@ def test_snapshot_and_shutdown_nonexistent_sandbox(
 
 
 @pytest.mark.acceptance
+@pytest.mark.modal
 @pytest.mark.timeout(180)
 def test_snapshot_and_shutdown_nonexistent_host_record(
     deployed_snapshot_function: tuple[str, str],

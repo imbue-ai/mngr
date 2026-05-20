@@ -456,7 +456,7 @@ class FakeSuperTokensBackend:
         if exc is not None:
             raise exc
 
-    async def sign_up(
+    def sign_up(
         self,
         *,
         tenant_id: str,
@@ -481,7 +481,7 @@ class FakeSuperTokensBackend:
         user = _build_st_user(account)
         return EPSignUpOkResult(user=user, recipe_user_id=RecipeUserId(account.user_id))
 
-    async def sign_in(
+    def sign_in(
         self,
         *,
         tenant_id: str,
@@ -497,7 +497,7 @@ class FakeSuperTokensBackend:
         user = _build_st_user(account)
         return EPSignInOkResult(user=user, recipe_user_id=RecipeUserId(account.user_id))
 
-    async def is_email_verified(
+    def is_email_verified(
         self,
         *,
         recipe_user_id: RecipeUserId,
@@ -508,7 +508,7 @@ class FakeSuperTokensBackend:
         account = self.accounts_by_id.get(recipe_user_id.get_as_string())
         return account is not None and account.is_verified
 
-    async def send_email_verification_email(
+    def send_email_verification_email(
         self,
         *,
         tenant_id: str,
@@ -522,7 +522,7 @@ class FakeSuperTokensBackend:
         self.verification_tokens[token] = (user_id, email)
         self.sent_verification_emails.append((user_id, email))
 
-    async def create_new_session(
+    def create_new_session(
         self,
         *,
         tenant_id: str,
@@ -538,7 +538,7 @@ class FakeSuperTokensBackend:
         self.sessions_by_refresh_token[session.refresh_token] = session
         return session
 
-    async def refresh_session(
+    def refresh_session(
         self,
         *,
         refresh_token: str,
@@ -557,7 +557,7 @@ class FakeSuperTokensBackend:
         self.sessions_by_refresh_token[session.refresh_token] = session
         return session
 
-    async def revoke_all_sessions_for_user(
+    def revoke_all_sessions_for_user(
         self,
         *,
         user_id: str,
@@ -593,7 +593,7 @@ class FakeSuperTokensBackend:
         del anti_csrf_check, session_required, override_global_claim_validators, user_context
         return self.sessions_by_access_token.get(access_token)
 
-    async def list_users_by_account_info(
+    def list_users_by_account_info(
         self,
         *,
         tenant_id: str,
@@ -607,7 +607,7 @@ class FakeSuperTokensBackend:
             return []
         return [_build_st_user(account)]
 
-    async def send_reset_password_email(
+    def send_reset_password_email(
         self,
         *,
         tenant_id: str,
@@ -623,7 +623,7 @@ class FakeSuperTokensBackend:
         self.sent_reset_emails.append((user_id, email))
         return "OK"
 
-    async def consume_password_reset_token(
+    def consume_password_reset_token(
         self,
         *,
         tenant_id: str,
@@ -641,7 +641,7 @@ class FakeSuperTokensBackend:
         account = self.accounts_by_id[user_id]
         return ConsumePasswordResetTokenOkResult(email=account.email, user_id=user_id)
 
-    async def update_email_or_password(
+    def update_email_or_password(
         self,
         *,
         recipe_user_id: RecipeUserId,
@@ -659,7 +659,7 @@ class FakeSuperTokensBackend:
             account.password = password
         return UpdateEmailOrPasswordOkResult()
 
-    async def verify_email_using_token(
+    def verify_email_using_token(
         self,
         *,
         tenant_id: str,
@@ -682,7 +682,7 @@ class FakeSuperTokensBackend:
             user=EmailVerificationUser(recipe_user_id=RecipeUserId(user_id), email=email),
         )
 
-    async def get_provider(
+    def get_provider(
         self,
         *,
         tenant_id: str,
@@ -693,7 +693,7 @@ class FakeSuperTokensBackend:
         del tenant_id, client_type, user_context
         return self.registered_providers.get(third_party_id)
 
-    async def manually_create_or_update_user(
+    def manually_create_or_update_user(
         self,
         *,
         tenant_id: str,
@@ -759,7 +759,7 @@ class FakePoolRow:
     """In-memory record for a single pool_hosts row."""
 
     host_id: UUID
-    vps_ip: str
+    vps_address: str
     vps_instance_id: str
     agent_id: str
     host_id_str: str
@@ -799,7 +799,7 @@ def _attributes_contain(row_attrs: dict[str, Any], requested: dict[str, Any]) ->
 
 def _make_pool_row(
     host_id: UUID,
-    vps_ip: str,
+    vps_address: str,
     agent_id: str,
     host_id_str: str,
     ssh_port: int,
@@ -813,7 +813,7 @@ def _make_pool_row(
 ) -> FakePoolRow:
     row = FakePoolRow()
     row.host_id = host_id
-    row.vps_ip = vps_ip
+    row.vps_address = vps_address
     row.vps_instance_id = f"vps-{host_id}"
     row.agent_id = agent_id
     row.host_id_str = host_id_str
@@ -859,7 +859,7 @@ class FakeCursor:
                 self._results = [
                     (
                         row.host_id,
-                        row.vps_ip,
+                        row.vps_address,
                         row.ssh_port,
                         row.ssh_user,
                         row.container_ssh_port,
@@ -884,37 +884,44 @@ class FakeCursor:
                     break
 
         elif (
+            "from pool_hosts" in query_lower
+            and "leased_to_user" in query_lower
+            and "select leased_to_user" in query_lower
+        ):
+            # Release endpoint: lookup by id. The connector stringifies
+            # the UUID before passing it as a bind param (psycopg2 can't
+            # adapt Python ``UUID`` directly), so accept either form.
+            # Returns ``(leased_to_user, status)`` so the route can
+            # distinguish 'already-released' (idempotent 200) from
+            # 'leased' (proceed with update) without a second SELECT.
+            raw_host_id = params[0]
+            host_id = UUID(raw_host_id) if isinstance(raw_host_id, str) else raw_host_id
+            for row in self._backend.pool_rows:
+                if row.host_id == host_id:
+                    self._results = [(row.leased_to_user, row.status)]
+                    break
+
+        elif (
             "from pool_hosts" in query_lower and "status = 'leased'" in query_lower and "leased_to_user" in query_lower
         ):
-            if "select leased_to_user" in query_lower:
-                # Release endpoint: lookup by id. The connector stringifies
-                # the UUID before passing it as a bind param (psycopg2 can't
-                # adapt Python ``UUID`` directly), so accept either form.
-                raw_host_id = params[0]
-                host_id = UUID(raw_host_id) if isinstance(raw_host_id, str) else raw_host_id
-                for row in self._backend.pool_rows:
-                    if row.host_id == host_id and row.status == "leased":
-                        self._results = [(row.leased_to_user,)]
-                        break
-            else:
-                # List endpoint: lookup by user
-                username = params[0]
-                for row in self._backend.pool_rows:
-                    if row.status == "leased" and row.leased_to_user == username:
-                        self._results.append(
-                            (
-                                row.host_id,
-                                row.vps_ip,
-                                row.ssh_port,
-                                row.ssh_user,
-                                row.container_ssh_port,
-                                row.agent_id,
-                                row.host_id_str,
-                                row.host_name,
-                                _row_attributes(row),
-                                row.leased_at,
-                            )
+            # List endpoint: lookup by user
+            username = params[0]
+            for row in self._backend.pool_rows:
+                if row.status == "leased" and row.leased_to_user == username:
+                    self._results.append(
+                        (
+                            row.host_id,
+                            row.vps_address,
+                            row.ssh_port,
+                            row.ssh_user,
+                            row.container_ssh_port,
+                            row.agent_id,
+                            row.host_id_str,
+                            row.host_name,
+                            _row_attributes(row),
+                            row.leased_at,
                         )
+                    )
 
         elif "update pool_hosts set status = 'released'" in query_lower:
             raw_host_id = params[0]
@@ -1013,7 +1020,7 @@ class FakePoolBackend:
         self,
         host_id: UUID,
         version: str,
-        vps_ip: str = "203.0.113.10",
+        vps_address: str = "203.0.113.10",
         ssh_port: int = 22,
         ssh_user: str = "root",
         container_ssh_port: int = 2222,
@@ -1024,7 +1031,7 @@ class FakePoolBackend:
         """Add an available host to the in-memory pool."""
         row = _make_pool_row(
             host_id=host_id,
-            vps_ip=vps_ip,
+            vps_address=vps_address,
             agent_id=agent_id,
             host_id_str=host_id_str,
             ssh_port=ssh_port,
@@ -1041,7 +1048,7 @@ class FakePoolBackend:
         host_id: UUID,
         version: str,
         leased_to_user: str,
-        vps_ip: str = "203.0.113.10",
+        vps_address: str = "203.0.113.10",
         ssh_port: int = 22,
         ssh_user: str = "root",
         container_ssh_port: int = 2222,
@@ -1052,7 +1059,7 @@ class FakePoolBackend:
         """Add a leased host to the in-memory pool."""
         row = _make_pool_row(
             host_id=host_id,
-            vps_ip=vps_ip,
+            vps_address=vps_address,
             agent_id=agent_id,
             host_id_str=host_id_str,
             ssh_port=ssh_port,

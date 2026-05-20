@@ -70,6 +70,19 @@ class HostInterface(MutableModel, ABC):
     """Interface for host implementations."""
 
     id: HostId = Field(frozen=True, description="Unique identifier for this host")
+    pre_baked_agent_id: AgentId | None = Field(
+        default=None,
+        frozen=True,
+        description=(
+            "Agent id of an agent that already exists on this host at host-creation "
+            "time and that ``create_agent_state`` is expected to adopt in place "
+            "(rather than treat as a duplicate-name collision). Set by providers "
+            "whose ``create_host`` returns a host with a baked-in agent -- "
+            "``ImbueCloudHost`` is the only example today (the lease surfaces a "
+            "pre-baked ``system-services`` agent). ``None`` for every other "
+            "provider, in which case the standard duplicate-name check applies."
+        ),
+    )
 
     @property
     @abstractmethod
@@ -159,6 +172,29 @@ class HostInterface(MutableModel, ABC):
         """Return lightweight data for all agents on this host."""
         ...
 
+    @abstractmethod
+    def rename_agent(
+        self,
+        agent_ref: DiscoveredAgent,
+        new_name: AgentName,
+        labels_to_merge: Mapping[str, str] | None = None,
+    ) -> DiscoveredAgent:
+        """Rename an agent (and optionally merge labels in the same write) and return its updated ref.
+
+        Works on both online and offline hosts. Online hosts additionally
+        rename the agent's tmux session and update its env file; offline
+        hosts edit only the provider's persisted agent data (data.json is
+        the source of truth for the agent name).
+
+        When ``labels_to_merge`` is non-empty, those keys/values are merged
+        into the agent's existing labels as part of the same read-modify-
+        write of ``data.json``, so an external observer (e.g. ``mngr
+        observe``) never sees an in-between state where the new name is set
+        but the new labels are not. Existing label keys are overwritten by
+        ``labels_to_merge``.
+        """
+        ...
+
     # =========================================================================
     # Agent-Derived Information
     # =========================================================================
@@ -211,8 +247,16 @@ class OuterHostInterface(MutableModel, ABC):
         ...
 
     @abstractmethod
-    def get_name(self) -> HostName:
-        """Return the human-readable name of this host."""
+    def get_name(self) -> str:
+        """Return the connector's display name (e.g. SSH hostname or IP).
+
+        Returns ``str`` -- not ``HostName`` -- because an outer host's name
+        is the literal connection target, which is commonly a dotted IPv4
+        address (``192.0.2.10``) or DNS name (``vps-x.vps.ovh.us``);
+        ``HostName`` forbids dots since it doubles as a CLI address token.
+        The ``Host`` subclass overrides this and returns a ``HostName``,
+        which is a ``str`` subclass and so satisfies the wider type here.
+        """
         ...
 
     @abstractmethod
@@ -551,23 +595,6 @@ class OnlineHostInterface(HostInterface, OuterHostInterface, ABC):
         mngr_ctx: MngrContext,
     ) -> None:
         """Install packages, create config files, and set up an agent."""
-        ...
-
-    @abstractmethod
-    def rename_agent(
-        self,
-        agent: AgentInterface,
-        new_name: AgentName,
-        labels_to_merge: Mapping[str, str] | None = None,
-    ) -> AgentInterface:
-        """Rename an agent (and optionally merge labels in the same write) and return it.
-
-        When ``labels_to_merge`` is non-empty, those keys/values are merged into
-        the agent's existing labels as part of the same read-modify-write of
-        ``data.json``, so an external observer (e.g. ``mngr observe``) never
-        sees an in-between state where the new name is set but the new labels
-        are not. Existing label keys are overwritten by ``labels_to_merge``.
-        """
         ...
 
     @abstractmethod

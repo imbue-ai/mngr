@@ -1,304 +1,419 @@
-"""CLI command to provision pool hosts for LEASED mode.
+"""``minds pool {create,list,destroy}`` -- env-aware wrapper around ``mngr imbue_cloud admin pool``.
 
-Creates Vultr VPS hosts using the same mngr create flow as CLOUD mode,
-then stops the agent, installs a management SSH key, opens the container
-SSH port in UFW, and registers the host in the pool database.
+Responsibility split:
+
+* ``mngr imbue_cloud admin pool create`` (in ``libs/mngr_imbue_cloud``) is the
+  provider-generic host-creation step. It accepts a required ``--region`` and
+  repeatable ``--tag KEY=VALUE`` and knows nothing about minds environments.
+* This module is the env-aware layer. From the activated minds env
+  (``MINDS_ROOT_NAME``) it:
+    1. injects ``--tag minds_env=<env-name>`` so ``minds env destroy`` can
+       later enumerate + delete every VPS the env owns (via the OVH IAM v2
+       tag walker in :mod:`imbue.minds.envs.providers.ovh_tags`);
+    2. reads the activated tier's OVH AK/AS/CK from Vault
+       (``<vault_path_prefix>/ovh``) and injects them into the admin
+       subprocess env so the inner ``mngr create ... --template ovh`` has
+       credentials;
+    3. derives the management public key from the activated tier's
+       ``<vault_path_prefix>/pool-ssh.POOL_SSH_PRIVATE_KEY`` Vault entry
+       (the connector runs with the SAME private key as a Modal Secret) and
+       passes it to the admin's ``--management-public-key-file`` -- so the
+       key injected on the VPS at bake time always matches the connector's
+       at lease time. This closes the keypair-mismatch class of bake
+       failures that hand-rolled ``--management-public-key-file`` paths used
+       to leak. Operators can still pass ``--management-public-key-file``
+       to force a specific key (escape hatch for one-off / non-vault setups).
+  All other admin flags (``--count`` / ``--attributes`` / ``--workspace-dir``
+  / ``--database-url`` / ``--mngr-source``) forward 1:1.
+
+Transport is subprocess (``mngr imbue_cloud admin pool ...``) to match the
+rest of the minds env CLI's mngr invocations and to keep the minds -> mngr
+dependency direction unchanged.
+
+The argument-construction logic (``build_*_args``) is split out from the
+click commands so unit tests can verify the env-name injection + flag
+forwarding behaviour without standing up a fake subprocess runner.
 """
 
-import json
+import contextlib
+import os
 import shlex
+import sys
+import tempfile
+from collections.abc import Iterator
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Any
 from typing import Final
-from uuid import uuid4
 
 import click
-import psycopg2
 from loguru import logger
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
-from imbue.concurrency_group.errors import ConcurrencyGroupError
 from imbue.concurrency_group.subprocess_utils import FinishedProcess
-from imbue.minds.desktop_client.api_key_store import generate_api_key
+from imbue.minds.cli._activated_env import require_activated_env_name
+from imbue.minds.cli._activated_env import tier_for_env_name
+from imbue.minds.config.loader import load_deploy_config
+from imbue.minds.envs.primitives import VaultReadError
+from imbue.minds.envs.vault_reader import VaultPath
+from imbue.minds.envs.vault_reader import read_vault_kv
 
-_CONTAINER_SSH_PORT: Final[int] = 2222
-_MNGR_COMMAND_TIMEOUT_SECONDS: Final[int] = 600
+_POOL_COMMAND_TIMEOUT_SECONDS: Final[int] = 7200
 
-# Manual rsync excludes layered on top of `--filter=:- .gitignore`. The
-# filter handles `__pycache__`, `.venv`, `node_modules`, `.test_output`,
-# `.mypy_cache`, `.ruff_cache`, `.pytest_cache`, `.external_worktrees`, and
-# anything else mngr's gitignore lists. These two patterns are NOT in
-# .gitignore so we exclude them explicitly:
-#   - `.git`: gitignore never lists it; it's git's internal dir.
-#   - `uv.lock`: intentionally committed at the mngr root, but each install
-#     context should regenerate its own.
-_RSYNC_MANUAL_EXCLUDES: Final[tuple[str, ...]] = (".git", "uv.lock")
-_GITIGNORE_RSYNC_FILTER: Final[str] = ":- .gitignore"
-_SSH_COMMAND_TIMEOUT_SECONDS: Final[int] = 60
+# OVH provider-config env vars consumed by ``OvhProviderConfig`` (in
+# ``libs/mngr_ovh``). The three AK/AS/CK keys are required; the
+# endpoint is optional (defaults to ``ovh-us`` in the provider config).
+_OVH_REQUIRED_ENV_VARS: Final[tuple[str, ...]] = (
+    "OVH_APPLICATION_KEY",
+    "OVH_APPLICATION_SECRET",
+    "OVH_CONSUMER_KEY",
+)
+_OVH_OPTIONAL_ENV_VARS: Final[tuple[str, ...]] = ("OVH_ENDPOINT",)
+
+# Vault key the management SSH private key lives under (per host-pool-setup.md
+# step 2). The connector deploys with this private key pushed to a Modal
+# Secret; the pool VPS's authorized_keys must hold the matching public key.
+_POOL_MGMT_PRIVATE_KEY_VAULT_FIELD: Final[str] = "POOL_SSH_PRIVATE_KEY"
+# How long ``ssh-keygen -y`` should take to derive a public key from a
+# small ed25519/RSA private key. Generous so a contended box doesn't
+# spuriously fail the bake at the very first step.
+_SSH_KEYGEN_DERIVE_TIMEOUT_SECONDS: Final[float] = 10.0
 
 
-def _run_mngr_command(
-    args: list[str],
-    cwd: Path | None = None,
-    timeout: int = _MNGR_COMMAND_TIMEOUT_SECONDS,
-) -> FinishedProcess:
-    """Run a mngr CLI command and return the result."""
-    full_command = ["mngr"] + args
-    logger.info("  Running: {}", " ".join(full_command))
-    cg = ConcurrencyGroup(name="pool-mngr")
+def build_create_admin_args(
+    *,
+    env_name: str,
+    count: int,
+    region: str,
+    attributes_json: str,
+    workspace_dir: str,
+    management_public_key_file: str,
+    database_url: str | None,
+    mngr_source: str | None,
+) -> list[str]:
+    """Compose the ``mngr imbue_cloud admin pool create`` argv from minds-side inputs.
+
+    Auto-injects ``--tag minds_env=<env_name>``; forwards every other
+    user-supplied flag verbatim. Split out from the click command so
+    tests can exercise the wiring without faking a subprocess.
+
+    ``--database-url`` is forwarded only when explicitly supplied. When
+    omitted, the admin CLI auto-resolves the DSN from the activated
+    minds env's ``secrets.toml`` (which the deploy wrote).
+    """
+    args = [
+        "create",
+        "--count",
+        str(count),
+        "--region",
+        region,
+        "--tag",
+        f"minds_env={env_name}",
+        "--attributes",
+        attributes_json,
+        "--workspace-dir",
+        workspace_dir,
+        "--management-public-key-file",
+        management_public_key_file,
+    ]
+    if database_url is not None:
+        args.extend(["--database-url", database_url])
+    if mngr_source is not None:
+        args.extend(["--mngr-source", mngr_source])
+    return args
+
+
+def build_list_admin_args(*, database_url: str | None) -> list[str]:
+    """Compose the ``mngr imbue_cloud admin pool list`` argv.
+
+    ``--database-url`` forwarded only when explicitly supplied; see
+    :func:`build_create_admin_args`.
+    """
+    args = ["list"]
+    if database_url is not None:
+        args.extend(["--database-url", database_url])
+    return args
+
+
+def build_destroy_admin_args(*, pool_host_id: str, database_url: str | None, force: bool) -> list[str]:
+    """Compose the ``mngr imbue_cloud admin pool destroy`` argv."""
+    args = ["destroy", pool_host_id]
+    if database_url is not None:
+        args.extend(["--database-url", database_url])
+    if force:
+        args.append("--force")
+    return args
+
+
+def _stream_subprocess_line(line: str, is_stdout: bool) -> None:
+    """Mirror a child-process line to our stderr in real time.
+
+    Match the line-streaming helper in ``mngr_imbue_cloud.cli.admin``:
+    we want to faithfully echo the inner ``mngr imbue_cloud admin pool``
+    output without loguru's timestamp/level prefix, so a multi-host bake
+    isn't a silent black box. ``logger.info`` would distort the format;
+    ``write_human_line`` is for one-shot status messages, not streamed
+    subprocess output.
+    """
+    suffix = "" if line.endswith("\n") else "\n"
+    sys.stderr.write(line + suffix)
+    sys.stderr.flush()
+
+
+def merge_ovh_env_into_subprocess_env(*, shell_env: Mapping[str, str], ovh_env: Mapping[str, str]) -> dict[str, str]:
+    """Build the subprocess env: start from ``shell_env``, then layer ``ovh_env`` on top.
+
+    OVH values from the activated tier's Vault entry win over whatever the
+    operator may have lying around in their shell. The operator's mental
+    model when running ``minds pool create`` (with an activated env) is
+    "this provisions hosts for the active tier" -- so the active tier's
+    creds are the source of truth, not a stale ``OVH_APPLICATION_KEY``
+    that might still be exported from a different tier's bake last week.
+
+    Pure function so the precedence rule is testable without a fake
+    subprocess runner or a fake Vault.
+    """
+    merged = dict(shell_env)
+    merged.update(ovh_env)
+    return merged
+
+
+def derive_public_key_from_private(
+    private_key_pem: str,
+    *,
+    parent_cg: ConcurrencyGroup | None = None,
+) -> str:
+    """Run ``ssh-keygen -y`` to derive the public key from a private key PEM.
+
+    ``ssh-keygen`` only reads from a file (not stdin), so the private key
+    is written to a 0600 temp file for the call and unlinked immediately
+    after. The returned string is the standard ``"<type> <base64>"`` form
+    (without a comment), suitable for an ``authorized_keys`` line.
+
+    Raises ``click.ClickException`` if ``ssh-keygen`` is missing or fails.
+    """
+    cg = (
+        parent_cg.make_concurrency_group(name="ssh-keygen-derive-pub")
+        if parent_cg is not None
+        else ConcurrencyGroup(name="ssh-keygen-derive-pub")
+    )
+    with tempfile.NamedTemporaryFile(mode="w", suffix="_priv", delete=False) as tmp:
+        tmp.write(private_key_pem)
+        if not private_key_pem.endswith("\n"):
+            tmp.write("\n")
+        tmp_path = tmp.name
+    try:
+        os.chmod(tmp_path, 0o600)
+        with cg:
+            result = cg.run_process_to_completion(
+                command=["ssh-keygen", "-y", "-f", tmp_path],
+                timeout=_SSH_KEYGEN_DERIVE_TIMEOUT_SECONDS,
+                is_checked_after=False,
+            )
+    finally:
+        os.unlink(tmp_path)
+    if result.returncode != 0:
+        raise click.ClickException(
+            f"`ssh-keygen -y` failed (exit {result.returncode}) while deriving the management "
+            f"public key from the Vault-stored private key: {result.stderr.strip()}"
+        )
+    derived = result.stdout.strip()
+    if not derived:
+        raise click.ClickException(
+            "`ssh-keygen -y` produced empty output while deriving the management public key; "
+            "the Vault-stored private key may be malformed."
+        )
+    return derived
+
+
+def resolve_management_public_key_from_vault(
+    env_name: str,
+    *,
+    parent_cg: ConcurrencyGroup | None = None,
+) -> str:
+    """Read the activated tier's management private key from Vault, return its public form.
+
+    Looks up the tier for ``env_name``, loads the corresponding deploy
+    config to discover ``vault_path_prefix``, then reads
+    ``<prefix>/pool-ssh.POOL_SSH_PRIVATE_KEY`` via the standard
+    ``read_vault_kv`` shellout. The returned public key is the openssh
+    ``authorized_keys`` line form (no comment), ready to write to the
+    file the inner admin CLI's ``--management-public-key-file`` reads.
+
+    Same Vault entry as the one ``minds env deploy`` pushes into the
+    ``pool-ssh-<tier>`` Modal Secret -- so the bake-time injection and
+    the connector's lease-time SSH auth always come from the same
+    keypair. The original "operator picks a public key by hand" path led
+    to silent mismatches (the operator generated a fresh key, baked a
+    VPS the connector then couldn't talk to); deriving here makes that
+    failure mode unreachable for the minds-side caller.
+
+    Raises ``click.ClickException`` if the Vault entry is missing the
+    required private-key field or if ``ssh-keygen -y`` cannot parse it.
+    Raises ``VaultReadError`` for any underlying Vault read failure.
+    """
+    tier = tier_for_env_name(env_name)
+    deploy_config = load_deploy_config(tier)
+    vault_prefix = str(deploy_config.vault_path_prefix).rstrip("/")
+    secret = read_vault_kv(VaultPath(f"{vault_prefix}/pool-ssh"), parent_concurrency_group=parent_cg)
+    private_key = secret.get(_POOL_MGMT_PRIVATE_KEY_VAULT_FIELD, "")
+    if not private_key:
+        raise click.ClickException(
+            f"Vault entry {vault_prefix}/pool-ssh is missing {_POOL_MGMT_PRIVATE_KEY_VAULT_FIELD!r}; "
+            "see apps/minds/docs/host-pool-setup.md step 2 for the schema."
+        )
+    return derive_public_key_from_private(private_key, parent_cg=parent_cg)
+
+
+@contextlib.contextmanager
+def resolved_management_public_key_path(
+    env_name: str,
+    *,
+    explicit_path: str | None,
+    parent_cg: ConcurrencyGroup | None = None,
+) -> Iterator[str]:
+    """Yield a filesystem path the inner admin CLI can hand to ``--management-public-key-file``.
+
+    Two source-of-truth modes, in precedence order:
+
+    1. ``explicit_path`` (from ``--management-public-key-file``): operator
+       override. Yielded unchanged. Escape hatch for one-off bakes where
+       the operator deliberately wants a non-canonical key.
+    2. Vault (default): :func:`resolve_management_public_key_from_vault`
+       derives the public form from the activated tier's
+       ``<vault_path_prefix>/pool-ssh.POOL_SSH_PRIVATE_KEY`` entry. The
+       derived key is written to a private temp file that's cleaned up
+       when the context exits (so the inner CLI sees ``exists=True`` and
+       no stale public-key files litter the operator's machine).
+    """
+    if explicit_path is not None:
+        yield explicit_path
+        return
+    pub_text = resolve_management_public_key_from_vault(env_name, parent_cg=parent_cg)
+    with tempfile.TemporaryDirectory(prefix="minds-pool-mgmt-pub-") as tmpdir:
+        pub_path = Path(tmpdir) / "id_ed25519.pub"
+        pub_path.write_text(pub_text + "\n")
+        yield str(pub_path)
+
+
+def resolve_ovh_env_from_vault(
+    env_name: str,
+    *,
+    parent_cg: ConcurrencyGroup | None = None,
+) -> dict[str, str]:
+    """Read the activated tier's OVH AK/AS/CK from Vault, return as env-var dict.
+
+    Looks up the tier for ``env_name`` (``production`` / ``staging`` /
+    ``dev``), loads the corresponding deploy config to discover
+    ``vault_path_prefix``, then reads ``<prefix>/ovh`` from Vault via the
+    standard ``read_vault_kv`` shellout (so the operator's existing
+    ``vault login`` + ``VAULT_ADDR`` / ``VAULT_NAMESPACE`` are honored).
+
+    The required keys ``OVH_APPLICATION_KEY`` / ``OVH_APPLICATION_SECRET``
+    / ``OVH_CONSUMER_KEY`` must all be present and non-empty; the
+    optional ``OVH_ENDPOINT`` is included if set. Missing required keys
+    raise ``click.ClickException`` with a pointer at the setup doc.
+
+    Raises ``VaultReadError`` if the Vault read itself fails (binary
+    missing, not logged in, entry absent, malformed payload).
+    """
+    tier = tier_for_env_name(env_name)
+    deploy_config = load_deploy_config(tier)
+    vault_prefix = str(deploy_config.vault_path_prefix).rstrip("/")
+    secret = read_vault_kv(VaultPath(f"{vault_prefix}/ovh"), parent_concurrency_group=parent_cg)
+    missing = [key for key in _OVH_REQUIRED_ENV_VARS if not secret.get(key)]
+    if missing:
+        raise click.ClickException(
+            f"Vault entry {vault_prefix}/ovh is missing required key(s) {missing}; "
+            "see apps/minds/docs/host-pool-setup.md step 3 for the schema."
+        )
+    env_vars: dict[str, str] = {key: secret[key] for key in _OVH_REQUIRED_ENV_VARS}
+    for key in _OVH_OPTIONAL_ENV_VARS:
+        if value := secret.get(key):
+            env_vars[key] = value
+    return env_vars
+
+
+def _run_admin_command(args: list[str], *, extra_env: Mapping[str, str] | None = None) -> FinishedProcess:
+    """Run ``mngr imbue_cloud admin pool <args>`` and return the result.
+
+    Streams the child's output line-by-line so a multi-host bake isn't a
+    silent black box. Forwards the current process env, with ``extra_env``
+    layered on top so callers can inject the activated tier's OVH AK/AS/CK
+    (read from Vault by :func:`resolve_ovh_env_from_vault`) without having
+    to mutate the parent process's environment.
+    """
+    full_command = ["mngr", "imbue_cloud", "admin", "pool"] + args
+    logger.info("Running: {}", " ".join(shlex.quote(part) for part in full_command))
+    subprocess_env: dict[str, str] | None = None
+    if extra_env:
+        subprocess_env = merge_ovh_env_into_subprocess_env(shell_env=os.environ, ovh_env=extra_env)
+    cg = ConcurrencyGroup(name="minds-pool")
     with cg:
         return cg.run_process_to_completion(
             command=full_command,
-            timeout=float(timeout),
+            timeout=float(_POOL_COMMAND_TIMEOUT_SECONDS),
             is_checked_after=False,
-            cwd=cwd,
+            on_output=_stream_subprocess_line,
+            env=subprocess_env,
         )
 
 
-def _run_ssh_command(
-    vps_ip: str,
-    ssh_key_path: str,
-    port: int,
-    command: str,
-) -> bool:
-    """Run a command on a host via SSH. Returns True on success."""
-    ssh_command = [
-        "ssh",
-        "-o",
-        "StrictHostKeyChecking=no",
-        "-o",
-        "UserKnownHostsFile=/dev/null",
-        "-o",
-        "ConnectTimeout=15",
-        "-i",
-        ssh_key_path,
-        "-p",
-        str(port),
-        "root@{}".format(vps_ip),
-        command,
-    ]
-    logger.info("  SSH {}:{}: {}", vps_ip, port, command)
-    cg = ConcurrencyGroup(name="pool-ssh")
-    with cg:
-        result = cg.run_process_to_completion(
-            command=ssh_command,
-            timeout=float(_SSH_COMMAND_TIMEOUT_SECONDS),
-            is_checked_after=False,
-        )
+def _raise_on_failure(label: str, result: FinishedProcess) -> None:
     if result.returncode != 0:
-        logger.warning("SSH command failed: {}", result.stderr.strip())
-        return False
-    return True
-
-
-def _get_agent_info(agent_name: str) -> dict[str, Any] | None:
-    """Query mngr list --format json and find the agent by name."""
-    result = _run_mngr_command(
-        ["list", "--format", "json", "--include", 'name == "{}"'.format(agent_name)],
-        timeout=60,
-    )
-    if result.returncode != 0:
-        logger.warning("mngr list failed: {}", result.stderr)
-        return None
-
-    try:
-        data = json.loads(result.stdout)
-    except json.JSONDecodeError:
-        logger.warning("Failed to parse mngr list output")
-        return None
-
-    agents: list[dict[str, Any]] = []
-    if isinstance(data, dict) and "agents" in data:
-        agents = data["agents"]
-    elif isinstance(data, list):
-        agents = data
-    else:
-        return None
-
-    for agent in agents:
-        if isinstance(agent, dict) and agent.get("name") == agent_name:
-            return agent
-    return None
-
-
-def _sync_mngr_into_template(mngr_source: Path, workspace_dir: Path) -> None:
-    """Rsync the mngr monorepo into the template's vendor/mngr/ directory."""
-    vendor_mngr = workspace_dir / "vendor" / "mngr"
-    vendor_mngr.mkdir(parents=True, exist_ok=True)
-    exclude_args: list[str] = []
-    for pattern in _RSYNC_MANUAL_EXCLUDES:
-        exclude_args.extend(["--exclude", pattern])
-    command = (
-        ["rsync", "-a", "--delete", "--filter={}".format(_GITIGNORE_RSYNC_FILTER)]
-        + exclude_args
-        + [
-            "{}/".format(mngr_source),
-            "{}/".format(vendor_mngr),
-        ]
-    )
-    logger.info("Syncing mngr source into {}", vendor_mngr)
-    cg = ConcurrencyGroup(name="rsync-vendor")
-    with cg:
-        result = cg.run_process_to_completion(
-            command=command,
-            is_checked_after=False,
-            timeout=120.0,
-        )
-    if result.returncode != 0:
-        logger.warning("rsync failed (exit {}): {}", result.returncode, result.stderr.strip())
-
-
-def _create_single_pool_host(
-    workspace_dir: Path,
-    version: str,
-    management_public_key: str,
-    database_url: str,
-) -> bool:
-    """Create a single pool host. Returns True on success."""
-    suffix = uuid4().hex
-    agent_name = "pool-{}".format(suffix)
-    host_name = "{}-host".format(agent_name)
-    address = "{}@{}.vultr".format(agent_name, host_name)
-
-    logger.info("Creating pool host: {}", address)
-
-    api_key = generate_api_key()
-    mngr_command = [
-        "create",
-        address,
-        "--new-host",
-        "--no-connect",
-        "--idle-mode",
-        "disabled",
-        "--template",
-        "main",
-        "--template",
-        "vultr",
-        "--env",
-        "MINDS_API_KEY={}".format(api_key),
-        "--label",
-        "workspace={}".format(agent_name),
-        "--label",
-        "user_created=true",
-        "--label",
-        "is_primary=true",
-        "--label",
-        "pool_version={}".format(version),
-    ]
-    mngr_command.extend(
-        [
-            "--host-env",
-            "MNGR_HOST_DIR=/mngr",
-            "--pass-host-env",
-            "MNGR_PREFIX",
-        ]
-    )
-
-    create_result = _run_mngr_command(mngr_command, cwd=workspace_dir)
-    if create_result.returncode != 0:
-        logger.error("mngr create failed: {}", create_result.stderr)
-        return False
-
-    logger.info("  Created agent: {}", agent_name)
-
-    # Stop the agent but keep the container running
-    stop_result = _run_mngr_command(["stop", agent_name])
-    if stop_result.returncode != 0:
-        logger.warning("mngr stop failed (continuing): {}", stop_result.stderr)
-
-    # Ensure sshd stays running in the container
-    logger.info("  Ensuring sshd is running in container")
-    _run_mngr_command(["exec", agent_name, "/usr/sbin/sshd"], timeout=30)
-
-    # Get agent info
-    agent_info = _get_agent_info(agent_name)
-    if agent_info is None:
-        logger.error("Could not find agent info for {}", agent_name)
-        return False
-
-    host = agent_info.get("host")
-    if not isinstance(host, dict):
-        logger.error("No host info in agent data")
-        return False
-
-    ssh = host.get("ssh")
-    if not isinstance(ssh, dict):
-        logger.error("No SSH info in host data")
-        return False
-
-    vps_ip = ssh.get("host")
-    if not isinstance(vps_ip, str):
-        logger.error("No VPS IP in SSH info")
-        return False
-
-    container_key_path = ssh.get("key_path")
-    if not isinstance(container_key_path, str):
-        logger.error("No SSH key path in host data")
-        return False
-
-    agent_id = str(agent_info.get("id", ""))
-    host_id = str(host.get("id", ""))
-    if not agent_id or not host_id:
-        logger.error("Missing agent_id or host_id")
-        return False
-
-    # Derive the VPS SSH key path from the container key path
-    vps_key_path = str(Path(container_key_path).parent / "vps_ssh_key")
-
-    # Open the container SSH port in UFW
-    _run_ssh_command(vps_ip, vps_key_path, 22, "ufw allow {}/tcp".format(_CONTAINER_SSH_PORT))
-
-    # Install management key on VPS
-    key_line = shlex.quote(management_public_key.strip())
-    install_cmd = "mkdir -p ~/.ssh && chmod 700 ~/.ssh && echo {} >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys".format(
-        key_line
-    )
-    _run_ssh_command(vps_ip, vps_key_path, 22, install_cmd)
-
-    # Install management key in container
-    logger.info("  Installing management key in container via mngr exec")
-    _run_mngr_command(["exec", agent_name, install_cmd], timeout=60)
-
-    # Insert into pool_hosts table
-    row_id = uuid4()
-    conn = psycopg2.connect(database_url)
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
-                "INSERT INTO pool_hosts "
-                "(id, vps_ip, vps_instance_id, agent_id, host_id, ssh_port, ssh_user, "
-                "container_ssh_port, status, version, created_at) "
-                "VALUES (%s, %s, %s, %s, %s, 22, 'root', %s, 'available', %s, NOW()) "
-                "RETURNING id",
-                (str(row_id), vps_ip, host_id, agent_id, host_id, _CONTAINER_SSH_PORT, version),
-            )
-            conn.commit()
-    finally:
-        conn.close()
-
-    logger.info("  Pool host ready: id={}, agent_id={}, vps_ip={}", row_id, agent_id, vps_ip)
-    return True
+        raise click.ClickException(f"mngr imbue_cloud admin pool {label} failed (exit {result.returncode}).")
 
 
 @click.group()
 def pool() -> None:
-    """Manage the pre-provisioned host pool for LEASED mode."""
+    """Pool-host orchestration for the currently activated minds env."""
 
 
-@pool.command("create")
+@pool.command(name="create")
 @click.option("--count", required=True, type=int, help="Number of pool hosts to create")
-@click.option("--version", required=True, type=str, help="Version label (e.g. v0.1.0 or branch name)")
 @click.option(
-    "--workspace-dir", required=True, type=click.Path(exists=True), help="Path to the template repo checkout"
+    "--region",
+    required=True,
+    type=str,
+    help=(
+        "OVH datacenter code for the new pool VPSes (e.g. ``US-EAST-VA``, ``US-WEST-OR``). "
+        "Validated by OVH at order time."
+    ),
+)
+@click.option(
+    "--attributes",
+    "attributes_json",
+    required=True,
+    help='Lease-attributes JSON for the new pool rows (e.g. \'{"version":"v1.2.3","cpus":2,"memory_gb":4}\')',
+)
+@click.option(
+    "--workspace-dir",
+    required=True,
+    type=click.Path(exists=True),
+    help="Path to the template repo checkout",
 )
 @click.option(
     "--management-public-key-file",
-    required=True,
+    required=False,
+    default=None,
     type=click.Path(exists=True),
-    help="Path to the management SSH public key",
+    help=(
+        "Override path for the management SSH public key injected on the pool VPS+container. "
+        "Default (omitted): derive from the activated tier's Vault entry "
+        "`<vault_path_prefix>/pool-ssh.POOL_SSH_PRIVATE_KEY` -- the same private key the connector "
+        "loads from its `pool-ssh-<tier>` Modal Secret, which guarantees the lease-time SSH-key "
+        "injection authenticates. Pass this only when bypassing the tier's canonical keypair."
+    ),
 )
 @click.option(
-    "--database-url", required=True, type=str, envvar="DATABASE_URL", help="Neon PostgreSQL direct connection string"
+    "--database-url",
+    required=False,
+    default=None,
+    type=str,
+    help=(
+        "Neon PostgreSQL direct connection string for the pool DB. Optional: "
+        "defaults to the activated minds env's NEON_HOST_POOL_DSN (written by "
+        "`minds env deploy`). Pass explicitly only when overriding."
+    ),
 )
 @click.option(
     "--mngr-source",
@@ -308,41 +423,92 @@ def pool() -> None:
 )
 def pool_create(
     count: int,
-    version: str,
+    region: str,
+    attributes_json: str,
     workspace_dir: str,
-    management_public_key_file: str,
-    database_url: str,
+    management_public_key_file: str | None,
+    database_url: str | None,
     mngr_source: str | None,
 ) -> None:
-    """Create pre-provisioned pool hosts for LEASED mode."""
-    management_public_key = Path(management_public_key_file).read_text().strip()
-    if not management_public_key:
-        logger.error("Management public key file is empty")
-        raise SystemExit(1)
+    """Create pool hosts for the activated minds env (OVH-backed via admin).
 
-    workspace_path = Path(workspace_dir)
-    if mngr_source is not None:
-        _sync_mngr_into_template(Path(mngr_source), workspace_path)
-
-    logger.info("Creating {} pool host(s) with version={}", count, version)
-
-    success_count = 0
-    for i in range(1, count + 1):
-        logger.info("[{}/{}]", i, count)
-        try:
-            is_success = _create_single_pool_host(
-                workspace_dir=workspace_path,
-                version=version,
-                management_public_key=management_public_key,
+    Reads the activated tier's OVH AK/AS/CK from Vault before invoking the
+    admin subcommand and injects them into the subprocess env, so the
+    operator never has to manually export them. Likewise derives the
+    management public key from the tier's ``<vault_path_prefix>/pool-ssh``
+    entry (unless ``--management-public-key-file`` overrides) -- the
+    activated env dictates which tier, which keeps "I'm on dev, I bake
+    against the dev OVH account using the dev management keypair" the
+    unambiguous default and makes the keypair-mismatch class of bake
+    failures unreachable for the standard path.
+    """
+    env_name = require_activated_env_name()
+    try:
+        ovh_env = resolve_ovh_env_from_vault(env_name)
+    except VaultReadError as exc:
+        raise click.ClickException(f"Could not read OVH credentials from Vault for env '{env_name}': {exc}") from exc
+    try:
+        with resolved_management_public_key_path(
+            env_name, explicit_path=management_public_key_file
+        ) as effective_mgmt_pub_path:
+            args = build_create_admin_args(
+                env_name=env_name,
+                count=count,
+                region=region,
+                attributes_json=attributes_json,
+                workspace_dir=workspace_dir,
+                management_public_key_file=effective_mgmt_pub_path,
                 database_url=database_url,
+                mngr_source=mngr_source,
             )
-        except (ConcurrencyGroupError, psycopg2.Error, OSError) as exc:
-            logger.warning("[{}] Failed: {}", i, exc)
-            is_success = False
+            _raise_on_failure("create", _run_admin_command(args, extra_env=ovh_env))
+    except VaultReadError as exc:
+        raise click.ClickException(
+            f"Could not read management SSH key from Vault for env '{env_name}': {exc}"
+        ) from exc
 
-        if is_success:
-            success_count += 1
 
-    logger.info("Done. Created {}/{} hosts.", success_count, count)
-    if success_count < count:
-        raise SystemExit(1)
+@pool.command(name="list")
+@click.option(
+    "--database-url",
+    required=False,
+    default=None,
+    type=str,
+    help=(
+        "Neon PostgreSQL direct connection string for the pool DB. Optional: "
+        "defaults to the activated minds env's NEON_HOST_POOL_DSN (written by "
+        "`minds env deploy`). Pass explicitly only when overriding."
+    ),
+)
+def pool_list(database_url: str | None) -> None:
+    """List pool_hosts rows (forwards to ``mngr imbue_cloud admin pool list``)."""
+    # No env-name filter: the admin command does not know about minds_env
+    # today and we don't want to start parsing its JSON output here just to
+    # filter. Operators who only want rows for the active env can pipe the
+    # JSON through ``jq``. ``require_activated_env_name`` is still called
+    # for consistency -- a pool list run outside an activated env is almost
+    # always an operator mistake.
+    require_activated_env_name()
+    args = build_list_admin_args(database_url=database_url)
+    _raise_on_failure("list", _run_admin_command(args))
+
+
+@pool.command(name="destroy")
+@click.argument("pool_host_id")
+@click.option(
+    "--database-url",
+    required=False,
+    default=None,
+    type=str,
+    help=(
+        "Neon PostgreSQL direct connection string for the pool DB. Optional: "
+        "defaults to the activated minds env's NEON_HOST_POOL_DSN (written by "
+        "`minds env deploy`). Pass explicitly only when overriding."
+    ),
+)
+@click.option("--force", is_flag=True, help="Drop the row even if status != 'released'")
+def pool_destroy(pool_host_id: str, database_url: str | None, force: bool) -> None:
+    """Remove a pool_hosts row by id (forwards to ``mngr imbue_cloud admin pool destroy``)."""
+    require_activated_env_name()
+    args = build_destroy_admin_args(pool_host_id=pool_host_id, database_url=database_url, force=force)
+    _raise_on_failure("destroy", _run_admin_command(args))

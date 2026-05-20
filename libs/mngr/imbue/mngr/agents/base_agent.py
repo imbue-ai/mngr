@@ -89,9 +89,10 @@ class BaseAgent(AgentInterface[AgentConfigT]):
 
         if not parts:
             raise UserInputError(
-                f"Agent type '{self.agent_type}' has no command configured. Either set "
-                f"`command = '...'` on the type, or pass a shell command after `--` "
-                f"(e.g. `mngr create foo --type command -- sleep 99999`)."
+                f"Agent type '{self.agent_type}' has no command to run. "
+                f"Pass a shell command after `--` "
+                f"(e.g. `mngr create foo --type command -- sleep 99999`), "
+                f"or set `command = '...'` on a custom `[agent_types.X]` in your config."
             )
 
         command = CommandString(" ".join(parts))
@@ -363,7 +364,7 @@ class BaseAgent(AgentInterface[AgentConfigT]):
         the tmux "command too long" error.
         """
         if len(message) < LONG_MESSAGE_THRESHOLD:
-            send_msg_cmd = f"tmux send-keys -t '{tmux_target}' -l {shlex.quote(message)}"
+            send_msg_cmd = f"tmux send-keys -t '{tmux_target}' -l -- {shlex.quote(message)}"
             result = self.host.execute_stateful_command(send_msg_cmd)
             if not result.success:
                 raise SendMessageError(str(self.name), f"tmux send-keys failed: {result.stderr or result.stdout}")

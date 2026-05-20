@@ -37,6 +37,19 @@ def _collect_entries(changelog_dir: Path) -> list[tuple[Path, str]]:
     return entries
 
 
+def pending_changelog_entries(repo_root: Path) -> list[Path]:
+    """Return changelog entry files awaiting consolidation.
+
+    Wraps ``_collect_entries`` so the gate in ``release.py`` can ask
+    "is there work to do?" without duplicating the filter rule
+    (``.gitkeep`` excluded, non-``.md`` excluded, empty content excluded).
+    """
+    changelog_dir = repo_root / "changelog"
+    if not changelog_dir.is_dir():
+        return []
+    return [path for path, _content in _collect_entries(changelog_dir)]
+
+
 def _get_entry_added_datetime(path: Path, repo_root: Path) -> datetime:
     """Return when the entry's PR landed on the current branch, as PT.
 

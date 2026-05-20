@@ -92,7 +92,7 @@ def _create_testable_agent(
     data = {
         "id": str(agent_id),
         "name": str(agent_name),
-        "type": "test",
+        "type": "generic",
         "command": "sleep 1000",
         "work_dir": str(temp_work_dir),
         "create_time": create_time.isoformat(),
@@ -102,7 +102,7 @@ def _create_testable_agent(
     agent = _TestableAgent(
         id=agent_id,
         name=agent_name,
-        agent_type=AgentTypeName("test"),
+        agent_type=AgentTypeName("generic"),
         work_dir=temp_work_dir,
         create_time=create_time,
         host_id=host.id,
@@ -632,7 +632,7 @@ def _create_test_agent(
     data = {
         "id": str(agent_id),
         "name": str(agent_name),
-        "type": "test",
+        "type": "generic",
         "command": "sleep 1000",
         "work_dir": str(temp_work_dir),
     }
@@ -641,7 +641,7 @@ def _create_test_agent(
     return BaseAgent(
         id=agent_id,
         name=agent_name,
-        agent_type=AgentTypeName("test"),
+        agent_type=AgentTypeName("generic"),
         work_dir=temp_work_dir,
         create_time=datetime.now(timezone.utc),
         host_id=host.id,
@@ -741,6 +741,38 @@ def test_build_start_agent_shell_command_includes_additional_windows(
     # Should send keys for the additional commands
     assert "tail -f /var/log/syslog" in result
     assert "htop" in result
+
+
+def test_build_start_agent_shell_command_send_keys_uses_end_of_options_separator(
+    local_provider: LocalProviderInstance,
+    temp_host_dir: Path,
+    temp_work_dir: Path,
+) -> None:
+    """Every `tmux send-keys -l` invocation must include `--` before the literal payload.
+
+    Without the `--` end-of-options separator, tmux's argv parser treats a leading
+    dash in the payload as a flag and errors with `invalid flag --`. The `send-keys
+    ... Enter` calls use a key name (not -l) and are unaffected.
+    """
+    agent = _create_test_agent(local_provider, temp_host_dir, temp_work_dir)
+    additional_commands = [
+        NamedCommand(command=CommandString("--model gemma"), window_name="dash-cmd"),
+    ]
+    result = _build_start_agent_shell_command(
+        agent=agent,
+        session_name=f"mngr-{agent.name}",
+        command="--flag-leading-command",
+        additional_commands=additional_commands,
+        env_shell_cmd="bash -c 'true'",
+        tmux_config_path=Path("/tmp/tmux.conf"),
+        unset_vars=[],
+        host_dir=temp_host_dir,
+    )
+
+    send_keys_l_lines = [line for line in result.split(" && ") if "send-keys" in line and " -l " in line]
+    assert send_keys_l_lines, "expected at least one `tmux send-keys -l` invocation"
+    for line in send_keys_l_lines:
+        assert " -l -- " in line, f"missing `--` end-of-options separator in: {line}"
 
 
 def test_build_start_agent_shell_command_no_select_window_without_additional_commands(
@@ -2247,6 +2279,47 @@ def test_host_get_agents_returns_agents(
     agent_names = {str(a.name) for a in agents}
     assert "agent-one" in agent_names
     assert "agent-two" in agent_names
+
+
+@pytest.mark.allow_warnings(match=r"^Agent .* has type .* which is no longer registered")
+def test_host_get_agents_tolerates_agent_with_unregistered_type(
+    local_host: Host,
+    temp_host_dir: Path,
+    temp_work_dir: Path,
+) -> None:
+    """get_agents must not blow up when an on-disk agent's type is no longer registered.
+
+    Simulates the "plugin was uninstalled after the agent was created" case:
+    write an agent state directory whose data.json names a type that does not
+    appear in any registry or in user config. Loading should degrade to
+    BaseAgent and produce an entry instead of raising UnknownAgentTypeError.
+    Without this tolerance, every mngr command that lists agents (destroy,
+    cleanup, gc, list, ...) would break for affected users.
+    """
+    host = local_host
+    # Plant a data.json by hand so we control the type string without going
+    # through host.create_agent_state (which validates the type).
+    agent_id = AgentId.generate()
+    agent_dir = temp_host_dir / "agents" / str(agent_id)
+    agent_dir.mkdir(parents=True, exist_ok=True)
+    (agent_dir / "data.json").write_text(
+        json.dumps(
+            {
+                "id": str(agent_id),
+                "name": "orphan-agent",
+                "type": "uninstalled-plugin-type",
+                "work_dir": str(temp_work_dir),
+                "create_time": "2026-01-01T00:00:00+00:00",
+            }
+        )
+    )
+
+    agents = host.get_agents()
+    agents_by_name = {str(a.name): a for a in agents}
+    assert "orphan-agent" in agents_by_name
+    # The docstring promises we degrade to BaseAgent; pin that explicitly so a
+    # regression that returns the wrong fallback class would be caught here.
+    assert isinstance(agents_by_name["orphan-agent"], BaseAgent)
 
 
 # =========================================================================

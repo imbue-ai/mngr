@@ -4231,7 +4231,7 @@ def test_should_preserve_sessions_false_for_non_claude_agent() -> None:
         agent_id=AgentId.generate(),
         agent_name=AgentName("test"),
         provider_name=ProviderInstanceName("local"),
-        certified_data={"type": "echo"},
+        certified_data={"type": "generic"},
     )
     assert _should_preserve_sessions(ref) is False
 
@@ -4327,7 +4327,7 @@ def test_modify_env_vars_omits_claude_config_dir_in_shared_mode(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """In shared mode, modify_env_vars leaves CLAUDE_CONFIG_DIR / ORIGINAL_CLAUDE_CONFIG_DIR
-    untouched so the agent inherits the parent shell's values."""
+    untouched so the agent inherits the parent shell's values, and adds no other env vars."""
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "shared"))
     agent, host = make_claude_agent(
@@ -4340,33 +4340,8 @@ def test_modify_env_vars_omits_claude_config_dir_in_shared_mode(
 
     agent.modify_env_vars(host, env_vars)
 
-    assert "CLAUDE_CONFIG_DIR" not in env_vars
-    assert "ORIGINAL_CLAUDE_CONFIG_DIR" not in env_vars
-    # Common transcript emission is independent of shared mode -- still set.
-    assert env_vars["MNGR_EMIT_COMMON_TRANSCRIPT"] == "1"
-
-
-def test_modify_env_vars_shared_mode_with_common_transcript_disabled(
-    local_provider: LocalProviderInstance,
-    tmp_path: Path,
-    temp_mngr_ctx: MngrContext,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """In shared mode with emit_common_transcript=False, the env dict stays empty."""
-    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "shared"))
-    agent, host = make_claude_agent(
-        local_provider,
-        tmp_path,
-        temp_mngr_ctx,
-        agent_config=ClaudeAgentConfig(
-            check_installation=False, use_env_config_dir=True, emit_common_transcript=False
-        ),
-    )
-    env_vars: dict[str, str] = {}
-
-    agent.modify_env_vars(host, env_vars)
-
+    # In shared mode there's nothing to add: the transcript opt-out is
+    # gated at provisioning time (on-disk script presence), not via env var.
     assert env_vars == {}
 
 

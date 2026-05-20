@@ -22,6 +22,8 @@ def test_start_cli_options_fields() -> None:
         agent_list=(AgentAddress(agent=AgentName("agent3")),),
         connect=False,
         connect_command=None,
+        restart=False,
+        no_resume=False,
         host=(),
         output_format="human",
         quiet=False,
@@ -34,6 +36,7 @@ def test_start_cli_options_fields() -> None:
     assert opts.agents == ("agent1", "agent2")
     assert opts.agent_list == (AgentAddress(agent=AgentName("agent3")),)
     assert opts.connect is False
+    assert opts.restart is False
 
 
 def test_start_requires_agent(
@@ -79,6 +82,14 @@ def test_output_result_human_with_agents(capsys: pytest.CaptureFixture[str]) -> 
     _output_result(["agent-1", "agent-2"], output_opts)
     captured = capsys.readouterr()
     assert "Successfully started 2 agent(s)" in captured.out
+
+
+def test_output_result_human_with_restarted_agents(capsys: pytest.CaptureFixture[str]) -> None:
+    """Test _output_result in HUMAN format with restarted agents uses 'restarted' verb."""
+    output_opts = OutputOptions(output_format=OutputFormat.HUMAN)
+    _output_result(["agent-1"], output_opts, is_restart=True)
+    captured = capsys.readouterr()
+    assert "Successfully restarted 1 agent(s)" in captured.out
 
 
 def test_output_result_json_format(capsys: pytest.CaptureFixture[str]) -> None:

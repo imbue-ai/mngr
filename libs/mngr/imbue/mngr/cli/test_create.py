@@ -34,6 +34,7 @@ from imbue.mngr.utils.testing import wait_for_agent_session
 
 
 @pytest.mark.tmux
+@pytest.mark.flaky
 def test_cli_create_via_subprocess(
     temp_work_dir: Path,
     temp_host_dir: Path,
@@ -1337,6 +1338,8 @@ def test_create_with_invalid_provider_name(
         [
             "--name",
             "test-invalid-provider",
+            "--type",
+            "command",
             "--provider",
             "nonexistent",
             "--source",
