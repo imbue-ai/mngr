@@ -7,6 +7,8 @@ Restructure the changelog system from a single repo-wide changelog to one set of
 - New `test_every_project_has_changelog_layout` meta-ratchet enforces that every project has `CHANGELOG.md`, `UNABRIDGED_CHANGELOG.md`, and a `changelog/` directory. Stubs were added for projects without entries yet.
 - `scripts/changelog_consolidation_prompt.md` updated to parse `SECTION` lines and summarize each project's section into that project's `CHANGELOG.md` `[Unreleased]`.
 - `scripts/release.py` finalizes each bumped package's `libs/<name>/CHANGELOG.md` `[Unreleased]` section using that package's own bumped version. `apps/<name>/CHANGELOG.md` and `dev/CHANGELOG.md` are not versioned, so their `[Unreleased]` accumulates entries indefinitely.
-- New shared `scripts/changelog_projects.py` owns the path-to-project mapping (used by the consolidator, the ratchet, and the release script).
+- New shared `scripts/changelog_projects.py` owns the path-to-project mapping (used by the consolidator, the ratchet, and the release script). Its `all_known_projects` deduplicates a name that exists under both `libs/` and `apps/` so the consolidator can't process the same project twice.
+- `scripts/consolidate_changelog.py` pre-validates that every project with pending entries has an `UNABRIDGED_CHANGELOG.md` before performing any mutation, so a partial multi-project failure can no longer leave the repo in an inconsistent state.
+- `test_meta_ratchets._get_all_project_dirs` is now a thin wrapper over `all_known_projects` (no duplicated discovery loop).
 
 The existing top-level `CHANGELOG.md` and `UNABRIDGED_CHANGELOG.md` were retroactively split into per-project files; see each project's `CHANGELOG.md` for its history.
