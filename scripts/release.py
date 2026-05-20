@@ -511,8 +511,9 @@ def _print_on_demand_consolidation_command(file: TextIO) -> None:
 def _gate_release_on_pending_changelog_entries(repo_root: Path, dry_run: bool) -> bool:
     """Block a release until pending changelog entries are consolidated.
 
-    Operates on ``repo_root``'s ``changelog/`` directory directly. Taking
-    the path as a parameter (rather than always reading the module-level
+    Walks each known project's ``<project_dir>/changelog/`` directory
+    under ``repo_root`` via ``pending_changelog_entries``. Taking the
+    path as a parameter (rather than always reading the module-level
     ``REPO_ROOT``) is the production contract -- the gate's job is to
     inspect a particular repo -- and conveniently lets tests pass a
     ``tmp_path`` populated with synthetic entries.
