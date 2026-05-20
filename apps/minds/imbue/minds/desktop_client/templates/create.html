@@ -73,24 +73,6 @@
           <div id="api-key-row" class="mt-3 hidden">
             <label for="anthropic_api_key" class="text-sm text-zinc-900 font-medium block mb-1">Anthropic API key</label>
             {{ ui.text_input('anthropic_api_key', value=anthropic_api_key, placeholder='sk-ant-...', id='anthropic_api_key', type='password') }}
-            {% if detected_env_anthropic_api_key %}
-              <label class="flex items-center gap-2 cursor-pointer mt-1.5 text-xs text-zinc-600">
-                <input type="checkbox" name="use_env_anthropic_api_key" id="use_env_anthropic_api_key"
-                       class="shrink-0"
-                       {% if use_env_anthropic_api_key %}checked{% endif %}>
-                Use <code class="bg-zinc-100 px-1 py-0.5 rounded">ANTHROPIC_API_KEY</code> from your environment
-              </label>
-            {% endif %}
-            <label for="anthropic_base_url" class="text-sm text-zinc-900 font-medium block mb-1 mt-3">Anthropic base URL <span class="text-xs text-zinc-400 font-normal">(optional)</span></label>
-            {{ ui.text_input('anthropic_base_url', value=anthropic_base_url, placeholder='https://api.anthropic.com', id='anthropic_base_url') }}
-            {% if detected_env_anthropic_base_url_value %}
-              <label class="flex items-center gap-2 cursor-pointer mt-1.5 text-xs text-zinc-600">
-                <input type="checkbox" name="use_env_anthropic_base_url" id="use_env_anthropic_base_url"
-                       class="shrink-0"
-                       {% if use_env_anthropic_base_url %}checked{% endif %}>
-                Use <code class="bg-zinc-100 px-1 py-0.5 rounded">ANTHROPIC_BASE_URL</code> from your environment (<code class="bg-zinc-100 px-1 py-0.5 rounded">{{ detected_env_anthropic_base_url_value }}</code>)
-              </label>
-            {% endif %}
           </div>
         </div>
       </div>
@@ -160,38 +142,9 @@
       var aiProviderSelect = document.getElementById('ai_provider');
       var apiKeyRow = document.getElementById('api-key-row');
       var apiKeyInput = document.getElementById('anthropic_api_key');
-      var baseUrlInput = document.getElementById('anthropic_base_url');
       var launchModeError = document.getElementById('launch-mode-account-error');
       var aiProviderError = document.getElementById('ai-provider-account-error');
       var submitBtn = document.getElementById('create-submit');
-      // The env-toggle checkboxes are only emitted by the template when the
-      // corresponding env var was present at render time, so each
-      // `getElementById` returns null when the user's shell didn't export
-      // it. They sit inside `api-key-row` so they only appear under
-      // API_KEY auth; SUBSCRIPTION never exposes them (the desktop client
-      // always scrubs ambient ANTHROPIC_* vars under SUBSCRIPTION since
-      // picking OAuth means the user wants OAuth, not their shell key).
-      var envApiKeyCheckbox = document.getElementById('use_env_anthropic_api_key');
-      var envBaseUrlCheckbox = document.getElementById('use_env_anthropic_base_url');
-
-      // Disable a text input when its env-toggle checkbox is checked: the
-      // env value will be used so editing the form field has no effect.
-      // Browsers also omit disabled inputs from POSTs, which is the wire-
-      // level signal the backend's API_KEY arm uses to fall back to env.
-      function syncDisabled(checkbox, input) {
-        if (!checkbox || !input) return;
-        input.disabled = checkbox.checked;
-      }
-      // The api-key checkbox's `change` listener is registered alongside
-      // the other form listeners below (it calls `update()`, which runs
-      // both `syncDisabled` invocations and refreshes `apiKeyInput.required`).
-      // The base-url checkbox only needs to sync its own disabled state
-      // since it doesn't gate any required-state.
-      if (envBaseUrlCheckbox) {
-        envBaseUrlCheckbox.addEventListener('change', function() {
-          syncDisabled(envBaseUrlCheckbox, baseUrlInput);
-        });
-      }
 
       function update() {
         var hasAccount = accountSelect.value !== '';
@@ -207,15 +160,7 @@
 
         var isApiKey = aiProviderSelect.value === 'API_KEY';
         apiKeyRow.classList.toggle('hidden', !isApiKey);
-        // The API-key input is required only when the env-checkbox isn't
-        // checked. When checked, the env value supplies the key and the
-        // disabled input is excluded from the POST.
-        apiKeyInput.required = isApiKey && !(envApiKeyCheckbox && envApiKeyCheckbox.checked);
-        // Sync the disabled states on each `update()` too, so a server-
-        // rendered ``checked`` attribute (e.g. on a validation re-render)
-        // is reflected in the input's disabled state at boot.
-        syncDisabled(envApiKeyCheckbox, apiKeyInput);
-        syncDisabled(envBaseUrlCheckbox, baseUrlInput);
+        apiKeyInput.required = isApiKey;
 
         var launchInvalid = !hasAccount && launchSelect.value === 'IMBUE_CLOUD';
         var aiInvalid = !hasAccount && aiProviderSelect.value === 'IMBUE_CLOUD';
@@ -227,7 +172,6 @@
       accountSelect.addEventListener('change', update);
       launchSelect.addEventListener('change', update);
       aiProviderSelect.addEventListener('change', update);
-      if (envApiKeyCheckbox) envApiKeyCheckbox.addEventListener('change', update);
       update();
     })();
   </script>

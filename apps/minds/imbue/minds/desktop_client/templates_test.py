@@ -130,67 +130,6 @@ def test_render_create_form_shows_error_message_when_supplied() -> None:
     assert "Imbue cloud requires an account." in html
 
 
-def test_render_create_form_omits_env_checkboxes_when_not_detected() -> None:
-    """When neither env var is detected, the form must not emit either
-    checkbox. Browsers omit unchecked checkboxes from POSTs, but emitting
-    them at all when no env is set would clutter the API_KEY auth UI with
-    a useless "use [empty string]" toggle."""
-    html = render_create_form(
-        detected_env_anthropic_api_key=False,
-        detected_env_anthropic_base_url_value="",
-    )
-    assert 'name="use_env_anthropic_api_key"' not in html
-    assert 'name="use_env_anthropic_base_url"' not in html
-
-
-def test_render_create_form_emits_env_api_key_checkbox_when_detected() -> None:
-    """When ANTHROPIC_API_KEY is detected, the form must emit an opt-in
-    checkbox inside the API-key row. The key value itself must NEVER
-    appear in the HTML -- only the env-var name."""
-    html = render_create_form(detected_env_anthropic_api_key=True)
-    assert 'name="use_env_anthropic_api_key"' in html
-    assert "ANTHROPIC_API_KEY" in html
-
-
-def test_render_create_form_emits_env_base_url_checkbox_with_value_when_detected() -> None:
-    """When ANTHROPIC_BASE_URL is detected, the form must emit an opt-in
-    checkbox and display the value inline (the base URL is non-secret, so
-    showing it lets the user sanity-check the endpoint before opting in)."""
-    html = render_create_form(detected_env_anthropic_base_url_value="https://litellm.example.com")
-    assert 'name="use_env_anthropic_base_url"' in html
-    assert "https://litellm.example.com" in html
-
-
-def test_render_create_form_preserves_use_env_checkbox_state_on_re_render() -> None:
-    """On a validation-error re-render, the submitted ``use_env_anthropic_*``
-    checkbox states must round-trip into the rendered HTML so the user's
-    prior opt-in choice is not silently reverted. Verified by rendering
-    with explicit ``True`` / ``False`` and confirming the ``checked``
-    attribute lands (or not) on the corresponding input."""
-    html_checked = render_create_form(
-        detected_env_anthropic_api_key=True,
-        detected_env_anthropic_base_url_value="https://litellm.example.com",
-        use_env_anthropic_api_key=True,
-        use_env_anthropic_base_url=True,
-    )
-    api_key_input_start = html_checked.index('id="use_env_anthropic_api_key"')
-    api_key_input_fragment = html_checked[api_key_input_start : api_key_input_start + 300]
-    assert "checked" in api_key_input_fragment
-    base_url_input_start = html_checked.index('id="use_env_anthropic_base_url"')
-    base_url_input_fragment = html_checked[base_url_input_start : base_url_input_start + 300]
-    assert "checked" in base_url_input_fragment
-
-    html_unchecked = render_create_form(
-        detected_env_anthropic_api_key=True,
-        detected_env_anthropic_base_url_value="https://litellm.example.com",
-        use_env_anthropic_api_key=False,
-        use_env_anthropic_base_url=False,
-    )
-    api_key_input_start = html_unchecked.index('id="use_env_anthropic_api_key"')
-    api_key_input_fragment = html_unchecked[api_key_input_start : api_key_input_start + 300]
-    assert "checked" not in api_key_input_fragment
-
-
 def test_render_login_page_shows_prompt() -> None:
     html = render_login_page()
     assert "login URL" in html.lower() or "Login" in html

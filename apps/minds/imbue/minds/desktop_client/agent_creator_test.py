@@ -25,7 +25,6 @@ from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client.agent_creator import AgentCreationStatus
 from imbue.minds.desktop_client.agent_creator import AgentCreator
 from imbue.minds.desktop_client.agent_creator import _build_mngr_create_command
-from imbue.minds.desktop_client.agent_creator import _build_mngr_create_subprocess_env
 from imbue.minds.desktop_client.agent_creator import _is_git_worktree
 from imbue.minds.desktop_client.agent_creator import _is_local_path
 from imbue.minds.desktop_client.agent_creator import _redact_url_credentials
@@ -227,128 +226,6 @@ def test_build_mngr_create_command_never_inlines_secret_env_flags() -> None:
 
 def test_is_git_worktree_returns_false_for_nonexistent_path(tmp_path) -> None:
     assert not _is_git_worktree(tmp_path / "no-such-dir")
-
-
-# ---------------------------------------------------------------------------
-# Subprocess-env construction tests
-#
-# These cover ``_build_mngr_create_subprocess_env`` -- the helper that decides
-# what env dict (if any) gets handed to the ``mngr create`` subprocess. The
-# key invariant: when the user opts out of forwarding an ambient ``ANTHROPIC_*``
-# var (e.g. picked SUBSCRIPTION auth without checking "use my env key"), the
-# var must NOT appear in the returned dict, even though it's in the parent
-# env -- otherwise the FCT template's ``pass_host_env`` would silently
-# forward it onto the container regardless of the form choice.
-# ---------------------------------------------------------------------------
-
-
-def test_build_mngr_create_subprocess_env_returns_none_when_no_overrides_or_scrubs() -> None:
-    """No overrides + no scrubs -> return ``None`` so the subprocess inherits the
-    parent env verbatim. Avoids allocating a copy of ``os.environ`` for the
-    common case where the form didn't touch any forwarded secret."""
-    result = _build_mngr_create_subprocess_env(
-        {"ANTHROPIC_API_KEY": "ambient-key", "PATH": "/usr/bin", "HOME": "/home/test"},
-        anthropic_api_key=None,
-        anthropic_base_url=None,
-        gh_token=None,
-        scrub_inherited_anthropic_api_key=False,
-        scrub_inherited_anthropic_base_url=False,
-    )
-    assert result is None
-
-
-def test_build_mngr_create_subprocess_env_scrubs_inherited_anthropic_api_key() -> None:
-    """``scrub_inherited_anthropic_api_key=True`` removes the var from the returned
-    env even when no override is supplied. Other env vars (including
-    ``ANTHROPIC_BASE_URL`` when its scrub flag is False) are preserved."""
-    result = _build_mngr_create_subprocess_env(
-        {
-            "ANTHROPIC_API_KEY": "ambient-key",
-            "ANTHROPIC_BASE_URL": "https://litellm.example.com",
-            "PATH": "/usr/bin",
-        },
-        anthropic_api_key=None,
-        anthropic_base_url=None,
-        gh_token=None,
-        scrub_inherited_anthropic_api_key=True,
-        scrub_inherited_anthropic_base_url=False,
-    )
-    assert result is not None
-    assert "ANTHROPIC_API_KEY" not in result
-    assert result["ANTHROPIC_BASE_URL"] == "https://litellm.example.com"
-    assert result["PATH"] == "/usr/bin"
-
-
-def test_build_mngr_create_subprocess_env_scrubs_inherited_anthropic_base_url() -> None:
-    """``scrub_inherited_anthropic_base_url=True`` removes only the base URL; the
-    API key (when its own flag is False) rides through untouched."""
-    result = _build_mngr_create_subprocess_env(
-        {"ANTHROPIC_API_KEY": "ambient-key", "ANTHROPIC_BASE_URL": "https://x.example.com"},
-        anthropic_api_key=None,
-        anthropic_base_url=None,
-        gh_token=None,
-        scrub_inherited_anthropic_api_key=False,
-        scrub_inherited_anthropic_base_url=True,
-    )
-    assert result is not None
-    assert result["ANTHROPIC_API_KEY"] == "ambient-key"
-    assert "ANTHROPIC_BASE_URL" not in result
-
-
-def test_build_mngr_create_subprocess_env_explicit_override_beats_scrub() -> None:
-    """When both ``scrub_inherited_anthropic_api_key`` is True AND an explicit
-    ``anthropic_api_key`` override is supplied, the override wins -- the scrub
-    just clears the inherited value before the override is layered on, so the
-    final dict carries the new value and nothing else."""
-    result = _build_mngr_create_subprocess_env(
-        {"ANTHROPIC_API_KEY": "ambient-key"},
-        anthropic_api_key="sk-new-form-supplied",
-        anthropic_base_url=None,
-        gh_token=None,
-        scrub_inherited_anthropic_api_key=True,
-        scrub_inherited_anthropic_base_url=False,
-    )
-    assert result is not None
-    assert result["ANTHROPIC_API_KEY"] == "sk-new-form-supplied"
-
-
-def test_build_mngr_create_subprocess_env_scrub_is_safe_when_var_not_in_env() -> None:
-    """Scrub flags should be a no-op (not an error) when the parent env doesn't
-    contain the var. ``dict.pop(..., None)`` semantics, exercised here so a
-    refactor that uses ``del`` would fail the test."""
-    result = _build_mngr_create_subprocess_env(
-        {"PATH": "/usr/bin"},
-        anthropic_api_key=None,
-        anthropic_base_url=None,
-        gh_token=None,
-        scrub_inherited_anthropic_api_key=True,
-        scrub_inherited_anthropic_base_url=True,
-    )
-    assert result is not None
-    assert "ANTHROPIC_API_KEY" not in result
-    assert "ANTHROPIC_BASE_URL" not in result
-    assert result["PATH"] == "/usr/bin"
-
-
-def test_build_mngr_create_subprocess_env_preserves_existing_override_behaviour() -> None:
-    """When only overrides are supplied (no scrubs), the helper still returns a
-    full dict copied from the parent env with the overrides layered on -- the
-    same behaviour that ``run_mngr_create`` had before the scrub flags were
-    introduced. Locks in backwards compatibility for the IMBUE_CLOUD / API_KEY
-    code paths that don't scrub."""
-    result = _build_mngr_create_subprocess_env(
-        {"ANTHROPIC_API_KEY": "old", "OTHER": "keep-me"},
-        anthropic_api_key="new",
-        anthropic_base_url="https://new.example.com",
-        gh_token="ghp_new",
-        scrub_inherited_anthropic_api_key=False,
-        scrub_inherited_anthropic_base_url=False,
-    )
-    assert result is not None
-    assert result["ANTHROPIC_API_KEY"] == "new"
-    assert result["ANTHROPIC_BASE_URL"] == "https://new.example.com"
-    assert result["GH_TOKEN"] == "ghp_new"
-    assert result["OTHER"] == "keep-me"
 
 
 def _make_test_creator(
@@ -638,35 +515,6 @@ def test_start_creation_subscription_ai_does_not_mint_litellm_key(tmp_path: Path
     assert cli.create_calls == []
 
 
-def test_start_creation_accepts_use_env_anthropic_flags(tmp_path: Path) -> None:
-    """Smoke test for the ``use_env_anthropic_*`` parameters added by the
-    env-detection feature: ``start_creation`` should accept the new flags
-    for every ``AIProvider`` choice without crashing on the signature, and
-    the SUBSCRIPTION + flagged-in path must still not mint a LiteLLM key
-    (the flags only control env forwarding, not provisioning).
-
-    The deeper behavioural assertion (that the scrub flags actually remove
-    ``ANTHROPIC_*`` env vars before mngr-create runs) is covered at the
-    helper level by ``test_build_mngr_create_subprocess_env_*``.
-    """
-    cli = _RecordingImbueCloudCli(
-        parent_concurrency_group=ConcurrencyGroup(name="recording-cli"),
-        connector_url=FAKE_CONNECTOR_URL,
-    )
-    creator = _make_creator_with_cli(tmp_path, cli)
-
-    creation_id = creator.start_creation(
-        repo_source=str(_make_fake_repo(tmp_path)),
-        host_name="my-workspace",
-        launch_mode=LaunchMode.LOCAL,
-        ai_provider=AIProvider.SUBSCRIPTION,
-        use_env_anthropic_api_key=True,
-        use_env_anthropic_base_url=False,
-    )
-    _wait_until_finished(creator, creation_id)
-    assert cli.create_calls == []
-
-
 def test_start_creation_api_key_ai_without_key_fails_with_clear_message(tmp_path: Path) -> None:
     """The API_KEY branch must reject an empty key with a specific error rather than
     silently falling through to mngr create with no key set."""
@@ -689,38 +537,3 @@ def test_start_creation_api_key_ai_without_key_fails_with_clear_message(tmp_path
     assert info is not None
     assert info.status is AgentCreationStatus.FAILED
     assert info.error is not None and "API_KEY" in info.error
-
-
-def test_start_creation_api_key_ai_with_empty_key_and_use_env_flag_does_not_raise(tmp_path: Path) -> None:
-    """When the user opts in to use the ambient ``ANTHROPIC_API_KEY`` env var (the
-    form-side gesture is ticking the "use env" checkbox, which disables and so
-    omits the API-key text input from the POST), the backend must NOT raise the
-    "API_KEY requires anthropic_api_key" error -- the inherited env var is what
-    supplies the credential, so the worker should proceed to ``mngr create`` with
-    ``effective_anthropic_api_key`` left as ``None`` (no override layered on top
-    of the inherited env var). Regression for the case where the API_KEY arm
-    rejected an empty form key unconditionally."""
-    cli = _RecordingImbueCloudCli(
-        parent_concurrency_group=ConcurrencyGroup(name="recording-cli"),
-        connector_url=FAKE_CONNECTOR_URL,
-    )
-    creator = _make_creator_with_cli(tmp_path, cli)
-
-    creation_id = creator.start_creation(
-        repo_source=str(_make_fake_repo(tmp_path)),
-        host_name="my-workspace",
-        launch_mode=LaunchMode.LOCAL,
-        ai_provider=AIProvider.API_KEY,
-        anthropic_api_key="",
-        use_env_anthropic_api_key=True,
-    )
-    _wait_until_finished(creator, creation_id)
-
-    info = creator.get_creation_info(creation_id)
-    assert info is not None
-    # Must NOT have failed with the "API_KEY requires anthropic_api_key" error.
-    # The creation may still end up FAILED for unrelated reasons (the fake
-    # mngr-create stub may not be fully wired in this fixture), but the
-    # specific "API_KEY" error message must not appear.
-    if info.error is not None:
-        assert "API_KEY requires anthropic_api_key" not in info.error

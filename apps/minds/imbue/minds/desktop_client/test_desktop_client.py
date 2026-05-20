@@ -3,7 +3,6 @@ import queue
 from pathlib import Path
 
 import httpx
-import pytest
 from fastapi import FastAPI
 from fastapi import Request as FastAPIRequest
 from fastapi.responses import HTMLResponse
@@ -356,39 +355,6 @@ def test_landing_page_shows_create_form_after_discovery_finds_no_agents(tmp_path
     assert response.status_code == 200
     assert "Create a Project" in response.text
     assert "git_url" in response.text
-
-
-def test_landing_page_create_form_surfaces_env_anthropic_credentials(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Regression: when the landing page falls back to rendering the inline
-    create form (no agents discovered yet), it must surface the same
-    ``ANTHROPIC_*`` env-detection checkboxes as the dedicated ``/create``
-    route -- the env-detection wiring was originally only added to
-    ``_handle_create_page`` and was missed on ``_handle_landing_page``'s
-    parallel ``render_create_form`` call, so a user on a fresh install who
-    landed straight on ``/`` would never see the opt-in toggles even with
-    ``ANTHROPIC_API_KEY`` / ``ANTHROPIC_BASE_URL`` set in their shell.
-    """
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
-    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://litellm.test.example/v1")
-    backend_resolver = StaticBackendResolver(url_by_agent_and_service={})
-    client, auth_store = _create_test_desktop_client(
-        tmp_path=tmp_path,
-        backend_resolver=backend_resolver,
-        http_client=None,
-    )
-    _authenticate_client(client=client, auth_store=auth_store)
-
-    response = client.get("/")
-    assert response.status_code == 200
-    assert 'name="use_env_anthropic_api_key"' in response.text
-    assert 'name="use_env_anthropic_base_url"' in response.text
-    # Base URL is non-secret and shown inline so the user can sanity-check it.
-    assert "https://litellm.test.example/v1" in response.text
-    # API key value must NEVER appear in the HTML.
-    assert "sk-ant-test" not in response.text
 
 
 def test_landing_page_prefills_git_url_from_query_param(tmp_path: Path) -> None:
@@ -1081,50 +1047,6 @@ def test_create_agent_api_rejects_api_key_provider_without_key(tmp_path: Path) -
     )
     assert response.status_code == 400
     assert "anthropic_api_key is required" in response.json()["error"]
-
-
-def test_create_form_submit_accepts_api_key_provider_with_use_env_flag(tmp_path: Path) -> None:
-    """API_KEY auth + empty form key + ``use_env_anthropic_api_key`` checkbox checked
-    must NOT be rejected up front: the user opted in to forwarding the ambient
-    ANTHROPIC_API_KEY env var, which supplies the credential. The form should
-    303-redirect to the creating page just like any accepted submission."""
-    client, _, agent_creator = _create_test_server_with_agent_creator(tmp_path)
-
-    response = client.post(
-        "/create",
-        data={
-            "git_url": "file:///nonexistent-repo",
-            "host_name": "my-agent",
-            "launch_mode": "LOCAL",
-            "ai_provider": "API_KEY",
-            "anthropic_api_key": "",
-            # Browsers send a string ("on") for a checked checkbox; the
-            # backend only checks for presence so any non-empty value works.
-            "use_env_anthropic_api_key": "on",
-        },
-        follow_redirects=False,
-    )
-    assert response.status_code == 303
-    agent_creator.wait_for_all()
-
-
-def test_create_agent_api_accepts_api_key_provider_with_use_env_flag(tmp_path: Path) -> None:
-    """JSON-API mirror: API_KEY + empty key + ``use_env_anthropic_api_key=true``
-    must NOT be rejected up front."""
-    client, _, agent_creator = _create_test_server_with_agent_creator(tmp_path)
-
-    response = client.post(
-        "/api/create-agent",
-        json={
-            "git_url": "file:///nonexistent-repo",
-            "ai_provider": "API_KEY",
-            "anthropic_api_key": "",
-            "use_env_anthropic_api_key": True,
-        },
-    )
-    assert response.status_code == 200
-    assert "agent_id" in response.json()
-    agent_creator.wait_for_all()
 
 
 def test_create_agent_api_rejects_invalid_ai_provider(tmp_path: Path) -> None:
