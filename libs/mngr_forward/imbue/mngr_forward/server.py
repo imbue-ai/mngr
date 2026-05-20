@@ -527,6 +527,14 @@ def _warn_resolver_miss(agent_id: AgentId, resolver: ForwardResolver) -> None:
     aid_str = str(agent_id)
     now = time.monotonic()
     with _resolver_miss_lock:
+        # Opportunistic GC so the dict is bounded by the count of agents
+        # seen in the last `_RESOLVER_MISS_WARN_INTERVAL_SECONDS`, rather
+        # than growing once per unique agent ever seen by the process.
+        cutoff = now - _RESOLVER_MISS_WARN_INTERVAL_SECONDS
+        stale = [aid for aid, ts in _resolver_miss_last_warn_at.items() if ts < cutoff]
+        for aid in stale:
+            del _resolver_miss_last_warn_at[aid]
+
         last = _resolver_miss_last_warn_at.get(aid_str, 0.0)
         if now - last < _RESOLVER_MISS_WARN_INTERVAL_SECONDS:
             return
