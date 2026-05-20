@@ -1,11 +1,16 @@
-"""Latchkey-specific permission grant/deny flow.
+"""Predefined-permission grant/deny flow (``RequestType.LATCHKEY_PERMISSION``).
 
-This module owns everything that happens between a
-``LatchkeyPredefinedPermissionRequestEvent`` arriving on the inbox and the user's
-decision being applied: rendering the dialog HTML, parsing the form
-submission, probing credential status, running ``latchkey auth browser``
-when needed, rewriting the per-agent ``latchkey_permissions.json``, appending the
+This module is one of the two sibling handlers under
+:mod:`imbue.minds.desktop_client.latchkey.permissions`. It owns the
+flow for *predefined* (catalog-backed) permission requests: rendering
+the per-permission dialog, probing credential status, running
+``latchkey auth browser`` when needed, rewriting the per-host
+``latchkey_permissions.json`` via the gateway extension, appending the
 response event, and notifying the waiting agent via ``mngr message``.
+
+The :mod:`.file_sharing` sibling handles file-sharing permission
+requests (single path, yes/no decision). Both siblings share the
+:class:`~.messaging.MngrMessageSender` helper.
 
 Services that latchkey reports as not supporting browser sign-in fall
 back to a manual flow: the grant is refused (the request stays pending),
@@ -25,7 +30,6 @@ import shlex
 from collections.abc import Sequence
 from enum import auto
 from pathlib import Path
-from typing import Final
 
 from fastapi import Request
 from fastapi.responses import HTMLResponse
@@ -33,18 +37,16 @@ from fastapi.responses import Response
 from loguru import logger
 from pydantic import Field
 
-from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
-from imbue.imbue_common.mutable_model import MutableModel
-from imbue.minds.config.data_types import MNGR_BINARY
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClient
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClientError
+from imbue.minds.desktop_client.latchkey.permissions.messaging import MngrMessageSender
+from imbue.minds.desktop_client.latchkey.permissions.templates import render_predefined_permission_dialog
 from imbue.minds.desktop_client.latchkey.services_catalog import ServicePermissionInfo
 from imbue.minds.desktop_client.latchkey.services_catalog import ServicesCatalog
-from imbue.minds.desktop_client.latchkey.templates import render_latchkey_permission_dialog
 from imbue.minds.desktop_client.request_events import LatchkeyPredefinedPermissionRequestEvent
 from imbue.minds.desktop_client.request_events import RequestEvent
 from imbue.minds.desktop_client.request_events import RequestInbox
@@ -60,8 +62,6 @@ from imbue.mngr_latchkey.core import CredentialStatus
 from imbue.mngr_latchkey.core import LATCHKEY_AUTH_OPTION_BROWSER
 from imbue.mngr_latchkey.core import Latchkey
 from imbue.mngr_latchkey.store import permissions_path_for_host
-
-_MNGR_MESSAGE_TIMEOUT_SECONDS: Final[float] = 30.0
 
 
 class GrantOutcome(UpperCaseStrEnum):
@@ -99,38 +99,6 @@ class GrantResult(FrozenModel):
 
 class LatchkeyPermissionFlowError(Exception):
     """Raised for caller-facing programming errors (empty grants, unknown permissions)."""
-
-
-class MngrMessageSender(MutableModel):
-    """Wrapper around ``mngr message <agent-id> <text>``.
-
-    Failures are logged at warning level but never raised: the response
-    event has already been written, so an undelivered nudge is recoverable
-    (the agent will eventually wake up on its own).
-    """
-
-    mngr_binary: str = Field(default=MNGR_BINARY, frozen=True, description="Path to mngr binary.")
-
-    def send(self, agent_id: AgentId, text: str) -> None:
-        cg = ConcurrencyGroup(name="mngr-message")
-        with cg:
-            result = cg.run_process_to_completion(
-                # ``-m`` and ``--`` are required: ``mngr message`` treats every
-                # positional argument as an agent identifier (``nargs=-1``), so
-                # passing the text as a positional would be parsed as a second
-                # agent and the actual message content would be read from
-                # stdin (silently empty in this subprocess context).
-                command=[self.mngr_binary, "message", "-m", text, "--", str(agent_id)],
-                timeout=_MNGR_MESSAGE_TIMEOUT_SECONDS,
-                is_checked_after=False,
-            )
-        if result.returncode != 0:
-            logger.warning(
-                "mngr message to agent {} exited {}: {}",
-                agent_id,
-                result.returncode,
-                result.stderr.strip(),
-            )
 
 
 def _format_granted_message(service_display_name: str, granted: Sequence[str]) -> str:
@@ -495,7 +463,7 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
             or not latchkey_service_info.auth_options
         )
 
-        rendered = render_latchkey_permission_dialog(
+        rendered = render_predefined_permission_dialog(
             agent_id=req_event.agent_id,
             request_id=str(req_event.event_id),
             ws_name=ws_name,

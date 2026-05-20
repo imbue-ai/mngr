@@ -1,14 +1,21 @@
-"""File-sharing permission flow (``RequestType.FILE_SHARING_PERMISSION``).
+"""File-sharing permission grant/deny flow (``RequestType.FILE_SHARING_PERMISSION``).
+
+This module is one of the two sibling handlers under
+:mod:`imbue.minds.desktop_client.latchkey.permissions`. It owns the
+flow for *file-sharing* permission requests: rendering the yes/no
+dialog for a single absolute file path, calling the gateway's
+``permission-requests`` extension to approve or drop the request,
+appending the response event, and notifying the waiting agent via
+``mngr message``.
 
 A file-sharing permission request asks the user to grant the agent
 access to a single absolute file path on the desktop host, served
-through the ``minds-api-proxy`` Latchkey extension.
-
-Unlike :mod:`imbue.minds.desktop_client.latchkey.permissions`, the
-dialog is a plain yes/no on a specific path -- there is no
-per-permission editing because the request itself is already
-fully-specified (one path, both read and write methods). Approval
-calls ``POST /permission-requests/approve/<id>`` on the gateway's
+through the ``minds-api-proxy`` Latchkey extension. Unlike its
+:mod:`.predefined` sibling, the dialog is a plain yes/no on a
+specific path -- there is no per-permission editing because the
+request itself is already fully-specified (one path, both read and
+write methods). Approval calls
+``POST /permission-requests/approve/<id>`` on the gateway's
 ``permission-requests`` extension; the extension owns the actual
 write to the agent's ``latchkey_permissions.json`` using the
 ``effect`` payload it precomputed when the request was created.
@@ -17,7 +24,6 @@ the gateway forgets the pending entry.
 """
 
 import asyncio
-import html as html_module
 import json
 from pathlib import Path
 from typing import Final
@@ -32,7 +38,8 @@ from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClient
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClientError
-from imbue.minds.desktop_client.latchkey.permissions import MngrMessageSender
+from imbue.minds.desktop_client.latchkey.permissions.messaging import MngrMessageSender
+from imbue.minds.desktop_client.latchkey.permissions.templates import render_file_sharing_permission_dialog
 from imbue.minds.desktop_client.request_events import LatchkeyFileSharingPermissionRequestEvent
 from imbue.minds.desktop_client.request_events import RequestEvent
 from imbue.minds.desktop_client.request_events import RequestInbox
@@ -76,138 +83,6 @@ def _resolve_workspace_name(
         return ws_name
     info = backend_resolver.get_agent_display_info(agent_id)
     return info.agent_name if info else fallback
-
-
-def _render_dialog_page(
-    request_id: str,
-    agent_id: str,
-    ws_name: str,
-    file_path: str,
-    rationale: str,
-    mngr_forward_origin: str,
-) -> str:
-    """Render the file-sharing approval dialog.
-
-    Plain hand-written HTML rather than a Jinja template: the page is
-    small, the layout is fixed, and adding a template just for this
-    one dialog isn't worth the indirection. Mirrors the visual style
-    of the latchkey-permission dialog (dark background, primary button
-    + secondary button) for consistency.
-    """
-    escaped_request_id = html_module.escape(request_id, quote=True)
-    escaped_agent_id = html_module.escape(agent_id, quote=True)
-    workspace_link = (
-        f'<a href="{html_module.escape(mngr_forward_origin, quote=True)}/goto/{escaped_agent_id}/">'
-        f"{html_module.escape(ws_name)}</a>"
-        if mngr_forward_origin
-        else html_module.escape(ws_name)
-    )
-    return f"""<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="UTF-8">
-  <title>File-sharing permission request</title>
-  <style>
-    body {{
-      font-family: -apple-system, BlinkMacSystemFont, sans-serif;
-      background: #0f172a;
-      color: #cbd5e1;
-      margin: 0;
-      padding: 32px;
-      max-width: 720px;
-    }}
-    h1 {{ color: #e2e8f0; font-size: 20px; margin-top: 0; }}
-    .path {{
-      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-      background: #1e293b;
-      padding: 6px 10px;
-      border-radius: 4px;
-      color: #f8fafc;
-      word-break: break-all;
-    }}
-    .rationale {{
-      background: #1e293b;
-      padding: 12px;
-      border-radius: 6px;
-      margin: 12px 0;
-      white-space: pre-wrap;
-    }}
-    .actions {{ margin-top: 24px; display: flex; gap: 12px; }}
-    button {{
-      padding: 10px 20px;
-      border-radius: 6px;
-      font-size: 14px;
-      cursor: pointer;
-      border: 1px solid #334155;
-    }}
-    button.primary {{
-      background: #1d4ed8;
-      color: white;
-      border-color: #1d4ed8;
-    }}
-    button.primary:hover {{ background: #1e40af; }}
-    button.secondary {{
-      background: transparent;
-      color: #cbd5e1;
-    }}
-    button.secondary:hover {{ background: rgba(255,255,255,0.06); }}
-    button:disabled {{ opacity: 0.5; cursor: not-allowed; }}
-    .status {{ margin-top: 16px; color: #94a3b8; font-size: 13px; }}
-    .error {{ color: #f87171; }}
-  </style>
-</head>
-<body>
-  <h1>File access request</h1>
-  <p>Workspace {workspace_link} is requesting access to a file on this host:</p>
-  <p class="path">{html_module.escape(file_path)}</p>
-  <div class="rationale">{html_module.escape(rationale)}</div>
-  <p>Approving lets the agent read and write this specific file through
-     the Minds API. The grant applies until you remove it from the
-     workspace settings.</p>
-  <div class="actions">
-    <button id="approve" class="primary" onclick="submitDecision('grant')">Approve</button>
-    <button id="deny" class="secondary" onclick="submitDecision('deny')">Deny</button>
-  </div>
-  <div id="status" class="status"></div>
-  <script>
-  async function submitDecision(action) {{
-    const approveBtn = document.getElementById('approve');
-    const denyBtn = document.getElementById('deny');
-    const status = document.getElementById('status');
-    approveBtn.disabled = true;
-    denyBtn.disabled = true;
-    status.className = 'status';
-    status.textContent = action === 'grant'
-      ? 'Granting access...'
-      : 'Denying request...';
-    try {{
-      const response = await fetch('/requests/{escaped_request_id}/' + action, {{
-        method: 'POST',
-        headers: {{ 'Content-Type': 'application/json' }},
-        body: '{{}}',
-      }});
-      if (!response.ok) {{
-        const body = await response.text();
-        status.className = 'status error';
-        status.textContent = 'Request failed (' + response.status + '): ' + body;
-        approveBtn.disabled = false;
-        denyBtn.disabled = false;
-        return;
-      }}
-      status.textContent = action === 'grant'
-        ? 'Access granted. The agent has been notified.'
-        : 'Request denied. The agent has been notified.';
-    }} catch (error) {{
-      status.className = 'status error';
-      status.textContent = 'Request failed: ' + (error && error.message);
-      approveBtn.disabled = false;
-      denyBtn.disabled = false;
-    }}
-  }}
-  </script>
-</body>
-</html>
-"""
 
 
 class FileSharingGrantHandler(RequestEventHandler):
@@ -257,12 +132,12 @@ class FileSharingGrantHandler(RequestEventHandler):
             return HTMLResponse(content="<p>Unsupported request type</p>", status_code=500)
         parsed_agent_id = AgentId(req_event.agent_id)
         ws_name = _resolve_workspace_name(backend_resolver, parsed_agent_id, fallback=req_event.agent_id)
-        rendered = _render_dialog_page(
-            request_id=str(req_event.event_id),
+        rendered = render_file_sharing_permission_dialog(
             agent_id=req_event.agent_id,
+            request_id=str(req_event.event_id),
             ws_name=ws_name,
-            file_path=req_event.path,
             rationale=req_event.rationale,
+            file_path=req_event.path,
             mngr_forward_origin=mngr_forward_origin,
         )
         return HTMLResponse(content=rendered)

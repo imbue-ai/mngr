@@ -27,10 +27,10 @@ from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
 from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
 from imbue.minds.desktop_client.cookie_manager import create_session_cookie
-from imbue.minds.desktop_client.latchkey.permissions import GrantOutcome
-from imbue.minds.desktop_client.latchkey.permissions import GrantResult
-from imbue.minds.desktop_client.latchkey.permissions import LatchkeyPermissionGrantHandler
-from imbue.minds.desktop_client.latchkey.permissions import MngrMessageSender
+from imbue.minds.desktop_client.latchkey.permissions.messaging import MngrMessageSender
+from imbue.minds.desktop_client.latchkey.permissions.predefined import GrantOutcome
+from imbue.minds.desktop_client.latchkey.permissions.predefined import GrantResult
+from imbue.minds.desktop_client.latchkey.permissions.predefined import LatchkeyPermissionGrantHandler
 from imbue.minds.desktop_client.latchkey.services_catalog import ServicePermissionInfo
 from imbue.minds.desktop_client.latchkey.services_catalog import ServicesCatalog
 from imbue.minds.desktop_client.latchkey.testing import build_fake_gateway_client

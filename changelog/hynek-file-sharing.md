@@ -35,6 +35,17 @@ request schema and a new approve endpoint:
   a pending request without applying its effect; the minds desktop
   client uses it for the deny path.
 
+The minds desktop client's latchkey-permission handler code was
+reorganised so the two permission request types now live as siblings
+under a single `imbue.minds.desktop_client.latchkey.permissions`
+package: `.predefined` (the existing catalog-backed flow, moved from
+`latchkey/permissions.py`) and `.file_sharing` (moved from
+`latchkey/file_sharing.py`). Their shared helpers (`MngrMessageSender`
+and the Jinja-template renderers) live alongside them in the same
+package. The file-sharing approval dialog now uses the same Jinja
+template + Tailwind base (`templates/permissions.html`) and visual
+style as the predefined dialog instead of a hand-written HTML page.
+
 The minds desktop client side learns to render and resolve both
 request types:
 
