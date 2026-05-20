@@ -18,6 +18,12 @@ class SigningKeyError(MindError):
     ...
 
 
+class ApiTokenError(MindError):
+    """Raised when the persisted minds API token cannot be read or written."""
+
+    ...
+
+
 class GitCloneError(MindError):
     """Raised when git clone fails."""
 

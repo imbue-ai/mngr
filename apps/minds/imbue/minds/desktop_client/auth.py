@@ -13,6 +13,7 @@ from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.mutable_model import MutableModel
+from imbue.minds.errors import ApiTokenError
 from imbue.minds.errors import SigningKeyError
 from imbue.minds.primitives import CookieSigningKey
 from imbue.minds.primitives import MindsApiToken
@@ -27,10 +28,6 @@ _SIGNING_KEY_FILENAME: Final[str] = "signing_key"
 _API_TOKEN_FILENAME: Final[str] = "api_token"
 
 _CODES_FILENAME: Final[str] = "one_time_codes.json"
-
-
-class ApiTokenError(Exception):
-    """Raised when the persisted minds API token cannot be read or written."""
 
 
 class OneTimeCodeStatus(UpperCaseStrEnum):
