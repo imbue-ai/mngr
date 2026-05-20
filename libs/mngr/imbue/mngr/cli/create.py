@@ -1162,45 +1162,22 @@ def _parse_project_name(
 
 @pure
 def _is_host_in_reuse_scope(
-    host_ref: DiscoveredHost,
+    discovered_host: DiscoveredHost,
     provider_name: ProviderInstanceName | None,
     host_name: HostName | HostId | None,
 ) -> bool:
     """Whether an already-discovered host falls within the provider/host scope a ``mngr create`` address asked for.
 
-    ``_try_reuse_existing_agent`` calls this once per discovered host to decide
-    which hosts to search for a reusable agent. ``provider_name`` and
-    ``host_name`` come straight from the parsed address
-    (``address.provider_name`` and ``address.host_name``); either is ``None``
-    when the user left that part of the address blank.
-
-    Matching, in order:
-
-    - Provider: when the address pinned a provider, the host's provider must
-      equal it. A blank provider does not constrain.
-    - Host: a blank ``host_name`` does not constrain -- every host on the
-      already-narrowed provider set is in scope (the "any host" behavior of
-      bare-name and ``@.PROVIDER`` reuse). A :class:`HostId` must equal the
-      host's id exactly. A :class:`HostName` must equal the host's name; the
-      provider check above is what keeps same-named hosts on different
-      providers from cross-matching.
-
-    Worked examples (``host_ref`` is a host found during discovery):
-
-    - ``provider=None, host=None`` (``mngr create worker``): every host.
-    - ``provider="modal", host=None`` (``worker@.modal``): hosts on modal.
-    - ``provider=None, host=HostName("h2")`` (``worker@h2``): hosts named "h2".
-    - ``provider="modal", host=HostName("h2")`` (``worker@h2.modal``): the
-      host named "h2" on modal (a host named "h2" on docker is excluded).
-    - ``provider=*, host=HostId("host-ab12")``: the host with that exact id.
+    ``provider_name``: if set, the host's provider must equal it; if ``None``, any provider matches.
+    ``host_name``: a ``HostName`` matches the host's name, a ``HostId`` its id; ``None`` matches any host.
     """
-    if provider_name is not None and host_ref.provider_name != provider_name:
+    if provider_name is not None and discovered_host.provider_name != provider_name:
         return False
     if host_name is None:
         return True
     if isinstance(host_name, HostId):
-        return host_ref.host_id == host_name
-    return host_ref.host_name == host_name
+        return discovered_host.host_id == host_name
+    return discovered_host.host_name == host_name
 
 
 def _try_reuse_existing_agent(
