@@ -908,6 +908,17 @@ class Latchkey(MutableModel):
                 env=env,
             )
         if result.returncode != 0:
+            # Almost always means "not registered yet" (latchkey prints
+            # ``Unknown service.`` and exits non-zero). Log at debug so
+            # genuinely-unexpected failure modes -- broken binary,
+            # encryption-key error, etc. -- still leave a trail without
+            # spamming warning on the common first-time setup path.
+            logger.debug(
+                "'latchkey services info {}' exited {}: {}",
+                service_name,
+                result.returncode,
+                result.stderr.strip(),
+            )
             return None
         try:
             payload = json.loads(result.stdout)
