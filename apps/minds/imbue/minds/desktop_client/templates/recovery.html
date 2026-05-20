@@ -53,6 +53,13 @@
       // deciding which tier to offer from the layer-2 probe).
       var attemptedTier = null;
 
+      // Whether this page has observed the agent in a RESTARTING state -- via
+      // initial_status or an SSE event. A restart_failed event is only a real
+      // in-flight failure (rather than a stale snapshot for an idle agent) once
+      // a restart has been seen in flight, so this gates surfacing failures
+      // for restarts triggered outside this page (sidebar / landing page).
+      var hasSeenRestarting = false;
+
       function show(el, visible) {
         el.classList.toggle('hidden', !visible);
       }
@@ -176,16 +183,24 @@
           statusEl.textContent = 'Workspace is ready. Reloading…';
           goBack();
         } else if (status === 'restarting') {
+          hasSeenRestarting = true;
           renderInFlight();
         } else if (status === 'restart_failed') {
-          // Ignore failure events until the user has actually triggered a
-          // restart this session -- otherwise the snapshot the SSE sends on
-          // connect would clobber the tier the layer-2 probe just chose.
+          // Ignore failure events until a restart has actually been seen in
+          // flight -- otherwise the snapshot the SSE sends on connect would
+          // clobber the tier the layer-2 probe just chose for an idle agent.
           if (attemptedTier === 'host') {
             renderTerminal(errorText);
           } else if (attemptedTier === 'system_interface') {
             setError(errorText || 'The system interface did not come back.');
             renderHostOffer(true);
+          } else if (hasSeenRestarting) {
+            // A restart that was triggered outside this page (sidebar or
+            // landing page) failed. We do not know which tier it was, so
+            // surface the reason and re-run the probe to re-offer a tier
+            // rather than hang forever on "Restarting...".
+            setError(errorText || 'The restart did not recover the system interface.');
+            runProbe();
           }
         }
       }
@@ -210,6 +225,9 @@
 
       // -- Initial state ------------------------------------------------------
       if (initialStatus === 'restarting') {
+        // A restart was already in flight when this page loaded. Record that
+        // so a later restart_failed SSE event is surfaced instead of dropped.
+        hasSeenRestarting = true;
         renderInFlight();
       } else {
         if (initialStatus === 'restart_failed' && initialError) {
