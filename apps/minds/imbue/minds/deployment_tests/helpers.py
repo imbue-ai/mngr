@@ -22,6 +22,8 @@ from imbue.minds.bootstrap import MINDS_ROOT_NAME_ENV_VAR
 from imbue.minds.bootstrap import mngr_host_dir_for
 from imbue.minds.bootstrap import mngr_prefix_for
 from imbue.minds.bootstrap import root_name_for_env_name
+from imbue.minds.cli._activated_env import modal_profile_for_tier_or_none
+from imbue.minds.cli._activated_env import tier_for_env_name
 from imbue.minds.deployment_tests.data_types import SharedEnvHandle
 from imbue.minds.envs.paths import client_config_file
 from imbue.minds.envs.primitives import DevEnvName
@@ -31,10 +33,6 @@ _SUPERTOKENS_TENANT_ID: Final[str] = "public"
 _SUPERTOKENS_ADMIN_TIMEOUT_SECONDS: Final[float] = 30.0
 _ENV_READY_TIMEOUT_SECONDS: Final[float] = 60.0
 _ENV_READY_POLL_INTERVAL_SECONDS: Final[float] = 1.0
-# Dev tier's Modal workspace -- ``minds env activate`` exports this as
-# MODAL_PROFILE so every subsequent ``modal`` shellout targets the right
-# workspace. Mirrors apps/minds/imbue/minds/config/envs/dev/deploy.toml.
-_DEV_MODAL_PROFILE: Final[str] = "minds-dev"
 
 
 def build_minds_env_subprocess_env(name: DevEnvName) -> dict[str, str]:
@@ -42,7 +40,13 @@ def build_minds_env_subprocess_env(name: DevEnvName) -> dict[str, str]:
 
     Mirrors what ``minds env activate <name>`` exports (without going
     through the print-shell-vars indirection): MINDS_ROOT_NAME, MNGR_HOST_DIR,
-    MNGR_PREFIX, MINDS_CLIENT_CONFIG_PATH, and (for dev envs) MODAL_PROFILE.
+    MNGR_PREFIX, MINDS_CLIENT_CONFIG_PATH, and (for tiers with a
+    committed ``modal_workspace``) MODAL_PROFILE. The MODAL_PROFILE
+    lookup goes through the same ``modal_profile_for_tier_or_none``
+    helper ``minds env activate`` itself uses, so a separated CI Modal
+    workspace (planned) automatically lands here without having to
+    update a test-only hardcoded constant.
+
     Inherits VAULT_TOKEN / VAULT_ADDR / VAULT_NAMESPACE / ANTHROPIC_API_KEY
     from the parent process unchanged so the subprocess can read Vault +
     talk to Anthropic without further wiring.
@@ -53,7 +57,9 @@ def build_minds_env_subprocess_env(name: DevEnvName) -> dict[str, str]:
     env["MNGR_HOST_DIR"] = str(mngr_host_dir_for(root_name))
     env["MNGR_PREFIX"] = mngr_prefix_for(root_name)
     env["MINDS_CLIENT_CONFIG_PATH"] = str(client_config_file(name))
-    env["MODAL_PROFILE"] = _DEV_MODAL_PROFILE
+    modal_profile = modal_profile_for_tier_or_none(tier_for_env_name(str(name)))
+    if modal_profile is not None:
+        env["MODAL_PROFILE"] = modal_profile
     return env
 
 
