@@ -409,11 +409,12 @@ def stop_modal_app(
         )
     if result.returncode == 0:
         return
-    # Modal's "no such app" wording has shifted; both known variants
-    # contain "not found" or "already stopped". Treat either as a no-op
-    # so destroy stays idempotent.
+    # Modal's "no such app" wording has shifted across versions:
+    #   - older: "could not find a deployed app named '<name>' ..."
+    #   - 1.4.x: "No App with name '<name>' found in the '<env>' environment."
+    # Both invariant substrings handled below so destroy stays idempotent.
     message = (result.stderr + result.stdout).lower()
-    if "not found" in message or "already stopped" in message or "no such" in message:
+    if "not found" in message or "already stopped" in message or "no such" in message or "no app with name" in message:
         logger.info("`modal app stop {} --env {}`: app already stopped or missing.", app_name, modal_env)
         return
     stderr = result.stderr.strip() or result.stdout.strip()
@@ -616,14 +617,16 @@ def get_modal_app_latest_version(*, app_name: str, modal_env: str, parent_cg: Co
         )
     if result.returncode != 0:
         message = (result.stderr + result.stdout).lower()
-        # Modal CLI's "no such app" wording: empirically "could not find a
-        # deployed app named '<name>' in the '<env>' environment." Also
-        # handle older variants for forward-compat.
+        # Modal CLI's "no such app" wording has shifted across versions:
+        #   - older: "could not find a deployed app named '<name>' in the '<env>' environment."
+        #   - 1.4.x: "No App with name '<name>' found in the '<env>' environment."
+        # Both reduce to a few invariant substrings. Match defensively.
         if (
             "could not find" in message
             or "not found" in message
             or "no such" in message
             or "does not exist" in message
+            or "no app with name" in message
         ):
             return None
         stderr = result.stderr.strip() or result.stdout.strip()
