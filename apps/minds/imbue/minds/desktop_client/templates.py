@@ -209,23 +209,52 @@ def render_create_form(
 
 
 _STATUS_TEXT_DEFAULT: Final[dict[str, str]] = {
-    "CLONING": "Cloning repository...",
-    "CREATING": "Creating agent...",
+    "INITIALIZING": "Starting...",
+    "CLONING_REPO": "Cloning repository...",
+    "CHECKING_OUT_BRANCH": "Checking out branch...",
+    "PROVISIONING_AI": "Provisioning AI access...",
+    "CREATING_WORKSPACE": "Creating workspace...",
+    "WAITING_FOR_READY": "Waiting for workspace to be ready...",
     "DONE": "Done. Redirecting...",
 }
 
+# IMBUE_CLOUD diverges in wording for the connection / agent-setup phases
+# where the user-facing mental model is "connecting to / setting up an
+# existing pool host" rather than "cloning / creating a new workspace".
 _STATUS_TEXT_IMBUE_CLOUD: Final[dict[str, str]] = {
-    "CLONING": "Connecting to host...",
-    "CREATING": "Setting up agent...",
+    "INITIALIZING": "Starting...",
+    "CLONING_REPO": "Connecting to host...",
+    "CHECKING_OUT_BRANCH": "Checking out branch...",
+    "PROVISIONING_AI": "Provisioning AI access...",
+    "CREATING_WORKSPACE": "Setting up agent...",
+    "WAITING_FOR_READY": "Waiting for workspace to be ready...",
     "DONE": "Done. Redirecting...",
 }
+
+
+@pure
+def status_text_for(
+    status: str,
+    error: str | None = None,
+    launch_mode: LaunchMode = LaunchMode.LOCAL,
+) -> str:
+    """Resolve the UI caption for an ``AgentCreationStatus`` value.
+
+    ``status`` is the stringified enum value (e.g. ``"CLONING_REPO"``).
+    ``error`` is consulted only for the ``FAILED`` case so the caption
+    can surface the underlying error message; for every other status the
+    text comes from the mode-aware ``_STATUS_TEXT_*`` maps.
+    """
+    if status == "FAILED":
+        return "Failed: {}".format(error or "unknown error")
+    text_map = _STATUS_TEXT_IMBUE_CLOUD if launch_mode is LaunchMode.IMBUE_CLOUD else _STATUS_TEXT_DEFAULT
+    return text_map.get(status, "Working...")
 
 
 @pure
 def render_creating_page(
     creation_id: CreationId,
     info: AgentCreationInfo,
-    launch_mode: LaunchMode = LaunchMode.LOCAL,
 ) -> str:
     """Render the progress page shown while an agent is being created.
 
@@ -235,12 +264,13 @@ def render_creating_page(
     needs a stable handle to poll status from the moment the user kicks
     off the form. The template's status-poll URL still includes this id
     so SSE/log-streaming endpoints can find the right ``log_queue``.
+
+    The launch mode is read off ``info.launch_mode`` --
+    ``AgentCreator.start_creation`` records it before spawning the worker
+    thread, so the ``AgentCreationInfo`` snapshot is the single source of
+    truth for caption resolution (consistent with the SSE status events).
     """
-    text_map = _STATUS_TEXT_IMBUE_CLOUD if launch_mode is LaunchMode.IMBUE_CLOUD else _STATUS_TEXT_DEFAULT
-    if str(info.status) == "FAILED":
-        status_text = "Failed: {}".format(info.error or "unknown error")
-    else:
-        status_text = text_map.get(str(info.status), "Working...")
+    status_text = status_text_for(str(info.status), error=info.error, launch_mode=info.launch_mode)
     template = JINJA_ENV.get_template("creating.html")
     return template.render(
         agent_id=creation_id,

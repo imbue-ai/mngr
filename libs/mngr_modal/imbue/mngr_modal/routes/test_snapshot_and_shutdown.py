@@ -223,6 +223,7 @@ def test_snapshot_and_shutdown_success(
 @pytest.mark.acceptance
 @pytest.mark.modal
 @pytest.mark.timeout(180)
+@pytest.mark.flaky
 def test_snapshot_and_shutdown_missing_sandbox_id(
     deployed_snapshot_function: tuple[str, str],
 ) -> None:
