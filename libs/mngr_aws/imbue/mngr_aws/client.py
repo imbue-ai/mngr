@@ -74,10 +74,11 @@ class AwsVpsClient(VpsClientInterface):
         default=(),
         description=(
             "CIDR blocks allowed inbound on tcp/22 and tcp/container_ssh_port of the auto-created "
-            "security group. Empty by default (fail-closed): if no security_group_id is provided "
-            "and this is empty, ensure_security_group raises rather than creating a wide-open SG. "
-            "Set to e.g. ('203.0.113.4/32',) to restrict to your own IP, or ('0.0.0.0/0',) to "
-            "expose to the public internet (NOT recommended for production)."
+            "security group. Empty by default (fail-closed): when `security_group` is "
+            "`AutoCreateSecurityGroup(...)` and this tuple is empty, `ensure_security_group` "
+            "raises rather than creating a wide-open SG. Set to e.g. ('203.0.113.4/32',) to "
+            "restrict to your own IP, or ('0.0.0.0/0',) to expose to the public internet (NOT "
+            "recommended for production)."
         ),
     )
     associate_public_ip: bool = Field(default=True, description="Assign a public IPv4 to launched instances")
