@@ -332,8 +332,9 @@ class LeaseHostResponse(BaseModel):
     host_db_id: UUID = Field(description="Database ID of the leased host")
     vps_address: str = Field(
         description=(
-            "SSH-reachable VPS address. Public IPv4 for Vultr-backed pool rows; "
-            "a DNS hostname (e.g. ``vps-eec8860b.vps.ovh.us``) for OVH-backed rows."
+            "SSH-reachable VPS address. Either a public IPv4 or a DNS hostname depending "
+            "on what the host's provider returned at bake time (OVH-backed rows are DNS "
+            "hostnames like ``vps-eec8860b.vps.ovh.us``)."
         )
     )
     ssh_port: int = Field(description="SSH port on the VPS")
@@ -355,8 +356,9 @@ class LeasedHostInfo(BaseModel):
     host_db_id: UUID = Field(description="Database ID of the leased host")
     vps_address: str = Field(
         description=(
-            "SSH-reachable VPS address. Public IPv4 for Vultr-backed pool rows; "
-            "a DNS hostname (e.g. ``vps-eec8860b.vps.ovh.us``) for OVH-backed rows."
+            "SSH-reachable VPS address. Either a public IPv4 or a DNS hostname depending "
+            "on what the host's provider returned at bake time (OVH-backed rows are DNS "
+            "hostnames like ``vps-eec8860b.vps.ovh.us``)."
         )
     )
     ssh_port: int = Field(description="SSH port on the VPS")

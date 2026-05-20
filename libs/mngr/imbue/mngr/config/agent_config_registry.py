@@ -5,11 +5,13 @@ from pydantic import Field
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.pure import pure
 from imbue.mngr.config.agent_class_registry import get_agent_class
+from imbue.mngr.config.agent_class_registry import is_agent_class_registered
 from imbue.mngr.config.data_types import AGENT_TYPE_CONCAT_TUPLE_FIELDS
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import merge_tuples
 from imbue.mngr.errors import MngrError
+from imbue.mngr.errors import UnknownAgentTypeError
 from imbue.mngr.primitives import AgentTypeName
 
 # Fields on AgentTypeConfig that are routing metadata (not runtime config values).
@@ -55,6 +57,19 @@ def list_registered_agent_config_types() -> list[str]:
 def reset_agent_config_registry() -> None:
     """Reset the registry. Used for test isolation."""
     _agent_config_registry.clear()
+
+
+def is_known_agent_type(agent_type: str, config: MngrConfig) -> bool:
+    """Whether an agent type is known anywhere: a registered class, a registered
+    config, or a user-defined [agent_types.X] block in the loaded config.
+
+    This is the canonical predicate for "is this a real agent type name?" --
+    callers should prefer this over checking individual registries.
+    """
+    name = AgentTypeName(agent_type)
+    return (
+        name in config.agent_types or is_agent_class_registered(agent_type) or is_agent_config_registered(agent_type)
+    )
 
 
 # =============================================================================
@@ -166,15 +181,22 @@ def resolve_agent_type(
     For plugin-registered or direct command types, returns the registered
     class and config directly.
 
-    Raises MngrError if the agent type (or its parent type) belongs to a
-    disabled plugin.
+    Raises UnknownAgentTypeError if the agent type name is not known via any
+    registry or user config (or, in the parent-type branch, if the parent
+    type itself is not known). Raises MngrError if the agent type (or its
+    parent type) belongs to a disabled plugin.
     """
     _check_agent_type_not_disabled(agent_type, config)
+
+    if not is_known_agent_type(str(agent_type), config):
+        raise UnknownAgentTypeError(str(agent_type))
 
     custom_config = config.agent_types.get(agent_type)
 
     if custom_config is not None and custom_config.parent_type is not None:
         parent_type = custom_config.parent_type
+        if not is_known_agent_type(str(parent_type), config):
+            raise UnknownAgentTypeError(str(parent_type))
         agent_class = get_agent_class(str(parent_type))
         config_class = get_agent_config_class(str(parent_type))
 

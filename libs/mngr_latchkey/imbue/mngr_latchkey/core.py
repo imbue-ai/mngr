@@ -377,22 +377,29 @@ def _build_gateway_env(
     return env
 
 
+_BUNDLED_EXTENSION_SUFFIXES: Final[tuple[str, ...]] = (".mjs", ".json")
+
+
 def _materialize_bundled_extensions(latchkey_directory: Path) -> Path:
     """Copy this package's bundled gateway extensions into ``LATCHKEY_DIRECTORY/extensions/``.
 
     The upstream ``latchkey gateway`` (>= 2.9.0) auto-loads every
-    ``.mjs`` file in this directory at startup. We rewrite the bundled
-    files unconditionally on every spawn so a package upgrade always
-    wins over a stale on-disk copy. The directory is created with
-    ``mode=0o700`` because it shares the same trust boundary as the
-    rest of ``LATCHKEY_DIRECTORY``.
+    ``.mjs`` file in this directory at startup. We also ship sibling
+    ``.json`` data files (e.g. ``services.json``) that the ``.mjs``
+    extensions read at request time; those are copied next to the
+    ``.mjs`` files so the extensions can locate them via
+    ``import.meta.url``. We rewrite the bundled files unconditionally
+    on every spawn so a package upgrade always wins over a stale
+    on-disk copy. The directory is created with ``mode=0o700`` because
+    it shares the same trust boundary as the rest of
+    ``LATCHKEY_DIRECTORY``.
     """
     extensions_dir = latchkey_directory / _GATEWAY_EXTENSIONS_SUBDIR
     extensions_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
     source_package = resources.files("imbue.mngr_latchkey.extensions")
     for entry in source_package.iterdir():
         name = entry.name
-        if not name.endswith(".mjs"):
+        if not any(name.endswith(suffix) for suffix in _BUNDLED_EXTENSION_SUFFIXES):
             continue
         destination = extensions_dir / name
         destination.write_text(entry.read_text(encoding="utf-8"), encoding="utf-8")

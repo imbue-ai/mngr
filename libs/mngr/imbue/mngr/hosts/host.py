@@ -39,6 +39,7 @@ from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.pure import pure
 from imbue.mngr import resources as mngr_resources
+from imbue.mngr.config.agent_class_registry import get_orphan_agent_class
 from imbue.mngr.config.agent_config_registry import resolve_agent_type
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import EnvVar
@@ -47,17 +48,18 @@ from imbue.mngr.config.data_types import WorkDirExtraPathMode
 from imbue.mngr.errors import AgentNotFoundOnHostError
 from imbue.mngr.errors import AgentStartError
 from imbue.mngr.errors import BaseMngrError
-from imbue.mngr.errors import DuplicateAgentNameError
 from imbue.mngr.errors import HostConnectionError
 from imbue.mngr.errors import HostDataSchemaError
 from imbue.mngr.errors import InvalidActivityTypeError
 from imbue.mngr.errors import LockNotHeldError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import NoCommandDefinedError
+from imbue.mngr.errors import UnknownAgentTypeError
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.common import build_ssh_transport_command
 from imbue.mngr.hosts.common import get_ssh_known_hosts_file
 from imbue.mngr.hosts.offline_host import BaseHost
+from imbue.mngr.hosts.offline_host import apply_rename_to_agent_data
 from imbue.mngr.hosts.outer_host import OuterHost
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.data_types import CertifiedHostData
@@ -986,7 +988,22 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
             return agent_refs
 
     def _load_agent_from_dir(self, agent_dir: Path) -> AgentInterface | None:
-        """Load an agent from its state directory."""
+        """Load an agent from its state directory.
+
+        If the agent's stored type is no longer registered (e.g. the plugin
+        was uninstalled or the type was renamed since the agent was created),
+        we degrade to the orphan-fallback class wired via
+        ``set_orphan_agent_class`` (configured by ``load_agents_from_plugins``
+        in the agents layer) plus a base ``AgentTypeConfig``, with a logged
+        warning so commands like ``mngr destroy`` / ``mngr list`` /
+        ``mngr cleanup`` can still operate on the agent. If no orphan
+        fallback has been wired (e.g. tests that skipped plugin loading),
+        the original ``UnknownAgentTypeError`` is propagated so the missing
+        setup surfaces instead of silently being swallowed.
+        ``check_agent_type_known`` separately marks the agent's lifecycle
+        state as ``RUNNING_UNKNOWN_AGENT_TYPE`` so users see that something
+        is off.
+        """
         data_path = agent_dir / "data.json"
         try:
             content = self.read_text_file(data_path)
@@ -998,9 +1015,28 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         logger.trace("Loaded agent {} from {}", data.get("name"), agent_dir)
 
         agent_type = AgentTypeName(data["type"])
-        resolved = resolve_agent_type(agent_type, self.mngr_ctx.config)
+        try:
+            resolved = resolve_agent_type(agent_type, self.mngr_ctx.config)
+            resolved_class = resolved.agent_class
+            resolved_config = resolved.agent_config
+        except UnknownAgentTypeError:
+            orphan_class = get_orphan_agent_class()
+            if orphan_class is None:
+                # No fallback configured (e.g. tests that didn't load the
+                # agent registry). Re-raise so the test surfaces the
+                # missing setup rather than silently swallowing the error.
+                raise
+            logger.warning(
+                "Agent {} has type '{}' which is no longer registered; "
+                "loading with fallback class {} so existing commands keep working.",
+                data.get("name"),
+                agent_type,
+                orphan_class.__name__,
+            )
+            resolved_class = orphan_class
+            resolved_config = AgentTypeConfig()
 
-        return resolved.agent_class(
+        return resolved_class(
             id=AgentId(data["id"]),
             name=AgentName(data["name"]),
             agent_type=agent_type,
@@ -1009,7 +1045,7 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
             host_id=self.id,
             host=self,
             mngr_ctx=self.mngr_ctx,
-            agent_config=resolved.agent_config,
+            agent_config=resolved_config,
         )
 
     def create_agent_work_dir(
@@ -2184,11 +2220,11 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
 
     def rename_agent(
         self,
-        agent: AgentInterface,
+        agent_ref: DiscoveredAgent,
         new_name: AgentName,
         labels_to_merge: Mapping[str, str] | None = None,
-    ) -> AgentInterface:
-        """Rename an agent (optionally merging labels) and return the updated object.
+    ) -> DiscoveredAgent:
+        """Rename an agent (optionally merging labels) and return the updated ref.
 
         The operation is idempotent: if interrupted mid-rename, re-running
         will complete it. This works because data.json (the "commit point")
@@ -2200,15 +2236,20 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         an external observer of the agent's state never sees the rename without
         also seeing the new labels.
         """
-        with log_span("Renaming agent", agent_id=str(agent.id), old_name=str(agent.name), new_name=str(new_name)):
+        agent_id = agent_ref.agent_id
+        with log_span(
+            "Renaming agent",
+            agent_id=str(agent_id),
+            old_name=str(agent_ref.agent_name),
+            new_name=str(new_name),
+        ):
             # Prevent same-host name collisions (the tmux session name is derived
             # from the agent name, so duplicates would share a session).
-            for existing_agent in self.get_agents():
-                if existing_agent.name == new_name and existing_agent.id != agent.id:
-                    raise DuplicateAgentNameError(new_name, existing_agent.id)
+            self._check_rename_conflict(agent_id, new_name)
 
-            old_name = agent.name
-            data_path = self._get_agent_state_dir(agent) / "data.json"
+            old_name = agent_ref.agent_name
+            agent_state_dir = get_agent_state_dir_path(self.host_dir, agent_id)
+            data_path = agent_state_dir / "data.json"
 
             # Rename the tmux session first (idempotent -- no-ops if session doesn't exist with old name)
             old_session_name = f"{self.mngr_ctx.config.prefix}{old_name}"
@@ -2220,7 +2261,7 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
             logger.debug("Tmux rename result: success={}, stdout={}", result.success, result.stdout.strip())
 
             # Update the MNGR_AGENT_NAME env var in the agent's env file
-            env_path = self.get_agent_env_path(agent)
+            env_path = agent_state_dir / "env"
             try:
                 env_content = self.read_text_file(env_path)
                 updated_lines: list[str] = []
@@ -2231,7 +2272,7 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
                         updated_lines.append(line)
                 self.write_file(env_path, ("\n".join(updated_lines) + "\n").encode(), is_atomic=True)
             except FileNotFoundError:
-                logger.debug("No env file found for agent {}, skipping env update", agent.id)
+                logger.debug("No env file found for agent {}, skipping env update", agent_id)
 
             # Update data.json last (the "commit point" for the rename). Any
             # provided labels are merged into the existing labels in the same
@@ -2239,18 +2280,17 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
             # together.
             content = self.read_text_file(data_path)
             data = json.loads(content)
-            data["name"] = str(new_name)
-            if labels_to_merge:
-                current_labels = data.get("labels") or {}
-                data["labels"] = {**current_labels, **dict(labels_to_merge)}
-            self.write_file(data_path, json.dumps(data, indent=2).encode(), is_atomic=True)
-            self.save_agent_data(agent.id, data)
+            updated = apply_rename_to_agent_data(data, new_name, labels_to_merge)
+            self.write_file(data_path, json.dumps(updated, indent=2).encode(), is_atomic=True)
+            self.save_agent_data(agent_id, updated)
 
-            # Reload and return the updated agent
-            updated_agent = self._load_agent_from_dir(self._get_agent_state_dir(agent))
-            if updated_agent is None:
-                raise AgentNotFoundOnHostError(agent.id, self.id)
-            return updated_agent
+            return DiscoveredAgent(
+                host_id=self.id,
+                agent_id=agent_id,
+                agent_name=new_name,
+                provider_name=self.provider_instance.name,
+                certified_data=updated,
+            )
 
     def destroy_agent(self, agent: AgentInterface) -> None:
         """Destroy an agent and clean up its resources."""
