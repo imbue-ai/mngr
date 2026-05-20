@@ -409,7 +409,7 @@ class _CreateCommand(click.Command):
     "--reuse/--no-reuse",
     default=False,
     show_default=True,
-    help="Reuse existing agent with the same name if it exists (idempotent create)",
+    help="Reuse existing agent with the same name if it exists (idempotent create); incompatible with --new-host",
 )
 @optgroup.option(
     "--update/--no-update",
