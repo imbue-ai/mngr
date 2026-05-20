@@ -11,6 +11,11 @@ DEST="$2"
 mkdir -p "$DEST";
 
 
+# Also drops scripts/post-source-setup.sh next to the tarball so the
+# Dockerfile can `COPY scripts/post-source-setup.sh ...` it into the
+# image before extracting the tarball -- the keyframe shape would
+# otherwise leave the script trapped inside the tarball with no way
+# for the extracting RUN to invoke it.
 [ -e "$DEST/$HASH.checkpoint" ] || ( \
   tmp=$(mktemp -d); \
   rm -rf "$tmp"; \
@@ -20,6 +25,8 @@ mkdir -p "$DEST";
   git -C "$tmp" checkout "$HASH"; \
   mv "$tmp" "$DEST/$HASH"; \
   COPYFILE_DISABLE=1 tar czf "$DEST/current.tar.gz" -C "$DEST/$HASH" .; \
+  mkdir -p "$DEST/scripts"; \
+  cp "$DEST/$HASH/scripts/post-source-setup.sh" "$DEST/scripts/post-source-setup.sh"; \
   rm -rf "$DEST/$HASH"; \
   touch "$DEST/$HASH.checkpoint"; \
 )

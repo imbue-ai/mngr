@@ -102,13 +102,24 @@ RUN export OFFLOAD_VERSION=0.9.5 \
 # `mngr schedule` and offload's post_patch_cmd assume.
 WORKDIR /code/mngr/
 
+# Pull in just scripts/post-source-setup.sh first, so the post-COPY
+# RUN below can invoke it even in the keyframe build-context shape
+# where everything else lives inside current.tar.gz. The real-source-
+# tree shape would also satisfy this COPY from the same path, and the
+# subsequent `COPY . /code/mngr/` (when the keyframe build context is
+# used) and the in-script tarball extraction both leave this same
+# script on disk afterwards -- a self-consistent end state.
+COPY scripts/post-source-setup.sh /code/mngr/scripts/post-source-setup.sh
+
 # Copy the build context. Two shapes are supported (the shape is
 # detected and normalized inside scripts/post-source-setup.sh below):
 #   - Real source tree (offload's exported repo, mngr_schedule's
 #     producer-side-extracted tree, the test_modal_create release
 #     test's unpacked tree, local docker builds).
 #   - .mngr/dev/build/ keyframe directory containing only
-#     current.tar.gz + a .checkpoint marker (typical end-user flow via
+#     current.tar.gz + a .checkpoint marker + a scripts/ subdir with
+#     just the post-source-setup.sh script (populated by
+#     make_tar_of_repo.sh; typical end-user flow via
 #     .mngr/settings.toml's pre_command_scripts hook + create_templates).
 # COPY lands files owned by root:root by default, so no chown is needed.
 COPY . /code/mngr/
