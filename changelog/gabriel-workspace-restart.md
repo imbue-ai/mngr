@@ -13,7 +13,11 @@ Tiered system-interface restart for the minds recovery flow.
   whole workspace container.
 - The sidebar workspace context menu gains a "Restart workspace…" entry
   (with a confirmation, since it interrupts every agent), and the home
-  page gains a per-workspace restart button.
+  page gains a per-workspace restart button. The sidebar restart entries
+  now show restart progress on the recovery page instead of immediately
+  reloading the (still-running) workspace, and the home-page restart
+  button opens the recovery page's tier picker even when the workspace is
+  currently healthy.
 - New `mngr stop --stop-host` flag: stops an agent's whole host instead
   of just the agent.
 - Opening a workspace whose container has been stopped now routes to the

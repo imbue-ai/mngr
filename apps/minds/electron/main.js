@@ -990,9 +990,9 @@ async function runChromeSSELoop() {
 // POST a restart endpoint (``restart-system-interface`` or ``restart-host``)
 // and resolve once the server has acknowledged the 202 dispatch (or the
 // request errors / times out). The endpoints return 202 immediately and
-// drive recovery asynchronously; callers navigate to the workspace URL
-// afterward, where the plugin serves its 503 loader until the workspace
-// comes back.
+// drive recovery asynchronously; the 202 also means the health tracker is
+// already RESTARTING, so callers navigate to the recovery page afterward,
+// which shows restart progress and returns to the workspace once healthy.
 //
 // Always resolves (never rejects) so callers can chain navigation
 // regardless of network outcome.
@@ -1658,12 +1658,20 @@ ipcMain.on('show-workspace-context-menu', (event, agentId, x, y) => {
     });
     template.push({ type: 'separator' });
   }
-  const reloadWorkspaceView = () => {
-    if (workspaceUrl && bundle.contentView && !bundle.contentView.webContents.isDestroyed()) {
-      // The plugin serves its styled 503 loader (the "System interface
-      // starting" page), which auto-refreshes into the workspace once the
-      // system interface is back.
-      bundle.contentView.webContents.loadURL(workspaceUrl);
+  const goToRecoveryView = () => {
+    if (bundle.contentView && !bundle.contentView.webContents.isDestroyed()) {
+      // The restart POST has already moved the health tracker to RESTARTING,
+      // so the recovery page renders its "Restarting…" progress state and
+      // polls (via SSE) until the workspace is healthy again, then navigates
+      // back to ``workspaceUrl``. Reloading the workspace URL directly would
+      // instead race the restart: the container is still up at dispatch
+      // time, so the reload would just show the pre-restart workspace.
+      bundle.contentView.webContents.loadURL(
+        toAbsoluteUrl(
+          '/agents/' + encodeURIComponent(agentId)
+          + '/recovery?return_to=' + encodeURIComponent(workspaceUrl || ''),
+        ),
+      );
     }
   };
   template.push({
@@ -1673,7 +1681,7 @@ ipcMain.on('show-workspace-context-menu', (event, agentId, x, y) => {
       // while the restart dispatch is acknowledged.
       closeSidebar(bundle);
       await postRestart(agentId, 'restart-system-interface');
-      reloadWorkspaceView();
+      goToRecoveryView();
     },
   });
   template.push({
@@ -1692,7 +1700,7 @@ ipcMain.on('show-workspace-context-menu', (event, agentId, x, y) => {
       if (response !== 1) return;
       closeSidebar(bundle);
       await postRestart(agentId, 'restart-host');
-      reloadWorkspaceView();
+      goToRecoveryView();
     },
   });
   const menu = Menu.buildFromTemplate(template);

@@ -1687,6 +1687,28 @@ def test_recovery_page_redirects_to_return_to_when_agent_already_healthy(tmp_pat
     assert response.headers["location"] == safe_return_to
 
 
+def test_recovery_page_renders_for_healthy_agent_with_explicit_restart_intent(tmp_path: Path) -> None:
+    """``intent=restart`` makes the page render for a HEALTHY agent instead of 302ing back.
+
+    The home-page restart control navigates here explicitly so the user can
+    pick a restart tier. Without the intent marker the healthy-redirect guard
+    would bounce them straight back to ``return_to`` and nothing would happen.
+    """
+    tracker = SystemInterfaceHealthTracker()
+    client, _, agent_id = _setup_test_server_with_tracker(tmp_path, tracker)
+    # With no record in the tracker, get_health returns HEALTHY by default.
+    assert tracker.get_health(agent_id) == AgentHealth.HEALTHY
+    safe_return_to = f"http://{agent_id}.localhost:8421/"
+
+    response = client.get(
+        f"/agents/{agent_id}/recovery?return_to={safe_return_to}&intent=restart",
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 200
+    assert 'data-initial-status="healthy"' in response.text
+
+
 def test_recovery_page_renders_normally_when_healthy_but_no_return_to(tmp_path: Path) -> None:
     """No return_to + HEALTHY: render the page (with a working restart button) instead of erroring.
 

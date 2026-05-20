@@ -118,13 +118,17 @@
       };
 
       // The per-row restart control routes to the recovery page, which runs
-      // the layer-2 probe and offers the appropriate restart tier.
+      // the layer-2 probe and offers the appropriate restart tier. The
+      // ``intent=restart`` marker tells the recovery page to render its
+      // restart UI even when the workspace is currently healthy, instead of
+      // redirecting straight back (the automatic-503 behaviour).
       window.landingRestartClick = function (button) {
         var row = button.closest('[data-agent-id]');
         if (!row) return;
         var agentId = row.dataset.agentId;
         var ret = row.dataset.defaultHref || '';
-        window.location = '/agents/' + encodeURIComponent(agentId) + '/recovery?return_to=' + encodeURIComponent(ret);
+        window.location = '/agents/' + encodeURIComponent(agentId)
+          + '/recovery?return_to=' + encodeURIComponent(ret) + '&intent=restart';
       };
 
       var es = null;
