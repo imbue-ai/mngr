@@ -1,4 +1,5 @@
 # Re-implement restart-system-interface on top of mngr_forward
+> Note: the "workspace server" feature has since been renamed to "system interface". Symbol and route names below (`WorkspaceServerHealthTracker`, `workspace_backend_failure`, `workspace_server_health.py`, `restart-workspace-server`, ...) describe the plan as written before that rename.
 
 ## Overview
 
