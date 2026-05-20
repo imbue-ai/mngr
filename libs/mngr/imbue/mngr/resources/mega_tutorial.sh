@@ -622,8 +622,8 @@ mngr snapshot destroy my-task --all-snapshots --dry-run
 
 ##############################################################################
 # MANAGING AGENT LIMITS
-#   Configure idle timeouts, activity tracking, permissions, and other
-#   runtime limits for agents and hosts.
+#   Configure idle timeouts, activity tracking, and other runtime limits
+#   for agents and hosts.
 ##############################################################################
 
 # "limit" is an experimental command. See "mngr limit --help" for current usage.
