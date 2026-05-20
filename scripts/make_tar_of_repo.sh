@@ -8,6 +8,12 @@ set -euo pipefail
 HASH="$1"
 DEST="$2"
 
+# Used below to drop the current copy of post-source-setup.sh alongside
+# the tarball. Pulled from the working-tree copy (next to this script)
+# rather than the keyframe checkout, because the pinned
+# image_commit_hash can predate the script's introduction (2026-05-08).
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+
 mkdir -p "$DEST";
 
 
@@ -26,7 +32,7 @@ mkdir -p "$DEST";
   mv "$tmp" "$DEST/$HASH"; \
   COPYFILE_DISABLE=1 tar czf "$DEST/current.tar.gz" -C "$DEST/$HASH" .; \
   mkdir -p "$DEST/scripts"; \
-  cp "$DEST/$HASH/scripts/post-source-setup.sh" "$DEST/scripts/post-source-setup.sh"; \
+  cp "$SCRIPT_DIR/post-source-setup.sh" "$DEST/scripts/post-source-setup.sh"; \
   rm -rf "$DEST/$HASH"; \
   touch "$DEST/$HASH.checkpoint"; \
 )
