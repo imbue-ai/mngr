@@ -54,7 +54,7 @@ def _extract_uuids(lines: list[str]) -> list[str]:
 class ScriptRunner:
     """Helper to run stream_transcript.sh in a test environment."""
 
-    def __init__(self, tmp_path: Path, stub_mngr_log_sh: str) -> None:
+    def __init__(self, tmp_path: Path, stub_mngr_log_sh: str, mngr_transcript_lib_sh: str) -> None:
         self.tmp_path = tmp_path
         self.agent_state_dir = tmp_path / "agent_state"
         # Fake HOME so ~/.claude/projects/ resolves to our test dir
@@ -71,6 +71,11 @@ class ScriptRunner:
         log_path = self.agent_state_dir / "commands" / "mngr_log.sh"
         log_path.write_text(stub_mngr_log_sh)
         log_path.chmod(0o755)
+
+        # Write the real mngr_transcript_lib.sh (the streamer sources it).
+        lib_path = self.agent_state_dir / "commands" / "mngr_transcript_lib.sh"
+        lib_path.write_text(mngr_transcript_lib_sh)
+        lib_path.chmod(0o755)
 
         # Standard paths
         self.script_path = Path(__file__).parent / "stream_transcript.sh"
@@ -129,17 +134,17 @@ class ScriptRunner:
 # -- Tests --
 
 
-def test_empty_history_produces_no_output(tmp_path: Path, stub_mngr_log_sh: str) -> None:
+def test_empty_history_produces_no_output(tmp_path: Path, stub_mngr_log_sh: str, mngr_transcript_lib_sh: str) -> None:
     """With no history file, the script should produce no output."""
-    runner = ScriptRunner(tmp_path, stub_mngr_log_sh)
+    runner = ScriptRunner(tmp_path, stub_mngr_log_sh, mngr_transcript_lib_sh)
     result = runner.run_single_pass()
     assert result.returncode == 0, f"stderr: {result.stderr}"
     assert runner.get_output_lines() == []
 
 
-def test_single_session_emits_all_lines(tmp_path: Path, stub_mngr_log_sh: str) -> None:
+def test_single_session_emits_all_lines(tmp_path: Path, stub_mngr_log_sh: str, mngr_transcript_lib_sh: str) -> None:
     """A single session with 3 lines should emit all 3 to the output."""
-    runner = ScriptRunner(tmp_path, stub_mngr_log_sh)
+    runner = ScriptRunner(tmp_path, stub_mngr_log_sh, mngr_transcript_lib_sh)
     uuids = [uuid4().hex for _ in range(3)]
     lines = [_make_jsonl_line(u) for u in uuids]
     runner.add_session("sess-1", lines)
@@ -151,9 +156,9 @@ def test_single_session_emits_all_lines(tmp_path: Path, stub_mngr_log_sh: str) -
     assert runner.get_offset("sess-1") == 3
 
 
-def test_multiple_sessions_emit_all(tmp_path: Path, stub_mngr_log_sh: str) -> None:
+def test_multiple_sessions_emit_all(tmp_path: Path, stub_mngr_log_sh: str, mngr_transcript_lib_sh: str) -> None:
     """Multiple sessions should all have their lines emitted."""
-    runner = ScriptRunner(tmp_path, stub_mngr_log_sh)
+    runner = ScriptRunner(tmp_path, stub_mngr_log_sh, mngr_transcript_lib_sh)
     uuids_a = [uuid4().hex for _ in range(2)]
     uuids_b = [uuid4().hex for _ in range(2)]
 
@@ -168,9 +173,11 @@ def test_multiple_sessions_emit_all(tmp_path: Path, stub_mngr_log_sh: str) -> No
     assert len(output_uuids) == 4
 
 
-def test_offset_tracking_skips_already_emitted(tmp_path: Path, stub_mngr_log_sh: str) -> None:
+def test_offset_tracking_skips_already_emitted(
+    tmp_path: Path, stub_mngr_log_sh: str, mngr_transcript_lib_sh: str
+) -> None:
     """With a stored offset, only new lines should be emitted."""
-    runner = ScriptRunner(tmp_path, stub_mngr_log_sh)
+    runner = ScriptRunner(tmp_path, stub_mngr_log_sh, mngr_transcript_lib_sh)
     uuids = [uuid4().hex for _ in range(5)]
     lines = [_make_jsonl_line(u) for u in uuids]
     runner.add_session("sess-1", lines)
@@ -188,10 +195,10 @@ def test_offset_tracking_skips_already_emitted(tmp_path: Path, stub_mngr_log_sh:
     assert runner.get_offset("sess-1") == 5
 
 
-def test_reconciliation_after_crash(tmp_path: Path, stub_mngr_log_sh: str) -> None:
+def test_reconciliation_after_crash(tmp_path: Path, stub_mngr_log_sh: str, mngr_transcript_lib_sh: str) -> None:
     """If we crashed after emitting but before saving the offset, reconciliation
     should find the true offset by scanning backwards."""
-    runner = ScriptRunner(tmp_path, stub_mngr_log_sh)
+    runner = ScriptRunner(tmp_path, stub_mngr_log_sh, mngr_transcript_lib_sh)
     uuids = [uuid4().hex for _ in range(5)]
     lines = [_make_jsonl_line(u) for u in uuids]
     runner.add_session("sess-1", lines)
@@ -210,10 +217,10 @@ def test_reconciliation_after_crash(tmp_path: Path, stub_mngr_log_sh: str) -> No
     assert runner.get_offset("sess-1") == 5
 
 
-def test_missing_session_file_no_crash(tmp_path: Path, stub_mngr_log_sh: str) -> None:
+def test_missing_session_file_no_crash(tmp_path: Path, stub_mngr_log_sh: str, mngr_transcript_lib_sh: str) -> None:
     """If a session ID is in the history but its file doesn't exist,
     the script should not crash and should produce partial output."""
-    runner = ScriptRunner(tmp_path, stub_mngr_log_sh)
+    runner = ScriptRunner(tmp_path, stub_mngr_log_sh, mngr_transcript_lib_sh)
 
     uuids_real = [uuid4().hex for _ in range(2)]
     runner.add_session("sess-real", [_make_jsonl_line(u) for u in uuids_real])
@@ -228,9 +235,9 @@ def test_missing_session_file_no_crash(tmp_path: Path, stub_mngr_log_sh: str) ->
     assert runner.get_output_uuids() == uuids_real
 
 
-def test_empty_session_file(tmp_path: Path, stub_mngr_log_sh: str) -> None:
+def test_empty_session_file(tmp_path: Path, stub_mngr_log_sh: str, mngr_transcript_lib_sh: str) -> None:
     """An empty session file should be handled gracefully."""
-    runner = ScriptRunner(tmp_path, stub_mngr_log_sh)
+    runner = ScriptRunner(tmp_path, stub_mngr_log_sh, mngr_transcript_lib_sh)
     runner.add_session("sess-empty", [])
 
     result = runner.run_single_pass()
@@ -239,9 +246,9 @@ def test_empty_session_file(tmp_path: Path, stub_mngr_log_sh: str) -> None:
     assert runner.get_offset("sess-empty") == 0
 
 
-def test_no_duplicate_emission(tmp_path: Path, stub_mngr_log_sh: str) -> None:
+def test_no_duplicate_emission(tmp_path: Path, stub_mngr_log_sh: str, mngr_transcript_lib_sh: str) -> None:
     """Running the script twice should not produce duplicates."""
-    runner = ScriptRunner(tmp_path, stub_mngr_log_sh)
+    runner = ScriptRunner(tmp_path, stub_mngr_log_sh, mngr_transcript_lib_sh)
     uuids = [uuid4().hex for _ in range(3)]
     lines = [_make_jsonl_line(u) for u in uuids]
     runner.add_session("sess-1", lines)
@@ -257,9 +264,9 @@ def test_no_duplicate_emission(tmp_path: Path, stub_mngr_log_sh: str) -> None:
     assert runner.get_output_uuids() == uuids
 
 
-def test_incremental_emission(tmp_path: Path, stub_mngr_log_sh: str) -> None:
+def test_incremental_emission(tmp_path: Path, stub_mngr_log_sh: str, mngr_transcript_lib_sh: str) -> None:
     """Adding lines to a session file between passes should emit only new lines."""
-    runner = ScriptRunner(tmp_path, stub_mngr_log_sh)
+    runner = ScriptRunner(tmp_path, stub_mngr_log_sh, mngr_transcript_lib_sh)
     uuids_batch1 = [uuid4().hex for _ in range(2)]
     session_file = runner.add_session("sess-1", [_make_jsonl_line(u) for u in uuids_batch1])
 
@@ -282,9 +289,11 @@ def test_incremental_emission(tmp_path: Path, stub_mngr_log_sh: str) -> None:
     assert runner.get_offset("sess-1") == 5
 
 
-def test_multiple_sessions_concurrent_writes(tmp_path: Path, stub_mngr_log_sh: str) -> None:
+def test_multiple_sessions_concurrent_writes(
+    tmp_path: Path, stub_mngr_log_sh: str, mngr_transcript_lib_sh: str
+) -> None:
     """Both sessions can have new lines appended and both should be emitted."""
-    runner = ScriptRunner(tmp_path, stub_mngr_log_sh)
+    runner = ScriptRunner(tmp_path, stub_mngr_log_sh, mngr_transcript_lib_sh)
     uuids_a = [uuid4().hex for _ in range(2)]
     uuids_b = [uuid4().hex for _ in range(2)]
     file_a = runner.add_session("sess-a", [_make_jsonl_line(u) for u in uuids_a])
@@ -311,10 +320,10 @@ def test_multiple_sessions_concurrent_writes(tmp_path: Path, stub_mngr_log_sh: s
     assert all_uuids == set(uuids_a + uuids_b + [new_a, new_b])
 
 
-def test_reconciliation_with_empty_output(tmp_path: Path, stub_mngr_log_sh: str) -> None:
+def test_reconciliation_with_empty_output(tmp_path: Path, stub_mngr_log_sh: str, mngr_transcript_lib_sh: str) -> None:
     """If the output file is empty but offset is stored, reconciliation
     should reset to 0 and re-emit everything."""
-    runner = ScriptRunner(tmp_path, stub_mngr_log_sh)
+    runner = ScriptRunner(tmp_path, stub_mngr_log_sh, mngr_transcript_lib_sh)
     uuids = [uuid4().hex for _ in range(3)]
     lines = [_make_jsonl_line(u) for u in uuids]
     runner.add_session("sess-1", lines)
@@ -328,10 +337,10 @@ def test_reconciliation_with_empty_output(tmp_path: Path, stub_mngr_log_sh: str)
     assert runner.get_offset("sess-1") == 3
 
 
-def test_offset_clamped_to_file_size(tmp_path: Path, stub_mngr_log_sh: str) -> None:
+def test_offset_clamped_to_file_size(tmp_path: Path, stub_mngr_log_sh: str, mngr_transcript_lib_sh: str) -> None:
     """If the stored offset exceeds the file size, reconciliation should
     handle it gracefully."""
-    runner = ScriptRunner(tmp_path, stub_mngr_log_sh)
+    runner = ScriptRunner(tmp_path, stub_mngr_log_sh, mngr_transcript_lib_sh)
     uuids = [uuid4().hex for _ in range(2)]
     lines = [_make_jsonl_line(u) for u in uuids]
     runner.add_session("sess-1", lines)
@@ -344,9 +353,9 @@ def test_offset_clamped_to_file_size(tmp_path: Path, stub_mngr_log_sh: str) -> N
     assert runner.get_offset("sess-1") == 2
 
 
-def test_offset_directory_created(tmp_path: Path, stub_mngr_log_sh: str) -> None:
+def test_offset_directory_created(tmp_path: Path, stub_mngr_log_sh: str, mngr_transcript_lib_sh: str) -> None:
     """The offset directory should be created if it doesn't exist."""
-    runner = ScriptRunner(tmp_path, stub_mngr_log_sh)
+    runner = ScriptRunner(tmp_path, stub_mngr_log_sh, mngr_transcript_lib_sh)
     runner.add_session("sess-1", [_make_jsonl_line()])
 
     result = runner.run_single_pass()
@@ -355,9 +364,11 @@ def test_offset_directory_created(tmp_path: Path, stub_mngr_log_sh: str) -> None
     assert runner.get_offset("sess-1") == 1
 
 
-def test_offset_stored_in_plugin_claude_directory(tmp_path: Path, stub_mngr_log_sh: str) -> None:
+def test_offset_stored_in_plugin_claude_directory(
+    tmp_path: Path, stub_mngr_log_sh: str, mngr_transcript_lib_sh: str
+) -> None:
     """Offsets should be stored under plugin/claude/.transcript_offsets/."""
-    runner = ScriptRunner(tmp_path, stub_mngr_log_sh)
+    runner = ScriptRunner(tmp_path, stub_mngr_log_sh, mngr_transcript_lib_sh)
     runner.add_session("sess-1", [_make_jsonl_line()])
 
     result = runner.run_single_pass()
@@ -368,10 +379,10 @@ def test_offset_stored_in_plugin_claude_directory(tmp_path: Path, stub_mngr_log_
     assert expected.read_text().strip() == "1"
 
 
-def test_session_added_after_initial_load(tmp_path: Path, stub_mngr_log_sh: str) -> None:
+def test_session_added_after_initial_load(tmp_path: Path, stub_mngr_log_sh: str, mngr_transcript_lib_sh: str) -> None:
     """A session added to the history file after the first pass should be
     picked up on the second pass."""
-    runner = ScriptRunner(tmp_path, stub_mngr_log_sh)
+    runner = ScriptRunner(tmp_path, stub_mngr_log_sh, mngr_transcript_lib_sh)
     uuids_a = [uuid4().hex for _ in range(2)]
     runner.add_session("sess-a", [_make_jsonl_line(u) for u in uuids_a])
 
@@ -391,9 +402,9 @@ def test_session_added_after_initial_load(tmp_path: Path, stub_mngr_log_sh: str)
     assert set(all_uuids) == set(uuids_a + uuids_b)
 
 
-def test_history_with_extra_fields(tmp_path: Path, stub_mngr_log_sh: str) -> None:
+def test_history_with_extra_fields(tmp_path: Path, stub_mngr_log_sh: str, mngr_transcript_lib_sh: str) -> None:
     """History lines with extra fields should correctly extract just the session ID."""
-    runner = ScriptRunner(tmp_path, stub_mngr_log_sh)
+    runner = ScriptRunner(tmp_path, stub_mngr_log_sh, mngr_transcript_lib_sh)
     uuid1 = uuid4().hex
     session_file = runner.claude_projects_dir / "proj1" / "sess-src.jsonl"
     session_file.parent.mkdir(parents=True, exist_ok=True)
@@ -407,9 +418,9 @@ def test_history_with_extra_fields(tmp_path: Path, stub_mngr_log_sh: str) -> Non
     assert runner.get_output_uuids() == [uuid1]
 
 
-def test_duplicate_session_id_in_history(tmp_path: Path, stub_mngr_log_sh: str) -> None:
+def test_duplicate_session_id_in_history(tmp_path: Path, stub_mngr_log_sh: str, mngr_transcript_lib_sh: str) -> None:
     """Duplicate session IDs in the history file should not cause duplicates."""
-    runner = ScriptRunner(tmp_path, stub_mngr_log_sh)
+    runner = ScriptRunner(tmp_path, stub_mngr_log_sh, mngr_transcript_lib_sh)
     uuids = [uuid4().hex for _ in range(2)]
     runner.add_session("sess-dup", [_make_jsonl_line(u) for u in uuids])
 
@@ -423,9 +434,11 @@ def test_duplicate_session_id_in_history(tmp_path: Path, stub_mngr_log_sh: str) 
 
 
 @pytest.mark.parametrize("line_count", [1, 10, 50])
-def test_various_file_sizes(tmp_path: Path, stub_mngr_log_sh: str, line_count: int) -> None:
+def test_various_file_sizes(
+    tmp_path: Path, stub_mngr_log_sh: str, mngr_transcript_lib_sh: str, line_count: int
+) -> None:
     """The script should handle session files of various sizes."""
-    runner = ScriptRunner(tmp_path, stub_mngr_log_sh)
+    runner = ScriptRunner(tmp_path, stub_mngr_log_sh, mngr_transcript_lib_sh)
     uuids = [uuid4().hex for _ in range(line_count)]
     lines = [_make_jsonl_line(u) for u in uuids]
     runner.add_session("sess-sized", lines)
@@ -436,9 +449,11 @@ def test_various_file_sizes(tmp_path: Path, stub_mngr_log_sh: str, line_count: i
     assert runner.get_offset("sess-sized") == line_count
 
 
-def test_reconciliation_finds_highest_emitted_line(tmp_path: Path, stub_mngr_log_sh: str) -> None:
+def test_reconciliation_finds_highest_emitted_line(
+    tmp_path: Path, stub_mngr_log_sh: str, mngr_transcript_lib_sh: str
+) -> None:
     """Reconciliation should find the LAST emitted line, not just any emitted line."""
-    runner = ScriptRunner(tmp_path, stub_mngr_log_sh)
+    runner = ScriptRunner(tmp_path, stub_mngr_log_sh, mngr_transcript_lib_sh)
     uuids = [uuid4().hex for _ in range(10)]
     lines = [_make_jsonl_line(u) for u in uuids]
     runner.add_session("sess-1", lines)
@@ -457,10 +472,12 @@ def test_reconciliation_finds_highest_emitted_line(tmp_path: Path, stub_mngr_log
     assert runner.get_offset("sess-1") == 10
 
 
-def test_multiple_sessions_partial_reconciliation(tmp_path: Path, stub_mngr_log_sh: str) -> None:
+def test_multiple_sessions_partial_reconciliation(
+    tmp_path: Path, stub_mngr_log_sh: str, mngr_transcript_lib_sh: str
+) -> None:
     """When one session needs reconciliation and another doesn't, both
     should end up with correct offsets."""
-    runner = ScriptRunner(tmp_path, stub_mngr_log_sh)
+    runner = ScriptRunner(tmp_path, stub_mngr_log_sh, mngr_transcript_lib_sh)
     uuids_a = [uuid4().hex for _ in range(4)]
     uuids_b = [uuid4().hex for _ in range(4)]
     lines_a = [_make_jsonl_line(u) for u in uuids_a]
