@@ -507,7 +507,7 @@ _resolver_miss_last_warn_at: dict[str, float] = {}
 _resolver_miss_lock: threading.Lock = threading.Lock()
 
 
-def _warn_resolver_miss(agent_id: AgentId, resolver: "ForwardResolver") -> None:
+def _warn_resolver_miss(agent_id: AgentId, resolver: ForwardResolver) -> None:
     """Log a throttled warning when the resolver can't route to ``agent_id``.
 
     Called from the 503 fall-through paths so a user-visible "Backend not yet
