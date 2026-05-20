@@ -1298,14 +1298,25 @@ class AgentCreator(MutableModel):
                         effective_anthropic_api_key = key_material.key.get_secret_value()
                         effective_anthropic_base_url = str(key_material.base_url)
                     case AIProvider.API_KEY:
-                        if not anthropic_api_key:
+                        # API_KEY auth needs an API key from *somewhere*.
+                        # Three valid combinations:
+                        #   1. Form key is non-empty -> layer it as the
+                        #      override (wins over any ambient env value,
+                        #      so no scrub needed).
+                        #   2. Form key is empty AND ``use_env_anthropic_api_key``
+                        #      is True -> leave the ambient ANTHROPIC_API_KEY
+                        #      in place so the FCT template's ``pass_host_env``
+                        #      forwards it onto the agent.
+                        #   3. Form key is empty AND the flag is False ->
+                        #      reject with a clear error rather than
+                        #      silently running mngr create with no key.
+                        if anthropic_api_key:
+                            effective_anthropic_api_key = anthropic_api_key
+                        elif not use_env_anthropic_api_key:
                             raise MngrCommandError("AI provider API_KEY requires anthropic_api_key to be supplied")
-                        effective_anthropic_api_key = anthropic_api_key
-                        # The form-supplied key always wins, so no need to
-                        # scrub the inherited one (the override layer
-                        # supersedes it). Base URL is form-optional: when
-                        # the user supplied one, use it; when they left
-                        # the field blank, honour ``use_env_anthropic_base_url``.
+                        # Base URL is form-optional in all three cases: when
+                        # the user supplied one, use it; when they left the
+                        # field blank, honour ``use_env_anthropic_base_url``.
                         if anthropic_base_url:
                             effective_anthropic_base_url = anthropic_base_url
                         elif not use_env_anthropic_base_url:

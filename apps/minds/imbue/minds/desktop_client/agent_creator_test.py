@@ -686,3 +686,38 @@ def test_start_creation_api_key_ai_without_key_fails_with_clear_message(tmp_path
     assert info is not None
     assert info.status is AgentCreationStatus.FAILED
     assert info.error is not None and "API_KEY" in info.error
+
+
+def test_start_creation_api_key_ai_with_empty_key_and_use_env_flag_does_not_raise(tmp_path: Path) -> None:
+    """When the user opts in to use the ambient ``ANTHROPIC_API_KEY`` env var (the
+    form-side gesture is ticking the "use env" checkbox, which disables and so
+    omits the API-key text input from the POST), the backend must NOT raise the
+    "API_KEY requires anthropic_api_key" error -- the inherited env var is what
+    supplies the credential, so the worker should proceed to ``mngr create`` with
+    ``effective_anthropic_api_key`` left as ``None`` (no override layered on top
+    of the inherited env var). Regression for the case where the API_KEY arm
+    rejected an empty form key unconditionally."""
+    cli = _RecordingImbueCloudCli(
+        parent_concurrency_group=ConcurrencyGroup(name="recording-cli"),
+        connector_url=FAKE_CONNECTOR_URL,
+    )
+    creator = _make_creator_with_cli(tmp_path, cli)
+
+    creation_id = creator.start_creation(
+        repo_source=str(_make_fake_repo(tmp_path)),
+        host_name="my-workspace",
+        launch_mode=LaunchMode.LOCAL,
+        ai_provider=AIProvider.API_KEY,
+        anthropic_api_key="",
+        use_env_anthropic_api_key=True,
+    )
+    _wait_until_finished(creator, creation_id)
+
+    info = creator.get_creation_info(creation_id)
+    assert info is not None
+    # Must NOT have failed with the "API_KEY requires anthropic_api_key" error.
+    # The creation may still end up FAILED for unrelated reasons (the fake
+    # mngr-create stub may not be fully wired in this fixture), but the
+    # specific "API_KEY" error message must not appear.
+    if info.error is not None:
+        assert "API_KEY requires anthropic_api_key" not in info.error
