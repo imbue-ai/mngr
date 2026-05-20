@@ -1007,11 +1007,12 @@ def _resolve_host_pool_dsn_for_migrations(
 ) -> SecretStr:
     """Return the DSN ``apply_pool_hosts_migrations`` should target for this tier.
 
-    Dev tier (``creates_resources=true``): use the per-env host_pool DSN
-    from the freshly-created or adopted Neon project record. Shared
-    tier (``creates_resources=false``): read ``DATABASE_URL`` from the
-    operator-managed ``secrets/minds/<tier>/neon`` Vault entry (single
-    shared DB where pool_hosts + litellm tables co-exist).
+    Per-env tiers (dev / ci, ``creates_resources=true``): use the per-env
+    host_pool DSN from the freshly-created or adopted Neon project
+    record. Shared tier (``creates_resources=false``): read
+    ``DATABASE_URL`` from the operator-managed
+    ``secrets/minds/<tier>/neon`` Vault entry (single shared DB where
+    pool_hosts + litellm tables co-exist).
 
     Raises :class:`MindError` if the shared-tier Vault entry is missing
     or lacks ``DATABASE_URL`` -- we'd otherwise silently skip migrations
