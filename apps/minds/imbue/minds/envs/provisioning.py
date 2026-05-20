@@ -163,13 +163,13 @@ class ProviderCredentials(FrozenModel):
 
 
 # Tiers whose default deploy strategy is RECREATE: dev (every personal
-# dev env and every CI ephemeral env, since both deploy with
-# ``tier="dev"``). Operator deploys against these almost always follow
-# a "deploy then immediately observe" pattern where a stale warm
+# dev env) and ci (every CI ephemeral env stood up by the deployment-
+# tests orchestrator). Operator deploys against these almost always
+# follow a "deploy then immediately observe" pattern where a stale warm
 # container that keeps serving the prior version's behavior is the
 # opposite of what the operator wants. Shared tiers (staging,
 # production) fall through to ROLLOVER for zero-downtime.
-_DEFAULT_RECREATE_TIERS: Final[frozenset[str]] = frozenset({"dev"})
+_DEFAULT_RECREATE_TIERS: Final[frozenset[str]] = frozenset({"dev", "ci"})
 
 
 def resolve_deploy_strategy(
