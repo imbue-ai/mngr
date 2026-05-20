@@ -823,13 +823,21 @@ class Latchkey(MutableModel):
     def register_service(self, service_name: str, base_api_url: str) -> None:
         """Idempotently register a generic latchkey service for ``base_api_url``.
 
-        Runs ``latchkey services register <name> --base-api-url <url>``.
-        When the service is already registered against the same URL,
-        latchkey exits non-zero with a ``DuplicateServiceNameError``;
-        we treat that as success. When it's registered against a
-        *different* URL (e.g. the desktop client started on a different
-        port since the last run), we deregister and re-register so the
-        URL stays current.
+        Wraps ``latchkey services register <name> --base-api-url <url>``
+        with a pre-check so the common steady-state call is a no-op:
+
+        1. Read the currently-registered base URL via
+           ``_read_registered_service_base_url`` (``latchkey services info``).
+        2. If it already equals ``base_api_url``: return immediately --
+           no subprocess work, no log line beyond the info call.
+        3. If a different URL is registered (e.g. the desktop client
+           started on a different port since the last run): deregister
+           first so ``services register`` can rebind to the new URL.
+        4. Run ``latchkey services register``.
+
+        As a race-condition fallback (e.g. a concurrent ``minds run``
+        registered between our step 1 and step 4), an ``already
+        registered`` stderr from step 4 is also treated as success.
 
         Raises :class:`LatchkeyError` for any other failure mode.
         """
