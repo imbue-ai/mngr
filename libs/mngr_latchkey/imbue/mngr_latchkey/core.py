@@ -74,9 +74,11 @@ _DEFAULT_LISTEN_HOST: Final[str] = "127.0.0.1"
 _GATEWAY_BIND_TIMEOUT_SECONDS: Final[float] = 10.0
 _GATEWAY_BIND_POLL_INTERVAL_SECONDS: Final[float] = 0.05
 
-# Services-info / create-jwt are normally instant but can stall on slow keychains.
-# The auth-browser flow waits on a real human and is intentionally untimed.
-_SERVICES_INFO_TIMEOUT_SECONDS: Final[float] = 15.0
+# Most latchkey CLI calls (services info / register / deregister,
+# auth set / clear, create-jwt) are normally instant but can stall on
+# slow keychains. The auth-browser flow waits on a real human and is
+# intentionally untimed.
+_LATCHKEY_CLI_TIMEOUT_SECONDS: Final[float] = 15.0
 _CREATE_JWT_TIMEOUT_SECONDS: Final[float] = 15.0
 
 # ``latchkey --version`` is a print-and-exit; 5s is generous slack for
@@ -776,7 +778,7 @@ class Latchkey(MutableModel):
             with cg:
                 result = cg.run_process_to_completion(
                     command=[self.latchkey_binary, "services", "info", service_name],
-                    timeout=_SERVICES_INFO_TIMEOUT_SECONDS,
+                    timeout=_LATCHKEY_CLI_TIMEOUT_SECONDS,
                     is_checked_after=False,
                     env=env,
                 )
@@ -858,7 +860,7 @@ class Latchkey(MutableModel):
                     "--base-api-url",
                     base_api_url,
                 ],
-                timeout=_SERVICES_INFO_TIMEOUT_SECONDS,
+                timeout=_LATCHKEY_CLI_TIMEOUT_SECONDS,
                 is_checked_after=False,
                 env=env,
             )
@@ -887,7 +889,7 @@ class Latchkey(MutableModel):
         with cg:
             result = cg.run_process_to_completion(
                 command=[self.latchkey_binary, "auth", "set", service_name, "-H", header],
-                timeout=_SERVICES_INFO_TIMEOUT_SECONDS,
+                timeout=_LATCHKEY_CLI_TIMEOUT_SECONDS,
                 is_checked_after=False,
                 env=env,
             )
@@ -903,7 +905,7 @@ class Latchkey(MutableModel):
         with cg:
             result = cg.run_process_to_completion(
                 command=[self.latchkey_binary, "services", "info", service_name],
-                timeout=_SERVICES_INFO_TIMEOUT_SECONDS,
+                timeout=_LATCHKEY_CLI_TIMEOUT_SECONDS,
                 is_checked_after=False,
                 env=env,
             )
@@ -956,7 +958,7 @@ class Latchkey(MutableModel):
         with cg_clear:
             clear_result = cg_clear.run_process_to_completion(
                 command=[self.latchkey_binary, "auth", "clear", service_name],
-                timeout=_SERVICES_INFO_TIMEOUT_SECONDS,
+                timeout=_LATCHKEY_CLI_TIMEOUT_SECONDS,
                 is_checked_after=False,
                 env=env,
             )
@@ -969,7 +971,7 @@ class Latchkey(MutableModel):
         with cg_dereg:
             result = cg_dereg.run_process_to_completion(
                 command=[self.latchkey_binary, "services", "deregister", service_name],
-                timeout=_SERVICES_INFO_TIMEOUT_SECONDS,
+                timeout=_LATCHKEY_CLI_TIMEOUT_SECONDS,
                 is_checked_after=False,
                 env=env,
             )
