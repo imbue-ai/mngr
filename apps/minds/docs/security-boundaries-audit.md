@@ -8,9 +8,9 @@ The minds desktop app uses a layered proxy architecture:
 
 1. **Electron shell** (`electron/main.js`): Creates `BaseWindow` with multiple `WebContentsView` instances (chromeView, contentView, sidebarView, requestsPanelView). Manages window lifecycle and IPC.
 
-2. **Desktop client** (FastAPI, `desktop_client/app.py`): Runs on `localhost:PORT`. Handles auth, agent discovery, and proxies `<agent-id>.localhost:PORT` subdomain requests to per-agent workspace servers.
+2. **Desktop client** (FastAPI, `desktop_client/app.py`): Runs on `localhost:PORT`. Handles auth, agent discovery, and proxies `<agent-id>.localhost:PORT` subdomain requests to per-agent system interfaces.
 
-3. **Workspace server** (`system-interface` CLI, source at `forever-claude-template/apps/system_interface/`): One per agent. Multiplexes agent services under `/service/<name>/...` paths. Handles cookie path rewriting, Service Worker registration, and HTML rewriting.
+3. **System interface** (`system-interface` CLI, source at `forever-claude-template/apps/system_interface/`): One per agent. Multiplexes agent services under `/service/<name>/...` paths. Handles cookie path rewriting, Service Worker registration, and HTML rewriting.
 
 4. **Agent services**: Individual HTTP servers (web UI, terminal, API, etc.) running inside each agent's container.
 
@@ -22,9 +22,9 @@ The minds desktop app uses a layered proxy architecture:
 
 The desktop client sets a `minds_session` cookie on each agent's subdomain via the auth bridge (`/goto/{agent_id}/` -> `/_subdomain_auth`). The cookie is signed with `itsdangerous.URLSafeTimedSerializer` using a single signing key, and the payload is always the string `"authenticated"` (see `cookie_manager.py:13`). Every agent's subdomain gets an independently-minted cookie, but they are all functionally identical -- any one of them would be valid on any other agent's subdomain if it could be obtained.
 
-Previously, the desktop client proxy (`_forward_workspace_http`) forwarded all request headers except `host` to the workspace server, including the `minds_session` cookie. A malicious workspace server could have extracted the cookie and reused it against other agents.
+Previously, the desktop client proxy (`_forward_workspace_http`) forwarded all request headers except `host` to the system interface, including the `minds_session` cookie. A malicious system interface could have extracted the cookie and reused it against other agents.
 
-**Fix applied:** The proxy now strips the `minds_session` cookie from the `Cookie` header before forwarding to the workspace server (see `app.py`, `_forward_workspace_http`). Auth is fully handled by the desktop client's middleware before the request reaches the proxy, so the workspace server does not need to see the session cookie. Additionally, the Electron content views now use a separate session partition (`persist:workspace-content`), isolating the content cookie jar from the chrome/sidebar views.
+**Fix applied:** The proxy now strips the `minds_session` cookie from the `Cookie` header before forwarding to the system interface (see `app.py`, `_forward_workspace_http`). Auth is fully handled by the desktop client's middleware before the request reaches the proxy, so the system interface does not need to see the session cookie. Additionally, the Electron content views now use a separate session partition (`persist:workspace-content`), isolating the content cookie jar from the chrome/sidebar views.
 
 ## Question 2: Can an agent access localStorage created by another agent?
 
@@ -87,17 +87,17 @@ The bare-origin `minds_session` cookie is never sent to `agent-X.localhost` subd
 
 ### Option A: Strip the auth cookie in the proxy -- IMPLEMENTED
 
-The desktop client proxy (`_forward_workspace_http`) strips the `minds_session` cookie from the `Cookie` header before forwarding to the workspace server. Auth is fully handled by the desktop client's middleware before the request reaches the proxy -- the workspace server does not need to see or validate the session cookie.
+The desktop client proxy (`_forward_workspace_http`) strips the `minds_session` cookie from the `Cookie` header before forwarding to the system interface. Auth is fully handled by the desktop client's middleware before the request reaches the proxy -- the system interface does not need to see or validate the session cookie.
 
 Implementation: In `_forward_workspace_http`, the `Cookie` header is parsed, the `minds_session` cookie is removed, and the remaining cookies are forwarded. Non-session cookies (e.g. service-specific cookies) are preserved.
 
 Pros:
 - Minimal code change
-- No breaking changes to workspace server behavior (services' own cookies still flow through)
+- No breaking changes to system interface behavior (services' own cookies still flow through)
 - Defense-in-depth: even if Electron session sharing were misconfigured, the cookie would never reach agent code
 
 Cons:
-- If any workspace server feature ever needs to verify auth (currently none do), it would need an alternative mechanism
+- If any system interface feature ever needs to verify auth (currently none do), it would need an alternative mechanism
 
 ### Option B: Per-agent session cookies (not implemented)
 
@@ -110,7 +110,7 @@ Pros:
 Cons:
 - More complex than Option A
 - The extracted cookie would still be usable against the same agent (less concerning)
-- Does not prevent the workspace server from seeing the cookie at all
+- Does not prevent the system interface from seeing the cookie at all
 
 ### Option C (variant): Content session partitioning -- IMPLEMENTED
 
@@ -133,4 +133,4 @@ The implemented approach combines Option A with a variant of Option C -- cookie 
 
 ## What was implemented
 
-**Option A (cookie stripping) and a variant of Option C (shared content partition) are both implemented.** Option A directly prevents the session cookie from reaching workspace servers. The content partition provides defense-in-depth by separating content and chrome cookie jars at the Electron level.
+**Option A (cookie stripping) and a variant of Option C (shared content partition) are both implemented.** Option A directly prevents the session cookie from reaching system interfaces. The content partition provides defense-in-depth by separating content and chrome cookie jars at the Electron level.

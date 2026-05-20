@@ -46,7 +46,7 @@ global = true
 ```
 
 Each application gets two URLs:
-1. **Local**: `http://{agent_id}.localhost:8420/service/{service_name}/` (the desktop client byte-forwards the subdomain request to the workspace's workspace server, which serves the service under `/service/<name>/`)
+1. **Local**: `http://{agent_id}.localhost:8420/service/{service_name}/` (the desktop client byte-forwards the subdomain request to the workspace's system interface, which serves the service under `/service/<name>/`)
 2. **Global**: `https://{service}--{agent_id}--{username}.{domain}` (via Cloudflare tunnel)
 
 The `global` flag indicates whether the agent wants Cloudflare forwarding enabled. The Share modal inside the workspace's dockview UI is authoritative for the actual state.

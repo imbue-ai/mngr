@@ -1,4 +1,4 @@
-# Re-implement restart-workspace-server on top of mngr_forward
+# Re-implement restart-system-interface on top of mngr_forward
 
 ## Overview
 
