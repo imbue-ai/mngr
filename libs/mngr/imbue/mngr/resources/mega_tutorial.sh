@@ -952,7 +952,7 @@ mngr list --format jsonl | jq --unbuffered 'select(.labels.priority == "high")'
 ##############################################################################
 # CREATE TEMPLATES
 #   Define reusable presets that bundle common options (provider, build
-#   args, permissions, environment, etc.) into a single template name.
+#   args, environment, etc.) into a single template name.
 ##############################################################################
 
 # templates are defined in your config (user, project, or local scope).
