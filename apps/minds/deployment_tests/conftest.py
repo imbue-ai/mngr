@@ -2,7 +2,7 @@
 
 Five fixtures, mirroring the spec:
 
-* ``shared_env(role)`` -- a pre-stood-up dev env reachable by URL.
+* ``shared_env(role)`` -- a pre-stood-up ci env reachable by URL.
 * ``fct_template_ref`` -- worktree path + (future) pushed ``ci-...`` branch
   ref for the FCT content under test.
 * ``verified_user`` -- function-scoped, pre-verified user created via the
