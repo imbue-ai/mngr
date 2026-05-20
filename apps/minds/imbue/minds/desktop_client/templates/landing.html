@@ -37,6 +37,15 @@
               <span class="flex-1 font-medium text-zinc-900 pl-1">{{ agent_names.get(agent_id | string, agent_id) }}</span>
               <span class="landing-health-badge hidden inline-flex items-center px-2 py-0.5 rounded text-sm font-medium"></span>
               <button class="bg-transparent border border-transparent rounded-md cursor-pointer p-1.5 text-zinc-400 hover:bg-zinc-100 hover:text-zinc-600 flex items-center justify-center"
+                      onclick="event.stopPropagation(); window.landingRestartClick(this)"
+                      title="Restart workspace"
+                      aria-label="Restart workspace">
+                <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M21 12a9 9 0 1 1-2.64-6.36"/>
+                  <path d="M21 3v6h-6"/>
+                </svg>
+              </button>
+              <button class="bg-transparent border border-transparent rounded-md cursor-pointer p-1.5 text-zinc-400 hover:bg-zinc-100 hover:text-zinc-600 flex items-center justify-center"
                       onclick="event.stopPropagation(); window.location='/workspace/{{ agent_id }}/settings'"
                       title="Settings"
                       aria-label="Workspace settings">
@@ -106,6 +115,16 @@
         } else {
           window.location = row.dataset.defaultHref;
         }
+      };
+
+      // The per-row restart control routes to the recovery page, which runs
+      // the layer-2 probe and offers the appropriate restart tier.
+      window.landingRestartClick = function (button) {
+        var row = button.closest('[data-agent-id]');
+        if (!row) return;
+        var agentId = row.dataset.agentId;
+        var ret = row.dataset.defaultHref || '';
+        window.location = '/agents/' + encodeURIComponent(agentId) + '/recovery?return_to=' + encodeURIComponent(ret);
       };
 
       var es = null;

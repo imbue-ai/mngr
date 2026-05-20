@@ -1,4 +1,4 @@
-const { BaseWindow, WebContentsView, Menu, Notification, ipcMain, net, shell, app, session, screen } = require('electron');
+const { BaseWindow, WebContentsView, Menu, Notification, ipcMain, net, shell, app, session, screen, dialog } = require('electron');
 const todesktop = require('@todesktop/runtime');
 const path = require('path');
 const fs = require('fs');
@@ -987,19 +987,17 @@ async function runChromeSSELoop() {
   }
 }
 
-// POST the system-interface restart API and resolve once the server has
-// acknowledged that the tmux kill dispatch finished (or the request
-// errors / times out). Callers navigate to the workspace URL afterward;
-// because the endpoint returns 200 only after the system_interface has
-// been killed, the plugin will then serve its 503 loader until the
-// workspace comes back -- giving the user a visible "System interface
-// starting" page instead of a silent reload onto the still-live
-// pre-restart UI.
+// POST a restart endpoint (``restart-system-interface`` or ``restart-host``)
+// and resolve once the server has acknowledged the 202 dispatch (or the
+// request errors / times out). The endpoints return 202 immediately and
+// drive recovery asynchronously; callers navigate to the workspace URL
+// afterward, where the plugin serves its 503 loader until the workspace
+// comes back.
 //
 // Always resolves (never rejects) so callers can chain navigation
 // regardless of network outcome.
 const RESTART_REQUEST_TIMEOUT_MS = 10000;
-function postRestartSystemInterface(agentId) {
+function postRestart(agentId, endpointPath) {
   return new Promise((resolve) => {
     if (!agentId || !backendBaseUrl) {
       resolve();
@@ -1008,7 +1006,7 @@ function postRestartSystemInterface(agentId) {
     let req;
     try {
       req = net.request({
-        url: `${backendBaseUrl}/api/agents/${encodeURIComponent(agentId)}/restart-system-interface`,
+        url: `${backendBaseUrl}/api/agents/${encodeURIComponent(agentId)}/${endpointPath}`,
         method: 'POST',
         useSessionCookies: true,
       });
@@ -1660,22 +1658,41 @@ ipcMain.on('show-workspace-context-menu', (event, agentId, x, y) => {
     });
     template.push({ type: 'separator' });
   }
+  const reloadWorkspaceView = () => {
+    if (workspaceUrl && bundle.contentView && !bundle.contentView.webContents.isDestroyed()) {
+      // The plugin serves its styled 503 loader (the "System interface
+      // starting" page), which auto-refreshes into the workspace once the
+      // system interface is back.
+      bundle.contentView.webContents.loadURL(workspaceUrl);
+    }
+  };
   template.push({
     label: 'Restart system interface',
     click: async () => {
       // Close the sidebar first so the user gets immediate visual feedback
-      // while we wait for the restart dispatch to ack. The endpoint returns
-      // 200 once `mngr exec` finishes killing the system_interface tmux window;
-      // navigating before that ack would race against a still-live backend
-      // and leave the user looking at the unchanged iframe.
+      // while the restart dispatch is acknowledged.
       closeSidebar(bundle);
-      await postRestartSystemInterface(agentId);
-      if (workspaceUrl && bundle.contentView && !bundle.contentView.webContents.isDestroyed()) {
-        // The plugin now serves its styled 503 loader (the
-        // "System interface starting" page), which auto-refreshes into the
-        // workspace once the system interface is back.
-        bundle.contentView.webContents.loadURL(workspaceUrl);
-      }
+      await postRestart(agentId, 'restart-system-interface');
+      reloadWorkspaceView();
+    },
+  });
+  template.push({
+    label: 'Restart workspace…',
+    click: async () => {
+      // A host restart interrupts every agent in the workspace, so confirm
+      // before dispatching it.
+      const { response } = await dialog.showMessageBox(bundle.window, {
+        type: 'warning',
+        buttons: ['Cancel', 'Restart workspace'],
+        defaultId: 0,
+        cancelId: 0,
+        message: 'Restart this workspace?',
+        detail: 'This restarts the whole workspace. In-progress work in all agents will be interrupted.',
+      });
+      if (response !== 1) return;
+      closeSidebar(bundle);
+      await postRestart(agentId, 'restart-host');
+      reloadWorkspaceView();
     },
   });
   const menu = Menu.buildFromTemplate(template);
