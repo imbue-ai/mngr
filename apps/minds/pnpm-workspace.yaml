@@ -1,3 +1,14 @@
+# Keep both `allowBuilds` (pnpm 11) and `onlyBuiltDependencies` (pnpm 10):
+# pnpm 11 removed `onlyBuiltDependencies` in favor of an `allowBuilds`
+# map, but each major silently ignores the other major's key. When adding
+# a new native dep that needs postinstall scripts, add it to BOTH the
+# `allowBuilds` map (as `true`) and the `onlyBuiltDependencies` list.
+#
+# The `false` entries below (`@firebase/util`, `dtrace-provider`,
+# `protobufjs`) are transitive deps under `@todesktop/cli` whose
+# postinstall scripts we explicitly deny so that pnpm 11 does not raise
+# `ERR_PNPM_IGNORED_BUILDS`. pnpm 10 ignores these entries entirely
+# (they aren't in `onlyBuiltDependencies`, so they don't run anyway).
 allowBuilds:
   '@firebase/util': false
   dtrace-provider: false
