@@ -63,16 +63,13 @@ def minds_root_name() -> str:
     """Resolve the runtime's MINDS_ROOT_NAME, matching the bundled lookup.
 
     Packaged builds embed the chosen value in
-    ``Contents/Resources/pyproject/imbue/minds/config/envs/_bundled/root_name``
-    (staging builds use ``minds-staging``, production uses ``minds``). The
-    runtime exports that value before launching ``minds run``. We read the
-    same file so artifact-capture paths line up with where the backend
+    ``Contents/Resources/pyproject/imbue/minds/config/envs/_bundled/root_name``;
+    the runtime exports that value before launching ``minds run``. Reading
+    the same file lines artifact-capture paths up with where the backend
     actually wrote them.
 
-    Resolution happens lazily because ``install_app`` puts the bundle in
-    place inside ``main()``; resolving at module import would always fall
-    back to ``minds`` on a fresh VM. The result is cached so all callers
-    after the first see a stable value.
+    Lazy because ``install_app`` stages the bundle inside ``main()``; the
+    cache holds the resolved value for the rest of the run.
     """
     override = os.environ.get("MINDS_ROOT_NAME")
     if override:
@@ -150,18 +147,17 @@ class StepFailure(RuntimeError):
 
 
 def wipe_minds_state() -> dict[str, Any]:
-    # Runs before install_app, so the bundled root_name file is not yet
-    # available. Wipe every candidate ``$HOME/.<name>`` dir so leftover
-    # state from a prior run of either tier (minds / minds-staging) is
-    # cleared, without depending on the lazy resolver.
+    # Wipe every candidate ``$HOME/.<name>`` dir so leftover state from
+    # either tier (minds / minds-staging) is cleared. Runs before
+    # install_app stages the bundle.
     wiped: list[str] = []
     for candidate in _MINDS_ROOT_NAME_CANDIDATES:
         path = HOME / f".{candidate}"
         if path.exists():
             shutil.rmtree(path)
             wiped.append(str(path))
-    # Also nuke any leftover minds.app from a prior run so we are testing the
-    # exact bundle the orchestrator copied in.
+    # Also nuke any leftover minds.app so we are testing the exact bundle
+    # the orchestrator copied in.
     target = Path("/Applications/minds.app")
     if target.exists():
         shutil.rmtree(target)
