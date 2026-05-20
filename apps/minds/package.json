@@ -20,8 +20,5 @@
   "devDependencies": {
     "electron": "35.7.5",
     "@todesktop/cli": "^1.8.0"
-  },
-  "engines": {
-    "pnpm": ">=10 <11"
   }
 }

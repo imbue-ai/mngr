@@ -150,7 +150,7 @@ URL -- env selection happens via `MINDS_CLIENT_CONFIG_PATH` /
 ### Prerequisites
 
 - Node.js >= 20
-- pnpm 10.x (v11 is not yet supported)
+- pnpm >= 10
 - Python >= 3.11, uv, git (for the Python backend)
 
 ### Running locally
