@@ -17,6 +17,24 @@ This module owns:
 
 The caller (``OvhProvider._provision_vps``) is responsible for the
 shared post-selection steps (rebuild, TOFU pin, container setup).
+
+**Recycle eligibility requires the ``mngr-provider`` IAM tag.** Candidate
+selection runs through :func:`list_vps_resources_for_provider`, which
+filters to VPSes whose ``mngr-provider`` tag matches the running
+provider instance's name. So a VPS that was ordered by mngr but whose
+provisioning aborted *before* the post-delivery tag attach (e.g. an OVH
+order that didn't deliver before ``vps_boot_timeout`` elapsed) is
+**invisible** to the recycle path and will not be reused -- it stays
+running as an unmanaged orphan that bills until OVH's next expiration
+boundary.
+
+The ``_provision_vps`` cleanup branch on
+:class:`OvhOrderDeliveryTimeoutError` and the
+``mngr ovh adopt-pending-order`` CLI both call
+:func:`adopt_orphan_vps_from_order` in ``ordering.py`` to attach the
+``mngr-provider`` / ``mngr-host-id`` tags + cancel the slow-delivered
+VPS so it becomes a recycle candidate. Without one of those code paths
+running, a slowly-delivered VPS leaks.
 """
 
 import time
@@ -79,6 +97,16 @@ def try_recycle_cancelled_vps(
     Returns ``None`` for any of: no candidates, all candidates failed
     safety filters, lock acquisition lost a race, mid-recycle API error.
     In all those cases the caller should fall through to ordering fresh.
+
+    Eligibility filter: candidates are sourced via
+    :func:`list_vps_resources_for_provider`, which only returns VPSes
+    whose ``mngr-provider`` IAM tag matches ``provider_name``. A VPS that
+    mngr ordered but failed to tag (e.g. an order whose delivery timed
+    out before ``_provision_vps``'s tag-immediately-on-first-sight step
+    ran) is invisible here. The
+    :func:`adopt_orphan_vps_from_order` helper in ``ordering.py`` and
+    the ``mngr ovh adopt-pending-order`` CLI exist precisely to attach
+    that tag retroactively so the orphan becomes a recycle candidate.
     """
     if client.is_unconfigured:
         return None

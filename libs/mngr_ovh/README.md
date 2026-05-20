@@ -98,6 +98,7 @@ OVH classic VPS is billed monthly (no hourly option). `mngr stop my-agent` halts
 To avoid wasting the remainder of a paid month, `mngr create --provider ovh` first checks for cancelled VPSes (those with `renew.deleteAtExpiration=true`) tagged by this provider instance. If one matches the requested plan + datacenter and has enough buffer until `expiration`, it is **un-cancelled** in place via `PUT /vps/{s}/serviceInfos` (no email round-trip needed for the reversal), its OS is rebuilt with our SSH key, and the `mngr-host-id` IAM tag is swapped to the new host. Only when no eligible cancelled VPS exists does a fresh order go out.
 
 Eligibility filters (all required):
+- **`mngr-provider` IAM tag matches this provider instance's name.** A VPS that mngr ordered but never finished tagging — e.g. an order whose delivery timed out before `_provision_vps`'s tag-immediately step ran — is invisible to the recycle path. See "Adopting slowly-delivered orphan VPSes" below.
 - `renew.deleteAtExpiration == true` and `status == "ok"`
 - `engagedUpTo` is null (no active engagement commitment)
 - `expiration` is at least `recycle_safety_margin_hours` (default 24h) into the future — guards against the billing boundary
@@ -110,3 +111,17 @@ A cooperative lock tag (`mngr-recycling-by=<uuid>`) is attached before any mutat
 This is opt-in via `enable_recycle_cancelled` (default `True`). Disable by setting `enable_recycle_cancelled = false` in your provider config if you'd rather see fresh VPS deliveries on every `mngr create`.
 
 Intended usage is to keep a VPS pool warm (e.g., via `mngr_imbue_cloud`) so that destroy → create within the same billing month is essentially free.
+
+## Adopting slowly-delivered orphan VPSes
+
+OVH's order pipeline is asynchronous: a `POST /order/cart/{id}/checkout` returns immediately with an `orderId`, but the actual VPS `serviceName` is only assigned during a later delivery phase. `mngr create` waits up to `vps_boot_timeout` (default 10 min) for that delivery. If OVH is slow (busy region, new-account fraud-review hold, etc.) and the VPS shows up *after* the timeout, the order silently produces a VPS that mngr never tags — invisible to discovery and to the recycle path. A full month of billing leaks.
+
+Two safety nets mitigate this:
+
+1. **`_provision_vps` extended-wait cleanup.** When `order_and_wait_for_vps` raises `OvhOrderDeliveryTimeoutError`, the bake's exception path keeps polling for `orphan_adopt_extra_timeout_seconds` more (default 5 min). If the VPS surfaces, the cleanup attaches `mngr-provider` / `mngr-host-id` and flips `deleteAtExpiration=true` so the next `mngr create` picks it up via the normal recycle flow. The bake still re-raises the original failure — the bake didn't succeed — but at least nothing leaks.
+
+2. **`mngr ovh adopt-pending-order` CLI.** For the rare case where even the extended wait isn't enough, an operator can run:
+   ```
+   mngr ovh adopt-pending-order --order-id <N> --provider-name <name> [--timeout-seconds 1800]
+   ```
+   to claim a VPS from an order id that's still pending. The order id is in the failed `mngr create`'s log line `OVH order placed (cart=..., order_id=N)`. Idempotent (re-running against an already-adopted order is a no-op).

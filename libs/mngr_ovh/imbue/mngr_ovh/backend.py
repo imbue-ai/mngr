@@ -34,9 +34,12 @@ from imbue.mngr_ovh.config import OvhProviderConfig
 from imbue.mngr_ovh.iam_tags import MNGR_HOST_ID_TAG_KEY
 from imbue.mngr_ovh.iam_tags import MNGR_PROVIDER_TAG_KEY
 from imbue.mngr_ovh.iam_tags import attach_tags
+from imbue.mngr_ovh.iam_tags import iam_region_code_for_endpoint
 from imbue.mngr_ovh.iam_tags import list_vps_resources_for_provider
 from imbue.mngr_ovh.iam_tags import parse_extra_tags_env
 from imbue.mngr_ovh.iam_tags import vps_urn_for
+from imbue.mngr_ovh.ordering import OvhOrderDeliveryTimeoutError
+from imbue.mngr_ovh.ordering import adopt_orphan_vps_from_order
 from imbue.mngr_ovh.ordering import order_and_wait_for_vps
 from imbue.mngr_ovh.ordering import rebuild_vps_with_public_key
 from imbue.mngr_ovh.recycle import abort_recycle
@@ -284,15 +287,38 @@ class OvhProvider(VpsDockerProvider):
             fresh_order_service_name: str | None = None
             try:
                 if recycle_handle is None:
-                    service_name = order_and_wait_for_vps(
-                        self.ovh_client,
-                        plan_code=plan,
-                        datacenter=region,
-                        image_name=image_name,
-                        pricing_mode=self.ovh_config.pricing_mode.to_wire_value(),
-                        duration=self.ovh_config.duration,
-                        deliver_timeout_seconds=self.ovh_config.vps_boot_timeout,
-                    )
+                    try:
+                        service_name = order_and_wait_for_vps(
+                            self.ovh_client,
+                            plan_code=plan,
+                            datacenter=region,
+                            image_name=image_name,
+                            pricing_mode=self.ovh_config.pricing_mode.to_wire_value(),
+                            duration=self.ovh_config.duration,
+                            deliver_timeout_seconds=self.ovh_config.vps_boot_timeout,
+                        )
+                    except OvhOrderDeliveryTimeoutError as exc:
+                        # OVH accepted the order but the VPS didn't deliver
+                        # within ``vps_boot_timeout``. Without intervention,
+                        # any later delivery becomes an unmanaged orphan
+                        # (no ``mngr-provider`` tag => invisible to
+                        # ``list_vps_resources_for_provider`` => the next
+                        # bake's recycle path can't see it => we leak a
+                        # full month of billing).
+                        #
+                        # Extend the poll for ``orphan_adopt_extra_timeout_seconds``
+                        # more; if the VPS surfaces, tag + cancel it so the
+                        # next bake picks it up. Then re-raise the original
+                        # exception either way -- this bake still failed.
+                        adopt_orphan_vps_from_order(
+                            self.ovh_client,
+                            order_id=exc.order_id,
+                            plan_code=plan,
+                            provider_name=str(self.name),
+                            region_code=iam_region_code_for_endpoint(self.ovh_config.endpoint),
+                            poll_timeout_seconds=self.ovh_config.orphan_adopt_extra_timeout_seconds,
+                        )
+                        raise
                     fresh_order_service_name = service_name
                 else:
                     service_name = recycle_handle.service_name
@@ -309,7 +335,7 @@ class OvhProvider(VpsDockerProvider):
                 # `mngr-host-id` to the new host id under a cooperative
                 # lock -- so we skip the re-tag there to avoid two
                 # redundant POST /tag calls per recycled host.
-                urn = vps_urn_for(service_name, region_code=_iam_region_code(self.ovh_config.endpoint))
+                urn = vps_urn_for(service_name, region_code=iam_region_code_for_endpoint(self.ovh_config.endpoint))
                 if recycle_handle is None:
                     # F1: ``extra_tags`` was parsed at the very top of
                     # ``_provision_vps`` so a typo / reserved key has
@@ -432,23 +458,6 @@ class OvhProvider(VpsDockerProvider):
                 service_name,
                 e,
             )
-
-
-def _iam_region_code(endpoint: str) -> str:
-    """Map a python-ovh endpoint id (``ovh-us``) to the URN's region segment (``us``).
-
-    Recognises the ``ovh-*`` family (which is what mngr's OVH backend
-    supports). Raises ``MngrError`` for unrecognised endpoints rather
-    than silently defaulting; a wrong URN region segment makes IAM v2
-    tag operations target a non-existent resource, which would surface
-    as a confusing 404 deep inside the recycle path.
-    """
-    if endpoint.startswith("ovh-"):
-        return endpoint.removeprefix("ovh-")
-    raise MngrError(
-        f"Cannot derive IAM URN region from OVH endpoint {endpoint!r}; "
-        "expected an ``ovh-*`` endpoint id (e.g. 'ovh-us', 'ovh-eu', 'ovh-ca')."
-    )
 
 
 class OvhProviderBackend(ProviderBackendInterface):

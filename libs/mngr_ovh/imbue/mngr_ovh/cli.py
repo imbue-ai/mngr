@@ -16,6 +16,7 @@ from loguru import logger
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.executor import ConcurrencyGroupExecutor
+from imbue.mngr.cli.output_helpers import write_human_line
 from imbue.mngr.errors import MngrError
 from imbue.mngr_ovh.client import OvhVpsClient
 from imbue.mngr_ovh.client import build_ovh_client
@@ -23,9 +24,19 @@ from imbue.mngr_ovh.config import OvhProviderConfig
 from imbue.mngr_ovh.iam_tags import MNGR_HOST_ID_TAG_KEY
 from imbue.mngr_ovh.iam_tags import MNGR_PROVIDER_TAG_KEY
 from imbue.mngr_ovh.iam_tags import MNGR_RECYCLING_LOCK_TAG_KEY
+from imbue.mngr_ovh.iam_tags import iam_region_code_for_endpoint
 from imbue.mngr_ovh.iam_tags import list_vps_resources
+from imbue.mngr_ovh.ordering import adopt_orphan_vps_from_order
 from imbue.mngr_vps_docker.errors import VpsApiError
+from imbue.mngr_vps_docker.errors import VpsProvisioningError
 from imbue.mngr_vps_docker.primitives import VpsInstanceId
+
+# Default extended-wait when an operator invokes ``adopt-pending-order`` by
+# hand. Generous because this CLI is run AFTER ``_provision_vps``'s own
+# extended wait already gave up -- if the operator is still trying, OVH
+# is genuinely slow and we'd rather wait than fail. Capped at 30 min so
+# a forgotten invocation doesn't run forever.
+_ADOPT_DEFAULT_TIMEOUT_SECONDS: Final[float] = 1800.0
 
 _MAX_PARALLEL_VPS_FETCHES: Final[int] = 16
 
@@ -152,6 +163,97 @@ def _safe_get_service_info(client: OvhVpsClient, service_name: str) -> dict[str,
     except VpsApiError as e:
         logger.debug("Failed to fetch /vps/{}/serviceInfos: {}", service_name, e)
         return None
+
+
+@ovh.command(name="adopt-pending-order")
+@click.option(
+    "--order-id",
+    required=True,
+    type=int,
+    help=(
+        "OVH order id (from a previous ``mngr create`` log line "
+        "``OVH order placed (cart=..., order_id=N)``) that succeeded at "
+        "checkout but didn't deliver a VPS before ``vps_boot_timeout`` "
+        "elapsed AND wasn't caught by ``_provision_vps``'s extended-wait "
+        "cleanup either."
+    ),
+)
+@click.option(
+    "--provider-name",
+    required=True,
+    type=str,
+    help=(
+        "mngr provider instance name to attribute the orphan to (the value "
+        "the next ``mngr create`` against this provider's recycle path will "
+        "filter on). Typically ``ovh`` for the default instance, or "
+        "``ovh-<slug>`` for a per-account instance."
+    ),
+)
+@click.option(
+    "--plan-code",
+    default="vps-2025-model1",
+    show_default=True,
+    type=str,
+    help=(
+        "OVH plan code the order placed for. Used to identify the VPS detail "
+        "in the order (vs the bundled OS / installation / backup details)."
+    ),
+)
+@click.option(
+    "--timeout-seconds",
+    default=_ADOPT_DEFAULT_TIMEOUT_SECONDS,
+    show_default=True,
+    type=float,
+    help="How long to poll OVH for the order's VPS serviceName before giving up.",
+)
+def adopt_pending_order_command(
+    order_id: int,
+    provider_name: str,
+    plan_code: str,
+    timeout_seconds: float,
+) -> None:
+    """Adopt a slowly-delivered VPS from a previously-timed-out OVH order.
+
+    Operator escape hatch for the rare case where ``_provision_vps``'s
+    own extended-wait cleanup (gated by
+    ``OvhProviderConfig.orphan_adopt_extra_timeout_seconds``) ran out of
+    patience before OVH finished delivering. Polls the order's
+    details/operations chain for ``--timeout-seconds`` more; if/when a
+    VPS surfaces, attaches the ``mngr-provider`` and ``mngr-host-id``
+    IAM tags and sets ``renew.deleteAtExpiration=true`` so the VPS
+    becomes a recycle candidate for the next ``mngr create``.
+
+    Idempotent: re-running against an already-adopted order is safe
+    (tag attach overwrites; cancellation flip is a no-op once set).
+    Exits non-zero only when the order still hasn't delivered within
+    the chosen timeout (operator should re-run later or check the OVH
+    manager UI for order status).
+    """
+    config = OvhProviderConfig()
+    client = build_ovh_client(config)
+    if client.is_unconfigured:
+        raise click.ClickException(
+            "OVH credentials not configured. Set OVH_APPLICATION_KEY/SECRET/CONSUMER_KEY "
+            "(or OAuth2 client_id/client_secret) or populate ~/.ovh.conf."
+        )
+    region_code = iam_region_code_for_endpoint(config.endpoint)
+    try:
+        service_name = adopt_orphan_vps_from_order(
+            client,
+            order_id=order_id,
+            plan_code=plan_code,
+            provider_name=provider_name,
+            region_code=region_code,
+            poll_timeout_seconds=timeout_seconds,
+        )
+    except (VpsApiError, VpsProvisioningError, MngrError) as exc:
+        raise click.ClickException(f"adopt-pending-order failed for order {order_id}: {exc}") from exc
+    if service_name is None:
+        raise click.ClickException(
+            f"OVH order {order_id} still has not delivered a VPS within {timeout_seconds}s. "
+            "Re-run this command later or check the OVH manager UI for the order's status."
+        )
+    write_human_line(f"Adopted VPS {service_name} from order {order_id}; marked as recycle candidate.")
 
 
 def _print_rows(rows: list[dict[str, str]]) -> None:
