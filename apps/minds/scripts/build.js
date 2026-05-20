@@ -571,6 +571,26 @@ function bundleClientConfig() {
   fs.writeFileSync(bundledRootNameFile, rootNameBundle + '\n');
   console.log(`Bundled ${resolvedConfig} -> ${bundledClient}`);
   console.log(`Bundled MINDS_ROOT_NAME=${rootNameBundle} -> ${bundledRootNameFile}`);
+
+  // The source-tree _bundled/ above ends up inside app.asar, which the
+  // Python backend subprocess cannot read. paths.js getBundledConfigDir()
+  // resolves the packaged-mode bundle under the pyproject resources dir
+  // (extraResources copies resources/ -> Resources/), so stage a second
+  // copy there on the real filesystem where `minds run --config-file`
+  // can reach it.
+  const packagedBundledDir = path.join(
+    RESOURCES_DIR,
+    'pyproject',
+    'imbue',
+    'minds',
+    'config',
+    'envs',
+    '_bundled'
+  );
+  fs.mkdirSync(packagedBundledDir, { recursive: true });
+  fs.copyFileSync(resolvedConfig, path.join(packagedBundledDir, 'client.toml'));
+  fs.writeFileSync(path.join(packagedBundledDir, 'root_name'), rootNameBundle + '\n');
+  console.log(`Staged bundled config for packaged runtime at ${packagedBundledDir}`);
 }
 
 /**
