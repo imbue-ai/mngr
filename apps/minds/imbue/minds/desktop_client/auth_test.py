@@ -173,6 +173,26 @@ def test_get_api_token_raises_for_empty_token_file(tmp_path: Path) -> None:
         store.get_api_token()
 
 
+def test_get_api_token_raises_on_read_error(tmp_path: Path) -> None:
+    """If an existing api_token file is not readable, ApiTokenError is raised.
+
+    Locks in the contract that read-time failures surface as the
+    caller-appropriate ``ApiTokenError`` (not ``SigningKeyError``, not
+    a bare ``OSError``) so bearer-token auth can keep catching exactly
+    that one class. Mirrors ``test_get_signing_key_raises_on_read_error``.
+    """
+    auth_dir = tmp_path / "auth"
+    auth_dir.mkdir(parents=True)
+    # Make "api_token" a directory -- read_text on a directory raises
+    # IsADirectoryError (a subclass of OSError). Triggers a real OS error
+    # that works regardless of whether we're running as root.
+    (auth_dir / "api_token").mkdir()
+
+    store = FileAuthStore(data_directory=auth_dir)
+    with pytest.raises(ApiTokenError):
+        store.get_api_token()
+
+
 def test_api_token_is_distinct_from_signing_key(tmp_path: Path) -> None:
     """The two secrets are stored in separate files and rotated independently."""
     store = _make_auth_store(tmp_path)
