@@ -56,9 +56,9 @@ def test_deploy_then_destroy_round_trip(ephemeral_env: EphemeralEnvHandle) -> No
 
     Post-destroy assertions: each of the above is gone.
 
-    Dev tier doesn't currently use OVH or Cloudflare resources for an
-    ephemeral env (those come in once workspaces / tunnels exist), so
-    those provider enumerations aren't asserted here.
+    The ci tier doesn't currently use OVH or Cloudflare resources for
+    an ephemeral env (those come in once workspaces / tunnels exist),
+    so those provider enumerations aren't asserted here.
     """
     creds = load_ci_credentials_from_vault()
     neon_org_id = creds["NEON_ORG_ID"]
