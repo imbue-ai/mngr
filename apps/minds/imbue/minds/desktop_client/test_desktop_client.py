@@ -481,6 +481,7 @@ def _create_test_server_with_agent_creator(
         paths=WorkspacePaths(data_dir=tmp_path / "minds"),
         root_concurrency_group=root_cg,
         notification_dispatcher=NotificationDispatcher.create(is_electron=False, tkinter_module=None, is_macos=False),
+        system_interface_health_tracker=SystemInterfaceHealthTracker(),
     )
     client, auth_store = _create_test_desktop_client(
         tmp_path=tmp_path,
@@ -1421,8 +1422,11 @@ def test_recovery_page_requires_authentication(tmp_path: Path) -> None:
 
 
 def test_recovery_page_renders_for_authenticated_user(tmp_path: Path) -> None:
-    client, auth_store, agent_id = _setup_test_server(tmp_path)
-    _authenticate_client(client, auth_store)
+    # Mark stuck so the page renders -- a HEALTHY agent with a valid return_to
+    # 302s straight to return_to (covered by the healthy-redirect test below).
+    tracker = SystemInterfaceHealthTracker()
+    client, _, agent_id = _setup_test_server_with_tracker(tmp_path, tracker)
+    tracker.mark_stuck(agent_id)
 
     # Use a legitimate localhost-subdomain return_to (the real plugin-emitted form).
     safe_return_to = f"http://{agent_id}.localhost:8421/some/path"
@@ -1470,9 +1474,14 @@ def test_recovery_page_drops_protocol_relative_return_to(tmp_path: Path) -> None
 
 
 def test_recovery_page_allows_relative_return_to(tmp_path: Path) -> None:
-    """A same-origin relative path must be preserved."""
-    client, auth_store, agent_id = _setup_test_server(tmp_path)
-    _authenticate_client(client, auth_store)
+    """A same-origin relative path must be preserved.
+
+    Pre-arranges STUCK so the page renders (a HEALTHY agent with a valid
+    return_to 302s to it; that path is covered separately).
+    """
+    tracker = SystemInterfaceHealthTracker()
+    client, _, agent_id = _setup_test_server_with_tracker(tmp_path, tracker)
+    tracker.mark_stuck(agent_id)
 
     response = client.get(
         f"/agents/{agent_id}/recovery?return_to=/agents/{agent_id}/",
@@ -1559,3 +1568,64 @@ def test_recovery_page_initial_status_reflects_tracker_restarting(tmp_path: Path
 
     assert response.status_code == 200
     assert 'data-initial-status="restarting"' in response.text
+
+
+def test_recovery_page_redirects_to_return_to_when_agent_already_healthy(tmp_path: Path) -> None:
+    """Regression: if the tracker says HEALTHY at recovery-page-render time, 302 to return_to.
+
+    Catches a real-world race where the chrome SSE pushes ``stuck`` and the
+    chrome JS navigates to /recovery, but the background probe loop flips
+    the tracker back to HEALTHY in the brief window before the GET lands.
+    Without the redirect, ``initial_status="healthy"`` would render the
+    "Workspace server not responding" page and the JS would never auto-
+    reload (the SSE doesn't push events for HEALTHY agents).
+    """
+    tracker = SystemInterfaceHealthTracker()
+    client, _, agent_id = _setup_test_server_with_tracker(tmp_path, tracker)
+    # With no record in the tracker, get_health returns HEALTHY by default.
+    assert tracker.get_health(agent_id) == AgentHealth.HEALTHY
+    safe_return_to = f"http://{agent_id}.localhost:8421/"
+
+    response = client.get(
+        f"/agents/{agent_id}/recovery?return_to={safe_return_to}",
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 302
+    assert response.headers["location"] == safe_return_to
+
+
+def test_recovery_page_renders_normally_when_healthy_but_no_return_to(tmp_path: Path) -> None:
+    """No return_to + HEALTHY: render the page (with a working restart button) instead of erroring.
+
+    Falls back to the manual restart path. The page itself still renders
+    correctly with ``initial_status="healthy"``; the user can hit the
+    restart button if they want to.
+    """
+    tracker = SystemInterfaceHealthTracker()
+    client, _, agent_id = _setup_test_server_with_tracker(tmp_path, tracker)
+
+    response = client.get(f"/agents/{agent_id}/recovery", follow_redirects=False)
+
+    assert response.status_code == 200
+    assert 'data-initial-status="healthy"' in response.text
+
+
+def test_recovery_page_does_not_redirect_when_stuck_even_with_return_to(tmp_path: Path) -> None:
+    """STUCK + return_to: still render the page so the user sees the problem + restart button.
+
+    Defends against the cleanup-side regression where the new HEALTHY-only
+    redirect accidentally widens to all states.
+    """
+    tracker = SystemInterfaceHealthTracker()
+    client, _, agent_id = _setup_test_server_with_tracker(tmp_path, tracker)
+    tracker.mark_stuck(agent_id)
+    safe_return_to = f"http://{agent_id}.localhost:8421/"
+
+    response = client.get(
+        f"/agents/{agent_id}/recovery?return_to={safe_return_to}",
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 200
+    assert 'data-initial-status="stuck"' in response.text

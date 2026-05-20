@@ -19,6 +19,7 @@ from fastapi import Depends
 from fastapi import FastAPI
 from fastapi import Request
 from fastapi.responses import HTMLResponse
+from fastapi.responses import RedirectResponse
 from fastapi.responses import Response
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -1556,6 +1557,18 @@ def _handle_recovery_page(
     tracker: SystemInterfaceHealthTracker | None = request.app.state.system_interface_health_tracker
     initial_status = tracker.get_health(aid).value if tracker is not None else AgentHealth.HEALTHY.value
     return_to = _sanitize_recovery_return_to(request.query_params.get("return_to", ""))
+    # If the agent has already recovered by the time the chrome navigates
+    # here (a real race: the background probe loop can flip the tracker
+    # back to HEALTHY in the brief window between the STUCK SSE push and
+    # the recovery-page GET landing), redirecting straight back to
+    # ``return_to`` is the right answer. Rendering the recovery page with
+    # ``initial_status="healthy"`` would otherwise wedge the user: the
+    # page's JS only auto-reloads on a streaming ``status=healthy`` SSE
+    # event, and the SSE doesn't push events for HEALTHY agents (the
+    # ``snapshot_all`` filter intentionally excludes them), so the user
+    # would sit on a misleading "not responding" page forever.
+    if initial_status == AgentHealth.HEALTHY.value and return_to:
+        return RedirectResponse(url=return_to, status_code=302)
     html_body = render_recovery_page(
         agent_id=aid,
         ws_name=ws_name,
