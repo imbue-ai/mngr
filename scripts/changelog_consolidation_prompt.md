@@ -21,11 +21,13 @@ to determine outcome.
 If any step fails, your final message must be a `failed` JSON object
 with the failing step number and error detail in `notes`.
 
-Background: this repo uses a per-project changelog layout. Each project
+Background: this repo uses an in-project changelog layout. Each project
 under `libs/`, `apps/`, plus the synthetic top-level `dev/` directory,
-owns its own `CHANGELOG.md` and `UNABRIDGED_CHANGELOG.md`. Per-PR entry
-files live at `changelog/<project>/<branch>.md`. Your job is to fan
-each pending entry into the right project's consolidated files.
+owns three artifacts at its root: a `changelog/` directory for per-PR
+entry files (`<project_dir>/changelog/<branch>.md`), a `CHANGELOG.md`
+for the consolidated summary, and an `UNABRIDGED_CHANGELOG.md` for the
+verbatim per-date sections. Your job is to fan each pending entry into
+the right project's consolidated files.
 
 1. `cd "$MNGR_AGENT_WORK_DIR"`. Verify with `git rev-parse --abbrev-ref
    HEAD` that you are on a `mngr/changelog-consolidation-*` branch (not
@@ -40,8 +42,9 @@ each pending entry into the right project's consolidated files.
    <YYYY-MM-DD>` lines — each one is a `## YYYY-MM-DD` section the
    consolidator just inserted at the top of
    `<project_dir>/UNABRIDGED_CHANGELOG.md`, where `<project_dir>` is
-   `libs/<project>` for libs, `apps/<project>` for apps, and `dev` for
-   the synthetic dev bucket.
+   `libs/<project>` for libs, `apps/<project>` for apps, and `dev/` for
+   the synthetic dev bucket (the same directory that holds the project's
+   `changelog/` entries dir).
 
 3. For each `SECTION <project> <date>` line: read that section's bullets
    from the project's `UNABRIDGED_CHANGELOG.md` (the section sits

@@ -17,6 +17,8 @@ from imbue.imbue_common.ratchet_testing.ratchets import find_bash_scripts_withou
 from imbue.imbue_common.test_profiles import detect_branch
 from scripts.changelog_projects import DEV_PROJECT
 from scripts.changelog_projects import all_known_projects
+from scripts.changelog_projects import project_dir as get_project_dir
+from scripts.changelog_projects import project_entries_dir
 from scripts.changelog_projects import project_for_path
 
 _REPO_ROOT = Path(__file__).parent
@@ -496,12 +498,13 @@ _CHANGELOG_ARTIFACT_BASENAMES: frozenset[str] = frozenset({"CHANGELOG.md", "UNAB
 def _is_changelog_artifact(rel_path: str) -> bool:
     """Return True for paths that are themselves changelog artifacts.
 
-    Covers both the per-PR entry files under ``changelog/`` and the
-    consolidated ``CHANGELOG.md`` / ``UNABRIDGED_CHANGELOG.md`` files at
-    each project root (including ``dev/``).
+    Covers per-PR entry files (any path with a ``changelog/`` segment,
+    e.g. ``libs/mngr/changelog/<branch>.md``, ``dev/changelog/<branch>.md``)
+    and the consolidated ``CHANGELOG.md`` / ``UNABRIDGED_CHANGELOG.md``
+    files at each project root.
     """
     parts = Path(rel_path).parts
-    if parts and parts[0] == "changelog":
+    if "changelog" in parts:
         return True
     return Path(rel_path).name in _CHANGELOG_ARTIFACT_BASENAMES
 
@@ -533,9 +536,9 @@ def test_pr_has_changelog_entry() -> None:
 
     For each project the PR changes a non-changelog file in (``libs/<name>``,
     ``apps/<name>``, or the synthetic ``dev`` bucket for root-level files),
-    require ``changelog/<project>/<branch-name>.md`` to exist (with slashes
-    in the branch name replaced by dashes). The nightly consolidator routes
-    each project's entries into that project's ``UNABRIDGED_CHANGELOG.md``.
+    require ``<project_dir>/changelog/<branch-name>.md`` to exist (with
+    slashes in the branch name replaced by dashes). The nightly consolidator
+    routes each project's entries into that project's ``UNABRIDGED_CHANGELOG.md``.
     """
     branch = detect_branch()
 
@@ -558,7 +561,7 @@ def test_pr_has_changelog_entry() -> None:
     sanitized = branch.replace("/", "-")
     missing: list[str] = []
     for project in sorted(touched):
-        entry_path = _REPO_ROOT / "changelog" / project / f"{sanitized}.md"
+        entry_path = project_entries_dir(project, _REPO_ROOT) / f"{sanitized}.md"
         if not entry_path.exists():
             missing.append(str(entry_path.relative_to(_REPO_ROOT)))
 
@@ -569,6 +572,37 @@ def test_pr_has_changelog_entry() -> None:
         f"Each file should briefly describe the user-visible changes in this PR "
         f"that pertain to that project. The synthetic '{DEV_PROJECT}' project "
         f"covers root-level files (scripts/, .github/, top-level docs, build tooling)."
+    )
+
+
+# --- Meta: ensure every project has the changelog layout files ---
+
+
+def test_every_project_has_changelog_layout() -> None:
+    """Ensure every project (libs/<name>, apps/<name>, and the synthetic dev)
+    has the full changelog layout: ``CHANGELOG.md``, ``UNABRIDGED_CHANGELOG.md``,
+    and a ``changelog/`` directory for per-PR entries.
+
+    Mirrors ``test_every_project_has_test_ratchets_file`` and
+    ``test_every_project_has_pypi_readme``: a symmetric requirement that
+    every project participates in the consolidation flow uniformly.
+    """
+    missing: list[str] = []
+    for project in all_known_projects(_REPO_ROOT):
+        proj_dir = get_project_dir(project, _REPO_ROOT)
+        for required in ("CHANGELOG.md", "UNABRIDGED_CHANGELOG.md"):
+            target = proj_dir / required
+            if not target.exists():
+                missing.append(str(target.relative_to(_REPO_ROOT)))
+        entries = project_entries_dir(project, _REPO_ROOT)
+        if not entries.is_dir():
+            missing.append(f"{entries.relative_to(_REPO_ROOT)}/ (directory)")
+
+    assert not missing, (
+        "The following projects are missing required changelog-layout files:\n"
+        + "\n".join(f"  - {m}" for m in missing)
+        + "\n\nEvery project must have CHANGELOG.md (with an '## [Unreleased]' heading), "
+        "UNABRIDGED_CHANGELOG.md, and a changelog/ directory."
     )
 
 

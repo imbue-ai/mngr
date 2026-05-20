@@ -132,14 +132,15 @@ If instructed not to commit:
 
 Every PR must include one changelog entry file **per project it touches**. CI will fail if any are missing.
 
-- A "project" is a directory under `libs/` or `apps/` (e.g. `mngr`, `minds`), or the synthetic `dev` bucket for root-level files (`scripts/`, `.github/`, `justfile`, repo-root docs, top-level config).
-- Create one file per touched project, at `changelog/<project>/<branch-name>.md`, where slashes in the branch name are replaced with dashes.
-  - Example: branch `mngr/add-mngr-feature-and-minds-fix` touches `libs/mngr` and `apps/minds`, so create both `changelog/mngr/mngr-add-mngr-feature-and-minds-fix.md` and `changelog/minds/mngr-add-mngr-feature-and-minds-fix.md`.
-  - A PR that only edits `scripts/` and CI workflows is a `dev`-only PR: `changelog/dev/<branch>.md`.
+- A "project" is a directory under `libs/` or `apps/` (e.g. `mngr`, `minds`), or the synthetic top-level `dev/` directory for root-level files (`scripts/`, `.github/`, `justfile`, repo-root docs, top-level config).
+- Each project holds its own changelog artifacts inside its own directory: `<project_dir>/changelog/` (per-PR entries), `<project_dir>/CHANGELOG.md` (concise summary), `<project_dir>/UNABRIDGED_CHANGELOG.md` (verbatim).
+- For each project a PR touches, create one entry file at `<project_dir>/changelog/<branch-name>.md`, where slashes in the branch name are replaced with dashes.
+  - Example: branch `mngr/add-mngr-feature-and-minds-fix` touches `libs/mngr` and `apps/minds`, so create both `libs/mngr/changelog/mngr-add-mngr-feature-and-minds-fix.md` and `apps/minds/changelog/mngr-add-mngr-feature-and-minds-fix.md`.
+  - A PR that only edits `scripts/` and CI workflows is a `dev`-only PR: `dev/changelog/<branch>.md`.
 - Each file should briefly describe the user-visible changes in the PR that pertain to *that* project. Same-PR entries can repeat shared context if it helps readers of each project's changelog.
-- A nightly agent fans each project's entries into that project's `<project_dir>/UNABRIDGED_CHANGELOG.md` (full verbatim entries) and `<project_dir>/CHANGELOG.md` (concise AI-generated summary). `<project_dir>` is `libs/<name>`, `apps/<name>`, or `dev/` at the repo root.
+- A nightly agent fans each project's entries into that project's `<project_dir>/UNABRIDGED_CHANGELOG.md` (full verbatim entries) and `<project_dir>/CHANGELOG.md` (concise AI-generated summary).
 - The changelog consolidation agent's own PRs (`mngr/changelog-consolidation-*`) are exempt from this requirement.
-- PRs that only edit changelog artifacts (entry files, project `CHANGELOG.md`s, project `UNABRIDGED_CHANGELOG.md`s) don't require new entries.
+- PRs that only edit changelog artifacts (any path with a `changelog/` segment, project `CHANGELOG.md`s, project `UNABRIDGED_CHANGELOG.md`s) don't require new entries.
 
 # Silly error workarounds
 

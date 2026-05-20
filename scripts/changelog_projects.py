@@ -1,14 +1,17 @@
 """Per-project changelog layout helpers.
 
 Maps repo-relative paths to the project that owns them, and project names
-to the directory holding that project's ``CHANGELOG.md`` /
-``UNABRIDGED_CHANGELOG.md``. Shared between the consolidator, the
-release script, the per-PR ratchet, and the consolidation prompt so they
-all agree on what a "project" is.
+to the directory holding that project's changelog artifacts:
+``<project_dir>/changelog/`` (per-PR entry files),
+``<project_dir>/CHANGELOG.md`` (consolidated summary),
+``<project_dir>/UNABRIDGED_CHANGELOG.md`` (consolidated verbatim).
+
+Shared between the consolidator, the release script, the per-PR ratchet,
+and the consolidation prompt so they all agree on what a "project" is.
 
 A "project" is a directory under ``libs/`` or ``apps/`` containing a
-``pyproject.toml``, or the synthetic ``dev`` bucket that owns root-level
-files (scripts, CI workflows, top-level docs, build tooling).
+``pyproject.toml``, or the synthetic top-level ``dev`` bucket that owns
+root-level files (scripts, CI workflows, top-level docs, build tooling).
 """
 
 from pathlib import Path
@@ -35,7 +38,7 @@ def project_for_path(rel_path: Path | str, repo_root: Path) -> str:
 
 
 def project_dir(project: str, repo_root: Path) -> Path:
-    """Return the directory that holds ``project``'s CHANGELOG.md files."""
+    """Return the directory that holds ``project``'s changelog artifacts."""
     if project == DEV_PROJECT:
         return repo_root / DEV_PROJECT
     libs = repo_root / "libs" / project
@@ -45,6 +48,11 @@ def project_dir(project: str, repo_root: Path) -> Path:
     if apps.is_dir():
         return apps
     raise ValueError(f"Unknown project: {project!r}")
+
+
+def project_entries_dir(project: str, repo_root: Path) -> Path:
+    """Return the ``<project_dir>/changelog/`` directory for per-PR entry files."""
+    return project_dir(project, repo_root) / "changelog"
 
 
 def all_known_projects(repo_root: Path) -> list[str]:

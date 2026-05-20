@@ -398,8 +398,8 @@ uv run minds env destroy --yes-i-mean-staging
   with the real Cloudflare domain + OAuth client ids.
 - [ ] (If the deployed URLs disagreed with the committed values:)
   the updated `apps/minds/imbue/minds/config/envs/staging/client.toml`.
-- [ ] A `changelog/minds/<branch-name>.md` entry describing the
-  staging tier bring-up (required by CI); plus a `changelog/dev/<branch-name>.md`
+- [ ] An `apps/minds/changelog/<branch-name>.md` entry describing the
+  staging tier bring-up (required by CI); plus a `dev/changelog/<branch-name>.md`
   entry if the PR also touches root-level files (scripts, CI, etc.).
 
 The `.minds/staging/pool_management_key/` directory should NOT land

@@ -22,33 +22,43 @@ from scripts.consolidate_changelog import _insert_section_into_changelog  # noqa
 from scripts.consolidate_changelog import pending_changelog_entries  # noqa: E402
 
 
+def _seed_libs_project(repo: Path, name: str) -> Path:
+    """Create ``libs/<name>/`` with a pyproject.toml and an empty changelog/."""
+    project = repo / "libs" / name
+    project.mkdir(parents=True, exist_ok=True)
+    (project / "pyproject.toml").write_text("")
+    (project / "changelog").mkdir(exist_ok=True)
+    return project
+
+
 def test_collect_project_entries_empty_dir(tmp_path: Path) -> None:
-    project_dir = tmp_path / "changelog" / "mngr"
-    project_dir.mkdir(parents=True)
-    (project_dir / ".gitkeep").touch()
-    assert _collect_project_entries(project_dir) == []
+    project = _seed_libs_project(tmp_path, "mngr")
+    (project / "changelog" / ".gitkeep").touch()
+    assert _collect_project_entries(project / "changelog") == []
+
+
+def test_collect_project_entries_missing_dir_returns_empty(tmp_path: Path) -> None:
+    """A project that hasn't been set up yet should not blow up the consolidator."""
+    assert _collect_project_entries(tmp_path / "libs" / "nonexistent" / "changelog") == []
 
 
 def test_collect_project_entries_skips_non_md_files(tmp_path: Path) -> None:
-    project_dir = tmp_path / "changelog" / "mngr"
-    project_dir.mkdir(parents=True)
-    (project_dir / "notes.txt").write_text("not a changelog entry")
-    assert _collect_project_entries(project_dir) == []
+    project = _seed_libs_project(tmp_path, "mngr")
+    (project / "changelog" / "notes.txt").write_text("not a changelog entry")
+    assert _collect_project_entries(project / "changelog") == []
 
 
 def test_collect_project_entries_skips_empty_content(tmp_path: Path) -> None:
-    project_dir = tmp_path / "changelog" / "mngr"
-    project_dir.mkdir(parents=True)
-    (project_dir / "empty.md").write_text("   \n\n  ")
-    assert _collect_project_entries(project_dir) == []
+    project = _seed_libs_project(tmp_path, "mngr")
+    (project / "changelog" / "empty.md").write_text("   \n\n  ")
+    assert _collect_project_entries(project / "changelog") == []
 
 
 def test_collect_project_entries_returns_sorted_entries(tmp_path: Path) -> None:
-    project_dir = tmp_path / "changelog" / "mngr"
-    project_dir.mkdir(parents=True)
-    (project_dir / "b-feature.md").write_text("- Feature B")
-    (project_dir / "a-bugfix.md").write_text("- Bugfix A")
-    entries = _collect_project_entries(project_dir)
+    project = _seed_libs_project(tmp_path, "mngr")
+    (project / "changelog" / "b-feature.md").write_text("- Feature B")
+    (project / "changelog" / "a-bugfix.md").write_text("- Bugfix A")
+    entries = _collect_project_entries(project / "changelog")
     assert len(entries) == 2
     assert entries[0][0].name == "a-bugfix.md"
     assert entries[0][1] == "- Bugfix A"
@@ -56,26 +66,33 @@ def test_collect_project_entries_returns_sorted_entries(tmp_path: Path) -> None:
     assert entries[1][1] == "- Feature B"
 
 
-def test_pending_changelog_entries_returns_empty_when_no_changelog_dir(tmp_path: Path) -> None:
+def test_pending_changelog_entries_returns_empty_when_no_projects(tmp_path: Path) -> None:
     assert pending_changelog_entries(tmp_path) == []
 
 
-def test_pending_changelog_entries_walks_project_subdirs(tmp_path: Path) -> None:
-    (tmp_path / "changelog").mkdir()
-    (tmp_path / "changelog" / ".gitkeep").touch()
-    mngr_dir = tmp_path / "changelog" / "mngr"
-    mngr_dir.mkdir()
-    (mngr_dir / "notes.txt").write_text("not a changelog entry")
-    (mngr_dir / "empty.md").write_text("   \n")
-    (mngr_dir / "b.md").write_text("- B")
-    (mngr_dir / "a.md").write_text("- A")
-    minds_dir = tmp_path / "changelog" / "minds"
-    minds_dir.mkdir()
-    (minds_dir / "c.md").write_text("- C")
+def test_pending_changelog_entries_walks_every_project(tmp_path: Path) -> None:
+    mngr = _seed_libs_project(tmp_path, "mngr")
+    (mngr / "changelog" / "notes.txt").write_text("not a changelog entry")
+    (mngr / "changelog" / "empty.md").write_text("   \n")
+    (mngr / "changelog" / "b.md").write_text("- B")
+    (mngr / "changelog" / "a.md").write_text("- A")
+
+    minds = tmp_path / "apps" / "minds"
+    minds.mkdir(parents=True)
+    (minds / "pyproject.toml").write_text("")
+    (minds / "changelog").mkdir()
+    (minds / "changelog" / "c.md").write_text("- C")
+
+    # dev/ has no pyproject.toml; it's the synthetic bucket.
+    dev_dir = tmp_path / "dev"
+    dev_dir.mkdir()
+    (dev_dir / "changelog").mkdir()
+    (dev_dir / "changelog" / "d.md").write_text("- D")
+
     result = pending_changelog_entries(tmp_path)
-    # Sorted by (project, filename); pending_changelog_entries iterates
-    # project subdirs in name order and entries within each in filename order.
-    assert [p.name for p in result] == ["c.md", "a.md", "b.md"]
+    # Sorted by project name (alphabetical: 'minds' < 'mngr'), then filename.
+    # 'dev' is always last.
+    assert [p.name for p in result] == ["c.md", "a.md", "b.md", "d.md"]
 
 
 def test_build_dated_sections_single_date() -> None:
@@ -194,10 +211,10 @@ def test_get_entry_added_datetime_uses_committer_date(tmp_path: Path) -> None:
         repo,
         [
             # 2026-05-08T18:00:00Z = 2026-05-08T11:00:00 PT (PDT, UTC-7)
-            ("changelog/mngr/foo.md", "- entry foo\n", "2026-05-08T18:00:00Z"),
+            ("libs/mngr/changelog/foo.md", "- entry foo\n", "2026-05-08T18:00:00Z"),
         ],
     )
-    dt = _get_entry_added_datetime(repo / "changelog" / "mngr" / "foo.md", repo)
+    dt = _get_entry_added_datetime(repo / "libs" / "mngr" / "changelog" / "foo.md", repo)
     assert dt.strftime("%Y-%m-%d") == "2026-05-08"
     assert dt.strftime("%H") == "11"
 
@@ -210,26 +227,19 @@ def test_get_entry_added_datetime_returns_merge_commit_date(tmp_path: Path) -> N
     repo.mkdir()
     env = _git_env()
     subprocess.run(["git", "init", "-q", "-b", "main"], cwd=repo, check=True, env=env)
-    # Seed main with an unrelated commit so we have a non-empty first-parent line.
     (repo / "README.md").write_text("# repo\n")
     subprocess.run(["git", "add", "README.md"], cwd=repo, check=True, env=env)
     seed_env = {**env, "GIT_AUTHOR_DATE": "2026-05-01T00:00:00Z", "GIT_COMMITTER_DATE": "2026-05-01T00:00:00Z"}
     subprocess.run(["git", "commit", "-q", "-m", "seed"], cwd=repo, check=True, env=seed_env)
 
-    # Branch off main, add the entry on the feature branch with an early author/committer date.
     subprocess.run(["git", "checkout", "-q", "-b", "feature"], cwd=repo, check=True, env=env)
-    (repo / "changelog" / "mngr").mkdir(parents=True)
-    (repo / "changelog" / "mngr" / "foo.md").write_text("- entry foo\n")
-    subprocess.run(["git", "add", "changelog/mngr/foo.md"], cwd=repo, check=True, env=env)
+    (repo / "libs" / "mngr" / "changelog").mkdir(parents=True)
+    (repo / "libs" / "mngr" / "changelog" / "foo.md").write_text("- entry foo\n")
+    subprocess.run(["git", "add", "libs/mngr/changelog/foo.md"], cwd=repo, check=True, env=env)
     feat_env = {**env, "GIT_AUTHOR_DATE": "2026-05-03T12:00:00Z", "GIT_COMMITTER_DATE": "2026-05-03T12:00:00Z"}
     subprocess.run(["git", "commit", "-q", "-m", "add foo"], cwd=repo, check=True, env=feat_env)
 
-    # Merge feature into main with a later committer date (the "PR merged" time).
-    # Author date is deliberately set to the feature-branch date so the test
-    # would fail if the helper read %aI instead of %cI.
     subprocess.run(["git", "checkout", "-q", "main"], cwd=repo, check=True, env=env)
-    # 2026-05-08T18:00:00Z = 2026-05-08T11:00:00 PT (committer/PR-merge time)
-    # 2026-05-03T12:00:00Z = 2026-05-03 PT (author time, would map to wrong day)
     merge_env = {**env, "GIT_AUTHOR_DATE": "2026-05-03T12:00:00Z", "GIT_COMMITTER_DATE": "2026-05-08T18:00:00Z"}
     subprocess.run(
         ["git", "merge", "-q", "--no-ff", "-m", "merge feature", "feature"],
@@ -238,17 +248,16 @@ def test_get_entry_added_datetime_returns_merge_commit_date(tmp_path: Path) -> N
         env=merge_env,
     )
 
-    dt = _get_entry_added_datetime(repo / "changelog" / "mngr" / "foo.md", repo)
+    dt = _get_entry_added_datetime(repo / "libs" / "mngr" / "changelog" / "foo.md", repo)
     assert dt.strftime("%Y-%m-%d") == "2026-05-08"
     assert dt.strftime("%H") == "11"
 
 
 def test_get_entry_added_datetime_raises_when_file_not_in_history(tmp_path: Path) -> None:
-    """If the file has no commit introducing it on the first-parent line, raise."""
     repo = tmp_path / "repo"
     repo.mkdir()
     _init_git_repo_with_files(repo, [("placeholder.txt", "x\n", "2026-05-01T00:00:00Z")])
-    untracked = repo / "changelog" / "mngr" / "fresh.md"
+    untracked = repo / "libs" / "mngr" / "changelog" / "fresh.md"
     untracked.parent.mkdir(parents=True)
     untracked.write_text("- new\n")
     with pytest.raises(RuntimeError, match="no commit found"):
@@ -256,61 +265,56 @@ def test_get_entry_added_datetime_raises_when_file_not_in_history(tmp_path: Path
 
 
 def test_group_entries_by_date_groups_by_committed_pt_date(tmp_path: Path) -> None:
-    """Entries with different commit dates land in separate per-date buckets."""
     repo = tmp_path / "repo"
     repo.mkdir()
     _init_git_repo_with_files(
         repo,
         [
-            ("changelog/mngr/old.md", "- old entry\n", "2026-05-01T12:00:00Z"),
-            ("changelog/mngr/mid.md", "- mid entry\n", "2026-05-05T12:00:00Z"),
-            ("changelog/mngr/new.md", "- new entry\n", "2026-05-08T12:00:00Z"),
+            ("libs/mngr/changelog/old.md", "- old entry\n", "2026-05-01T12:00:00Z"),
+            ("libs/mngr/changelog/mid.md", "- mid entry\n", "2026-05-05T12:00:00Z"),
+            ("libs/mngr/changelog/new.md", "- new entry\n", "2026-05-08T12:00:00Z"),
         ],
     )
-    entries = _collect_project_entries(repo / "changelog" / "mngr")
+    entries = _collect_project_entries(repo / "libs" / "mngr" / "changelog")
     by_date = _group_entries_by_date(entries, repo)
     assert sorted(by_date.keys()) == ["2026-05-01", "2026-05-05", "2026-05-08"]
     assert [p.name for p, _ in by_date["2026-05-08"]] == ["new.md"]
 
 
 def test_group_entries_by_date_combines_same_day(tmp_path: Path) -> None:
-    """Two entries written the same PT date end up in one bucket, sorted by filename."""
     repo = tmp_path / "repo"
     repo.mkdir()
     _init_git_repo_with_files(
         repo,
         [
-            ("changelog/mngr/b.md", "- b entry\n", "2026-05-08T11:00:00Z"),
-            ("changelog/mngr/a.md", "- a entry\n", "2026-05-08T17:00:00Z"),
+            ("libs/mngr/changelog/b.md", "- b entry\n", "2026-05-08T11:00:00Z"),
+            ("libs/mngr/changelog/a.md", "- a entry\n", "2026-05-08T17:00:00Z"),
         ],
     )
-    entries = _collect_project_entries(repo / "changelog" / "mngr")
+    entries = _collect_project_entries(repo / "libs" / "mngr" / "changelog")
     by_date = _group_entries_by_date(entries, repo)
     assert list(by_date.keys()) == ["2026-05-08"]
     assert [p.name for p, _ in by_date["2026-05-08"]] == ["a.md", "b.md"]
 
 
 def test_group_entries_by_date_uses_pacific_timezone(tmp_path: Path) -> None:
-    """A UTC entry past midnight that's still 'yesterday' in PT lands under the PT date."""
     repo = tmp_path / "repo"
     repo.mkdir()
     _init_git_repo_with_files(
         repo,
         [
-            # 2026-05-09T03:00:00Z = 2026-05-08T20:00:00 PT (PDT, UTC-7)
-            ("changelog/mngr/late.md", "- late\n", "2026-05-09T03:00:00Z"),
+            ("libs/mngr/changelog/late.md", "- late\n", "2026-05-09T03:00:00Z"),
         ],
     )
-    entries = _collect_project_entries(repo / "changelog" / "mngr")
+    entries = _collect_project_entries(repo / "libs" / "mngr" / "changelog")
     by_date = _group_entries_by_date(entries, repo)
     assert list(by_date.keys()) == ["2026-05-08"]
 
 
 def test_get_entry_added_datetime_raises_when_not_a_git_repo(tmp_path: Path) -> None:
-    """If the directory isn't a git repo at all, the helper raises RuntimeError."""
     not_a_repo = tmp_path / "not_a_repo"
     not_a_repo.mkdir()
-    stray = not_a_repo / "changelog" / "mngr" / "stray.md"
+    stray = not_a_repo / "libs" / "mngr" / "changelog" / "stray.md"
     stray.parent.mkdir(parents=True)
     stray.write_text("- stray\n")
     with pytest.raises(RuntimeError, match="git log failed"):
@@ -322,40 +326,33 @@ def test_consolidate_project_errors_when_unabridged_missing(tmp_path: Path) -> N
     refuse to consolidate rather than silently creating a new file."""
     repo = tmp_path / "repo"
     repo.mkdir()
-    # Set up a project under libs/ with a pending entry, but no UNABRIDGED_CHANGELOG.md.
-    (repo / "libs" / "mngr").mkdir(parents=True)
-    (repo / "libs" / "mngr" / "pyproject.toml").write_text("")
+    _seed_libs_project(repo, "mngr")
     _init_git_repo_with_files(
         repo,
         [
-            ("changelog/mngr/foo.md", "- foo\n", "2026-05-08T12:00:00Z"),
+            ("libs/mngr/changelog/foo.md", "- foo\n", "2026-05-08T12:00:00Z"),
         ],
     )
     with pytest.raises(FileNotFoundError, match="missing.*UNABRIDGED_CHANGELOG.md"):
-        _consolidate_project("mngr", repo / "changelog" / "mngr", repo)
+        _consolidate_project("mngr", repo)
 
 
 def test_consolidate_project_routes_to_project_unabridged(tmp_path: Path) -> None:
-    """A successful consolidate writes to <project_dir>/UNABRIDGED_CHANGELOG.md
-    and deletes the entry file."""
     repo = tmp_path / "repo"
     repo.mkdir()
-    (repo / "libs" / "mngr").mkdir(parents=True)
-    (repo / "libs" / "mngr" / "pyproject.toml").write_text("")
-    (repo / "libs" / "mngr" / "UNABRIDGED_CHANGELOG.md").write_text("# Unabridged Changelog - mngr\n\nIntro.\n")
+    project = _seed_libs_project(repo, "mngr")
+    (project / "UNABRIDGED_CHANGELOG.md").write_text("# Unabridged Changelog - mngr\n\nIntro.\n")
     _init_git_repo_with_files(
         repo,
         [
-            ("changelog/mngr/foo.md", "- foo\n", "2026-05-08T12:00:00Z"),
+            ("libs/mngr/changelog/foo.md", "- foo\n", "2026-05-08T12:00:00Z"),
         ],
     )
 
-    dates_added, entry_names = _consolidate_project("mngr", repo / "changelog" / "mngr", repo)
+    dates_added, entry_names = _consolidate_project("mngr", repo)
     assert dates_added == ["2026-05-08"]
     assert entry_names == ["foo.md"]
-    # Entry file removed
-    assert not (repo / "changelog" / "mngr" / "foo.md").exists()
-    # New dated section prepended to the project's UNABRIDGED_CHANGELOG.md
-    unabridged = (repo / "libs" / "mngr" / "UNABRIDGED_CHANGELOG.md").read_text()
+    assert not (project / "changelog" / "foo.md").exists()
+    unabridged = (project / "UNABRIDGED_CHANGELOG.md").read_text()
     assert "## 2026-05-08\n\n- foo\n" in unabridged
     assert unabridged.startswith("# Unabridged Changelog - mngr\n\nIntro.")

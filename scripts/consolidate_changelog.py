@@ -1,40 +1,42 @@
 """Consolidate per-project changelog entry files into each project's
 ``UNABRIDGED_CHANGELOG.md``.
 
-Reads all ``.md`` files under ``changelog/<project>/`` (excluding
-``.gitkeep``), groups them by the date the entry's PR landed on the
+Reads all ``.md`` files under ``<project_dir>/changelog/`` (excluding
+``.gitkeep``) for every known project (``libs/<name>``, ``apps/<name>``,
+or ``dev``), groups them by the date the entry's PR landed on the
 current branch (committer date of the introducing commit on the
 first-parent line, in America/Los_Angeles), and prepends one
 date-headed section per distinct date to that project's
-``UNABRIDGED_CHANGELOG.md`` (newest first). Deletes the individual
-entry files once routed.
+``<project_dir>/UNABRIDGED_CHANGELOG.md`` (newest first). Deletes the
+individual entry files once routed.
 
 Exits with code 0 and no changes if there are no changelog entries to consolidate.
 """
 
 import subprocess
 import sys
-from collections.abc import Iterable
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from changelog_projects import all_known_projects
 from changelog_projects import project_dir
+from changelog_projects import project_entries_dir
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
-_CHANGELOG_DIR = _REPO_ROOT / "changelog"
 _PACIFIC = ZoneInfo("America/Los_Angeles")
 
 
-def _collect_project_entries(project_changelog_dir: Path) -> list[tuple[Path, str]]:
-    """Collect all entry files in ``project_changelog_dir``.
+def _collect_project_entries(entries_dir: Path) -> list[tuple[Path, str]]:
+    """Collect all entry files in ``entries_dir`` (a ``<project_dir>/changelog/``).
 
     Returns a list of (path, content) tuples sorted by filename, excluding
     ``.gitkeep``, non-``.md`` files, and empty-content entries.
     """
     entries: list[tuple[Path, str]] = []
-    for path in sorted(project_changelog_dir.iterdir()):
+    if not entries_dir.is_dir():
+        return entries
+    for path in sorted(entries_dir.iterdir()):
         if path.name == ".gitkeep" or not path.name.endswith(".md") or not path.is_file():
             continue
         content = path.read_text().strip()
@@ -43,29 +45,16 @@ def _collect_project_entries(project_changelog_dir: Path) -> list[tuple[Path, st
     return entries
 
 
-def _iter_project_entry_dirs(changelog_dir: Path) -> Iterable[tuple[str, Path]]:
-    """Yield ``(project_name, project_changelog_dir)`` for each subdir under ``changelog/``.
-
-    Skips files at the top level (the layout is per-project subdirs).
-    """
-    if not changelog_dir.is_dir():
-        return
-    for child in sorted(changelog_dir.iterdir()):
-        if child.is_dir():
-            yield child.name, child
-
-
 def pending_changelog_entries(repo_root: Path) -> list[Path]:
     """Return all changelog entry files awaiting consolidation, across every project.
 
-    Wraps ``_collect_project_entries`` over every ``changelog/<project>/``
-    subdirectory so ``release.py`` can ask "is there work to do?" without
-    duplicating the filter rule.
+    Walks each known project's ``<project_dir>/changelog/`` directory so
+    ``release.py`` can ask "is there work to do?" without duplicating the
+    filter rule.
     """
-    changelog_dir = repo_root / "changelog"
     pending: list[Path] = []
-    for _project, project_changelog_dir in _iter_project_entry_dirs(changelog_dir):
-        pending.extend(path for path, _content in _collect_project_entries(project_changelog_dir))
+    for project in all_known_projects(repo_root):
+        pending.extend(path for path, _content in _collect_project_entries(project_entries_dir(project, repo_root)))
     return pending
 
 
@@ -156,11 +145,7 @@ def _insert_section_into_changelog(changelog_path: Path, new_block: str) -> None
     changelog_path.write_text(result)
 
 
-def _consolidate_project(
-    project: str,
-    project_changelog_dir: Path,
-    repo_root: Path,
-) -> tuple[list[str], list[str]]:
+def _consolidate_project(project: str, repo_root: Path) -> tuple[list[str], list[str]]:
     """Consolidate one project's pending entries into its UNABRIDGED_CHANGELOG.md.
 
     Returns ``(dates_added, entry_filenames)``. Empty lists if the project
@@ -169,7 +154,8 @@ def _consolidate_project(
     contract -- creating it would mask a project that was added without
     setting up its changelog).
     """
-    entries = _collect_project_entries(project_changelog_dir)
+    entries_dir = project_entries_dir(project, repo_root)
+    entries = _collect_project_entries(entries_dir)
     if not entries:
         return [], []
 
@@ -178,7 +164,7 @@ def _consolidate_project(
     if not unabridged_path.exists():
         raise FileNotFoundError(
             f"Project {project!r} has pending changelog entries under "
-            f"{project_changelog_dir.relative_to(repo_root)}/ but is missing "
+            f"{entries_dir.relative_to(repo_root)}/ but is missing "
             f"{unabridged_path.relative_to(repo_root)}. Create the file (with a "
             f"header and no date sections) before re-running."
         )
@@ -196,33 +182,19 @@ def _consolidate_project(
 
 
 def main() -> None:
-    if not _CHANGELOG_DIR.is_dir():
-        print("No changelog/ directory found. Nothing to consolidate.")
-        return
-
-    known_projects = set(all_known_projects(_REPO_ROOT))
-    project_subdirs = list(_iter_project_entry_dirs(_CHANGELOG_DIR))
-
-    # Reject entries filed under unknown project names so a typo doesn't
-    # silently produce a half-consolidated state.
-    unknown = [name for name, _ in project_subdirs if name not in known_projects]
-    if unknown:
-        raise SystemExit(
-            f"changelog/ contains entries under unknown project name(s): {', '.join(sorted(unknown))}. "
-            f"Move them under a real project directory (libs/<name>, apps/<name>, or 'dev')."
-        )
-
     total_entries = 0
     consolidated_any = False
+    projects_with_entries = 0
     # Emit one "SECTION <project> <date>" line per (project, date) the
     # consolidator just inserted. The consolidation prompt parses these to
     # know which CHANGELOG.md [Unreleased] sections to summarize and
     # populate.
-    for project, project_changelog_dir in project_subdirs:
-        dates_added, entry_names = _consolidate_project(project, project_changelog_dir, _REPO_ROOT)
+    for project in all_known_projects(_REPO_ROOT):
+        dates_added, entry_names = _consolidate_project(project, _REPO_ROOT)
         if not dates_added:
             continue
         consolidated_any = True
+        projects_with_entries += 1
         total_entries += len(entry_names)
         target = project_dir(project, _REPO_ROOT).relative_to(_REPO_ROOT)
         print(f"Consolidated {len(entry_names)} entries for {project!r} into {target}/UNABRIDGED_CHANGELOG.md.")
@@ -234,9 +206,7 @@ def main() -> None:
         print("No changelog entries found. Nothing to consolidate.")
         return
 
-    print(
-        f"Total: consolidated {total_entries} entries across {len([p for p, _ in project_subdirs])} project subdir(s)."
-    )
+    print(f"Total: consolidated {total_entries} entries across {projects_with_entries} project(s).")
 
 
 if __name__ == "__main__":
