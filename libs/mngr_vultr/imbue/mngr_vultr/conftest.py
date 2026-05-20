@@ -112,8 +112,17 @@ def _destroy_leaked_instance(client: VultrVpsClient, instance: dict[str, Any]) -
 
     Does not raise: the goal is to attempt cleanup of every survivor
     before the session exits, then surface the outcome to the caller.
+    A list entry missing the ``id`` field is treated as a malformed
+    Vultr response -- loudly logged and returned as ``DESTROY_FAILED``
+    (so it counts as a real leak) rather than silently substituting
+    an empty id and issuing a misleading ``DELETE /instances/`` that
+    would log as ``Failed to destroy leaked Vultr instance :`` and
+    hide the actual root cause.
     """
-    instance_id = instance.get("id", "")
+    instance_id = instance.get("id")
+    if not instance_id:
+        logger.error("Vultr list_instances returned an entry missing 'id': {}", instance)
+        return _LeakDestroyOutcome.DESTROY_FAILED
     try:
         client.destroy_instance(VpsInstanceId(instance_id))
         return _LeakDestroyOutcome.DESTROYED
