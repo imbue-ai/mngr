@@ -1646,7 +1646,7 @@ def _await_system_interface_ready(agent_id: AgentId, mngr_forward_port: int, pre
     return False
 
 
-def _run_restart_sequence(
+def _run_restart_sequence_steps(
     workspace_agent_id: AgentId,
     is_host_restart: bool,
     tracker: SystemInterfaceHealthTracker,
@@ -1656,14 +1656,15 @@ def _run_restart_sequence(
     concurrency_group: ConcurrencyGroup,
     mngr_forward_port: int,
     mngr_forward_preauth_cookie: str | None,
+    tier_label: str,
 ) -> None:
-    """Background worker: stop + start the system-services agent, then await recovery.
+    """Stop + start the system-services agent, then await recovery.
 
     Drives the health tracker to HEALTHY on recovery or RESTART_FAILED (with
     a reason) when a step errors or the system interface does not return
-    within the shared startup-wait budget.
+    within the shared startup-wait budget. Unexpected exceptions are handled
+    by the ``_run_restart_sequence`` wrapper.
     """
-    tier_label = "host restart" if is_host_restart else "system-interface restart"
     services_agent_id = backend_resolver.get_system_services_agent_id(workspace_agent_id)
     if services_agent_id is None:
         tracker.mark_restart_failed(
@@ -1702,6 +1703,46 @@ def _run_restart_sequence(
             f"The system interface did not respond within "
             f"{int(_SYSTEM_INTERFACE_STARTUP_WAIT_SECONDS)}s of the {tier_label}.",
         )
+
+
+def _run_restart_sequence(
+    workspace_agent_id: AgentId,
+    is_host_restart: bool,
+    tracker: SystemInterfaceHealthTracker,
+    backend_resolver: BackendResolverInterface,
+    mngr_binary: str,
+    mngr_host_dir: Path,
+    concurrency_group: ConcurrencyGroup,
+    mngr_forward_port: int,
+    mngr_forward_preauth_cookie: str | None,
+) -> None:
+    """Background worker: run the restart sequence, never leaving the tracker stuck.
+
+    The recovery page only leaves its "Restarting..." state on a HEALTHY or
+    RESTART_FAILED tracker transition. The tracker is already RESTARTING when
+    this worker starts, so any unhandled exception must still be turned into a
+    RESTART_FAILED transition -- otherwise the recovery page hangs forever.
+    """
+    tier_label = "host restart" if is_host_restart else "system-interface restart"
+    try:
+        _run_restart_sequence_steps(
+            workspace_agent_id=workspace_agent_id,
+            is_host_restart=is_host_restart,
+            tracker=tracker,
+            backend_resolver=backend_resolver,
+            mngr_binary=mngr_binary,
+            mngr_host_dir=mngr_host_dir,
+            concurrency_group=concurrency_group,
+            mngr_forward_port=mngr_forward_port,
+            mngr_forward_preauth_cookie=mngr_forward_preauth_cookie,
+            tier_label=tier_label,
+        )
+    except Exception as exc:
+        # Broad catch at the background-worker boundary: log the failure and
+        # transition the tracker so the recovery page surfaces it instead of
+        # hanging indefinitely on "Restarting...".
+        logger.exception("Restart sequence for {} ({}) raised unexpectedly", workspace_agent_id, tier_label)
+        tracker.mark_restart_failed(workspace_agent_id, f"The {tier_label} failed unexpectedly: {exc}")
 
 
 def _dispatch_restart(
