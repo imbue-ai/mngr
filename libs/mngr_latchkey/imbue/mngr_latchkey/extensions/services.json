@@ -459,8 +459,8 @@
     ]
   },
   "minds": {
-    "scope": "mind-creation",
-    "display_name": "Spawn a peer mind",
-    "permissions": []
+    "scope": "minds",
+    "display_name": "Peer minds",
+    "permissions": ["minds-create", "minds-status", "minds-logs"]
   }
 }

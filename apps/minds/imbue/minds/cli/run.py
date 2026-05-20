@@ -74,7 +74,7 @@ from imbue.minds.primitives import OutputFormat
 from imbue.minds.telegram.setup import TelegramSetupOrchestrator
 from imbue.minds.utils.output import emit_event
 from imbue.mngr.utils.parent_process import start_grandparent_death_watcher
-from imbue.mngr_latchkey.agent_setup import ensure_mind_creation_schema_in_existing_host_files
+from imbue.mngr_latchkey.agent_setup import ensure_minds_schema_in_existing_host_files
 from imbue.mngr_latchkey.core import LATCHKEY_BINARY
 from imbue.mngr_latchkey.core import Latchkey
 from imbue.mngr_latchkey.core import LatchkeyError
@@ -179,11 +179,12 @@ def run(
     # Must run before the gateway is restarted (below) so the freshly
     # registered service is in the registry the gateway loads. We also
     # migrate any pre-existing per-host permissions file to include the
-    # new ``mind-creation`` schema, again before the gateway is up so
-    # there is no race with the ``permissions.mjs`` extension.
-    migrated_count = ensure_mind_creation_schema_in_existing_host_files(latchkey.plugin_data_dir)
+    # new ``minds`` scope + named-permission schemas, again before the
+    # gateway is up so there is no race with the ``permissions.mjs``
+    # extension.
+    migrated_count = ensure_minds_schema_in_existing_host_files(latchkey.plugin_data_dir)
     if migrated_count > 0:
-        logger.info("Injected mind-creation schema into {} existing per-host permissions file(s)", migrated_count)
+        logger.info("Injected minds schema into {} existing per-host permissions file(s)", migrated_count)
     minds_api_token = auth_store.get_api_token().get_secret_value()
     try:
         latchkey.register_service("minds", f"http://127.0.0.1:{port}")

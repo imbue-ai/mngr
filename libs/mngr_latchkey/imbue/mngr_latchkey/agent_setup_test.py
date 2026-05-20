@@ -12,6 +12,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+import jsonschema
 import pytest
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
@@ -21,7 +22,7 @@ from imbue.mngr_latchkey.agent_setup import ENV_LATCHKEY_DISABLE_COUNTING
 from imbue.mngr_latchkey.agent_setup import ENV_LATCHKEY_GATEWAY
 from imbue.mngr_latchkey.agent_setup import ENV_LATCHKEY_GATEWAY_PASSWORD
 from imbue.mngr_latchkey.agent_setup import ENV_LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE
-from imbue.mngr_latchkey.agent_setup import ensure_mind_creation_schema_in_existing_host_files
+from imbue.mngr_latchkey.agent_setup import ensure_minds_schema_in_existing_host_files
 from imbue.mngr_latchkey.agent_setup import finalize_host_permissions
 from imbue.mngr_latchkey.agent_setup import prepare_agent_latchkey
 from imbue.mngr_latchkey.core import AGENT_SIDE_LATCHKEY_PORT
@@ -107,19 +108,45 @@ def test_prepare_full_wiring_tunneled(tmp_path: Path) -> None:
         "type": "string",
         "pattern": r"^/permissions/available/[a-z0-9][a-z0-9-]*$",
     }
-    # The mind-creation schema is materialized inline but NOT pre-granted
-    # via a rule; agents must go through the standard permission-request
-    # dialog before their first spawn.
-    assert schemas["mind-creation"] == {
+    # The ``minds`` scope and its named permissions are materialized
+    # inline but NOT pre-granted via a rule; agents must go through the
+    # standard permission-request dialog before their first spawn.
+    assert schemas["minds"] == {
         "properties": {
             "domain": {"const": "127.0.0.1"},
-            "path": {"const": "/api/create-agent"},
-            "method": {"const": "POST"},
+            "path": {"type": "string", "pattern": r"^/api/create-agent(/|$)"},
         },
-        "required": ["domain", "path", "method"],
+        "required": ["domain", "path"],
+    }
+    assert schemas["minds-create"] == {
+        "properties": {
+            "method": {"const": "POST"},
+            "path": {"const": "/api/create-agent"},
+        },
+        "required": ["method", "path"],
+    }
+    assert schemas["minds-status"] == {
+        "properties": {
+            "method": {"const": "GET"},
+            "path": {
+                "type": "string",
+                "pattern": r"^/api/create-agent/creation-[0-9a-f]{32}/status$",
+            },
+        },
+        "required": ["method", "path"],
+    }
+    assert schemas["minds-logs"] == {
+        "properties": {
+            "method": {"const": "GET"},
+            "path": {
+                "type": "string",
+                "pattern": r"^/api/create-agent/creation-[0-9a-f]{32}/logs$",
+            },
+        },
+        "required": ["method", "path"],
     }
     granted_scopes = {key for rule in on_disk["rules"] for key in rule}
-    assert "mind-creation" not in granted_scopes
+    assert "minds" not in granted_scopes
 
 
 def test_prepare_full_wiring_on_host_uses_live_port(tmp_path: Path) -> None:
@@ -232,7 +259,14 @@ def test_agent_latchkey_setup_default_opaque_path_is_none() -> None:
     assert isinstance(setup.env, Mapping)
 
 
-# -- ensure_mind_creation_schema_in_existing_host_files ---------------------
+# -- ensure_minds_schema_in_existing_host_files ---------------------
+
+_MINDS_SCHEMA_KEYS_EXPECTED: tuple[str, ...] = (
+    "minds",
+    "minds-create",
+    "minds-status",
+    "minds-logs",
+)
 
 
 def _write_host_permissions(host_dir: Path, payload: dict[str, Any]) -> Path:
@@ -243,38 +277,36 @@ def _write_host_permissions(host_dir: Path, payload: dict[str, Any]) -> Path:
 
 
 def test_migration_injects_schema_into_existing_file(tmp_path: Path) -> None:
-    """A pre-existing per-host file without the schema gets one added; rules left untouched."""
+    """A pre-existing per-host file without the schemas gets them added; rules left untouched."""
     plugin_data_dir = tmp_path / "mngr_latchkey"
     host_dir = plugin_data_dir / "hosts" / "host-abc"
     existing_rule = {"slack-api": ["slack-read-all"]}
     path = _write_host_permissions(host_dir, {"rules": [existing_rule], "schemas": {}})
 
-    migrated = ensure_mind_creation_schema_in_existing_host_files(plugin_data_dir)
+    migrated = ensure_minds_schema_in_existing_host_files(plugin_data_dir)
 
     assert migrated == 1
     on_disk = json.loads(path.read_text())
     assert on_disk["rules"] == [existing_rule]
-    assert on_disk["schemas"]["mind-creation"]["properties"]["path"] == {"const": "/api/create-agent"}
+    for key in _MINDS_SCHEMA_KEYS_EXPECTED:
+        assert key in on_disk["schemas"]
+    assert on_disk["schemas"]["minds-create"]["properties"]["path"] == {"const": "/api/create-agent"}
+    assert on_disk["schemas"]["minds-status"]["properties"]["method"] == {"const": "GET"}
 
 
 def test_migration_is_idempotent(tmp_path: Path) -> None:
-    """Files that already have the up-to-date schema are not rewritten."""
+    """Files that already have the up-to-date schemas are not rewritten."""
     plugin_data_dir = tmp_path / "mngr_latchkey"
     host_dir = plugin_data_dir / "hosts" / "host-abc"
-    full_schema = {
-        "properties": {
-            "domain": {"const": "127.0.0.1"},
-            "path": {"const": "/api/create-agent"},
-            "method": {"const": "POST"},
-        },
-        "required": ["domain", "path", "method"],
-    }
-    _write_host_permissions(host_dir, {"rules": [], "schemas": {"mind-creation": full_schema}})
+    # Seed with the schemas the migration would install, by running it
+    # once against an empty schemas block; subsequent runs must be no-ops.
+    _write_host_permissions(host_dir, {"rules": [], "schemas": {}})
 
-    migrated = ensure_mind_creation_schema_in_existing_host_files(plugin_data_dir)
-    assert migrated == 0
-    # Second run is still a no-op.
-    assert ensure_mind_creation_schema_in_existing_host_files(plugin_data_dir) == 0
+    assert ensure_minds_schema_in_existing_host_files(plugin_data_dir) == 1
+    # Second run is a no-op.
+    assert ensure_minds_schema_in_existing_host_files(plugin_data_dir) == 0
+    # Third run is also a no-op.
+    assert ensure_minds_schema_in_existing_host_files(plugin_data_dir) == 0
 
 
 def test_migration_skips_other_unrelated_schemas(tmp_path: Path) -> None:
@@ -284,16 +316,17 @@ def test_migration_skips_other_unrelated_schemas(tmp_path: Path) -> None:
     other_schema = {"properties": {"domain": {"const": "example.invalid"}}, "required": ["domain"]}
     path = _write_host_permissions(host_dir, {"rules": [], "schemas": {"custom": other_schema}})
 
-    ensure_mind_creation_schema_in_existing_host_files(plugin_data_dir)
+    ensure_minds_schema_in_existing_host_files(plugin_data_dir)
 
     on_disk = json.loads(path.read_text())
     assert on_disk["schemas"]["custom"] == other_schema
-    assert "mind-creation" in on_disk["schemas"]
+    for key in _MINDS_SCHEMA_KEYS_EXPECTED:
+        assert key in on_disk["schemas"]
 
 
 def test_migration_returns_zero_when_no_hosts_dir(tmp_path: Path) -> None:
     plugin_data_dir = tmp_path / "mngr_latchkey"
-    assert ensure_mind_creation_schema_in_existing_host_files(plugin_data_dir) == 0
+    assert ensure_minds_schema_in_existing_host_files(plugin_data_dir) == 0
 
 
 def test_migration_skips_malformed_files(tmp_path: Path) -> None:
@@ -305,6 +338,80 @@ def test_migration_skips_malformed_files(tmp_path: Path) -> None:
     good_dir = plugin_data_dir / "hosts" / "host-good"
     good_path = _write_host_permissions(good_dir, {"rules": [], "schemas": {}})
 
-    migrated = ensure_mind_creation_schema_in_existing_host_files(plugin_data_dir)
+    migrated = ensure_minds_schema_in_existing_host_files(plugin_data_dir)
     assert migrated == 1
-    assert "mind-creation" in json.loads(good_path.read_text())["schemas"]
+    on_disk_schemas = json.loads(good_path.read_text())["schemas"]
+    for key in _MINDS_SCHEMA_KEYS_EXPECTED:
+        assert key in on_disk_schemas
+
+
+def test_migration_rewrites_when_only_subset_of_keys_present(tmp_path: Path) -> None:
+    """A file with the scope schema but missing one named permission gets rewritten."""
+    plugin_data_dir = tmp_path / "mngr_latchkey"
+    host_dir = plugin_data_dir / "hosts" / "host-abc"
+    # Seed with all keys present so we can simulate a partial state.
+    _write_host_permissions(host_dir, {"rules": [], "schemas": {}})
+    assert ensure_minds_schema_in_existing_host_files(plugin_data_dir) == 1
+
+    path = host_dir / "latchkey_permissions.json"
+    on_disk = json.loads(path.read_text())
+    # Remove just one of the named-permission schemas; migration must
+    # re-install it (and only rewrite when something is missing).
+    del on_disk["schemas"]["minds-logs"]
+    path.write_text(json.dumps(on_disk, indent=2))
+
+    migrated = ensure_minds_schema_in_existing_host_files(plugin_data_dir)
+    assert migrated == 1
+    on_disk_schemas = json.loads(path.read_text())["schemas"]
+    assert "minds-logs" in on_disk_schemas
+
+
+def test_schema_admits_intended_requests_and_rejects_others(tmp_path: Path) -> None:
+    """Validate the minds schemas against a representative request matrix.
+
+    Uses ``jsonschema`` directly: the gateway's detent evaluator is a JSON
+    Schema validator under the hood, so checking each schema against a
+    request envelope is a faithful proxy for end-to-end matching.
+    """
+    fake = _full_fake(tmp_path)
+    setup = prepare_agent_latchkey(fake, is_tunneled=True)
+    assert setup.opaque_permissions_path is not None
+    schemas = json.loads(setup.opaque_permissions_path.read_text())["schemas"]
+    scope = schemas["minds"]
+    create = schemas["minds-create"]
+    status = schemas["minds-status"]
+    logs = schemas["minds-logs"]
+
+    creation_id = "creation-" + "0" * 32
+
+    def admits(schema: dict[str, Any], envelope: dict[str, Any]) -> bool:
+        try:
+            jsonschema.validate(envelope, schema)
+            return True
+        except jsonschema.ValidationError:
+            return False
+
+    base = {"domain": "127.0.0.1"}
+
+    # Scope schema admits any minds-management path under the prefix.
+    assert admits(scope, {**base, "path": "/api/create-agent"})
+    assert admits(scope, {**base, "path": f"/api/create-agent/{creation_id}/status"})
+    assert admits(scope, {**base, "path": f"/api/create-agent/{creation_id}/logs"})
+    # Scope schema rejects anything off-prefix or off-domain.
+    assert not admits(scope, {**base, "path": "/api/destroy-agent/x"})
+    assert not admits(scope, {**base, "path": "/anything-else"})
+    assert not admits(scope, {"domain": "example.com", "path": "/api/create-agent"})
+
+    # Named permissions admit exactly their (method, path).
+    assert admits(create, {"method": "POST", "path": "/api/create-agent"})
+    assert not admits(create, {"method": "GET", "path": "/api/create-agent"})
+    assert not admits(create, {"method": "POST", "path": f"/api/create-agent/{creation_id}/status"})
+
+    assert admits(status, {"method": "GET", "path": f"/api/create-agent/{creation_id}/status"})
+    assert not admits(status, {"method": "POST", "path": f"/api/create-agent/{creation_id}/status"})
+    assert not admits(status, {"method": "GET", "path": "/api/create-agent/not-a-real-id/status"})
+    assert not admits(status, {"method": "GET", "path": f"/api/create-agent/{creation_id}/logs"})
+
+    assert admits(logs, {"method": "GET", "path": f"/api/create-agent/{creation_id}/logs"})
+    assert not admits(logs, {"method": "POST", "path": f"/api/create-agent/{creation_id}/logs"})
+    assert not admits(logs, {"method": "GET", "path": f"/api/create-agent/{creation_id}/status"})

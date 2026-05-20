@@ -153,12 +153,14 @@ The detection-and-wait logic for Claude Code lives in the
 `forever-claude-template` repository's latchkey skill, not in this
 monorepo.
 
-## Spawning peer minds
+## Peer-mind operations
 
-Agents can create new peer minds (siblings, not children) through the
-same latchkey curl pipeline they use for third-party services:
+Agents can create new peer minds (siblings, not children) and follow
+their creation through to completion through the same latchkey curl
+pipeline they use for third-party services:
 
 ```bash
+# Spawn a peer.
 latchkey curl -X POST 'http://127.0.0.1:9100/api/create-agent' \
   -H 'Content-Type: application/json' \
   -d '{
@@ -166,6 +168,12 @@ latchkey curl -X POST 'http://127.0.0.1:9100/api/create-agent' \
     "launch_mode": "LOCAL",
     "ai_provider": "SUBSCRIPTION"
   }'
+
+# Poll its creation status (use the ``agent_id`` from the spawn response).
+latchkey curl 'http://127.0.0.1:9100/api/create-agent/creation-XXXX/status'
+
+# Stream creation logs (server-sent events).
+latchkey curl -N 'http://127.0.0.1:9100/api/create-agent/creation-XXXX/logs'
 ```
 
 Latchkey injects the agent-invisible `Authorization: Bearer ...` header
@@ -182,12 +190,17 @@ this together; all are set up by `minds run` at startup:
   desktop client's `/api/create-agent`, `/api/create-agent/{id}/status`,
   and `/api/create-agent/{id}/logs` endpoints accept the token as an
   alternative to the browser session cookie.
-* **A detent scope schema named `mind-creation`** is materialized
-  inline in every per-agent `latchkey_permissions.json` baseline
-  (defined in `libs/mngr_latchkey/imbue/mngr_latchkey/agent_setup.py`).
-  The schema matches exactly `POST http://127.0.0.1:<any>/api/create-agent`
-  -- not added to detent's built-in catalog so the rule stays
-  self-contained and minds owns the schema definition.
+* **A detent scope named `minds`, with three named permissions**, is
+  materialized inline in every per-agent `latchkey_permissions.json`
+  baseline (defined in
+  `libs/mngr_latchkey/imbue/mngr_latchkey/agent_setup.py`). The scope
+  schema gates `domain=127.0.0.1` AND `path` under `/api/create-agent`;
+  the named permissions `minds-create`, `minds-status`, and `minds-logs`
+  each match a specific `(method, path)` pair. The scope is not added
+  to detent's built-in catalog so the rule stays self-contained and
+  minds owns the schema definition. Future operations (destroy / list
+  peer minds) will be added as additional named permissions under the
+  same scope.
 
 Because the `latchkey gateway` itself spawns curl on the desktop host
 (see "End-to-end flow" above), `127.0.0.1` in the request URL resolves
@@ -202,21 +215,23 @@ permission-request dialog:
 
 1. Agent runs `latchkey curl -X POST 'http://127.0.0.1:9100/api/create-agent' ...`.
 2. Gateway evaluates the request against the agent's permissions file.
-   No `mind-creation` rule yet, so detent denies. Gateway returns 403
-   with `Request not permitted by the user.`.
-3. Agent submits `POST /permission-requests` with `scope=mind-creation`
-   and a rationale ("I want to spawn a peer mind to explore X").
-4. Desktop client surfaces a card titled "Spawn a peer mind". The
-   user approves with `any` (the only checkbox -- the `permissions`
-   field in `services.json` is empty by design).
-5. Desktop writes `{"mind-creation": ["any"]}` into the agent's
-   permissions file via the gateway's `permissions` extension.
+   No `minds` rule yet, so detent denies. Gateway returns 403 with
+   `Request not permitted by the user.`.
+3. Agent submits `POST /permission-requests` with `scope=minds` and a
+   rationale ("I want to spawn a peer mind to explore X").
+4. Desktop client surfaces a card titled "Peer minds". The user picks
+   either `any` (one-click full grant) or any combination of
+   `minds-create`, `minds-status`, and `minds-logs`.
+5. Desktop writes e.g. `{"minds": ["any"]}` into the agent's permissions
+   file via the gateway's `permissions` extension.
 6. Agent retries the curl. Detent now matches; gateway looks up the
    `minds` service, injects the bearer header, and forwards. Minds
    validates the token and returns `{"agent_id": "<creation_id>", "status": "CLONING"}`.
-7. Agent polls `GET /api/create-agent/<creation_id>/status` (same bearer
-   auth) until `agent_id` is populated. The new mind appears in the UI
-   agent list as a peer of the creating mind.
+7. Agent polls `GET /api/create-agent/<creation_id>/status` and may
+   stream `GET /api/create-agent/<creation_id>/logs` -- both are
+   covered by the same grant -- until `agent_id` is populated. The new
+   mind then appears in the UI agent list as a peer of the creating
+   mind.
 
 Subsequent spawns from the same agent go through without a dialog --
 the rule persists in the host's permissions file. Revoke by deleting
@@ -225,9 +240,10 @@ the rule from the same dialog.
 ### Adding the schema to existing installs
 
 Agents created before this feature shipped have a host permissions
-file without the inline `mind-creation` schema, so detent cannot match
+file without the inline `minds` scope schemas, so detent cannot match
 the rule even after the user grants it. `minds run` runs an idempotent
-migration at startup that injects the schema into any existing
-`hosts/<host_id>/latchkey_permissions.json` that is missing it. The
+migration at startup that injects the `minds` scope schema plus the
+three named-permission schemas into any existing
+`hosts/<host_id>/latchkey_permissions.json` that is missing them. The
 migration happens *before* the gateway is restarted to avoid a race
 with the `permissions.mjs` extension.

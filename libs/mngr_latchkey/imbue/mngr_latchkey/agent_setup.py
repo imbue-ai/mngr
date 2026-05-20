@@ -80,17 +80,38 @@ _PERM_READ_AVAILABLE_PERMISSIONS: Final[str] = "latchkey-self-read-available-per
 # up the per-service catalog endpoint.
 _AVAILABLE_PERMISSIONS_PATH_PATTERN: Final[str] = r"^/permissions/available/[a-z0-9][a-z0-9-]*$"
 
-# Inline detent schema for the minds desktop client's create-agent
-# endpoint. Defining it in every per-agent permissions file (rather than
-# upstreaming it to detent's built-in catalog) keeps the schema
-# self-contained: a user grant of ``{"mind-creation": ["any"]}`` will
-# match exactly this endpoint, on whatever port the desktop client picked
-# this session. The schema is materialized but NOT pre-granted -- agents
-# go through the standard permission-request dialog before their first
-# spawn, and subsequent spawns reuse the rule the user wrote on approval.
-_SCOPE_MIND_CREATION: Final[str] = "mind-creation"
+# Inline detent scope + named permissions for the minds desktop client's
+# peer-mind management endpoints. Mirrors the ``_SCOPE_LATCHKEY_SELF``
+# paradigm above: the scope schema constrains the domain + path prefix,
+# each named permission constrains a specific ``(method, path)`` pair. To
+# grow the scope (e.g. when destroy / list endpoints opt into bearer
+# auth), add a new permission entry and widen ``_MINDS_SCOPE_PATH_PATTERN``
+# accordingly. Defining everything in every per-agent permissions file
+# (rather than upstreaming to detent's built-in catalog) keeps the schema
+# self-contained: a user grant like ``{"minds": ["any"]}`` will match
+# exactly the endpoints declared here, on whatever port the desktop
+# client picked this session. The scope is materialized but NOT pre-
+# granted -- agents go through the standard permission-request dialog
+# before their first spawn, and subsequent spawns reuse the rule the
+# user wrote on approval.
+_SCOPE_MINDS: Final[str] = "minds"
+_PERM_CREATE_MIND: Final[str] = "minds-create"
+_PERM_MIND_STATUS: Final[str] = "minds-status"
+_PERM_MIND_LOGS: Final[str] = "minds-logs"
+
 _MINDS_HOST: Final[str] = "127.0.0.1"
 _MINDS_CREATE_AGENT_PATH: Final[str] = "/api/create-agent"
+# Creation id segment is exactly ``creation-<32 hex chars>`` per
+# ``imbue.minds.primitives.CreationId``; pinning it that tightly here
+# avoids admitting traversal-shaped segments or unrelated id schemes.
+_MINDS_STATUS_PATH_PATTERN: Final[str] = r"^/api/create-agent/creation-[0-9a-f]{32}/status$"
+_MINDS_LOGS_PATH_PATTERN: Final[str] = r"^/api/create-agent/creation-[0-9a-f]{32}/logs$"
+# Scope-level path-prefix gate. Necessary because detent ``any`` matches
+# every request satisfying the scope schema -- without this gate,
+# ``{"minds": ["any"]}`` would escape into every other ``127.0.0.1``
+# endpoint (the latchkey gateway itself, cookie-gated
+# ``/api/destroy-agent/...``, etc.).
+_MINDS_SCOPE_PATH_PATTERN: Final[str] = r"^/api/create-agent(/|$)"
 
 _AGENT_BASELINE_PERMISSIONS: Final[LatchkeyPermissionsConfig] = LatchkeyPermissionsConfig(
     rules=(
@@ -131,13 +152,33 @@ _AGENT_BASELINE_PERMISSIONS: Final[LatchkeyPermissionsConfig] = LatchkeyPermissi
             },
             "required": ["method", "path"],
         },
-        _SCOPE_MIND_CREATION: {
+        _SCOPE_MINDS: {
             "properties": {
                 "domain": {"const": _MINDS_HOST},
-                "path": {"const": _MINDS_CREATE_AGENT_PATH},
-                "method": {"const": "POST"},
+                "path": {"type": "string", "pattern": _MINDS_SCOPE_PATH_PATTERN},
             },
-            "required": ["domain", "path", "method"],
+            "required": ["domain", "path"],
+        },
+        _PERM_CREATE_MIND: {
+            "properties": {
+                "method": {"const": "POST"},
+                "path": {"const": _MINDS_CREATE_AGENT_PATH},
+            },
+            "required": ["method", "path"],
+        },
+        _PERM_MIND_STATUS: {
+            "properties": {
+                "method": {"const": "GET"},
+                "path": {"type": "string", "pattern": _MINDS_STATUS_PATH_PATTERN},
+            },
+            "required": ["method", "path"],
+        },
+        _PERM_MIND_LOGS: {
+            "properties": {
+                "method": {"const": "GET"},
+                "path": {"type": "string", "pattern": _MINDS_LOGS_PATH_PATTERN},
+            },
+            "required": ["method", "path"],
         },
     },
 )
@@ -285,20 +326,29 @@ def finalize_host_permissions(
     link_opaque_permissions_to_host(latchkey.plugin_data_dir, opaque_permissions_path, host_id)
 
 
-def ensure_mind_creation_schema_in_existing_host_files(plugin_data_dir: Path) -> int:
-    """Inject the ``mind-creation`` schema into existing host permissions files.
+_MINDS_SCHEMA_KEYS: Final[tuple[str, ...]] = (
+    _SCOPE_MINDS,
+    _PERM_CREATE_MIND,
+    _PERM_MIND_STATUS,
+    _PERM_MIND_LOGS,
+)
+
+
+def ensure_minds_schema_in_existing_host_files(plugin_data_dir: Path) -> int:
+    """Inject the ``minds`` scope + permission schemas into existing host permission files.
 
     Agents created before this feature shipped have a host
-    ``latchkey_permissions.json`` that lacks the ``mind-creation`` scope
-    schema. Without the schema, detent cannot match a
-    ``{"mind-creation": [...]}`` rule that the user grants via the
-    dialog, so the spawn-a-peer-mind request would be silently denied.
+    ``latchkey_permissions.json`` that lacks the ``minds`` scope and
+    its named permission schemas. Without those schemas, detent cannot
+    match a ``{"minds": [...]}`` rule that the user grants via the
+    dialog, so peer-mind requests would be silently denied.
 
     This idempotent migration walks every
     ``<plugin_data_dir>/hosts/<host_id>/latchkey_permissions.json``,
-    parses it, and rewrites it with the schema added if absent. Files
-    that already have the schema (or that contain a non-dict ``schemas``,
-    which we leave alone) are skipped.
+    parses it, and rewrites it whenever any of the four ``minds`` schema
+    keys is missing or stale. Files whose schemas already match are
+    skipped, as are files containing a non-dict ``schemas`` block (which
+    we leave alone).
 
     Must run *before* the shared gateway starts so the gateway's
     ``permissions.mjs`` extension does not race with us. Returns the
@@ -307,7 +357,7 @@ def ensure_mind_creation_schema_in_existing_host_files(plugin_data_dir: Path) ->
     hosts_dir = plugin_data_dir / "hosts"
     if not hosts_dir.is_dir():
         return 0
-    expected_schema = _AGENT_BASELINE_PERMISSIONS.schemas[_SCOPE_MIND_CREATION]
+    expected_schemas = {key: _AGENT_BASELINE_PERMISSIONS.schemas[key] for key in _MINDS_SCHEMA_KEYS}
     migrated = 0
     for host_dir in hosts_dir.iterdir():
         if not host_dir.is_dir():
@@ -318,20 +368,20 @@ def ensure_mind_creation_schema_in_existing_host_files(plugin_data_dir: Path) ->
         try:
             raw = path.read_text()
         except OSError as e:
-            logger.warning("Could not read {} during mind-creation schema migration: {}", path, e)
+            logger.warning("Could not read {} during minds schema migration: {}", path, e)
             continue
         try:
             parsed = LatchkeyPermissionsConfig.model_validate_json(raw)
         except ValueError as e:
             logger.warning(
-                "Skipping {} during mind-creation schema migration; cannot parse as LatchkeyPermissionsConfig: {}",
+                "Skipping {} during minds schema migration; cannot parse as LatchkeyPermissionsConfig: {}",
                 path,
                 e,
             )
             continue
-        if parsed.schemas.get(_SCOPE_MIND_CREATION) == expected_schema:
+        if all(parsed.schemas.get(key) == expected_schemas[key] for key in _MINDS_SCHEMA_KEYS):
             continue
-        new_schemas = {**parsed.schemas, _SCOPE_MIND_CREATION: expected_schema}
+        new_schemas = {**parsed.schemas, **expected_schemas}
         updated = parsed.model_copy_update(to_update(parsed.field_ref().schemas, new_schemas))
         save_permissions(path, updated)
         migrated += 1
