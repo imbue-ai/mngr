@@ -1,5 +1,4 @@
 import base64
-import time
 from collections.abc import Mapping
 from collections.abc import Sequence
 from datetime import datetime
@@ -158,27 +157,6 @@ class VultrVpsClient(VpsClientInterface):
         if main_ip == "0.0.0.0":
             raise VpsProvisioningError(f"Instance {instance_id} does not have an IP yet")
         return main_ip
-
-    def wait_for_instance_active(
-        self,
-        instance_id: VpsInstanceId,
-        timeout_seconds: float = 300.0,
-    ) -> str:
-        start = time.monotonic()
-        while time.monotonic() - start < timeout_seconds:
-            status = self.get_instance_status(instance_id)
-            if status == VpsInstanceStatus.ACTIVE:
-                try:
-                    ip = self.get_instance_ip(instance_id)
-                    elapsed = time.monotonic() - start
-                    if elapsed > 60.0:
-                        logger.warning("VPS provisioning took {:.1f}s (threshold: 60s)", elapsed)
-                    return ip
-                except VpsProvisioningError:
-                    pass
-            time.sleep(5.0)
-
-        raise VpsProvisioningError(f"Vultr instance {instance_id} did not become active within {timeout_seconds}s")
 
     def get_instance_info(self, instance_id: VpsInstanceId) -> dict[str, Any]:
         """Get full instance info from the API."""

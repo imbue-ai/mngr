@@ -1,5 +1,4 @@
 import os
-import time
 from collections.abc import Iterator
 from collections.abc import Mapping
 from collections.abc import Sequence
@@ -49,6 +48,11 @@ class AwsVpsClient(VpsClientInterface):
     """EC2 client implementing the VPS provider interface via boto3."""
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    # EC2 instance bootstrap is routinely slower than Vultr (Debian + Docker
+    # install on a t3.small typically lands around 60-90s); raise the warning
+    # threshold so normal boots don't log a "slow" warning.
+    slow_provisioning_warning_threshold_seconds: float = Field(default=90.0)
 
     session: boto3.Session = Field(frozen=True, description="boto3 Session with resolved credentials")
     region: str = Field(frozen=True, description="AWS region this client targets")
@@ -343,26 +347,6 @@ class AwsVpsClient(VpsClientInterface):
         if not ip:
             raise VpsProvisioningError(f"Instance {instance_id} does not have a public IP yet")
         return ip
-
-    def wait_for_instance_active(
-        self,
-        instance_id: VpsInstanceId,
-        timeout_seconds: float = 300.0,
-    ) -> str:
-        start = time.monotonic()
-        while time.monotonic() - start < timeout_seconds:
-            status = self.get_instance_status(instance_id)
-            if status == VpsInstanceStatus.ACTIVE:
-                try:
-                    ip = self.get_instance_ip(instance_id)
-                    elapsed = time.monotonic() - start
-                    if elapsed > 90.0:
-                        logger.warning("EC2 provisioning took {:.1f}s (threshold: 90s)", elapsed)
-                    return ip
-                except VpsProvisioningError:
-                    pass
-            time.sleep(5.0)
-        raise VpsProvisioningError(f"EC2 instance {instance_id} did not become active within {timeout_seconds}s")
 
     def list_instances(self, provider_tag: str | None = None) -> list[dict[str, Any]]:
         """List instances in this region. Optionally filtered by ``mngr-provider=<value>`` tag.
