@@ -19,13 +19,16 @@ orchestrator does not crash hard. The expected invocation is always
 """
 
 import os
+import pwd
 import re
+import shutil
 import subprocess
 from collections.abc import Callable
 from collections.abc import Generator
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
+from typing import Final
 from uuid import uuid4
 
 import httpx
@@ -233,30 +236,58 @@ _STALE_TEST_USER_EMAIL_PATTERN = re.compile(r"^test-[0-9a-f]+@example\.test$")
 _STALE_TEST_USER_MAX_AGE_SECONDS = 30 * 60
 
 
+# Dotfiles the deployment_tests subprocesses need from the operator's
+# real HOME. The project-wide ``setup_test_mngr_env`` autouse re-points
+# HOME at a per-test tmpdir; each entry here is copied from the real
+# HOME into the tmpdir HOME before the test body runs so the subprocess
+# CLIs (``vault``, ``modal``) find their auth files at the expected
+# paths under the redirected HOME.
+#
+# - ``.vault-token``: HashiCorp Vault CLI auth token. ``minds env
+#   deploy`` calls ``_load_dev_credentials_from_vault`` which shells out
+#   to ``vault`` and expects this file.
+# - ``.modal.toml``: Modal CLI auth tokens per workspace.
+#   ``modal deploy`` / ``modal app history`` / ``modal app rollback``
+#   read this file to pick the workspace's API tokens.
+_OPERATOR_DOTFILES_TO_COPY: Final[tuple[str, ...]] = (".vault-token", ".modal.toml")
+
+# Captured at module-import time (before any pytest fixture runs) via
+# pwd.getpwuid, which reads /etc/passwd directly -- so it stays correct
+# even after the autouse fixture re-points ``$HOME`` at a tmpdir.
+_OPERATOR_REAL_HOME: Final[Path] = Path(pwd.getpwuid(os.getuid()).pw_dir)
+
+
 @pytest.fixture(autouse=True)
-def setup_test_mngr_env() -> Generator[None, None, None]:
-    """Override the project-wide autouse mngr-test-isolation fixture for this suite.
+def _copy_operator_credentials_into_test_home(
+    setup_test_mngr_env: None,
+) -> Generator[None, None, None]:
+    """Copy ``~/.vault-token`` + ``~/.modal.toml`` from the operator's real HOME into the test HOME.
 
-    The default ``setup_test_mngr_env`` (from
-    ``imbue.mngr.utils.plugin_testing.register_plugin_test_fixtures``)
-    points ``HOME`` at a per-test tmpdir for filesystem isolation, plus
-    sets ``MNGR_HOST_DIR`` / ``MNGR_PREFIX`` / ``MNGR_ROOT_NAME`` at
-    test-only values. That isolation is wrong for the deployment_tests
-    suite:
+    The project-wide ``setup_test_mngr_env`` autouse fixture (from
+    ``imbue.mngr.utils.plugin_testing``) re-points ``$HOME`` at a
+    per-test tmpdir for filesystem isolation, which we generally want
+    -- it keeps any test-driven file writes from landing in the
+    operator's real home. The downside is that the in-test subprocess
+    ``minds env deploy`` shells out to ``vault`` (reads
+    ``$HOME/.vault-token``) and ``modal`` (reads ``$HOME/.modal.toml``)
+    which then find empty / missing auth files and fail with 403s.
 
-    * The subprocess ``minds env deploy`` / ``destroy`` shellouts need
-      the real ``HOME`` so ``vault`` finds ``~/.vault-token``, and so
-      ``~/.minds-<env>/`` is the real env root (not a tmpdir).
-    * Mngr env vars are set per-subprocess by
-      :func:`helpers.build_minds_env_subprocess_env`, so the in-process
-      isolation defaults are not load-bearing here.
-
-    Tests in this directory run against real cloud and write under
-    the operator's real ``~/.minds-<env>/`` directories. The
-    ``ephemeral_env`` fixture's destroy step + the orchestrator's
-    name+age sweep + the per-test uuid in the env name are what
-    bound the blast radius.
+    This fixture depends on ``setup_test_mngr_env`` as a parameter so
+    it runs AFTER the HOME re-point; it then copies the named dotfiles
+    from the operator's pre-captured real HOME into the new HOME so the
+    subprocesses succeed. The per-test tmpdir is deleted at teardown
+    by pytest's ``tmp_path`` machinery so no operator-credential copies
+    leak past the test.
     """
+    _ = setup_test_mngr_env
+    new_home = Path(os.environ["HOME"])
+    # Defensive: if the upstream override didn't actually fire, skip
+    # the copies -- the operator's real dotfiles are already in place.
+    if new_home.resolve() != _OPERATOR_REAL_HOME.resolve():
+        for relpath in _OPERATOR_DOTFILES_TO_COPY:
+            src = _OPERATOR_REAL_HOME / relpath
+            if src.is_file():
+                shutil.copy2(src, new_home / relpath)
     yield
 
 
