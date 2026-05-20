@@ -976,7 +976,7 @@ mngr create my-task --template modal-big --template with-tests
 ##############################################################################
 # CUSTOM AGENT TYPES
 #   Define your own agent types in config, or use the built-in `command` type
-#   to run any shell command. Wrap existing tools with custom defaults and permissions.
+#   to run any shell command. Wrap existing tools with custom defaults.
 ##############################################################################
 
 # mngr supports multiple agent types out of the box (claude, codex, etc.)
