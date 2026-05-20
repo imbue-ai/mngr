@@ -2,8 +2,8 @@ from pathlib import Path
 
 import pytest
 
-from imbue.minds.desktop_client.auth import ApiTokenError
 from imbue.minds.desktop_client.auth import FileAuthStore
+from imbue.minds.errors import ApiTokenError
 from imbue.minds.errors import SigningKeyError
 from imbue.minds.primitives import OneTimeCode
 
