@@ -6,7 +6,7 @@
 - Two new pytest marks split the test surface by launch condition: `minds_deployment` for tests that exercise the deploy process itself (ephemeral env per test), `minds_services` for tests that hit a pre-stood-up shared env's deployed Modal apps + Neon + SuperTokens. The existing acceptance / release offload jobs (and the local `just test-unit` / `test-integration` / `test-quick` recipes) exclude both marks so neither the normal CI matrix nor a plain local `pytest` run accidentally collects them.
 - Resource lifecycle uses a real per-run ledger (`.minds/ci-test-deploys.jsonl`) for fast iteration cleanup plus a cross-operator name+age sweep (`ci-<YYYYMMDDTHHMMSSZ>` prefix, 4h staleness) as the authoritative safety net. Same shape as the existing `mngr_modal` and Docker container leak-detection patterns.
 - Defers GitHub Actions integration entirely -- the orchestrator is operator-invoked from a workstation that has already run `vault login`, mirroring `minds env deploy` today. The orchestrator sets up the pytest process's env (`VAULT_TOKEN`, the resolved per-env secrets bundle, the mail.tm credentials, etc.) before invoking pytest, so in-process `minds env deploy` calls work without further auth. The same env-var contract applies when this moves to offload later.
-- Ships an initial suite of three `minds_deployment` tests (full create/destroy round-trip, auto-rollback on broken `/healthcheck`, re-deploy advances version) and three `minds_services` tests (realistic signup + email-verify-via-mail.tm + tunnel lifecycle, logged-in smoke across customer-facing routes, real-LLM-call-through-litellm via a local Docker FCT workspace asserting spend lands in Neon). One bigger pool-host bake/lease/agent/release-plus-user-isolation test is explicitly deferred to a follow-up PR. All plumbing is sized so adding more tests later does not materially grow wall time.
+- Ships an initial suite of three `minds_deployment` tests (full create/destroy round-trip, auto-rollback on broken `/healthcheck`, re-deploy advances version) and two `minds_services` tests (realistic signup + email-verify-via-mail.tm + tunnel lifecycle, logged-in smoke across customer-facing routes). Two larger tests are explicitly deferred to follow-up PRs: real-LLM-call-through-litellm via a local Docker FCT workspace asserting spend lands in Neon (lands once the orchestrator wires per-env Neon DSNs through `SharedEnvHandle`), and the pool-host bake/lease/agent/release-plus-user-isolation test. All plumbing is sized so adding more tests later does not materially grow wall time.
 
 ## Expected Behavior
 
@@ -63,7 +63,7 @@
   - Assert: live Modal app version advanced past v1's id; the connector's `/version` endpoint reflects the new `MINDS_DEPLOY_ID`.
   - Covers the steady-state contract that re-deploying actually deploys.
 
-#### `minds_services` (three shipped in this PR + one deferred)
+#### `minds_services` (two shipped in this PR + two deferred)
 
 - `test_realistic_signup_verify_signin_create_tunnel_signout`
   - The full first-time-user flow end-to-end, exercising the only customer-facing path that goes through real email + the desktop client's workspace + tunnel surface in one test. Drives the connector + the desktop client programmatically (in-process `create_desktop_client(...)` -- same pattern as the existing `test_desktop_client_e2e.py` -- plus direct HTTP) rather than through a real Electron instance. Replacing this with Playwright against a packaged Electron is captured in Future Work below.
@@ -79,8 +79,9 @@
   - Hits each connector route the desktop client uses on the home screen (agent list, host list, settings, `/version`) plus the litellm-proxy's `/health`; asserts each returns the expected shape + 2xx.
   - Cheap, fast signal that distinguishes "env is sick" from "a specific feature broke" when one of the heavier tests fails.
 
-- `test_litellm_spend_tracking_via_local_workspace`
+- **Deferred to a follow-up PR:** `test_litellm_spend_tracking_via_local_workspace`
   - Real-product test of "minds agent uses imbue_cloud LLM and spend is tracked".
+  - Deferred until the orchestrator wires per-env Neon DSNs through `SharedEnvHandle` so the spend-tracking assertion has something to query.
   - Uses the `verified_user` fixture (admin-bypass verification + admin-minted session token, so the test does not redo the realistic signup flow).
   - Drives the in-process desktop client (same shape as test 1 -- programmatic, not Electron/Playwright) to create a local Docker workspace from the FCT template (using `fct_template_ref`) configured with the `imbue_cloud` AI-key option so the agent's LLM calls flow through the shared env's `litellm_proxy_url`.
   - Use `mngr message` (subprocess) against the running container to send a real chat message to claude inside.
@@ -105,7 +106,7 @@
 - Live Neon / Prisma migration tests (today covered only by existing unit tests for `apply_pool_hosts_migrations`).
 - GitHub Actions CI integration (blocked on solving vault-in-runner; the script and tests are designed so adding CI later is a small wrapper layer, not a redesign).
 - Live latency / performance assertions (the suite produces deployed envs that could host them, but no perf tests are in the initial roster).
-- Many shorter, narrower tests of individual surfaces (the initial six are deliberately heavy end-to-end flows; finer-grained tests against the same shared env are cheap to add later).
+- Many shorter, narrower tests of individual surfaces (the initial five are deliberately heavy end-to-end flows; finer-grained tests against the same shared env are cheap to add later).
 
 ## Changes
 
