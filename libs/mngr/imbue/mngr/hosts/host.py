@@ -1957,7 +1957,6 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
                 "initial_message": options.initial_message,
                 "resume_message": options.resume_message,
                 "ready_timeout_seconds": options.ready_timeout_seconds,
-                "permissions": [],
                 "start_on_boot": False,
                 "labels": dict(options.label_options.labels),
                 "created_branch_name": created_branch_name,
