@@ -41,6 +41,7 @@ from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client.api_key_store import generate_api_key
 from imbue.minds.desktop_client.api_key_store import hash_api_key
 from imbue.minds.desktop_client.api_key_store import save_api_key_hash
+from imbue.minds.desktop_client.backend_resolver import SYSTEM_SERVICES_AGENT_NAME
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import LiteLLMKeyMaterial
@@ -420,8 +421,10 @@ def _rsync_worktree_over_clone(
 # Constant agent name for every minds-created agent. Minds runs one agent
 # per host, so the agent name carries no per-workspace information; the
 # workspace is identified by its host name. Kept as a SafeName-typed
-# constant so callers can pass it to ``mngr`` without re-validating.
-_DEFAULT_AGENT_NAME: Final[AgentName] = AgentName("system-services")
+# constant so callers can pass it to ``mngr`` without re-validating. The
+# bare string lives in ``backend_resolver`` (the lower-level module that
+# also needs it, for the recovery flow's system-services lookup).
+_DEFAULT_AGENT_NAME: Final[AgentName] = AgentName(SYSTEM_SERVICES_AGENT_NAME)
 
 
 def _build_mngr_create_command(

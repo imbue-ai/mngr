@@ -246,6 +246,33 @@ def test_stop_output_result_format_template(capsys: pytest.CaptureFixture[str]) 
 
 
 @pytest.mark.tmux
+def test_stop_host_routes_to_provider_stop_host(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    create_test_agent: Callable[..., str],
+    temp_host_dir: Path,
+) -> None:
+    """``stop --stop-host`` dispatches to ``provider.stop_host``, not ``stop_agents``.
+
+    The local provider advertises ``supports_shutdown_hosts`` but refuses
+    the actual host stop (you cannot stop your own computer), so reaching
+    that refusal proves the flag routed to ``stop_host`` -- a plain
+    ``stop_agents`` call would have succeeded instead.
+    """
+    create_test_agent("stop-host-routing-agent", "sleep 300031")
+
+    result = cli_runner.invoke(
+        stop,
+        ["stop-host-routing-agent", "--stop-host"],
+        obj=plugin_manager,
+        catch_exceptions=True,
+    )
+
+    assert result.exit_code != 0
+    assert "Cannot stop the local host" in result.output
+
+
+@pytest.mark.tmux
 def test_stop_archive_sets_archived_at_label(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,

@@ -23,8 +23,9 @@ REQUESTS_EVENT_SOURCE_NAME: Final[str] = "requests"
 REFRESH_EVENT_SOURCE_NAME: Final[str] = "refresh"
 
 # Every minds workspace runs a constant-named ``main``-type agent that owns
-# the bootstrap service manager (and thus the system interface). See
-# ``_DEFAULT_AGENT_NAME`` in ``agent_creator.py``.
+# the bootstrap service manager (and thus the system interface). This is the
+# canonical definition of that name; ``agent_creator._DEFAULT_AGENT_NAME``
+# is the ``AgentName``-typed form built from it.
 SYSTEM_SERVICES_AGENT_NAME: Final[str] = "system-services"
 
 
