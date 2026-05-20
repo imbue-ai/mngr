@@ -436,6 +436,22 @@ async function downloadLima({ platform, arch }) {
     binaryPath: path.join(limaDir, 'bin', 'limactl'),
     label: 'Lima',
   });
+
+  // Strip Darwin guest-agents. Each one is a gzipped arm64/x86_64 Mach-O,
+  // and Apple's notarytool unzips it and rejects the inner binary because
+  // we never code-signed it (no Developer ID, no hardened runtime, no
+  // secure timestamp). We run Linux VMs only via Lima, so Darwin guest-
+  // agents are unreachable code and safe to delete.
+  const limaShareDir = path.join(limaDir, 'share', 'lima');
+  if (fs.existsSync(limaShareDir)) {
+    for (const entry of fs.readdirSync(limaShareDir)) {
+      if (entry.startsWith('lima-guestagent.Darwin-') && entry.endsWith('.gz')) {
+        const full = path.join(limaShareDir, entry);
+        fs.rmSync(full);
+        console.log(`Stripped Darwin guest-agent (unsignable inside .gz): ${full}`);
+      }
+    }
+  }
 }
 
 async function downloadGit() {
