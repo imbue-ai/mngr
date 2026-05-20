@@ -1310,7 +1310,9 @@ class AgentCreator(MutableModel):
                         effective_anthropic_base_url = str(key_material.base_url)
                     case AIProvider.API_KEY:
                         # API_KEY auth needs an API key from *somewhere*.
-                        # Three valid combinations:
+                        # Three valid combinations for the API key (the
+                        # base URL has its own independent decision tree
+                        # right below):
                         #   1. Form key is non-empty -> layer it as the
                         #      override (wins over any ambient env value,
                         #      so no scrub needed).
