@@ -214,7 +214,8 @@ deploy *args:
     uv run minds env deploy {{args}}
 
 # Start the minds desktop client (electron) in dev mode against the
-# activated env. Sources .env (for ANTHROPIC_API_KEY etc.) and sets
+# activated env. Sources .env if present, scrubs any ambient
+# ANTHROPIC_API_KEY / ANTHROPIC_BASE_URL (see below), and sets
 # MINDS_WORKSPACE_* env vars so the create-form auto-fills "repository",
 # "name", and "branch":
 #   MINDS_WORKSPACE_GIT_URL = .external_worktrees/forever-claude-template/
@@ -304,6 +305,15 @@ minds-start agent_name="mindtest" branch="":
         . .env
         set +a
     fi
+    # Scrub ANTHROPIC_API_KEY / ANTHROPIC_BASE_URL from the environment
+    # the desktop client inherits. In dev these are typically exported by
+    # the shell rc of whoever runs `just minds-start`, and the client
+    # would otherwise forward them into every agent it creates -- silently
+    # overriding the auth mode picked in the create form. A real packaged
+    # macOS app launched from Finder never sources shell rc files, so this
+    # leak is a dev-environment artifact; unsetting here is the
+    # proportionate fix. `unset` of an already-unset var is a no-op.
+    unset ANTHROPIC_API_KEY ANTHROPIC_BASE_URL
     export MINDS_WORKSPACE_GIT_URL="$fct_wt"
     if [ -n "{{branch}}" ]; then
         export MINDS_WORKSPACE_BRANCH="{{branch}}"
