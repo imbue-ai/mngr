@@ -19,6 +19,7 @@ from scripts.consolidate_changelog import _consolidate_project  # noqa: E402
 from scripts.consolidate_changelog import _get_entry_added_datetime  # noqa: E402
 from scripts.consolidate_changelog import _group_entries_by_date  # noqa: E402
 from scripts.consolidate_changelog import _insert_section_into_changelog  # noqa: E402
+from scripts.consolidate_changelog import _validate_unabridged_targets_exist  # noqa: E402
 from scripts.consolidate_changelog import pending_changelog_entries  # noqa: E402
 
 
@@ -335,6 +336,39 @@ def test_consolidate_project_errors_when_unabridged_missing(tmp_path: Path) -> N
     )
     with pytest.raises(FileNotFoundError, match="missing.*UNABRIDGED_CHANGELOG.md"):
         _consolidate_project("mngr", repo)
+
+
+def test_validate_unabridged_targets_passes_when_no_pending_entries(tmp_path: Path) -> None:
+    """No projects, no entries: validator should not raise."""
+    _validate_unabridged_targets_exist(tmp_path)
+
+
+def test_validate_unabridged_targets_passes_when_targets_exist(tmp_path: Path) -> None:
+    """Projects with pending entries whose UNABRIDGED_CHANGELOG.md exists pass validation."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    project = _seed_libs_project(repo, "mngr")
+    (project / "UNABRIDGED_CHANGELOG.md").write_text("# Unabridged Changelog - mngr\n")
+    (project / "changelog" / "foo.md").write_text("- foo\n")
+    _validate_unabridged_targets_exist(repo)
+
+
+def test_validate_unabridged_targets_raises_when_any_target_missing(tmp_path: Path) -> None:
+    """A single project with pending entries but missing UNABRIDGED_CHANGELOG.md aborts
+    before any consolidation mutation happens (the multi-project main() loop relies on
+    this to stay effectively atomic)."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    has_target = _seed_libs_project(repo, "mngr")
+    (has_target / "UNABRIDGED_CHANGELOG.md").write_text("# Unabridged Changelog - mngr\n")
+    (has_target / "changelog" / "ok.md").write_text("- ok\n")
+    missing_target = _seed_libs_project(repo, "mngr_lima")
+    (missing_target / "changelog" / "broken.md").write_text("- broken\n")
+    with pytest.raises(FileNotFoundError, match="libs/mngr_lima/UNABRIDGED_CHANGELOG.md"):
+        _validate_unabridged_targets_exist(repo)
+    # The healthy project's entries must remain on disk -- the validator
+    # mustn't mutate state itself.
+    assert (has_target / "changelog" / "ok.md").exists()
 
 
 def test_consolidate_project_routes_to_project_unabridged(tmp_path: Path) -> None:

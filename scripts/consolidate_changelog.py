@@ -145,6 +145,33 @@ def _insert_section_into_changelog(changelog_path: Path, new_block: str) -> None
     changelog_path.write_text(result)
 
 
+def _validate_unabridged_targets_exist(repo_root: Path) -> None:
+    """Raise ``FileNotFoundError`` if any project with pending entries is missing its
+    ``UNABRIDGED_CHANGELOG.md``.
+
+    Run *before* any consolidation mutation so the multi-project ``main()`` loop is
+    effectively atomic: if validation passes, every per-project ``_consolidate_project``
+    call is guaranteed to find its target file and will not abort mid-loop after having
+    already mutated earlier projects. The per-project check inside
+    ``_consolidate_project`` remains as a defensive guard for callers (e.g. unit tests)
+    that invoke it directly.
+    """
+    missing: list[str] = []
+    for project in all_known_projects(repo_root):
+        entries_dir = project_entries_dir(project, repo_root)
+        if not _collect_project_entries(entries_dir):
+            continue
+        unabridged_path = project_dir(project, repo_root) / "UNABRIDGED_CHANGELOG.md"
+        if not unabridged_path.exists():
+            missing.append(str(unabridged_path.relative_to(repo_root)))
+    if missing:
+        raise FileNotFoundError(
+            "The following projects have pending changelog entries but are missing their "
+            "UNABRIDGED_CHANGELOG.md (create each with a header and no date sections before "
+            "re-running):\n" + "\n".join(f"  - {p}" for p in missing)
+        )
+
+
 def _consolidate_project(project: str, repo_root: Path) -> tuple[list[str], list[str]]:
     """Consolidate one project's pending entries into its UNABRIDGED_CHANGELOG.md.
 
@@ -182,6 +209,11 @@ def _consolidate_project(project: str, repo_root: Path) -> tuple[list[str], list
 
 
 def main() -> None:
+    # Pre-validate so the consolidation loop is effectively atomic: with every target
+    # UNABRIDGED_CHANGELOG.md known to exist, _consolidate_project cannot abort
+    # mid-loop after having already mutated earlier projects.
+    _validate_unabridged_targets_exist(_REPO_ROOT)
+
     total_entries = 0
     consolidated_any = False
     projects_with_entries = 0
