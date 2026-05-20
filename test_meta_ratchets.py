@@ -498,15 +498,19 @@ _CHANGELOG_ARTIFACT_BASENAMES: frozenset[str] = frozenset({"CHANGELOG.md", "UNAB
 def _is_changelog_artifact(rel_path: str) -> bool:
     """Return True for paths that are themselves changelog artifacts.
 
-    Covers per-PR entry files (any path with a ``changelog/`` segment,
-    e.g. ``libs/mngr/changelog/<branch>.md``, ``dev/changelog/<branch>.md``)
-    and the consolidated ``CHANGELOG.md`` / ``UNABRIDGED_CHANGELOG.md``
-    files at each project root.
+    Covers per-PR entry files (any file directly inside a known project's
+    ``<project_dir>/changelog/`` directory) and the consolidated
+    ``CHANGELOG.md`` / ``UNABRIDGED_CHANGELOG.md`` files at each project
+    root. Anchoring the entry-file match to a known project's entries
+    directory keeps unrelated paths like ``docs/changelog/intro.md`` from
+    silently bypassing the entry requirement.
     """
-    parts = Path(rel_path).parts
-    if "changelog" in parts:
+    path = Path(rel_path)
+    if path.name in _CHANGELOG_ARTIFACT_BASENAMES:
         return True
-    return Path(rel_path).name in _CHANGELOG_ARTIFACT_BASENAMES
+    project = project_for_path(rel_path, _REPO_ROOT)
+    expected_parent = project_entries_dir(project, _REPO_ROOT).relative_to(_REPO_ROOT)
+    return path.parent == expected_parent
 
 
 def _projects_requiring_entry(changed_files: list[str]) -> set[str]:
