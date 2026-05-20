@@ -15,7 +15,8 @@ from imbue.resource_guards.resource_guards import _GuardViolation
 from imbue.resource_guards.resource_guards import _GuardViolationKind
 from imbue.resource_guards.resource_guards import _PerTestGuardState
 from imbue.resource_guards.resource_guards import _build_guard_env
-from imbue.resource_guards.resource_guards import _check_fixture_setup_violations
+from imbue.resource_guards.resource_guards import _check_fixture_at_scope_end
+from imbue.resource_guards.resource_guards import _check_fixture_blocked_after_setup
 from imbue.resource_guards.resource_guards import _check_guard_violations
 from imbue.resource_guards.resource_guards import _collect_fixture_covered_resources
 from imbue.resource_guards.resource_guards import _detect_guard_violations
@@ -310,7 +311,11 @@ def test_unmarked_consumer_of_tagged_fixture_fails(pytester: pytest.Pytester, cl
 
 
 def test_fixture_declares_resource_but_does_not_use_it_fails(pytester: pytest.Pytester, clean_guard_env: None) -> None:
-    """A fixture that declares a resource it never invokes during setup should fail."""
+    """A fixture that declares a resource it never invokes (in setup or teardown) fires at scope end.
+
+    The check is deferred to a fixture-scope finalizer, so the consuming
+    test's call phase passes; the violation surfaces as a teardown error.
+    """
     pytester.makeconftest(_PYTESTER_CONFTEST)
     pytester.makepyfile("""
         import pytest
@@ -322,12 +327,16 @@ def test_fixture_declares_resource_but_does_not_use_it_fails(pytester: pytest.Py
         def empty_fixture():
             yield "value"
 
+        @pytest.mark.cat
         def test_consumer(empty_fixture):
             assert empty_fixture == "value"
     """)
     result = pytester.runpytest_subprocess("-n0", "--no-header", "-p", "no:cacheprovider")
-    result.assert_outcomes(errors=1)
-    result.stdout.fnmatch_lines(["*did not invoke cat during setup*"])
+    # The call phase passes (the fixture had no BLOCKED issue, and the
+    # consumer doesn't actually run cat). The fixture-scope finalizer then
+    # fires NEVER_INVOKED -- pytest reports that as a teardown error.
+    result.assert_outcomes(passed=1, errors=1)
+    result.stdout.fnmatch_lines(["*did not invoke cat during setup or teardown*"])
 
 
 def test_fixture_uses_resource_without_declaring_it_fails(pytester: pytest.Pytester, clean_guard_env: None) -> None:
@@ -456,6 +465,162 @@ def test_fixture_teardown_resource_calls_authorized_against_fixture(
     result.assert_outcomes(passed=2)
 
 
+def test_fixture_invoking_resource_only_during_teardown_passes(
+    pytester: pytest.Pytester, clean_guard_env: None
+) -> None:
+    """A fixture that only uses its declared resource during teardown still satisfies the check.
+
+    The NEVER_INVOKED check is deferred to a fixture-scope finalizer that
+    runs after the wrapper's post-yield body, so teardown-only invocations
+    count toward satisfying the declaration.
+    """
+    pytester.makeconftest(_PYTESTER_CONFTEST)
+    pytester.makepyfile("""
+        import subprocess
+        import pytest
+
+        from imbue.resource_guards.resource_guards import fixture_uses_resources
+
+        @pytest.fixture
+        @fixture_uses_resources("cat")
+        def teardown_only_fixture():
+            # Setup invokes nothing.
+            yield "value"
+            # Teardown invokes cat.
+            subprocess.run(["cat", "/dev/null"], check=True)
+
+        @pytest.mark.cat
+        def test_consumer(teardown_only_fixture):
+            assert teardown_only_fixture == "value"
+    """)
+    result = pytester.runpytest_subprocess("-n0", "--no-header", "-p", "no:cacheprovider")
+    result.assert_outcomes(passed=1)
+
+
+def test_fixture_with_undeclared_blocked_invocation_in_teardown_fails(
+    pytester: pytest.Pytester, clean_guard_env: None
+) -> None:
+    """Teardown-phase BLOCKED is caught by the scope-end check when the resource is guarded."""
+    pytester.makeconftest(_PYTESTER_CONFTEST_TWO_GUARDS)
+    pytester.makepyfile("""
+        import subprocess
+        import pytest
+
+        from imbue.resource_guards.resource_guards import fixture_uses_resources
+
+        @pytest.fixture
+        @fixture_uses_resources("cat")
+        def fixture():
+            # Setup invokes cat (declared); no BLOCKED here, no NEVER_INVOKED.
+            subprocess.run(["cat", "/dev/null"], check=True)
+            yield "value"
+            # Teardown invokes ls, which is NOT in the fixture's declared
+            # resources. The wrapper blocks it (exits 127) and writes
+            # blocked_ls. The setup-time BLOCKED check has already passed;
+            # the at-scope-end check picks this up.
+            subprocess.run(["ls", "/"], capture_output=True)
+
+        @pytest.mark.cat
+        def test_consumer(fixture):
+            assert fixture == "value"
+    """)
+    result = pytester.runpytest_subprocess("-n0", "--no-header", "-p", "no:cacheprovider")
+    # Call passes; the scope-end finalizer raises during fixture teardown.
+    result.assert_outcomes(passed=1, errors=1)
+    result.stdout.fnmatch_lines(["*invoked 'ls' but did not declare it*"])
+
+
+def test_fixture_with_multiple_declared_resources_split_across_setup_and_teardown_passes(
+    pytester: pytest.Pytester, clean_guard_env: None
+) -> None:
+    """A fixture declaring two resources may invoke one in setup and the other in teardown."""
+    pytester.makeconftest(_PYTESTER_CONFTEST_TWO_GUARDS)
+    pytester.makepyfile("""
+        import subprocess
+        import pytest
+
+        from imbue.resource_guards.resource_guards import fixture_uses_resources
+
+        @pytest.fixture
+        @fixture_uses_resources("cat", "ls")
+        def split_fixture():
+            subprocess.run(["cat", "/dev/null"], check=True)
+            yield "value"
+            subprocess.run(["ls", "/"], check=True, capture_output=True)
+
+        @pytest.mark.cat
+        @pytest.mark.ls
+        def test_consumer(split_fixture):
+            assert split_fixture == "value"
+    """)
+    result = pytester.runpytest_subprocess("-n0", "--no-header", "-p", "no:cacheprovider")
+    result.assert_outcomes(passed=1)
+
+
+def test_fixture_declaring_two_resources_invoking_only_one_in_teardown_fails(
+    pytester: pytest.Pytester, clean_guard_env: None
+) -> None:
+    """If only one of two declared resources is ever invoked (in setup or teardown), the other fires."""
+    pytester.makeconftest(_PYTESTER_CONFTEST_TWO_GUARDS)
+    pytester.makepyfile("""
+        import subprocess
+        import pytest
+
+        from imbue.resource_guards.resource_guards import fixture_uses_resources
+
+        @pytest.fixture
+        @fixture_uses_resources("cat", "ls")
+        def partial_fixture():
+            yield "value"
+            # Only teardown uses cat; ls is never invoked.
+            subprocess.run(["cat", "/dev/null"], check=True)
+
+        @pytest.mark.cat
+        @pytest.mark.ls
+        def test_consumer(partial_fixture):
+            assert partial_fixture == "value"
+    """)
+    result = pytester.runpytest_subprocess("-n0", "--no-header", "-p", "no:cacheprovider")
+    result.assert_outcomes(passed=1, errors=1)
+    result.stdout.fnmatch_lines(["*did not invoke ls during setup or teardown*"])
+
+
+def test_fixture_setup_blocked_invocation_surfaces_at_setup_phase(
+    pytester: pytest.Pytester, clean_guard_env: None
+) -> None:
+    """A BLOCKED invocation during setup surfaces immediately as a setup-phase error.
+
+    The deferred at-scope-end check must NOT redundantly fire on the same
+    blocked tracking file -- otherwise the user would see the same error
+    twice (once at setup, once at scope-end). The inline check sets the
+    setup_failed flag so the deferred check skips.
+    """
+    pytester.makeconftest(_PYTESTER_CONFTEST_TWO_GUARDS)
+    pytester.makepyfile("""
+        import subprocess
+        import pytest
+
+        from imbue.resource_guards.resource_guards import fixture_uses_resources
+
+        @pytest.fixture
+        @fixture_uses_resources("ls")
+        def fixture():
+            # Setup invokes cat, which is NOT declared -- BLOCKED fires
+            # in the inline check after yield.
+            subprocess.run(["cat", "/dev/null"], capture_output=True)
+            yield "value"
+
+        @pytest.mark.ls
+        def test_consumer(fixture):
+            assert fixture == "value"
+    """)
+    result = pytester.runpytest_subprocess("-n0", "--no-header", "-p", "no:cacheprovider")
+    # Exactly one error -- the inline BLOCKED check. The deferred check
+    # should skip because setup_failed was set.
+    result.assert_outcomes(errors=1)
+    result.stdout.fnmatch_lines(["*invoked 'cat' but did not declare it*"])
+
+
 def test_fixture_declaring_multiple_resources_authorizes_each(
     pytester: pytest.Pytester, clean_guard_env: None
 ) -> None:
@@ -534,8 +699,10 @@ def test_multi_resource_fixture_must_invoke_each_declared_resource(
             assert half_used_fixture == "value"
     """)
     result = pytester.runpytest_subprocess("-n0", "--no-header", "-p", "no:cacheprovider")
-    result.assert_outcomes(errors=1)
-    result.stdout.fnmatch_lines(["*did not invoke ls during setup*"])
+    # The consumer's call phase passes; the fixture-scope finalizer raises
+    # NEVER_INVOKED for ls at teardown.
+    result.assert_outcomes(passed=1, errors=1)
+    result.stdout.fnmatch_lines(["*did not invoke ls during setup or teardown*"])
 
 
 def test_consumer_of_two_distinct_tagged_fixtures_requires_each_mark(
@@ -1342,17 +1509,27 @@ class _FakeOutcome:
 class _FakeFixtureRequest:
     """Minimal stand-in for pytest.FixtureRequest used by _pytest_fixture_setup.
 
-    The hook calls request.getfixturevalue("tmp_path_factory") to get pytest's
-    session-scoped tmp dir factory. Tests pass the real fixture in here so the
-    hook gets a working factory.
+    Supports getfixturevalue("tmp_path_factory") (the hook needs pytest's
+    session-scoped tmp dir factory) and addfinalizer (the hook registers
+    the at-scope-end check as a finalizer). Tests can call run_finalizers()
+    to simulate pytest's scope-end teardown.
     """
 
     def __init__(self, tmp_path_factory: pytest.TempPathFactory | None = None) -> None:
         self._tmp_path_factory = tmp_path_factory
+        self.finalizers: list[Callable[[], None]] = []
 
     def getfixturevalue(self, name: str) -> Any:
         assert name == "tmp_path_factory", f"_FakeFixtureRequest only supports tmp_path_factory, got {name!r}"
         return self._tmp_path_factory
+
+    def addfinalizer(self, finalizer: Callable[[], None]) -> None:
+        self.finalizers.append(finalizer)
+
+    def run_finalizers(self) -> None:
+        """Run registered finalizers in LIFO order, matching pytest's behavior."""
+        for finalizer in reversed(self.finalizers):
+            finalizer()
 
 
 def test_check_guard_violations_blocked_invocation_fails_passing_test(
@@ -1799,69 +1976,142 @@ def test_make_guarded_fixture_wrapper_plain_fixture_applies_env(
     assert os.environ.get("_TEST_FIXTURE_FLAG") is None
 
 
-def test_check_fixture_setup_violations_passes_when_clean(
+# --- _check_fixture_blocked_after_setup ---
+
+
+def test_check_fixture_blocked_after_setup_passes_when_clean(
     isolated_guard_state: None,
     tmp_path: Path,
 ) -> None:
-    """A fixture that invoked its declared resource should pass the check."""
+    """No tracking files at all should be silent (no BLOCKED to report; NEVER_INVOKED deferred)."""
+    register_resource_guard("cat")
+
+    _check_fixture_blocked_after_setup("my_fixture", {"cat"}, str(tmp_path))
+
+
+def test_check_fixture_blocked_after_setup_passes_when_resource_invoked(
+    isolated_guard_state: None,
+    tmp_path: Path,
+) -> None:
+    """A declared resource that was invoked during setup is fine."""
     register_resource_guard("cat")
     (tmp_path / "cat").touch()
 
-    _check_fixture_setup_violations("my_fixture", {"cat"}, str(tmp_path), setup_failed=False)
+    _check_fixture_blocked_after_setup("my_fixture", {"cat"}, str(tmp_path))
 
 
-def test_check_fixture_setup_violations_raises_on_blocked(
+def test_check_fixture_blocked_after_setup_raises_on_blocked(
     isolated_guard_state: None,
     tmp_path: Path,
 ) -> None:
-    """A fixture that invoked an undeclared resource should raise ResourceGuardViolation."""
+    """A fixture that invoked an undeclared resource during setup should raise immediately."""
     register_resource_guard("cat")
     (tmp_path / "blocked_cat").touch()
 
     with pytest.raises(ResourceGuardViolation, match="did not declare it"):
-        _check_fixture_setup_violations("my_fixture", set(), str(tmp_path), setup_failed=False)
+        _check_fixture_blocked_after_setup("my_fixture", set(), str(tmp_path))
 
 
-def test_check_fixture_setup_violations_raises_on_never_invoked(
+def test_check_fixture_blocked_after_setup_does_not_raise_on_never_invoked(
     isolated_guard_state: None,
     tmp_path: Path,
 ) -> None:
-    """A fixture that declared a resource but never invoked it should raise."""
+    """NEVER_INVOKED is deferred -- the setup-time check should ignore it."""
     register_resource_guard("cat")
 
-    with pytest.raises(ResourceGuardViolation, match="did not invoke cat during setup"):
-        _check_fixture_setup_violations("my_fixture", {"cat"}, str(tmp_path), setup_failed=False)
+    # No tracking files at all (would trigger NEVER_INVOKED in the deferred check).
+    _check_fixture_blocked_after_setup("my_fixture", {"cat"}, str(tmp_path))
 
 
-def test_check_fixture_setup_violations_skips_never_invoked_when_setup_failed(
+def test_check_fixture_blocked_after_setup_chains_setup_exception(
     isolated_guard_state: None,
     tmp_path: Path,
 ) -> None:
-    """If fixture setup raised, the never-invoked check is suppressed (likely a downstream effect)."""
-    register_resource_guard("cat")
-
-    _check_fixture_setup_violations("my_fixture", {"cat"}, str(tmp_path), setup_failed=True)
-
-
-def test_check_fixture_setup_violations_chains_setup_exception_on_blocked(
-    isolated_guard_state: None,
-    tmp_path: Path,
-) -> None:
-    """When setup raised and a BLOCKED violation fires, the original exception is preserved as __cause__."""
+    """When setup raised and a BLOCKED violation fires, the original exception is chained as __cause__."""
     register_resource_guard("cat")
     (tmp_path / "blocked_cat").touch()
 
     original = RuntimeError("setup failed for unrelated reason")
     with pytest.raises(ResourceGuardViolation) as exc_info:
-        _check_fixture_setup_violations(
+        _check_fixture_blocked_after_setup(
             "my_fixture",
             set(),
             str(tmp_path),
-            setup_failed=True,
             setup_exception=original,
         )
 
     assert exc_info.value.__cause__ is original
+
+
+# --- _check_fixture_at_scope_end ---
+
+
+def test_check_fixture_at_scope_end_passes_when_clean(
+    isolated_guard_state: None,
+    tmp_path: Path,
+) -> None:
+    """A fixture that invoked its declared resource (in setup or teardown) passes the deferred check."""
+    register_resource_guard("cat")
+    (tmp_path / "cat").touch()
+
+    _check_fixture_at_scope_end("my_fixture", {"cat"}, str(tmp_path), setup_failed=False)
+
+
+def test_check_fixture_at_scope_end_raises_on_blocked_in_teardown(
+    isolated_guard_state: None,
+    tmp_path: Path,
+) -> None:
+    """A blocked tracking file that only appeared during teardown should still be caught."""
+    register_resource_guard("cat")
+    (tmp_path / "blocked_cat").touch()
+
+    with pytest.raises(ResourceGuardViolation, match="did not declare it"):
+        _check_fixture_at_scope_end("my_fixture", set(), str(tmp_path), setup_failed=False)
+
+
+def test_check_fixture_at_scope_end_raises_on_never_invoked(
+    isolated_guard_state: None,
+    tmp_path: Path,
+) -> None:
+    """A declared resource never invoked in setup or teardown should raise."""
+    register_resource_guard("cat")
+
+    with pytest.raises(ResourceGuardViolation, match="did not invoke cat during setup or teardown"):
+        _check_fixture_at_scope_end("my_fixture", {"cat"}, str(tmp_path), setup_failed=False)
+
+
+def test_check_fixture_at_scope_end_skips_when_setup_failed(
+    isolated_guard_state: None,
+    tmp_path: Path,
+) -> None:
+    """When setup raised, the deferred check is suppressed (no teardown ran; never_invoked is misleading)."""
+    register_resource_guard("cat")
+    # No tracking files; ordinarily would raise NEVER_INVOKED, but setup_failed suppresses it.
+    _check_fixture_at_scope_end("my_fixture", {"cat"}, str(tmp_path), setup_failed=True)
+
+
+def test_check_fixture_at_scope_end_skips_blocked_when_setup_failed(
+    isolated_guard_state: None,
+    tmp_path: Path,
+) -> None:
+    """When setup raised, even a stray BLOCKED tracking file is ignored at scope-end (setup check fired)."""
+    register_resource_guard("cat")
+    (tmp_path / "blocked_cat").touch()
+
+    _check_fixture_at_scope_end("my_fixture", set(), str(tmp_path), setup_failed=True)
+
+
+def test_check_fixture_at_scope_end_multi_resource_one_invoked_one_not(
+    isolated_guard_state: None,
+    tmp_path: Path,
+) -> None:
+    """When a fixture declares two resources but only invokes one, the other still fires NEVER_INVOKED."""
+    register_resource_guard("cat")
+    register_resource_guard("ls")
+    (tmp_path / "cat").touch()
+
+    with pytest.raises(ResourceGuardViolation, match="did not invoke ls during setup or teardown"):
+        _check_fixture_at_scope_end("my_fixture", {"cat", "ls"}, str(tmp_path), setup_failed=False)
 
 
 def test_pytest_fixture_setup_skips_undeclared_fixture() -> None:
@@ -1907,10 +2157,77 @@ def test_pytest_fixture_setup_wraps_declared_fixture_and_restores_on_exit(
     for _ in gen:
         pass
 
-    # Closing the hookwrapper restores fixturedef.func and runs the check.
+    # Closing the hookwrapper restores fixturedef.func and runs the inline BLOCKED check.
     with pytest.raises(StopIteration):
         hook.send(_FakeOutcome(excinfo=None))  # ty: ignore[invalid-argument-type]
     assert fixturedef.func is some_fixture
+    # The deferred at-scope-end check is registered as a finalizer.
+    assert len(request.finalizers) == 1
+    # Running it here (simulating pytest's scope-end teardown) should be clean
+    # since cat was invoked.
+    request.run_finalizers()
+
+
+def test_pytest_fixture_setup_defers_never_invoked_check_until_finalizer(
+    isolated_guard_state: None,
+    tmp_path_factory: pytest.TempPathFactory,
+) -> None:
+    """NEVER_INVOKED does not fire at hookwrapper close -- only when finalizers run."""
+    register_resource_guard("cat")
+
+    @fixture_uses_resources("cat")
+    def empty_fixture() -> Generator[str, None, None]:
+        # Setup invokes nothing. NEVER_INVOKED would fire if the inline check
+        # ran it; it must wait for the at-scope-end finalizer.
+        yield "value"
+
+    fixturedef = _FakeFixtureDef(func=empty_fixture, argname="empty_fixture")
+    request = _FakeFixtureRequest(tmp_path_factory=tmp_path_factory)
+    hook = _pytest_fixture_setup(fixturedef, request=request)  # ty: ignore[invalid-argument-type]
+
+    next(hook)
+    gen = fixturedef.func()
+    next(gen)
+    for _ in gen:
+        pass
+
+    # Hookwrapper close: the inline BLOCKED check is clean; no error.
+    with pytest.raises(StopIteration):
+        hook.send(_FakeOutcome(excinfo=None))  # ty: ignore[invalid-argument-type]
+
+    # Running the deferred finalizer fires NEVER_INVOKED.
+    with pytest.raises(ResourceGuardViolation, match="did not invoke cat during setup or teardown"):
+        request.run_finalizers()
+
+
+def test_pytest_fixture_setup_at_scope_end_skipped_when_setup_failed(
+    isolated_guard_state: None,
+    tmp_path_factory: pytest.TempPathFactory,
+) -> None:
+    """If setup raised, the at-scope-end finalizer must not fire NEVER_INVOKED."""
+    register_resource_guard("cat")
+
+    @fixture_uses_resources("cat")
+    def empty_fixture() -> Generator[str, None, None]:
+        yield "value"
+
+    fixturedef = _FakeFixtureDef(func=empty_fixture, argname="empty_fixture")
+    request = _FakeFixtureRequest(tmp_path_factory=tmp_path_factory)
+    hook = _pytest_fixture_setup(fixturedef, request=request)  # ty: ignore[invalid-argument-type]
+
+    next(hook)
+    gen = fixturedef.func()
+    next(gen)
+    for _ in gen:
+        pass
+
+    # Simulate inner setup raising: outcome.excinfo is non-None.
+    original = RuntimeError("inner setup boom")
+    with pytest.raises(StopIteration):
+        hook.send(_FakeOutcome(excinfo=(type(original), original, None)))  # ty: ignore[invalid-argument-type]
+
+    # The deferred finalizer runs but skips both checks (setup_failed=True).
+    request.run_finalizers()
 
 
 def test_pytest_fixture_setup_raises_on_undeclared_fixture_call(

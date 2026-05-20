@@ -704,41 +704,82 @@ def _make_guarded_fixture_wrapper(
     return wrapped_plain
 
 
-def _check_fixture_setup_violations(
+def _raise_fixture_blocked(
+    fixture_id: str,
+    resource: str,
+    setup_exception: BaseException | None,
+) -> None:
+    """Raise the BLOCKED-violation error for a fixture invoking an undeclared resource."""
+    raise ResourceGuardViolation(
+        f"RESOURCE GUARD: Fixture '{fixture_id}' invoked '{resource}' but did not declare it via "
+        f"@fixture_uses_resources({resource!r}). Add the declaration or remove the {resource} usage."
+    ) from setup_exception
+
+
+def _check_fixture_blocked_after_setup(
+    fixture_id: str,
+    resources: set[str],
+    tracking_dir: str,
+    setup_exception: BaseException | None = None,
+) -> None:
+    """Raise immediately if the fixture's setup invoked an undeclared resource.
+
+    Runs in the fixture-setup hookwrapper's finally clause so a broken
+    setup fails fast -- pytest aborts before the fixture's teardown
+    runs and before any consuming tests execute. Chains the original
+    setup exception via ``from`` so the underlying failure is preserved
+    in the traceback.
+
+    Only checks BLOCKED; NEVER_INVOKED (and any teardown-phase BLOCKED)
+    is deferred to _check_fixture_at_scope_end, which runs as a fixture
+    finalizer after the wrapper's post-yield body has executed.
+    """
+    violation = _detect_guard_violations(resources, tracking_dir, check_never_invoked=False)
+    if violation is None:
+        return
+    # check_never_invoked=False guarantees only BLOCKED is returned.
+    assert violation.kind == _GuardViolationKind.BLOCKED
+    _raise_fixture_blocked(fixture_id, violation.resource, setup_exception)
+
+
+def _check_fixture_at_scope_end(
     fixture_id: str,
     resources: set[str],
     tracking_dir: str,
     setup_failed: bool,
-    setup_exception: BaseException | None = None,
 ) -> None:
-    """Validate fixture-scope guard invariants after setup.
+    """Validate fixture-scope guard invariants after the wrapper's teardown completes.
 
-    Raises ResourceGuardViolation on a blocked invocation regardless of
-    setup outcome, and on a "declared but never invoked" violation only
-    when setup succeeded (otherwise the violation may be a downstream
-    consequence of the setup failure).
+    Registered as a fixture finalizer before pytest's teardown
+    finalizer, so it runs LAST in LIFO order (after teardown writes
+    its tracking files). Catches:
+    - BLOCKED invocations during teardown (the setup-time check
+      already handled setup-phase BLOCKED via
+      _check_fixture_blocked_after_setup; this re-runs the detector
+      to catch new tracking files written during teardown).
+    - NEVER_INVOKED for any declared resource that was never used
+      in setup or teardown.
 
-    When raising and ``setup_exception`` is provided, the original setup
-    exception is chained via ``raise ... from setup_exception`` so the
-    underlying failure is preserved in the traceback instead of being
-    silently replaced by the guard violation.
+    Skips both checks when setup_failed -- a never-invoked violation
+    there may just be a downstream effect of the underlying failure,
+    and a teardown-phase BLOCKED cannot occur because pytest does not
+    run teardown when setup failed.
     """
-    violation = _detect_guard_violations(resources, tracking_dir, check_never_invoked=not setup_failed)
+    if setup_failed:
+        return
+    violation = _detect_guard_violations(resources, tracking_dir, check_never_invoked=True)
     if violation is None:
         return
 
     match violation.kind:
         case _GuardViolationKind.BLOCKED:
-            raise ResourceGuardViolation(
-                f"RESOURCE GUARD: Fixture '{fixture_id}' invoked '{violation.resource}' but did not declare it via "
-                f"@fixture_uses_resources({violation.resource!r}). Add the declaration or remove the {violation.resource} usage."
-            ) from setup_exception
+            _raise_fixture_blocked(fixture_id, violation.resource, None)
         case _GuardViolationKind.NEVER_INVOKED:
             raise ResourceGuardViolation(
                 f"RESOURCE GUARD: Fixture '{fixture_id}' declared @fixture_uses_resources({violation.resource!r}) "
-                f"but did not invoke {violation.resource} during setup. Remove the declaration "
+                f"but did not invoke {violation.resource} during setup or teardown. Remove the declaration "
                 f"or ensure the fixture exercises {violation.resource}."
-            ) from setup_exception
+            )
         case _:  # pragma: no cover
             assert_never(violation.kind)
 
@@ -813,7 +854,19 @@ def _pytest_fixture_setup(
     fixture_env = _build_guard_env(resources_set, tracking_dir)
     fixture_id = fixturedef.argname
 
+    # Register the deferred at-scope-end check BEFORE pytest's setup
+    # registers its teardown finalizer. Finalizers run in LIFO order, so
+    # this one runs LAST -- after the wrapper's post-yield (teardown)
+    # phase has executed and written any teardown-phase tracking files.
+    # The closure reads `setup_failed` from the enclosing scope at
+    # finalizer-call time, so it sees the value assigned below.
     setup_failed = False
+
+    def _at_scope_end() -> None:
+        _check_fixture_at_scope_end(fixture_id, resources_set, tracking_dir, setup_failed)
+
+    request.addfinalizer(_at_scope_end)
+
     setup_exception: BaseException | None = None
     with _swapped_fixturedef_func(fixturedef, _make_guarded_fixture_wrapper(fixturedef.func, fixture_env)):
         try:
@@ -826,9 +879,22 @@ def _pytest_fixture_setup(
                 # failure isn't silently dropped from the traceback.
                 setup_exception = outcome.excinfo[1]
         finally:
-            _check_fixture_setup_violations(
-                fixture_id, resources_set, tracking_dir, setup_failed, setup_exception=setup_exception
-            )
+            # Fast-fail BLOCKED check: if setup invoked an undeclared
+            # resource, raise now so pytest aborts consuming tests with
+            # a clear error. NEVER_INVOKED and any teardown-phase
+            # BLOCKED are handled by _at_scope_end.
+            #
+            # If our BLOCKED check raises, flip setup_failed so the
+            # deferred _at_scope_end skips its checks -- otherwise the
+            # same blocked tracking file would surface twice (once
+            # here, once via the deferred re-detection).
+            try:
+                _check_fixture_blocked_after_setup(
+                    fixture_id, resources_set, tracking_dir, setup_exception=setup_exception
+                )
+            except ResourceGuardViolation:
+                setup_failed = True
+                raise
 
 
 @pytest.hookimpl(hookwrapper=True)

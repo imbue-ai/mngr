@@ -77,7 +77,7 @@ def test_prevent_silent_decode_error_catches() -> None:
 # rule to skip string literals lives in imbue_common, not this package, so
 # the snapshot bump is intentional.
 def test_prevent_inline_imports() -> None:
-    rc.check_inline_imports(_DIR, snapshot(70))
+    rc.check_inline_imports(_DIR, snapshot(85))
 
 
 def test_prevent_relative_imports() -> None:
@@ -273,7 +273,7 @@ def test_prevent_if_elif_without_else() -> None:
 # nested defs uniformly, so the bump is the cost of the feature rather
 # than a structural smell.
 def test_prevent_inline_functions() -> None:
-    rc.check_inline_functions(_DIR, snapshot(4))
+    rc.check_inline_functions(_DIR, snapshot(5))
 
 
 def test_prevent_underscore_imports() -> None:
