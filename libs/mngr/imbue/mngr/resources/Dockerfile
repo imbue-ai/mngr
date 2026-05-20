@@ -124,7 +124,15 @@ COPY . /code/mngr/
 # the same image state as a from-scratch Dockerfile build. Adding any
 # other RUN step below this line causes drift between the two paths.
 # Don't.
-RUN bash scripts/post-source-setup.sh
+#
+# The script path is absolute so this RUN works regardless of WORKDIR
+# inheritance. mngr_modal's `_build_image_from_dockerfile_contents`
+# ships each Dockerfile instruction to Modal as its own per-layer
+# `dockerfile_commands` call (FROM base + instruction), and WORKDIR
+# set in an earlier layer does NOT carry through into the next
+# layer's RUN cwd -- it defaults to /. The script itself `cd`s into
+# /code/mngr first thing, so this only matters for finding the script.
+RUN bash /code/mngr/scripts/post-source-setup.sh
 
 # Run idly forever while being responsive to SIGTERM.
 # PID 1 must explicitly install signal handlers in order to respect signals.
