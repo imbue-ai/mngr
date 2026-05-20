@@ -110,11 +110,25 @@ WORKDIR /code/mngr/
 #   - .mngr/dev/build/ keyframe directory containing only
 #     current.tar.gz + a .checkpoint marker (typical end-user flow via
 #     .mngr/settings.toml's pre_command_scripts hook + create_templates).
-#     The keyframe commit MUST be recent enough to include
-#     scripts/post-source-setup.sh -- the post-COPY RUN below invokes
-#     it directly out of the extracted tarball.
 # COPY lands files owned by root:root by default, so no chown is needed.
 COPY . /code/mngr/
+
+# Bootstrap the source tree for the keyframe shape: if the COPY above
+# only carried current.tar.gz + a .checkpoint marker (the keyframe
+# shape produced by scripts/make_tar_of_repo.sh), extract the tarball
+# inline so the post-COPY RUN below can find the script it's trying
+# to invoke. We delete the tarball + checkpoint afterwards so the
+# script's own equivalent extraction step is a no-op when it runs
+# next. No-op for the real-source-tree shape where current.tar.gz
+# isn't present.
+#
+# The condition is phrased "if tarball present" rather than "if script
+# absent" so this RUN doesn't trip the mngr_schedule PACKAGE-mode
+# install-section-end sentinel (which matches on the substring
+# "scripts/post-source-setup.sh").
+RUN if [ -f /code/mngr/current.tar.gz ]; then \
+        cd /code/mngr && tar xzf current.tar.gz && rm -f current.tar.gz *.checkpoint; \
+    fi
 
 # THE single, only post-COPY RUN. All source-dependent setup
 # (current.tar.gz extraction, .git normalization, image_commit_hash,
