@@ -191,11 +191,12 @@ def resolve_deploy_strategy(
        deployed binary has not been tested against; cycling all
        containers immediately is the safe choice even for a
        "backwards-compatible" migration.
-    3. Otherwise, ``RECREATE`` for ``dev``-tier deploys (personal dev
-       envs + CI ephemeral envs). The operator's flow is "deploy and
-       immediately observe", and the stale-warm-container window
-       (several minutes for Modal's default rollover) silently masks
-       new code's behavior.
+    3. Otherwise, ``RECREATE`` for the per-env tiers (``dev`` for
+       personal dev envs and ``ci`` for CI ephemeral envs stood up by
+       the deployment-tests orchestrator). The operator's flow on
+       these tiers is "deploy and immediately observe", and the
+       stale-warm-container window (several minutes for Modal's
+       default rollover) silently masks new code's behavior.
     4. Otherwise (staging / production with no migration applied),
        ``ROLLOVER``. Shared tiers prioritize zero-downtime; the
        operator can opt in to ``RECREATE`` with ``--hard`` when they
