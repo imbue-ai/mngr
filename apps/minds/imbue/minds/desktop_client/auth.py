@@ -17,6 +17,7 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.minds.errors import ApiTokenError
+from imbue.minds.errors import MindError
 from imbue.minds.errors import SigningKeyError
 from imbue.minds.primitives import CookieSigningKey
 from imbue.minds.primitives import MindsApiToken
@@ -146,7 +147,7 @@ class FileAuthStore(AuthStoreInterface):
         read_error_message: str,
         empty_error_message: str,
         write_error_message: str,
-        error_class: type[Exception],
+        error_class: type[MindError],
         wrap: Callable[[str], _SecretT],
     ) -> _SecretT:
         """Read a 0o600-permissioned secret file, generating it on first access.
