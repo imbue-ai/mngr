@@ -45,6 +45,7 @@ from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import LiteLLMKeyMaterial
 from imbue.minds.desktop_client.notification import NotificationDispatcher
+from imbue.minds.desktop_client.workspace_server_health import WorkspaceServerHealthTracker
 from imbue.minds.errors import GitCloneError
 from imbue.minds.errors import GitOperationError
 from imbue.minds.errors import MngrCommandError
@@ -155,10 +156,24 @@ def make_log_callback(log_queue: queue.Queue[str]) -> OutputCallback:
 
 
 class AgentCreationStatus(UpperCaseStrEnum):
-    """Status of a background agent creation."""
+    """Status of a background agent creation.
 
-    CLONING = auto()
-    CREATING = auto()
+    The non-terminal values correspond to the ordered phases the worker
+    thread walks through; ``_stream_creation_logs`` polls the current
+    status and emits a SSE event each time it changes so the UI spinner
+    caption stays in sync with what the backend is actually doing.
+    Conditional phases (``CHECKING_OUT_BRANCH`` only if a branch was
+    given, ``PROVISIONING_AI`` only for ``IMBUE_CLOUD`` AI provider) are
+    skipped when they don't apply -- the status simply jumps to the next
+    applicable phase.
+    """
+
+    INITIALIZING = auto()
+    CLONING_REPO = auto()
+    CHECKING_OUT_BRANCH = auto()
+    PROVISIONING_AI = auto()
+    CREATING_WORKSPACE = auto()
+    WAITING_FOR_READY = auto()
     DONE = auto()
     FAILED = auto()
 
@@ -183,6 +198,12 @@ class AgentCreationInfo(FrozenModel):
         description="Canonical mngr agent id; populated once ``mngr create`` returns, ``None`` while in-flight",
     )
     status: AgentCreationStatus = Field(description="Current creation status")
+    launch_mode: LaunchMode = Field(
+        description=(
+            "Launch mode for this creation. Carried alongside status so consumers can resolve "
+            "mode-aware status captions without a separate lookup."
+        ),
+    )
     redirect_url: str | None = Field(default=None, description="URL to redirect to when creation is done")
     error: str | None = Field(default=None, description="Error message, set when status is FAILED")
 
@@ -887,6 +908,18 @@ class AgentCreator(MutableModel):
             "readiness probing alongside ``mngr_forward_port=0``."
         ),
     )
+    workspace_health_tracker: WorkspaceServerHealthTracker = Field(
+        frozen=True,
+        description=(
+            "Per-process health tracker shared with the ``mngr forward`` ``workspace_backend_failure`` "
+            "envelope consumer and the background workspace-health probe loop. ``_wait_for_workspace_ready`` "
+            "calls ``record_success`` on the probe that breaks out of its readiness loop, which cancels "
+            "any pending HEALTHY->STUCK timer the warmup failures have already armed. Without this call, "
+            "every workspace creation that takes >5s for its container's ``minds-workspace-server`` to "
+            "bind ``:8000`` (i.e. most of them) trips a spurious STUCK transition and the chrome jumps "
+            "to the recovery page right after the user lands on the workspace."
+        ),
+    )
     workspace_ready_timeout_seconds: float = Field(
         default=300.0,
         frozen=True,
@@ -919,6 +952,7 @@ class AgentCreator(MutableModel):
     _canonical_agent_ids: dict[str, AgentId] = PrivateAttr(default_factory=dict)
     _redirect_urls: dict[str, str] = PrivateAttr(default_factory=dict)
     _errors: dict[str, str] = PrivateAttr(default_factory=dict)
+    _launch_modes: dict[str, LaunchMode] = PrivateAttr(default_factory=dict)
     _log_queues: dict[str, queue.Queue[str]] = PrivateAttr(default_factory=dict)
     _threads: list[threading.Thread] = PrivateAttr(default_factory=list)
     _lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
@@ -987,7 +1021,8 @@ class AgentCreator(MutableModel):
         creation_id = CreationId()
 
         with self._lock:
-            self._statuses[str(creation_id)] = AgentCreationStatus.CLONING
+            self._statuses[str(creation_id)] = AgentCreationStatus.INITIALIZING
+            self._launch_modes[str(creation_id)] = launch_mode
             self._log_queues[str(creation_id)] = log_queue
 
         thread = threading.Thread(
@@ -1039,6 +1074,7 @@ class AgentCreator(MutableModel):
                 creation_id=creation_id,
                 agent_id=self._canonical_agent_ids.get(cid_str),
                 status=status,
+                launch_mode=self._launch_modes.get(cid_str, LaunchMode.LOCAL),
                 redirect_url=self._redirect_urls.get(cid_str),
                 error=self._errors.get(cid_str),
             )
@@ -1100,6 +1136,13 @@ class AgentCreator(MutableModel):
                 # the imbue_cloud command-construction drift from the other
                 # modes' (and was hard to keep in sync with the bake's view
                 # of the same config).
+                # Worker thread takes over from the initial ``INITIALIZING``
+                # status that ``start_creation`` set; cloning is the first
+                # real action. The caption rendered for this status is
+                # launch-mode-aware via ``_STATUS_TEXT_IMBUE_CLOUD``.
+                with self._lock:
+                    self._statuses[cid_str] = AgentCreationStatus.CLONING_REPO
+
                 if _is_local_path(repo_source):
                     resolved_path = Path(os.path.expanduser(repo_source)).resolve()
                     if not resolved_path.is_dir():
@@ -1156,6 +1199,8 @@ class AgentCreator(MutableModel):
                     workspace_dir = clone_target
 
                 if branch:
+                    with self._lock:
+                        self._statuses[cid_str] = AgentCreationStatus.CHECKING_OUT_BRANCH
                     log_queue.put("[minds] Checking out branch '{}'...".format(branch))
                     checkout_branch(
                         workspace_dir,
@@ -1176,6 +1221,8 @@ class AgentCreator(MutableModel):
                             raise MngrCommandError("AI provider IMBUE_CLOUD requires imbue_cloud_cli to be configured")
                         if not account_email:
                             raise MngrCommandError("AI provider IMBUE_CLOUD requires an account_email to be supplied")
+                        with self._lock:
+                            self._statuses[cid_str] = AgentCreationStatus.PROVISIONING_AI
                         log_queue.put(f"[minds] Minting LiteLLM virtual key for account {account_email}...")
                         try:
                             key_material: LiteLLMKeyMaterial = self.imbue_cloud_cli.create_litellm_key(
@@ -1200,7 +1247,7 @@ class AgentCreator(MutableModel):
                         assert_never(unreachable)
 
                 with self._lock:
-                    self._statuses[cid_str] = AgentCreationStatus.CREATING
+                    self._statuses[cid_str] = AgentCreationStatus.CREATING_WORKSPACE
 
                 # Pre-create the shared latchkey gateway password and a
                 # per-host permissions-override JWT before invoking
@@ -1308,6 +1355,8 @@ class AgentCreator(MutableModel):
                 # startup. The probe is best-effort: if it times out, we
                 # publish anyway so the user at least lands on the retry
                 # page rather than spinning forever (PR 1471 part 1).
+                with self._lock:
+                    self._statuses[cid_str] = AgentCreationStatus.WAITING_FOR_READY
                 self._wait_for_workspace_ready(canonical_id, log_queue)
 
                 # The redirect URL is *absolute* and points at the plugin's
@@ -1418,6 +1467,20 @@ class AgentCreator(MutableModel):
                     if status == 200:
                         logger.debug("Workspace ready for {} after {} probe(s)", agent_id, attempt)
                         log_queue.put("[minds] Workspace server is ready.")
+                        # Propagate the success into the shared health tracker.
+                        # Earlier probes in this loop go through ``mngr forward``
+                        # too, and each one's connect-refused failure trips a
+                        # ``workspace_backend_failure`` envelope that arms a
+                        # 5-second HEALTHY->STUCK timer on the tracker. Without
+                        # this explicit ``record_success`` the timer fires
+                        # *after* we return (because no other success path
+                        # flows back into the tracker until the background
+                        # probe loop next ticks, ~2s later), the chrome jumps
+                        # to the recovery page, and the user sees a "Workspace
+                        # server not responding" page seconds after their
+                        # freshly-created agent appeared healthy. Idempotent
+                        # if the tracker has no record for this agent.
+                        self.workspace_health_tracker.record_success(agent_id)
                         return
                 threading.Event().wait(timeout=self.workspace_ready_poll_interval_seconds)
         logger.warning(

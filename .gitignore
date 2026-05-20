@@ -265,6 +265,11 @@
 # it to check that per-env .sh files declare every template key.
 !/.minds/template/
 !/.minds/template/**
+# Vault ACL policies for the minds tiers. The HCL is non-sensitive and is
+# the source of truth for the policies pushed to Vault via
+# `vault policy write <name> .minds/policies/<name>.hcl`.
+!/.minds/policies/
+!/.minds/policies/**
 
 # Autofix session artifacts
 **/.autofix/
@@ -319,6 +324,9 @@ apps/minds_workspace_server/package-lock.json
 # macOS Finder metadata
 **/.DS_Store
 **/.env.swp
+# Vim swap files for any file (`.foo.swp`, `.foo.swo`, etc.) -- generated
+# while a file is open in vim. Never checked in.
+**/.*.sw[a-p]
 
 # `minds env deploy` writes a recover-target file at the monorepo root
 # on failed deploys; `minds env recover` deletes it after rolling back.

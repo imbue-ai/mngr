@@ -19,6 +19,7 @@ from fastapi import Depends
 from fastapi import FastAPI
 from fastapi import Request
 from fastapi.responses import HTMLResponse
+from fastapi.responses import RedirectResponse
 from fastapi.responses import Response
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -87,6 +88,7 @@ from imbue.minds.desktop_client.templates import render_sharing_editor
 from imbue.minds.desktop_client.templates import render_sidebar_page
 from imbue.minds.desktop_client.templates import render_welcome_page
 from imbue.minds.desktop_client.templates import render_workspace_settings
+from imbue.minds.desktop_client.templates import status_text_for
 from imbue.minds.desktop_client.templates import workspace_accent
 from imbue.minds.desktop_client.workspace_server_health import AgentHealth
 from imbue.minds.desktop_client.workspace_server_health import WorkspaceServerHealthTracker
@@ -660,8 +662,6 @@ async def _handle_create_form_submit(request: Request, auth_store: AuthStoreDep)
     )
 
     creating_url = "/creating/{}".format(creation_id)
-    if launch_mode is LaunchMode.IMBUE_CLOUD:
-        creating_url += "?mode=IMBUE_CLOUD"
     return Response(status_code=303, headers={"Location": creating_url})
 
 
@@ -810,7 +810,7 @@ async def _handle_create_agent_api(request: Request, auth_store: AuthStoreDep) -
     # CreationId (minds-internal in-flight handle, distinct prefix from a
     # canonical AgentId). The status-polling endpoints accept either.
     return Response(
-        content=json.dumps({"agent_id": str(creation_id), "status": "CLONING"}),
+        content=json.dumps({"agent_id": str(creation_id), "status": str(AgentCreationStatus.INITIALIZING)}),
         media_type="application/json",
     )
 
@@ -877,12 +877,7 @@ def _handle_creating_page(
     if info.status == AgentCreationStatus.DONE and info.redirect_url is not None:
         return Response(status_code=307, headers={"Location": info.redirect_url})
 
-    mode_param = request.query_params.get("mode", "")
-    try:
-        creating_launch_mode = LaunchMode(mode_param) if mode_param else LaunchMode.LOCAL
-    except ValueError:
-        creating_launch_mode = LaunchMode.LOCAL
-    html = render_creating_page(creation_id=creation_id, info=info, launch_mode=creating_launch_mode)
+    html = render_creating_page(creation_id=creation_id, info=info)
     return HTMLResponse(content=html)
 
 
@@ -894,13 +889,35 @@ async def _stream_creation_logs(
 ) -> AsyncGenerator[str, None]:
     """Async generator that yields SSE events from a creation log queue.
 
+    Each iteration polls ``agent_creator.get_creation_info(creation_id)``
+    and emits a ``{"_type": "status", ...}`` event whenever the status
+    has changed since the last emission. This piggybacks on the existing
+    ~1s log-queue keepalive cadence; caption-update latency is therefore
+    bounded by the queue.get timeout below, which is acceptable since
+    each backend phase takes much longer than 1s.
+
     Exits cleanly when ``shutdown_event`` is set so the server's
     graceful-shutdown deadline doesn't have to cancel us mid-stream.
     """
+    last_status: AgentCreationStatus | None = None
     streaming = True
     while streaming:
         if shutdown_event.is_set():
             return
+        info = agent_creator.get_creation_info(creation_id)
+        if info is not None and info.status != last_status:
+            last_status = info.status
+            status_event = {
+                "_type": "status",
+                "status": str(info.status),
+                "status_text": status_text_for(
+                    str(info.status),
+                    error=info.error,
+                    launch_mode=info.launch_mode,
+                ),
+            }
+            yield "data: {}\n\n".format(json.dumps(status_event))
+
         try:
             line = await asyncio.get_running_loop().run_in_executor(None, log_queue.get, True, 1.0)
         except (queue.Empty, TimeoutError, OSError):
@@ -1577,6 +1594,18 @@ def _handle_recovery_page(
     tracker: WorkspaceServerHealthTracker | None = request.app.state.workspace_health_tracker
     initial_status = tracker.get_health(aid).value if tracker is not None else AgentHealth.HEALTHY.value
     return_to = _sanitize_recovery_return_to(request.query_params.get("return_to", ""))
+    # If the agent has already recovered by the time the chrome navigates
+    # here (a real race: the background probe loop can flip the tracker
+    # back to HEALTHY in the brief window between the STUCK SSE push and
+    # the recovery-page GET landing), redirecting straight back to
+    # ``return_to`` is the right answer. Rendering the recovery page with
+    # ``initial_status="healthy"`` would otherwise wedge the user: the
+    # page's JS only auto-reloads on a streaming ``status=healthy`` SSE
+    # event, and the SSE doesn't push events for HEALTHY agents (the
+    # ``snapshot_all`` filter intentionally excludes them), so the user
+    # would sit on a misleading "not responding" page forever.
+    if initial_status == AgentHealth.HEALTHY.value and return_to:
+        return RedirectResponse(url=return_to, status_code=302)
     html_body = render_recovery_page(
         agent_id=aid,
         ws_name=ws_name,
