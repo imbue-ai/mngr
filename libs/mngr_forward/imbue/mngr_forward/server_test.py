@@ -684,7 +684,7 @@ def test_subdomain_forward_returns_plain_503_for_non_html_on_connect_failure(tmp
 def test_subdomain_forward_emits_system_interface_backend_failure_on_sse_startup_timeout(tmp_path: Path) -> None:
     """``TimeoutException`` on an SSE-startup ``send()`` must emit ``CONNECT_ERROR``.
 
-    Regression test: a wedged-but-listening workspace backend produces a
+    Regression test: a wedged-but-listening backend produces a
     ``httpx.TimeoutException`` (not ``ConnectError``) when ``send(..., stream=True)``
     waits for response headers that never arrive. Without an envelope on
     this branch the minds-side tracker would never transition to STUCK
