@@ -6,7 +6,7 @@ LIMA_BACKEND_NAME: Final[ProviderBackendName] = ProviderBackendName("lima")
 
 LIMA_INSTANCE_PREFIX: Final[str] = "mngr-"
 
-# Minimum Lima version (major, minor, patch) accepted by check_lima_version.
+# Minimum supported Lima version (major, minor, patch)
 MINIMUM_LIMA_VERSION: Final[tuple[int, int, int]] = (1, 0, 0)
 
 # Default image URLs for Lima VMs (Ubuntu 24.04 LTS cloud images).
