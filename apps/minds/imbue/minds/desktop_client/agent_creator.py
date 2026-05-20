@@ -45,6 +45,7 @@ from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import LiteLLMKeyMaterial
 from imbue.minds.desktop_client.notification import NotificationDispatcher
+from imbue.minds.desktop_client.workspace_server_health import WorkspaceServerHealthTracker
 from imbue.minds.errors import GitCloneError
 from imbue.minds.errors import GitOperationError
 from imbue.minds.errors import MngrCommandError
@@ -880,6 +881,18 @@ class AgentCreator(MutableModel):
             "readiness probing alongside ``mngr_forward_port=0``."
         ),
     )
+    workspace_health_tracker: WorkspaceServerHealthTracker = Field(
+        frozen=True,
+        description=(
+            "Per-process health tracker shared with the ``mngr forward`` ``workspace_backend_failure`` "
+            "envelope consumer and the background workspace-health probe loop. ``_wait_for_workspace_ready`` "
+            "calls ``record_success`` on the probe that breaks out of its readiness loop, which cancels "
+            "any pending HEALTHY->STUCK timer the warmup failures have already armed. Without this call, "
+            "every workspace creation that takes >5s for its container's ``minds-workspace-server`` to "
+            "bind ``:8000`` (i.e. most of them) trips a spurious STUCK transition and the chrome jumps "
+            "to the recovery page right after the user lands on the workspace."
+        ),
+    )
     workspace_ready_timeout_seconds: float = Field(
         default=60.0,
         frozen=True,
@@ -1402,6 +1415,20 @@ class AgentCreator(MutableModel):
                     if status == 200:
                         logger.debug("Workspace ready for {} after {} probe(s)", agent_id, attempt)
                         log_queue.put("[minds] Workspace server is ready.")
+                        # Propagate the success into the shared health tracker.
+                        # Earlier probes in this loop go through ``mngr forward``
+                        # too, and each one's connect-refused failure trips a
+                        # ``workspace_backend_failure`` envelope that arms a
+                        # 5-second HEALTHY->STUCK timer on the tracker. Without
+                        # this explicit ``record_success`` the timer fires
+                        # *after* we return (because no other success path
+                        # flows back into the tracker until the background
+                        # probe loop next ticks, ~2s later), the chrome jumps
+                        # to the recovery page, and the user sees a "Workspace
+                        # server not responding" page seconds after their
+                        # freshly-created agent appeared healthy. Idempotent
+                        # if the tracker has no record for this agent.
+                        self.workspace_health_tracker.record_success(agent_id)
                         return
                 threading.Event().wait(timeout=self.workspace_ready_poll_interval_seconds)
         logger.warning(
