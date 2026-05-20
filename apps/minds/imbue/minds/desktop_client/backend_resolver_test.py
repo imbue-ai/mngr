@@ -19,6 +19,10 @@ from imbue.minds.desktop_client.conftest import make_resolver_with_data
 from imbue.minds.desktop_client.conftest import make_service_log
 from imbue.minds.primitives import ServiceName
 from imbue.mngr.primitives import AgentId
+from imbue.mngr.primitives import AgentName
+from imbue.mngr.primitives import DiscoveredAgent
+from imbue.mngr.primitives import HostId
+from imbue.mngr.primitives import ProviderInstanceName
 
 _AGENT_A: AgentId = AgentId("agent-00000000000000000000000000000001")
 _AGENT_B: AgentId = AgentId("agent-00000000000000000000000000000002")
@@ -261,6 +265,42 @@ def test_mngr_cli_resolver_has_completed_initial_discovery() -> None:
 
     resolver.update_agents(ParsedAgentsResult(agent_ids=()))
     assert resolver.has_completed_initial_discovery()
+
+
+def _discovered_agent(host_id: HostId, agent_id: AgentId, agent_name: str) -> DiscoveredAgent:
+    return DiscoveredAgent(
+        host_id=host_id,
+        agent_id=agent_id,
+        agent_name=AgentName(agent_name),
+        provider_name=ProviderInstanceName("docker"),
+    )
+
+
+def test_get_system_services_agent_id_finds_agent_sharing_the_host() -> None:
+    """The system-services agent on the workspace agent's host is resolved, not one on another host."""
+    resolver = MngrCliBackendResolver()
+    host_a = HostId.generate()
+    host_b = HostId.generate()
+    workspace_agent = AgentId.generate()
+    services_on_a = AgentId.generate()
+    services_on_b = AgentId.generate()
+    resolver.update_agents(
+        ParsedAgentsResult(
+            agent_ids=(workspace_agent, services_on_a, services_on_b),
+            discovered_agents=(
+                _discovered_agent(host_a, workspace_agent, "my-claude-agent"),
+                _discovered_agent(host_a, services_on_a, "system-services"),
+                _discovered_agent(host_b, services_on_b, "system-services"),
+            ),
+        )
+    )
+
+    assert resolver.get_system_services_agent_id(workspace_agent) == services_on_a
+
+
+def test_get_system_services_agent_id_returns_none_when_not_discovered() -> None:
+    resolver = MngrCliBackendResolver()
+    assert resolver.get_system_services_agent_id(AgentId.generate()) is None
 
 
 def test_mngr_cli_resolver_update_services_replaces_state() -> None:
