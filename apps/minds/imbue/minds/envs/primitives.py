@@ -1,4 +1,4 @@
-"""Primitives + errors for the dynamic dev env subsystem."""
+"""Primitives + errors for the dynamic env subsystem (dev + ci tiers)."""
 
 import re
 from enum import auto
