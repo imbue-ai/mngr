@@ -33,7 +33,6 @@ just minds-test-services-against dev-josh apps/minds/deployment_tests/test_logge
 
 - Operator has run `vault login` so `minds env deploy` can read tier secrets.
 - A `git worktree` of `forever-claude-template` exists at `<monorepo>/.external_worktrees/forever-claude-template/`, matching whichever FCT branch you're testing against. The orchestrator errors out at startup with the setup command if missing.
-- A Docker daemon is running for the litellm-via-workspace test.
 
 ## Status
 
