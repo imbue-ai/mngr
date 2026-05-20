@@ -9,6 +9,7 @@ import uuid
 from collections.abc import Sequence
 from pathlib import Path
 
+import pytest
 from fastapi import FastAPI
 from fastapi import Request
 from fastapi.responses import Response
@@ -27,6 +28,7 @@ from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
 from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
 from imbue.minds.desktop_client.cookie_manager import create_session_cookie
+from imbue.minds.desktop_client.latchkey import permissions as permissions_module
 from imbue.minds.desktop_client.latchkey.permissions import GrantOutcome
 from imbue.minds.desktop_client.latchkey.permissions import GrantResult
 from imbue.minds.desktop_client.latchkey.permissions import LatchkeyPermissionGrantHandler
@@ -564,14 +566,18 @@ def test_get_permission_request_page_pre_checks_union_of_existing_and_requested(
     assert "checked" not in body[read_all_tag_start:read_all_tag_end]
 
 
-def test_post_permission_grant_returns_503_when_host_not_yet_discovered(tmp_path: Path) -> None:
+def test_post_permission_grant_returns_503_when_host_not_yet_discovered(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Grant fails fast when the agent's host can't be resolved.
 
     Latchkey state is keyed by host_id; if the backend resolver hasn't
     seen the agent yet (or only reports a non-:class:`HostId` placeholder
     like the static resolver's default ``"localhost"``) the route would
     otherwise write the grant to the wrong file. 503 tells the UI to
-    retry, instead of silently mis-keying state.
+    retry, instead of silently mis-keying state. The ``mngr list``
+    fallback is patched to also return ``None`` so both resolution
+    paths fail and the 503 path is exercised in isolation.
     """
     agent_id = AgentId()
     request = create_latchkey_permission_request_event(
@@ -581,9 +587,8 @@ def test_post_permission_grant_returns_503_when_host_not_yet_discovered(tmp_path
     )
     inbox = RequestInbox().add_request(request)
     handler = _make_recording_handler(tmp_path)
-    # No ``agent_id=`` kwarg -> default ``StaticBackendResolver`` -> host
-    # cannot be resolved.
     client = _build_authenticated_client(tmp_path, handler, inbox)
+    monkeypatch.setattr(permissions_module, "_resolve_host_id_via_mngr_list", lambda _agent_id: None)
 
     response = client.post(
         f"/requests/{request.event_id}/grant",
@@ -594,6 +599,45 @@ def test_post_permission_grant_returns_503_when_host_not_yet_discovered(tmp_path
     assert handler.grant_calls == []
     final_inbox = _get_app_request_inbox(client)
     assert final_inbox.get_pending_count() == 1
+
+
+def test_post_permission_grant_uses_mngr_list_fallback_when_cache_misses(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Grant succeeds when the resolver's cache misses but ``mngr list`` knows the agent.
+
+    The desktop client's in-memory discovery cache can lag behind agents
+    created after subscription (the bug observed with Lima/Docker child
+    agents). The route layer falls back to ``mngr list --format json
+    --on-error continue`` for an authoritative agent_id -> host_id
+    lookup; without that fallback an Approve click would 503 every time
+    the cache hadn't caught up.
+    """
+    agent_id = AgentId()
+    fallback_host_id = HostId()
+    request = create_latchkey_permission_request_event(
+        agent_id=str(agent_id),
+        scope="slack-api",
+        rationale="reason",
+    )
+    inbox = RequestInbox().add_request(request)
+    handler = _make_recording_handler(tmp_path)
+    # No ``agent_id=`` kwarg -> default ``StaticBackendResolver`` -> cache miss.
+    client = _build_authenticated_client(tmp_path, handler, inbox)
+    monkeypatch.setattr(
+        permissions_module,
+        "_resolve_host_id_via_mngr_list",
+        lambda _agent_id: fallback_host_id,
+    )
+
+    response = client.post(
+        f"/requests/{request.event_id}/grant",
+        data={"permissions": ["slack-read-all"]},
+    )
+
+    assert response.status_code == 200
+    assert len(handler.grant_calls) == 1
+    assert handler.grant_calls[0]["host_id"] == str(fallback_host_id)
 
 
 def test_unauthenticated_grant_post_returns_403(tmp_path: Path) -> None:
