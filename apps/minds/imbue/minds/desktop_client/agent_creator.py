@@ -514,21 +514,16 @@ def _build_mngr_create_command(
 
     match launch_mode:
         case LaunchMode.IMBUE_CLOUD:
-            # The pool host already has a baked ``system-services`` agent
-            # (per ``_BAKED_SERVICES_AGENT_NAME`` in
-            # ``mngr_imbue_cloud/cli/admin.py``) which the lease/adopt path
-            # in ``ImbueCloudHost.create_agent_state`` will hydrate in
-            # place. mngr's core create flow runs an "agent already
-            # exists on this host" pre-flight that fires before the
-            # adopt path -- without ``--reuse`` it aborts with
-            # ``An agent named 'system-services' already exists``.
-            # ``--reuse`` tells mngr's pre-flight to expect the existing
-            # agent; the adopt path then keeps the baked id intact.
-            # ``--update`` is intentionally NOT passed: the adopt path
-            # already patches the labels + command in place; running
-            # mngr's standard provisioning on top would re-do the file
-            # transfer + provisioning round the bake already paid for.
-            mngr_command.append("--reuse")
+            # IMBUE_CLOUD passes neither --reuse nor --update. The leased pool
+            # host is provisioned fresh via --new-host; its baked
+            # ``system-services`` agent is adopted in place by
+            # ``ImbueCloudHost.create_agent_state``. The baked agent's name
+            # collision with the create's agent name is resolved by mngr's
+            # duplicate-name check, which exempts ``host.pre_baked_agent_id``.
+            # --reuse would be a no-op here (the leased host is not yet
+            # discoverable when mngr's reuse lookup runs) and mngr rejects
+            # --reuse together with --new-host.
+            pass
         case _:
             mngr_command.extend(["--reuse", "--update"])
 

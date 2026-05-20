@@ -23,7 +23,6 @@ from imbue.mngr.cli.create import _editor_cleanup_scope
 from imbue.mngr.cli.create import _get_source_remote_url
 from imbue.mngr.cli.create import _is_creating_new_host
 from imbue.mngr.cli.create import _is_host_in_reuse_scope
-from imbue.mngr.cli.create import _is_imbue_cloud_provider
 from imbue.mngr.cli.create import _parse_agent_opts
 from imbue.mngr.cli.create import _parse_branch_flag
 from imbue.mngr.cli.create import _parse_host_lifecycle_options
@@ -39,7 +38,6 @@ from imbue.mngr.cli.create import _try_reuse_existing_agent
 from imbue.mngr.cli.create import create
 from imbue.mngr.config.data_types import CreateCliOptions
 from imbue.mngr.config.data_types import MngrContext
-from imbue.mngr.config.data_types import ProviderInstanceConfig
 from imbue.mngr.config.loader import get_or_create_profile_dir
 from imbue.mngr.errors import HostNotFoundError
 from imbue.mngr.errors import UserInputError
@@ -59,7 +57,6 @@ from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import IdleMode
 from imbue.mngr.primitives import NewAgentLocation
-from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
@@ -503,105 +500,6 @@ def test_try_reuse_existing_agent_address_host_isolates_same_named_agents(
             mngr_ctx=temp_mngr_ctx,
             agent_and_host_loader=lambda: {host1: [agent1], host2: [agent2]},
         )
-
-
-# -- _is_imbue_cloud_provider: gates the --reuse + --new-host exemption --
-
-
-def test_is_imbue_cloud_provider_returns_false_for_none(temp_mngr_ctx: MngrContext) -> None:
-    """A None provider name (no provider pinned in the address) is not imbue_cloud."""
-    assert _is_imbue_cloud_provider(None, temp_mngr_ctx) is False
-
-
-def test_is_imbue_cloud_provider_uses_configured_backend(temp_mngr_ctx: MngrContext) -> None:
-    """A configured per-account instance (e.g. ``imbue_cloud_alice``) resolves via its backend field.
-
-    This is the production path: the minds caller targets per-slug provider
-    names like ``imbue_cloud_alice`` whose backend is ``imbue_cloud``. The
-    exemption must recognise these.
-    """
-    instance_name = ProviderInstanceName("imbue_cloud_alice")
-    updated_config = temp_mngr_ctx.config.model_copy_update(
-        to_update(
-            temp_mngr_ctx.config.field_ref().providers,
-            {instance_name: ProviderInstanceConfig(backend=ProviderBackendName("imbue_cloud"))},
-        ),
-    )
-    ctx = temp_mngr_ctx.model_copy_update(
-        to_update(temp_mngr_ctx.field_ref().config, updated_config),
-    )
-
-    assert _is_imbue_cloud_provider(instance_name, ctx) is True
-
-
-def test_is_imbue_cloud_provider_falls_back_to_bare_name(temp_mngr_ctx: MngrContext) -> None:
-    """Bare-name fallback: an unconfigured ``imbue_cloud`` instance still counts.
-
-    Mirrors :func:`get_provider_instance`'s fallback: when no provider config
-    entry matches, the instance name itself is treated as the backend.
-    """
-    assert _is_imbue_cloud_provider(ProviderInstanceName("imbue_cloud"), temp_mngr_ctx) is True
-
-
-def test_is_imbue_cloud_provider_rejects_other_backends(temp_mngr_ctx: MngrContext) -> None:
-    """A configured instance whose backend is not ``imbue_cloud`` must not match."""
-    instance_name = ProviderInstanceName("my-modal")
-    updated_config = temp_mngr_ctx.config.model_copy_update(
-        to_update(
-            temp_mngr_ctx.config.field_ref().providers,
-            {instance_name: ProviderInstanceConfig(backend=ProviderBackendName("modal"))},
-        ),
-    )
-    ctx = temp_mngr_ctx.model_copy_update(
-        to_update(temp_mngr_ctx.field_ref().config, updated_config),
-    )
-
-    assert _is_imbue_cloud_provider(instance_name, ctx) is False
-
-
-def test_is_imbue_cloud_provider_rejects_unrelated_bare_name(temp_mngr_ctx: MngrContext) -> None:
-    """Unrelated bare-name instances (e.g. ``local``) do not trigger the exemption."""
-    assert _is_imbue_cloud_provider(ProviderInstanceName("local"), temp_mngr_ctx) is False
-
-
-def test_create_does_not_reject_reuse_with_new_host_on_imbue_cloud_provider(
-    cli_runner: CliRunner,
-    plugin_manager: pluggy.PluginManager,
-    temp_host_dir: Path,
-) -> None:
-    """imbue_cloud is exempted from the ``--reuse + --new-host`` rejection.
-
-    Regression for the validator exemption that the minds IMBUE_CLOUD lease/adopt
-    flow depends on. Configures a provider instance with ``backend = "imbue_cloud"``
-    in the test profile, invokes ``mngr create`` with ``--reuse --new-host`` against
-    that instance, and asserts the validator-specific error message is NOT raised.
-
-    The command still fails downstream because the imbue_cloud plugin is not
-    installed in mngr core tests; the salient property is that the failure is
-    NOT ``--reuse cannot be combined with --new-host``.
-    """
-    profile_dir = get_or_create_profile_dir(temp_host_dir)
-    settings_doc = load_config_file_tomlkit(profile_dir / "settings.toml")
-    providers = settings_doc.setdefault("providers", tomlkit.table())
-    imbue_cloud_block = tomlkit.table()
-    imbue_cloud_block["backend"] = "imbue_cloud"
-    providers["imbue_cloud_test"] = imbue_cloud_block
-    save_config_file(profile_dir / "settings.toml", settings_doc)
-
-    result = cli_runner.invoke(
-        create,
-        [
-            "system-services@new-host.imbue_cloud_test",
-            "--reuse",
-            "--new-host",
-            "--type",
-            "command",
-            "--no-connect",
-        ],
-        obj=plugin_manager,
-    )
-
-    assert "--reuse cannot be combined with --new-host" not in result.output
 
 
 # -- Tests using real local provider infrastructure --
@@ -1961,8 +1859,7 @@ def test_create_rejects_reuse_with_new_host(
     """--reuse + --new-host is contradictory and should fail with a clear error.
 
     --new-host always provisions a fresh host; --reuse looks up an existing agent
-    on an existing host. The combination has no coherent meaning for any provider
-    other than imbue_cloud's lease/adopt flow.
+    on an existing host, which a fresh host cannot have.
     """
     result = cli_runner.invoke(
         create,

@@ -15,6 +15,10 @@ behavior.
 
 `mngr create` also rejects `--reuse --new-host` with a `UserInputError`:
 `--new-host` always provisions a fresh host, while `--reuse` looks up an
-existing agent on an existing host, so the combination has no coherent
-meaning. The imbue_cloud provider is exempted so the lease/adopt flow that
-the minds caller depends on continues to work.
+existing agent on an existing host, which a fresh host cannot have.
+
+The minds IMBUE_CLOUD launch path no longer passes `--reuse`. It was a
+no-op there -- the leased pool host is not discoverable when the reuse
+lookup runs -- and the baked `system-services` agent's name collision is
+already handled by the `pre_baked_agent_id` exemption in the duplicate-name
+check, not by `--reuse`.

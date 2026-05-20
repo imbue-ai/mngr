@@ -94,7 +94,6 @@ from imbue.mngr.primitives import LogLevel
 from imbue.mngr.primitives import NewAgentLocation
 from imbue.mngr.primitives import OutputFormat
 from imbue.mngr.primitives import Permission
-from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import SnapshotName
 from imbue.mngr.primitives import TransferMode
@@ -262,26 +261,6 @@ def _is_new_host_implied(address: NewAgentLocation) -> bool:
 def _is_creating_new_host(address: NewAgentLocation, new_host_flag: bool) -> bool:
     """Whether this location combined with the --new-host flag means creating a new host."""
     return new_host_flag or _is_new_host_implied(address)
-
-
-# Backend name of the imbue_cloud provider plugin.
-_IMBUE_CLOUD_BACKEND: Final[ProviderBackendName] = ProviderBackendName("imbue_cloud")
-
-
-@pure
-def _is_imbue_cloud_provider(provider_name: ProviderInstanceName | None, mngr_ctx: MngrContext) -> bool:
-    """Return True when ``provider_name`` resolves to the imbue_cloud backend.
-
-    Resolves the backend from the provider config's ``backend`` field, or
-    falls back to treating the instance name itself as the backend when the
-    name is not in the config. Does not build the provider.
-    """
-    if provider_name is None:
-        return False
-    provider_config = mngr_ctx.config.providers.get(provider_name)
-    if provider_config is not None:
-        return provider_config.backend == _IMBUE_CLOUD_BACKEND
-    return ProviderBackendName(str(provider_name)) == _IMBUE_CLOUD_BACKEND
 
 
 @pure
@@ -642,11 +621,8 @@ def create(ctx: click.Context, **kwargs) -> None:
 
         # Validate --reuse + --new-host: contradictory by construction. --new-host
         # always provisions a fresh host; --reuse looks up an existing agent on an
-        # existing host. The imbue_cloud provider is exempted: on its fresh-lease
-        # path the leased host is not yet in agents_by_host when _try_reuse runs,
-        # so --reuse is a no-op there rather than contradictory, and rejecting the
-        # combination would break callers that pass both flags for that provider.
-        if opts.reuse and opts.new_host and not _is_imbue_cloud_provider(address.provider_name, mngr_ctx):
+        # existing host, which a fresh host cannot have.
+        if opts.reuse and opts.new_host:
             raise UserInputError(
                 "--reuse cannot be combined with --new-host: --reuse looks up an existing agent "
                 "on an existing host, --new-host always provisions a fresh host. Drop one."
