@@ -20,7 +20,7 @@ from imbue.minds.envs.primitives import DevEnvName
 
 
 class SharedEnvUrls(FrozenModel):
-    """Public URLs for one shared dev env, keyed by role in :class:`DeploymentEnvsConfig`.
+    """Public URLs for one shared env, keyed by role in :class:`DeploymentEnvsConfig`.
 
     Secrets (Neon DSNs, SuperTokens admin key) for the same env live in
     env vars prefixed ``MINDS_DEPLOYMENT_TEST_SHARED_<ROLE_UPPER>_`` so
