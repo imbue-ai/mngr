@@ -885,9 +885,9 @@ def _create_agent(
     update_host: OnlineHostInterface | None = None
     if opts.reuse and agent_opts.name is not None:
         reuse_result = _try_reuse_existing_agent(
-            agent_name=agent_opts.name,
             provider_name=address.provider_name,
-            address_host=address.host_name,
+            host_name=address.host_name,
+            agent_name=agent_opts.name,
             mngr_ctx=mngr_ctx,
             agent_and_host_loader=setup.agent_and_host_loader,
         )
@@ -1184,37 +1184,73 @@ def _parse_project_name(
     )
 
 
-def _try_reuse_existing_agent(
-    agent_name: AgentName,
+@pure
+def _is_host_in_reuse_scope(
+    host_ref: DiscoveredHost,
     provider_name: ProviderInstanceName | None,
-    address_host: HostName | HostId | None,
+    host_name: HostName | HostId | None,
+) -> bool:
+    """Whether an already-discovered host falls within the provider/host scope a ``mngr create`` address asked for.
+
+    ``_try_reuse_existing_agent`` calls this once per discovered host to decide
+    which hosts to search for a reusable agent. ``provider_name`` and
+    ``host_name`` come straight from the parsed address
+    (``address.provider_name`` and ``address.host_name``); either is ``None``
+    when the user left that part of the address blank.
+
+    Matching, in order:
+
+    - Provider: when the address pinned a provider, the host's provider must
+      equal it. A blank provider does not constrain.
+    - Host: a blank ``host_name`` does not constrain -- every host on the
+      already-narrowed provider set is in scope (the "any host" behavior of
+      bare-name and ``@.PROVIDER`` reuse). A :class:`HostId` must equal the
+      host's id exactly. A :class:`HostName` must equal the host's name; the
+      provider check above is what keeps same-named hosts on different
+      providers from cross-matching.
+
+    Worked examples (``host_ref`` is a host found during discovery):
+
+    - ``provider=None, host=None`` (``mngr create worker``): every host.
+    - ``provider="modal", host=None`` (``worker@.modal``): hosts on modal.
+    - ``provider=None, host=HostName("h2")`` (``worker@h2``): hosts named "h2".
+    - ``provider="modal", host=HostName("h2")`` (``worker@h2.modal``): the
+      host named "h2" on modal (a host named "h2" on docker is excluded).
+    - ``provider=*, host=HostId("host-ab12")``: the host with that exact id.
+    """
+    if provider_name is not None and host_ref.provider_name != provider_name:
+        return False
+    if host_name is None:
+        return True
+    if isinstance(host_name, HostId):
+        return host_ref.host_id == host_name
+    return host_ref.host_name == host_name
+
+
+def _try_reuse_existing_agent(
+    provider_name: ProviderInstanceName | None,
+    host_name: HostName | HostId | None,
+    agent_name: AgentName,
     mngr_ctx: MngrContext,
     agent_and_host_loader: Callable[[], dict[DiscoveredHost, list[DiscoveredAgent]]],
 ) -> tuple[AgentInterface, OnlineHostInterface] | None:
     """Try to find and start an existing agent with the given name.
 
-    Searches for an agent matching the name, scoped by provider and by the
-    host component of the address (when present). ``address_host`` is the
-    address's ``host_name`` field straight from ``NewAgentLocation``: a
-    :class:`HostId` produces an exact match on ``host_id``; a :class:`HostName`
-    matches on ``host_name``, and when ``provider_name`` is also set the
-    host's provider must match too (so same-named hosts on different
-    providers cannot cross-match). ``None`` keeps the documented "any host"
-    behavior used by the bare-name reuse path. If found, ensures the agent is
-    started and returns it along with its host. If not found, returns None so
-    the caller can proceed with creating a new agent.
+    Searches the discovered hosts for an agent named ``agent_name``, restricted
+    to the provider/host scope of the create address. ``provider_name`` and
+    ``host_name`` are the address's ``provider_name`` / ``host_name`` fields;
+    :func:`_is_host_in_reuse_scope` defines exactly which hosts that pair
+    selects. When neither is set the search spans every host (the documented
+    "any host" behavior of bare-name ``--reuse``). If found, ensures the agent
+    is started and returns it along with its host. If not found, returns None
+    so the caller can proceed with creating a new agent.
     """
     agents_by_host = agent_and_host_loader()
 
     matching_agents: list[tuple[DiscoveredHost, DiscoveredAgent]] = []
 
     for host_ref, agent_refs in agents_by_host.items():
-        # Skip hosts that don't match the provider filter (if specified)
-        if provider_name is not None and host_ref.provider_name != provider_name:
-            continue
-
-        # Skip hosts that don't match the address's host component (if specified)
-        if not _host_ref_matches_address(host_ref, address_host, provider_name):
+        if not _is_host_in_reuse_scope(host_ref, provider_name, host_name):
             continue
 
         for agent_ref in agent_refs:
@@ -1711,32 +1747,6 @@ def _parse_target_host(
         raise UserInputError(f"Could not find host: {address.host_name}")
 
     return host_ref
-
-
-@pure
-def _host_ref_matches_address(
-    host_ref: DiscoveredHost,
-    address_host: HostName | HostId | None,
-    provider_name: ProviderInstanceName | None,
-) -> bool:
-    """Whether ``host_ref`` matches the host component of the create address.
-
-    ``None`` means the user did not pin a host in the address; the caller's
-    "any host" semantics apply and every host is a match. A :class:`HostId`
-    matches on ``host_id`` (IDs are unique). A :class:`HostName` matches on
-    ``host_name``; when a provider was also pinned, the host's
-    ``provider_name`` must match too, preventing same-named hosts on
-    different providers from cross-matching.
-    """
-    if address_host is None:
-        return True
-    if isinstance(address_host, HostId):
-        return host_ref.host_id == address_host
-    if host_ref.host_name != address_host:
-        return False
-    if provider_name is not None and host_ref.provider_name != provider_name:
-        return False
-    return True
 
 
 def _find_existing_host(

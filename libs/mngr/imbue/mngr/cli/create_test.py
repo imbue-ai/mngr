@@ -21,8 +21,8 @@ from imbue.mngr.cli.create import _apply_host_labels
 from imbue.mngr.cli.create import _check_source_does_not_contain_state_dir
 from imbue.mngr.cli.create import _editor_cleanup_scope
 from imbue.mngr.cli.create import _get_source_remote_url
-from imbue.mngr.cli.create import _host_ref_matches_address
 from imbue.mngr.cli.create import _is_creating_new_host
+from imbue.mngr.cli.create import _is_host_in_reuse_scope
 from imbue.mngr.cli.create import _is_imbue_cloud_provider
 from imbue.mngr.cli.create import _parse_agent_opts
 from imbue.mngr.cli.create import _parse_branch_flag
@@ -328,7 +328,7 @@ def test_try_reuse_existing_agent_no_agents_found(temp_mngr_ctx: MngrContext) ->
     result = _try_reuse_existing_agent(
         agent_name=AgentName("nonexistent"),
         provider_name=None,
-        address_host=None,
+        host_name=None,
         mngr_ctx=temp_mngr_ctx,
         agent_and_host_loader=lambda: {},
     )
@@ -344,7 +344,7 @@ def test_try_reuse_existing_agent_no_matching_name(temp_mngr_ctx: MngrContext) -
     result = _try_reuse_existing_agent(
         agent_name=AgentName("test-agent"),
         provider_name=None,
-        address_host=None,
+        host_name=None,
         mngr_ctx=temp_mngr_ctx,
         agent_and_host_loader=lambda: {host_ref: [agent_ref]},
     )
@@ -360,7 +360,7 @@ def test_try_reuse_existing_agent_filters_by_provider(temp_mngr_ctx: MngrContext
     result = _try_reuse_existing_agent(
         agent_name=AgentName("test-agent"),
         provider_name=ProviderInstanceName("local"),
-        address_host=None,
+        host_name=None,
         mngr_ctx=temp_mngr_ctx,
         agent_and_host_loader=lambda: {host_ref: [agent_ref]},
     )
@@ -376,7 +376,7 @@ def test_try_reuse_existing_agent_filters_by_address_host_id(temp_mngr_ctx: Mngr
     result = _try_reuse_existing_agent(
         agent_name=AgentName("test-agent"),
         provider_name=None,
-        address_host=HostId(TEST_HOST_ID_2),
+        host_name=HostId(TEST_HOST_ID_2),
         mngr_ctx=temp_mngr_ctx,
         agent_and_host_loader=lambda: {host_ref: [agent_ref]},
     )
@@ -392,7 +392,7 @@ def test_try_reuse_existing_agent_filters_by_address_host_name(temp_mngr_ctx: Mn
     result = _try_reuse_existing_agent(
         agent_name=AgentName("test-agent"),
         provider_name=None,
-        address_host=HostName("h2"),
+        host_name=HostName("h2"),
         mngr_ctx=temp_mngr_ctx,
         agent_and_host_loader=lambda: {host_ref: [agent_ref]},
     )
@@ -400,19 +400,19 @@ def test_try_reuse_existing_agent_filters_by_address_host_name(temp_mngr_ctx: Mn
     assert result is None
 
 
-def test_host_ref_matches_address_provider_filter_rejects_other_provider() -> None:
+def test_is_host_in_reuse_scope_provider_filter_rejects_other_provider() -> None:
     """When two hosts share a name across providers, the pinned provider picks one.
 
-    Direct unit test for the provider-filter branch of ``_host_ref_matches_address``:
-    when ``address_host`` is a :class:`HostName` and ``provider_name`` is set,
-    a host whose name matches but whose provider does not must be rejected,
-    and the matching-provider host must be accepted.
+    Direct unit test for the provider-filter branch of ``_is_host_in_reuse_scope``:
+    when ``host_name`` is a :class:`HostName` and ``provider_name`` is set, a
+    host whose name matches but whose provider does not must be rejected, and
+    the matching-provider host must be accepted.
     """
     host_local = _make_discovered_host(host_id=TEST_HOST_ID_1, host_name="shared", provider="local")
     host_modal = _make_discovered_host(host_id=TEST_HOST_ID_2, host_name="shared", provider="modal")
 
-    assert _host_ref_matches_address(host_local, HostName("shared"), ProviderInstanceName("local")) is True
-    assert _host_ref_matches_address(host_modal, HostName("shared"), ProviderInstanceName("local")) is False
+    assert _is_host_in_reuse_scope(host_local, ProviderInstanceName("local"), HostName("shared")) is True
+    assert _is_host_in_reuse_scope(host_modal, ProviderInstanceName("local"), HostName("shared")) is False
 
 
 def test_try_reuse_existing_agent_address_host_name_without_provider_raises_on_collision(
@@ -420,7 +420,7 @@ def test_try_reuse_existing_agent_address_host_name_without_provider_raises_on_c
 ) -> None:
     """Without the provider filter, same-named hosts on different providers both match.
 
-    With ``provider_name=None`` the provider-equality branch in ``_host_ref_matches_address``
+    With ``provider_name=None`` the provider-equality check in ``_is_host_in_reuse_scope``
     is bypassed, so both same-named hosts pass the filter and
     ``_try_reuse_existing_agent`` ends up with multiple candidates -- the
     documented disambiguation error fires.
@@ -438,7 +438,7 @@ def test_try_reuse_existing_agent_address_host_name_without_provider_raises_on_c
         _try_reuse_existing_agent(
             agent_name=AgentName("test-agent"),
             provider_name=None,
-            address_host=HostName("shared"),
+            host_name=HostName("shared"),
             mngr_ctx=temp_mngr_ctx,
             agent_and_host_loader=lambda: {host_local: [agent_local], host_modal: [agent_modal]},
         )
@@ -462,7 +462,7 @@ def test_try_reuse_existing_agent_bare_name_multiple_matches_raises(
         _try_reuse_existing_agent(
             agent_name=AgentName("worker"),
             provider_name=None,
-            address_host=None,
+            host_name=None,
             mngr_ctx=temp_mngr_ctx,
             agent_and_host_loader=lambda: {host1: [agent1], host2: [agent2]},
         )
@@ -474,7 +474,7 @@ def test_try_reuse_existing_agent_bare_name_multiple_matches_raises(
 def test_try_reuse_existing_agent_address_host_isolates_same_named_agents(
     temp_mngr_ctx: MngrContext,
 ) -> None:
-    """Two same-named agents on different hosts: address_host picks the right one.
+    """Two same-named agents on different hosts: the address's host picks the right one.
 
     Regression for the reported bug where a fresh-host create with --reuse
     accidentally adopted an unrelated same-named agent on another host because
@@ -499,7 +499,7 @@ def test_try_reuse_existing_agent_address_host_isolates_same_named_agents(
         _try_reuse_existing_agent(
             agent_name=AgentName("system-services"),
             provider_name=None,
-            address_host=HostName("h2"),
+            host_name=HostName("h2"),
             mngr_ctx=temp_mngr_ctx,
             agent_and_host_loader=lambda: {host1: [agent1], host2: [agent2]},
         )
@@ -644,7 +644,7 @@ def test_try_reuse_existing_agent_found_and_started(
         result = _try_reuse_existing_agent(
             agent_name=agent.name,
             provider_name=None,
-            address_host=None,
+            host_name=None,
             mngr_ctx=temp_mngr_ctx,
             agent_and_host_loader=lambda: {host_ref: [agent_ref]},
         )
@@ -681,7 +681,7 @@ def test_try_reuse_existing_agent_not_found_on_host(
     result = _try_reuse_existing_agent(
         agent_name=AgentName("ghost-agent"),
         provider_name=None,
-        address_host=None,
+        host_name=None,
         mngr_ctx=temp_mngr_ctx,
         agent_and_host_loader=lambda: {host_ref: [agent_ref]},
     )
