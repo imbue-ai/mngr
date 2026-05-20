@@ -1083,6 +1083,50 @@ def test_create_agent_api_rejects_api_key_provider_without_key(tmp_path: Path) -
     assert "anthropic_api_key is required" in response.json()["error"]
 
 
+def test_create_form_submit_accepts_api_key_provider_with_use_env_flag(tmp_path: Path) -> None:
+    """API_KEY auth + empty form key + ``use_env_anthropic_api_key`` checkbox checked
+    must NOT be rejected up front: the user opted in to forwarding the ambient
+    ANTHROPIC_API_KEY env var, which supplies the credential. The form should
+    303-redirect to the creating page just like any accepted submission."""
+    client, _, agent_creator = _create_test_server_with_agent_creator(tmp_path)
+
+    response = client.post(
+        "/create",
+        data={
+            "git_url": "file:///nonexistent-repo",
+            "host_name": "my-agent",
+            "launch_mode": "LOCAL",
+            "ai_provider": "API_KEY",
+            "anthropic_api_key": "",
+            # Browsers send a string ("on") for a checked checkbox; the
+            # backend only checks for presence so any non-empty value works.
+            "use_env_anthropic_api_key": "on",
+        },
+        follow_redirects=False,
+    )
+    assert response.status_code == 303
+    agent_creator.wait_for_all()
+
+
+def test_create_agent_api_accepts_api_key_provider_with_use_env_flag(tmp_path: Path) -> None:
+    """JSON-API mirror: API_KEY + empty key + ``use_env_anthropic_api_key=true``
+    must NOT be rejected up front."""
+    client, _, agent_creator = _create_test_server_with_agent_creator(tmp_path)
+
+    response = client.post(
+        "/api/create-agent",
+        json={
+            "git_url": "file:///nonexistent-repo",
+            "ai_provider": "API_KEY",
+            "anthropic_api_key": "",
+            "use_env_anthropic_api_key": True,
+        },
+    )
+    assert response.status_code == 200
+    assert "agent_id" in response.json()
+    agent_creator.wait_for_all()
+
+
 def test_create_agent_api_rejects_invalid_ai_provider(tmp_path: Path) -> None:
     """An unknown ai_provider is rejected by the JSON API."""
     client, _, _ = _create_test_server_with_agent_creator(tmp_path)

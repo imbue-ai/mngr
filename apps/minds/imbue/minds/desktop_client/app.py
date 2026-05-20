@@ -642,8 +642,18 @@ async def _handle_create_form_submit(request: Request, auth_store: AuthStoreDep)
             "option for both the compute and AI providers."
         )
 
-    if ai_provider is AIProvider.API_KEY and not anthropic_api_key:
-        return _re_render_with_error("An Anthropic API key is required when AI provider is set to api_key.")
+    # API_KEY auth needs a key from somewhere. Accept either a form-supplied
+    # key or an explicit opt-in to forward the ambient ``ANTHROPIC_API_KEY``
+    # env var (the form's "Use ANTHROPIC_API_KEY from your environment"
+    # checkbox disables and so omits the text input from the POST when
+    # checked). The worker thread enforces the same gate; this upfront
+    # check just gives the user inline feedback on the form.
+    if ai_provider is AIProvider.API_KEY and not anthropic_api_key and not use_env_anthropic_api_key:
+        return _re_render_with_error(
+            "An Anthropic API key is required when AI provider is set to api_key "
+            "(or check \"Use ANTHROPIC_API_KEY from your environment\" if your shell "
+            "exports it)."
+        )
 
     # Resolve the account email when needed (imbue_cloud compute or AI). The
     # mngr_imbue_cloud plugin owns the SuperTokens session and is responsible
@@ -806,10 +816,18 @@ async def _handle_create_agent_api(request: Request, auth_store: AuthStoreDep) -
             content='{"error": "account_id is required when launch_mode or ai_provider is IMBUE_CLOUD"}',
             media_type="application/json",
         )
-    if ai_provider is AIProvider.API_KEY and not anthropic_api_key:
+    # Mirror the form path's gate: accept either a form-supplied key or an
+    # explicit ``use_env_anthropic_api_key`` opt-in. The worker thread
+    # enforces the same condition; this upfront check just gives the API
+    # caller a 400 with a clear error rather than a deferred FAILED status.
+    if ai_provider is AIProvider.API_KEY and not anthropic_api_key and not use_env_anthropic_api_key:
         return Response(
             status_code=400,
-            content='{"error": "anthropic_api_key is required when ai_provider is API_KEY"}',
+            content=(
+                '{"error": "anthropic_api_key is required when ai_provider is API_KEY '
+                '(or set use_env_anthropic_api_key=true to forward the ambient '
+                'ANTHROPIC_API_KEY env var)"}'
+            ),
             media_type="application/json",
         )
 
