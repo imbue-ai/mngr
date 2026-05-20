@@ -1015,15 +1015,20 @@ class AgentCreator(MutableModel):
         - ``SUBSCRIPTION`` -- inject neither; the user signs in to Claude
           interactively in the workspace.
 
-        For ``SUBSCRIPTION`` (and for ``API_KEY`` when the corresponding
-        form field is empty), ``use_env_anthropic_api_key`` and
-        ``use_env_anthropic_base_url`` decide whether the desktop client's
-        own ``ANTHROPIC_API_KEY`` / ``ANTHROPIC_BASE_URL`` env vars (sourced
-        from the user's shell) ride along into the container. False means
-        scrub them from the ``mngr create`` subprocess env so the FCT
-        template's ``pass_host_env`` can't silently forward them; True
-        means leave them in place. The desktop UI surfaces the choice
-        inline when either env var is detected.
+        ``use_env_anthropic_api_key`` and ``use_env_anthropic_base_url``
+        control whether the desktop client's own ambient ``ANTHROPIC_API_KEY``
+        / ``ANTHROPIC_BASE_URL`` env vars (sourced from the user's shell)
+        ride along into the container. They are honoured only under
+        ``API_KEY`` auth: for each var, True means leave the ambient value
+        in place so the FCT template's ``pass_host_env`` forwards it onto
+        the host; False (or a form-supplied override) means scrub the
+        ambient value before ``mngr create`` runs. Under ``SUBSCRIPTION``
+        the flags are ignored and both ambient vars are always scrubbed --
+        picking OAuth means the user wants OAuth, not a surprise key from
+        the shell silently riding along. Under ``IMBUE_CLOUD`` the minted
+        LiteLLM credentials always win, so scrubbing is moot. The desktop
+        UI only surfaces the checkboxes when an ambient env var is
+        detected AND the user picked ``API_KEY`` auth.
 
         ``gh_token`` is optional; when provided it's forwarded to the host
         as ``GH_TOKEN``.
