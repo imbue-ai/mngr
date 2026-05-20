@@ -651,7 +651,7 @@ async def _handle_create_form_submit(request: Request, auth_store: AuthStoreDep)
     if ai_provider is AIProvider.API_KEY and not anthropic_api_key and not use_env_anthropic_api_key:
         return _re_render_with_error(
             "An Anthropic API key is required when AI provider is set to api_key "
-            "(or check \"Use ANTHROPIC_API_KEY from your environment\" if your shell "
+            '(or check "Use ANTHROPIC_API_KEY from your environment" if your shell '
             "exports it)."
         )
 
@@ -825,7 +825,7 @@ async def _handle_create_agent_api(request: Request, auth_store: AuthStoreDep) -
             status_code=400,
             content=(
                 '{"error": "anthropic_api_key is required when ai_provider is API_KEY '
-                '(or set use_env_anthropic_api_key=true to forward the ambient '
+                "(or set use_env_anthropic_api_key=true to forward the ambient "
                 'ANTHROPIC_API_KEY env var)"}'
             ),
             media_type="application/json",

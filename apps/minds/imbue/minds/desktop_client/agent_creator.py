@@ -1336,9 +1336,7 @@ class AgentCreator(MutableModel):
                             # ``pass_host_env``.
                             pass
                         else:
-                            raise MngrCommandError(
-                                "AI provider API_KEY requires anthropic_api_key to be supplied"
-                            )
+                            raise MngrCommandError("AI provider API_KEY requires anthropic_api_key to be supplied")
                         # Base URL is form-optional in all three cases: when
                         # the user supplied one, use it; when they left the
                         # field blank, honour ``use_env_anthropic_base_url``.
