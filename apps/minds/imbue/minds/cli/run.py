@@ -185,24 +185,18 @@ def run(
     # gateway is up so there is no race with the ``permissions.mjs``
     # extension.
     #
-    # Everything in this block is best-effort: a failure in any one
-    # step (disk error during the schema migration, an unreadable
-    # api_token file, a latchkey CLI hiccup) leaves the spawn-peer
-    # capability disabled but lets the rest of the desktop client come
-    # up normally.
+    # Wiring is best-effort: a failure in any one step (disk error
+    # during the schema migration, an unreadable api_token file, a
+    # latchkey CLI hiccup) leaves the spawn-peer capability disabled
+    # but lets the rest of the desktop client come up normally.
     try:
-        migrated_count = ensure_minds_schema_in_existing_host_files(latchkey.plugin_data_dir)
-        if migrated_count > 0:
-            logger.info("Injected minds schema into {} existing per-host permissions file(s)", migrated_count)
-        minds_api_token = auth_store.get_api_token().get_secret_value()
-        latchkey.register_service("minds", f"http://127.0.0.1:{port}")
-        latchkey.auth_set_header("minds", f"Authorization: Bearer {minds_api_token}")
+        _wire_latchkey_minds_service(latchkey=latchkey, auth_store=auth_store, port=port)
     except (LatchkeyError, ApiTokenError, OSError, ConcurrencyExceptionGroup) as exc:
         # ``ConcurrencyExceptionGroup`` covers ``ProcessSetupError`` etc.
         # from the latchkey CLI subprocesses, which the new
         # ``register_service`` / ``auth_set_header`` helpers do not catch
         # internally (unlike ``services_info``). Catching it here honours
-        # the best-effort contract the block claims.
+        # the best-effort contract.
         logger.warning("Could not wire latchkey 'minds' service: {}", exc)
 
     root_concurrency_group = ConcurrencyGroup(name="minds-run")
@@ -494,6 +488,37 @@ class _StreamedPermissionRequestHandler(FrozenModel):
             event.event_id,
         )
         self.backend_resolver.notify_change()
+
+
+def _wire_latchkey_minds_service(
+    *,
+    latchkey: Latchkey,
+    auth_store: FileAuthStore,
+    port: int,
+) -> None:
+    """Run the per-startup wiring that makes the ``minds`` service callable from agents.
+
+    Three idempotent steps, in order:
+
+    1. Backfill the ``minds`` scope + named-permission schemas into any
+       pre-existing per-host ``latchkey_permissions.json``.
+    2. Load (or generate on first run) the persistent minds API bearer
+       token from disk.
+    3. Register ``minds`` as a latchkey service for the current
+       desktop-client URL and stash the bearer token in latchkey's
+       encrypted credential store.
+
+    Raises whatever the underlying calls raise. The caller is responsible
+    for treating any failure here as best-effort: the spawn-peer
+    capability will be disabled but the rest of the desktop client can
+    still come up.
+    """
+    migrated_count = ensure_minds_schema_in_existing_host_files(latchkey.plugin_data_dir)
+    if migrated_count > 0:
+        logger.info("Injected minds schema into {} existing per-host permissions file(s)", migrated_count)
+    minds_api_token = auth_store.get_api_token().get_secret_value()
+    latchkey.register_service("minds", f"http://127.0.0.1:{port}")
+    latchkey.auth_set_header("minds", f"Authorization: Bearer {minds_api_token}")
 
 
 def _build_latchkey(data_directory: Path) -> Latchkey:
