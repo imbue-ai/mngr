@@ -1157,11 +1157,15 @@ class AgentCreator(MutableModel):
         plugin CLI) and forwards ``ANTHROPIC_API_KEY``/``ANTHROPIC_BASE_URL``
         onto the host via the subprocess env + matching
         ``--pass-(host-)env`` flags. For ``API_KEY``, forwards the
-        form-supplied key (and optional base URL) the same way. For
-        ``SUBSCRIPTION``, injects neither -- and, depending on the
-        ``use_env_anthropic_*`` flags, may scrub any ambient
-        ``ANTHROPIC_*`` vars from the subprocess env so the FCT template's
-        ``pass_host_env`` can't silently forward them.
+        form-supplied key (and optional base URL) the same way; when the
+        form fields are empty, the ``use_env_anthropic_*`` flags decide
+        whether to leave the ambient ``ANTHROPIC_*`` env vars in place
+        (True) or scrub them before ``mngr create`` runs (False). For
+        ``SUBSCRIPTION``, injects neither and unconditionally scrubs both
+        ambient ``ANTHROPIC_*`` vars from the subprocess env (the
+        ``use_env_anthropic_*`` flags are intentionally ignored here, so
+        an OAuth choice can't be silently overridden by a shell key
+        riding along via the FCT template's ``pass_host_env``).
 
         For ``LaunchMode.IMBUE_CLOUD``, the plugin's provider backend
         handles the lease + SSH bootstrap inside ``create_host``; the
