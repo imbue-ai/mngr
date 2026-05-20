@@ -1264,13 +1264,15 @@ class AgentCreator(MutableModel):
 
                 # Resolve the Anthropic credentials according to the AI
                 # provider choice. IMBUE_CLOUD mints a fresh LiteLLM key;
-                # API_KEY uses the form-supplied key (and optional base URL);
+                # API_KEY uses the form-supplied key (and optional base URL),
+                # falling back to the ambient ``ANTHROPIC_*`` env vars when
+                # the corresponding ``use_env_anthropic_*`` flag is set;
                 # SUBSCRIPTION injects nothing so the agent prompts the user
-                # to log in. For SUBSCRIPTION / form-empty API_KEY, the
-                # ``use_env_anthropic_*`` flags decide whether the desktop
-                # client's own ambient ``ANTHROPIC_*`` env vars ride along
-                # via the FCT template's ``pass_host_env`` (True = ride
-                # along, False = scrub before mngr-create runs).
+                # to log in. The ``use_env_anthropic_*`` flags govern the
+                # API_KEY arm only -- SUBSCRIPTION always scrubs both
+                # ambient ``ANTHROPIC_*`` vars regardless of the flags, so
+                # an OAuth choice can't be silently overridden by a shell
+                # key riding along via the FCT template's ``pass_host_env``.
                 effective_anthropic_api_key: str | None = None
                 effective_anthropic_base_url: str | None = None
                 # IMBUE_CLOUD always overwrites both vars with the minted
