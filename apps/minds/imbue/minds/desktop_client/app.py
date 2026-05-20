@@ -36,6 +36,7 @@ from imbue.minds.desktop_client.agent_creator import LOG_SENTINEL
 from imbue.minds.desktop_client.agent_creator import resolve_template_version
 from imbue.minds.desktop_client.api_v1 import create_api_v1_router
 from imbue.minds.desktop_client.api_v1 import inject_tunnel_token_into_agent
+from imbue.minds.desktop_client.auth import ApiTokenError
 from imbue.minds.desktop_client.auth import AuthStoreInterface
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
@@ -167,7 +168,17 @@ def _is_api_authenticated(
     presented = auth_header[len("bearer ") :].strip()
     if not presented:
         return False
-    expected = auth_store.get_api_token().get_secret_value()
+    # Fail closed (return False -> caller returns 403) when the persisted
+    # api_token file is unreadable or empty. The alternative -- letting
+    # ApiTokenError bubble out -- turns into a 500 from FastAPI, which is
+    # both less informative for the caller and harder to distinguish from
+    # actual backend faults. The warning log preserves the operator's
+    # ability to notice the underlying corruption.
+    try:
+        expected = auth_store.get_api_token().get_secret_value()
+    except ApiTokenError as exc:
+        logger.warning("Bearer-token auth could not load the minds api_token: {}", exc)
+        return False
     return secrets.compare_digest(presented, expected)
 
 

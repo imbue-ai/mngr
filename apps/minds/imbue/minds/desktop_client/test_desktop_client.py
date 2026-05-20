@@ -1467,3 +1467,26 @@ def test_creation_status_api_accepts_valid_bearer_token(tmp_path: Path) -> None:
 
     # 501 = passed auth, no agent_creator configured (this test).
     assert response.status_code == 501
+
+
+def test_create_agent_api_returns_403_when_api_token_file_is_empty(tmp_path: Path) -> None:
+    """A corrupted (empty) api_token file makes bearer auth fail closed with 403, not 500."""
+    auth_dir = tmp_path / "auth"
+    auth_dir.mkdir(parents=True)
+    # Pre-populate an empty token file so ``get_api_token`` raises
+    # ``ApiTokenError`` on the first bearer-auth attempt.
+    (auth_dir / "api_token").write_text("")
+    backend_resolver = StaticBackendResolver(url_by_agent_and_service={})
+    client, _ = _create_test_desktop_client(
+        tmp_path=tmp_path,
+        backend_resolver=backend_resolver,
+        http_client=None,
+    )
+
+    response = client.post(
+        "/api/create-agent",
+        json={"git_url": "file:///nonexistent-repo"},
+        headers={"Authorization": "Bearer some-token-value"},
+    )
+
+    assert response.status_code == 403
