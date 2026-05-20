@@ -1,4 +1,4 @@
-"""``minds_deployment`` test: full create / destroy round-trip of a dev env.
+"""``minds_deployment`` test: full create / destroy round-trip of a CI ephemeral env.
 
 Asserts that ``minds env deploy`` from clean creates every expected
 cloud-side resource and that ``minds env destroy`` removes every one of
