@@ -106,8 +106,13 @@ if [[ -x "$real_git" ]]; then
     clt_root=/Library/Developer/CommandLineTools
     rm -rf "$resources_dir/git/libexec" "$resources_dir/git/share"
     mkdir -p "$resources_dir/git/libexec" "$resources_dir/git/share"
-    cp -R "$clt_root/usr/libexec/git-core" "$resources_dir/git/libexec/"
-    cp -R "$clt_root/usr/share/git-core" "$resources_dir/git/share/"
+    # -L dereferences symlinks. git-core ships many helpers as symlinks
+    # back to the git binary (git-shell, git-receive-pack, etc.).
+    # @electron/packager's symlink-dereference step ENOENTs when the
+    # symlink target sits outside the copy tree, so we materialize files
+    # at copy time.
+    cp -RL "$clt_root/usr/libexec/git-core" "$resources_dir/git/libexec/"
+    cp -RL "$clt_root/usr/share/git-core" "$resources_dir/git/share/"
 else
     die "expected real git at $real_git; install Xcode Command Line Tools first"
 fi
