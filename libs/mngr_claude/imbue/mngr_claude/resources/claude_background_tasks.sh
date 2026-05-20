@@ -9,18 +9,17 @@
 #   2. Transcript streaming: launches stream_transcript.sh which watches
 #      all session JSONL files and streams new lines to
 #      $MNGR_AGENT_STATE_DIR/logs/claude_transcript/events.jsonl
-#   3. Common transcript (optional): if MNGR_EMIT_COMMON_TRANSCRIPT=1,
-#      launches common_transcript.sh which converts the raw transcript
-#      into an agent-agnostic common format at
-#      $MNGR_AGENT_STATE_DIR/events/claude/common_transcript/events.jsonl
+#   3. Common transcript (optional): launches common_transcript.sh, which
+#      converts the raw transcript into an agent-agnostic common format at
+#      $MNGR_AGENT_STATE_DIR/events/claude/common_transcript/events.jsonl,
+#      only if that script is present in commands/. ClaudeAgent.provision()
+#      skips writing the converter when emit_common_transcript=False, so
+#      disabled-emit takes effect simply via the on-disk -x check.
 #
 # Usage: claude_background_tasks.sh <tmux_session_name>
 #
 # Requires environment variables:
 #   MNGR_AGENT_STATE_DIR  - the agent's state directory (contains commands/)
-#
-# Optional environment variables:
-#   MNGR_EMIT_COMMON_TRANSCRIPT - set to "1" to enable common transcript conversion
 #
 # Uses a pidfile to prevent duplicate instances for the same session.
 
@@ -62,10 +61,12 @@ if [ -x "$STREAM_SCRIPT" ]; then
     log_info "Started transcript streaming (PID: $_STREAM_PID)"
 fi
 
-# Optionally start common transcript conversion in the background
+# Optionally start common transcript conversion in the background. The
+# converter script is only on disk when ClaudeAgent.provision() decided to
+# emit the common transcript, so this -x check is the single gate.
 COMMON_TRANSCRIPT_SCRIPT="$MNGR_AGENT_STATE_DIR/commands/common_transcript.sh"
 _COMMON_TRANSCRIPT_PID=""
-if [ "${MNGR_EMIT_COMMON_TRANSCRIPT:-}" = "1" ] && [ -x "$COMMON_TRANSCRIPT_SCRIPT" ]; then
+if [ -x "$COMMON_TRANSCRIPT_SCRIPT" ]; then
     bash "$COMMON_TRANSCRIPT_SCRIPT" &
     _COMMON_TRANSCRIPT_PID=$!
     log_info "Started common transcript converter (PID: $_COMMON_TRANSCRIPT_PID)"
