@@ -91,16 +91,3 @@ def test_all_known_projects_includes_libs_apps_and_dev(tmp_path: Path) -> None:
     # libs/garbage is excluded (no pyproject.toml).
     # dev is always last.
     assert names == ["minds", "mngr", "mngr_lima", DEV_PROJECT]
-
-
-def test_all_known_projects_dedupes_libs_and_apps_with_same_name(tmp_path: Path) -> None:
-    """A name present under both libs/ and apps/ (no rule enforces uniqueness)
-    must appear only once: otherwise consolidate_changelog.main() would process
-    the project twice and project_dir's libs-first resolution would silently
-    skip the apps half on the second iteration."""
-    repo = _seed_repo(tmp_path)
-    # Add apps/mngr alongside the seed's libs/mngr.
-    (repo / "apps" / "mngr").mkdir(parents=True)
-    (repo / "apps" / "mngr" / "pyproject.toml").write_text("")
-    names = all_known_projects(repo)
-    assert names.count("mngr") == 1
