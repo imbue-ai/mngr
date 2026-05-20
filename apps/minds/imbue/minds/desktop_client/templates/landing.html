@@ -32,8 +32,10 @@
             <div class="accent-spine relative flex items-center gap-3 bg-white border border-zinc-200 rounded-xl px-4 py-3.5 cursor-pointer overflow-hidden transition hover:border-zinc-300 hover:shadow-sm"
                  style="--workspace-accent: {{ agent_accents.get(agent_id | string, 'oklch(65% 0.15 230)') }};"
                  data-agent-id="{{ agent_id }}"
-                 onclick="window.location='{{ mngr_forward_origin }}/goto/{{ agent_id }}/'">
+                 data-default-href="{{ mngr_forward_origin }}/goto/{{ agent_id }}/"
+                 onclick="window.landingRowClick(this)">
               <span class="flex-1 font-medium text-zinc-900 pl-1">{{ agent_names.get(agent_id | string, agent_id) }}</span>
+              <span class="landing-health-badge hidden inline-flex items-center px-2 py-0.5 rounded text-sm font-medium"></span>
               <button class="bg-transparent border border-transparent rounded-md cursor-pointer p-1.5 text-zinc-400 hover:bg-zinc-100 hover:text-zinc-600 flex items-center justify-center"
                       onclick="event.stopPropagation(); window.location='/workspace/{{ agent_id }}/settings'"
                       title="Settings"
@@ -71,6 +73,41 @@
       var rendered = (document.querySelector('[data-landing-agent-ids]') || {}).dataset || {};
       var renderedIds = (rendered.landingAgentIds || '').split(',').filter(function (s) { return s.length > 0; });
       var renderedSet = new Set(renderedIds);
+
+      var healthStatusByAgent = {};
+
+      function getRow(agentId) {
+        return document.querySelector('[data-agent-id="' + (window.CSS && CSS.escape ? CSS.escape(agentId) : agentId) + '"]');
+      }
+
+      function applyRowHealth(agentId, status) {
+        var row = getRow(agentId);
+        if (!row) return;
+        var badge = row.querySelector('.landing-health-badge');
+        if (!badge) return;
+        if (status === 'stuck') {
+          badge.textContent = 'Server not responding';
+          badge.className = 'landing-health-badge inline-flex items-center px-2 py-0.5 rounded text-sm font-medium bg-amber-100 text-amber-800';
+        } else if (status === 'restarting') {
+          badge.textContent = 'Restarting...';
+          badge.className = 'landing-health-badge inline-flex items-center px-2 py-0.5 rounded text-sm font-medium bg-amber-100 text-amber-800';
+        } else {
+          badge.textContent = '';
+          badge.className = 'landing-health-badge hidden inline-flex items-center px-2 py-0.5 rounded text-sm font-medium';
+        }
+      }
+
+      window.landingRowClick = function (row) {
+        var agentId = row.dataset.agentId;
+        var status = healthStatusByAgent[agentId];
+        if (status === 'stuck' || status === 'restarting') {
+          var ret = row.dataset.defaultHref || '';
+          window.location = '/agents/' + encodeURIComponent(agentId) + '/recovery?return_to=' + encodeURIComponent(ret);
+        } else {
+          window.location = row.dataset.defaultHref;
+        }
+      };
+
       var es = null;
       function connect() {
         if (es) es.close();
@@ -78,6 +115,13 @@
         es.onmessage = function (event) {
           var data;
           try { data = JSON.parse(event.data); } catch (e) { return; }
+          if (data.type === 'workspace_server_status') {
+            var aid = data.agent_id;
+            if (data.status === 'healthy') delete healthStatusByAgent[aid];
+            else healthStatusByAgent[aid] = data.status;
+            applyRowHealth(aid, data.status);
+            return;
+          }
           if (data.type !== 'workspaces' || !Array.isArray(data.workspaces)) return;
           var liveIds = data.workspaces.map(function (w) { return w.id; });
           var liveSet = new Set(liveIds);

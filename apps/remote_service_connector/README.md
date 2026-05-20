@@ -19,28 +19,38 @@ Deployment is split into two pieces so you can rotate secrets without redeployin
 
 ### 1. Environment-scoped Modal secrets
 
-The committed `.minds/template/*.sh` files declare the expected keys for each service. Per-env secrets live at `.minds/<env-name>/<service>.sh` and are gitignored; to bootstrap a new env, copy the template into it:
+The committed `.minds/template/*.sh` files declare the expected keys for each service -- they are the schema for the HCP Vault entries at `secrets/minds/<tier>/<service>`. To populate a fresh tier's Vault entry, copy the template into a tmp file, fill in the values, push it to Vault, and shred the local file:
 
 ```bash
-cp -r .minds/template/ .minds/production/
+cp .minds/template/cloudflare.sh /tmp/cloudflare-production.sh
+$EDITOR /tmp/cloudflare-production.sh
+uv run scripts/push_vault_from_file.py production cloudflare /tmp/cloudflare-production.sh
+shred -u /tmp/cloudflare-production.sh
 ```
 
-Each file is shell-style:
+Each template file is shell-style:
 
 ```sh
-# .minds/production/cloudflare.sh
-export CLOUDFLARE_API_TOKEN=...
-export CLOUDFLARE_ACCOUNT_ID=...
+# .minds/template/cloudflare.sh
+export CLOUDFLARE_API_TOKEN=
+export CLOUDFLARE_ACCOUNT_ID=
 # ...
 ```
 
-Push them to Modal with:
+Push everything to Modal and deploy in one shot:
 
 ```bash
-uv run scripts/push_modal_secrets.py production
+eval "$(uv run minds env activate production)"
+uv run minds env deploy --yes-i-mean-production
 ```
 
-This creates/updates Modal secrets named `<service>-<env>`, e.g. `cloudflare-production` and `supertokens-production`. The push aborts with a diagnostic if any per-env file is missing a key declared in the template -- so if you add a new secret to the template, existing envs must declare it (empty values are fine) before they can be pushed again.
+`minds env deploy` reads `apps/minds/imbue/minds/config/envs/production/deploy.toml`
+for the list of services to push from Vault, creates/updates Modal
+secrets named `<service>-<env>` (e.g. `cloudflare-production` and
+`supertokens-production`), then runs `modal deploy` for both the
+connector and the LiteLLM proxy. The push aborts with a diagnostic if
+any Vault entry is missing a key declared by the template (empty
+values are fine -- the deploy skips them when pushing to Modal).
 
 **cloudflare.sh** holds the Cloudflare API credentials:
 
@@ -64,11 +74,21 @@ This creates/updates Modal secrets named `<service>-<env>`, e.g. `cloudflare-pro
 
 ### 2. Deploy the Modal app
 
+The previous step (`minds env deploy --yes-i-mean-production`) already
+runs `modal deploy` for the connector as part of the unified deploy
+flow. If you want to re-deploy just the connector (e.g. after editing
+`app.py` without changing any Vault secrets), invoke `modal deploy`
+directly:
+
 ```bash
-scripts/deploy_remote_service_connector.sh production
+MNGR_DEPLOY_ENV=production uv run modal deploy --name remote-service-connector-production \
+    --env main apps/remote_service_connector/imbue/remote_service_connector/app.py
 ```
 
-The script sets `MNGR_DEPLOY_ENV=production` in the shell that runs `modal deploy`, which is read at module level by `app.py` to pin the secret names (`cloudflare-production`, `supertokens-production`) and also baked into a `Secret.from_dict` so the container can read `MNGR_DEPLOY_ENV` at runtime. Running `modal deploy` directly without the wrapper defaults to `production`.
+`MNGR_DEPLOY_ENV` is read at module load by `app.py` to pin the
+secret names (`cloudflare-production`, `supertokens-production`).
+Running `modal deploy` directly without the wrapper defaults to
+`production`.
 
 ## Authentication
 

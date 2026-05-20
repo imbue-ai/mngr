@@ -291,6 +291,10 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
             "local-docker hosts) rather than a HostName-shaped value."
         ),
     )
+    # ``pre_baked_agent_id`` is inherited from ``HostInterface``; defaults to
+    # ``None`` for every Host except ones whose provider populates it (today:
+    # ``ImbueCloudHost`` via its lease/adopt flow). The duplicate-agent-name
+    # check in ``api/create.py`` uses it to recognize the adopt scenario.
 
     def get_name(self) -> HostName:
         """Return the user-facing host name (overrides ``OuterHost.get_name``)."""

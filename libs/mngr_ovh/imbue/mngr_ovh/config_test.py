@@ -29,12 +29,20 @@ def test_default_config_values(clean_env: None) -> None:
     assert config.default_region == "US-EAST-VA"
     assert config.default_plan == "vps-2025-model1"
     assert config.default_image_name == "Debian 12 - Docker"
+    # Matches OVH's `Debian 12 - Docker` image which installs the rebuild
+    # SSH key only under /home/debian/.ssh; the provider sudo-copies that
+    # key to /root during provisioning so the rest of the flow works as root.
+    assert config.bootstrap_ssh_user == "debian"
     assert config.pricing_mode == OvhPricingMode.DEFAULT
     assert config.pricing_mode.to_wire_value() == "default"
     assert config.duration == "P1M"
     assert config.vps_boot_timeout == 600.0
     assert config.ovh_subsidiary == "US"
     assert config.application_key is None
+    # Pool-workload-tuned: tight enough that destroy + create in the same
+    # day reuses the cancelled VPS even when it has only a few hours of
+    # paid month left.
+    assert config.recycle_safety_margin_hours == 2
 
 
 def test_backend_name_defaults_to_ovh(clean_env: None) -> None:

@@ -1777,9 +1777,12 @@ def test_substitute_dockerfile_build_args_raises_for_bad_format() -> None:
 # =============================================================================
 
 
+_TEST_PROVIDER_NAME = ProviderInstanceName("modal-test")
+
+
 def test_check_host_name_is_unique_passes_when_no_existing_hosts() -> None:
     """check_host_name_is_unique should not raise when there are no existing hosts."""
-    check_host_name_is_unique(HostName("new-host"), host_records=[], running_host_ids=set())
+    check_host_name_is_unique(_TEST_PROVIDER_NAME, HostName("new-host"), host_records=[], running_host_ids=set())
 
 
 def test_check_host_name_is_unique_passes_when_name_is_different() -> None:
@@ -1787,7 +1790,9 @@ def test_check_host_name_is_unique_passes_when_name_is_different() -> None:
     host_id = HostId.generate()
     existing_record = _make_host_record(host_id, host_name="existing-host", snapshots=[_make_snapshot_record()])
 
-    check_host_name_is_unique(HostName("different-host"), host_records=[existing_record], running_host_ids=set())
+    check_host_name_is_unique(
+        _TEST_PROVIDER_NAME, HostName("different-host"), host_records=[existing_record], running_host_ids=set()
+    )
 
 
 def test_check_host_name_is_unique_raises_when_name_already_exists_on_running_host() -> None:
@@ -1796,7 +1801,9 @@ def test_check_host_name_is_unique_raises_when_name_already_exists_on_running_ho
     existing_record = _make_host_record(host_id, host_name="taken-name")
 
     with pytest.raises(HostNameConflictError) as exc_info:
-        check_host_name_is_unique(HostName("taken-name"), host_records=[existing_record], running_host_ids={host_id})
+        check_host_name_is_unique(
+            _TEST_PROVIDER_NAME, HostName("taken-name"), host_records=[existing_record], running_host_ids={host_id}
+        )
     assert "taken-name" in str(exc_info.value)
 
 
@@ -1806,7 +1813,9 @@ def test_check_host_name_is_unique_raises_when_name_exists_on_stopped_host_with_
     existing_record = _make_host_record(host_id, host_name="taken-name", snapshots=[_make_snapshot_record()])
 
     with pytest.raises(HostNameConflictError):
-        check_host_name_is_unique(HostName("taken-name"), host_records=[existing_record], running_host_ids=set())
+        check_host_name_is_unique(
+            _TEST_PROVIDER_NAME, HostName("taken-name"), host_records=[existing_record], running_host_ids=set()
+        )
 
 
 def test_check_host_name_is_unique_allows_reuse_of_destroyed_host_name() -> None:
@@ -1816,7 +1825,9 @@ def test_check_host_name_is_unique_allows_reuse_of_destroyed_host_name() -> None
     destroyed_record = _make_host_record(host_id, host_name="reusable-name", snapshots=[])
 
     # Should not raise
-    check_host_name_is_unique(HostName("reusable-name"), host_records=[destroyed_record], running_host_ids=set())
+    check_host_name_is_unique(
+        _TEST_PROVIDER_NAME, HostName("reusable-name"), host_records=[destroyed_record], running_host_ids=set()
+    )
 
 
 def test_check_host_name_is_unique_raises_when_name_matches_any_non_destroyed() -> None:
@@ -1828,7 +1839,9 @@ def test_check_host_name_is_unique_raises_when_name_matches_any_non_destroyed() 
     ]
 
     with pytest.raises(HostNameConflictError):
-        check_host_name_is_unique(HostName("host-beta"), host_records=host_records, running_host_ids=set())
+        check_host_name_is_unique(
+            _TEST_PROVIDER_NAME, HostName("host-beta"), host_records=host_records, running_host_ids=set()
+        )
 
 
 def test_check_host_name_is_unique_raises_when_name_exists_on_failed_host() -> None:
@@ -1837,4 +1850,6 @@ def test_check_host_name_is_unique_raises_when_name_exists_on_failed_host() -> N
     failed_record = _make_host_record(host_id, host_name="failed-host", failure_reason="Build failed")
 
     with pytest.raises(HostNameConflictError):
-        check_host_name_is_unique(HostName("failed-host"), host_records=[failed_record], running_host_ids=set())
+        check_host_name_is_unique(
+            _TEST_PROVIDER_NAME, HostName("failed-host"), host_records=[failed_record], running_host_ids=set()
+        )

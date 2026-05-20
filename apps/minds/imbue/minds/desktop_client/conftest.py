@@ -4,6 +4,7 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
+from pydantic import AnyUrl
 from pydantic import Field
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
@@ -24,6 +25,8 @@ from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import ProviderInstanceName
 
 DEFAULT_SERVICE_NAME: ServiceName = ServiceName("web")
+
+FAKE_CONNECTOR_URL: AnyUrl = AnyUrl("https://test--rsc-api.modal.run")
 
 
 class FakeImbueCloudCli(ImbueCloudCli):
@@ -66,7 +69,10 @@ class FakeImbueCloudCli(ImbueCloudCli):
 
 def make_fake_imbue_cloud_cli() -> FakeImbueCloudCli:
     """Build a :class:`FakeImbueCloudCli` rooted at a fresh ``ConcurrencyGroup``."""
-    return FakeImbueCloudCli(parent_concurrency_group=ConcurrencyGroup(name="fake-imbue-cloud-cli"))
+    return FakeImbueCloudCli(
+        parent_concurrency_group=ConcurrencyGroup(name="fake-imbue-cloud-cli"),
+        connector_url=FAKE_CONNECTOR_URL,
+    )
 
 
 def make_session_store_for_test(data_dir: Path, cli: ImbueCloudCli | None = None) -> MultiAccountSessionStore:
