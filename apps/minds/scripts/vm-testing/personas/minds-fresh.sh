@@ -15,6 +15,12 @@ echo "[minds-fresh] provisioning..."
 # setting APPLY_QUARANTINE=1 when invoking run-test.sh.
 sudo defaults write com.apple.LaunchServices LSQuarantine -bool false || true
 
+# Disable Gatekeeper entirely. Unsigned binaries inside a locally-packaged
+# minds.app (electron-packager output, the bundled git, etc.) are
+# SIGKILLed at exec time on macOS Tahoe otherwise. Acceptable for a
+# throwaway test VM; never set on a real user machine.
+sudo spctl --master-disable || true
+
 # Keep Spotlight from chewing CPU during tests on a freshly populated home.
 sudo mdutil -i off / 2>/dev/null || true
 
