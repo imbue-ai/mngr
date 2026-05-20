@@ -268,6 +268,7 @@ def _is_creating_new_host(address: NewAgentLocation, new_host_flag: bool) -> boo
 _IMBUE_CLOUD_BACKEND: Final[ProviderBackendName] = ProviderBackendName("imbue_cloud")
 
 
+@pure
 def _is_imbue_cloud_provider(provider_name: ProviderInstanceName | None, mngr_ctx: MngrContext) -> bool:
     """Return True when ``provider_name`` resolves to the imbue_cloud backend.
 
