@@ -83,7 +83,7 @@ By default, `mngr create` uses the local host. Use the agent address to specify 
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
 | `--provider` | text | Provider for the host (alternative to .PROVIDER in the address, e.g. --provider docker) | None |
-| `--new-host` | boolean | Force creating a new host (requires a provider via address or --provider) | `False` |
+| `--new-host` | boolean | Force creating a new host (requires a provider via address or --provider). Incompatible with --reuse | `False` |
 | `--host-label` | text | Host metadata label KEY=VALUE [repeatable] | None |
 | `--host-name-style` | choice (`coolname` &#x7C; `astronomy` &#x7C; `places` &#x7C; `cities` &#x7C; `fantasy` &#x7C; `scifi` &#x7C; `painters` &#x7C; `authors` &#x7C; `artists` &#x7C; `musicians` &#x7C; `scientists`) | Auto-generated host name style | `coolname` |
 
@@ -91,7 +91,7 @@ By default, `mngr create` uses the local host. Use the agent address to specify 
 
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
-| `--reuse`, `--no-reuse` | boolean | Reuse existing agent with the same name if it exists (idempotent create) | `False` |
+| `--reuse`, `--no-reuse` | boolean | Reuse existing agent with the same name if it exists (idempotent create). Incompatible with --new-host | `False` |
 | `--update`, `--no-update` | boolean | When combined with --reuse, stop and fully re-create the agent (update work_dir, re-provision, restart). Requires --reuse | `False` |
 | `--connect`, `--no-connect` | boolean | Connect to the agent after creation [default: connect] | `True` |
 | `--foreground` | boolean | Run a headless agent in the foreground, streaming output and auto-destroying when done. Required for headless agent types | `False` |

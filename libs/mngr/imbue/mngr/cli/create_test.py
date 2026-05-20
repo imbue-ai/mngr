@@ -1731,6 +1731,36 @@ def test_create_rejects_update_without_reuse(
     assert "--update requires --reuse" in result.output
 
 
+def test_create_rejects_reuse_with_new_host(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """--reuse combined with --new-host should fail: a fresh host has no agents to reuse."""
+    result = cli_runner.invoke(
+        create,
+        ["my-agent@.modal", "--reuse", "--new-host", "--type", "command", "--no-connect"],
+        obj=plugin_manager,
+    )
+
+    assert result.exit_code != 0
+    assert "--reuse cannot be combined with --new-host" in result.output
+
+
+def test_create_rejects_reuse_update_with_new_host(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """--reuse --update --new-host should also be caught by the --reuse / --new-host check."""
+    result = cli_runner.invoke(
+        create,
+        ["my-agent@.modal", "--reuse", "--update", "--new-host", "--type", "command", "--no-connect"],
+        obj=plugin_manager,
+    )
+
+    assert result.exit_code != 0
+    assert "--reuse cannot be combined with --new-host" in result.output
+
+
 # =============================================================================
 # Tests for positional / --name mutual exclusivity
 # =============================================================================

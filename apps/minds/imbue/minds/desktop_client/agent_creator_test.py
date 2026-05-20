@@ -141,10 +141,12 @@ def test_build_mngr_create_command_uses_main_template_and_omits_message_arg() ->
     # minds no longer pre-generates an agent id; mngr generates one and we
     # parse it out of the JSONL ``created`` event in run_mngr_create.
     assert "--id" not in command
-    # ``--reuse --update`` keeps re-deploys of the same workspace name
-    # idempotent on local-host modes.
-    assert "--reuse" in command
-    assert "--update" in command
+    # Every mode passes ``--new-host``, which mngr rejects in combination
+    # with ``--reuse``: a brand-new host has no agents to reuse. Removed
+    # alongside ``--update`` (which itself requires ``--reuse``).
+    assert "--reuse" not in command
+    assert "--update" not in command
+    assert "--new-host" in command
     # We always emit JSONL so the canonical agent id can be parsed from the
     # trailing ``"event": "created"`` line.
     assert "--format" in command
@@ -164,16 +166,15 @@ def test_build_mngr_create_command_imbue_cloud_targets_account_provider() -> Non
     # create_host to ImbueCloudProvider. The agent name is now the constant
     # ``system-services``; the user's input drives the host name.
     assert "system-services@hello.imbue_cloud_alice-imbue-com" in joined
-    # IMBUE_CLOUD passes ``--reuse`` because the bake's services agent
-    # is named ``system-services`` too, which mngr's pre-flight "agent
-    # already exists on this host" check would otherwise reject. It
-    # does NOT pass ``--update`` (the adopt path in
-    # ``ImbueCloudHost.create_agent_state`` already patches the agent
-    # in place; ``--update`` would re-run the bake's file-transfer
-    # provisioning unnecessarily). No ``--id`` either: the canonical
+    # IMBUE_CLOUD passes ``--new-host``, which mngr rejects in combination
+    # with ``--reuse``: a brand-new host has no agents to reuse. The bake's
+    # ``system-services`` agent name collision is handled by mngr's
+    # duplicate-name check exempting ``host.pre_baked_agent_id`` in
+    # ``libs/mngr/imbue/mngr/api/create.py``, so the lease/adopt path
+    # still works without ``--reuse``. No ``--id`` either: the canonical
     # id is parsed from the JSONL ``created`` event.
     assert "--id" not in command
-    assert "--reuse" in command
+    assert "--reuse" not in command
     assert "--update" not in command
     assert api_key
     # Lease attributes flow through --build-arg.
