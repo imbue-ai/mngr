@@ -429,12 +429,14 @@ def _build_mngr_create_command(
         the lease's baked name); ``imbue_cloud_*`` arguments encode the
         lease attributes (--build-arg).
 
-    Every mode creates a separate host (all pass ``--new-host``), so the
-    agent address uses ``system-services@<host_name>`` -- the agent name is
-    constant across every minds workspace; the host name (the user's input
-    from the create-project form) is the workspace identifier. No mode
-    passes ``--reuse``/``--update``: a fresh host has no agent to reuse, and
-    mngr rejects ``--reuse`` together with ``--new-host``.
+    Every mode creates a separate host, so the agent address uses
+    ``system-services@<host_name>`` -- the agent name is constant across
+    every minds workspace; the host name (the user's input from the
+    create-project form) is the workspace identifier. ``--reuse`` and
+    ``--update`` are passed for the non-IMBUE_CLOUD modes so re-deploying
+    resets the agent on the same host instead of failing on a duplicate
+    name (IMBUE_CLOUD's lease flow is one-shot per pool host, so reuse
+    is not meaningful there).
 
     Secrets (``ANTHROPIC_API_KEY``, ``ANTHROPIC_BASE_URL``, ``GH_TOKEN``)
     are forwarded by the FCT template's own ``pass_(host_)env`` declarations,
@@ -509,6 +511,26 @@ def _build_mngr_create_command(
         "--label",
         "is_primary=true",
     ]
+
+    match launch_mode:
+        case LaunchMode.IMBUE_CLOUD:
+            # The pool host already has a baked ``system-services`` agent
+            # (per ``_BAKED_SERVICES_AGENT_NAME`` in
+            # ``mngr_imbue_cloud/cli/admin.py``) which the lease/adopt path
+            # in ``ImbueCloudHost.create_agent_state`` will hydrate in
+            # place. mngr's core create flow runs an "agent already
+            # exists on this host" pre-flight that fires before the
+            # adopt path -- without ``--reuse`` it aborts with
+            # ``An agent named 'system-services' already exists``.
+            # ``--reuse`` tells mngr's pre-flight to expect the existing
+            # agent; the adopt path then keeps the baked id intact.
+            # ``--update`` is intentionally NOT passed: the adopt path
+            # already patches the labels + command in place; running
+            # mngr's standard provisioning on top would re-do the file
+            # transfer + provisioning round the bake already paid for.
+            mngr_command.append("--reuse")
+        case _:
+            mngr_command.extend(["--reuse", "--update"])
 
     # Per-mode template + per-mode runtime flags. All modes use
     # ``--template main --template <mode>``; the per-mode template provides

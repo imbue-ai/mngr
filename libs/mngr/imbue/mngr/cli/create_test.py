@@ -1852,60 +1852,6 @@ def test_create_rejects_update_without_reuse(
     assert "--update requires --reuse" in result.output
 
 
-def test_create_rejects_reuse_with_new_host(
-    cli_runner: CliRunner,
-    plugin_manager: pluggy.PluginManager,
-) -> None:
-    """--reuse + --new-host is contradictory and should fail with a clear error.
-
-    --new-host always provisions a fresh host; --reuse looks up an existing agent
-    on an existing host, which a fresh host cannot have.
-    """
-    result = cli_runner.invoke(
-        create,
-        [
-            "system-services@new-host.lima",
-            "--reuse",
-            "--new-host",
-            "--type",
-            "command",
-            "--no-connect",
-        ],
-        obj=plugin_manager,
-    )
-
-    assert result.exit_code != 0
-    assert "--reuse cannot be combined with --new-host" in result.output
-
-
-def test_create_rejects_reuse_update_with_new_host(
-    cli_runner: CliRunner,
-    plugin_manager: pluggy.PluginManager,
-) -> None:
-    """--reuse --update --new-host is the call shape minds previously emitted; reject it.
-
-    This is the direct regression test for the reported bug where a fresh-host
-    create-form submission accidentally re-targeted an unrelated same-named
-    agent on a different host.
-    """
-    result = cli_runner.invoke(
-        create,
-        [
-            "system-services@new-host.lima",
-            "--reuse",
-            "--update",
-            "--new-host",
-            "--type",
-            "command",
-            "--no-connect",
-        ],
-        obj=plugin_manager,
-    )
-
-    assert result.exit_code != 0
-    assert "--reuse cannot be combined with --new-host" in result.output
-
-
 # =============================================================================
 # Tests for positional / --name mutual exclusivity
 # =============================================================================

@@ -371,7 +371,7 @@ class _CreateCommand(click.Command):
     "--new-host",
     is_flag=True,
     default=False,
-    help="Force creating a new host (requires a provider via address or --provider; incompatible with --reuse)",
+    help="Force creating a new host (requires a provider via address or --provider)",
 )
 @optgroup.option("--host-label", multiple=True, help="Host metadata label KEY=VALUE [repeatable]")
 @optgroup.option(
@@ -386,7 +386,7 @@ class _CreateCommand(click.Command):
     "--reuse/--no-reuse",
     default=False,
     show_default=True,
-    help="Reuse existing agent with the same name if it exists (idempotent create); incompatible with --new-host",
+    help="Reuse existing agent with the same name if it exists (idempotent create)",
 )
 @optgroup.option(
     "--update/--no-update",
@@ -618,15 +618,6 @@ def create(ctx: click.Context, **kwargs) -> None:
         # Validate --update requires --reuse
         if opts.update and not opts.reuse:
             raise UserInputError("--update requires --reuse. Use --reuse --update together.")
-
-        # Validate --reuse + --new-host: contradictory by construction. --new-host
-        # always provisions a fresh host; --reuse looks up an existing agent on an
-        # existing host, which a fresh host cannot have.
-        if opts.reuse and opts.new_host:
-            raise UserInputError(
-                "--reuse cannot be combined with --new-host: --reuse looks up an existing agent "
-                "on an existing host, --new-host always provisions a fresh host. Drop one."
-            )
 
         # Validate conflicting agent types early (before the headless path
         # returns). This is the single check; the resolution helper below

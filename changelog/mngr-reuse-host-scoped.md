@@ -13,13 +13,6 @@ path stays anchored to the host the user actually asked for. The bare-name
 form (`--reuse` without a host in the address) keeps its documented "any host"
 behavior.
 
-`mngr create` also rejects `--reuse --new-host` with a `UserInputError`:
-`--new-host` always provisions a fresh host, while `--reuse` looks up an
-existing agent on an existing host, which a fresh host cannot have.
-
-The minds create-project launch path no longer passes `--reuse`/`--update`
-for any launch mode. Every mode provisions a fresh host with `--new-host`,
-so there is no existing agent to reuse, and the combination is now an
-error. This also removes the original wrong-host adoption bug, where a
-minds `--reuse --update --new-host` create on a fresh host name adopted an
-unrelated same-named agent on a different host.
+This also makes `--reuse` safe to combine with `--new-host`: a fresh host
+name matches no existing host, so `--reuse` finds nothing and a new host is
+created; an address whose host name already exists reuses the agent there.
