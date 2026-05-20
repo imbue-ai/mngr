@@ -1646,7 +1646,25 @@ def _await_system_interface_ready(agent_id: AgentId, mngr_forward_port: int, pre
     return False
 
 
-def _run_restart_sequence_steps(
+class _RestartWorkerFailureHandler(MutableModel):
+    """Callable ``on_failure`` hook for the restart worker thread.
+
+    The recovery page only leaves its "Restarting..." state on a HEALTHY or
+    RESTART_FAILED transition, and the tracker is already RESTARTING when the
+    worker starts. If the worker thread crashes unexpectedly, the
+    ``ConcurrencyGroup`` invokes this so the tracker still reaches
+    RESTART_FAILED instead of the page hanging. The crash itself is logged by
+    the ``ObservableThread`` machinery, so this only records the recovery state.
+    """
+
+    tracker: SystemInterfaceHealthTracker = Field(frozen=True, description="Health tracker to transition.")
+    workspace_agent_id: AgentId = Field(frozen=True, description="Workspace agent whose restart worker crashed.")
+
+    def __call__(self, exc: BaseException) -> None:
+        self.tracker.mark_restart_failed(self.workspace_agent_id, f"The restart worker failed unexpectedly: {exc}")
+
+
+def _run_restart_sequence(
     workspace_agent_id: AgentId,
     is_host_restart: bool,
     tracker: SystemInterfaceHealthTracker,
@@ -1656,15 +1674,16 @@ def _run_restart_sequence_steps(
     concurrency_group: ConcurrencyGroup,
     mngr_forward_port: int,
     mngr_forward_preauth_cookie: str | None,
-    tier_label: str,
 ) -> None:
-    """Stop + start the system-services agent, then await recovery.
+    """Background worker: stop + start the system-services agent, then await recovery.
 
     Drives the health tracker to HEALTHY on recovery or RESTART_FAILED (with
     a reason) when a step errors or the system interface does not return
-    within the shared startup-wait budget. Unexpected exceptions are handled
-    by the ``_run_restart_sequence`` wrapper.
+    within the shared startup-wait budget. A crash of this worker is turned
+    into RESTART_FAILED by ``_handle_restart_worker_failure``, wired as the
+    thread's ``on_failure`` callback.
     """
+    tier_label = "host restart" if is_host_restart else "system-interface restart"
     services_agent_id = backend_resolver.get_system_services_agent_id(workspace_agent_id)
     if services_agent_id is None:
         tracker.mark_restart_failed(
@@ -1682,9 +1701,7 @@ def _run_restart_sequence_steps(
         tracker.mark_restart_failed(workspace_agent_id, f"Stop step of {tier_label} failed: {stop_error}")
         return
 
-    start_error = _run_mngr_command(
-        concurrency_group, _build_mngr_start_argv(mngr_binary, services_agent_id), env
-    )
+    start_error = _run_mngr_command(concurrency_group, _build_mngr_start_argv(mngr_binary, services_agent_id), env)
     if start_error is not None:
         tracker.mark_restart_failed(workspace_agent_id, f"Start step of {tier_label} failed: {start_error}")
         return
@@ -1703,46 +1720,6 @@ def _run_restart_sequence_steps(
             f"The system interface did not respond within "
             f"{int(_SYSTEM_INTERFACE_STARTUP_WAIT_SECONDS)}s of the {tier_label}.",
         )
-
-
-def _run_restart_sequence(
-    workspace_agent_id: AgentId,
-    is_host_restart: bool,
-    tracker: SystemInterfaceHealthTracker,
-    backend_resolver: BackendResolverInterface,
-    mngr_binary: str,
-    mngr_host_dir: Path,
-    concurrency_group: ConcurrencyGroup,
-    mngr_forward_port: int,
-    mngr_forward_preauth_cookie: str | None,
-) -> None:
-    """Background worker: run the restart sequence, never leaving the tracker stuck.
-
-    The recovery page only leaves its "Restarting..." state on a HEALTHY or
-    RESTART_FAILED tracker transition. The tracker is already RESTARTING when
-    this worker starts, so any unhandled exception must still be turned into a
-    RESTART_FAILED transition -- otherwise the recovery page hangs forever.
-    """
-    tier_label = "host restart" if is_host_restart else "system-interface restart"
-    try:
-        _run_restart_sequence_steps(
-            workspace_agent_id=workspace_agent_id,
-            is_host_restart=is_host_restart,
-            tracker=tracker,
-            backend_resolver=backend_resolver,
-            mngr_binary=mngr_binary,
-            mngr_host_dir=mngr_host_dir,
-            concurrency_group=concurrency_group,
-            mngr_forward_port=mngr_forward_port,
-            mngr_forward_preauth_cookie=mngr_forward_preauth_cookie,
-            tier_label=tier_label,
-        )
-    except Exception as exc:
-        # Broad catch at the background-worker boundary: log the failure and
-        # transition the tracker so the recovery page surfaces it instead of
-        # hanging indefinitely on "Restarting...".
-        logger.exception("Restart sequence for {} ({}) raised unexpectedly", workspace_agent_id, tier_label)
-        tracker.mark_restart_failed(workspace_agent_id, f"The {tier_label} failed unexpectedly: {exc}")
 
 
 def _dispatch_restart(
@@ -1768,6 +1745,9 @@ def _dispatch_restart(
     if not tracker.mark_restarting(aid):
         return Response(status_code=202, content="{}", media_type="application/json")
 
+    # is_checked=False + on_failure: a crash of the one-shot worker is handled
+    # by transitioning the tracker to RESTART_FAILED (so the recovery page does
+    # not hang), rather than being surfaced later when the root group is checked.
     concurrency_group.start_new_thread(
         target=_run_restart_sequence,
         kwargs={
@@ -1783,6 +1763,8 @@ def _dispatch_restart(
         },
         name=f"system-interface-restart-{aid}",
         daemon=True,
+        is_checked=False,
+        on_failure=_RestartWorkerFailureHandler(tracker=tracker, workspace_agent_id=aid),
     )
     return Response(status_code=202, content="{}", media_type="application/json")
 

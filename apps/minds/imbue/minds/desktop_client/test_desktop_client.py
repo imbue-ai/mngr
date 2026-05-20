@@ -1734,12 +1734,7 @@ def _write_fake_mngr(tmp_path: Path, stop_exit: int = 0, start_exit: int = 0) ->
     """
     script = tmp_path / "fake_mngr"
     script.write_text(
-        "#!/bin/sh\n"
-        'case "$1" in\n'
-        f"  stop) exit {stop_exit} ;;\n"
-        f"  start) exit {start_exit} ;;\n"
-        "  *) exit 0 ;;\n"
-        "esac\n"
+        f'#!/bin/sh\ncase "$1" in\n  stop) exit {stop_exit} ;;\n  start) exit {start_exit} ;;\n  *) exit 0 ;;\nesac\n'
     )
     script.chmod(0o755)
     return str(script)
