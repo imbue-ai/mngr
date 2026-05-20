@@ -355,3 +355,66 @@ def test_ensure_mngr_settings_writes_default_imbue_cloud_disabled(
     parsed = tomllib.loads(settings_path.read_text())
     assert parsed["providers"]["imbue_cloud"] == {"backend": "imbue_cloud", "is_enabled": False}
     assert parsed["plugins"]["recursive"]["enabled"] is False
+
+
+def test_set_imbue_cloud_provider_for_account_also_writes_default_disabled_block(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Regression: a first signin on a fresh ``MINDS_ROOT_NAME`` must land
+    both the per-account block AND the default-disabled
+    ``[providers.imbue_cloud]`` suppression block.
+
+    Without the suppression block, ``mngr observe`` auto-creates a phantom
+    default ``imbue_cloud`` instance with no ``connector_url``, which
+    raises ``MissingConnectorUrlError`` on every discovery cycle and
+    breaks ``mngr create`` against the env. ``apply_bootstrap``'s call
+    to ``_ensure_mngr_settings`` no-ops on a fresh env (the mngr profile
+    dir doesn't exist yet at startup), so ``set_imbue_cloud_provider_for_account``
+    has to ensure it as part of writing the per-account block.
+    """
+    settings_path = _stub_mngr_host_dir(monkeypatch, tmp_path, "minds-staging")
+    set_imbue_cloud_provider_for_account(
+        "josh@imbue.com",
+        connector_url=_FAKE_CONNECTOR_URL,
+        root_name="minds-staging",
+    )
+    parsed = tomllib.loads(settings_path.read_text())
+    # The per-account block lands as before.
+    assert parsed["providers"]["imbue_cloud_josh-imbue-com"]["connector_url"] == _FAKE_CONNECTOR_URL
+    # AND the suppression block + recursive-disable land in the same pass.
+    assert parsed["providers"]["imbue_cloud"] == {"backend": "imbue_cloud", "is_enabled": False}
+    assert parsed["plugins"]["recursive"]["enabled"] is False
+
+
+def test_set_imbue_cloud_provider_for_account_repairs_missing_default_block_on_resignin(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """An already-signed-in user whose settings.toml is missing the
+    suppression block (because the original signin happened on a build
+    that didn't write it) gets the block back on the next signin event,
+    even when the per-account block itself is unchanged and the function
+    short-circuits its per-account write path.
+    """
+    settings_path = _stub_mngr_host_dir(monkeypatch, tmp_path, "minds-staging")
+    # Pre-seed: a per-account block exists but the suppression block is missing
+    # (mirrors the on-disk state of a staging env that signed in before the
+    # fix landed).
+    settings_path.write_text(
+        "[providers.imbue_cloud_josh-imbue-com]\n"
+        'backend = "imbue_cloud"\n'
+        'account = "josh@imbue.com"\n'
+        f'connector_url = "{_FAKE_CONNECTOR_URL}"\n'
+        "is_enabled = true\n"
+    )
+
+    changed = set_imbue_cloud_provider_for_account(
+        "josh@imbue.com",
+        connector_url=_FAKE_CONNECTOR_URL,
+        root_name="minds-staging",
+    )
+    # The per-account write itself is a no-op (existing block already matches),
+    # but the file is still modified because the suppression block lands.
+    assert changed is False
+    parsed = tomllib.loads(settings_path.read_text())
+    assert parsed["providers"]["imbue_cloud"] == {"backend": "imbue_cloud", "is_enabled": False}
+    assert parsed["plugins"]["recursive"]["enabled"] is False
