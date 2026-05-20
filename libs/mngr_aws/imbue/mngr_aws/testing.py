@@ -12,7 +12,6 @@ from typing import Any
 from typing import Final
 
 from pydantic import Field
-from pydantic import PrivateAttr
 
 from imbue.mngr_aws.client import AWS_TEST_INSTANCE_LABEL_PREFIX
 from imbue.mngr_aws.client import AwsVpsClient
@@ -89,8 +88,6 @@ class _StubbedAwsVpsClient(AwsVpsClient):
         description="Pre-built EC2 client to use instead of session.client('ec2'). "
         "Typically a Stubber-wrapped client created by the test fixture."
     )
-
-    _cached_ec2_client_override: Any = PrivateAttr(default=None)
 
     def _ec2(self) -> Any:
         return self.stubbed_ec2_client

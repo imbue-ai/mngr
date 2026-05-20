@@ -42,6 +42,7 @@ import boto3
 import pytest
 
 from imbue.mngr_aws.client import AwsVpsClient
+from imbue.mngr_aws.config import DEFAULT_AMI_BY_REGION
 from imbue.mngr_aws.config import ExistingSecurityGroup
 from imbue.mngr_aws.testing import AWS_DEFAULT_REGION
 from imbue.mngr_aws.testing import AWS_RELEASE_TESTS_OPT_IN
@@ -210,3 +211,30 @@ class TestAwsApiClient:
     def test_list_snapshots_does_not_error(self, aws_release_client: AwsVpsClient) -> None:
         snapshots = aws_release_client.list_snapshots()
         assert isinstance(snapshots, list)
+
+
+def test_default_amis_describe_successfully() -> None:
+    """Every entry in DEFAULT_AMI_BY_REGION must still resolve via DescribeImages.
+
+    Hard-coded AMI IDs go stale over time -- Debian publishes new ones every
+    few months and older snapshots eventually get deprecated. A periodic
+    release-test run is the cheapest way to catch this: skipif gates the test
+    on AWS credentials, so local runs without creds skip silently.
+    """
+    failures: list[str] = []
+    for region, ami_id in DEFAULT_AMI_BY_REGION.items():
+        ec2 = boto3.Session(region_name=region).client("ec2")
+        response = ec2.describe_images(ImageIds=[ami_id])
+        images = response.get("Images", [])
+        if not images:
+            failures.append(f"{region}: AMI {ami_id} not found")
+            continue
+        image = images[0]
+        state = image.get("State", "")
+        if state != "available":
+            failures.append(f"{region}: AMI {ami_id} state={state!r} (expected 'available')")
+    assert not failures, (
+        "DEFAULT_AMI_BY_REGION has stale entries:\n  " + "\n  ".join(failures) + "\n"
+        "Update the constant in libs/mngr_aws/imbue/mngr_aws/config.py with current "
+        "Debian 12 amd64 AMI IDs from https://wiki.debian.org/Cloud/AmazonEC2Image."
+    )

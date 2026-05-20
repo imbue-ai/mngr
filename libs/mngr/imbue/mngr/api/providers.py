@@ -53,7 +53,6 @@ def reset_provider_instances() -> None:
 def get_provider_instance(
     name: ProviderInstanceName,
     mngr_ctx: MngrContext,
-    is_for_host_creation: bool = False,
 ) -> BaseProviderInstance:
     """Get or create a provider instance by name.
 
@@ -62,11 +61,10 @@ def get_provider_instance(
     back to treating the name as a backend name with defaults.
     The returned instance is tracked for cleanup at process exit via atexit.
 
-    ``is_for_host_creation`` is forwarded to the backend's
-    ``build_provider_instance`` so backends with one-time bootstrap resources
-    (currently: the Modal backend's per-user environment) can distinguish
-    create-host construction from construction for read-only or existing-host
-    operations. Only the ``mngr create`` path sets this to ``True``.
+    Always treated as read-only-or-existing-host construction: backends must
+    not bootstrap one-time resources here. Callers about to create a host
+    should first call ``backend.bootstrap_for_host_creation(...)`` directly
+    (see ``api/create.py``).
     """
     _ensure_atexit_registered()
 
@@ -84,7 +82,6 @@ def get_provider_instance(
             backend_name=provider_config.backend,
             config=provider_config,
             mngr_ctx=mngr_ctx,
-            is_for_host_creation=is_for_host_creation,
         )
         logger.trace("Built provider instance {} from config with backend {}", name, provider_config.backend)
     else:
@@ -98,7 +95,6 @@ def get_provider_instance(
             backend_name=backend_name,
             config=default_config,
             mngr_ctx=mngr_ctx,
-            is_for_host_creation=is_for_host_creation,
         )
         logger.trace("Built provider instance {} using backend name as default", name)
 

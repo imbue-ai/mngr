@@ -12,6 +12,7 @@ from imbue.mngr.api.discovery_events import emit_discovery_events_for_host
 from imbue.mngr.api.providers import get_provider_instance
 from imbue.mngr.config.agent_config_registry import resolve_agent_type
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.config.provider_config_registry import get_provider_config_class
 from imbue.mngr.errors import DuplicateAgentNameError
 from imbue.mngr.errors import HostNameConflictError
 from imbue.mngr.errors import MngrError
@@ -27,6 +28,9 @@ from imbue.mngr.plugins.hookspecs import OnBeforeCreateArgs
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import HostName
+from imbue.mngr.primitives import ProviderBackendName
+from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr.providers.registry import get_backend
 from imbue.mngr.utils.env_utils import parse_env_file
 from imbue.mngr.utils.git_utils import delete_git_branch
 from imbue.mngr.utils.git_utils import find_source_repo_of_worktree
@@ -369,17 +373,42 @@ def _create_new_host(
     return new_host
 
 
+def _bootstrap_backend_for_host_creation(
+    provider_name: ProviderInstanceName,
+    mngr_ctx: MngrContext,
+) -> None:
+    """Resolve the backend + config for ``provider_name`` and call ``bootstrap_for_host_creation``.
+
+    Mirrors the lookup logic in ``get_provider_instance``: a configured
+    provider instance uses its declared backend + config; an unconfigured
+    name is treated as a bare backend name with default config. Most
+    backends override this to a no-op so the call is cheap.
+    """
+    if provider_name in mngr_ctx.config.providers:
+        provider_config = mngr_ctx.config.providers[provider_name]
+        backend_name = provider_config.backend
+    else:
+        backend_name = ProviderBackendName(str(provider_name))
+        config_class = get_provider_config_class(str(backend_name))
+        provider_config = config_class(backend=backend_name)
+    backend = get_backend(backend_name)
+    backend.bootstrap_for_host_creation(name=provider_name, config=provider_config, mngr_ctx=mngr_ctx)
+
+
 def resolve_target_host(
     target_host: OnlineHostInterface | NewHostOptions,
     mngr_ctx: MngrContext,
 ) -> OnlineHostInterface:
     """Resolve which host to use for the agent."""
     if target_host is not None and isinstance(target_host, NewHostOptions):
-        # Create a new host using the specified provider. Pass is_for_host_creation=True
-        # so that backends with one-time bootstrap (Modal's per-user environment) are
-        # allowed to create those resources here -- the create path is the only caller
-        # authorized to do so.
-        provider = get_provider_instance(target_host.provider, mngr_ctx, is_for_host_creation=True)
+        # Bootstrap any one-time backend resources (e.g. Modal's per-user
+        # environment) before building the provider instance. The create-host
+        # path is the only call site authorized to do this -- read-only paths
+        # like ``mngr list`` build the provider directly via
+        # ``get_provider_instance`` and skip the provider on ProviderEmptyError
+        # instead of bootstrapping silently behind the user's back.
+        _bootstrap_backend_for_host_creation(target_host.provider, mngr_ctx)
+        provider = get_provider_instance(target_host.provider, mngr_ctx)
         is_auto_named = target_host.name is None
         host_name = target_host.name
         if host_name is None:

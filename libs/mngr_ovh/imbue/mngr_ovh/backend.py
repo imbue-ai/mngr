@@ -631,15 +631,7 @@ class OvhProviderBackend(ProviderBackendInterface):
         name: ProviderInstanceName,
         config: ProviderInstanceConfig,
         mngr_ctx: MngrContext,
-        is_for_host_creation: bool = False,
     ) -> ProviderInstanceInterface:
-        """Build an OVH provider instance.
-
-        ``is_for_host_creation`` is ignored: the OVH backend has no one-time
-        bootstrap resources to gate on (compare the Modal backend, which uses
-        this flag to authorize creating a missing per-user env).
-        """
-        del is_for_host_creation
         if not isinstance(config, OvhProviderConfig):
             raise MngrError(f"Expected OvhProviderConfig, got {type(config).__name__}")
         ovh_client = build_ovh_client(config)

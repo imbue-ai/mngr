@@ -52,15 +52,39 @@ class ProviderBackendInterface(MutableModel, ABC):
         name: ProviderInstanceName,
         config: ProviderInstanceConfig,
         mngr_ctx: MngrContext,
-        is_for_host_creation: bool = False,
     ) -> ProviderInstanceInterface:
         """Create a configured provider instance from this backend.
 
-        ``is_for_host_creation`` lets a backend distinguish construction that
-        is happening because the user is about to create a new host (so it is
-        free to bootstrap any one-time backend resources, like a Modal
-        environment) from construction that is happening for read-only or
-        existing-host operations (which must not silently create new backend-
-        side resources). Backends with no such one-time setup ignore the flag.
+        This call is always treated as a read-only-or-existing-host construction:
+        backends must not silently create one-time backend-side resources here.
+        If a backend has such resources (e.g. Modal's per-user environment) and
+        the construction would otherwise fail because they are missing, raise
+        ``ProviderEmptyError`` so read paths (``mngr list`` / ``mngr gc`` /
+        discovery) can skip this provider entirely.
+
+        Backends that need to bootstrap one-time resources for the create-host
+        path override ``bootstrap_for_host_creation`` (default no-op). The
+        ``mngr create`` flow calls that method before ``build_provider_instance``;
+        no other call path triggers a bootstrap.
         """
         ...
+
+    @staticmethod
+    def bootstrap_for_host_creation(
+        name: ProviderInstanceName,
+        config: ProviderInstanceConfig,
+        mngr_ctx: MngrContext,
+    ) -> None:
+        """Ensure any one-time backend resources exist before the first host create.
+
+        Default: no-op. Most backends have nothing to bootstrap -- their
+        per-host resources are created on demand inside ``build_provider_instance``
+        or the provider's create-host path.
+
+        Backends with one-time per-user resources (the Modal per-user
+        environment is the motivating example) override this to create them
+        if missing. Must be idempotent; the create-host path calls it
+        unconditionally before building the provider instance.
+        """
+        # Default no-op; overrides exist on backends with one-time resources.
+        del name, config, mngr_ctx

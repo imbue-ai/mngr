@@ -127,13 +127,7 @@ class AwsProviderBackend(ProviderBackendInterface):
         name: ProviderInstanceName,
         config: ProviderInstanceConfig,
         mngr_ctx: MngrContext,
-        is_for_host_creation: bool = False,
     ) -> ProviderInstanceInterface:
-        # is_for_host_creation is consumed only by backends with one-time
-        # bootstrap state (e.g. Modal's per-user environment). AWS has none --
-        # security groups and SSH keys are created on demand inside
-        # AwsVpsClient -- so the flag is intentionally ignored.
-        del is_for_host_creation
         if not isinstance(config, AwsProviderConfig):
             raise MngrError(f"Expected AwsProviderConfig, got {type(config).__name__}")
 

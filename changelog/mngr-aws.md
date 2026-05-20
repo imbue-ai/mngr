@@ -21,3 +21,13 @@
 - On AWS, combined with `InstanceInitiatedShutdownBehavior=terminate` (always on), this auto-terminates the EC2 instance — useful as a runaway-cost safety net for ephemeral / test hosts.
 - AWS release tests set this to 60 minutes via a tmp-path `settings.toml` pointed at by `MNGR_PROJECT_CONFIG_DIR`, so instances self-terminate even if pytest is killed before any cleanup runs.
 - `AwsProvider` refuses to launch an EC2 instance under pytest if `auto_shutdown_minutes` is unset or non-positive, and `AwsVpsClient.create_instance` refuses if the EC2 `Name` tag does not start with `mngr-test-aws-`. Both mirror the Modal-style guard in `mngr_modal.backend._create_environment` and prevent a test that forgets to override these from silently leaking instances.
+
+## Provider backend interface cleanup
+
+- `ProviderBackendInterface.build_provider_instance` no longer carries the Modal-specific `is_for_host_creation` flag. Backends with one-time per-user resources (currently just Modal's environment) override the new `bootstrap_for_host_creation` method; the `mngr create` path calls it before `build_provider_instance`. Other backends (Local, SSH, Docker, AWS, Vultr, OVH, Lima, imbue_cloud) get the default no-op.
+- `mngr_aws` adds `boto3-stubs[ec2]` as a dependency so botocore calls are typed instead of `Any`.
+- `wait_for_instance_active` lifted onto `VpsClientInterface` as a default method; AWS / Vultr no longer carry the identical polling implementation. A new `slow_provisioning_warning_threshold_seconds` field lets each provider tune the "took longer than usual" warning (90s for AWS, 60s default for Vultr).
+- `AwsProvider` raises `ProviderEmptyError` at construction time when credentials or AMIs are unresolvable, matching the Modal pattern (read paths skip the provider instead of constructing a half-working placeholder).
+- `AwsVpsClient` no longer carries an `ec2_client` field for test injection; the test-only `_StubbedAwsVpsClient` subclass in `mngr_aws.testing` does that.
+- AWS security-group config moved to a tagged union (`security_group: ExistingSecurityGroup | AutoCreateSecurityGroup` keyed on `kind`), replacing the parallel `security_group_id` / `security_group_name` fields.
+- `mngr_aws/test_release_aws.py` ships a `test_default_amis_describe_successfully` release test that calls `DescribeImages` on every entry in `DEFAULT_AMI_BY_REGION` so stale AMI IDs surface in CI rather than silently failing host creates.
