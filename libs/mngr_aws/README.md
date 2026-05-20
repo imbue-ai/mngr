@@ -26,11 +26,39 @@ default_ami_id = ""                # leave empty to use default_ami_by_region
 # Optional networking
 # security_group_id = "sg-..."     # auto-created if unset
 # subnet_id = "subnet-..."          # default-VPC subnet if unset
-allowed_ssh_cidr = "0.0.0.0/0"
+# Required (fail-closed): every CIDR allowed inbound on tcp/22 and the
+# container SSH port of the auto-created security group. Empty default
+# refuses to auto-create the SG -- you must opt in to either a tight
+# range like ['203.0.113.4/32'] or the wide-open '0.0.0.0/0'.
+allowed_ssh_cidrs = ["203.0.113.4/32"]
 
 # Optional EBS sizing
 root_volume_size_gb = 30
 root_volume_type = "gp3"
+```
+
+### Multiple regions
+
+Each provider instance is bound to a single region (the underlying
+`AwsVpsClient` is built with a single boto3 client at construction time).
+To work across regions, configure one instance per region and pick the
+right one at create time:
+
+```toml
+[providers.aws-east]
+backend = "aws"
+default_region = "us-east-1"
+allowed_ssh_cidrs = ["203.0.113.4/32"]
+
+[providers.aws-west]
+backend = "aws"
+default_region = "us-west-2"
+allowed_ssh_cidrs = ["203.0.113.4/32"]
+```
+
+```bash
+mngr create my-east-agent --provider aws-east
+mngr create my-west-agent --provider aws-west
 ```
 
 ## Usage
@@ -59,7 +87,7 @@ These fields extend the base `VpsDockerProviderConfig` (see `mngr_vps_docker`):
 | `security_group_name` | `mngr-aws` | Name used for the auto-created SG. |
 | `subnet_id` | `None` | Optional explicit subnet. |
 | `vpc_id` | `None` | Scopes auto-SG lookup. |
-| `allowed_ssh_cidr` | `0.0.0.0/0` | Inbound CIDR for tcp/22 and tcp/`container_ssh_port`. |
+| `allowed_ssh_cidrs` | `()` | Tuple of inbound CIDRs for tcp/22 and tcp/`container_ssh_port`. Empty (fail-closed): the auto-SG path raises unless you explicitly list a CIDR or pre-create the SG. |
 | `associate_public_ip` | `True` | Assign a public IPv4 to instances. |
 | `root_volume_size_gb` | `30` | Root EBS volume size. |
 | `root_volume_type` | `gp3` | Root EBS volume type. |

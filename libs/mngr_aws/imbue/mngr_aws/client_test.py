@@ -69,6 +69,7 @@ class TestAwsVpsClientInstances:
                 "BlockDeviceMappings": ANY,
                 "NetworkInterfaces": ANY,
                 "InstanceInitiatedShutdownBehavior": "terminate",
+                "MetadataOptions": ANY,
                 "TagSpecifications": ANY,
                 "KeyName": "key-1",
             },
@@ -376,6 +377,10 @@ class TestAwsVpsClientSecurityGroup:
             ami_id="ami-test",
             security_group_id=None,
             security_group_name="mngr-aws-test",
+            # Existing tests assume the auto-create path produces a usable SG;
+            # provide an explicit CIDR (test-only example range) so
+            # ensure_security_group's fail-closed guard passes.
+            allowed_ssh_cidrs=("203.0.113.4/32",),
             ec2_client=ec2,
         )
         stubber.activate()
@@ -387,6 +392,24 @@ class TestAwsVpsClientSecurityGroup:
     def test_returns_preset_id_when_provided(self, stubbed_client: tuple[AwsVpsClient, Stubber]) -> None:
         client, _stubber = stubbed_client
         assert client.ensure_security_group() == "sg-test"
+
+    def test_auto_create_fails_closed_when_no_cidrs(self) -> None:
+        """No security_group_id + empty allowed_ssh_cidrs must raise, not create an unreachable SG."""
+        session = boto3.Session(
+            aws_access_key_id="AKIATEST",
+            aws_secret_access_key="secret",
+            region_name="us-east-1",
+        )
+        ec2 = session.client("ec2", region_name="us-east-1")
+        client = AwsVpsClient(
+            session=session,
+            region="us-east-1",
+            ami_id="ami-test",
+            security_group_id=None,
+            ec2_client=ec2,
+        )
+        with pytest.raises(MngrError, match="allowed_ssh_cidrs is empty"):
+            client.ensure_security_group()
 
     def test_reuses_existing_sg_when_found(self, auto_sg_client: tuple[AwsVpsClient, Stubber]) -> None:
         client, stubber = auto_sg_client

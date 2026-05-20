@@ -2,7 +2,8 @@
 
 - New `aws` provider backend (`mngr_aws`) that runs agents in Docker containers on EC2.
 - Credentials are resolved exclusively via boto3's default chain (`AWS_*` env vars, `~/.aws/credentials`, `~/.aws/config`, EC2 IMDS) — `[providers.aws]` config has no credential fields, matching the Modal provider convention.
-- Auto-creates a per-region security group (`mngr-aws` by default) opening tcp/22 and the container SSH port to `allowed_ssh_cidr` (default `0.0.0.0/0` — tighten in prod).
+- Auto-creates a per-region security group (`mngr-aws` by default) opening tcp/22 and the container SSH port to every CIDR in `allowed_ssh_cidrs`. Default is empty (fail-closed): users must explicitly opt in (e.g. `['203.0.113.4/32']` for their own IP) or pre-create the SG.
+- Every EC2 instance launched with `Encrypted: True` on the root EBS volume (guaranteed regardless of account default-encryption setting) and IMDSv2 enforced (`HttpTokens: required`, `HttpPutResponseHopLimit: 1`) so the instance metadata service is unreachable from a hostile container.
 - Per-host EC2 KeyPair via `ImportKeyPair`, deleted on `destroy_host`.
 - EC2 instances tagged with `mngr-provider`, `mngr-host-id`, and `mngr-created-at`; discovery filters `DescribeInstances` by `tag:mngr-provider`.
 - `InstanceInitiatedShutdownBehavior=terminate` so a self-halted instance is GC'd automatically.

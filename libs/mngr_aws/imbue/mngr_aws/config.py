@@ -65,13 +65,23 @@ class AwsProviderConfig(VpsDockerProviderConfig):
         default=None,
         description="VPC ID. Only used to scope auto-created security group lookups.",
     )
-    allowed_ssh_cidr: str = Field(
-        default="0.0.0.0/0",
-        description="CIDR block allowed inbound on tcp/22 and tcp/<container_ssh_port> on the auto-created SG.",
+    allowed_ssh_cidrs: tuple[str, ...] = Field(
+        default=(),
+        description=(
+            "CIDR blocks allowed inbound on tcp/22 and tcp/<container_ssh_port> on the "
+            "auto-created security group. Empty by default (fail-closed): without an explicit "
+            "list, ensure_security_group raises rather than create a permissive SG. Use e.g. "
+            "['203.0.113.4/32'] to allow only your own IP, or ['0.0.0.0/0'] to expose to the "
+            "public internet (NOT recommended for production)."
+        ),
     )
     associate_public_ip: bool = Field(
         default=True,
-        description="Assign a public IPv4 address to the instance.",
+        description=(
+            "Assign a public IPv4 address to the instance. Required for the current "
+            "mngr-from-developer-laptop SSH access model. For a more secure deployment, "
+            "set to False and run mngr from a bastion or via Session Manager."
+        ),
     )
     root_volume_size_gb: int = Field(
         default=30,

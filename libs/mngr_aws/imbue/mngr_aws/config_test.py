@@ -38,7 +38,8 @@ def test_default_config_values() -> None:
     assert config.default_region == "us-east-1"
     assert config.default_plan == "t3.small"
     assert config.security_group_name == "mngr-aws"
-    assert config.allowed_ssh_cidr == "0.0.0.0/0"
+    # Empty by default -- fail-closed; user must opt in to SSH ingress.
+    assert config.allowed_ssh_cidrs == ()
     assert config.associate_public_ip is True
     assert config.root_volume_size_gb == 30
     assert config.root_volume_type == "gp3"

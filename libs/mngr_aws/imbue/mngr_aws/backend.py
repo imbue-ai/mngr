@@ -2,7 +2,6 @@ import os
 from typing import Any
 from typing import Final
 
-import boto3
 from botocore.exceptions import BotoCoreError
 from loguru import logger
 from pydantic import ConfigDict
@@ -12,6 +11,7 @@ from pydantic import PrivateAttr
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import ProviderInstanceConfig
 from imbue.mngr.errors import MngrError
+from imbue.mngr.errors import ProviderEmptyError
 from imbue.mngr.interfaces.provider_backend import ProviderBackendInterface
 from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
 from imbue.mngr.primitives import ProviderBackendName
@@ -140,25 +140,20 @@ class AwsProviderBackend(ProviderBackendInterface):
         try:
             session = config.get_session()
         except (ValueError, BotoCoreError) as e:
-            logger.warning(
-                "AWS provider {} initialised without resolvable AWS credentials: {}. "
-                "Discovery operations will return empty results.",
-                name,
-                e,
-            )
-            session = _make_unresolved_session(config)
+            # Match the Modal pattern in mngr_modal.backend.build_provider_instance:
+            # when the provider cannot be reached (here: no resolvable AWS credentials),
+            # raise ProviderEmptyError so read paths (mngr list / mngr gc / discovery)
+            # skip the AWS provider entirely instead of constructing a half-working
+            # placeholder. Host-creation paths surface this same error to the user.
+            raise ProviderEmptyError(name, str(e)) from e
 
         try:
             ami_id = config.get_ami_id_for_region(config.default_region)
         except ValueError as e:
-            logger.warning(
-                "AWS provider {} initialised without a resolvable AMI for region {}: {}. "
-                "Host creation will fail until default_ami_id is configured.",
-                name,
-                config.default_region,
-                e,
-            )
-            ami_id = ""
+            # No usable AMI configured -- analogous to the missing-creds case
+            # above. Surfaces clearly on `mngr create --provider aws` while
+            # letting `mngr list` skip the provider.
+            raise ProviderEmptyError(name, str(e)) from e
 
         aws_client = AwsVpsClient(
             session=session,
@@ -168,7 +163,7 @@ class AwsProviderBackend(ProviderBackendInterface):
             security_group_name=config.security_group_name,
             subnet_id=config.subnet_id,
             vpc_id=config.vpc_id,
-            allowed_ssh_cidr=config.allowed_ssh_cidr,
+            allowed_ssh_cidrs=config.allowed_ssh_cidrs,
             associate_public_ip=config.associate_public_ip,
             root_volume_size_gb=config.root_volume_size_gb,
             root_volume_type=config.root_volume_type,
@@ -185,21 +180,6 @@ class AwsProviderBackend(ProviderBackendInterface):
             aws_client=aws_client,
             aws_config=config,
         )
-
-
-def _make_unresolved_session(config: AwsProviderConfig) -> boto3.Session:
-    """Return a plain boto3 Session bound to the configured region.
-
-    Only called after ``config.get_session()`` has already failed to resolve
-    credentials. The returned Session still walks boto3's default credential
-    chain (env vars, profile, shared credentials file, IMDS); we don't strip
-    credentials, we just don't require them at construction time. Any EC2
-    call on this Session is expected to fail loudly with an AWS auth error,
-    which is the desired behavior: we want the provider to be registrable
-    even without credentials so that listing operations short-circuit in
-    ``_list_provider_vps_hostnames`` while host-creation operations fail clearly.
-    """
-    return boto3.Session(region_name=config.default_region)
 
 
 @hookimpl

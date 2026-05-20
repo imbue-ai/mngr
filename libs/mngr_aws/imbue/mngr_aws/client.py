@@ -59,8 +59,15 @@ class AwsVpsClient(VpsClientInterface):
     security_group_name: str = Field(default="mngr-aws", description="Name used when auto-creating the security group")
     subnet_id: str | None = Field(default=None, description="Subnet ID, or None to let EC2 pick a default")
     vpc_id: str | None = Field(default=None, description="VPC ID, used only to scope SG lookup")
-    allowed_ssh_cidr: str = Field(
-        default="0.0.0.0/0", description="CIDR allowed inbound on SSH ports of the auto-created SG"
+    allowed_ssh_cidrs: tuple[str, ...] = Field(
+        default=(),
+        description=(
+            "CIDR blocks allowed inbound on tcp/22 and tcp/container_ssh_port of the auto-created "
+            "security group. Empty by default (fail-closed): if no security_group_id is provided "
+            "and this is empty, ensure_security_group raises rather than creating a wide-open SG. "
+            "Set to e.g. ('203.0.113.4/32',) to restrict to your own IP, or ('0.0.0.0/0',) to "
+            "expose to the public internet (NOT recommended for production)."
+        ),
     )
     associate_public_ip: bool = Field(default=True, description="Assign a public IPv4 to launched instances")
     root_volume_size_gb: int = Field(default=30, description="Root EBS volume size in GB")
@@ -108,10 +115,23 @@ class AwsVpsClient(VpsClientInterface):
         If ``security_group_id`` was provided, it is returned as-is. Otherwise
         an SG named ``security_group_name`` is looked up (optionally scoped to
         ``vpc_id``) and created if absent, with ingress for tcp/22 and
-        tcp/``container_ssh_port`` from ``allowed_ssh_cidr``.
+        tcp/``container_ssh_port`` from every CIDR in ``allowed_ssh_cidrs``.
+
+        Fails closed if ``allowed_ssh_cidrs`` is empty: rather than create a
+        no-ingress SG (which would result in unreachable instances) or default
+        to ``0.0.0.0/0`` (which would expose SSH to the public internet),
+        we raise so the caller has to make an explicit decision. Matches AWS's
+        own native default for a brand-new SG: no ingress until you add it.
         """
         if self.security_group_id is not None:
             return self.security_group_id
+
+        if not self.allowed_ssh_cidrs:
+            raise MngrError(
+                "Cannot auto-create an AWS security group: allowed_ssh_cidrs is empty. "
+                "Either set allowed_ssh_cidrs to a tuple of CIDR blocks (e.g. ('203.0.113.4/32',) "
+                "for your own IP), or pre-create the SG and pass its id as security_group_id."
+            )
 
         filters: list[dict[str, Any]] = [{"Name": "group-name", "Values": [self.security_group_name]}]
         if self.vpc_id is not None:
@@ -147,18 +167,19 @@ class AwsVpsClient(VpsClientInterface):
         ``InvalidPermission.Duplicate`` atomically — none of the permissions in
         the batch are added if any one is a duplicate.
         """
+        ip_ranges = [{"CidrIp": cidr} for cidr in self.allowed_ssh_cidrs]
         ip_permissions = [
             {
                 "IpProtocol": "tcp",
                 "FromPort": 22,
                 "ToPort": 22,
-                "IpRanges": [{"CidrIp": self.allowed_ssh_cidr}],
+                "IpRanges": ip_ranges,
             },
             {
                 "IpProtocol": "tcp",
                 "FromPort": self.container_ssh_port,
                 "ToPort": self.container_ssh_port,
-                "IpRanges": [{"CidrIp": self.allowed_ssh_cidr}],
+                "IpRanges": ip_ranges,
             },
         ]
         for permission in ip_permissions:
@@ -220,6 +241,11 @@ class AwsVpsClient(VpsClientInterface):
                     "VolumeSize": self.root_volume_size_gb,
                     "VolumeType": self.root_volume_type,
                     "DeleteOnTermination": True,
+                    # Explicit Encrypted=True so encryption-at-rest is guaranteed
+                    # regardless of the AWS account's EBS-default-encryption
+                    # setting (which only became automatic on new accounts in
+                    # 2023). Uses the account's default KMS key.
+                    "Encrypted": True,
                 },
             }
         ]
@@ -244,6 +270,16 @@ class AwsVpsClient(VpsClientInterface):
             "BlockDeviceMappings": block_device_mappings,
             "NetworkInterfaces": network_interfaces,
             "InstanceInitiatedShutdownBehavior": "terminate",
+            # IMDSv2 required: refuse IMDSv1 (unauthenticated GET) entirely
+            # and cap the response-hop limit at 1 so the metadata service
+            # cannot be reached from a hostile container running on the
+            # instance. Mirrors the AWS-recommended secure default from
+            # https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/configuring-instance-metadata-service.html.
+            "MetadataOptions": {
+                "HttpTokens": "required",
+                "HttpEndpoint": "enabled",
+                "HttpPutResponseHopLimit": 1,
+            },
             "TagSpecifications": [
                 {"ResourceType": "instance", "Tags": tag_specs},
                 {"ResourceType": "volume", "Tags": tag_specs},
