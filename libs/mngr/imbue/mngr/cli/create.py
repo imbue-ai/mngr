@@ -885,9 +885,9 @@ def _create_agent(
     update_host: OnlineHostInterface | None = None
     if opts.reuse and agent_opts.name is not None:
         reuse_result = _try_reuse_existing_agent(
-            provider_name=address.provider_name,
-            host_name=address.host_name,
             agent_name=agent_opts.name,
+            host_name=address.host_name,
+            provider_name=address.provider_name,
             mngr_ctx=mngr_ctx,
             agent_and_host_loader=setup.agent_and_host_loader,
         )
@@ -1228,9 +1228,9 @@ def _is_host_in_reuse_scope(
 
 
 def _try_reuse_existing_agent(
-    provider_name: ProviderInstanceName | None,
-    host_name: HostName | HostId | None,
     agent_name: AgentName,
+    host_name: HostName | HostId | None,
+    provider_name: ProviderInstanceName | None,
     mngr_ctx: MngrContext,
     agent_and_host_loader: Callable[[], dict[DiscoveredHost, list[DiscoveredAgent]]],
 ) -> tuple[AgentInterface, OnlineHostInterface] | None:
