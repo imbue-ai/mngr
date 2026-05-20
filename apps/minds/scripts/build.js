@@ -454,22 +454,12 @@ async function downloadLima({ platform, arch }) {
   }
 }
 
-async function downloadGit() {
-  const gitDir = path.join(RESOURCES_DIR, 'git');
-  const binDir = path.join(gitDir, 'bin');
-  fs.mkdirSync(binDir, { recursive: true });
-
-  // Copy the system git binary into the resources directory.
-  const systemGit = execSync('which git', { encoding: 'utf-8' }).trim();
-  if (!systemGit) {
-    throw new Error('git not found on system -- install git first');
-  }
-
-  const destGit = path.join(binDir, 'git');
-  fs.copyFileSync(systemGit, destGit);
-  fs.chmodSync(destGit, 0o755);
-  console.log(`git binary copied to ${destGit}`);
-}
+// Reuse download-binaries.js's real-git resolution: on macOS `which git`
+// is the xcode-select shim, not a runnable binary -- bundling it produces
+// an app that cannot clone on a machine without Xcode at the expected
+// path. downloadGit() there resolves the real binary via `xcrun --find
+// git` and copies its libexec/git-core helpers and templates too.
+const { downloadGit } = require('./download-binaries.js');
 /**
  * Bake an explicit client.toml (and the matching MINDS_ROOT_NAME) into
  * _bundled/ so the shipped desktop client passes --config-file
@@ -654,7 +644,7 @@ async function main() {
   await Promise.all([
     downloadUv({ platform, arch }),
     downloadLima({ platform, arch }),
-    downloadGit(),
+    downloadGit(RESOURCES_DIR, { platform }),
   ]);
 
   bundleLatchkey();

@@ -422,6 +422,10 @@ module.exports = async ({ appDir }) => {
   await downloadBinaries(resourcesDir);
 };
 
+// Exposed so build.js can reuse the real-git resolution (xcrun-resolved
+// binary + libexec + templates) instead of copying the macOS git shim.
+module.exports.downloadGit = downloadGit;
+
 // Allow direct execution: node scripts/download-binaries.js [resources-dir]
 if (require.main === module) {
   const resourcesDir = process.argv[2] || path.join(path.resolve(__dirname, '..'), 'resources');
