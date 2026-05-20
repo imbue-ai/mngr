@@ -127,6 +127,20 @@ def _enqueue_health_change(
     change_event.set()
 
 
+def _system_interface_status_payload(
+    tracker: "SystemInterfaceHealthTracker | None",
+    agent_id: str,
+    status: AgentHealth,
+) -> dict[str, str]:
+    """Build a ``system_interface_status`` SSE payload, including the failure reason for RESTART_FAILED."""
+    payload: dict[str, str] = {"type": "system_interface_status", "agent_id": agent_id, "status": status.value}
+    if status == AgentHealth.RESTART_FAILED and tracker is not None:
+        error = tracker.get_last_restart_error(AgentId(agent_id))
+        if error is not None:
+            payload["error"] = error
+    return payload
+
+
 # -- Dependency injection helpers --
 
 
@@ -1332,7 +1346,7 @@ async def _handle_chrome_events(
             if tracker is not None:
                 for aid, status in tracker.snapshot_all().items():
                     yield "data: {}\n\n".format(
-                        json.dumps({"type": "system_interface_status", "agent_id": str(aid), "status": status.value})
+                        json.dumps(_system_interface_status_payload(tracker, str(aid), status))
                     )
 
             # Wait for changes and push updates until client disconnects.
@@ -1384,9 +1398,7 @@ async def _handle_chrome_events(
 
                 while not health_queue.empty():
                     aid_str, status = health_queue.get_nowait()
-                    yield "data: {}\n\n".format(
-                        json.dumps({"type": "system_interface_status", "agent_id": aid_str, "status": status.value})
-                    )
+                    yield "data: {}\n\n".format(json.dumps(_system_interface_status_payload(tracker, aid_str, status)))
 
                 current_data = _build_workspace_list(backend_resolver, session_store)
                 if current_data != last_workspace_data:

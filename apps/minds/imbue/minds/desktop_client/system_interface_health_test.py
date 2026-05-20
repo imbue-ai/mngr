@@ -112,6 +112,64 @@ def test_mark_stuck_is_idempotent() -> None:
     assert seen == [AgentHealth.STUCK]
 
 
+def test_mark_restart_failed_sets_state_and_carries_error() -> None:
+    """mark_restart_failed transitions to RESTART_FAILED and stores the reason."""
+    tracker = SystemInterfaceHealthTracker(stuck_threshold_seconds=_FAST_THRESHOLD)
+    aid = AgentId.generate()
+    seen: list[AgentHealth] = []
+    tracker.add_on_change_callback(lambda _a, h: seen.append(h))
+
+    tracker.mark_restarting(aid)
+    tracker.mark_restart_failed(aid, "mngr start exited 1")
+
+    assert tracker.get_health(aid) == AgentHealth.RESTART_FAILED
+    assert tracker.get_last_restart_error(aid) == "mngr start exited 1"
+    assert seen == [AgentHealth.RESTARTING, AgentHealth.RESTART_FAILED]
+
+
+def test_mark_restart_failed_refires_with_updated_reason() -> None:
+    """A second failure re-fires the callback even though the state is unchanged."""
+    tracker = SystemInterfaceHealthTracker(stuck_threshold_seconds=_FAST_THRESHOLD)
+    aid = AgentId.generate()
+    seen: list[AgentHealth] = []
+    tracker.add_on_change_callback(lambda _a, h: seen.append(h))
+
+    tracker.mark_restart_failed(aid, "first reason")
+    tracker.mark_restart_failed(aid, "second reason")
+
+    assert tracker.get_last_restart_error(aid) == "second reason"
+    assert seen == [AgentHealth.RESTART_FAILED, AgentHealth.RESTART_FAILED]
+
+
+def test_success_clears_restart_failed_and_error() -> None:
+    """A successful probe recovers a RESTART_FAILED agent and drops its error."""
+    tracker = SystemInterfaceHealthTracker(stuck_threshold_seconds=_FAST_THRESHOLD)
+    aid = AgentId.generate()
+
+    tracker.mark_restart_failed(aid, "boom")
+    tracker.record_success(aid)
+
+    assert tracker.get_health(aid) == AgentHealth.HEALTHY
+    assert tracker.get_last_restart_error(aid) is None
+
+
+def test_mark_restarting_clears_prior_restart_error() -> None:
+    """Starting a fresh restart attempt drops the previous failure reason."""
+    tracker = SystemInterfaceHealthTracker(stuck_threshold_seconds=_FAST_THRESHOLD)
+    aid = AgentId.generate()
+
+    tracker.mark_restart_failed(aid, "old failure")
+    tracker.mark_restarting(aid)
+
+    assert tracker.get_health(aid) == AgentHealth.RESTARTING
+    assert tracker.get_last_restart_error(aid) is None
+
+
+def test_get_last_restart_error_is_none_for_untracked_agent() -> None:
+    tracker = SystemInterfaceHealthTracker(stuck_threshold_seconds=_FAST_THRESHOLD)
+    assert tracker.get_last_restart_error(AgentId.generate()) is None
+
+
 def test_repeated_failures_during_window_do_not_double_fire() -> None:
     tracker = SystemInterfaceHealthTracker(stuck_threshold_seconds=_FAST_THRESHOLD)
     aid = AgentId.generate()

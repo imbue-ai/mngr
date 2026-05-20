@@ -11,7 +11,11 @@ applies a simple state machine:
   titlebar reacts by navigating the content view to the recovery page.
 - STUCK -> RESTARTING: the restart endpoint marks the tracker so the
   recovery page can render a different label and the probe loop keeps polling.
-- {STUCK, RESTARTING} -> HEALTHY: a successful probe.
+- RESTARTING -> RESTART_FAILED: a restart tier failed to recover the
+  workspace within its window, or its ``mngr`` commands errored. The
+  recovery page renders the failure reason and an escalate / try-again
+  affordance.
+- {STUCK, RESTARTING, RESTART_FAILED} -> HEALTHY: a successful probe.
 
 State changes fire registered on-change callbacks. Callbacks are invoked
 outside the internal lock so they may take the FastAPI app's own locks
@@ -49,6 +53,7 @@ class AgentHealth(str, Enum):
     HEALTHY = "healthy"
     STUCK = "stuck"
     RESTARTING = "restarting"
+    RESTART_FAILED = "restart_failed"
 
 
 OnChangeCallback = Callable[[AgentId, AgentHealth], None]
@@ -61,6 +66,10 @@ class _AgentRecord(MutableModel):
     first_failure_at: float | None = Field(
         default=None,
         description="time.monotonic() of the first failure in the current failing run, or None.",
+    )
+    last_restart_error: str | None = Field(
+        default=None,
+        description="Failure reason carried while health is RESTART_FAILED, for the recovery page to render.",
     )
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
@@ -163,8 +172,9 @@ class SystemInterfaceHealthTracker(MutableModel):
     def record_success(self, agent_id: AgentId) -> None:
         """Record a successful probe for ``agent_id``.
 
-        Clears any pending stuck timer; if the agent was STUCK or
-        RESTARTING, transitions it back to HEALTHY and fires on-change.
+        Clears any pending stuck timer; if the agent was STUCK,
+        RESTARTING, or RESTART_FAILED, transitions it back to HEALTHY and
+        fires on-change.
         """
         aid_str = str(agent_id)
         fire_health: AgentHealth | None = None
@@ -176,6 +186,7 @@ class SystemInterfaceHealthTracker(MutableModel):
             record.first_failure_at = None
             if record.health != AgentHealth.HEALTHY:
                 record.health = AgentHealth.HEALTHY
+                record.last_restart_error = None
                 self._last_recovery_at[aid_str] = time.monotonic()
                 fire_health = AgentHealth.HEALTHY
         if fire_health is not None:
@@ -213,11 +224,35 @@ class SystemInterfaceHealthTracker(MutableModel):
             record = self._records.setdefault(aid_str, _AgentRecord())
             self._cancel_stuck_timer_locked(aid_str)
             record.first_failure_at = None
+            # A fresh restart attempt supersedes any prior failure reason.
+            record.last_restart_error = None
             if record.health != AgentHealth.RESTARTING:
                 record.health = AgentHealth.RESTARTING
                 fire_health = AgentHealth.RESTARTING
         if fire_health is not None:
             self._fire_on_change(agent_id, fire_health)
+
+    def mark_restart_failed(self, agent_id: AgentId, error: str) -> None:
+        """Mark ``agent_id`` as RESTART_FAILED, carrying ``error`` as the reason.
+
+        Called when a restart tier fails to recover the workspace within
+        its window, or its ``mngr`` commands error out. The reason is
+        surfaced to the recovery page so it can render an escalate /
+        try-again affordance instead of an indefinite "Restarting...".
+        """
+        aid_str = str(agent_id)
+        should_fire = False
+        with self._lock:
+            record = self._records.setdefault(aid_str, _AgentRecord())
+            self._cancel_stuck_timer_locked(aid_str)
+            record.first_failure_at = None
+            record.last_restart_error = error
+            # Always re-fire: a second failure with a new reason must reach
+            # the recovery page even if the state is already RESTART_FAILED.
+            record.health = AgentHealth.RESTART_FAILED
+            should_fire = True
+        if should_fire:
+            self._fire_on_change(agent_id, AgentHealth.RESTART_FAILED)
 
     def get_health(self, agent_id: AgentId) -> AgentHealth:
         """Return the current health for ``agent_id`` (HEALTHY by default)."""
@@ -226,6 +261,14 @@ class SystemInterfaceHealthTracker(MutableModel):
             if record is None:
                 return AgentHealth.HEALTHY
             return record.health
+
+    def get_last_restart_error(self, agent_id: AgentId) -> str | None:
+        """Return the failure reason for ``agent_id`` if it is RESTART_FAILED."""
+        with self._lock:
+            record = self._records.get(str(agent_id))
+            if record is None:
+                return None
+            return record.last_restart_error
 
     def snapshot_all(self) -> dict[AgentId, AgentHealth]:
         """Return a copy of all currently-tracked non-HEALTHY agents.
