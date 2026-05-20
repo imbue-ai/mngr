@@ -162,13 +162,19 @@ _SSH_COMMAND_TIMEOUT_SECONDS: Final[int] = 60
 
 # Manual rsync excludes layered on top of `--filter=:- .gitignore`. The
 # filter handles `__pycache__`, `.venv`, `node_modules`, `.test_output`,
-# `.mypy_cache`, `.ruff_cache`, `.pytest_cache`, `.external_worktrees`, and
-# anything else mngr's gitignore lists. These two patterns are NOT in
-# .gitignore so we exclude them explicitly:
+# `.mypy_cache`, `.ruff_cache`, `.pytest_cache`, and anything else mngr's
+# gitignore lists. These patterns are excluded manually:
 #   - `.git`: gitignore never lists it; it's git's internal dir.
 #   - `uv.lock`: intentionally committed at the mngr root, but each install
 #     context should regenerate its own.
-_RSYNC_MANUAL_EXCLUDES: Final[tuple[str, ...]] = (".git", "uv.lock")
+#   - `.external_worktrees`: gitignore lists it as `**/.external_worktrees/`,
+#     but rsync's `**/` pattern requires at least one preceding path
+#     component, so the top-level `.external_worktrees/` is not matched by
+#     the filter. Exclude it explicitly to avoid recursing into the
+#     destination (which can live at
+#     `.external_worktrees/forever-claude-template/vendor/mngr`) and to
+#     prevent unrelated external worktrees from being copied in.
+_RSYNC_MANUAL_EXCLUDES: Final[tuple[str, ...]] = (".git", "uv.lock", ".external_worktrees")
 _GITIGNORE_RSYNC_FILTER: Final[str] = ":- .gitignore"
 
 # INSERT statement for a freshly-baked pool host row. The column list MUST
