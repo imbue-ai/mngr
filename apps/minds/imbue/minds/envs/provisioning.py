@@ -82,6 +82,7 @@ from imbue.minds.envs.per_env_deploy import push_per_env_modal_secret
 from imbue.minds.envs.per_env_deploy import stop_modal_app
 from imbue.minds.envs.per_env_deploy import tier_connector_url
 from imbue.minds.envs.per_env_deploy import tier_litellm_proxy_url
+from imbue.minds.envs.primitives import DeployStrategy
 from imbue.minds.envs.primitives import DevEnvName
 from imbue.minds.envs.providers.neon_db import NeonProjectRecord
 from imbue.minds.envs.providers.ovh_tags import OvhCredentials
@@ -152,6 +153,54 @@ class ProviderCredentials(FrozenModel):
     ovh_credentials: OvhCredentials = Field(description="Dev-tier OVH AK/AS/CK credentials (shared across dev envs).")
 
 
+# Tiers whose default deploy strategy is RECREATE: dev (every personal
+# dev env and every CI ephemeral env, since both deploy with
+# ``tier="dev"``). Operator deploys against these almost always follow
+# a "deploy then immediately observe" pattern where a stale warm
+# container that keeps serving the prior version's behavior is the
+# opposite of what the operator wants. Shared tiers (staging,
+# production) fall through to ROLLOVER for zero-downtime.
+_DEFAULT_RECREATE_TIERS: Final[frozenset[str]] = frozenset({"dev"})
+
+
+def resolve_deploy_strategy(
+    *,
+    explicit: DeployStrategy | None,
+    tier: str,
+    had_migrations: bool,
+) -> DeployStrategy:
+    """Pick the Modal deploy strategy from operator override + deploy context.
+
+    Policy (operator-documented):
+
+    1. ``explicit`` wins. ``--hard`` / ``--soft`` on the CLI resolve to
+       :attr:`DeployStrategy.RECREATE` / :attr:`DeployStrategy.ROLLOVER`
+       respectively and we always honour them. Pass ``None`` to defer
+       to the default policy.
+    2. If a migration was applied this deploy, use ``RECREATE``. Old
+       code against a freshly-migrated DB schema is a combination the
+       deployed binary has not been tested against; cycling all
+       containers immediately is the safe choice even for a
+       "backwards-compatible" migration.
+    3. Otherwise, ``RECREATE`` for ``dev``-tier deploys (personal dev
+       envs + CI ephemeral envs). The operator's flow is "deploy and
+       immediately observe", and the stale-warm-container window
+       (several minutes for Modal's default rollover) silently masks
+       new code's behavior.
+    4. Otherwise (staging / production with no migration applied),
+       ``ROLLOVER``. Shared tiers prioritize zero-downtime; the
+       operator can opt in to ``RECREATE`` with ``--hard`` when they
+       need it.
+    """
+    if explicit is not None:
+        return explicit
+    if had_migrations:
+        return DeployStrategy.RECREATE
+    if tier in _DEFAULT_RECREATE_TIERS:
+        return DeployStrategy.RECREATE
+    return DeployStrategy.ROLLOVER
+
+
 # Type aliases for the injectable provider callables. Tests substitute
 # fakes here; the CLI wires the real provider modules at runtime.
 # ``CreateNeonProjectFn`` provisions a per-dev-env Neon project (named
@@ -166,7 +215,7 @@ ListOvhInstancesFn = Callable[[DevEnvName, OvhCredentials], tuple[IamResource, .
 DeleteOvhInstancesFn = Callable[[tuple[IamResource, ...], OvhCredentials], None]
 ModalEnvOpFn = Callable[[DevEnvName, ConcurrencyGroup], None]
 PushPerEnvSecretFn = Callable[[str, dict[str, str], str, ConcurrencyGroup], None]
-# (modal_env, tier, min_containers, deploy_id, cg) -> deployed URL.
+# (modal_env, tier, min_containers, deploy_id, strategy, cg) -> deployed URL.
 # ``modal_env`` is the dev env name for dev-tier deploys or the tier's
 # stable Modal env (``main`` by convention) for shared-tier deploys.
 # ``min_containers`` is the per-app warm-pool size from the tier's
@@ -174,8 +223,10 @@ PushPerEnvSecretFn = Callable[[str, dict[str, str], str, ConcurrencyGroup], None
 # UTC-timestamp deploy id minted at the start of this deploy run;
 # the implementation threads it into the modal subprocess env as
 # ``MINDS_DEPLOY_ID`` so the deployed app pins to the matching
-# ``<svc>-<tier>-<id>`` Modal Secrets.
-DeployModalAppFn = Callable[[str, str, int, str, ConcurrencyGroup], AnyUrl]
+# ``<svc>-<tier>-<id>`` Modal Secrets. ``strategy`` is forwarded to
+# ``modal deploy --strategy`` so a single deploy can cycle both apps
+# the same way (see :class:`DeployStrategy`).
+DeployModalAppFn = Callable[[str, str, int, str, DeployStrategy, ConcurrencyGroup], AnyUrl]
 # (app_name, modal_env, cg) -> None. Used by tier destroys to ``modal
 # app stop`` each deployed app. Idempotent in the underlying call.
 StopModalAppFn = Callable[[str, str, ConcurrencyGroup], None]
@@ -432,6 +483,7 @@ def deploy_env(
     credentials: ProviderCredentials,
     providers: Providers,
     parent_concurrency_group: ConcurrencyGroup,
+    explicit_strategy: DeployStrategy | None = None,
 ) -> DeployedEnv:
     """Provision (or upgrade) the activated env -- unified path for every tier.
 
@@ -504,6 +556,7 @@ def deploy_env(
             modal_workspace=modal_workspace,
             tier_vault_prefix=tier_vault_prefix,
             modal_env=modal_env,
+            explicit_strategy=explicit_strategy,
         )
 
 
@@ -520,6 +573,7 @@ def _deploy_env_locked(
     modal_workspace: str,
     tier_vault_prefix: str,
     modal_env: str,
+    explicit_strategy: DeployStrategy | None,
 ) -> DeployedEnv:
     """The body of :func:`deploy_env`, run inside the per-env flock."""
     # Refuse-on-stale-recover-target check now happens INSIDE the lock
@@ -696,6 +750,23 @@ def _deploy_env_locked(
         if applied:
             logger.info("Applied {} pool-hosts migration(s): {}", len(applied), [m.name for m in applied])
 
+    # Resolve the Modal deploy strategy now that we know whether a
+    # migration ran. Done here (rather than at the CLI boundary) so the
+    # decision sees the full deploy context the policy depends on; the
+    # CLI only knows about ``--hard`` / ``--soft``.
+    deploy_strategy = resolve_deploy_strategy(
+        explicit=explicit_strategy,
+        tier=tier,
+        had_migrations=bool(applied),
+    )
+    logger.info(
+        "Modal deploy strategy for env {!r} (tier {!r}, had_migrations={}): {}",
+        str(name),
+        tier,
+        bool(applied),
+        deploy_strategy.value,
+    )
+
     # Step 2: tier generation id -- only when this tier exposes one.
     generation_id: str | None = None
     if lifecycle.tracks_generation:
@@ -775,24 +846,36 @@ def _deploy_env_locked(
     connector_min_containers = int(deploy_config.min_containers.connector)
 
     with info_span(
-        "Deploying llm-{} into env {!r} (min_containers={})",
+        "Deploying llm-{} into env {!r} (min_containers={}, strategy={})",
         tier,
         modal_env,
         litellm_proxy_min_containers,
+        deploy_strategy.value,
     ):
         litellm_proxy_url = providers.deploy_litellm_proxy(
-            modal_env, tier, litellm_proxy_min_containers, deploy_id, parent_concurrency_group
+            modal_env,
+            tier,
+            litellm_proxy_min_containers,
+            deploy_id,
+            deploy_strategy,
+            parent_concurrency_group,
         )
     _assert_deploy_url_matches(actual=litellm_proxy_url, expected=expected_litellm_proxy_url, app=f"llm-{tier}")
 
     with info_span(
-        "Deploying rsc-{} into env {!r} (min_containers={})",
+        "Deploying rsc-{} into env {!r} (min_containers={}, strategy={})",
         tier,
         modal_env,
         connector_min_containers,
+        deploy_strategy.value,
     ):
         connector_url = providers.deploy_remote_service_connector(
-            modal_env, tier, connector_min_containers, deploy_id, parent_concurrency_group
+            modal_env,
+            tier,
+            connector_min_containers,
+            deploy_id,
+            deploy_strategy,
+            parent_concurrency_group,
         )
     _assert_deploy_url_matches(actual=connector_url, expected=expected_connector_url, app=f"rsc-{tier}")
 

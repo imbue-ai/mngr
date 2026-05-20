@@ -6,7 +6,7 @@ from typing import Sequence
 
 import modal
 from loguru import logger
-from modal._output import OutputManager
+from modal._output.manager import OutputManager
 
 from imbue.imbue_common.logging import log_span
 from imbue.mngr.primitives import LogLevel
