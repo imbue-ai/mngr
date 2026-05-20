@@ -1167,7 +1167,6 @@ def _is_host_in_reuse_scope(
     host_name: HostName | HostId | None,
 ) -> bool:
     """The ``discovered_host``'s provider and host must match the address parts that were specified.
-
     An unspecified (``None``) provider or host does not constrain the match.
 
     Examples (caller args -> which discovered hosts are in scope):
@@ -1196,14 +1195,9 @@ def _try_reuse_existing_agent(
 ) -> tuple[AgentInterface, OnlineHostInterface] | None:
     """Try to find and start an existing agent with the given name.
 
-    Searches the discovered hosts for an agent named ``agent_name``, restricted
-    to the provider/host scope of the create address. ``provider_name`` and
-    ``host_name`` are the address's ``provider_name`` / ``host_name`` fields;
-    :func:`_is_host_in_reuse_scope` defines exactly which hosts that pair
-    selects. When neither is set the search spans every host (the documented
-    "any host" behavior of bare-name ``--reuse``). If found, ensures the agent
-    is started and returns it along with its host. If not found, returns None
-    so the caller can proceed with creating a new agent.
+    Searches for an agent matching the name, scoped by provider and host if specified.
+    If found, ensures the agent is started and returns it along with its host.
+    If not found, returns None so the caller can proceed with creating a new agent.
     """
     agents_by_host = agent_and_host_loader()
 
