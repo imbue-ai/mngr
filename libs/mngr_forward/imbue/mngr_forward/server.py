@@ -549,9 +549,8 @@ def _warn_resolver_miss(agent_id: AgentId, resolver: "ForwardResolver") -> None:
             f"ssh_info={'present' if ssh_info is not None else 'missing'}."
         )
     logger.warning(
-        "mngr_forward 503 for agent {}: {}. Returning auto-refreshing "
-        "'Backend not yet available' to the renderer. (Throttled: next "
-        "warning for this agent suppressed for {:.0f}s.)",
+        "mngr_forward could not route request for agent {}: {}. "
+        "(Throttled: next warning for this agent suppressed for {:.0f}s.)",
         agent_id,
         reason,
         _RESOLVER_MISS_WARN_INTERVAL_SECONDS,
