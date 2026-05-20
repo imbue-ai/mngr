@@ -343,7 +343,20 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
             )
 
         latchkey_service_info = self.latchkey.services_info(service_info.name)
-        if latchkey_service_info.credential_status != CredentialStatus.VALID:
+        # Only intervene when latchkey is certain credentials are absent
+        # (MISSING) or known-broken (INVALID). VALID obviously proceeds.
+        # UNKNOWN also proceeds: for generic ``rawCurl`` credentials
+        # (e.g. the ``minds`` service, where the desktop client itself
+        # pre-installs a bearer token at startup) latchkey has no way to
+        # verify the credential, so it always reports UNKNOWN even when
+        # the credential is present. Treating UNKNOWN as "needs setup"
+        # would prompt the user to redo work that's already been done; if
+        # the credential is in fact stale, the downstream API call will
+        # fail and surface a real error instead.
+        if latchkey_service_info.credential_status in (
+            CredentialStatus.MISSING,
+            CredentialStatus.INVALID,
+        ):
             # If latchkey advertises a browser flow (or returned no
             # ``authOptions`` at all and we don't actually know), keep the
             # legacy behaviour and run it. Otherwise refuse the grant and

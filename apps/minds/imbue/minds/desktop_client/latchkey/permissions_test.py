@@ -277,10 +277,11 @@ def test_grant_with_invalid_credentials_also_invokes_auth_browser(tmp_path: Path
     assert len(auth_recording) == 1
 
 
-def test_grant_with_unknown_credentials_invokes_auth_browser(tmp_path: Path) -> None:
-    # services info exits 0 but with no recognized status -> UNKNOWN.
-    # No authOptions either, so the grant falls back to the legacy browser
-    # behaviour rather than refusing.
+def test_grant_with_unknown_credentials_proceeds_without_invoking_auth_browser(tmp_path: Path) -> None:
+    # services info exits 0 but with unparseable JSON -> UNKNOWN.
+    # UNKNOWN means latchkey can't validate the credential (e.g. a raw
+    # curl bearer that the desktop client pre-installed at startup); the
+    # grant must proceed without prompting the user or invoking browser.
     binary = tmp_path / "latchkey"
     auth_recording = tmp_path / "auth_latchkey_report.jsonl"
     binary.write_text(
@@ -314,7 +315,37 @@ def test_grant_with_unknown_credentials_invokes_auth_browser(tmp_path: Path) -> 
     )
 
     assert result.outcome == GrantOutcome.GRANTED
-    assert len(_read_recording(auth_recording)) == 1
+    # Browser flow must not fire: UNKNOWN is treated as "trust the
+    # caller", not "we need to (re-)authenticate".
+    assert _read_recording(auth_recording) == []
+
+
+def test_grant_with_unknown_credentials_and_set_only_auth_proceeds(tmp_path: Path) -> None:
+    # This mirrors the real ``minds`` service: the desktop client
+    # pre-stores a raw curl bearer via ``latchkey auth set`` at startup,
+    # latchkey reports ``credentialStatus=unknown`` (it can't validate
+    # rawCurl credentials) and ``authOptions=["set"]`` (no browser flow).
+    # Before the fix this returned ``NEEDS_MANUAL_CREDENTIALS`` even
+    # though credentials were already in place; the grant must now
+    # succeed without any user-visible re-setup prompt.
+    handler = _build_handler(
+        tmp_path,
+        credential_status="unknown",
+        auth_options_json=json.dumps(["set"]),
+    )
+
+    result = handler.grant(
+        request_event_id="evt-abc",
+        agent_id=AgentId(),
+        host_id=HostId(),
+        service_info=_SLACK_SERVICE_INFO,
+        granted_permissions=("slack-read-all",),
+    )
+
+    assert result.outcome == GrantOutcome.GRANTED
+    assert result.set_credentials_example is None
+    # auth browser must not have been invoked.
+    assert not (tmp_path / "auth_latchkey_report.jsonl").exists()
 
 
 def test_grant_treats_failed_browser_flow_as_deny_with_distinct_message(tmp_path: Path) -> None:
