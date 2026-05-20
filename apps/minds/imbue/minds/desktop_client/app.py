@@ -1580,6 +1580,7 @@ def _handle_recovery_page(
         ws_name = info.agent_name if info else str(agent_id)
     tracker: SystemInterfaceHealthTracker | None = request.app.state.system_interface_health_tracker
     initial_status = tracker.get_health(aid).value if tracker is not None else AgentHealth.HEALTHY.value
+    initial_error = (tracker.get_last_restart_error(aid) or "") if tracker is not None else ""
     return_to = _sanitize_recovery_return_to(request.query_params.get("return_to", ""))
     # If the agent has already recovered by the time the chrome navigates
     # here (a real race: the background probe loop can flip the tracker
@@ -1598,6 +1599,7 @@ def _handle_recovery_page(
         ws_name=ws_name,
         return_to=return_to,
         initial_status=initial_status,
+        initial_error=initial_error,
     )
     return HTMLResponse(content=html_body)
 

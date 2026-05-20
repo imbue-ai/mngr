@@ -8,17 +8,23 @@
          style="--workspace-accent: {{ accent }};"
          data-agent-id="{{ agent_id }}"
          data-return-to="{{ return_to }}"
-         data-initial-status="{{ initial_status }}">
-      <h1 class="text-xl font-semibold text-zinc-900 mb-2">System interface not responding</h1>
-      <p class="text-zinc-600 mb-4">
+         data-initial-status="{{ initial_status }}"
+         data-initial-error="{{ initial_error }}">
+      <h1 id="recovery-title" class="text-xl font-semibold text-zinc-900 mb-2">System interface not responding</h1>
+      <p id="recovery-message" class="text-zinc-600 mb-4">
         The system interface for <span class="font-mono">{{ ws_name }}</span> is unresponsive.
-        Click below to restart it. Your agents will not be interrupted.
-        The page will reload back to your workspace as soon as it is ready again.
       </p>
+      <div id="recovery-error"
+           class="hidden mb-4 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
+      </div>
       <div class="flex items-center gap-3">
-        <button id="recovery-restart-btn"
-                class="rounded-md bg-zinc-900 px-4 py-2 text-sm font-medium text-white hover:bg-zinc-700">
+        <button id="recovery-surgical-btn"
+                class="hidden rounded-md bg-zinc-900 px-4 py-2 text-sm font-medium text-white hover:bg-zinc-700">
           Restart system interface
+        </button>
+        <button id="recovery-host-btn"
+                class="hidden rounded-md bg-zinc-900 px-4 py-2 text-sm font-medium text-white hover:bg-zinc-700">
+          Restart workspace
         </button>
         <span id="recovery-status" class="text-sm text-zinc-500"></span>
       </div>
@@ -32,44 +38,157 @@
       if (!root) return;
       var agentId = root.dataset.agentId;
       var returnTo = root.dataset.returnTo || '';
-      var status = root.dataset.initialStatus || 'stuck';
+      var initialStatus = root.dataset.initialStatus || 'stuck';
+      var initialError = root.dataset.initialError || '';
+
+      var titleEl = document.getElementById('recovery-title');
+      var messageEl = document.getElementById('recovery-message');
+      var errorEl = document.getElementById('recovery-error');
       var statusEl = document.getElementById('recovery-status');
-      var btn = document.getElementById('recovery-restart-btn');
-      var inFlight = false;
+      var surgicalBtn = document.getElementById('recovery-surgical-btn');
+      var hostBtn = document.getElementById('recovery-host-btn');
 
-      function setStatus(text, busy) {
-        statusEl.textContent = text;
-        btn.disabled = !!busy;
-        btn.classList.toggle('opacity-50', !!busy);
-        btn.classList.toggle('cursor-not-allowed', !!busy);
-      }
-      if (status === 'restarting') {
-        setStatus('Restarting...', true);
+      // The tier the user triggered this session. Until they click a button
+      // it stays null, and SSE failure events are ignored (the page is still
+      // deciding which tier to offer from the layer-2 probe).
+      var attemptedTier = null;
+
+      function show(el, visible) {
+        el.classList.toggle('hidden', !visible);
       }
 
-      function doRestart() {
-        if (inFlight) return;
-        inFlight = true;
-        setStatus('Restarting...', true);
-        // Wait for the restart dispatch to ack (the endpoint returns 200
-        // once the system_interface tmux window has been killed) before
-        // navigating, so the plugin reliably serves its 503 loader instead
-        // of racing against a still-live backend. The plugin's loader
-        // auto-refreshes into the workspace once the system interface is back.
-        function goBack() {
-          if (returnTo) {
-            window.location.assign(returnTo);
-          } else {
-            window.location.reload();
-          }
+      function setError(text) {
+        if (text) {
+          errorEl.textContent = text;
+          show(errorEl, true);
+        } else {
+          errorEl.textContent = '';
+          show(errorEl, false);
         }
-        fetch('/api/agents/' + encodeURIComponent(agentId) + '/restart-system-interface', {
+      }
+
+      function goBack() {
+        if (returnTo) {
+          window.location.assign(returnTo);
+        } else {
+          window.location.reload();
+        }
+      }
+
+      // -- UI modes -----------------------------------------------------------
+      function renderChecking() {
+        titleEl.textContent = 'System interface not responding';
+        messageEl.textContent = 'Checking host health…';
+        show(surgicalBtn, false);
+        show(hostBtn, false);
+        statusEl.textContent = '';
+      }
+
+      function renderSurgicalOffer() {
+        titleEl.textContent = 'System interface not responding';
+        messageEl.textContent =
+          'Restarting the system interface should bring your workspace back. Your agents will not be interrupted.';
+        show(surgicalBtn, true);
+        show(hostBtn, false);
+        statusEl.textContent = '';
+      }
+
+      function renderHostOffer(isEscalation) {
+        titleEl.textContent = 'System interface not responding';
+        messageEl.textContent = isEscalation
+          ? 'The system interface did not come back. Restarting the whole workspace should recover it. '
+            + 'In-progress work in all agents will be interrupted.'
+          : 'This workspace needs a full restart to recover. In-progress work in all agents will be interrupted.';
+        show(surgicalBtn, false);
+        show(hostBtn, true);
+        hostBtn.textContent = 'Restart workspace';
+        statusEl.textContent = '';
+      }
+
+      function renderInFlight() {
+        show(surgicalBtn, false);
+        show(hostBtn, false);
+        statusEl.textContent = 'Restarting…';
+      }
+
+      function renderTerminal(reason) {
+        titleEl.textContent = 'Restart failed';
+        messageEl.textContent =
+          'The workspace restart did not recover the system interface. You can try again, '
+          + 'or contact support if the problem persists.';
+        setError(reason || 'The workspace restart did not recover the system interface.');
+        show(surgicalBtn, false);
+        show(hostBtn, true);
+        hostBtn.textContent = 'Try again';
+        statusEl.textContent = '';
+      }
+
+      // -- Layer-2 probe ------------------------------------------------------
+      function runProbe() {
+        renderChecking();
+        fetch('/api/agents/' + encodeURIComponent(agentId) + '/host-health', {
+          credentials: 'same-origin',
+        }).then(function (resp) {
+          return resp.json();
+        }).then(function (data) {
+          if (data && data.reachable) {
+            renderSurgicalOffer();
+          } else {
+            renderHostOffer(false);
+          }
+        }, function () {
+          // If the probe itself fails to complete, the safe fallback is the
+          // full host restart -- it does not depend on the container being
+          // reachable for a lighter-weight fix.
+          renderHostOffer(false);
+        });
+      }
+
+      // -- Restart dispatch ---------------------------------------------------
+      function postRestart(path, tier) {
+        attemptedTier = tier;
+        renderInFlight();
+        fetch('/api/agents/' + encodeURIComponent(agentId) + path, {
           method: 'POST',
           credentials: 'same-origin',
-        }).then(goBack, goBack);
+        }).catch(function () {
+          // A failed dispatch POST still leaves the tracker untouched only if
+          // it never reached the server; the recovery path is SSE-driven, so
+          // surface a generic failure rather than hanging on "Restarting".
+          if (tier === 'host') {
+            renderTerminal('Could not reach minds to start the restart.');
+          } else {
+            renderHostOffer(true);
+          }
+        });
       }
 
-      btn.addEventListener('click', doRestart);
+      surgicalBtn.addEventListener('click', function () {
+        postRestart('/restart-system-interface', 'system_interface');
+      });
+      hostBtn.addEventListener('click', function () {
+        postRestart('/restart-host', 'host');
+      });
+
+      // -- SSE ----------------------------------------------------------------
+      function handleStatus(status, errorText) {
+        if (status === 'healthy') {
+          statusEl.textContent = 'Workspace is ready. Reloading…';
+          goBack();
+        } else if (status === 'restarting') {
+          renderInFlight();
+        } else if (status === 'restart_failed') {
+          // Ignore failure events until the user has actually triggered a
+          // restart this session -- otherwise the snapshot the SSE sends on
+          // connect would clobber the tier the layer-2 probe just chose.
+          if (attemptedTier === 'host') {
+            renderTerminal(errorText);
+          } else if (attemptedTier === 'system_interface') {
+            setError(errorText || 'The system interface did not come back.');
+            renderHostOffer(true);
+          }
+        }
+      }
 
       var es = null;
       function connectSSE() {
@@ -79,19 +198,7 @@
           var data;
           try { data = JSON.parse(event.data); } catch (e) { return; }
           if (data.type !== 'system_interface_status' || data.agent_id !== agentId) return;
-          if (data.status === 'healthy') {
-            setStatus('Workspace is ready. Reloading...', true);
-            es.close();
-            if (returnTo) {
-              window.location.assign(returnTo);
-            } else {
-              window.location.reload();
-            }
-          } else if (data.status === 'restarting') {
-            setStatus('Restarting...', true);
-          } else if (data.status === 'stuck') {
-            setStatus('Workspace is not responding.', false);
-          }
+          handleStatus(data.status, data.error);
         };
         es.onerror = function () {
           if (!es) return;
@@ -99,6 +206,16 @@
           es = null;
           setTimeout(connectSSE, 5000);
         };
+      }
+
+      // -- Initial state ------------------------------------------------------
+      if (initialStatus === 'restarting') {
+        renderInFlight();
+      } else {
+        if (initialStatus === 'restart_failed' && initialError) {
+          setError(initialError);
+        }
+        runProbe();
       }
       connectSSE();
     })();

@@ -235,12 +235,17 @@ def test_render_recovery_page_includes_agent_id_and_return_to() -> None:
         ws_name="my-workspace",
         return_to="http://agent.localhost:8421/",
         initial_status="stuck",
+        initial_error="",
     )
     assert str(_AGENT_A) in html
     assert "my-workspace" in html
     assert "http://agent.localhost:8421/" in html
     assert "/api/agents/" in html
+    # The two restart tiers the recovery page can dispatch.
     assert "restart-system-interface" in html
+    assert "restart-host" in html
+    # The layer-2 probe endpoint the page calls on load.
+    assert "host-health" in html
     assert 'data-initial-status="stuck"' in html
 
 
@@ -250,5 +255,18 @@ def test_render_recovery_page_restarting_status() -> None:
         ws_name="ws",
         return_to="",
         initial_status="restarting",
+        initial_error="",
     )
     assert 'data-initial-status="restarting"' in html
+
+
+def test_render_recovery_page_carries_restart_failed_error() -> None:
+    html = render_recovery_page(
+        agent_id=_AGENT_B,
+        ws_name="ws",
+        return_to="",
+        initial_status="restart_failed",
+        initial_error="Start step of host restart failed: exited 1",
+    )
+    assert 'data-initial-status="restart_failed"' in html
+    assert "Start step of host restart failed: exited 1" in html

@@ -309,19 +309,23 @@ def render_recovery_page(
     ws_name: str,
     return_to: str,
     initial_status: str,
+    initial_error: str,
 ) -> str:
     """Render the workspace-recovery page shown when the system interface is unresponsive.
 
-    ``initial_status`` is one of ``"stuck"``/``"restarting"``/``"healthy"`` and
-    governs the page's initial UI state. ``return_to`` is the URL the page
-    reloads back to once the tracker reports HEALTHY again -- typically the
-    original plugin subdomain URL the user was navigating to.
+    ``initial_status`` is one of ``"stuck"``/``"restarting"``/``"restart_failed"``/
+    ``"healthy"`` and governs the page's initial UI state. ``initial_error`` is the
+    failure reason carried when ``initial_status`` is ``"restart_failed"`` (empty
+    otherwise). ``return_to`` is the URL the page reloads back to once the tracker
+    reports HEALTHY again -- typically the original plugin subdomain URL the user
+    was navigating to.
     """
     return JINJA_ENV.get_template("recovery.html").render(
         agent_id=str(agent_id),
         ws_name=ws_name,
         return_to=return_to,
         initial_status=initial_status,
+        initial_error=initial_error,
         accent=workspace_accent(str(agent_id)),
     )
 
