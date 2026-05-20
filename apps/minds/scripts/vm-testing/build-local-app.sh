@@ -100,8 +100,16 @@ if [[ -x "$real_git" ]]; then
     log "swapping bundled git with $real_git"
     cp "$real_git" "$resources_dir/git/bin/git"
     chmod +x "$resources_dir/git/bin/git"
+    # git looks for its helpers (git-remote-https, etc.) and templates
+    # relative to the binary location: <prefix>/libexec/git-core/ and
+    # <prefix>/share/git-core/. Copy both so HTTPS clones actually work.
+    clt_root=/Library/Developer/CommandLineTools
+    rm -rf "$resources_dir/git/libexec" "$resources_dir/git/share"
+    mkdir -p "$resources_dir/git/libexec" "$resources_dir/git/share"
+    cp -R "$clt_root/usr/libexec/git-core" "$resources_dir/git/libexec/"
+    cp -R "$clt_root/usr/share/git-core" "$resources_dir/git/share/"
 else
-    log "WARNING: $real_git not found; bundled git will be the xcselect stub and SIGKILL on Tahoe"
+    die "expected real git at $real_git; install Xcode Command Line Tools first"
 fi
 
 log "building workspace wheels into $wheels_dir"
