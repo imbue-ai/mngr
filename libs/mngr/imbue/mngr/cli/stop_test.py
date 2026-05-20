@@ -9,12 +9,17 @@ import pytest
 from click.testing import CliRunner
 
 from imbue.mngr.cli.stop import StopCliOptions
+from imbue.mngr.cli.stop import _ensure_providers_support_host_shutdown
 from imbue.mngr.cli.stop import _output_result
 from imbue.mngr.cli.stop import stop
+from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import OutputOptions
+from imbue.mngr.errors import HostShutdownNotSupportedError
 from imbue.mngr.primitives import AgentAddress
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import OutputFormat
+from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr.providers.mock_provider_test import MockProviderInstance
 
 
 def test_stop_cli_options_fields() -> None:
@@ -24,6 +29,7 @@ def test_stop_cli_options_fields() -> None:
         agent_list=(AgentAddress(agent=AgentName("agent3")),),
         archive=False,
         sessions=(),
+        stop_host=False,
         snapshot_mode=None,
         graceful=True,
         graceful_timeout=None,
@@ -88,6 +94,67 @@ def test_stop_session_fails_with_invalid_prefix(
     assert "does not match the expected format" in result.output
 
 
+def test_stop_host_rejects_archive_combination(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """--stop-host and --archive cannot be used together."""
+    result = cli_runner.invoke(
+        stop,
+        ["my-agent", "--stop-host", "--archive"],
+        obj=plugin_manager,
+        catch_exceptions=True,
+    )
+
+    assert result.exit_code != 0
+    assert "Cannot use --stop-host together with --archive" in result.output
+
+
+# =============================================================================
+# Host-shutdown capability validation
+# =============================================================================
+
+
+def _make_mock_provider(
+    name: str,
+    supports_shutdown: bool,
+    temp_host_dir: Path,
+    temp_mngr_ctx: MngrContext,
+) -> MockProviderInstance:
+    return MockProviderInstance(
+        name=ProviderInstanceName(name),
+        host_dir=temp_host_dir,
+        mngr_ctx=temp_mngr_ctx,
+        mock_supports_shutdown_hosts=supports_shutdown,
+    )
+
+
+def test_ensure_providers_support_host_shutdown_passes_when_all_support(
+    temp_host_dir: Path,
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """No error is raised when every provider supports stopping hosts."""
+    providers = [
+        _make_mock_provider("p1", True, temp_host_dir, temp_mngr_ctx),
+        _make_mock_provider("p2", True, temp_host_dir, temp_mngr_ctx),
+    ]
+    _ensure_providers_support_host_shutdown(providers)
+
+
+def test_ensure_providers_support_host_shutdown_raises_for_unsupported(
+    temp_host_dir: Path,
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """A provider that cannot stop hosts triggers HostShutdownNotSupportedError."""
+    providers = [
+        _make_mock_provider("good", True, temp_host_dir, temp_mngr_ctx),
+        _make_mock_provider("bad", False, temp_host_dir, temp_mngr_ctx),
+    ]
+    with pytest.raises(HostShutdownNotSupportedError) as exc_info:
+        _ensure_providers_support_host_shutdown(providers)
+    assert exc_info.value.provider_name == ProviderInstanceName("bad")
+
+
 # =============================================================================
 # StopCliOptions additional field tests
 # =============================================================================
@@ -100,6 +167,7 @@ def test_stop_cli_options_accepts_all_optional_fields() -> None:
         agent_list=(AgentAddress(agent=AgentName("a4")),),
         archive=True,
         sessions=("mngr-session-1", "mngr-session-2"),
+        stop_host=True,
         snapshot_mode="auto",
         graceful=False,
         graceful_timeout="30s",
