@@ -12,9 +12,9 @@ The desktop client (`minds run`) provides:
 - Authentication via one-time codes and signed cookies
 - A landing page listing all accessible workspaces (or a creation form if none exist)
 - Agent creation from git repositories or local paths via a web form or API
-- Byte-forwarding of HTTP and WebSocket traffic from `<agent-id>.localhost:8420/*` to the workspace's own workspace server (the `minds-workspace-server` CLI, source at `forever-claude-template/apps/system_interface/`; optionally through an SSH tunnel for remote agents)
+- Byte-forwarding of HTTP and WebSocket traffic from `<agent-id>.localhost:8420/*` to the workspace's own system interface (the `system-interface` CLI, source at `forever-claude-template/apps/system_interface/`; optionally through an SSH tunnel for remote agents)
 
-Each workspace runs its own workspace server (the `minds-workspace-server` CLI, source at `forever-claude-template/apps/system_interface/`), which serves the dockview UI and multiplexes the workspace's services under `/service/<name>/...` paths (Service Worker bootstrap, HTML/cookie rewriting, and WebSocket shims live there, not in the desktop client). Browsers access a workspace at `http://<agent-id>.localhost:8420/` and its individual services at `http://<agent-id>.localhost:8420/service/<service_name>/`.
+Each workspace runs its own system interface (the `system-interface` CLI, source at `forever-claude-template/apps/system_interface/`), which serves the dockview UI and multiplexes the workspace's services under `/service/<name>/...` paths (Service Worker bootstrap, HTML/cookie rewriting, and WebSocket shims live there, not in the desktop client). Browsers access a workspace at `http://<agent-id>.localhost:8420/` and its individual services at `http://<agent-id>.localhost:8420/service/<service_name>/`.
 
 ### Agent container (runs in Docker)
 

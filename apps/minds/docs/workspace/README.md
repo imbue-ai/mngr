@@ -23,7 +23,7 @@ Defines background services that run in tmux windows:
 
 ```toml
 [services.web]
-command = "python3 scripts/forward_port.py --url http://localhost:8000 --name web && minds-workspace-server"
+command = "python3 scripts/forward_port.py --url http://localhost:8000 --name web && system-interface"
 
 [services.terminal]
 command = "bash scripts/run_ttyd.sh"
