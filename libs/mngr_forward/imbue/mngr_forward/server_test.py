@@ -238,7 +238,7 @@ def test_preauth_cookie_short_circuit(tmp_path: Path) -> None:
 
 def test_subdomain_forward_strips_session_cookie_before_proxying_to_backend(tmp_path: Path) -> None:
     """The plugin must NEVER forward its own session cookie to the agent's
-    workspace_server.
+    system_interface.
 
     The cookie value is the plugin's auth credential -- a backend that sees
     it could replay it against ``localhost:<plugin_port>`` and reach every
@@ -451,7 +451,7 @@ def test_subdomain_forward_allows_loopback_fallback_when_opted_in(tmp_path: Path
 
 
 def test_subdomain_forward_returns_retry_page_on_backend_connect_error(tmp_path: Path) -> None:
-    """When the backend refuses the connection (workspace_server still booting), HTML callers
+    """When the backend refuses the connection (system_interface still booting), HTML callers
     must get the auto-refresh retry page rather than a hard 502."""
     auth_store = FileAuthStore(data_directory=tmp_path)
     resolver = ForwardResolver(strategy=ForwardServiceStrategy(service_name="system_interface"))
@@ -499,13 +499,13 @@ def test_subdomain_forward_returns_retry_page_on_backend_connect_error(tmp_path:
     # HTML navigations get the auto-refresh retry page so the user lands on
     # something useful instead of a hard 502.
     assert html_response.status_code == 503
-    assert "Workspace server starting" in html_response.text
+    assert "System interface starting" in html_response.text
     assert 'http-equiv="refresh"' in html_response.text
     # Non-HTML callers get a plain 503 they can interpret programmatically.
     assert json_response.status_code == 503
 
 
-# -- workspace_backend_failure envelope + recovery redirect tests --
+# -- system_interface_backend_failure envelope + recovery redirect tests --
 
 
 def _make_forward_app_with_capture(
@@ -548,8 +548,8 @@ def _envelope_lines(envelope_output: io.StringIO) -> list[str]:
     return [line for line in envelope_output.getvalue().splitlines() if line.strip()]
 
 
-def test_subdomain_forward_emits_workspace_backend_failure_on_5xx(tmp_path: Path) -> None:
-    """A 502/503/504 backend response triggers a ``workspace_backend_failure`` envelope."""
+def test_subdomain_forward_emits_system_interface_backend_failure_on_5xx(tmp_path: Path) -> None:
+    """A 502/503/504 backend response triggers a ``system_interface_backend_failure`` envelope."""
     agent_id = AgentId()
     preauth = "preauth-cookie-1"
     captured: list[httpx.Request] = []
@@ -578,7 +578,7 @@ def test_subdomain_forward_emits_workspace_backend_failure_on_5xx(tmp_path: Path
     assert envelope["stream"] == "forward"
     assert envelope["agent_id"] == str(agent_id)
     payload = envelope["payload"]
-    assert payload["type"] == "workspace_backend_failure"
+    assert payload["type"] == "system_interface_backend_failure"
     assert payload["reason"] == "FIVEXX_RESPONSE"
     assert payload["status_code"] == 503
 
@@ -610,7 +610,7 @@ def test_subdomain_forward_does_not_emit_failure_on_2xx(tmp_path: Path) -> None:
     assert _envelope_lines(env_out) == []
 
 
-def test_subdomain_forward_emits_workspace_backend_failure_on_sse_startup_disconnect(tmp_path: Path) -> None:
+def test_subdomain_forward_emits_system_interface_backend_failure_on_sse_startup_disconnect(tmp_path: Path) -> None:
     """``RemoteProtocolError`` on an SSE-startup ``send()`` must emit ``CONNECT_ERROR``.
 
     Regression test: previously, an SSE-style request (``Accept: text/event-stream``)
@@ -650,7 +650,7 @@ def test_subdomain_forward_emits_workspace_backend_failure_on_sse_startup_discon
     assert envelope["stream"] == "forward"
     assert envelope["agent_id"] == str(agent_id)
     payload = envelope["payload"]
-    assert payload["type"] == "workspace_backend_failure"
+    assert payload["type"] == "system_interface_backend_failure"
     assert payload["reason"] == "CONNECT_ERROR"
 
 
@@ -681,10 +681,10 @@ def test_subdomain_forward_returns_plain_503_for_non_html_on_connect_failure(tmp
     assert "location" not in {k.lower() for k in response.headers}
 
 
-def test_subdomain_forward_emits_workspace_backend_failure_on_sse_startup_timeout(tmp_path: Path) -> None:
+def test_subdomain_forward_emits_system_interface_backend_failure_on_sse_startup_timeout(tmp_path: Path) -> None:
     """``TimeoutException`` on an SSE-startup ``send()`` must emit ``CONNECT_ERROR``.
 
-    Regression test: a wedged-but-listening workspace backend produces a
+    Regression test: a wedged-but-listening backend produces a
     ``httpx.TimeoutException`` (not ``ConnectError``) when ``send(..., stream=True)``
     waits for response headers that never arrive. Without an envelope on
     this branch the minds-side tracker would never transition to STUCK
@@ -718,11 +718,11 @@ def test_subdomain_forward_emits_workspace_backend_failure_on_sse_startup_timeou
     assert envelope["stream"] == "forward"
     assert envelope["agent_id"] == str(agent_id)
     payload = envelope["payload"]
-    assert payload["type"] == "workspace_backend_failure"
+    assert payload["type"] == "system_interface_backend_failure"
     assert payload["reason"] == "CONNECT_ERROR"
 
 
-def test_subdomain_forward_emits_workspace_backend_failure_on_non_sse_timeout(tmp_path: Path) -> None:
+def test_subdomain_forward_emits_system_interface_backend_failure_on_non_sse_timeout(tmp_path: Path) -> None:
     """``TimeoutException`` on a non-SSE backend request must emit ``CONNECT_ERROR``.
 
     Regression test: covers the non-streaming path counterpart to the
@@ -758,5 +758,5 @@ def test_subdomain_forward_emits_workspace_backend_failure_on_non_sse_timeout(tm
     assert envelope["stream"] == "forward"
     assert envelope["agent_id"] == str(agent_id)
     payload = envelope["payload"]
-    assert payload["type"] == "workspace_backend_failure"
+    assert payload["type"] == "system_interface_backend_failure"
     assert payload["reason"] == "CONNECT_ERROR"
