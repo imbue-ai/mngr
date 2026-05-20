@@ -1,0 +1,1 @@
+mngr_vultr: add a session-end leak detector to test_release_vultr. Tags every test-created VPS with a per-session UUID and destroys any survivors at pytest session end, matching the Modal leak-detection pattern. Catches cost leaks from tests that crash between create and their finally-block destroy, or whose destroy itself fails silently.
