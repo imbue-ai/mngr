@@ -978,10 +978,10 @@ def env_deploy(
 
     When neither ``--hard`` nor ``--soft`` is passed, the deploy strategy
     is chosen per :func:`resolve_deploy_strategy`: ``RECREATE`` whenever
-    a migration ran or the tier is ``dev`` (covers personal dev envs +
-    CI ephemeral envs), ``ROLLOVER`` for shared tiers with no migration
-    (staging / production prefer zero-downtime when nothing risky
-    happened).
+    a migration ran or the tier is ``dev`` or ``ci`` (the per-env tiers
+    -- personal dev envs and CI ephemeral envs respectively), ``ROLLOVER``
+    for shared tiers with no migration (staging / production prefer
+    zero-downtime when nothing risky happened).
     """
     output_format: OutputFormat = ctx.obj.get("output_format", OutputFormat.HUMAN)
     env_name = require_activated_env_name()
