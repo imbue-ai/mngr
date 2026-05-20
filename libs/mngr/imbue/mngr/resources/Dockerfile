@@ -106,9 +106,9 @@ WORKDIR /code/mngr/
 # RUN below can invoke it even in the keyframe build-context shape
 # where everything else lives inside current.tar.gz. The real-source-
 # tree shape would also satisfy this COPY from the same path, and the
-# subsequent `COPY . /code/mngr/` (when the keyframe build context is
-# used) and the in-script tarball extraction both leave this same
-# script on disk afterwards -- a self-consistent end state.
+# subsequent bulk-copy step plus the in-script tarball extraction
+# both leave this same script on disk afterwards -- a self-consistent
+# end state.
 COPY scripts/post-source-setup.sh /code/mngr/scripts/post-source-setup.sh
 
 # Copy the build context. Two shapes are supported (the shape is
