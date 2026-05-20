@@ -163,6 +163,32 @@ Forthcoming personas (separate work items, not in this PR):
   older build to exercise upgrade.
 - `minds-non-admin` -- the user is a Standard account, no sudo.
 
+## Coverage limits in v1
+
+The harness reliably exercises **install_app -> launch_app ->
+wait_for_backend -> create_agent** for any minds.app bundle. The
+**create_agent** step further depends on the agent's chosen compute
+provider, and several providers are not viable inside a Tart guest:
+
+- `LAUNCH_MODE=LIMA` reaches Lima's `limactl start` (downloads the
+  Ubuntu image, the nerdctl archive, expands the disk), then fails at
+  `Starting VZ` -- Apple Virtualization Framework refuses to run a
+  guest VM inside a guest VM because Tart does not enable nested
+  virtualization. This is a structural Tart-on-Apple-Silicon limit; no
+  amount of harness work fixes it.
+- `LAUNCH_MODE=DOCKER` needs Docker Desktop or colima installed in the
+  persona. The `minds-fresh` persona does neither.
+- `LAUNCH_MODE=LOCAL` runs the agent natively on the VM (no Lima/Docker
+  detour). For builds whose template defaults to local-only, this is
+  the path the harness can fully verify end-to-end -- through to
+  `send_message`.
+
+In practice this means v1 reliably ratchets the first four steps of
+every build and reports a structured failure at `create_agent` for any
+provider that doesn't fit the guest. The `send_message` step lights up
+on builds whose template provisions cleanly under one of those
+provider constraints.
+
 ## Known gotchas
 
 - **`tart run` and the VNC flag**: scripts always pass `--vnc-experimental`
