@@ -59,16 +59,18 @@ def all_known_projects(repo_root: Path) -> list[str]:
     """Return all known project names: every ``libs/<name>`` and ``apps/<name>``
     with a ``pyproject.toml``, plus the synthetic ``dev`` bucket.
 
-    Sorted alphabetically with ``dev`` always last.
+    Sorted alphabetically with ``dev`` always last. A name that exists under
+    both ``libs/`` and ``apps/`` (an arrangement nothing enforces against) is
+    deduplicated -- it would otherwise drive downstream loops (e.g. the
+    consolidator) to process the same project twice, where ``project_dir``'s
+    libs-first resolution would silently skip the ``apps/`` half.
     """
-    names: list[str] = []
+    names: set[str] = set()
     for parent_name in ("libs", "apps"):
         parent = repo_root / parent_name
         if not parent.is_dir():
             continue
-        for child in sorted(parent.iterdir()):
+        for child in parent.iterdir():
             if child.is_dir() and (child / "pyproject.toml").exists():
-                names.append(child.name)
-    names.sort()
-    names.append(DEV_PROJECT)
-    return names
+                names.add(child.name)
+    return [*sorted(names), DEV_PROJECT]
