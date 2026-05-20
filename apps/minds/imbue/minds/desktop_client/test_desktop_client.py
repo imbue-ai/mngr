@@ -1393,14 +1393,22 @@ def test_refresh_event_before_lifespan_is_dropped_without_raising(tmp_path: Path
     assert received == []
 
 
-def test_create_agent_api_accepts_valid_bearer_token(tmp_path: Path) -> None:
-    """POST /api/create-agent with a matching ``Authorization: Bearer ...`` succeeds without a cookie."""
-    backend_resolver = StaticBackendResolver(url_by_agent_and_service={})
-    client, auth_store = _create_test_desktop_client(
+def _bearer_test_client(tmp_path: Path) -> tuple[TestClient, FileAuthStore]:
+    """Build a desktop client wired with an empty backend resolver for bearer-auth tests.
+
+    The bearer-auth tests below don't proxy to a backend; they just need
+    a client whose ``/api/create-agent*`` routes hit the auth check.
+    """
+    return _create_test_desktop_client(
         tmp_path=tmp_path,
-        backend_resolver=backend_resolver,
+        backend_resolver=StaticBackendResolver(url_by_agent_and_service={}),
         http_client=None,
     )
+
+
+def test_create_agent_api_accepts_valid_bearer_token(tmp_path: Path) -> None:
+    """POST /api/create-agent with a matching ``Authorization: Bearer ...`` succeeds without a cookie."""
+    client, auth_store = _bearer_test_client(tmp_path)
     token = auth_store.get_api_token().get_secret_value()
 
     response = client.post(
@@ -1416,12 +1424,7 @@ def test_create_agent_api_accepts_valid_bearer_token(tmp_path: Path) -> None:
 
 def test_create_agent_api_rejects_bearer_token_mismatch(tmp_path: Path) -> None:
     """A wrong bearer token (and no cookie) still gets 403."""
-    backend_resolver = StaticBackendResolver(url_by_agent_and_service={})
-    client, _auth_store = _create_test_desktop_client(
-        tmp_path=tmp_path,
-        backend_resolver=backend_resolver,
-        http_client=None,
-    )
+    client, _auth_store = _bearer_test_client(tmp_path)
 
     response = client.post(
         "/api/create-agent",
@@ -1434,12 +1437,7 @@ def test_create_agent_api_rejects_bearer_token_mismatch(tmp_path: Path) -> None:
 
 def test_create_agent_api_rejects_empty_bearer_token(tmp_path: Path) -> None:
     """An ``Authorization: Bearer`` header with no token value gets 403."""
-    backend_resolver = StaticBackendResolver(url_by_agent_and_service={})
-    client, _ = _create_test_desktop_client(
-        tmp_path=tmp_path,
-        backend_resolver=backend_resolver,
-        http_client=None,
-    )
+    client, _ = _bearer_test_client(tmp_path)
 
     response = client.post(
         "/api/create-agent",
@@ -1452,12 +1450,7 @@ def test_create_agent_api_rejects_empty_bearer_token(tmp_path: Path) -> None:
 
 def test_creation_status_api_accepts_valid_bearer_token(tmp_path: Path) -> None:
     """GET /api/create-agent/{id}/status accepts a valid bearer token."""
-    backend_resolver = StaticBackendResolver(url_by_agent_and_service={})
-    client, auth_store = _create_test_desktop_client(
-        tmp_path=tmp_path,
-        backend_resolver=backend_resolver,
-        http_client=None,
-    )
+    client, auth_store = _bearer_test_client(tmp_path)
     token = auth_store.get_api_token().get_secret_value()
 
     response = client.get(
@@ -1476,12 +1469,7 @@ def test_create_agent_api_returns_403_when_api_token_file_is_empty(tmp_path: Pat
     # Pre-populate an empty token file so ``get_api_token`` raises
     # ``ApiTokenError`` on the first bearer-auth attempt.
     (auth_dir / "api_token").write_text("")
-    backend_resolver = StaticBackendResolver(url_by_agent_and_service={})
-    client, _ = _create_test_desktop_client(
-        tmp_path=tmp_path,
-        backend_resolver=backend_resolver,
-        http_client=None,
-    )
+    client, _ = _bearer_test_client(tmp_path)
 
     response = client.post(
         "/api/create-agent",
