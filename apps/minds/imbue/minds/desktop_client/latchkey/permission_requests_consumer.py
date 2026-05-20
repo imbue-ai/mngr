@@ -36,10 +36,23 @@ from imbue.imbue_common.event_envelope import IsoTimestamp
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClient
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClientError
+from imbue.minds.desktop_client.latchkey.gateway_client import REQUEST_TYPE_FILE_SHARING
+from imbue.minds.desktop_client.latchkey.gateway_client import REQUEST_TYPE_PREDEFINED
 from imbue.minds.desktop_client.latchkey.gateway_client import StreamedPermissionRequest
+from imbue.minds.desktop_client.request_events import FileSharingPermissionRequestEvent
 from imbue.minds.desktop_client.request_events import LatchkeyPermissionRequestEvent
 from imbue.minds.desktop_client.request_events import REQUESTS_EVENT_SOURCE_NAME
+from imbue.minds.desktop_client.request_events import RequestEvent
 from imbue.minds.desktop_client.request_events import RequestType
+
+
+class UnknownStreamedRequestTypeError(ValueError):
+    """Raised when a streamed permission request has an unrecognized ``request_type``."""
+
+    def __init__(self, request_type: str) -> None:
+        self.request_type = request_type
+        super().__init__(f"Unknown streamed request_type {request_type!r}")
+
 
 # Backoff bounds for the reconnect loop. The lower bound keeps the
 # consumer responsive when the gateway is just slow to start; the upper
@@ -54,26 +67,49 @@ def _now_iso() -> IsoTimestamp:
     return IsoTimestamp(datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ"))
 
 
-def streamed_request_to_event(streamed: StreamedPermissionRequest) -> LatchkeyPermissionRequestEvent:
+def streamed_request_to_event(streamed: StreamedPermissionRequest) -> RequestEvent:
     """Translate a streamed permission request into the inbox's event shape.
 
     ``request_id`` from the extension is reused verbatim as the inbox
     ``event_id`` so the FastAPI routes (which look events up by
     ``event_id`` and DELETE the gateway record on grant/deny) can join
     the two systems on a single identifier.
+
+    Dispatches on ``request_type``: ``predefined`` requests become
+    :class:`LatchkeyPermissionRequestEvent` (the legacy scope/perm
+    grant flow); ``file-sharing`` requests become
+    :class:`FileSharingPermissionRequestEvent` (rendered as a single
+    per-path yes/no dialog whose grant path goes through
+    ``POST /permission-requests/approve/<id>``).
     """
-    return LatchkeyPermissionRequestEvent(
-        timestamp=_now_iso(),
-        type=EventType("latchkey_permission_request"),
-        event_id=EventId(streamed.request_id),
-        source=EventSource(REQUESTS_EVENT_SOURCE_NAME),
-        agent_id=streamed.agent_id,
-        request_type=str(RequestType.LATCHKEY_PERMISSION),
-        is_user_requested=False,
-        scope=streamed.scope,
-        permissions=streamed.permissions,
-        rationale=streamed.rationale,
-    )
+    if streamed.request_type == REQUEST_TYPE_PREDEFINED:
+        predefined = streamed.as_predefined_payload()
+        return LatchkeyPermissionRequestEvent(
+            timestamp=_now_iso(),
+            type=EventType("latchkey_permission_request"),
+            event_id=EventId(streamed.request_id),
+            source=EventSource(REQUESTS_EVENT_SOURCE_NAME),
+            agent_id=streamed.agent_id,
+            request_type=str(RequestType.LATCHKEY_PERMISSION),
+            is_user_requested=False,
+            scope=predefined.scope,
+            permissions=predefined.permissions,
+            rationale=streamed.rationale,
+        )
+    if streamed.request_type == REQUEST_TYPE_FILE_SHARING:
+        file_sharing = streamed.as_file_sharing_payload()
+        return FileSharingPermissionRequestEvent(
+            timestamp=_now_iso(),
+            type=EventType("file_sharing_permission_request"),
+            event_id=EventId(streamed.request_id),
+            source=EventSource(REQUESTS_EVENT_SOURCE_NAME),
+            agent_id=streamed.agent_id,
+            request_type=str(RequestType.FILE_SHARING_PERMISSION),
+            is_user_requested=False,
+            path=file_sharing.path,
+            rationale=streamed.rationale,
+        )
+    raise UnknownStreamedRequestTypeError(streamed.request_type)
 
 
 class PermissionRequestsConsumer(MutableModel):
@@ -91,10 +127,12 @@ class PermissionRequestsConsumer(MutableModel):
         frozen=True,
         description="HTTP client used to talk to the gateway's bundled extension endpoints.",
     )
-    on_request: Callable[[LatchkeyPermissionRequestEvent], None] = Field(
+    on_request: Callable[[RequestEvent], None] = Field(
         description=(
             "Callback invoked from the consumer thread for each streamed permission request "
-            "after translation into the inbox event shape."
+            "after translation into the inbox event shape. Receives either a "
+            ":class:`LatchkeyPermissionRequestEvent` (for ``type=predefined``) or a "
+            ":class:`FileSharingPermissionRequestEvent` (for ``type=file-sharing``)."
         ),
     )
 

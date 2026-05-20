@@ -57,6 +57,7 @@ from imbue.minds.desktop_client.forward_cli import LocalAgentDiscoveryHandler
 from imbue.minds.desktop_client.forward_cli import MindsApiUrlWriter
 from imbue.minds.desktop_client.forward_cli import start_mngr_forward
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
+from imbue.minds.desktop_client.latchkey.file_sharing import FileSharingGrantHandler
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClient
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClientError
 from imbue.minds.desktop_client.latchkey.permission_requests_consumer import PermissionRequestsConsumer
@@ -65,7 +66,9 @@ from imbue.minds.desktop_client.latchkey.permissions import MngrMessageSender
 from imbue.minds.desktop_client.latchkey.services_catalog import ServicesCatalog
 from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.notification import NotificationDispatcher
+from imbue.minds.desktop_client.request_events import FileSharingPermissionRequestEvent
 from imbue.minds.desktop_client.request_events import LatchkeyPermissionRequestEvent
+from imbue.minds.desktop_client.request_events import RequestEvent
 from imbue.minds.desktop_client.request_events import RequestInbox
 from imbue.minds.desktop_client.request_events import load_response_events
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
@@ -209,12 +212,18 @@ def run(
     # orphan tree running across restarts.
     start_grandparent_death_watcher(root_concurrency_group)
 
+    mngr_message_sender = MngrMessageSender()
     latchkey_permission_handler = LatchkeyPermissionGrantHandler(
         data_dir=data_directory,
         latchkey=latchkey,
         services_catalog=ServicesCatalog(gateway_client=gateway_client),
-        mngr_message_sender=MngrMessageSender(),
+        mngr_message_sender=mngr_message_sender,
         gateway_client=gateway_client,
+    )
+    file_sharing_handler = FileSharingGrantHandler(
+        data_dir=data_directory,
+        gateway_client=gateway_client,
+        mngr_message_sender=mngr_message_sender,
     )
     imbue_cloud_cli = ImbueCloudCli(
         parent_concurrency_group=root_concurrency_group,
@@ -321,7 +330,7 @@ def run(
         minds_config=minds_config,
         client_env_config=client_env_config,
         request_inbox=request_inbox,
-        request_event_handlers=(latchkey_permission_handler,),
+        request_event_handlers=(latchkey_permission_handler, file_sharing_handler),
         server_port=port,
         mngr_forward_port=mngr_forward_port,
         mngr_forward_preauth_cookie=preauth_cookie,
@@ -444,7 +453,7 @@ class _StreamedPermissionRequestHandler(FrozenModel):
     # natives; tolerate them with ``arbitrary_types_allowed``.
     model_config = {"arbitrary_types_allowed": True, "frozen": True, "extra": "forbid"}
 
-    def __call__(self, event: LatchkeyPermissionRequestEvent) -> None:
+    def __call__(self, event: RequestEvent) -> None:
         current: RequestInbox | None = self.app.state.request_inbox
         if current is None:
             return
@@ -458,12 +467,27 @@ class _StreamedPermissionRequestHandler(FrozenModel):
         if current.get_request_by_id(str(event.event_id)) is not None:
             return
         self.app.state.request_inbox = current.add_request(event)
-        logger.info(
-            "Streamed latchkey permission request for agent {} (scope={}, request_id={})",
-            event.agent_id,
-            event.scope,
-            event.event_id,
-        )
+        if isinstance(event, LatchkeyPermissionRequestEvent):
+            logger.info(
+                "Streamed latchkey permission request for agent {} (scope={}, request_id={})",
+                event.agent_id,
+                event.scope,
+                event.event_id,
+            )
+        elif isinstance(event, FileSharingPermissionRequestEvent):
+            logger.info(
+                "Streamed file-sharing permission request for agent {} (path={}, request_id={})",
+                event.agent_id,
+                event.path,
+                event.event_id,
+            )
+        else:
+            logger.info(
+                "Streamed permission request for agent {} (request_type={}, request_id={})",
+                event.agent_id,
+                event.request_type,
+                event.event_id,
+            )
         self.backend_resolver.notify_change()
 
 

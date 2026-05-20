@@ -41,6 +41,7 @@ class RequestType(UpperCaseStrEnum):
 
     PERMISSIONS = auto()
     LATCHKEY_PERMISSION = auto()
+    FILE_SHARING_PERMISSION = auto()
 
 
 class RequestStatus(UpperCaseStrEnum):
@@ -100,6 +101,23 @@ class LatchkeyPermissionRequestEvent(RequestEvent):
     rationale: str = Field(description="One-paragraph human-readable reason the agent needs this access.")
 
 
+class FileSharingPermissionRequestEvent(RequestEvent):
+    """A request for the user to grant the agent access to a single file path.
+
+    Delivered to the inbox when an agent submits a ``type=file-sharing``
+    permission request to the gateway. The dialog is presented as a
+    yes/no on a specific absolute path (no per-permission editing): on
+    approval the desktop client calls
+    ``POST /permission-requests/approve/<id>`` and lets the gateway
+    splice the precomputed effect into the per-host
+    ``latchkey_permissions.json``; on denial it falls back to the
+    existing ``DELETE /permission-requests/<id>`` path.
+    """
+
+    path: str = Field(description="Absolute filesystem path the agent wants access to.")
+    rationale: str = Field(description="One-paragraph human-readable reason the agent needs this access.")
+
+
 class RequestResponseEvent(EventEnvelope):
     """A response to a request, written by the desktop client."""
 
@@ -138,6 +156,26 @@ def create_latchkey_permission_request_event(
     )
 
 
+def create_file_sharing_permission_request_event(
+    agent_id: str,
+    path: str,
+    rationale: str,
+    is_user_requested: bool = False,
+) -> "FileSharingPermissionRequestEvent":
+    """Create a new file-sharing permission request event with auto-generated metadata."""
+    return FileSharingPermissionRequestEvent(
+        timestamp=_now_iso(),
+        type=EventType("file_sharing_permission_request"),
+        event_id=_generate_event_id(),
+        source=EventSource(REQUESTS_EVENT_SOURCE_NAME),
+        agent_id=agent_id,
+        request_type=str(RequestType.FILE_SHARING_PERMISSION),
+        is_user_requested=is_user_requested,
+        path=path,
+        rationale=rationale,
+    )
+
+
 def create_request_response_event(
     request_event_id: str,
     status: RequestStatus,
@@ -160,12 +198,25 @@ def create_request_response_event(
 
 
 def _dedup_key(event: RequestEvent | RequestResponseEvent) -> tuple[str, str | None, str]:
-    """Compute the deduplication key for a request or response event."""
-    if isinstance(event, (LatchkeyPermissionRequestEvent, RequestResponseEvent)):
-        scope = event.scope
+    """Compute the deduplication key for a request or response event.
+
+    Latchkey-permission requests are deduplicated by ``(agent_id,
+    scope, request_type)``: a fresh request for the same scope replaces
+    the earlier one in the pending list. File-sharing requests are
+    deduplicated by ``(agent_id, path, request_type)`` -- the file
+    path takes the role of the scope, so the same agent re-requesting
+    the same path collapses to one card while different paths stay
+    separate.
+    """
+    if isinstance(event, LatchkeyPermissionRequestEvent):
+        scope_or_path = event.scope
+    elif isinstance(event, FileSharingPermissionRequestEvent):
+        scope_or_path = event.path
+    elif isinstance(event, RequestResponseEvent):
+        scope_or_path = event.scope
     else:
-        scope = None
-    return (event.agent_id, scope, event.request_type)
+        scope_or_path = None
+    return (event.agent_id, scope_or_path, event.request_type)
 
 
 class RequestInbox(FrozenModel):
@@ -235,6 +286,8 @@ def parse_request_event(line: str) -> RequestEvent | None:
             return PermissionsRequestEvent.model_validate(data)
         elif request_type == str(RequestType.LATCHKEY_PERMISSION):
             return LatchkeyPermissionRequestEvent.model_validate(data)
+        elif request_type == str(RequestType.FILE_SHARING_PERMISSION):
+            return FileSharingPermissionRequestEvent.model_validate(data)
         else:
             return RequestEvent.model_validate(data)
     except (json.JSONDecodeError, ValueError, TypeError) as e:
