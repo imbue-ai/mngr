@@ -108,7 +108,7 @@ def probe_workspace_through_plugin(
     probe_timeout_seconds: float,
     client: httpx.Client | None = None,
 ) -> int | None:
-    """Issue a single probe through the plugin to the agent's workspace_server.
+    """Issue a single probe through the plugin to the agent's system_interface.
 
     Returns the HTTP status code observed (any 200 means ready), or ``None``
     if the probe failed at the transport layer (connect error, mid-stream
@@ -866,7 +866,7 @@ class AgentCreator(MutableModel):
         frozen=True,
         description=(
             "Port the ``mngr forward`` plugin is bound to. Used by ``_wait_for_workspace_ready`` to "
-            "probe the freshly-created agent's workspace_server through the plugin's per-subdomain "
+            "probe the freshly-created agent's system_interface through the plugin's per-subdomain "
             "endpoint before publishing the redirect URL. The default of 0 disables readiness "
             "probing -- only appropriate for tests that never exercise the happy-path redirect."
         ),
@@ -883,12 +883,12 @@ class AgentCreator(MutableModel):
     workspace_ready_timeout_seconds: float = Field(
         default=60.0,
         frozen=True,
-        description="Maximum time to wait for the new agent's workspace_server to return HTTP 200.",
+        description="Maximum time to wait for the new agent's system_interface to return HTTP 200.",
     )
     workspace_ready_poll_interval_seconds: float = Field(
         default=0.5,
         frozen=True,
-        description="Sleep between probe attempts when the workspace_server is not yet ready.",
+        description="Sleep between probe attempts when the system_interface is not yet ready.",
     )
     workspace_ready_probe_timeout_seconds: float = Field(
         default=2.0,
@@ -1284,11 +1284,11 @@ class AgentCreator(MutableModel):
 
                 log_queue.put("[minds] Agent created successfully.")
 
-                # Wait for the agent's workspace_server to actually answer 200
+                # Wait for the agent's system_interface to actually answer 200
                 # through the plugin before publishing the redirect. Without
                 # this poll, the user gets dropped on a hard error page (404
                 # /503) for the few seconds between ``mngr create`` returning
-                # and the workspace_server inside the agent finishing
+                # and the system_interface inside the agent finishing
                 # startup. The probe is best-effort: if it times out, we
                 # publish anyway so the user at least lands on the retry
                 # page rather than spinning forever (PR 1471 part 1).
@@ -1362,11 +1362,11 @@ class AgentCreator(MutableModel):
         return f"http://localhost:{self.mngr_forward_port}/goto/{agent_id}/"
 
     def _wait_for_workspace_ready(self, agent_id: AgentId, log_queue: queue.Queue[str]) -> None:
-        """Poll the agent's workspace_server through the plugin until it responds 200.
+        """Poll the agent's system_interface through the plugin until it responds 200.
 
         Probes ``http://<agent_id>.localhost:<plugin_port>/`` with the preauth
         cookie set, treating any 200 as ready. Other status codes (typically
-        503 from the plugin's auto-refresh page when the workspace_server
+        503 from the plugin's auto-refresh page when the system_interface
         isn't yet listening, or 502 when SSH info hasn't propagated) are
         treated as not-yet-ready and re-polled until the timeout elapses.
 
@@ -1381,7 +1381,7 @@ class AgentCreator(MutableModel):
             return
 
         deadline = time.monotonic() + self.workspace_ready_timeout_seconds
-        log_queue.put("[minds] Waiting for workspace server to be ready...")
+        log_queue.put("[minds] Waiting for system interface to be ready...")
         last_status: int | None = None
         attempt = 0
         with make_workspace_probe_client(

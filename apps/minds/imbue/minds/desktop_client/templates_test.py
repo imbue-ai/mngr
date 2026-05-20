@@ -181,7 +181,7 @@ def test_render_recovery_page_includes_agent_id_and_return_to() -> None:
     assert "my-workspace" in html
     assert "http://agent.localhost:8421/" in html
     assert "/api/agents/" in html
-    assert "restart-workspace-server" in html
+    assert "restart-system-interface" in html
     assert 'data-initial-status="stuck"' in html
 
 

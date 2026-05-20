@@ -336,7 +336,7 @@ def test_wait_for_workspace_ready_returns_when_probe_succeeds(tmp_path) -> None:
     drained: list[str] = []
     while not log_q.empty():
         drained.append(log_q.get_nowait())
-    assert any("Waiting for workspace" in line for line in drained)
+    assert any("Waiting for system interface" in line for line in drained)
     assert any("ready" in line.lower() for line in drained)
 
 
