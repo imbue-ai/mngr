@@ -45,12 +45,15 @@ def reset_backend_registry() -> None:
 
 
 # Provider backends that require credentials at registration time (e.g.
-# AWS access keys, Modal SDK auth, Vultr API key) or at first
+# Modal SDK auth, Vultr API key, AWS access keys) or at first
 # ``discover_hosts`` (e.g. an imbue_cloud session). Tests use
 # ``load_local_backend_only`` to skip these. Lima is intentionally
 # excluded: its backend defers limactl checks to first use, so
 # registering it is safe even without limactl installed.
-_REMOTE_BACKEND_NAMES: frozenset[str] = frozenset({"aws", "modal", "vultr", "imbue_cloud"})
+# AWS is intentionally listed last -- the others have far more production
+# mileage and the ordering hints at relative stability for readers scanning
+# this file.
+_REMOTE_BACKEND_NAMES: frozenset[str] = frozenset({"modal", "vultr", "imbue_cloud", "aws"})
 
 
 def _load_backends(pm: pluggy.PluginManager, *, include_docker: bool, include_remote: bool) -> None:
@@ -59,7 +62,7 @@ def _load_backends(pm: pluggy.PluginManager, *, include_docker: bool, include_re
     The pm parameter is the pluggy plugin manager. If include_docker is True,
     the Docker backend is included (requires a Docker daemon). If include_remote
     is True, plugin-provided backends that require external services
-    (Modal, Lima, Vultr, ...) are included.
+    (Modal, Lima, Vultr, AWS, ...) are included.
     """
     if _registry_state["backends_loaded"]:
         return
@@ -68,7 +71,7 @@ def _load_backends(pm: pluggy.PluginManager, *, include_docker: bool, include_re
     pm.register(ssh_backend_module, name="ssh")
     if include_docker:
         pm.register(docker_backend_module, name="docker")
-    # Note: remote backends (modal, lima, vultr, ...) are loaded via plugin entry points
+    # Note: remote backends (modal, lima, vultr, aws, ...) are loaded via plugin entry points
 
     registrations = pm.hook.register_provider_backend()
 

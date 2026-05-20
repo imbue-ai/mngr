@@ -29,8 +29,9 @@ AWS_RELEASE_TESTS_OPT_IN: Final[bool] = os.environ.get("MNGR_AWS_RELEASE_TESTS")
 
 # Single source of truth for the release-test instance lifetime. Used in two
 # places that must stay aligned:
-#   1. ``test_release_aws.py`` propagates this into ``MNGR_AWS_AUTO_SHUTDOWN_MINUTES``
-#      so cloud-init runs ``shutdown -P +N`` on every test instance.
+#   1. ``test_release_aws.py`` writes it into a tmp-path settings.toml
+#      (``[providers.aws] auto_shutdown_minutes``) so cloud-init runs
+#      ``shutdown -P +N`` on every test instance.
 #   2. ``conftest.py`` derives the orphan-scan grace period from this value
 #      so the session-end leak detector never race-kills an in-flight test
 #      on a parallel worker.

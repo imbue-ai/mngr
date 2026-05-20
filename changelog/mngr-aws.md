@@ -18,4 +18,5 @@
 
 - New optional `auto_shutdown_minutes` field on `VpsDockerProviderConfig`. When set, cloud-init schedules `shutdown -P +N` so the VPS halts itself after the configured number of minutes.
 - On AWS, combined with `InstanceInitiatedShutdownBehavior=terminate` (always on), this auto-terminates the EC2 instance — useful as a runaway-cost safety net for ephemeral / test hosts.
-- AWS release tests force this to 60 minutes via `MNGR_AWS_AUTO_SHUTDOWN_MINUTES=60` (test-only env-var escape hatch) so instances self-terminate even if pytest is killed before any cleanup runs.
+- AWS release tests set this to 60 minutes via a tmp-path `settings.toml` pointed at by `MNGR_PROJECT_CONFIG_DIR`, so instances self-terminate even if pytest is killed before any cleanup runs.
+- `AwsProvider` refuses to launch an EC2 instance under pytest if `auto_shutdown_minutes` is unset or non-positive, and `AwsVpsClient.create_instance` refuses if the EC2 `Name` tag does not start with `mngr-test-aws-`. Both mirror the Modal-style guard in `mngr_modal.backend._create_environment` and prevent a test that forgets to override these from silently leaking instances.

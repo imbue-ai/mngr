@@ -20,6 +20,11 @@ tracking list would live. The scan is naturally tag-based (matching
 ``mngr-<AWS_TEST_NAME_PREFIX>*``) and ignores anything younger than
 ``_TEST_LEAK_TTL`` so it never race-kills an in-flight test on a
 parallel worker.
+
+Also registers the shared plugin-test fixtures (including
+``temp_mngr_ctx``) so backend-level unit tests can construct real
+provider instances; mirrors the conftest pattern used by
+``mngr_vps_docker`` and ``mngr_schedule``.
 """
 
 from datetime import datetime
@@ -34,11 +39,14 @@ from botocore.exceptions import BotoCoreError
 from botocore.exceptions import ClientError
 from loguru import logger
 
+from imbue.mngr.utils.plugin_testing import register_plugin_test_fixtures
 from imbue.mngr_aws.testing import AWS_DEFAULT_REGION
 from imbue.mngr_aws.testing import AWS_RELEASE_TESTS_OPT_IN
 from imbue.mngr_aws.testing import AWS_TEST_INSTANCE_AUTO_SHUTDOWN_MINUTES
 from imbue.mngr_aws.testing import AWS_TEST_NAME_PREFIX
 from imbue.mngr_aws.testing import aws_credentials_available
+
+register_plugin_test_fixtures(globals())
 
 # Orphan-scan grace period. A test-named instance younger than this is left
 # alone to avoid race-killing an in-flight test on a parallel worker.

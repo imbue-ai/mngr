@@ -1,3 +1,4 @@
+import os
 import time
 from collections.abc import Iterator
 from collections.abc import Mapping
@@ -15,6 +16,7 @@ from pydantic import ConfigDict
 from pydantic import Field
 from pydantic import PrivateAttr
 
+from imbue.mngr.errors import MngrError
 from imbue.mngr_vps_docker.errors import VpsApiError
 from imbue.mngr_vps_docker.errors import VpsProvisioningError
 from imbue.mngr_vps_docker.primitives import VpsInstanceId
@@ -23,6 +25,13 @@ from imbue.mngr_vps_docker.primitives import VpsSnapshotId
 from imbue.mngr_vps_docker.vps_client import VpsClientInterface
 from imbue.mngr_vps_docker.vps_client import VpsSnapshotInfo
 from imbue.mngr_vps_docker.vps_client import VpsSshKeyInfo
+
+# Prefix the conftest hook scans for to find leaked test instances. Tests
+# under pytest must produce EC2 `Name` tags that begin with this prefix so
+# the session-end orphan scan can find them. Hardcoded in production code
+# (rather than imported from ``mngr_aws.testing``) because production
+# layers do not import from testing modules.
+_TEST_LABEL_PREFIX: Final[str] = "mngr-test-aws-"
 
 _STATE_MAP: Final[dict[str, VpsInstanceStatus]] = {
     "pending": VpsInstanceStatus.PENDING,
@@ -179,6 +188,21 @@ class AwsVpsClient(VpsClientInterface):
                 400,
                 f"Cross-region create not supported: client bound to {self.region!r}, "
                 f"got region={region!r}. Instantiate a region-specific client.",
+            )
+
+        # Mirrors the Modal pattern in ``mngr_modal.backend._create_environment``:
+        # under pytest, refuse to launch an instance whose Name tag the
+        # conftest leak scanner could not later identify as test-owned.
+        # Without this, a test that spawns ``mngr create`` via an in-process
+        # code path that inherits os.environ but forgets to override the
+        # host name would create a default-prefixed instance no cleanup
+        # script recognises.
+        if "PYTEST_CURRENT_TEST" in os.environ and not label.startswith(_TEST_LABEL_PREFIX):
+            raise MngrError(
+                f"Refusing to create EC2 instance with label {label!r} during pytest: "
+                f"test instance labels must start with {_TEST_LABEL_PREFIX!r} so the "
+                "session-end orphan scan in mngr_aws/conftest.py can find leaked "
+                "instances by Name tag."
             )
 
         sg_id = self.ensure_security_group()

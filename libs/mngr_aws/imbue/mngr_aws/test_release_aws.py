@@ -14,12 +14,16 @@ Three layers of damage control prevent leaked EC2 cost (see
 
 1. Each test's ``finally`` calls ``mngr destroy --force``.
 2. ``pytest_sessionfinish`` in ``conftest.py`` force-terminates any
-   instance still tagged with the test name prefix and older than 1h
+   instance still tagged with the test name prefix and older than the TTL
    at session end and fails the session.
-3. ``MNGR_AWS_AUTO_SHUTDOWN_MINUTES=60`` is propagated into cloud-init,
-   triggering ``shutdown -P +60`` on each test instance. Combined with
-   ``InstanceInitiatedShutdownBehavior=terminate``, this auto-terminates
-   the instance from the inside even if pytest itself is killed.
+3. The subprocess that runs ``mngr create`` is pointed at a temporary
+   ``settings.toml`` (via ``MNGR_PROJECT_CONFIG_DIR``) that sets
+   ``[providers.aws] auto_shutdown_minutes``. This propagates into
+   cloud-init as ``shutdown -P +N`` on each test instance; combined with
+   the launch flag ``InstanceInitiatedShutdownBehavior=terminate``, this
+   auto-terminates the instance from the inside even if pytest itself
+   is killed. The production AwsProvider refuses to create EC2 instances
+   under pytest without this set, so a missed override fails closed.
 
 Run manually:
 
@@ -31,6 +35,8 @@ Run manually:
 import os
 import subprocess
 import time
+from collections.abc import Iterator
+from pathlib import Path
 
 import boto3
 import pytest
@@ -52,18 +58,33 @@ pytestmark = [
 ]
 
 
-def _run_mngr(*args: str, timeout: int = 300) -> subprocess.CompletedProcess[str]:
-    """Run a mngr command and return the result.
+@pytest.fixture()
+def aws_test_settings_dir(tmp_path: Path) -> Iterator[Path]:
+    """Write a project settings.toml that sets the AWS auto-shutdown TTL.
 
-    Inherits the current process env, then forces ``MNGR_AWS_AUTO_SHUTDOWN_MINUTES``
-    so every EC2 instance the test spins up has cloud-init schedule a
-    ``shutdown -P +N``. Combined with the launch flag
-    ``InstanceInitiatedShutdownBehavior=terminate``, this guarantees self-
-    termination even if pytest is killed before the session-end cleanup
-    hook in ``conftest.py`` runs.
+    The release tests must set ``auto_shutdown_minutes`` on the AWS
+    provider config so the cloud-init self-shutdown safety net actually
+    fires; the production AwsProvider refuses to create an EC2 instance
+    under pytest without it. Using ``MNGR_PROJECT_CONFIG_DIR`` to point
+    the subprocess at this settings file keeps the test-only TTL out of
+    production code paths.
     """
+    settings_dir = tmp_path / ".mngr"
+    settings_dir.mkdir()
+    (settings_dir / "settings.toml").write_text(
+        f'[providers.aws]\nbackend = "aws"\nauto_shutdown_minutes = {AWS_TEST_INSTANCE_AUTO_SHUTDOWN_MINUTES}\n'
+    )
+    yield tmp_path
+
+
+def _run_mngr(
+    project_config_dir: Path,
+    *args: str,
+    timeout: int = 300,
+) -> subprocess.CompletedProcess[str]:
+    """Run a mngr command with the test settings.toml in scope."""
     env = os.environ.copy()
-    env["MNGR_AWS_AUTO_SHUTDOWN_MINUTES"] = str(AWS_TEST_INSTANCE_AUTO_SHUTDOWN_MINUTES)
+    env["MNGR_PROJECT_CONFIG_DIR"] = str(project_config_dir)
     cmd = ["uv", "run", "mngr", *args]
     return subprocess.run(
         cmd,
@@ -78,10 +99,11 @@ def _run_mngr(*args: str, timeout: int = 300) -> subprocess.CompletedProcess[str
 class TestAwsProviderLifecycle:
     """Tests for the full EC2 Docker provider lifecycle."""
 
-    def test_create_exec_and_destroy(self) -> None:
+    def test_create_exec_and_destroy(self, aws_test_settings_dir: Path) -> None:
         agent_name = f"{AWS_TEST_NAME_PREFIX}{int(time.time()) % 100000}"
 
         result = _run_mngr(
+            aws_test_settings_dir,
             "create",
             agent_name,
             "--type",
@@ -96,28 +118,29 @@ class TestAwsProviderLifecycle:
         assert "Done" in result.stdout or "created successfully" in result.stderr
 
         try:
-            result = _run_mngr("exec", agent_name, "echo hello-from-aws")
+            result = _run_mngr(aws_test_settings_dir, "exec", agent_name, "echo hello-from-aws")
             assert result.returncode == 0, f"Exec failed: {result.stderr}"
             assert "hello-from-aws" in result.stdout
 
-            result = _run_mngr("exec", agent_name, "test -d /mngr && echo exists")
+            result = _run_mngr(aws_test_settings_dir, "exec", agent_name, "test -d /mngr && echo exists")
             assert result.returncode == 0, f"host_dir check failed: {result.stderr}"
             assert "exists" in result.stdout
 
-            result = _run_mngr("list")
+            result = _run_mngr(aws_test_settings_dir, "list")
             assert result.returncode == 0, f"List failed: {result.stderr}"
             assert agent_name in result.stdout
             assert "aws" in result.stdout
         finally:
             # --force skips the destroy confirmation, so no stdin input needed.
             # Result is intentionally not checked: best-effort cleanup.
-            _run_mngr("destroy", agent_name, "--force", timeout=120)
+            _run_mngr(aws_test_settings_dir, "destroy", agent_name, "--force", timeout=120)
             time.sleep(20)
 
-    def test_create_stop_start_destroy(self) -> None:
+    def test_create_stop_start_destroy(self, aws_test_settings_dir: Path) -> None:
         agent_name = f"{AWS_TEST_NAME_PREFIX}ss-{int(time.time()) % 100000}"
 
         result = _run_mngr(
+            aws_test_settings_dir,
             "create",
             agent_name,
             "--type",
@@ -131,23 +154,23 @@ class TestAwsProviderLifecycle:
         assert result.returncode == 0, f"Create failed: {result.stderr}"
 
         try:
-            result = _run_mngr("stop", agent_name)
+            result = _run_mngr(aws_test_settings_dir, "stop", agent_name)
             assert result.returncode == 0, f"Stop failed: {result.stderr}"
 
-            result = _run_mngr("list")
+            result = _run_mngr(aws_test_settings_dir, "list")
             assert result.returncode == 0
             assert agent_name in result.stdout
 
-            result = _run_mngr("start", agent_name, "--no-connect")
+            result = _run_mngr(aws_test_settings_dir, "start", agent_name, "--no-connect")
             assert result.returncode == 0, f"Start failed: {result.stderr}"
 
-            result = _run_mngr("exec", agent_name, "echo alive-after-restart")
+            result = _run_mngr(aws_test_settings_dir, "exec", agent_name, "echo alive-after-restart")
             assert result.returncode == 0, f"Post-restart exec failed: {result.stderr}"
             assert "alive-after-restart" in result.stdout
         finally:
             # --force skips the destroy confirmation, so no stdin input needed.
             # Result is intentionally not checked: best-effort cleanup.
-            _run_mngr("destroy", agent_name, "--force", timeout=120)
+            _run_mngr(aws_test_settings_dir, "destroy", agent_name, "--force", timeout=120)
             time.sleep(20)
 
 

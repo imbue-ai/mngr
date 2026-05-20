@@ -15,6 +15,7 @@ import pytest
 from botocore.stub import ANY
 from botocore.stub import Stubber
 
+from imbue.mngr.errors import MngrError
 from imbue.mngr_aws.client import AwsVpsClient
 from imbue.mngr_vps_docker.errors import VpsApiError
 from imbue.mngr_vps_docker.errors import VpsProvisioningError
@@ -73,7 +74,7 @@ class TestAwsVpsClientInstances:
             },
         )
         instance_id = client.create_instance(
-            label="test-host",
+            label="mngr-test-aws-host",
             region="us-east-1",
             plan="t3.small",
             user_data="test-user-data",
@@ -87,7 +88,7 @@ class TestAwsVpsClientInstances:
         stubber.add_response("run_instances", {"Instances": []})
         with pytest.raises(VpsProvisioningError):
             client.create_instance(
-                label="test-host",
+                label="mngr-test-aws-host",
                 region="us-east-1",
                 plan="t3.small",
                 user_data="test",
@@ -99,8 +100,30 @@ class TestAwsVpsClientInstances:
         client, _stubber = stubbed_client
         with pytest.raises(VpsApiError, match="Cross-region create not supported"):
             client.create_instance(
-                label="test",
+                label="mngr-test-aws-host",
                 region="eu-west-1",
+                plan="t3.small",
+                user_data="test",
+                ssh_key_ids=[],
+                tags={},
+            )
+
+    def test_create_instance_under_pytest_rejects_non_test_label(
+        self, stubbed_client: tuple[AwsVpsClient, Stubber]
+    ) -> None:
+        """The pytest-detection guard refuses labels that the conftest leak scan would miss.
+
+        Regression: a future test that constructs ``mngr create`` arguments
+        without overriding the host name would produce an instance with a
+        default ``mngr-<uuid>`` Name tag that the session-end orphan scan
+        in conftest.py cannot find. The guard must fail loudly at the API
+        boundary, before run_instances is called.
+        """
+        client, _stubber = stubbed_client
+        with pytest.raises(MngrError, match="must start with 'mngr-test-aws-'"):
+            client.create_instance(
+                label="mngr-some-prod-host",
+                region="us-east-1",
                 plan="t3.small",
                 user_data="test",
                 ssh_key_ids=[],

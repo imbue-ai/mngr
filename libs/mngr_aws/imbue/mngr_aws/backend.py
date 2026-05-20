@@ -1,3 +1,4 @@
+import os
 from typing import Any
 from typing import Final
 
@@ -8,7 +9,6 @@ from pydantic import ConfigDict
 from pydantic import Field
 from pydantic import PrivateAttr
 
-from imbue.imbue_common.env_vars import parse_int_env
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import ProviderInstanceConfig
 from imbue.mngr.errors import MngrError
@@ -49,22 +49,30 @@ class AwsProvider(VpsDockerProvider):
         return self.aws_config.has_resolvable_credentials()
 
     def _get_effective_auto_shutdown_minutes(self) -> int | None:
-        """Resolve auto-shutdown TTL with the AWS test-only env-var override.
+        """Resolve auto-shutdown TTL, refusing to create an instance under pytest without one.
 
-        ``MNGR_AWS_AUTO_SHUTDOWN_MINUTES`` is a test-only escape hatch: when
-        set to a positive integer, it forces the cloud-init shutdown timer
-        regardless of project config. Combined with the EC2 launch flag
-        ``InstanceInitiatedShutdownBehavior=terminate``, this guarantees that
-        instances created by a release-test run auto-terminate after the
-        window even if pytest is killed or the host crashes. Malformed values
-        (non-integer, zero, negative) silently fall back to the config value.
-        Intentionally not a config field; production users should set
-        ``auto_shutdown_minutes`` in their provider config directly.
+        Mirrors the Modal pattern in ``mngr_modal.backend._create_environment``:
+        when ``PYTEST_CURRENT_TEST`` is set, the test harness is responsible
+        for configuring the safety net that prevents leaked cost if pytest
+        itself is killed. For AWS, that safety net is cloud-init
+        ``shutdown -P +N`` combined with the launch flag
+        ``InstanceInitiatedShutdownBehavior=terminate`` (both rely on
+        ``auto_shutdown_minutes`` being set on the provider config). If it
+        isn't, fail closed before launching the instance rather than
+        silently leaking it.
         """
-        override = parse_int_env("MNGR_AWS_AUTO_SHUTDOWN_MINUTES", 0)
-        if override > 0:
-            return override
-        return super()._get_effective_auto_shutdown_minutes()
+        minutes = super()._get_effective_auto_shutdown_minutes()
+        if "PYTEST_CURRENT_TEST" in os.environ and not (minutes and minutes > 0):
+            raise MngrError(
+                "Refusing to create EC2 instance during pytest without "
+                "auto_shutdown_minutes set on the AWS provider config. "
+                "Set [providers.<instance>] auto_shutdown_minutes = <N> in "
+                "the project settings.toml so cloud-init schedules "
+                "'shutdown -P +N' (combined with the launch flag "
+                "InstanceInitiatedShutdownBehavior=terminate) and the "
+                "instance self-terminates even if pytest is killed."
+            )
+        return minutes
 
     def _list_provider_vps_hostnames(self) -> list[str]:
         """Return public IPs of EC2 instances tagged with this provider's name."""
@@ -119,7 +127,13 @@ class AwsProviderBackend(ProviderBackendInterface):
         name: ProviderInstanceName,
         config: ProviderInstanceConfig,
         mngr_ctx: MngrContext,
+        is_for_host_creation: bool = False,
     ) -> ProviderInstanceInterface:
+        # is_for_host_creation is consumed only by backends with one-time
+        # bootstrap state (e.g. Modal's per-user environment). AWS has none --
+        # security groups and SSH keys are created on demand inside
+        # AwsVpsClient -- so the flag is intentionally ignored.
+        del is_for_host_creation
         if not isinstance(config, AwsProviderConfig):
             raise MngrError(f"Expected AwsProviderConfig, got {type(config).__name__}")
 

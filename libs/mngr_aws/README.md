@@ -103,9 +103,9 @@ Three layers of damage control limit leaks from killed-mid-run tests:
 
 1. Every test's `finally` calls `mngr destroy --force`.
 2. A `pytest_sessionfinish` hook in `imbue/mngr_aws/conftest.py` scans for any test-tagged EC2 instance older than 1 hour at session end, force-terminates leaks, and fails the session.
-3. Release tests set `MNGR_AWS_AUTO_SHUTDOWN_MINUTES=60`, which propagates to cloud-init as `shutdown -P +60` on every test instance. Combined with `InstanceInitiatedShutdownBehavior=terminate`, this means a test instance auto-terminates 60 minutes after boot even if pytest is killed before any cleanup runs.
+3. Release tests point `mngr` at a tmp-path settings.toml (via `MNGR_PROJECT_CONFIG_DIR`) that sets `[providers.aws] auto_shutdown_minutes = 60`. This propagates to cloud-init as `shutdown -P +60` on every test instance; combined with `InstanceInitiatedShutdownBehavior=terminate`, the instance auto-terminates 60 minutes after boot even if pytest is killed before any cleanup runs.
 
-The `MNGR_AWS_AUTO_SHUTDOWN_MINUTES` env var is intentionally a test-only escape hatch — production users should set `auto_shutdown_minutes` in `[providers.aws]` config directly.
+Production code enforces this: `AwsProvider._get_effective_auto_shutdown_minutes` refuses to launch an EC2 instance when `PYTEST_CURRENT_TEST` is set unless `auto_shutdown_minutes` is configured (positive). `AwsVpsClient.create_instance` similarly refuses if the EC2 `Name` tag does not start with `mngr-test-aws-`, so the conftest leak scanner can always find leaked test instances. Both mirror the pattern used by `mngr_modal.backend._create_environment`.
 
 ## Future improvements
 
