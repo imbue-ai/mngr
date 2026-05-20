@@ -48,7 +48,6 @@ from imbue.mngr.config.data_types import WorkDirExtraPathMode
 from imbue.mngr.errors import AgentNotFoundOnHostError
 from imbue.mngr.errors import AgentStartError
 from imbue.mngr.errors import BaseMngrError
-from imbue.mngr.errors import DuplicateAgentNameError
 from imbue.mngr.errors import HostConnectionError
 from imbue.mngr.errors import HostDataSchemaError
 from imbue.mngr.errors import InvalidActivityTypeError
@@ -60,6 +59,7 @@ from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.common import build_ssh_transport_command
 from imbue.mngr.hosts.common import get_ssh_known_hosts_file
 from imbue.mngr.hosts.offline_host import BaseHost
+from imbue.mngr.hosts.offline_host import apply_rename_to_agent_data
 from imbue.mngr.hosts.outer_host import OuterHost
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.data_types import CertifiedHostData
@@ -2220,11 +2220,11 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
 
     def rename_agent(
         self,
-        agent: AgentInterface,
+        agent_ref: DiscoveredAgent,
         new_name: AgentName,
         labels_to_merge: Mapping[str, str] | None = None,
-    ) -> AgentInterface:
-        """Rename an agent (optionally merging labels) and return the updated object.
+    ) -> DiscoveredAgent:
+        """Rename an agent (optionally merging labels) and return the updated ref.
 
         The operation is idempotent: if interrupted mid-rename, re-running
         will complete it. This works because data.json (the "commit point")
@@ -2236,15 +2236,20 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         an external observer of the agent's state never sees the rename without
         also seeing the new labels.
         """
-        with log_span("Renaming agent", agent_id=str(agent.id), old_name=str(agent.name), new_name=str(new_name)):
+        agent_id = agent_ref.agent_id
+        with log_span(
+            "Renaming agent",
+            agent_id=str(agent_id),
+            old_name=str(agent_ref.agent_name),
+            new_name=str(new_name),
+        ):
             # Prevent same-host name collisions (the tmux session name is derived
             # from the agent name, so duplicates would share a session).
-            for existing_agent in self.get_agents():
-                if existing_agent.name == new_name and existing_agent.id != agent.id:
-                    raise DuplicateAgentNameError(new_name, existing_agent.id)
+            self._check_rename_conflict(agent_id, new_name)
 
-            old_name = agent.name
-            data_path = self._get_agent_state_dir(agent) / "data.json"
+            old_name = agent_ref.agent_name
+            agent_state_dir = get_agent_state_dir_path(self.host_dir, agent_id)
+            data_path = agent_state_dir / "data.json"
 
             # Rename the tmux session first (idempotent -- no-ops if session doesn't exist with old name)
             old_session_name = f"{self.mngr_ctx.config.prefix}{old_name}"
@@ -2256,7 +2261,7 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
             logger.debug("Tmux rename result: success={}, stdout={}", result.success, result.stdout.strip())
 
             # Update the MNGR_AGENT_NAME env var in the agent's env file
-            env_path = self.get_agent_env_path(agent)
+            env_path = agent_state_dir / "env"
             try:
                 env_content = self.read_text_file(env_path)
                 updated_lines: list[str] = []
@@ -2267,7 +2272,7 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
                         updated_lines.append(line)
                 self.write_file(env_path, ("\n".join(updated_lines) + "\n").encode(), is_atomic=True)
             except FileNotFoundError:
-                logger.debug("No env file found for agent {}, skipping env update", agent.id)
+                logger.debug("No env file found for agent {}, skipping env update", agent_id)
 
             # Update data.json last (the "commit point" for the rename). Any
             # provided labels are merged into the existing labels in the same
@@ -2275,18 +2280,17 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
             # together.
             content = self.read_text_file(data_path)
             data = json.loads(content)
-            data["name"] = str(new_name)
-            if labels_to_merge:
-                current_labels = data.get("labels") or {}
-                data["labels"] = {**current_labels, **dict(labels_to_merge)}
-            self.write_file(data_path, json.dumps(data, indent=2).encode(), is_atomic=True)
-            self.save_agent_data(agent.id, data)
+            updated = apply_rename_to_agent_data(data, new_name, labels_to_merge)
+            self.write_file(data_path, json.dumps(updated, indent=2).encode(), is_atomic=True)
+            self.save_agent_data(agent_id, updated)
 
-            # Reload and return the updated agent
-            updated_agent = self._load_agent_from_dir(self._get_agent_state_dir(agent))
-            if updated_agent is None:
-                raise AgentNotFoundOnHostError(agent.id, self.id)
-            return updated_agent
+            return DiscoveredAgent(
+                host_id=self.id,
+                agent_id=agent_id,
+                agent_name=new_name,
+                provider_name=self.provider_instance.name,
+                certified_data=updated,
+            )
 
     def destroy_agent(self, agent: AgentInterface) -> None:
         """Destroy an agent and clean up its resources."""
