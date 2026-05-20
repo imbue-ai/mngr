@@ -24,17 +24,18 @@ filters to VPSes whose ``mngr-provider`` tag matches the running
 provider instance's name. So a VPS that was ordered by mngr but whose
 provisioning aborted *before* the post-delivery tag attach (e.g. an OVH
 order that didn't deliver before ``vps_boot_timeout`` elapsed) is
-**invisible** to the recycle path and will not be reused -- it stays
-running as an unmanaged orphan that bills until OVH's next expiration
-boundary.
+**invisible** to the recycle path and would leak indefinitely on its
+own.
 
-The ``_provision_vps`` cleanup branch on
-:class:`OvhOrderDeliveryTimeoutError` and the
-``mngr ovh adopt-pending-order`` CLI both call
-:func:`adopt_orphan_vps_from_order` in ``ordering.py`` to attach the
-``mngr-provider`` / ``mngr-host-id`` tags + cancel the slow-delivered
-VPS so it becomes a recycle candidate. Without one of those code paths
-running, a slowly-delivered VPS leaks.
+The recovery mechanism for that case is the pending-order marker
+pattern in ``pending_orders.py`` + ``OvhProvider._reconcile_pending_orders``:
+``_provision_vps`` writes a marker on
+:class:`OvhOrderDeliveryTimeoutError`, and every subsequent
+``mngr create`` polls each marker's order once before its own
+provisioning. Any newly-delivered VPS gets tagged + cancelled in that
+sweep, becomes a recycle candidate, and is claimed by the very next
+``_maybe_claim_recycled_vps`` call -- or by a later bake's call if
+delivery is still pending now.
 """
 
 import time
@@ -103,10 +104,10 @@ def try_recycle_cancelled_vps(
     whose ``mngr-provider`` IAM tag matches ``provider_name``. A VPS that
     mngr ordered but failed to tag (e.g. an order whose delivery timed
     out before ``_provision_vps``'s tag-immediately-on-first-sight step
-    ran) is invisible here. The
-    :func:`adopt_orphan_vps_from_order` helper in ``ordering.py`` and
-    the ``mngr ovh adopt-pending-order`` CLI exist precisely to attach
-    that tag retroactively so the orphan becomes a recycle candidate.
+    ran) is invisible here. ``OvhProvider._reconcile_pending_orders``
+    (driven by the pending-order markers in ``pending_orders.py``) is
+    what attaches that tag retroactively so the orphan becomes a
+    recycle candidate.
     """
     if client.is_unconfigured:
         return None

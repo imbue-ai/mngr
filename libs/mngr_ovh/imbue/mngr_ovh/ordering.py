@@ -1,5 +1,4 @@
 import time
-import uuid
 from collections.abc import Mapping
 from typing import Any
 
@@ -7,13 +6,9 @@ from loguru import logger
 
 from imbue.imbue_common.logging import log_span
 from imbue.mngr.errors import MngrError
-from imbue.mngr_ovh._tag_keys import MNGR_HOST_ID_TAG_KEY
-from imbue.mngr_ovh._tag_keys import MNGR_PROVIDER_TAG_KEY
 from imbue.mngr_ovh.catalog import find_required_field
 from imbue.mngr_ovh.catalog import validate_datacenter
 from imbue.mngr_ovh.client import OvhVpsClient
-from imbue.mngr_ovh.iam_tags import attach_tag
-from imbue.mngr_ovh.iam_tags import vps_urn_for
 from imbue.mngr_vps_docker.errors import VpsApiError
 from imbue.mngr_vps_docker.errors import VpsProvisioningError
 from imbue.mngr_vps_docker.primitives import VpsInstanceId
@@ -22,9 +17,9 @@ from imbue.mngr_vps_docker.primitives import VpsInstanceId
 class OvhOrderDeliveryTimeoutError(VpsProvisioningError):
     """Raised when an OVH order succeeds at checkout but doesn't deliver a VPS in time.
 
-    Carries ``order_id`` so the caller can post-hoc tag + cancel any
-    slowly-delivered VPS (or invoke the adopt-pending-order CLI for
-    pathological delays) instead of leaking it. Subclasses
+    Carries ``order_id`` so the caller can write a pending-order marker
+    (see ``pending_orders.py``) for the next bake's
+    ``_reconcile_pending_orders`` sweep to pick up. Subclasses
     :class:`VpsProvisioningError` so existing ``except VpsProvisioningError``
     blocks (e.g. the cart-cleanup branch in :func:`order_and_wait_for_vps`)
     still catch it; only the call sites that want to react to the order_id
@@ -192,79 +187,29 @@ def order_and_wait_for_vps(
             raise
 
 
-def adopt_orphan_vps_from_order(
+def try_poll_order_for_delivered_vps(
     client: OvhVpsClient,
     *,
     order_id: int,
     plan_code: str,
-    provider_name: str,
-    region_code: str,
-    poll_timeout_seconds: float,
 ) -> str | None:
-    """Best-effort claim of a VPS from an order that didn't deliver before its first timeout.
+    """One-shot poll of an OVH order's details/operations chain. Returns the serviceName or None.
 
-    Polls the order's details/operations chain for up to ``poll_timeout_seconds``.
-    If/when a VPS serviceName appears, attaches the ``mngr-provider`` and
-    ``mngr-host-id`` IAM tags + flips ``renew.deleteAtExpiration=true`` so
-    the VPS becomes a recycle candidate for the next ``mngr create``.
+    Wraps :func:`_try_fetch_order_service_name` with a public name + a
+    fixed "single sweep" semantic so callers (notably the
+    pending-orders reconcile sweep) don't accidentally drag in the
+    blocking poll loop ``_wait_for_service_name_from_order`` uses.
+    A bake under reconcile can have multiple pending orders to check;
+    waiting on each one would balloon the bake's startup time.
 
-    Returns the adopted serviceName on success, or ``None`` if the order
-    still hasn't delivered within the extended timeout. Either way the
-    caller is expected to log the order_id and re-raise the original
-    exception; this function does **not** raise on the no-delivery path
-    (no delivery = nothing to clean up = nothing to report failure on).
-
-    The placeholder ``mngr-host-id`` value carries the order id so the
-    operator can correlate orphan VPSes back to the failed bake that
-    spawned them.
-
-    Used by:
-      - :func:`OvhProvider._provision_vps`'s cleanup branch on
-        :class:`OvhOrderDeliveryTimeoutError`, with a moderate
-        ``poll_timeout_seconds`` (~5 min) so the bake's failure exit
-        is bounded.
-      - The ``mngr ovh adopt-pending-order`` CLI, with a longer
-        ``poll_timeout_seconds`` for cases the bake didn't catch.
+    Returns ``None`` when:
+      - OVH hasn't yet allocated this order's VPS detail (delivery still pending).
+      - The fetch hit any transient API error (logged at DEBUG).
+    Either way the caller should leave the pending-order marker in
+    place so the next reconcile re-checks.
     """
-    with log_span("OVH adopt-orphan for order {} (poll timeout {}s)", order_id, poll_timeout_seconds):
-        try:
-            service_name = _wait_for_service_name_from_order(
-                client,
-                order_id=order_id,
-                requested_plan_code=plan_code,
-                timeout_seconds=poll_timeout_seconds,
-            )
-        except OvhOrderDeliveryTimeoutError as exc:
-            logger.warning(
-                "OVH adopt-orphan: order {} still pending after extended {}s wait; "
-                "rerun ``mngr ovh adopt-pending-order --order-id {}`` later to claim it. "
-                "Last status: {}",
-                order_id,
-                poll_timeout_seconds,
-                order_id,
-                exc.last_status,
-            )
-            return None
-        # Build a placeholder host_id that carries the order id so the
-        # orphan is traceable in ``mngr ovh list --all`` output. The
-        # recycle path swaps this tag for the new host's real id at
-        # claim time, so the placeholder doesn't have to match any
-        # in-mngr record. Full uuid4 hex (not truncated) so two
-        # concurrent orphan adoptions can't collide.
-        placeholder_host_id = f"host-orphan-from-order-{order_id}-{uuid.uuid4().hex}"
-        urn = vps_urn_for(service_name, region_code=region_code)
-        attach_tag(client, urn, MNGR_PROVIDER_TAG_KEY, provider_name)
-        attach_tag(client, urn, MNGR_HOST_ID_TAG_KEY, placeholder_host_id)
-        client.set_renew_at_expiration(service_name, True)
-        logger.warning(
-            "OVH adopt-orphan: order {} delivered VPS {} after bake gave up; "
-            "tagged as recycle candidate (provider={}, host_id={}) and cancelled.",
-            order_id,
-            service_name,
-            provider_name,
-            placeholder_host_id,
-        )
-        return service_name
+    service_name, _status = _try_fetch_order_service_name(client, order_id=order_id, requested_plan_code=plan_code)
+    return service_name
 
 
 def _set_configuration(

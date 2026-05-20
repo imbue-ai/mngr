@@ -114,14 +114,16 @@ Intended usage is to keep a VPS pool warm (e.g., via `mngr_imbue_cloud`) so that
 
 ## Adopting slowly-delivered orphan VPSes
 
-OVH's order pipeline is asynchronous: a `POST /order/cart/{id}/checkout` returns immediately with an `orderId`, but the actual VPS `serviceName` is only assigned during a later delivery phase. `mngr create` waits up to `vps_boot_timeout` (default 10 min) for that delivery. If OVH is slow (busy region, new-account fraud-review hold, etc.) and the VPS shows up *after* the timeout, the order silently produces a VPS that mngr never tags — invisible to discovery and to the recycle path. A full month of billing leaks.
+OVH's order pipeline is asynchronous: a `POST /order/cart/{id}/checkout` returns immediately with an `orderId`, but the actual VPS `serviceName` is only assigned during a later delivery phase. `mngr create` waits up to `vps_boot_timeout` (default 10 min) for that delivery. If OVH is slow (busy region, new-account fraud-review hold, etc.) and the VPS shows up *after* the timeout, the order silently produces a VPS that mngr never tags — invisible to discovery and to the recycle path. A full month of billing would leak.
 
-Two safety nets mitigate this:
+The recovery mechanism is a **pending-order marker** pattern:
 
-1. **`_provision_vps` extended-wait cleanup.** When `order_and_wait_for_vps` raises `OvhOrderDeliveryTimeoutError`, the bake's exception path keeps polling for `orphan_adopt_extra_timeout_seconds` more (default 5 min). If the VPS surfaces, the cleanup attaches `mngr-provider` / `mngr-host-id` and flips `deleteAtExpiration=true` so the next `mngr create` picks it up via the normal recycle flow. The bake still re-raises the original failure — the bake didn't succeed — but at least nothing leaks.
+1. **Marker write on timeout.** When `order_and_wait_for_vps` raises `OvhOrderDeliveryTimeoutError`, `_provision_vps` writes a JSON marker file at `<profile_dir>/providers/ovh/<instance>/pending_orders/order-<N>.json` carrying `order_id` + `plan_code` + `region`, then re-raises the original failure. The bake exits at its normal timeout — no extra wait.
 
-2. **`mngr ovh adopt-pending-order` CLI.** For the rare case where even the extended wait isn't enough, an operator can run:
-   ```
-   mngr ovh adopt-pending-order --order-id <N> --provider-name <name> [--timeout-seconds 1800]
-   ```
-   to claim a VPS from an order id that's still pending. The order id is in the failed `mngr create`'s log line `OVH order placed (cart=..., order_id=N)`. Idempotent (re-running against an already-adopted order is a no-op).
+2. **Reconcile sweep on every subsequent bake.** At the top of every `_provision_vps`, `_reconcile_pending_orders` walks the marker dir. For each marker, one short OVH poll (`try_poll_order_for_delivered_vps`):
+   - If the order has delivered → attach `mngr-provider` / `mngr-host-id` IAM tags, flip `deleteAtExpiration=true`, delete the marker. The `_maybe_claim_recycled_vps` call that runs immediately after sees the newly-tagged orphan as a candidate and claims it for the current bake.
+   - If still pending → keep the marker for the next bake's reconcile.
+
+Failure modes are all swallowed (logged at WARNING) so a transient OVH error or a broken marker doesn't block the current bake from proceeding to its normal order path. Worst case the orphan retries on the next bake. No operator intervention required.
+
+Mirrors the shape of `minds.envs.recover`'s recover-target file pattern.

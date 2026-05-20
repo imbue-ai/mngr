@@ -12,9 +12,9 @@ import pytest
 from imbue.mngr.errors import MngrError
 from imbue.mngr_ovh.client import OvhVpsClient
 from imbue.mngr_ovh.ordering import OvhOrderDeliveryTimeoutError
-from imbue.mngr_ovh.ordering import adopt_orphan_vps_from_order
 from imbue.mngr_ovh.ordering import order_and_wait_for_vps
 from imbue.mngr_ovh.ordering import rebuild_vps_with_public_key
+from imbue.mngr_ovh.ordering import try_poll_order_for_delivered_vps
 from imbue.mngr_vps_docker.errors import VpsApiError
 from imbue.mngr_vps_docker.errors import VpsProvisioningError
 
@@ -365,13 +365,10 @@ def test_order_raises_when_delivery_times_out() -> None:
     assert operation_fetches["n"] >= 1
 
 
-def test_adopt_orphan_returns_none_when_order_still_not_delivered() -> None:
-    """If polling exhausts the budget without delivery, return None so the caller can log + give up."""
-    operation_fetches = {"n": 0}
+def test_try_poll_returns_none_when_order_not_delivered_yet() -> None:
+    """One-shot poll returns None when no operation has a populated resource.name yet."""
 
     def fake(method: str, path: str, body: Any = None, need_auth: bool = True) -> Any:
-        # Same as the delivery-timeout test's order chain, but no cart prefix
-        # (adopt operates against an existing order_id, not the order flow).
         if method == "GET" and path == "/me/order/9999/details":
             return [555]
         if method == "GET" and path == "/me/order/9999/details/555/extension":
@@ -387,28 +384,16 @@ def test_adopt_orphan_returns_none_when_order_still_not_delivered() -> None:
         if method == "GET" and path == "/me/order/9999/details/555/operations":
             return [777]
         if method == "GET" and path == "/me/order/9999/details/555/operations/777":
-            operation_fetches["n"] += 1
             return {"id": 777, "status": "doing", "resource": {}}
         raise AssertionError(f"unexpected call: {method} {path}")
 
     client = _client(fake)
-    with patch("imbue.mngr_ovh.ordering._OVH_DELIVERY_POLL_INTERVAL_SECONDS", 0.0):
-        result = adopt_orphan_vps_from_order(
-            client,
-            order_id=9999,
-            plan_code="vps-2025-model1",
-            provider_name="ovh",
-            region_code="us",
-            poll_timeout_seconds=0.05,
-        )
+    result = try_poll_order_for_delivered_vps(client, order_id=9999, plan_code="vps-2025-model1")
     assert result is None
-    assert operation_fetches["n"] >= 1
 
 
-def test_adopt_orphan_tags_and_cancels_delivered_vps() -> None:
-    """When the slowly-delivered VPS surfaces, attach mngr-provider/mngr-host-id + cancel."""
-    tag_attaches: list[tuple[str, str, str]] = []
-    cancel_calls: list[str] = []
+def test_try_poll_returns_service_name_when_order_has_delivered() -> None:
+    """One-shot poll returns the assigned serviceName as soon as the operation publishes it."""
 
     def fake(method: str, path: str, body: Any = None, need_auth: bool = True) -> Any:
         if method == "GET" and path == "/me/order/8888/details":
@@ -426,45 +411,12 @@ def test_adopt_orphan_tags_and_cancels_delivered_vps() -> None:
         if method == "GET" and path == "/me/order/8888/details/444/operations":
             return [666]
         if method == "GET" and path == "/me/order/8888/details/444/operations/666":
-            # VPS surfaces immediately on this poll.
-            return {"id": 666, "status": "done", "resource": {"name": "vps-orphan42.vps.ovh.us"}}
-        # Tag attach calls land on the IAM v2 surface.
-        if method == "POST" and path.startswith("/v2/iam/resource/") and path.endswith("/tag"):
-            urn = path.removeprefix("/v2/iam/resource/").removesuffix("/tag")
-            tag_attaches.append((urn, body["key"], body["value"]))
-            return None
-        # serviceInfos PUT for the cancellation (set_renew_at_expiration).
-        if method == "GET" and path == "/vps/vps-orphan42.vps.ovh.us/serviceInfos":
-            return {"renew": {"period": 1, "deleteAtExpiration": False, "automatic": True}}
-        if method == "PUT" and path == "/vps/vps-orphan42.vps.ovh.us/serviceInfos":
-            cancel_calls.append(path)
-            assert body["renew"]["deleteAtExpiration"] is True
-            return None
+            return {"id": 666, "status": "done", "resource": {"name": "vps-late42.vps.ovh.us"}}
         raise AssertionError(f"unexpected call: {method} {path}")
 
     client = _client(fake)
-    with patch("imbue.mngr_ovh.ordering._OVH_DELIVERY_POLL_INTERVAL_SECONDS", 0.0):
-        service_name = adopt_orphan_vps_from_order(
-            client,
-            order_id=8888,
-            plan_code="vps-2025-model1",
-            provider_name="ovh-prod",
-            region_code="us",
-            poll_timeout_seconds=5.0,
-        )
-    assert service_name == "vps-orphan42.vps.ovh.us"
-    # Both required IAM tags were attached.
-    tag_keys_attached = {key for _urn, key, _value in tag_attaches}
-    assert "mngr-provider" in tag_keys_attached
-    assert "mngr-host-id" in tag_keys_attached
-    # mngr-provider carries the requested provider name.
-    provider_value = next(v for _urn, key, v in tag_attaches if key == "mngr-provider")
-    assert provider_value == "ovh-prod"
-    # mngr-host-id carries the order id so the orphan is traceable.
-    host_id_value = next(v for _urn, key, v in tag_attaches if key == "mngr-host-id")
-    assert "8888" in host_id_value
-    # And the VPS was cancelled.
-    assert cancel_calls == ["/vps/vps-orphan42.vps.ovh.us/serviceInfos"]
+    result = try_poll_order_for_delivered_vps(client, order_id=8888, plan_code="vps-2025-model1")
+    assert result == "vps-late42.vps.ovh.us"
 
 
 def test_order_raises_when_checkout_returns_no_order_id() -> None:

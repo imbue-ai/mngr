@@ -99,20 +99,13 @@ class OvhProviderConfig(VpsDockerProviderConfig):
     )
     vps_boot_timeout: float = Field(
         default=600.0,
-        description="Seconds to wait for an OVH order to deliver a VPS (slower than direct-create APIs).",
-    )
-    orphan_adopt_extra_timeout_seconds: float = Field(
-        default=300.0,
         description=(
-            "When ``order_and_wait_for_vps`` raises ``OvhOrderDeliveryTimeoutError`` "
-            "(order succeeded at checkout but no VPS delivered within ``vps_boot_timeout``), "
-            "``_provision_vps``'s cleanup branch keeps polling for this many additional "
-            "seconds. If the VPS surfaces, it gets tagged with ``mngr-provider`` / "
-            "``mngr-host-id`` and ``renew.deleteAtExpiration=true`` so the next "
-            "``mngr create`` recycles it. Anything still undelivered after the extended "
-            "wait must be adopted manually via ``mngr ovh adopt-pending-order --order-id N``. "
-            "Total worst-case bake-failure exit is ``vps_boot_timeout + this`` seconds; "
-            "default of 5min keeps the wait bounded while catching the common slow-delivery case."
+            "Seconds to wait for an OVH order to deliver a VPS (slower than direct-create APIs). "
+            "On timeout, ``_provision_vps`` writes a pending-order marker under the provider's "
+            "state dir; the next ``mngr create`` runs ``_reconcile_pending_orders`` at the top "
+            "of ``_provision_vps`` and adopts any VPS that has since delivered as a recycle "
+            "candidate. No inline extended wait happens here -- the failing bake exits at this "
+            "timeout, and recovery is eventually-consistent across subsequent bakes."
         ),
     )
     ovh_subsidiary: str = Field(
