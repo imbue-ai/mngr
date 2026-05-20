@@ -2,12 +2,15 @@ import json
 import secrets
 from abc import ABC
 from abc import abstractmethod
+from collections.abc import Callable
 from enum import auto
 from pathlib import Path
 from typing import Final
+from typing import TypeVar
 
 from loguru import logger
 from pydantic import Field
+from pydantic import SecretStr
 
 from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
@@ -18,6 +21,8 @@ from imbue.minds.errors import SigningKeyError
 from imbue.minds.primitives import CookieSigningKey
 from imbue.minds.primitives import MindsApiToken
 from imbue.minds.primitives import OneTimeCode
+
+_SecretT = TypeVar("_SecretT", bound=SecretStr)
 
 _SIGNING_KEY_LENGTH: Final[int] = 64
 
@@ -109,47 +114,67 @@ class FileAuthStore(AuthStoreInterface):
             return True
 
     def get_signing_key(self) -> CookieSigningKey:
-        key_path = self.data_directory / _SIGNING_KEY_FILENAME
-        if key_path.exists():
-            try:
-                key_value = key_path.read_text().strip()
-            except OSError as e:
-                raise SigningKeyError(f"Cannot read signing key from {key_path}") from e
-            if not key_value:
-                raise SigningKeyError(f"Signing key file is empty: {key_path}")
-            return CookieSigningKey(key_value)
-
-        # Generate a new key
-        with log_span("Generating new signing key"):
-            new_key = secrets.token_urlsafe(_SIGNING_KEY_LENGTH)
-            try:
-                self.data_directory.mkdir(parents=True, exist_ok=True)
-                key_path.write_text(new_key)
-                key_path.chmod(0o600)
-            except OSError as e:
-                raise SigningKeyError(f"Cannot write signing key to {key_path}") from e
-            return CookieSigningKey(new_key)
+        return self._load_or_generate_secret(
+            filename=_SIGNING_KEY_FILENAME,
+            secret_byte_length=_SIGNING_KEY_LENGTH,
+            log_span_label="Generating new signing key",
+            read_error_message="Cannot read signing key from {path}",
+            empty_error_message="Signing key file is empty: {path}",
+            write_error_message="Cannot write signing key to {path}",
+            error_class=SigningKeyError,
+            wrap=CookieSigningKey,
+        )
 
     def get_api_token(self) -> MindsApiToken:
-        token_path = self.data_directory / _API_TOKEN_FILENAME
-        if token_path.exists():
-            try:
-                token_value = token_path.read_text().strip()
-            except OSError as e:
-                raise ApiTokenError(f"Cannot read API token from {token_path}") from e
-            if not token_value:
-                raise ApiTokenError(f"API token file is empty: {token_path}")
-            return MindsApiToken(token_value)
+        return self._load_or_generate_secret(
+            filename=_API_TOKEN_FILENAME,
+            secret_byte_length=_API_TOKEN_LENGTH,
+            log_span_label="Generating new minds API token",
+            read_error_message="Cannot read API token from {path}",
+            empty_error_message="API token file is empty: {path}",
+            write_error_message="Cannot write API token to {path}",
+            error_class=ApiTokenError,
+            wrap=MindsApiToken,
+        )
 
-        with log_span("Generating new minds API token"):
-            new_token = secrets.token_urlsafe(_API_TOKEN_LENGTH)
+    def _load_or_generate_secret(
+        self,
+        *,
+        filename: str,
+        secret_byte_length: int,
+        log_span_label: str,
+        read_error_message: str,
+        empty_error_message: str,
+        write_error_message: str,
+        error_class: type[Exception],
+        wrap: Callable[[str], _SecretT],
+    ) -> _SecretT:
+        """Read a 0o600-permissioned secret file, generating it on first access.
+
+        Shared between :meth:`get_signing_key` and :meth:`get_api_token`.
+        The error-message templates each accept a ``{path}`` placeholder
+        so each caller can supply its own wording without the helper
+        having to know about the specific secret kind.
+        """
+        secret_path = self.data_directory / filename
+        if secret_path.exists():
+            try:
+                secret_value = secret_path.read_text().strip()
+            except OSError as e:
+                raise error_class(read_error_message.format(path=secret_path)) from e
+            if not secret_value:
+                raise error_class(empty_error_message.format(path=secret_path))
+            return wrap(secret_value)
+
+        with log_span(log_span_label):
+            new_secret = secrets.token_urlsafe(secret_byte_length)
             try:
                 self.data_directory.mkdir(parents=True, exist_ok=True)
-                token_path.write_text(new_token)
-                token_path.chmod(0o600)
+                secret_path.write_text(new_secret)
+                secret_path.chmod(0o600)
             except OSError as e:
-                raise ApiTokenError(f"Cannot write API token to {token_path}") from e
-            return MindsApiToken(new_token)
+                raise error_class(write_error_message.format(path=secret_path)) from e
+            return wrap(new_secret)
 
     def add_one_time_code(
         self,
