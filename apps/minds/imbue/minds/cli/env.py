@@ -967,9 +967,11 @@ def env_deploy(
       env. Writes nothing to disk. Requires
       ``--yes-i-mean-production`` (or ``--yes-i-mean-staging``) so an
       accidental invocation can never silently fire.
-    - Anything else: dev-tier deploy -- provisions the Modal env, Neon
-      DB, SuperTokens app, pushes per-env Modal Secrets, deploys both
-      apps, and writes ``~/.minds-<name>/client.toml`` + ``secrets.toml``.
+    - Anything else: per-env-tier deploy (``dev`` for ``dev-<user>``
+      envs, ``ci`` for ``ci-<...>`` envs minted by the deployment-tests
+      orchestrator) -- provisions the Modal env, Neon DB, SuperTokens
+      app, pushes per-env Modal Secrets, deploys both apps, and writes
+      ``~/.minds-<name>/client.toml`` + ``secrets.toml``.
 
     Idempotent: re-running picks up any new tier-shared Vault values and
     re-deploys in place.
