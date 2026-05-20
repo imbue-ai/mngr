@@ -19,6 +19,8 @@ from jinja2 import FileSystemLoader
 from jinja2 import select_autoescape
 
 from imbue.imbue_common.pure import pure
+from imbue.minds.bootstrap import DEFAULT_MINDS_ROOT_NAME
+from imbue.minds.bootstrap import MINDS_ROOT_NAME_ENV_VAR
 from imbue.minds.desktop_client.agent_creator import AgentCreationInfo
 from imbue.minds.primitives import AIProvider
 from imbue.minds.primitives import CreationId
@@ -109,15 +111,46 @@ def render_landing_page(
     )
 
 
-_DEFAULT_GIT_URL: Final[str] = os.getenv(
-    "MINDS_WORKSPACE_GIT_URL", "https://github.com/imbue-ai/forever-claude-template.git"
-)
+# Hardcoded fallbacks for the workspace-creation form. Overridable via
+# the MINDS_WORKSPACE_* env vars in dev tiers ONLY -- see
+# ``_dev_only_workspace_default`` for the gating rationale.
+_FALLBACK_GIT_URL: Final[str] = "https://github.com/imbue-ai/forever-claude-template.git"
+_FALLBACK_HOST_NAME: Final[str] = "assistant"
+_FALLBACK_BRANCH: Final[str] = ""
+
+# Root names that map to operator-managed shared tiers (production /
+# staging). For these tiers the MINDS_WORKSPACE_* env-var defaults are
+# intentionally ignored: ``just minds-start`` (and any other dev-iteration
+# tool) exports those vars from the operator's local FCT worktree state,
+# which only makes sense when iterating against a per-developer dev env.
+# In staging / production the workspaces are end-user-driven and a leaked
+# ``MINDS_WORKSPACE_BRANCH`` from the operator's shell would silently
+# pin the lease to a ref that no pool host carries.
+_SHARED_TIER_ROOT_NAMES: Final[frozenset[str]] = frozenset({DEFAULT_MINDS_ROOT_NAME, "minds-staging"})
 
 
-_DEFAULT_HOST_NAME: Final[str] = os.getenv("MINDS_WORKSPACE_NAME", "assistant")
+def _dev_only_workspace_default(env_var: str, fallback: str) -> str:
+    """Read ``env_var`` for dev tiers; otherwise return ``fallback``.
 
+    The MINDS_WORKSPACE_GIT_URL / _NAME / _BRANCH env vars are a dev
+    convenience that wire the create-form's defaults to the operator's
+    local FCT worktree (``just minds-start`` exports them). They have
+    no business pre-filling the form in staging or production, where
+    workspaces are end-user-driven and the operator's local git state
+    is irrelevant.
 
-_DEFAULT_BRANCH: Final[str] = os.getenv("MINDS_WORKSPACE_BRANCH", "")
+    Activation is detected via ``MINDS_ROOT_NAME``. The env var is
+    honored only when the root name names a dev tier (i.e. anything
+    other than ``minds`` / ``minds-staging``). An unactivated shell --
+    ``MINDS_ROOT_NAME`` unset entirely -- is treated as non-dev (defensive
+    default: ``minds run`` always activates first today, so this branch
+    is essentially unreachable; we still want to ignore the env var if
+    we somehow get there).
+    """
+    root_name = os.environ.get(MINDS_ROOT_NAME_ENV_VAR, "")
+    if not root_name or root_name in _SHARED_TIER_ROOT_NAMES:
+        return fallback
+    return os.environ.get(env_var, fallback)
 
 
 @pure
@@ -144,9 +177,11 @@ def render_create_form(
     host name on the resulting workspace. (The agent itself is always
     named ``system-services``.)
     """
-    effective_url = git_url if git_url else _DEFAULT_GIT_URL
-    effective_name = host_name if host_name else _DEFAULT_HOST_NAME
-    effective_branch = branch if branch else _DEFAULT_BRANCH
+    effective_url = git_url if git_url else _dev_only_workspace_default("MINDS_WORKSPACE_GIT_URL", _FALLBACK_GIT_URL)
+    effective_name = (
+        host_name if host_name else _dev_only_workspace_default("MINDS_WORKSPACE_NAME", _FALLBACK_HOST_NAME)
+    )
+    effective_branch = branch if branch else _dev_only_workspace_default("MINDS_WORKSPACE_BRANCH", _FALLBACK_BRANCH)
     has_account = bool(default_account_id and accounts)
     effective_launch_mode = (
         launch_mode if launch_mode is not None else (LaunchMode.IMBUE_CLOUD if has_account else LaunchMode.LOCAL)
@@ -174,23 +209,52 @@ def render_create_form(
 
 
 _STATUS_TEXT_DEFAULT: Final[dict[str, str]] = {
-    "CLONING": "Cloning repository...",
-    "CREATING": "Creating agent...",
+    "INITIALIZING": "Starting...",
+    "CLONING_REPO": "Cloning repository...",
+    "CHECKING_OUT_BRANCH": "Checking out branch...",
+    "PROVISIONING_AI": "Provisioning AI access...",
+    "CREATING_WORKSPACE": "Creating workspace...",
+    "WAITING_FOR_READY": "Waiting for workspace to be ready...",
     "DONE": "Done. Redirecting...",
 }
 
+# IMBUE_CLOUD diverges in wording for the connection / agent-setup phases
+# where the user-facing mental model is "connecting to / setting up an
+# existing pool host" rather than "cloning / creating a new workspace".
 _STATUS_TEXT_IMBUE_CLOUD: Final[dict[str, str]] = {
-    "CLONING": "Connecting to host...",
-    "CREATING": "Setting up agent...",
+    "INITIALIZING": "Starting...",
+    "CLONING_REPO": "Connecting to host...",
+    "CHECKING_OUT_BRANCH": "Checking out branch...",
+    "PROVISIONING_AI": "Provisioning AI access...",
+    "CREATING_WORKSPACE": "Setting up agent...",
+    "WAITING_FOR_READY": "Waiting for workspace to be ready...",
     "DONE": "Done. Redirecting...",
 }
+
+
+@pure
+def status_text_for(
+    status: str,
+    error: str | None = None,
+    launch_mode: LaunchMode = LaunchMode.LOCAL,
+) -> str:
+    """Resolve the UI caption for an ``AgentCreationStatus`` value.
+
+    ``status`` is the stringified enum value (e.g. ``"CLONING_REPO"``).
+    ``error`` is consulted only for the ``FAILED`` case so the caption
+    can surface the underlying error message; for every other status the
+    text comes from the mode-aware ``_STATUS_TEXT_*`` maps.
+    """
+    if status == "FAILED":
+        return "Failed: {}".format(error or "unknown error")
+    text_map = _STATUS_TEXT_IMBUE_CLOUD if launch_mode is LaunchMode.IMBUE_CLOUD else _STATUS_TEXT_DEFAULT
+    return text_map.get(status, "Working...")
 
 
 @pure
 def render_creating_page(
     creation_id: CreationId,
     info: AgentCreationInfo,
-    launch_mode: LaunchMode = LaunchMode.LOCAL,
 ) -> str:
     """Render the progress page shown while an agent is being created.
 
@@ -200,12 +264,13 @@ def render_creating_page(
     needs a stable handle to poll status from the moment the user kicks
     off the form. The template's status-poll URL still includes this id
     so SSE/log-streaming endpoints can find the right ``log_queue``.
+
+    The launch mode is read off ``info.launch_mode`` --
+    ``AgentCreator.start_creation`` records it before spawning the worker
+    thread, so the ``AgentCreationInfo`` snapshot is the single source of
+    truth for caption resolution (consistent with the SSE status events).
     """
-    text_map = _STATUS_TEXT_IMBUE_CLOUD if launch_mode is LaunchMode.IMBUE_CLOUD else _STATUS_TEXT_DEFAULT
-    if str(info.status) == "FAILED":
-        status_text = "Failed: {}".format(info.error or "unknown error")
-    else:
-        status_text = text_map.get(str(info.status), "Working...")
+    status_text = status_text_for(str(info.status), error=info.error, launch_mode=info.launch_mode)
     template = JINJA_ENV.get_template("creating.html")
     return template.render(
         agent_id=creation_id,
