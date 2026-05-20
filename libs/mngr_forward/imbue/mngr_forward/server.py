@@ -381,7 +381,7 @@ async def _forward_workspace_http(
     try:
         backend_response = await http_client.request(method=request.method, url=url, headers=headers, content=body)
     except (httpx.ConnectError, httpx.RemoteProtocolError):
-        # Workspace-server may not yet be listening, or it may have closed the
+        # System interface may not yet be listening, or it may have closed the
         # connection before sending headers (typical during startup). Surface
         # a 503 so chrome's health SSE (driven by the failure envelope below)
         # can navigate the user to the minds-side recovery UI; non-HTML

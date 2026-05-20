@@ -1401,7 +1401,7 @@ class AgentCreator(MutableModel):
                     last_status = status
                     if status == 200:
                         logger.debug("Workspace ready for {} after {} probe(s)", agent_id, attempt)
-                        log_queue.put("[minds] Workspace server is ready.")
+                        log_queue.put("[minds] System interface is ready.")
                         return
                 threading.Event().wait(timeout=self.workspace_ready_poll_interval_seconds)
         logger.warning(
