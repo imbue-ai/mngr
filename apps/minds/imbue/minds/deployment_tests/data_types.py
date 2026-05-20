@@ -22,10 +22,9 @@ from imbue.minds.envs.primitives import DevEnvName
 class SharedEnvUrls(FrozenModel):
     """Public URLs for one shared dev env, keyed by role in :class:`DeploymentEnvsConfig`.
 
-    Secrets (the SuperTokens admin connection URI + API key) for the
-    same env live in env vars prefixed
-    ``MINDS_DEPLOYMENT_TEST_SHARED_<ROLE_UPPER>_`` so they never land
-    on disk in the test-results dir.
+    Secrets (Neon DSNs, SuperTokens admin key) for the same env live in
+    env vars prefixed ``MINDS_DEPLOYMENT_TEST_SHARED_<ROLE_UPPER>_`` so
+    they never land on disk in the test-results dir.
     """
 
     role: SharedEnvRole = Field(description="The role name this env serves (e.g. 'default').")
@@ -108,6 +107,8 @@ class SharedEnvHandle(FrozenModel):
     urls: SharedEnvUrls
     supertokens_connection_uri: SecretStr
     supertokens_api_key: SecretStr
+    neon_host_pool_dsn: SecretStr
+    neon_litellm_dsn: SecretStr
 
 
 class VerifiedUserHandle(FrozenModel):

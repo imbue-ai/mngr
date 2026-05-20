@@ -125,6 +125,8 @@ def shared_env(
                 urls=urls,
                 supertokens_connection_uri=SecretStr(_require_env_var(f"{env_prefix}SUPERTOKENS_CONNECTION_URI")),
                 supertokens_api_key=SecretStr(_require_env_var(f"{env_prefix}SUPERTOKENS_API_KEY")),
+                neon_host_pool_dsn=SecretStr(_require_env_var(f"{env_prefix}NEON_HOST_POOL_DSN")),
+                neon_litellm_dsn=SecretStr(_require_env_var(f"{env_prefix}NEON_LITELLM_DSN")),
             )
         except DeploymentTestConfigError as exc:
             pytest.skip(str(exc))
