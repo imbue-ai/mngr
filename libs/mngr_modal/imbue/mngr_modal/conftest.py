@@ -35,6 +35,7 @@ from imbue.mngr.utils.testing import deregister_modal_test_volume
 from imbue.mngr.utils.testing import generate_test_environment_name
 from imbue.mngr.utils.testing import get_subprocess_test_env
 from imbue.mngr.utils.testing import make_mngr_ctx
+from imbue.mngr.utils.testing import read_shared_modal_env_name
 from imbue.mngr.utils.testing import register_modal_test_app
 from imbue.mngr.utils.testing import register_modal_test_environment
 from imbue.mngr.utils.testing import register_modal_test_volume
@@ -57,12 +58,17 @@ def make_modal_provider_real(
     app_name: str,
     is_persistent: bool = False,
     is_snapshotted_after_create: bool = False,
+    user_id_override: UserId | None = None,
 ) -> ModalProviderInstance:
     """Create a ModalProviderInstance with real Modal for acceptance tests.
 
     By default, is_snapshotted_after_create=False to speed up tests by not creating
     an initial snapshot. Tests that specifically need to test initial snapshot
     behavior should pass is_snapshotted_after_create=True.
+
+    ``user_id_override`` forwards into ``ModalProviderConfig.user_id`` so the
+    shared-env test mode (MNGR_TEST_SHARED_MODAL_ENV_NAME) can pin the env
+    name's user_id segment to the suffix the justfile pre-created.
     """
     prefix = mngr_ctx.config.prefix
     if not TEST_ENV_PATTERN.match(prefix):
@@ -80,6 +86,7 @@ def make_modal_provider_real(
         default_memory=2.0,
         is_persistent=is_persistent,
         is_snapshotted_after_create=is_snapshotted_after_create,
+        user_id=user_id_override,
     )
     # Acceptance fixtures always need to bootstrap the per-session Modal env,
     # so pass is_for_host_creation=True to authorize env creation.
@@ -107,15 +114,25 @@ def modal_mngr_ctx(
     created by these tests are visible to the CI cleanup script
     (cleanup_old_modal_test_environments.py), providing a safety net if
     per-test fixture cleanup fails.
+
+    When MNGR_TEST_SHARED_MODAL_ENV_NAME is set (offload mode), the prefix is
+    taken from the pre-created shared env so every test in the offload run
+    points at the same Modal environment.
     """
-    now = datetime.now(timezone.utc)
-    timestamp = now.strftime("%Y-%m-%d-%H-%M-%S")
-    prefix = f"{TEST_ENV_PREFIX}{timestamp}-"
+    shared = read_shared_modal_env_name()
+    if shared is not None:
+        prefix, _ = shared
+    else:
+        now = datetime.now(timezone.utc)
+        timestamp = now.strftime("%Y-%m-%d-%H-%M-%S")
+        prefix = f"{TEST_ENV_PREFIX}{timestamp}-"
     config = MngrConfig(default_host_dir=temp_host_dir, prefix=prefix)
     return make_mngr_ctx(config, plugin_manager, temp_profile_dir, concurrency_group=cg)
 
 
-def _cleanup_modal_test_resources(app_name: str, volume_name: str, environment_name: str) -> None:
+def _cleanup_modal_test_resources(
+    app_name: str, volume_name: str, environment_name: str, delete_env: bool = True
+) -> None:
     """Clean up Modal test resources after a test completes.
 
     1. Close the Modal app context. For ephemeral apps this advances the
@@ -126,7 +143,7 @@ def _cleanup_modal_test_resources(app_name: str, volume_name: str, environment_n
        `modal environment delete` "deletes all apps in the selected
        environment" (https://modal.com/docs/reference/cli/environment).
     2. Delete the volume (must precede env deletion).
-    3. Delete the environment.
+    3. Delete the environment (only when ``delete_env`` is True).
 
     Apps are deliberately not in the deregister chain. We leave registered
     apps tracked and let `_get_leaked_modal_apps` be the authoritative
@@ -134,6 +151,10 @@ def _cleanup_modal_test_resources(app_name: str, volume_name: str, environment_n
 
     Volume + env are deregistered only on DELETED/NOT_FOUND. FAILED leaves the
     resource tracked so the session-end leak detector surfaces it.
+
+    When ``delete_env`` is False (shared-env mode), the environment is owned
+    by the justfile wrapper, not the test, so we skip env deletion entirely.
+    Volume cleanup still runs -- volumes are per-test and must be deleted.
 
     Known limitation: treating NOT_FOUND as success has a residual failure
     mode. If env-create propagation is eventually consistent across Modal
@@ -149,6 +170,8 @@ def _cleanup_modal_test_resources(app_name: str, volume_name: str, environment_n
         deregister=lambda: deregister_modal_test_volume(volume_name),
         resource_description=f"volume {volume_name} in environment {environment_name}",
     )
+    if not delete_env:
+        return
     # Delete the environment using Modal SDK.
     _apply_cleanup_outcome(
         outcome=_delete_modal_environment_via_sdk(environment_name),
@@ -223,6 +246,45 @@ def _delete_modal_environment_via_sdk(environment_name: str) -> ModalCleanupOutc
     )
 
 
+def _build_real_modal_provider_with_shared_env_support(
+    modal_mngr_ctx: MngrContext,
+    mngr_test_id: str,
+    *,
+    is_persistent: bool = False,
+    is_snapshotted_after_create: bool = False,
+) -> tuple[ModalProviderInstance, str, str, str, bool]:
+    """Build a real-Modal provider and register its resources for leak detection.
+
+    Honors ``MNGR_TEST_SHARED_MODAL_ENV_NAME``: when set, threads the suffix
+    through ``ModalProviderConfig.user_id`` so every fixture in the offload
+    run lands in the justfile's pre-created env, and skips
+    ``register_modal_test_environment`` (the env is not owned by the test).
+
+    Returns ``(provider, app_name, environment_name, volume_name, delete_env)``
+    so each fixture can yield the provider, then pass ``delete_env`` into
+    ``_cleanup_modal_test_resources`` on teardown.
+    """
+    shared = read_shared_modal_env_name()
+    user_id_override = UserId(shared[1]) if shared is not None else None
+    app_name = f"{MODAL_TEST_APP_PREFIX}{mngr_test_id}"
+    provider = make_modal_provider_real(
+        modal_mngr_ctx,
+        app_name,
+        is_persistent=is_persistent,
+        is_snapshotted_after_create=is_snapshotted_after_create,
+        user_id_override=user_id_override,
+    )
+    environment_name = provider.environment_name
+    volume_name = f"{app_name}{STATE_VOLUME_SUFFIX}"
+
+    register_modal_test_app(app_name)
+    register_modal_test_volume(volume_name)
+    delete_env = shared is None
+    if delete_env:
+        register_modal_test_environment(environment_name)
+    return provider, app_name, environment_name, volume_name, delete_env
+
+
 @pytest.fixture
 def real_modal_provider(
     modal_mngr_ctx: MngrContext, mngr_test_id: str
@@ -236,19 +298,13 @@ def real_modal_provider(
     Uses modal_mngr_ctx (with timestamp-based prefix) so leaked environments
     are visible to the CI cleanup script as a safety net.
     """
-    app_name = f"{MODAL_TEST_APP_PREFIX}{mngr_test_id}"
-    provider = make_modal_provider_real(modal_mngr_ctx, app_name)
-    environment_name = provider.environment_name
-    volume_name = f"{app_name}{STATE_VOLUME_SUFFIX}"
-
-    # Register resources for leak detection (safety net in case cleanup fails)
-    register_modal_test_app(app_name)
-    register_modal_test_environment(environment_name)
-    register_modal_test_volume(volume_name)
+    provider, app_name, environment_name, volume_name, delete_env = _build_real_modal_provider_with_shared_env_support(
+        modal_mngr_ctx, mngr_test_id
+    )
 
     yield provider
 
-    _cleanup_modal_test_resources(app_name, volume_name, environment_name)
+    _cleanup_modal_test_resources(app_name, volume_name, environment_name, delete_env=delete_env)
 
 
 @pytest.fixture
@@ -263,19 +319,13 @@ def persistent_modal_provider(
     Uses modal_mngr_ctx (with timestamp-based prefix) so leaked environments
     are visible to the CI cleanup script as a safety net.
     """
-    app_name = f"{MODAL_TEST_APP_PREFIX}{mngr_test_id}"
-    provider = make_modal_provider_real(modal_mngr_ctx, app_name, is_persistent=True)
-    environment_name = provider.environment_name
-    volume_name = f"{app_name}{STATE_VOLUME_SUFFIX}"
-
-    # Register resources for leak detection
-    register_modal_test_app(app_name)
-    register_modal_test_environment(environment_name)
-    register_modal_test_volume(volume_name)
+    provider, app_name, environment_name, volume_name, delete_env = _build_real_modal_provider_with_shared_env_support(
+        modal_mngr_ctx, mngr_test_id, is_persistent=True
+    )
 
     yield provider
 
-    _cleanup_modal_test_resources(app_name, volume_name, environment_name)
+    _cleanup_modal_test_resources(app_name, volume_name, environment_name, delete_env=delete_env)
 
 
 @pytest.fixture
@@ -290,19 +340,13 @@ def initial_snapshot_provider(
     Uses modal_mngr_ctx (with timestamp-based prefix) so leaked environments
     are visible to the CI cleanup script as a safety net.
     """
-    app_name = f"{MODAL_TEST_APP_PREFIX}{mngr_test_id}"
-    provider = make_modal_provider_real(modal_mngr_ctx, app_name, is_snapshotted_after_create=True)
-    environment_name = provider.environment_name
-    volume_name = f"{app_name}{STATE_VOLUME_SUFFIX}"
-
-    # Register resources for leak detection
-    register_modal_test_app(app_name)
-    register_modal_test_environment(environment_name)
-    register_modal_test_volume(volume_name)
+    provider, app_name, environment_name, volume_name, delete_env = _build_real_modal_provider_with_shared_env_support(
+        modal_mngr_ctx, mngr_test_id, is_snapshotted_after_create=True
+    )
 
     yield provider
 
-    _cleanup_modal_test_resources(app_name, volume_name, environment_name)
+    _cleanup_modal_test_resources(app_name, volume_name, environment_name, delete_env=delete_env)
 
 
 # =============================================================================
@@ -343,7 +387,19 @@ def setup_test_mngr_env(
 
 @pytest.fixture(scope="session")
 def modal_test_session_env_name() -> str:
-    """Generate a unique, timestamp-based environment name for this test session."""
+    """Generate a unique, timestamp-based environment name for this test session.
+
+    In shared-env mode (MNGR_TEST_SHARED_MODAL_ENV_NAME set), returns the
+    timestamp portion of the shared env name (without the trailing dash) so
+    the session-scoped subprocess-env fixture lands in the same Modal
+    environment as the function-scoped fixtures.
+    """
+    shared = read_shared_modal_env_name()
+    if shared is not None:
+        prefix, _ = shared
+        # Strip the trailing '-' that the prefix carries (callers append '-'
+        # themselves), so this fixture's contract matches generate_test_environment_name().
+        return prefix.rstrip("-")
     return generate_test_environment_name()
 
 
@@ -357,7 +413,16 @@ def modal_test_session_host_dir(tmp_path_factory: pytest.TempPathFactory) -> Pat
 
 @pytest.fixture(scope="session")
 def modal_test_session_user_id() -> UserId:
-    """Generate a deterministic user ID for the test session."""
+    """Generate a deterministic user ID for the test session.
+
+    In shared-env mode, returns the user_id suffix from
+    MNGR_TEST_SHARED_MODAL_ENV_NAME so subprocess tests target the same
+    Modal environment as the in-process fixtures.
+    """
+    shared = read_shared_modal_env_name()
+    if shared is not None:
+        _, user_id_suffix = shared
+        return UserId(user_id_suffix)
     return UserId(uuid4().hex)
 
 
@@ -366,15 +431,25 @@ def modal_test_session_cleanup(
     modal_test_session_env_name: str,
     modal_test_session_user_id: UserId,
 ) -> Generator[None, None, None]:
-    """Session-scoped fixture that cleans up the Modal environment at session end."""
+    """Session-scoped fixture that cleans up the Modal environment at session end.
+
+    In shared-env mode the env is owned by the justfile wrapper, so this
+    fixture stops apps and deletes volumes (per-session leftovers are still
+    worth sweeping) but does not delete the env or register it for leak
+    detection.
+    """
     prefix = f"{modal_test_session_env_name}-"
     environment_name = f"{prefix}{modal_test_session_user_id}"
     if len(environment_name) > 64:
         environment_name = environment_name[:64]
-    register_modal_test_environment(environment_name)
+    is_shared = read_shared_modal_env_name() is not None
+    if not is_shared:
+        register_modal_test_environment(environment_name)
     yield
     delete_modal_apps_in_environment(environment_name)
     delete_modal_volumes_in_environment(environment_name)
+    if is_shared:
+        return
     # Deregister only on DELETED/NOT_FOUND (synchronous response is
     # authoritative). FAILED leaves the env tracked so the session-end
     # leak detector still surfaces it. See `_cleanup_modal_test_resources`

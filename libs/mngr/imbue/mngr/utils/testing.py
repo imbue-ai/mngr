@@ -40,6 +40,7 @@ from imbue.mngr.cli.create import create as create_command
 from imbue.mngr.config.consts import PROFILES_DIRNAME
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.errors import ConfigStructureError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.hosts.tmux import build_tmux_capture_pane_command
 from imbue.mngr.interfaces.data_types import AgentDetails
@@ -174,6 +175,40 @@ def generate_test_environment_name() -> str:
     now = datetime.now(timezone.utc)
     timestamp = now.strftime("%Y-%m-%d-%H-%M-%S")
     return f"{TEST_ENV_PREFIX}{timestamp}"
+
+
+SHARED_MODAL_ENV_NAME_VAR: Final[str] = "MNGR_TEST_SHARED_MODAL_ENV_NAME"
+
+
+def read_shared_modal_env_name() -> tuple[str, str] | None:
+    """Parse ``MNGR_TEST_SHARED_MODAL_ENV_NAME`` into ``(prefix, user_id_suffix)``.
+
+    When the env var is unset or empty, returns ``None`` -- callers fall back
+    to per-test environment creation. Otherwise splits the shared env name
+    into the timestamp prefix (including the trailing dash, suitable for
+    ``MngrConfig.prefix``) and the remainder (suitable for
+    ``ModalProviderConfig.user_id``), so ``prefix + user_id_suffix`` reproduces
+    the full shared env name.
+
+    Raises ``ConfigStructureError`` when the env var is set but the value does
+    not match the ``mngr_test-YYYY-MM-DD-HH-MM-SS`` timestamp pattern -- the
+    justfile generates conforming names, so a mismatch is a bug we want to
+    surface rather than silently fall back to per-test envs.
+    """
+    raw = os.environ.get(SHARED_MODAL_ENV_NAME_VAR, "")
+    if not raw:
+        return None
+    match = TEST_ENV_PATTERN.match(raw)
+    if match is None:
+        raise ConfigStructureError(
+            f"{SHARED_MODAL_ENV_NAME_VAR}={raw!r} does not match the required "
+            "'mngr_test-YYYY-MM-DD-HH-MM-SS-<suffix>' pattern."
+        )
+    # Include the dash separator after the timestamp in the prefix so callers
+    # can feed it straight into MngrConfig.prefix (which is concatenated with
+    # the user_id, no extra separator).
+    split_at = match.end() + 1
+    return raw[:split_at], raw[split_at:]
 
 
 def isolate_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

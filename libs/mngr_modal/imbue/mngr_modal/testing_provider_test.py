@@ -20,6 +20,7 @@ import pytest
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.model_update import to_update
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.errors import ConfigStructureError
 from imbue.mngr.errors import HostNameConflictError
 from imbue.mngr.errors import HostNotFoundError
 from imbue.mngr.errors import MngrError
@@ -36,11 +37,14 @@ from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import SnapshotId
 from imbue.mngr.primitives import SnapshotName
+from imbue.mngr.primitives import UserId
 from imbue.mngr.primitives import VolumeId
 from imbue.mngr.providers.listing_utils import build_listing_collection_script
 from imbue.mngr.providers.listing_utils import parse_optional_float
 from imbue.mngr.providers.listing_utils import parse_optional_int
+from imbue.mngr.utils.testing import SHARED_MODAL_ENV_NAME_VAR
 from imbue.mngr.utils.testing import generate_test_environment_name
+from imbue.mngr.utils.testing import read_shared_modal_env_name
 from imbue.mngr_modal.backend import MODAL_NAME_MAX_LENGTH
 from imbue.mngr_modal.backend import ModalAppContextHandle
 from imbue.mngr_modal.backend import ModalProviderBackend
@@ -977,6 +981,66 @@ def test_derive_modal_names_truncates_long_app_name(
     )
     # App name must leave room for the state-volume suffix.
     assert len(app_name) <= MODAL_NAME_MAX_LENGTH
+
+
+# ---------------------------------------------------------------------------
+# Shared Modal env tests (MNGR_TEST_SHARED_MODAL_ENV_NAME)
+# ---------------------------------------------------------------------------
+
+
+def test_read_shared_modal_env_name_returns_none_when_unset(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv(SHARED_MODAL_ENV_NAME_VAR, raising=False)
+    assert read_shared_modal_env_name() is None
+
+
+def test_read_shared_modal_env_name_returns_none_when_empty(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Empty env var (e.g. `FOO=`) is treated as unset so callers fall back cleanly."""
+    monkeypatch.setenv(SHARED_MODAL_ENV_NAME_VAR, "")
+    assert read_shared_modal_env_name() is None
+
+
+def test_read_shared_modal_env_name_splits_into_prefix_and_suffix(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The prefix includes the trailing dash so `prefix + suffix` reproduces the input."""
+    full_name = "mngr_test-2026-05-20-12-00-00-shared-abc123def456"
+    monkeypatch.setenv(SHARED_MODAL_ENV_NAME_VAR, full_name)
+    result = read_shared_modal_env_name()
+    assert result == ("mngr_test-2026-05-20-12-00-00-", "shared-abc123def456")
+    prefix, suffix = result
+    assert prefix + suffix == full_name
+
+
+def test_read_shared_modal_env_name_raises_on_malformed_value(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A non-timestamp value must fail loudly -- the justfile generates conforming names."""
+    monkeypatch.setenv(SHARED_MODAL_ENV_NAME_VAR, "not-a-test-env-name")
+    with pytest.raises(ConfigStructureError, match="MNGR_TEST_SHARED_MODAL_ENV_NAME"):
+        read_shared_modal_env_name()
+
+
+def test_derive_modal_names_reproduces_shared_env_via_prefix_and_user_id(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """Feeding the shared-env split through MngrConfig.prefix + ModalProviderConfig.user_id
+    reconstructs the original shared env name. This locks in the contract the
+    justfile + conftest wiring relies on.
+    """
+    full_name = "mngr_test-2026-05-20-12-00-00-shared-abc123def456"
+    prefix = "mngr_test-2026-05-20-12-00-00-"
+    user_id_suffix = "shared-abc123def456"
+
+    shared_config = temp_mngr_ctx.config.model_copy_update(to_update(temp_mngr_ctx.config.field_ref().prefix, prefix))
+    shared_ctx = temp_mngr_ctx.model_copy_update(to_update(temp_mngr_ctx.field_ref().config, shared_config))
+    modal_config = ModalProviderConfig(
+        app_name="shared-env-test",
+        host_dir=shared_ctx.config.default_host_dir,
+        user_id=UserId(user_id_suffix),
+    )
+
+    environment_name, _, _ = ModalProviderBackend._derive_modal_names(
+        ProviderInstanceName("test"),
+        modal_config,
+        shared_ctx,
+    )
+    assert environment_name == full_name
 
 
 def test_construct_modal_provider_accepts_injected_modal_interface(
