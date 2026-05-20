@@ -630,11 +630,11 @@ def main() -> None:
             print(f"ERROR: Must be on main branch (currently on {branch})", file=sys.stderr)
             sys.exit(1)
 
-    # Refuse to release while there are unconsolidated entries in
-    # changelog/. Otherwise the [Unreleased] section we're about to
-    # finalize would be missing those entries' bullets. In --dry-run we
-    # warn rather than block so the user can still preview what would
-    # be released.
+    # Refuse to release while any project has unconsolidated entries in
+    # its <project_dir>/changelog/ directory. Otherwise the per-package
+    # [Unreleased] sections we're about to finalize would be missing
+    # those entries' bullets. In --dry-run we warn rather than block so
+    # the user can still preview what would be released.
     if not _gate_release_on_pending_changelog_entries(REPO_ROOT, dry_run=args.dry_run):
         sys.exit(1)
 
