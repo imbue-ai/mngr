@@ -283,7 +283,7 @@ def _is_imbue_cloud_provider(provider_name: ProviderInstanceName | None, mngr_ct
     provider_config = mngr_ctx.config.providers.get(provider_name)
     if provider_config is not None:
         return provider_config.backend == _IMBUE_CLOUD_BACKEND
-    return provider_name == _IMBUE_CLOUD_BACKEND
+    return ProviderBackendName(str(provider_name)) == _IMBUE_CLOUD_BACKEND
 
 
 @pure
