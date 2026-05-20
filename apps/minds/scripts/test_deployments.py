@@ -8,7 +8,7 @@ Plain-Python (click-driven) entrypoint -- NOT a pytest wrapper. Owns:
   unchanged.
 * The per-run mail.tm account: creation via the public mail.tm HTTP
   API, env-var threading into pytest, and deletion in cleanup.
-* Shared dev env stand-up via ``minds env deploy`` (subprocess), serial
+* Shared CI env stand-up via ``minds env deploy`` (subprocess), serial
   for the initial single-``default``-env roster.
 * Sequential dispatch of the two pytest invocations
   (``-m minds_deployment`` first, then ``-m minds_services``).
