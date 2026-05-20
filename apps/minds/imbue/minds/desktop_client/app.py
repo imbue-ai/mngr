@@ -819,7 +819,11 @@ def _handle_creation_status_api(
     request: Request,
     auth_store: AuthStoreDep,
 ) -> Response:
-    """API endpoint for checking agent creation status."""
+    """API endpoint for checking agent creation status.
+
+    Authenticates via either the desktop-client session cookie (browser
+    callers) or a bearer token (latchkey-mediated agent callers).
+    """
     if not _is_api_authenticated(request=request, auth_store=auth_store):
         return Response(status_code=403, content='{"error": "Not authenticated"}', media_type="application/json")
 
@@ -929,7 +933,11 @@ async def _handle_creation_logs_sse(
     request: Request,
     auth_store: AuthStoreDep,
 ) -> Response:
-    """SSE endpoint that streams creation logs for an agent."""
+    """SSE endpoint that streams creation logs for an agent.
+
+    Authenticates via either the desktop-client session cookie (browser
+    callers) or a bearer token (latchkey-mediated agent callers).
+    """
     if not _is_api_authenticated(request=request, auth_store=auth_store):
         return Response(status_code=403, content="Not authenticated")
 
