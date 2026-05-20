@@ -157,9 +157,10 @@ def _is_api_authenticated(
     The bearer token is the per-installation minds API token persisted
     under the auth data dir and registered with latchkey via ``latchkey
     auth set minds``. Lets a peer mind drive ``/api/create-agent`` (and
-    its status/logs siblings) as well as ``/api/destroy-agent/<id>`` and
-    its ``/api/destroying/<id>/{status,log,dismiss}`` siblings without
-    ever seeing the credential itself -- latchkey injects the
+    its status/logs siblings), ``/api/list-agents``, and
+    ``/api/destroy-agent/<id>`` with its
+    ``/api/destroying/<id>/{status,log,dismiss}`` siblings without ever
+    seeing the credential itself -- latchkey injects the
     ``Authorization`` header at request time, gated by user-granted
     detent permissions under the ``minds`` scope.
     """
