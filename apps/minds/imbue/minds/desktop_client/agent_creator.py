@@ -512,20 +512,11 @@ def _build_mngr_create_command(
         "is_primary=true",
     ]
 
-    match launch_mode:
-        case LaunchMode.IMBUE_CLOUD:
-            # IMBUE_CLOUD passes neither --reuse nor --update. The leased pool
-            # host is provisioned fresh via --new-host; its baked
-            # ``system-services`` agent is adopted in place by
-            # ``ImbueCloudHost.create_agent_state``. The baked agent's name
-            # collision with the create's agent name is resolved by mngr's
-            # duplicate-name check, which exempts ``host.pre_baked_agent_id``.
-            # --reuse would be a no-op here (the leased host is not yet
-            # discoverable when mngr's reuse lookup runs) and mngr rejects
-            # --reuse together with --new-host.
-            pass
-        case _:
-            mngr_command.extend(["--reuse", "--update"])
+    # LOCAL/LIMA/CLOUD pass --reuse --update so re-deploying the same workspace
+    # resets the agent in place. IMBUE_CLOUD must not: it leases a fresh host
+    # via --new-host every time, and mngr rejects --reuse together with --new-host.
+    if launch_mode != LaunchMode.IMBUE_CLOUD:
+        mngr_command.extend(["--reuse", "--update"])
 
     # Per-mode template + per-mode runtime flags. All modes use
     # ``--template main --template <mode>``; the per-mode template provides
