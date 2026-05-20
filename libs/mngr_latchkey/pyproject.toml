@@ -20,6 +20,14 @@ dependencies = [
     "pydantic>=2.0",
 ]
 
+[project.optional-dependencies]
+# ``jsonschema`` is used by ``agent_setup_test.py`` to validate the
+# minds detent schemas against a representative request matrix. The
+# gateway itself runs JSON-Schema evaluation under the hood, so this
+# gives us a faithful proxy for end-to-end matching without standing
+# up a real gateway in unit tests.
+dev = ["jsonschema>=4.0"]
+
 [project.entry-points.mngr]
 latchkey = "imbue.mngr_latchkey.plugin"
 
