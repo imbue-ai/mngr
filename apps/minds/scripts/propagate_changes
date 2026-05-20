@@ -141,12 +141,18 @@ fi
 # `:- .gitignore` is rsync's dir-merge filter: it reads .gitignore at each
 # directory level under the source and applies its "-" (exclude) rules.
 # That covers __pycache__, .venv, node_modules, .test_output, .mypy_cache,
-# .ruff_cache, .pytest_cache, .external_worktrees, and anything else listed
-# in the source repo's gitignore. We layer two manual excludes on top for
-# things gitignore deliberately doesn't list:
+# .ruff_cache, .pytest_cache, and anything else listed in the source repo's
+# gitignore. We layer manual excludes on top for things the filter doesn't
+# catch:
 #   - .git: gitignore never lists it (git's internal dir).
 #   - uv.lock: committed at the mngr root on purpose, but each install
 #     context regenerates its own.
+#   - .external_worktrees: gitignore lists it as `**/.external_worktrees/`,
+#     but rsync's `**/` requires at least one preceding path component, so
+#     the top-level directory isn't matched by the filter. Exclude it
+#     manually to avoid recursing into the FCT worktree destination
+#     (which lives at `.external_worktrees/forever-claude-template/`) and
+#     to keep unrelated external worktrees out of vendor/mngr.
 # Both rsync sources (mngr monorepo for step 1, FCT template for step 2/3)
 # carry their own .gitignore at the root, so the same filter applies cleanly
 # to all three rsync calls below.
@@ -156,6 +162,7 @@ RSYNC_EXCLUDES=(
     --filter=':- .gitignore'
     --exclude='.git'
     --exclude='uv.lock'
+    --exclude='.external_worktrees'
 )
 
 # ---------------------------------------------------------------------------

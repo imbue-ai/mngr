@@ -274,14 +274,19 @@ minds-start agent_name="mindtest" branch="":
     # `--filter=:- .gitignore` reads .gitignore at each directory level under
     # the source and applies its exclude rules, so __pycache__, .venv,
     # node_modules, .test_output, .mypy_cache, .ruff_cache, .pytest_cache,
-    # .external_worktrees, etc. are all covered without listing them here.
+    # etc. are all covered without listing them here.
     # `.git` and `uv.lock` aren't in .gitignore (`.git` is git's internal
     # dir; `uv.lock` is intentionally committed but each install context
-    # regenerates its own), so we exclude those manually.
+    # regenerates its own), so we exclude those manually. `.external_worktrees`
+    # is in .gitignore as `**/.external_worktrees/`, but rsync's `**/` requires
+    # at least one preceding path component, so the top-level directory isn't
+    # matched -- exclude it explicitly to avoid recursing into the destination
+    # (which lives at `.external_worktrees/forever-claude-template/vendor/mngr`).
     rsync -a --delete \
         --filter=':- .gitignore' \
         --exclude=.git \
         --exclude=uv.lock \
+        --exclude=.external_worktrees \
         ./ "$vendor_mngr/"
     pid_file="/tmp/minds-start-$(echo -n "$PWD" | sha1sum | cut -c1-12).pid"
     if [ -f "$pid_file" ]; then
