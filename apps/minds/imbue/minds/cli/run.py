@@ -48,6 +48,7 @@ from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.config.loader import load_client_config
 from imbue.minds.desktop_client.agent_creator import AgentCreator
 from imbue.minds.desktop_client.app import create_desktop_client
+from imbue.minds.desktop_client.auth import ApiTokenError
 from imbue.minds.desktop_client.auth import FileAuthStore
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
@@ -182,17 +183,20 @@ def run(
     # new ``minds`` scope + named-permission schemas, again before the
     # gateway is up so there is no race with the ``permissions.mjs``
     # extension.
-    migrated_count = ensure_minds_schema_in_existing_host_files(latchkey.plugin_data_dir)
-    if migrated_count > 0:
-        logger.info("Injected minds schema into {} existing per-host permissions file(s)", migrated_count)
-    minds_api_token = auth_store.get_api_token().get_secret_value()
+    #
+    # Everything in this block is best-effort: a failure in any one
+    # step (disk error during the schema migration, an unreadable
+    # api_token file, a latchkey CLI hiccup) leaves the spawn-peer
+    # capability disabled but lets the rest of the desktop client come
+    # up normally.
     try:
+        migrated_count = ensure_minds_schema_in_existing_host_files(latchkey.plugin_data_dir)
+        if migrated_count > 0:
+            logger.info("Injected minds schema into {} existing per-host permissions file(s)", migrated_count)
+        minds_api_token = auth_store.get_api_token().get_secret_value()
         latchkey.register_service("minds", f"http://127.0.0.1:{port}")
         latchkey.auth_set_header("minds", f"Authorization: Bearer {minds_api_token}")
-    except LatchkeyError as exc:
-        # Don't fail the whole desktop client over a single CLI hiccup --
-        # the rest of the app still works, just without the spawn-peer
-        # capability. Surface the failure prominently in the log.
+    except (LatchkeyError, ApiTokenError, OSError) as exc:
         logger.warning("Could not wire latchkey 'minds' service: {}", exc)
 
     root_concurrency_group = ConcurrencyGroup(name="minds-run")
