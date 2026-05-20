@@ -1223,10 +1223,19 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
             self._git_push_to_target(source_host, source_path, target_path)
 
             with log_span("Configuring target git repo"):
+                # -f / --force: the target's working tree may have
+                # pre-bootstrap files (e.g. an in-image keyframe extracted
+                # by a Dockerfile RUN, plus a post-extraction mutation to
+                # .mngr/image_commit_hash) that would otherwise trigger
+                # "Your local changes would be overwritten" / "untracked
+                # files in the way" errors. The whole point of the mirror
+                # push + checkout is to materialize the operator's branch
+                # tip on disk, so clobbering any pre-existing state is
+                # the intended behavior.
                 if new_branch_name:
-                    checkout_cmd = f"git checkout -B {shlex.quote(new_branch_name)} {shlex.quote(base_branch_name)}"
+                    checkout_cmd = f"git checkout -f -B {shlex.quote(new_branch_name)} {shlex.quote(base_branch_name)}"
                 else:
-                    checkout_cmd = f"git checkout {shlex.quote(base_branch_name)}"
+                    checkout_cmd = f"git checkout -f {shlex.quote(base_branch_name)}"
                 config_commands = [
                     "git config --bool core.bare false",
                     checkout_cmd,
@@ -1236,12 +1245,21 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
                 if git_author_email:
                     config_commands.append(f"git config user.email {shlex.quote(git_author_email)}")
                 if origin_url:
-                    # Use set-url if origin already exists (e.g. from mirror push),
-                    # otherwise add it.
+                    # Use set-url if origin already exists (e.g. from the
+                    # in-image keyframe's .git or the bare init), otherwise
+                    # add it. Written as an explicit if/else so a failure
+                    # in an earlier `&&`-chained command can't trigger
+                    # this clause as a `||` fallback (bash operator
+                    # precedence: `A && B || C` parses as `(A && B) || C`,
+                    # so if B fails, C runs unintentionally and `add`
+                    # errors with "remote origin already exists" -- a
+                    # confusing co-symptom of the real failure upstream).
+                    quoted_origin = shlex.quote(origin_url)
                     set_or_add = (
-                        f"git remote set-url origin {shlex.quote(origin_url)}"
-                        f" 2>/dev/null"
-                        f" || git remote add origin {shlex.quote(origin_url)}"
+                        f"if git remote get-url origin >/dev/null 2>&1; "
+                        f"then git remote set-url origin {quoted_origin}; "
+                        f"else git remote add origin {quoted_origin}; "
+                        f"fi"
                     )
                     config_commands.append(set_or_add)
 

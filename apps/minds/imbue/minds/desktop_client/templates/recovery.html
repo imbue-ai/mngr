@@ -9,16 +9,16 @@
          data-agent-id="{{ agent_id }}"
          data-return-to="{{ return_to }}"
          data-initial-status="{{ initial_status }}">
-      <h1 class="text-xl font-semibold text-zinc-900 mb-2">Workspace server not responding</h1>
+      <h1 class="text-xl font-semibold text-zinc-900 mb-2">System interface not responding</h1>
       <p class="text-zinc-600 mb-4">
-        The workspace server for <span class="font-mono">{{ ws_name }}</span> is unresponsive.
+        The system interface for <span class="font-mono">{{ ws_name }}</span> is unresponsive.
         Click below to restart it. Your agents will not be interrupted.
         The page will reload back to your workspace as soon as it is ready again.
       </p>
       <div class="flex items-center gap-3">
         <button id="recovery-restart-btn"
                 class="rounded-md bg-zinc-900 px-4 py-2 text-sm font-medium text-white hover:bg-zinc-700">
-          Restart workspace server
+          Restart system interface
         </button>
         <span id="recovery-status" class="text-sm text-zinc-500"></span>
       </div>
@@ -52,10 +52,10 @@
         inFlight = true;
         setStatus('Restarting...', true);
         // Wait for the restart dispatch to ack (the endpoint returns 200
-        // once the workspace tmux window has been killed) before
+        // once the system_interface tmux window has been killed) before
         // navigating, so the plugin reliably serves its 503 loader instead
         // of racing against a still-live backend. The plugin's loader
-        // auto-refreshes into the workspace once the server is back.
+        // auto-refreshes into the workspace once the system interface is back.
         function goBack() {
           if (returnTo) {
             window.location.assign(returnTo);
@@ -63,7 +63,7 @@
             window.location.reload();
           }
         }
-        fetch('/api/agents/' + encodeURIComponent(agentId) + '/restart-workspace-server', {
+        fetch('/api/agents/' + encodeURIComponent(agentId) + '/restart-system-interface', {
           method: 'POST',
           credentials: 'same-origin',
         }).then(goBack, goBack);
@@ -78,7 +78,7 @@
         es.onmessage = function (event) {
           var data;
           try { data = JSON.parse(event.data); } catch (e) { return; }
-          if (data.type !== 'workspace_server_status' || data.agent_id !== agentId) return;
+          if (data.type !== 'system_interface_status' || data.agent_id !== agentId) return;
           if (data.status === 'healthy') {
             setStatus('Workspace is ready. Reloading...', true);
             es.close();

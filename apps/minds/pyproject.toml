@@ -19,7 +19,7 @@ dependencies = [
     "imbue-mngr-latchkey",
     "imbue-mngr-ovh",
     "imbue-mngr-vps-docker",
-    "modal>=1.3.1",
+    "modal>=1.4.3",
     "paramiko>=3.0",
     "playwright>=1.40.0",
     "pydantic>=2.0",
@@ -91,6 +91,11 @@ omit = [
   "*/telegram/injector.py",
   # SuperTokens routes require a live Core connection -- tested via release test.
   "*/desktop_client/supertokens_routes.py",
+  # The deployment_tests importable helper package is exercised only by the
+  # minds_deployment / minds_services pytest suites against real cloud
+  # (see apps/minds/deployment_tests/). Those suites are excluded from
+  # `just test-offload` so the helpers can't reach coverage from offload runs.
+  "*/imbue/minds/deployment_tests/*",
 ]
 
 [tool.inline-snapshot]
