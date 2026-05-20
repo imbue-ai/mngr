@@ -55,7 +55,6 @@ from imbue.mngr.utils.polling import poll_for_value
 
 BUMP_KINDS: Final[tuple[str, ...]] = ("major", "minor", "patch")
 BUMP_LEVEL_ORDER: Final[dict[str, int]] = {"patch": 0, "minor": 1, "major": 2}
-CHANGELOG_FILE: Final[Path] = REPO_ROOT / "CHANGELOG.md"
 
 PUBLISH_WORKFLOW: Final[str] = "publish.yml"
 ACTIONS_URL: Final[str] = "https://github.com/imbue-ai/mngr/actions/workflows/publish.yml"
@@ -548,7 +547,7 @@ def _gate_release_on_pending_changelog_entries(repo_root: Path, dry_run: bool) -
     print(f"ERROR: cannot release with {len(entries)} pending changelog {entry_word}.", file=sys.stderr)
     print(file=sys.stderr)
     print("The following entries in changelog/ haven't been consolidated into", file=sys.stderr)
-    print("CHANGELOG.md's [Unreleased] section yet:", file=sys.stderr)
+    print("their projects' CHANGELOG.md [Unreleased] sections yet:", file=sys.stderr)
     print(_format_pending_changelog_list(entries, repo_root), file=sys.stderr)
     print(file=sys.stderr)
     print(
@@ -784,13 +783,26 @@ def main() -> None:
     print("Regenerating uv.lock...")
     run("uv", "lock")
 
-    # Finalize CHANGELOG.md: rename [Unreleased] -> [v<version>] - <date>
+    # Finalize each bumped package's per-project CHANGELOG.md: rename its
+    # [Unreleased] section to [v<package-version>] - <date> and insert a
+    # fresh empty [Unreleased] above it. apps/<name>/ and dev/ changelogs
+    # are not versioned and stay untouched -- their entries accumulate in
+    # [Unreleased] indefinitely (the consolidator keeps appending there).
     release_date = today_pacific()
-    had_content = finalize_changelog_unreleased(CHANGELOG_FILE, new_mngr_version, release_date)
-    if had_content:
-        print(f"Finalized CHANGELOG.md: [Unreleased] -> [v{new_mngr_version}] - {release_date}")
-    else:
-        print(f"WARNING: [Unreleased] was empty; emitted empty [v{new_mngr_version}] section.")
+    finalized_paths: list[Path] = []
+    for pypi_name, new_version in new_versions.items():
+        pkg = PACKAGE_BY_PYPI_NAME[pypi_name]
+        pkg_changelog = REPO_ROOT / "libs" / pkg.dir_name / "CHANGELOG.md"
+        if not pkg_changelog.exists():
+            print(f"WARNING: {pkg.dir_name} has no CHANGELOG.md; skipping finalize.")
+            continue
+        had_content = finalize_changelog_unreleased(pkg_changelog, new_version, release_date)
+        rel = pkg_changelog.relative_to(REPO_ROOT)
+        if had_content:
+            print(f"Finalized {rel}: [Unreleased] -> [v{new_version}] - {release_date}")
+        else:
+            print(f"WARNING: [Unreleased] empty in {rel}; emitted empty [v{new_version}] section.")
+        finalized_paths.append(pkg_changelog)
 
     # Commit, tag, push
     all_released_names = sorted(set(new_versions.keys()) | confirmed_new)
@@ -799,7 +811,7 @@ def main() -> None:
     files_to_add = [
         *[str(pkg.pyproject_path.relative_to(REPO_ROOT)) for pkg in PACKAGES],
         "uv.lock",
-        str(CHANGELOG_FILE.relative_to(REPO_ROOT)),
+        *[str(p.relative_to(REPO_ROOT)) for p in finalized_paths],
     ]
     run("git", "add", *files_to_add)
     run("git", "commit", "-m", commit_msg)

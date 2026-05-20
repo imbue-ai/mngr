@@ -15,10 +15,11 @@ from scripts.release import _gate_release_on_pending_changelog_entries  # noqa: 
 from scripts.release import _pluralize_entry  # noqa: E402
 
 
-def _write_changelog_entry(tmp_path: Path, name: str, content: str = "- entry") -> None:
-    changelog_dir = tmp_path / "changelog"
-    changelog_dir.mkdir(exist_ok=True)
-    (changelog_dir / name).write_text(content)
+def _write_changelog_entry(tmp_path: Path, name: str, content: str = "- entry", project: str = "mngr") -> None:
+    """Drop an entry under the per-project subdir layout (changelog/<project>/<name>)."""
+    project_dir = tmp_path / "changelog" / project
+    project_dir.mkdir(parents=True, exist_ok=True)
+    (project_dir / name).write_text(content)
 
 
 @pytest.mark.parametrize(
@@ -51,14 +52,14 @@ def test_gate_warns_and_returns_true_in_dry_run_with_pending_entries(
     output = capsys.readouterr().out
     assert "WARNING" in output
     assert "1 pending changelog entry" in output
-    assert "changelog/fake-entry.md" in output
+    assert "changelog/mngr/fake-entry.md" in output
 
 
 def test_gate_blocks_and_returns_false_with_pending_entries(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    _write_changelog_entry(tmp_path, "fake-a.md")
-    _write_changelog_entry(tmp_path, "fake-b.md")
+    _write_changelog_entry(tmp_path, "fake-a.md", project="mngr")
+    _write_changelog_entry(tmp_path, "fake-b.md", project="minds")
     result = _gate_release_on_pending_changelog_entries(tmp_path, dry_run=False)
     assert result is False
     captured = capsys.readouterr()
@@ -68,7 +69,7 @@ def test_gate_blocks_and_returns_false_with_pending_entries(
     err = captured.err
     assert "ERROR" in err
     assert "2 pending changelog entries" in err
-    assert "changelog/fake-a.md" in err
-    assert "changelog/fake-b.md" in err
+    assert "changelog/mngr/fake-a.md" in err
+    assert "changelog/minds/fake-b.md" in err
     # The error path prints the on-demand command for the user to copy.
     assert "mngr schedule run" in err

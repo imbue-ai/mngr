@@ -1,0 +1,66 @@
+"""Per-project changelog layout helpers.
+
+Maps repo-relative paths to the project that owns them, and project names
+to the directory holding that project's ``CHANGELOG.md`` /
+``UNABRIDGED_CHANGELOG.md``. Shared between the consolidator, the
+release script, the per-PR ratchet, and the consolidation prompt so they
+all agree on what a "project" is.
+
+A "project" is a directory under ``libs/`` or ``apps/`` containing a
+``pyproject.toml``, or the synthetic ``dev`` bucket that owns root-level
+files (scripts, CI workflows, top-level docs, build tooling).
+"""
+
+from pathlib import Path
+from typing import Final
+
+DEV_PROJECT: Final[str] = "dev"
+
+
+def project_for_path(rel_path: Path | str, repo_root: Path) -> str:
+    """Return the project that owns ``rel_path`` (a repo-relative path).
+
+    A ``libs/<name>/...`` or ``apps/<name>/...`` path resolves to ``<name>``
+    when that directory contains a ``pyproject.toml``; everything else
+    falls back to ``dev``. The ``pyproject.toml`` check guards against a
+    path like ``libs/garbage/...`` (not an actual project) being treated
+    as a real project.
+    """
+    parts = Path(rel_path).parts
+    if len(parts) >= 2 and parts[0] in ("libs", "apps"):
+        candidate = repo_root / parts[0] / parts[1]
+        if (candidate / "pyproject.toml").exists():
+            return parts[1]
+    return DEV_PROJECT
+
+
+def project_dir(project: str, repo_root: Path) -> Path:
+    """Return the directory that holds ``project``'s CHANGELOG.md files."""
+    if project == DEV_PROJECT:
+        return repo_root / DEV_PROJECT
+    libs = repo_root / "libs" / project
+    if libs.is_dir():
+        return libs
+    apps = repo_root / "apps" / project
+    if apps.is_dir():
+        return apps
+    raise ValueError(f"Unknown project: {project!r}")
+
+
+def all_known_projects(repo_root: Path) -> list[str]:
+    """Return all known project names: every ``libs/<name>`` and ``apps/<name>``
+    with a ``pyproject.toml``, plus the synthetic ``dev`` bucket.
+
+    Sorted alphabetically with ``dev`` always last.
+    """
+    names: list[str] = []
+    for parent_name in ("libs", "apps"):
+        parent = repo_root / parent_name
+        if not parent.is_dir():
+            continue
+        for child in sorted(parent.iterdir()):
+            if child.is_dir() and (child / "pyproject.toml").exists():
+                names.append(child.name)
+    names.sort()
+    names.append(DEV_PROJECT)
+    return names
