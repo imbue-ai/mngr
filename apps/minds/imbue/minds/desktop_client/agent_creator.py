@@ -1316,9 +1316,21 @@ class AgentCreator(MutableModel):
                         #      reject with a clear error rather than
                         #      silently running mngr create with no key.
                         if anthropic_api_key:
+                            # Form key wins over any ambient env value (the
+                            # override is layered on top of the parent env,
+                            # so no scrub is needed).
                             effective_anthropic_api_key = anthropic_api_key
-                        elif not use_env_anthropic_api_key:
-                            raise MngrCommandError("AI provider API_KEY requires anthropic_api_key to be supplied")
+                        elif use_env_anthropic_api_key:
+                            # Leave ``effective_anthropic_api_key`` at None
+                            # so no override is layered on top -- the
+                            # inherited ambient ``ANTHROPIC_API_KEY`` rides
+                            # through to the host via the FCT template's
+                            # ``pass_host_env``.
+                            pass
+                        else:
+                            raise MngrCommandError(
+                                "AI provider API_KEY requires anthropic_api_key to be supplied"
+                            )
                         # Base URL is form-optional in all three cases: when
                         # the user supplied one, use it; when they left the
                         # field blank, honour ``use_env_anthropic_base_url``.
