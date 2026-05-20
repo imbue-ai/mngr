@@ -333,10 +333,22 @@ def _delete_mailtm_account(account_id: NonEmptyStr, jwt: SecretStr, *, run_id: R
 
 
 def _mint_shared_env_name(*, run_id: RunId, role: SharedEnvRole) -> DevEnvName:
-    """``ci-<run-id>`` for the only-shared-env case; appends role only when >1 shared envs."""
+    """``ci-<run-id>-<short>`` (default role), or with the role appended otherwise.
+
+    Every CI env name MUST include both a timestamp AND a random suffix:
+    the timestamp is what the name+age sweep parses to decide which envs
+    are old enough to destroy (regex :data:`_CI_ENV_NAME_PATTERN`
+    anchors on ``^ci-<timestamp>``), and the random suffix prevents
+    name collisions between two runs that happen to start in the same
+    UTC second (e.g. two concurrent orchestrator invocations, or a
+    re-run within a single second of the prior one). The role -- when
+    not ``default`` -- is appended LAST so the timestamp stays at
+    position 2 and the sweep regex matches every shape uniformly.
+    """
+    short = get_short_random_string()
     if role == SharedEnvRole("default"):
-        return DevEnvName(f"ci-{run_id}")
-    return DevEnvName(f"ci-{role}-{run_id}")
+        return DevEnvName(f"ci-{run_id}-{short}")
+    return DevEnvName(f"ci-{run_id}-{short}-{role}")
 
 
 def _deploy_shared_env(*, name: DevEnvName, run_id: RunId, role: SharedEnvRole) -> SharedEnvUrls:
