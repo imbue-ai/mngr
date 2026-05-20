@@ -7,6 +7,7 @@ from datetime import datetime
 from datetime import timezone
 from typing import Any
 from typing import Final
+from typing import assert_never
 
 import boto3
 from botocore.exceptions import ClientError
@@ -132,6 +133,8 @@ class AwsVpsClient(VpsClientInterface):
                 return sg_id
             case AutoCreateSecurityGroup(name=sg_name):
                 return self._ensure_auto_created_security_group(sg_name)
+            case _ as unreachable:
+                assert_never(unreachable)
 
     def _ensure_auto_created_security_group(self, sg_name: str) -> str:
         if not self.allowed_ssh_cidrs:
