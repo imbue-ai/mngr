@@ -17,8 +17,9 @@ Usage:
     uv run scripts/release.py --retry                  # rerun failed jobs and watch
 
 The script refuses to cut a release while there are unconsolidated entries in
-``changelog/`` (those bullets would otherwise be omitted from the version's
-release notes). When the gate fires it prints the on-demand invocation of the
+any project's ``<project_dir>/changelog/`` (those bullets would otherwise be
+omitted from the version's release notes). When the gate fires it prints the
+on-demand invocation of the
 ``changelog-consolidation`` schedule on stderr; run that, land the resulting
 PR, then re-run this script. ``--dry-run`` downgrades the gate to a warning
 so the preview still works.
