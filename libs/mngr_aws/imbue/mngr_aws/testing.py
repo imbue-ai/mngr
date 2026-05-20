@@ -8,9 +8,14 @@ test-helper analogue, folded into one module since both are very small.
 """
 
 import os
+from typing import Any
 from typing import Final
 
+from pydantic import Field
+from pydantic import PrivateAttr
+
 from imbue.mngr_aws.client import AWS_TEST_INSTANCE_LABEL_PREFIX
+from imbue.mngr_aws.client import AwsVpsClient
 
 # ``mngr_vps_docker.instance`` builds every EC2 ``Name`` tag as
 # ``f"mngr-{agent_name}"``, so to make a Name tag that starts with the
@@ -66,3 +71,26 @@ def aws_credentials_available() -> bool:
     fast, non-network check, not a full boto3 ``get_credentials`` probe.
     """
     return bool(os.environ.get("AWS_ACCESS_KEY_ID")) or bool(os.environ.get("AWS_PROFILE"))
+
+
+class _StubbedAwsVpsClient(AwsVpsClient):
+    """Test-only AwsVpsClient that bypasses session-based EC2 client construction.
+
+    Unit tests use ``botocore.stub.Stubber`` to intercept boto3 calls, but
+    the Stubber must wrap the same client instance that the code under test
+    uses. Production ``AwsVpsClient`` builds the EC2 client lazily from its
+    boto3 Session; this subclass exposes a constructor field that callers
+    can populate with a pre-built (and stubber-wrapped) client. Keeping the
+    test-only injection out of the production model means production code
+    never carries a field whose sole purpose is test orchestration.
+    """
+
+    stubbed_ec2_client: Any = Field(
+        description="Pre-built EC2 client to use instead of session.client('ec2'). "
+        "Typically a Stubber-wrapped client created by the test fixture."
+    )
+
+    _cached_ec2_client_override: Any = PrivateAttr(default=None)
+
+    def _ec2(self) -> Any:
+        return self.stubbed_ec2_client

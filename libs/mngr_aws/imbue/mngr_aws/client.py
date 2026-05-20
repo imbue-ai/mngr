@@ -80,19 +80,10 @@ class AwsVpsClient(VpsClientInterface):
     container_ssh_port: int = Field(
         default=2222, description="Port the container's sshd is exposed on (added to the SG)"
     )
-    ec2_client: Any | None = Field(
-        default=None,
-        description=(
-            "Optional pre-built EC2 client (e.g. a botocore Stubber-wrapped client for tests). "
-            "When None, the client is lazily built from ``session`` on first use and cached."
-        ),
-    )
-
     _cached_ec2_client: Any = PrivateAttr(default=None)
 
     def _ec2(self) -> Any:
-        if self.ec2_client is not None:
-            return self.ec2_client
+        """Return the EC2 client, building and caching it from the session on first use."""
         if self._cached_ec2_client is None:
             self._cached_ec2_client = self.session.client("ec2", region_name=self.region)
         return self._cached_ec2_client

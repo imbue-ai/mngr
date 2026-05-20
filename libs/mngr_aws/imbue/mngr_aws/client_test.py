@@ -17,6 +17,7 @@ from botocore.stub import Stubber
 
 from imbue.mngr.errors import MngrError
 from imbue.mngr_aws.client import AwsVpsClient
+from imbue.mngr_aws.testing import _StubbedAwsVpsClient
 from imbue.mngr_vps_docker.errors import VpsApiError
 from imbue.mngr_vps_docker.errors import VpsProvisioningError
 from imbue.mngr_vps_docker.primitives import VpsInstanceId
@@ -26,10 +27,11 @@ from imbue.mngr_vps_docker.primitives import VpsSnapshotId
 
 @pytest.fixture()
 def stubbed_client() -> Iterator[tuple[AwsVpsClient, Stubber]]:
-    """Yield an AwsVpsClient whose underlying EC2 client is wrapped in a Stubber.
+    """Yield a _StubbedAwsVpsClient whose underlying EC2 client is wrapped in a Stubber.
 
-    The stubbed EC2 client is injected via the ``ec2_client`` constructor field
-    so that all internal ``_ec2()`` calls return the same stubbed instance.
+    Uses the test-only ``_StubbedAwsVpsClient`` subclass (defined in
+    ``mngr_aws.testing``) so the production ``AwsVpsClient`` does not carry
+    a field whose sole purpose is test orchestration.
     """
     session = boto3.Session(
         aws_access_key_id="AKIATEST",
@@ -39,12 +41,12 @@ def stubbed_client() -> Iterator[tuple[AwsVpsClient, Stubber]]:
     ec2 = session.client("ec2", region_name="us-east-1")
     stubber = Stubber(ec2)
 
-    client = AwsVpsClient(
+    client = _StubbedAwsVpsClient(
         session=session,
         region="us-east-1",
         ami_id="ami-test12345",
         security_group_id="sg-test",
-        ec2_client=ec2,
+        stubbed_ec2_client=ec2,
     )
 
     stubber.activate()
@@ -371,7 +373,7 @@ class TestAwsVpsClientSecurityGroup:
         )
         ec2 = session.client("ec2", region_name="us-east-1")
         stubber = Stubber(ec2)
-        client = AwsVpsClient(
+        client = _StubbedAwsVpsClient(
             session=session,
             region="us-east-1",
             ami_id="ami-test",
@@ -381,7 +383,7 @@ class TestAwsVpsClientSecurityGroup:
             # provide an explicit CIDR (test-only example range) so
             # ensure_security_group's fail-closed guard passes.
             allowed_ssh_cidrs=("203.0.113.4/32",),
-            ec2_client=ec2,
+            stubbed_ec2_client=ec2,
         )
         stubber.activate()
         try:
@@ -401,12 +403,12 @@ class TestAwsVpsClientSecurityGroup:
             region_name="us-east-1",
         )
         ec2 = session.client("ec2", region_name="us-east-1")
-        client = AwsVpsClient(
+        client = _StubbedAwsVpsClient(
             session=session,
             region="us-east-1",
             ami_id="ami-test",
             security_group_id=None,
-            ec2_client=ec2,
+            stubbed_ec2_client=ec2,
         )
         with pytest.raises(MngrError, match="allowed_ssh_cidrs is empty"):
             client.ensure_security_group()
