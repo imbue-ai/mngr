@@ -10,10 +10,25 @@ test-helper analogue, folded into one module since both are very small.
 import os
 from typing import Final
 
+from imbue.mngr_aws.client import AWS_TEST_INSTANCE_LABEL_PREFIX
+
+# ``mngr_vps_docker.instance`` builds every EC2 ``Name`` tag as
+# ``f"mngr-{agent_name}"``, so to make a Name tag that starts with the
+# production guard's expected prefix, the agent name must start with that
+# prefix minus the ``"mngr-"`` literal.
+_MNGR_LABEL_PREFIX: Final[str] = "mngr-"
+assert AWS_TEST_INSTANCE_LABEL_PREFIX.startswith(_MNGR_LABEL_PREFIX), (
+    f"AWS_TEST_INSTANCE_LABEL_PREFIX must start with {_MNGR_LABEL_PREFIX!r} "
+    f"(mngr_vps_docker prepends it to every label); got "
+    f"{AWS_TEST_INSTANCE_LABEL_PREFIX!r}."
+)
+
 # ``Name`` tag prefix used by release tests when naming their hosts; the
 # session-end orphan scan uses this prefix to find instances that escaped
-# any per-test cleanup.
-AWS_TEST_NAME_PREFIX: Final[str] = "test-aws-"
+# any per-test cleanup. Derived from the production label prefix so the
+# guard in ``client.create_instance`` and the conftest leak scanner cannot
+# drift out of alignment with the names tests actually generate.
+AWS_TEST_NAME_PREFIX: Final[str] = AWS_TEST_INSTANCE_LABEL_PREFIX[len(_MNGR_LABEL_PREFIX) :]
 
 # Region used by the AWS release tests and the session-end leak scan. Tests
 # can override via ``AWS_REGION``; defaults to ``us-east-1`` to match the

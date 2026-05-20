@@ -28,10 +28,12 @@ from imbue.mngr_vps_docker.vps_client import VpsSshKeyInfo
 
 # Prefix the conftest hook scans for to find leaked test instances. Tests
 # under pytest must produce EC2 `Name` tags that begin with this prefix so
-# the session-end orphan scan can find them. Hardcoded in production code
-# (rather than imported from ``mngr_aws.testing``) because production
-# layers do not import from testing modules.
-_TEST_LABEL_PREFIX: Final[str] = "mngr-test-aws-"
+# the session-end orphan scan can find them. Defined here in production
+# code (not in ``mngr_aws.testing``) because the production guard in
+# ``create_instance`` depends on it; ``mngr_aws.testing`` imports this
+# constant and derives its ``AWS_TEST_NAME_PREFIX`` from it, so the two
+# can never drift.
+AWS_TEST_INSTANCE_LABEL_PREFIX: Final[str] = "mngr-test-aws-"
 
 _STATE_MAP: Final[dict[str, VpsInstanceStatus]] = {
     "pending": VpsInstanceStatus.PENDING,
@@ -197,10 +199,10 @@ class AwsVpsClient(VpsClientInterface):
         # code path that inherits os.environ but forgets to override the
         # host name would create a default-prefixed instance no cleanup
         # script recognises.
-        if "PYTEST_CURRENT_TEST" in os.environ and not label.startswith(_TEST_LABEL_PREFIX):
+        if "PYTEST_CURRENT_TEST" in os.environ and not label.startswith(AWS_TEST_INSTANCE_LABEL_PREFIX):
             raise MngrError(
                 f"Refusing to create EC2 instance with label {label!r} during pytest: "
-                f"test instance labels must start with {_TEST_LABEL_PREFIX!r} so the "
+                f"test instance labels must start with {AWS_TEST_INSTANCE_LABEL_PREFIX!r} so the "
                 "session-end orphan scan in mngr_aws/conftest.py can find leaked "
                 "instances by Name tag."
             )
