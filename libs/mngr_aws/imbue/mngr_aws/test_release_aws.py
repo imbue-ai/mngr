@@ -68,10 +68,14 @@ def aws_test_settings_dir(tmp_path: Path) -> Iterator[Path]:
     under pytest without it. Using ``MNGR_PROJECT_CONFIG_DIR`` to point
     the subprocess at this settings file keeps the test-only TTL out of
     production code paths.
+
+    ``MNGR_PROJECT_CONFIG_DIR`` is the literal directory containing
+    ``settings.toml`` (see ``resolve_project_config_dir`` in
+    ``mngr/config/pre_readers.py``); it is *not* a project root that
+    gets a ``.<root_name>/`` subdirectory appended. So the file is
+    written directly into ``tmp_path``.
     """
-    settings_dir = tmp_path / ".mngr"
-    settings_dir.mkdir()
-    (settings_dir / "settings.toml").write_text(
+    (tmp_path / "settings.toml").write_text(
         f'[providers.aws]\nbackend = "aws"\nauto_shutdown_minutes = {AWS_TEST_INSTANCE_AUTO_SHUTDOWN_MINUTES}\n'
     )
     yield tmp_path
