@@ -1110,6 +1110,8 @@ def _make_registry_binary(
     existing_base_api_url: str | None = None,
     register_exit_code: int = 0,
     register_stderr: str = "",
+    deregister_exit_code: int = 0,
+    deregister_stderr: str = "",
 ) -> Path:
     """Stub ``latchkey`` that emulates ``services info`` / ``services register`` / ``auth set`` / ``auth clear`` / ``services deregister``.
 
@@ -1142,7 +1144,9 @@ def _make_registry_binary(
         f"        sys.stderr.write({register_stderr!r})\n"
         f"    sys.exit({register_exit_code})\n"
         "if sys.argv[1:3] == ['services', 'deregister']:\n"
-        "    sys.exit(0)\n"
+        f"    if {deregister_stderr!r}:\n"
+        f"        sys.stderr.write({deregister_stderr!r})\n"
+        f"    sys.exit({deregister_exit_code})\n"
         "if sys.argv[1:3] == ['auth', 'set']:\n"
         "    sys.exit(0)\n"
         "if sys.argv[1:3] == ['auth', 'clear']:\n"
@@ -1211,6 +1215,25 @@ def test_register_service_raises_on_unknown_error(tmp_path: Path) -> None:
         existing_base_api_url=None,
         register_exit_code=1,
         register_stderr="Error: backend on fire.\n",
+    )
+    latchkey = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(binary))
+    with pytest.raises(LatchkeyError):
+        latchkey.register_service("minds", "http://127.0.0.1:9100")
+
+
+def test_register_service_raises_when_deregister_fails_during_rebind(tmp_path: Path) -> None:
+    """A failing ``services deregister`` must surface as ``LatchkeyError``.
+
+    Otherwise the following ``services register`` would error with
+    ``already registered`` and be swallowed by the race-condition
+    fallback, leaving the service bound to the old URL while the call
+    site logs a successful rebind.
+    """
+    binary = _make_registry_binary(
+        tmp_path,
+        existing_base_api_url="http://127.0.0.1:8000",
+        deregister_exit_code=1,
+        deregister_stderr="Error: deregister failed.\n",
     )
     latchkey = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(binary))
     with pytest.raises(LatchkeyError):

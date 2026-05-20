@@ -929,16 +929,30 @@ class Latchkey(MutableModel):
         return None
 
     def _deregister_service(self, service_name: str, env: Mapping[str, str] | None) -> None:
-        """Best-effort ``latchkey services deregister`` so register can rebind to a new URL."""
+        """Run ``latchkey services deregister`` so register can rebind to a new URL.
+
+        Raises :class:`LatchkeyError` if either ``auth clear`` or
+        ``services deregister`` fails. Propagating the failure is
+        important: if we swallowed it, the subsequent ``services
+        register`` call in :meth:`register_service` would fail with
+        ``already registered`` and be misinterpreted as the
+        race-condition success path, leaving the service bound to the
+        old URL while logging a successful rebind.
+        """
         # Clear stored credentials first; latchkey refuses to deregister
         # otherwise.
         cg_clear = ConcurrencyGroup(name="latchkey-auth-clear")
         with cg_clear:
-            cg_clear.run_process_to_completion(
+            clear_result = cg_clear.run_process_to_completion(
                 command=[self.latchkey_binary, "auth", "clear", service_name],
                 timeout=_SERVICES_INFO_TIMEOUT_SECONDS,
                 is_checked_after=False,
                 env=env,
+            )
+        if clear_result.returncode != 0:
+            raise LatchkeyError(
+                f"latchkey auth clear {service_name} exited {clear_result.returncode}: "
+                f"{clear_result.stderr.strip()}"
             )
         cg_dereg = ConcurrencyGroup(name="latchkey-services-deregister")
         with cg_dereg:
@@ -949,11 +963,9 @@ class Latchkey(MutableModel):
                 env=env,
             )
         if result.returncode != 0:
-            logger.warning(
-                "latchkey services deregister {} exited {}: {}",
-                service_name,
-                result.returncode,
-                result.stderr.strip(),
+            raise LatchkeyError(
+                f"latchkey services deregister {service_name} exited {result.returncode}: "
+                f"{result.stderr.strip()}"
             )
 
     # -- Interactive auth ----------------------------------------------------
