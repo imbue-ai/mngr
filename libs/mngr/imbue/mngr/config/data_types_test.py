@@ -1110,6 +1110,186 @@ def test_detect_settings_narrowing_flags_nested_value_replacement(mngr_test_pref
     assert detect_settings_narrowing(base, override) == ["commands.create.defaults.env"]
 
 
+# === Narrowing detection across agent_types / providers / create_templates / plugins ===
+#
+# These container dicts all use per-key additive merge at the top level, so adding
+# a new entry never narrows. Within each entry, the sub-model fields use assign-
+# by-default, so narrowing applies the same way it does for MngrConfig direct
+# attributes. The tests below mirror the user's stated requirement that all three
+# (four, with plugins) mechanisms honour the same __extend / narrowing semantics.
+
+
+def test_detect_settings_narrowing_allows_adding_new_agent_type_entry(mngr_test_prefix: str) -> None:
+    """Adding a new agent_type key in a higher layer never narrows -- the
+    container-level merge is per-key additive, so the base entry survives."""
+    base = MngrConfig(
+        prefix=mngr_test_prefix,
+        agent_types={AgentTypeName("a"): AgentTypeConfig(cli_args=("--x",))},
+    )
+    override = MngrConfig(
+        prefix=mngr_test_prefix,
+        agent_types={AgentTypeName("b"): AgentTypeConfig(cli_args=("--y",))},
+    )
+    assert detect_settings_narrowing(base, override) == []
+
+
+def test_detect_settings_narrowing_flags_agent_type_cli_args_replacement(mngr_test_prefix: str) -> None:
+    """Reassigning ``agent_types.<name>.cli_args`` over a non-empty base is narrowing."""
+    base = MngrConfig(
+        prefix=mngr_test_prefix,
+        agent_types={AgentTypeName("my_claude"): AgentTypeConfig(cli_args=("--debug",))},
+    )
+    override = MngrConfig(
+        prefix=mngr_test_prefix,
+        agent_types={AgentTypeName("my_claude"): AgentTypeConfig(cli_args=("--verbose",))},
+    )
+    assert detect_settings_narrowing(base, override) == ["agent_types.my_claude.cli_args"]
+
+
+def test_detect_settings_narrowing_flags_agent_type_cli_args_clearing(mngr_test_prefix: str) -> None:
+    """Explicitly clearing ``agent_types.<name>.cli_args`` to an empty tuple still narrows."""
+    base = MngrConfig(
+        prefix=mngr_test_prefix,
+        agent_types={AgentTypeName("my_claude"): AgentTypeConfig(cli_args=("--debug",))},
+    )
+    override = MngrConfig(
+        prefix=mngr_test_prefix,
+        agent_types={AgentTypeName("my_claude"): AgentTypeConfig(cli_args=())},
+    )
+    assert detect_settings_narrowing(base, override) == ["agent_types.my_claude.cli_args"]
+
+
+def test_detect_settings_narrowing_allows_agent_type_cli_args_superset(mngr_test_prefix: str) -> None:
+    """An assign that includes every base entry (e.g. the materialised result of
+    ``cli_args__extend``) preserves all prior entries and does not narrow."""
+    base = MngrConfig(
+        prefix=mngr_test_prefix,
+        agent_types={AgentTypeName("my_claude"): AgentTypeConfig(cli_args=("--debug",))},
+    )
+    override = MngrConfig(
+        prefix=mngr_test_prefix,
+        agent_types={AgentTypeName("my_claude"): AgentTypeConfig(cli_args=("--debug", "--verbose"))},
+    )
+    assert detect_settings_narrowing(base, override) == []
+
+
+def test_detect_settings_narrowing_flags_provider_subclass_list_replacement(mngr_test_prefix: str) -> None:
+    """A provider sub-config's list field follows the same narrowing rule via
+    sub-model recursion. Uses ``_TestProviderConfigWithListAndDict`` because
+    ``ProviderInstanceConfig`` itself has no list fields (those are added by
+    backend-specific subclasses)."""
+    base = MngrConfig(
+        prefix=mngr_test_prefix,
+        providers={
+            ProviderInstanceName("my_p"): _TestProviderConfigWithListAndDict(
+                backend=ProviderBackendName("local"),
+                tags=["base"],
+                options={},
+            )
+        },
+    )
+    override = MngrConfig(
+        prefix=mngr_test_prefix,
+        providers={
+            ProviderInstanceName("my_p"): _TestProviderConfigWithListAndDict(
+                backend=ProviderBackendName("local"),
+                tags=["other"],
+                options={},
+            )
+        },
+    )
+    assert detect_settings_narrowing(base, override) == ["providers.my_p.tags"]
+
+
+def test_detect_settings_narrowing_flags_provider_subclass_dict_replacement(mngr_test_prefix: str) -> None:
+    """A provider sub-config's dict field also follows the narrowing rule."""
+    base = MngrConfig(
+        prefix=mngr_test_prefix,
+        providers={
+            ProviderInstanceName("my_p"): _TestProviderConfigWithListAndDict(
+                backend=ProviderBackendName("local"),
+                tags=[],
+                options={"k1": "v1", "k2": "v_base"},
+            )
+        },
+    )
+    # Override drops "k1" entirely -- narrowing.
+    override = MngrConfig(
+        prefix=mngr_test_prefix,
+        providers={
+            ProviderInstanceName("my_p"): _TestProviderConfigWithListAndDict(
+                backend=ProviderBackendName("local"),
+                tags=[],
+                options={"k2": "v_override"},
+            )
+        },
+    )
+    assert detect_settings_narrowing(base, override) == ["providers.my_p.options"]
+
+
+def test_detect_settings_narrowing_flags_create_template_options_replacement(mngr_test_prefix: str) -> None:
+    """Re-assigning a list value inside ``create_templates.<name>.options`` is flagged
+    at the deepest path (``options.<param>``) where the loss actually happens."""
+    base = MngrConfig(
+        prefix=mngr_test_prefix,
+        create_templates={CreateTemplateName("dev"): CreateTemplate(options={"env": ["X=1"]})},
+    )
+    override = MngrConfig(
+        prefix=mngr_test_prefix,
+        create_templates={CreateTemplateName("dev"): CreateTemplate(options={"env": ["X=2"]})},
+    )
+    assert detect_settings_narrowing(base, override) == ["create_templates.dev.options.env"]
+
+
+def test_detect_settings_narrowing_flags_create_template_options_key_drop(mngr_test_prefix: str) -> None:
+    """Re-assigning ``create_templates.<name>.options`` to a dict missing a base key
+    flags at the ``options`` level (the dict itself was truncated)."""
+    base = MngrConfig(
+        prefix=mngr_test_prefix,
+        create_templates={CreateTemplateName("dev"): CreateTemplate(options={"env": ["X=1"], "name": "agent"})},
+    )
+    # Override drops "name" -- the whole options dict has been narrowed.
+    override = MngrConfig(
+        prefix=mngr_test_prefix,
+        create_templates={CreateTemplateName("dev"): CreateTemplate(options={"env": ["X=1"]})},
+    )
+    assert detect_settings_narrowing(base, override) == ["create_templates.dev.options"]
+
+
+def test_detect_settings_narrowing_allows_create_template_options_superset(mngr_test_prefix: str) -> None:
+    """An override that preserves every base options key (and value) does not narrow."""
+    base = MngrConfig(
+        prefix=mngr_test_prefix,
+        create_templates={CreateTemplateName("dev"): CreateTemplate(options={"env": ["X=1"]})},
+    )
+    override = MngrConfig(
+        prefix=mngr_test_prefix,
+        create_templates={CreateTemplateName("dev"): CreateTemplate(options={"env": ["X=1"], "name": "agent"})},
+    )
+    assert detect_settings_narrowing(base, override) == []
+
+
+def test_detect_settings_narrowing_flags_plugin_subclass_list_replacement(mngr_test_prefix: str) -> None:
+    """Plugin sub-configs (subclasses of PluginConfig with extra fields) follow the
+    same narrowing rule. Plugin configs are routinely extended by plugin authors with
+    list / dict fields; the safety net must reach them too."""
+    base = MngrConfig(
+        prefix=mngr_test_prefix,
+        plugins={PluginName("my-plugin"): _TestPluginConfigWithListField(enabled=True, items=["a"])},
+    )
+    override = MngrConfig(
+        prefix=mngr_test_prefix,
+        plugins={PluginName("my-plugin"): _TestPluginConfigWithListField(enabled=True, items=["b"])},
+    )
+    assert detect_settings_narrowing(base, override) == ["plugins.my-plugin.items"]
+
+
+class _TestPluginConfigWithListField(PluginConfig):
+    """Plugin sub-config with a list field, used by the plugin narrowing test."""
+
+    items: list[str] = Field(default_factory=list)
+
+
 def _build_fully_populated_mngr_config(mngr_test_prefix: str) -> MngrConfig:
     """Construct a MngrConfig with every field set to a non-default value.
 

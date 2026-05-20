@@ -1905,3 +1905,101 @@ def test_load_config_extend_avoids_narrowing_without_opt_in(
 
     mngr_ctx = load_config(pm=pm, context_dir=tmp_path, concurrency_group=cg)
     assert mngr_ctx.config.commands["create"].defaults["env"] == ["X=4", "X=5"]
+
+
+# === load_config narrowing guard against agent_types / providers / create_templates ===
+#
+# These layer-level integration tests verify the guard fires uniformly across all
+# of the container-dict mechanisms, not just commands.<cmd>.defaults. Each test
+# follows the same shape: project layer sets a non-empty aggregate value on a
+# named entry, local layer assigns over it with a different value, load_config
+# must raise unless the user opts in (and ``__extend`` is the natural workaround).
+
+
+def _setup_layered_test_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> tuple[pluggy.PluginManager, Path]:
+    """Shared boilerplate for the narrowing integration tests below.
+
+    Returns a fresh plugin manager and the project-config dir to write TOML into.
+    The autouse fixtures clamp HOME/MNGR_* so the loader can't pick up the
+    developer's real config; we re-clamp the project-config dir to tmp_path.
+    """
+    pm = pluggy.PluginManager("mngr")
+    pm.add_hookspecs(hookspecs)
+    load_all_registries(pm)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("MNGR_PREFIX", raising=False)
+    monkeypatch.delenv("MNGR_HOST_DIR", raising=False)
+    monkeypatch.delenv("MNGR_ROOT_NAME", raising=False)
+    monkeypatch.setenv("MNGR_PROJECT_CONFIG_DIR", str(tmp_path))
+    return pm, tmp_path
+
+
+def test_load_config_narrowing_raises_on_agent_type_cli_args_replacement(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, cg: ConcurrencyGroup
+) -> None:
+    """A local layer that re-assigns a non-empty ``agent_types.<name>.cli_args`` raises by default."""
+    pm, project_dir = _setup_layered_test_env(monkeypatch, tmp_path)
+    (project_dir / "settings.toml").write_text(
+        '[agent_types.my_claude]\nparent_type = "claude"\ncli_args = ["--debug"]\n'
+    )
+    (project_dir / "settings.local.toml").write_text('[agent_types.my_claude]\ncli_args = ["--verbose"]\n')
+    with pytest.raises(ConfigParseError, match="agent_types.my_claude.cli_args"):
+        load_config(pm=pm, context_dir=tmp_path, concurrency_group=cg)
+
+
+def test_load_config_extend_avoids_narrowing_on_agent_type_cli_args(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, cg: ConcurrencyGroup
+) -> None:
+    """``cli_args__extend`` in the local layer preserves the project layer's entries
+    and merges them in precedence order, without tripping the guard."""
+    pm, project_dir = _setup_layered_test_env(monkeypatch, tmp_path)
+    (project_dir / "settings.toml").write_text(
+        '[agent_types.my_claude]\nparent_type = "claude"\ncli_args = ["--debug"]\n'
+    )
+    (project_dir / "settings.local.toml").write_text('[agent_types.my_claude]\ncli_args__extend = ["--verbose"]\n')
+    mngr_ctx = load_config(pm=pm, context_dir=tmp_path, concurrency_group=cg)
+    cli_args = mngr_ctx.config.agent_types[AgentTypeName("my_claude")].cli_args
+    assert cli_args == ("--debug", "--verbose")
+
+
+def test_load_config_narrowing_raises_on_create_template_options_replacement(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, cg: ConcurrencyGroup
+) -> None:
+    """A local layer that re-assigns a non-empty list inside
+    ``create_templates.<name>.options`` raises by default."""
+    pm, project_dir = _setup_layered_test_env(monkeypatch, tmp_path)
+    (project_dir / "settings.toml").write_text('[create_templates.dev]\nenv = ["X=1"]\n')
+    (project_dir / "settings.local.toml").write_text('[create_templates.dev]\nenv = ["X=2"]\n')
+    with pytest.raises(ConfigParseError, match="create_templates.dev"):
+        load_config(pm=pm, context_dir=tmp_path, concurrency_group=cg)
+
+
+def test_load_config_extend_avoids_narrowing_on_create_template_options(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, cg: ConcurrencyGroup
+) -> None:
+    """``env__extend`` inside ``[create_templates.dev]`` walks through the
+    ``options`` mapping and merges with the project layer's entries."""
+    pm, project_dir = _setup_layered_test_env(monkeypatch, tmp_path)
+    (project_dir / "settings.toml").write_text('[create_templates.dev]\nenv = ["X=1"]\n')
+    (project_dir / "settings.local.toml").write_text('[create_templates.dev]\nenv__extend = ["X=2"]\n')
+    mngr_ctx = load_config(pm=pm, context_dir=tmp_path, concurrency_group=cg)
+    template = mngr_ctx.config.create_templates[CreateTemplateName("dev")]
+    assert template.options["env"] == ["X=1", "X=2"]
+
+
+def test_load_config_allows_adding_new_agent_type_in_local(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, cg: ConcurrencyGroup
+) -> None:
+    """Adding a brand-new agent_type entry in the local layer never narrows --
+    the per-key container merge preserves the project layer's entry alongside the
+    new one. Sanity-check that the safety net doesn't fire on pure additions."""
+    pm, project_dir = _setup_layered_test_env(monkeypatch, tmp_path)
+    (project_dir / "settings.toml").write_text(
+        '[agent_types.my_claude]\nparent_type = "claude"\ncli_args = ["--debug"]\n'
+    )
+    (project_dir / "settings.local.toml").write_text(
+        '[agent_types.my_codex]\nparent_type = "codex"\ncli_args = ["--other"]\n'
+    )
+    mngr_ctx = load_config(pm=pm, context_dir=tmp_path, concurrency_group=cg)
+    assert mngr_ctx.config.agent_types[AgentTypeName("my_claude")].cli_args == ("--debug",)
+    assert mngr_ctx.config.agent_types[AgentTypeName("my_codex")].cli_args == ("--other",)

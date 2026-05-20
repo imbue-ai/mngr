@@ -23,6 +23,7 @@ from pydantic import BaseModel
 
 from imbue.imbue_common.pure import pure
 from imbue.mngr.config.data_types import CommandDefaults
+from imbue.mngr.config.data_types import CreateTemplate
 from imbue.mngr.errors import ConfigParseError
 
 # Operator suffix on a leaf key indicating "extend the current value".
@@ -100,12 +101,13 @@ def _walk_to_field(base: Any, path: tuple[str, ...]) -> Any:
     when MngrConfig and its plugin sub-configs grow. The direct walk is
     cheap and simpler; we bump the getattr ratchet by one for it.
 
-    ``CommandDefaults`` is exposed transparently: arbitrary parameter
-    overrides live inside its ``defaults`` mapping rather than as direct
-    attributes, so ``commands.<name>.<param>__extend`` would otherwise
-    silently fall through to ``None`` (causing extend to act as assign).
-    When the segment is not a model field on ``CommandDefaults``, fall back
-    to its ``defaults`` dict so the extend resolves against the real base
+    ``CommandDefaults`` and ``CreateTemplate`` are exposed transparently:
+    both stash arbitrary per-key overrides inside a ``defaults`` / ``options``
+    mapping rather than as direct attributes, so ``commands.<name>.<param>``
+    and ``create_templates.<name>.<param>`` paths would otherwise silently
+    fall through to ``None`` (causing ``__extend`` to act as assign). When
+    the segment is not a model field on the wrapper, fall back to the
+    appropriate inner mapping so the extend resolves against the real base
     value.
     """
     current: Any = base
@@ -114,6 +116,8 @@ def _walk_to_field(base: Any, path: tuple[str, ...]) -> Any:
             return None
         if isinstance(current, CommandDefaults) and segment not in current.__class__.model_fields:
             current = current.defaults.get(segment)
+        elif isinstance(current, CreateTemplate) and segment not in current.__class__.model_fields:
+            current = current.options.get(segment)
         elif isinstance(current, BaseModel):
             current = getattr(current, segment, None)
         elif isinstance(current, Mapping):

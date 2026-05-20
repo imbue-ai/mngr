@@ -4,7 +4,10 @@ from typing import Any
 
 import pytest
 
+from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import CommandDefaults
+from imbue.mngr.config.data_types import CreateTemplate
+from imbue.mngr.config.data_types import CreateTemplateName
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import WorkDirExtraPathMode
 from imbue.mngr.config.key_resolver import EXTEND_SUFFIX
@@ -13,6 +16,7 @@ from imbue.mngr.config.key_resolver import is_extend_key
 from imbue.mngr.config.key_resolver import parse_scalar_value
 from imbue.mngr.config.key_resolver import resolve_extends
 from imbue.mngr.errors import ConfigParseError
+from imbue.mngr.primitives import AgentTypeName
 
 # =============================================================================
 # is_extend_key / bare_key
@@ -176,3 +180,36 @@ def test_resolve_extends_walks_through_command_defaults() -> None:
         {"commands": {"create": {"env__extend": ["X=7"]}}},
     )
     assert resolved == {"commands": {"create": {"env": ["X=5", "X=7"]}}}
+
+
+def test_resolve_extends_walks_through_create_template_options() -> None:
+    """``create_templates.<name>.<param>__extend`` extends against the merged value
+    stored in ``CreateTemplate.options[<param>]``. Symmetrical to the CommandDefaults
+    transparency above -- both wrappers stash arbitrary per-key overrides in an
+    inner mapping, so the resolver has to peek through to make ``__extend`` honour
+    the existing value.
+    """
+    base = MngrConfig(
+        create_templates={CreateTemplateName("dev"): CreateTemplate(options={"env": ["X=1"]})},
+    )
+    resolved = resolve_extends(
+        base,
+        {"create_templates": {"dev": {"env__extend": ["X=2"]}}},
+    )
+    assert resolved == {"create_templates": {"dev": {"env": ["X=1", "X=2"]}}}
+
+
+def test_resolve_extends_walks_through_agent_type_direct_attribute() -> None:
+    """``agent_types.<name>.<field>__extend`` extends against the value on the
+    ``AgentTypeConfig`` attribute. Unlike ``CommandDefaults``/``CreateTemplate``,
+    agent-type fields like ``cli_args`` / ``env`` are real model attributes, so the
+    generic ``getattr`` path is sufficient -- no special wrapper transparency needed.
+    """
+    base = MngrConfig(
+        agent_types={AgentTypeName("my_claude"): AgentTypeConfig(cli_args=("--debug",))},
+    )
+    resolved = resolve_extends(
+        base,
+        {"agent_types": {"my_claude": {"cli_args__extend": ["--verbose"]}}},
+    )
+    assert resolved == {"agent_types": {"my_claude": {"cli_args": ("--debug", "--verbose")}}}

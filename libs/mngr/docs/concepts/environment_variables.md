@@ -65,6 +65,15 @@ The only assignments that pass without flagging are no-ops (the override value e
 
 Layers that don't write the field at all are never flagged: `parse_config` leaves unset fields as `None`, and the merge falls back to the lower-precedence value without involving the narrowing guard. So defaults from one layer can't silently wipe entries that an earlier layer set.
 
+The same rules apply uniformly to fields inside per-key container entries:
+- `agent_types.<name>.<field>` (e.g. `cli_args`, `env`, `permissions`)
+- `providers.<name>.<field>` (including backend-specific subclass fields)
+- `create_templates.<name>.<field>` (resolved through the wrapper's `options` map)
+- `plugins.<name>.<field>` (including plugin-defined subclass fields)
+- `commands.<name>.<field>` (resolved through the wrapper's `defaults` map)
+
+Adding a brand-new entry under any of these (e.g. defining `[agent_types.my_other_claude]` in `settings.local.toml` when only `[agent_types.my_claude]` was in `settings.toml`) is a pure addition and never narrows; the container-level merge is per-key additive by design.
+
 The default value of `allow_settings_key_assignment_narrowing` is expected to change to `true` in a future version, and support for `false` may be removed entirely. Migrate your configs ahead of the flip so the eventual default change is a no-op.
 
 CLI flags that supply tuple/list values (e.g. `--env X=6`) always extend the merged settings value rather than replace it — the result is `<config values> + <CLI values>`. The safety net only applies to the settings-file / env-var / `--setting` merge, not to CLI flag merging.
