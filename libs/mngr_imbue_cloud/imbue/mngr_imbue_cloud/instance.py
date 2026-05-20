@@ -57,6 +57,7 @@ from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.interfaces.data_types import CpuResources
 from imbue.mngr.interfaces.data_types import ErrorInfo
 from imbue.mngr.interfaces.data_types import HostDetails
+from imbue.mngr.interfaces.data_types import HostErrorInfo
 from imbue.mngr.interfaces.data_types import HostLifecycleOptions
 from imbue.mngr.interfaces.data_types import HostResources
 from imbue.mngr.interfaces.data_types import PyinfraConnector
@@ -468,7 +469,7 @@ class ImbueCloudProvider(BaseProviderInstance):
         result: dict[DiscoveredHost, list[DiscoveredAgent]] = {}
         for entry in leased:
             host_id = HostId(entry.host_id)
-            raw, outer_error, is_auth_failure = self._collect_listing_raw_via_outer(entry)
+            raw, outer_error, is_auth_failure = self._collect_listing_raw_via_outer(entry, on_error)
             if raw is None:
                 # Outer SSH itself failed; fall back to a lease-only stub
                 # so the host doesn't disappear from `mngr list`. The state
@@ -544,6 +545,7 @@ class ImbueCloudProvider(BaseProviderInstance):
     def _collect_listing_raw_via_outer(
         self,
         lease: LeasedHostInfo,
+        on_error: Callable[[ErrorInfo], None] | None = None,
     ) -> tuple[dict[str, Any] | None, str | None, bool]:
         """Run the outer listing script over root SSH on the leased VPS.
 
@@ -554,6 +556,11 @@ class ImbueCloudProvider(BaseProviderInstance):
         authentication error (``HostAuthenticationError``) -- in that case
         the host is reachable but our key was rejected, which is the
         ``UNAUTHENTICATED`` state, not ``CRASHED``.
+
+        When the host's listing data can't be collected, the per-host
+        failure is also surfaced via on_error as a HostErrorInfo so the
+        listing pipeline records it (and exits non-zero under
+        ``--on-error abort``); the host still appears as a fallback stub.
         """
         host_id = HostId(lease.host_id)
         host_dir = str(self.host_dir)
@@ -574,6 +581,8 @@ class ImbueCloudProvider(BaseProviderInstance):
                 host_id,
                 exc,
             )
+            if on_error is not None:
+                on_error(HostErrorInfo.build_for_host(exc, host_id))
             return None, f"outer SSH authentication failed: {exc}", True
         except (HostConnectionError, HostNotFoundError, MngrError) as exc:
             logger.warning(
@@ -582,15 +591,25 @@ class ImbueCloudProvider(BaseProviderInstance):
                 host_id,
                 exc,
             )
+            if on_error is not None:
+                on_error(HostErrorInfo.build_for_host(exc, host_id))
             return None, f"outer SSH unreachable: {exc}", False
         if not result.success:
+            stderr = result.stderr.strip()
             logger.warning(
                 "imbue_cloud[{}] outer listing script for host {} exited non-zero: {}",
                 self.name,
                 host_id,
-                result.stderr.strip(),
+                stderr,
             )
-            return None, f"outer listing script failed: {result.stderr.strip() or 'non-zero exit'}", False
+            if on_error is not None:
+                on_error(
+                    HostErrorInfo.build_for_host(
+                        HostConnectionError(f"outer listing script failed: {stderr or 'non-zero exit'}"),
+                        host_id,
+                    )
+                )
+            return None, f"outer listing script failed: {stderr or 'non-zero exit'}", False
         return parse_listing_collection_output(result.stdout), None, False
 
     def get_host_and_agent_details(

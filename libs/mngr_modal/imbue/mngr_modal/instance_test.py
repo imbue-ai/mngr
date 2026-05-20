@@ -16,6 +16,8 @@ from imbue.mngr.errors import HostNameConflictError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import ModalAuthError
 from imbue.mngr.interfaces.data_types import CertifiedHostData
+from imbue.mngr.interfaces.data_types import ErrorInfo
+from imbue.mngr.interfaces.data_types import ProviderErrorInfo
 from imbue.mngr.interfaces.data_types import SnapshotRecord
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
@@ -570,6 +572,54 @@ def test_discover_hosts_prefers_running_sandbox_over_host_record(
     # Should use sandbox, not host record
     mock_from_sandbox.assert_called_once()
     mock_from_record.assert_not_called()
+
+
+# =============================================================================
+# _list_running_host_ids: per-sandbox tag-parse failures surface via on_error
+# =============================================================================
+
+
+def test_list_running_host_ids_emits_provider_error_on_bad_tags(
+    modal_provider: ModalProviderInstance,
+) -> None:
+    """A sandbox whose tags can't be parsed is dropped and surfaced via on_error.
+
+    A running sandbox that won't appear in the listing is a real per-resource
+    failure, so it must reach result.errors -- not be silently swallowed.
+    """
+    bad_sandbox = MagicMock()
+    bad_sandbox.get_tags.side_effect = ValueError("malformed sandbox tag")
+    captured: list[ErrorInfo] = []
+
+    with (
+        patch.object(modal_provider, "_get_modal_app", return_value=MagicMock()),
+        patch.object(modal_provider, "_list_all_sandboxes_for_app", return_value=[bad_sandbox]),
+    ):
+        running = modal_provider._list_running_host_ids(modal_provider.mngr_ctx.concurrency_group, captured.append)
+
+    assert running == set()
+    assert len(captured) == 1
+    error = captured[0]
+    assert isinstance(error, ProviderErrorInfo)
+    assert error.provider_name == modal_provider.name
+    assert error.exception_type == "ValueError"
+    assert "malformed sandbox tag" in error.message
+
+
+def test_list_running_host_ids_with_none_on_error_swallows_bad_tags(
+    modal_provider: ModalProviderInstance,
+) -> None:
+    """on_error=None still drops the bad sandbox without raising."""
+    bad_sandbox = MagicMock()
+    bad_sandbox.get_tags.side_effect = ValueError("malformed sandbox tag")
+
+    with (
+        patch.object(modal_provider, "_get_modal_app", return_value=MagicMock()),
+        patch.object(modal_provider, "_list_all_sandboxes_for_app", return_value=[bad_sandbox]),
+    ):
+        running = modal_provider._list_running_host_ids(modal_provider.mngr_ctx.concurrency_group, None)
+
+    assert running == set()
 
 
 # =============================================================================

@@ -58,6 +58,7 @@ from imbue.mngr.interfaces.data_types import HostConfig
 from imbue.mngr.interfaces.data_types import HostDetails
 from imbue.mngr.interfaces.data_types import HostLifecycleOptions
 from imbue.mngr.interfaces.data_types import HostResources
+from imbue.mngr.interfaces.data_types import ProviderErrorInfo
 from imbue.mngr.interfaces.data_types import PyinfraConnector
 from imbue.mngr.interfaces.data_types import SnapshotInfo
 from imbue.mngr.interfaces.data_types import SnapshotRecord
@@ -2319,11 +2320,19 @@ log "=== Shutdown script completed ==="
                 return None, None
         return None, None
 
-    def _list_running_host_ids(self, cg: ConcurrencyGroup) -> set[HostId]:
+    def _list_running_host_ids(
+        self,
+        cg: ConcurrencyGroup,
+        on_error: Callable[[ErrorInfo], None] | None = None,
+    ) -> set[HostId]:
         """List host IDs of all running sandboxes, fetching tags in parallel.
 
         Lists all sandboxes for this app, then fetches tags for each sandbox
-        concurrently to determine which hosts are running.
+        concurrently to determine which hosts are running. A sandbox whose
+        tags can't be parsed is dropped from the running set and, if
+        on_error is provided, surfaced as a ProviderErrorInfo -- a running
+        sandbox that won't appear in the listing is a real per-resource
+        failure, not a silent skip.
         """
         with log_span("Listing running sandbox host IDs for app={}", self.app_name):
             app = self._get_modal_app()
@@ -2355,6 +2364,8 @@ log "=== Shutdown script completed ==="
                             self._sandbox_cache_by_name[HostName(tags[TAG_HOST_NAME])] = sandbox
                 except (KeyError, ValueError) as e:
                     logger.warning("Skipped sandbox with invalid tags: {}", e)
+                    if on_error is not None:
+                        on_error(ProviderErrorInfo.build_for_provider(e, self.name))
 
             logger.debug("Found {} running host ID(s) for app={}", len(running_host_ids), self.app_name)
             return running_host_ids
@@ -2382,7 +2393,7 @@ log "=== Shutdown script completed ==="
                     with ConcurrencyGroupExecutor(
                         parent_cg=cg, name=f"modal_discover_hosts_and_agents_{self.name}", max_workers=3
                     ) as executor:
-                        running_ids_future = executor.submit(self._list_running_host_ids, cg)
+                        running_ids_future = executor.submit(self._list_running_host_ids, cg, on_error)
                         host_and_agent_future = executor.submit(self._list_all_host_and_agent_records, cg)
 
                     running_host_ids = running_ids_future.result()
