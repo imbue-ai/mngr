@@ -140,7 +140,7 @@ Every PR must include one changelog entry file **per project it touches**. CI wi
 - Each file should briefly describe the user-visible changes in the PR that pertain to *that* project. Same-PR entries can repeat shared context if it helps readers of each project's changelog.
 - A nightly agent fans each project's entries into that project's `<project_dir>/UNABRIDGED_CHANGELOG.md` (full verbatim entries) and `<project_dir>/CHANGELOG.md` (concise AI-generated summary).
 - The changelog consolidation agent's own PRs (`mngr/changelog-consolidation-*`) are exempt from this requirement.
-- PRs that only edit changelog artifacts (any path with a `changelog/` segment, project `CHANGELOG.md`s, project `UNABRIDGED_CHANGELOG.md`s) don't require new entries.
+- PRs that only edit changelog artifacts don't require new entries. The exempted paths are: per-PR entry files directly under a known project's `<project_dir>/changelog/` directory, project `CHANGELOG.md` files, and project `UNABRIDGED_CHANGELOG.md` files. Other paths that happen to contain a `changelog` segment (e.g. `docs/changelog/intro.md`, or files nested deeper than `<project_dir>/changelog/`) are not exempted.
 
 # Silly error workarounds
 
