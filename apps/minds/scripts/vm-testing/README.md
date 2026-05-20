@@ -171,11 +171,15 @@ wait_for_backend -> create_agent** for any minds.app bundle. The
 provider, and several providers are not viable inside a Tart guest:
 
 - `LAUNCH_MODE=LIMA` reaches Lima's `limactl start` (downloads the
-  Ubuntu image, the nerdctl archive, expands the disk), then fails at
-  `Starting VZ` -- Apple Virtualization Framework refuses to run a
-  guest VM inside a guest VM because Tart does not enable nested
-  virtualization. This is a structural Tart-on-Apple-Silicon limit; no
-  amount of harness work fixes it.
+  Ubuntu image, the nerdctl archive, expands the disk), then exits
+  `level=fatal` at `Starting VZ` with no errors captured at the
+  harness's vantage point. The most likely cause is that Lima's VZ
+  driver invokes Apple's Virtualization Framework to create a Linux
+  guest, which requires nested virtualization on M3+, and Tart's CLI
+  does not expose a knob to enable it for its own guests. The actual
+  failure reason is in `~/.lima/<vm>/ha.stderr.log` *inside the VM*;
+  the harness does not currently copy that out, so this is a
+  best-known explanation rather than verified root cause.
 - `LAUNCH_MODE=DOCKER` needs Docker Desktop or colima installed in the
   persona. The `minds-fresh` persona does neither.
 - `LAUNCH_MODE=LOCAL` runs the agent natively on the VM (no Lima/Docker
