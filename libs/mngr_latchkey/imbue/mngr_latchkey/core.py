@@ -79,7 +79,6 @@ _GATEWAY_BIND_POLL_INTERVAL_SECONDS: Final[float] = 0.05
 # slow keychains. The auth-browser flow waits on a real human and is
 # intentionally untimed.
 _LATCHKEY_CLI_TIMEOUT_SECONDS: Final[float] = 15.0
-_CREATE_JWT_TIMEOUT_SECONDS: Final[float] = 15.0
 
 # ``latchkey --version`` is a print-and-exit; 5s is generous slack for
 # Node-runtime startup on cold filesystems.
@@ -737,7 +736,7 @@ class Latchkey(MutableModel):
                         "--no-validate",
                         permissions_config_path,
                     ],
-                    timeout=_CREATE_JWT_TIMEOUT_SECONDS,
+                    timeout=_LATCHKEY_CLI_TIMEOUT_SECONDS,
                     is_checked_after=False,
                     env=env,
                 )
