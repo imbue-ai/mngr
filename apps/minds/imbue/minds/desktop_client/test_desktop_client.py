@@ -15,6 +15,7 @@ from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client.agent_creator import AgentCreationStatus
 from imbue.minds.desktop_client.agent_creator import AgentCreator
 from imbue.minds.desktop_client.agent_creator import LOG_SENTINEL
+from imbue.minds.desktop_client.app import _build_mngr_exec_argv
 from imbue.minds.desktop_client.app import _build_workspace_list
 from imbue.minds.desktop_client.app import create_desktop_client
 from imbue.minds.desktop_client.auth import FileAuthStore
@@ -34,6 +35,8 @@ from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.request_events import RequestInbox
 from imbue.minds.desktop_client.request_events import create_latchkey_permission_request_event
+from imbue.minds.desktop_client.workspace_server_health import AgentHealth
+from imbue.minds.desktop_client.workspace_server_health import WorkspaceServerHealthTracker
 from imbue.minds.primitives import CreationId
 from imbue.minds.primitives import LaunchMode
 from imbue.minds.primitives import OneTimeCode
@@ -1335,7 +1338,7 @@ def test_requests_panel_card_routes_via_minds_bridge(tmp_path: Path) -> None:
     # TestClient and still have a concretely-typed handle to app.state.
     agent_id = str(AgentId())
     event = create_latchkey_permission_request_event(
-        agent_id=agent_id, service_name="slack", rationale="Need to post status updates"
+        agent_id=agent_id, scope="slack-api", rationale="Need to post status updates"
     )
     auth_store = FileAuthStore(data_directory=tmp_path / "auth")
     session_store = make_session_store_for_test(tmp_path)
@@ -1506,3 +1509,168 @@ def test_refresh_event_before_lifespan_is_dropped_without_raising(tmp_path: Path
     resolver._fire_on_refresh(str(agent_id), raw_line)
 
     assert received == []
+
+
+# -- workspace-server restart + recovery tests --
+
+
+def test_build_mngr_exec_argv_includes_agent_id_and_command() -> None:
+    aid = AgentId.generate()
+    argv = _build_mngr_exec_argv(
+        mngr_binary="/usr/local/bin/mngr",
+        agent_id=aid,
+        shell_command="echo hello",
+    )
+    assert argv[0] == "/usr/local/bin/mngr"
+    assert argv[1] == "exec"
+    assert argv[2] == str(aid)
+    assert argv[3] == "echo hello"
+    assert "--timeout" in argv
+    assert "--quiet" in argv
+
+
+def test_recovery_page_requires_authentication(tmp_path: Path) -> None:
+    client, _, agent_id = _setup_test_server(tmp_path)
+    response = client.get(f"/agents/{agent_id}/recovery", follow_redirects=False)
+    assert response.status_code == 403
+
+
+def test_recovery_page_renders_for_authenticated_user(tmp_path: Path) -> None:
+    client, auth_store, agent_id = _setup_test_server(tmp_path)
+    _authenticate_client(client, auth_store)
+
+    # Use a legitimate localhost-subdomain return_to (the real plugin-emitted form).
+    safe_return_to = f"http://{agent_id}.localhost:8421/some/path"
+    response = client.get(
+        f"/agents/{agent_id}/recovery?return_to={safe_return_to}",
+        follow_redirects=False,
+    )
+    assert response.status_code == 200
+    assert str(agent_id) in response.text
+    assert safe_return_to in response.text
+    assert "Restart workspace server" in response.text
+
+
+def test_recovery_page_drops_open_redirect_return_to(tmp_path: Path) -> None:
+    """A return_to pointing at a non-localhost host must be dropped, not rendered.
+
+    Otherwise the recovery page would be an open-redirect: an attacker could
+    craft ``?return_to=https://evil.com/`` and the page would navigate the
+    user there after a successful restart.
+    """
+    client, auth_store, agent_id = _setup_test_server(tmp_path)
+    _authenticate_client(client, auth_store)
+
+    response = client.get(
+        f"/agents/{agent_id}/recovery?return_to=https://evil.com/phish",
+        follow_redirects=False,
+    )
+    assert response.status_code == 200
+    assert "evil.com" not in response.text
+    # The data-return-to attribute should be empty so the page falls back to reload().
+    assert 'data-return-to=""' in response.text
+
+
+def test_recovery_page_drops_protocol_relative_return_to(tmp_path: Path) -> None:
+    """Protocol-relative URLs like ``//evil.com/`` must not be treated as relative."""
+    client, auth_store, agent_id = _setup_test_server(tmp_path)
+    _authenticate_client(client, auth_store)
+
+    response = client.get(
+        f"/agents/{agent_id}/recovery?return_to=//evil.com/phish",
+        follow_redirects=False,
+    )
+    assert response.status_code == 200
+    assert "evil.com" not in response.text
+
+
+def test_recovery_page_allows_relative_return_to(tmp_path: Path) -> None:
+    """A same-origin relative path must be preserved."""
+    client, auth_store, agent_id = _setup_test_server(tmp_path)
+    _authenticate_client(client, auth_store)
+
+    response = client.get(
+        f"/agents/{agent_id}/recovery?return_to=/agents/{agent_id}/",
+        follow_redirects=False,
+    )
+    assert response.status_code == 200
+    assert f"/agents/{agent_id}/" in response.text
+
+
+def test_restart_api_requires_authentication(tmp_path: Path) -> None:
+    client, _, agent_id = _setup_test_server(tmp_path)
+    response = client.post(f"/api/agents/{agent_id}/restart-workspace-server")
+    assert response.status_code == 403
+
+
+def test_create_desktop_client_stashes_workspace_health_tracker(tmp_path: Path) -> None:
+    """create_desktop_client should expose the tracker on app.state for handlers."""
+    auth_dir = tmp_path / "auth"
+    auth_store = FileAuthStore(data_directory=auth_dir)
+    tracker = WorkspaceServerHealthTracker()
+    backend_resolver = StaticBackendResolver(url_by_agent_and_service={})
+
+    app = create_desktop_client(
+        auth_store=auth_store,
+        backend_resolver=backend_resolver,
+        http_client=None,
+        workspace_health_tracker=tracker,
+    )
+
+    assert app.state.workspace_health_tracker is tracker
+
+
+def _setup_test_server_with_tracker(
+    tmp_path: Path,
+    tracker: WorkspaceServerHealthTracker,
+) -> tuple[TestClient, FileAuthStore, AgentId]:
+    """Build a test client wired to a real WorkspaceServerHealthTracker.
+
+    The default ``_setup_test_server`` helper doesn't accept a tracker, and
+    several tests need to verify the recovery page reads the tracker's
+    current state. Constructing a fresh app per test keeps the tests
+    isolated from each other.
+    """
+    agent_id = AgentId()
+    auth_dir = tmp_path / "auth"
+    auth_store = FileAuthStore(data_directory=auth_dir)
+    backend_resolver = StaticBackendResolver(url_by_agent_and_service={})
+    app = create_desktop_client(
+        auth_store=auth_store,
+        backend_resolver=backend_resolver,
+        http_client=None,
+        workspace_health_tracker=tracker,
+    )
+    client = TestClient(app, base_url="http://localhost")
+    _authenticate_client(client=client, auth_store=auth_store)
+    return client, auth_store, agent_id
+
+
+def test_recovery_page_initial_status_reflects_tracker_stuck(tmp_path: Path) -> None:
+    """The recovery page must read the tracker's current health into ``initial_status``.
+
+    Without this wiring the page would always render with ``data-initial-status="healthy"``,
+    so the JS would not show the busy state when the user lands on the page mid-restart.
+    """
+    tracker = WorkspaceServerHealthTracker()
+    client, _, agent_id = _setup_test_server_with_tracker(tmp_path, tracker)
+    tracker.mark_stuck(agent_id)
+    assert tracker.get_health(agent_id) == AgentHealth.STUCK
+
+    response = client.get(f"/agents/{agent_id}/recovery", follow_redirects=False)
+
+    assert response.status_code == 200
+    assert 'data-initial-status="stuck"' in response.text
+
+
+def test_recovery_page_initial_status_reflects_tracker_restarting(tmp_path: Path) -> None:
+    """A user landing on the recovery page during an in-flight restart must see RESTARTING."""
+    tracker = WorkspaceServerHealthTracker()
+    client, _, agent_id = _setup_test_server_with_tracker(tmp_path, tracker)
+    tracker.mark_restarting(agent_id)
+    assert tracker.get_health(agent_id) == AgentHealth.RESTARTING
+
+    response = client.get(f"/agents/{agent_id}/recovery", follow_redirects=False)
+
+    assert response.status_code == 200
+    assert 'data-initial-status="restarting"' in response.text

@@ -59,8 +59,14 @@ class DockerProviderBackend(ProviderBackendInterface):
         name: ProviderInstanceName,
         config: ProviderInstanceConfig,
         mngr_ctx: MngrContext,
+        is_for_host_creation: bool = False,
     ) -> ProviderInstanceInterface:
-        """Build a Docker provider instance."""
+        """Build a Docker provider instance.
+
+        ``is_for_host_creation`` is ignored: the Docker backend has no one-time
+        backend resources to bootstrap.
+        """
+        del is_for_host_creation
         if not isinstance(config, DockerProviderConfig):
             raise MngrError(f"Expected DockerProviderConfig, got {type(config).__name__}")
         host_dir = config.host_dir if config.host_dir is not None else Path("/mngr")

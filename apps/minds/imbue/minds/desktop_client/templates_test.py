@@ -7,6 +7,7 @@ from imbue.minds.desktop_client.templates import render_create_form
 from imbue.minds.desktop_client.templates import render_landing_page
 from imbue.minds.desktop_client.templates import render_login_page
 from imbue.minds.desktop_client.templates import render_login_redirect_page
+from imbue.minds.desktop_client.templates import render_recovery_page
 from imbue.minds.desktop_client.templates import render_sidebar_page
 from imbue.minds.primitives import AIProvider
 from imbue.minds.primitives import LaunchMode
@@ -228,3 +229,28 @@ def test_render_sidebar_page_contains_workspace_list() -> None:
     # The interactivity (including the SSE EventSource fallback) now lives
     # in the external /_static/sidebar.js file; the template should pull it in.
     assert "/_static/sidebar.js" in html
+
+
+def test_render_recovery_page_includes_agent_id_and_return_to() -> None:
+    html = render_recovery_page(
+        agent_id=_AGENT_A,
+        ws_name="my-workspace",
+        return_to="http://agent.localhost:8421/",
+        initial_status="stuck",
+    )
+    assert str(_AGENT_A) in html
+    assert "my-workspace" in html
+    assert "http://agent.localhost:8421/" in html
+    assert "/api/agents/" in html
+    assert "restart-workspace-server" in html
+    assert 'data-initial-status="stuck"' in html
+
+
+def test_render_recovery_page_restarting_status() -> None:
+    html = render_recovery_page(
+        agent_id=_AGENT_B,
+        ws_name="ws",
+        return_to="",
+        initial_status="restarting",
+    )
+    assert 'data-initial-status="restarting"' in html

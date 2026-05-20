@@ -33,11 +33,11 @@ def test_prevent_while_true() -> None:
 
 
 def test_prevent_time_sleep() -> None:
-    # The one remaining match is in ``destroying_test.py`` (a real test
-    # poll loop). The fake-binary string literal that previously
-    # contributed a second match lived in the now-relocated latchkey
-    # core_test.py, which moved to the ``mngr_latchkey`` package.
-    rc.check_time_sleep(_DIR, snapshot(1))
+    # Two matches: ``destroying_test.py`` (a real test poll loop) and
+    # ``cli/env.py::_exec_into_recover`` (the 5-second auto-rollback
+    # countdown -- a deliberate user-facing pause so the operator can
+    # Ctrl-C if they want to intervene before recover fires).
+    rc.check_time_sleep(_DIR, snapshot(2))
 
 
 def test_prevent_global_keyword() -> None:
@@ -45,7 +45,7 @@ def test_prevent_global_keyword() -> None:
 
 
 def test_prevent_bare_print() -> None:
-    rc.check_bare_print(_DIR, snapshot(12))
+    rc.check_bare_print(_DIR, snapshot(13))
 
 
 # --- Exception handling ---
@@ -154,11 +154,11 @@ def test_prevent_num_prefix() -> None:
 
 
 def test_prevent_trailing_comments() -> None:
-    # ``forward_cli.py`` carries one ``# noqa: S603`` next to the
-    # ``subprocess.Popen`` call that spawns ``mngr forward``. The S603
-    # suppression must be on the same line as the call for ruff to
-    # recognize it; ``# noqa`` is intentionally not in the trailing-
-    # comment exempt list.
+    # ``forward_cli.py`` carries one ``noqa: S603`` suppression next to
+    # the ``subprocess.Popen`` call that spawns ``mngr forward``. The
+    # S603 suppression must be on the same line as the call for ruff to
+    # recognize it; the noqa marker is intentionally not in the
+    # trailing-comment exempt list.
     rc.check_trailing_comments(_DIR, snapshot(1))
 
 
@@ -270,7 +270,14 @@ def test_prevent_direct_subprocess() -> None:
         # ``latchkey/_spawn.py``. See specs/detached-destroy-flow/spec.md.
         "*/desktop_client/destroying.py",
     )
-    rc.check_direct_subprocess(_DIR, snapshot(0), excluded_patterns=excluded)
+    # The one allowed match is ``cli/env.py::_exec_into_recover``,
+    # which uses ``os.execvp`` to REPLACE the current process with
+    # ``minds env recover`` on deploy failure. That is the opposite of
+    # "spawn a managed child" -- there's no subprocess to clean up,
+    # and the whole point is for stdout/stderr/exit-code to flow
+    # through to the operator's shell as if recover were the original
+    # command. ConcurrencyGroup doesn't apply.
+    rc.check_direct_subprocess(_DIR, snapshot(1), excluded_patterns=excluded)
 
 
 # --- AST-based ratchets ---

@@ -1,3 +1,4 @@
+import os
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Final
@@ -19,7 +20,10 @@ from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_ovh import hookimpl
+from imbue.mngr_ovh.bootstrap import bootstrap_root_authorized_keys_via_user
+from imbue.mngr_ovh.bootstrap import install_required_outer_packages
 from imbue.mngr_ovh.bootstrap import pin_host_key_via_tofu
+from imbue.mngr_ovh.bootstrap import verify_root_ssh
 from imbue.mngr_ovh.bootstrap import wait_for_ssh_after_rebuild
 from imbue.mngr_ovh.catalog import resolve_image_id
 from imbue.mngr_ovh.cli import ovh as ovh_cli_group
@@ -31,6 +35,7 @@ from imbue.mngr_ovh.iam_tags import MNGR_HOST_ID_TAG_KEY
 from imbue.mngr_ovh.iam_tags import MNGR_PROVIDER_TAG_KEY
 from imbue.mngr_ovh.iam_tags import attach_tags
 from imbue.mngr_ovh.iam_tags import list_vps_resources_for_provider
+from imbue.mngr_ovh.iam_tags import parse_extra_tags_env
 from imbue.mngr_ovh.iam_tags import vps_urn_for
 from imbue.mngr_ovh.ordering import order_and_wait_for_vps
 from imbue.mngr_ovh.ordering import rebuild_vps_with_public_key
@@ -239,6 +244,23 @@ class OvhProvider(VpsDockerProvider):
 
         public_key = self.ovh_client.get_cached_public_key(vps_ssh_key_id)
 
+        # F1: parse MNGR_VPS_EXTRA_TAGS BEFORE any state-changing call
+        # so a typo / reserved key / missing ``=`` fails before we order
+        # (and pay for) a VPS. ``parse_extra_tags_env`` enforces OVH's
+        # IAM-key regex + the reserved-key list locally, so a 400 from
+        # the IAM tag attach loop -- which would otherwise leak a freshly-
+        # ordered month of billing -- cannot happen. (DEPLOY_SAFETY_AUDIT-
+        # style F1; spec required pre-order parsing.) The recycle path
+        # does not apply extra tags (the recycled VPS already carries
+        # whatever tags it had pre-cancellation, plus its mngr-host-id
+        # gets swapped by ``try_recycle_cancelled_vps``), so the parsed
+        # dict is only consumed in the fresh-order branch below. Parsing
+        # at the top still matters for the recycle path: if recycling
+        # falls through, the same provisioning call ends up ordering a
+        # fresh VPS, and we want to have already validated extra tags
+        # by that point.
+        extra_tags = parse_extra_tags_env(os.environ.get("MNGR_VPS_EXTRA_TAGS", ""))
+
         with log_span("OVH provisioning for host {} ({})", name, host_id):
             recycle_handle = self._maybe_claim_recycled_vps(
                 new_host_id=host_id, requested_plan=plan, requested_region=region
@@ -274,7 +296,44 @@ class OvhProvider(VpsDockerProvider):
                     fresh_order_service_name = service_name
                 else:
                     service_name = recycle_handle.service_name
-                    self._vps_iam_cache = None
+
+                # Tag-immediately on first sight: attach mngr-provider /
+                # mngr-host-id as the very first action against the new
+                # serviceName. Anything that fails later (rebuild, TOFU,
+                # root bootstrap, host-record write) leaves the VPS
+                # discoverable via the normal mngr discovery path (which
+                # filters on `mngr-provider`), so the operator sees the
+                # orphan in `mngr list` and the create-cleanup path can
+                # clean it up by service name. The recycle path arrives
+                # already tagged -- `try_recycle_cancelled_vps` swapped
+                # `mngr-host-id` to the new host id under a cooperative
+                # lock -- so we skip the re-tag there to avoid two
+                # redundant POST /tag calls per recycled host.
+                urn = vps_urn_for(service_name, region_code=_iam_region_code(self.ovh_config.endpoint))
+                if recycle_handle is None:
+                    # F1: ``extra_tags`` was parsed at the very top of
+                    # ``_provision_vps`` so a typo / reserved key has
+                    # already failed before we got here. Just merge.
+                    # ``MNGR_VPS_EXTRA_TAGS`` mirrors the contract
+                    # ``mngr_vps_docker.build_vps_tags`` honors for
+                    # Vultr-style callers (e.g. the imbue_cloud pool
+                    # bake setting ``minds_env=<name>``).
+                    all_tags: dict[str, str] = {
+                        MNGR_PROVIDER_TAG_KEY: str(self.name),
+                        MNGR_HOST_ID_TAG_KEY: str(host_id),
+                    }
+                    all_tags.update(extra_tags)
+                    attach_tags(
+                        self.ovh_client,
+                        urn,
+                        all_tags,
+                    )
+                # Invalidate the IAM-listing cache so a concurrent
+                # `mngr list` / `mngr ovh list` issued later in this
+                # process sees the new VPS. Done for both fresh-order
+                # (tags just attached above) and recycle (tags swapped
+                # by try_recycle_cancelled_vps) paths.
+                self._vps_iam_cache = None
 
                 image_id = resolve_image_id(self.ovh_client, service_name, image_name)
                 rebuild_vps_with_public_key(
@@ -291,24 +350,48 @@ class OvhProvider(VpsDockerProvider):
                     timeout_seconds=self.config.ssh_connect_timeout,
                 )
 
+                # OVH installs the rebuild key for the image's default
+                # non-root user (e.g. `debian` on `Debian 12 - Docker`),
+                # not for root. TOFU + bootstrap happen as that user;
+                # the bootstrap sudo-copies the key to /root/.ssh so the
+                # rest of the provider (which operates as root via the
+                # base VpsDockerProvider) works without per-call sudos.
                 vps_private_key_path, _ = self._get_vps_ssh_keypair()
+                bootstrap_user = self.ovh_config.bootstrap_ssh_user
                 pin_host_key_via_tofu(
                     hostname=service_name,
                     port=22,
-                    ssh_user="root",
+                    ssh_user=bootstrap_user,
                     private_key_path=vps_private_key_path,
                     known_hosts_path=self._vps_known_hosts_path(),
                     timeout_seconds=self.config.ssh_connect_timeout,
                 )
-
-                urn = vps_urn_for(service_name, region_code=_iam_region_code(self.ovh_config.endpoint))
-                attach_tags(
-                    self.ovh_client,
-                    urn,
-                    {
-                        MNGR_PROVIDER_TAG_KEY: str(self.name),
-                        MNGR_HOST_ID_TAG_KEY: str(host_id),
-                    },
+                bootstrap_root_authorized_keys_via_user(
+                    hostname=service_name,
+                    port=22,
+                    bootstrap_user=bootstrap_user,
+                    private_key_path=vps_private_key_path,
+                    known_hosts_path=self._vps_known_hosts_path(),
+                    timeout_seconds=self.config.ssh_connect_timeout,
+                )
+                verify_root_ssh(
+                    hostname=service_name,
+                    port=22,
+                    private_key_path=vps_private_key_path,
+                    known_hosts_path=self._vps_known_hosts_path(),
+                    timeout_seconds=self.config.ssh_connect_timeout,
+                )
+                # OVH has no cloud-init, so the Debian 12 - Docker image's
+                # missing ``rsync`` (which the vps_docker build-context
+                # upload needs) has to be installed explicitly. Runs as the
+                # final outer-bootstrap step before the base
+                # VpsDockerProvider takes over.
+                install_required_outer_packages(
+                    hostname=service_name,
+                    port=22,
+                    private_key_path=vps_private_key_path,
+                    known_hosts_path=self._vps_known_hosts_path(),
+                    timeout_seconds=self.config.ssh_connect_timeout,
                 )
                 # All post-claim steps succeeded. Ownership of both the
                 # recycle lock (recycle path) and the freshly-ordered
@@ -405,7 +488,15 @@ class OvhProviderBackend(ProviderBackendInterface):
         name: ProviderInstanceName,
         config: ProviderInstanceConfig,
         mngr_ctx: MngrContext,
+        is_for_host_creation: bool = False,
     ) -> ProviderInstanceInterface:
+        """Build an OVH provider instance.
+
+        ``is_for_host_creation`` is ignored: the OVH backend has no one-time
+        bootstrap resources to gate on (compare the Modal backend, which uses
+        this flag to authorize creating a missing per-user env).
+        """
+        del is_for_host_creation
         if not isinstance(config, OvhProviderConfig):
             raise MngrError(f"Expected OvhProviderConfig, got {type(config).__name__}")
         ovh_client = build_ovh_client(config)

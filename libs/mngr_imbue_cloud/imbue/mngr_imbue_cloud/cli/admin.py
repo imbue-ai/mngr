@@ -1,20 +1,28 @@
 """`mngr imbue_cloud admin pool ...` -- operator-only pool provisioning.
 
-Ported from ``apps/minds/imbue/minds/cli/pool.py``. Provisions Vultr VPSes via
-``mngr create`` (the imbue-team operator must have a Vultr-configured mngr
-provider available locally), waits for the agent, installs a management SSH key
-on both the VPS and the container, then writes a row to the connector's Neon
+Provisions OVH classic VPSes via ``mngr create`` (the imbue-team operator must
+have an OVH-configured mngr provider available locally), waits for the agent,
+installs + configures ufw on the VPS, installs a management SSH key on both
+the VPS and the container, then writes a row to the connector's Neon
 ``pool_hosts`` table.
 
+Provider-generic by design: extra VPS-side tags (e.g. ``minds_env=<name>``
+threaded through by the ``minds pool`` env-aware wrapper) come from
+repeatable ``--tag KEY=VALUE`` CLI options. This command itself has no
+knowledge of minds environments; that's the caller's responsibility.
+
 Authentication: this command talks to Neon directly via ``DATABASE_URL`` and to
-Vultr via the operator's local ``mngr`` provider config. It does NOT use the
-operator's SuperTokens session; the connector is not involved in pool
-provisioning at all.
+OVH via the operator's local ``mngr`` provider config (or
+``OVH_APPLICATION_KEY`` / ``OVH_APPLICATION_SECRET`` / ``OVH_CONSUMER_KEY``
+env vars). It does NOT use the operator's SuperTokens session; the connector
+is not involved in pool provisioning at all.
 """
 
 import json as _json
+import os
 import shlex
 import sys
+import tomllib
 from pathlib import Path
 from typing import Any
 from typing import Final
@@ -30,8 +38,123 @@ from imbue.concurrency_group.subprocess_utils import FinishedProcess
 from imbue.mngr_imbue_cloud.cli._common import emit_json
 from imbue.mngr_imbue_cloud.cli._common import fail_with_json
 
+# Env var name a minds-activated shell uses to flag the pool host DSN
+# for the activated env. Mirrors the field name written into
+# ``~/.minds-<env>/secrets.toml`` by ``minds env deploy`` so an operator
+# can also point us at a one-off DSN by exporting it directly.
+_MINDS_HOST_POOL_DSN_ENV_VAR: Final[str] = "MINDS_HOST_POOL_DSN"
+# Env vars the minds bootstrap exports on ``minds env activate`` so we
+# can locate the per-env secrets.toml without importing any minds
+# module (this CLI lives in mngr_imbue_cloud and is intentionally
+# decoupled from the minds package).
+_MINDS_ROOT_NAME_ENV_VAR: Final[str] = "MINDS_ROOT_NAME"
+_MINDS_PREFIX: Final[str] = "minds"
+
+
+def _read_activated_minds_host_pool_dsn() -> str | None:
+    """Return the activated minds env's NEON_HOST_POOL_DSN, or None.
+
+    Walks the same on-disk layout ``minds env deploy`` writes:
+
+        $HOME/.<MINDS_ROOT_NAME>/secrets.toml -> [secrets].NEON_HOST_POOL_DSN
+
+    Returns None when ``MINDS_ROOT_NAME`` is unset, when the env root
+    is production (``MINDS_ROOT_NAME=minds``, no per-env secrets.toml),
+    when the file doesn't exist, or when the field is missing / empty.
+    All of those map to "this CLI has no opinion -- caller must pass
+    ``--database-url`` explicitly or set ``MINDS_HOST_POOL_DSN``."
+    """
+    root_name = os.environ.get(_MINDS_ROOT_NAME_ENV_VAR)
+    if not root_name or root_name == _MINDS_PREFIX:
+        return None
+    secrets_path = Path.home() / f".{root_name}" / "secrets.toml"
+    if not secrets_path.is_file():
+        return None
+    try:
+        raw = tomllib.loads(secrets_path.read_text())
+    except OSError as exc:
+        logger.warning("Could not read {} for pool DSN resolution: {}", secrets_path, exc)
+        return None
+    except tomllib.TOMLDecodeError as exc:
+        logger.warning(
+            "Could not parse {} for pool DSN resolution ({}); pass --database-url explicitly.",
+            secrets_path,
+            exc,
+        )
+        return None
+    secrets_block = raw.get("secrets")
+    if not isinstance(secrets_block, dict):
+        return None
+    dsn = secrets_block.get("NEON_HOST_POOL_DSN")
+    if not isinstance(dsn, str) or not dsn:
+        return None
+    return dsn
+
+
+def _resolve_pool_database_url(explicit: str | None) -> str:
+    """Resolve the pool DSN for an admin pool command.
+
+    Precedence (highest first):
+
+    1. The explicit ``--database-url`` flag, if the operator passed it.
+    2. ``$MINDS_HOST_POOL_DSN`` env var.
+    3. The activated minds env's ``secrets.toml`` ``NEON_HOST_POOL_DSN``
+       field (written by ``minds env deploy`` for dev envs).
+    4. Refuse with a useful error.
+
+    Production / staging operators (or anyone running outside an
+    activated minds env) keep working: explicit ``--database-url`` is
+    still accepted, and ``$DATABASE_URL`` is intentionally NOT consulted
+    here -- it's a generic env var that the operator might have pointed
+    at a totally unrelated DB. ``MINDS_HOST_POOL_DSN`` is the explicit
+    opt-in.
+    """
+    if explicit:
+        return explicit
+    env_value = os.environ.get(_MINDS_HOST_POOL_DSN_ENV_VAR)
+    if env_value:
+        return env_value
+    activated_dsn = _read_activated_minds_host_pool_dsn()
+    if activated_dsn:
+        return activated_dsn
+    fail_with_json(
+        "No pool DSN available. Either pass --database-url explicitly, export "
+        f"{_MINDS_HOST_POOL_DSN_ENV_VAR}=<dsn>, or `minds env activate <dev-env>` "
+        "first (deploys write the DSN into the per-env secrets.toml).",
+        error_class="UsageError",
+    )
+    # ``fail_with_json`` raises; this line is unreachable but satisfies
+    # the type checker.
+    raise AssertionError("unreachable")
+
+
 _CONTAINER_SSH_PORT: Final[int] = 2222
-# 30 min: the inner ``mngr create ... --template vultr`` builds a fresh
+
+# Constant agent name baked onto every pool host. The minds-side
+# adoption code (``ImbueCloudHost.create_agent_state``) explicitly keeps
+# the bake's agent name verbatim -- so the bake must use the same name
+# the user's ``mngr create system-services@<host>.imbue_cloud_<slug>``
+# does, otherwise the user's lease ends up with an agent whose tmux
+# session is named after a per-bake UUID instead of ``system-services``.
+# Tracked at ``libs/mngr_imbue_cloud/imbue/mngr_imbue_cloud/host.py:67-75``
+# (the ``ImbueCloudHost`` docstring spells the contract out).
+_BAKED_SERVICES_AGENT_NAME: Final[str] = "system-services"
+
+# Path inside the pool host's container of the FCT bootstrap's
+# initial-chat sentinel. The bootstrap writes this file after creating
+# the chat agent on first boot, then skips the create on every later
+# boot if it sees the file. Removing it at bake time means the user's
+# first lease + start re-fires the create, this time with the
+# lease-rewritten ``/mngr/data.json`` ``host_name`` (the user's
+# workspace name) so the chat agent inherits the right name. The file
+# lives inside ``runtime/`` which is already a git worktree at bake
+# time, so ``_init_runtime_worktree`` skips on every subsequent
+# bootstrap run and the in-container ``rm`` is enough (no commit or
+# push needed -- the on-disk working-tree state survives all subsequent
+# mngr stop/start cycles inside the same container).
+_INITIAL_CHAT_SENTINEL_PATH: Final[str] = "/code/runtime/initial_chat_created"
+
+# 30 min: the inner ``mngr create ... --template ovh`` builds a fresh
 # Docker image on the leased VPS, which can take 10-20 min (network bound).
 # A previous 10-min cap occasionally killed otherwise-healthy provisions.
 _MNGR_COMMAND_TIMEOUT_SECONDS: Final[int] = 1800
@@ -48,6 +171,22 @@ _SSH_COMMAND_TIMEOUT_SECONDS: Final[int] = 60
 _RSYNC_MANUAL_EXCLUDES: Final[tuple[str, ...]] = (".git", "uv.lock")
 _GITIGNORE_RSYNC_FILTER: Final[str] = ":- .gitignore"
 
+# INSERT statement for a freshly-baked pool host row. The column list MUST
+# stay in sync with the ``pool_hosts`` schema declared in
+# ``apps/remote_service_connector/migrations/*.sql``: any NOT NULL column
+# without a DB-side default has to appear here, otherwise the bake
+# succeeds in the cloud (VPS provisioned, image built, key injected)
+# but the final DB write 500s with a NOT NULL violation -- leaving a
+# stranded VPS with no DB row. ``host_name`` was the first such drift
+# (added to the schema; missed in the INSERT until 2026-05). Tested in
+# ``admin_test.py::test_pool_hosts_insert_has_required_columns``.
+_INSERT_POOL_HOST_SQL: Final[str] = (
+    "INSERT INTO pool_hosts "
+    "(id, vps_address, vps_instance_id, agent_id, host_id, host_name, ssh_port, ssh_user, "
+    "container_ssh_port, status, attributes, created_at) "
+    "VALUES (%s, %s, %s, %s, %s, %s, 22, 'root', %s, 'available', %s::jsonb, NOW())"
+)
+
 
 @click.group(name="admin")
 def admin() -> None:
@@ -56,7 +195,7 @@ def admin() -> None:
 
 @admin.group(name="pool")
 def pool() -> None:
-    """Pool host provisioning (Vultr + Neon)."""
+    """Pool host provisioning (OVH + Neon)."""
 
 
 def _stream_subprocess_line(line: str, is_stdout: bool) -> None:
@@ -78,6 +217,7 @@ def _run_mngr_command(
     cwd: Path | None = None,
     timeout: int = _MNGR_COMMAND_TIMEOUT_SECONDS,
     is_streaming: bool = False,
+    extra_env: dict[str, str] | None = None,
 ) -> FinishedProcess:
     """Run a mngr CLI command and return the result.
 
@@ -88,10 +228,19 @@ def _run_mngr_command(
     minutes and otherwise produces no visible output until completion,
     which makes diagnosing pool-bake failures (or just confirming that
     provisioning is making progress) difficult.
+
+    ``extra_env`` merges into ``os.environ`` for the subprocess.
+    Used by the pool-bake to thread ``MNGR_VPS_EXTRA_TAGS`` (so the
+    spawned VPS gets the activated minds env's ``minds_env=<name>``
+    tag) without polluting the calling process's own env.
     """
     full_command = ["mngr"] + args
     logger.info("  Running: {}", " ".join(full_command))
     on_output = _stream_subprocess_line if is_streaming else None
+    subprocess_env: dict[str, str] | None = None
+    if extra_env:
+        subprocess_env = dict(os.environ)
+        subprocess_env.update(extra_env)
     cg = ConcurrencyGroup(name="pool-mngr")
     with cg:
         return cg.run_process_to_completion(
@@ -100,11 +249,12 @@ def _run_mngr_command(
             is_checked_after=False,
             cwd=cwd,
             on_output=on_output,
+            env=subprocess_env,
         )
 
 
 def _run_ssh_command(
-    vps_ip: str,
+    vps_address: str,
     ssh_key_path: str,
     port: int,
     command: str,
@@ -122,10 +272,10 @@ def _run_ssh_command(
         ssh_key_path,
         "-p",
         str(port),
-        f"root@{vps_ip}",
+        f"root@{vps_address}",
         command,
     ]
-    logger.info("  SSH {}:{}: {}", vps_ip, port, command)
+    logger.info("  SSH {}:{}: {}", vps_address, port, command)
     cg = ConcurrencyGroup(name="pool-ssh")
     with cg:
         result = cg.run_process_to_completion(
@@ -139,10 +289,15 @@ def _run_ssh_command(
     return True
 
 
-def _get_agent_info(agent_name: str, provider: str = "vultr") -> dict[str, Any] | None:
-    """Query mngr list --format json and find the agent by name.
+def _get_agent_info(
+    agent_name: str,
+    *,
+    host_name: str,
+    provider: str = "ovh",
+) -> dict[str, Any] | None:
+    """Query mngr list --format json and find the agent by name + host name.
 
-    Scopes to ``--provider <provider>`` (the bake only ever creates on vultr
+    Scopes to ``--provider <provider>`` (the bake only ever creates on ovh
     today, so the default matches the call site) and passes ``--on-error
     continue`` so unrelated stale hosts on the operator's machine -- e.g. a
     pre-existing leased pool host whose container's ``/code/`` workdir has
@@ -150,6 +305,14 @@ def _get_agent_info(agent_name: str, provider: str = "vultr") -> dict[str, Any] 
     record. The bake still treats "agent not in output" as a failure: that
     path is handled by the normal "agent_info is None" check at the call
     site, so genuine create failures are not papered over.
+
+    ``host_name`` MUST be the bake's per-bake-unique host name (not the
+    constant agent name). The operator's local mngr state accumulates one
+    ``system-services`` agent per bake (each on a different host), so
+    filtering on agent name alone returns the first match -- which under
+    sequential bakes is some prior bake's stale agent on a different VPS.
+    Disambiguating on ``host.name`` makes the lookup unambiguous because
+    the bake's host name carries a per-bake hex suffix.
     """
     result = _run_mngr_command(
         [
@@ -161,7 +324,7 @@ def _get_agent_info(agent_name: str, provider: str = "vultr") -> dict[str, Any] 
             "--on-error",
             "continue",
             "--include",
-            f'name == "{agent_name}"',
+            f'name == "{agent_name}" && host.name == "{host_name}"',
         ],
         timeout=60,
     )
@@ -184,7 +347,10 @@ def _get_agent_info(agent_name: str, provider: str = "vultr") -> dict[str, Any] 
         return None
 
     for agent in agents:
-        if isinstance(agent, dict) and agent.get("name") == agent_name:
+        if not isinstance(agent, dict) or agent.get("name") != agent_name:
+            continue
+        host = agent.get("host")
+        if isinstance(host, dict) and host.get("name") == host_name:
             return agent
     return None
 
@@ -216,23 +382,91 @@ def _sync_mngr_into_template(mngr_source: Path, workspace_dir: Path) -> None:
         logger.warning("rsync failed (exit {}): {}", result.returncode, result.stderr.strip())
 
 
+def build_extra_tags_env_value(tags: tuple[str, ...]) -> str:
+    """Join repeated ``--tag KEY=VALUE`` CLI values into ``MNGR_VPS_EXTRA_TAGS``.
+
+    Each entry must already be a ``KEY=VALUE`` string (validated client-side
+    before we ever construct the env var so a typo'd ``--tag foo`` aborts the
+    bake with a usage error instead of crashing inside mngr).
+    ``mngr_vps_docker.build_vps_tags`` and ``mngr_ovh.iam_tags.parse_extra_tags_env``
+    both consume the comma-separated form.
+    """
+    for entry in tags:
+        if "=" not in entry:
+            raise click.UsageError(f"--tag value must be KEY=VALUE, got: {entry!r}")
+    return ",".join(tags)
+
+
+def _ufw_provision_commands(container_ssh_port: int) -> tuple[str, ...]:
+    """Return the sequence of root-shell commands that install + configure ufw.
+
+    The order matters: allow port 22 *before* enabling ufw, otherwise enabling
+    severs the in-progress SSH session that runs the next command. Default
+    policy is deny-incoming + allow-outgoing once 22 and the container sshd
+    port are explicitly allowed.
+    """
+    return (
+        "apt-get update",
+        "DEBIAN_FRONTEND=noninteractive apt-get install -y ufw",
+        "ufw allow 22/tcp",
+        f"ufw allow {container_ssh_port}/tcp",
+        "ufw default allow outgoing",
+        "ufw default deny incoming",
+        "ufw --force enable",
+    )
+
+
+def _checked_ssh_command(vps_address: str, ssh_key_path: str, port: int, command: str, *, label: str) -> None:
+    """Run an SSH command and raise on non-zero exit.
+
+    Used for steps that MUST succeed (ufw install/configure, management key
+    install). The bake aborts on failure rather than continuing with a
+    half-configured host that would silently land in the pool.
+    """
+    if not _run_ssh_command(vps_address, ssh_key_path, port, command):
+        raise PoolBakeError(f"{label} failed on VPS {vps_address}; aborting bake")
+
+
+class PoolBakeError(RuntimeError):
+    """Raised when a required pool-bake step fails irrecoverably."""
+
+
 def _create_single_pool_host(
     workspace_dir: Path,
     attributes: dict[str, Any],
     management_public_key: str,
     database_url: str,
+    region: str,
+    extra_tags: tuple[str, ...],
 ) -> bool:
     """Create a single pool host. Returns True on success.
 
     Inserts a row with the request-side ``attributes`` dict so the connector's
-    ``attributes @>`` match can find it.
+    ``attributes @>`` match can find it. ``extra_tags`` is a tuple of
+    ``KEY=VALUE`` strings forwarded as ``MNGR_VPS_EXTRA_TAGS`` to the inner
+    ``mngr create``; ``mngr_ovh`` then attaches them as additional OVH IAM
+    v2 tags alongside ``mngr-provider`` / ``mngr-host-id``.
     """
     suffix = uuid4().hex
-    agent_name = f"pool-{suffix}"
-    host_name = f"{agent_name}-host"
-    address = f"{agent_name}@{host_name}.vultr"
+    # ``agent_name`` is the contract with ``ImbueCloudHost.create_agent_state``
+    # (see ``host.py`` docstring): adoption preserves the bake's name
+    # verbatim, so this must match the minds-side default agent name
+    # ``system-services`` to give the user's tmux session a sane label
+    # instead of a per-bake UUID. ``host_name`` keeps the suffix so the
+    # operator's local mngr state can distinguish pool hosts across
+    # sequential bakes; the user's chosen workspace name overwrites it at
+    # lease time via ``ImbueCloudProvider.create_host``.
+    agent_name = _BAKED_SERVICES_AGENT_NAME
+    host_name = f"pool-{suffix}-host"
+    address = f"{agent_name}@{host_name}.ovh"
+    # The FCT bootstrap's ``_create_initial_chat_agent`` derives the
+    # chat-agent name from ``$MNGR_HOST_DIR/data.json``'s ``host_name``
+    # (see ``forever-claude-template/libs/bootstrap/src/bootstrap/manager.py``
+    # :func:`_build_create_chat_command`). Captured here so the post-bake
+    # cleanup can target it by name for ``mngr destroy``.
+    bootstrap_chat_agent_name = host_name
 
-    logger.info("Creating pool host: {}", address)
+    logger.info("Creating pool host: {} (region={})", address, region)
 
     mngr_command = [
         "create",
@@ -244,7 +478,7 @@ def _create_single_pool_host(
         "--template",
         "main",
         "--template",
-        "vultr",
+        "ovh",
         "--label",
         f"workspace={agent_name}",
         "--label",
@@ -257,16 +491,35 @@ def _create_single_pool_host(
         "MNGR_HOST_DIR=/mngr",
         "--pass-host-env",
         "MNGR_PREFIX",
+        # Per-bake region: the ``ovh`` create template does NOT bake one
+        # in, so every host can land in a different OVH datacenter.
+        "-b",
+        f"--vps-datacenter={region}",
     ]
 
-    create_result = _run_mngr_command(mngr_command, cwd=workspace_dir, is_streaming=True)
+    pool_create_env: dict[str, str] | None = None
+    if extra_tags:
+        pool_create_env = {"MNGR_VPS_EXTRA_TAGS": build_extra_tags_env_value(extra_tags)}
+        logger.info("  Tagging VPS with extra tags: {}", pool_create_env["MNGR_VPS_EXTRA_TAGS"])
+
+    create_result = _run_mngr_command(mngr_command, cwd=workspace_dir, is_streaming=True, extra_env=pool_create_env)
     if create_result.returncode != 0:
         logger.error("mngr create failed: {}", create_result.stderr)
         return False
 
     logger.info("  Created agent: {}", agent_name)
 
-    stop_result = _run_mngr_command(["stop", agent_name])
+    # The agent NAME (``system-services``) is constant across every bake,
+    # so the operator's local mngr state can accumulate several
+    # ``system-services`` agents (one per bake, each on a different
+    # host). Subsequent ``mngr stop``/``mngr exec`` calls in this bake
+    # MUST use the per-bake-unique address to target the just-created
+    # agent specifically -- ``mngr stop system-services`` alone is
+    # ambiguous under sequential bakes and can pick the wrong one
+    # (silently, since ``--on-error continue`` is the mngr default).
+    full_address = f"{agent_name}@{host_name}.ovh"
+
+    stop_result = _run_mngr_command(["stop", full_address])
     if stop_result.returncode != 0:
         logger.warning("mngr stop failed (continuing): {}", stop_result.stderr)
 
@@ -275,21 +528,17 @@ def _create_single_pool_host(
     # provider's sshd config): the default ``MaxStartups=10:30:100``
     # caps the pre-auth queue tightly, and the imbue_cloud lease + claim
     # flow plus parallel ``mngr observe`` discovery routinely exceeds it
-    # and loses connections mid-rsync.
+    # and loses connections mid-rsync. ``shlex.join`` packs the whole
+    # sshd invocation into a single ``mngr exec`` COMMAND positional
+    # (mngr exec parses ``AGENTS... COMMAND`` so multi-token commands
+    # have to arrive as one shell-quoted string).
+    sshd_command = shlex.join(["/usr/sbin/sshd", "-o", "MaxSessions=100", "-o", "MaxStartups=100:30:200"])
     _run_mngr_command(
-        [
-            "exec",
-            agent_name,
-            "/usr/sbin/sshd",
-            "-o",
-            "MaxSessions=100",
-            "-o",
-            "MaxStartups=100:30:200",
-        ],
+        ["exec", full_address, sshd_command],
         timeout=30,
     )
 
-    agent_info = _get_agent_info(agent_name)
+    agent_info = _get_agent_info(agent_name, host_name=host_name)
     if agent_info is None:
         logger.error("Could not find agent info for {}", agent_name)
         return False
@@ -304,9 +553,9 @@ def _create_single_pool_host(
         logger.error("No SSH info in host data")
         return False
 
-    vps_ip = ssh.get("host")
-    if not isinstance(vps_ip, str):
-        logger.error("No VPS IP in SSH info")
+    vps_address = ssh.get("host")
+    if not isinstance(vps_address, str):
+        logger.error("No VPS address in SSH info")
         return False
 
     container_key_path = ssh.get("key_path")
@@ -322,7 +571,12 @@ def _create_single_pool_host(
 
     vps_key_path = str(Path(container_key_path).parent / "vps_ssh_key")
 
-    _run_ssh_command(vps_ip, vps_key_path, 22, f"ufw allow {_CONTAINER_SSH_PORT}/tcp")
+    # Install + configure ufw on the VPS. Each step must succeed; we bail
+    # on the whole bake if anything fails (otherwise the host would land
+    # in the pool with no firewall and a half-applied policy).
+    logger.info("  Installing + configuring ufw on VPS {}", vps_address)
+    for ufw_command in _ufw_provision_commands(_CONTAINER_SSH_PORT):
+        _checked_ssh_command(vps_address, vps_key_path, 22, ufw_command, label=f"ufw step {ufw_command!r}")
 
     key_line = shlex.quote(management_public_key.strip())
     install_cmd = (
@@ -330,10 +584,56 @@ def _create_single_pool_host(
         + key_line
         + " >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys"
     )
-    _run_ssh_command(vps_ip, vps_key_path, 22, install_cmd)
+    _checked_ssh_command(vps_address, vps_key_path, 22, install_cmd, label="install management key on VPS")
 
     logger.info("  Installing management key in container via mngr exec")
-    _run_mngr_command(["exec", agent_name, install_cmd], timeout=60)
+    container_install = _run_mngr_command(["exec", full_address, install_cmd], timeout=60)
+    if container_install.returncode != 0:
+        raise PoolBakeError(
+            f"installing management key inside container for {agent_name} failed: {container_install.stderr.strip()}"
+        )
+
+    # During the bake the services agent booted and the FCT bootstrap created
+    # an initial chat agent named after the BAKE's host name. That name is
+    # wrong for the user's eventual workspace (the user picks their own host
+    # name at lease time), and the bootstrap won't recreate the chat agent
+    # on later starts because of the sentinel file it wrote. Tear both
+    # down so the user's first start gets a fresh chat agent named after
+    # their own host name.
+    logger.info("  Destroying bootstrap-created chat agent: {}", bootstrap_chat_agent_name)
+    # ``mngr exec`` parses ``AGENTS... COMMAND`` -- the LAST positional
+    # goes to ``COMMAND`` and the rest to ``AGENTS``. Passing a multi-
+    # token command as separate argv entries makes click treat all but
+    # the last as agent names ("No agent(s) found matching: destroy,
+    # mngr, pool-..."). Pack the whole remote command into one
+    # shell-quoted string so it lands as a single ``COMMAND`` positional;
+    # the remote sshd parses it back via bash.
+    chat_destroy_cmd = shlex.join(["mngr", "destroy", bootstrap_chat_agent_name, "--force"])
+    chat_destroy = _run_mngr_command(
+        ["exec", full_address, chat_destroy_cmd],
+        timeout=120,
+    )
+    if chat_destroy.returncode != 0:
+        # Don't fail the bake -- the chat agent may have failed to come up
+        # at all (no API key, slow boot, etc) which is fine for our purposes
+        # since we just need it gone. Warn so an operator notices if every
+        # bake hits this path.
+        logger.warning(
+            "Best-effort destroy of bootstrap chat agent {!r} failed (continuing): {}",
+            bootstrap_chat_agent_name,
+            chat_destroy.stderr.strip(),
+        )
+
+    logger.info("  Removing initial-chat sentinel: {}", _INITIAL_CHAT_SENTINEL_PATH)
+    sentinel_rm_cmd = shlex.join(["rm", "-f", _INITIAL_CHAT_SENTINEL_PATH])
+    sentinel_rm = _run_mngr_command(
+        ["exec", full_address, sentinel_rm_cmd],
+        timeout=30,
+    )
+    if sentinel_rm.returncode != 0:
+        raise PoolBakeError(
+            f"removing initial-chat sentinel {_INITIAL_CHAT_SENTINEL_PATH!r} failed: {sentinel_rm.stderr.strip()}"
+        )
 
     row_id = uuid4()
     conn = psycopg2.connect(database_url)
@@ -341,16 +641,14 @@ def _create_single_pool_host(
         with conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    "INSERT INTO pool_hosts "
-                    "(id, vps_ip, vps_instance_id, agent_id, host_id, ssh_port, ssh_user, "
-                    "container_ssh_port, status, attributes, created_at) "
-                    "VALUES (%s, %s, %s, %s, %s, 22, 'root', %s, 'available', %s::jsonb, NOW())",
+                    _INSERT_POOL_HOST_SQL,
                     (
                         str(row_id),
-                        vps_ip,
+                        vps_address,
                         host_id,
                         agent_id,
                         host_id,
+                        host_name,
                         _CONTAINER_SSH_PORT,
                         _json.dumps(attributes),
                     ),
@@ -358,12 +656,31 @@ def _create_single_pool_host(
     finally:
         conn.close()
 
-    logger.info("  Pool host ready: id={}, agent_id={}, vps_ip={}", row_id, agent_id, vps_ip)
+    logger.info("  Pool host ready: id={}, agent_id={}, vps_address={}", row_id, agent_id, vps_address)
     return True
 
 
 @pool.command(name="create")
 @click.option("--count", required=True, type=int, help="Number of pool hosts to create")
+@click.option(
+    "--region",
+    required=True,
+    type=str,
+    help=(
+        "OVH datacenter code for the new pool VPSes (e.g. ``US-EAST-VA``, ``US-WEST-OR``). "
+        "Validated by OVH at order time; failure surfaces as a 'datacenter not allowed for this plan' error."
+    ),
+)
+@click.option(
+    "--tag",
+    "tags",
+    multiple=True,
+    help=(
+        "Repeatable ``KEY=VALUE`` tag attached to every freshly-provisioned VPS via the OVH IAM v2 "
+        "tag system. Forwarded to the inner ``mngr create`` as ``MNGR_VPS_EXTRA_TAGS=k1=v1,k2=v2``. "
+        "Example: ``--tag minds_env=alice --tag pool-owner=bob``."
+    ),
+)
 @click.option(
     "--attributes",
     "attributes_json",
@@ -384,10 +701,15 @@ def _create_single_pool_host(
 )
 @click.option(
     "--database-url",
-    required=True,
+    required=False,
+    default=None,
     type=str,
-    envvar="DATABASE_URL",
-    help="Neon PostgreSQL direct connection string",
+    help=(
+        "Neon PostgreSQL direct connection string for the pool DB. Defaults to "
+        "MINDS_HOST_POOL_DSN env var, or the activated minds env's "
+        "secrets.toml NEON_HOST_POOL_DSN field (so `minds env activate <dev-env>` "
+        "is enough). Pass this explicitly when operating outside an activated env."
+    ),
 )
 @click.option(
     "--mngr-source",
@@ -397,13 +719,16 @@ def _create_single_pool_host(
 )
 def pool_create(
     count: int,
+    region: str,
+    tags: tuple[str, ...],
     attributes_json: str,
     workspace_dir: str,
     management_public_key_file: str,
-    database_url: str,
+    database_url: str | None,
     mngr_source: str | None,
 ) -> None:
     """Create pre-provisioned pool hosts."""
+    resolved_database_url = _resolve_pool_database_url(database_url)
     try:
         parsed_attributes = _json.loads(attributes_json)
     except _json.JSONDecodeError as exc:
@@ -411,6 +736,12 @@ def pool_create(
         fail_with_json(f"Invalid --attributes JSON: {exc}", error_class="UsageError")
     if not isinstance(parsed_attributes, dict):
         fail_with_json("--attributes must be a JSON object", error_class="UsageError")
+    # Validate ``--tag`` shapes up front so we don't bake the first
+    # host and then trip over a typo on the second one.
+    try:
+        build_extra_tags_env_value(tags)
+    except click.UsageError as exc:
+        fail_with_json(str(exc), error_class="UsageError")
 
     management_public_key = Path(management_public_key_file).read_text().strip()
     if not management_public_key:
@@ -420,7 +751,13 @@ def pool_create(
     if mngr_source is not None:
         _sync_mngr_into_template(Path(mngr_source), workspace_path)
 
-    logger.info("Creating {} pool host(s) with attributes={}", count, parsed_attributes)
+    logger.info(
+        "Creating {} pool host(s) with region={}, attributes={}, tags={}",
+        count,
+        region,
+        parsed_attributes,
+        list(tags),
+    )
 
     success_count = 0
     failures: list[str] = []
@@ -431,9 +768,11 @@ def pool_create(
                 workspace_dir=workspace_path,
                 attributes=parsed_attributes,
                 management_public_key=management_public_key,
-                database_url=database_url,
+                database_url=resolved_database_url,
+                region=region,
+                extra_tags=tags,
             )
-        except (ConcurrencyGroupError, psycopg2.Error, OSError) as exc:
+        except (ConcurrencyGroupError, PoolBakeError, psycopg2.Error, OSError) as exc:
             logger.warning("[{}] Failed: {}", i, exc)
             failures.append(str(exc))
             is_success = False
@@ -456,18 +795,24 @@ def pool_create(
 @pool.command(name="list")
 @click.option(
     "--database-url",
-    required=True,
+    required=False,
+    default=None,
     type=str,
-    envvar="DATABASE_URL",
-    help="Neon PostgreSQL direct connection string",
+    help=(
+        "Neon PostgreSQL direct connection string for the pool DB. Defaults to "
+        "MINDS_HOST_POOL_DSN env var, or the activated minds env's "
+        "secrets.toml NEON_HOST_POOL_DSN field (so `minds env activate <dev-env>` "
+        "is enough). Pass this explicitly when operating outside an activated env."
+    ),
 )
-def pool_list(database_url: str) -> None:
+def pool_list(database_url: str | None) -> None:
     """List rows in pool_hosts."""
-    conn = psycopg2.connect(database_url)
+    resolved_database_url = _resolve_pool_database_url(database_url)
+    conn = psycopg2.connect(resolved_database_url)
     try:
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT id, vps_ip, agent_id, host_id, status, attributes, "
+                "SELECT id, vps_address, agent_id, host_id, status, attributes, "
                 "leased_to_user, leased_at, released_at, created_at "
                 "FROM pool_hosts ORDER BY created_at DESC"
             )
@@ -478,7 +823,7 @@ def pool_list(database_url: str) -> None:
         [
             {
                 "id": str(row[0]),
-                "vps_ip": row[1],
+                "vps_address": row[1],
                 "agent_id": row[2],
                 "host_id": row[3],
                 "status": row[4],
@@ -497,20 +842,26 @@ def pool_list(database_url: str) -> None:
 @click.argument("pool_host_id")
 @click.option(
     "--database-url",
-    required=True,
+    required=False,
+    default=None,
     type=str,
-    envvar="DATABASE_URL",
-    help="Neon PostgreSQL direct connection string",
+    help=(
+        "Neon PostgreSQL direct connection string for the pool DB. Defaults to "
+        "MINDS_HOST_POOL_DSN env var, or the activated minds env's "
+        "secrets.toml NEON_HOST_POOL_DSN field (so `minds env activate <dev-env>` "
+        "is enough). Pass this explicitly when operating outside an activated env."
+    ),
 )
 @click.option("--force", is_flag=True, help="Drop the row even if status != 'released'")
-def pool_destroy(pool_host_id: str, database_url: str, force: bool) -> None:
+def pool_destroy(pool_host_id: str, database_url: str | None, force: bool) -> None:
     """Remove a pool_hosts row.
 
-    Note: this does NOT destroy the underlying Vultr VPS; that is intentional
+    Note: this does NOT destroy the underlying OVH VPS; that is intentional
     so an operator can use ``mngr destroy`` themselves and inspect the row
     state first.
     """
-    conn = psycopg2.connect(database_url)
+    resolved_database_url = _resolve_pool_database_url(database_url)
+    conn = psycopg2.connect(resolved_database_url)
     try:
         with conn:
             with conn.cursor() as cur:

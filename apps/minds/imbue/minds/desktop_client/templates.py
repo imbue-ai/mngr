@@ -295,6 +295,29 @@ def render_auth_error_page(message: str) -> str:
 
 
 @pure
+def render_recovery_page(
+    agent_id: AgentId,
+    ws_name: str,
+    return_to: str,
+    initial_status: str,
+) -> str:
+    """Render the workspace-recovery page shown when the workspace server is unresponsive.
+
+    ``initial_status`` is one of ``"stuck"``/``"restarting"``/``"healthy"`` and
+    governs the page's initial UI state. ``return_to`` is the URL the page
+    reloads back to once the tracker reports HEALTHY again -- typically the
+    original plugin subdomain URL the user was navigating to.
+    """
+    return JINJA_ENV.get_template("recovery.html").render(
+        agent_id=str(agent_id),
+        ws_name=ws_name,
+        return_to=return_to,
+        initial_status=initial_status,
+        accent=workspace_accent(str(agent_id)),
+    )
+
+
+@pure
 def render_destroying_page(
     agent_id: AgentId,
     agent_name: str,
