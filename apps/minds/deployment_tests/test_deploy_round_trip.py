@@ -6,46 +6,131 @@ them. The shared-env stand-up the orchestrator already does is itself a
 "deploy works" smoke; this test pairs it with an explicit destroy
 assertion that the shared envs never exercise.
 
-Currently skipped -- iterates with the rest of the suite once the
-``ephemeral_env`` fixture's ``minds env deploy`` shell-out lands.
+The ephemeral_env fixture has already done the deploy and given us a
+handle; this body asserts the post-deploy state, then runs ``minds env
+destroy`` explicitly and asserts the post-destroy state. The fixture's
+teardown ``destroy`` then no-ops (env root already gone).
 """
 
+import subprocess
+from pathlib import Path
+
+import httpx
 import pytest
+from loguru import logger
+from pydantic import SecretStr
 
 from imbue.minds.deployment_tests.data_types import EphemeralEnvHandle
+from imbue.minds.deployment_tests.helpers import build_minds_env_subprocess_env
+from imbue.minds.deployment_tests.helpers import load_dev_credentials_from_vault
+from imbue.minds.deployment_tests.helpers import modal_env_exists
+from imbue.minds.deployment_tests.helpers import neon_project_exists
+from imbue.minds.deployment_tests.helpers import supertokens_app_exists
+from imbue.minds.envs.paths import client_config_file
+from imbue.minds.envs.paths import env_root_dir
+from imbue.minds.envs.paths import secrets_file
+
+_REPO_ROOT = Path(__file__).resolve().parents[3]
 
 pytestmark = pytest.mark.minds_deployment
 
+# The fixture's deploy (~3 min) + this test's destroy (~2 min) + the
+# four cloud probes (a few seconds each) fit well under this.
+_TEST_TIMEOUT_SECONDS = 15 * 60
 
-@pytest.mark.skip(
-    reason=(
-        "Pending implementation of the ephemeral_env fixture's `minds env deploy` shell-out "
-        "and the per-provider 'is this resource really gone' assertions. See "
-        "specs/minds-deployment-tests.md > Initial test inventory."
-    )
-)
+_DESTROY_TIMEOUT_SECONDS = 10 * 60
+_REQUEST_TIMEOUT_SECONDS = 30.0
+
+
+@pytest.mark.timeout(_TEST_TIMEOUT_SECONDS)
 def test_deploy_then_destroy_round_trip(ephemeral_env: EphemeralEnvHandle) -> None:
-    """Deploy from clean, assert every resource exists, destroy, assert every resource is gone.
+    """Deploy creates every resource; destroy removes them all.
 
-    Planned assertions (post-deploy):
-    - Modal env for ``ephemeral_env.name`` exists.
-    - Both Modal apps (``rsc-dev`` + ``llm-dev``) are deployed and their
-      ``/healthcheck`` endpoints return 200.
-    - Neon project named ``minds-<env>`` exists with ``host_pool`` +
-      ``litellm_cost`` databases inside.
-    - SuperTokens app for ``<env>`` exists.
-    - ``~/.minds-<env>/client.toml`` + ``secrets.toml`` exist with the
-      right shape and mode 0600 for the secrets file.
-    - Vault contains a generation id for the env (when the tier tracks
-      generations -- dev does not today, so this is a no-op assertion
-      for dev envs).
+    Post-deploy assertions:
+    - Modal env named ``<ephemeral_env.name>`` exists in the dev-tier workspace.
+    - Connector + litellm-proxy /health/liveness both 200 (proxied via
+      the just-deployed Modal apps).
+    - Neon project ``minds-<name>`` exists under the dev-tier Neon org.
+    - SuperTokens app ``<name>`` exists in the dev-tier core.
+    - ``~/.minds-<name>/client.toml`` + ``secrets.toml`` exist on disk.
 
-    Planned assertions (post-destroy, after calling ``minds env destroy``):
-    - All of the above are gone.
-    - No OVH / Cloudflare resources remain tagged with the env name.
-    - ``~/.minds-<env>/`` is removed.
-    - The ``ephemeral_env`` fixture's teardown is a no-op for an
-      already-destroyed env (uses the same env-root presence check
-      ``minds env destroy`` itself relies on).
+    Post-destroy assertions: each of the above is gone.
+
+    Dev tier doesn't currently use OVH or Cloudflare resources for an
+    ephemeral env (those come in once workspaces / tunnels exist), so
+    those provider enumerations aren't asserted here.
     """
-    raise AssertionError("not implemented yet -- see skip reason")
+    creds = load_dev_credentials_from_vault()
+    neon_org_id = creds["NEON_ORG_ID"]
+    neon_api_token = SecretStr(creds["NEON_API_TOKEN"])
+    supertokens_core_url = creds["SUPERTOKENS_CONNECTION_URI"]
+    supertokens_api_key = SecretStr(creds["SUPERTOKENS_API_KEY"])
+
+    # === Post-deploy state ===
+    # Modal env created.
+    assert modal_env_exists(ephemeral_env.name), (
+        f"Modal env {ephemeral_env.name!r} not found in `modal environment list` after deploy."
+    )
+
+    # Both Modal apps reachable.
+    connector_url = str(ephemeral_env.connector_url).rstrip("/")
+    litellm_url = str(ephemeral_env.litellm_proxy_url).rstrip("/")
+    with httpx.Client(timeout=_REQUEST_TIMEOUT_SECONDS) as client:
+        connector_health = client.get(f"{connector_url}/health/liveness")
+        litellm_health = client.get(f"{litellm_url}/health/liveness")
+    assert connector_health.status_code == 200, (connector_health.status_code, connector_health.text[:300])
+    assert litellm_health.status_code == 200, (litellm_health.status_code, litellm_health.text[:300])
+
+    # Neon project for this env exists.
+    assert neon_project_exists(name=ephemeral_env.name, org_id=neon_org_id, api_token=neon_api_token), (
+        f"Neon project `minds-{ephemeral_env.name}` not found under org {neon_org_id!r} after deploy."
+    )
+
+    # SuperTokens app for this env exists.
+    assert supertokens_app_exists(
+        name=ephemeral_env.name, core_base_url=supertokens_core_url, api_key=supertokens_api_key
+    ), f"SuperTokens app {ephemeral_env.name!r} not present in core after deploy."
+
+    # Local state files written.
+    env_root = env_root_dir(ephemeral_env.name)
+    assert env_root.is_dir(), env_root
+    client_toml = client_config_file(ephemeral_env.name)
+    secrets_toml = secrets_file(ephemeral_env.name)
+    assert client_toml.is_file(), client_toml
+    assert secrets_toml.is_file(), secrets_toml
+
+    # === Destroy ===
+    _run_minds_env_destroy(ephemeral_env.name)
+
+    # === Post-destroy state ===
+    assert not modal_env_exists(ephemeral_env.name), (
+        f"Modal env {ephemeral_env.name!r} still in `modal environment list` after destroy."
+    )
+    assert not neon_project_exists(name=ephemeral_env.name, org_id=neon_org_id, api_token=neon_api_token), (
+        f"Neon project `minds-{ephemeral_env.name}` still present after destroy."
+    )
+    assert not supertokens_app_exists(
+        name=ephemeral_env.name, core_base_url=supertokens_core_url, api_key=supertokens_api_key
+    ), f"SuperTokens app {ephemeral_env.name!r} still present in core after destroy."
+    assert not env_root.exists(), f"Env root {env_root} still on disk after destroy."
+
+    # ephemeral_env fixture teardown's destroy will no-op (env root gone).
+
+
+def _run_minds_env_destroy(name) -> None:
+    """Shell out to ``uv run minds env destroy`` for ``name`` and assert success."""
+    sub_env = build_minds_env_subprocess_env(name)
+    completed = subprocess.run(
+        ["uv", "run", "minds", "env", "destroy"],
+        env=sub_env,
+        cwd=str(_REPO_ROOT),
+        capture_output=True,
+        text=True,
+        timeout=_DESTROY_TIMEOUT_SECONDS,
+        check=False,
+    )
+    logger.info("=== destroy stdout ({}) ===\n{}", name, completed.stdout)
+    logger.info("=== destroy stderr ({}) ===\n{}", name, completed.stderr)
+    assert completed.returncode == 0, (
+        f"`minds env destroy` for {name!r} exited {completed.returncode}. Stderr tail:\n{completed.stderr[-2000:]}"
+    )

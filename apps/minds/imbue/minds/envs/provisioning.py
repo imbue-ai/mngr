@@ -38,6 +38,7 @@ with ``--force``, Modal deploys overwrite), so they don't need rollback
 -- the operator can just re-run ``minds env deploy``.
 """
 
+import os
 from collections.abc import Callable
 from pathlib import Path
 from typing import Final
@@ -112,6 +113,14 @@ from imbue.mngr_ovh.iam_tags import IamResource
 # enumerate + delete only that env's tunnels (vs walking every tunnel
 # on the shared dev-tier CF account).
 MINDS_ENV_NAME_KEY: Final[str] = "MINDS_ENV_NAME"
+
+# Env-var name the deployed connector reads at request time to drive
+# its broken-healthcheck injection (see app.py::get_health_liveness).
+# When set in the operator's environment at `minds env deploy` time,
+# we propagate it into the per-deploy litellm-connector Modal Secret
+# so the deployed container sees it. This is the injection point
+# `test_deploy_rollback` uses to drive the auto-rollback path.
+INJECT_BROKEN_HEALTHCHECK_ENV_VAR: Final[str] = "MINDS_INJECT_BROKEN_HEALTHCHECK"
 
 
 class ProviderCredentials(FrozenModel):
@@ -830,6 +839,14 @@ def _deploy_env_locked(
         if generation_id is not None:
             connector_secret_overrides.setdefault(GENERATION_ID_KEY, generation_id)
         connector_secret_overrides.setdefault(MINDS_ENV_NAME_KEY, str(name))
+        # When the operator sets MINDS_INJECT_BROKEN_HEALTHCHECK at deploy time,
+        # propagate it into the deployed connector's Modal Secret so the
+        # in-container healthcheck returns 500 and the auto-rollback path
+        # fires. Used by `test_deploy_rollback` to drive that flow; unset
+        # in every real deploy.
+        broken_healthcheck = os.environ.get(INJECT_BROKEN_HEALTHCHECK_ENV_VAR)
+        if broken_healthcheck:
+            connector_secret_overrides.setdefault(INJECT_BROKEN_HEALTHCHECK_ENV_VAR, broken_healthcheck)
         connector_secret_name = timestamped_secret_name("litellm-connector", tier, deploy_id)
         with info_span("Pushing derived Modal Secret {!r}", connector_secret_name):
             providers.push_per_env_modal_secret(
