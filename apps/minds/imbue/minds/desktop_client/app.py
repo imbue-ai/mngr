@@ -1182,10 +1182,12 @@ def _handle_list_agents_api(
     paths: WorkspacePaths | None = request.app.state.api_v1_paths
     destroying_records = list_destroying(paths, frozenset(workspace_ids)) if paths is not None else {}
 
-    all_ids = sorted({str(agent_id) for agent_id in workspace_ids} | {str(agent_id) for agent_id in destroying_records})
+    # AgentId subclasses str, so sorted() on the typed set gives the
+    # same lex order as sorting str(...) would, without round-tripping
+    # through the AgentId validator on every entry.
+    all_ids = sorted(set(workspace_ids) | set(destroying_records))
     agents: list[dict[str, object]] = []
-    for agent_id_str in all_ids:
-        agent_id = AgentId(agent_id_str)
+    for agent_id in all_ids:
         display = backend_resolver.get_agent_display_info(agent_id)
         record = destroying_records.get(agent_id)
         destroying_block: dict[str, object] | None = None
@@ -1193,7 +1195,7 @@ def _handle_list_agents_api(
             destroying_block = {"status": str(record.status).lower(), "pid_alive": record.pid_alive}
         agents.append(
             {
-                "agent_id": agent_id_str,
+                "agent_id": str(agent_id),
                 "agent_name": display.agent_name if display is not None else None,
                 "host_id": display.host_id if display is not None else None,
                 "workspace_name": backend_resolver.get_workspace_name(agent_id),
