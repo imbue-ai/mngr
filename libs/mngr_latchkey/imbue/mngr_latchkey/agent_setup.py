@@ -100,6 +100,7 @@ _SCOPE_MINDS: Final[str] = "minds"
 _PERM_CREATE_MIND: Final[str] = "minds-create"
 _PERM_MIND_STATUS: Final[str] = "minds-status"
 _PERM_MIND_LOGS: Final[str] = "minds-logs"
+_PERM_LIST_MINDS: Final[str] = "minds-list"
 _PERM_DESTROY_MIND: Final[str] = "minds-destroy"
 _PERM_DESTROYING_STATUS: Final[str] = "minds-destroying-status"
 _PERM_DESTROYING_LOG: Final[str] = "minds-destroying-log"
@@ -107,6 +108,7 @@ _PERM_DESTROYING_DISMISS: Final[str] = "minds-destroying-dismiss"
 
 _MINDS_HOST: Final[str] = "127.0.0.1"
 _MINDS_CREATE_AGENT_PATH: Final[str] = "/api/create-agent"
+_MINDS_LIST_AGENTS_PATH: Final[str] = "/api/list-agents"
 # Creation id segment is exactly ``creation-<32 hex chars>`` per
 # ``imbue.minds.primitives.CreationId``; pinning it that tightly here
 # avoids admitting traversal-shaped segments or unrelated id schemes.
@@ -125,7 +127,7 @@ _MINDS_DESTROYING_DISMISS_PATH_PATTERN: Final[str] = r"^/api/destroying/agent-[0
 # ``{"minds": ["any"]}`` would escape into every other ``127.0.0.1``
 # endpoint (the latchkey gateway itself, the HTML ``/destroying/<id>``
 # detail page, etc.).
-_MINDS_SCOPE_PATH_PATTERN: Final[str] = r"^/api/(create-agent|destroy-agent|destroying)(/|$)"
+_MINDS_SCOPE_PATH_PATTERN: Final[str] = r"^/api/(create-agent|destroy-agent|destroying|list-agents)(/|$)"
 
 _AGENT_BASELINE_PERMISSIONS: Final[LatchkeyPermissionsConfig] = LatchkeyPermissionsConfig(
     rules=(
@@ -191,6 +193,13 @@ _AGENT_BASELINE_PERMISSIONS: Final[LatchkeyPermissionsConfig] = LatchkeyPermissi
             "properties": {
                 "method": {"const": "GET"},
                 "path": {"type": "string", "pattern": _MINDS_LOGS_PATH_PATTERN},
+            },
+            "required": ["method", "path"],
+        },
+        _PERM_LIST_MINDS: {
+            "properties": {
+                "method": {"const": "GET"},
+                "path": {"const": _MINDS_LIST_AGENTS_PATH},
             },
             "required": ["method", "path"],
         },
@@ -373,6 +382,7 @@ _MINDS_SCHEMA_KEYS: Final[tuple[str, ...]] = (
     _PERM_CREATE_MIND,
     _PERM_MIND_STATUS,
     _PERM_MIND_LOGS,
+    _PERM_LIST_MINDS,
     _PERM_DESTROY_MIND,
     _PERM_DESTROYING_STATUS,
     _PERM_DESTROYING_LOG,

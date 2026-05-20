@@ -1,4 +1,5 @@
 import json
+import subprocess
 from pathlib import Path
 
 import httpx
@@ -1550,3 +1551,102 @@ def test_destroying_dismiss_api_accepts_valid_bearer_token(tmp_path: Path) -> No
 
     # 200 = passed auth; dismiss is a no-op when ``api_v1_paths is None``.
     assert response.status_code == 200
+
+
+def test_list_agents_api_accepts_valid_bearer_token(tmp_path: Path) -> None:
+    """GET /api/list-agents with a matching bearer token returns 200 with an empty list."""
+    client, auth_store = _bearer_test_client(tmp_path)
+    token = auth_store.get_api_token().get_secret_value()
+
+    response = client.get(
+        "/api/list-agents",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"agents": []}
+
+
+def test_list_agents_api_rejects_bearer_token_mismatch(tmp_path: Path) -> None:
+    """A wrong bearer token (and no cookie) still gets 403."""
+    client, _ = _bearer_test_client(tmp_path)
+
+    response = client.get(
+        "/api/list-agents",
+        headers={"Authorization": "Bearer not-the-right-token"},
+    )
+
+    assert response.status_code == 403
+
+
+def test_list_agents_api_returns_workspace_peers_and_destroying_records(tmp_path: Path) -> None:
+    """GET /api/list-agents merges workspace-primary peers with in-flight destroying records.
+
+    Sets up:
+      - one workspace-primary peer in the resolver (no destroying record)
+      - one peer that has been started-destroy but is still in the resolver (mid-teardown)
+      - one destroying-only record whose agent has already left the resolver (display fields null)
+    """
+    workspace_only = AgentId()
+    workspace_and_destroying = AgentId()
+    destroying_only = AgentId()
+
+    resolver = make_resolver_with_data(
+        agents_json=make_agents_json(workspace_only, workspace_and_destroying),
+    )
+
+    auth_dir = tmp_path / "auth"
+    auth_store = FileAuthStore(data_directory=auth_dir)
+    paths = WorkspacePaths(data_dir=tmp_path / "minds_data")
+    paths.data_dir.mkdir(parents=True, exist_ok=True)
+
+    app = create_desktop_client(
+        auth_store=auth_store,
+        backend_resolver=resolver,
+        http_client=None,
+        paths=paths,
+    )
+    client = TestClient(app, base_url="http://localhost")
+
+    # Lay down two destroying records on disk in the shape
+    # ``read_destroying`` expects: directory + pid file pointing at a
+    # reaped (and therefore guaranteed-dead) PID. Spawning ``true`` and
+    # waiting on it gives us a PID that ``os.kill(pid, 0)`` will see as
+    # ESRCH.
+    proc = subprocess.Popen(["true"])
+    proc.wait()
+    dead_pid = proc.pid
+    for agent_id in (workspace_and_destroying, destroying_only):
+        record_dir = paths.data_dir / "destroying" / str(agent_id)
+        record_dir.mkdir(parents=True)
+        (record_dir / "pid").write_text(str(dead_pid))
+        (record_dir / "output.log").write_text("")
+
+    token = auth_store.get_api_token().get_secret_value()
+    response = client.get("/api/list-agents", headers={"Authorization": f"Bearer {token}"})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert set(body) == {"agents"}
+    by_id = {row["agent_id"]: row for row in body["agents"]}
+    assert set(by_id) == {str(workspace_only), str(workspace_and_destroying), str(destroying_only)}
+
+    # workspace-only: in resolver, no destroying block.
+    workspace_only_row = by_id[str(workspace_only)]
+    assert workspace_only_row["destroying"] is None
+    assert workspace_only_row["agent_name"] is not None
+    assert workspace_only_row["host_id"] is not None
+
+    # workspace + destroying: in resolver AND has a destroying record. pid is
+    # dead and the agent is still in the resolver -> FAILED.
+    both_row = by_id[str(workspace_and_destroying)]
+    assert both_row["destroying"] == {"status": "failed", "pid_alive": False}
+    assert both_row["agent_name"] is not None
+
+    # destroying-only: pid dead, agent absent from resolver -> DONE; display
+    # fields are null because the resolver has no info about it.
+    destroying_only_row = by_id[str(destroying_only)]
+    assert destroying_only_row["destroying"] == {"status": "done", "pid_alive": False}
+    assert destroying_only_row["agent_name"] is None
+    assert destroying_only_row["host_id"] is None
+    assert destroying_only_row["workspace_name"] is None

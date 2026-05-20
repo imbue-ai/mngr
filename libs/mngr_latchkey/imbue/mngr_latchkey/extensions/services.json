@@ -465,6 +465,7 @@
       "minds-create",
       "minds-status",
       "minds-logs",
+      "minds-list",
       "minds-destroy",
       "minds-destroying-status",
       "minds-destroying-log",

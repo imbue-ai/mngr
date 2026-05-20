@@ -175,6 +175,10 @@ latchkey curl 'http://127.0.0.1:9100/api/create-agent/creation-XXXX/status'
 # Stream creation logs (server-sent events).
 latchkey curl -N 'http://127.0.0.1:9100/api/create-agent/creation-XXXX/logs'
 
+# List existing peer minds (workspace-primary agents on this desktop,
+# plus any peers that are mid-teardown).
+latchkey curl 'http://127.0.0.1:9100/api/list-agents'
+
 # Destroy a peer (use the canonical ``agent_id`` reported once the peer
 # finishes creating -- destroy keys on the AgentId, not the CreationId).
 latchkey curl -X POST 'http://127.0.0.1:9100/api/destroy-agent/agent-YYYY'
@@ -203,24 +207,25 @@ this together; all are set up by `minds run` at startup:
   via `latchkey auth set minds -H 'Authorization: Bearer <token>'`. The
   desktop client's create- and destroy-side endpoints
   (`/api/create-agent`, `/api/create-agent/{id}/status`,
-  `/api/create-agent/{id}/logs`, `/api/destroy-agent/{id}`,
-  `/api/destroying/{id}/status`, `/api/destroying/{id}/log`,
-  `/api/destroying/{id}/dismiss`) all accept the token as an
+  `/api/create-agent/{id}/logs`, `/api/list-agents`,
+  `/api/destroy-agent/{id}`, `/api/destroying/{id}/status`,
+  `/api/destroying/{id}/log`, `/api/destroying/{id}/dismiss`) all
+  accept the token as an
   alternative to the browser session cookie. The HTML
   `/destroying/{id}` detail page stays cookie-only -- it is a
   human-facing surface, not an API.
-* **A detent scope named `minds`, with seven named permissions**, is
+* **A detent scope named `minds`, with eight named permissions**, is
   materialized inline in every per-agent `latchkey_permissions.json`
   baseline (defined in
   `libs/mngr_latchkey/imbue/mngr_latchkey/agent_setup.py`). The scope
   schema gates `domain=127.0.0.1` AND `path` under
-  `/api/create-agent`, `/api/destroy-agent`, or `/api/destroying`; the
-  named permissions each match a specific `(method, path)` pair:
-  `minds-create`, `minds-status`, `minds-logs`, `minds-destroy`,
-  `minds-destroying-status`, `minds-destroying-log`, and
-  `minds-destroying-dismiss`. The scope is not added to detent's
-  built-in catalog so the rule stays self-contained and minds owns the
-  schema definition.
+  `/api/create-agent`, `/api/list-agents`, `/api/destroy-agent`, or
+  `/api/destroying`; the named permissions each match a specific
+  `(method, path)` pair: `minds-create`, `minds-status`, `minds-logs`,
+  `minds-list`, `minds-destroy`, `minds-destroying-status`,
+  `minds-destroying-log`, and `minds-destroying-dismiss`. The scope is
+  not added to detent's built-in catalog so the rule stays
+  self-contained and minds owns the schema definition.
 
 Because the `latchkey gateway` itself spawns curl on the desktop host
 (see "End-to-end flow" above), `127.0.0.1` in the request URL resolves
@@ -240,10 +245,10 @@ permission-request dialog:
 3. Agent submits `POST /permission-requests` with `scope=minds` and a
    rationale ("I want to spawn a peer mind to explore X").
 4. Desktop client surfaces a card titled "Peer minds". The user picks
-   either `any` (one-click full grant) or any combination of the seven
+   either `any` (one-click full grant) or any combination of the eight
    named permissions (`minds-create`, `minds-status`, `minds-logs`,
-   `minds-destroy`, `minds-destroying-status`, `minds-destroying-log`,
-   `minds-destroying-dismiss`).
+   `minds-list`, `minds-destroy`, `minds-destroying-status`,
+   `minds-destroying-log`, `minds-destroying-dismiss`).
 5. Desktop writes e.g. `{"minds": ["any"]}` into the agent's permissions
    file via the gateway's `permissions` extension.
 6. Agent retries the curl. Detent now matches; gateway looks up the
@@ -265,8 +270,8 @@ Agents created before this feature shipped have a host permissions
 file without the inline `minds` scope schemas, so detent cannot match
 the rule even after the user grants it. `minds run` runs an idempotent
 migration at startup that injects the `minds` scope schema plus the
-seven named-permission schemas (`minds-create`, `minds-status`,
-`minds-logs`, `minds-destroy`, `minds-destroying-status`,
+eight named-permission schemas (`minds-create`, `minds-status`,
+`minds-logs`, `minds-list`, `minds-destroy`, `minds-destroying-status`,
 `minds-destroying-log`, `minds-destroying-dismiss`) into any existing
 `hosts/<host_id>/latchkey_permissions.json` that is missing them. The
 migration also re-runs whenever the scope-level `path` pattern itself

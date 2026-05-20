@@ -116,7 +116,7 @@ def test_prepare_full_wiring_tunneled(tmp_path: Path) -> None:
             "domain": {"const": "127.0.0.1"},
             "path": {
                 "type": "string",
-                "pattern": r"^/api/(create-agent|destroy-agent|destroying)(/|$)",
+                "pattern": r"^/api/(create-agent|destroy-agent|destroying|list-agents)(/|$)",
             },
         },
         "required": ["domain", "path"],
@@ -145,6 +145,13 @@ def test_prepare_full_wiring_tunneled(tmp_path: Path) -> None:
                 "type": "string",
                 "pattern": r"^/api/create-agent/creation-[0-9a-f]{32}/logs$",
             },
+        },
+        "required": ["method", "path"],
+    }
+    assert schemas["minds-list"] == {
+        "properties": {
+            "method": {"const": "GET"},
+            "path": {"const": "/api/list-agents"},
         },
         "required": ["method", "path"],
     }
@@ -309,6 +316,7 @@ _MINDS_SCHEMA_KEYS_EXPECTED: tuple[str, ...] = (
     "minds-create",
     "minds-status",
     "minds-logs",
+    "minds-list",
     "minds-destroy",
     "minds-destroying-status",
     "minds-destroying-log",
@@ -359,6 +367,42 @@ def test_migration_is_idempotent(tmp_path: Path) -> None:
     assert ensure_minds_schema_in_existing_host_files(plugin_data_dir) == 0
     # Third run is also a no-op.
     assert ensure_minds_schema_in_existing_host_files(plugin_data_dir) == 0
+
+
+def test_migration_injects_minds_list_into_pre_list_file(tmp_path: Path) -> None:
+    """A file written before ``minds-list`` shipped gets the new schema injected without touching its rule list.
+
+    Simulates an install that already went through the create/destroy
+    schemas: the file has every minds schema except ``minds-list`` and
+    carries the older scope path pattern. The migration must both add
+    the ``minds-list`` schema and widen the scope-level path pattern.
+    """
+    plugin_data_dir = tmp_path / "mngr_latchkey"
+    host_dir = plugin_data_dir / "hosts" / "host-abc"
+    pre_list_minds_scope = {
+        "properties": {
+            "domain": {"const": "127.0.0.1"},
+            "path": {
+                "type": "string",
+                "pattern": r"^/api/(create-agent|destroy-agent|destroying)(/|$)",
+            },
+        },
+        "required": ["domain", "path"],
+    }
+    pre_list_schemas: dict[str, Any] = {"minds": pre_list_minds_scope}
+    # User had previously granted ``minds-create``; that rule must survive untouched.
+    existing_rule = {"minds": ["minds-create"]}
+    path = _write_host_permissions(host_dir, {"rules": [existing_rule], "schemas": pre_list_schemas})
+
+    migrated = ensure_minds_schema_in_existing_host_files(plugin_data_dir)
+
+    assert migrated == 1
+    on_disk = json.loads(path.read_text())
+    assert on_disk["rules"] == [existing_rule]
+    assert on_disk["schemas"]["minds-list"]["properties"]["path"] == {"const": "/api/list-agents"}
+    assert on_disk["schemas"]["minds-list"]["properties"]["method"] == {"const": "GET"}
+    # Scope pattern must have been widened to include ``list-agents``.
+    assert "list-agents" in on_disk["schemas"]["minds"]["properties"]["path"]["pattern"]
 
 
 def test_migration_skips_other_unrelated_schemas(tmp_path: Path) -> None:

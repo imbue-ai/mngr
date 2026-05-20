@@ -1150,6 +1150,58 @@ def _handle_destroying_dismiss_api(
     return Response(status_code=200, content="{}", media_type="application/json")
 
 
+def _handle_list_agents_api(
+    request: Request,
+    auth_store: AuthStoreDep,
+    backend_resolver: BackendResolverDep,
+) -> Response:
+    """GET /api/list-agents: enumerate this desktop client's peer minds.
+
+    Returns the union of workspace-primary agents known to the backend
+    resolver and any in-flight destroying records. The same set of
+    agents is what the destroy surface keys on, so a caller can hand
+    any ``agent_id`` from this response straight to
+    ``/api/destroy-agent/<agent_id>``.
+
+    Each entry carries the resolver's display fields plus an optional
+    ``destroying`` block populated from
+    :py:func:`imbue.minds.desktop_client.destroying.list_destroying`.
+    Destroying-only rows (agents that have already left the resolver
+    but whose teardown record still exists) carry null display fields.
+
+    Authenticates via either the desktop-client session cookie or a
+    bearer token, matching the create/destroy endpoints, so a peer
+    mind that has been granted the ``minds-list`` named permission can
+    curl this endpoint without ever seeing the token.
+    """
+    if not _is_api_authenticated(request=request, auth_store=auth_store):
+        return Response(status_code=403, content='{"error": "Not authenticated"}', media_type="application/json")
+
+    workspace_ids = backend_resolver.list_known_workspace_ids()
+    paths: WorkspacePaths | None = request.app.state.api_v1_paths
+    destroying_records = list_destroying(paths, frozenset(workspace_ids)) if paths is not None else {}
+
+    all_ids = sorted({str(agent_id) for agent_id in workspace_ids} | {str(agent_id) for agent_id in destroying_records})
+    agents: list[dict[str, object]] = []
+    for agent_id_str in all_ids:
+        agent_id = AgentId(agent_id_str)
+        display = backend_resolver.get_agent_display_info(agent_id)
+        record = destroying_records.get(agent_id)
+        destroying_block: dict[str, object] | None = None
+        if record is not None:
+            destroying_block = {"status": str(record.status).lower(), "pid_alive": record.pid_alive}
+        agents.append(
+            {
+                "agent_id": agent_id_str,
+                "agent_name": display.agent_name if display is not None else None,
+                "host_id": display.host_id if display is not None else None,
+                "workspace_name": backend_resolver.get_workspace_name(agent_id),
+                "destroying": destroying_block,
+            }
+        )
+    return Response(content=json.dumps({"agents": agents}), media_type="application/json")
+
+
 def _handle_destroying_page(
     agent_id: str,
     request: Request,
@@ -2336,6 +2388,9 @@ def create_desktop_client(
     app.get("/api/create-agent/{agent_id}/status")(_handle_creation_status_api)
     app.get("/api/create-agent/{agent_id}/logs")(_handle_creation_logs_sse)
     app.get("/creating/{agent_id}")(_handle_creating_page)
+
+    # Peer-mind enumeration
+    app.get("/api/list-agents")(_handle_list_agents_api)
 
     # Agent destruction routes
     app.post("/api/destroy-agent/{agent_id}")(_handle_destroy_agent_api)
