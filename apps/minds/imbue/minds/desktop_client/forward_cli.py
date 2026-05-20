@@ -157,7 +157,9 @@ class EnvelopeStreamConsumer(MutableModel):
         with self._lock:
             self._on_reverse_tunnel_established_callbacks.append(callback)
 
-    def add_on_system_interface_backend_failure_callback(self, callback: OnSystemInterfaceBackendFailureCallback) -> None:
+    def add_on_system_interface_backend_failure_callback(
+        self, callback: OnSystemInterfaceBackendFailureCallback
+    ) -> None:
         """Register a callback fired for each ``system_interface_backend_failure`` forward-stream envelope.
 
         The callback receives ``(agent_id, reason, status_code)``. ``reason``

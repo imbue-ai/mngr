@@ -98,7 +98,9 @@ class SystemInterfaceBackendFailurePayload(FrozenModel):
     )
 
 
-ForwardPayload = LoginUrlPayload | ListeningPayload | ReverseTunnelEstablishedPayload | SystemInterfaceBackendFailurePayload
+ForwardPayload = (
+    LoginUrlPayload | ListeningPayload | ReverseTunnelEstablishedPayload | SystemInterfaceBackendFailurePayload
+)
 
 
 class ForwardEnvelope(FrozenModel):

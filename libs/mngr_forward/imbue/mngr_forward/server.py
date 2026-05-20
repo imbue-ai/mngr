@@ -404,7 +404,10 @@ async def _forward_workspace_http(
 
     if backend_response.status_code in _INFRASTRUCTURE_5XX_STATUSES:
         _emit_backend_failure(
-            envelope_writer, agent_id, SystemInterfaceBackendFailureReason.FIVEXX_RESPONSE, backend_response.status_code
+            envelope_writer,
+            agent_id,
+            SystemInterfaceBackendFailureReason.FIVEXX_RESPONSE,
+            backend_response.status_code,
         )
 
     response = Response(content=backend_response.content, status_code=backend_response.status_code)
