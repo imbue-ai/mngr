@@ -785,25 +785,32 @@ def main() -> None:
     print("Regenerating uv.lock...")
     run("uv", "lock")
 
-    # Finalize each bumped package's per-project CHANGELOG.md: rename its
+    # Finalize each released package's per-project CHANGELOG.md: rename its
     # [Unreleased] section to [v<package-version>] - <date> and insert a
-    # fresh empty [Unreleased] above it. apps/<name>/ and dev/ changelogs
-    # are not versioned and stay untouched -- their entries accumulate in
-    # [Unreleased] indefinitely (the consolidator keeps appending there).
+    # fresh empty [Unreleased] above it. Covers both bumped packages (use
+    # the new version) and confirmed first-time publications (use the
+    # current version, since these publish without a bump). apps/<name>/
+    # and dev/ changelogs are not versioned and stay untouched -- their
+    # entries accumulate in [Unreleased] indefinitely (the consolidator
+    # keeps appending there).
     release_date = today_pacific()
     finalized_paths: list[Path] = []
-    for pypi_name, new_version in new_versions.items():
+    versions_to_finalize: dict[str, str] = {
+        **{name: current_versions[name] for name in confirmed_new},
+        **new_versions,
+    }
+    for pypi_name, version in versions_to_finalize.items():
         pkg = PACKAGE_BY_PYPI_NAME[pypi_name]
         pkg_changelog = REPO_ROOT / "libs" / pkg.dir_name / "CHANGELOG.md"
         if not pkg_changelog.exists():
             print(f"WARNING: {pkg.dir_name} has no CHANGELOG.md; skipping finalize.")
             continue
-        had_content = finalize_changelog_unreleased(pkg_changelog, new_version, release_date)
+        had_content = finalize_changelog_unreleased(pkg_changelog, version, release_date)
         rel = pkg_changelog.relative_to(REPO_ROOT)
         if had_content:
-            print(f"Finalized {rel}: [Unreleased] -> [v{new_version}] - {release_date}")
+            print(f"Finalized {rel}: [Unreleased] -> [v{version}] - {release_date}")
         else:
-            print(f"WARNING: [Unreleased] empty in {rel}; emitted empty [v{new_version}] section.")
+            print(f"WARNING: [Unreleased] empty in {rel}; emitted empty [v{version}] section.")
         finalized_paths.append(pkg_changelog)
 
     # Commit, tag, push
