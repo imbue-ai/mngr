@@ -493,42 +493,20 @@ def _changed_files_against_base() -> list[str]:
     return [line for line in result.stdout.splitlines() if line.strip()]
 
 
-# Files that are themselves changelog artifacts -- editing them should not
-# trigger a changelog-entry requirement for the project they live in.
-_CHANGELOG_ARTIFACT_BASENAMES: frozenset[str] = frozenset({"CHANGELOG.md", "UNABRIDGED_CHANGELOG.md"})
-
-
-def _is_changelog_artifact(rel_path: str) -> bool:
-    """Return True for paths that are themselves changelog artifacts.
-
-    Covers per-PR entry files (any file directly inside a known project's
-    ``<project_dir>/changelog/`` directory) and the consolidated
-    ``CHANGELOG.md`` / ``UNABRIDGED_CHANGELOG.md`` files at each project
-    root. Anchoring the entry-file match to a known project's entries
-    directory keeps unrelated paths like ``docs/changelog/intro.md`` from
-    silently bypassing the entry requirement.
-    """
-    path = Path(rel_path)
-    if path.name in _CHANGELOG_ARTIFACT_BASENAMES:
-        return True
-    project = project_for_path(rel_path, _REPO_ROOT)
-    expected_parent = project_entries_dir(project, _REPO_ROOT).relative_to(_REPO_ROOT)
-    return path.parent == expected_parent
-
-
 def _projects_requiring_entry(changed_files: list[str]) -> set[str]:
     """Return the set of projects this PR must produce a changelog entry for.
 
-    A project is "touched" iff the PR changes at least one non-changelog
-    file owned by it (see ``_is_changelog_artifact`` for the exclusion
-    rule). ``project_for_path`` handles the ``libs/<name>`` / ``apps/<name>``
-    / ``dev`` bucketing.
+    A project is "touched" iff the PR changes any file under it.
+    ``project_for_path`` handles the ``libs/<name>`` / ``apps/<name>`` /
+    ``dev`` bucketing. Files that are themselves changelog artifacts (entry
+    files, ``CHANGELOG.md``, ``UNABRIDGED_CHANGELOG.md``) are intentionally
+    *not* excluded -- adding an entry file inherently satisfies the
+    requirement, and a PR that only edits a project's consolidated changelog
+    should still describe that edit in a per-PR entry.
     """
     known = set(all_known_projects(_REPO_ROOT))
     touched: set[str] = set()
     for rel_path in changed_files:
-        if _is_changelog_artifact(rel_path):
-            continue
         project = project_for_path(rel_path, _REPO_ROOT)
         if project in known:
             touched.add(project)
@@ -541,7 +519,7 @@ def _projects_requiring_entry(changed_files: list[str]) -> set[str]:
 def test_pr_has_changelog_entry() -> None:
     """Ensure every PR branch has one changelog entry per project it touches.
 
-    For each project the PR changes a non-changelog file in (``libs/<name>``,
+    For each project the PR changes a file in (``libs/<name>``,
     ``apps/<name>``, or the synthetic ``dev`` bucket for root-level files),
     require ``<project_dir>/changelog/<branch-name>.md`` to exist (with
     slashes in the branch name replaced by dashes). The nightly consolidator
@@ -558,12 +536,6 @@ def test_pr_has_changelog_entry() -> None:
 
     changed_files = _changed_files_against_base()
     touched = _projects_requiring_entry(changed_files)
-
-    if not touched:
-        # PR is purely changelog edits (and not exempt). The consolidation
-        # cron is the only branch that hits this path today; if a human PR
-        # ends up here, treat it as a no-op rather than gating.
-        pytest.skip("PR touches only changelog artifacts; no per-project entries required.")
 
     sanitized = branch.replace("/", "-")
     missing: list[str] = []
