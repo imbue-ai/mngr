@@ -1680,7 +1680,7 @@ def _run_restart_sequence(
     Drives the health tracker to HEALTHY on recovery or RESTART_FAILED (with
     a reason) when a step errors or the system interface does not return
     within the shared startup-wait budget. A crash of this worker is turned
-    into RESTART_FAILED by ``_handle_restart_worker_failure``, wired as the
+    into RESTART_FAILED by ``_RestartWorkerFailureHandler``, wired as the
     thread's ``on_failure`` callback.
     """
     tier_label = "host restart" if is_host_restart else "system-interface restart"
