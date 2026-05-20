@@ -1,6 +1,6 @@
-"""Tracks per-agent workspace-server health for restart-recovery UX.
+"""Tracks per-agent system-interface health for restart-recovery UX.
 
-The plugin (``mngr_forward``) emits a ``workspace_backend_failure`` envelope
+The plugin (``mngr_forward``) emits a ``system_interface_backend_failure`` envelope
 each time it observes a backend failure (connect error, mid-SSE EOF, 5xx
 response). Minds routes those into ``record_failure``; an HTTP 200 probe
 hit from the background probe loop calls ``record_success``. The tracker
@@ -66,7 +66,7 @@ class _AgentRecord(MutableModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
 
-class WorkspaceServerHealthTracker(MutableModel):
+class SystemInterfaceHealthTracker(MutableModel):
     """Per-agent health state machine driven by failure / success events.
 
     Construct one per minds process; share with envelope-consumer callbacks
@@ -275,4 +275,4 @@ class WorkspaceServerHealthTracker(MutableModel):
             try:
                 callback(agent_id, new_health)
             except (OSError, RuntimeError, ValueError) as e:
-                logger.warning("WorkspaceServerHealthTracker on-change callback failed for {}: {}", agent_id, e)
+                logger.warning("SystemInterfaceHealthTracker on-change callback failed for {}: {}", agent_id, e)
