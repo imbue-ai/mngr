@@ -114,7 +114,10 @@ def test_prepare_full_wiring_tunneled(tmp_path: Path) -> None:
     assert schemas["minds"] == {
         "properties": {
             "domain": {"const": "127.0.0.1"},
-            "path": {"type": "string", "pattern": r"^/api/create-agent(/|$)"},
+            "path": {
+                "type": "string",
+                "pattern": r"^/api/(create-agent|destroy-agent|destroying)(/|$)",
+            },
         },
         "required": ["domain", "path"],
     }
@@ -141,6 +144,46 @@ def test_prepare_full_wiring_tunneled(tmp_path: Path) -> None:
             "path": {
                 "type": "string",
                 "pattern": r"^/api/create-agent/creation-[0-9a-f]{32}/logs$",
+            },
+        },
+        "required": ["method", "path"],
+    }
+    assert schemas["minds-destroy"] == {
+        "properties": {
+            "method": {"const": "POST"},
+            "path": {
+                "type": "string",
+                "pattern": r"^/api/destroy-agent/agent-[0-9a-f]{32}$",
+            },
+        },
+        "required": ["method", "path"],
+    }
+    assert schemas["minds-destroying-status"] == {
+        "properties": {
+            "method": {"const": "GET"},
+            "path": {
+                "type": "string",
+                "pattern": r"^/api/destroying/agent-[0-9a-f]{32}/status$",
+            },
+        },
+        "required": ["method", "path"],
+    }
+    assert schemas["minds-destroying-log"] == {
+        "properties": {
+            "method": {"const": "GET"},
+            "path": {
+                "type": "string",
+                "pattern": r"^/api/destroying/agent-[0-9a-f]{32}/log$",
+            },
+        },
+        "required": ["method", "path"],
+    }
+    assert schemas["minds-destroying-dismiss"] == {
+        "properties": {
+            "method": {"const": "POST"},
+            "path": {
+                "type": "string",
+                "pattern": r"^/api/destroying/agent-[0-9a-f]{32}/dismiss$",
             },
         },
         "required": ["method", "path"],
@@ -266,6 +309,10 @@ _MINDS_SCHEMA_KEYS_EXPECTED: tuple[str, ...] = (
     "minds-create",
     "minds-status",
     "minds-logs",
+    "minds-destroy",
+    "minds-destroying-status",
+    "minds-destroying-log",
+    "minds-destroying-dismiss",
 )
 
 
@@ -292,6 +339,11 @@ def test_migration_injects_schema_into_existing_file(tmp_path: Path) -> None:
         assert key in on_disk["schemas"]
     assert on_disk["schemas"]["minds-create"]["properties"]["path"] == {"const": "/api/create-agent"}
     assert on_disk["schemas"]["minds-status"]["properties"]["method"] == {"const": "GET"}
+    # Spot-check that the destroy schemas (a) are present and (b) carry
+    # the expected method, so the migration test actually exercises the
+    # destroy keys (not just the create ones).
+    assert on_disk["schemas"]["minds-destroy"]["properties"]["method"] == {"const": "POST"}
+    assert on_disk["schemas"]["minds-destroying-status"]["properties"]["method"] == {"const": "GET"}
 
 
 def test_migration_is_idempotent(tmp_path: Path) -> None:
@@ -381,8 +433,13 @@ def test_schema_admits_intended_requests_and_rejects_others(tmp_path: Path) -> N
     create = schemas["minds-create"]
     status = schemas["minds-status"]
     logs = schemas["minds-logs"]
+    destroy = schemas["minds-destroy"]
+    destroying_status = schemas["minds-destroying-status"]
+    destroying_log = schemas["minds-destroying-log"]
+    destroying_dismiss = schemas["minds-destroying-dismiss"]
 
     creation_id = "creation-" + "0" * 32
+    agent_id = "agent-" + "0" * 32
 
     def admits(schema: dict[str, Any], envelope: dict[str, Any]) -> bool:
         try:
@@ -397,9 +454,13 @@ def test_schema_admits_intended_requests_and_rejects_others(tmp_path: Path) -> N
     assert admits(scope, {**base, "path": "/api/create-agent"})
     assert admits(scope, {**base, "path": f"/api/create-agent/{creation_id}/status"})
     assert admits(scope, {**base, "path": f"/api/create-agent/{creation_id}/logs"})
+    assert admits(scope, {**base, "path": f"/api/destroy-agent/{agent_id}"})
+    assert admits(scope, {**base, "path": f"/api/destroying/{agent_id}/status"})
+    assert admits(scope, {**base, "path": f"/api/destroying/{agent_id}/log"})
+    assert admits(scope, {**base, "path": f"/api/destroying/{agent_id}/dismiss"})
     # Scope schema rejects anything off-prefix or off-domain.
-    assert not admits(scope, {**base, "path": "/api/destroy-agent/x"})
     assert not admits(scope, {**base, "path": "/anything-else"})
+    assert not admits(scope, {**base, "path": "/api/destroying-something-else"})
     assert not admits(scope, {"domain": "example.com", "path": "/api/create-agent"})
 
     # Named permissions admit exactly their (method, path).
@@ -415,3 +476,22 @@ def test_schema_admits_intended_requests_and_rejects_others(tmp_path: Path) -> N
     assert admits(logs, {"method": "GET", "path": f"/api/create-agent/{creation_id}/logs"})
     assert not admits(logs, {"method": "POST", "path": f"/api/create-agent/{creation_id}/logs"})
     assert not admits(logs, {"method": "GET", "path": f"/api/create-agent/{creation_id}/status"})
+
+    # Destroy named permissions.
+    assert admits(destroy, {"method": "POST", "path": f"/api/destroy-agent/{agent_id}"})
+    assert not admits(destroy, {"method": "GET", "path": f"/api/destroy-agent/{agent_id}"})
+    assert not admits(destroy, {"method": "POST", "path": "/api/destroy-agent/not-a-real-id"})
+    # Reject the CreationId shape (wrong prefix) -- destroy paths key on AgentId.
+    assert not admits(destroy, {"method": "POST", "path": f"/api/destroy-agent/{creation_id}"})
+
+    assert admits(destroying_status, {"method": "GET", "path": f"/api/destroying/{agent_id}/status"})
+    assert not admits(destroying_status, {"method": "POST", "path": f"/api/destroying/{agent_id}/status"})
+    assert not admits(destroying_status, {"method": "GET", "path": f"/api/destroying/{agent_id}/log"})
+
+    assert admits(destroying_log, {"method": "GET", "path": f"/api/destroying/{agent_id}/log"})
+    assert not admits(destroying_log, {"method": "POST", "path": f"/api/destroying/{agent_id}/log"})
+    assert not admits(destroying_log, {"method": "GET", "path": f"/api/destroying/{agent_id}/status"})
+
+    assert admits(destroying_dismiss, {"method": "POST", "path": f"/api/destroying/{agent_id}/dismiss"})
+    assert not admits(destroying_dismiss, {"method": "GET", "path": f"/api/destroying/{agent_id}/dismiss"})
+    assert not admits(destroying_dismiss, {"method": "POST", "path": f"/api/destroying/{agent_id}/status"})

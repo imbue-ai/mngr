@@ -1478,3 +1478,75 @@ def test_create_agent_api_returns_403_when_api_token_file_is_empty(tmp_path: Pat
     )
 
     assert response.status_code == 403
+
+
+def test_destroy_agent_api_accepts_valid_bearer_token(tmp_path: Path) -> None:
+    """POST /api/destroy-agent/<id> with a matching bearer token passes auth.
+
+    The bearer fixture leaves ``api_v1_paths is None``, so the handler
+    returns 501 once auth succeeds -- the 501 here means "auth passed
+    and execution reached the next gate", matching the create-side
+    pattern above.
+    """
+    client, auth_store = _bearer_test_client(tmp_path)
+    token = auth_store.get_api_token().get_secret_value()
+
+    response = client.post(
+        "/api/destroy-agent/{}".format(AgentId()),
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 501
+
+
+def test_destroy_agent_api_rejects_bearer_token_mismatch(tmp_path: Path) -> None:
+    """A wrong bearer token (and no cookie) still gets 403."""
+    client, _ = _bearer_test_client(tmp_path)
+
+    response = client.post(
+        "/api/destroy-agent/{}".format(AgentId()),
+        headers={"Authorization": "Bearer not-the-right-token"},
+    )
+
+    assert response.status_code == 403
+
+
+def test_destroying_status_api_accepts_valid_bearer_token(tmp_path: Path) -> None:
+    """GET /api/destroying/<id>/status accepts a valid bearer token."""
+    client, auth_store = _bearer_test_client(tmp_path)
+    token = auth_store.get_api_token().get_secret_value()
+
+    response = client.get(
+        "/api/destroying/{}/status".format(AgentId()),
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    # 404 = passed auth, no destroy record / no paths configured.
+    assert response.status_code == 404
+
+
+def test_destroying_log_api_accepts_valid_bearer_token(tmp_path: Path) -> None:
+    """GET /api/destroying/<id>/log accepts a valid bearer token."""
+    client, auth_store = _bearer_test_client(tmp_path)
+    token = auth_store.get_api_token().get_secret_value()
+
+    response = client.get(
+        "/api/destroying/{}/log".format(AgentId()),
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 404
+
+
+def test_destroying_dismiss_api_accepts_valid_bearer_token(tmp_path: Path) -> None:
+    """POST /api/destroying/<id>/dismiss accepts a valid bearer token."""
+    client, auth_store = _bearer_test_client(tmp_path)
+    token = auth_store.get_api_token().get_secret_value()
+
+    response = client.post(
+        "/api/destroying/{}/dismiss".format(AgentId()),
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    # 200 = passed auth; dismiss is a no-op when ``api_v1_paths is None``.
+    assert response.status_code == 200

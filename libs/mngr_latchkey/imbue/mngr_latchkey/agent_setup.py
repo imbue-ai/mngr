@@ -84,8 +84,8 @@ _AVAILABLE_PERMISSIONS_PATH_PATTERN: Final[str] = r"^/permissions/available/[a-z
 # peer-mind management endpoints. Mirrors the ``_SCOPE_LATCHKEY_SELF``
 # paradigm above: the scope schema constrains the domain + path prefix,
 # each named permission constrains a specific ``(method, path)`` pair. To
-# grow the scope (e.g. when destroy / list endpoints opt into bearer
-# auth), add a new permission entry and widen ``_MINDS_SCOPE_PATH_PATTERN``
+# grow the scope (e.g. when a new endpoint opts into bearer auth), add a
+# new permission entry and widen ``_MINDS_SCOPE_PATH_PATTERN``
 # accordingly. Defining everything in every per-agent permissions file
 # (rather than upstreaming to detent's built-in catalog) keeps the schema
 # self-contained: a user grant like ``{"minds": ["any"]}`` will match
@@ -93,11 +93,17 @@ _AVAILABLE_PERMISSIONS_PATH_PATTERN: Final[str] = r"^/permissions/available/[a-z
 # client picked this session. The scope is materialized but NOT pre-
 # granted -- agents go through the standard permission-request dialog
 # before their first spawn, and subsequent spawns reuse the rule the
-# user wrote on approval.
+# user wrote on approval. Today the scope spans both the create flow
+# (``/api/create-agent`` + status/logs) and the destroy flow
+# (``/api/destroy-agent`` + ``/api/destroying`` status/log/dismiss).
 _SCOPE_MINDS: Final[str] = "minds"
 _PERM_CREATE_MIND: Final[str] = "minds-create"
 _PERM_MIND_STATUS: Final[str] = "minds-status"
 _PERM_MIND_LOGS: Final[str] = "minds-logs"
+_PERM_DESTROY_MIND: Final[str] = "minds-destroy"
+_PERM_DESTROYING_STATUS: Final[str] = "minds-destroying-status"
+_PERM_DESTROYING_LOG: Final[str] = "minds-destroying-log"
+_PERM_DESTROYING_DISMISS: Final[str] = "minds-destroying-dismiss"
 
 _MINDS_HOST: Final[str] = "127.0.0.1"
 _MINDS_CREATE_AGENT_PATH: Final[str] = "/api/create-agent"
@@ -106,12 +112,20 @@ _MINDS_CREATE_AGENT_PATH: Final[str] = "/api/create-agent"
 # avoids admitting traversal-shaped segments or unrelated id schemes.
 _MINDS_STATUS_PATH_PATTERN: Final[str] = r"^/api/create-agent/creation-[0-9a-f]{32}/status$"
 _MINDS_LOGS_PATH_PATTERN: Final[str] = r"^/api/create-agent/creation-[0-9a-f]{32}/logs$"
+# Destroy paths key on the canonical ``AgentId`` (``agent-<32 hex>`` per
+# ``imbue.mngr.primitives.AgentId`` / ``imbue.imbue_common.ids.RandomId``)
+# rather than a CreationId: by the time a peer is destroyable, ``mngr
+# create`` has already returned its canonical agent id.
+_MINDS_DESTROY_AGENT_PATH_PATTERN: Final[str] = r"^/api/destroy-agent/agent-[0-9a-f]{32}$"
+_MINDS_DESTROYING_STATUS_PATH_PATTERN: Final[str] = r"^/api/destroying/agent-[0-9a-f]{32}/status$"
+_MINDS_DESTROYING_LOG_PATH_PATTERN: Final[str] = r"^/api/destroying/agent-[0-9a-f]{32}/log$"
+_MINDS_DESTROYING_DISMISS_PATH_PATTERN: Final[str] = r"^/api/destroying/agent-[0-9a-f]{32}/dismiss$"
 # Scope-level path-prefix gate. Necessary because detent ``any`` matches
 # every request satisfying the scope schema -- without this gate,
 # ``{"minds": ["any"]}`` would escape into every other ``127.0.0.1``
-# endpoint (the latchkey gateway itself, cookie-gated
-# ``/api/destroy-agent/...``, etc.).
-_MINDS_SCOPE_PATH_PATTERN: Final[str] = r"^/api/create-agent(/|$)"
+# endpoint (the latchkey gateway itself, the HTML ``/destroying/<id>``
+# detail page, etc.).
+_MINDS_SCOPE_PATH_PATTERN: Final[str] = r"^/api/(create-agent|destroy-agent|destroying)(/|$)"
 
 _AGENT_BASELINE_PERMISSIONS: Final[LatchkeyPermissionsConfig] = LatchkeyPermissionsConfig(
     rules=(
@@ -177,6 +191,34 @@ _AGENT_BASELINE_PERMISSIONS: Final[LatchkeyPermissionsConfig] = LatchkeyPermissi
             "properties": {
                 "method": {"const": "GET"},
                 "path": {"type": "string", "pattern": _MINDS_LOGS_PATH_PATTERN},
+            },
+            "required": ["method", "path"],
+        },
+        _PERM_DESTROY_MIND: {
+            "properties": {
+                "method": {"const": "POST"},
+                "path": {"type": "string", "pattern": _MINDS_DESTROY_AGENT_PATH_PATTERN},
+            },
+            "required": ["method", "path"],
+        },
+        _PERM_DESTROYING_STATUS: {
+            "properties": {
+                "method": {"const": "GET"},
+                "path": {"type": "string", "pattern": _MINDS_DESTROYING_STATUS_PATH_PATTERN},
+            },
+            "required": ["method", "path"],
+        },
+        _PERM_DESTROYING_LOG: {
+            "properties": {
+                "method": {"const": "GET"},
+                "path": {"type": "string", "pattern": _MINDS_DESTROYING_LOG_PATH_PATTERN},
+            },
+            "required": ["method", "path"],
+        },
+        _PERM_DESTROYING_DISMISS: {
+            "properties": {
+                "method": {"const": "POST"},
+                "path": {"type": "string", "pattern": _MINDS_DESTROYING_DISMISS_PATH_PATTERN},
             },
             "required": ["method", "path"],
         },
@@ -331,6 +373,10 @@ _MINDS_SCHEMA_KEYS: Final[tuple[str, ...]] = (
     _PERM_CREATE_MIND,
     _PERM_MIND_STATUS,
     _PERM_MIND_LOGS,
+    _PERM_DESTROY_MIND,
+    _PERM_DESTROYING_STATUS,
+    _PERM_DESTROYING_LOG,
+    _PERM_DESTROYING_DISMISS,
 )
 
 
@@ -345,9 +391,9 @@ def ensure_minds_schema_in_existing_host_files(plugin_data_dir: Path) -> int:
 
     This idempotent migration walks every
     ``<plugin_data_dir>/hosts/<host_id>/latchkey_permissions.json``,
-    parses it, and rewrites it whenever any of the four ``minds`` schema
-    keys is missing or stale. Files whose schemas already match are
-    skipped. Files that cannot be parsed as a
+    parses it, and rewrites it whenever any of the ``minds`` schema
+    keys (see ``_MINDS_SCHEMA_KEYS``) is missing or stale. Files whose
+    schemas already match are skipped. Files that cannot be parsed as a
     :class:`LatchkeyPermissionsConfig` (malformed JSON, or a shape that
     fails model validation -- e.g. a non-dict ``schemas`` block) are
     logged at warning level and left untouched.

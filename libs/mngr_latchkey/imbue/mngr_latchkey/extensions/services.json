@@ -461,6 +461,14 @@
   "minds": {
     "scope": "minds",
     "display_name": "Peer minds",
-    "permissions": ["minds-create", "minds-status", "minds-logs"]
+    "permissions": [
+      "minds-create",
+      "minds-status",
+      "minds-logs",
+      "minds-destroy",
+      "minds-destroying-status",
+      "minds-destroying-log",
+      "minds-destroying-dismiss"
+    ]
   }
 }

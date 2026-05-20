@@ -157,8 +157,11 @@ def _is_api_authenticated(
     The bearer token is the per-installation minds API token persisted
     under the auth data dir and registered with latchkey via ``latchkey
     auth set minds``. Lets a peer mind drive ``/api/create-agent`` (and
-    its status/logs siblings) without ever seeing the credential itself
-    -- latchkey injects the ``Authorization`` header at request time.
+    its status/logs siblings) as well as ``/api/destroy-agent/<id>`` and
+    its ``/api/destroying/<id>/{status,log,dismiss}`` siblings without
+    ever seeing the credential itself -- latchkey injects the
+    ``Authorization`` header at request time, gated by user-granted
+    detent permissions under the ``minds`` scope.
     """
     if _is_authenticated(cookies=request.cookies, auth_store=auth_store):
         return True
@@ -1013,8 +1016,13 @@ async def _handle_destroy_agent_api(
     Always returns ``redirect_url: "/"`` so the settings-page JS can
     immediately navigate to the landing page (where the destroying
     marker is already visible).
+
+    Authenticates via either the desktop-client session cookie (browser
+    callers) or a bearer token (latchkey-mediated agent callers), so a
+    peer mind that has been granted the ``minds-destroy`` named
+    permission can curl this endpoint without ever seeing the token.
     """
-    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
+    if not _is_api_authenticated(request=request, auth_store=auth_store):
         return Response(status_code=403, content='{"error": "Not authenticated"}', media_type="application/json")
 
     paths: WorkspacePaths | None = request.app.state.api_v1_paths
@@ -1057,8 +1065,12 @@ def _handle_destroying_status_api(
     request: Request,
     auth_store: AuthStoreDep,
 ) -> Response:
-    """GET /api/destroying/<agent_id>/status: live status of a destroy."""
-    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
+    """GET /api/destroying/<agent_id>/status: live status of a destroy.
+
+    Authenticates via either the desktop-client session cookie or a
+    bearer token, matching ``_handle_destroy_agent_api``.
+    """
+    if not _is_api_authenticated(request=request, auth_store=auth_store):
         return Response(status_code=403, content='{"error": "Not authenticated"}', media_type="application/json")
     paths: WorkspacePaths | None = request.app.state.api_v1_paths
     if paths is None:
@@ -1086,8 +1098,12 @@ def _handle_destroying_log_api(
     request: Request,
     auth_store: AuthStoreDep,
 ) -> Response:
-    """GET /api/destroying/<agent_id>/log?after=<bytes>: tail the destroy log."""
-    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
+    """GET /api/destroying/<agent_id>/log?after=<bytes>: tail the destroy log.
+
+    Authenticates via either the desktop-client session cookie or a
+    bearer token, matching ``_handle_destroy_agent_api``.
+    """
+    if not _is_api_authenticated(request=request, auth_store=auth_store):
         return Response(status_code=403, content='{"error": "Not authenticated"}', media_type="application/json")
     paths: WorkspacePaths | None = request.app.state.api_v1_paths
     if paths is None:
@@ -1119,8 +1135,12 @@ def _handle_destroying_dismiss_api(
     request: Request,
     auth_store: AuthStoreDep,
 ) -> Response:
-    """POST /api/destroying/<agent_id>/dismiss: remove the destroy record."""
-    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
+    """POST /api/destroying/<agent_id>/dismiss: remove the destroy record.
+
+    Authenticates via either the desktop-client session cookie or a
+    bearer token, matching ``_handle_destroy_agent_api``.
+    """
+    if not _is_api_authenticated(request=request, auth_store=auth_store):
         return Response(status_code=403, content='{"error": "Not authenticated"}', media_type="application/json")
     paths: WorkspacePaths | None = request.app.state.api_v1_paths
     if paths is None:
