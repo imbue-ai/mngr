@@ -34,6 +34,8 @@ from imbue.minds.desktop_client.conftest import FAKE_CONNECTOR_URL
 from imbue.minds.desktop_client.conftest import FakeImbueCloudCli
 from imbue.minds.desktop_client.imbue_cloud_cli import LiteLLMKeyMaterial
 from imbue.minds.desktop_client.notification import NotificationDispatcher
+from imbue.minds.desktop_client.workspace_server_health import AgentHealth
+from imbue.minds.desktop_client.workspace_server_health import WorkspaceServerHealthTracker
 from imbue.minds.primitives import AIProvider
 from imbue.minds.primitives import CreationId
 from imbue.minds.primitives import LaunchMode
@@ -236,6 +238,7 @@ def _make_test_creator(
     timeout_seconds: float = 1.0,
     poll_interval_seconds: float = 0.05,
     probe_timeout_seconds: float = 0.5,
+    workspace_health_tracker: WorkspaceServerHealthTracker | None = None,
 ) -> AgentCreator:
     paths = WorkspacePaths(data_dir=tmp_path)
     cg = ConcurrencyGroup(name="agent-creator-test")
@@ -249,6 +252,7 @@ def _make_test_creator(
         workspace_ready_timeout_seconds=timeout_seconds,
         workspace_ready_poll_interval_seconds=poll_interval_seconds,
         workspace_ready_probe_timeout_seconds=probe_timeout_seconds,
+        workspace_health_tracker=workspace_health_tracker or WorkspaceServerHealthTracker(),
     )
 
 
@@ -338,6 +342,44 @@ def test_wait_for_workspace_ready_returns_when_probe_succeeds(tmp_path) -> None:
         drained.append(log_q.get_nowait())
     assert any("Waiting for workspace" in line for line in drained)
     assert any("ready" in line.lower() for line in drained)
+
+
+def test_wait_for_workspace_ready_calls_record_success_on_ready(tmp_path) -> None:
+    """Regression: a successful readiness probe must propagate to the health tracker.
+
+    Without the ``record_success`` call, a HEALTHY->STUCK timer armed by an
+    earlier ``workspace_backend_failure`` envelope would fire AFTER readiness
+    returned, the chrome SSE would receive ``status=stuck``, and the user
+    would land on the workspace-recovery page seconds after their freshly
+    created agent appeared healthy. See ``workspace_server_health.py`` for
+    the timer's lifecycle.
+    """
+    tracker = WorkspaceServerHealthTracker()
+    aid = AgentId.generate()
+    # Pre-arm the STUCK timer the way an in-flight warmup failure would.
+    # The agent stays HEALTHY until the 5s timer fires; we want to verify
+    # ``record_success`` cancels the timer before that.
+    tracker.record_failure(aid)
+    assert tracker.get_health(aid) == AgentHealth.HEALTHY
+    server, _thread, port = _start_scripted_server(not_ready_count=0)
+    try:
+        creator = _make_test_creator(
+            tmp_path,
+            mngr_forward_port=port,
+            preauth_cookie="any-preauth",
+            timeout_seconds=2.0,
+            poll_interval_seconds=0.02,
+            probe_timeout_seconds=0.5,
+            workspace_health_tracker=tracker,
+        )
+        creator._wait_for_workspace_ready(aid, queue.Queue())
+    finally:
+        server.shutdown()
+    # ``record_success`` cancelled the timer + cleared first_failure_at, so
+    # any subsequent record_failure would arm a fresh timer (i.e. the
+    # tracker is no longer mid-failing-run for this agent).
+    assert tracker.get_health(aid) == AgentHealth.HEALTHY
+    assert aid not in tracker.snapshot_all()
 
 
 def test_wait_for_workspace_ready_publishes_anyway_on_timeout(tmp_path) -> None:
@@ -431,6 +473,7 @@ def _make_creator_with_cli(tmp_path: Path, cli: _RecordingImbueCloudCli) -> Agen
         root_concurrency_group=cg,
         notification_dispatcher=NotificationDispatcher.create(is_electron=False, tkinter_module=None, is_macos=False),
         imbue_cloud_cli=cli,
+        workspace_health_tracker=WorkspaceServerHealthTracker(),
     )
 
 
