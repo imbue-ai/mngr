@@ -4,6 +4,692 @@ Full, unedited changelog entries consolidated nightly from individual files in t
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-05-19
+
+Workspace-server restart and health-recovery UI on the `mngr_forward` plugin architecture.
+
+User-visible changes:
+
+- When an agent's workspace server stops responding, the chrome auto-navigates the workspace view to a recovery page where the user can restart the server. The recovery page streams server-status updates over SSE and reloads back to the workspace once the server is healthy again.
+- The landing page now annotates each project row with a status badge when its workspace server is unresponsive or restarting; clicking such a row goes to the recovery page instead of the workspace.
+- The sidebar context menu gained a "Restart workspace server" entry that opens the recovery page for the selected workspace.
+- A dedicated recovery page (`/agents/<id>/recovery`) renders the restart button, streams server-status updates via SSE, and auto-reloads back to the workspace once the server is healthy again.
+- The plugin emits `workspace_backend_failure` envelopes when it sees connection errors, mid-SSE EOF, or 5xx responses from the workspace backend. Minds tracks these as a per-agent state machine (HEALTHY -> STUCK after 5 seconds of continuous failures -> RESTARTING during a user-triggered restart -> back to HEALTHY on the first successful probe).
+
+Restart UX improvements on top of the above:
+
+- The plugin's 503 fallback page (shown while the workspace server is
+  unreachable) is now a styled card with a loading spinner instead of the
+  blank "Backend not yet available. Retrying..." page. It still auto-refreshes
+  every second.
+- The `/api/agents/<id>/restart-workspace-server` endpoint now returns 200
+  as soon as the `mngr exec` kill dispatch completes (it no longer blocks
+  for up to 15 seconds polling the workspace through the plugin). The
+  background workspace-health probe loop continues to flip the tracker back
+  to HEALTHY once the workspace is responsive. This makes the endpoint a
+  reliable "the workspace has been killed" signal for callers that want to
+  navigate to the plugin's loader page.
+- The recovery page's "Restart workspace server" button and the sidebar
+  right-click "Restart workspace server" menu item now both await the
+  restart API response before navigating to the workspace URL. Previously
+  they fired the POST and navigated immediately, which on a still-healthy
+  workspace raced against the in-flight kill and silently reloaded onto
+  the unchanged iframe. Awaiting guarantees the user lands on the plugin's
+  "Workspace server starting..." loader.
+- The recovery page now notes that running agents are not interrupted by a
+  workspace-server restart.
+- Stale failure envelopes arriving immediately after a successful restart
+  no longer cause a brief recovery-page flash; the health tracker now
+  ignores failures within a short grace window after recovery.
+- The "Workspace server starting" loader spinner no longer visibly jumps
+  on each refresh. The spinner's animation duration now matches the page's
+  1-second auto-refresh interval, so the spinner is at the cycle boundary
+  (rather than 90 degrees past it) when the reload fires.
+
+- The `permission-requests` latchkey gateway extension now expects POST
+  bodies with the fields `agent_id`, `scope` (string), `permissions`
+  (list of strings), and `rationale` in place of the previous
+  `service_name` field. Pending requests are stored under
+  `<latchkey-directory>/permission_requests/v1/` so any existing files
+  left over from the old shape are silently ignored.
+- The `permissions` latchkey gateway extension now exposes two new
+  catalog endpoints: `GET /permissions/available` returns the full
+  catalog as a JSON object keyed by raw service name, and
+  `GET /permissions/available/<service_name>` returns a single entry
+  (or 404 if the service is unknown). Each catalog value has the
+  shape `{"scope": "<schema_name>", "display_name": "...",
+  "permissions": [...]}`. The catalog is backed by a `services.json`
+  data file that ships alongside the extensions and is materialized
+  into `LATCHKEY_DIRECTORY/extensions/` together with the `.mjs` files
+  at gateway-spawn time.
+- The default permissions seeded for every new agent are broadened to
+  let the agent read its own current permissions
+  (`GET /permissions/self`) and read the per-service catalog entry
+  (`GET /permissions/available/<service_name>`) in addition to the
+  existing ability to file a new permission request
+  (`POST /permission-requests`). The catalog read is granted under a
+  path-pattern Detent permission schema (matching
+  `/permissions/available/<service_name>` only) so the agent baseline
+  does not also expose the unbounded collection endpoint.
+- The minds desktop client has been adapted to the new request shape:
+  `LatchkeyPermissionRequestEvent` now carries `scope` (Detent schema)
+  and `permissions` (the agent's requested list) instead of
+  `service_name`. The previously-bundled
+  `apps/minds/imbue/minds/desktop_client/latchkey/services.toml` has
+  been deleted; the desktop client now lazily fetches the catalog from
+  the gateway's `/permissions/available` endpoint (cached in process)
+  to look up display names and the legal permission set. The grant
+  dialog continues to render the display name ("Slack" etc.) and lets
+  the user broaden or narrow the requested permission set.
+- The minds desktop client now tolerates legacy response events on
+  disk. Older versions wrote a ``service_name`` field on each
+  ``RequestResponseEvent``; the current schema replaced it with
+  ``scope``. Without a migration the historical events.jsonl emitted
+  a pydantic-extras warning per legacy line at every minds startup
+  and the corresponding request would not be marked resolved. The
+  loader now drops ``service_name`` before validating, so historical
+  responses load cleanly and their requests are correctly filtered
+  out of the pending list. The dropped ``service_name`` is
+  informational only -- pending-request filtering uses
+  ``request_event_id`` -- so no functional information is lost.
+- The streamed-permission-request handler now dedupes redeliveries by
+  ``event_id``. The gateway re-emits every still-pending request on
+  each stream reconnect (every couple of seconds when idle), but the
+  handler used to append a fresh entry to the in-memory request inbox
+  and emit an INFO log line + an SSE wake-up for every redelivery. The
+  ``requests`` list therefore grew unbounded for as long as a request
+  stayed pending, and the desktop log filled with duplicate ``Streamed
+  latchkey permission request ...`` lines. The handler now checks the
+  inbox for the incoming ``event_id`` first and no-ops on a match.
+- Fixed a startup race where the minds desktop client could cache a
+  stale latchkey gateway port and then fail every subsequent call
+  with ``[Errno 111] Connection refused``. The race occurred because
+  the supervisor restart and the gateway-client pre-warm previously
+  ran on independent background threads at minds startup: the
+  gateway client could observe the previous supervisor's record
+  (still on disk, still alive) before the restart deleted that
+  record and stamped the fresh port. Two fixes:
+  - ``LatchkeyGatewayClient`` now self-heals from a stale cached
+    gateway URL on connect-level transport failures
+    (``httpx.ConnectError`` / ``httpx.ConnectTimeout``): the cached
+    URL is invalidated and the next call re-resolves the port from
+    the supervisor's on-disk record. Non-connect errors (read
+    failures mid-stream, 5xx responses, etc.) continue to propagate
+    without invalidation, since those usually indicate a problem at
+    the gateway end rather than a stale local cache.
+  - The supervisor restart and the gateway-client pre-warm now run
+    sequentially on a single background thread, eliminating the
+    race in the first place. App startup is unaffected: this still
+    runs in a background thread, so the supervisor restart's 10s
+    SIGTERM grace never blocks the foreground startup path.
+- ``LatchkeyGatewayClient.get_available_services`` now returns a typed
+  ``dict[str, AvailableServiceEntry]`` (pydantic-validated) instead of
+  the previous untyped ``dict[str, object]``. Wire-shape validation
+  (missing fields, wrong types, empty strings) now happens inside the
+  client and surfaces as ``LatchkeyGatewayClientError``; the catalog
+  module that consumes the result has been simplified accordingly
+  and no longer maintains its own parallel ``_RawServiceEntry`` /
+  ``MalformedServicesCatalogError`` validation layer.
+- The latchkey permission dialog no longer pre-checks the catch-all
+  ``any`` permission as an implicit default. ``any`` is still offered
+  as the first checkbox so the user can opt into unrestricted access
+  explicitly, but the initial check state is now the union of (a)
+  permissions already granted for the scope on the agent's host and
+  (b) the permissions the agent declared in the request event.
+  Approving without modification therefore grants exactly that union
+  (matching the user's mental model of "give the agent what it's
+  asking for, on top of what it already has"). Previously, existing
+  grants alone seeded the pre-check and the agent's new ask was
+  ignored unless the user actively ticked it; under the new behavior
+  an unmodified Approve actually delivers the requested permissions.
+
+Fixed a race condition in `mngr_latchkey`'s per-directory encryption-key
+resolution where a concurrent caller could read the on-disk key file
+while another process was mid-write, observing an empty string. The key
+file is now published atomically by writing to a sibling temp file,
+`fsync`ing it, and `os.link`-ing it into the final path -- so the final
+path only ever exists with complete contents.
+
+`mngr rename` now works against offline hosts: when the agent's host is
+not online, the rename (and any `-l KEY=VALUE` labels) are written to
+the provider's persisted agent data without starting the host. The
+`--start/--no-start` flag still exists but now defaults to `--no-start`;
+pass `--start` to force the host online first so tmux and the env file
+are updated alongside data.json.
+
+## 2026-05-18
+
+Minds: start the latchkey gateway client lazily on a background thread so `minds run` no longer blocks on the `mngr latchkey forward` supervisor binding its gateway port. Callers that need the gateway (the permission-request stream consumer and the FastAPI request handlers) wait on `ensure_initialized()` themselves the first time they use the client.
+
+- `mngr_lima`: switch the serial-log tailer to `tail -F`. The previous `tail --follow=name --retry` is GNU-only; BSD tail (macOS) rejects it with "unrecognized option" and exits immediately, silently losing the serial-log diagnostics during Lima VM boot. `tail -F` is portable: GNU's `-F` is documented as equivalent to `--follow=name --retry`, and BSD's `-F` is documented to wait for a non-existent file to appear and follow it on creation. Empirically verified on both platforms (GNU coreutils 9.4 in a Lima Ubuntu 24.04 guest, and macOS aarch64).
+
+## Modal provider no longer auto-creates an environment from non-create commands
+
+`mngr list`, `mngr gc`, and other read flows no longer silently bootstrap a
+Modal environment (the `Created Modal environment: ...` log line) just because
+the modal provider is enabled. The Modal provider now disables itself (raises
+`ProviderUnavailableError`, which higher-level loaders skip) when its per-user
+Modal environment doesn't exist yet. Only `mngr create` is allowed to bootstrap
+the environment on first use.
+
+This is plumbed through a new `is_for_host_creation: bool = False` parameter on
+`ProviderBackendInterface.build_provider_instance` / `api.providers.get_provider_instance`,
+which all other backends accept and ignore. `mngr create` passes `True`; every
+other path leaves the default.
+
+Batch of `minds env deploy` / connector follow-ups from the F-numbered
+findings in `MANUAL_DEPLOY_FINDINGS.md`:
+
+- `_authenticate_supertokens` now passes
+  ``override_global_claim_validators=lambda *_: []`` to the SuperTokens
+  session getter so the explicit ``if not is_verified: raise 401
+  "Email not verified"`` check fires for unverified tokens instead of
+  being shadowed by the SDK's generic ``Invalid token`` rejection. The
+  matching ``_get_user_id_from_access_token`` helper also skips claim
+  validation so flows like ``/auth/session/revoke`` (sign-out) work
+  for unverified users -- they legitimately need to sign out of a
+  session they never finished verifying. (F6)
+- Connector exposes a new no-auth ``GET /health/liveness`` route
+  returning ``{"status": "ok"}``. ``minds env deploy``'s post-deploy
+  health check now polls it instead of ``/docs`` (smaller, faster,
+  symmetric with the LiteLLM proxy's existing liveness probe). The
+  per-attempt HTTP timeout bumped from 3s to 10s and the total budget
+  from 30s to 60s so cold-booting Modal containers have a realistic
+  chance to respond before being declared unhealthy. (F2, F3)
+- ``DELETE /tunnels/{name}`` and ``POST /hosts/{id}/release`` are now
+  idempotent at the HTTP layer: a second call against an already-
+  deleted tunnel or already-released host returns 200 with
+  ``{"status": "already_deleted"}`` / ``{"status": "already_released"}``
+  instead of 404. Clients retrying after a transient error no longer
+  have to special-case 404. (F7, F30)
+- ``DeployLifecycleConfig`` has a new pydantic model validator that
+  rejects ``writes_local_state=true`` + ``creates_resources=false``
+  at deploy.toml parse time. The combination would previously have
+  AssertionError'd partway through deploy AFTER both Modal apps had
+  been deployed; failing at config load is far less surprising. The
+  matching asserts in ``deploy_env`` stay as defense-in-depth for
+  non-CLI callers. (F18)
+- ``minds env deploy`` runs ``apply_pool_hosts_migrations`` for every
+  tier instead of only the dev tier. Shared tiers (staging /
+  production) source the host_pool DSN from ``DATABASE_URL`` in their
+  operator-managed ``secrets/minds/<tier>/neon`` Vault entry. Without
+  this, a new ``.sql`` migration shipped via PR would apply to dev
+  envs immediately but never to staging / production until the
+  operator ran psql manually -- and the two schemas would diverge.
+  (F17)
+- ``minds env destroy`` proceeds with cloud-side cleanup even when the
+  local env root has already been removed by hand. The cloud-side
+  resources are keyed off the env *name*, not the local directory, so
+  an operator who ``rm -rf``'d ``~/.minds-<env>/`` can still re-run
+  destroy by name to clean up Modal apps / Neon / SuperTokens /
+  Cloudflare tunnels / OVH instances. ``destroy_env`` no longer
+  raises ``DevEnvNotFoundError`` for missing-root; it logs a warning
+  and proceeds. Step 1 (``mngr destroy`` per agent) becomes a no-op
+  since the agents directory is gone too. (F22)
+- ``per_env_connector_url`` / ``per_env_litellm_proxy_url`` now take
+  the ``tier`` as a keyword arg. The dev URLs stay shaped as
+  ``rsc-dev`` / ``llm-dev`` so existing per-env deployments keep
+  working without a redeploy, but any future ``PER_ENV`` tier other
+  than dev gets the right ``rsc-<tier>`` segment automatically
+  instead of silently colliding on the hardcoded ``dev`` segment.
+  (F24)
+- ``minds env deploy``'s ``find_monorepo_root`` check happens BEFORE
+  the Vault credential read in the CLI and BEFORE
+  ``make_deploy_id`` inside ``deploy_env``. Running from outside
+  the monorepo now fails immediately with a clean error rather than
+  reading Vault first and logging a misleading "Deploy id: ..."
+  line. (F15)
+- ``minds env list`` resolves the reserved tiers' (``production`` /
+  ``staging``) client.toml to the committed in-repo
+  ``apps/minds/imbue/minds/config/envs/<tier>/client.toml`` instead
+  of showing ``(no client.toml)``. The ``DevEnvSummary`` gains a
+  ``client_config_source: "env_root" | "in_repo" | None`` field so
+  machine consumers can distinguish "per-env file" from "in-repo
+  file" from "unprovisioned." Human-format output now reads
+  ``<path>  (in-repo, committed)`` for reserved tiers and
+  ``(no client.toml -- run `minds env deploy`)`` for unprovisioned
+  dev envs. (F11)
+- The ``litellm-connector`` Modal Secret no longer appears in
+  ``[secrets].services`` -- it was never vault-backed (no
+  ``secrets/minds/<tier>/litellm-connector`` Vault entry exists),
+  and the carve-out (``_DERIVED_ONLY_SECRET_SERVICES``) that
+  suppressed a misleading per-deploy warning was a code smell. The
+  deploy now pushes the secret as a separate code-driven step at
+  the end of the secret-push loop; ``_DERIVED_ONLY_SECRET_SERVICES``
+  is deleted. ``[secrets].services`` in every tier's deploy.toml
+  becomes a truthful "vault-backed only" list. The post-deploy GC
+  picks up ``litellm-connector-<tier>-<deploy_id>`` secrets via the
+  same suffix-match pattern, so no GC bookkeeping changes. (F25)
+- Recover changes: when the captured pre-deploy app version is
+  ``None`` (a first-ever deploy of this env / tier), ``minds env
+  recover`` now ``modal app stop``s the deployed app instead of
+  leaving it running -- otherwise the just-deleted Modal Secrets
+  would leave the app 500'ing on every request. (F19)
+- The recover-target file is per-env: each in-flight deploy gets
+  its own ``.minds-deploy-recover-target-<env>.json`` at the
+  monorepo root, so concurrent deploys against different envs don't
+  refuse each other (useful for parallel test runs). The
+  environment-scoped commands (``deploy`` / ``destroy``) refuse only
+  if THEIR env's file exists; the env-agnostic commands (``activate``
+  / ``deactivate`` / ``list``) still refuse loud if ANY recover-
+  target file exists (listing all in the error). ``deploy_env`` and
+  ``recover_env`` additionally hold a per-env ``flock`` on
+  ``.minds-deploy-lock-<env>.lock`` for their entire process
+  lifecycle, so two concurrent invocations against the same env
+  serialize at the kernel level. (F26)
+- Doc / spec updates: comment on the connector's ``/generation`` env
+  var now explains empty-string is the steady state for
+  ``tracks_generation=false`` tiers (not a legacy artifact). Spec
+  ``specs/minds-deploy-safety-overhaul/spec.md`` updated to use
+  branch-based Neon-snapshot terminology (the implementation pivoted
+  from the spec's original named-restore-point design because Neon's
+  named-restore-point API is org-tier-gated) and to refer to
+  ``/health/liveness`` on both apps. ``modal_litellm``'s README +
+  module docstring drop the wrong ``/anthropic`` suffix from the
+  documented ``ANTHROPIC_BASE_URL`` -- the Anthropic SDK appends
+  ``/v1/messages`` itself, which lands on LiteLLM's native route
+  that already accepts the Anthropic request shape. (F1, F4, F9,
+  F20)
+
+Minds dev-environment fixes:
+
+- Hard-enforces the `dev-<your-user>` naming convention for dev envs:
+  `DevEnvName` rejects anything that does not start with `dev-`, and
+  `MINDS_ROOT_NAME_PATTERN` only accepts `minds`, `minds-staging`, or
+  `minds-dev-<rest>`. Dev env roots come out tier-first as
+  `~/.minds-dev-<your-user>/` and `MINDS_ROOT_NAME=minds-dev-<your-user>`.
+- `minds env activate` now exports `MODAL_PROFILE` derived from the
+  activated tier's committed `modal_workspace`. Every subsequent
+  `modal` CLI shellout (deploy, secret create, environment create) is
+  pinned to the right workspace regardless of which profile is marked
+  `active = true` in `~/.modal.toml`. Prerequisite: the operator must
+  have a matching profile in `~/.modal.toml` for each tier
+  (`modal token set --profile <workspace>` once per tier). Skipped
+  when the tier's `modal_workspace` is still the literal `CHANGE_ME`
+  placeholder.
+- Renamed `vps_ip` -> `vps_address` end-to-end: API models
+  (`LeaseResult`, `LeasedHostInfo`, `LeaseHostResponse`), all Python
+  call sites, AND the `pool_hosts.vps_ip` DB column. Migration ships
+  as `apps/remote_service_connector/migrations/003_vps_address.sql`
+  (idempotent rename). The field can hold a public IPv4 or a DNS
+  hostname (e.g. OVH's `vps-eec8860b.vps.ovh.us`).
+- `min_containers` for the deployed `remote-service-connector-<tier>`
+  and `litellm-proxy-<tier>` Modal apps is now driven by a tier's
+  committed `deploy.toml` via a new `[min_containers]` block (fields:
+  `connector`, `litellm_proxy`). Defaults to 0 in the Pydantic model;
+  staging / production deploy.toml ship with `1` for both. The values
+  thread into `modal deploy` as `MINDS_CONNECTOR_MIN_CONTAINERS` /
+  `MINDS_LITELLM_PROXY_MIN_CONTAINERS`, which the modal app modules
+  read at import time.
+- Per-dev-env Neon **project** (not just a database): each dev env
+  now owns a brand-new Neon project named `minds-<env>` under the
+  dev-tier Neon org, containing two databases (`host_pool` and
+  `litellm_cost`). `minds env deploy` provisions the project and
+  applies the `pool_hosts` schema (via `apps/remote_service_connector/
+  migrations/*.sql`) to `host_pool` automatically. `minds env destroy`
+  deletes the project outright -- atomic teardown of both DBs, roles,
+  and the project's pooler endpoint.
+
+  The deploy now overrides BOTH `neon.DATABASE_URL` and
+  `litellm.DATABASE_URL` in the per-env Modal Secrets with the per-env
+  project's two DSNs, so the connector and the LiteLLM proxy talk to
+  the same env-isolated Neon project. The per-env `secrets.toml` on
+  disk grows two fields (`NEON_HOST_POOL_DSN`, `NEON_LITELLM_DSN`,
+  replacing the single `NEON_POOLED_DSN`).
+
+  Vault `secrets/minds/<tier>/neon-admin` now expects `NEON_ORG_ID`
+  (instead of `NEON_PROJECT_ID`). The token must have project-create
+  scope on the dev tier's Neon org.
+
+  `mngr imbue_cloud admin pool create` and friends now auto-resolve
+  `--database-url` from the activated minds env's `NEON_HOST_POOL_DSN`
+  (or `MINDS_HOST_POOL_DSN` env var), so the standard dev-env flow no
+  longer requires passing the DSN explicitly. Operators outside an
+  activated env still pass `--database-url` directly.
+
+  Staging / production keep the tier-shared single-DB model unchanged.
+
+- Added a `secrets/minds/<tier>/ovh` Vault template (AK / AS / CK) and
+  documented the manual provisioning step in
+  `apps/minds/docs/vault-setup.md` and
+  `apps/minds/docs/host-pool-setup.md`.
+
+- `minds env deploy` is now actually idempotent against Neon. The
+  Neon REST API does not 409 on duplicate project names within an
+  organization -- POSTing `/projects` with a name that's already in
+  use creates a second, distinct project with the same name and a
+  different id. The previous `create_neon_project` assumed Neon would
+  409 (the adopt-fallback path was never reached), so every dev-tier
+  re-deploy silently leaked an entire Neon project (with its own
+  host_pool + litellm_cost DBs + branches + endpoints). Several
+  attempts at deploying dev-josh-1 during one session today left
+  four projects named `minds-dev-josh-1` in the dev org. The same
+  bug would have caused `minds env destroy` to delete the wrong
+  project (always the first match from the list endpoint, i.e. the
+  oldest, not the live one), leaving the live project stranded.
+  `create_neon_project` and `delete_neon_project` now look up by
+  name first via `_find_projects_by_name`, adopt when there's
+  exactly one match, raise a `NeonProviderError` with every
+  matching project id + creation timestamp + a copy-pasteable
+  cleanup recipe when there are several. Refusing-loud is
+  intentional: silently picking one would risk destroying the wrong
+  project under a real name collision (e.g. two devs using the same
+  env name cross-machine). A new `_select_one_or_raise_multi_match`
+  pure helper carries the decision logic; the operator-facing error
+  message is unit-tested.
+
+- Connector auth endpoints no longer 500 on `/auth/session/revoke`,
+  `/auth/email/is-verified`, `/auth/email/send-verification`. The connector's
+  twelve `async def` endpoints (plus the `_build_session_tokens` helper)
+  have been converted to sync `def`, with the SuperTokens recipe imports
+  switched from their `asyncio` modules to the `syncio` equivalents. The
+  three broken endpoints were calling SuperTokens' `syncio.get_user` /
+  `syncio.get_session_without_request_response` from inside an
+  `async def`, where the syncio wrapper's `loop.run_until_complete` hit
+  "RuntimeError: This event loop is already running" against the live
+  FastAPI/uvicorn loop and produced bare 500s. The conversion makes the
+  bug class structurally impossible (no event loop is running in
+  FastAPI's threadpool workers) and also aligns the file with the
+  monorepo style guide's prohibition on `async`/`asyncio`. Each
+  newly-sync endpoint is wrapped in `with handle_endpoint_errors():` so
+  error handling stays uniform across the file. The two OAuth callback
+  endpoints still need to bridge to async-only methods on SuperTokens'
+  `Provider` object (`get_authorisation_redirect_url`,
+  `exchange_auth_code_for_oauth_tokens`, `get_user_info`); those three
+  calls go through `supertokens_python.async_to_sync_wrapper.sync`, the
+  same wrapper SuperTokens' own syncio modules use internally -- safe
+  here because FastAPI runs sync def endpoints in a threadpool worker
+  with no live event loop.
+
+- `mngr list` no longer aborts with "Provider 'modal' is not available"
+  when the Modal per-user environment hasn't been created yet. The
+  Modal backend now raises a new `ProviderEmptyError` (distinct from
+  `ProviderUnavailableError`) when its env doesn't exist, and the
+  listing pipeline silently skips empty providers in every mode
+  (streaming + batch, ABORT + CONTINUE). Semantically: empty means
+  "the backend answered that there's nothing here" and is always safe
+  to drop from a listing; unavailable means "we couldn't ask" and may
+  still warrant an error.
+
+Minds deploy safety overhaul (spec
+`specs/minds-deploy-safety-overhaul/spec.md`):
+
+- Shorter Modal app + function names so the deployed hostname stays
+  under DNS's 63-char limit for every realistic env name:
+  `remote-service-connector` -> `rsc`, `fastapi_app` -> `api`,
+  `litellm-proxy` -> `llm`, `litellm_app` -> `proxy`. Modal workspaces
+  rename to `minds-dev` / `minds-staging` / `minds-production`. URL
+  is now exactly what we compute up front, so the deploy no longer
+  runs a second-pass secret push or a connector redeploy. `DevEnvName`
+  enforces a 40-char max so the hostname budget always fits.
+
+- One `minds env deploy` path for every tier, driven by a new required
+  `[lifecycle]` block in each tier's `deploy.toml` (flags:
+  `creates_resources`, `modal_env_strategy`, `writes_local_state`,
+  `tracks_generation`). dev / staging / production all execute the
+  same code now; behavior diverges only via the flag matrix.
+  `deploy_dev_env` + `deploy_tier_env` collapse into `deploy_env`.
+  Inline best-effort rollback machinery (`_best_effort_rollback`,
+  `_ROLLBACK_TABLE`, `_rollback_*`) deleted -- replaced by
+  `minds env recover` (below). Production now `tracks_generation=true`
+  for parity with staging (production destroy is hard-refused so the
+  generation id is effectively immutable for the tier's lifetime).
+
+- Pool-hosts schema migrations now backed by a real
+  `schema_migrations(version, applied_at)` table instead of the old
+  "replay every .sql with IF NOT EXISTS guards". New
+  `apps/minds/imbue/minds/envs/migrations.py` owns the runner. Legacy
+  files keep their `IF NOT EXISTS` guards so a backfill against an
+  already-migrated DB is a no-op + records the row; new migrations
+  land WITHOUT guards (the table is the source of truth).
+
+- Every `minds env deploy` mints a fresh `MINDS_DEPLOY_ID` (UTC
+  `YYYYMMDDTHHMMSSZ`) and pushes every Modal Secret under a new name
+  `<svc>-<tier>-<deploy_id>` (no overwrites). The deployed Modal apps
+  read `MINDS_DEPLOY_ID` at module load and pin every
+  `Secret.from_name(...)` to the matching timestamped name. Hard-fails
+  at module load if `MINDS_DEPLOY_ID` is missing (no fallback to
+  unsuffixed names; manual `modal deploy` outside `minds env deploy`
+  is unsupported). End-of-deploy GC keeps the last 10 timestamped
+  secrets per `<svc>-<tier>`; shared-tier destroy deletes all
+  timestamped secrets matching the tier.
+
+- New `minds env recover` command + recover-target file at the
+  monorepo root. Every deploy captures pre-deploy Modal app versions,
+  creates a Neon snapshot branch (`pre-deploy-<deploy_id>` off the
+  default branch -- COW so it's near-free), and writes
+  `.minds-deploy-recover-target.json` (gitignored) atomically BEFORE
+  touching any external state. On a failed deploy, the operator runs
+  `minds env recover`; it idempotently runs every reversal step
+  (`modal app rollback`, Neon branch-restore from the snapshot with
+  the pre-restore state preserved under `pre-rollback-<deploy_id>`,
+  delete orphan timestamped secrets, delete the recover-target file).
+  Successful deploys delete the snapshot branch (best-effort cleanup).
+  Every other `minds env *` command (`activate` / `deactivate` /
+  `list` / `deploy` / `destroy`) refuses to run while a recover-
+  target file exists.
+
+  Snapshot/restore works for every tier (dev creates_resources=true
+  and shared creates_resources=false). Shared tiers (staging /
+  production) require `NEON_PROJECT_ID` in their
+  `secrets/minds/<tier>/neon-admin` Vault entry; the deploy resolves
+  the default branch on demand. Without `NEON_PROJECT_ID` shared-tier
+  deploys log a warning and skip the snapshot (so recover can roll
+  back Modal apps but not the DB).
+
+- Post-deploy health check: `await_apps_healthy` polls
+  `<connector>/docs` and `<litellm_proxy>/health` for up to 30s each
+  (sequential), with cold-boot 5xx tolerance + immediate failure on
+  4xx / 5xx-with-body / wrong-shape responses. Failure surfaces as
+  `HealthCheckFailedError` and goes through the same "run
+  `minds env recover`" guidance as any other deploy failure.
+
+- Each deploy also gets a `[lifecycle].tracks_generation=true` tier
+  generation id minted into the litellm-connector Modal Secret (no
+  change for dev / staging; production now also gets one).
+
+Operator-visible: re-deploys after any of the above are
+backwards-compatible against the existing dev-tier resources. The
+shared (`staging` / `production`) tiers' `deploy.toml` files now
+require a `[lifecycle]` block; operators bringing up staging /
+production for the first time need to populate the existing OAuth
+client IDs as before plus ensure the `[lifecycle]` block matches the
+defaults documented in the committed file.
+
+Speed up local minds workspace creation by restructuring the `forever-claude-template` Dockerfile and deferring Playwright into a post-boot install. The bulk of this change lives in the `forever-claude-template` repo (see `mngr/faster-minds-build` over there); this monorepo PR carries the spec (`specs/faster-minds-build/concise.md`) and a one-line mention in `apps/minds/docs/design.md`.
+
+What changes for end users:
+
+- Cold (no Docker layer cache) image builds drop the Playwright + Chromium install from the Dockerfile entirely. That step was downloading ~280 MB of browser assets plus apt-installing system libraries on every cold build; it now runs once on first container boot via a new `deferred-install` service.
+- Warm-cache rebuilds after a code-only edit (no manifest changes) no longer invalidate the heavy `uv sync --all-packages` and `npm ci` layers. The Dockerfile now copies dependency manifests in an early layer, runs `uv sync --frozen --no-install-workspace --no-install-local` to pre-warm the wheel cache + `npm ci` for the frontend, and only then does `COPY . /code/`. Post-`COPY` `uv sync` collapses to ~1.5s because the warmed cache covers every third-party wheel; `npm run build` similarly reuses cached `node_modules`.
+- Drop the post-`COPY` recursive `chown -R root:root /code/` step. `COPY` without `--chown` already lands files as root:root, so the chown was a no-op walk over the entire (~250 MB, including `.git/`) source tree -- worth ~60s on every warm-cache rebuild. Measured warm-rebuild (single Python edit, all pre-`COPY` layers cached): **1m33s -> 30s**.
+- Drop `mngr_modal` from the post-`COPY` `uv tool install -e apps/system_interface --with-editable ...` chain and from `mngr plugin add --path ...`. The FCT `.mngr/settings.toml` sets `providers.modal.is_enabled = false` and no Python in `apps/` or `libs/` imports `imbue.mngr_modal`, so the plugin was load-bearing for nothing. `mngr plugin add` shells out to a uv-tool inject per plugin, so trimming one plugin saves a measurable amount. Brings warm rebuild to **~25.6s** total.
+- Playwright's Chromium browser installs asynchronously on first boot via a new `services.toml` entry `deferred-install` (running `scripts/deferred_install.sh`). The script is idempotent: per-package marker files under `/var/lib/minds/deferred-install/done.<package>` gate every install, so subsequent container restarts no-op in milliseconds and packages never silently upgrade between restarts. Container rebuilds wipe the marker so the install runs exactly once on a fresh image.
+- The `forever-claude-template` `.dockerignore` is now a symlink to `.gitignore` (Docker reads the symlink target). `.gitignore` patterns were rewritten to start with `**/` (or contain a path separator) so the same patterns work in both formats; two new ratchets in `test_meta_ratchets.py` (`test_gitignore_patterns_use_double_star`, `test_dockerignore_is_symlink_to_gitignore`) keep the convention enforced.
+
+If a process tries to use Playwright before the deferred install has finished, it will fail loudly -- that is acceptable. `forever-claude-template/CLAUDE.md` documents how to check the marker file or the `svc-deferred-install` tmux window before exercising browser automation in a fresh workspace.
+
+Out of scope for this PR (kept for follow-ups): BuildKit cache mounts for the `uv` / `npm` wheel caches across image rebuilds; pulling the same restructuring into the lima provider's `.mngr/settings.toml` `create_templates.lima.extra_provision_command`; deferring other "nice but not required" packages (e.g. `modal` CLI, apt convenience tools); generalizing the deferred-install marker pattern into a small framework.
+
+Fix `mngr config` help text and docs example: the example showed `--user` but the actual option is `--scope user`.
+
+End-to-end fixes for the OVH-backed imbue_cloud pool flow (`minds pool create` -> `mngr imbue_cloud admin pool create` -> bake -> lease/adopt -> first-start). Discovered + fixed iteratively while smoke-testing the flow against a fresh dev env (`dev-josh-ovh`).
+
+### `minds pool create` auto-injects tier secrets
+
+- `minds pool create` reads the activated tier's OVH AK/AS/CK from Vault (`<vault_path_prefix>/ovh`) and injects them into the inner `mngr imbue_cloud admin pool create` subprocess. Operators no longer need to export `OVH_APPLICATION_KEY` / `OVH_APPLICATION_SECRET` / `OVH_CONSUMER_KEY` before baking pool hosts; activating a minds env is sufficient. Vault values win over any stale `OVH_*` in the shell so a session left over from a different tier's bake can't silently misroute the OVH order.
+- `--management-public-key-file` is now optional. Default behavior derives the public key from the activated tier's `<vault_path_prefix>/pool-ssh.POOL_SSH_PRIVATE_KEY` Vault entry -- the same private key the deployed connector loads from its `pool-ssh-<tier>` Modal Secret. Closes the keypair-mismatch class of bakes that succeeded locally but failed every subsequent lease with "Authentication failed" at the connector's SSH-key-injection step (the operator's hand-rolled pub key didn't match the connector's stored priv key). The flag stays available as an operator escape hatch for one-off / non-vault setups.
+
+### OVH outer-bootstrap installs `rsync`
+
+The OVH `Debian 12 - Docker` image ships docker but not `rsync`, which the `mngr_vps_docker` build-context upload needs. Cloud-init-using backends (Vultr) inherit rsync from their base images; OVH has no cloud-init at all, so the gap surfaced as `bash: line 1: rsync: command not found` after every other outer-bootstrap step had already succeeded. New `install_required_outer_packages` helper in `mngr_ovh.bootstrap` runs as the final outer step before `VpsDockerProvider.create_host` takes over. `rsync` also added to `mngr_vps_docker.cloud_init.generate_cloud_init_user_data`'s package list for belt-and-suspenders symmetry on cloud-init backends.
+
+### `pool_hosts` INSERT picks up the schema's `host_name` column
+
+A prior schema migration added `host_name NOT NULL` to `pool_hosts` but the bake's INSERT in `mngr_imbue_cloud.cli.admin._create_single_pool_host` was never updated. Every successful pool bake died at the very last step with `null value in column "host_name" of relation "pool_hosts" violates not-null constraint` -- worst of all, the cleanup path doesn't run on a psycopg2 error, so the OVH VPS + docker image + agent + ufw + injected management key were all already done by the time the INSERT fired, and every failed bake leaked a fully-provisioned VPS. Fix adds the column (the variable was already computed at the top of `_create_single_pool_host`) and extracts the SQL into a module-level `_INSERT_POOL_HOST_SQL` constant with a regression test asserting every required column appears, so any future drift of the same shape gets caught up front without needing a fake DB.
+
+### Bake produces a leasable state aligned with the adopt path
+
+- The bake's services agent now uses the constant name `system-services` (was a per-bake `pool-<hex>` UUID). The minds-side adopt code in `mngr_imbue_cloud.host.ImbueCloudHost.create_agent_state` explicitly keeps the bake's name verbatim, so the bake has to use the same name the user's `mngr create system-services@<host>.imbue_cloud_<slug>` does -- otherwise the leased workspace's tmux sessions are named after the per-bake UUID instead of the user's expected `system-services`. The per-bake unique `pool-<hex>-host` suffix stays on the *host name* for operator-local mngr disambiguation across sequential bakes.
+- After the existing key-injection step, the bake destroys the FCT-bootstrap-created chat agent and `rm -f`'s `/code/runtime/initial_chat_created`. During the bake the services agent boots and the FCT bootstrap creates an initial chat agent named after the bake's host (per `_build_create_chat_command` in the FCT bootstrap), then drops a sentinel file so it never recreates on later starts. Without the cleanup, the user's lease inherits the bake's chat agent name and the bake-time agent's claude session that has no API key (because the user's LiteLLM key didn't exist at bake time). Destroying both lets the bootstrap fire fresh on the user's first start with the correct host_name + access to the patched claude config dir.
+- The bake's subsequent `mngr stop` / `mngr exec` calls use the full address `system-services@<host_name>.ovh` instead of just `system-services`. Now that the agent name is a constant, the operator's local mngr state accumulates one `system-services` agent per bake (each on a different host). `_get_agent_info` previously took an agent name alone and the mngr-list `--include` filter returned the first match, which under sequential bakes is some prior bake's stale agent on a stale VPS -- the bake would then SSH the wrong VPS for ufw + key injection + DB INSERT while the actually-baked container received nothing. `_get_agent_info` now takes `host_name` as a keyword arg and filters by both `name` and `host.name`.
+- Multi-token `mngr exec` commands are packed into a single `shlex.join`'d positional string. `mngr exec`'s click parser is `AGENTS... COMMAND` -- the LAST positional goes to `COMMAND` and the rest to `AGENTS`. Passing the inner `mngr destroy <name> --force` as separate argv entries either ate `--force` as a `mngr exec` option (which doesn't exist) or treated `mngr`/`destroy`/`<name>` as additional agent names. Joining into one string sidesteps both.
+
+### Lease/adopt rewrites the container's `host_name`
+
+`ImbueCloudProvider.create_host` now SFTPs into the leased container after the host-key scan and rewrites `/mngr/data.json`'s `host_name` field to the user-supplied `HostName`. Without this, the FCT bootstrap's `_maybe_create_initial_chat` (which reads `host_name` from `/mngr/data.json` to decide what to name the freshly-recreated chat agent on the user's first start) inherits the bake's placeholder name (`pool-<hex>-host`) instead of the user's chosen workspace name. SFTP-based to dodge shell-quoting hazards in an `exec_command` round-trip; raises `MngrError` on any SSH / SFTP / JSON failure since the wrong `host_name` is exactly the bug this exists to prevent.
+
+### `mngr create` honors the adopt scenario
+
+- minds passes `--reuse` for IMBUE_CLOUD agent creates. The bake's services agent is now named `system-services` too, which mngr's pre-flight "agent already exists on this host" check would otherwise reject. `--reuse` is necessary to signal that the lease's pre-baked agent isn't a duplicate-name collision. (`--update` is intentionally NOT passed: the adopt path in `ImbueCloudHost.create_agent_state` already patches labels + command in place; running standard provisioning on top would re-do the file-transfer + provisioning round the bake already paid for.)
+- `mngr` core's duplicate-agent-name check in `api/create.py` now honors `host.pre_baked_agent_id`. With just `--reuse` the check still fired because `--reuse`'s lookup runs BEFORE `resolve_target_host` fires the lease, so the leased host's agent isn't in the operator-local mngr state yet to be reused. The pre-flight check now skips the raise when the existing agent's id matches the host's `pre_baked_agent_id` -- that's the lease-adopt scenario by design and `host.create_agent_state` knows how to hydrate the existing agent in place.
+- `pre_baked_agent_id` is hoisted onto `HostInterface` as a `None`-defaulted frozen field, so the check in `api/create.py` reads `host.pre_baked_agent_id` directly (no `getattr` shim that would trip the `prevent_getattr` ratchet). Providers whose `create_host` returns a host with a baked-in agent (`ImbueCloudHost` is the only one today) populate it; every other provider's hosts default to `None` and the duplicate-name check's prior behavior is preserved.
+
+Stop caching the latchkey per-directory encryption key on the long-lived `Latchkey` pydantic model. The optional `encryption_key: SecretStr | None` field is gone; instead, `Latchkey._load_encryption_key()` reads (and on first call mints) the key on every subprocess-spawn call, so the secret only lives in parent-process memory for the duration of a single env-builder + process-spawn call frame. `apps/minds/imbue/minds/cli/run.py:_build_latchkey` and `libs/mngr_latchkey/imbue/mngr_latchkey/cli.py:_build_initialized_latchkey` no longer pre-load the key at construction time.
+
+`load_or_create_encryption_key` now validates the on-disk key file's permission bits every load. Any group or other access bit set (i.e. anything that isn't owner-only -- `0o400`, `0o600`, `0o700` are accepted) raises a new `LatchkeyEncryptionKeyPermissionError` with a copy-pasteable `chmod 600 <path>` hint, so an operator who relaxed the mode finds out loudly instead of silently leaking the key to other local users. The operator override branch (`LATCHKEY_ENCRYPTION_KEY` in the env) still wins and is unaffected. Adds `encryption_key_test.py` covering precedence, idempotence, owner-only mode acceptance, group/other rejection, and the umask-permissive minting path.
+
+Deploy-safety overhaul: three correctness fixes to `_deploy_env_locked` discovered while auditing PR #1671 (full audit in `DEPLOY_SAFETY_AUDIT.md`).
+
+- **F1**: Neon snapshot + recover-target file write now happen BEFORE pool-hosts migrations run. Previously migrations ran first, so the snapshot captured the post-migration state and `minds env recover` could not roll back a bad migration -- especially dangerous for shared tiers (staging/production) where the operator-managed DB likely has live traffic. The new ordering: capture app versions → resolve Neon project → verify token scope (F2) → snapshot → write recover-target (with F4 cleanup-on-failure) → migrations.
+- **F2**: `providers.verify_neon_token_has_restore_scope(...)` is now actually called as a preflight check, right after Neon project resolution and before snapshot creation. It was declared on the Providers bundle and wired to the real implementation but had zero callers in the deploy path. Stale/misconfigured Neon tokens now fail at the cheapest possible probe (a `GET /projects/{id}` call) before any mutation, instead of only surfacing at `minds env recover` time after the deploy had already started rolling forward.
+- **F4**: `write_recover_target_atomic` is now wrapped in a `try/except (OSError, MindError)` that best-effort deletes the just-created Neon snapshot branch before re-raising. Closes a window where a successful snapshot followed by a failed local file write (disk full, ENOSPC, permission denied, fsync failure) would orphan the snapshot branch with no `recover-target` file pointing at it. Cleanup failure is logged loudly so the operator knows the branch needs manual deletion; the original write error still propagates as the user-visible exception.
+
+Each fix has two new ratchet tests in `provisioning_test.py` pinning the invariant (snapshot-before-migration for dev + shared tier; verify-before-snapshot happy path + short-circuit on scope failure; snapshot cleanup on write failure + on compounded cleanup failure).
+
+OVH provider: two correctness fixes to `OvhProvider._provision_vps` + `ordering.order_and_wait_for_vps` discovered while auditing PR #1671 (full audit in `OVH_AUDIT.md`).
+
+- **F1**: `parse_extra_tags_env(os.environ.get("MNGR_VPS_EXTRA_TAGS", ""))` now runs at the very top of `_provision_vps`, before `_maybe_claim_recycled_vps` and before any OVH API call. Previously the parse ran AFTER `order_and_wait_for_vps`, so a typo in `MNGR_VPS_EXTRA_TAGS` (uppercase key, reserved key, missing `=`) raised only after we'd already ordered + paid for a fresh-month VPS. The spec explicitly required pre-order validation. Pinned by a source-position test in `backend_test.py` so a future refactor that moves the parse back down breaks the test loudly.
+- **F39**: `OvhVpsClient.set_renew_at_expiration` now retries on the OVH transient 400 message `"Unable to synchronize l1::Service, subscription is not active yet"`. OVH's billing subsystem takes a few minutes to fully activate a freshly-ordered VPS subscription, during which any `PUT /vps/{name}/serviceInfos` (the cancellation flag flip) fails with this exact message; without the retry, `OvhProvider._terminate_orphaned_fresh_order`'s cleanup (fired from the `_provision_vps` `finally` branch when the fresh-order path raises after `order_and_wait_for_vps` succeeded) loses the race and silently leaks a freshly-ordered month of billing. Other 400s / 404s / 5xxs propagate immediately so unrelated client errors don't get swallowed. Retry uses `poll_for_value` with a 5-minute default budget + 15s poll interval (both injectable via new `set_renew_retry_timeout_seconds` and `set_renew_retry_poll_interval_seconds` fields on the client). Verified live on 2026-05-18: a `set_renew_at_expiration` call issued immediately after a fresh order failed once with this exact message; a 30-second retry succeeded. Three new tests in `client_test.py` cover the happy retry path, the "different 400 propagates immediately" guard, and the budget-exhausted error path.
+
+- **F3**: `order_and_wait_for_vps` no longer diffs `/vps` listings to find the new serviceName. It captures the `orderId` from the checkout response and then walks the `/me/order/{orderId}/details/{detailId}/{extension,operations,operations/{opId}}` chain, matching on `extension.order.plan.code == requested_plan_code` to disambiguate the VPS line item from the OS / backup / installation sub-items, and reading the assigned serviceName from `service.Operation.resource.name`. **Strong correlation: every poll is scoped to OUR `orderId`, so two concurrent orders against the same OVH account can never swap serviceNames** -- the legacy diff approach picked `sorted(new_names)[0]` and would silently return the wrong VPS to one of the callers when two deliveries finished within the same poll interval. The OVH API's `billing.OrderDetail.domain` field, which an earlier version of this fix tried to use, is always the literal `"*"` for VPS orders (verified live against OVH-US on 2026-05-18); only the operations chain yields the assigned serviceName. Belt-and-suspenders: after fetching the serviceName, the function `GET /vps/{serviceName}` and verifies `model.name == requested_plan` and the requested datacenter is a case-insensitive substring of `zone`. On mismatch the function raises and the existing cleanup cancels future renewal on the wrong VPS. **End-to-end live-verified against the real OVH-US API**: one live `vps-2025-model1` order in US-EAST-VA returned `vps-c4aeb97e.vps.ovh.us` in ~80s; an independent script-side walk of the same operations chain (detail 105339987 -> operation 173487777 -> resource.name) returned the same name; the post-hoc verify saw the expected `model.name` + `zone`; the diff-against-`/vps` cross-check confirmed exactly one new VPS appeared. Unit tests in `ordering_test.py` cover the happy path, delayed detail-listing materialisation, the plan-code filter rejecting OS sub-resource details, post-hoc plan/region verify mismatch detection, missing-orderId refusal, delivery timeout, and a multi-thread parallel-orders regression test that runs two concurrent orders against a single shared fake client + asserts each thread returns its own serviceName (the legacy code would have failed this test).
+
+Swap the imbue-cloud pool bake (and the `minds env destroy` walker) from Vultr to OVH:
+
+- `mngr imbue_cloud admin pool create` is now provider-generic. It drops the `MINDS_ROOT_NAME` env detection, adds a required `--region REGION` and repeatable `--tag KEY=VALUE`, lands on `--template main --template ovh` with `@host.ovh` + `--provider ovh`, appends `-b --vps-datacenter=<region>`, and installs + configures `ufw` on every leased VPS before the row hits `pool_hosts`. UFW failures abort the bake.
+- New top-level `minds pool` CLI group (`create` / `list` / `destroy`). It requires an activated minds env, auto-injects `--tag minds_env=<active-env>`, and shells out 1:1 to `mngr imbue_cloud admin pool ...`.
+- `mngr_ovh.OvhProvider` now honors `MNGR_VPS_EXTRA_TAGS=k1=v1,k2=v2` and attaches each entry as an OVH IAM v2 tag alongside `mngr-provider` / `mngr-host-id`. Parsing is strict with local IAM-key validation so typos fail before the API call.
+- `minds env destroy` swaps its Vultr `/instances` walker for an OVH IAM v2 walker (matches by `tags["minds_env"] == <env>` and terminates via `OvhVpsClient.destroy_instance`). The dev-tier Vault path is now `<tier>/ovh` with `OVH_APPLICATION_KEY` / `OVH_APPLICATION_SECRET` / `OVH_CONSUMER_KEY`.
+- `OvhProviderConfig.recycle_safety_margin_hours` default drops 24 -> 2 so same-day destroy + create reclaims the cancelled VPS instead of ordering a fresh month.
+- `forever-claude-template` gains a `[create_templates.ovh]` block (no plan / datacenter baked in -- region flows in per-invocation, plan defaults from `OvhProviderConfig`). The `[create_templates.vultr]` block stays in place; `mngr_vultr` is still a registered provider for non-pool uses.
+- `mngr_ovh` README plan-size info is updated: `vps-2025-model1` is 1 vCPU / 8 GB RAM / 80 GB SSD at ~$7.99/mo (the previous README claim of 2 GB / $7.60 was stale).
+
+The orphaned `apps/minds/imbue/minds/cli/pool.py` duplicate (pre-`mngr_imbue_cloud`) and `apps/minds/imbue/minds/envs/providers/vultr_tags.py` are deleted in the same change. Existing Vultr-backed `pool_hosts` rows are not migrated automatically; operators destroy / drop them by hand after merge.
+
+Fixed three blocker bugs in the OVH provider that surfaced the first time `mngr create --provider ovh` was exercised end-to-end against a live OVH account.
+
+- Post-delivery race: `order_and_wait_for_vps` no longer returns until the background `deliverVm` task drains, so the immediately-following `/rebuild` no longer fails with "Action not available while there are running tasks on the VPS". `rebuild_vps_with_public_key` also performs the same drain as a pre-flight so the recycle path is covered.
+- `destroy_instance` now actually cancels the VPS via `PUT /serviceInfos` (`renew.deleteAtExpiration=true`) instead of `POST /terminate`. The legacy `/terminate` call only emails a confirmation token, so without a human acting on the email the VPS would auto-renew indefinitely.
+- `set_renew_at_expiration(False)` now also restores `renew.automatic=true` and `renewalType=automaticV2012`, which OVH silently auto-flips when `deleteAtExpiration` goes to `true`. Without this, a recycled VPS would not auto-renew at the next anniversary even though the un-cancel flag flip succeeded.
+- OVH's `Debian 12 - Docker` image installs the rebuild SSH key into `/home/debian/.ssh/authorized_keys` rather than `/root/.ssh/authorized_keys`. The provider now sudo-copies the key into root's home during provisioning (configurable via the new `bootstrap_ssh_user` field on `OvhProviderConfig`, defaulting to `debian`), so the rest of the provider continues to run as root without per-call sudos.
+- The OVH `mngr-provider` / `mngr-host-id` IAM tags are now attached immediately after the VPS appears in `GET /vps`, before rebuild + TOFU + root-bootstrap. Any failure during those later steps now leaves an orphan VPS that is discoverable via mngr's normal IAM-tag listing instead of being invisible until inspected via `mngr ovh list --all`.
+- The SSH-as-bootstrap-user / SSH-as-root paramiko sessions in the OVH provider now load the private key with a type-agnostic helper that tries Ed25519, RSA, and ECDSA in turn. Previously the call was hardcoded to `paramiko.Ed25519Key.from_private_key_file`, which raised against the RSA keys the base `VpsDockerProvider` actually produces; this had been masked until the Bug 1 fix let the provisioning flow reach the TOFU step.
+- `OuterHost.get_name` and `OuterHostInterface.get_name` now return `str` instead of `HostName`. The outer host's name is the connector's literal connection target -- an SSH hostname or IP address -- which routinely contains dots (`vps-x.vps.ovh.us`, `192.0.2.10`) and was rejected by `HostName`'s validator (dots are reserved as the deterministic separator in CLI `HOST.PROVIDER` addresses). The `Host` subclass's `get_name` still returns `HostName`, which is a `str` subtype and so satisfies the wider interface.
+
+- `ProviderError` now carries `provider_name` on the base class. Every subclass (`HostNotFoundError`, `HostNameConflictError`, `HostNotRunningError`, `HostNotStoppedError`, `SnapshotNotFoundError`, `TagLimitExceededError`, `ImageNotFoundError`, `LocalHostNotStoppableError`, `LocalHostNotDestroyableError`, `LimaHostCreationError`, etc.) now requires `provider_name` as its first constructor argument. Handlers that catch `ProviderError` can read `e.provider_name` without isinstance-narrowing to a specific subclass.
+
+LiteLLM-proxy deploys now run a Prisma schema push against the proxy's DATABASE_URL automatically (via a new `migrate_db` Modal Function invoked by `minds env deploy`), so a fresh tier or dev env no longer requires a manual `prisma db push` step before the first virtual-key create.
+
+Move minds to multi-environment deploys (`dev`, `staging`, `production`) backed by HCP Vault, and reshape every env around a per-env data root. Each env now owns one directory: `~/.minds/` for production and `~/.minds-<env-name>/` for every other env (staging, plus any per-developer dynamic dev env). Each root holds that env's own mngr profile, agents, auth, logs, and (for dev envs) a split chmod-0600 `secrets.toml` next to a public `client.toml`. The pre-refactor shared `~/.devminds/` layout is gone -- `rm -rf ~/.devminds/` when convenient. `MINDS_ROOT_NAME` validation tightens to `minds(-<env-name>)?`; legacy values like `devminds` are silently treated as unset with a warning so a stale shell falls back to production rather than blowing up.
+
+`minds env` is reorganized around explicit shell activation. New `minds env activate <name>` exports `MINDS_ROOT_NAME` + the derived `MNGR_*` vars + `MINDS_CLIENT_CONFIG_PATH` for `eval` (staging/production point at the in-repo committed `client.toml`; dev envs at the per-env `~/.minds-<name>/client.toml`); new `minds env deactivate` unsets them. A `--create` flag on `activate` idempotently mkdirs the env root for fresh dev envs so first-time bootstrap is one line: `eval "$(minds env activate --create <your-user>-dev)" && minds env deploy`. `minds env deploy` and `minds env destroy` no longer take a name argument -- they operate on the currently-activated env and refuse loudly when nothing is activated. `minds env destroy` supports staging (gated by `--yes-i-mean-staging`; stops the deployed Modal apps and removes the env root, leaving operator-managed Vault/Neon/SuperTokens state in place) and hard-refuses production regardless of any flag. `minds env list` globs `~/.minds*/` directly so every env on disk shows up regardless of deploy state.
+
+All deploys flow through `minds env deploy`. The standalone `scripts/deploy_remote_service_connector.sh`, `scripts/deploy_litellm.sh`, and `scripts/push_modal_secrets.py` are removed; their work folds into the unified CLI. Tier deploys (staging / production) require a mandatory `--yes-i-mean-<tier>` flag, push Vault secrets straight to Modal, and run `modal deploy` for both apps -- writing nothing to disk because the committed in-repo `client.toml` is the source of truth for those tiers. Dev env deploys also write `~/.minds-<name>/{client.toml,secrets.toml}` so re-deploys can find their per-env state.
+
+`minds run` (and `propagate_changes`, and every justfile recipe that touches mngr state) refuse without an activated env. No implicit fallback to a hardcoded dev `client.toml`; the dev tier's static `client.toml` is deleted entirely (only `dev/deploy.toml` remains). The packaged Electron build drops `MINDS_BUILD_TIER` in favor of explicit `MINDS_CLIENT_CONFIG_BUNDLE=<path>` + `MINDS_ROOT_NAME_BUNDLE=<minds(-<env-name>)?>`; the runtime exports `MINDS_ROOT_NAME` from the embedded value and passes `--config-file` from the embedded path so a beta or staging build never collides on disk with an installed production build. `just devminds-start` and `forward-{minds,devminds}-system-interface` are gone -- replaced by a single env-agnostic `just minds-start` and `forward-system-interface` that read the activated env from the shell.
+
+`minds env destroy` now actually destroys everything `deploy` created, plus clears the env-specific data accumulated inside operator-managed shared resources (so the next deploy starts from a clean slate). For every env destroy: `mngr destroy` every agent under the env's mngr profile first, then walk the cloud-side teardown, and only `rmdir ~/.minds-<env-name>/` if every cloud step succeeded -- a partial failure leaves the env root in place so re-running picks up where things broke. Dev env destroy deletes the per-env Modal env (cascade-deletes apps/secrets/volumes), Neon DB, and SuperTokens app outright; the new staging tier destroy (gated by `--yes-i-mean-staging`) `modal app stop`s both apps, `modal secret delete`s every per-tier Secret, wipes the SuperTokens app's users via delete+recreate of the same `app_id`, and `DROP SCHEMA public CASCADE`s the Neon DB via psql. Both paths now also enumerate + delete Cloudflare tunnels tagged with `metadata.env=<env-name>` (set by `cf_create_tunnel` at create time when the connector reads the new `MINDS_ENV_NAME` env var) and delete Vultr instances tagged `minds_env=<env-name>` (renamed from the dev-only `minds_dev_env`).
+
+A new per-tier generation id is minted at deploy time, stored at `secrets/minds/<tier>/generation` in Vault, exposed by the deployed connector at `GET /generation`. `minds env activate` fetches the id and compares it against a per-env `last_seen_generation` marker on disk -- on mismatch (i.e. the tier got destroyed + redeployed since the dev last activated) the activation auto-wipes the env's `mngr/` / `auth/` / `logs/` subdirs so the dev's next `mngr list` / `minds run` doesn't surface stale state pointing at the (now-gone) previous deploy.
+
+Also: minds shutdown is cleaner now (terminates the `mngr forward` subprocess before draining the concurrency group, so reader threads no longer time out on every clean exit); the browser auto-open lands directly on the login URL with the one-time code instead of the bare origin; `list_agents`' ABORT-mode failures are now properly attributed to the failing provider so minds' auto-disable-on-auth-error handler actually fires; and `scripts/push_vault_from_file.py` pipes values as JSON on stdin to avoid the vault CLI's `@`-as-file sigil. New docs at `apps/minds/docs/environments.md` and `apps/minds/docs/vault-setup.md` walk through the new operator workflow.
+
+## 2026-05-17
+
+`scripts/release.py` now refuses to cut a release when there are unconsolidated entries in `changelog/`, since those would otherwise be omitted from the version's release notes. When the gate fires it prints the exact one-liner that triggers the `changelog-consolidation` schedule on demand (the same one that normally runs nightly), so the human can run it, land its PR, and re-run the release. The predicate ("are there pending entries?") lives next to the consolidator's own filter in `scripts/consolidate_changelog.py`, and the plugin-disable args used around `mngr schedule` invocations live in `scripts/trigger_changelog_consolidation.py` and are shared by `scripts/setup_changelog_agent.sh`.
+
+# Consistent agent address resolution across single-agent subcommands
+
+Refactored how single-agent subcommands turn an `AgentAddress` into the live
+interfaces they operate on. The "find" stage (discovery + matching against
+the address) is now strictly separate from the "ensure live" stage (bringing
+the host online, looking up the live agent, optionally starting it).
+
+Two new helpers in `imbue.mngr.api.find` replace the previous
+`is_start_desired` / `skip_agent_state_check` flags on
+`find_one_agent` / `find_agent_for_command`:
+
+- `resolve_to_started_host_and_agent`: bring the host online and resolve
+  the agent ref to an `AgentInterface` without checking the agent's
+  lifecycle state. Used by `push`, `pull`, `provision`, and `rename`.
+- `resolve_to_started_host_and_running_agent`: as above, but also
+  require / auto-start the agent process. Used by `connect` and `capture`.
+
+Both helpers take a single `allow_auto_start` flag (driven by `--start`).
+
+User-visible changes:
+
+- `push`, `pull`, and `provision` no longer require the agent to be
+  running. Previously they failed when targeting a stopped agent on an
+  online host; now they operate on stopped agents directly.
+- `push`, `pull`, `provision`, and `rename` gain a `--start/--no-start`
+  flag (default `--start`) that controls whether an offline host is
+  started automatically.
+- The `--start` help text on `connect`, `capture`, and `exec` has been
+  reworded to reflect what `--start` actually starts in each command.
+- `mngr connect` no longer falls back to "most recently created agent"
+  when run non-interactively without an explicit agent. It now matches
+  every other single-agent command: pass an agent name, or run it from
+  an interactive terminal to use the selector.
+- Cancelling the interactive agent selector now exits cleanly via
+  `click.Abort` instead of printing nothing and returning silently.
+
+# Rename `HostedLocation` to `HostLocationAddress`
+
+Renamed the address-side `HostedLocation` type to `HostLocationAddress` so its
+name matches its peers (`HostAddress`, `AgentAddress`) and makes its
+relationship to the runtime `HostLocation` type explicit.
+
+Cascading internal renames:
+
+- `parse_hosted_location` -> `parse_host_location_address`
+- `resolve_hosted_location` -> `resolve_host_location_address`
+- `ResolvedHostedLocation` -> `ResolvedHostLocationAddress`
+- `HostedLocationParamType` -> `HostLocationAddressParamType`
+- `HOSTED_LOCATION` (Click param type instance) -> `HOST_LOCATION_ADDRESS`
+- Click param-type display name `hosted_location` -> `host_location_address`
+  (visible in command-line help / docs for `mngr push`, `mngr pull`,
+  `mngr pair`)
+
+No behavior change.
+
+Adds shell-level integration tests for `scripts/install.sh`. The existing install tests build a venv that simulates what install.sh produces, but never invoke the script itself. The new `test_install_script.py` runs `bash scripts/install.sh` against mock `uv` and `mngr` binaries on a synthetic PATH and verifies the control flow: `uv tool upgrade` vs `uv tool install` branches, the PATH-not-set error path, and the continue-on-failure (`|| warn`) behaviour of `mngr dependencies -i` and `mngr extras -i`. No real PyPI install or system dependencies are required, so the tests run in under three seconds with no network access.
+
+`mngr create --type X` now fails fast with `UnknownAgentTypeError` when `X` does not resolve to a registered agent class (either directly via a plugin/built-in registration, or via a `[agent_types.X]` block whose `parent_type` points to a known type), instead of silently resolving to a generic `BaseAgent` + empty config. A bare `[agent_types.X]` block without `parent_type` is also rejected. Use `--type command -- <shell command>` to run an arbitrary shell command. The `--type X -- ...` form is no longer a hidden alias for `--type command -- ...`.
+
+## 2026-05-16
+
+- `mngr_lima`: drop ssh-keyscan from the host-creation flow. Each Lima VM now gets a pre-generated ed25519 host keypair injected into the guest via the Lima provision script (which writes `/etc/ssh/ssh_host_ed25519_key{,.pub}`, removes other host-key types, and restarts sshd before `limactl_start_new` returns). The host machine writes the matching `known_hosts` entry atomically using the public key it already has on disk -- no scan, no `Broken pipe` race during VM bring-up, no TOFU. Mirrors `mngr_vps_docker`'s cloud-init-driven host-key injection pattern, adapted to Lima's `provision[mode=system]` surface (Lima's `UserData` Go struct doesn't expose top-level `ssh_keys`). Per-host keys and the matching `known_hosts` file live under `<provider-dir>/keys/hosts/<host_id>/` so each VM has an isolated identity (no shared `known_hosts` accumulating stale `127.0.0.1:<old-port>` entries across restarts); `delete_host` cleans up that directory. `merge_lima_yaml` now extends `provision` and `mounts` instead of replacing them: a user-supplied `provision:` (e.g. to install extra packages) is appended after mngr's, and a user-supplied `mounts:` is appended after the `/mngr` volume mount -- so mngr's load-bearing entries (host-key injection in `provision`, the `/mngr` mount) are preserved. Lima runs `provision[mode=system]` scripts in list order, so mngr's host-key swap runs before any user script.
+
+Fix Lima provider to actually disable guest -> host port forwarding. The previous empty `portForwards: []` did not suppress Lima's auto-appended fallback rule, so guest sockets on any interface (e.g. `0.0.0.0:8082`) leaked to host loopback and collided across coexisting VMs. The provider now emits two ignore rules -- one for `guestIP: 0.0.0.0` (with `guestIPMustBeZero: true`) and one for `guestIP: 127.0.0.1` -- because empirical testing on Lima 2.1.1 showed user-supplied rules match the guest bind address literally and neither rule alone catches both cases. `merge_lima_yaml` locks `portForwards` against user `--file` overrides. SSH is unaffected -- Lima manages it through a separate top-level config.
+
+Add the `mngr_ovh` provider plugin: run mngr agents in Docker containers on OVH classic VPS instances (e.g. `vps-2025-model1` / "VPS-1" at ~$7.60/mo).
+
+- Uses the official `python-ovh` SDK; supports OAuth2, AK/AS/CK, and `~/.ovh.conf` credentials.
+- Provisions via the OVH `/order/cart` flow and bootstraps via `POST /vps/{s}/rebuild` with a pre-installed SSH public key (no cloud-init is available on OVH classic VPS).
+- Discovers VPSes via OVH IAM v2 tags (`POST /v2/iam/resource/{urn}/tag`) on the `vps` resource URN, so multiple `mngr` instances on different machines see the same agents.
+- First SSH connection performs a TOFU pin of the host key into a per-provider `known_hosts` file; strict host-key checking is enforced from then on. See `libs/mngr_ovh/README.md` for the security caveat.
+- `mngr create --provider ovh` automatically reuses a cancelled-but-still-alive OVH VPS (the leftover from a prior `mngr destroy` that OVH won't actually decommission until end of month) instead of ordering a fresh one. Controlled by `enable_recycle_cancelled` (default `True`), `recycle_safety_margin_hours` (default `24`), and `recycle_max_candidates_considered` (default `10`).
+- Adds `mngr ovh list [--all]` operator command: shows every mngr-tagged OVH VPS in the account (or every VPS with `--all`) with plan, datacenter, state, expiration, cancellation status, and IAM tags (`mngr-provider`, `mngr-host-id`, `mngr-recycling-by`). Plain text table; one IAM-resource call plus parallel per-VPS detail fetches via `ConcurrencyGroupExecutor`.
+- Refactors `VpsDockerProvider` to lift the shared parallel-SSH discovery into the base class behind a new `_list_provider_vps_hostnames()` seam method (concrete in the base, returns `[]`; overridden by concrete providers); `mngr_vultr` now only contributes the tag-listing.
+- Widens `os_id` in the VPS Docker base to `int | str` so providers (like OVH) can carry friendly image names through the existing build-args parser without disrupting integer-id providers (like Vultr).
+
+- The TMR GitHub Actions workflow now defaults `MNGR_USER_ID` to the shared `tmr-ci` namespace and reads inbound-SSH authorized keys from the checked-in `.github/tmr-authorized-keys` file (in addition to the existing `additional_authorized_hosts` workflow input). To register your key, run `uv run --project libs/mngr_tmr python libs/mngr_tmr/scripts/setup_tmr_ci_debug.py` and append the printed public key to that file via PR; then debug CI-created modal agents locally with `MNGR_HOST_DIR=~/.mngr-tmr-ci uv run mngr list` / `mngr connect`.
+- TMR run names are now a single compact timestamp `YYYYMMDDHHMMSS` (e.g. `20260514184215`) used consistently across the output directory (`tmr_<run>/`), the `tmr_run_name` agent label, and the agent / host / branch names of every TMR-spawned entity. Testing agents are `tmr-<run>-<test_name>` (with `-2`, `-3`... appended on sanitization collisions; the random hex id has been removed), branches are `mngr-tmr/<run>/<test_name>`, the snapshotter and integrator are `tmr-<run>-snapshotter` / `tmr-<run>-integrator`, and the host pool is `tmr-<run>-host-<i>`. A new `tmr_role` label (`testing` / `snapshotter` / `integrator`) replaces the previous name-prefix matching for filtering integrator agents during `--reintegrate`.
+- The TMR HTML report is now mirrored to `s3://int8-shared-internal/tmr-reports/<run>.html` (us-west-2) on every regeneration when `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` are set, and the public URL `http://go/shared/tmr-reports/<run>.html` is printed (and emitted as a structured `report_url` event in JSON/JSONL output). The TMR GitHub Actions workflow passes the AWS secrets through and uses the URL in the auto-opened PR body, falling back to the existing `tmr-report` artifact when no upload happened.
+- Added a `--run-name` flag to `mngr tmr` to override the auto-generated run name. The main `TMR` GitHub Actions workflow accepts a corresponding `run_name` workflow_dispatch input, and a new `TMR (reintegrate)` workflow takes that run name back as a required input and runs `mngr tmr --reintegrate <run>` against it (re-running just the integrator phase, opening the same kind of draft PR).
+- Internal cleanup: the `tmr_role` agent label is now derived directly from `AgentKind` (which gained a `SNAPSHOTTER` variant) and stamped centrally inside `_create_tmr_agent`, so a single `kind: AgentKind` argument controls both in-process classification and the on-server label. The S3 mirror of the HTML report is now invoked from the orchestration / cli layers rather than from inside `report.generate_html_report`, restoring the reporter to its previous "writes a file, returns a Path" contract. The two TMR workflows share a new `.github/actions/tmr-setup` composite action for their common setup steps.
+
 ## 2026-05-15
 
 Restore Modal compatibility for the standard mngr Dockerfile and adopt offload's `post_patch_cmd` (introduced in v0.9.4). The Dockerfile is back to a single `FROM python:3.12-slim` stage (mngr's Modal image builder rejects multi-stage Dockerfiles), and all source-dependent setup (tarball extraction, git normalization, `image_commit_hash`, `uv sync`) lives in `scripts/post-source-setup.sh`, called both as the final Dockerfile RUN and as offload's `post_patch_cmd` so the two paths stay in sync. Bumps the offload pin from 0.9.2 to 0.9.5.
