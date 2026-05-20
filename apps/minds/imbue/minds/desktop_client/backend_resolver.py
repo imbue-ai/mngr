@@ -22,6 +22,11 @@ SERVICES_EVENT_SOURCE_NAME: Final[str] = "services"
 REQUESTS_EVENT_SOURCE_NAME: Final[str] = "requests"
 REFRESH_EVENT_SOURCE_NAME: Final[str] = "refresh"
 
+# Every minds workspace runs a constant-named ``main``-type agent that owns
+# the bootstrap service manager (and thus the system interface). See
+# ``_DEFAULT_AGENT_NAME`` in ``agent_creator.py``.
+SYSTEM_SERVICES_AGENT_NAME: Final[str] = "system-services"
+
 
 class AgentDisplayInfo(FrozenModel):
     """Display-oriented information about an agent for UI rendering."""
@@ -95,6 +100,14 @@ class BackendResolverInterface(MutableModel, ABC):
 
         Default implementation returns None.
         Subclasses with access to agent labels should override this.
+        """
+        return None
+
+    def get_system_services_agent_id(self, workspace_agent_id: AgentId) -> AgentId | None:
+        """Return the ``system-services`` agent id that shares the workspace agent's host.
+
+        Default implementation returns None.
+        Subclasses with access to per-host agent data should override this.
         """
         return None
 
@@ -374,6 +387,26 @@ class MngrCliBackendResolver(BackendResolverInterface):
         """Return SSH info for the agent's host, or None for local agents."""
         with self._lock:
             return self._agents_result.ssh_info_by_agent_id.get(str(agent_id))
+
+    def get_system_services_agent_id(self, workspace_agent_id: AgentId) -> AgentId | None:
+        """Return the ``system-services`` agent sharing the workspace agent's host.
+
+        The workspace (claude) agent and the system-services agent run in the
+        same container, so they share a host id. Returns None when discovery
+        has not yet surfaced either agent.
+        """
+        with self._lock:
+            host_id: str | None = None
+            for agent in self._agents_result.discovered_agents:
+                if agent.agent_id == workspace_agent_id:
+                    host_id = str(agent.host_id)
+                    break
+            if host_id is None:
+                return None
+            for agent in self._agents_result.discovered_agents:
+                if str(agent.host_id) == host_id and str(agent.agent_name) == SYSTEM_SERVICES_AGENT_NAME:
+                    return agent.agent_id
+            return None
 
     def get_agent_display_info(self, agent_id: AgentId) -> AgentDisplayInfo | None:
         """Return display info from discovered agent data."""

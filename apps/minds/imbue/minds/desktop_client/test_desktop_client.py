@@ -14,7 +14,8 @@ from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client.agent_creator import AgentCreationStatus
 from imbue.minds.desktop_client.agent_creator import AgentCreator
 from imbue.minds.desktop_client.agent_creator import LOG_SENTINEL
-from imbue.minds.desktop_client.app import _build_mngr_exec_argv
+from imbue.minds.desktop_client.app import _build_mngr_start_argv
+from imbue.minds.desktop_client.app import _build_mngr_stop_argv
 from imbue.minds.desktop_client.app import _build_workspace_list
 from imbue.minds.desktop_client.app import create_desktop_client
 from imbue.minds.desktop_client.auth import FileAuthStore
@@ -1481,19 +1482,23 @@ def test_refresh_event_before_lifespan_is_dropped_without_raising(tmp_path: Path
 # -- system-interface restart + recovery tests --
 
 
-def test_build_mngr_exec_argv_includes_agent_id_and_command() -> None:
+def test_build_mngr_stop_argv_appends_stop_host_only_for_host_restart() -> None:
+    """The host tier adds --stop-host; the surgical tier stops just the agent."""
     aid = AgentId.generate()
-    argv = _build_mngr_exec_argv(
-        mngr_binary="/usr/local/bin/mngr",
-        agent_id=aid,
-        shell_command="echo hello",
-    )
-    assert argv[0] == "/usr/local/bin/mngr"
-    assert argv[1] == "exec"
-    assert argv[2] == str(aid)
-    assert argv[3] == "echo hello"
-    assert "--timeout" in argv
-    assert "--quiet" in argv
+
+    surgical = _build_mngr_stop_argv("/usr/local/bin/mngr", aid, is_host_restart=False)
+    assert surgical[:3] == ["/usr/local/bin/mngr", "stop", str(aid)]
+    assert "--stop-host" not in surgical
+
+    host = _build_mngr_stop_argv("/usr/local/bin/mngr", aid, is_host_restart=True)
+    assert host[:3] == ["/usr/local/bin/mngr", "stop", str(aid)]
+    assert "--stop-host" in host
+
+
+def test_build_mngr_start_argv_targets_the_agent() -> None:
+    aid = AgentId.generate()
+    argv = _build_mngr_start_argv("/usr/local/bin/mngr", aid)
+    assert argv[:3] == ["/usr/local/bin/mngr", "start", str(aid)]
 
 
 def test_recovery_page_requires_authentication(tmp_path: Path) -> None:
