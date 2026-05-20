@@ -459,6 +459,28 @@ Supported build arguments for the modal provider:
         return "No start arguments are supported for the modal provider."
 
     @staticmethod
+    def _resolve_modal_interface(config: ProviderInstanceConfig) -> ModalInterface:
+        """Validate ``config`` is a ``ModalProviderConfig`` and pick the matching ``ModalInterface``.
+
+        Shared by ``build_provider_instance`` and ``bootstrap_for_host_creation``; both call
+        sites need the same isinstance guard and the same ``match config.mode`` dispatch.
+        Factoring it out keeps the per-mode dispatch in exactly one place so adding a new
+        ``ModalMode`` variant only needs editing here.
+        """
+        if not isinstance(config, ModalProviderConfig):
+            raise ConfigStructureError(f"Expected ModalProviderConfig, got {type(config).__name__}")
+
+        match config.mode:
+            case ModalMode.DIRECT:
+                return DirectModalInterface()
+            case ModalMode.PROXIED:
+                raise NotImplementedError(
+                    "ModalMode.PROXIED (routing through imbue_cloud gateway) is not yet implemented.",
+                )
+            case _ as unreachable:
+                assert_never(unreachable)
+
+    @staticmethod
     def build_provider_instance(
         name: ProviderInstanceName,
         config: ProviderInstanceConfig,
@@ -475,19 +497,7 @@ Supported build arguments for the modal provider:
         which creates the environment if missing; the subsequent
         ``build_provider_instance`` call then succeeds normally.
         """
-        if not isinstance(config, ModalProviderConfig):
-            raise ConfigStructureError(f"Expected ModalProviderConfig, got {type(config).__name__}")
-
-        match config.mode:
-            case ModalMode.DIRECT:
-                modal_interface: ModalInterface = DirectModalInterface()
-            case ModalMode.PROXIED:
-                raise NotImplementedError(
-                    "ModalMode.PROXIED (routing through imbue_cloud gateway) is not yet implemented.",
-                )
-            case _ as unreachable:
-                assert_never(unreachable)
-
+        modal_interface = ModalProviderBackend._resolve_modal_interface(config)
         return ModalProviderBackend._construct_modal_provider(
             name, config, mngr_ctx, modal_interface, is_environment_creation_allowed=False
         )
@@ -511,19 +521,7 @@ Supported build arguments for the modal provider:
         ``build_provider_instance`` call in the create path reuses the cached
         app via ``_get_or_create_app``.
         """
-        if not isinstance(config, ModalProviderConfig):
-            raise ConfigStructureError(f"Expected ModalProviderConfig, got {type(config).__name__}")
-
-        match config.mode:
-            case ModalMode.DIRECT:
-                modal_interface: ModalInterface = DirectModalInterface()
-            case ModalMode.PROXIED:
-                raise NotImplementedError(
-                    "ModalMode.PROXIED (routing through imbue_cloud gateway) is not yet implemented.",
-                )
-            case _ as unreachable:
-                assert_never(unreachable)
-
+        modal_interface = ModalProviderBackend._resolve_modal_interface(config)
         ModalProviderBackend._construct_modal_provider(
             name, config, mngr_ctx, modal_interface, is_environment_creation_allowed=True
         )
