@@ -1166,10 +1166,17 @@ def _is_host_in_reuse_scope(
     provider_name: ProviderInstanceName | None,
     host_name: HostName | HostId | None,
 ) -> bool:
-    """Whether an already-discovered host falls within the provider/host scope a ``mngr create`` address asked for.
+    """The ``discovered_host``'s provider and host must match the address parts that were specified.
 
-    ``provider_name``: if set, the host's provider must equal it; if ``None``, any provider matches.
-    ``host_name``: a ``HostName`` matches the host's name, a ``HostId`` its id; ``None`` matches any host.
+    An unspecified (``None``) provider or host does not constrain the match.
+
+    Examples (caller args -> which discovered hosts are in scope):
+
+    - ``provider_name=None, host_name=None`` -> every host
+    - ``provider_name="modal", host_name=None`` -> every host on modal
+    - ``provider_name=None, host_name=HostName("h2")`` -> every host named "h2"
+    - ``provider_name="modal", host_name=HostName("h2")`` -> the "h2" host on modal
+    - ``provider_name=None, host_name=HostId("host-1")`` -> the host with that exact id
     """
     if provider_name is not None and discovered_host.provider_name != provider_name:
         return False
