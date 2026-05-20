@@ -182,11 +182,11 @@
         if (!checkbox || !input) return;
         input.disabled = checkbox.checked;
       }
-      if (envApiKeyCheckbox) {
-        envApiKeyCheckbox.addEventListener('change', function() {
-          syncDisabled(envApiKeyCheckbox, apiKeyInput);
-        });
-      }
+      // The api-key checkbox's `change` listener is registered alongside
+      // the other form listeners below (it calls `update()`, which runs
+      // both `syncDisabled` invocations and refreshes `apiKeyInput.required`).
+      // The base-url checkbox only needs to sync its own disabled state
+      // since it doesn't gate any required-state.
       if (envBaseUrlCheckbox) {
         envBaseUrlCheckbox.addEventListener('change', function() {
           syncDisabled(envBaseUrlCheckbox, baseUrlInput);
