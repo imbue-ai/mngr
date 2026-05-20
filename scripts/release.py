@@ -546,7 +546,7 @@ def _gate_release_on_pending_changelog_entries(repo_root: Path, dry_run: bool) -
     print(file=sys.stderr)
     print(f"ERROR: cannot release with {len(entries)} pending changelog {entry_word}.", file=sys.stderr)
     print(file=sys.stderr)
-    print("The following entries in changelog/ haven't been consolidated into", file=sys.stderr)
+    print("The following entries in per-project changelog/ dirs haven't been consolidated into", file=sys.stderr)
     print("their projects' CHANGELOG.md [Unreleased] sections yet:", file=sys.stderr)
     print(_format_pending_changelog_list(entries, repo_root), file=sys.stderr)
     print(file=sys.stderr)
