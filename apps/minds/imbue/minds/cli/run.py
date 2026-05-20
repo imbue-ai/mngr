@@ -34,6 +34,7 @@ from fastapi import FastAPI
 from loguru import logger
 from pydantic import Field
 
+from imbue.concurrency_group.concurrency_group import ConcurrencyExceptionGroup
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.minds.bootstrap import disable_imbue_cloud_provider_for_account
@@ -196,7 +197,12 @@ def run(
         minds_api_token = auth_store.get_api_token().get_secret_value()
         latchkey.register_service("minds", f"http://127.0.0.1:{port}")
         latchkey.auth_set_header("minds", f"Authorization: Bearer {minds_api_token}")
-    except (LatchkeyError, ApiTokenError, OSError) as exc:
+    except (LatchkeyError, ApiTokenError, OSError, ConcurrencyExceptionGroup) as exc:
+        # ``ConcurrencyExceptionGroup`` covers ``ProcessSetupError`` etc.
+        # from the latchkey CLI subprocesses, which the new
+        # ``register_service`` / ``auth_set_header`` helpers do not catch
+        # internally (unlike ``services_info``). Catching it here honours
+        # the best-effort contract the block claims.
         logger.warning("Could not wire latchkey 'minds' service: {}", exc)
 
     root_concurrency_group = ConcurrencyGroup(name="minds-run")
