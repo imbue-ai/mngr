@@ -114,8 +114,8 @@ def probe_workspace_through_plugin(
     Returns the HTTP status code observed (any 200 means ready), or ``None``
     if the probe failed at the transport layer (connect error, mid-stream
     EOF, read timeout). Shared by ``_wait_for_workspace_ready`` (creation
-    flow) and the workspace-health tracker's background probe loop so both
-    paths agree on what "ready" means.
+    flow) and the system-interface-health tracker's background probe loop
+    so both paths agree on what "ready" means.
 
     Pass a pre-constructed ``client`` (via ``make_workspace_probe_client``)
     to reuse the connection pool across a tight poll loop. When omitted, a
