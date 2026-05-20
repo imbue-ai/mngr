@@ -41,15 +41,18 @@ pytestmark = pytest.mark.xdist_group(name="meta_ratchets")
 
 
 def _get_all_project_dirs() -> list[Path]:
-    """Return all project directories (libs/* and apps/*) that are not excluded."""
-    project_dirs: list[Path] = []
-    for parent in [_REPO_ROOT / "libs", _REPO_ROOT / "apps"]:
-        if not parent.is_dir():
-            continue
-        for child in sorted(parent.iterdir()):
-            if child.is_dir() and (child / "pyproject.toml").exists() and child.name not in _EXCLUDED_PROJECTS:
-                project_dirs.append(child)
-    return project_dirs
+    """Return all project directories (libs/* and apps/*) that are not excluded.
+
+    Built on top of ``all_known_projects`` to keep the libs/+apps/+pyproject.toml
+    discovery rule in one place (``scripts.changelog_projects``). Filters out the
+    synthetic ``dev`` bucket (it has no test/coverage/ratchet structure) and any
+    project listed in ``_EXCLUDED_PROJECTS``.
+    """
+    return [
+        get_project_dir(name, _REPO_ROOT)
+        for name in all_known_projects(_REPO_ROOT)
+        if name != DEV_PROJECT and name not in _EXCLUDED_PROJECTS
+    ]
 
 
 def _find_test_ratchets_file(project_dir: Path) -> Path | None:
