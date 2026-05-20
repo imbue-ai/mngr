@@ -85,8 +85,13 @@ ENV UV_LINK_MODE=copy
 # only cargo-installed tool in the image, so the toolchain has no further
 # purpose. If a future tool needs to be cargo-installed, install it in
 # this same RUN before the cleanup line.
-ARG OFFLOAD_VERSION=0.9.5
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+# OFFLOAD_VERSION is exported inline (not a Dockerfile ARG) because mngr_modal
+# ships each Dockerfile instruction to Modal as its own `dockerfile_commands`
+# call (per-layer caching, see `_build_image_from_dockerfile_contents`). ARGs
+# don't carry across separate calls, so an ARG above would expand to empty in
+# the RUN below and `cargo install offload@` would error.
+RUN export OFFLOAD_VERSION=0.9.5 \
+    && curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
         | sh -s -- -y --default-toolchain stable --profile minimal --no-modify-path \
     && /root/.cargo/bin/cargo install offload@${OFFLOAD_VERSION} --locked --root /opt/offload \
     && cp /opt/offload/bin/offload /usr/local/bin/offload \
