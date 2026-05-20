@@ -1269,6 +1269,12 @@ def test_detect_settings_narrowing_allows_create_template_options_superset(mngr_
     assert detect_settings_narrowing(base, override) == []
 
 
+class _TestPluginConfigWithListField(PluginConfig):
+    """Plugin sub-config with a list field, used by the plugin narrowing test."""
+
+    items: list[str] = Field(default_factory=list)
+
+
 def test_detect_settings_narrowing_flags_plugin_subclass_list_replacement(mngr_test_prefix: str) -> None:
     """Plugin sub-configs (subclasses of PluginConfig with extra fields) follow the
     same narrowing rule. Plugin configs are routinely extended by plugin authors with
@@ -1282,12 +1288,6 @@ def test_detect_settings_narrowing_flags_plugin_subclass_list_replacement(mngr_t
         plugins={PluginName("my-plugin"): _TestPluginConfigWithListField(enabled=True, items=["b"])},
     )
     assert detect_settings_narrowing(base, override) == ["plugins.my-plugin.items"]
-
-
-class _TestPluginConfigWithListField(PluginConfig):
-    """Plugin sub-config with a list field, used by the plugin narrowing test."""
-
-    items: list[str] = Field(default_factory=list)
 
 
 def _build_fully_populated_mngr_config(mngr_test_prefix: str) -> MngrConfig:
