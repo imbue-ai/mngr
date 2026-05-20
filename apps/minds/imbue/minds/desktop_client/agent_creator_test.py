@@ -649,7 +649,10 @@ def test_start_creation_accepts_use_env_anthropic_flags(tmp_path: Path) -> None:
     ``ANTHROPIC_*`` env vars before mngr-create runs) is covered at the
     helper level by ``test_build_mngr_create_subprocess_env_*``.
     """
-    cli = _RecordingImbueCloudCli(parent_concurrency_group=ConcurrencyGroup(name="recording-cli"))
+    cli = _RecordingImbueCloudCli(
+        parent_concurrency_group=ConcurrencyGroup(name="recording-cli"),
+        connector_url=FAKE_CONNECTOR_URL,
+    )
     creator = _make_creator_with_cli(tmp_path, cli)
 
     creation_id = creator.start_creation(
