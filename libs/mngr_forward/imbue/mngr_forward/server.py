@@ -597,8 +597,14 @@ async def _handle_workspace_forward_http(
             ssh_http_clients_lock,
         )
     except (SSHTunnelError, paramiko.SSHException, OSError) as e:
+        # A stopped container fails here (its SSH endpoint is gone) rather
+        # than at the resolver -- the resolver still holds a stale entry.
+        # Emit a backend-failure envelope so the minds health tracker ticks
+        # the agent toward STUCK and shows the recovery page, and serve the
+        # same styled loader as the UNRESOLVED path instead of raw error text.
         logger.warning("SSH tunnel setup failed for {}: {}", agent_id, e)
-        return Response(status_code=502, content=f"SSH tunnel failed: {e}")
+        _emit_backend_failure(envelope_writer, agent_id, SystemInterfaceBackendFailureReason.CONNECT_ERROR, None)
+        return _service_unavailable_response(request)
 
     if tunnel_client is None and _is_loopback_url(backend_url) and not allow_host_loopback:
         logger.warning(

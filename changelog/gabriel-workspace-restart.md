@@ -16,3 +16,8 @@ Tiered system-interface restart for the minds recovery flow.
   page gains a per-workspace restart button.
 - New `mngr stop --stop-host` flag: stops an agent's whole host instead
   of just the agent.
+- Opening a workspace whose container has been stopped now routes to the
+  recovery page (and serves the styled loader) instead of showing a raw
+  "SSH tunnel failed" error: the forwarding plugin now reports an SSH-tunnel
+  setup failure as a backend failure, the same as other unreachable-backend
+  cases.
