@@ -1,11 +1,44 @@
+from typing import Annotated
 from typing import Final
+from typing import Literal
 
 import boto3
 from botocore.exceptions import BotoCoreError
 from pydantic import Field
 
+from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr_vps_docker.config import VpsDockerProviderConfig
+
+
+class ExistingSecurityGroup(FrozenModel):
+    """Use an existing AWS security group by ID; the SG must already permit SSH ingress."""
+
+    kind: Literal["existing"] = "existing"
+    id: str = Field(description="EC2 security group ID (e.g. 'sg-0123abcd').")
+
+
+class AutoCreateSecurityGroup(FrozenModel):
+    """Auto-create an AWS security group, opening SSH ingress to the configured CIDRs.
+
+    Fail-closed: ``ensure_security_group`` raises if ``AwsProviderConfig.allowed_ssh_cidrs``
+    is empty so a missing-CIDRs config does not silently produce an unreachable instance.
+    """
+
+    kind: Literal["auto_create"] = "auto_create"
+    name: str = Field(
+        default="mngr-aws",
+        description="Name used when looking up / creating the security group.",
+    )
+
+
+# Tagged union: either reuse an existing SG by id, or auto-create one by name.
+# Discriminator on ``kind`` so pydantic can pick the right concrete type from a
+# TOML object without ambiguity.
+SecurityGroupSpec = Annotated[
+    ExistingSecurityGroup | AutoCreateSecurityGroup,
+    Field(discriminator="kind"),
+]
 
 DEFAULT_AMI_BY_REGION: Final[dict[str, str]] = {
     "us-east-1": "ami-064519b8c76274859",
@@ -49,13 +82,13 @@ class AwsProviderConfig(VpsDockerProviderConfig):
         default_factory=lambda: dict(DEFAULT_AMI_BY_REGION),
         description="Per-region default AMI IDs. Used when default_ami_id is empty.",
     )
-    security_group_id: str | None = Field(
-        default=None,
-        description="Existing security group ID to attach. When None, one is auto-created per region.",
-    )
-    security_group_name: str = Field(
-        default="mngr-aws",
-        description="Name used when auto-creating the security group.",
+    security_group: SecurityGroupSpec = Field(
+        default_factory=AutoCreateSecurityGroup,
+        description=(
+            "Either {'kind': 'existing', 'id': 'sg-...'} to attach an existing security group, "
+            "or {'kind': 'auto_create', 'name': '...'} to auto-create one by name. Default is "
+            "auto-create with name 'mngr-aws'. The auto-create path consults allowed_ssh_cidrs."
+        ),
     )
     subnet_id: str | None = Field(
         default=None,

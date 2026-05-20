@@ -42,6 +42,7 @@ import boto3
 import pytest
 
 from imbue.mngr_aws.client import AwsVpsClient
+from imbue.mngr_aws.config import ExistingSecurityGroup
 from imbue.mngr_aws.testing import AWS_DEFAULT_REGION
 from imbue.mngr_aws.testing import AWS_RELEASE_TESTS_OPT_IN
 from imbue.mngr_aws.testing import AWS_TEST_INSTANCE_AUTO_SHUTDOWN_MINUTES
@@ -191,7 +192,7 @@ def aws_release_client() -> AwsVpsClient:
         session=session,
         region=AWS_DEFAULT_REGION,
         ami_id="ami-placeholder",
-        security_group_id="sg-placeholder",
+        security_group=ExistingSecurityGroup(id="sg-placeholder"),
     )
 
 

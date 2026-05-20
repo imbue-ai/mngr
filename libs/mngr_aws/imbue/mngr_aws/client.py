@@ -16,6 +16,9 @@ from pydantic import Field
 from pydantic import PrivateAttr
 
 from imbue.mngr.errors import MngrError
+from imbue.mngr_aws.config import AutoCreateSecurityGroup
+from imbue.mngr_aws.config import ExistingSecurityGroup
+from imbue.mngr_aws.config import SecurityGroupSpec
 from imbue.mngr_vps_docker.errors import VpsApiError
 from imbue.mngr_vps_docker.errors import VpsProvisioningError
 from imbue.mngr_vps_docker.primitives import VpsInstanceId
@@ -57,10 +60,14 @@ class AwsVpsClient(VpsClientInterface):
     session: boto3.Session = Field(frozen=True, description="boto3 Session with resolved credentials")
     region: str = Field(frozen=True, description="AWS region this client targets")
     ami_id: str = Field(frozen=True, description="Default AMI ID for instances created via this client")
-    security_group_id: str | None = Field(
-        default=None, description="Security group attached to launched instances; auto-created if None"
+    security_group: SecurityGroupSpec = Field(
+        default_factory=AutoCreateSecurityGroup,
+        description=(
+            "Tagged union: ``ExistingSecurityGroup(id=...)`` to attach an existing SG, or "
+            "``AutoCreateSecurityGroup(name=...)`` to look up / create one by name. Default "
+            "is auto-create with the conventional 'mngr-aws' name."
+        ),
     )
-    security_group_name: str = Field(default="mngr-aws", description="Name used when auto-creating the security group")
     subnet_id: str | None = Field(default=None, description="Subnet ID, or None to let EC2 pick a default")
     vpc_id: str | None = Field(default=None, description="VPC ID, used only to scope SG lookup")
     allowed_ssh_cidrs: tuple[str, ...] = Field(
@@ -107,28 +114,34 @@ class AwsVpsClient(VpsClientInterface):
     def ensure_security_group(self) -> str:
         """Return the SG id to attach to new instances, creating it if needed.
 
-        If ``security_group_id`` was provided, it is returned as-is. Otherwise
-        an SG named ``security_group_name`` is looked up (optionally scoped to
-        ``vpc_id``) and created if absent, with ingress for tcp/22 and
-        tcp/``container_ssh_port`` from every CIDR in ``allowed_ssh_cidrs``.
+        ``security_group`` is a tagged union:
+        - ``ExistingSecurityGroup(id=...)``: return the id as-is.
+        - ``AutoCreateSecurityGroup(name=...)``: look up by name (optionally
+          scoped to ``vpc_id``); create if absent. Open tcp/22 and
+          tcp/``container_ssh_port`` to every CIDR in ``allowed_ssh_cidrs``.
 
-        Fails closed if ``allowed_ssh_cidrs`` is empty: rather than create a
-        no-ingress SG (which would result in unreachable instances) or default
-        to ``0.0.0.0/0`` (which would expose SSH to the public internet),
-        we raise so the caller has to make an explicit decision. Matches AWS's
-        own native default for a brand-new SG: no ingress until you add it.
+        The auto-create path fails closed if ``allowed_ssh_cidrs`` is empty:
+        rather than create a no-ingress SG (unreachable instances) or default
+        to ``0.0.0.0/0`` (public-internet SSH), raise so the caller makes an
+        explicit decision. Matches AWS's own default for a brand-new SG: no
+        ingress until you add it.
         """
-        if self.security_group_id is not None:
-            return self.security_group_id
+        match self.security_group:
+            case ExistingSecurityGroup(id=sg_id):
+                return sg_id
+            case AutoCreateSecurityGroup(name=sg_name):
+                return self._ensure_auto_created_security_group(sg_name)
 
+    def _ensure_auto_created_security_group(self, sg_name: str) -> str:
         if not self.allowed_ssh_cidrs:
             raise MngrError(
                 "Cannot auto-create an AWS security group: allowed_ssh_cidrs is empty. "
                 "Either set allowed_ssh_cidrs to a tuple of CIDR blocks (e.g. ('203.0.113.4/32',) "
-                "for your own IP), or pre-create the SG and pass its id as security_group_id."
+                "for your own IP), or pre-create the SG and pass it as "
+                "security_group=ExistingSecurityGroup(id='sg-...')."
             )
 
-        filters: list[dict[str, Any]] = [{"Name": "group-name", "Values": [self.security_group_name]}]
+        filters: list[dict[str, Any]] = [{"Name": "group-name", "Values": [sg_name]}]
         if self.vpc_id is not None:
             filters.append({"Name": "vpc-id", "Values": [self.vpc_id]})
 
@@ -140,7 +153,7 @@ class AwsVpsClient(VpsClientInterface):
             return sg_id
 
         create_kwargs: dict[str, Any] = {
-            "GroupName": self.security_group_name,
+            "GroupName": sg_name,
             "Description": "Auto-created by mngr_aws for SSH access to managed instances",
         }
         if self.vpc_id is not None:

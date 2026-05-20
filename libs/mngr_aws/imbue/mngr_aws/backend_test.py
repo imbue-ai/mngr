@@ -13,6 +13,7 @@ from imbue.mngr_aws.backend import AwsProviderBackend
 from imbue.mngr_aws.backend import register_provider_backend
 from imbue.mngr_aws.client import AwsVpsClient
 from imbue.mngr_aws.config import AwsProviderConfig
+from imbue.mngr_aws.config import ExistingSecurityGroup
 
 
 def test_backend_name() -> None:
@@ -71,7 +72,7 @@ def _build_provider(mngr_ctx: MngrContext, *, auto_shutdown_minutes: int | None)
         session=boto3.Session(region_name=config.default_region),
         region=config.default_region,
         ami_id="ami-placeholder",
-        security_group_id="sg-placeholder",
+        security_group=ExistingSecurityGroup(id="sg-placeholder"),
     )
     return AwsProvider(
         name=ProviderInstanceName("aws-test"),

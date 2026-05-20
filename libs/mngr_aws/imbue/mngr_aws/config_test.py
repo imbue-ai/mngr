@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from imbue.mngr_aws.config import AutoCreateSecurityGroup
 from imbue.mngr_aws.config import AwsProviderConfig
 
 
@@ -37,7 +38,9 @@ def test_default_config_values() -> None:
     config = AwsProviderConfig()
     assert config.default_region == "us-east-1"
     assert config.default_plan == "t3.small"
-    assert config.security_group_name == "mngr-aws"
+    # Default security_group is AutoCreate with name 'mngr-aws'.
+    assert isinstance(config.security_group, AutoCreateSecurityGroup)
+    assert config.security_group.name == "mngr-aws"
     # Empty by default -- fail-closed; user must opt in to SSH ingress.
     assert config.allowed_ssh_cidrs == ()
     assert config.associate_public_ip is True

@@ -17,6 +17,8 @@ from botocore.stub import Stubber
 
 from imbue.mngr.errors import MngrError
 from imbue.mngr_aws.client import AwsVpsClient
+from imbue.mngr_aws.config import AutoCreateSecurityGroup
+from imbue.mngr_aws.config import ExistingSecurityGroup
 from imbue.mngr_aws.testing import _StubbedAwsVpsClient
 from imbue.mngr_vps_docker.errors import VpsApiError
 from imbue.mngr_vps_docker.errors import VpsProvisioningError
@@ -45,7 +47,7 @@ def stubbed_client() -> Iterator[tuple[AwsVpsClient, Stubber]]:
         session=session,
         region="us-east-1",
         ami_id="ami-test12345",
-        security_group_id="sg-test",
+        security_group=ExistingSecurityGroup(id="sg-test"),
         stubbed_ec2_client=ec2,
     )
 
@@ -377,8 +379,7 @@ class TestAwsVpsClientSecurityGroup:
             session=session,
             region="us-east-1",
             ami_id="ami-test",
-            security_group_id=None,
-            security_group_name="mngr-aws-test",
+            security_group=AutoCreateSecurityGroup(name="mngr-aws-test"),
             # Existing tests assume the auto-create path produces a usable SG;
             # provide an explicit CIDR (test-only example range) so
             # ensure_security_group's fail-closed guard passes.
@@ -396,7 +397,7 @@ class TestAwsVpsClientSecurityGroup:
         assert client.ensure_security_group() == "sg-test"
 
     def test_auto_create_fails_closed_when_no_cidrs(self) -> None:
-        """No security_group_id + empty allowed_ssh_cidrs must raise, not create an unreachable SG."""
+        """AutoCreateSecurityGroup + empty allowed_ssh_cidrs must raise, not create an unreachable SG."""
         session = boto3.Session(
             aws_access_key_id="AKIATEST",
             aws_secret_access_key="secret",
@@ -407,7 +408,8 @@ class TestAwsVpsClientSecurityGroup:
             session=session,
             region="us-east-1",
             ami_id="ami-test",
-            security_group_id=None,
+            # Explicit default mirroring config.py
+            security_group=AutoCreateSecurityGroup(),
             stubbed_ec2_client=ec2,
         )
         with pytest.raises(MngrError, match="allowed_ssh_cidrs is empty"):

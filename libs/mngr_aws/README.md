@@ -24,7 +24,10 @@ default_plan = "t3.small"          # instance type
 default_ami_id = ""                # leave empty to use default_ami_by_region
 
 # Optional networking
-# security_group_id = "sg-..."     # auto-created if unset
+# security_group defaults to auto-create with name 'mngr-aws'. To override:
+# [providers.aws.security_group]
+# kind = "existing"
+# id = "sg-..."
 # subnet_id = "subnet-..."          # default-VPC subnet if unset
 # Required (fail-closed): every CIDR allowed inbound on tcp/22 and the
 # container SSH port of the auto-created security group. Empty default
@@ -83,8 +86,7 @@ These fields extend the base `VpsDockerProviderConfig` (see `mngr_vps_docker`):
 | `default_plan` | `t3.small` | EC2 instance type. |
 | `default_ami_id` | `""` | Explicit AMI override; takes precedence over the per-region map. |
 | `default_ami_by_region` | (pinned Debian 12 amd64 per region) | Per-region default AMIs. |
-| `security_group_id` | `None` | Existing SG; auto-created when unset. |
-| `security_group_name` | `mngr-aws` | Name used for the auto-created SG. |
+| `security_group` | `AutoCreateSecurityGroup(name="mngr-aws")` | Tagged union: `{kind = "existing", id = "sg-..."}` to attach an existing SG, or `{kind = "auto_create", name = "..."}` to look up / create one. |
 | `subnet_id` | `None` | Optional explicit subnet. |
 | `vpc_id` | `None` | Scopes auto-SG lookup. |
 | `allowed_ssh_cidrs` | `()` | Tuple of inbound CIDRs for tcp/22 and tcp/`container_ssh_port`. Empty (fail-closed): the auto-SG path raises unless you explicitly list a CIDR or pre-create the SG. |
