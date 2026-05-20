@@ -6,7 +6,7 @@
 
 modal_workspace = "minds-production"
 vault_path_prefix = "secrets/minds/production"
-cloudflare_domain = "CHANGE_ME.example.com"
+cloudflare_domain = "imbueminds.com"
 
 # Every service named here must exist as `.minds/template/<service>.sh`
 # (the schema) AND have a corresponding Vault entry at
