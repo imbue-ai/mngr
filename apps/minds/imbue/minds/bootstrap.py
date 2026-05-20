@@ -31,11 +31,11 @@ _MINDS_PREFIX: Final[str] = "minds"
 # :mod:`imbue.minds.cli.env`:
 #
 #   * ``staging`` -- the reserved staging tier name.
-#   * ``dev-<rest>`` -- any dev env. ``<rest>`` matches
-#     :data:`imbue.minds.envs.primitives.DEV_ENV_NAME_PATTERN` after the
-#     ``dev-`` prefix; kept inlined here so this module stays free of
-#     ``imbue.mngr.*`` / pydantic imports (see module docstring).
-#   * ``ci-<rest>`` -- any CI ephemeral env (same shape as ``dev-``).
+#   * ``dev-<rest>`` / ``ci-<rest>`` -- any dynamic env (developer dev
+#     env or CI ephemeral env, respectively). Together they mirror
+#     :data:`imbue.minds.envs.primitives.DEV_ENV_NAME_PATTERN`; kept
+#     inlined here so this module stays free of ``imbue.mngr.*`` /
+#     pydantic imports (see module docstring).
 #
 # Production has no suffix (``minds`` alone). Anything that does not
 # fit this pattern is treated as ``unset`` by ``resolve_minds_root_name``
