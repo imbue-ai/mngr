@@ -27,9 +27,20 @@ def test_is_transient_status_500_after_cold_boot_is_definitive() -> None:
     assert _is_transient_status(status_code=500, body_is_empty=False, elapsed_seconds=20.0) is False
 
 
-def test_is_transient_status_4xx_is_definitive_even_during_cold_boot() -> None:
-    """4xx is never transient -- it's an immediate definitive failure."""
-    assert _is_transient_status(status_code=404, body_is_empty=False, elapsed_seconds=2.0) is False
+def test_is_transient_status_4xx_during_cold_boot_is_transient() -> None:
+    """4xx within the cold-boot window is transient.
+
+    Modal can serve a stale container from the prior version during the
+    swap window (with ``min_containers=0``); requests can hit the old
+    code's FastAPI app and 404 on routes that didn't exist there. We
+    retry until the new container takes over.
+    """
+    assert _is_transient_status(status_code=404, body_is_empty=False, elapsed_seconds=2.0) is True
+
+
+def test_is_transient_status_4xx_after_cold_boot_is_definitive() -> None:
+    """4xx after the cold-boot window means the route is really missing -- definitive."""
+    assert _is_transient_status(status_code=404, body_is_empty=False, elapsed_seconds=20.0) is False
 
 
 def test_health_check_failed_error_is_a_minderror() -> None:
@@ -47,8 +58,8 @@ def _client_with_response(status: int, body: str = "") -> httpx.Client:
     return httpx.Client(transport=httpx.MockTransport(handler))
 
 
-def test_check_once_4xx_returns_definitive_failure() -> None:
-    """An HTTP 4xx response surfaces as a definitive failure (reason is non-None)."""
+def test_check_once_4xx_during_cold_boot_is_transient() -> None:
+    """During the cold-boot window an HTTP 4xx is transient (keep polling)."""
     with _client_with_response(404, "not found") as client:
         ok, reason = check_once(
             client=client,
@@ -56,6 +67,20 @@ def test_check_once_4xx_returns_definitive_failure() -> None:
             expected_substring=None,
             per_attempt_timeout=1.0,
             elapsed_seconds=0.0,
+        )
+    assert ok is False
+    assert reason is None
+
+
+def test_check_once_4xx_after_cold_boot_is_definitive_failure() -> None:
+    """After the cold-boot window an HTTP 4xx surfaces as a definitive failure."""
+    with _client_with_response(404, "not found") as client:
+        ok, reason = check_once(
+            client=client,
+            url="https://example.com",
+            expected_substring=None,
+            per_attempt_timeout=1.0,
+            elapsed_seconds=30.0,
         )
     assert ok is False
     assert reason is not None

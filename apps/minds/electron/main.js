@@ -596,7 +596,7 @@ function sendCurrentWorkspaceToBundleViews(bundle) {
   // Both the titlebar (chrome view) and the sidebar key UI off the current
   // workspace -- the titlebar uses it to scope the per-agent accent swatch
   // and the auto-redirect to the recovery page (which only fires when a
-  // workspace_server_status event matches the currently-displayed agent).
+  // system_interface_status event matches the currently-displayed agent).
   if (bundle.chromeView && !bundle.chromeView.webContents.isDestroyed()) {
     bundle.chromeView.webContents.send('current-workspace-changed', bundle.currentWorkspaceId);
   }
@@ -1015,18 +1015,19 @@ async function runChromeSSELoop() {
   }
 }
 
-// POST the workspace-server restart API and resolve once the server has
+// POST the system-interface restart API and resolve once the server has
 // acknowledged that the tmux kill dispatch finished (or the request
 // errors / times out). Callers navigate to the workspace URL afterward;
-// because the endpoint returns 200 only after the workspace has been
-// killed, the plugin will then serve its 503 loader until the workspace
-// comes back -- giving the user a visible "Workspace server starting"
-// page instead of a silent reload onto the still-live pre-restart UI.
+// because the endpoint returns 200 only after the system_interface has
+// been killed, the plugin will then serve its 503 loader until the
+// workspace comes back -- giving the user a visible "System interface
+// starting" page instead of a silent reload onto the still-live
+// pre-restart UI.
 //
 // Always resolves (never rejects) so callers can chain navigation
 // regardless of network outcome.
 const RESTART_REQUEST_TIMEOUT_MS = 10000;
-function postRestartWorkspaceServer(agentId) {
+function postRestartSystemInterface(agentId) {
   return new Promise((resolve) => {
     if (!agentId || !backendBaseUrl) {
       resolve();
@@ -1035,7 +1036,7 @@ function postRestartWorkspaceServer(agentId) {
     let req;
     try {
       req = net.request({
-        url: `${backendBaseUrl}/api/agents/${encodeURIComponent(agentId)}/restart-workspace-server`,
+        url: `${backendBaseUrl}/api/agents/${encodeURIComponent(agentId)}/restart-system-interface`,
         method: 'POST',
         useSessionCookies: true,
       });
@@ -1764,19 +1765,19 @@ ipcMain.on('show-workspace-context-menu', (event, agentId, x, y) => {
     template.push({ type: 'separator' });
   }
   template.push({
-    label: 'Restart workspace server',
+    label: 'Restart system interface',
     click: async () => {
       // Close the sidebar first so the user gets immediate visual feedback
       // while we wait for the restart dispatch to ack. The endpoint returns
-      // 200 once `mngr exec` finishes killing the workspace tmux window;
+      // 200 once `mngr exec` finishes killing the system_interface tmux window;
       // navigating before that ack would race against a still-live backend
       // and leave the user looking at the unchanged iframe.
       closeSidebar(bundle);
-      await postRestartWorkspaceServer(agentId);
+      await postRestartSystemInterface(agentId);
       if (workspaceUrl && bundle.contentView && !bundle.contentView.webContents.isDestroyed()) {
         // The plugin now serves its styled 503 loader (the
-        // "Workspace server starting" page), which auto-refreshes into the
-        // workspace once the server is back.
+        // "System interface starting" page), which auto-refreshes into the
+        // workspace once the system interface is back.
         bundle.contentView.webContents.loadURL(workspaceUrl);
       }
     },

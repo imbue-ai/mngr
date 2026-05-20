@@ -34,8 +34,8 @@ from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.request_events import RequestInbox
 from imbue.minds.desktop_client.request_events import create_latchkey_permission_request_event
-from imbue.minds.desktop_client.workspace_server_health import AgentHealth
-from imbue.minds.desktop_client.workspace_server_health import WorkspaceServerHealthTracker
+from imbue.minds.desktop_client.system_interface_health import AgentHealth
+from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
 from imbue.minds.primitives import CreationId
 from imbue.minds.primitives import LaunchMode
 from imbue.minds.primitives import OneTimeCode
@@ -491,7 +491,7 @@ def _create_test_server_with_agent_creator(
         paths=WorkspacePaths(data_dir=tmp_path / "minds"),
         root_concurrency_group=root_cg,
         notification_dispatcher=NotificationDispatcher.create(is_electron=False, tkinter_module=None, is_macos=False),
-        workspace_health_tracker=WorkspaceServerHealthTracker(),
+        system_interface_health_tracker=SystemInterfaceHealthTracker(),
     )
     client, auth_store = _create_test_desktop_client(
         tmp_path=tmp_path,
@@ -1467,7 +1467,7 @@ def _build_refresh_test_app(
 
 def test_refresh_event_posts_to_system_interface_broadcast(tmp_path: Path) -> None:
     """A refresh event on the mngr event stream triggers a POST to the
-    plugin's per-agent subdomain so the workspace server broadcasts. The URL
+    plugin's per-agent subdomain so the system interface broadcasts. The URL
     is on the plugin's port and the request carries the ``mngr_forward_session``
     cookie (set to the preauth value minds wired in)."""
     agent_id = AgentId()
@@ -1525,7 +1525,7 @@ def test_refresh_event_before_lifespan_is_dropped_without_raising(tmp_path: Path
     assert received == []
 
 
-# -- workspace-server restart + recovery tests --
+# -- system-interface restart + recovery tests --
 
 
 def test_build_mngr_exec_argv_includes_agent_id_and_command() -> None:
@@ -1552,7 +1552,7 @@ def test_recovery_page_requires_authentication(tmp_path: Path) -> None:
 def test_recovery_page_renders_for_authenticated_user(tmp_path: Path) -> None:
     # Mark stuck so the page renders -- a HEALTHY agent with a valid return_to
     # 302s straight to return_to (covered by the healthy-redirect test below).
-    tracker = WorkspaceServerHealthTracker()
+    tracker = SystemInterfaceHealthTracker()
     client, _, agent_id = _setup_test_server_with_tracker(tmp_path, tracker)
     tracker.mark_stuck(agent_id)
 
@@ -1565,7 +1565,7 @@ def test_recovery_page_renders_for_authenticated_user(tmp_path: Path) -> None:
     assert response.status_code == 200
     assert str(agent_id) in response.text
     assert safe_return_to in response.text
-    assert "Restart workspace server" in response.text
+    assert "Restart system interface" in response.text
 
 
 def test_recovery_page_drops_open_redirect_return_to(tmp_path: Path) -> None:
@@ -1607,7 +1607,7 @@ def test_recovery_page_allows_relative_return_to(tmp_path: Path) -> None:
     Pre-arranges STUCK so the page renders (a HEALTHY agent with a valid
     return_to 302s to it; that path is covered separately).
     """
-    tracker = WorkspaceServerHealthTracker()
+    tracker = SystemInterfaceHealthTracker()
     client, _, agent_id = _setup_test_server_with_tracker(tmp_path, tracker)
     tracker.mark_stuck(agent_id)
 
@@ -1621,32 +1621,32 @@ def test_recovery_page_allows_relative_return_to(tmp_path: Path) -> None:
 
 def test_restart_api_requires_authentication(tmp_path: Path) -> None:
     client, _, agent_id = _setup_test_server(tmp_path)
-    response = client.post(f"/api/agents/{agent_id}/restart-workspace-server")
+    response = client.post(f"/api/agents/{agent_id}/restart-system-interface")
     assert response.status_code == 403
 
 
-def test_create_desktop_client_stashes_workspace_health_tracker(tmp_path: Path) -> None:
+def test_create_desktop_client_stashes_system_interface_health_tracker(tmp_path: Path) -> None:
     """create_desktop_client should expose the tracker on app.state for handlers."""
     auth_dir = tmp_path / "auth"
     auth_store = FileAuthStore(data_directory=auth_dir)
-    tracker = WorkspaceServerHealthTracker()
+    tracker = SystemInterfaceHealthTracker()
     backend_resolver = StaticBackendResolver(url_by_agent_and_service={})
 
     app = create_desktop_client(
         auth_store=auth_store,
         backend_resolver=backend_resolver,
         http_client=None,
-        workspace_health_tracker=tracker,
+        system_interface_health_tracker=tracker,
     )
 
-    assert app.state.workspace_health_tracker is tracker
+    assert app.state.system_interface_health_tracker is tracker
 
 
 def _setup_test_server_with_tracker(
     tmp_path: Path,
-    tracker: WorkspaceServerHealthTracker,
+    tracker: SystemInterfaceHealthTracker,
 ) -> tuple[TestClient, FileAuthStore, AgentId]:
-    """Build a test client wired to a real WorkspaceServerHealthTracker.
+    """Build a test client wired to a real SystemInterfaceHealthTracker.
 
     The default ``_setup_test_server`` helper doesn't accept a tracker, and
     several tests need to verify the recovery page reads the tracker's
@@ -1661,7 +1661,7 @@ def _setup_test_server_with_tracker(
         auth_store=auth_store,
         backend_resolver=backend_resolver,
         http_client=None,
-        workspace_health_tracker=tracker,
+        system_interface_health_tracker=tracker,
     )
     client = TestClient(app, base_url="http://localhost")
     _authenticate_client(client=client, auth_store=auth_store)
@@ -1674,7 +1674,7 @@ def test_recovery_page_initial_status_reflects_tracker_stuck(tmp_path: Path) -> 
     Without this wiring the page would always render with ``data-initial-status="healthy"``,
     so the JS would not show the busy state when the user lands on the page mid-restart.
     """
-    tracker = WorkspaceServerHealthTracker()
+    tracker = SystemInterfaceHealthTracker()
     client, _, agent_id = _setup_test_server_with_tracker(tmp_path, tracker)
     tracker.mark_stuck(agent_id)
     assert tracker.get_health(agent_id) == AgentHealth.STUCK
@@ -1687,7 +1687,7 @@ def test_recovery_page_initial_status_reflects_tracker_stuck(tmp_path: Path) -> 
 
 def test_recovery_page_initial_status_reflects_tracker_restarting(tmp_path: Path) -> None:
     """A user landing on the recovery page during an in-flight restart must see RESTARTING."""
-    tracker = WorkspaceServerHealthTracker()
+    tracker = SystemInterfaceHealthTracker()
     client, _, agent_id = _setup_test_server_with_tracker(tmp_path, tracker)
     tracker.mark_restarting(agent_id)
     assert tracker.get_health(agent_id) == AgentHealth.RESTARTING
@@ -1705,10 +1705,10 @@ def test_recovery_page_redirects_to_return_to_when_agent_already_healthy(tmp_pat
     chrome JS navigates to /recovery, but the background probe loop flips
     the tracker back to HEALTHY in the brief window before the GET lands.
     Without the redirect, ``initial_status="healthy"`` would render the
-    "Workspace server not responding" page and the JS would never auto-
+    "System interface not responding" page and the JS would never auto-
     reload (the SSE doesn't push events for HEALTHY agents).
     """
-    tracker = WorkspaceServerHealthTracker()
+    tracker = SystemInterfaceHealthTracker()
     client, _, agent_id = _setup_test_server_with_tracker(tmp_path, tracker)
     # With no record in the tracker, get_health returns HEALTHY by default.
     assert tracker.get_health(agent_id) == AgentHealth.HEALTHY
@@ -1730,7 +1730,7 @@ def test_recovery_page_renders_normally_when_healthy_but_no_return_to(tmp_path: 
     correctly with ``initial_status="healthy"``; the user can hit the
     restart button if they want to.
     """
-    tracker = WorkspaceServerHealthTracker()
+    tracker = SystemInterfaceHealthTracker()
     client, _, agent_id = _setup_test_server_with_tracker(tmp_path, tracker)
 
     response = client.get(f"/agents/{agent_id}/recovery", follow_redirects=False)
@@ -1745,7 +1745,7 @@ def test_recovery_page_does_not_redirect_when_stuck_even_with_return_to(tmp_path
     Defends against the cleanup-side regression where the new HEALTHY-only
     redirect accidentally widens to all states.
     """
-    tracker = WorkspaceServerHealthTracker()
+    tracker = SystemInterfaceHealthTracker()
     client, _, agent_id = _setup_test_server_with_tracker(tmp_path, tracker)
     tracker.mark_stuck(agent_id)
     safe_return_to = f"http://{agent_id}.localhost:8421/"
