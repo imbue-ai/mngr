@@ -211,12 +211,19 @@ class SystemInterfaceHealthTracker(MutableModel):
         if fire_health is not None:
             self._fire_on_change(agent_id, fire_health)
 
-    def mark_restarting(self, agent_id: AgentId) -> None:
+    def mark_restarting(self, agent_id: AgentId) -> bool:
         """Mark ``agent_id`` as RESTARTING (called from the restart endpoint).
 
         Cancels any pending stuck timer (the agent is already known-bad and
         we don't need a delayed STUCK transition) and fires on-change so
         the recovery page can re-label.
+
+        Returns ``True`` if this call transitioned the agent into RESTARTING
+        (the agent was not already RESTARTING), and ``False`` if it was
+        already RESTARTING. The transition is decided under the internal
+        lock, so callers can use the return value as an atomic
+        compare-and-set to ensure exactly one of several concurrent restart
+        requests proceeds.
         """
         aid_str = str(agent_id)
         fire_health: AgentHealth | None = None
@@ -231,6 +238,7 @@ class SystemInterfaceHealthTracker(MutableModel):
                 fire_health = AgentHealth.RESTARTING
         if fire_health is not None:
             self._fire_on_change(agent_id, fire_health)
+        return fire_health is not None
 
     def mark_restart_failed(self, agent_id: AgentId, error: str) -> None:
         """Mark ``agent_id`` as RESTART_FAILED, carrying ``error`` as the reason.

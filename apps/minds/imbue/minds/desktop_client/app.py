@@ -1761,11 +1761,13 @@ def _dispatch_restart(
     if tracker is None or concurrency_group is None:
         return _json_error("System-interface restart is unavailable in this configuration", status_code=503)
     # A restart is already in flight for this agent -- don't stack a second
-    # worker thread racing the first one's stop/start commands.
-    if tracker.get_health(aid) == AgentHealth.RESTARTING:
+    # worker thread racing the first one's stop/start commands. mark_restarting
+    # decides the RESTARTING transition under its own lock and reports whether
+    # this caller won it, so this check-and-claim is atomic against concurrent
+    # restart requests (recovery page, sidebar, landing page).
+    if not tracker.mark_restarting(aid):
         return Response(status_code=202, content="{}", media_type="application/json")
 
-    tracker.mark_restarting(aid)
     concurrency_group.start_new_thread(
         target=_run_restart_sequence,
         kwargs={
