@@ -74,6 +74,8 @@ from imbue.minds.desktop_client.sharing_handler import parse_emails_form_value
 from imbue.minds.desktop_client.sharing_handler import resolve_account_email_for_workspace
 from imbue.minds.desktop_client.supertokens_routes import create_supertokens_router
 from imbue.minds.desktop_client.supertokens_routes import signout_user_via_plugin
+from imbue.minds.desktop_client.system_interface_health import AgentHealth
+from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
 from imbue.minds.desktop_client.templates import render_accounts_page
 from imbue.minds.desktop_client.templates import render_auth_error_page
 from imbue.minds.desktop_client.templates import render_chrome_page
@@ -90,8 +92,6 @@ from imbue.minds.desktop_client.templates import render_welcome_page
 from imbue.minds.desktop_client.templates import render_workspace_settings
 from imbue.minds.desktop_client.templates import status_text_for
 from imbue.minds.desktop_client.templates import workspace_accent
-from imbue.minds.desktop_client.workspace_server_health import AgentHealth
-from imbue.minds.desktop_client.workspace_server_health import WorkspaceServerHealthTracker
 from imbue.minds.primitives import AIProvider
 from imbue.minds.primitives import CreationId
 from imbue.minds.primitives import LaunchMode
@@ -1291,7 +1291,7 @@ async def _handle_chrome_events(
         change_event = asyncio.Event()
         loop = asyncio.get_running_loop()
 
-        # Health transitions from the workspace-server tracker arrive on
+        # Health transitions from the system-interface tracker arrive on
         # background threads (envelope reader, probe loop, restart endpoint).
         # We accumulate them into a per-connection queue and drain them
         # in the main generator loop so each subscriber sees every event.
@@ -1306,7 +1306,7 @@ async def _handle_chrome_events(
         if isinstance(backend_resolver, MngrCliBackendResolver):
             backend_resolver.add_on_change_callback(_on_change)
 
-        tracker: WorkspaceServerHealthTracker | None = request.app.state.workspace_health_tracker
+        tracker: SystemInterfaceHealthTracker | None = request.app.state.system_interface_health_tracker
         if tracker is not None:
             tracker.add_on_change_callback(_on_health_change)
 
@@ -1332,7 +1332,7 @@ async def _handle_chrome_events(
             if tracker is not None:
                 for aid, status in tracker.snapshot_all().items():
                     yield "data: {}\n\n".format(
-                        json.dumps({"type": "workspace_server_status", "agent_id": str(aid), "status": status.value})
+                        json.dumps({"type": "system_interface_status", "agent_id": str(aid), "status": status.value})
                     )
 
             # Wait for changes and push updates until client disconnects.
@@ -1385,7 +1385,7 @@ async def _handle_chrome_events(
                 while not health_queue.empty():
                     aid_str, status = health_queue.get_nowait()
                     yield "data: {}\n\n".format(
-                        json.dumps({"type": "workspace_server_status", "agent_id": aid_str, "status": status.value})
+                        json.dumps({"type": "system_interface_status", "agent_id": aid_str, "status": status.value})
                     )
 
                 current_data = _build_workspace_list(backend_resolver, session_store)
@@ -1444,7 +1444,7 @@ def _build_workspace_list(
     return workspaces
 
 
-# -- Workspace-server recovery / restart --
+# -- System-interface recovery / restart --
 
 # Minds creates two mngr agents per workspace, both with ``work_dir=/code``
 # in the same container:
@@ -1452,10 +1452,10 @@ def _build_workspace_list(
 #     Claude conversation in tmux session ``${MNGR_PREFIX}<user-name>``.
 #   - a ``main``-type agent always named ``system-services`` -- runs the
 #     bootstrap service manager (which spawns ``svc-*`` windows from
-#     ``services.toml``, including the workspace server) in tmux session
+#     ``services.toml``, including the system interface) in tmux session
 #     ``${MNGR_PREFIX}system-services``.
 # The restart endpoint is invoked with the user agent's id, but the
-# workspace server lives under the system-services agent's session, so
+# system interface lives under the system-services agent's session, so
 # the kill must explicitly target that session.
 #
 # ``MNGR_PREFIX`` is propagated into the container's host env (see
@@ -1464,13 +1464,13 @@ def _build_workspace_list(
 # available in the shell that runs this command.
 #
 # The bootstrap manager prefixes every services.toml-managed tmux window
-# with ``svc-`` and runs the workspace server under the
+# with ``svc-`` and runs the system interface under the
 # ``system_interface`` service entry, so the window we kick is always
 # ``svc-system_interface``.
 _SERVICES_AGENT_NAME: Final[str] = "system-services"
 _RESTART_TMUX_WINDOW: Final[str] = "svc-system_interface"
 # How long a single workspace probe through the plugin is allowed to hang.
-# Used by the background workspace-health probe loop -- we want a short,
+# Used by the background system-interface-health probe loop -- we want a short,
 # snappy timeout so a wedged workspace doesn't gate the recovery UI.
 _WORKSPACE_PROBE_TIMEOUT_SECONDS: Final[float] = 2.0
 # Timeout for the ``mngr exec`` dispatch itself (must be > 0 and short --
@@ -1570,7 +1570,7 @@ def _handle_recovery_page(
     if not ws_name:
         info = backend_resolver.get_agent_display_info(aid)
         ws_name = info.agent_name if info else str(agent_id)
-    tracker: WorkspaceServerHealthTracker | None = request.app.state.workspace_health_tracker
+    tracker: SystemInterfaceHealthTracker | None = request.app.state.system_interface_health_tracker
     initial_status = tracker.get_health(aid).value if tracker is not None else AgentHealth.HEALTHY.value
     return_to = _sanitize_recovery_return_to(request.query_params.get("return_to", ""))
     # If the agent has already recovered by the time the chrome navigates
@@ -1594,22 +1594,22 @@ def _handle_recovery_page(
     return HTMLResponse(content=html_body)
 
 
-async def _handle_restart_workspace_server_api(
+async def _handle_restart_system_interface_api(
     agent_id: str,
     request: Request,
     auth_store: AuthStoreDep,
 ) -> Response:
-    """Restart the workspace_server tmux window on the agent host.
+    """Restart the system_interface tmux window on the agent host.
 
     Dispatches the ``tmux kill-window`` + ``touch services.toml`` command
     via ``mngr exec`` (which internally routes through the mngr Host
     abstraction, so local and remote agents are handled uniformly) and
     returns 200 as soon as that dispatch succeeds. The workspace tmux
     window is gone by then, so an immediate fetch of the workspace URL
-    will reliably hit the plugin's 503 "Workspace server starting..."
+    will reliably hit the plugin's 503 "System interface starting..."
     loader instead of the still-live pre-restart UI. The background
-    workspace-health probe loop flips the tracker back to HEALTHY when
-    the workspace responds 200 again.
+    system-interface health probe loop flips the tracker back to HEALTHY
+    when the workspace responds 200 again.
 
     No backend_resolver dependency is taken: ``mngr exec`` routes by
     agent ID through the mngr Host abstraction, so the per-agent backend
@@ -1619,7 +1619,7 @@ async def _handle_restart_workspace_server_api(
         return _json_error("Not authenticated", status_code=403)
     aid = AgentId(agent_id)
 
-    tracker: WorkspaceServerHealthTracker | None = request.app.state.workspace_health_tracker
+    tracker: SystemInterfaceHealthTracker | None = request.app.state.system_interface_health_tracker
     mngr_binary: str = request.app.state.mngr_binary
     mngr_host_dir: Path = request.app.state.mngr_host_dir
     concurrency_group: ConcurrencyGroup | None = request.app.state.root_concurrency_group
@@ -2336,7 +2336,7 @@ def _parse_refresh_service_name(raw_line: str) -> str | None:
 
 
 async def _dispatch_refresh_broadcast(app: FastAPI, agent_id: AgentId, service_name: str) -> None:
-    """POST to the agent's workspace server so it emits a refresh_service WS broadcast.
+    """POST to the agent's system interface so it emits a refresh_service WS broadcast.
 
     Routed through the ``mngr forward`` plugin's per-agent subdomain
     (``<agent>.localhost:<plugin_port>``) so we reuse the plugin's existing
@@ -2383,7 +2383,7 @@ def _log_refresh_dispatch_result(
 
 
 def _handle_refresh_event_callback(agent_id_str: str, raw_line: str) -> None:
-    """Fan a refresh event out to every registered app's workspace server.
+    """Fan a refresh event out to every registered app's system interface.
 
     Runs on the mngr-events reader thread, so the async POST is scheduled
     on each app's captured event loop via run_coroutine_threadsafe.
@@ -2440,7 +2440,7 @@ def create_desktop_client(
     mngr_forward_preauth_cookie: str | None = None,
     output_format: OutputFormat | None = None,
     root_concurrency_group: ConcurrencyGroup | None = None,
-    workspace_health_tracker: WorkspaceServerHealthTracker | None = None,
+    system_interface_health_tracker: SystemInterfaceHealthTracker | None = None,
     mngr_binary: str = "mngr",
     mngr_host_dir: Path | None = None,
 ) -> FastAPI:
@@ -2512,7 +2512,7 @@ def create_desktop_client(
     app.state.mngr_forward_preauth_cookie = mngr_forward_preauth_cookie
     app.state.auth_output_format = output_format or OutputFormat.JSONL
     app.state.root_concurrency_group = root_concurrency_group
-    app.state.workspace_health_tracker = workspace_health_tracker
+    app.state.system_interface_health_tracker = system_interface_health_tracker
     app.state.mngr_binary = mngr_binary
     app.state.mngr_host_dir = mngr_host_dir if mngr_host_dir is not None else Path.home() / ".mngr"
     # Populated with the running loop by _managed_lifespan on startup. Defined
@@ -2611,9 +2611,9 @@ def create_desktop_client(
     app.post("/api/agents/{agent_id}/telegram/setup")(_handle_telegram_setup)
     app.get("/api/agents/{agent_id}/telegram/status")(_handle_telegram_status)
 
-    # Workspace-server recovery routes
+    # System-interface recovery routes
     app.get("/agents/{agent_id}/recovery")(_handle_recovery_page)
-    app.post("/api/agents/{agent_id}/restart-workspace-server")(_handle_restart_workspace_server_api)
+    app.post("/api/agents/{agent_id}/restart-system-interface")(_handle_restart_system_interface_api)
 
     return app
 
@@ -2624,8 +2624,8 @@ def create_desktop_client(
 _HEALTH_PROBE_INTERVAL_SECONDS: Final[float] = 2.0
 
 
-def start_workspace_health_probe_loop(
-    tracker: WorkspaceServerHealthTracker,
+def start_system_interface_health_probe_loop(
+    tracker: SystemInterfaceHealthTracker,
     backend_resolver: BackendResolverInterface,
     mngr_forward_port: int,
     mngr_forward_preauth_cookie: str | None,
@@ -2647,28 +2647,28 @@ def start_workspace_health_probe_loop(
         return
 
     root_concurrency_group.start_new_thread(
-        target=_run_workspace_health_probe_loop,
+        target=_run_system_interface_health_probe_loop,
         args=(tracker, backend_resolver, mngr_forward_port, mngr_forward_preauth_cookie, root_concurrency_group),
-        name="workspace-server-health-probe",
+        name="system-interface-health-probe",
         daemon=True,
     )
 
 
-def _run_workspace_health_probe_loop(
-    tracker: WorkspaceServerHealthTracker,
+def _run_system_interface_health_probe_loop(
+    tracker: SystemInterfaceHealthTracker,
     backend_resolver: BackendResolverInterface,
     mngr_forward_port: int,
     mngr_forward_preauth_cookie: str,
     root_concurrency_group: ConcurrencyGroup,
 ) -> None:
-    """Loop body for the background workspace-server health probe thread."""
+    """Loop body for the background system-interface health probe thread."""
     if not isinstance(backend_resolver, MngrCliBackendResolver):
         # Static resolvers used by tests don't expose the same subdomain
         # routing, so probing them by ID is meaningless. Resolver type is
         # fixed for the process lifetime, so exit the thread immediately
         # rather than spinning forever doing nothing.
         logger.debug(
-            "Workspace-server health probe thread exiting: backend_resolver is {}, not MngrCliBackendResolver",
+            "System-interface health probe thread exiting: backend_resolver is {}, not MngrCliBackendResolver",
             type(backend_resolver).__name__,
         )
         return

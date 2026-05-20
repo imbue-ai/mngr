@@ -21,11 +21,22 @@ both recognize.
 import pytest
 
 from imbue.imbue_common.conftest_hooks import register_conftest_hooks
+from imbue.imbue_common.conftest_hooks import register_marker
 from imbue.mngr.utils.logging import suppress_warnings
 from imbue.mngr.utils.plugin_testing import register_plugin_test_fixtures
 from imbue.mngr.utils.testing import generate_test_environment_name
 
 suppress_warnings()
+register_marker(
+    "minds_deployment: tests that exercise the minds deploy process itself by minting their own "
+    "ephemeral dev env. Driven by `just minds-test-deployment`; never collected by the standard "
+    "CI test runs or `just test-quick`."
+)
+register_marker(
+    "minds_services: tests that exercise the deployed services of a pre-stood-up shared dev env. "
+    "Driven by `just minds-test-deployment`; never collected by the standard CI test runs or "
+    "`just test-quick`."
+)
 register_conftest_hooks(globals())
 register_plugin_test_fixtures(globals())
 

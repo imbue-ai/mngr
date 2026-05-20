@@ -45,7 +45,7 @@ from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import LiteLLMKeyMaterial
 from imbue.minds.desktop_client.notification import NotificationDispatcher
-from imbue.minds.desktop_client.workspace_server_health import WorkspaceServerHealthTracker
+from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
 from imbue.minds.errors import GitCloneError
 from imbue.minds.errors import GitOperationError
 from imbue.minds.errors import MngrCommandError
@@ -109,13 +109,13 @@ def probe_workspace_through_plugin(
     probe_timeout_seconds: float,
     client: httpx.Client | None = None,
 ) -> int | None:
-    """Issue a single probe through the plugin to the agent's workspace_server.
+    """Issue a single probe through the plugin to the agent's system_interface.
 
     Returns the HTTP status code observed (any 200 means ready), or ``None``
     if the probe failed at the transport layer (connect error, mid-stream
     EOF, read timeout). Shared by ``_wait_for_workspace_ready`` (creation
-    flow) and the workspace-health tracker's background probe loop so both
-    paths agree on what "ready" means.
+    flow) and the system-interface-health tracker's background probe loop
+    so both paths agree on what "ready" means.
 
     Pass a pre-constructed ``client`` (via ``make_workspace_probe_client``)
     to reuse the connection pool across a tight poll loop. When omitted, a
@@ -887,7 +887,7 @@ class AgentCreator(MutableModel):
         frozen=True,
         description=(
             "Port the ``mngr forward`` plugin is bound to. Used by ``_wait_for_workspace_ready`` to "
-            "probe the freshly-created agent's workspace_server through the plugin's per-subdomain "
+            "probe the freshly-created agent's system_interface through the plugin's per-subdomain "
             "endpoint before publishing the redirect URL. The default of 0 disables readiness "
             "probing -- only appropriate for tests that never exercise the happy-path redirect."
         ),
@@ -901,14 +901,14 @@ class AgentCreator(MutableModel):
             "readiness probing alongside ``mngr_forward_port=0``."
         ),
     )
-    workspace_health_tracker: WorkspaceServerHealthTracker = Field(
+    system_interface_health_tracker: SystemInterfaceHealthTracker = Field(
         frozen=True,
         description=(
-            "Per-process health tracker shared with the ``mngr forward`` ``workspace_backend_failure`` "
-            "envelope consumer and the background workspace-health probe loop. ``_wait_for_workspace_ready`` "
+            "Per-process health tracker shared with the ``mngr forward`` ``system_interface_backend_failure`` "
+            "envelope consumer and the background system-interface-health probe loop. ``_wait_for_workspace_ready`` "
             "calls ``record_success`` on the probe that breaks out of its readiness loop, which cancels "
             "any pending HEALTHY->STUCK timer the warmup failures have already armed. Without this call, "
-            "every workspace creation that takes >5s for its container's ``minds-workspace-server`` to "
+            "every workspace creation that takes >5s for its container's ``system-interface`` to "
             "bind ``:8000`` (i.e. most of them) trips a spurious STUCK transition and the chrome jumps "
             "to the recovery page right after the user lands on the workspace."
         ),
@@ -916,12 +916,12 @@ class AgentCreator(MutableModel):
     workspace_ready_timeout_seconds: float = Field(
         default=60.0,
         frozen=True,
-        description="Maximum time to wait for the new agent's workspace_server to return HTTP 200.",
+        description="Maximum time to wait for the new agent's system_interface to return HTTP 200.",
     )
     workspace_ready_poll_interval_seconds: float = Field(
         default=0.5,
         frozen=True,
-        description="Sleep between probe attempts when the workspace_server is not yet ready.",
+        description="Sleep between probe attempts when the system_interface is not yet ready.",
     )
     workspace_ready_probe_timeout_seconds: float = Field(
         default=2.0,
@@ -1331,11 +1331,11 @@ class AgentCreator(MutableModel):
 
                 log_queue.put("[minds] Agent created successfully.")
 
-                # Wait for the agent's workspace_server to actually answer 200
+                # Wait for the agent's system_interface to actually answer 200
                 # through the plugin before publishing the redirect. Without
                 # this poll, the user gets dropped on a hard error page (404
                 # /503) for the few seconds between ``mngr create`` returning
-                # and the workspace_server inside the agent finishing
+                # and the system_interface inside the agent finishing
                 # startup. The probe is best-effort: if it times out, we
                 # publish anyway so the user at least lands on the retry
                 # page rather than spinning forever (PR 1471 part 1).
@@ -1411,11 +1411,11 @@ class AgentCreator(MutableModel):
         return f"http://localhost:{self.mngr_forward_port}/goto/{agent_id}/"
 
     def _wait_for_workspace_ready(self, agent_id: AgentId, log_queue: queue.Queue[str]) -> None:
-        """Poll the agent's workspace_server through the plugin until it responds 200.
+        """Poll the agent's system_interface through the plugin until it responds 200.
 
         Probes ``http://<agent_id>.localhost:<plugin_port>/`` with the preauth
         cookie set, treating any 200 as ready. Other status codes (typically
-        503 from the plugin's auto-refresh page when the workspace_server
+        503 from the plugin's auto-refresh page when the system_interface
         isn't yet listening, or 502 when SSH info hasn't propagated) are
         treated as not-yet-ready and re-polled until the timeout elapses.
 
@@ -1430,7 +1430,7 @@ class AgentCreator(MutableModel):
             return
 
         deadline = time.monotonic() + self.workspace_ready_timeout_seconds
-        log_queue.put("[minds] Waiting for workspace server to be ready...")
+        log_queue.put("[minds] Waiting for system interface to be ready...")
         last_status: int | None = None
         attempt = 0
         with make_workspace_probe_client(
@@ -1450,21 +1450,21 @@ class AgentCreator(MutableModel):
                     last_status = status
                     if status == 200:
                         logger.debug("Workspace ready for {} after {} probe(s)", agent_id, attempt)
-                        log_queue.put("[minds] Workspace server is ready.")
+                        log_queue.put("[minds] System interface is ready.")
                         # Propagate the success into the shared health tracker.
                         # Earlier probes in this loop go through ``mngr forward``
                         # too, and each one's connect-refused failure trips a
-                        # ``workspace_backend_failure`` envelope that arms a
-                        # 5-second HEALTHY->STUCK timer on the tracker. Without
+                        # ``system_interface_backend_failure`` envelope that arms
+                        # a 5-second HEALTHY->STUCK timer on the tracker. Without
                         # this explicit ``record_success`` the timer fires
                         # *after* we return (because no other success path
                         # flows back into the tracker until the background
                         # probe loop next ticks, ~2s later), the chrome jumps
-                        # to the recovery page, and the user sees a "Workspace
-                        # server not responding" page seconds after their
+                        # to the recovery page, and the user sees a "System
+                        # interface not responding" page seconds after their
                         # freshly-created agent appeared healthy. Idempotent
                         # if the tracker has no record for this agent.
-                        self.workspace_health_tracker.record_success(agent_id)
+                        self.system_interface_health_tracker.record_success(agent_id)
                         return
                 threading.Event().wait(timeout=self.workspace_ready_poll_interval_seconds)
         logger.warning(

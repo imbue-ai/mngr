@@ -310,7 +310,7 @@ def render_recovery_page(
     return_to: str,
     initial_status: str,
 ) -> str:
-    """Render the workspace-recovery page shown when the workspace server is unresponsive.
+    """Render the workspace-recovery page shown when the system interface is unresponsive.
 
     ``initial_status`` is one of ``"stuck"``/``"restarting"``/``"healthy"`` and
     governs the page's initial UI state. ``return_to`` is the URL the page

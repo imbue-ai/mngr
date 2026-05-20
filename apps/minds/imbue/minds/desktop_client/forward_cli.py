@@ -62,7 +62,7 @@ from imbue.mngr.api.discovery_events import HostSSHInfoEvent
 from imbue.mngr.api.discovery_events import parse_discovery_event_line
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import DiscoveredAgent
-from imbue.mngr_forward.data_types import WorkspaceBackendFailureReason
+from imbue.mngr_forward.data_types import SystemInterfaceBackendFailureReason
 
 _DEFAULT_MNGR_HOST_DIR: Final[Path] = Path.home() / ".mngr"
 _REMOTE_HOST_DIR: Final[str] = "/mngr"
@@ -72,7 +72,7 @@ OnAgentDiscoveredCallback = Callable[[AgentId, RemoteSSHInfo | None, str], None]
 OnAgentDestroyedCallback = Callable[[AgentId], None]
 OnReverseTunnelEstablishedCallback = Callable[["ReverseTunnelEstablishedInfo"], None]
 OnProviderErrorCallback = Callable[[str, str, str], None]
-OnWorkspaceBackendFailureCallback = Callable[[AgentId, WorkspaceBackendFailureReason, int | None], None]
+OnSystemInterfaceBackendFailureCallback = Callable[[AgentId, SystemInterfaceBackendFailureReason, int | None], None]
 
 
 class ReverseTunnelEstablishedInfo(FrozenModel):
@@ -133,7 +133,7 @@ class EnvelopeStreamConsumer(MutableModel):
         default_factory=list
     )
     _on_provider_error_callbacks: list[OnProviderErrorCallback] = PrivateAttr(default_factory=list)
-    _on_workspace_backend_failure_callbacks: list[OnWorkspaceBackendFailureCallback] = PrivateAttr(
+    _on_system_interface_backend_failure_callbacks: list[OnSystemInterfaceBackendFailureCallback] = PrivateAttr(
         default_factory=list
     )
     _process: subprocess.Popen[bytes] | None = PrivateAttr(default=None)
@@ -157,17 +157,19 @@ class EnvelopeStreamConsumer(MutableModel):
         with self._lock:
             self._on_reverse_tunnel_established_callbacks.append(callback)
 
-    def add_on_workspace_backend_failure_callback(self, callback: OnWorkspaceBackendFailureCallback) -> None:
-        """Register a callback fired for each ``workspace_backend_failure`` forward-stream envelope.
+    def add_on_system_interface_backend_failure_callback(
+        self, callback: OnSystemInterfaceBackendFailureCallback
+    ) -> None:
+        """Register a callback fired for each ``system_interface_backend_failure`` forward-stream envelope.
 
         The callback receives ``(agent_id, reason, status_code)``. ``reason``
-        is a ``WorkspaceBackendFailureReason`` enum value (CONNECT_ERROR /
+        is a ``SystemInterfaceBackendFailureReason`` enum value (CONNECT_ERROR /
         SSE_EOF / FIVEXX_RESPONSE / UNRESOLVED); ``status_code`` is set
-        only when ``reason == WorkspaceBackendFailureReason.FIVEXX_RESPONSE``.
-        Used by minds to feed its ``WorkspaceServerHealthTracker``.
+        only when ``reason == SystemInterfaceBackendFailureReason.FIVEXX_RESPONSE``.
+        Used by minds to feed its ``SystemInterfaceHealthTracker``.
         """
         with self._lock:
-            self._on_workspace_backend_failure_callbacks.append(callback)
+            self._on_system_interface_backend_failure_callbacks.append(callback)
 
     def add_on_provider_error_callback(self, callback: OnProviderErrorCallback) -> None:
         """Register a callback fired for each ``DiscoveryErrorEvent`` attributable to a provider.
@@ -563,12 +565,12 @@ class EnvelopeStreamConsumer(MutableModel):
                     callback(info)
                 except (OSError, RuntimeError, paramiko.SSHException) as e:
                     logger.warning("reverse_tunnel_established callback failed for {}: {}", info.agent_id, e)
-        elif payload_type == "workspace_backend_failure":
+        elif payload_type == "system_interface_backend_failure":
             try:
                 agent_id = AgentId(str(payload["agent_id"]))
-                reason = WorkspaceBackendFailureReason(str(payload["reason"]))
+                reason = SystemInterfaceBackendFailureReason(str(payload["reason"]))
             except (KeyError, ValueError, TypeError) as e:
-                logger.warning("Could not parse workspace_backend_failure payload: {}", e)
+                logger.warning("Could not parse system_interface_backend_failure payload: {}", e)
                 return
             raw_status_code = payload.get("status_code")
             try:
@@ -576,12 +578,12 @@ class EnvelopeStreamConsumer(MutableModel):
             except (ValueError, TypeError):
                 status_code = None
             with self._lock:
-                callbacks = list(self._on_workspace_backend_failure_callbacks)
+                callbacks = list(self._on_system_interface_backend_failure_callbacks)
             for callback in callbacks:
                 try:
                     callback(agent_id, reason, status_code)
                 except (OSError, RuntimeError, ValueError) as e:
-                    logger.warning("workspace_backend_failure callback failed for {}: {}", agent_id, e)
+                    logger.warning("system_interface_backend_failure callback failed for {}: {}", agent_id, e)
         elif payload_type in ("login_url", "listening"):
             logger.debug("Forward stream payload {}: {}", payload_type, payload)
         else:

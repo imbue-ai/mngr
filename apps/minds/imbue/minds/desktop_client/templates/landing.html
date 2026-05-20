@@ -115,7 +115,7 @@
         es.onmessage = function (event) {
           var data;
           try { data = JSON.parse(event.data); } catch (e) { return; }
-          if (data.type === 'workspace_server_status') {
+          if (data.type === 'system_interface_status') {
             var aid = data.agent_id;
             if (data.status === 'healthy') delete healthStatusByAgent[aid];
             else healthStatusByAgent[aid] = data.status;
