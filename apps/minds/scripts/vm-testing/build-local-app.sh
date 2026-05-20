@@ -87,6 +87,23 @@ pyproject_dir="$resources_dir/pyproject"
 log "running pnpm build for the binary resources (wipes resources/)"
 ( cd "$minds_dir" && pnpm install --silent && pnpm build 2>&1 | sed 's/^/[pnpm-build] /' )
 
+# Replace the bundled git with the real one from
+# /Library/Developer/CommandLineTools/. build.js copies `which git`, which
+# on a developer Mac is /usr/bin/git -- an xcselect stub that links against
+# /usr/lib/libxcselect.dylib. macOS Tahoe SIGKILLs that stub when it's run
+# from anywhere other than /usr/bin/ (AMFI / library validation), which
+# breaks the desktop client's first `git clone` inside the agent-creation
+# step. The CLT-installed git at the path below depends only on system
+# libs and runs fine from any location.
+real_git=/Library/Developer/CommandLineTools/usr/bin/git
+if [[ -x "$real_git" ]]; then
+    log "swapping bundled git with $real_git"
+    cp "$real_git" "$resources_dir/git/bin/git"
+    chmod +x "$resources_dir/git/bin/git"
+else
+    log "WARNING: $real_git not found; bundled git will be the xcselect stub and SIGKILL on Tahoe"
+fi
+
 log "building workspace wheels into $wheels_dir"
 rm -rf "$wheels_dir"
 mkdir -p "$wheels_dir"

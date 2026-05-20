@@ -9,17 +9,24 @@ BASE_IMAGE="${BASE_IMAGE:-ghcr.io/cirruslabs/macos-tahoe-vanilla:latest}"
 
 # Disable host key checking and Kerberos prompts; we never reuse identities
 # across throwaway VMs and the VM's host key changes every clone.
-# Force password auth so sshpass actually has a chance to supply the
-# password before sshd's MaxAuthTries kills the connection (the user's
-# loaded SSH identities would otherwise be tried first and burn that quota).
+# Force a single password prompt so sshpass actually authenticates: macOS
+# sshd offers keyboard-interactive ahead of password, which sshpass's
+# pseudo-tty stuffing can confuse into infinite retry-on-fail. Pinning
+# PreferredAuthentications=password and turning off keyboard-interactive +
+# challenge-response makes sshpass's one-shot password the only path; the
+# NumberOfPasswordPrompts=1 cap also prevents post-failure retries that
+# exhaust MaxAuthTries on the server side.
 SSH_OPTS=(
     -o StrictHostKeyChecking=no
     -o UserKnownHostsFile=/dev/null
     -o LogLevel=ERROR
     -o GSSAPIAuthentication=no
     -o PubkeyAuthentication=no
+    -o KbdInteractiveAuthentication=no
+    -o ChallengeResponseAuthentication=no
     -o PreferredAuthentications=password
     -o IdentitiesOnly=yes
+    -o NumberOfPasswordPrompts=1
     -o ConnectTimeout=5
 )
 
