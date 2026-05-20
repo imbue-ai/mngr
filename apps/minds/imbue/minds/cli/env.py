@@ -114,14 +114,16 @@ from imbue.minds.primitives import OutputFormat
 from imbue.minds.utils.output import write_stdout_line
 from imbue.mngr_ovh.iam_tags import IamResource
 
-# Reserved env names that map to named tiers; everything else is the
-# ``dev`` tier. Mirrors the spec's hard-coded tier mapping and lets
-# ``minds env deploy`` / ``destroy`` dispatch on env name alone.
-# The individual ``_PRODUCTION_ENV_NAME`` / ``_STAGING_ENV_NAME`` /
-# ``_DEV_TIER`` constants + the ``_tier_for_env_name`` mapper live in
-# ``_activated_env.py`` so ``minds pool`` (which also needs to derive
-# the tier for its Vault-scoped OVH credentials read) can share them
-# without an env.py -> pool.py back-reference.
+# Reserved env names that map to named tiers; names starting with
+# ``ci-`` map to the ``ci`` tier (CI-orchestrator-minted ephemeral envs),
+# and everything else maps to the ``dev`` tier. Mirrors the spec's
+# hard-coded tier mapping and lets ``minds env deploy`` / ``destroy``
+# dispatch on env name alone. The individual ``_PRODUCTION_ENV_NAME`` /
+# ``_STAGING_ENV_NAME`` / ``_DEV_TIER`` / ``_CI_TIER`` constants + the
+# ``_tier_for_env_name`` mapper live in ``_activated_env.py`` so
+# ``minds pool`` (which also needs to derive the tier for its
+# Vault-scoped OVH credentials read) can share them without an
+# env.py -> pool.py back-reference.
 _RESERVED_TIER_ENV_NAMES: Final[frozenset[str]] = frozenset({"production", "staging"})
 
 # Env vars exported by ``activate`` (and unset by ``deactivate``). The
