@@ -26,9 +26,9 @@ no Vultr API calls). Modeled on the leak detector in
 ``libs/mngr_modal/imbue/mngr_modal/conftest.py``.
 """
 
-import enum
 import os
 import uuid
+from enum import auto
 from typing import Any
 from typing import Final
 from typing import assert_never
@@ -37,6 +37,7 @@ import pytest
 from loguru import logger
 from pydantic import SecretStr
 
+from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.mngr_vps_docker.errors import VpsApiError
 from imbue.mngr_vps_docker.primitives import VpsInstanceId
 from imbue.mngr_vultr.client import VultrVpsClient
@@ -45,7 +46,7 @@ _SESSION_TAG_KEY: Final[str] = "mngr-vultr-test-session"
 _SESSION_TAG: Final[str] = f"{_SESSION_TAG_KEY}={uuid.uuid4().hex}"
 
 
-class _LeakDestroyOutcome(enum.Enum):
+class _LeakDestroyOutcome(UpperCaseStrEnum):
     """Outcome of attempting to destroy one survivor at session end.
 
     DESTROYED -- destroy API call succeeded on a still-running instance.
@@ -58,9 +59,9 @@ class _LeakDestroyOutcome(enum.Enum):
         could not clean it up.
     """
 
-    DESTROYED = "destroyed"
-    ALREADY_GONE = "already_gone"
-    DESTROY_FAILED = "destroy_failed"
+    DESTROYED = auto()
+    ALREADY_GONE = auto()
+    DESTROY_FAILED = auto()
 
 
 # Used to set + restore MNGR_VPS_EXTRA_TAGS across the pytest session.
