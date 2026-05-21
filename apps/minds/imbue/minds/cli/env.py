@@ -142,7 +142,7 @@ _ACTIVATION_ENV_VARS: Final[tuple[str, ...]] = (
     "MNGR_PREFIX",
     "MINDS_CLIENT_CONFIG_PATH",
     # Modal CLI workspace selector. Only set by ``activate --deploy``;
-    # see :func:`_collect_activation_exports` and the ``--deploy`` flag
+    # see :func:`_build_deploy_mode_exports` and the ``--deploy`` flag
     # on ``minds env activate``.
     MODAL_PROFILE_ENV_VAR,
 )
