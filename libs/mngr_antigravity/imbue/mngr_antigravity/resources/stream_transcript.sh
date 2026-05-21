@@ -44,11 +44,10 @@ AGY_LOG_FILE="${ANTIGRAVITY_AGY_LOG_FILE:?ANTIGRAVITY_AGY_LOG_FILE must be set}"
 APP_DATA_DIR="${ANTIGRAVITY_APP_DATA_DIR:-$HOME/.gemini/antigravity-cli}"
 OUTPUT_FILE="$AGENT_DATA_DIR/logs/antigravity_transcript/events.jsonl"
 OFFSET_DIR="$AGENT_DATA_DIR/plugin/antigravity/.transcript_offsets"
-CONV_IDS_FILE="$AGENT_DATA_DIR/plugin/antigravity/.conversation_ids"
 POLL_INTERVAL=1
 
-mkdir -p "$(dirname "$OUTPUT_FILE")" "$OFFSET_DIR" "$(dirname "$CONV_IDS_FILE")"
-touch "$OUTPUT_FILE" "$CONV_IDS_FILE"
+mkdir -p "$(dirname "$OUTPUT_FILE")" "$OFFSET_DIR"
+touch "$OUTPUT_FILE"
 
 # Configure and source the shared logging library
 _MNGR_LOG_TYPE="stream_transcript"
@@ -90,8 +89,8 @@ _transcript_path() {
 # agy writes `Created conversation <uuid>` to its --log-file every time it
 # opens a new conversation (new session, /fork, /new). Resumed conversations
 # (-c / --conversation) emit `Resumed conversation <uuid>` -- we accept both
-# verbs. Each discovered id is appended to CONV_IDS_FILE so subsequent runs
-# can pick up where we left off without re-parsing the log from scratch.
+# verbs. The log is re-scanned on every poll cycle; this is cheap relative
+# to the JSONL emit step and keeps the implementation stateless.
 #
 # Echoes one uuid per line.
 _find_conversation_ids() {
