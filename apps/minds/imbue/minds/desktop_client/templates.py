@@ -8,6 +8,7 @@ that we moved from inline strings to file-based templates.
 """
 
 import hashlib
+import html
 import os
 from collections.abc import Mapping
 from collections.abc import Sequence
@@ -27,6 +28,7 @@ from imbue.minds.primitives import CreationId
 from imbue.minds.primitives import LaunchMode
 from imbue.minds.primitives import OneTimeCode
 from imbue.mngr.primitives import AgentId
+from imbue.mngr_forward.loading_page import render_loading_page
 
 TEMPLATE_DIR: Final[Path] = Path(__file__).resolve().parent / "templates"
 
@@ -303,30 +305,210 @@ def render_auth_error_page(message: str) -> str:
     return JINJA_ENV.get_template("auth_error.html").render(message=message)
 
 
+# CSS for the recovery page's restart controls, appended to the shared
+# ``LOADING_PAGE_CSS``. The card itself, spinner, heading and message all come
+# from the shared loading page, so the recovery page's loading state is
+# byte-identical to the mngr_forward proxy loader.
+_RECOVERY_STYLE: Final[str] = """\
+      .hidden { display: none; }
+      details {
+        margin-top: 16px;
+        border: 1px solid #fde68a;
+        background: #fffbeb;
+        border-radius: 6px;
+        color: #92400e;
+      }
+      summary { cursor: pointer; padding: 8px 12px; font-weight: 500; font-size: 0.8125rem; }
+      details pre {
+        margin: 0;
+        padding: 0 12px 12px;
+        max-height: 240px;
+        overflow-y: auto;
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+        font-size: 0.75rem;
+        line-height: 1.5;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      }
+      button {
+        margin-top: 16px;
+        background: #18181b;
+        color: #fff;
+        border: 0;
+        border-radius: 6px;
+        padding: 8px 16px;
+        font-size: 0.875rem;
+        font-weight: 500;
+        cursor: pointer;
+      }
+      button:hover { background: #3f3f46; }
+"""
+
+# The recovery page's behavior. It drives the shared loading card (toggling
+# the spinner, heading and message) plus the recovery-only restart button and
+# error <details>. While a restart is in flight it auto-refreshes itself:
+# _handle_recovery_page re-renders from the live tracker state on every GET,
+# so a timed reload is the whole "is it healthy yet?" check.
+_RECOVERY_SCRIPT: Final[str] = """\
+      (function () {
+        var root = document.querySelector('[data-agent-id]');
+        if (!root) return;
+        var agentId = root.dataset.agentId;
+        var returnTo = root.dataset.returnTo || '';
+        var initialStatus = root.dataset.initialStatus || 'stuck';
+
+        var titleEl = document.getElementById('loading-title');
+        var messageEl = document.getElementById('loading-message');
+        var spinnerEl = document.getElementById('loading-spinner');
+        var errorEl = document.getElementById('recovery-error');  // null unless restart_failed
+        var hostBtn = document.getElementById('recovery-host-btn');
+
+        var REFRESH_INTERVAL_MS = 1500;
+
+        function show(el, visible) {
+          if (el) el.classList.toggle('hidden', !visible);
+        }
+
+        // The poll URL omits intent=restart so that, once the restart is
+        // dispatched, a healthy tracker state 302s the user back to the workspace.
+        function pollUrl() {
+          var u = '/agents/' + encodeURIComponent(agentId) + '/recovery';
+          if (returnTo) u += '?return_to=' + encodeURIComponent(returnTo);
+          return u;
+        }
+        function scheduleRefresh() {
+          setTimeout(function () { window.location.assign(pollUrl()); }, REFRESH_INTERVAL_MS);
+        }
+
+        function renderLoading() {
+          titleEl.textContent = 'Loading workspace';
+          messageEl.textContent = 'This page will reload automatically once your workspace is ready.';
+          show(spinnerEl, true);
+          show(errorEl, false);
+          show(hostBtn, false);
+        }
+        function renderHostOffer() {
+          titleEl.textContent = 'System interface not responding';
+          messageEl.textContent =
+            'This workspace needs a restart to recover. In-progress work in all agents will be interrupted.';
+          show(spinnerEl, false);
+          show(errorEl, false);
+          hostBtn.textContent = 'Restart workspace';
+          show(hostBtn, true);
+        }
+        function renderFailed() {
+          titleEl.textContent = 'Restart failed';
+          messageEl.textContent =
+            'The restart did not recover the workspace. You can try again, or contact support '
+            + 'if the problem persists.';
+          show(spinnerEl, false);
+          show(errorEl, true);
+          hostBtn.textContent = 'Restart workspace';
+          show(hostBtn, true);
+        }
+        function renderDispatchError() {
+          titleEl.textContent = 'System interface not responding';
+          messageEl.textContent = 'Could not start the restart. Check your connection and try again.';
+          show(spinnerEl, false);
+          show(errorEl, false);
+          hostBtn.textContent = 'Restart workspace';
+          show(hostBtn, true);
+        }
+
+        function postRestart(path) {
+          renderLoading();
+          // The endpoint returns 202 once the tracker is RESTARTING; any other
+          // status means the dispatch did not start, so surface an error
+          // instead of refreshing into a re-probe loop.
+          fetch('/api/agents/' + encodeURIComponent(agentId) + path, {
+            method: 'POST',
+            credentials: 'same-origin',
+          }).then(function (resp) {
+            if (resp.ok) { scheduleRefresh(); } else { renderDispatchError(); }
+          }, renderDispatchError);
+        }
+
+        function runProbe() {
+          renderLoading();
+          fetch('/api/agents/' + encodeURIComponent(agentId) + '/host-health', {
+            credentials: 'same-origin',
+          }).then(function (resp) {
+            return resp.json();
+          }).then(function (data) {
+            if (data && data.reachable) {
+              // Container running: the surgical system-interface restart can
+              // recover the workspace without interrupting agents.
+              postRestart('/restart-system-interface');
+            } else if (data && data.host_offline) {
+              // Container fully stopped: nothing is running, so a host restart
+              // just starts it back up -- dispatch it, no confirmation needed.
+              postRestart('/restart-host');
+            } else {
+              // Ambiguous host state: a host restart could interrupt running
+              // agents, so make the user confirm by clicking.
+              renderHostOffer();
+            }
+          }, function () {
+            renderHostOffer();
+          });
+        }
+
+        hostBtn.addEventListener('click', function () {
+          postRestart('/restart-host');
+        });
+
+        if (initialStatus === 'restarting') {
+          renderLoading();
+          scheduleRefresh();
+        } else if (initialStatus === 'restart_failed') {
+          renderFailed();
+        } else if (initialStatus === 'healthy') {
+          // Degenerate: rendered HEALTHY with no return_to to 302 to. Offer a
+          // manual restart rather than auto-dispatching one on a healthy page.
+          renderHostOffer();
+        } else {
+          runProbe();
+        }
+      })();
+"""
+
+
 @pure
 def render_recovery_page(
     agent_id: AgentId,
-    ws_name: str,
     return_to: str,
     initial_status: str,
     initial_error: str,
 ) -> str:
     """Render the workspace-recovery page shown when the system interface is unresponsive.
 
-    ``initial_status`` is one of ``"stuck"``/``"restarting"``/``"restart_failed"``/
-    ``"healthy"`` and governs the page's initial UI state. ``initial_error`` is the
-    failure reason carried when ``initial_status`` is ``"restart_failed"`` (empty
-    otherwise). ``return_to`` is the URL the page reloads back to once the tracker
-    reports HEALTHY again -- typically the original plugin subdomain URL the user
-    was navigating to.
+    Built on the shared ``render_loading_page`` so the recovery page's loading
+    state is identical to the mngr_forward proxy loader. ``initial_status`` is
+    one of ``"stuck"``/``"restarting"``/``"restart_failed"``/``"healthy"`` and
+    governs the page's initial UI state. ``initial_error`` is the failure
+    reason shown (collapsed) when ``initial_status`` is ``"restart_failed"``.
+    ``return_to`` is the URL the page navigates back to once the workspace is
+    healthy again.
     """
-    return JINJA_ENV.get_template("recovery.html").render(
-        agent_id=str(agent_id),
-        ws_name=ws_name,
-        return_to=return_to,
-        initial_status=initial_status,
-        initial_error=initial_error,
-        accent=workspace_accent(str(agent_id)),
+    error_block = ""
+    if initial_error:
+        error_block = (
+            '      <details id="recovery-error" class="hidden">\n'
+            "        <summary>Show error details</summary>\n"
+            f"        <pre>{html.escape(initial_error)}</pre>\n"
+            "      </details>\n"
+        )
+    card_extra = error_block + '      <button id="recovery-host-btn" class="hidden">Restart workspace</button>\n'
+    card_attrs = (
+        f' data-agent-id="{html.escape(str(agent_id))}"'
+        f' data-return-to="{html.escape(return_to)}"'
+        f' data-initial-status="{html.escape(initial_status)}"'
+    )
+    return render_loading_page(
+        style_extra=_RECOVERY_STYLE,
+        card_attrs=card_attrs,
+        card_extra=card_extra,
+        body_extra="    <script>\n" + _RECOVERY_SCRIPT + "    </script>\n",
     )
 
 

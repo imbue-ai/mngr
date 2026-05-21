@@ -53,6 +53,7 @@ from imbue.mngr_forward.cookie import verify_subdomain_auth_token
 from imbue.mngr_forward.data_types import SystemInterfaceBackendFailurePayload
 from imbue.mngr_forward.data_types import SystemInterfaceBackendFailureReason
 from imbue.mngr_forward.envelope import EnvelopeWriter
+from imbue.mngr_forward.loading_page import render_loading_page
 from imbue.mngr_forward.primitives import FORWARD_SUBDOMAIN_PATTERN
 from imbue.mngr_forward.primitives import MNGR_FORWARD_SESSION_COOKIE_NAME
 from imbue.mngr_forward.primitives import OneTimeCode
@@ -436,63 +437,10 @@ def _emit_backend_failure(
         logger.trace("Could not emit system_interface_backend_failure envelope for {}: {}", agent_id, e)
 
 
-_SERVICE_UNAVAILABLE_HTML = """\
-<!doctype html>
-<html>
-  <head>
-    <meta charset="utf-8">
-    <meta http-equiv="refresh" content="1">
-    <title>Loading workspace</title>
-    <style>
-      html, body { height: 100%; margin: 0; }
-      body {
-        background: #fafafa;
-        color: #18181b;
-        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        padding: 24px;
-        box-sizing: border-box;
-      }
-      .card {
-        background: #fff;
-        border: 1px solid #e4e4e7;
-        border-radius: 12px;
-        padding: 24px;
-        max-width: 480px;
-        width: 100%;
-        box-sizing: border-box;
-        box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
-      }
-      .row { display: flex; align-items: center; gap: 12px; }
-      h1 { font-size: 1.125rem; font-weight: 600; margin: 0 0 6px; color: #18181b; }
-      p { margin: 0; color: #52525b; font-size: 0.875rem; line-height: 1.5; }
-      .spinner {
-        width: 20px;
-        height: 20px;
-        border: 2px solid #e4e4e7;
-        border-top-color: #18181b;
-        border-radius: 50%;
-        animation: spin 1s linear infinite;
-        flex-shrink: 0;
-      }
-      @keyframes spin { to { transform: rotate(360deg); } }
-    </style>
-  </head>
-  <body>
-    <div class="card">
-      <div class="row">
-        <div class="spinner" aria-hidden="true"></div>
-        <div>
-          <h1>Loading workspace</h1>
-          <p>This page will reload automatically once your workspace is ready.</p>
-        </div>
-      </div>
-    </div>
-  </body>
-</html>
-"""
+# The proxy loader: the canonical "Loading workspace" page with a 1s meta
+# refresh so it re-attempts the workspace until the backend answers. minds'
+# recovery page reuses ``render_loading_page`` so the two are identical.
+_SERVICE_UNAVAILABLE_HTML = render_loading_page(head_extra='    <meta http-equiv="refresh" content="1">\n')
 
 
 def _service_unavailable_response(request: Request) -> Response:

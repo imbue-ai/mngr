@@ -30,6 +30,7 @@ from pydantic import Field
 from imbue.concurrency_group.concurrency_group import ConcurrencyExceptionGroup
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.errors import ConcurrencyGroupError
+from imbue.concurrency_group.subprocess_utils import FinishedProcess
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.minds.bootstrap import is_imbue_cloud_provider_enabled_for_account
 from imbue.minds.config.data_types import ClientEnvConfig
@@ -1596,16 +1597,11 @@ def _handle_recovery_page(
     agent_id: str,
     request: Request,
     auth_store: AuthStoreDep,
-    backend_resolver: BackendResolverDep,
 ) -> Response:
     """Render the workspace-recovery page (shown by the 503 redirect or by direct nav)."""
     if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
         return HTMLResponse(content=render_login_page(), status_code=403)
     aid = AgentId(agent_id)
-    ws_name = backend_resolver.get_workspace_name(aid)
-    if not ws_name:
-        info = backend_resolver.get_agent_display_info(aid)
-        ws_name = info.agent_name if info else str(agent_id)
     tracker: SystemInterfaceHealthTracker | None = request.app.state.system_interface_health_tracker
     initial_status = tracker.get_health(aid).value if tracker is not None else AgentHealth.HEALTHY.value
     initial_error = (tracker.get_last_restart_error(aid) or "") if tracker is not None else ""
@@ -1634,7 +1630,6 @@ def _handle_recovery_page(
         # render; the page then offers a manual restart button.
     html_body = render_recovery_page(
         agent_id=aid,
-        ws_name=ws_name,
         return_to=return_to,
         initial_status=render_status,
         initial_error=initial_error,
@@ -1642,8 +1637,19 @@ def _handle_recovery_page(
     return HTMLResponse(content=html_body)
 
 
-def _run_mngr_command(concurrency_group: ConcurrencyGroup, argv: list[str], env: dict[str, str]) -> str | None:
-    """Run an ``mngr`` subprocess to completion; return an error message, or None on success."""
+def _run_mngr_subprocess(
+    concurrency_group: ConcurrencyGroup, argv: list[str], env: dict[str, str]
+) -> tuple[FinishedProcess | None, str | None]:
+    """Run an ``mngr`` subprocess to completion and classify the outcome.
+
+    Returns ``(finished, failure_reason)``:
+      - ``finished`` -- the completed process, or None when the subprocess
+        could not be run at all (one of the caught exceptions fired).
+      - ``failure_reason`` -- a human-readable description of why the run
+        failed, or None on a clean exit (returncode 0, not timed out).
+    Shared by ``_run_mngr_command`` (which forwards the reason) and
+    ``_capture_mngr_command`` (which needs the stdout on success).
+    """
     try:
         finished = concurrency_group.run_process_to_completion(
             argv,
@@ -1656,18 +1662,24 @@ def _run_mngr_command(concurrency_group: ConcurrencyGroup, argv: list[str], env:
         # ConcurrencyGroupError the strand-level failures the group raises, and
         # TimeoutExpired any internal wait that surfaces it.
         logger.warning("mngr command {} failed: {}", argv, exc)
-        return str(exc)
+        return None, str(exc)
     if finished.is_timed_out:
         # With is_checked_after=False the timeout ceiling does not raise; it
         # comes back as a finished process flagged is_timed_out (with a
         # signal-based returncode), so it must be detected explicitly here --
         # otherwise it would be misreported as a plain non-zero exit below.
         logger.warning("mngr command {} timed out after {}s", argv, _RESTART_COMMAND_TIMEOUT_SECONDS)
-        return f"timed out after {int(_RESTART_COMMAND_TIMEOUT_SECONDS)}s"
+        return finished, f"timed out after {int(_RESTART_COMMAND_TIMEOUT_SECONDS)}s"
     if finished.returncode != 0:
         logger.warning("mngr command {} exited {}: {}", argv, finished.returncode, finished.stderr)
-        return f"exited {finished.returncode}: {finished.stderr.strip()}"
-    return None
+        return finished, f"exited {finished.returncode}: {finished.stderr.strip()}"
+    return finished, None
+
+
+def _run_mngr_command(concurrency_group: ConcurrencyGroup, argv: list[str], env: dict[str, str]) -> str | None:
+    """Run an ``mngr`` subprocess to completion; return an error message, or None on success."""
+    _finished, failure_reason = _run_mngr_subprocess(concurrency_group, argv, env)
+    return failure_reason
 
 
 def _capture_mngr_command(concurrency_group: ConcurrencyGroup, argv: list[str], env: dict[str, str]) -> str | None:
@@ -1677,24 +1689,8 @@ def _capture_mngr_command(concurrency_group: ConcurrencyGroup, argv: list[str], 
     stdout; this is the counterpart for ``mngr`` queries whose stdout the caller
     needs to parse (currently the host-state probe).
     """
-    try:
-        finished = concurrency_group.run_process_to_completion(
-            argv,
-            timeout=_RESTART_COMMAND_TIMEOUT_SECONDS,
-            is_checked_after=False,
-            env=env,
-        )
-    except (OSError, RuntimeError, subprocess.TimeoutExpired, ConcurrencyGroupError) as exc:
-        logger.warning("mngr command {} failed: {}", argv, exc)
-        return None
-    if finished.is_timed_out or finished.returncode != 0:
-        logger.warning(
-            "mngr command {} unsuccessful: timed_out={} returncode={} stderr={}",
-            argv,
-            finished.is_timed_out,
-            finished.returncode,
-            finished.stderr.strip(),
-        )
+    finished, failure_reason = _run_mngr_subprocess(concurrency_group, argv, env)
+    if failure_reason is not None or finished is None:
         return None
     return finished.stdout
 

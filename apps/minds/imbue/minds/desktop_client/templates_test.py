@@ -232,13 +232,11 @@ def test_render_sidebar_page_contains_workspace_list() -> None:
 def test_render_recovery_page_includes_agent_id_and_return_to() -> None:
     html = render_recovery_page(
         agent_id=_AGENT_A,
-        ws_name="my-workspace",
         return_to="http://agent.localhost:8421/",
         initial_status="stuck",
         initial_error="",
     )
     assert str(_AGENT_A) in html
-    assert "my-workspace" in html
     assert "http://agent.localhost:8421/" in html
     assert "/api/agents/" in html
     # The two restart tiers the recovery page can dispatch.
@@ -252,7 +250,6 @@ def test_render_recovery_page_includes_agent_id_and_return_to() -> None:
 def test_render_recovery_page_restarting_status() -> None:
     html = render_recovery_page(
         agent_id=_AGENT_B,
-        ws_name="ws",
         return_to="",
         initial_status="restarting",
         initial_error="",
@@ -263,7 +260,6 @@ def test_render_recovery_page_restarting_status() -> None:
 def test_render_recovery_page_carries_restart_failed_error() -> None:
     html = render_recovery_page(
         agent_id=_AGENT_B,
-        ws_name="ws",
         return_to="",
         initial_status="restart_failed",
         initial_error="Start step of host restart failed: exited 1",
