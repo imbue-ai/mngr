@@ -542,6 +542,34 @@ def test_reverse_tunnel_established_with_invalid_payload_is_skipped(
     assert fired == []
 
 
+# --- forward stream: listening --------------------------------------------
+
+
+def test_listening_envelope_unblocks_wait_for_listening_with_port(
+    consumer: EnvelopeStreamConsumer,
+) -> None:
+    """A `listening` forward envelope hands wait_for_listening the bound port."""
+    _dispatch(consumer, _forward_envelope({"type": "listening", "host": "127.0.0.1", "port": 9137}))
+    assert consumer.wait_for_listening(timeout=1.0) == 9137
+
+
+def test_wait_for_listening_times_out_when_no_envelope_arrives(
+    consumer: EnvelopeStreamConsumer,
+) -> None:
+    """Without a `listening` envelope (e.g. the plugin died), wait returns None."""
+    assert consumer.wait_for_listening(timeout=0.05) is None
+
+
+def test_malformed_listening_port_is_dropped_and_waiter_keeps_waiting(
+    consumer: EnvelopeStreamConsumer,
+) -> None:
+    """A `listening` envelope with an unparseable port must not unblock the waiter
+    with a bogus value -- it is dropped and the waiter times out instead.
+    """
+    _dispatch(consumer, _forward_envelope({"type": "listening", "host": "127.0.0.1", "port": "nope"}))
+    assert consumer.wait_for_listening(timeout=0.05) is None
+
+
 # --- bounce_observe / terminate -------------------------------------------
 
 

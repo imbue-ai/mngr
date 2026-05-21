@@ -81,8 +81,13 @@ from imbue.mngr_latchkey.core import Latchkey
 from imbue.mngr_latchkey.core import LatchkeyError
 from imbue.mngr_latchkey.forward_supervisor import LatchkeyForwardSupervisor
 
-_DEFAULT_MNGR_FORWARD_PORT: Final[int] = 8421
 _AUTH_ERROR_TYPE: Final[str] = "ImbueCloudAuthError"
+
+# How long `minds run` waits for the spawned `mngr forward` plugin to report
+# its bound port via a `listening` envelope before treating startup as failed.
+# The plugin emits this from its FastAPI lifespan startup, so the only slow
+# part is the subprocess's own interpreter start -- 30s is generous headroom.
+_MNGR_FORWARD_LISTEN_TIMEOUT_SECONDS: Final[float] = 30.0
 
 
 @click.command()
@@ -97,19 +102,6 @@ _AUTH_ERROR_TYPE: Final[str] = "ImbueCloudAuthError"
     default=DEFAULT_DESKTOP_CLIENT_PORT,
     show_default=True,
     help="Port to bind the minds bare-origin server to",
-)
-@click.option(
-    "--mngr-forward-port",
-    default=_DEFAULT_MNGR_FORWARD_PORT,
-    show_default=True,
-    envvar="MINDS_MNGR_FORWARD_PORT",
-    help=(
-        "Port to bind the spawned `mngr forward` subprocess to. "
-        "Falls back to the MINDS_MNGR_FORWARD_PORT env var so test "
-        "harnesses can dodge a hardcoded port collision when an "
-        "existing `just minds-start` (or a prior crashed run) still "
-        "holds the default."
-    ),
 )
 @click.option(
     "--no-browser",
@@ -136,11 +128,9 @@ def run(
     ctx: click.Context,
     host: str,
     port: int,
-    mngr_forward_port: int,
     no_browser: bool,
     config_file: Path | None,
 ) -> None:
-    # noqa: PLR0913 — flag count matches the legacy `minds forward` interface
     """Run the minds bare-origin server with `mngr forward` as a subprocess."""
     if config_file is None:
         raise click.ClickException(
@@ -158,7 +148,6 @@ def run(
 
     logger.info("Starting `minds run`...")
     logger.info("  Bare-origin: http://{}:{}", host, port)
-    logger.info("  mngr forward: http://127.0.0.1:{}", mngr_forward_port)
     logger.info("  MINDS_ROOT_NAME: {}", root_name)
     logger.info("  Data directory: {}", data_directory)
     logger.info("  Config file: {}", client_config_path)
@@ -233,7 +222,6 @@ def run(
     mngr_host_dir_str = os.environ.get("MNGR_HOST_DIR")
     mngr_host_dir = Path(mngr_host_dir_str).expanduser() if mngr_host_dir_str else (Path.home() / ".mngr")
     forward_config = ForwardSubprocessConfig(
-        port=mngr_forward_port,
         reverse_specs=(f"0:{port}",),
         mngr_host_dir=mngr_host_dir,
     )
@@ -253,23 +241,6 @@ def run(
     system_interface_health_tracker = SystemInterfaceHealthTracker()
     consumer.add_on_system_interface_backend_failure_callback(
         lambda agent_id, _reason, _status: system_interface_health_tracker.record_failure(agent_id)
-    )
-
-    # AgentCreator is constructed *after* ``start_mngr_forward`` so the
-    # readiness probe can use the same preauth cookie the plugin accepts and
-    # Electron pre-sets. Building it earlier would force us to either pre-mint
-    # the cookie out of band or expose a setter on AgentCreator, both of which
-    # are worse than just keeping the construction order linear.
-    agent_creator = AgentCreator(
-        paths=paths,
-        server_port=port,
-        imbue_cloud_cli=imbue_cloud_cli,
-        latchkey=latchkey,
-        root_concurrency_group=root_concurrency_group,
-        notification_dispatcher=notification_dispatcher,
-        mngr_forward_port=mngr_forward_port,
-        mngr_forward_preauth_cookie=preauth_cookie,
-        system_interface_health_tracker=system_interface_health_tracker,
     )
 
     # Local-agent ``minds_api_url`` writes (Cloudflare-token re-injection
@@ -300,6 +271,38 @@ def run(
     # callbacks were registered would be dispatched against an empty
     # callback list and silently dropped.
     consumer.start(root_concurrency_group)
+
+    # Block until the plugin reports the port it bound. minds no longer
+    # dictates the port -- the plugin picks one (its default, or an
+    # OS-assigned fallback when the default is taken) and reports it via a
+    # ``listening`` envelope. Everything below that needs the port
+    # (AgentCreator, the desktop app, the health probe, the Electron
+    # ``mngr_forward_started`` event) is built only after this returns.
+    mngr_forward_port = consumer.wait_for_listening(timeout=_MNGR_FORWARD_LISTEN_TIMEOUT_SECONDS)
+    if mngr_forward_port is None:
+        consumer.terminate()
+        raise click.ClickException(
+            "`mngr forward` did not report a listening port within "
+            f"{_MNGR_FORWARD_LISTEN_TIMEOUT_SECONDS:.0f}s; the plugin likely failed to start. "
+            "Check the logs above for its stderr and retry."
+        )
+    logger.info("  mngr forward: http://127.0.0.1:{}", mngr_forward_port)
+
+    # AgentCreator is constructed *after* ``start_mngr_forward`` so the
+    # readiness probe can use the same preauth cookie the plugin accepts and
+    # Electron pre-sets, and after ``wait_for_listening`` so it has the
+    # plugin's actual bound port.
+    agent_creator = AgentCreator(
+        paths=paths,
+        server_port=port,
+        imbue_cloud_cli=imbue_cloud_cli,
+        latchkey=latchkey,
+        root_concurrency_group=root_concurrency_group,
+        notification_dispatcher=notification_dispatcher,
+        mngr_forward_port=mngr_forward_port,
+        mngr_forward_preauth_cookie=preauth_cookie,
+        system_interface_health_tracker=system_interface_health_tracker,
+    )
 
     # Emit the started event so Electron can pre-set the cookie before the
     # first navigation. ``minds run`` itself does not open the browser at
