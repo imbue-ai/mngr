@@ -46,17 +46,6 @@ _CONV_RESUMED = "33333333-3333-3333-3333-333333333333"
 _CONV_MISSING = "44444444-4444-4444-4444-444444444444"
 
 
-def _stub_mngr_log_sh() -> str:
-    return (
-        "#!/bin/bash\n"
-        'mngr_timestamp() { date -u +"%Y-%m-%dT%H:%M:%S.000000000Z"; }\n'
-        "log_info() { :; }\n"
-        "log_debug() { :; }\n"
-        "log_warn() { :; }\n"
-        "log_error() { :; }\n"
-    )
-
-
 def _make_event(step_index: int, source: str, type_: str, **extra: Any) -> str:
     body: dict[str, Any] = {
         "step_index": step_index,
@@ -70,7 +59,7 @@ def _make_event(step_index: int, source: str, type_: str, **extra: Any) -> str:
 
 
 @pytest.fixture
-def env(tmp_path: Path) -> dict[str, Any]:
+def env(tmp_path: Path, stub_mngr_log_sh: str) -> dict[str, Any]:
     """Build the controlled filesystem + env vars the streamer expects.
 
     Returns a dict with the staged paths so individual tests can write
@@ -79,7 +68,7 @@ def env(tmp_path: Path) -> dict[str, Any]:
     state_dir = tmp_path / "agent"
     commands = state_dir / "commands"
     commands.mkdir(parents=True)
-    (commands / "mngr_log.sh").write_text(_stub_mngr_log_sh())
+    (commands / "mngr_log.sh").write_text(stub_mngr_log_sh)
 
     app_data_dir = tmp_path / "app_data"
     (app_data_dir / "brain").mkdir(parents=True)
