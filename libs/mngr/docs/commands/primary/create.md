@@ -228,8 +228,8 @@ Provider: lima
                           mngr pre-built image.
   Start args are passed directly to 'limactl start'. Common options:
     --cpus=N              Number of CPU cores (default: 4)
-    --memory=NGiB         Memory size (default: 4GiB)
-    --disk=NGiB           Disk size (default: 100GiB)
+    --memory=N            Memory in GiB (default: 4)
+    --disk=N              Disk in GiB (default: 100)
     --vm-type=TYPE        VM type: qemu or vz (default: auto-detected)
     --mount-writable      Make default mounts writable
   Run 'limactl start --help' for the full list.
