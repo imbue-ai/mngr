@@ -349,6 +349,12 @@ def reconcile_imbue_cloud_providers_from_sessions(connector_url: str, *, root_na
     """
     if root_name is None:
         root_name = resolve_minds_root_name()
+    # Same rationale as in ``set_imbue_cloud_provider_for_account``: the
+    # startup ``apply_bootstrap`` call no-ops on a freshly-created
+    # MINDS_ROOT_NAME (mngr profile dir doesn't exist yet). Re-run here
+    # so existing users who never re-signin still get the suppression
+    # block on their next minds startup.
+    _ensure_mngr_settings(root_name)
     accounts_path = _imbue_cloud_accounts_path(root_name)
     if accounts_path is None or not accounts_path.is_file():
         return
@@ -505,9 +511,22 @@ def set_imbue_cloud_provider_for_account(
     Returns ``True`` when the file was modified, so callers know whether
     to bounce ``mngr observe`` (the running process needs a restart to
     see the new provider instance).
+
+    Always (re-)runs :func:`_ensure_mngr_settings` before touching the
+    per-account block. ``apply_bootstrap`` calls ``_ensure_mngr_settings``
+    at minds-startup, but for a freshly-created ``MINDS_ROOT_NAME`` the
+    mngr profile dir doesn't exist yet at that point, so the call
+    silently no-ops. By the time a signin fires this function, mngr has
+    been initialized (the in-process ``mngr forward`` subprocess does
+    that), so the second call lands the suppression block + recursive-
+    disable that the first call missed. Without this, the auto-created
+    default ``[providers.imbue_cloud]`` instance trips every
+    ``mngr observe`` cycle with ``MissingConnectorUrlError`` and the
+    first ``mngr create`` against this env fails outright.
     """
     if root_name is None:
         root_name = resolve_minds_root_name()
+    _ensure_mngr_settings(root_name)
     settings_path = _resolve_active_settings_path(root_name)
     if settings_path is None:
         return False

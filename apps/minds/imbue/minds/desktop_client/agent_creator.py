@@ -45,6 +45,7 @@ from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import LiteLLMKeyMaterial
 from imbue.minds.desktop_client.notification import NotificationDispatcher
+from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
 from imbue.minds.errors import GitCloneError
 from imbue.minds.errors import GitOperationError
 from imbue.minds.errors import MngrCommandError
@@ -108,13 +109,13 @@ def probe_workspace_through_plugin(
     probe_timeout_seconds: float,
     client: httpx.Client | None = None,
 ) -> int | None:
-    """Issue a single probe through the plugin to the agent's workspace_server.
+    """Issue a single probe through the plugin to the agent's system_interface.
 
     Returns the HTTP status code observed (any 200 means ready), or ``None``
     if the probe failed at the transport layer (connect error, mid-stream
     EOF, read timeout). Shared by ``_wait_for_workspace_ready`` (creation
-    flow) and the workspace-health tracker's background probe loop so both
-    paths agree on what "ready" means.
+    flow) and the system-interface-health tracker's background probe loop
+    so both paths agree on what "ready" means.
 
     Pass a pre-constructed ``client`` (via ``make_workspace_probe_client``)
     to reuse the connection pool across a tight poll loop. When omitted, a
@@ -155,10 +156,24 @@ def make_log_callback(log_queue: queue.Queue[str]) -> OutputCallback:
 
 
 class AgentCreationStatus(UpperCaseStrEnum):
-    """Status of a background agent creation."""
+    """Status of a background agent creation.
 
-    CLONING = auto()
-    CREATING = auto()
+    The non-terminal values correspond to the ordered phases the worker
+    thread walks through; ``_stream_creation_logs`` polls the current
+    status and emits a SSE event each time it changes so the UI spinner
+    caption stays in sync with what the backend is actually doing.
+    Conditional phases (``CHECKING_OUT_BRANCH`` only if a branch was
+    given, ``PROVISIONING_AI`` only for ``IMBUE_CLOUD`` AI provider) are
+    skipped when they don't apply -- the status simply jumps to the next
+    applicable phase.
+    """
+
+    INITIALIZING = auto()
+    CLONING_REPO = auto()
+    CHECKING_OUT_BRANCH = auto()
+    PROVISIONING_AI = auto()
+    CREATING_WORKSPACE = auto()
+    WAITING_FOR_READY = auto()
     DONE = auto()
     FAILED = auto()
 
@@ -183,6 +198,12 @@ class AgentCreationInfo(FrozenModel):
         description="Canonical mngr agent id; populated once ``mngr create`` returns, ``None`` while in-flight",
     )
     status: AgentCreationStatus = Field(description="Current creation status")
+    launch_mode: LaunchMode = Field(
+        description=(
+            "Launch mode for this creation. Carried alongside status so consumers can resolve "
+            "mode-aware status captions without a separate lookup."
+        ),
+    )
     redirect_url: str | None = Field(default=None, description="URL to redirect to when creation is done")
     error: str | None = Field(default=None, description="Error message, set when status is FAILED")
 
@@ -847,7 +868,7 @@ class AgentCreator(MutableModel):
         frozen=True,
         description=(
             "Port the ``mngr forward`` plugin is bound to. Used by ``_wait_for_workspace_ready`` to "
-            "probe the freshly-created agent's workspace_server through the plugin's per-subdomain "
+            "probe the freshly-created agent's system_interface through the plugin's per-subdomain "
             "endpoint before publishing the redirect URL. The default of 0 disables readiness "
             "probing -- only appropriate for tests that never exercise the happy-path redirect."
         ),
@@ -861,15 +882,27 @@ class AgentCreator(MutableModel):
             "readiness probing alongside ``mngr_forward_port=0``."
         ),
     )
+    system_interface_health_tracker: SystemInterfaceHealthTracker = Field(
+        frozen=True,
+        description=(
+            "Per-process health tracker shared with the ``mngr forward`` ``system_interface_backend_failure`` "
+            "envelope consumer and the background system-interface-health probe loop. ``_wait_for_workspace_ready`` "
+            "calls ``record_success`` on the probe that breaks out of its readiness loop, which cancels "
+            "any pending HEALTHY->STUCK timer the warmup failures have already armed. Without this call, "
+            "every workspace creation that takes >5s for its container's ``system-interface`` to "
+            "bind ``:8000`` (i.e. most of them) trips a spurious STUCK transition and the chrome jumps "
+            "to the recovery page right after the user lands on the workspace."
+        ),
+    )
     workspace_ready_timeout_seconds: float = Field(
         default=60.0,
         frozen=True,
-        description="Maximum time to wait for the new agent's workspace_server to return HTTP 200.",
+        description="Maximum time to wait for the new agent's system_interface to return HTTP 200.",
     )
     workspace_ready_poll_interval_seconds: float = Field(
         default=0.5,
         frozen=True,
-        description="Sleep between probe attempts when the workspace_server is not yet ready.",
+        description="Sleep between probe attempts when the system_interface is not yet ready.",
     )
     workspace_ready_probe_timeout_seconds: float = Field(
         default=2.0,
@@ -886,6 +919,7 @@ class AgentCreator(MutableModel):
     _canonical_agent_ids: dict[str, AgentId] = PrivateAttr(default_factory=dict)
     _redirect_urls: dict[str, str] = PrivateAttr(default_factory=dict)
     _errors: dict[str, str] = PrivateAttr(default_factory=dict)
+    _launch_modes: dict[str, LaunchMode] = PrivateAttr(default_factory=dict)
     _log_queues: dict[str, queue.Queue[str]] = PrivateAttr(default_factory=dict)
     _threads: list[threading.Thread] = PrivateAttr(default_factory=list)
     _lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
@@ -954,7 +988,8 @@ class AgentCreator(MutableModel):
         creation_id = CreationId()
 
         with self._lock:
-            self._statuses[str(creation_id)] = AgentCreationStatus.CLONING
+            self._statuses[str(creation_id)] = AgentCreationStatus.INITIALIZING
+            self._launch_modes[str(creation_id)] = launch_mode
             self._log_queues[str(creation_id)] = log_queue
 
         thread = threading.Thread(
@@ -1006,6 +1041,7 @@ class AgentCreator(MutableModel):
                 creation_id=creation_id,
                 agent_id=self._canonical_agent_ids.get(cid_str),
                 status=status,
+                launch_mode=self._launch_modes.get(cid_str, LaunchMode.LOCAL),
                 redirect_url=self._redirect_urls.get(cid_str),
                 error=self._errors.get(cid_str),
             )
@@ -1067,6 +1103,13 @@ class AgentCreator(MutableModel):
                 # the imbue_cloud command-construction drift from the other
                 # modes' (and was hard to keep in sync with the bake's view
                 # of the same config).
+                # Worker thread takes over from the initial ``INITIALIZING``
+                # status that ``start_creation`` set; cloning is the first
+                # real action. The caption rendered for this status is
+                # launch-mode-aware via ``_STATUS_TEXT_IMBUE_CLOUD``.
+                with self._lock:
+                    self._statuses[cid_str] = AgentCreationStatus.CLONING_REPO
+
                 if _is_local_path(repo_source):
                     resolved_path = Path(os.path.expanduser(repo_source)).resolve()
                     if not resolved_path.is_dir():
@@ -1121,6 +1164,8 @@ class AgentCreator(MutableModel):
                     workspace_dir = clone_target
 
                 if branch:
+                    with self._lock:
+                        self._statuses[cid_str] = AgentCreationStatus.CHECKING_OUT_BRANCH
                     log_queue.put("[minds] Checking out branch '{}'...".format(branch))
                     checkout_branch(
                         workspace_dir,
@@ -1141,6 +1186,8 @@ class AgentCreator(MutableModel):
                             raise MngrCommandError("AI provider IMBUE_CLOUD requires imbue_cloud_cli to be configured")
                         if not account_email:
                             raise MngrCommandError("AI provider IMBUE_CLOUD requires an account_email to be supplied")
+                        with self._lock:
+                            self._statuses[cid_str] = AgentCreationStatus.PROVISIONING_AI
                         log_queue.put(f"[minds] Minting LiteLLM virtual key for account {account_email}...")
                         try:
                             key_material: LiteLLMKeyMaterial = self.imbue_cloud_cli.create_litellm_key(
@@ -1165,7 +1212,7 @@ class AgentCreator(MutableModel):
                         assert_never(unreachable)
 
                 with self._lock:
-                    self._statuses[cid_str] = AgentCreationStatus.CREATING
+                    self._statuses[cid_str] = AgentCreationStatus.CREATING_WORKSPACE
 
                 # Pre-create the shared latchkey gateway password and a
                 # per-host permissions-override JWT before invoking
@@ -1265,14 +1312,16 @@ class AgentCreator(MutableModel):
 
                 log_queue.put("[minds] Agent created successfully.")
 
-                # Wait for the agent's workspace_server to actually answer 200
+                # Wait for the agent's system_interface to actually answer 200
                 # through the plugin before publishing the redirect. Without
                 # this poll, the user gets dropped on a hard error page (404
                 # /503) for the few seconds between ``mngr create`` returning
-                # and the workspace_server inside the agent finishing
+                # and the system_interface inside the agent finishing
                 # startup. The probe is best-effort: if it times out, we
                 # publish anyway so the user at least lands on the retry
                 # page rather than spinning forever (PR 1471 part 1).
+                with self._lock:
+                    self._statuses[cid_str] = AgentCreationStatus.WAITING_FOR_READY
                 self._wait_for_workspace_ready(canonical_id, log_queue)
 
                 # The redirect URL is *absolute* and points at the plugin's
@@ -1343,11 +1392,11 @@ class AgentCreator(MutableModel):
         return f"http://localhost:{self.mngr_forward_port}/goto/{agent_id}/"
 
     def _wait_for_workspace_ready(self, agent_id: AgentId, log_queue: queue.Queue[str]) -> None:
-        """Poll the agent's workspace_server through the plugin until it responds 200.
+        """Poll the agent's system_interface through the plugin until it responds 200.
 
         Probes ``http://<agent_id>.localhost:<plugin_port>/`` with the preauth
         cookie set, treating any 200 as ready. Other status codes (typically
-        503 from the plugin's auto-refresh page when the workspace_server
+        503 from the plugin's auto-refresh page when the system_interface
         isn't yet listening, or 502 when SSH info hasn't propagated) are
         treated as not-yet-ready and re-polled until the timeout elapses.
 
@@ -1362,7 +1411,7 @@ class AgentCreator(MutableModel):
             return
 
         deadline = time.monotonic() + self.workspace_ready_timeout_seconds
-        log_queue.put("[minds] Waiting for workspace server to be ready...")
+        log_queue.put("[minds] Waiting for system interface to be ready...")
         last_status: int | None = None
         attempt = 0
         with make_workspace_probe_client(
@@ -1382,7 +1431,21 @@ class AgentCreator(MutableModel):
                     last_status = status
                     if status == 200:
                         logger.debug("Workspace ready for {} after {} probe(s)", agent_id, attempt)
-                        log_queue.put("[minds] Workspace server is ready.")
+                        log_queue.put("[minds] System interface is ready.")
+                        # Propagate the success into the shared health tracker.
+                        # Earlier probes in this loop go through ``mngr forward``
+                        # too, and each one's connect-refused failure trips a
+                        # ``system_interface_backend_failure`` envelope that arms
+                        # a 5-second HEALTHY->STUCK timer on the tracker. Without
+                        # this explicit ``record_success`` the timer fires
+                        # *after* we return (because no other success path
+                        # flows back into the tracker until the background
+                        # probe loop next ticks, ~2s later), the chrome jumps
+                        # to the recovery page, and the user sees a "System
+                        # interface not responding" page seconds after their
+                        # freshly-created agent appeared healthy. Idempotent
+                        # if the tracker has no record for this agent.
+                        self.system_interface_health_tracker.record_success(agent_id)
                         return
                 threading.Event().wait(timeout=self.workspace_ready_poll_interval_seconds)
         logger.warning(

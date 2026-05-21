@@ -68,7 +68,6 @@ from imbue.mngr.interfaces.host import AgentEnvironmentOptions
 from imbue.mngr.interfaces.host import AgentGitOptions
 from imbue.mngr.interfaces.host import AgentLabelOptions
 from imbue.mngr.interfaces.host import AgentLifecycleOptions
-from imbue.mngr.interfaces.host import AgentPermissionsOptions
 from imbue.mngr.interfaces.host import AgentProvisioningOptions
 from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.interfaces.host import HostEnvironmentOptions
@@ -93,7 +92,6 @@ from imbue.mngr.primitives import LOCAL_PROVIDER_NAME
 from imbue.mngr.primitives import LogLevel
 from imbue.mngr.primitives import NewAgentLocation
 from imbue.mngr.primitives import OutputFormat
-from imbue.mngr.primitives import Permission
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import SnapshotName
 from imbue.mngr.primitives import TransferMode
@@ -485,7 +483,6 @@ class _CreateCommand(click.Command):
 )
 @optgroup.option("--pass-env", multiple=True, help="Forward variable from shell")
 @optgroup.group("Provisioning")
-@optgroup.option("--grant", "grant", multiple=True, help="Grant a permission to the agent [repeatable]")
 @optgroup.option(
     "--extra-provision-command",
     "extra_provision_command",
@@ -1523,11 +1520,6 @@ def _parse_agent_opts(
         is_start_on_boot=opts.start_on_boot,
     )
 
-    # Parse permissions options
-    permissions = AgentPermissionsOptions(
-        granted_permissions=tuple(Permission(p) for p in opts.grant),
-    )
-
     # Parse label options
     label_options = resolve_labels(opts.label)
 
@@ -1563,7 +1555,6 @@ def _parse_agent_opts(
         git=git,
         environment=environment,
         lifecycle=lifecycle,
-        permissions=permissions,
         label_options=label_options,
         provisioning=provisioning,
         source_agent_state_location=source_agent_state_location,
@@ -1815,7 +1806,7 @@ _CREATE_HELP_METADATA = CommandHelpMetadata(
     [--label KEY=VALUE] [--host-label KEY=VALUE] [--project <PROJECT>] [--from <SOURCE>] [--transfer <MODE>]
     [--[no-]rsync] [--rsync-args <ARGS>] [--branch [BASE][:NEW]] [--[no-]ensure-clean]
     [--snapshot <ID>] [-b <BUILD_ARG>] [-s <START_ARG>]
-    [--env <KEY=VALUE>] [--env-file <FILE>] [--pass-env <KEY>] [--grant <PERMISSION>] [--extra-provision-command <COMMAND>] [--upload-file <LOCAL:REMOTE>]
+    [--env <KEY=VALUE>] [--env-file <FILE>] [--pass-env <KEY>] [--extra-provision-command <COMMAND>] [--upload-file <LOCAL:REMOTE>]
     [--idle-timeout <SECONDS>] [--idle-mode <MODE>] [--start-on-boot|--no-start-on-boot] [--reuse|--no-reuse]
     [--message <TEXT>] [--message-file <FILE>] [--edit-message]
     [--[no-]connect] [--[no-]auto-start] [-y|--yes] [--] [<AGENT_ARGS>...]""",

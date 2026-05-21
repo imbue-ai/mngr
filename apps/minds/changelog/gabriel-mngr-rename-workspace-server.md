@@ -1,0 +1,1 @@
+Renamed the "workspace server" feature to "system interface" in the desktop client: the menu item / recovery page label "Restart workspace server" became "Restart system interface". Frontend Electron clients automatically pick up the new wire format and labels.

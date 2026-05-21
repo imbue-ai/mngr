@@ -9,7 +9,6 @@ def test_opencode_agent_config_has_correct_defaults() -> None:
 
     assert str(config.command) == "opencode"
     assert config.cli_args == ()
-    assert config.permissions == []
     assert config.parent_type is None
 
 

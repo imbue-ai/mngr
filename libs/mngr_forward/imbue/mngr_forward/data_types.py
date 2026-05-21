@@ -13,7 +13,7 @@ from imbue.mngr_forward.primitives import ForwardPort
 from imbue.mngr_forward.ssh_tunnel import RemoteSSHInfo
 
 
-class WorkspaceBackendFailureReason(UpperCaseStrEnum):
+class SystemInterfaceBackendFailureReason(UpperCaseStrEnum):
     """Why a per-agent backend forward attempt failed.
 
     Surfaced by the plugin so the minds-side health tracker can decide
@@ -80,25 +80,27 @@ class ReverseTunnelEstablishedPayload(FrozenModel):
     ssh_port: PositiveInt = Field(description="SSH port on ssh_host")
 
 
-class WorkspaceBackendFailurePayload(FrozenModel):
+class SystemInterfaceBackendFailurePayload(FrozenModel):
     """Emitted when the plugin observes a per-agent backend failure.
 
     The plugin's role is observation only: it surfaces the kind of failure
     it saw (connect error, mid-SSE EOF, 5xx response) so the minds-side
-    ``WorkspaceServerHealthTracker`` can apply policy (e.g. 5s
+    ``SystemInterfaceHealthTracker`` can apply policy (e.g. 5s
     HEALTHY -> STUCK transition).
     """
 
-    type: Literal["workspace_backend_failure"] = "workspace_backend_failure"
+    type: Literal["system_interface_backend_failure"] = "system_interface_backend_failure"
     agent_id: AgentId = Field(description="Agent whose backend failed")
-    reason: WorkspaceBackendFailureReason = Field(description="Why the forward attempt failed")
+    reason: SystemInterfaceBackendFailureReason = Field(description="Why the forward attempt failed")
     status_code: int | None = Field(
         default=None,
         description="HTTP status code returned by the backend (only set when reason is FIVEXX_RESPONSE)",
     )
 
 
-ForwardPayload = LoginUrlPayload | ListeningPayload | ReverseTunnelEstablishedPayload | WorkspaceBackendFailurePayload
+ForwardPayload = (
+    LoginUrlPayload | ListeningPayload | ReverseTunnelEstablishedPayload | SystemInterfaceBackendFailurePayload
+)
 
 
 class ForwardEnvelope(FrozenModel):
