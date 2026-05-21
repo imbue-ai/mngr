@@ -403,9 +403,11 @@ jobs:
       - name: Run minds Electron e2e test
         # `xvfb-run -a` provides the display server the Electron renderer
         # needs; `env` sets PYTEST_MAX_DURATION_SECONDS for the wrapped
-        # command so the pytest lockfile records a deadline matching the
-        # job's own 600s pytest timeout.
-        run: xvfb-run -a env PYTEST_MAX_DURATION_SECONDS=600 uv run pytest -n 0 --timeout 600 --no-cov --cov-fail-under=0 -v --tb=short -m 'minds_electron and not release'
+        # command. Both the env-var suite-level budget and the
+        # `--timeout` per-test default match the test's own
+        # `@pytest.mark.timeout(900)`, so the suite budget cannot kill
+        # the pytest run before the per-test marker fires.
+        run: xvfb-run -a env PYTEST_MAX_DURATION_SECONDS=900 uv run pytest -n 0 --timeout 900 --no-cov --cov-fail-under=0 -v --tb=short -m 'minds_electron and not release'
 
   # Docker release tests - runs on a GitHub runner with a real Docker daemon,
   # since Docker-in-Docker under gVisor (offload-modal-release) is too flaky.
