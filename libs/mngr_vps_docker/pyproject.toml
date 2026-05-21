@@ -48,9 +48,7 @@ omit = [
 # Lower than concrete provider packages (e.g. mngr_vultr at 60%) because
 # most of `instance.py` is host-lifecycle code (create, snapshot, exec,
 # destroy) that's exercised end-to-end by each concrete provider's release
-# tests rather than at the unit level. The shared cross-VPS discovery flow
-# (parallel-SSH fan-out, cache fallback, name/id lookup) IS covered by
-# instance_discovery_test.py against a concrete VpsDockerProvider subclass.
+# tests rather than at the unit level.
 fail_under = 42
 omit = [
   "*_test.py",

@@ -60,10 +60,6 @@ The base config (`VpsDockerProviderConfig`) provides these settings:
 | `default_plan` | `vc2-1c-1gb` | Default VPS plan |
 | `default_start_args` | `()` | Default `docker run` arguments |
 
-OS image selection is provider-specific (Vultr's `default_os_id`, AWS's
-`default_ami_id` / `default_ami_by_region`) and lives on each provider's
-config, not on this shared base.
-
 ## Build and start args
 
 Build args (`-b`) serve two purposes: VPS provisioning and Docker image building.

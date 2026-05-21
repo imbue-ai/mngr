@@ -145,6 +145,17 @@ def _parse_build_args(
                 plan = arg.split("=", 1)[1]
             elif arg.startswith("--git-depth="):
                 git_depth = int(arg.split("=", 1)[1])
+            elif arg.startswith("--vps-os") or arg.startswith("--vps-image") or arg.startswith("--vps-ami"):
+                # Dedicated error for the removed image-selection arg --
+                # used to be ``--vps-os=`` on Vultr / ``--vps-os=NAME`` on OVH;
+                # also catches ``--vps-image=`` / ``--vps-ami=`` since those are
+                # the most likely guesses for the AWS equivalent.
+                raise MngrError(
+                    f"{arg.split('=', 1)[0]} is no longer supported. OS image selection lives on the provider "
+                    "config: set ``default_os_id`` ([providers.<name>] for Vultr), ``default_image_name`` "
+                    "(OVH), or ``default_ami_id`` / ``default_ami_by_region`` (AWS) in your settings.toml. "
+                    "Per-host image overrides require a separate provider instance with its own config block."
+                )
             elif arg.startswith("--vps-"):
                 raise MngrError(
                     f"Unknown VPS build arg: {arg}. Valid VPS args: --vps-region=, --vps-plan=, --git-depth="

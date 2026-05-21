@@ -32,10 +32,6 @@ def test_prevent_while_true() -> None:
 
 
 def test_prevent_time_sleep() -> None:
-    # 3 = wait_for_cloud_init poll loop and rsync-retry backoff in instance.py,
-    # plus the wait_for_instance_active polling sleep that was lifted into the
-    # shared VpsClientInterface (was previously duplicated in mngr_aws and
-    # mngr_vultr).
     rc.check_time_sleep(_DIR, snapshot(3))
 
 

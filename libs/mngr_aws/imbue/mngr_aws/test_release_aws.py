@@ -40,6 +40,7 @@ from pathlib import Path
 
 import boto3
 import pytest
+from botocore.exceptions import ClientError
 
 from imbue.mngr_aws.client import AwsVpsClient
 from imbue.mngr_aws.config import DEFAULT_AMI_BY_REGION
@@ -78,17 +79,40 @@ def aws_test_settings_dir(tmp_path: Path) -> Iterator[Path]:
     written directly into ``tmp_path``.
     """
     (tmp_path / "settings.toml").write_text(
-        f'[providers.aws]\nbackend = "aws"\nauto_shutdown_minutes = {AWS_TEST_INSTANCE_AUTO_SHUTDOWN_MINUTES}\n'
+        "[providers.aws]\n"
+        'backend = "aws"\n'
+        # Auto-terminate via cloud-init if pytest is killed before the
+        # per-test cleanup runs (combined with InstanceInitiatedShutdownBehavior=terminate).
+        f"auto_shutdown_minutes = {AWS_TEST_INSTANCE_AUTO_SHUTDOWN_MINUTES}\n"
+        # Open the auto-created SG to the public internet so the test SSH
+        # connection (from the developer laptop / CI runner) works without
+        # caller IP discovery. Production callers must pick a tight CIDR;
+        # ``allowed_ssh_cidrs`` defaults to empty (fail-closed) to force
+        # an explicit choice. The instance only lives for the duration of
+        # the test and is then destroyed.
+        'allowed_ssh_cidrs = ["0.0.0.0/0"]\n'
+        # Disable other remote providers so the create-host preflight
+        # doesn't trip on them looking for credentials.
+        "\n[providers.modal]\nis_enabled = false\n"
+        "\n[providers.vultr]\nis_enabled = false\n"
+        "\n[providers.ovh]\nis_enabled = false\n"
+        "\n[providers.imbue_cloud]\nis_enabled = false\n"
     )
     yield tmp_path
 
 
 def _run_mngr(
     project_config_dir: Path,
+    cwd: Path,
     *args: str,
     timeout: int = 300,
 ) -> subprocess.CompletedProcess[str]:
-    """Run a mngr command with the test settings.toml in scope."""
+    """Run a mngr command with the test settings.toml in scope.
+
+    ``cwd`` must be inside a git repository -- ``mngr create`` reads the
+    source from the current git checkout unless ``--from`` is passed. The
+    release tests supply the ``temp_git_repo`` fixture for this.
+    """
     env = os.environ.copy()
     env["MNGR_PROJECT_CONFIG_DIR"] = str(project_config_dir)
     cmd = ["uv", "run", "mngr", *args]
@@ -97,7 +121,7 @@ def _run_mngr(
         capture_output=True,
         text=True,
         timeout=timeout,
-        cwd=os.environ.get("MNGR_REPO_ROOT", os.getcwd()),
+        cwd=str(cwd),
         env=env,
     )
 
@@ -107,79 +131,88 @@ def _run_mngr(
 # =============================================================================
 
 
-def test_provider_lifecycle_create_exec_and_destroy(aws_test_settings_dir: Path) -> None:
+def test_provider_lifecycle_create_exec_and_destroy(
+    aws_test_settings_dir: Path,
+    temp_git_repo: Path,
+) -> None:
     agent_name = f"{AWS_TEST_NAME_PREFIX}{int(time.time()) % 100000}"
 
+    # ``command`` runs a long-lived interactive shell -- no agent-specific
+    # setup required (unlike ``claude``, which needs
+    # ``.claude/settings.local.json`` gitignored), and ``mngr exec`` runs
+    # against the host's shell regardless of the agent type. The test is
+    # exercising the AWS provider lifecycle, not the agent.
     result = _run_mngr(
         aws_test_settings_dir,
+        temp_git_repo,
         "create",
         agent_name,
         "--type",
-        "claude",
+        "command",
         "--provider",
         "aws",
         "--no-connect",
-        "--message",
-        "just say hello",
     )
     assert result.returncode == 0, f"Create failed: {result.stderr}"
     assert "Done" in result.stdout or "created successfully" in result.stderr
 
     try:
-        result = _run_mngr(aws_test_settings_dir, "exec", agent_name, "echo hello-from-aws")
+        result = _run_mngr(aws_test_settings_dir, temp_git_repo, "exec", agent_name, "echo hello-from-aws")
         assert result.returncode == 0, f"Exec failed: {result.stderr}"
         assert "hello-from-aws" in result.stdout
 
-        result = _run_mngr(aws_test_settings_dir, "exec", agent_name, "test -d /mngr && echo exists")
+        result = _run_mngr(aws_test_settings_dir, temp_git_repo, "exec", agent_name, "test -d /mngr && echo exists")
         assert result.returncode == 0, f"host_dir check failed: {result.stderr}"
         assert "exists" in result.stdout
 
-        result = _run_mngr(aws_test_settings_dir, "list")
+        result = _run_mngr(aws_test_settings_dir, temp_git_repo, "list")
         assert result.returncode == 0, f"List failed: {result.stderr}"
         assert agent_name in result.stdout
         assert "aws" in result.stdout
     finally:
         # --force skips the destroy confirmation, so no stdin input needed.
         # Result is intentionally not checked: best-effort cleanup.
-        _run_mngr(aws_test_settings_dir, "destroy", agent_name, "--force", timeout=120)
+        _run_mngr(aws_test_settings_dir, temp_git_repo, "destroy", agent_name, "--force", timeout=120)
         time.sleep(20)
 
 
-def test_provider_lifecycle_create_stop_start_destroy(aws_test_settings_dir: Path) -> None:
+def test_provider_lifecycle_create_stop_start_destroy(
+    aws_test_settings_dir: Path,
+    temp_git_repo: Path,
+) -> None:
     agent_name = f"{AWS_TEST_NAME_PREFIX}ss-{int(time.time()) % 100000}"
 
     result = _run_mngr(
         aws_test_settings_dir,
+        temp_git_repo,
         "create",
         agent_name,
         "--type",
-        "claude",
+        "command",
         "--provider",
         "aws",
         "--no-connect",
-        "--message",
-        "just say hello",
     )
     assert result.returncode == 0, f"Create failed: {result.stderr}"
 
     try:
-        result = _run_mngr(aws_test_settings_dir, "stop", agent_name)
+        result = _run_mngr(aws_test_settings_dir, temp_git_repo, "stop", agent_name)
         assert result.returncode == 0, f"Stop failed: {result.stderr}"
 
-        result = _run_mngr(aws_test_settings_dir, "list")
+        result = _run_mngr(aws_test_settings_dir, temp_git_repo, "list")
         assert result.returncode == 0
         assert agent_name in result.stdout
 
-        result = _run_mngr(aws_test_settings_dir, "start", agent_name, "--no-connect")
+        result = _run_mngr(aws_test_settings_dir, temp_git_repo, "start", agent_name, "--no-connect")
         assert result.returncode == 0, f"Start failed: {result.stderr}"
 
-        result = _run_mngr(aws_test_settings_dir, "exec", agent_name, "echo alive-after-restart")
+        result = _run_mngr(aws_test_settings_dir, temp_git_repo, "exec", agent_name, "echo alive-after-restart")
         assert result.returncode == 0, f"Post-restart exec failed: {result.stderr}"
         assert "alive-after-restart" in result.stdout
     finally:
         # --force skips the destroy confirmation, so no stdin input needed.
         # Result is intentionally not checked: best-effort cleanup.
-        _run_mngr(aws_test_settings_dir, "destroy", agent_name, "--force", timeout=120)
+        _run_mngr(aws_test_settings_dir, temp_git_repo, "destroy", agent_name, "--force", timeout=120)
         time.sleep(20)
 
 
@@ -227,11 +260,21 @@ def test_default_amis_describe_successfully() -> None:
     few months and older snapshots eventually get deprecated. A periodic
     release-test run is the cheapest way to catch this: skipif gates the test
     on AWS credentials, so local runs without creds skip silently.
+
+    Collects errors across every region rather than aborting on the first
+    failure, so a sweep produces a complete list of stale / inaccessible
+    entries in one run.
     """
     failures: list[str] = []
     for region, ami_id in DEFAULT_AMI_BY_REGION.items():
         ec2 = boto3.Session(region_name=region).client("ec2")
-        response = ec2.describe_images(ImageIds=[ami_id])
+        try:
+            response = ec2.describe_images(ImageIds=[ami_id])
+        except ClientError as e:
+            # InvalidAMIID.NotFound -> deprecated; UnauthorizedOperation /
+            # AuthFailure -> the cred set lacks access to this region.
+            failures.append(f"{region}: AMI {ami_id} {e.response.get('Error', {}).get('Code', 'Unknown')}: {e}")
+            continue
         images = response.get("Images", [])
         if not images:
             failures.append(f"{region}: AMI {ami_id} not found")
@@ -241,7 +284,7 @@ def test_default_amis_describe_successfully() -> None:
         if state != "available":
             failures.append(f"{region}: AMI {ami_id} state={state!r} (expected 'available')")
     assert not failures, (
-        "DEFAULT_AMI_BY_REGION has stale entries:\n  " + "\n  ".join(failures) + "\n"
+        "DEFAULT_AMI_BY_REGION has stale or inaccessible entries:\n  " + "\n  ".join(failures) + "\n"
         "Update the constant in libs/mngr_aws/imbue/mngr_aws/config.py with current "
         "Debian 12 amd64 AMI IDs from https://wiki.debian.org/Cloud/AmazonEC2Image."
     )

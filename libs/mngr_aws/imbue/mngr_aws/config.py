@@ -40,14 +40,22 @@ SecurityGroupSpec = Annotated[
 ]
 
 DEFAULT_AMI_BY_REGION: Final[dict[str, str]] = {
-    "us-east-1": "ami-064519b8c76274859",
-    "us-east-2": "ami-0a78fdf26eaf90eed",
-    "us-west-1": "ami-0cd7c0f3f5b4d6f29",
-    "us-west-2": "ami-024c80694b5b3e51a",
-    "eu-west-1": "ami-09e3d23a5d8b3a466",
-    "eu-central-1": "ami-0a9fa2b8b7a3d9e8a",
-    "ap-southeast-1": "ami-038c5add0e8ce40fa",
-    "ap-northeast-1": "ami-0d52744d6551d851e",
+    # Debian 12 amd64. Fetched via
+    #   aws ec2 describe-images --owners 136693071363 \\
+    #       --filters Name=name,Values=debian-12-amd64-* Name=architecture,Values=x86_64 \\
+    #                 Name=state,Values=available \\
+    #       --query 'sort_by(Images, &CreationDate)[-1].ImageId'
+    # Periodically validated by ``test_default_amis_describe_successfully``
+    # in ``test_release_aws.py``; refresh when that release test starts
+    # flagging entries.
+    "us-east-1": "ami-05b5db63304a51103",
+    "us-east-2": "ami-07863ce80fb4e7190",
+    "us-west-1": "ami-07f5877f993ca15f3",
+    "us-west-2": "ami-04730af737bd6ef2e",
+    "eu-west-1": "ami-049f2bbc51711e7d3",
+    "eu-central-1": "ami-0eabf0a4c5d86ddb6",
+    "ap-southeast-1": "ami-0728f47e064ce89f5",
+    "ap-northeast-1": "ami-084b599f3a2dd0895",
 }
 
 

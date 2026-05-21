@@ -84,9 +84,26 @@ def test_parse_build_args_rejects_unknown_vps_arg() -> None:
 
 
 def test_parse_build_args_rejects_dropped_vps_os_arg() -> None:
-    """--vps-os= was a Vultr-specific knob; now rejected like any other unknown --vps- arg."""
-    with pytest.raises(MngrError, match="Unknown VPS build arg.*--vps-os"):
+    """--vps-os= used to override the Vultr OS id / OVH image name; now rejected with a guiding error.
+
+    The error must point at the per-provider config field that replaced it
+    (default_os_id / default_image_name / default_ami_id), not just say
+    "unknown arg".
+    """
+    with pytest.raises(MngrError, match="no longer supported.*default_os_id.*default_image_name.*default_ami_id"):
         _parse_with_defaults(["--vps-os=9999"])
+
+
+def test_parse_build_args_rejects_vps_image_arg_with_guidance() -> None:
+    """The dedicated error also catches a plausible alternative spelling (--vps-image=)."""
+    with pytest.raises(MngrError, match="no longer supported"):
+        _parse_with_defaults(["--vps-image=debian-12"])
+
+
+def test_parse_build_args_rejects_vps_ami_arg_with_guidance() -> None:
+    """And catches the AWS-flavoured spelling (--vps-ami=)."""
+    with pytest.raises(MngrError, match="no longer supported"):
+        _parse_with_defaults(["--vps-ami=ami-0123abcd"])
 
 
 def test_parse_build_args_git_depth() -> None:

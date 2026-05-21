@@ -29,14 +29,11 @@ from imbue.mngr_vps_docker.vps_client import VpsClientInterface
 from imbue.mngr_vps_docker.vps_client import VpsSnapshotInfo
 from imbue.mngr_vps_docker.vps_client import VpsSshKeyInfo
 
-# Prefix the conftest hook scans for to find leaked test instances. Tests
-# under pytest must produce EC2 `Name` tags that begin with this prefix so
-# the session-end orphan scan can find them. Defined here in production
-# code (not in ``mngr_aws.testing``) because the production guard in
-# ``create_instance`` depends on it; ``mngr_aws.testing`` imports this
-# constant and derives its ``AWS_TEST_NAME_PREFIX`` from it, so the two
-# can never drift.
-AWS_TEST_INSTANCE_LABEL_PREFIX: Final[str] = "mngr-test-aws-"
+# Tag that ``create_instance`` adds to every EC2 instance launched while
+# ``PYTEST_CURRENT_TEST`` is set. The conftest session-end scanner uses
+# this tag (not the Name tag) to find leaked instances, which means tests
+# do not have to constrain host naming: any agent name works.
+AWS_PYTEST_LAUNCHED_TAG: Final[str] = "mngr-pytest-launched"
 
 _STATE_MAP: Final[dict[str, VpsInstanceStatus]] = {
     "pending": VpsInstanceStatus.PENDING,
@@ -237,25 +234,16 @@ class AwsVpsClient(VpsClientInterface):
             )
 
         # Mirrors the Modal pattern in ``mngr_modal.backend._create_environment``:
-        # under pytest, refuse to launch an instance whose Name tag the
-        # conftest leak scanner could not later identify as test-owned.
-        # Without this, a test that spawns ``mngr create`` via an in-process
-        # code path that inherits os.environ but forgets to override the
-        # host name would create a default-prefixed instance no cleanup
-        # script recognises.
-        if "PYTEST_CURRENT_TEST" in os.environ and not label.startswith(AWS_TEST_INSTANCE_LABEL_PREFIX):
-            raise MngrError(
-                f"Refusing to create EC2 instance with label {label!r} during pytest: "
-                f"test instance labels must start with {AWS_TEST_INSTANCE_LABEL_PREFIX!r} so the "
-                "session-end orphan scan in mngr_aws/conftest.py can find leaked "
-                "instances by Name tag."
-            )
-
         sg_id = self.ensure_security_group()
 
         tag_specs: list[dict[str, str]] = [{"Key": k, "Value": v} for k, v in tags.items()]
         tag_specs.append({"Key": "Name", "Value": label})
         tag_specs.append({"Key": "mngr-created-at", "Value": datetime.now(timezone.utc).isoformat()})
+        # Mark instances launched during pytest so the conftest session-end
+        # orphan scanner can identify and force-terminate any leaks
+        # without having to constrain the agent / host name shape.
+        if "PYTEST_CURRENT_TEST" in os.environ:
+            tag_specs.append({"Key": AWS_PYTEST_LAUNCHED_TAG, "Value": "true"})
 
         block_device_mappings = [
             {

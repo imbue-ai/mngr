@@ -11,28 +11,18 @@ import os
 from typing import Any
 from typing import Final
 
+import boto3
+from botocore.exceptions import BotoCoreError
 from pydantic import Field
 
-from imbue.mngr_aws.client import AWS_TEST_INSTANCE_LABEL_PREFIX
 from imbue.mngr_aws.client import AwsVpsClient
 
-# ``mngr_vps_docker.instance`` builds every EC2 ``Name`` tag as
-# ``f"mngr-{agent_name}"``, so to make a Name tag that starts with the
-# production guard's expected prefix, the agent name must start with that
-# prefix minus the ``"mngr-"`` literal.
-_MNGR_LABEL_PREFIX: Final[str] = "mngr-"
-assert AWS_TEST_INSTANCE_LABEL_PREFIX.startswith(_MNGR_LABEL_PREFIX), (
-    f"AWS_TEST_INSTANCE_LABEL_PREFIX must start with {_MNGR_LABEL_PREFIX!r} "
-    f"(mngr_vps_docker prepends it to every label); got "
-    f"{AWS_TEST_INSTANCE_LABEL_PREFIX!r}."
-)
-
-# ``Name`` tag prefix used by release tests when naming their hosts; the
-# session-end orphan scan uses this prefix to find instances that escaped
-# any per-test cleanup. Derived from the production label prefix so the
-# guard in ``client.create_instance`` and the conftest leak scanner cannot
-# drift out of alignment with the names tests actually generate.
-AWS_TEST_NAME_PREFIX: Final[str] = AWS_TEST_INSTANCE_LABEL_PREFIX[len(_MNGR_LABEL_PREFIX) :]
+# Optional prefix release tests use for their agent names so leaked instances
+# (should the scanner ever fail) are still visually identifiable as test-owned.
+# Cleanup logic does NOT depend on this -- ``AwsVpsClient.create_instance``
+# tags pytest-launched instances with ``mngr-pytest-launched=true`` and the
+# conftest scanner filters on that tag.
+AWS_TEST_NAME_PREFIX: Final[str] = "test-aws-"
 
 # Region used by the AWS release tests and the session-end leak scan. Tests
 # can override via ``AWS_REGION``; defaults to ``us-east-1`` to match the
@@ -61,15 +51,22 @@ AWS_TEST_INSTANCE_AUTO_SHUTDOWN_MINUTES: Final[int] = 60
 
 
 def aws_credentials_available() -> bool:
-    """Return True if AWS credentials are plausibly present in the environment.
+    """Return True iff boto3's default credential chain can resolve credentials.
 
     Used to gate release tests (skipif) and the session-end cleanup hook
-    (no-op when credentials are absent). Only checks the two env-var
-    families that are sufficient for boto3's default chain to find
-    credentials without further configuration -- this is intentionally a
-    fast, non-network check, not a full boto3 ``get_credentials`` probe.
+    (no-op when credentials are absent). Walks the full boto3 chain (env
+    vars, shared credentials file, AWS_PROFILE, EC2 IMDS), matching what
+    ``AwsProviderConfig.get_session`` does at provider-construction time
+    -- so the gate and the production code agree on what counts as
+    "available".
+
+    ``session.get_credentials()`` does not make a network call when env or
+    file sources resolve; it only contacts IMDS as a last resort.
     """
-    return bool(os.environ.get("AWS_ACCESS_KEY_ID")) or bool(os.environ.get("AWS_PROFILE"))
+    try:
+        return boto3.Session().get_credentials() is not None
+    except BotoCoreError:
+        return False
 
 
 class _StubbedAwsVpsClient(AwsVpsClient):

@@ -27,9 +27,11 @@ provider instances; mirrors the conftest pattern used by
 ``mngr_vps_docker`` and ``mngr_schedule``.
 """
 
+from collections.abc import Generator
 from datetime import datetime
 from datetime import timedelta
 from datetime import timezone
+from pathlib import Path
 from typing import Any
 from typing import Final
 
@@ -40,13 +42,56 @@ from botocore.exceptions import ClientError
 from loguru import logger
 
 from imbue.mngr.utils.plugin_testing import register_plugin_test_fixtures
+from imbue.mngr.utils.testing import setup_mngr_test_environment
+from imbue.mngr_aws.client import AWS_PYTEST_LAUNCHED_TAG
 from imbue.mngr_aws.testing import AWS_DEFAULT_REGION
 from imbue.mngr_aws.testing import AWS_RELEASE_TESTS_OPT_IN
 from imbue.mngr_aws.testing import AWS_TEST_INSTANCE_AUTO_SHUTDOWN_MINUTES
-from imbue.mngr_aws.testing import AWS_TEST_NAME_PREFIX
 from imbue.mngr_aws.testing import aws_credentials_available
 
 register_plugin_test_fixtures(globals())
+
+
+@pytest.fixture(autouse=True)
+def setup_test_mngr_env(
+    tmp_home_dir: Path,
+    temp_host_dir: Path,
+    mngr_test_prefix: str,
+    mngr_test_root_name: str,
+    monkeypatch: pytest.MonkeyPatch,
+    _isolate_tmux_server: None,
+) -> Generator[None, None, None]:
+    """Override mngr's autouse env setup to snapshot AWS creds before HOME swap.
+
+    Mirrors ``mngr_modal/conftest.py``'s analogous override: HOME isolation
+    hides ``~/.aws/credentials`` and ``~/.aws/config`` from the test
+    process, which makes boto3 raise ``NoCredentialsError`` even when the
+    real shell has working creds. Resolve boto3's chain *before* HOME is
+    swapped, then export the credentials as env vars so they survive
+    isolation. Skipped silently when the session has no resolvable creds
+    (the release-test ``skipif`` then takes over).
+    """
+    if aws_credentials_available():
+        creds = boto3.Session().get_credentials()
+        if creds is not None:
+            frozen = creds.get_frozen_credentials()
+            # boto3-stubs types these as ``str | None`` to allow the
+            # not-yet-resolved case, but a frozen-credentials access_key
+            # is non-empty by construction (None would have been caught
+            # above via ``get_credentials() is None``).
+            assert frozen.access_key and frozen.secret_key, "frozen credentials must not be empty"
+            monkeypatch.setenv("AWS_ACCESS_KEY_ID", frozen.access_key)
+            monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", frozen.secret_key)
+            if frozen.token:
+                monkeypatch.setenv("AWS_SESSION_TOKEN", frozen.token)
+            # Stop boto3 inside the isolated HOME from re-reading the
+            # config/credentials files (which won't exist there anyway).
+            monkeypatch.delenv("AWS_PROFILE", raising=False)
+            monkeypatch.delenv("AWS_CONFIG_FILE", raising=False)
+            monkeypatch.delenv("AWS_SHARED_CREDENTIALS_FILE", raising=False)
+    setup_mngr_test_environment(tmp_home_dir, temp_host_dir, mngr_test_prefix, mngr_test_root_name, monkeypatch)
+    yield
+
 
 # Orphan-scan grace period. A test-named instance younger than this is left
 # alone to avoid race-killing an in-flight test on a parallel worker.
@@ -65,11 +110,13 @@ def _force_terminate_instances(ec2: Any, instance_ids: list[str]) -> None:
         logger.warning("Failed to terminate leaked EC2 instances {}: {}", instance_ids, e)
 
 
-def _find_orphan_instances_by_name(ec2: Any) -> list[str]:
-    """Return instance IDs whose ``Name`` tag begins with the test prefix and are older than the TTL.
+def _find_orphan_test_instances(ec2: Any) -> list[str]:
+    """Return instance IDs tagged ``mngr-pytest-launched=true`` and older than the TTL.
 
-    Younger instances are intentionally skipped so this never races a
-    parallel worker's in-flight test.
+    ``AwsVpsClient.create_instance`` adds the tag to every EC2 instance
+    launched while ``PYTEST_CURRENT_TEST`` is set, so this scanner only
+    matches instances we created here. Younger instances are intentionally
+    skipped so this never races a parallel worker's in-flight test.
     """
     cutoff = datetime.now(timezone.utc) - _TEST_LEAK_TTL
     leaked: list[str] = []
@@ -78,7 +125,7 @@ def _find_orphan_instances_by_name(ec2: Any) -> list[str]:
         for page in paginator.paginate(
             Filters=[
                 {"Name": "instance-state-name", "Values": ["pending", "running", "stopping", "stopped"]},
-                {"Name": "tag:Name", "Values": [f"mngr-{AWS_TEST_NAME_PREFIX}*"]},
+                {"Name": f"tag:{AWS_PYTEST_LAUNCHED_TAG}", "Values": ["true"]},
             ]
         ):
             for reservation in page.get("Reservations", []):
@@ -117,7 +164,7 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
         logger.warning("Failed to build EC2 client for session-end leak scan: {}", e)
         return
 
-    orphans = _find_orphan_instances_by_name(ec2)
+    orphans = _find_orphan_test_instances(ec2)
     if not orphans:
         return
 

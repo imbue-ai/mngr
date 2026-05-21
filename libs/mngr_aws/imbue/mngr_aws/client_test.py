@@ -150,29 +150,6 @@ def test_create_instance_cross_region_raises(stubbed_client: tuple[AwsVpsClient,
         )
 
 
-def test_create_instance_under_pytest_rejects_non_test_label(
-    stubbed_client: tuple[AwsVpsClient, Stubber],
-) -> None:
-    """The pytest-detection guard refuses labels that the conftest leak scan would miss.
-
-    Regression: a future test that constructs ``mngr create`` arguments
-    without overriding the host name would produce an instance with a
-    default ``mngr-<uuid>`` Name tag that the session-end orphan scan
-    in conftest.py cannot find. The guard must fail loudly at the API
-    boundary, before run_instances is called.
-    """
-    client, _stubber = stubbed_client
-    with pytest.raises(MngrError, match="must start with 'mngr-test-aws-'"):
-        client.create_instance(
-            label="mngr-some-prod-host",
-            region="us-east-1",
-            plan="t3.small",
-            user_data="test",
-            ssh_key_ids=[],
-            tags={},
-        )
-
-
 # =============================================================================
 # destroy_instance / get_instance_status / get_instance_ip / list_instances
 # =============================================================================
