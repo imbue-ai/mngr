@@ -798,6 +798,14 @@ def test_unset_vars_applied_during_agent_start(
     # This lets us send echo commands to check environment variables.
     host.execute_stateful_command(f"tmux send-keys -t {quoted_window_target} C-c")
 
+    # This was enabled in modal, but caused things to fail locally. I don't think we need or want this (and I did do a better job of waiting above by ensuring that the sleep text shows up)
+    # # Wait for the shell prompt to return after Ctrl-C
+    # def shell_ready() -> bool:
+    #     capture_result = host.execute_command(f"tmux capture-pane -t '{session_name}' -p")
+    #     return capture_result.success and ("$" in capture_result.stdout or "#" in capture_result.stdout)
+    #
+    # wait_for(shell_ready, error_message="Shell prompt not ready after Ctrl-C")
+
     host.execute_stateful_command(
         f"tmux send-keys -t {quoted_window_target} 'echo HISTFILE_VALUE=${{HISTFILE:-UNSET}}' Enter"
     )
