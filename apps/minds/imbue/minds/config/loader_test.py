@@ -63,6 +63,15 @@ def test_load_deploy_config_dev_tier_round_trip() -> None:
     assert "supertokens" in config.secrets.services
 
 
+def test_load_deploy_config_ci_tier_round_trip() -> None:
+    """The committed ci/deploy.toml parses cleanly."""
+    config = load_deploy_config("ci")
+    assert isinstance(config, DeployEnvConfig)
+    assert config.vault_path_prefix == "secrets/minds/ci"
+    assert "cloudflare" in config.secrets.services
+    assert "supertokens" in config.secrets.services
+
+
 def test_load_deploy_config_unknown_tier_raises() -> None:
     with pytest.raises(EnvConfigError, match="No deploy config found for tier"):
         load_deploy_config("not_a_real_tier")

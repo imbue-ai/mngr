@@ -153,7 +153,7 @@ class ImbueCloudHost(Host):
         path), we *load* the existing ``data.json`` from the host -- which the
         bake wrote with ``--template main --template vultr`` and therefore
         already contains the ``additional_commands`` that start
-        ``minds-workspace-server``, ``cloudflared``, etc. -- and patch only
+        ``system-interface``, ``cloudflared``, etc. -- and patch only
         the minds-driven fields in place: ``labels`` and ``command``
         (regenerated via ``assemble_command`` so the embedded
         ``<MNGR_PREFIX><name>`` tmux session reference still resolves).

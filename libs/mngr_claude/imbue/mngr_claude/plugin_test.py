@@ -1696,13 +1696,14 @@ def test_on_before_provisioning_shared_mode_raises_for_remote_host(
         agent.on_before_provisioning(host=remote_host, options=options, mngr_ctx=temp_mngr_ctx)
 
 
-def test_on_before_provisioning_shared_mode_raises_when_env_unset(
+def test_on_before_provisioning_shared_mode_passes_when_env_unset(
     local_provider: LocalProviderInstance,
     tmp_path: Path,
     temp_mngr_ctx: MngrContext,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """With use_env_config_dir=True and $CLAUDE_CONFIG_DIR unset, on_before_provisioning raises."""
+    """With use_env_config_dir=True and $CLAUDE_CONFIG_DIR unset, on_before_provisioning falls
+    back to ``~/.claude/`` and does not raise (it's the "don't touch the config" path)."""
     monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
     agent, host = make_claude_agent(
         local_provider,
@@ -1713,8 +1714,8 @@ def test_on_before_provisioning_shared_mode_raises_when_env_unset(
 
     options = CreateAgentOptions(agent_type=AgentTypeName("claude"))
 
-    with pytest.raises(UserInputError, match="use_env_config_dir"):
-        agent.on_before_provisioning(host=host, options=options, mngr_ctx=temp_mngr_ctx)
+    # Should not raise.
+    agent.on_before_provisioning(host=host, options=options, mngr_ctx=temp_mngr_ctx)
 
 
 def test_on_destroy_removes_trust(
@@ -4327,7 +4328,7 @@ def test_modify_env_vars_omits_claude_config_dir_in_shared_mode(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """In shared mode, modify_env_vars leaves CLAUDE_CONFIG_DIR / ORIGINAL_CLAUDE_CONFIG_DIR
-    untouched so the agent inherits the parent shell's values."""
+    untouched so the agent inherits the parent shell's values, and adds no other env vars."""
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "shared"))
     agent, host = make_claude_agent(
@@ -4340,33 +4341,8 @@ def test_modify_env_vars_omits_claude_config_dir_in_shared_mode(
 
     agent.modify_env_vars(host, env_vars)
 
-    assert "CLAUDE_CONFIG_DIR" not in env_vars
-    assert "ORIGINAL_CLAUDE_CONFIG_DIR" not in env_vars
-    # Common transcript emission is independent of shared mode -- still set.
-    assert env_vars["MNGR_EMIT_COMMON_TRANSCRIPT"] == "1"
-
-
-def test_modify_env_vars_shared_mode_with_common_transcript_disabled(
-    local_provider: LocalProviderInstance,
-    tmp_path: Path,
-    temp_mngr_ctx: MngrContext,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """In shared mode with emit_common_transcript=False, the env dict stays empty."""
-    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "shared"))
-    agent, host = make_claude_agent(
-        local_provider,
-        tmp_path,
-        temp_mngr_ctx,
-        agent_config=ClaudeAgentConfig(
-            check_installation=False, use_env_config_dir=True, emit_common_transcript=False
-        ),
-    )
-    env_vars: dict[str, str] = {}
-
-    agent.modify_env_vars(host, env_vars)
-
+    # In shared mode there's nothing to add: the transcript opt-out is
+    # gated at provisioning time (on-disk script presence), not via env var.
     assert env_vars == {}
 
 
@@ -4405,13 +4381,17 @@ def test_get_claude_config_dir_returns_shared_env_value_in_shared_mode(
     assert agent.get_claude_config_dir() == shared
 
 
-def test_get_claude_config_dir_raises_in_shared_mode_when_env_unset(
+def test_get_claude_config_dir_falls_back_to_home_in_shared_mode_when_env_unset(
     local_provider: LocalProviderInstance,
     tmp_path: Path,
     temp_mngr_ctx: MngrContext,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """In shared mode with $CLAUDE_CONFIG_DIR unset, get_claude_config_dir raises."""
+    """In shared mode with $CLAUDE_CONFIG_DIR unset, get_claude_config_dir falls back
+    to ``~/.claude/`` (claude's own default), so ``use_env_config_dir=True`` effectively
+    means "don't touch the config dir at all -- inherit whatever the parent shell would
+    have used."
+    """
     monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
     agent, _ = make_claude_agent(
         local_provider,
@@ -4420,8 +4400,7 @@ def test_get_claude_config_dir_raises_in_shared_mode_when_env_unset(
         agent_config=ClaudeAgentConfig(check_installation=False, use_env_config_dir=True),
     )
 
-    with pytest.raises(UserInputError, match="use_env_config_dir"):
-        agent.get_claude_config_dir()
+    assert agent.get_claude_config_dir() == Path.home() / ".claude"
 
 
 # =============================================================================
