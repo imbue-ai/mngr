@@ -1266,9 +1266,13 @@ async def _handle_provider_toggle(
             media_type="application/json",
         )
     changed = set_provider_is_enabled(provider_name, is_enabled)
-    consumer: EnvelopeStreamConsumer | None = request.app.state.envelope_stream_consumer
-    if consumer is not None:
-        consumer.bounce_observe()
+    # Only bounce observe when the settings file actually changed -- a no-op toggle
+    # (e.g. user clicking Disable twice) should not trigger a SIGHUP and a full
+    # mngr observe restart, since the next discovery snapshot would be identical.
+    if changed:
+        consumer: EnvelopeStreamConsumer | None = request.app.state.envelope_stream_consumer
+        if consumer is not None:
+            consumer.bounce_observe()
     return Response(
         content=json.dumps({"provider_name": provider_name, "is_enabled": is_enabled, "changed": changed}),
         media_type="application/json",
