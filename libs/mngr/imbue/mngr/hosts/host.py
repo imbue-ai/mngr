@@ -2195,7 +2195,7 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         - ``mngr_transcript_lib.sh`` provides the raw-transcript primitives
           (field extraction, id-set construction, offset reconciliation,
           bounded sed-append, percent-encoded path keys) shared by per-agent
-          streamers such as claude's and gemini's ``stream_transcript.sh``.
+          streamers such as claude's ``stream_transcript.sh``.
         """
         host_commands = self.host_dir / "commands"
         agent_commands = self._get_agent_state_dir(agent) / "commands"
