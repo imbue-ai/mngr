@@ -250,8 +250,20 @@
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ is_enabled: isEnabled }),
-        }).catch(function () {
-          // Network error: drop the pending state so the user can retry.
+        }).then(function (response) {
+          if (!response.ok) {
+            // Server rejected the toggle (4xx / 5xx). fetch only rejects on network
+            // errors, so a non-ok status would otherwise leave the row stuck in
+            // "Waiting…" until the next snapshot. Log + clear the pending state so
+            // the user can retry.
+            console.error('Provider toggle for', name, 'returned HTTP', response.status);
+            delete pendingToggleClickedAtByProvider[name];
+            renderProviders({ providers: renderedProviders || [] });
+          }
+        }).catch(function (err) {
+          // Network error: log so it surfaces in the devtools console and drop the
+          // pending state so the user can retry.
+          console.error('Provider toggle for', name, 'failed:', err);
           delete pendingToggleClickedAtByProvider[name];
           renderProviders({ providers: renderedProviders || [] });
         });
