@@ -27,7 +27,6 @@ from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import CommandString
 from imbue.mngr.primitives import HostId
-from imbue.mngr.primitives import Permission
 
 # this is the only place where it is acceptable to use the TYPE_CHECKING flag
 if TYPE_CHECKING:
@@ -97,16 +96,6 @@ class AgentInterface(MutableModel, ABC, Generic[AgentConfigT]):
         Subclasses can override this to return a hardcoded process name
         when the command is complex (e.g., shell wrappers with exports).
         """
-        ...
-
-    @abstractmethod
-    def get_permissions(self) -> list[Permission]:
-        """Return the list of permissions assigned to this agent."""
-        ...
-
-    @abstractmethod
-    def set_permissions(self, value: Sequence[Permission]) -> None:
-        """Set the list of permissions for this agent."""
         ...
 
     @abstractmethod
@@ -447,15 +436,6 @@ class AgentInterface(MutableModel, ABC, Generic[AgentConfigT]):
         removing external configuration entries or releasing resources.
         """
         ...
-
-
-class NoPermissionsAgentMixin:
-    """Marker mixin for agents that are granted no permissions.
-
-    These agents have no tool access and cannot perform destructive actions
-    (e.g. configured with --tools ""). Because no permissions are granted,
-    trust validation and permission dialogs are unnecessary during provisioning.
-    """
 
 
 class HasTranscriptMixin(ABC):
