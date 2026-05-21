@@ -33,7 +33,7 @@ def get_antigravity_user_settings_path() -> Path:
     return Path.home() / ".gemini" / "antigravity-cli" / "settings.json"
 
 
-_TRUSTED_WORKSPACES_KEY: str = "trustedWorkspaces"
+TRUSTED_WORKSPACES_KEY: str = "trustedWorkspaces"
 
 
 def read_antigravity_settings(host: OnlineHostInterface, settings_path: Path) -> dict[str, Any]:
@@ -93,7 +93,7 @@ def merge_trusted_workspace(settings: Mapping[str, Any], workspace_path: str) ->
     string forms of the same logical path (e.g. with vs without a trailing
     slash) are treated as distinct entries, matching agy's own behavior.
     """
-    existing_raw = settings.get(_TRUSTED_WORKSPACES_KEY, [])
+    existing_raw = settings.get(TRUSTED_WORKSPACES_KEY, [])
     if isinstance(existing_raw, list):
         existing: list[Any] = list(existing_raw)
     else:
@@ -101,5 +101,5 @@ def merge_trusted_workspace(settings: Mapping[str, Any], workspace_path: str) ->
     if workspace_path in existing:
         return None
     merged: dict[str, Any] = dict(settings)
-    merged[_TRUSTED_WORKSPACES_KEY] = existing + [workspace_path]
+    merged[TRUSTED_WORKSPACES_KEY] = existing + [workspace_path]
     return merged

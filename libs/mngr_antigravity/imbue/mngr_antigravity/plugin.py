@@ -57,6 +57,7 @@ from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import CommandString
 from imbue.mngr_antigravity import resources as _antigravity_resources
+from imbue.mngr_antigravity.antigravity_config import TRUSTED_WORKSPACES_KEY
 from imbue.mngr_antigravity.antigravity_config import get_antigravity_user_settings_path
 from imbue.mngr_antigravity.antigravity_config import merge_trusted_workspace
 from imbue.mngr_antigravity.antigravity_config import read_antigravity_settings
@@ -262,7 +263,7 @@ class AntigravityAgent(InteractiveTuiAgent[AntigravityAgentConfig], HasCommonTra
         settings_path = get_antigravity_user_settings_path()
         existing_settings = read_antigravity_settings(host, settings_path)
         self._check_existing_trustedworkspaces_shape(settings_path, existing_settings)
-        if workspace_path in existing_settings.get("trustedWorkspaces", []):
+        if workspace_path in existing_settings.get(TRUSTED_WORKSPACES_KEY, []):
             logger.debug("Workspace {} already trusted in {}", workspace_path, settings_path)
             return
 
@@ -316,7 +317,7 @@ class AntigravityAgent(InteractiveTuiAgent[AntigravityAgentConfig], HasCommonTra
         destroy entries an unknown future agy schema put there. Surfacing
         the schema break is safer than rewriting the file.
         """
-        existing_trusted = existing_settings.get("trustedWorkspaces")
+        existing_trusted = existing_settings.get(TRUSTED_WORKSPACES_KEY)
         if existing_trusted is not None and not isinstance(existing_trusted, list):
             raise UserInputError(
                 f"Antigravity settings at {settings_path} has a "
