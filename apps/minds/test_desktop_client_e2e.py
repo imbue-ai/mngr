@@ -63,7 +63,10 @@ _FCT_FALLBACK_BRANCH: Final[str] = "main"
 # The contentView page URL contains ``/_chrome`` only for the chrome
 # (sidebar/title-bar) view; the main content view never does. We match the
 # pure-localhost backend pages, not the ``agent-<id>.localhost`` proxy.
-_BACKEND_ORIGIN_PATTERN: Final[re.Pattern[str]] = re.compile(r"^http://localhost:\d+(?:/|$)")
+# The capturing group exposes the bare origin (``http://localhost:<port>``)
+# so :func:`_backend_origin_from_page` can reuse the same pattern instead
+# of re-encoding the localhost-origin contract a second time.
+_BACKEND_ORIGIN_PATTERN: Final[re.Pattern[str]] = re.compile(r"^(http://localhost:\d+)(?:/|$)")
 _CHROME_PATH_PATTERN: Final[re.Pattern[str]] = re.compile(r"^http://localhost:\d+/_chrome(?:/|$|\?)")
 # The agent subdomain URL the create flow redirects to once the workspace's
 # ``system_interface`` is reachable. The desktop client wraps that origin in
@@ -374,8 +377,13 @@ def _pick_content_page(browser: Browser, timeout_seconds: int) -> Page:
 
 
 def _backend_origin_from_page(page: Page) -> str:
-    """Extract ``http://localhost:<backend_port>`` from a content-view page URL."""
-    match = re.match(r"^(http://localhost:\d+)", page.url)
+    """Extract ``http://localhost:<backend_port>`` from a content-view page URL.
+
+    Reuses :data:`_BACKEND_ORIGIN_PATTERN` so the localhost-origin contract
+    is encoded in exactly one place; the pattern's capturing group exposes
+    the bare origin without re-parsing the URL.
+    """
+    match = _BACKEND_ORIGIN_PATTERN.match(page.url)
     if match is None:
         raise AssertionError(f"Content page URL is not on the backend origin: {page.url!r}")
     return match.group(1)
