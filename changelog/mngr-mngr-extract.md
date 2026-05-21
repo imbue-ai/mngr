@@ -1,4 +1,3 @@
 - `mngr create --provider lima` help text and docs now show `--memory=N` / `--disk=N` (plain integers, no `GiB` suffix), matching what `limactl start` expects.
 - `mngr_claude` bounds macOS keychain reads (`security find-generic-password`) with a 10s timeout so a hidden ACL prompt cannot wedge `mngr create` indefinitely.
-- `mngr_forward` 503 fall-through paths now log a per-agent throttled warning (every 30s) distinguishing "agent not in resolver's known set" from "agent known but no service URL registered", and the `_service_unavailable_response` / 503 envelope comments were trimmed of cross-module references.
 - `mngr_imbue_cloud` and `mngr_latchkey` bump their pinned `imbue-mngr` / `imbue-common` / `concurrency-group` versions to match the current monorepo.
