@@ -37,27 +37,33 @@ class URLParseError(RuntimeError):
     """Raised when the function URL cannot be parsed from deploy output."""
 
 
+class CleanupError(RuntimeError):
+    """Raised when one or more Modal cleanup subprocesses exit non-zero."""
+
+
 def _get_test_app_name() -> str:
     """Generate a unique test app name with the mngr-test prefix."""
     return f"{MODAL_TEST_APP_PREFIX}snapshot-{get_short_random_string()}"
 
 
-def _stop_app(app_name: str) -> None:
-    """Stop a Modal app."""
-    subprocess.run(
-        ["uv", "run", "modal", "app", "stop", "--yes", app_name],
-        timeout=60,
-        check=True,
-    )
+def _stop_app_and_delete_volume(app_name: str, volume_name: str) -> None:
+    """Stop the Modal app and delete its volume in parallel.
 
-
-def _delete_volume(volume_name: str) -> None:
-    """Delete a Modal volume."""
-    subprocess.run(
-        ["uv", "run", "modal", "volume", "delete", volume_name, "--yes"],
-        capture_output=True,
-        timeout=60,
-    )
+    Raises CleanupError listing every subprocess that exited non-zero.
+    """
+    with (
+        subprocess.Popen(["uv", "run", "modal", "app", "stop", "--yes", app_name]) as stop_process,
+        subprocess.Popen(["uv", "run", "modal", "volume", "delete", volume_name, "--yes"]) as delete_process,
+    ):
+        stop_returncode = stop_process.wait(timeout=60)
+        delete_returncode = delete_process.wait(timeout=60)
+    failures = []
+    if stop_returncode != 0:
+        failures.append(f"`modal app stop {app_name}` exited {stop_returncode}")
+    if delete_returncode != 0:
+        failures.append(f"`modal volume delete {volume_name}` exited {delete_returncode}")
+    if failures:
+        raise CleanupError("; ".join(failures))
 
 
 def _warmup_function(url: str) -> None:
@@ -148,8 +154,7 @@ def deployed_snapshot_function() -> Generator[tuple[str, str], None, None]:
         _warmup_function(url)
         yield (app_name, url)
     finally:
-        _stop_app(app_name)
-        _delete_volume(volume_name)
+        _stop_app_and_delete_volume(app_name, volume_name)
 
 
 @pytest.mark.acceptance
