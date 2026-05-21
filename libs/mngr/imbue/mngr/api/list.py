@@ -404,8 +404,8 @@ def _construct_and_discover_for_provider(
             # extract provider_name from ProviderDiscoveryError) can attribute
             # the failure to this provider. The CONTINUE branch below already
             # carries provider_name through emit_discovery_error_event; ABORT
-            # needs the same attribution so minds' auto-disable-on-auth-error
-            # path sees a usable provider_name on the emitted event.
+            # needs the same attribution so downstream consumers (e.g. minds'
+            # providers panel) see a usable provider_name on the emitted event.
             raise ProviderDiscoveryError(provider_name, e) from e
         logger.opt(exception=e).error("Error discovering agents for provider {}", provider_name)
         emit_discovery_error_event(
