@@ -87,7 +87,7 @@ _AUTH_ERROR_TYPE: Final[str] = "ImbueCloudAuthError"
 # its bound port via a `listening` envelope before treating startup as failed.
 # The plugin emits this from its FastAPI lifespan startup, so the wait only
 # needs to cover the subprocess's own interpreter start and imports.
-_MNGR_FORWARD_LISTEN_TIMEOUT_SECONDS: Final[float] = 10.0
+_MNGR_FORWARD_LISTEN_TIMEOUT_SECONDS: Final[float] = 5.0
 
 
 @click.command()
