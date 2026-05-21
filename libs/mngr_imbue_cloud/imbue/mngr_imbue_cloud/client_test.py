@@ -56,7 +56,7 @@ def test_lease_host_success_parses_response(monkeypatch: pytest.MonkeyPatch) -> 
             200,
             json={
                 "host_db_id": "00000000-0000-0000-0000-000000000001",
-                "vps_ip": "10.0.0.1",
+                "vps_address": "10.0.0.1",
                 "ssh_port": 22,
                 "ssh_user": "root",
                 "container_ssh_port": 2222,
@@ -76,7 +76,7 @@ def test_lease_host_success_parses_response(monkeypatch: pytest.MonkeyPatch) -> 
     monkeypatch.setattr(httpx, "post", fake_post)
     client = ImbueCloudConnectorClient(base_url=AnyUrl("https://example.com"))
     result = client.lease_host(SecretStr("tok"), LeaseAttributes(cpus=2), "ssh-ed25519 AAAA", "my-host")
-    assert result.vps_ip == "10.0.0.1"
+    assert result.vps_address == "10.0.0.1"
     assert result.agent_id == "agent-abc"
     assert result.host_name == "my-host"
     assert result.attributes == {"cpus": 2}

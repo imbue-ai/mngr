@@ -1,3 +1,4 @@
+import inspect
 import json
 import os
 import re
@@ -10,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import typing
 from collections.abc import Generator
 from collections.abc import Sequence
 from contextlib import contextmanager
@@ -38,6 +40,7 @@ from imbue.mngr.cli.create import create as create_command
 from imbue.mngr.config.consts import PROFILES_DIRNAME
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.errors import ConfigStructureError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.hosts.tmux import build_tmux_capture_pane_command
 from imbue.mngr.interfaces.data_types import AgentDetails
@@ -172,6 +175,50 @@ def generate_test_environment_name() -> str:
     now = datetime.now(timezone.utc)
     timestamp = now.strftime("%Y-%m-%d-%H-%M-%S")
     return f"{TEST_ENV_PREFIX}{timestamp}"
+
+
+SHARED_MODAL_ENV_NAME_VAR: Final[str] = "MNGR_TEST_SHARED_MODAL_ENV_NAME"
+
+# Matches a full shared Modal env name and splits it into:
+#   group 1: the bare timestamp portion (no trailing dash), matching the shape
+#            ``generate_test_environment_name()`` returns. Callers join with a
+#            dash to build ``MngrConfig.prefix`` or any other prefix-shape value.
+#   group 2: the non-empty suffix (feeds ``ModalProviderConfig.user_id``).
+# Unlike ``TEST_ENV_PATTERN`` (which only anchors the timestamp), this pattern
+# enforces a literal dash separator and a non-empty suffix that the docstring of
+# ``read_shared_modal_env_name`` promises, so malformed values raise loudly
+# instead of producing a half-formed split.
+_SHARED_MODAL_ENV_NAME_PATTERN: Final[re.Pattern[str]] = re.compile(
+    r"^(mngr_test-\d{4}-\d{2}-\d{2}-\d{2}-\d{2}-\d{2})-(.+)$"
+)
+
+
+def read_shared_modal_env_name() -> tuple[str, str] | None:
+    """Parse ``MNGR_TEST_SHARED_MODAL_ENV_NAME`` into ``(timestamp_name, user_id_suffix)``.
+
+    When the env var is unset or empty, returns ``None`` -- callers fall back
+    to per-test environment creation. Otherwise splits the shared env name on
+    the dash between the timestamp and the suffix, returning the bare timestamp
+    portion (same shape as ``generate_test_environment_name()``) and the
+    suffix. Callers join with ``-`` to reproduce the full shared env name.
+
+    Raises ``ConfigStructureError`` when the env var is set but the value does
+    not match the ``mngr_test-YYYY-MM-DD-HH-MM-SS-<suffix>`` pattern (the
+    dash separator and a non-empty suffix are both required) -- the justfile
+    generates conforming names, so a mismatch is a bug we want to surface
+    rather than silently fall back to per-test envs or produce a half-formed
+    split.
+    """
+    raw = os.environ.get(SHARED_MODAL_ENV_NAME_VAR, "")
+    if not raw:
+        return None
+    match = _SHARED_MODAL_ENV_NAME_PATTERN.match(raw)
+    if match is None:
+        raise ConfigStructureError(
+            f"{SHARED_MODAL_ENV_NAME_VAR}={raw!r} does not match the required "
+            "'mngr_test-YYYY-MM-DD-HH-MM-SS-<suffix>' pattern."
+        )
+    return match.group(1), match.group(2)
 
 
 def isolate_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -973,6 +1020,17 @@ def is_claude_installed() -> bool:
     return shutil.which("claude") is not None
 
 
+def write_executable_script(path: Path, content: str) -> None:
+    """Write ``content`` to ``path`` and mark the file executable (mode 0o755).
+
+    Used by tests that need to drop a bash mock onto PATH (e.g. mocking
+    ``uv`` / ``brew`` / ``sudo`` so we can exercise subprocess plumbing
+    without invoking the real tool).
+    """
+    path.write_text(content)
+    path.chmod(0o755)
+
+
 def setup_claude_trust_config_for_subprocess(
     trusted_paths: list[Path],
     root_name: str = "mngr-acceptance-test",
@@ -1477,7 +1535,6 @@ def make_test_discovered_agent() -> DiscoveredAgent:
             "work_dir": "/tmp/test",
             "start_on_boot": False,
             "labels": {},
-            "permissions": [],
         },
     )
 
@@ -1517,3 +1574,42 @@ def write_discovery_snapshot_to_path(
         "hosts": hosts,
     }
     events_path.write_text(json.dumps(event) + "\n")
+
+
+def walk_concrete_subclasses(cls: type) -> list[type]:
+    """Return every concrete (non-abstract) subclass of ``cls`` reachable via ``__subclasses__``.
+
+    Used by parametrized invariant tests that need to enumerate the full subclass
+    tree. Only subclasses whose defining module has already been imported are
+    visible -- callers that rely on full coverage must import those modules first
+    (typically by importing the relevant subclasses at the top of the test file).
+    """
+    found: list[type] = []
+    for sub in cls.__subclasses__():
+        if not inspect.isabstract(sub):
+            found.append(sub)
+        found.extend(walk_concrete_subclasses(sub))
+    return found
+
+
+def assert_init_first_param_is_provider_name(subclass: type) -> None:
+    """Assert ``subclass.__init__`` takes ``provider_name: ProviderInstanceName`` as the first parameter after ``self``.
+
+    Shared by parametrized invariant tests across provider packages that enforce
+    the ``ProviderError`` contract: every subclass must accept ``provider_name``
+    first so handlers catching the base class can read ``e.provider_name`` without
+    isinstance narrowing.
+    """
+    params = list(inspect.signature(subclass.__init__).parameters.values())
+    assert len(params) >= 2, f"{subclass.__name__}.__init__ has no parameters beyond self"
+    assert params[1].name == "provider_name", (
+        f"{subclass.__name__}.__init__ first parameter is {params[1].name!r}, expected 'provider_name'"
+    )
+    # Use get_type_hints so string forward references (e.g. from `from __future__
+    # import annotations`) are resolved before comparison.
+    hints = typing.get_type_hints(subclass.__init__)
+    provider_name_hint = hints.get("provider_name")
+    assert provider_name_hint is ProviderInstanceName, (
+        f"{subclass.__name__}.__init__ provider_name annotation is {provider_name_hint!r}, "
+        f"expected ProviderInstanceName"
+    )

@@ -38,7 +38,6 @@ from imbue.mngr.interfaces.host import get_agent_ready_timeout
 from imbue.mngr.primitives import ActivitySource
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import CommandString
-from imbue.mngr.primitives import Permission
 from imbue.mngr.utils.env_utils import parse_env_file
 
 _CAPTURE_PANE_TIMEOUT_SECONDS: Final[float] = 10.0
@@ -89,9 +88,10 @@ class BaseAgent(AgentInterface[AgentConfigT]):
 
         if not parts:
             raise UserInputError(
-                f"Agent type '{self.agent_type}' has no command configured. Either set "
-                f"`command = '...'` on the type, or pass a shell command after `--` "
-                f"(e.g. `mngr create foo --type command -- sleep 99999`)."
+                f"Agent type '{self.agent_type}' has no command to run. "
+                f"Pass a shell command after `--` "
+                f"(e.g. `mngr create foo --type command -- sleep 99999`), "
+                f"or set `command = '...'` on a custom `[agent_types.X]` in your config."
             )
 
         command = CommandString(" ".join(parts))
@@ -140,16 +140,6 @@ class BaseAgent(AgentInterface[AgentConfigT]):
         data = self._read_data()
         cmd = data.get("command")
         return CommandString(cmd) if cmd else CommandString("bash")
-
-    def get_permissions(self) -> list[Permission]:
-        data = self._read_data()
-        perms = data.get("permissions", [])
-        return [Permission(p) for p in perms]
-
-    def set_permissions(self, value: Sequence[Permission]) -> None:
-        data = self._read_data()
-        data["permissions"] = [str(p) for p in value]
-        self._write_data(data)
 
     def get_labels(self) -> dict[str, str]:
         data = self._read_data()

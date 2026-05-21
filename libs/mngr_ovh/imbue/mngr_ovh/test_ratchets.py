@@ -32,7 +32,13 @@ def test_prevent_while_true() -> None:
 
 
 def test_prevent_time_sleep() -> None:
-    rc.check_time_sleep(_DIR, snapshot(9))
+    # Bumped from 9 -> 10 for `OvhVpsClient.wait_for_no_active_tasks`, which
+    # polls OVH's `/vps/{s}/tasks?state=todo|doing` after order delivery
+    # before the post-delivery `/rebuild` (the fix for the "Action not
+    # available while there are running tasks on the VPS" race). OVH exposes
+    # no push/event mechanism for task completion, so polling-and-sleeping
+    # is the same shape `wait_for_task` already uses.
+    rc.check_time_sleep(_DIR, snapshot(10))
 
 
 def test_prevent_global_keyword() -> None:

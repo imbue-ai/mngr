@@ -1933,7 +1933,7 @@ dependencies = [
 requires-dist = [
     { name = "dockerfile-parse", specifier = ">=2.0.0" },
     { name = "imbue-mngr", editable = "libs/mngr" },
-    { name = "modal", specifier = "==1.3.1" },
+    { name = "modal", specifier = "==1.4.3" },
     { name = "modal-proxy", editable = "libs/modal_proxy" },
 ]
 
@@ -2041,7 +2041,7 @@ requires-dist = [
     { name = "imbue-common", editable = "libs/imbue_common" },
     { name = "imbue-mngr", editable = "libs/mngr" },
     { name = "imbue-mngr-modal", editable = "libs/mngr_modal" },
-    { name = "modal", specifier = ">=1.3.1" },
+    { name = "modal", specifier = ">=1.4.3" },
     { name = "python-dotenv", specifier = ">=1.0" },
     { name = "tabulate", specifier = ">=0.9.0" },
 ]
@@ -2594,6 +2594,8 @@ dependencies = [
     { name = "imbue-mngr" },
     { name = "imbue-mngr-forward" },
     { name = "imbue-mngr-latchkey" },
+    { name = "imbue-mngr-ovh" },
+    { name = "imbue-mngr-vps-docker" },
     { name = "itsdangerous" },
     { name = "jinja2" },
     { name = "loguru" },
@@ -2619,10 +2621,12 @@ requires-dist = [
     { name = "imbue-mngr", editable = "libs/mngr" },
     { name = "imbue-mngr-forward", editable = "libs/mngr_forward" },
     { name = "imbue-mngr-latchkey", editable = "libs/mngr_latchkey" },
+    { name = "imbue-mngr-ovh", editable = "libs/mngr_ovh" },
+    { name = "imbue-mngr-vps-docker", editable = "libs/mngr_vps_docker" },
     { name = "itsdangerous", specifier = ">=2.2.0" },
     { name = "jinja2", specifier = ">=3.1.0" },
     { name = "loguru" },
-    { name = "modal", specifier = ">=1.3.1" },
+    { name = "modal", specifier = ">=1.4.3" },
     { name = "paramiko", specifier = ">=3.0" },
     { name = "playwright", specifier = ">=1.40.0" },
     { name = "pydantic", specifier = ">=2.0" },
@@ -2635,7 +2639,7 @@ requires-dist = [
 
 [[package]]
 name = "modal"
-version = "1.3.1"
+version = "1.4.3"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "aiohttp" },
@@ -2647,15 +2651,14 @@ dependencies = [
     { name = "rich" },
     { name = "synchronicity" },
     { name = "toml" },
-    { name = "typer" },
     { name = "types-certifi" },
     { name = "types-toml" },
     { name = "typing-extensions" },
     { name = "watchfiles" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/f1/3e/97805b561e37eaac6b8baae7ee58bf203225bde6e98c4969652c8c6178a9/modal-1.3.1.tar.gz", hash = "sha256:c15e9218d59f9b04224ab55561eba131c1c657ff02d0f797776f9be699145774", size = 659259, upload-time = "2026-01-22T16:15:52.638Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/c6/7d/4126d0fe879ef3e86002ca821a34cb68a2588ea2e8ccb2bfe421d0f42ffe/modal-1.4.3.tar.gz", hash = "sha256:35b2fc840f759b512e12527afb538e1ea4cc232b84cfbfcef3f5d96d5a66abaa", size = 720488, upload-time = "2026-05-18T22:34:45.842Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/81/bb/6ad9a6df012cfc5adecfb639622b525c2b4d82833ff800cb62b7c462599a/modal-1.3.1-py3-none-any.whl", hash = "sha256:aae46d83d9b034e2ec28c82b0cbdd2e74e21aca3db18dbeb708e3ba36f726209", size = 755322, upload-time = "2026-01-22T16:15:50.668Z" },
+    { url = "https://files.pythonhosted.org/packages/56/54/400262056c144ceee5edab40efa2541ae8928ae5f244fd9025f3ad26c909/modal-1.4.3-py3-none-any.whl", hash = "sha256:802917181f576458a0cb833322157dab09c4f367326426c5a732661a0c519577", size = 826232, upload-time = "2026-05-18T22:34:43.335Z" },
 ]
 
 [[package]]
@@ -2672,7 +2675,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "litellm", extras = ["proxy"], specifier = ">=1.83" },
-    { name = "modal", specifier = ">=1.3.1" },
+    { name = "modal", specifier = ">=1.4.3" },
     { name = "prisma", specifier = ">=0.15" },
     { name = "pyyaml", specifier = ">=6.0" },
 ]
@@ -2694,7 +2697,7 @@ requires-dist = [
     { name = "concurrency-group", editable = "libs/concurrency_group" },
     { name = "imbue-common", editable = "libs/imbue_common" },
     { name = "imbue-mngr", editable = "libs/mngr" },
-    { name = "modal", specifier = "==1.3.1" },
+    { name = "modal", specifier = "==1.4.3" },
     { name = "resource-guards", editable = "libs/resource_guards" },
 ]
 
@@ -3870,7 +3873,7 @@ requires-dist = [
     { name = "httpx", specifier = ">=0.27.0" },
     { name = "imbue-common", editable = "libs/imbue_common" },
     { name = "loguru", specifier = ">=0.7" },
-    { name = "modal", specifier = ">=1.3.1" },
+    { name = "modal", specifier = ">=1.4.3" },
     { name = "paramiko", specifier = ">=3.0" },
     { name = "psycopg2-binary", specifier = ">=2.9" },
     { name = "pydantic", specifier = ">=2.0" },
@@ -4399,14 +4402,14 @@ wheels = [
 
 [[package]]
 name = "synchronicity"
-version = "0.11.1"
+version = "0.12.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "typing-extensions" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/a3/26/8874d34755691994266d4a844ba8d53d10c2690ec67f246ca4d6b6f34cbb/synchronicity-0.11.1.tar.gz", hash = "sha256:3628df9ab34bd7be89b729104114841c62612c5d5ec43b76f4b7b243185ec1a8", size = 58131, upload-time = "2025-12-19T18:28:42.291Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/f9/5e/50ea27817003665c7cc4f5bdad309f13d6329037f657848ee87fe06c3740/synchronicity-0.12.2.tar.gz", hash = "sha256:6fd605a5035d1ec74ce48fffaca80ea00345c84ca34223914e2436fb4f162ff9", size = 60018, upload-time = "2026-04-06T15:06:15.447Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/3f/b9/71153db12f4ad029cfe9b7fbf9792ef3fc9ade4485d31a13470b52954e62/synchronicity-0.11.1-py3-none-any.whl", hash = "sha256:53959c7f8b9b852fb5ea4d3d290a47a04310ede483a4cf0f8452cb4b5fa09db2", size = 40399, upload-time = "2025-12-19T18:28:40.972Z" },
+    { url = "https://files.pythonhosted.org/packages/41/44/4f6ba4e2c171847e6f9a460213b196bbf26edea43d0e66889c7ccc55d368/synchronicity-0.12.2-py3-none-any.whl", hash = "sha256:9dbaca81fb7f2b57c6dea326e514e1c80e9ccfd9c9618515e84fa6091026273b", size = 41312, upload-time = "2026-04-06T15:06:14.459Z" },
 ]
 
 [[package]]

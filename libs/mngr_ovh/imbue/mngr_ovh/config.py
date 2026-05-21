@@ -13,6 +13,10 @@ _DEFAULT_ENDPOINT: Final[str] = "ovh-us"
 _DEFAULT_PLAN: Final[str] = "vps-2025-model1"
 _DEFAULT_REGION: Final[str] = "US-EAST-VA"
 _DEFAULT_IMAGE_NAME: Final[str] = "Debian 12 - Docker"
+# OVH images install the rebuild SSH key into the image's default non-root
+# user, not into /root. mngr operates as root downstream so we sudo-copy the
+# key to root during provisioning; this is the user the rebuild key lands on.
+_DEFAULT_BOOTSTRAP_SSH_USER: Final[str] = "debian"
 
 
 class OvhPricingMode(UpperCaseStrEnum):
@@ -74,6 +78,17 @@ class OvhProviderConfig(VpsDockerProviderConfig):
         default=_DEFAULT_IMAGE_NAME,
         description="Default OS image name (resolved to UUID per-VPS at create time).",
     )
+    bootstrap_ssh_user: str = Field(
+        default=_DEFAULT_BOOTSTRAP_SSH_USER,
+        description=(
+            "Default non-root user the OVH image installs the rebuild key for. "
+            "On the default ``Debian 12 - Docker`` image this is ``debian``; "
+            "Ubuntu images use ``ubuntu``; AlmaLinux uses ``almalinux``; etc. "
+            "Used during the post-rebuild bootstrap to sudo-copy authorized_keys "
+            "into ``/root/.ssh`` so the rest of the provider (which assumes root "
+            "SSH) works without scattering sudos through downstream code."
+        ),
+    )
     pricing_mode: OvhPricingMode = Field(
         default=OvhPricingMode.DEFAULT,
         description="OVH pricing mode. UPFRONT6 / UPFRONT12 get a discount in exchange for prepayment.",
@@ -84,7 +99,14 @@ class OvhProviderConfig(VpsDockerProviderConfig):
     )
     vps_boot_timeout: float = Field(
         default=600.0,
-        description="Seconds to wait for an OVH order to deliver a VPS (slower than direct-create APIs).",
+        description=(
+            "Seconds to wait for an OVH order to deliver a VPS (slower than direct-create APIs). "
+            "On timeout, ``_provision_vps`` writes a pending-order marker under the provider's "
+            "state dir; the next ``mngr create`` runs ``_reconcile_pending_orders`` at the top "
+            "of ``_provision_vps`` and adopts any VPS that has since delivered as a recycle "
+            "candidate. No inline extended wait happens here -- the failing bake exits at this "
+            "timeout, and recovery is eventually-consistent across subsequent bakes."
+        ),
     )
     ovh_subsidiary: str = Field(
         default="US",
@@ -102,11 +124,14 @@ class OvhProviderConfig(VpsDockerProviderConfig):
         ),
     )
     recycle_safety_margin_hours: int = Field(
-        default=24,
+        default=2,
         description=(
             "Minimum number of hours of remaining ``expiration`` for a cancelled "
             "VPS to be considered for recycling. Buffer against the billing "
-            "boundary so OVH does not decommission the VPS mid-recycle."
+            "boundary so OVH does not decommission the VPS mid-recycle. "
+            "The default is tuned for pool workloads (the recycle path's "
+            "intended user), where same-day destroy + create is the common "
+            "case and we want recycling to claim a cancelled VPS aggressively."
         ),
     )
     recycle_max_candidates_considered: int = Field(

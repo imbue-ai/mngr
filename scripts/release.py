@@ -15,6 +15,13 @@ Usage:
     uv run scripts/release.py patch --dry-run          # preview without changes
     uv run scripts/release.py --watch                  # watch publish workflow
     uv run scripts/release.py --retry                  # rerun failed jobs and watch
+
+The script refuses to cut a release while there are unconsolidated entries in
+``changelog/`` (those bullets would otherwise be omitted from the version's
+release notes). When the gate fires it prints the on-demand invocation of the
+``changelog-consolidation`` schedule on stderr; run that, land the resulting
+PR, then re-run this script. ``--dry-run`` downgrades the gate to a warning
+so the preview still works.
 """
 
 import argparse
@@ -25,6 +32,7 @@ from collections import deque
 from pathlib import Path
 from typing import Any
 from typing import Final
+from typing import TextIO
 from typing import cast
 
 import httpx
@@ -32,6 +40,11 @@ import semver
 import tomlkit
 from changelog_release_utils import finalize_changelog_unreleased
 from changelog_release_utils import today_pacific
+from consolidate_changelog import pending_changelog_entries
+from trigger_changelog_consolidation import MNGR_ROOT_NAME as CHANGELOG_MNGR_ROOT_NAME
+from trigger_changelog_consolidation import PROVIDER as CHANGELOG_PROVIDER
+from trigger_changelog_consolidation import TRIGGER_NAME as CHANGELOG_TRIGGER_NAME
+from trigger_changelog_consolidation import disable_plugin_args as changelog_disable_plugin_args
 from utils import PACKAGES
 from utils import PACKAGE_BY_PYPI_NAME
 from utils import REPO_ROOT
@@ -454,6 +467,102 @@ def _print_bump_summary(
         print("  (none)")
 
 
+def _format_pending_changelog_list(entries: list[Path], repo_root: Path) -> str:
+    return "\n".join(f"  - {entry.relative_to(repo_root)}" for entry in entries)
+
+
+def _pluralize_entry(count: int) -> str:
+    return "entry" if count == 1 else "entries"
+
+
+def _print_on_demand_consolidation_command(file: TextIO) -> None:
+    """Print the one-liner that triggers an on-demand consolidation run.
+
+    Equivalent to the example invocation in ``setup_changelog_agent.sh``'s
+    header so the user can copy-paste it directly. Uses the shared
+    constants and helper so the disable-plugin list stays in sync with
+    the deploy script. The deploy script's header inlines that list as
+    ``$DISABLE_PLUGIN_ARGS``; this helper expands it onto its own line
+    because the resolved value is long.
+
+    The provider is the shared ``CHANGELOG_PROVIDER`` constant, so the
+    printed command targets the same provider the schedule was deployed
+    against; changing providers requires editing the constant and
+    redeploying the schedule together.
+
+    ``file`` is the stream to write to (forwarded to ``print``). The
+    caller in the gate's error path passes ``sys.stderr`` so the
+    on-demand command lands on the same stream as the surrounding error
+    message.
+    """
+    disable_args = " ".join(changelog_disable_plugin_args())
+    print(f"  env -u MNGR_HOST_DIR -u MNGR_PREFIX MNGR_ROOT_NAME={CHANGELOG_MNGR_ROOT_NAME} \\", file=file)
+    # Only emit a continuation + third line when there are disable-plugin
+    # args to print. Otherwise the command would end with a trailing
+    # backslash followed by a whitespace-only line, which makes the
+    # copy-paste form malformed (the empty line terminates the
+    # continuation and the leading spaces become a stray empty command).
+    if disable_args:
+        print(f"    uv run mngr schedule run {CHANGELOG_TRIGGER_NAME} --provider {CHANGELOG_PROVIDER} \\", file=file)
+        print(f"    {disable_args}", file=file)
+    else:
+        print(f"    uv run mngr schedule run {CHANGELOG_TRIGGER_NAME} --provider {CHANGELOG_PROVIDER}", file=file)
+
+
+def _gate_release_on_pending_changelog_entries(repo_root: Path, dry_run: bool) -> bool:
+    """Block a release until pending changelog entries are consolidated.
+
+    Operates on ``repo_root``'s ``changelog/`` directory directly. Taking
+    the path as a parameter (rather than always reading the module-level
+    ``REPO_ROOT``) is the production contract -- the gate's job is to
+    inspect a particular repo -- and conveniently lets tests pass a
+    ``tmp_path`` populated with synthetic entries.
+
+    Returns ``True`` if the release may proceed (no pending entries, or
+    ``dry_run`` is set), ``False`` if the caller must abort. After
+    consolidating (waiting for the nightly cron or running the on-demand
+    one-liner this prints), the user re-runs ``release.py``.
+
+    ``dry_run`` swaps the error for a warning so ``release.py --dry-run``
+    can still preview what would be released.
+    """
+    entries = pending_changelog_entries(repo_root)
+    if not entries:
+        return True
+
+    entry_word = _pluralize_entry(len(entries))
+    if dry_run:
+        print()
+        print(f"WARNING: {len(entries)} pending changelog {entry_word} would block a real release:")
+        print(_format_pending_changelog_list(entries, repo_root))
+        print(f"(consolidate via the '{CHANGELOG_TRIGGER_NAME}' schedule before cutting the release)")
+        print()
+        return True
+
+    # Route the block-release path to stderr to match every other
+    # 'ERROR:' message in this file (see _find_last_release_tag, the
+    # workflow polling helpers, the branch check, etc.). The dry-run
+    # WARNING above stays on stdout to match release.py's other
+    # informational WARNINGs (e.g. the empty-[Unreleased] notice).
+    print(file=sys.stderr)
+    print(f"ERROR: cannot release with {len(entries)} pending changelog {entry_word}.", file=sys.stderr)
+    print(file=sys.stderr)
+    print("The following entries in changelog/ haven't been consolidated into", file=sys.stderr)
+    print("CHANGELOG.md's [Unreleased] section yet:", file=sys.stderr)
+    print(_format_pending_changelog_list(entries, repo_root), file=sys.stderr)
+    print(file=sys.stderr)
+    print(
+        f"The '{CHANGELOG_TRIGGER_NAME}' schedule runs nightly at 08:00 UTC (midnight or 1 AM Pacific, depending on DST). To",
+        file=sys.stderr,
+    )
+    print("trigger it on demand instead (opens a PR you can merge before re-running", file=sys.stderr)
+    print("this script), run:", file=sys.stderr)
+    print(file=sys.stderr)
+    _print_on_demand_consolidation_command(file=sys.stderr)
+    print(file=sys.stderr)
+    return False
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Selectively bump and publish changed packages to PyPI.")
     parser.add_argument(
@@ -507,6 +616,26 @@ def main() -> None:
 
     if args.bump_kind is None:
         parser.error("bump_kind is required: patch, minor, or major")
+
+    # On a real run, enforce branch == main before doing anything else.
+    # In --dry-run, surface a WARNING instead so the user sees they would
+    # be blocked on a real run, but the preview still proceeds (matching
+    # the dry-run-friendly behavior of the changelog gate below).
+    branch = run("git", "branch", "--show-current")
+    if branch != "main":
+        if args.dry_run:
+            print(f"WARNING: not on main branch (currently on {branch}); a real release would fail this check.")
+        else:
+            print(f"ERROR: Must be on main branch (currently on {branch})", file=sys.stderr)
+            sys.exit(1)
+
+    # Refuse to release while there are unconsolidated entries in
+    # changelog/. Otherwise the [Unreleased] section we're about to
+    # finalize would be missing those entries' bullets. In --dry-run we
+    # warn rather than block so the user can still preview what would
+    # be released.
+    if not _gate_release_on_pending_changelog_entries(REPO_ROOT, dry_run=args.dry_run):
+        sys.exit(1)
 
     base_kind: str = args.bump_kind
 
@@ -617,12 +746,9 @@ def main() -> None:
         print("\n(dry run -- no changes made)")
         return
 
-    # Ensure we're on main and up to date before prompting for confirmation
-    branch = run("git", "branch", "--show-current")
-    if branch != "main":
-        print(f"ERROR: Must be on main branch (currently on {branch})", file=sys.stderr)
-        sys.exit(1)
-
+    # Ensure the working tree is clean and up to date before prompting
+    # for confirmation. (Branch == main is enforced above for non-dry-run
+    # invocations, before the pending-changelog-entry gate.)
     if run("git", "status", "--porcelain"):
         print("ERROR: Working tree is not clean. Commit or stash changes first.", file=sys.stderr)
         sys.exit(1)

@@ -74,14 +74,11 @@ class ImbueCloudHost(Host):
     bake wrote (typically a constant such as ``system-services``).
     """
 
-    pre_baked_agent_id: AgentId | None = Field(
-        default=None,
-        frozen=True,
-        description=(
-            "Agent id of the agent that was pre-provisioned on this pool host. "
-            "Set by the provider when the host is created via lease."
-        ),
-    )
+    # ``pre_baked_agent_id`` is inherited from the base ``Host`` class
+    # (default None on every other provider's hosts; this provider's
+    # ``create_host`` populates it from the lease). Keeping it on the base
+    # lets ``api/create.py``'s duplicate-name check recognize the adopt
+    # scenario without a getattr-on-host shim.
     lease_db_id: str | None = Field(
         default=None,
         frozen=True,
@@ -156,7 +153,7 @@ class ImbueCloudHost(Host):
         path), we *load* the existing ``data.json`` from the host -- which the
         bake wrote with ``--template main --template vultr`` and therefore
         already contains the ``additional_commands`` that start
-        ``minds-workspace-server``, ``cloudflared``, etc. -- and patch only
+        ``system-interface``, ``cloudflared``, etc. -- and patch only
         the minds-driven fields in place: ``labels`` and ``command``
         (regenerated via ``assemble_command`` so the embedded
         ``<MNGR_PREFIX><name>`` tmux session reference still resolves).

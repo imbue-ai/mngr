@@ -24,7 +24,6 @@ from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import CommandString
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import InvalidName
-from imbue.mngr.primitives import Permission
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr.utils.polling import wait_for
 from imbue.mngr.utils.testing import cleanup_tmux_session
@@ -125,26 +124,38 @@ def test_is_running_true_when_tmux_session_running(
 
 @pytest.mark.tmux
 def test_lifecycle_state_running_unknown_agent_type_when_different_process_exists(
-    test_agent: BaseAgent,
+    local_provider: LocalProviderInstance,
+    temp_work_dir: Path,
 ) -> None:
     """Test that agent is RUNNING_UNKNOWN_AGENT_TYPE when tmux session exists with
     a different process and the agent type is not registered."""
-    session_name = f"{test_agent.mngr_ctx.config.prefix}{test_agent.name}"
+    # Use a name that is deliberately NOT in the test-placeholder agent-type
+    # registration, and pass is_type_registered=False so the create_test_agent
+    # helper does not register it on the fly. That way check_agent_type_known
+    # returns False and the lifecycle logic reports RUNNING_UNKNOWN_AGENT_TYPE
+    # rather than REPLACED.
+    unregistered_agent = create_test_agent(
+        local_provider,
+        temp_work_dir,
+        agent_config=None,
+        agent_type=AgentTypeName("lifecycle-unregistered-type"),
+        extra_data=None,
+        agent_class=BaseAgent,
+        is_type_registered=False,
+    )
+    session_name = f"{unregistered_agent.mngr_ctx.config.prefix}{unregistered_agent.name}"
 
     # Create a tmux session with a different command (cat waits for input indefinitely)
-    test_agent.host.execute_idempotent_command(
+    unregistered_agent.host.execute_idempotent_command(
         f"tmux new-session -d -s '{session_name}' 'cat'",
         timeout_seconds=5.0,
     )
 
     try:
-        # The test agent has type "test" which is not registered, so with an
-        # unrecognized process running it should be RUNNING_UNKNOWN_AGENT_TYPE
-        # (not REPLACED, which is for known agent types).
         # There's a race condition where tmux spawns a shell first, then execs the command.
         # During that brief window, pane_current_command shows the shell, giving DONE.
         wait_for(
-            lambda: test_agent.get_lifecycle_state() == AgentLifecycleState.RUNNING_UNKNOWN_AGENT_TYPE,
+            lambda: unregistered_agent.get_lifecycle_state() == AgentLifecycleState.RUNNING_UNKNOWN_AGENT_TYPE,
             error_message="Expected agent lifecycle state to be RUNNING_UNKNOWN_AGENT_TYPE",
         )
     finally:
@@ -428,12 +439,12 @@ def test_assemble_command_raises_when_no_base_and_no_args(
         local_provider,
         temp_work_dir,
         agent_config=config,
-        agent_type=AgentTypeName("my-custom-type"),
+        agent_type=AgentTypeName("generic"),
         extra_data=None,
         agent_class=BaseAgent,
     )
 
-    with pytest.raises(UserInputError, match=r"has no command configured"):
+    with pytest.raises(UserInputError, match=r"has no command to run"):
         agent.assemble_command(
             host=agent.host,
             agent_args=(),
@@ -553,29 +564,6 @@ def test_get_command_returns_bash_when_no_command(
     data_path.write_text(json.dumps(data, indent=2))
 
     assert test_agent.get_command() == CommandString("bash")
-
-
-# =========================================================================
-# get_permissions / set_permissions tests
-# =========================================================================
-
-
-def test_get_permissions_returns_empty_list_by_default(
-    test_agent: BaseAgent,
-) -> None:
-    """Test that get_permissions returns an empty list when none are set."""
-    assert test_agent.get_permissions() == []
-
-
-def test_set_and_get_permissions(
-    test_agent: BaseAgent,
-) -> None:
-    """Test that set_permissions persists and get_permissions retrieves them."""
-    perms = [Permission("read"), Permission("write"), Permission("execute")]
-    test_agent.set_permissions(perms)
-
-    result = test_agent.get_permissions()
-    assert result == perms
 
 
 # =========================================================================
@@ -961,7 +949,7 @@ def _create_named_agent_with_stub_host(
     return cls.model_construct(
         id=AgentId.generate(),
         name=name,
-        agent_type=AgentTypeName("test"),
+        agent_type=AgentTypeName("generic"),
         work_dir=Path("/tmp/stub-work"),
         create_time=datetime.now(timezone.utc),
         host_id=HostId.generate(),

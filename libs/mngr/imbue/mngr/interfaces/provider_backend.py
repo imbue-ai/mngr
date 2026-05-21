@@ -52,6 +52,15 @@ class ProviderBackendInterface(MutableModel, ABC):
         name: ProviderInstanceName,
         config: ProviderInstanceConfig,
         mngr_ctx: MngrContext,
+        is_for_host_creation: bool = False,
     ) -> ProviderInstanceInterface:
-        """Create a configured provider instance from this backend."""
+        """Create a configured provider instance from this backend.
+
+        ``is_for_host_creation`` lets a backend distinguish construction that
+        is happening because the user is about to create a new host (so it is
+        free to bootstrap any one-time backend resources, like a Modal
+        environment) from construction that is happening for read-only or
+        existing-host operations (which must not silently create new backend-
+        side resources). Backends with no such one-time setup ignore the flag.
+        """
         ...

@@ -29,6 +29,7 @@ from imbue.minds.desktop_client.app import create_desktop_client
 from imbue.minds.desktop_client.auth import FileAuthStore
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.notification import NotificationDispatcher
+from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
 from imbue.minds.primitives import OneTimeCode
 from imbue.mngr.primitives import AgentId
 
@@ -61,6 +62,7 @@ def test_sse_redirect_on_done(tmp_path: Path) -> None:
         paths=paths,
         root_concurrency_group=root_cg,
         notification_dispatcher=NotificationDispatcher.create(is_electron=False, tkinter_module=None, is_macos=False),
+        system_interface_health_tracker=SystemInterfaceHealthTracker(),
     )
 
     # Manually set up a fake agent creation that completes immediately
@@ -68,7 +70,7 @@ def test_sse_redirect_on_done(tmp_path: Path) -> None:
     log_queue: queue.Queue[str] = queue.Queue()
 
     with creator._lock:
-        creator._statuses[str(agent_id)] = AgentCreationStatus.CLONING
+        creator._statuses[str(agent_id)] = AgentCreationStatus.INITIALIZING
         creator._log_queues[str(agent_id)] = log_queue
 
     app = create_desktop_client(

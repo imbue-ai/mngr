@@ -265,6 +265,11 @@
 # it to check that per-env .sh files declare every template key.
 !/.minds/template/
 !/.minds/template/**
+# Vault ACL policies for the minds tiers. The HCL is non-sensitive and is
+# the source of truth for the policies pushed to Vault via
+# `vault policy write <name> .minds/policies/<name>.hcl`.
+!/.minds/policies/
+!/.minds/policies/**
 
 # Autofix session artifacts
 **/.autofix/
@@ -314,3 +319,20 @@
 # re-fetch.
 /apps/minds/imbue/minds/desktop_client/static/tailwind.js
 **/.env.swp
+# Vim swap files for any file (`.foo.swp`, `.foo.swo`, etc.) -- generated
+# while a file is open in vim. Never checked in.
+**/.*.sw[a-p]
+
+# `minds env deploy` writes a recover-target file at the monorepo root
+# on failed deploys; `minds env recover` deletes it after rolling back.
+# Never checked in. Per-env naming
+# (``.minds-deploy-recover-target-<env-name>.json``) means each in-flight
+# deploy has its own file, so concurrent deploys against different envs
+# don't trip over each other.
+**/.minds-deploy-*.json
+# Per-env deploy lock files (kernel-level ``flock`` targets). Created
+# by ``hold_deploy_lock`` in ``apps/minds/imbue/minds/envs/recover.py``
+# and held for the entire duration of ``minds env deploy`` /
+# ``minds env recover`` so two concurrent invocations against the same
+# env serialize. The file itself is empty and cheap to leave around.
+**/.minds-deploy-lock-*.lock
