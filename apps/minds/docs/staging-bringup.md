@@ -59,9 +59,12 @@ become Vault entries in step 4.
   modal token set --profile minds-staging
   ```
   Verify a `[minds-staging]` block landed in `~/.modal.toml`. The
-  `MODAL_PROFILE` export in `minds env activate staging` (see step 6)
-  pins every subsequent `modal` shellout to this profile -- the
+  `MODAL_PROFILE` export in `minds env activate --deploy staging` (see
+  step 6) pins every subsequent `modal` shellout to this profile -- the
   account you're logged into via `active = true` is irrelevant.
+  Without `--deploy`, the `[minds-staging]` block is still checked at
+  *deploy* time (by the activate-time validator) but not needed for
+  *use*-time activation.
 
 - [ ] **Neon project for staging.** Create a single project under your
   Neon org (any name; the staging tier uses `creates_resources=false`
@@ -252,21 +255,24 @@ After every push:
 ## 5. Verify Modal CLI talks to `minds-staging`
 
 ```bash
-eval "$(uv run minds env activate staging)"
+eval "$(uv run minds env activate --deploy staging)"
 echo "$MODAL_PROFILE"   # expect: minds-staging
 modal environment list  # should NOT error; no envs needed yet for SHARED tier
 ```
 
 If `modal` complains about missing auth, re-run `modal token set
---profile minds-staging`. The `MODAL_PROFILE` export the activation
-emits is what pins every `modal` shellout below to this workspace.
+--profile minds-staging`. The `MODAL_PROFILE` export the `--deploy`
+activation emits is what pins every `modal` shellout below to this
+workspace. Without `--deploy`, `MODAL_PROFILE` is not exported (and
+plain `activate` actively unsets it) -- that mode is for *using* the
+deployed tier, not deploying it.
 
 ---
 
 ## 6. First-time tier deploy
 
 ```bash
-eval "$(uv run minds env activate staging)"
+eval "$(uv run minds env activate --deploy staging)"
 uv run minds env deploy --yes-i-mean-staging
 ```
 

@@ -5,9 +5,16 @@ all refuse to run unless the calling shell has been activated against a
 specific minds env (``MINDS_ROOT_NAME`` set + matching the bootstrap
 pattern). The check + error-message text is identical across both
 subcommands, so it lives here rather than being duplicated.
+
+``minds env deploy`` / ``destroy`` / ``recover`` additionally require
+*deploy-mode* activation (``minds env activate --deploy``), which pins
+``MODAL_PROFILE`` to the tier's Modal workspace. The deploy-mode gate
+also lives here so all three commands share the same refusal text.
 """
 
 import os
+import tomllib
+from pathlib import Path
 from typing import Final
 
 import click
@@ -19,6 +26,14 @@ from imbue.minds.bootstrap import env_name_from_root_name
 from imbue.minds.bootstrap import is_minds_root_name_set_to_active_env
 from imbue.minds.config.loader import EnvConfigError
 from imbue.minds.config.loader import load_deploy_config
+
+# Env var the activation exports set to pin every ``modal`` CLI
+# shellout to a specific workspace, regardless of which profile is
+# marked ``active = true`` in ``~/.modal.toml``. Only exported by
+# ``minds env activate --deploy``; plain ``minds env activate`` emits
+# ``unset MODAL_PROFILE`` so a previously-deploy-activated shell
+# reverts cleanly.
+MODAL_PROFILE_ENV_VAR: Final[str] = "MODAL_PROFILE"
 
 PRODUCTION_ENV_NAME: Final[str] = "production"
 STAGING_ENV_NAME: Final[str] = "staging"
@@ -81,6 +96,87 @@ def modal_profile_for_tier_or_none(tier: str) -> str | None:
     if not workspace or workspace == "CHANGE_ME":
         return None
     return workspace
+
+
+def validate_modal_profile_exists_in_modal_toml(workspace: str) -> None:
+    """Raise ``ClickException`` if ``~/.modal.toml`` has no profile named ``workspace``.
+
+    Called by ``minds env activate --deploy`` so the operator hits a clean
+    error at activation time (with a copy-pasteable ``modal token set``
+    hint) instead of a confusing Modal SDK auth failure on the first
+    subsequent ``modal …`` shellout.
+
+    Reads ``$HOME/.modal.toml`` (which is also what the Modal SDK reads
+    by default). The file is TOML with one section per profile, keyed by
+    the workspace name; a matching profile is any section whose key
+    equals ``workspace`` and whose value is a table.
+
+    A missing or unparseable ``~/.modal.toml`` is treated the same as a
+    missing profile -- the operator's mitigation is the same in either
+    case.
+    """
+    modal_toml = Path.home() / ".modal.toml"
+    if not modal_toml.is_file():
+        raise click.ClickException(
+            f"~/.modal.toml not found, so the Modal profile {workspace!r} required for "
+            f"deploy-mode activation cannot exist. Run `modal token set --profile {workspace}` "
+            f"(after `uvx modal token new` if you have no Modal account on this machine yet) "
+            f"and re-run."
+        )
+    try:
+        data = tomllib.loads(modal_toml.read_text())
+    except (OSError, tomllib.TOMLDecodeError) as exc:
+        raise click.ClickException(
+            f"Could not read ~/.modal.toml ({exc}); cannot verify the {workspace!r} profile "
+            f"required for deploy-mode activation."
+        ) from exc
+    if not isinstance(data.get(workspace), dict):
+        raise click.ClickException(
+            f"~/.modal.toml has no profile named {workspace!r}, which deploy-mode activation "
+            f"of this tier requires. Run `modal token set --profile {workspace}` (after "
+            f"`uvx modal token new` if you have no Modal account on this machine yet) and "
+            f"re-run."
+        )
+
+
+def require_deploy_mode_activation(*, env_name: str, tier: str) -> None:
+    """Raise ``ClickException`` unless the shell is deploy-activated for this tier.
+
+    ``minds env deploy`` / ``destroy`` / ``recover`` all call this so the
+    operator cannot accidentally run a deploy with the wrong (or no)
+    ``MODAL_PROFILE`` pinned -- which previously caused silent misroutes
+    to the wrong Modal workspace.
+
+    Deploy-activated means ``MODAL_PROFILE`` is set in the environment
+    and equals the tier's ``modal_workspace`` from ``deploy.toml``.
+    Tiers with no committed ``modal_workspace`` (deploy.toml missing or
+    the literal ``CHANGE_ME`` placeholder) skip the gate -- there is no
+    workspace to pin to in that case.
+    """
+    expected_workspace = modal_profile_for_tier_or_none(tier)
+    if expected_workspace is None:
+        return
+    current = os.environ.get(MODAL_PROFILE_ENV_VAR, "")
+    if current == expected_workspace:
+        return
+    reactivate_hint = (
+        f"Re-activate this shell with deploy-mode: "
+        f'`eval "$(uv run minds env activate --deploy {env_name})"` and re-run.'
+    )
+    if not current:
+        raise click.ClickException(
+            f"This shell was activated for use only -- minds env deploy/destroy/recover "
+            f"require MODAL_PROFILE pinned to {expected_workspace!r}, but it is unset. "
+            f"(Activation now distinguishes use-mode from deploy-mode; plain "
+            f"`minds env activate <name>` no longer exports MODAL_PROFILE.) "
+            f"{reactivate_hint}"
+        )
+    raise click.ClickException(
+        f"MODAL_PROFILE={current!r} does not match this tier's modal_workspace "
+        f"{expected_workspace!r}; minds env deploy/destroy/recover refuse to run with a "
+        f"mismatched Modal profile, since it would silently misroute the deploy to the "
+        f"wrong Modal workspace. {reactivate_hint}"
+    )
 
 
 def require_activated_env_name() -> str:

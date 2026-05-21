@@ -45,14 +45,17 @@ _SUPERTOKENS_PROBE_TIMEOUT_SECONDS: Final[float] = 30.0
 def build_minds_env_subprocess_env(name: DevEnvName) -> dict[str, str]:
     """Build the env dict for a ``minds env deploy/destroy`` subprocess targeting ``name``.
 
-    Mirrors what ``minds env activate <name>`` exports (without going
-    through the print-shell-vars indirection): MINDS_ROOT_NAME, MNGR_HOST_DIR,
-    MNGR_PREFIX, MINDS_CLIENT_CONFIG_PATH, and (for tiers with a
-    committed ``modal_workspace``) MODAL_PROFILE. The MODAL_PROFILE
-    lookup goes through the same ``modal_profile_for_tier_or_none``
-    helper ``minds env activate`` itself uses, so a separated CI Modal
-    workspace (planned) automatically lands here without having to
-    update a test-only hardcoded constant.
+    Mirrors what ``minds env activate --deploy <name>`` exports (without
+    going through the print-shell-vars indirection): MINDS_ROOT_NAME,
+    MNGR_HOST_DIR, MNGR_PREFIX, MINDS_CLIENT_CONFIG_PATH, and (for tiers
+    with a committed ``modal_workspace``) MODAL_PROFILE. The
+    MODAL_PROFILE lookup goes through the same
+    ``modal_profile_for_tier_or_none`` helper ``minds env activate``
+    itself uses, so a separated CI Modal workspace (planned)
+    automatically lands here without having to update a test-only
+    hardcoded constant. Including MODAL_PROFILE is required for the
+    subprocess deploy/destroy to satisfy the deploy-mode activation
+    gate enforced by ``require_deploy_mode_activation``.
 
     Inherits VAULT_TOKEN / VAULT_ADDR / VAULT_NAMESPACE / ANTHROPIC_API_KEY
     from the parent process unchanged so the subprocess can read Vault +
