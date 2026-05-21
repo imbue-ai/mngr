@@ -1867,10 +1867,6 @@ pushing all local branches and tags via git. Use --transfer to override the defa
             "See [connect options](./connect.md) for full details (only applies if `--connect` is specified).",
         ),
         (
-            "Agent Provisioning",
-            "See [Provision Options](../secondary/provision.md) for full details.",
-        ),
-        (
             "Host Options",
             "By default, `mngr create` uses the local host. Use the agent address to specify a different host.",
         ),
