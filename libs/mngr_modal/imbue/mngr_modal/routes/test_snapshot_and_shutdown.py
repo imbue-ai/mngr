@@ -43,12 +43,11 @@ def _get_test_app_name() -> str:
 
 
 def _stop_app(app_name: str) -> None:
-    """Stop and clean up a Modal app."""
+    """Stop a Modal app."""
     subprocess.run(
-        ["uv", "run", "modal", "app", "stop", app_name],
-        input=b"y\n",
-        capture_output=True,
+        ["uv", "run", "modal", "app", "stop", "--yes", app_name],
         timeout=60,
+        check=True,
     )
 
 

@@ -1,0 +1,1 @@
+Fix Modal app leak in `test_snapshot_and_shutdown.py`: the teardown's `modal app stop` call silently failed because the piped `y\n` confirmation is ignored when there is no TTY. Pass `--yes` and use `check=True` so failures surface instead of leaving the app deployed.
