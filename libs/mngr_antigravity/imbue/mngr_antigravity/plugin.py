@@ -260,28 +260,31 @@ class AntigravityAgent(InteractiveTuiAgent[AntigravityAgentConfig], HasCommonTra
 
         1. ``( bash background_tasks.sh <session> ) &`` -- backgrounded
            supervisor for the transcript streamer + converter.
-        2. ``agy <user_args> --log-file <state>/logs/agy_cli.log
+        2. ``mkdir -p <state>/logs`` -- foreground step that guarantees the
+           directory exists before agy attempts to open its ``--log-file``.
+           The supervisor runs concurrently with agy, so we cannot rely on
+           the supervisor (or any background watcher) creating this
+           directory in time.
+        3. ``agy <user_args> --log-file <state>/logs/agy_cli.log
            [--dangerously-skip-permissions]`` -- foreground process.
 
-        Bash precedence note: ``A & B`` runs A in the background and B in
-        the foreground, so the supervisor's subshell is naturally scoped to
-        ``&`` and ``agy`` stays in the foreground. No ``&&`` chain is
-        needed because the supervisor's pidfile check tolerates being
-        launched before agy is ready.
+        Bash precedence note: ``A & B && C`` parses as ``A &`` followed by
+        ``B && C``. The supervisor's subshell is therefore scoped to ``&``,
+        while ``mkdir -p`` and ``agy`` form a foreground sequential chain.
 
         The ``--log-file`` arg pipes agy's internal log to a per-agent
         path; stream_transcript.sh greps it for ``Created conversation
-        <uuid>`` to scope its watch to this agent. We append the flag
-        unconditionally and mngr ensures the directory exists via the
-        supervisor's ``mkdir -p`` in resources/.
+        <uuid>`` to scope its watch to this agent.
         """
-        log_file_arg = f"--log-file {shlex.quote(str(self._get_agy_log_file_path()))}"
+        log_file_path = self._get_agy_log_file_path()
+        log_file_arg = f"--log-file {shlex.quote(str(log_file_path))}"
         extra_args: list[str] = [log_file_arg]
         if self.agent_config.auto_allow_permissions:
             extra_args.append(_DANGEROUSLY_SKIP_PERMISSIONS_FLAG)
         base_command = super().assemble_command(host, agent_args, command_override, initial_message)
         background_cmd = self._build_background_tasks_command()
-        return CommandString(f"{background_cmd} {base_command} {' '.join(extra_args)}")
+        mkdir_cmd = f"mkdir -p {shlex.quote(str(log_file_path.parent))}"
+        return CommandString(f"{background_cmd} {mkdir_cmd} && {base_command} {' '.join(extra_args)}")
 
 
 @hookimpl

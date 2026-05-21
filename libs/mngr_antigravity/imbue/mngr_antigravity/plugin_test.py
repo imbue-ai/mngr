@@ -165,6 +165,20 @@ def test_assemble_command_launches_background_tasks_supervisor(antigravity_agent
     assert "( bash $MNGR_AGENT_STATE_DIR/commands/common_transcript.sh ) &" not in command
 
 
+def test_assemble_command_pre_creates_agy_log_directory(antigravity_agent: AntigravityAgent) -> None:
+    """A foreground `mkdir -p <logs_dir>` runs before agy so --log-file does not fail on a fresh agent.
+
+    The supervisor runs concurrently with agy, so we cannot rely on a
+    watcher's own `mkdir -p` to create the directory in time. The mkdir
+    must be in the foreground chain, ordered before the agy invocation.
+    """
+    command = str(antigravity_agent.assemble_command(antigravity_agent.host, (), command_override=None))
+    log_dir = str(antigravity_agent._get_agent_dir() / "logs")
+    assert f"mkdir -p {log_dir} && " in command, command
+    # And it must come before agy, not after.
+    assert command.index("mkdir -p") < command.index(" agy "), command
+
+
 def test_get_expected_process_name_returns_agy(antigravity_agent: AntigravityAgent) -> None:
     """`agy` is the single-file Go binary name visible to ps/tmux."""
     assert antigravity_agent.get_expected_process_name() == "agy"
