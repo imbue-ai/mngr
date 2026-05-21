@@ -29,23 +29,6 @@ import pytest
 _SCRIPT_PATH = Path(__file__).parent / "common_transcript.sh"
 
 
-def _stub_mngr_log_sh() -> str:
-    """Mirror the shared fixture from libs/mngr/imbue/mngr/conftest.py.
-
-    common_transcript.sh sources mngr_log.sh for its log_info/log_debug
-    helpers; the converter doesn't itself emit log lines (only the calling
-    main loop does), so a no-op stub is sufficient.
-    """
-    return (
-        "#!/bin/bash\n"
-        'mngr_timestamp() { date -u +"%Y-%m-%dT%H:%M:%S.000000000Z"; }\n'
-        "log_info() { :; }\n"
-        "log_debug() { :; }\n"
-        "log_warn() { :; }\n"
-        "log_error() { :; }\n"
-    )
-
-
 def _make_event(
     *,
     conv_id: str,
@@ -127,12 +110,12 @@ def _conversation_history(conv_id: str, step_index: int) -> str:
 
 
 @pytest.fixture
-def state_dir(tmp_path: Path) -> Path:
+def state_dir(tmp_path: Path, stub_mngr_log_sh: str) -> Path:
     """Per-test fake $MNGR_AGENT_STATE_DIR with stub mngr_log.sh installed."""
     state = tmp_path / "agent"
     (state / "commands").mkdir(parents=True)
     (state / "logs" / "antigravity_transcript").mkdir(parents=True)
-    (state / "commands" / "mngr_log.sh").write_text(_stub_mngr_log_sh())
+    (state / "commands" / "mngr_log.sh").write_text(stub_mngr_log_sh)
     return state
 
 
