@@ -893,10 +893,14 @@ def run_discovery_stream(
     """Stream discovery events as JSONL.
 
     Snapshots are always unfiltered so they can be used for state reconstruction.
-    The underlying ``_write_unfiltered_full_snapshot`` always lists with
-    ``ErrorBehavior.ABORT`` (with retries) so a flaky provider can never
-    cause a partial DISCOVERY_FULL event to be emitted; consumers can rely
-    on every full snapshot being authoritative.
+    The underlying ``_write_unfiltered_full_snapshot`` lists with
+    ``ErrorBehavior.CONTINUE`` so a snapshot is emitted on every poll, even
+    when some providers raised. Per-provider failures land in the snapshot's
+    ``error_by_provider_name`` field; consumers treat each snapshot as
+    authoritative state and drop previously-known agents/hosts for any
+    provider that errored on this poll. Providers are responsible for retrying
+    their own transient failures before raising -- there is no top-level
+    retry layer here.
 
     1. Emit from the latest cached snapshot on disk (instant, if available)
     2. Run a full sync in the background to update the event stream
