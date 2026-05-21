@@ -253,7 +253,6 @@ def test_planner_response_with_tool_calls_emits_synthetic_tool_call_ids(state_di
     assert tc["tool_call_id"] == "conv-A-2-tc0"
     assert tc["tool_name"] == "write_to_file"
     # Args are JSON-serialized into the preview
-    assert "write_to_file" in tc["tool_name"]
     assert "/tmp/x" in tc["input_preview"]
 
 
