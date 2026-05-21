@@ -382,7 +382,7 @@ _RECOVERY_SCRIPT: Final[str] = """\
 
         function renderLoading() {
           titleEl.textContent = 'Loading workspace';
-          messageEl.textContent = 'This page will reload automatically once your workspace is ready.';
+          messageEl.textContent = '';
           show(spinnerEl, true);
           show(errorEl, false);
           show(hostBtn, false);

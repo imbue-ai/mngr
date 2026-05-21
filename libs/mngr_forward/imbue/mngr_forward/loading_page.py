@@ -52,9 +52,11 @@ LOADING_PAGE_CSS: Final[str] = """\
 
 # The default heading/message. The minds recovery page overrides these at
 # runtime (via its script) for non-loading states, but the initial render --
-# and the proxy loader always -- shows this.
+# and the proxy loader always -- shows this. The loading state has no message;
+# the empty <p> stays in the markup so the recovery script can populate it for
+# the other states.
 _LOADING_TITLE: Final[str] = "Loading workspace"
-_LOADING_MESSAGE: Final[str] = "This page will reload automatically once your workspace is ready."
+_LOADING_MESSAGE: Final[str] = ""
 
 
 def render_loading_page(

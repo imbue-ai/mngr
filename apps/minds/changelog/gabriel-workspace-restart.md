@@ -26,6 +26,9 @@ Tiered system-interface restart for the minds recovery flow.
 - Opening a workspace whose container has been stopped now routes to the
   recovery page (and serves the styled "Loading workspace" loader)
   instead of flashing a raw error.
+- The recovery page's "Loading workspace" state no longer shows the
+  explanatory "This page will reload automatically..." line -- it just
+  shows the heading.
 - The recovery page no longer flashes up for a workspace that is actually
   healthy. A workspace is now only treated as stuck after the background
   probe loop confirms it unreachable with a sustained run of failed HTTP
