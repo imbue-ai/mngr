@@ -1744,7 +1744,7 @@ def _dispatch_restart(
     concurrency_group: ConcurrencyGroup | None = request.app.state.root_concurrency_group
     backend_resolver: BackendResolverInterface = request.app.state.backend_resolver
     if tracker is None or concurrency_group is None:
-        return _json_error("System-interface restart is unavailable in this configuration", status_code=503)
+        return _json_error("Workspace restart is unavailable in this configuration", status_code=503)
     # A restart is already in flight for this agent -- don't stack a second
     # worker thread racing the first one's stop/start commands. mark_restarting
     # decides the RESTARTING transition under its own lock and reports whether
