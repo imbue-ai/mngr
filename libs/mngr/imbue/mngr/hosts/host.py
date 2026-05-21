@@ -2498,8 +2498,21 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
                     if not result.success:
                         raise AgentStartError(str(agent.name), result.stderr)
 
-    def _get_all_descendant_pids(self, parent_pid: str) -> list[str]:
-        """Recursively get all descendant PIDs of a given parent PID."""
+    def _get_all_descendant_pids(self, parent_pid: str, visited: set[str] | None = None) -> list[str]:
+        """Recursively get all descendant PIDs of a given parent PID.
+
+        Tracks already-visited PIDs in ``visited`` to break cycles that can
+        appear via pid reuse (a long-lived process at pid X dies, the kernel
+        recycles X as a descendant of one of its own descendants, and a
+        naive walk loops forever). Without this, a sufficiently long-lived
+        agent's destroy path could hit Python's recursion limit and crash
+        the caller mid-cleanup.
+        """
+        if visited is None:
+            visited = set()
+        if parent_pid in visited:
+            return []
+        visited.add(parent_pid)
         descendant_pids: list[str] = []
 
         # Get immediate children
@@ -2507,10 +2520,10 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         if result.success and result.stdout.strip():
             child_pids = result.stdout.strip().split("\n")
             for child_pid in child_pids:
-                if child_pid:
+                if child_pid and child_pid not in visited:
                     descendant_pids.append(child_pid)
                     # Recursively get descendants of this child
-                    descendant_pids.extend(self._get_all_descendant_pids(child_pid))
+                    descendant_pids.extend(self._get_all_descendant_pids(child_pid, visited))
 
         return descendant_pids
 

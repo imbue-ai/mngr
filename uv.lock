@@ -34,6 +34,7 @@ members = [
     "imbue-mngr-tmr",
     "imbue-mngr-ttyd",
     "imbue-mngr-tutor",
+    "imbue-mngr-uncapped-claude",
     "imbue-mngr-usage",
     "imbue-mngr-vps-docker",
     "imbue-mngr-vultr",
@@ -2088,6 +2089,21 @@ requires-dist = [
     { name = "click", specifier = ">=8.0" },
     { name = "click-option-group", specifier = ">=0.5.6" },
     { name = "imbue-mngr", editable = "libs/mngr" },
+]
+
+[[package]]
+name = "imbue-mngr-uncapped-claude"
+version = "0.1.0"
+source = { editable = "libs/mngr_uncapped_claude" }
+dependencies = [
+    { name = "imbue-mngr" },
+    { name = "imbue-mngr-claude" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "imbue-mngr", editable = "libs/mngr" },
+    { name = "imbue-mngr-claude", editable = "libs/mngr_claude" },
 ]
 
 [[package]]
