@@ -209,12 +209,11 @@ class SystemInterfaceHealthTracker(MutableModel):
             self._fire_on_change(agent_id, fire_health)
 
     def mark_stuck(self, agent_id: AgentId) -> None:
-        """Force-transition ``agent_id`` to STUCK.
+        """Force-transition ``agent_id`` to STUCK, firing on-change.
 
-        Used by the restart endpoint to roll back a RESTARTING transition when
-        the dispatch fails: without this, a failed dispatch would leave the
-        recovery page permanently labelled "Restarting..." until an unrelated
-        probe result rewrote the state.
+        Unconditionally sets the agent's health to STUCK, regardless of any
+        in-progress probe-failure run. Idempotent: a call on an
+        already-STUCK agent is a no-op and does not re-fire on-change.
         """
         aid_str = str(agent_id)
         fire_health: AgentHealth | None = None
