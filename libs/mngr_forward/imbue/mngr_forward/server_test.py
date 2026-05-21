@@ -369,18 +369,27 @@ def test_is_loopback_url() -> None:
         "http://[::1]:8000",
     ],
 )
-def test_subdomain_forward_refuses_loopback_fallback_without_tunnel(
+def test_subdomain_forward_routes_loopback_without_tunnel_to_recovery(
     tmp_path: Path,
     loopback_url: str,
 ) -> None:
-    """Without an SSH tunnel, a loopback registered URL must 502 -- not silently dial host loopback."""
+    """A loopback registered URL with no SSH tunnel must route to recovery, not raw 502.
+
+    This is what a stopped container looks like once discovery drops its SSH
+    info. The handler still refuses to dial host loopback (security: PR 1482),
+    but rather than returning raw 502 text it emits a ``CONNECT_ERROR``
+    backend-failure envelope and serves the styled loader -- the same
+    treatment as an SSH-tunnel setup failure -- so the minds health tracker
+    shows the recovery page instead of flashing a raw error.
+    """
     auth_store = FileAuthStore(data_directory=tmp_path)
     resolver = ForwardResolver(strategy=ForwardServiceStrategy(service_name="system_interface"))
     agent_id = AgentId()
     resolver.add_known_agent(agent_id)
     resolver.update_services(agent_id, {"system_interface": loopback_url})
     tunnel_manager = SSHTunnelManager()
-    envelope_writer = EnvelopeWriter(output=io.StringIO())
+    envelope_output = io.StringIO()
+    envelope_writer = EnvelopeWriter(output=envelope_output)
     preauth = "opaque-preauth-cookie-value"
     app = create_forward_app(
         auth_store=auth_store,
@@ -404,12 +413,22 @@ def test_subdomain_forward_refuses_loopback_fallback_without_tunnel(
         app.state.http_client = mock_client
         response = client.get(
             "/api/whatever",
-            headers={"cookie": f"{MNGR_FORWARD_SESSION_COOKIE_NAME}={preauth}"},
+            headers={
+                "cookie": f"{MNGR_FORWARD_SESSION_COOKIE_NAME}={preauth}",
+                "accept": "text/html,application/xhtml+xml",
+            },
         )
 
-    assert response.status_code == 502
-    assert "refusing to dial host loopback" in response.text
+    # HTML callers get the styled auto-refreshing loader, not raw 502 text.
+    assert response.status_code == 503
+    assert "System interface starting" in response.text
     assert captured == [], "request must NOT be forwarded to anything when loopback fallback is refused"
+    # The failure envelope is what drives minds to the recovery page.
+    lines = _envelope_lines(envelope_output)
+    assert len(lines) == 1
+    payload = json.loads(lines[0])["payload"]
+    assert payload["type"] == "system_interface_backend_failure"
+    assert payload["reason"] == "CONNECT_ERROR"
 
 
 def test_subdomain_forward_allows_loopback_fallback_when_opted_in(tmp_path: Path) -> None:

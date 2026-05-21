@@ -1515,6 +1515,12 @@ def _build_mngr_reachability_probe_argv(mngr_binary: str, agent_id: AgentId) -> 
     A clean exit means ``mngr`` can reach the container and run agent
     operations there, so the surgical restart is worth attempting; a
     failure means the recovery flow should go straight to a host restart.
+
+    ``--no-start`` keeps this a read-only check. ``mngr exec`` defaults to
+    ``--start``, which starts a stopped host before running the command --
+    that would make the probe start the very container it is meant to be
+    inspecting, so a genuinely stopped workspace would always misreport as
+    reachable and the host-restart tier would never be offered.
     """
     return [
         mngr_binary,
@@ -1523,6 +1529,7 @@ def _build_mngr_reachability_probe_argv(mngr_binary: str, agent_id: AgentId) -> 
         "true",
         "--timeout",
         str(_HOST_REACHABILITY_PROBE_TIMEOUT_SECONDS),
+        "--no-start",
         "--quiet",
     ]
 

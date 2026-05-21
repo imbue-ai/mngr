@@ -14,6 +14,7 @@ from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client.agent_creator import AgentCreationStatus
 from imbue.minds.desktop_client.agent_creator import AgentCreator
 from imbue.minds.desktop_client.agent_creator import LOG_SENTINEL
+from imbue.minds.desktop_client.app import _build_mngr_reachability_probe_argv
 from imbue.minds.desktop_client.app import _build_mngr_start_argv
 from imbue.minds.desktop_client.app import _build_mngr_stop_argv
 from imbue.minds.desktop_client.app import _build_workspace_list
@@ -1505,6 +1506,20 @@ def test_build_mngr_start_argv_targets_the_agent() -> None:
     aid = AgentId.generate()
     argv = _build_mngr_start_argv("/usr/local/bin/mngr", aid)
     assert argv[:3] == ["/usr/local/bin/mngr", "start", str(aid)]
+
+
+def test_build_mngr_reachability_probe_argv_does_not_auto_start_the_host() -> None:
+    """The layer-2 probe must pass --no-start so it is a read, not a host start.
+
+    ``mngr exec`` defaults to ``--start``; without ``--no-start`` the probe
+    would start the stopped container it is meant to be inspecting, so a
+    stopped workspace would always misreport as reachable.
+    """
+    aid = AgentId.generate()
+    argv = _build_mngr_reachability_probe_argv("/usr/local/bin/mngr", aid)
+    assert argv[:4] == ["/usr/local/bin/mngr", "exec", str(aid), "true"]
+    assert "--no-start" in argv
+    assert "--start" not in argv
 
 
 def test_recovery_page_requires_authentication(tmp_path: Path) -> None:

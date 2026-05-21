@@ -607,19 +607,21 @@ async def _handle_workspace_forward_http(
         return _service_unavailable_response(request)
 
     if tunnel_client is None and _is_loopback_url(backend_url) and not allow_host_loopback:
+        # A loopback registered URL with no SSH tunnel is what a stopped
+        # container looks like once discovery drops its SSH info: there is
+        # nothing safe to dial. Treat it exactly like the SSH-tunnel setup
+        # failure above -- emit a backend-failure envelope so the minds health
+        # tracker shows the recovery page, and serve the styled loader instead
+        # of raw 502 error text. (When allow_host_loopback is set the agent
+        # really runs on the host, so that case never reaches here.)
         logger.warning(
             "Refusing to dial host loopback for agent {}: registered URL {} has no SSH tunnel "
             "(pass --allow-host-loopback if the agent really runs on the host).",
             agent_id,
             backend_url,
         )
-        return Response(
-            status_code=502,
-            content=(
-                f"system interface unreachable: no SSH tunnel available for agent {agent_id}; "
-                f"refusing to dial host loopback at {backend_url}"
-            ),
-        )
+        _emit_backend_failure(envelope_writer, agent_id, SystemInterfaceBackendFailureReason.CONNECT_ERROR, None)
+        return _service_unavailable_response(request)
 
     active_client = tunnel_client or http_client
     return await _forward_workspace_http(
