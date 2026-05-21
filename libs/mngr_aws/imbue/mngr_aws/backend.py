@@ -3,7 +3,6 @@ from typing import Any
 from typing import Final
 
 from botocore.exceptions import BotoCoreError
-from loguru import logger
 from pydantic import ConfigDict
 from pydantic import Field
 from pydantic import PrivateAttr
@@ -45,9 +44,6 @@ class AwsProvider(VpsDockerProvider):
         self._instances_cache = self.aws_client.list_instances(provider_tag=str(self.name))
         return self._instances_cache
 
-    def _credentials_configured(self) -> bool:
-        return self.aws_config.has_resolvable_credentials()
-
     def _get_effective_auto_shutdown_minutes(self) -> int | None:
         """Resolve auto-shutdown TTL, refusing to create an instance under pytest without one.
 
@@ -75,10 +71,15 @@ class AwsProvider(VpsDockerProvider):
         return minutes
 
     def _list_provider_vps_hostnames(self) -> list[str]:
-        """Return public IPs of EC2 instances tagged with this provider's name."""
-        if not self._credentials_configured():
-            logger.warning("AWS credentials not configured, skipping EC2 discovery")
-            return []
+        """Return public IPs of EC2 instances tagged with this provider's name.
+
+        Credentials are guaranteed to be resolvable here: ``build_provider_instance``
+        raises ``ProviderEmptyError`` when ``config.get_session()`` fails, so any
+        AwsProvider that reaches this point has working credentials. The shared
+        ``VpsClientInterface`` base method that calls this is invoked for both
+        listing and create-host flows, so AWS does not need a separate
+        ``_credentials_configured`` override.
+        """
         instances = self._list_instances_cached()
         vps_ips: list[str] = []
         for instance in instances:

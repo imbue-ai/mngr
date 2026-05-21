@@ -102,82 +102,90 @@ def _run_mngr(
     )
 
 
-class TestAwsProviderLifecycle:
-    """Tests for the full EC2 Docker provider lifecycle."""
+# =============================================================================
+# Provider lifecycle (full create / exec / stop / start / destroy)
+# =============================================================================
 
-    def test_create_exec_and_destroy(self, aws_test_settings_dir: Path) -> None:
-        agent_name = f"{AWS_TEST_NAME_PREFIX}{int(time.time()) % 100000}"
 
-        result = _run_mngr(
-            aws_test_settings_dir,
-            "create",
-            agent_name,
-            "--type",
-            "claude",
-            "--provider",
-            "aws",
-            "--no-connect",
-            "--message",
-            "just say hello",
-        )
-        assert result.returncode == 0, f"Create failed: {result.stderr}"
-        assert "Done" in result.stdout or "created successfully" in result.stderr
+def test_provider_lifecycle_create_exec_and_destroy(aws_test_settings_dir: Path) -> None:
+    agent_name = f"{AWS_TEST_NAME_PREFIX}{int(time.time()) % 100000}"
 
-        try:
-            result = _run_mngr(aws_test_settings_dir, "exec", agent_name, "echo hello-from-aws")
-            assert result.returncode == 0, f"Exec failed: {result.stderr}"
-            assert "hello-from-aws" in result.stdout
+    result = _run_mngr(
+        aws_test_settings_dir,
+        "create",
+        agent_name,
+        "--type",
+        "claude",
+        "--provider",
+        "aws",
+        "--no-connect",
+        "--message",
+        "just say hello",
+    )
+    assert result.returncode == 0, f"Create failed: {result.stderr}"
+    assert "Done" in result.stdout or "created successfully" in result.stderr
 
-            result = _run_mngr(aws_test_settings_dir, "exec", agent_name, "test -d /mngr && echo exists")
-            assert result.returncode == 0, f"host_dir check failed: {result.stderr}"
-            assert "exists" in result.stdout
+    try:
+        result = _run_mngr(aws_test_settings_dir, "exec", agent_name, "echo hello-from-aws")
+        assert result.returncode == 0, f"Exec failed: {result.stderr}"
+        assert "hello-from-aws" in result.stdout
 
-            result = _run_mngr(aws_test_settings_dir, "list")
-            assert result.returncode == 0, f"List failed: {result.stderr}"
-            assert agent_name in result.stdout
-            assert "aws" in result.stdout
-        finally:
-            # --force skips the destroy confirmation, so no stdin input needed.
-            # Result is intentionally not checked: best-effort cleanup.
-            _run_mngr(aws_test_settings_dir, "destroy", agent_name, "--force", timeout=120)
-            time.sleep(20)
+        result = _run_mngr(aws_test_settings_dir, "exec", agent_name, "test -d /mngr && echo exists")
+        assert result.returncode == 0, f"host_dir check failed: {result.stderr}"
+        assert "exists" in result.stdout
 
-    def test_create_stop_start_destroy(self, aws_test_settings_dir: Path) -> None:
-        agent_name = f"{AWS_TEST_NAME_PREFIX}ss-{int(time.time()) % 100000}"
+        result = _run_mngr(aws_test_settings_dir, "list")
+        assert result.returncode == 0, f"List failed: {result.stderr}"
+        assert agent_name in result.stdout
+        assert "aws" in result.stdout
+    finally:
+        # --force skips the destroy confirmation, so no stdin input needed.
+        # Result is intentionally not checked: best-effort cleanup.
+        _run_mngr(aws_test_settings_dir, "destroy", agent_name, "--force", timeout=120)
+        time.sleep(20)
 
-        result = _run_mngr(
-            aws_test_settings_dir,
-            "create",
-            agent_name,
-            "--type",
-            "claude",
-            "--provider",
-            "aws",
-            "--no-connect",
-            "--message",
-            "just say hello",
-        )
-        assert result.returncode == 0, f"Create failed: {result.stderr}"
 
-        try:
-            result = _run_mngr(aws_test_settings_dir, "stop", agent_name)
-            assert result.returncode == 0, f"Stop failed: {result.stderr}"
+def test_provider_lifecycle_create_stop_start_destroy(aws_test_settings_dir: Path) -> None:
+    agent_name = f"{AWS_TEST_NAME_PREFIX}ss-{int(time.time()) % 100000}"
 
-            result = _run_mngr(aws_test_settings_dir, "list")
-            assert result.returncode == 0
-            assert agent_name in result.stdout
+    result = _run_mngr(
+        aws_test_settings_dir,
+        "create",
+        agent_name,
+        "--type",
+        "claude",
+        "--provider",
+        "aws",
+        "--no-connect",
+        "--message",
+        "just say hello",
+    )
+    assert result.returncode == 0, f"Create failed: {result.stderr}"
 
-            result = _run_mngr(aws_test_settings_dir, "start", agent_name, "--no-connect")
-            assert result.returncode == 0, f"Start failed: {result.stderr}"
+    try:
+        result = _run_mngr(aws_test_settings_dir, "stop", agent_name)
+        assert result.returncode == 0, f"Stop failed: {result.stderr}"
 
-            result = _run_mngr(aws_test_settings_dir, "exec", agent_name, "echo alive-after-restart")
-            assert result.returncode == 0, f"Post-restart exec failed: {result.stderr}"
-            assert "alive-after-restart" in result.stdout
-        finally:
-            # --force skips the destroy confirmation, so no stdin input needed.
-            # Result is intentionally not checked: best-effort cleanup.
-            _run_mngr(aws_test_settings_dir, "destroy", agent_name, "--force", timeout=120)
-            time.sleep(20)
+        result = _run_mngr(aws_test_settings_dir, "list")
+        assert result.returncode == 0
+        assert agent_name in result.stdout
+
+        result = _run_mngr(aws_test_settings_dir, "start", agent_name, "--no-connect")
+        assert result.returncode == 0, f"Start failed: {result.stderr}"
+
+        result = _run_mngr(aws_test_settings_dir, "exec", agent_name, "echo alive-after-restart")
+        assert result.returncode == 0, f"Post-restart exec failed: {result.stderr}"
+        assert "alive-after-restart" in result.stdout
+    finally:
+        # --force skips the destroy confirmation, so no stdin input needed.
+        # Result is intentionally not checked: best-effort cleanup.
+        _run_mngr(aws_test_settings_dir, "destroy", agent_name, "--force", timeout=120)
+        time.sleep(20)
+
+
+# =============================================================================
+# API client smoke tests (real network calls, read-only)
+# =============================================================================
 
 
 @pytest.fixture()
@@ -197,20 +205,19 @@ def aws_release_client() -> AwsVpsClient:
     )
 
 
-class TestAwsApiClient:
-    """Tests for the AWS API client with real EC2 API calls."""
+def test_api_client_list_instances_does_not_error(aws_release_client: AwsVpsClient) -> None:
+    instances = aws_release_client.list_instances()
+    assert isinstance(instances, list)
 
-    def test_list_instances_does_not_error(self, aws_release_client: AwsVpsClient) -> None:
-        instances = aws_release_client.list_instances()
-        assert isinstance(instances, list)
 
-    def test_list_ssh_keys_does_not_error(self, aws_release_client: AwsVpsClient) -> None:
-        keys = aws_release_client.list_ssh_keys()
-        assert isinstance(keys, list)
+def test_api_client_list_ssh_keys_does_not_error(aws_release_client: AwsVpsClient) -> None:
+    keys = aws_release_client.list_ssh_keys()
+    assert isinstance(keys, list)
 
-    def test_list_snapshots_does_not_error(self, aws_release_client: AwsVpsClient) -> None:
-        snapshots = aws_release_client.list_snapshots()
-        assert isinstance(snapshots, list)
+
+def test_api_client_list_snapshots_does_not_error(aws_release_client: AwsVpsClient) -> None:
+    snapshots = aws_release_client.list_snapshots()
+    assert isinstance(snapshots, list)
 
 
 def test_default_amis_describe_successfully() -> None:

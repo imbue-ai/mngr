@@ -3,7 +3,6 @@ from typing import Final
 from typing import Literal
 
 import boto3
-from botocore.exceptions import BotoCoreError
 from pydantic import Field
 
 from imbue.imbue_common.frozen_model import FrozenModel
@@ -145,19 +144,6 @@ class AwsProviderConfig(VpsDockerProviderConfig):
                 "configure ~/.aws/credentials, set AWS_PROFILE, or attach an EC2 instance role."
             )
         return session
-
-    def has_resolvable_credentials(self) -> bool:
-        """Return True iff boto3's default credential chain can resolve credentials.
-
-        Both the "no credentials at all" ``ValueError`` and boto3's own
-        ``BotoCoreError`` subclasses (e.g., ``ProfileNotFound``) are treated
-        as unresolvable.
-        """
-        try:
-            self.get_session()
-        except (ValueError, BotoCoreError):
-            return False
-        return True
 
     def get_ami_id_for_region(self, region: str) -> str:
         """Return the AMI ID to use for the given region.

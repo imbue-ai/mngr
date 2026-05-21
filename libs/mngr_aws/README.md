@@ -1,6 +1,8 @@
-# mngr AWS Provider
+# mngr AWS Provider [experimental]
 
 AWS provider backend plugin for mngr. Runs agents in Docker containers on Amazon EC2 instances.
+
+> This plugin is **experimental** — it has not been exercised in a production setting at the same scale as `mngr_modal` or `mngr_vultr`. The shared `mngr_vps_docker` machinery underneath it is well-tested, but AWS-specific defaults and the IAM permission set may change. Treat the security defaults (see "AWS-specific configuration" below) as a starting point: review the security group, AMI choice, IAM profile, and `auto_shutdown_minutes` before pointing this at production resources.
 
 See `mngr_vps_docker` for the base architecture and shared infrastructure.
 
@@ -102,13 +104,14 @@ The minimal policy actions needed:
 
 ```
 ec2:RunInstances, ec2:TerminateInstances, ec2:DescribeInstances,
-ec2:StopInstances, ec2:StartInstances, ec2:CreateTags,
 ec2:DescribeKeyPairs, ec2:ImportKeyPair, ec2:DeleteKeyPair,
 ec2:DescribeSecurityGroups, ec2:CreateSecurityGroup,
 ec2:AuthorizeSecurityGroupIngress,
 ec2:DescribeSnapshots, ec2:CreateSnapshot, ec2:DeleteSnapshot,
-ec2:DescribeVolumes
+ec2:DescribeImages
 ```
+
+Tags are set in the `RunInstances` call via `TagSpecifications`, not via a separate `CreateTags` call. EBS volumes are tagged the same way (no extra permission needed). Stop/start operate on the container inside the instance (Docker over SSH), not on the EC2 instance itself, so `ec2:StopInstances` / `ec2:StartInstances` are not needed. `DescribeImages` is needed by the AMI-staleness release test (`test_default_amis_describe_successfully`).
 
 ## Implementation details
 

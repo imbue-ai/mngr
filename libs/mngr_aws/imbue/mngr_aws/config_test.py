@@ -54,47 +54,6 @@ def test_backend_name_defaults_to_aws() -> None:
     assert str(config.backend) == "aws"
 
 
-def test_has_resolvable_credentials_with_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    _clear_aws_env(monkeypatch)
-    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "AKIATEST")
-    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "secret")
-    config = AwsProviderConfig()
-    assert config.has_resolvable_credentials()
-
-
-def test_has_resolvable_credentials_with_aws_profile_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """AWS_PROFILE pointing at a [default] profile resolves via boto3's chain."""
-    _clear_aws_env(monkeypatch)
-    monkeypatch.setenv("AWS_PROFILE", "default")
-    monkeypatch.setenv("AWS_EC2_METADATA_DISABLED", "true")
-    creds_file = write_default_credentials_file(tmp_path)
-    monkeypatch.setenv("AWS_SHARED_CREDENTIALS_FILE", str(creds_file))
-    config = AwsProviderConfig()
-    assert config.has_resolvable_credentials()
-
-
-def test_has_resolvable_credentials_returns_false_when_missing(monkeypatch: pytest.MonkeyPatch) -> None:
-    """With no env / file / IMDS credentials, the check must return False."""
-    _clear_aws_env(monkeypatch)
-    monkeypatch.setenv("AWS_EC2_METADATA_DISABLED", "true")
-    monkeypatch.setenv("AWS_CONFIG_FILE", "/nonexistent")
-    monkeypatch.setenv("AWS_SHARED_CREDENTIALS_FILE", "/nonexistent")
-    config = AwsProviderConfig()
-    assert not config.has_resolvable_credentials()
-
-
-def test_has_resolvable_credentials_finds_shared_credentials_file(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """Credentials present only in ~/.aws/credentials are resolvable."""
-    _clear_aws_env(monkeypatch)
-    monkeypatch.setenv("AWS_EC2_METADATA_DISABLED", "true")
-    creds_file = write_default_credentials_file(tmp_path)
-    monkeypatch.setenv("AWS_SHARED_CREDENTIALS_FILE", str(creds_file))
-    config = AwsProviderConfig()
-    assert config.has_resolvable_credentials()
-
-
 def test_get_session_raises_when_missing(monkeypatch: pytest.MonkeyPatch) -> None:
     _clear_aws_env(monkeypatch)
     monkeypatch.setenv("AWS_EC2_METADATA_DISABLED", "true")
