@@ -1,8 +1,10 @@
 """Unit tests for AntigravityAgentConfig and AntigravityAgent."""
 
+import json
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -14,6 +16,7 @@ from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import HostName
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
+from imbue.mngr_antigravity.antigravity_config import get_antigravity_user_settings_path
 from imbue.mngr_antigravity.plugin import AntigravityAgent
 from imbue.mngr_antigravity.plugin import AntigravityAgentConfig
 from imbue.mngr_antigravity.plugin import register_agent_type
@@ -26,6 +29,8 @@ def test_antigravity_agent_config_has_correct_defaults() -> None:
     assert config.cli_args == ()
     assert config.parent_type is None
     assert config.auto_allow_permissions is False
+    # Default-on: every fresh work_dir would hit the trust dialog otherwise.
+    assert config.pre_trust_workspace is True
 
 
 def test_antigravity_agent_config_merge_with_concatenates_user_args() -> None:
@@ -98,6 +103,14 @@ def antigravity_agent_auto_allow(
     return _make_antigravity_agent(local_provider, tmp_path, AntigravityAgentConfig(auto_allow_permissions=True))
 
 
+@pytest.fixture
+def antigravity_agent_pre_trust_disabled(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+) -> AntigravityAgent:
+    return _make_antigravity_agent(local_provider, tmp_path, AntigravityAgentConfig(pre_trust_workspace=False))
+
+
 def test_assemble_command_uses_bare_agy_command_with_no_default_cli_args(
     antigravity_agent: AntigravityAgent,
 ) -> None:
@@ -153,11 +166,11 @@ def test_modify_env_vars_is_a_noop(antigravity_agent: AntigravityAgent) -> None:
 
 
 def test_provision_does_not_create_workspace_subdirs(antigravity_agent: AntigravityAgent) -> None:
-    """v0 plugin writes nothing to the user's work_dir.
+    """The plugin writes nothing to the user's work_dir.
 
     Antigravity reads workspace-tier files from `<work_dir>/.agents/` and
-    `<work_dir>/.antigravityignore`; v0 must not populate either. Re-evaluate
-    when transcript / readiness-hook support lands.
+    `<work_dir>/.antigravityignore`; mngr leaves both alone so the user's
+    project tree is untouched by ``mngr create``.
     """
     antigravity_agent.provision(
         host=antigravity_agent.host,
@@ -167,3 +180,85 @@ def test_provision_does_not_create_workspace_subdirs(antigravity_agent: Antigrav
     assert not (antigravity_agent.work_dir / ".agents").exists()
     assert not (antigravity_agent.work_dir / ".antigravityignore").exists()
     assert not (antigravity_agent.work_dir / ".gemini").exists()
+
+
+def _read_user_settings(monkeypatched_home: Path) -> dict[str, Any]:
+    """Read the user-tier settings.json that the agent should have populated."""
+    settings_path = monkeypatched_home / ".gemini" / "antigravity-cli" / "settings.json"
+    if not settings_path.exists():
+        return {}
+    parsed: Any = json.loads(settings_path.read_text())
+    assert isinstance(parsed, dict)
+    return parsed
+
+
+@pytest.fixture
+def isolated_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Redirect ``Path.home()`` to a tmpdir so trust-file writes do not touch the user's real config."""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    return home
+
+
+def test_provision_pre_trusts_workspace_in_user_settings(
+    antigravity_agent: AntigravityAgent,
+    isolated_home: Path,
+) -> None:
+    """Default `pre_trust_workspace=True` writes work_dir into trustedWorkspaces."""
+    antigravity_agent.provision(
+        host=antigravity_agent.host,
+        options=CreateAgentOptions(agent_type=AgentTypeName("antigravity")),
+        mngr_ctx=antigravity_agent.mngr_ctx,
+    )
+    settings = _read_user_settings(isolated_home)
+    assert str(antigravity_agent.work_dir) in settings["trustedWorkspaces"]
+
+
+def test_provision_skips_pre_trust_when_disabled(
+    antigravity_agent_pre_trust_disabled: AntigravityAgent,
+    isolated_home: Path,
+) -> None:
+    """``pre_trust_workspace=False`` leaves the user's settings file untouched."""
+    antigravity_agent_pre_trust_disabled.provision(
+        host=antigravity_agent_pre_trust_disabled.host,
+        options=CreateAgentOptions(agent_type=AgentTypeName("antigravity")),
+        mngr_ctx=antigravity_agent_pre_trust_disabled.mngr_ctx,
+    )
+    settings_path = get_antigravity_user_settings_path()
+    assert not settings_path.exists()
+
+
+def test_provision_pre_trust_preserves_existing_settings(
+    antigravity_agent: AntigravityAgent,
+    isolated_home: Path,
+) -> None:
+    """Pre-trust must be additive: prior keys and entries stay verbatim."""
+    settings_path = get_antigravity_user_settings_path()
+    settings_path.parent.mkdir(parents=True)
+    settings_path.write_text(json.dumps({"trustedWorkspaces": ["/prior/workspace"], "colorScheme": "dark"}, indent=2))
+
+    antigravity_agent.provision(
+        host=antigravity_agent.host,
+        options=CreateAgentOptions(agent_type=AgentTypeName("antigravity")),
+        mngr_ctx=antigravity_agent.mngr_ctx,
+    )
+
+    settings = _read_user_settings(isolated_home)
+    assert "/prior/workspace" in settings["trustedWorkspaces"]
+    assert str(antigravity_agent.work_dir) in settings["trustedWorkspaces"]
+    assert settings["colorScheme"] == "dark"
+
+
+def test_provision_pre_trust_is_idempotent(
+    antigravity_agent: AntigravityAgent,
+    isolated_home: Path,
+) -> None:
+    """Two provisioning passes produce a single trust entry, not duplicates."""
+    options = CreateAgentOptions(agent_type=AgentTypeName("antigravity"))
+    antigravity_agent.provision(host=antigravity_agent.host, options=options, mngr_ctx=antigravity_agent.mngr_ctx)
+    antigravity_agent.provision(host=antigravity_agent.host, options=options, mngr_ctx=antigravity_agent.mngr_ctx)
+
+    settings = _read_user_settings(isolated_home)
+    trusted = settings["trustedWorkspaces"]
+    assert trusted.count(str(antigravity_agent.work_dir)) == 1
