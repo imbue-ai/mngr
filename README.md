@@ -383,6 +383,7 @@ As well as the code for some plugins that we maintain, including:
 
 - [libs/mngr_modal/](libs/mngr_modal/README.md)
 - [libs/mngr_claude/](libs/mngr_claude/README.md)
+- [libs/mngr_uncapped_claude/](libs/mngr_uncapped_claude/README.md)
 - [libs/mngr_pair/](libs/mngr_pair/README.md)
 - [libs/mngr_opencode/](libs/mngr_opencode/README.md)
 - [libs/mngr_gemini/](libs/mngr_gemini/README.md)
