@@ -35,7 +35,6 @@ from imbue.minds.desktop_client.notification import NotificationRequest
 from imbue.minds.desktop_client.ssh_tunnel import RemoteSSHInfo
 from imbue.minds.primitives import ServiceName
 from imbue.mngr.api.discovery_events import AgentDestroyedEvent
-from imbue.mngr.api.discovery_events import DiscoveryErrorEvent
 from imbue.mngr.api.discovery_events import FullDiscoverySnapshotEvent
 from imbue.mngr.api.discovery_events import HostDestroyedEvent
 from imbue.mngr.api.discovery_events import HostSSHInfoEvent
@@ -332,83 +331,6 @@ def test_host_destroyed_destroys_all_agents_on_host(consumer: EnvelopeStreamCons
 
     assert set(destroyed) == {_AGENT_ID_1, _AGENT_ID_2}
     assert consumer.resolver.list_known_agent_ids() == ()
-
-
-# --- observe stream: discovery error --------------------------------------
-
-
-def test_discovery_error_with_provider_name_fires_provider_error_callback(
-    consumer: EnvelopeStreamConsumer,
-) -> None:
-    counter = [0]
-    fired: list[tuple[str, str, str]] = []
-    consumer.add_on_provider_error_callback(lambda name, etype, emsg: fired.append((name, etype, emsg)))
-
-    error_event = DiscoveryErrorEvent(
-        timestamp=_TIMESTAMP,
-        event_id=_next_event_id(counter),
-        source=_EVENT_SOURCE,
-        error_type="ImbueCloudAuthError",
-        error_message="Refresh rejected by connector: token theft detected",
-        source_name="discovery_poll",
-        provider_name="imbue_cloud_thejash-gmail-com",
-    )
-    _dispatch(consumer, _observe_envelope(error_event))
-
-    assert fired == [
-        (
-            "imbue_cloud_thejash-gmail-com",
-            "ImbueCloudAuthError",
-            "Refresh rejected by connector: token theft detected",
-        )
-    ]
-
-
-def test_discovery_error_without_provider_name_does_not_fire_callback(
-    consumer: EnvelopeStreamConsumer,
-) -> None:
-    counter = [0]
-    fired: list[tuple[str, str, str]] = []
-    consumer.add_on_provider_error_callback(lambda name, etype, emsg: fired.append((name, etype, emsg)))
-
-    error_event = DiscoveryErrorEvent(
-        timestamp=_TIMESTAMP,
-        event_id=_next_event_id(counter),
-        source=_EVENT_SOURCE,
-        error_type="VpsApiError",
-        error_message="VPS API error 502",
-        source_name="discovery_poll",
-        provider_name=None,
-    )
-    _dispatch(consumer, _observe_envelope(error_event))
-
-    assert fired == []
-
-
-def test_provider_error_callback_failure_does_not_block_other_callbacks(
-    consumer: EnvelopeStreamConsumer,
-) -> None:
-    counter = [0]
-    fired: list[str] = []
-
-    def _bad_callback(_name: str, _etype: str, _emsg: str) -> None:
-        raise RuntimeError("boom")
-
-    consumer.add_on_provider_error_callback(_bad_callback)
-    consumer.add_on_provider_error_callback(lambda name, _etype, _emsg: fired.append(name))
-
-    error_event = DiscoveryErrorEvent(
-        timestamp=_TIMESTAMP,
-        event_id=_next_event_id(counter),
-        source=_EVENT_SOURCE,
-        error_type="ImbueCloudAuthError",
-        error_message="msg",
-        source_name="discovery_poll",
-        provider_name="imbue_cloud_alice",
-    )
-    _dispatch(consumer, _observe_envelope(error_event))
-
-    assert fired == ["imbue_cloud_alice"]
 
 
 # --- event stream: services / requests / refresh --------------------------

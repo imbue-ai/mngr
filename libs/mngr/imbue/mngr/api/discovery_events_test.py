@@ -9,6 +9,7 @@ import pytest
 from imbue.mngr.api.discovery_events import AgentDestroyedEvent
 from imbue.mngr.api.discovery_events import AgentDiscoveryEvent
 from imbue.mngr.api.discovery_events import DISCOVERY_EVENT_SOURCE
+from imbue.mngr.api.discovery_events import DiscoveryError
 from imbue.mngr.api.discovery_events import DiscoveryErrorEvent
 from imbue.mngr.api.discovery_events import DiscoveryEventType
 from imbue.mngr.api.discovery_events import FullDiscoverySnapshotEvent
@@ -36,6 +37,7 @@ from imbue.mngr.api.discovery_events import find_latest_full_snapshot_offset
 from imbue.mngr.api.discovery_events import get_discovery_events_dir
 from imbue.mngr.api.discovery_events import get_discovery_events_path
 from imbue.mngr.api.discovery_events import make_agent_discovery_event
+from imbue.mngr.api.discovery_events import make_discovered_provider
 from imbue.mngr.api.discovery_events import make_full_discovery_snapshot_event
 from imbue.mngr.api.discovery_events import make_host_discovery_event
 from imbue.mngr.api.discovery_events import parse_discovery_event_line
@@ -43,6 +45,7 @@ from imbue.mngr.api.discovery_events import resolve_provider_names_for_identifie
 from imbue.mngr.api.discovery_events import write_full_discovery_snapshot
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.config.data_types import ProviderInstanceConfig
 from imbue.mngr.errors import DiscoverySchemaChangedError
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import AgentId
@@ -51,6 +54,7 @@ from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import DiscoveredHost
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
+from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import SSHInfo
 from imbue.mngr.utils.jsonl_warn import MalformedJsonLineWarner
@@ -103,6 +107,73 @@ def test_make_full_discovery_snapshot_event_has_correct_fields() -> None:
     assert event.source == "mngr/discovery"
     assert len(event.agents) == 2
     assert len(event.hosts) == 1
+
+
+def test_make_full_discovery_snapshot_event_defaults_providers_and_errors_to_empty() -> None:
+    event = make_full_discovery_snapshot_event((), ())
+    assert event.providers == ()
+    assert event.error_by_provider_name == {}
+
+
+def test_make_full_discovery_snapshot_event_carries_providers_and_errors() -> None:
+    provider_name = ProviderInstanceName("docker")
+    provider = make_discovered_provider(
+        provider_name=provider_name,
+        config=ProviderInstanceConfig(backend=ProviderBackendName("docker"), is_enabled=True),
+    )
+    error_provider_name = ProviderInstanceName("modal")
+    error = DiscoveryError(
+        type_name="ImbueCloudAuthError",
+        message="token missing",
+        provider_name=error_provider_name,
+    )
+    event = make_full_discovery_snapshot_event(
+        (),
+        (),
+        providers=(provider,),
+        error_by_provider_name={error_provider_name: error},
+    )
+    assert event.providers == (provider,)
+    assert event.error_by_provider_name == {error_provider_name: error}
+
+
+def test_make_discovered_provider_drops_subclass_fields() -> None:
+    """A provider config subclass with extra fields should serialize as the base only."""
+
+    class _ProviderConfigWithExtras(ProviderInstanceConfig):
+        # Plugin-defined field that must NOT leak into the snapshot
+        api_secret: str = "shhh"
+
+    extras = _ProviderConfigWithExtras(backend=ProviderBackendName("modal"), is_enabled=True, api_secret="leaked")
+    discovered = make_discovered_provider(ProviderInstanceName("modal-prod"), extras)
+    assert discovered.config.backend == "modal"
+    assert discovered.config.is_enabled is True
+    # Serialize and check the wire format has no plugin-defined field
+    dumped = discovered.model_dump()
+    assert "api_secret" not in dumped["config"]
+    assert dumped["config"] == {
+        "backend": "modal",
+        "plugin": None,
+        "is_enabled": True,
+        "destroyed_host_persisted_seconds": None,
+        "min_online_host_age_seconds": None,
+    }
+
+
+def test_full_discovery_snapshot_event_parses_legacy_lines_without_new_fields() -> None:
+    """Old snapshots written before the providers/error_by_provider_name fields existed must still parse."""
+    legacy = {
+        "type": DiscoveryEventType.DISCOVERY_FULL.value,
+        "timestamp": "2026-05-21T00:00:00.000000000Z",
+        "event_id": "evt-legacy",
+        "source": "mngr/discovery",
+        "agents": [],
+        "hosts": [],
+    }
+    parsed = parse_discovery_event_line(json.dumps(legacy))
+    assert isinstance(parsed, FullDiscoverySnapshotEvent)
+    assert parsed.providers == ()
+    assert parsed.error_by_provider_name == {}
 
 
 # === Conversion Helper Tests ===

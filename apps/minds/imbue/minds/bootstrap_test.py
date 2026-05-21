@@ -11,7 +11,6 @@ from imbue.minds.bootstrap import MINDS_ROOT_NAME_ENV_VAR
 from imbue.minds.bootstrap import MINDS_ROOT_NAME_PATTERN
 from imbue.minds.bootstrap import _ensure_mngr_settings
 from imbue.minds.bootstrap import apply_bootstrap
-from imbue.minds.bootstrap import disable_imbue_cloud_provider_for_account
 from imbue.minds.bootstrap import env_name_from_root_name
 from imbue.minds.bootstrap import is_minds_root_name_set_to_active_env
 from imbue.minds.bootstrap import minds_data_dir_for
@@ -20,6 +19,7 @@ from imbue.minds.bootstrap import mngr_prefix_for
 from imbue.minds.bootstrap import resolve_minds_root_name
 from imbue.minds.bootstrap import root_name_for_env_name
 from imbue.minds.bootstrap import set_imbue_cloud_provider_for_account
+from imbue.minds.bootstrap import set_provider_is_enabled
 
 
 def _clear_env(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -288,7 +288,7 @@ def test_set_imbue_cloud_provider_for_account_writes_block(monkeypatch: pytest.M
     }
 
 
-def test_disable_imbue_cloud_provider_for_account_flips_is_enabled(
+def test_set_provider_is_enabled_flips_is_enabled_on_existing_block(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     settings_path = _stub_mngr_host_dir(monkeypatch, tmp_path, "minds-dev-tname")
@@ -298,13 +298,52 @@ def test_disable_imbue_cloud_provider_for_account_flips_is_enabled(
         root_name="minds-dev-tname",
     )
 
-    changed = disable_imbue_cloud_provider_for_account("alice@example.com", root_name="minds-dev-tname")
+    changed = set_provider_is_enabled("imbue_cloud_alice-example-com", False, root_name="minds-dev-tname")
     assert changed is True
     parsed = tomllib.loads(settings_path.read_text())
     assert parsed["providers"]["imbue_cloud_alice-example-com"]["is_enabled"] is False
 
-    # Idempotent: a second disable is a no-op.
-    assert disable_imbue_cloud_provider_for_account("alice@example.com", root_name="minds-dev-tname") is False
+    # Idempotent: setting to the same value is a no-op.
+    assert set_provider_is_enabled("imbue_cloud_alice-example-com", False, root_name="minds-dev-tname") is False
+
+    # Re-enabling flips the bit back.
+    assert set_provider_is_enabled("imbue_cloud_alice-example-com", True, root_name="minds-dev-tname") is True
+    parsed = tomllib.loads(settings_path.read_text())
+    assert parsed["providers"]["imbue_cloud_alice-example-com"]["is_enabled"] is True
+
+
+def test_set_provider_is_enabled_creates_override_block_for_missing_provider(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """When [providers.<name>] doesn't exist in minds' settings, it's created with just is_enabled."""
+    settings_path = _stub_mngr_host_dir(monkeypatch, tmp_path, "minds-dev-tname")
+
+    changed = set_provider_is_enabled("docker", False, root_name="minds-dev-tname")
+    assert changed is True
+    parsed = tomllib.loads(settings_path.read_text())
+    assert parsed["providers"]["docker"] == {"is_enabled": False}
+
+    # Now re-enable: same block is updated.
+    changed = set_provider_is_enabled("docker", True, root_name="minds-dev-tname")
+    assert changed is True
+    parsed = tomllib.loads(settings_path.read_text())
+    assert parsed["providers"]["docker"] == {"is_enabled": True}
+
+
+def test_set_provider_is_enabled_creates_settings_file_when_missing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """If minds' active settings file does not yet exist, it is created."""
+    settings_path = _stub_mngr_host_dir(monkeypatch, tmp_path, "minds-dev-tname")
+    # Make sure no file exists yet
+    if settings_path.exists():
+        settings_path.unlink()
+
+    changed = set_provider_is_enabled("modal", False, root_name="minds-dev-tname")
+    assert changed is True
+    assert settings_path.exists()
+    parsed = tomllib.loads(settings_path.read_text())
+    assert parsed["providers"]["modal"] == {"is_enabled": False}
 
 
 def test_set_force_enable_re_enables_disabled_block(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -314,7 +353,7 @@ def test_set_force_enable_re_enables_disabled_block(monkeypatch: pytest.MonkeyPa
         connector_url=_FAKE_CONNECTOR_URL,
         root_name="minds-dev-tname",
     )
-    disable_imbue_cloud_provider_for_account("alice@example.com", root_name="minds-dev-tname")
+    set_provider_is_enabled("imbue_cloud_alice-example-com", False, root_name="minds-dev-tname")
 
     changed = set_imbue_cloud_provider_for_account(
         "alice@example.com",
@@ -337,7 +376,7 @@ def test_set_preserve_does_not_re_enable_disabled_block(monkeypatch: pytest.Monk
         connector_url=_FAKE_CONNECTOR_URL,
         root_name="minds-dev-tname",
     )
-    disable_imbue_cloud_provider_for_account("alice@example.com", root_name="minds-dev-tname")
+    set_provider_is_enabled("imbue_cloud_alice-example-com", False, root_name="minds-dev-tname")
 
     changed = set_imbue_cloud_provider_for_account(
         "alice@example.com",
