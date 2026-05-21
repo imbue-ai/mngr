@@ -472,14 +472,13 @@ def _resolve_diff_base() -> str:
     )
 
 
-def _changed_files_against_base() -> list[str]:
-    """Return the repo-relative paths the PR branch changes vs. its diff base.
+def _changed_files_against_base(base: str) -> list[str]:
+    """Return the repo-relative paths the PR branch changes vs. ``base``.
 
     Uses ``git diff --name-only <base>...HEAD`` (three-dot form, i.e. the
     diff against the merge base) so renames/branches behave intuitively.
     Raises ``RuntimeError`` if ``git diff`` itself fails.
     """
-    base = _resolve_diff_base()
     result = subprocess.run(
         ["git", "diff", "--name-only", f"{base}...HEAD"],
         cwd=_REPO_ROOT,
@@ -533,7 +532,8 @@ def test_pr_has_changelog_entry() -> None:
         if branch.startswith(prefix):
             pytest.skip(f"Branch '{branch}' is exempt from changelog requirement")
 
-    changed_files = _changed_files_against_base()
+    diff_base = _resolve_diff_base()
+    changed_files = _changed_files_against_base(diff_base)
     touched = _projects_requiring_entry(changed_files)
 
     sanitized = branch.replace("/", "-")
@@ -544,12 +544,22 @@ def test_pr_has_changelog_entry() -> None:
             missing.append(str(entry_path.relative_to(_REPO_ROOT)))
 
     assert not missing, (
-        f"Missing changelog entries for branch '{branch}'. This PR touches the "
+        f"Missing changelog entries for branch '{branch}' "
+        f"(diff base: '{diff_base}', resolved via "
+        f"git diff --name-only {diff_base}...HEAD). This PR touches the "
         f"project(s) {sorted(touched)}; each needs its own entry file.\n"
         f"Create:\n" + "\n".join(f"  - {p}" for p in missing) + "\n"
         f"Each file should briefly describe the user-visible changes in this PR "
         f"that pertain to that project. The synthetic '{DEV_PROJECT}' project "
-        f"covers root-level files (scripts/, .github/, top-level docs, build tooling)."
+        f"covers root-level files (scripts/, .github/, top-level docs, build tooling).\n"
+        f"\n"
+        f"IMPORTANT: if you believe this PR makes NO actual changes (e.g. it is a "
+        f"docs-only or no-op PR), do NOT add a changelog entry just to satisfy this "
+        f"check. Instead, verify that the diff base ('{diff_base}') is correct -- a "
+        f"stale or misconfigured base can make unrelated files from main appear as "
+        f"if they changed on this branch. In that case, fetch the correct base "
+        f"(typically 'git fetch origin main'), confirm 'git diff {diff_base}...HEAD' "
+        f"shows only your real changes, and re-run."
     )
 
 
