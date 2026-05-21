@@ -66,7 +66,7 @@ The only assignments that pass without flagging are no-ops (the override value e
 Layers that don't write the field at all are never flagged: `parse_config` leaves unset fields as `None`, and the merge falls back to the lower-precedence value without involving the narrowing guard. So defaults from one layer can't silently wipe entries that an earlier layer set.
 
 The same rules apply uniformly to fields inside per-key container entries:
-- `agent_types.<name>.<field>` (e.g. `cli_args`, `env`, `permissions`)
+- `agent_types.<name>.<field>` (e.g. `cli_args`, `env`, `extra_provision_command`)
 - `providers.<name>.<field>` (including backend-specific subclass fields)
 - `create_templates.<name>.<field>` (resolved through the wrapper's `options` map)
 - `plugins.<name>.<field>` (including plugin-defined subclass fields)
