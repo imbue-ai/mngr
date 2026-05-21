@@ -125,12 +125,11 @@ def modal_mngr_ctx(
     """
     shared = read_shared_modal_env_name()
     if shared is not None:
-        prefix, _ = shared
+        timestamp_name, _ = shared
     else:
         now = datetime.now(timezone.utc)
-        timestamp = now.strftime("%Y-%m-%d-%H-%M-%S")
-        prefix = f"{TEST_ENV_PREFIX}{timestamp}-"
-    config = MngrConfig(default_host_dir=temp_host_dir, prefix=prefix)
+        timestamp_name = f"{TEST_ENV_PREFIX}{now.strftime('%Y-%m-%d-%H-%M-%S')}"
+    config = MngrConfig(default_host_dir=temp_host_dir, prefix=f"{timestamp_name}-")
     return make_mngr_ctx(config, plugin_manager, temp_profile_dir, concurrency_group=cg)
 
 
@@ -414,16 +413,15 @@ def modal_test_session_env_name() -> str:
     """Generate a unique, timestamp-based environment name for this test session.
 
     In shared-env mode (MNGR_TEST_SHARED_MODAL_ENV_NAME set), returns the
-    timestamp portion of the shared env name (without the trailing dash) so
-    the session-scoped subprocess-env fixture lands in the same Modal
-    environment as the function-scoped fixtures.
+    bare timestamp portion of the shared env name so the session-scoped
+    subprocess-env fixture lands in the same Modal environment as the
+    function-scoped fixtures. Same shape as ``generate_test_environment_name()``
+    -- callers join with ``-`` to build their full prefix.
     """
     shared = read_shared_modal_env_name()
     if shared is not None:
-        prefix, _ = shared
-        # Strip the trailing '-' that the prefix carries (callers append '-'
-        # themselves), so this fixture's contract matches generate_test_environment_name().
-        return prefix.rstrip("-")
+        timestamp_name, _ = shared
+        return timestamp_name
     return generate_test_environment_name()
 
 

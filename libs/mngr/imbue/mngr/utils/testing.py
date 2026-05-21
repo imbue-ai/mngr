@@ -180,35 +180,34 @@ def generate_test_environment_name() -> str:
 SHARED_MODAL_ENV_NAME_VAR: Final[str] = "MNGR_TEST_SHARED_MODAL_ENV_NAME"
 
 # Matches a full shared Modal env name and splits it into:
-#   group 1: the timestamp prefix INCLUDING the trailing dash (feeds
-#            ``MngrConfig.prefix``, which is concatenated with ``user_id`` with
-#            no extra separator).
+#   group 1: the bare timestamp portion (no trailing dash), matching the shape
+#            ``generate_test_environment_name()`` returns. Callers join with a
+#            dash to build ``MngrConfig.prefix`` or any other prefix-shape value.
 #   group 2: the non-empty suffix (feeds ``ModalProviderConfig.user_id``).
 # Unlike ``TEST_ENV_PATTERN`` (which only anchors the timestamp), this pattern
-# enforces the dash separator and a non-empty suffix that the docstring of
+# enforces a literal dash separator and a non-empty suffix that the docstring of
 # ``read_shared_modal_env_name`` promises, so malformed values raise loudly
-# instead of silently producing a prefix without a trailing dash.
+# instead of producing a half-formed split.
 _SHARED_MODAL_ENV_NAME_PATTERN: Final[re.Pattern[str]] = re.compile(
-    r"^(mngr_test-\d{4}-\d{2}-\d{2}-\d{2}-\d{2}-\d{2}-)(.+)$"
+    r"^(mngr_test-\d{4}-\d{2}-\d{2}-\d{2}-\d{2}-\d{2})-(.+)$"
 )
 
 
 def read_shared_modal_env_name() -> tuple[str, str] | None:
-    """Parse ``MNGR_TEST_SHARED_MODAL_ENV_NAME`` into ``(prefix, user_id_suffix)``.
+    """Parse ``MNGR_TEST_SHARED_MODAL_ENV_NAME`` into ``(timestamp_name, user_id_suffix)``.
 
     When the env var is unset or empty, returns ``None`` -- callers fall back
-    to per-test environment creation. Otherwise splits the shared env name
-    into the timestamp prefix (including the trailing dash, suitable for
-    ``MngrConfig.prefix``) and the remainder (suitable for
-    ``ModalProviderConfig.user_id``), so ``prefix + user_id_suffix`` reproduces
-    the full shared env name.
+    to per-test environment creation. Otherwise splits the shared env name on
+    the dash between the timestamp and the suffix, returning the bare timestamp
+    portion (same shape as ``generate_test_environment_name()``) and the
+    suffix. Callers join with ``-`` to reproduce the full shared env name.
 
     Raises ``ConfigStructureError`` when the env var is set but the value does
     not match the ``mngr_test-YYYY-MM-DD-HH-MM-SS-<suffix>`` pattern (the
-    trailing dash and a non-empty suffix are both required) -- the justfile
+    dash separator and a non-empty suffix are both required) -- the justfile
     generates conforming names, so a mismatch is a bug we want to surface
-    rather than silently fall back to per-test envs or produce a malformed
-    prefix.
+    rather than silently fall back to per-test envs or produce a half-formed
+    split.
     """
     raw = os.environ.get(SHARED_MODAL_ENV_NAME_VAR, "")
     if not raw:

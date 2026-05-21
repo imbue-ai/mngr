@@ -999,14 +999,16 @@ def test_read_shared_modal_env_name_returns_none_when_empty(monkeypatch: pytest.
     assert read_shared_modal_env_name() is None
 
 
-def test_read_shared_modal_env_name_splits_into_prefix_and_suffix(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The prefix includes the trailing dash so `prefix + suffix` reproduces the input."""
+def test_read_shared_modal_env_name_splits_into_timestamp_name_and_suffix(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Returns the bare timestamp portion (no trailing dash) and the user_id suffix;
+    callers join with ``-`` to reproduce the full shared env name.
+    """
     full_name = "mngr_test-2026-05-20-12-00-00-shared-abc123def456"
     monkeypatch.setenv(SHARED_MODAL_ENV_NAME_VAR, full_name)
     result = read_shared_modal_env_name()
-    assert result == ("mngr_test-2026-05-20-12-00-00-", "shared-abc123def456")
-    prefix, suffix = result
-    assert prefix + suffix == full_name
+    assert result == ("mngr_test-2026-05-20-12-00-00", "shared-abc123def456")
+    timestamp_name, suffix = result
+    assert f"{timestamp_name}-{suffix}" == full_name
 
 
 def test_read_shared_modal_env_name_raises_on_malformed_value(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1019,9 +1021,8 @@ def test_read_shared_modal_env_name_raises_on_malformed_value(monkeypatch: pytes
 @pytest.mark.parametrize(
     "value",
     [
-        # Timestamp matches but no dash separator -- callers downstream concatenate
-        # `prefix + user_id` with no extra separator and would produce a malformed
-        # Modal env name.
+        # Timestamp matches but no dash separator -- the pattern requires a
+        # literal dash before the suffix.
         "mngr_test-2026-05-20-12-00-00suffix",
         # Bare timestamp with no suffix -- the docstring requires a non-empty suffix.
         "mngr_test-2026-05-20-12-00-00",
@@ -1032,7 +1033,7 @@ def test_read_shared_modal_env_name_raises_on_malformed_value(monkeypatch: pytes
 def test_read_shared_modal_env_name_raises_when_dash_or_suffix_missing(
     monkeypatch: pytest.MonkeyPatch, value: str
 ) -> None:
-    """The trailing dash and a non-empty suffix are both required by the contract."""
+    """The dash separator and a non-empty suffix are both required by the contract."""
     monkeypatch.setenv(SHARED_MODAL_ENV_NAME_VAR, value)
     with pytest.raises(ConfigStructureError, match="MNGR_TEST_SHARED_MODAL_ENV_NAME"):
         read_shared_modal_env_name()
@@ -1042,14 +1043,17 @@ def test_derive_modal_names_reproduces_shared_env_via_prefix_and_user_id(
     temp_mngr_ctx: MngrContext,
 ) -> None:
     """Feeding the shared-env split through MngrConfig.prefix + ModalProviderConfig.user_id
-    reconstructs the original shared env name. This locks in the contract the
-    justfile + conftest wiring relies on.
+    reconstructs the original shared env name. Callers join the bare timestamp
+    name with ``-`` to build MngrConfig.prefix, then ``_derive_modal_names``
+    concatenates prefix + user_id with no extra separator.
     """
     full_name = "mngr_test-2026-05-20-12-00-00-shared-abc123def456"
-    prefix = "mngr_test-2026-05-20-12-00-00-"
+    timestamp_name = "mngr_test-2026-05-20-12-00-00"
     user_id_suffix = "shared-abc123def456"
 
-    shared_config = temp_mngr_ctx.config.model_copy_update(to_update(temp_mngr_ctx.config.field_ref().prefix, prefix))
+    shared_config = temp_mngr_ctx.config.model_copy_update(
+        to_update(temp_mngr_ctx.config.field_ref().prefix, f"{timestamp_name}-")
+    )
     shared_ctx = temp_mngr_ctx.model_copy_update(to_update(temp_mngr_ctx.field_ref().config, shared_config))
     modal_config = ModalProviderConfig(
         app_name="shared-env-test",
