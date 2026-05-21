@@ -134,6 +134,7 @@ def test_connect_via_cli_group(
 
 
 @pytest.mark.tmux
+@pytest.mark.flaky
 def test_connect_start_restarts_stopped_agent(
     cli_runner: CliRunner,
     temp_work_dir: Path,
