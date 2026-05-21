@@ -114,14 +114,16 @@ from imbue.minds.primitives import OutputFormat
 from imbue.minds.utils.output import write_stdout_line
 from imbue.mngr_ovh.iam_tags import IamResource
 
-# Reserved env names that map to named tiers; everything else is the
-# ``dev`` tier. Mirrors the spec's hard-coded tier mapping and lets
-# ``minds env deploy`` / ``destroy`` dispatch on env name alone.
-# The individual ``_PRODUCTION_ENV_NAME`` / ``_STAGING_ENV_NAME`` /
-# ``_DEV_TIER`` constants + the ``_tier_for_env_name`` mapper live in
-# ``_activated_env.py`` so ``minds pool`` (which also needs to derive
-# the tier for its Vault-scoped OVH credentials read) can share them
-# without an env.py -> pool.py back-reference.
+# Reserved env names that map to named tiers; names starting with
+# ``ci-`` map to the ``ci`` tier (CI-orchestrator-minted ephemeral envs),
+# and everything else maps to the ``dev`` tier. Mirrors the spec's
+# hard-coded tier mapping and lets ``minds env deploy`` / ``destroy``
+# dispatch on env name alone. The individual ``_PRODUCTION_ENV_NAME`` /
+# ``_STAGING_ENV_NAME`` / ``_DEV_TIER`` / ``_CI_TIER`` constants + the
+# ``_tier_for_env_name`` mapper live in ``_activated_env.py`` so
+# ``minds pool`` (which also needs to derive the tier for its
+# Vault-scoped OVH credentials read) can share them without an
+# env.py -> pool.py back-reference.
 _RESERVED_TIER_ENV_NAMES: Final[frozenset[str]] = frozenset({"production", "staging"})
 
 # Env vars exported by ``activate`` (and unset by ``deactivate``). The
@@ -965,19 +967,21 @@ def env_deploy(
       env. Writes nothing to disk. Requires
       ``--yes-i-mean-production`` (or ``--yes-i-mean-staging``) so an
       accidental invocation can never silently fire.
-    - Anything else: dev-tier deploy -- provisions the Modal env, Neon
-      DB, SuperTokens app, pushes per-env Modal Secrets, deploys both
-      apps, and writes ``~/.minds-<name>/client.toml`` + ``secrets.toml``.
+    - Anything else: per-env-tier deploy (``dev`` for ``dev-<user>``
+      envs, ``ci`` for ``ci-<...>`` envs minted by the deployment-tests
+      orchestrator) -- provisions the Modal env, Neon DB, SuperTokens
+      app, pushes per-env Modal Secrets, deploys both apps, and writes
+      ``~/.minds-<name>/client.toml`` + ``secrets.toml``.
 
     Idempotent: re-running picks up any new tier-shared Vault values and
     re-deploys in place.
 
     When neither ``--hard`` nor ``--soft`` is passed, the deploy strategy
     is chosen per :func:`resolve_deploy_strategy`: ``RECREATE`` whenever
-    a migration ran or the tier is ``dev`` (covers personal dev envs +
-    CI ephemeral envs), ``ROLLOVER`` for shared tiers with no migration
-    (staging / production prefer zero-downtime when nothing risky
-    happened).
+    a migration ran or the tier is ``dev`` or ``ci`` (the per-env tiers
+    -- personal dev envs and CI ephemeral envs respectively), ``ROLLOVER``
+    for shared tiers with no migration (staging / production prefer
+    zero-downtime when nothing risky happened).
     """
     output_format: OutputFormat = ctx.obj.get("output_format", OutputFormat.HUMAN)
     env_name = require_activated_env_name()
