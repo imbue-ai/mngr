@@ -9,4 +9,5 @@ backend failure instead of flashing a raw error.
 - This drives the minds health tracker toward STUCK and routes the user
   to the workspace recovery page when their container has been stopped.
 - The "Loading workspace" loader no longer shows the explanatory "This
-  page will reload automatically..." line -- it just shows the heading.
+  page will reload automatically..." line -- it just shows the heading,
+  vertically centered against the spinner.

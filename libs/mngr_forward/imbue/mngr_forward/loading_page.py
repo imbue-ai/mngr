@@ -36,8 +36,11 @@ LOADING_PAGE_CSS: Final[str] = """\
         box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
       }
       .row { display: flex; align-items: center; gap: 12px; }
-      h1 { font-size: 1.125rem; font-weight: 600; margin: 0 0 6px; color: #18181b; }
-      p { margin: 0; color: #52525b; font-size: 0.875rem; line-height: 1.5; }
+      h1 { font-size: 1.125rem; font-weight: 600; margin: 0; color: #18181b; }
+      p { margin: 6px 0 0; color: #52525b; font-size: 0.875rem; line-height: 1.5; }
+      /* With no message (the loading state) the empty <p> is removed so the
+         heading stays vertically centered against the spinner. */
+      p:empty { display: none; }
       .spinner {
         width: 20px;
         height: 20px;
