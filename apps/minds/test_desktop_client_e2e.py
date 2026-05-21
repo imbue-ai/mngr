@@ -43,6 +43,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Final
+from typing import IO
 from uuid import uuid4
 
 import httpx
@@ -249,12 +250,19 @@ def _stream_electron_output(process: subprocess.Popen[bytes]) -> None:
     Electron blocks. We don't parse anything; the test reads state from CDP.
     """
 
-    def _drain(stream: object, prefix: str) -> None:
+    def _drain(stream: IO[bytes], prefix: str) -> None:
         for raw_line in iter(stream.readline, b""):
             line = raw_line.decode("utf-8", errors="replace").rstrip()
             if line:
                 logger.debug("[{}] {}", prefix, line)
 
+    # ``_launched_electron`` always opens both pipes with ``subprocess.PIPE``;
+    # the explicit None check narrows ``Popen.stdout``/``stderr`` from
+    # ``IO[bytes] | None`` to ``IO[bytes]`` and turns a future regression
+    # (someone drops ``stdout=PIPE``) into an obvious assertion failure rather
+    # than a silent thread crash on ``None.readline``.
+    if process.stdout is None or process.stderr is None:
+        raise AssertionError("Electron subprocess was launched without piped stdout/stderr")
     for stream, prefix in ((process.stdout, "electron-out"), (process.stderr, "electron-err")):
         thread = threading.Thread(target=_drain, args=(stream, prefix), daemon=True)
         thread.start()
