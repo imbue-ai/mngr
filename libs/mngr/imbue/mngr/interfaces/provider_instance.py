@@ -24,6 +24,7 @@ from imbue.mngr.errors import HostConnectionError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.data_types import AgentDetails
+from imbue.mngr.interfaces.data_types import ErrorInfo
 from imbue.mngr.interfaces.data_types import HostDetails
 from imbue.mngr.interfaces.data_types import HostLifecycleOptions
 from imbue.mngr.interfaces.data_types import HostResources
@@ -422,6 +423,7 @@ class ProviderInstanceInterface(MutableModel, ABC):
         self,
         cg: ConcurrencyGroup,
         include_destroyed: bool = False,
+        on_error: Callable[[ErrorInfo], None] | None = None,
     ) -> dict[DiscoveredHost, list[DiscoveredAgent]]:
         """Load hosts from this provider and fetch agent references for each host.
 
@@ -432,6 +434,13 @@ class ProviderInstanceInterface(MutableModel, ABC):
 
         The default implementation calls discover_hosts() and then discover_agents()
         on each host in parallel.
+
+        ``on_error``: optional callback for surfacing a per-resource failure to
+        the listing pipeline without aborting discovery. Providers invoke it
+        with an ``ErrorInfo`` (typically a ``ProviderErrorInfo``,
+        ``HostErrorInfo``, or ``AgentErrorInfo``) from inside a per-resource
+        catch site. The listing layer records each emitted error on
+        ``result.errors``; exit code is governed by ``--on-error``.
         """
         logger.trace("Loading hosts from provider {}", self.name)
         host_refs = self.discover_hosts(cg=cg, include_destroyed=include_destroyed)

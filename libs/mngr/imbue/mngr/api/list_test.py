@@ -1,3 +1,4 @@
+from collections.abc import Callable
 from collections.abc import Mapping
 from collections.abc import Sequence
 from datetime import datetime
@@ -24,6 +25,7 @@ from imbue.mngr.api.list import HostErrorInfo
 from imbue.mngr.api.list import ListResult
 from imbue.mngr.api.list import ProviderErrorInfo
 from imbue.mngr.api.list import _AGENT_SCHEMALESS_PATHS
+from imbue.mngr.api.list import _ErrorEmitter
 from imbue.mngr.api.list import _ListAgentsParams
 from imbue.mngr.api.list import _apply_cel_filters
 from imbue.mngr.api.list import _collect_and_emit_details_for_host
@@ -38,7 +40,6 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import ProviderInstanceConfig
 from imbue.mngr.config.provider_config_registry import _provider_config_registry
 from imbue.mngr.errors import MngrError
-from imbue.mngr.errors import ProviderEmptyError
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.interfaces.data_types import CertifiedHostData
@@ -1232,6 +1233,7 @@ class _RaisingDiscoveryProviderInstance(MockProviderInstance):
         self,
         cg: ConcurrencyGroup,
         include_destroyed: bool = False,
+        on_error: Callable[[ErrorInfo], None] | None = None,
     ) -> dict[DiscoveredHost, list[DiscoveredAgent]]:
         raise MngrError("simulated discovery failure from test")
 
@@ -1264,6 +1266,7 @@ class _MismatchedProviderInstance(MockProviderInstance):
         self,
         cg: ConcurrencyGroup,
         include_destroyed: bool = False,
+        on_error: Callable[[ErrorInfo], None] | None = None,
     ) -> dict[DiscoveredHost, list[DiscoveredAgent]]:
         mismatched_host = DiscoveredHost(
             host_id=HostId.generate(),
@@ -1361,65 +1364,33 @@ class _RaisingDiscoveryProviderBackend(ProviderBackendInterface):
         )
 
 
-_EMPTY_BACKEND_NAME = ProviderBackendName("test-empty-backend")
-
-
-class _EmptyProviderBackend(ProviderBackendInterface):
-    """Backend whose construction always raises ``ProviderEmptyError``.
-
-    Mirrors the Modal-env-missing situation: the backend is reachable and
-    answers definitively that nothing has been created yet.
-    """
-
-    @staticmethod
-    def get_name() -> ProviderBackendName:
-        return _EMPTY_BACKEND_NAME
-
-    @staticmethod
-    def get_description() -> str:
-        return "Test backend that reports itself empty at construction time"
-
-    @staticmethod
-    def get_config_class() -> type[ProviderInstanceConfig]:
-        return ProviderInstanceConfig
-
-    @staticmethod
-    def get_build_args_help() -> str:
-        return "No arguments supported."
-
-    @staticmethod
-    def get_start_args_help() -> str:
-        return "No arguments supported."
-
-    @staticmethod
-    def build_provider_instance(
-        name: ProviderInstanceName,
-        config: ProviderInstanceConfig,
-        mngr_ctx: MngrContext,
-        is_for_host_creation: bool = False,
-    ) -> ProviderInstanceInterface:
-        del config, mngr_ctx, is_for_host_creation
-        raise ProviderEmptyError(provider_name=name, reason="simulated empty backend from test")
-
-
 def _make_list_params(
     error_behavior: ErrorBehavior = ErrorBehavior.CONTINUE,
     on_error: Any = None,
     on_agent: Any = None,
     include_filters: tuple[str, ...] = (),
     exclude_filters: tuple[str, ...] = (),
+    result: ListResult | None = None,
+    results_lock: Any = None,
 ) -> _ListAgentsParams:
-    """Build a _ListAgentsParams for testing, with optional CEL filters."""
+    """Build a _ListAgentsParams for testing, with optional CEL filters.
+
+    The embedded ``error_emitter`` is wired to the same ``result`` /
+    ``results_lock`` that the test holds, so per-resource errors land on
+    the test's result.
+    """
     compiled_include: list[Any] = []
     compiled_exclude: list[Any] = []
     if include_filters or exclude_filters:
         compiled_include, compiled_exclude = compile_cel_filters(include_filters, exclude_filters)
+    bound_result = result if result is not None else ListResult()
+    bound_lock = results_lock if results_lock is not None else Lock()
     return _ListAgentsParams(
         compiled_include_filters=compiled_include,
         compiled_exclude_filters=compiled_exclude,
         error_behavior=error_behavior,
         on_agent=on_agent,
-        on_error=on_error,
+        error_emitter=_ErrorEmitter(result=bound_result, results_lock=bound_lock, on_error=on_error),
     )
 
 
@@ -1684,6 +1655,8 @@ def test_construct_discover_and_emit_for_provider_continue_mode_records_error(
         params = _make_list_params(
             error_behavior=ErrorBehavior.CONTINUE,
             on_error=lambda e: captured_errors.append(e),
+            result=result,
+            results_lock=lock,
         )
 
         _construct_discover_and_emit_for_provider(
@@ -1716,7 +1689,7 @@ def test_construct_discover_and_emit_for_provider_abort_mode_propagates_error(
         mngr_ctx = _make_raising_provider_ctx(temp_mngr_ctx)
         result = ListResult()
         lock = Lock()
-        params = _make_list_params(error_behavior=ErrorBehavior.ABORT)
+        params = _make_list_params(error_behavior=ErrorBehavior.ABORT, result=result, results_lock=lock)
 
         with pytest.raises(MngrError, match="simulated discovery failure from test"):
             _construct_discover_and_emit_for_provider(
@@ -1746,7 +1719,7 @@ def test_construct_discover_and_emit_for_provider_success_path_processes_agents(
     """
     result = ListResult()
     lock = Lock()
-    params = _make_list_params(error_behavior=ErrorBehavior.CONTINUE)
+    params = _make_list_params(error_behavior=ErrorBehavior.CONTINUE, result=result, results_lock=lock)
 
     _construct_discover_and_emit_for_provider(
         provider_name=ProviderInstanceName("local"),
@@ -1758,74 +1731,6 @@ def test_construct_discover_and_emit_for_provider_success_path_processes_agents(
     )
 
     assert result.errors == []
-
-
-# =============================================================================
-# ProviderEmptyError: always silently skipped in listing, regardless of mode
-# =============================================================================
-
-
-def _make_empty_provider_ctx(temp_mngr_ctx: MngrContext) -> MngrContext:
-    """Build a MngrContext that has one configured provider that reports empty at construction."""
-    provider_config = ProviderInstanceConfig(backend=_EMPTY_BACKEND_NAME)
-    updated_config = temp_mngr_ctx.config.model_copy_update(
-        to_update(
-            temp_mngr_ctx.config.field_ref().providers,
-            {ProviderInstanceName("empty-provider"): provider_config},
-        ),
-    )
-    return temp_mngr_ctx.model_copy_update(
-        to_update(temp_mngr_ctx.field_ref().config, updated_config),
-    )
-
-
-def test_list_agents_streaming_abort_mode_silently_skips_empty_provider(
-    temp_mngr_ctx: MngrContext,
-) -> None:
-    """A provider raising ProviderEmptyError at construction is silently dropped
-    from the listing even in ABORT mode, because the provider's state is known
-    to be empty (nothing to list) -- distinct from ProviderUnavailableError
-    which signals unknown state and is allowed to abort.
-
-    Regression for: `mngr list` aborting when the Modal env didn't exist yet.
-    """
-    _backend_registry[_EMPTY_BACKEND_NAME] = _EmptyProviderBackend
-    _provider_config_registry[_EMPTY_BACKEND_NAME] = ProviderInstanceConfig
-    try:
-        mngr_ctx = _make_empty_provider_ctx(temp_mngr_ctx)
-        result = list_agents(
-            mngr_ctx=mngr_ctx,
-            is_streaming=True,
-            error_behavior=ErrorBehavior.ABORT,
-        )
-
-        assert result.errors == []
-    finally:
-        del _backend_registry[_EMPTY_BACKEND_NAME]
-        del _provider_config_registry[_EMPTY_BACKEND_NAME]
-
-
-def test_list_agents_batch_abort_mode_silently_skips_empty_provider(
-    temp_mngr_ctx: MngrContext,
-) -> None:
-    """Same as the streaming variant: batch mode in ABORT also silently skips
-    an empty provider rather than wrapping the error into a ProviderDiscoveryError
-    that would abort the whole listing.
-    """
-    _backend_registry[_EMPTY_BACKEND_NAME] = _EmptyProviderBackend
-    _provider_config_registry[_EMPTY_BACKEND_NAME] = ProviderInstanceConfig
-    try:
-        mngr_ctx = _make_empty_provider_ctx(temp_mngr_ctx)
-        result = list_agents(
-            mngr_ctx=mngr_ctx,
-            is_streaming=False,
-            error_behavior=ErrorBehavior.ABORT,
-        )
-
-        assert result.errors == []
-    finally:
-        del _backend_registry[_EMPTY_BACKEND_NAME]
-        del _provider_config_registry[_EMPTY_BACKEND_NAME]
 
 
 # =============================================================================
@@ -1845,14 +1750,12 @@ def test_handle_listing_error_continue_with_discovered_agent_creates_agent_error
     exception = MngrError("simulated agent lookup failure from test")
     result = ListResult()
     lock = Lock()
-    params = _make_list_params(error_behavior=ErrorBehavior.CONTINUE)
+    params = _make_list_params(error_behavior=ErrorBehavior.CONTINUE, result=result, results_lock=lock)
 
     _handle_listing_error(
         source=agent_ref,
         exception=exception,
         params=params,
-        result=result,
-        results_lock=lock,
     )
 
     assert len(result.errors) == 1
@@ -1871,14 +1774,12 @@ def test_handle_listing_error_continue_with_discovered_host_creates_host_error()
     exception = MngrError("simulated host unreachable from test")
     result = ListResult()
     lock = Lock()
-    params = _make_list_params(error_behavior=ErrorBehavior.CONTINUE)
+    params = _make_list_params(error_behavior=ErrorBehavior.CONTINUE, result=result, results_lock=lock)
 
     _handle_listing_error(
         source=host_ref,
         exception=exception,
         params=params,
-        result=result,
-        results_lock=lock,
     )
 
     assert len(result.errors) == 1
@@ -1903,14 +1804,14 @@ def test_handle_listing_error_continue_calls_on_error_callback() -> None:
     params = _make_list_params(
         error_behavior=ErrorBehavior.CONTINUE,
         on_error=lambda e: captured.append(e),
+        result=result,
+        results_lock=lock,
     )
 
     _handle_listing_error(
         source=agent_ref,
         exception=exception,
         params=params,
-        result=result,
-        results_lock=lock,
     )
 
     assert len(captured) == 1
@@ -1927,15 +1828,13 @@ def test_handle_listing_error_abort_mode_raises() -> None:
     exception = MngrError("simulated abort error from test")
     result = ListResult()
     lock = Lock()
-    params = _make_list_params(error_behavior=ErrorBehavior.ABORT)
+    params = _make_list_params(error_behavior=ErrorBehavior.ABORT, result=result, results_lock=lock)
 
     with pytest.raises(MngrError, match="simulated abort error from test"):
         _handle_listing_error(
             source=host_ref,
             exception=exception,
             params=params,
-            result=result,
-            results_lock=lock,
         )
 
     assert result.errors == []
@@ -2173,6 +2072,8 @@ def test_process_host_with_error_handling_continue_mode_records_host_error(
     params = _make_list_params(
         error_behavior=ErrorBehavior.CONTINUE,
         on_error=lambda e: captured_errors.append(e),
+        result=result,
+        results_lock=lock,
     )
 
     _process_host_with_error_handling(
@@ -2216,7 +2117,7 @@ def test_process_host_with_error_handling_abort_mode_propagates_error(
 
     result = ListResult()
     lock = Lock()
-    params = _make_list_params(error_behavior=ErrorBehavior.ABORT)
+    params = _make_list_params(error_behavior=ErrorBehavior.ABORT, result=result, results_lock=lock)
 
     with pytest.raises(MngrError, match="simulated detail retrieval failure from test"):
         _process_host_with_error_handling(
@@ -2229,3 +2130,172 @@ def test_process_host_with_error_handling_abort_mode_propagates_error(
         )
 
     assert result.errors == []
+
+
+# =============================================================================
+# _ErrorEmitter: per-resource on_error plumbing from providers into result.errors
+# =============================================================================
+
+
+def test_error_emitter_appends_to_result_errors() -> None:
+    """The _ErrorEmitter callable appends ErrorInfo records to result.errors."""
+    result = ListResult()
+    lock = Lock()
+    emitter = _ErrorEmitter(result=result, results_lock=lock, on_error=None)
+    error_info = ProviderErrorInfo.build_for_provider(MngrError("vps unreachable"), ProviderInstanceName("vultr-test"))
+    emitter(error_info)
+
+    assert len(result.errors) == 1
+    assert result.errors[0] is error_info
+
+
+def test_error_emitter_invokes_on_error_callback() -> None:
+    """The emitter forwards each error to the params.on_error callback alongside collection."""
+    result = ListResult()
+    lock = Lock()
+    captured: list[ErrorInfo] = []
+    emitter = _ErrorEmitter(result=result, results_lock=lock, on_error=captured.append)
+    error_info = ProviderErrorInfo.build_for_provider(MngrError("vps unreachable"), ProviderInstanceName("vultr-test"))
+    emitter(error_info)
+
+    assert captured == [error_info]
+    assert result.errors == [error_info]
+
+
+def test_error_emitter_collects_per_resource_errors_during_discovery(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """An _ErrorEmitter passed as on_error captures provider-emitted errors during discovery.
+
+    Wires the emitter directly into `provider.discover_hosts_and_agents` and
+    confirms the provider's per-resource emission lands on both
+    `result.errors` and the forwarded on_error callback. The full pipeline
+    wire-up (via `_construct_discover_and_emit_for_provider`) is exercised
+    separately by `test_list_agents_wires_provider_on_error_to_result_errors`.
+    """
+    failure = MngrError("VPS 7 unreachable")
+    emitted_error = ProviderErrorInfo.build_for_provider(failure, ProviderInstanceName("per-resource-test"))
+
+    class _PerResourceErrorProvider(MockProviderInstance):
+        def discover_hosts_and_agents(
+            self,
+            cg: ConcurrencyGroup,
+            include_destroyed: bool = False,
+            on_error: Callable[[ErrorInfo], None] | None = None,
+        ) -> dict[DiscoveredHost, list[DiscoveredAgent]]:
+            if on_error is not None:
+                on_error(emitted_error)
+            return {}
+
+    provider = _PerResourceErrorProvider(
+        name=ProviderInstanceName("per-resource-test"),
+        host_dir=temp_mngr_ctx.config.default_host_dir,
+        mngr_ctx=temp_mngr_ctx,
+    )
+
+    result = ListResult()
+    lock = Lock()
+    captured: list[ErrorInfo] = []
+    emitter = _ErrorEmitter(result=result, results_lock=lock, on_error=captured.append)
+
+    provider.discover_hosts_and_agents(cg=temp_mngr_ctx.concurrency_group, on_error=emitter)
+
+    assert result.errors == [emitted_error]
+    assert captured == [emitted_error]
+
+
+@pytest.mark.parametrize("is_streaming", [True, False])
+def test_list_agents_wires_provider_on_error_to_result_errors(
+    temp_mngr_ctx: MngrContext,
+    is_streaming: bool,
+) -> None:
+    """End-to-end: list_agents routes a provider's on_error to result.errors.
+
+    Confirms both pipeline modes build an `_ErrorEmitter` and thread it into
+    `provider.discover_hosts_and_agents`, so a per-resource failure inside a
+    provider lands in `result.errors` with full attribution:
+
+    - ``is_streaming=True`` exercises ``_construct_discover_and_emit_for_provider``
+    - ``is_streaming=False`` exercises ``_construct_and_discover_for_provider``
+    """
+
+    class _EmittingProvider(MockProviderInstance):
+        def discover_hosts_and_agents(
+            self,
+            cg: ConcurrencyGroup,
+            include_destroyed: bool = False,
+            on_error: Callable[[ErrorInfo], None] | None = None,
+        ) -> dict[DiscoveredHost, list[DiscoveredAgent]]:
+            if on_error is not None:
+                on_error(ProviderErrorInfo.build_for_provider(MngrError("simulated per-resource failure"), self.name))
+            return {}
+
+    # Distinct names per parametrization so xdist workers don't collide in
+    # the shared module-level registries.
+    mode_suffix = "streaming" if is_streaming else "batch"
+    provider_name = ProviderInstanceName(f"emitting-provider-{mode_suffix}")
+    backend_name = ProviderBackendName(f"emitting-backend-{mode_suffix}")
+
+    class _EmittingBackend(ProviderBackendInterface):
+        @staticmethod
+        def get_name() -> ProviderBackendName:
+            return backend_name
+
+        @staticmethod
+        def get_description() -> str:
+            return "Test backend whose provider emits an on_error during discovery"
+
+        @staticmethod
+        def get_config_class() -> type[ProviderInstanceConfig]:
+            return ProviderInstanceConfig
+
+        @staticmethod
+        def get_build_args_help() -> str:
+            return ""
+
+        @staticmethod
+        def get_start_args_help() -> str:
+            return ""
+
+        @staticmethod
+        def build_provider_instance(
+            name: ProviderInstanceName,
+            config: ProviderInstanceConfig,
+            mngr_ctx: MngrContext,
+            is_for_host_creation: bool = False,
+        ) -> ProviderInstanceInterface:
+            del is_for_host_creation
+            return _EmittingProvider(
+                name=name,
+                host_dir=mngr_ctx.config.default_host_dir,
+                mngr_ctx=mngr_ctx,
+            )
+
+    _backend_registry[backend_name] = _EmittingBackend
+    _provider_config_registry[backend_name] = ProviderInstanceConfig
+    try:
+        emitting_config = ProviderInstanceConfig(backend=backend_name)
+        updated_config = temp_mngr_ctx.config.model_copy_update(
+            to_update(temp_mngr_ctx.config.field_ref().providers, {provider_name: emitting_config}),
+        )
+        ctx = temp_mngr_ctx.model_copy_update(
+            to_update(temp_mngr_ctx.field_ref().config, updated_config),
+        )
+
+        captured: list[ErrorInfo] = []
+        result = list_agents(
+            mngr_ctx=ctx,
+            is_streaming=is_streaming,
+            error_behavior=ErrorBehavior.CONTINUE,
+            provider_names=(str(provider_name),),
+            on_error=captured.append,
+        )
+    finally:
+        del _backend_registry[backend_name]
+        del _provider_config_registry[backend_name]
+
+    per_resource_errors = [e for e in result.errors if isinstance(e, ProviderErrorInfo)]
+    assert len(per_resource_errors) == 1
+    assert per_resource_errors[0].provider_name == provider_name
+    assert "simulated per-resource failure" in per_resource_errors[0].message
+    assert captured == result.errors

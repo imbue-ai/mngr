@@ -1,12 +1,21 @@
 """Tests for VPS Docker provider instance utilities."""
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
+from typing import Any
+from typing import cast
 
 import pytest
 
+from imbue.mngr.errors import HostConnectionError
 from imbue.mngr.errors import MngrError
+from imbue.mngr.interfaces.data_types import ErrorInfo
+from imbue.mngr.interfaces.data_types import ProviderErrorInfo
 from imbue.mngr.primitives import HostId
+from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_vps_docker.instance import ParsedVpsBuildOptions
+from imbue.mngr_vps_docker.instance import VpsDockerProvider
 from imbue.mngr_vps_docker.instance import _emit_docker_build_output
 from imbue.mngr_vps_docker.instance import _is_retryable_rsync_error
 from imbue.mngr_vps_docker.instance import _parse_build_args
@@ -296,3 +305,65 @@ def test_emit_docker_build_output_skips_whitespace_only() -> None:
     _emit_docker_build_output("")
     _emit_docker_build_output("   ")
     _emit_docker_build_output("\n")
+
+
+# -- _read_records_from_vps on_error tests --
+#
+# `_read_records_from_vps` is the canonical conversion site for the
+# per-resource on_error feature: when outer SSH to a VPS fails, it must
+# surface a ProviderErrorInfo so `mngr list --on-error abort` exits 1.
+# These tests exercise the method against a minimal stub instead of
+# constructing a full VpsDockerProvider, which would require fabricating
+# a VpsClientInterface and full MngrContext.
+
+
+class _ReadRecordsStub:
+    """Minimal stand-in for `self` when calling `_read_records_from_vps` unbound.
+
+    Exposes only the attributes the method reads. `_make_outer_for_vps_ip`
+    is the only failure injection point in these tests; the host store
+    accessor is never reached because the outer raises first.
+    """
+
+    def __init__(self, raise_on_outer: Exception | None = None) -> None:
+        self._raise_on_outer = raise_on_outer
+        self._host_record_cache: dict[str, Any] = {}
+        self.name = ProviderInstanceName("test-vps-provider")
+
+    @contextmanager
+    def _make_outer_for_vps_ip(self, _vps_ip: str) -> Iterator[Any]:
+        if self._raise_on_outer is not None:
+            raise self._raise_on_outer
+        yield object()
+
+    def _get_existing_host_store(self, _outer: Any) -> Any:
+        raise AssertionError("_get_existing_host_store should not be reached when outer raises")
+
+
+def test_read_records_from_vps_emits_provider_error_info_on_outer_ssh_failure() -> None:
+    """Outer SSH failure surfaces a ProviderErrorInfo through on_error and returns empty results."""
+    stub = _ReadRecordsStub(raise_on_outer=HostConnectionError("vps 7 unreachable"))
+    captured: list[ErrorInfo] = []
+
+    records, agent_data = VpsDockerProvider._read_records_from_vps(
+        cast(VpsDockerProvider, stub), "203.0.113.7", captured.append
+    )
+
+    assert records == []
+    assert agent_data == {}
+    assert len(captured) == 1
+    error = captured[0]
+    assert isinstance(error, ProviderErrorInfo)
+    assert error.provider_name == ProviderInstanceName("test-vps-provider")
+    assert "vps 7 unreachable" in error.message
+    assert error.exception_type == "HostConnectionError"
+
+
+def test_read_records_from_vps_with_none_on_error_swallows_failure() -> None:
+    """on_error=None still returns empty results; no callback invocation needed."""
+    stub = _ReadRecordsStub(raise_on_outer=MngrError("outer ssh blew up"))
+
+    records, agent_data = VpsDockerProvider._read_records_from_vps(cast(VpsDockerProvider, stub), "203.0.113.8", None)
+
+    assert records == []
+    assert agent_data == {}

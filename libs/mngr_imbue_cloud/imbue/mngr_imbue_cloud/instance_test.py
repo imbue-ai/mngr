@@ -4,6 +4,10 @@ from pathlib import Path
 
 import pytest
 
+from imbue.mngr.errors import HostAuthenticationError
+from imbue.mngr.errors import HostConnectionError
+from imbue.mngr.interfaces.data_types import ErrorInfo
+from imbue.mngr.interfaces.data_types import HostErrorInfo
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import DiscoveredAgent
@@ -143,3 +147,102 @@ def test_build_offline_details_from_lease_preserves_host_and_failure_reason(tmp_
     assert len(agent_details_list) == 1
     assert agent_details_list[0].id == agent_id
     assert agent_details_list[0].host == host_details
+
+
+# =============================================================================
+# _collect_listing_raw_via_outer: per-host outer-SSH failures surface via on_error
+# =============================================================================
+
+
+def _make_lease(host_id: HostId, agent_id: AgentId) -> LeasedHostInfo:
+    """Build a LeasedHostInfo for the per-host on_error tests."""
+    return LeasedHostInfo(
+        host_db_id=LeaseDbId("lease-db-id"),
+        vps_address="203.0.113.42",
+        ssh_port=22,
+        ssh_user="user1",
+        container_ssh_port=2222,
+        agent_id=str(agent_id),
+        host_id=str(host_id),
+        host_name=str(host_id),
+        attributes={},
+        leased_at="2025-01-01T00:00:00Z",
+    )
+
+
+class _ConnectionFailureProvider(_StubImbueCloudProvider):
+    """Stub whose outer-host-key scan raises HostConnectionError."""
+
+    def _ensure_outer_host_key_known(self, lease: LeasedHostInfo) -> None:
+        raise HostConnectionError("stub: outer SSH unreachable")
+
+
+class _AuthFailureProvider(_StubImbueCloudProvider):
+    """Stub whose outer-host-key scan raises HostAuthenticationError."""
+
+    def _ensure_outer_host_key_known(self, lease: LeasedHostInfo) -> None:
+        raise HostAuthenticationError("stub: outer SSH key rejected")
+
+
+def test_collect_listing_raw_emits_host_error_on_connection_failure(tmp_path: Path) -> None:
+    """An unreachable outer SSH surfaces a HostErrorInfo through on_error."""
+    host_id = HostId.generate()
+    lease = _make_lease(host_id, AgentId.generate())
+    provider = _ConnectionFailureProvider.model_construct(
+        name=ProviderInstanceName("imbue-cloud-test"),
+        host_dir=tmp_path,
+        _stub_keypair_dir=tmp_path,
+    )
+    captured: list[ErrorInfo] = []
+
+    raw, outer_error, is_auth_failure = provider._collect_listing_raw_via_outer(lease, captured.append)
+
+    assert raw is None
+    assert is_auth_failure is False
+    assert outer_error is not None and "outer SSH unreachable" in outer_error
+    assert len(captured) == 1
+    error = captured[0]
+    assert isinstance(error, HostErrorInfo)
+    assert error.host_id == host_id
+    assert error.exception_type == "HostConnectionError"
+    assert "stub: outer SSH unreachable" in error.message
+
+
+def test_collect_listing_raw_emits_host_error_on_auth_failure(tmp_path: Path) -> None:
+    """An outer-SSH auth failure surfaces a HostErrorInfo and sets is_auth_failure."""
+    host_id = HostId.generate()
+    lease = _make_lease(host_id, AgentId.generate())
+    provider = _AuthFailureProvider.model_construct(
+        name=ProviderInstanceName("imbue-cloud-test"),
+        host_dir=tmp_path,
+        _stub_keypair_dir=tmp_path,
+    )
+    captured: list[ErrorInfo] = []
+
+    raw, outer_error, is_auth_failure = provider._collect_listing_raw_via_outer(lease, captured.append)
+
+    assert raw is None
+    assert is_auth_failure is True
+    assert outer_error is not None and "authentication failed" in outer_error
+    assert len(captured) == 1
+    error = captured[0]
+    assert isinstance(error, HostErrorInfo)
+    assert error.host_id == host_id
+    assert error.exception_type == "HostAuthenticationError"
+
+
+def test_collect_listing_raw_with_none_on_error_swallows_failure(tmp_path: Path) -> None:
+    """on_error=None still returns the fallback tuple without raising."""
+    host_id = HostId.generate()
+    lease = _make_lease(host_id, AgentId.generate())
+    provider = _ConnectionFailureProvider.model_construct(
+        name=ProviderInstanceName("imbue-cloud-test"),
+        host_dir=tmp_path,
+        _stub_keypair_dir=tmp_path,
+    )
+
+    raw, outer_error, is_auth_failure = provider._collect_listing_raw_via_outer(lease, None)
+
+    assert raw is None
+    assert is_auth_failure is False
+    assert outer_error is not None

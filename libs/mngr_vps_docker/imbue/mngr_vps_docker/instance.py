@@ -43,9 +43,11 @@ from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.interfaces.data_types import CpuResources
+from imbue.mngr.interfaces.data_types import ErrorInfo
 from imbue.mngr.interfaces.data_types import HostDetails
 from imbue.mngr.interfaces.data_types import HostLifecycleOptions
 from imbue.mngr.interfaces.data_types import HostResources
+from imbue.mngr.interfaces.data_types import ProviderErrorInfo
 from imbue.mngr.interfaces.data_types import PyinfraConnector
 from imbue.mngr.interfaces.data_types import SnapshotInfo
 from imbue.mngr.interfaces.data_types import SnapshotRecord
@@ -1603,6 +1605,7 @@ class VpsDockerProvider(BaseProviderInstance):
         self,
         cg: ConcurrencyGroup,
         include_destroyed: bool = False,
+        on_error: Callable[[ErrorInfo], None] | None = None,
     ) -> dict[DiscoveredHost, list[DiscoveredAgent]]:
         """Load hosts and agent references from state volumes in batched SSH calls.
 
@@ -1611,7 +1614,7 @@ class VpsDockerProvider(BaseProviderInstance):
         per-host SSH calls into containers for agent discovery.
         """
         with log_span("VPS Docker discover_hosts_and_agents for provider={}", self.name):
-            all_records, agent_data_by_host_id = self._discover_host_records_with_agents()
+            all_records, agent_data_by_host_id = self._discover_host_records_with_agents(on_error=on_error)
 
         result: dict[DiscoveredHost, list[DiscoveredAgent]] = {}
         for record in all_records:
@@ -1703,6 +1706,7 @@ class VpsDockerProvider(BaseProviderInstance):
     def _read_records_from_vps(
         self,
         vps_ip: str,
+        on_error: Callable[[ErrorInfo], None] | None = None,
     ) -> tuple[list[VpsDockerHostRecord], dict[HostId, list[dict[str, Any]]]]:
         """Read all host records and agent data from a single VPS in one SSH command.
 
@@ -1712,7 +1716,9 @@ class VpsDockerProvider(BaseProviderInstance):
         empty results. If outer SSH to the VPS fails, fall back to any
         in-process cached records for that VPS so the hosts still appear
         in the listing (with an offline state) instead of disappearing
-        entirely; one bad VPS must not silently drop its hosts.
+        entirely; one bad VPS must not silently drop its hosts. The
+        per-VPS failure is surfaced via on_error so the listing pipeline
+        can record it (and exit non-zero under --on-error abort).
         """
         try:
             with self._make_outer_for_vps_ip(vps_ip) as outer:
@@ -1732,10 +1738,13 @@ class VpsDockerProvider(BaseProviderInstance):
                 )
             else:
                 logger.warning("Failed to read records from VPS {}: {}", vps_ip, e)
+            if on_error is not None:
+                on_error(ProviderErrorInfo.build_for_provider(e, self.name))
             return cached_records, {}
 
     def _discover_host_records_with_agents(
         self,
+        on_error: Callable[[ErrorInfo], None] | None = None,
     ) -> tuple[list[VpsDockerHostRecord], dict[HostId, list[dict[str, Any]]]]:
         """Discover host records and agent data from all VPSes for this provider.
 
@@ -1743,23 +1752,25 @@ class VpsDockerProvider(BaseProviderInstance):
         (provider-specific), then SSHes to each in parallel to read host
         records and agent data in a single command per VPS.
         """
-        vps_ips = self._list_provider_vps_hostnames()
-        if not vps_ips:
+        vps_hostnames = self._list_provider_vps_hostnames()
+        if not vps_hostnames:
             return [], {}
 
         all_records: list[VpsDockerHostRecord] = []
         all_agent_data: dict[HostId, list[dict[str, Any]]] = {}
 
         cg_name = f"{type(self).__name__}-discover"
-        with log_span("Reading records from {} VPS instance(s) in parallel", len(vps_ips)):
+        with log_span("Reading records from {} VPS instance(s) in parallel", len(vps_hostnames)):
             cg = ConcurrencyGroup(name=cg_name)
             with cg:
                 with ConcurrencyGroupExecutor(
                     parent_cg=cg,
                     name=f"{cg_name}_read_records",
-                    max_workers=min(len(vps_ips), 32),
+                    max_workers=min(len(vps_hostnames), 32),
                 ) as executor:
-                    futures = [executor.submit(self._read_records_from_vps, ip) for ip in vps_ips]
+                    futures = [
+                        executor.submit(self._read_records_from_vps, hostname, on_error) for hostname in vps_hostnames
+                    ]
 
                 for future in futures:
                     records, agent_data = future.result()
