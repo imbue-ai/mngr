@@ -19,15 +19,11 @@ Tiered system-interface restart for the minds recovery flow.
   reloading the (still-running) workspace, and the home-page restart
   button opens the recovery page's tier picker even when the workspace is
   currently healthy.
-- New `mngr stop --stop-host` flag: stops an agent's whole host instead
-  of just the agent.
 - Opening a workspace whose container has been stopped now routes to the
   recovery page (and serves the styled loader) instead of flashing a raw
-  error: the forwarding plugin reports both an SSH-tunnel setup failure and
-  a refused host-loopback dial as backend failures, the same as other
-  unreachable-backend cases.
+  error.
 - The recovery page's host-health probe no longer starts the workspace
-  container as a side effect. It now runs `mngr exec --no-start`, so a
-  genuinely stopped workspace is reported as unreachable and offered the
-  full workspace restart, instead of being silently started by the probe
-  and offered only the surgical restart.
+  container as a side effect, so a genuinely stopped workspace is
+  reported as unreachable and offered the full workspace restart, instead
+  of being silently started by the probe and offered only the surgical
+  restart.
