@@ -39,10 +39,12 @@ _TRUSTED_WORKSPACES_KEY: str = "trustedWorkspaces"
 def read_antigravity_settings(host: OnlineHostInterface, settings_path: Path) -> dict[str, Any]:
     """Read Antigravity's ``settings.json`` via the host filesystem.
 
-    A missing file or a malformed top-level JSON document both yield an empty
-    dict so that downstream provisioning can fall through into a clean write.
-    Any other read failure (permission denied, IO error) is allowed to
-    propagate.
+    A missing file, a malformed top-level JSON document, or a valid JSON
+    document whose top-level value is not an object all yield an empty dict
+    so that downstream provisioning can fall through into a clean write.
+    The non-object case is logged at warning level (the same level used for
+    malformed JSON) so that overwriting the file is not silent. Any other
+    read failure (permission denied, IO error) is allowed to propagate.
     """
     try:
         content = host.read_text_file(settings_path)
@@ -56,6 +58,11 @@ def read_antigravity_settings(host: OnlineHostInterface, settings_path: Path) ->
         logger.warning("Malformed JSON in Antigravity settings at {}: {}. Treating as empty.", settings_path, exc)
         return {}
     if not isinstance(parsed, dict):
+        logger.warning(
+            "Antigravity settings at {} has a non-object top-level value ({}). Treating as empty.",
+            settings_path,
+            type(parsed).__name__,
+        )
         return {}
     return parsed
 
