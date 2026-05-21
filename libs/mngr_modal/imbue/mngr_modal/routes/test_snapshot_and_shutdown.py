@@ -18,6 +18,7 @@ import pytest
 from imbue.mngr.primitives import HostState
 from imbue.mngr.utils.polling import wait_for
 from imbue.mngr.utils.testing import get_short_random_string
+from imbue.mngr.utils.testing import register_modal_test_app
 from imbue.mngr.utils.testing import register_modal_test_volume
 from imbue.mngr_modal.constants import MODAL_TEST_APP_PREFIX
 from imbue.mngr_modal.routes.deployment import deploy_function
@@ -140,6 +141,7 @@ def deployed_snapshot_function() -> Generator[tuple[str, str], None, None]:
     app_name = _get_test_app_name()
     # The deployed function creates a volume named {app_name}-state
     volume_name = f"{app_name}-state"
+    register_modal_test_app(app_name)
     register_modal_test_volume(volume_name)
 
     try:
