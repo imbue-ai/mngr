@@ -39,7 +39,10 @@ mngr create my-agent my_agy
 ## Caveats
 
 - **`agy` PATH shadowing**: if the Antigravity 2.0 desktop app is installed, its bundled `agy` shim can shadow the standalone CLI in `PATH`. Remove the desktop app's `bin/agy` or override `command` with an absolute path to the Go binary.
-- **First-launch trust dialog**: each fresh `work_dir` would normally trigger Antigravity's "Do you trust this folder?" gate. `mngr_antigravity` suppresses this by appending the agent's `work_dir` to `~/.gemini/antigravity-cli/settings.json::trustedWorkspaces` during provisioning. Set `pre_trust_workspace = false` on the agent type if you want the interactive dialog instead.
+- **First-launch trust dialog**: each fresh `work_dir` would normally trigger Antigravity's "Do you trust this folder?" gate, which intercepts the first keystroke sent to the tmux pane and breaks `mngr message`. `mngr_antigravity` dismisses the dialog before launch by appending the agent's `work_dir` to `~/.gemini/antigravity-cli/settings.json::trustedWorkspaces`. Because that file is shared user state, the write is gated:
+    - `mngr create --yes` (`mngr_ctx.is_auto_approve`) or `auto_dismiss_dialogs = true` on the agent type: silent trust.
+    - Interactive shell: mngr prompts via `click.confirm` before writing.
+    - Non-interactive shell without either opt-in: provisioning raises `UserInputError`. Re-run with `--yes` or set `auto_dismiss_dialogs = true`.
 - **No readiness sentinel**: readiness is signalled purely by polling the rendered TUI banner. Live testing showed agy *loads* `hooks.json` but hook execution is gated behind the `json-hooks-enabled` experiment flag that Google enables per-account; once it ships GA we can re-introduce the sentinel.
 
 See the [mngr agent types documentation](https://github.com/imbue-ai/mngr/blob/main/libs/mngr/docs/concepts/agent_types.md) for more details.
