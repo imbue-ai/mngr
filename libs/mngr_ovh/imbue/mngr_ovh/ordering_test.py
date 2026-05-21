@@ -11,8 +11,10 @@ import pytest
 
 from imbue.mngr.errors import MngrError
 from imbue.mngr_ovh.client import OvhVpsClient
+from imbue.mngr_ovh.ordering import OvhOrderDeliveryTimeoutError
 from imbue.mngr_ovh.ordering import order_and_wait_for_vps
 from imbue.mngr_ovh.ordering import rebuild_vps_with_public_key
+from imbue.mngr_ovh.ordering import try_poll_order_for_delivered_vps
 from imbue.mngr_vps_docker.errors import VpsApiError
 from imbue.mngr_vps_docker.errors import VpsProvisioningError
 
@@ -345,7 +347,7 @@ def test_order_raises_when_delivery_times_out() -> None:
 
     client = _client(fake)
     with patch("imbue.mngr_ovh.ordering._OVH_DELIVERY_POLL_INTERVAL_SECONDS", 0.0):
-        with pytest.raises(VpsProvisioningError, match="did not produce a VPS serviceName"):
+        with pytest.raises(OvhOrderDeliveryTimeoutError) as exc_info:
             order_and_wait_for_vps(
                 client,
                 plan_code="vps-2025-model1",
@@ -355,7 +357,66 @@ def test_order_raises_when_delivery_times_out() -> None:
                 duration="P1M",
                 deliver_timeout_seconds=0.05,
             )
+    # The exception subclasses VpsProvisioningError so existing handlers still catch it,
+    # AND carries order_id so the cleanup path can attempt post-hoc adoption.
+    assert isinstance(exc_info.value, VpsProvisioningError)
+    assert exc_info.value.order_id == 4242
+    assert "did not produce a VPS serviceName" in str(exc_info.value)
     assert operation_fetches["n"] >= 1
+
+
+def test_try_poll_returns_none_when_order_not_delivered_yet() -> None:
+    """One-shot poll returns None when no operation has a populated resource.name yet."""
+
+    def fake(method: str, path: str, body: Any = None, need_auth: bool = True) -> Any:
+        if method == "GET" and path == "/me/order/9999/details":
+            return [555]
+        if method == "GET" and path == "/me/order/9999/details/555/extension":
+            return {
+                "order": {
+                    "plan": {
+                        "code": "vps-2025-model1",
+                        "duration": "P1M",
+                        "product": {"name": "virtualPrivateServer"},
+                    },
+                },
+            }
+        if method == "GET" and path == "/me/order/9999/details/555/operations":
+            return [777]
+        if method == "GET" and path == "/me/order/9999/details/555/operations/777":
+            return {"id": 777, "status": "doing", "resource": {}}
+        raise AssertionError(f"unexpected call: {method} {path}")
+
+    client = _client(fake)
+    result = try_poll_order_for_delivered_vps(client, order_id=9999, plan_code="vps-2025-model1")
+    assert result is None
+
+
+def test_try_poll_returns_service_name_when_order_has_delivered() -> None:
+    """One-shot poll returns the assigned serviceName as soon as the operation publishes it."""
+
+    def fake(method: str, path: str, body: Any = None, need_auth: bool = True) -> Any:
+        if method == "GET" and path == "/me/order/8888/details":
+            return [444]
+        if method == "GET" and path == "/me/order/8888/details/444/extension":
+            return {
+                "order": {
+                    "plan": {
+                        "code": "vps-2025-model1",
+                        "duration": "P1M",
+                        "product": {"name": "virtualPrivateServer"},
+                    },
+                },
+            }
+        if method == "GET" and path == "/me/order/8888/details/444/operations":
+            return [666]
+        if method == "GET" and path == "/me/order/8888/details/444/operations/666":
+            return {"id": 666, "status": "done", "resource": {"name": "vps-late42.vps.ovh.us"}}
+        raise AssertionError(f"unexpected call: {method} {path}")
+
+    client = _client(fake)
+    result = try_poll_order_for_delivered_vps(client, order_id=8888, plan_code="vps-2025-model1")
+    assert result == "vps-late42.vps.ovh.us"
 
 
 def test_order_raises_when_checkout_returns_no_order_id() -> None:

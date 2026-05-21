@@ -1,11 +1,43 @@
 """Primitives + errors for the dynamic dev env subsystem."""
 
 import re
+from enum import auto
 from typing import Final
 from typing import Self
 
+from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.primitives import NonEmptyStr
 from imbue.minds.errors import MindError
+
+
+class DeployStrategy(UpperCaseStrEnum):
+    """How ``modal deploy`` cycles existing containers when a new version goes live.
+
+    Wraps Modal's ``--strategy`` flag (1.4.x+). ``ROLLOVER`` is Modal's
+    default: containers from the prior version stay alive serving
+    in-flight requests until they idle out, and new requests gradually
+    move to the new version's containers as they cold-boot. No
+    downtime, but a "stale-content" window where new code is deployed
+    yet not actually serving traffic for several minutes.
+
+    ``RECREATE`` terminates ALL running containers immediately; the
+    next request cold-boots a fresh container at the new version. Brief
+    downtime / latency window, but every subsequent request is
+    guaranteed to hit the new code. Necessary when a migration has
+    just shifted the DB schema (old code against new schema is an
+    untested combination), and the typical right answer for dev / CI /
+    test deploys where the operator runs ``deploy`` and immediately
+    observes the result.
+
+    Lives here (rather than in :mod:`provisioning`) so
+    :mod:`per_env_deploy` can import the type without re-importing
+    :mod:`provisioning` (which already imports the per-env helpers --
+    the other direction would close the cycle).
+    """
+
+    ROLLOVER = auto()
+    RECREATE = auto()
+
 
 # Max total length of a DevEnvName. Bounded so the dev env name can
 # safely participate in a Modal deployed-function hostname under DNS's

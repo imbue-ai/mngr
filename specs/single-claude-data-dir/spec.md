@@ -77,7 +77,7 @@ Packaged as a single PR. Branch: `mngr/single-claude-data-dir`.
 #### `ClaudeAgent.modify_env_vars`
 
 - Branch on the flag:
-  - `True`: do not set `CLAUDE_CONFIG_DIR` or `ORIGINAL_CLAUDE_CONFIG_DIR`. Still set `MNGR_EMIT_COMMON_TRANSCRIPT` when `emit_common_transcript=True`.
+  - `True`: do not set `CLAUDE_CONFIG_DIR` or `ORIGINAL_CLAUDE_CONFIG_DIR`.
   - `False`: unchanged.
 
 #### `ClaudeAgent.on_before_provisioning`
@@ -124,7 +124,7 @@ Packaged as a single PR. Branch: `mngr/single-claude-data-dir`.
   - `test_resolve_shared_claude_config_dir_raises_when_unset` — unset env, assert `UserInputError`.
 - New unit tests in `libs/mngr_claude/imbue/mngr_claude/plugin_test.py`:
   - `test_claude_agent_get_claude_config_dir_uses_env_in_shared_mode` — instantiate agent with flag on, monkeypatch env, assert `get_claude_config_dir()` returns the env value.
-  - `test_claude_agent_modify_env_vars_omits_claude_config_dir_in_shared_mode` — assert `CLAUDE_CONFIG_DIR` and `ORIGINAL_CLAUDE_CONFIG_DIR` are not in the resulting dict; `MNGR_EMIT_COMMON_TRANSCRIPT` still present when configured.
+  - `test_claude_agent_modify_env_vars_omits_claude_config_dir_in_shared_mode` — assert `CLAUDE_CONFIG_DIR` and `ORIGINAL_CLAUDE_CONFIG_DIR` are not in the resulting dict.
 - New integration test (offload-only, `test_*.py` style) in `libs/mngr_claude/imbue/mngr_claude/test_shared_config_dir.py`:
   - `test_shared_config_dir_local_agent_does_not_touch_user_config` — create a local agent with `use_env_config_dir=True`, point `CLAUDE_CONFIG_DIR` at a snapshot of a real `~/.claude` (copied to `tmp_path`), capture mtimes of `.claude.json`/`settings.json`/`projects/` before run, start the agent, send a no-op message, destroy, assert mtimes of pre-existing files are unchanged (newly created `projects/<encoded>/...` files are allowed).
   - `test_shared_config_dir_remote_raises` — attempt to create a Modal agent with the flag, assert `UserInputError` from `on_before_provisioning`.

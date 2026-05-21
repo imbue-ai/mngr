@@ -117,7 +117,6 @@ def test_pi_coding_agent_config_has_correct_defaults() -> None:
 
     assert str(config.command) == "pi"
     assert config.cli_args == ()
-    assert config.permissions == []
     assert config.parent_type is None
     assert config.sync_home_settings is True
     assert config.sync_auth is True

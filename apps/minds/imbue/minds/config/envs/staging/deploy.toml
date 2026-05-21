@@ -2,10 +2,7 @@
 
 modal_workspace = "minds-staging"
 vault_path_prefix = "secrets/minds/staging"
-cloudflare_domain = "CHANGE_ME.example.com"
-
-oauth_google_client_id = ""
-oauth_github_client_id = ""
+cloudflare_domain = "minds-staging.com"
 
 # Vault-backed per-env Modal Secrets (see dev/deploy.toml for the
 # full explanation). The `litellm-connector` Modal Secret is pushed

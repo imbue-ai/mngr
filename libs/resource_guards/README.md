@@ -7,6 +7,8 @@ Resource guards catch two classes of bugs:
 - **Missing marks**: a test calls an external resource without the corresponding `@pytest.mark.<resource>`. The guard fails the test with a clear message.
 - **Superfluous marks**: a test carries a resource mark but never actually invokes the resource. The guard fails the test so the mark doesn't rot.
 
+These two checks together enforce a single design invariant: **for any (test, guarded resource) pair, there is exactly one correct mark state.** A test that exercises the resource (directly or via a tagged fixture in its closure) must carry the mark; a test that doesn't must not. Allowing a test to pass both with and without the mark would defeat the point of the system, since `pytest -m <resource>` would no longer reliably select every test that needs the resource. Every rule that follows is in service of this invariant.
+
 ## How it works
 
 There are two guard mechanisms, covering CLI binaries and Python SDKs respectively.
@@ -52,6 +54,39 @@ import pytest
 def test_agent_creates_tmux_session():
     ...
 ```
+
+## Fixture-level resource declarations
+
+`@fixture_uses_resources(...)` is the fixture-level analogue of the regular per-test resource mark: it declares which resources a fixture itself uses, and is independently verified -- the fixture must actually invoke each declared resource during setup, just like a marked test must actually invoke each marked resource.
+
+By default, resource calls during fixture setup/teardown are attributed to whichever test happens to drive that lifecycle. That's fine when every consumer also invokes the resource directly. It breaks down for module/session-scoped fixtures whose consumers reach the resource only through the fixture: the setup call lands in one test's tracking dir, and siblings carrying the mark fail the superfluous-mark check -- or, if the triggering test lacks the mark, the fixture's setup call is blocked outright.
+
+Opt a fixture into its own guard scope with `@fixture_uses_resources(...)`. Pass every resource the fixture invokes in a single call:
+
+```python
+import pytest
+from imbue.resource_guards.resource_guards import fixture_uses_resources
+
+@pytest.fixture(scope="module")
+@fixture_uses_resources("modal", "docker")
+def deployed_function():
+    # Setup runs under the fixture's own guard scope: modal/docker calls here
+    # are authorized against this declaration, not the consuming test's marks.
+    deploy_function(...)
+    yield url
+    # Teardown also runs under the fixture's guard scope.
+    stop_function(...)
+```
+
+With this in place, `@pytest.mark.modal` on a test is satisfied by *either*:
+- the test body directly invoking modal (the original meaning), OR
+- the test consuming a `@fixture_uses_resources("modal")` fixture in its closure.
+
+The mark is **required** on every consumer of a tagged fixture, even if they don't otherwise use the resource. This keeps `pytest -m modal` as the canonical "select every test that transitively needs modal" selector.
+
+The block check (calls without the mark) is unaffected: a test body that directly invokes a resource still needs `@pytest.mark.<resource>` regardless of which fixtures it consumes.
+
+The decorator must go *below* `@pytest.fixture` so it sees the underlying function before pytest captures it. Opt-in: untagged fixtures are unaffected.
 
 ## Usage for multi-package projects
 

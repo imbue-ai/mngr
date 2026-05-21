@@ -35,6 +35,7 @@ from pydantic import AnyUrl
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.logging import info_span
+from imbue.minds.envs.primitives import DeployStrategy
 from imbue.minds.envs.primitives import DevEnvName
 from imbue.minds.envs.primitives import VaultReadError
 from imbue.minds.envs.providers.neon_db import NeonProjectRecord
@@ -92,6 +93,18 @@ LITELLM_PROXY_MIN_CONTAINERS_ENV_VAR: Final[str] = "MINDS_LITELLM_PROXY_MIN_CONT
 # from there) because ``per_env_deploy`` predates that module and we
 # avoid the circular import.
 MINDS_DEPLOY_ID_ENV_VAR: Final[str] = "MINDS_DEPLOY_ID"
+
+# Map our ``DeployStrategy`` enum (whose member names match the
+# operator-facing ``--hard`` / ``--soft`` vocabulary) to the literal
+# argument values ``modal deploy --strategy`` expects on the CLI.
+# Modal calls the no-downtime variant ``rolling``; our matching enum
+# member is :attr:`DeployStrategy.ROLLOVER` (chosen so the operator
+# language "we deployed with the rollover strategy" reads naturally
+# alongside ``--soft``).
+_MODAL_STRATEGY_ARG_BY_ENUM: Final[dict[DeployStrategy, str]] = {
+    DeployStrategy.ROLLOVER: "rolling",
+    DeployStrategy.RECREATE: "recreate",
+}
 
 
 class ModalDeployError(MindError):
@@ -282,6 +295,7 @@ def deploy_litellm_proxy(
     tier: str,
     min_containers: int,
     deploy_id: str,
+    strategy: DeployStrategy,
     parent_cg: ConcurrencyGroup,
 ) -> AnyUrl:
     """``modal deploy`` the litellm-proxy app into ``modal_env`` for ``tier``.
@@ -320,13 +334,14 @@ def deploy_litellm_proxy(
             deploy_id=deploy_id,
             parent_cg=parent_cg,
         )
-    with info_span("modal deploy llm-{} into env {!r}", tier, modal_env):
+    with info_span("modal deploy llm-{} into env {!r} (strategy={})", tier, modal_env, strategy.value):
         return _deploy_modal_app(
             app_file=app_file,
             app_name=f"llm-{tier}",
             modal_env=modal_env,
             tier=tier,
             deploy_id=deploy_id,
+            strategy=strategy,
             extra_env={LITELLM_PROXY_MIN_CONTAINERS_ENV_VAR: str(min_containers)},
             parent_cg=parent_cg,
         )
@@ -394,11 +409,12 @@ def stop_modal_app(
         )
     if result.returncode == 0:
         return
-    # Modal's "no such app" wording has shifted; both known variants
-    # contain "not found" or "already stopped". Treat either as a no-op
-    # so destroy stays idempotent.
+    # Modal's "no such app" wording has shifted across versions:
+    #   - older: "could not find a deployed app named '<name>' ..."
+    #   - 1.4.x: "No App with name '<name>' found in the '<env>' environment."
+    # Both invariant substrings handled below so destroy stays idempotent.
     message = (result.stderr + result.stdout).lower()
-    if "not found" in message or "already stopped" in message or "no such" in message:
+    if "not found" in message or "already stopped" in message or "no such" in message or "no app with name" in message:
         logger.info("`modal app stop {} --env {}`: app already stopped or missing.", app_name, modal_env)
         return
     stderr = result.stderr.strip() or result.stdout.strip()
@@ -413,6 +429,7 @@ def deploy_remote_service_connector(
     tier: str,
     min_containers: int,
     deploy_id: str,
+    strategy: DeployStrategy,
     parent_cg: ConcurrencyGroup,
 ) -> AnyUrl:
     """``modal deploy`` the remote_service_connector app into ``modal_env`` for ``tier``.
@@ -427,13 +444,14 @@ def deploy_remote_service_connector(
     Modal Secrets minted by this deploy. Missing the id at the app's module
     load is a hard failure (the app raises ``DeployIdMissingError``).
     """
-    with info_span("modal deploy rsc-{} into env {!r}", tier, modal_env):
+    with info_span("modal deploy rsc-{} into env {!r} (strategy={})", tier, modal_env, strategy.value):
         return _deploy_modal_app(
             app_file=_connector_app_file(),
             app_name=f"rsc-{tier}",
             modal_env=modal_env,
             tier=tier,
             deploy_id=deploy_id,
+            strategy=strategy,
             extra_env={CONNECTOR_MIN_CONTAINERS_ENV_VAR: str(min_containers)},
             parent_cg=parent_cg,
         )
@@ -463,11 +481,17 @@ def _deploy_modal_app(
     modal_env: str,
     tier: str,
     deploy_id: str,
+    strategy: DeployStrategy,
     extra_env: dict[str, str] | None = None,
     parent_cg: ConcurrencyGroup,
 ) -> AnyUrl:
     if not app_file.is_file():
         raise RepoLayoutError(f"Modal app file not found: {app_file}")
+    # Modal's CLI calls the rollover strategy ``rolling`` and the
+    # recreate strategy ``recreate``. We use ``ROLLOVER`` in our own
+    # vocabulary (matches the operator-facing ``--soft`` flag) and
+    # only translate at the CLI boundary.
+    modal_strategy_arg = _MODAL_STRATEGY_ARG_BY_ENUM[strategy]
     command = [
         "modal",
         "deploy",
@@ -475,6 +499,8 @@ def _deploy_modal_app(
         app_name,
         "--env",
         modal_env,
+        "--strategy",
+        modal_strategy_arg,
         str(app_file),
     ]
     subprocess_env = _modal_subprocess_env()
@@ -591,14 +617,16 @@ def get_modal_app_latest_version(*, app_name: str, modal_env: str, parent_cg: Co
         )
     if result.returncode != 0:
         message = (result.stderr + result.stdout).lower()
-        # Modal CLI's "no such app" wording: empirically "could not find a
-        # deployed app named '<name>' in the '<env>' environment." Also
-        # handle older variants for forward-compat.
+        # Modal CLI's "no such app" wording has shifted across versions:
+        #   - older: "could not find a deployed app named '<name>' in the '<env>' environment."
+        #   - 1.4.x: "No App with name '<name>' found in the '<env>' environment."
+        # Both reduce to a few invariant substrings. Match defensively.
         if (
             "could not find" in message
             or "not found" in message
             or "no such" in message
             or "does not exist" in message
+            or "no app with name" in message
         ):
             return None
         stderr = result.stderr.strip() or result.stdout.strip()

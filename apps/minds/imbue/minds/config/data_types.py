@@ -218,9 +218,6 @@ class DeployEnvConfig(FrozenModel):
     Names the Modal workspace + tier-specific Vault path prefix and the
     list of services whose ``.minds/template/<service>.sh`` schemas must
     be pulled from Vault and pushed into Modal as ``<service>-<tier>``.
-
-    OAuth client IDs are not secrets and live here; client secrets stay
-    in the ``supertokens`` Vault entry.
     """
 
     modal_workspace: NonEmptyStr = Field(description="Modal workspace (Modal team/account) this tier deploys into.")
@@ -238,14 +235,6 @@ class DeployEnvConfig(FrozenModel):
     )
     cloudflare_domain: NonEmptyStr = Field(
         description="Cloudflare zone domain used by this tier (informational; the connector also reads this from its own Vault entry)."
-    )
-    oauth_google_client_id: str = Field(
-        default="",
-        description="Public Google OAuth client id for this tier. Client secret lives in the `supertokens` Vault entry.",
-    )
-    oauth_github_client_id: str = Field(
-        default="",
-        description="Public GitHub OAuth client id for this tier. Client secret lives in the `supertokens` Vault entry.",
     )
     secrets: DeploySecretsConfig = Field(
         description="Which `.minds/template/*.sh`-shaped services the deploy step pulls from Vault and pushes to Modal."
