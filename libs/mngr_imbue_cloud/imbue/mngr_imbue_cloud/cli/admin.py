@@ -379,7 +379,9 @@ def _sync_mngr_into_template(mngr_source: Path, workspace_dir: Path) -> None:
             timeout=120.0,
         )
     if result.returncode != 0:
-        logger.warning("rsync failed (exit {}): {}", result.returncode, result.stderr.strip())
+        raise PoolBakeError(
+            f"rsync of {mngr_source} into {vendor_mngr} failed (exit {result.returncode}): {result.stderr.strip()}"
+        )
 
 
 def build_extra_tags_env_value(tags: tuple[str, ...]) -> str:
@@ -521,7 +523,9 @@ def _create_single_pool_host(
 
     stop_result = _run_mngr_command(["stop", full_address])
     if stop_result.returncode != 0:
-        logger.warning("mngr stop failed (continuing): {}", stop_result.stderr)
+        raise PoolBakeError(
+            f"`mngr stop {full_address}` failed (exit {stop_result.returncode}): {stop_result.stderr.strip()}"
+        )
 
     logger.info("  Ensuring sshd is running in container")
     # Match the cloud-init bump we apply to the host VPS (and the lima
@@ -614,14 +618,17 @@ def _create_single_pool_host(
         timeout=120,
     )
     if chat_destroy.returncode != 0:
-        # Don't fail the bake -- the chat agent may have failed to come up
-        # at all (no API key, slow boot, etc) which is fine for our purposes
-        # since we just need it gone. Warn so an operator notices if every
-        # bake hits this path.
-        logger.warning(
-            "Best-effort destroy of bootstrap chat agent {!r} failed (continuing): {}",
-            bootstrap_chat_agent_name,
-            chat_destroy.stderr.strip(),
+        # Failing the bake instead of warning -- a destroy that errors
+        # out almost always means a vendored-mngr / FCT-template version
+        # skew (e.g. an `agent_types` field the older vendored mngr
+        # doesn't recognize), and shipping a pool host whose internal
+        # bootstrap state we don't actually understand has bitten us
+        # before. Better to abort + clean up than land a half-known
+        # host in the pool.
+        raise PoolBakeError(
+            f"destroying bootstrap chat agent {bootstrap_chat_agent_name!r} via "
+            f"`mngr exec {full_address} {chat_destroy_cmd!r}` failed "
+            f"(exit {chat_destroy.returncode}): {chat_destroy.stderr.strip()}"
         )
 
     logger.info("  Removing initial-chat sentinel: {}", _INITIAL_CHAT_SENTINEL_PATH)

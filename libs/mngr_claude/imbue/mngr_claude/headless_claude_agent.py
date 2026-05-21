@@ -24,7 +24,6 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import NoCommandDefinedError
 from imbue.mngr.interfaces.agent import AgentInterface
-from imbue.mngr.interfaces.agent import NoPermissionsAgentMixin
 from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import CommandString
@@ -432,7 +431,7 @@ class _StreamTailState(MutableModel):
                 yield from self._yield_text_from_lines(remaining.split("\n"))
 
 
-class NoPermissionsClaudeAgent(ClaudeAgent, NoPermissionsAgentMixin):
+class NoPermissionsClaudeAgent(ClaudeAgent):
     """ClaudeAgent with no permissions granted (no tools, no trust needed).
 
     Skips trust validation and dialog dismissal during provisioning since

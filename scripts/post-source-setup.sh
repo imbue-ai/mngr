@@ -77,7 +77,7 @@ uv tool install -e "$CODE_DIR/libs/mngr" \
     --with-editable "$CODE_DIR/libs/mngr_claude"
 uv tool install modal
 
-# Step 6: rebuild the minds_workspace_server frontend, but only if node
+# Step 6: rebuild the system_interface frontend, but only if node
 # is installed and the project is present.
 #
 # This step is a no-op for the base mngr Dockerfile (which does not
@@ -90,8 +90,8 @@ uv tool install modal
 # image, node is already baked in, the guard succeeds, and the
 # frontend is rebuilt against the just-patched source. Without this,
 # release tests can drift against a stale frontend.
-FRONTEND_DIR="$CODE_DIR/apps/minds_workspace_server/frontend"
+FRONTEND_DIR="$CODE_DIR/apps/system_interface/frontend"
 if command -v npm >/dev/null 2>&1 && [ -f "$FRONTEND_DIR/package-lock.json" ]; then
-    echo "Rebuilding minds_workspace_server frontend"
+    echo "Rebuilding system_interface frontend"
     (cd "$FRONTEND_DIR" && npm ci && npm run build)
 fi

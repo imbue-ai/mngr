@@ -168,7 +168,7 @@ def test_discover_agents_returns_refs_from_provider(
     """Test that discover_agents loads agent data from provider and populates certified_data."""
     agent_id_1 = AgentId.generate()
     agent_id_2 = AgentId.generate()
-    agent_data_1 = {"id": str(agent_id_1), "name": "my-agent", "type": "claude", "permissions": ["read", "write"]}
+    agent_data_1 = {"id": str(agent_id_1), "name": "my-agent", "type": "claude"}
     agent_data_2 = {"id": str(agent_id_2), "name": "other-agent", "type": "codex"}
     fake_provider.mock_agent_data = [agent_data_1, agent_data_2]
 
@@ -182,13 +182,11 @@ def test_discover_agents_returns_refs_from_provider(
     # Verify certified_data is populated with full agent data
     assert refs[0].certified_data == agent_data_1
     assert refs[0].agent_type == "claude"
-    assert refs[0].permissions == ("read", "write")
 
     assert refs[1].agent_id == agent_id_2
     assert refs[1].agent_name == AgentName("other-agent")
     assert refs[1].certified_data == agent_data_2
     assert refs[1].agent_type == "codex"
-    assert refs[1].permissions == ()
 
 
 @pytest.mark.allow_warnings(match=r"^Skipping malformed agent record for host")
@@ -200,29 +198,6 @@ def test_discover_agents_returns_empty_list_on_error(
 
     refs = offline_host.discover_agents()
     assert refs == []
-
-
-def test_get_permissions_returns_empty_list_when_no_agents(offline_host: OfflineHost) -> None:
-    """Test that get_permissions returns empty list when no agents exist."""
-    permissions = offline_host.get_permissions()
-    assert permissions == []
-
-
-def test_get_permissions_returns_permissions_from_agents(
-    offline_host: OfflineHost, fake_provider: MockProviderInstance
-) -> None:
-    """Test that get_permissions returns union of all agent permissions from persisted data."""
-    agent_id_1 = AgentId.generate()
-    agent_id_2 = AgentId.generate()
-    fake_provider.mock_agent_data = [
-        {"id": str(agent_id_1), "name": "agent-1", "permissions": ["read", "write"]},
-        {"id": str(agent_id_2), "name": "agent-2", "permissions": ["write", "execute"]},
-    ]
-
-    permissions = offline_host.get_permissions()
-
-    # Should be the union of all permissions
-    assert set(permissions) == {"read", "write", "execute"}
 
 
 def test_get_state_returns_crashed_when_no_stop_reason(offline_host: OfflineHost) -> None:
@@ -398,7 +373,6 @@ def test_validate_and_create_discovered_agent_creates_valid_ref() -> None:
         "id": str(agent_id),
         "name": "my-agent",
         "type": "claude",
-        "permissions": ["read"],
     }
 
     ref = validate_and_create_discovered_agent(agent_data, host_id, provider_name)
@@ -410,7 +384,6 @@ def test_validate_and_create_discovered_agent_creates_valid_ref() -> None:
     assert ref.provider_name == provider_name
     assert ref.certified_data == agent_data
     assert ref.agent_type == "claude"
-    assert ref.permissions == ("read",)
 
 
 @pytest.mark.allow_warnings(match=r"^Skipping malformed agent record for host")
