@@ -12,7 +12,6 @@ from imbue.mngr.api.discovery_events import emit_discovery_events_for_host
 from imbue.mngr.api.providers import get_provider_instance
 from imbue.mngr.config.agent_config_registry import resolve_agent_type
 from imbue.mngr.config.data_types import MngrContext
-from imbue.mngr.config.provider_config_registry import get_provider_config_class
 from imbue.mngr.errors import DuplicateAgentNameError
 from imbue.mngr.errors import HostNameConflictError
 from imbue.mngr.errors import MngrError
@@ -28,9 +27,8 @@ from imbue.mngr.plugins.hookspecs import OnBeforeCreateArgs
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import HostName
-from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
-from imbue.mngr.providers.registry import get_backend
+from imbue.mngr.providers.registry import resolve_backend_and_config
 from imbue.mngr.utils.env_utils import parse_env_file
 from imbue.mngr.utils.git_utils import delete_git_branch
 from imbue.mngr.utils.git_utils import find_source_repo_of_worktree
@@ -379,19 +377,11 @@ def _bootstrap_backend_for_host_creation(
 ) -> None:
     """Resolve the backend + config for ``provider_name`` and call ``bootstrap_for_host_creation``.
 
-    Mirrors the lookup logic in ``get_provider_instance``: a configured
-    provider instance uses its declared backend + config; an unconfigured
-    name is treated as a bare backend name with default config. Most
-    backends override this to a no-op so the call is cheap.
+    Shares its resolution logic with ``get_provider_instance`` via
+    ``resolve_backend_and_config``. Most backends override
+    ``bootstrap_for_host_creation`` to a no-op so the call is cheap.
     """
-    if provider_name in mngr_ctx.config.providers:
-        provider_config = mngr_ctx.config.providers[provider_name]
-        backend_name = provider_config.backend
-    else:
-        backend_name = ProviderBackendName(str(provider_name))
-        config_class = get_provider_config_class(str(backend_name))
-        provider_config = config_class(backend=backend_name)
-    backend = get_backend(backend_name)
+    backend, provider_config = resolve_backend_and_config(provider_name, mngr_ctx)
     backend.bootstrap_for_host_creation(name=provider_name, config=provider_config, mngr_ctx=mngr_ctx)
 
 

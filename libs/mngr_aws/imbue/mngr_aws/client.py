@@ -151,6 +151,17 @@ class AwsVpsClient(VpsClientInterface):
 
         with self._translate_aws_errors():
             existing = self._ec2().describe_security_groups(Filters=filters).get("SecurityGroups", [])
+        if len(existing) > 1:
+            # EC2 enforces (group-name, vpc-id) uniqueness, so >1 result here
+            # means our lookup spans multiple VPCs (vpc_id is None and there
+            # are SGs with the same name in different VPCs). Refuse to guess
+            # which one the user wanted -- pick a specific one explicitly.
+            sg_descriptions = ", ".join(f"{g['GroupId']} (vpc={g.get('VpcId', '?')})" for g in existing)
+            raise MngrError(
+                f"Found {len(existing)} security groups named {sg_name!r}: {sg_descriptions}. "
+                "Set vpc_id on the AWS provider config to scope the lookup, or pass an explicit "
+                "security_group=ExistingSecurityGroup(id='sg-...')."
+            )
         if existing:
             sg_id = existing[0]["GroupId"]
             self._authorize_ssh_ingress_idempotent(sg_id)
@@ -420,21 +431,18 @@ class AwsVpsClient(VpsClientInterface):
     def list_snapshots(self) -> list[VpsSnapshotInfo]:
         with self._translate_aws_errors():
             result = self._ec2().describe_snapshots(OwnerIds=["self"])
-        snapshots: list[VpsSnapshotInfo] = []
-        for snap in result.get("Snapshots", []):
-            created = snap.get("StartTime")
-            if isinstance(created, datetime):
-                created_at = created if created.tzinfo else created.replace(tzinfo=timezone.utc)
-            else:
-                created_at = datetime.now(timezone.utc)
-            snapshots.append(
-                VpsSnapshotInfo(
-                    id=VpsSnapshotId(snap["SnapshotId"]),
-                    description=snap.get("Description", ""),
-                    created_at=created_at,
-                )
+        # boto3 returns tz-aware datetimes for EC2 timestamps; let a missing
+        # StartTime or unexpected type surface as a KeyError / TypeError
+        # rather than silently substituting "now" (which would be misleading
+        # data attached to the wrong snapshot).
+        return [
+            VpsSnapshotInfo(
+                id=VpsSnapshotId(snap["SnapshotId"]),
+                description=snap.get("Description", ""),
+                created_at=snap["StartTime"],
             )
-        return snapshots
+            for snap in result.get("Snapshots", [])
+        ]
 
     # =========================================================================
     # SSH Key Operations (EC2 KeyPairs)

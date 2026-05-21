@@ -5,7 +5,6 @@ from typing import Final
 from botocore.exceptions import BotoCoreError
 from pydantic import ConfigDict
 from pydantic import Field
-from pydantic import PrivateAttr
 
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import ProviderInstanceConfig
@@ -31,21 +30,12 @@ class AwsProvider(VpsDockerProvider):
     aws_client: AwsVpsClient = Field(frozen=True, description="EC2 API client")
     aws_config: AwsProviderConfig = Field(frozen=True, description="AWS-specific configuration")
 
-    _instances_cache: list[dict[str, Any]] | None = PrivateAttr(default=None)
+    def _fetch_provider_instances(self) -> list[dict[str, Any]]:
+        """List EC2 instances tagged with this provider's name."""
+        return self.aws_client.list_instances(provider_tag=str(self.name))
 
-    def reset_caches(self) -> None:
-        super().reset_caches()
-        self._instances_cache = None
-
-    def _list_instances_cached(self) -> list[dict[str, Any]]:
-        """List EC2 instances tagged for this provider, caching for the duration of the command."""
-        if self._instances_cache is not None:
-            return self._instances_cache
-        self._instances_cache = self.aws_client.list_instances(provider_tag=str(self.name))
-        return self._instances_cache
-
-    def _get_effective_auto_shutdown_minutes(self) -> int | None:
-        """Resolve auto-shutdown TTL, refusing to create an instance under pytest without one.
+    def _validate_provider_args_for_create(self) -> None:
+        """Refuse to create an EC2 instance under pytest without auto_shutdown_minutes set.
 
         Mirrors the Modal pattern in ``mngr_modal.backend._create_environment``:
         when ``PYTEST_CURRENT_TEST`` is set, the test harness is responsible
@@ -54,11 +44,13 @@ class AwsProvider(VpsDockerProvider):
         ``shutdown -P +N`` combined with the launch flag
         ``InstanceInitiatedShutdownBehavior=terminate`` (both rely on
         ``auto_shutdown_minutes`` being set on the provider config). If it
-        isn't, fail closed before launching the instance rather than
-        silently leaking it.
+        isn't, fail closed at the pre-create hook rather than silently leak
+        an instance.
         """
-        minutes = super()._get_effective_auto_shutdown_minutes()
-        if "PYTEST_CURRENT_TEST" in os.environ and not (minutes and minutes > 0):
+        if "PYTEST_CURRENT_TEST" not in os.environ:
+            return
+        minutes = self._get_effective_auto_shutdown_minutes()
+        if not (minutes and minutes > 0):
             raise MngrError(
                 "Refusing to create EC2 instance during pytest without "
                 "auto_shutdown_minutes set on the AWS provider config. "
@@ -68,7 +60,6 @@ class AwsProvider(VpsDockerProvider):
                 "InstanceInitiatedShutdownBehavior=terminate) and the "
                 "instance self-terminates even if pytest is killed."
             )
-        return minutes
 
     def _list_provider_vps_hostnames(self) -> list[str]:
         """Return public IPs of EC2 instances tagged with this provider's name.

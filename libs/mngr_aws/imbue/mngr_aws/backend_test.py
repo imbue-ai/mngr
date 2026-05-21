@@ -57,33 +57,34 @@ def _build_provider(mngr_ctx: MngrContext, *, auto_shutdown_minutes: int | None)
     )
 
 
-def test_get_effective_auto_shutdown_minutes_under_pytest_raises_when_unset(
+def test_validate_provider_args_under_pytest_raises_when_unset(
     temp_mngr_ctx: MngrContext,
 ) -> None:
-    """The guard fires when auto_shutdown_minutes is None (the config default).
+    """The pre-create hook fires when auto_shutdown_minutes is None (the config default).
 
     Regression: a release test that forgets to set auto_shutdown_minutes on
     the AWS provider config would silently launch instances with no self-
-    termination safety net. The guard must abort the launch before any
+    termination safety net. The hook must abort the launch before any
     EC2 API call so the leak window is zero.
     """
     provider = _build_provider(temp_mngr_ctx, auto_shutdown_minutes=None)
     with pytest.raises(MngrError, match="auto_shutdown_minutes"):
-        provider._get_effective_auto_shutdown_minutes()
+        provider._validate_provider_args_for_create()
 
 
-def test_get_effective_auto_shutdown_minutes_under_pytest_accepts_positive(
+def test_validate_provider_args_under_pytest_accepts_positive(
     temp_mngr_ctx: MngrContext,
 ) -> None:
-    """Properly configured tests pass the guard and propagate the value to cloud-init."""
+    """Properly configured tests pass the hook and proceed to instance creation."""
     provider = _build_provider(temp_mngr_ctx, auto_shutdown_minutes=60)
-    assert provider._get_effective_auto_shutdown_minutes() == 60
+    # No exception raised.
+    provider._validate_provider_args_for_create()
 
 
-def test_get_effective_auto_shutdown_minutes_under_pytest_raises_when_zero(
+def test_validate_provider_args_under_pytest_raises_when_zero(
     temp_mngr_ctx: MngrContext,
 ) -> None:
     """Zero (and negatives) are explicitly rejected, not silently treated as unset."""
     provider = _build_provider(temp_mngr_ctx, auto_shutdown_minutes=0)
     with pytest.raises(MngrError, match="auto_shutdown_minutes"):
-        provider._get_effective_auto_shutdown_minutes()
+        provider._validate_provider_args_for_create()

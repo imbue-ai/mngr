@@ -121,6 +121,7 @@ Tags are set in the `RunInstances` call via `TagSpecifications`, not via a separ
 - Discovery: `DescribeInstances` filtered by `tag:mngr-provider`, then SSH to each VPS to read host records from the state volume.
 - Instance shutdown behavior is set to `terminate` so a self-halted instance is garbage-collected automatically.
 - The security group (`mngr-aws` by default) is auto-created on first `create_host` and reused across hosts; it is not deleted on `destroy_host` — clean up manually when retiring a provider.
+- **No automatic snapshot-on-create**: unlike `mngr_modal`, where every sandbox is snapshotted at create time so a hard-killed host can be rehydrated, this provider does not snapshot EC2 instances automatically. `AwsVpsClient.create_snapshot` / `list_snapshots` / `delete_snapshot` are implemented; you can call them manually via `mngr snapshot`, or write a plugin that hooks `on_host_created` to do it for you.
 
 ## Release tests and cost
 

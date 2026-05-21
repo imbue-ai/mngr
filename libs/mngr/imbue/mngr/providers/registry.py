@@ -125,6 +125,33 @@ def list_backends() -> list[str]:
     return sorted(str(k) for k in _backend_registry.keys())
 
 
+def resolve_backend_and_config(
+    provider_name: ProviderInstanceName,
+    mngr_ctx: MngrContext,
+) -> tuple[type[ProviderBackendInterface], ProviderInstanceConfig]:
+    """Resolve the backend class and config for a provider-instance name.
+
+    Two cases:
+    1. The name matches a configured provider instance in ``mngr_ctx.config.providers``:
+       return the declared backend and the user's config.
+    2. Otherwise, treat the name as a bare backend name and instantiate the
+       backend's default config (supports e.g. ``--provider local`` /
+       ``--provider docker`` without a ``[providers.<name>]`` block).
+
+    Used by both ``get_provider_instance`` and the ``mngr create``
+    bootstrap path so the "configured-instance vs. bare-backend-name"
+    fallback logic lives in exactly one place.
+    """
+    if provider_name in mngr_ctx.config.providers:
+        provider_config = mngr_ctx.config.providers[provider_name]
+        backend_name = provider_config.backend
+    else:
+        backend_name = ProviderBackendName(str(provider_name))
+        config_class = get_provider_config_class(str(backend_name))
+        provider_config = config_class(backend=backend_name)
+    return get_backend(backend_name), provider_config
+
+
 def build_provider_instance(
     instance_name: ProviderInstanceName,
     backend_name: ProviderBackendName,

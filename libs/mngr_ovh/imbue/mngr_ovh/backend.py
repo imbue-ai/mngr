@@ -616,8 +616,6 @@ class OvhProviderBackend(ProviderBackendInterface):
             "  --vps-plan=PLAN       OVH plan code (default: vps-2025-model1 = VPS-1)\n"
             "  --git-depth=N         Shallow-clone build context to depth N before upload\n"
             "\n"
-            "OS image is set via default_image_name on the provider config (defaults to\n"
-            "'Debian 12 - Docker'); per-host overrides are not supported via build args.\n"
             "All other build args are passed to 'docker build' on the VPS.\n"
             "Example: -b --vps-plan=vps-2025-model1 -b --file=Dockerfile -b .\n"
         )

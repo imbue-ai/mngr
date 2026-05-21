@@ -579,6 +579,7 @@ class VpsDockerProvider(BaseProviderInstance):
 
     _host_record_cache: dict[HostId, VpsDockerHostRecord] = PrivateAttr(default_factory=dict)
     _container_running_cache: dict[str, bool] = PrivateAttr(default_factory=dict)
+    _instances_cache: list[dict[str, Any]] | None = PrivateAttr(default=None)
 
     @property
     def supports_snapshots(self) -> bool:
@@ -601,6 +602,38 @@ class VpsDockerProvider(BaseProviderInstance):
             self._evict_cached_host(host_id)
         self._host_record_cache.clear()
         self._container_running_cache.clear()
+        self._instances_cache = None
+
+    def _fetch_provider_instances(self) -> list[dict[str, Any]]:
+        """Provider-specific listing hook: return the raw instance dicts from the API.
+
+        Default returns ``[]`` so subclasses without a tag-based listing API
+        (e.g. OVH, which uses ``_list_provider_vps_hostnames`` directly) can
+        opt out. Subclasses with one (currently AWS and Vultr) override to
+        call their typed client's ``list_instances``; the result is cached
+        for the duration of a single command via ``_list_instances_cached``.
+        """
+        return []
+
+    def _list_instances_cached(self) -> list[dict[str, Any]]:
+        """List instances tagged for this provider, caching for the duration of the command.
+
+        Subclasses customise *what* gets listed by overriding
+        ``_fetch_provider_instances``; the cache scaffolding lives here.
+        """
+        if self._instances_cache is not None:
+            return self._instances_cache
+        self._instances_cache = self._fetch_provider_instances()
+        return self._instances_cache
+
+    def _validate_provider_args_for_create(self) -> None:
+        """Hook called by ``_provision_vps`` immediately before ``create_instance``.
+
+        Default no-op. Subclasses override to enforce provider-specific
+        pre-create invariants (e.g. AWS's pytest-only "must have
+        auto_shutdown_minutes set" guard) at the natural moment in the
+        lifecycle, instead of piggy-backing on a property accessor.
+        """
 
     # =========================================================================
     # Key Management
@@ -974,6 +1007,11 @@ class VpsDockerProvider(BaseProviderInstance):
 
         Returns (vps_instance_id, vps_ip).
         """
+        # Provider-specific pre-create checks (e.g. AWS's pytest-only "must
+        # have auto_shutdown_minutes set" guard). Runs before any API call so
+        # a failed check leaves no leaked resources.
+        self._validate_provider_args_for_create()
+
         vps_host_private_key = vps_host_key_path.read_text()
         user_data = generate_cloud_init_user_data(
             host_private_key=vps_host_private_key,

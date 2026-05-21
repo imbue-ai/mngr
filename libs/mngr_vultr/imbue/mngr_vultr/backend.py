@@ -4,7 +4,6 @@ from typing import Final
 from loguru import logger
 from pydantic import ConfigDict
 from pydantic import Field
-from pydantic import PrivateAttr
 from pydantic import SecretStr
 
 from imbue.mngr.config.data_types import MngrContext
@@ -35,18 +34,16 @@ class VultrProvider(VpsDockerProvider):
     vultr_client: VultrVpsClient = Field(frozen=True, description="Vultr API client")
     vultr_config: VultrProviderConfig = Field(frozen=True, description="Vultr-specific configuration")
 
-    _instances_cache: list[dict[str, Any]] | None = PrivateAttr(default=None)
+    def _fetch_provider_instances(self) -> list[dict[str, Any]]:
+        """List every Vultr instance in the account.
 
-    def reset_caches(self) -> None:
-        super().reset_caches()
-        self._instances_cache = None
-
-    def _list_instances_cached(self) -> list[dict[str, Any]]:
-        """List Vultr instances, caching the result for the duration of the command."""
-        if self._instances_cache is not None:
-            return self._instances_cache
-        self._instances_cache = self.vultr_client.list_instances()
-        return self._instances_cache
+        Vultr's API has a ``tag`` filter but Vultr stores tags as flat
+        ``"key=value"`` strings, so an exact-match filter doesn't compose with
+        our ``mngr-provider=<name>`` convention the same way AWS's
+        ``tag:mngr-provider`` filter does. List everything and let the shared
+        discovery flow filter by SSH-reachability + state-container presence.
+        """
+        return self.vultr_client.list_instances()
 
     def _credentials_configured(self) -> bool:
         return bool(self.vultr_client.api_key.get_secret_value())
@@ -96,8 +93,6 @@ class VultrProviderBackend(ProviderBackendInterface):
             "  --vps-plan=PLAN      Vultr plan (default: vc2-2c-4gb)\n"
             "  --git-depth=N        Shallow-clone build context to depth N before upload\n"
             "\n"
-            "OS image is set via default_os_id on the provider config (Debian 12 x64 by\n"
-            "default); per-host overrides are not supported via build args.\n"
             "All other build args are passed to 'docker build' on the VPS.\n"
             "Example: -b --vps-plan=vc2-2c-4gb -b --file=Dockerfile -b .\n"
         )

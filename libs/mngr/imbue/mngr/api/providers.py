@@ -10,8 +10,8 @@ from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.providers.base_provider import BaseProviderInstance
 from imbue.mngr.providers.registry import build_provider_instance
-from imbue.mngr.providers.registry import get_config_class
 from imbue.mngr.providers.registry import list_backends
+from imbue.mngr.providers.registry import resolve_backend_and_config
 
 # Cache provider instances by (name, mngr_ctx identity) so the same instance
 # is reused across calls within the same context. This prevents accumulating
@@ -74,29 +74,14 @@ def get_provider_instance(
         logger.trace("Returning cached provider instance {}", name)
         return _instance_cache[cache_key]
 
-    # Check if there's a configured provider instance with this name
-    if name in mngr_ctx.config.providers:
-        provider_config = mngr_ctx.config.providers[name]
-        instance = build_provider_instance(
-            instance_name=name,
-            backend_name=provider_config.backend,
-            config=provider_config,
-            mngr_ctx=mngr_ctx,
-        )
-        logger.trace("Built provider instance {} from config with backend {}", name, provider_config.backend)
-    else:
-        # Otherwise, treat the name as a backend name and use defaults
-        # This supports the common case of just specifying "--provider local" or "--provider docker"
-        backend_name = ProviderBackendName(str(name))
-        config_class = get_config_class(backend_name)
-        default_config = config_class(backend=backend_name)
-        instance = build_provider_instance(
-            instance_name=name,
-            backend_name=backend_name,
-            config=default_config,
-            mngr_ctx=mngr_ctx,
-        )
-        logger.trace("Built provider instance {} using backend name as default", name)
+    _, provider_config = resolve_backend_and_config(name, mngr_ctx)
+    instance = build_provider_instance(
+        instance_name=name,
+        backend_name=provider_config.backend,
+        config=provider_config,
+        mngr_ctx=mngr_ctx,
+    )
+    logger.trace("Built provider instance {} with backend {}", name, provider_config.backend)
 
     _instance_cache[cache_key] = instance
     return instance
