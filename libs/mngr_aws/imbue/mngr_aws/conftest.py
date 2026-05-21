@@ -6,18 +6,20 @@ runs cannot leak EC2 cost:
 
 1. Per-test cleanup happens via ``mngr destroy --force`` in each test's
    ``finally`` block (in ``test_release_aws.py``).
-2. ``pytest_sessionfinish`` here scans for leaked EC2 instances by
-   ``Name`` tag prefix at the end of the session, force-terminates any
-   matches older than the TTL, and fails the session.
+2. ``pytest_sessionfinish`` here scans for leaked EC2 instances tagged
+   ``mngr-pytest-launched=true`` at the end of the session, force-
+   terminates any matches older than the TTL, and fails the session.
 3. Cloud-init in each test instance runs ``shutdown -P +N`` with
    ``InstanceInitiatedShutdownBehavior=terminate``, which self-
    terminates the instance even if pytest itself is killed.
 
-Layer 2 relies solely on a ``Name``-tag scan because the current
-release-test path spawns ``mngr create`` in a subprocess, so there is
-no Python hand-off back to the test process where an in-process
-tracking list would live. The scan is naturally tag-based (matching
-``mngr-<AWS_TEST_NAME_PREFIX>*``) and ignores anything younger than
+Layer 2 relies solely on a tag scan because the current release-test
+path spawns ``mngr create`` in a subprocess, so there is no Python
+hand-off back to the test process where an in-process tracking list
+would live. ``AwsVpsClient.create_instance`` adds the
+``mngr-pytest-launched=true`` tag (see ``AWS_PYTEST_LAUNCHED_TAG``)
+to every EC2 instance launched while ``PYTEST_CURRENT_TEST`` is set,
+and the scan filters on that tag and ignores anything younger than
 ``_TEST_LEAK_TTL`` so it never race-kills an in-flight test on a
 parallel worker.
 
