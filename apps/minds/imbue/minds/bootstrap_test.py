@@ -349,8 +349,9 @@ def test_set_force_enable_re_enables_disabled_block(monkeypatch: pytest.MonkeyPa
 
 
 def test_set_preserve_does_not_re_enable_disabled_block(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """The bootstrap reconcile path must leave a previously auto-disabled
-    provider disabled -- only an explicit signin event force-enables.
+    """The bootstrap reconcile path must leave a previously disabled
+    provider (e.g. from the providers panel toggle) disabled -- only an
+    explicit signin event force-enables.
     """
     settings_path = stub_mngr_host_dir(monkeypatch, tmp_path, "minds-dev-tname")
     set_imbue_cloud_provider_for_account(
