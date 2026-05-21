@@ -151,7 +151,7 @@ URL -- env selection happens via `MINDS_CLIENT_CONFIG_PATH` /
 
 - Node.js 24.15.0 (pinned via `.nvmrc` and `engines.node`)
 - pnpm 10.33.4 (pinned via `engines.pnpm`)
-- Python 3.12.13 (pinned via `.python-version`), uv, git (for the Python backend)
+- Python 3.12, uv, git (for the Python backend)
 
 ### Running locally
 
