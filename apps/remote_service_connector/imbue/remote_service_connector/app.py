@@ -332,8 +332,9 @@ class LeaseHostResponse(BaseModel):
     host_db_id: UUID = Field(description="Database ID of the leased host")
     vps_address: str = Field(
         description=(
-            "SSH-reachable VPS address. Public IPv4 for Vultr-backed pool rows; "
-            "a DNS hostname (e.g. ``vps-eec8860b.vps.ovh.us``) for OVH-backed rows."
+            "SSH-reachable VPS address. Either a public IPv4 or a DNS hostname depending "
+            "on what the host's provider returned at bake time (OVH-backed rows are DNS "
+            "hostnames like ``vps-eec8860b.vps.ovh.us``)."
         )
     )
     ssh_port: int = Field(description="SSH port on the VPS")
@@ -355,8 +356,9 @@ class LeasedHostInfo(BaseModel):
     host_db_id: UUID = Field(description="Database ID of the leased host")
     vps_address: str = Field(
         description=(
-            "SSH-reachable VPS address. Public IPv4 for Vultr-backed pool rows; "
-            "a DNS hostname (e.g. ``vps-eec8860b.vps.ovh.us``) for OVH-backed rows."
+            "SSH-reachable VPS address. Either a public IPv4 or a DNS hostname depending "
+            "on what the host's provider returned at bake time (OVH-backed rows are DNS "
+            "hostnames like ``vps-eec8860b.vps.ovh.us``)."
         )
     )
     ssh_port: int = Field(description="SSH port on the VPS")
@@ -1552,6 +1554,20 @@ web_app = FastAPI()
 # lifecycle deploy would produce, hence the matching legacy fallback.)
 _GENERATION_ID_ENV_VAR = "MINDS_TIER_GENERATION_ID"
 
+# Per-deploy timestamp threaded into the connector's process env by
+# ``minds env deploy``. Read at module-import time below to build the
+# Modal Secret bundle names, and re-read at request time by ``/version``
+# (see ``get_version``); kept in one place so the literal string never
+# drifts between those two call sites.
+_MINDS_DEPLOY_ID_ENV_VAR = "MINDS_DEPLOY_ID"
+
+# Test-only env var honored by ``/health/liveness``. When set to ``"1"``,
+# the liveness probe returns 500 unconditionally so the deployment-test
+# suite can drive the auto-rollback path in ``minds env deploy`` without
+# editing source. Unset in every non-test deploy. See
+# ``specs/minds-deployment-tests.md`` (``test_deploy_auto_rollback_on_broken_healthcheck``).
+_INJECT_BROKEN_HEALTHCHECK_ENV_VAR = "MINDS_INJECT_BROKEN_HEALTHCHECK"
+
 
 @web_app.get("/health/liveness")
 def get_health_liveness() -> dict[str, str]:
@@ -1560,7 +1576,13 @@ def get_health_liveness() -> dict[str, str]:
     Used by ``minds env deploy``'s post-deploy health check to confirm
     the connector is reachable. Returns a fixed body so the poller has
     something to assert on beyond a 200 status.
+
+    Honors ``MINDS_INJECT_BROKEN_HEALTHCHECK=1`` per-request so the
+    deployment-test suite can drive the auto-rollback flow. The env
+    var is unset in every non-test deploy.
     """
+    if os.environ.get(_INJECT_BROKEN_HEALTHCHECK_ENV_VAR) == "1":
+        raise HTTPException(status_code=500, detail="liveness probe failed: MINDS_INJECT_BROKEN_HEALTHCHECK=1")
     return {"status": "ok"}
 
 
@@ -1577,6 +1599,34 @@ def get_generation() -> dict[str, str]:
     uuid the operator can read off ``minds env list`` or Vault anyway).
     """
     return {"generation_id": os.environ.get(_GENERATION_ID_ENV_VAR, "")}
+
+
+@web_app.get("/version")
+def get_version() -> dict[str, str]:
+    """Return the connector's deploy id + tier generation id.
+
+    Used by the deployment-test suite to assert that a re-deploy
+    actually advances the live Modal app version (the ``deploy_id``
+    field) and as part of the logged-in smoke test's "is this env
+    healthy" sanity check.
+
+    Reads two env vars that are already populated by ``minds env
+    deploy`` for every tier:
+
+    * ``MINDS_DEPLOY_ID`` -- the compact ISO-8601 timestamp minted by
+      ``secret_lifecycle.make_deploy_id`` and threaded through the
+      Modal Secret bundle; advances on every successful deploy.
+    * ``MINDS_TIER_GENERATION_ID`` -- the tier generation uuid;
+      empty for tiers that don't track generations (dev today).
+
+    No auth required (mirrors ``/generation`` -- the values are
+    non-sensitive and surfaceable from any operator's machine via
+    ``modal app describe``).
+    """
+    return {
+        "deploy_id": os.environ.get(_MINDS_DEPLOY_ID_ENV_VAR, ""),
+        "generation_id": os.environ.get(_GENERATION_ID_ENV_VAR, ""),
+    }
 
 
 @web_app.post("/tunnels")
@@ -2561,7 +2611,7 @@ _DEPLOY_ENV = os.environ.get("MNGR_DEPLOY_ENV", "production")
 # any Modal env so a real ``modal deploy`` invocation outside of
 # ``minds env deploy`` will fail with "Secret not found" -- the safety
 # property the timestamped-secret rollback model needs.
-_MINDS_DEPLOY_ID = os.environ.get("MINDS_DEPLOY_ID", "MINDS_DEPLOY_ID_UNSET")
+_MINDS_DEPLOY_ID = os.environ.get(_MINDS_DEPLOY_ID_ENV_VAR, "MINDS_DEPLOY_ID_UNSET")
 
 # Warm-pool size for the deployed function. ``minds env deploy`` reads
 # the tier's ``[min_containers].connector`` from its committed
@@ -2695,7 +2745,7 @@ def _init_supertokens() -> None:
         modal.Secret.from_name(f"pool-ssh-{_DEPLOY_ENV}-{_MINDS_DEPLOY_ID}"),
         modal.Secret.from_name(f"litellm-connector-{_DEPLOY_ENV}-{_MINDS_DEPLOY_ID}"),
         modal.Secret.from_name(f"paid-accounts-{_DEPLOY_ENV}-{_MINDS_DEPLOY_ID}"),
-        modal.Secret.from_dict({"MNGR_DEPLOY_ENV": _DEPLOY_ENV, "MINDS_DEPLOY_ID": _MINDS_DEPLOY_ID}),
+        modal.Secret.from_dict({"MNGR_DEPLOY_ENV": _DEPLOY_ENV, _MINDS_DEPLOY_ID_ENV_VAR: _MINDS_DEPLOY_ID}),
     ],
     # Warm-pool size driven by ``_MIN_CONTAINERS`` at the top of this
     # module: defaults to 1 for production / staging (avoid cold-boot
