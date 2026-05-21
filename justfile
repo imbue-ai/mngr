@@ -66,11 +66,22 @@ test-offload-acceptance args="":
     : "${MODAL_TOKEN_ID:?must be set}"
     : "${MODAL_TOKEN_SECRET:?must be set}"
     just _generate-dockerignore
-    trap "rm -f .dockerignore" EXIT
+    # Pre-create a single shared Modal environment for this offload run so
+    # every fanned-out sandbox lands in the same env (Modal caps workspaces
+    # at 1500 envs; without this, a single run mints dozens to hundreds).
+    # The shared env name matches mngr_test-YYYY-MM-DD-HH-MM-SS-* so the
+    # hourly cleanup script will sweep it if the trap below ever fails.
+    SHARED_ENV="mngr_test-$(date -u +%Y-%m-%d-%H-%M-%S)-shared-$(uuidgen | tr 'A-Z' 'a-z' | tr -d '-' | cut -c1-12)"
+    # Install the trap *before* `modal environment create` so a SIGINT
+    # between create and the next line still cleans up; '|| true' on delete
+    # absorbs the not-found case if the env is already gone.
+    trap 'uv run modal environment delete "$SHARED_ENV" --yes >/dev/null 2>&1 || true; rm -f .dockerignore' EXIT
+    uv run modal environment create "$SHARED_ENV"
     # MODAL_IMAGE_BUILDER_VERSION=2025.06 is required for enable_docker support (Docker-in-Docker alpha).
     MODAL_IMAGE_BUILDER_VERSION=2025.06 offload -c offload-modal-acceptance.toml run --trace \
         --env "MODAL_TOKEN_ID=$MODAL_TOKEN_ID" \
         --env "MODAL_TOKEN_SECRET=$MODAL_TOKEN_SECRET" \
+        --env "MNGR_TEST_SHARED_MODAL_ENV_NAME=$SHARED_ENV" \
         --env "GITHUB_HEAD_REF=${GITHUB_HEAD_REF:-}" \
         --env "GITHUB_REF_NAME=${GITHUB_REF_NAME:-}" {{args}} || [[ $? -eq 2 ]]
 
@@ -86,13 +97,18 @@ test-offload-release args="":
     # so the two stay in sync.
     just _generate-release-dockerfile
     just _generate-dockerignore
-    trap "rm -f .dockerignore" EXIT
+    # Pre-create a single shared Modal environment for this offload run.
+    # See `test-offload-acceptance` for the full rationale.
+    SHARED_ENV="mngr_test-$(date -u +%Y-%m-%d-%H-%M-%S)-shared-$(uuidgen | tr 'A-Z' 'a-z' | tr -d '-' | cut -c1-12)"
+    trap 'uv run modal environment delete "$SHARED_ENV" --yes >/dev/null 2>&1 || true; rm -f .dockerignore' EXIT
+    uv run modal environment create "$SHARED_ENV"
 
     # MODAL_IMAGE_BUILDER_VERSION=2025.06 is required for enable_docker support (Docker-in-Docker alpha).
     MODAL_IMAGE_BUILDER_VERSION=2025.06 offload -c offload-modal-release.toml run --trace \
         --env "MODAL_TOKEN_ID=$MODAL_TOKEN_ID" \
         --env "MODAL_TOKEN_SECRET=$MODAL_TOKEN_SECRET" \
         --env "ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY" \
+        --env "MNGR_TEST_SHARED_MODAL_ENV_NAME=$SHARED_ENV" \
         --env "IS_RELEASE=1" \
         --env "GITHUB_HEAD_REF=${GITHUB_HEAD_REF:-}" \
         --env "GITHUB_REF_NAME=${GITHUB_REF_NAME:-}" {{args}} || [[ $? -eq 2 ]]

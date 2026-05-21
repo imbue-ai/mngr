@@ -10,7 +10,7 @@ mngr [create|c] [<ADDRESS>] [<AGENT_TYPE>] [-t <TEMPLATE>] [--new-host] [-w WIND
     [--label KEY=VALUE] [--host-label KEY=VALUE] [--project <PROJECT>] [--from <SOURCE>] [--transfer <MODE>]
     [--[no-]rsync] [--rsync-args <ARGS>] [--branch [BASE][:NEW]] [--[no-]ensure-clean]
     [--snapshot <ID>] [-b <BUILD_ARG>] [-s <START_ARG>]
-    [--env <KEY=VALUE>] [--env-file <FILE>] [--pass-env <KEY>] [--grant <PERMISSION>] [--extra-provision-command <COMMAND>] [--upload-file <LOCAL:REMOTE>]
+    [--env <KEY=VALUE>] [--env-file <FILE>] [--pass-env <KEY>] [--extra-provision-command <COMMAND>] [--upload-file <LOCAL:REMOTE>]
     [--idle-timeout <SECONDS>] [--idle-mode <MODE>] [--start-on-boot|--no-start-on-boot] [--reuse|--no-reuse]
     [--message <TEXT>] [--message-file <FILE>] [--edit-message]
     [--[no-]connect] [--[no-]auto-start] [-y|--yes] [--] [<AGENT_ARGS>...]
@@ -135,7 +135,6 @@ By default, `mngr create` uses the local host. Use the agent address to specify 
 
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
-| `--grant` | text | Grant a permission to the agent [repeatable] | None |
 | `--extra-provision-command` | text | Run custom shell command during provisioning [repeatable] | None |
 | `--upload-file` | text | Upload LOCAL:REMOTE file pair [repeatable] | None |
 
@@ -216,8 +215,8 @@ Provider: lima
                           mngr pre-built image.
   Start args are passed directly to 'limactl start'. Common options:
     --cpus=N              Number of CPU cores (default: 4)
-    --memory=NGiB         Memory size (default: 4GiB)
-    --disk=NGiB           Disk size (default: 100GiB)
+    --memory=N            Memory in GiB (default: 4)
+    --disk=N              Disk in GiB (default: 100)
     --vm-type=TYPE        VM type: qemu or vz (default: auto-detected)
     --mount-writable      Make default mounts writable
   Run 'limactl start --help' for the full list.
