@@ -10,8 +10,17 @@
 # binary. ToDesktop bundles its own Electron at build time, so this
 # postinstall is just there to make `pnpm start` work locally during dev.
 # Approving it costs ~100MB of cache space in CI but unblocks the build.
+#
+# The `: false` entries are transitive deps with install scripts we
+# deliberately do not run: dtrace-provider is bunyan's optional native
+# binding (bunyan works without it), and @firebase/util / protobufjs ship
+# benign postinstalls. They must still be listed -- pnpm 11 errors on any
+# unlisted build-script dep, regardless of whether we want it built.
 allowBuilds:
   electron: true
+  "@firebase/util": false
+  dtrace-provider: false
+  protobufjs: false
 
 # Make pnpm produce a flat npm-style `node_modules/` with every transitive
 # dep visible at top level. The default pnpm layout puts most modules under
