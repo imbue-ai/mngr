@@ -1,3 +1,2 @@
 - repo: `.gitignore` now also ignores `**/scripts/*.local.sh` (one-off local test harnesses), `apps/minds_workspace_server/package-lock.json`, and `**/.DS_Store`.
 - specs: update `specs/electron-desktop-app/` (spec + concise) to reflect the shipped minds desktop-app architecture.
-- pyproject: exclude test files from wheel builds across mngr / mngr_lima / mngr_modal / imbue_common so the packaged desktop-app wheels do not ship tests.

@@ -721,32 +721,14 @@ def _claude_json_has_primary_api_key() -> bool:
 
 
 def _read_macos_keychain_credential(label: str, concurrency_group: ConcurrencyGroup) -> str | None:
-    """Read a credential from the macOS keychain by label.
-
-    Bounded by a short timeout: `security find-generic-password` will block
-    indefinitely when macOS pops a keychain ACL prompt that the user does
-    not see / answer (e.g. when a different signed binary first reads an
-    entry owned by another app). A hung keychain read used to block all of
-    `mngr create` -- agent provisioning would stop at "_setup_per_agent_config_dir"
-    with no further log lines.
-    """
+    """Read a credential from the macOS keychain by label."""
     try:
         result = concurrency_group.run_process_to_completion(
             ["security", "find-generic-password", "-l", label, "-w"],
             is_checked_after=False,
-            timeout=10.0,
         )
     except ProcessSetupError:
         logger.debug("macOS security binary not found")
-        return None
-    if result.is_timed_out:
-        logger.warning(
-            "macOS keychain read for label {!r} timed out (likely a hidden ACL prompt); "
-            "skipping. If you need this credential merged into the agent's config, "
-            "grant the running app access in Keychain Access.app or set "
-            "convert_macos_credentials=false in the agent config.",
-            label,
-        )
         return None
     if result.returncode != 0:
         logger.debug("No keychain credential found for label {!r}", label)

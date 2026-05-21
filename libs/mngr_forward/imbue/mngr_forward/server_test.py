@@ -16,7 +16,6 @@ from fastapi import FastAPI
 from starlette.testclient import TestClient
 
 from imbue.mngr.primitives import AgentId
-from imbue.mngr.utils.testing import capture_loguru
 from imbue.mngr_forward.auth import FileAuthStore
 from imbue.mngr_forward.cookie import create_session_cookie
 from imbue.mngr_forward.cookie import create_subdomain_auth_token
@@ -26,9 +25,7 @@ from imbue.mngr_forward.primitives import MNGR_FORWARD_SESSION_COOKIE_NAME
 from imbue.mngr_forward.primitives import OneTimeCode
 from imbue.mngr_forward.resolver import ForwardResolver
 from imbue.mngr_forward.server import _is_loopback_url
-from imbue.mngr_forward.server import _resolver_miss_last_warn_at
 from imbue.mngr_forward.server import _sanitize_next_url
-from imbue.mngr_forward.server import _warn_resolver_miss
 from imbue.mngr_forward.server import create_forward_app
 from imbue.mngr_forward.ssh_tunnel import SSHTunnelManager
 
@@ -508,95 +505,12 @@ def test_subdomain_forward_returns_retry_page_on_backend_connect_error(tmp_path:
     assert json_response.status_code == 503
 
 
-# -- _warn_resolver_miss --------------------------------------------------
-#
-# Use the project's `capture_loguru` context manager (libs/mngr/.../testing.py)
-# instead of pytest's standard `caplog`: loguru's sink isn't wired into stdlib
-# logging by default, and `capture_loguru` also implicitly opts out of the
-# autouse "no unexpected loguru warnings" check.
-
-
-def _reset_warn_miss_cache() -> None:
-    """Drop throttle entries so tests don't see each other's bookkeeping."""
-    _resolver_miss_last_warn_at.clear()
-
-
-def test_warn_resolver_miss_says_agent_not_in_known_set() -> None:
-    """If the agent isn't in the resolver's known set, the warning should say so explicitly.
-
-    This is the "host-side discovery hasn't seen this agent yet" case -- distinct from
-    the "agent known but no service URL" case below.
-    """
-    _reset_warn_miss_cache()
-    resolver = ForwardResolver(strategy=ForwardServiceStrategy(service_name="system_interface"))
-    agent_id = AgentId()
-
-    with capture_loguru("WARNING") as log:
-        _warn_resolver_miss(agent_id, resolver)
-
-    output = log.getvalue()
-    assert "not in resolver's known set" in output, output
-    assert str(agent_id) in output, output
-
-
-def test_warn_resolver_miss_says_agent_known_but_no_service() -> None:
-    """If the agent IS in the known set but the service URL is missing, say so distinctly.
-
-    This is the "VM-side app-watcher didn't publish the URL" case -- the diagnostic
-    points the reader at the right side of the host/VM boundary.
-    """
-    _reset_warn_miss_cache()
-    resolver = ForwardResolver(strategy=ForwardServiceStrategy(service_name="system_interface"))
-    agent_id = AgentId()
-    resolver.add_known_agent(agent_id)
-    # Intentionally do NOT call resolver.update_services -- the service URL stays missing.
-
-    with capture_loguru("WARNING") as log:
-        _warn_resolver_miss(agent_id, resolver)
-
-    output = log.getvalue()
-    assert "agent IS known but the requested service URL is missing" in output, output
-
-
-def test_warn_resolver_miss_throttles_per_agent() -> None:
-    """Three back-to-back misses for the same agent should produce ONE warning, not three.
-
-    The 503 retry-page refreshes every 1s; without throttling the log would flood.
-    """
-    _reset_warn_miss_cache()
-    resolver = ForwardResolver(strategy=ForwardServiceStrategy(service_name="system_interface"))
-    agent_id = AgentId()
-
-    with capture_loguru("WARNING") as log:
-        _warn_resolver_miss(agent_id, resolver)
-        _warn_resolver_miss(agent_id, resolver)
-        _warn_resolver_miss(agent_id, resolver)
-
-    output = log.getvalue()
-    assert output.count(str(agent_id)) == 1, output
-
-
-def test_warn_resolver_miss_throttle_is_per_agent_not_global() -> None:
-    """Different agents should each get their own warning, even within the throttle window."""
-    _reset_warn_miss_cache()
-    resolver = ForwardResolver(strategy=ForwardServiceStrategy(service_name="system_interface"))
-    agent_a = AgentId()
-    agent_b = AgentId()
-
-    with capture_loguru("WARNING") as log:
-        _warn_resolver_miss(agent_a, resolver)
-        _warn_resolver_miss(agent_b, resolver)
-
-    output = log.getvalue()
-    assert str(agent_a) in output, output
-    assert str(agent_b) in output, output
-
-
 # -- system_interface_backend_failure envelope + recovery redirect tests --
 
 
-def _make_forward_app_with_mock_backend(
+def _make_forward_app_with_capture(
     tmp_path: Path,
+    capture: list[httpx.Request],
     agent_id: AgentId,
     preauth: str,
     *,
@@ -620,13 +534,13 @@ def _make_forward_app_with_mock_backend(
         preauth_cookie_value=preauth,
     )
 
-    async def _handler(request: httpx.Request) -> httpx.Response:
-        del request
+    async def _capture(request: httpx.Request) -> httpx.Response:
+        capture.append(request)
         if raise_error is not None:
             raise raise_error("simulated failure")
         return httpx.Response(backend_status, content=b"hi")
 
-    mock_client = httpx.AsyncClient(transport=httpx.MockTransport(_handler), follow_redirects=False)
+    mock_client = httpx.AsyncClient(transport=httpx.MockTransport(_capture), follow_redirects=False)
     return app, envelope_output, mock_client
 
 
@@ -638,8 +552,10 @@ def test_subdomain_forward_emits_system_interface_backend_failure_on_5xx(tmp_pat
     """A 502/503/504 backend response triggers a ``system_interface_backend_failure`` envelope."""
     agent_id = AgentId()
     preauth = "preauth-cookie-1"
-    app, env_out, mock_client = _make_forward_app_with_mock_backend(
+    captured: list[httpx.Request] = []
+    app, env_out, mock_client = _make_forward_app_with_capture(
         tmp_path,
+        captured,
         agent_id,
         preauth,
         backend_status=503,
@@ -671,8 +587,10 @@ def test_subdomain_forward_does_not_emit_failure_on_2xx(tmp_path: Path) -> None:
     """A successful backend response must not produce a failure envelope."""
     agent_id = AgentId()
     preauth = "preauth-cookie-ok"
-    app, env_out, mock_client = _make_forward_app_with_mock_backend(
+    captured: list[httpx.Request] = []
+    app, env_out, mock_client = _make_forward_app_with_capture(
         tmp_path,
+        captured,
         agent_id,
         preauth,
         backend_status=200,
@@ -695,15 +613,21 @@ def test_subdomain_forward_does_not_emit_failure_on_2xx(tmp_path: Path) -> None:
 def test_subdomain_forward_emits_system_interface_backend_failure_on_sse_startup_disconnect(tmp_path: Path) -> None:
     """``RemoteProtocolError`` on an SSE-startup ``send()`` must emit ``CONNECT_ERROR``.
 
-    Covers the SSE branch of ``_forward_workspace_http``: an SSE-style request
-    (``Accept: text/event-stream``) whose backend disconnects before any
-    response bytes must produce a 503 and exactly one
-    ``workspace_backend_failure`` envelope with ``reason=CONNECT_ERROR``.
+    Regression test: previously, an SSE-style request (``Accept: text/event-stream``)
+    whose backend died between SSH-tunnel accept and channel-open would surface
+    ``httpx.RemoteProtocolError`` from ``http_client.send(..., stream=True)``.
+    That exception was not caught by the SSE branch (only ``ConnectError``
+    and ``TimeoutException`` were), so it bubbled up through starlette as a
+    500 and no failure envelope was emitted -- meaning the minds-side health
+    tracker never transitioned to STUCK and the chrome never navigated to
+    the recovery page.
     """
     agent_id = AgentId()
     preauth = "preauth-cookie-sse-startup"
-    app, env_out, mock_client = _make_forward_app_with_mock_backend(
+    captured: list[httpx.Request] = []
+    app, env_out, mock_client = _make_forward_app_with_capture(
         tmp_path,
+        captured,
         agent_id,
         preauth,
         raise_error=httpx.RemoteProtocolError,
@@ -734,8 +658,10 @@ def test_subdomain_forward_returns_plain_503_for_non_html_on_connect_failure(tmp
     """Non-HTML callers (API clients) get the plain 503 with no location header."""
     agent_id = AgentId()
     preauth = "preauth-cookie-json"
-    app, _env_out, mock_client = _make_forward_app_with_mock_backend(
+    captured: list[httpx.Request] = []
+    app, env_out, mock_client = _make_forward_app_with_capture(
         tmp_path,
+        captured,
         agent_id,
         preauth,
         raise_error=httpx.ConnectError,
@@ -766,8 +692,10 @@ def test_subdomain_forward_emits_system_interface_backend_failure_on_sse_startup
     """
     agent_id = AgentId()
     preauth = "preauth-cookie-sse-timeout"
-    app, env_out, mock_client = _make_forward_app_with_mock_backend(
+    captured: list[httpx.Request] = []
+    app, env_out, mock_client = _make_forward_app_with_capture(
         tmp_path,
+        captured,
         agent_id,
         preauth,
         raise_error=httpx.ConnectTimeout,
@@ -797,15 +725,17 @@ def test_subdomain_forward_emits_system_interface_backend_failure_on_sse_startup
 def test_subdomain_forward_emits_system_interface_backend_failure_on_non_sse_timeout(tmp_path: Path) -> None:
     """``TimeoutException`` on a non-SSE backend request must emit ``CONNECT_ERROR``.
 
-    Covers the non-streaming branch of ``_forward_workspace_http``: when the
-    backend hangs without ever sending a response, the request must produce a
-    504 plus exactly one ``workspace_backend_failure`` envelope tagged
-    ``CONNECT_ERROR``.
+    Regression test: covers the non-streaming path counterpart to the
+    SSE-startup timeout case. Both paths previously returned a 504 with
+    no failure envelope, so the chrome health SSE never saw a tick toward
+    STUCK for hung backends.
     """
     agent_id = AgentId()
     preauth = "preauth-cookie-json-timeout"
-    app, env_out, mock_client = _make_forward_app_with_mock_backend(
+    captured: list[httpx.Request] = []
+    app, env_out, mock_client = _make_forward_app_with_capture(
         tmp_path,
+        captured,
         agent_id,
         preauth,
         raise_error=httpx.ConnectTimeout,
