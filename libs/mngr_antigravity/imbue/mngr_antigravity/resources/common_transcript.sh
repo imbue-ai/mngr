@@ -68,6 +68,7 @@ convert_new_events() {
 import json
 import os
 import re
+import sys
 
 _MAX_INPUT_PREVIEW_LENGTH = 200
 _MAX_OUTPUT_LENGTH = 2000
@@ -79,13 +80,33 @@ _MAX_OUTPUT_LENGTH = 2000
 _USER_REQUEST_RE = re.compile(r"<USER_REQUEST>\s*(.*?)\s*</USER_REQUEST>", re.DOTALL)
 
 
-def _extract_user_text(content):
+def _extract_user_text(content, conv_id, step_index):
+    """Return the inner <USER_REQUEST> text, or None when the envelope is missing.
+
+    agy 1.0.0 always wraps USER_INPUT in
+    ``<USER_REQUEST>...</USER_REQUEST>\\n<ADDITIONAL_METADATA>...</ADDITIONAL_METADATA>``.
+    If the envelope is absent, a silent fall-through to the raw content would
+    bake agy's bookkeeping (local-time / model-selection metadata, future
+    fields) into the user-facing transcript without any indication that the
+    converter's contract was violated. We log loudly to stderr (the calling
+    bash surfaces this as a log_warn "convert error: ...") and return None
+    so the caller drops the event; the next agy version that changes the
+    envelope shape will produce an obvious schema-break signal instead of
+    silent garbage.
+    """
     if not isinstance(content, str):
-        return ""
+        sys.stderr.write(
+            f"USER_INPUT content is not a string for conv={conv_id} step={step_index}; dropping event\n"
+        )
+        return None
     match = _USER_REQUEST_RE.search(content)
-    if match is not None:
-        return match.group(1)
-    return content
+    if match is None:
+        sys.stderr.write(
+            f"USER_INPUT content missing <USER_REQUEST> envelope for conv={conv_id} step={step_index}; "
+            "dropping event so the schema break is visible upstream\n"
+        )
+        return None
+    return match.group(1)
 
 
 def _short_value(value):
@@ -160,8 +181,8 @@ def convert():
                 event_id = f"{conv_id}-{step_index}-user"
                 if event_id in existing_ids:
                     continue
-                text = _extract_user_text(raw.get("content"))
-                if not text:
+                text = _extract_user_text(raw.get("content"), conv_id, step_index)
+                if text is None or not text:
                     continue
                 new_events.append((timestamp, {
                     "timestamp": timestamp,
@@ -250,7 +271,11 @@ CONVERT_SCRIPT
 )
 
     if [ -s "$convert_stderr" ]; then
+        # Forward the heredoc Python's stderr to both the structured log
+        # (via log_warn) and the process's stderr -- the latter is what tests
+        # and operators read when something has gone wrong with conversion.
         log_warn "convert error: $(cat "$convert_stderr")"
+        cat "$convert_stderr" >&2
     fi
     rm -f "$convert_stderr"
 

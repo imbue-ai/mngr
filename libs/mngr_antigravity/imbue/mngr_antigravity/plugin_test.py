@@ -8,7 +8,9 @@ from typing import Any
 
 import pytest
 
+from imbue.imbue_common.model_update import to_update
 from imbue.mngr.agents.tui_agent import InteractiveTuiAgent
+from imbue.mngr.errors import UserInputError
 from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
@@ -16,7 +18,6 @@ from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import HostName
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
-from imbue.mngr.utils.testing import capture_loguru
 from imbue.mngr_antigravity.antigravity_config import get_antigravity_user_settings_path
 from imbue.mngr_antigravity.plugin import AntigravityAgent
 from imbue.mngr_antigravity.plugin import AntigravityAgentConfig
@@ -30,8 +31,10 @@ def test_antigravity_agent_config_has_correct_defaults() -> None:
     assert config.cli_args == ()
     assert config.parent_type is None
     assert config.auto_allow_permissions is False
-    # Default-on: every fresh work_dir would hit the trust dialog otherwise.
-    assert config.pre_trust_workspace is True
+    # Default-off, matching mngr_claude's auto_dismiss_dialogs posture: writing
+    # to the user's shared ~/.gemini/antigravity-cli/settings.json should be an
+    # explicit choice (--yes or auto_dismiss_dialogs=True), not a default.
+    assert config.auto_dismiss_dialogs is False
 
 
 def test_antigravity_agent_config_merge_with_concatenates_user_args() -> None:
@@ -105,11 +108,80 @@ def antigravity_agent_auto_allow(
 
 
 @pytest.fixture
-def antigravity_agent_pre_trust_disabled(
+def antigravity_agent_auto_dismiss(
     local_provider: LocalProviderInstance,
     tmp_path: Path,
 ) -> AntigravityAgent:
-    return _make_antigravity_agent(local_provider, tmp_path, AntigravityAgentConfig(pre_trust_workspace=False))
+    """Agent with `auto_dismiss_dialogs=True` so provision() pre-trusts silently."""
+    return _make_antigravity_agent(local_provider, tmp_path, AntigravityAgentConfig(auto_dismiss_dialogs=True))
+
+
+class _ConfirmingAntigravityAgent(AntigravityAgent):
+    """Test subclass whose trust prompt auto-accepts without invoking click.confirm."""
+
+    def _prompt_user_to_trust_workspace(self, workspace_path: str, settings_path: Path) -> bool:
+        return True
+
+
+class _DecliningAntigravityAgent(AntigravityAgent):
+    """Test subclass whose trust prompt auto-declines without invoking click.confirm."""
+
+    def _prompt_user_to_trust_workspace(self, workspace_path: str, settings_path: Path) -> bool:
+        return False
+
+
+def _make_subclassed_agent_with_flags(
+    cls: type[AntigravityAgent],
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+    agent_config: AntigravityAgentConfig,
+    *,
+    is_interactive: bool = False,
+    is_auto_approve: bool = False,
+) -> AntigravityAgent:
+    """Build a subclassed agent with the requested MngrContext flags set."""
+    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    ctx = local_provider.mngr_ctx.model_copy_update(
+        to_update(local_provider.mngr_ctx.field_ref().is_interactive, is_interactive),
+        to_update(local_provider.mngr_ctx.field_ref().is_auto_approve, is_auto_approve),
+    )
+    return cls.model_construct(
+        id=AgentId.generate(),
+        name=AgentName("test-antigravity"),
+        agent_type=AgentTypeName("antigravity"),
+        work_dir=work_dir,
+        create_time=datetime.now(timezone.utc),
+        host_id=host.id,
+        mngr_ctx=ctx,
+        agent_config=agent_config,
+        host=host,
+    )
+
+
+@pytest.fixture
+def auto_approve_ctx(local_provider: LocalProviderInstance, tmp_path: Path) -> AntigravityAgent:
+    """Agent whose ``mngr_ctx.is_auto_approve=True`` so provision() pre-trusts silently."""
+    return _make_subclassed_agent_with_flags(
+        AntigravityAgent, local_provider, tmp_path, AntigravityAgentConfig(), is_auto_approve=True
+    )
+
+
+@pytest.fixture
+def interactive_ctx_with_confirmation(local_provider: LocalProviderInstance, tmp_path: Path) -> AntigravityAgent:
+    """Subclassed agent: is_interactive=True and the prompt auto-accepts."""
+    return _make_subclassed_agent_with_flags(
+        _ConfirmingAntigravityAgent, local_provider, tmp_path, AntigravityAgentConfig(), is_interactive=True
+    )
+
+
+@pytest.fixture
+def interactive_ctx_with_declination(local_provider: LocalProviderInstance, tmp_path: Path) -> AntigravityAgent:
+    """Subclassed agent: is_interactive=True and the prompt auto-declines."""
+    return _make_subclassed_agent_with_flags(
+        _DecliningAntigravityAgent, local_provider, tmp_path, AntigravityAgentConfig(), is_interactive=True
+    )
 
 
 _BACKGROUND_TASKS_LAUNCH_PREFIX = "( bash $MNGR_AGENT_STATE_DIR/commands/antigravity_background_tasks.sh"
@@ -197,7 +269,7 @@ def test_modify_env_vars_exposes_agy_log_file_path(antigravity_agent: Antigravit
 
 
 def test_provision_does_not_create_workspace_subdirs(
-    antigravity_agent: AntigravityAgent,
+    auto_approve_ctx: AntigravityAgent,
     isolated_home: Path,
 ) -> None:
     """The plugin writes nothing to the user's work_dir.
@@ -206,18 +278,19 @@ def test_provision_does_not_create_workspace_subdirs(
     `<work_dir>/.antigravityignore`; mngr leaves both alone so the user's
     project tree is untouched by ``mngr create``.
 
-    ``isolated_home`` redirects ``Path.home()`` to a tmpdir so the default
-    ``pre_trust_workspace=True`` branch in ``provision()`` does not write to
-    the developer's real ``~/.gemini/antigravity-cli/settings.json``.
+    Runs under ``auto_approve_ctx`` so ``provision`` takes the silent-trust
+    branch; otherwise the default non-interactive non-auto-approve config
+    would correctly raise rather than touch the user's work_dir.
     """
-    antigravity_agent.provision(
-        host=antigravity_agent.host,
+    agent = auto_approve_ctx
+    agent.provision(
+        host=agent.host,
         options=CreateAgentOptions(agent_type=AgentTypeName("antigravity")),
-        mngr_ctx=antigravity_agent.mngr_ctx,
+        mngr_ctx=agent.mngr_ctx,
     )
-    assert not (antigravity_agent.work_dir / ".agents").exists()
-    assert not (antigravity_agent.work_dir / ".antigravityignore").exists()
-    assert not (antigravity_agent.work_dir / ".gemini").exists()
+    assert not (agent.work_dir / ".agents").exists()
+    assert not (agent.work_dir / ".antigravityignore").exists()
+    assert not (agent.work_dir / ".gemini").exists()
 
 
 def _read_user_settings(monkeypatched_home: Path) -> dict[str, Any]:
@@ -239,101 +312,181 @@ def isolated_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return home
 
 
-def test_provision_pre_trusts_workspace_in_user_settings(
-    antigravity_agent: AntigravityAgent,
+def test_provision_pre_trusts_workspace_under_auto_approve(
+    auto_approve_ctx: AntigravityAgent,
     isolated_home: Path,
 ) -> None:
-    """Default `pre_trust_workspace=True` writes work_dir into trustedWorkspaces."""
-    antigravity_agent.provision(
-        host=antigravity_agent.host,
+    """``mngr create --yes`` (mngr_ctx.is_auto_approve) silently trusts work_dir."""
+    agent = auto_approve_ctx
+    agent.provision(
+        host=agent.host,
         options=CreateAgentOptions(agent_type=AgentTypeName("antigravity")),
-        mngr_ctx=antigravity_agent.mngr_ctx,
+        mngr_ctx=agent.mngr_ctx,
     )
     settings = _read_user_settings(isolated_home)
-    assert str(antigravity_agent.work_dir) in settings["trustedWorkspaces"]
+    assert str(agent.work_dir) in settings["trustedWorkspaces"]
 
 
-def test_provision_skips_pre_trust_when_disabled(
-    antigravity_agent_pre_trust_disabled: AntigravityAgent,
+def test_provision_pre_trusts_workspace_under_auto_dismiss_dialogs(
+    antigravity_agent_auto_dismiss: AntigravityAgent,
     isolated_home: Path,
 ) -> None:
-    """``pre_trust_workspace=False`` leaves the user's settings file untouched."""
-    antigravity_agent_pre_trust_disabled.provision(
-        host=antigravity_agent_pre_trust_disabled.host,
+    """`auto_dismiss_dialogs=True` (per-agent-type opt-in) silently trusts work_dir."""
+    agent = antigravity_agent_auto_dismiss
+    agent.provision(
+        host=agent.host,
         options=CreateAgentOptions(agent_type=AgentTypeName("antigravity")),
-        mngr_ctx=antigravity_agent_pre_trust_disabled.mngr_ctx,
+        mngr_ctx=agent.mngr_ctx,
     )
+    settings = _read_user_settings(isolated_home)
+    assert str(agent.work_dir) in settings["trustedWorkspaces"]
+
+
+def test_provision_prompts_user_then_trusts_when_interactive_and_user_accepts(
+    interactive_ctx_with_confirmation: AntigravityAgent,
+    isolated_home: Path,
+) -> None:
+    """Mirror of mngr_claude's `_prompt_user_for_trust`: prompt, then write on yes."""
+    agent = interactive_ctx_with_confirmation
+    agent.provision(
+        host=agent.host,
+        options=CreateAgentOptions(agent_type=AgentTypeName("antigravity")),
+        mngr_ctx=agent.mngr_ctx,
+    )
+    settings = _read_user_settings(isolated_home)
+    assert str(agent.work_dir) in settings["trustedWorkspaces"]
+
+
+def test_provision_aborts_when_interactive_and_user_declines(
+    interactive_ctx_with_declination: AntigravityAgent,
+    isolated_home: Path,
+) -> None:
+    """If the user declines the prompt, abort with a clear UserInputError."""
+    agent = interactive_ctx_with_declination
+    with pytest.raises(UserInputError) as excinfo:
+        agent.provision(
+            host=agent.host,
+            options=CreateAgentOptions(agent_type=AgentTypeName("antigravity")),
+            mngr_ctx=agent.mngr_ctx,
+        )
+    assert "declined" in str(excinfo.value).lower()
     settings_path = get_antigravity_user_settings_path()
     assert not settings_path.exists()
 
 
-def test_provision_pre_trust_preserves_existing_settings(
+def test_provision_aborts_in_non_interactive_mode_without_opt_in(
     antigravity_agent: AntigravityAgent,
     isolated_home: Path,
 ) -> None:
-    """Pre-trust must be additive: prior keys and entries stay verbatim."""
-    settings_path = get_antigravity_user_settings_path()
-    settings_path.parent.mkdir(parents=True)
-    settings_path.write_text(json.dumps({"trustedWorkspaces": ["/prior/workspace"], "colorScheme": "dark"}, indent=2))
+    """Non-interactive without --yes or auto_dismiss_dialogs: raise rather than silently fail.
 
-    antigravity_agent.provision(
-        host=antigravity_agent.host,
-        options=CreateAgentOptions(agent_type=AgentTypeName("antigravity")),
-        mngr_ctx=antigravity_agent.mngr_ctx,
-    )
-
-    settings = _read_user_settings(isolated_home)
-    assert "/prior/workspace" in settings["trustedWorkspaces"]
-    assert str(antigravity_agent.work_dir) in settings["trustedWorkspaces"]
-    assert settings["colorScheme"] == "dark"
-
-
-def test_provision_pre_trust_is_idempotent(
-    antigravity_agent: AntigravityAgent,
-    isolated_home: Path,
-) -> None:
-    """Two provisioning passes produce a single trust entry, not duplicates."""
-    options = CreateAgentOptions(agent_type=AgentTypeName("antigravity"))
-    antigravity_agent.provision(host=antigravity_agent.host, options=options, mngr_ctx=antigravity_agent.mngr_ctx)
-    antigravity_agent.provision(host=antigravity_agent.host, options=options, mngr_ctx=antigravity_agent.mngr_ctx)
-
-    settings = _read_user_settings(isolated_home)
-    trusted = settings["trustedWorkspaces"]
-    assert trusted.count(str(antigravity_agent.work_dir)) == 1
-
-
-def test_provision_pre_trust_warns_when_trustedworkspaces_has_non_list_value(
-    antigravity_agent: AntigravityAgent,
-    isolated_home: Path,
-) -> None:
-    """A future agy schema that stores `trustedWorkspaces` as a non-list value must surface a warning.
-
-    The @pure ``merge_trusted_workspace`` helper silently falls back to a
-    fresh array when the existing value is the wrong shape; without the
-    warning emitted by ``_pre_trust_work_dir`` the data loss is invisible.
-    This test pins both that the warning fires (with the path and the
-    unexpected type name) and that the merge recovers by writing the
-    new workspace into a fresh array.
+    Default mngr_ctx has is_interactive=False and is_auto_approve=False;
+    the antigravity_agent fixture defaults auto_dismiss_dialogs=False, so
+    no path to a trust write exists and we must abort. Mirrors Claude's
+    ClaudeDirectoryNotTrustedError behavior.
     """
-    settings_path = get_antigravity_user_settings_path()
-    settings_path.parent.mkdir(parents=True)
-    settings_path.write_text(json.dumps({"trustedWorkspaces": "not-a-list"}))
-
-    with capture_loguru(level="WARNING") as log_output:
+    with pytest.raises(UserInputError) as excinfo:
         antigravity_agent.provision(
             host=antigravity_agent.host,
             options=CreateAgentOptions(agent_type=AgentTypeName("antigravity")),
             mngr_ctx=antigravity_agent.mngr_ctx,
         )
+    message = str(excinfo.value)
+    assert "not trusted" in message
+    assert "--yes" in message or "auto_dismiss_dialogs" in message
+    settings_path = get_antigravity_user_settings_path()
+    assert not settings_path.exists()
 
-    output = log_output.getvalue()
-    assert "non-list trustedWorkspaces" in output
-    assert str(settings_path) in output
-    # The unexpected type's name (str) must appear so operators can grep for it.
-    assert "str" in output
+
+def test_provision_dialog_dismissal_preserves_existing_settings(
+    auto_approve_ctx: AntigravityAgent,
+    isolated_home: Path,
+) -> None:
+    """Trust write must be additive: prior keys and entries stay verbatim."""
+    agent = auto_approve_ctx
+    settings_path = get_antigravity_user_settings_path()
+    settings_path.parent.mkdir(parents=True)
+    settings_path.write_text(json.dumps({"trustedWorkspaces": ["/prior/workspace"], "colorScheme": "dark"}, indent=2))
+
+    agent.provision(
+        host=agent.host,
+        options=CreateAgentOptions(agent_type=AgentTypeName("antigravity")),
+        mngr_ctx=agent.mngr_ctx,
+    )
 
     settings = _read_user_settings(isolated_home)
-    assert settings["trustedWorkspaces"] == [str(antigravity_agent.work_dir)]
+    assert "/prior/workspace" in settings["trustedWorkspaces"]
+    assert str(agent.work_dir) in settings["trustedWorkspaces"]
+    assert settings["colorScheme"] == "dark"
+
+
+def test_provision_dialog_dismissal_is_idempotent(
+    auto_approve_ctx: AntigravityAgent,
+    isolated_home: Path,
+) -> None:
+    """Two passes under auto-approve yield one trust entry, not duplicates."""
+    agent = auto_approve_ctx
+    options = CreateAgentOptions(agent_type=AgentTypeName("antigravity"))
+    agent.provision(host=agent.host, options=options, mngr_ctx=agent.mngr_ctx)
+    agent.provision(host=agent.host, options=options, mngr_ctx=agent.mngr_ctx)
+
+    settings = _read_user_settings(isolated_home)
+    trusted = settings["trustedWorkspaces"]
+    assert trusted.count(str(agent.work_dir)) == 1
+
+
+def test_provision_already_trusted_workspace_does_not_reprompt(
+    interactive_ctx_with_declination: AntigravityAgent,
+    isolated_home: Path,
+) -> None:
+    """If the workspace is already in trustedWorkspaces, no prompt fires.
+
+    The declining-user fixture stubs click.confirm to return False; if the
+    short-circuit weren't in place, this test would raise UserInputError.
+    """
+    agent = interactive_ctx_with_declination
+    settings_path = get_antigravity_user_settings_path()
+    settings_path.parent.mkdir(parents=True)
+    settings_path.write_text(json.dumps({"trustedWorkspaces": [str(agent.work_dir)]}))
+
+    agent.provision(
+        host=agent.host,
+        options=CreateAgentOptions(agent_type=AgentTypeName("antigravity")),
+        mngr_ctx=agent.mngr_ctx,
+    )
+    # The file is unchanged because the workspace was already trusted.
+    assert json.loads(settings_path.read_text()) == {"trustedWorkspaces": [str(agent.work_dir)]}
+
+
+def test_provision_errors_when_trustedworkspaces_has_non_list_value(
+    auto_approve_ctx: AntigravityAgent,
+    isolated_home: Path,
+) -> None:
+    """A future agy schema that stores `trustedWorkspaces` as a non-list value must hard-error.
+
+    Silently coercing a non-list value into a fresh array would destroy
+    whatever the unknown schema put there. The plugin refuses to write
+    instead, surfacing the schema break for human inspection.
+    """
+    agent = auto_approve_ctx
+    settings_path = get_antigravity_user_settings_path()
+    settings_path.parent.mkdir(parents=True)
+    settings_path.write_text(json.dumps({"trustedWorkspaces": "not-a-list"}))
+
+    with pytest.raises(UserInputError) as excinfo:
+        agent.provision(
+            host=agent.host,
+            options=CreateAgentOptions(agent_type=AgentTypeName("antigravity")),
+            mngr_ctx=agent.mngr_ctx,
+        )
+
+    message = str(excinfo.value)
+    assert "non-list trustedWorkspaces" in message
+    assert str(settings_path) in message
+    # The unexpected type's name (str) must appear so operators can grep for it.
+    assert "str" in message
+    # The settings file is left untouched.
+    assert json.loads(settings_path.read_text()) == {"trustedWorkspaces": "not-a-list"}
 
 
 def _provision(agent: AntigravityAgent) -> None:
@@ -349,13 +502,20 @@ def antigravity_agent_without_common_transcript(
     local_provider: LocalProviderInstance,
     tmp_path: Path,
 ) -> AntigravityAgent:
-    return _make_antigravity_agent(local_provider, tmp_path, AntigravityAgentConfig(emit_common_transcript=False))
+    """Agent with `auto_dismiss_dialogs=True` so provision() can complete in tests."""
+    return _make_antigravity_agent(
+        local_provider,
+        tmp_path,
+        AntigravityAgentConfig(emit_common_transcript=False, auto_dismiss_dialogs=True),
+    )
 
 
-def test_provision_writes_raw_transcript_streamer(antigravity_agent: AntigravityAgent, isolated_home: Path) -> None:
+def test_provision_writes_raw_transcript_streamer(
+    antigravity_agent_auto_dismiss: AntigravityAgent, isolated_home: Path
+) -> None:
     """The raw streamer is required by HasTranscriptMixin and is provisioned unconditionally."""
-    _provision(antigravity_agent)
-    expected = antigravity_agent._get_agent_dir() / "commands" / "stream_transcript.sh"
+    _provision(antigravity_agent_auto_dismiss)
+    expected = antigravity_agent_auto_dismiss._get_agent_dir() / "commands" / "stream_transcript.sh"
     assert expected.exists()
     body = expected.read_text()
     assert body.startswith("#!/usr/bin/env bash")
@@ -374,11 +534,11 @@ def test_provision_writes_raw_streamer_even_when_common_transcript_disabled(
 
 
 def test_provision_with_common_transcript_writes_converter(
-    antigravity_agent: AntigravityAgent, isolated_home: Path
+    antigravity_agent_auto_dismiss: AntigravityAgent, isolated_home: Path
 ) -> None:
     """`emit_common_transcript=True` (default) provisions common_transcript.sh."""
-    _provision(antigravity_agent)
-    expected = antigravity_agent._get_agent_dir() / "commands" / "common_transcript.sh"
+    _provision(antigravity_agent_auto_dismiss)
+    expected = antigravity_agent_auto_dismiss._get_agent_dir() / "commands" / "common_transcript.sh"
     assert expected.exists()
     body = expected.read_text()
     assert body.startswith("#!/usr/bin/env bash")
@@ -397,11 +557,11 @@ def test_provision_without_common_transcript_omits_converter(
 
 
 def test_provision_writes_background_tasks_supervisor(
-    antigravity_agent: AntigravityAgent, isolated_home: Path
+    antigravity_agent_auto_dismiss: AntigravityAgent, isolated_home: Path
 ) -> None:
     """The supervisor is the single backgrounded entry point launched from assemble_command."""
-    _provision(antigravity_agent)
-    expected = antigravity_agent._get_agent_dir() / "commands" / "antigravity_background_tasks.sh"
+    _provision(antigravity_agent_auto_dismiss)
+    expected = antigravity_agent_auto_dismiss._get_agent_dir() / "commands" / "antigravity_background_tasks.sh"
     assert expected.exists()
     body = expected.read_text()
     assert body.startswith("#!/usr/bin/env bash")

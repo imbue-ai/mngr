@@ -33,9 +33,11 @@ import importlib.resources
 import shlex
 from collections.abc import Mapping
 from pathlib import Path
+from typing import Any
 from typing import ClassVar
 from typing import Final
 
+import click
 from loguru import logger
 from pydantic import Field
 
@@ -48,6 +50,7 @@ from imbue.mngr.agents.tui_agent import InteractiveTuiAgent
 from imbue.mngr.agents.tui_utils import send_enter_best_effort
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.errors import UserInputError
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.agent import HasCommonTranscriptMixin
 from imbue.mngr.interfaces.host import CreateAgentOptions
@@ -101,32 +104,39 @@ class AntigravityAgentConfig(AgentTypeConfig):
         default=(),
         description="Additional CLI arguments to pass to the antigravity agent.",
     )
+    # auto_allow_permissions wires Antigravity's documented
+    # ``--dangerously-skip-permissions`` CLI flag (same spelling Claude Code
+    # uses). We deliberately route through the flag rather than a permission
+    # hook because hook *execution* is currently gated behind the
+    # ``json-hooks-enabled`` experiment that Google enables per-account.
     auto_allow_permissions: bool = Field(
         default=False,
-        description="When True, launch with `--dangerously-skip-permissions` so every tool "
-        "call is auto-approved without prompting. Antigravity exposes this as a top-level "
-        "CLI flag (same spelling Claude Code uses); we wire it instead of a permission "
-        "hook because hook execution is currently gated behind the `json-hooks-enabled` "
-        "experiment flag.",
+        description="When True, auto-approve every tool call without prompting.",
     )
-    pre_trust_workspace: bool = Field(
-        default=True,
-        description="When True, append the agent's work_dir to "
-        "`~/.gemini/antigravity-cli/settings.json::trustedWorkspaces` during provisioning "
-        "so the first-launch trust dialog is suppressed. The user's settings file is "
-        "merged additively -- no other keys are touched and an already-trusted path is "
-        "left alone. Disable to fall back to the interactive dialog (useful if you want "
-        "the user to consciously accept each new agent's workspace).",
+    # auto_dismiss_dialogs is the mngr_claude-style auto-trust knob. When
+    # True (or when ``mngr_ctx.is_auto_approve`` is set, i.e. ``mngr create
+    # --yes``), provisioning silently appends the work_dir to agy's
+    # ``trustedWorkspaces`` without prompting. When False (default), the
+    # provisioner asks the user via ``click.confirm`` before mutating the
+    # global config, mirroring ``mngr_claude``'s ``auto_dismiss_dialogs``.
+    # Why default off: the file is shared user state, so we should make
+    # writing to it an explicit choice. Why dismiss-before-launch at all:
+    # agy's first-launch trust dialog consumes the first keystroke
+    # otherwise, breaking ``mngr message`` / ``--message`` flows -- the
+    # same shape ``mngr_claude`` mitigates via its dismiss path.
+    auto_dismiss_dialogs: bool = Field(
+        default=False,
+        description="When True, auto-trust the work_dir without prompting. "
+        "When False (default), the user is prompted interactively.",
     )
+    # emit_common_transcript gates the JSONL -> common-schema converter that
+    # writes to ``events/antigravity/common_transcript/events.jsonl``. The raw
+    # transcript at ``logs/antigravity_transcript/events.jsonl`` is always
+    # captured (required by HasTranscriptMixin); only the common-format
+    # converter is gated by this flag.
     emit_common_transcript: bool = Field(
         default=True,
-        description="Emit a common, agent-agnostic transcript at "
-        "events/antigravity/common_transcript/events.jsonl. When enabled, a background "
-        "process tails agy's per-conversation JSONL transcripts and converts user, "
-        "assistant, and tool-call/result events into the common schema that "
-        "`mngr transcript` reads. The raw transcript at "
-        "logs/antigravity_transcript/events.jsonl is always captured (required by "
-        "HasTranscriptMixin); only the common-format converter is gated by this flag.",
+        description="When True, emit a common-schema transcript that `mngr transcript` reads.",
     )
 
 
@@ -194,16 +204,22 @@ class AntigravityAgent(InteractiveTuiAgent[AntigravityAgentConfig], HasCommonTra
         options: CreateAgentOptions,
         mngr_ctx: MngrContext,
     ) -> None:
-        """Pre-trust ``work_dir``, then install the background-tasks supervisor + transcript scripts.
+        """Dismiss agy's startup dialogs, then install the background-tasks supervisor + transcript scripts.
 
-        The trust step matches what Claude Code does for its workspace-trust
-        gate (writes to a settings file before launch). The transcript scripts
-        are then installed under ``$MNGR_AGENT_STATE_DIR/commands/`` so the
-        backgrounded supervisor (launched from ``assemble_command``) can
-        invoke them.
+        Dialog dismissal mirrors ``mngr_claude``'s
+        ``interactively_dismiss_claude_dialogs``: in auto-approve mode
+        (``mngr_ctx.is_auto_approve`` or ``auto_dismiss_dialogs=True``) the
+        work_dir is pre-trusted silently; in interactive mode the user is
+        prompted via ``click.confirm`` before mngr mutates the global
+        ``~/.gemini/antigravity-cli/settings.json``; in non-interactive mode
+        with neither auto-approve nor opt-in, we raise so the operator
+        notices instead of falling back to agy's TUI dialog (which would
+        consume the first keystroke of ``mngr message``).
+
+        After dismissal, the transcript scripts and the background-tasks
+        supervisor are installed under ``$MNGR_AGENT_STATE_DIR/commands/``.
         """
-        if self.agent_config.pre_trust_workspace:
-            self._pre_trust_work_dir(host)
+        self._interactively_dismiss_antigravity_dialogs(host, mngr_ctx)
         with mngr_ctx.concurrency_group.make_concurrency_group("antigravity_provisioning") as concurrency_group:
             provision_raw_transcript_scripts(
                 self,
@@ -224,26 +240,99 @@ class AntigravityAgent(InteractiveTuiAgent[AntigravityAgentConfig], HasCommonTra
                 concurrency_group,
             )
 
-    def _pre_trust_work_dir(self, host: OnlineHostInterface) -> None:
+    def _interactively_dismiss_antigravity_dialogs(self, host: OnlineHostInterface, mngr_ctx: MngrContext) -> None:
+        """Ensure agy's first-launch trust dialog won't intercept tmux input.
+
+        Three branches, matching ``mngr_claude``'s dismiss flow:
+
+        * ``auto_dismiss_dialogs=True`` or ``mngr_ctx.is_auto_approve``:
+          silently trust the work_dir.
+        * Interactive mode (``mngr_ctx.is_interactive``): prompt the user
+          via ``click.confirm`` before mutating the global settings file.
+          If the user declines, raise ``UserInputError`` so the agent
+          creation aborts cleanly instead of leaving the operator stuck
+          inside agy's TUI dialog.
+        * Non-interactive mode with neither auto-approve nor opt-in:
+          raise. The operator likely intended to opt in and didn't.
+
+        If the work_dir is already trusted (idempotent re-provision) the
+        method short-circuits without prompting.
+        """
+        workspace_path = str(self.work_dir)
         settings_path = get_antigravity_user_settings_path()
         existing_settings = read_antigravity_settings(host, settings_path)
-        # Warn before invoking the @pure merge helper if the existing
-        # trustedWorkspaces value is the wrong shape: merge_trusted_workspace
-        # defensively replaces just that key with a fresh array containing
-        # only the new workspace (other top-level keys in the settings dict
-        # are preserved). Whatever was previously stored under
-        # trustedWorkspaces (e.g. an object form introduced by a future agy
-        # schema) is silently dropped by the fallback; logging here keeps the
-        # helper pure while making that drop visible.
+        self._check_existing_trustedworkspaces_shape(settings_path, existing_settings)
+        if workspace_path in existing_settings.get("trustedWorkspaces", []):
+            logger.debug("Workspace {} already trusted in {}", workspace_path, settings_path)
+            return
+
+        if self.agent_config.auto_dismiss_dialogs or mngr_ctx.is_auto_approve:
+            self._write_workspace_trust(host, settings_path, existing_settings, workspace_path)
+            return
+
+        if not mngr_ctx.is_interactive:
+            raise UserInputError(
+                f"Antigravity workspace {workspace_path} is not trusted in {settings_path}. "
+                f"agy's first-launch trust dialog would consume the first keystroke sent to "
+                f"the tmux pane and break `mngr message`. Re-run with `--yes`, or set "
+                f"`auto_dismiss_dialogs = true` on the antigravity agent type."
+            )
+
+        if not self._prompt_user_to_trust_workspace(workspace_path, settings_path):
+            raise UserInputError(
+                f"User declined to trust {workspace_path} in {settings_path}. "
+                f"Antigravity's first-launch trust dialog would block tmux input."
+            )
+        self._write_workspace_trust(host, settings_path, existing_settings, workspace_path)
+
+    def _prompt_user_to_trust_workspace(self, workspace_path: str, settings_path: Path) -> bool:
+        """Prompt the user to trust the agent's work_dir in Antigravity's user-tier settings.
+
+        Returns True iff the user confirms. Pattern matches ``mngr_claude``'s
+        ``_prompt_user_for_trust`` (`libs/mngr_claude/imbue/mngr_claude/plugin.py`).
+        Defaults to ``False`` so a stray Enter doesn't grant trust silently.
+        Exposed as a method (rather than a module-level function) so tests
+        can subclass and override without monkeypatching.
+        """
+        logger.info(
+            "\nWorkspace {} is not yet trusted by the Antigravity CLI.\n"
+            "mngr needs to add a trust entry for this directory to {}\n"
+            "so that agy's first-launch trust dialog doesn't intercept tmux input.\n",
+            workspace_path,
+            settings_path,
+        )
+        return click.confirm(
+            f"Would you like to update {settings_path} to trust this directory?",
+            default=False,
+        )
+
+    def _check_existing_trustedworkspaces_shape(
+        self, settings_path: Path, existing_settings: Mapping[str, Any]
+    ) -> None:
+        """Hard-error if ``trustedWorkspaces`` exists but isn't a list.
+
+        The ``@pure`` merge helper used to silently coerce non-list values
+        into a fresh array containing only the new workspace, which could
+        destroy entries an unknown future agy schema put there. Surfacing
+        the schema break is safer than rewriting the file.
+        """
         existing_trusted = existing_settings.get("trustedWorkspaces")
         if existing_trusted is not None and not isinstance(existing_trusted, list):
-            logger.warning(
-                "Antigravity settings at {} has a non-list trustedWorkspaces value ({}); "
-                "replacing with a fresh array.",
-                settings_path,
-                type(existing_trusted).__name__,
+            raise UserInputError(
+                f"Antigravity settings at {settings_path} has a "
+                f"non-list trustedWorkspaces value ({type(existing_trusted).__name__}); "
+                f"refusing to overwrite. Inspect the file by hand and either fix the value "
+                f"or remove the key, then re-run."
             )
-        workspace_path = str(self.work_dir)
+
+    def _write_workspace_trust(
+        self,
+        host: OnlineHostInterface,
+        settings_path: Path,
+        existing_settings: Mapping[str, Any],
+        workspace_path: str,
+    ) -> None:
+        """Append ``workspace_path`` to the user-tier settings' trust list and write it back."""
         merged = merge_trusted_workspace(existing_settings, workspace_path)
         if merged is None:
             logger.debug("Workspace {} already trusted in {}", workspace_path, settings_path)

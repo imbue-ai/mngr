@@ -124,8 +124,15 @@ def _write_raw_transcript(state_dir: Path, lines: list[str]) -> None:
     raw_path.write_text("\n".join(lines) + "\n")
 
 
-def _run_converter(state_dir: Path) -> None:
-    """Run common_transcript.sh in single-pass mode against the seeded raw transcript."""
+def _run_converter(state_dir: Path) -> str:
+    """Run common_transcript.sh in single-pass mode against the seeded raw transcript.
+
+    Returns the converter's combined stderr (from both the bash main script
+    and the heredoc Python) so callers can assert on loud-error messages
+    emitted by the conversion pass. The shared logging library also writes
+    structured warnings to events/logs/common_transcript/events.jsonl --
+    stderr is the easier surface to inspect in tests.
+    """
     env = {**os.environ, "MNGR_AGENT_STATE_DIR": str(state_dir)}
     result = subprocess.run(
         ["bash", str(_SCRIPT_PATH), "--single-pass"],
@@ -134,9 +141,12 @@ def _run_converter(state_dir: Path) -> None:
         text=True,
         check=True,
     )
-    # Surface converter stderr in the test failure message; the heredoc Python
-    # writes warnings here when an event is malformed.
+    # A Python traceback in the converter would mean the conversion pass
+    # crashed mid-loop and dropped subsequent events. Surface it in the
+    # failure message rather than letting a downstream assertion fail
+    # mysteriously.
     assert "Traceback" not in result.stderr, result.stderr
+    return result.stderr
 
 
 def _read_common_events(state_dir: Path) -> list[dict[str, Any]]:
@@ -173,22 +183,29 @@ def test_user_input_is_converted_to_user_message(state_dir: Path) -> None:
     assert event["source"] == "antigravity/common_transcript"
 
 
-def test_user_input_without_user_request_envelope_falls_through_verbatim(state_dir: Path) -> None:
-    """Defensive: a future agy version without the envelope still produces a user_message."""
+def test_user_input_without_user_request_envelope_drops_event_with_loud_error(state_dir: Path) -> None:
+    """If a future agy version drops the <USER_REQUEST> envelope, surface a loud error and drop the event.
+
+    Silently falling through to the raw content would bake agy's bookkeeping
+    (metadata preamble, future fields) into the user-visible transcript and
+    hide the schema break. Better to drop and shout so the schema mismatch is
+    visible upstream when it happens for the first time.
+    """
     raw = _make_event(
         conv_id="conv-A",
         step_index=0,
         source="USER_EXPLICIT",
         type_="USER_INPUT",
-        content="plain text",
+        content="plain text without envelope",
     )
     _write_raw_transcript(state_dir, [raw])
 
-    _run_converter(state_dir)
+    stderr = _run_converter(state_dir)
 
-    events = _read_common_events(state_dir)
-    assert len(events) == 1
-    assert events[0]["content"] == "plain text"
+    assert _read_common_events(state_dir) == []
+    assert "USER_INPUT content missing <USER_REQUEST> envelope" in stderr
+    assert "conv=conv-A" in stderr
+    assert "step=0" in stderr
 
 
 def test_planner_response_without_tool_calls_is_assistant_message(state_dir: Path) -> None:
