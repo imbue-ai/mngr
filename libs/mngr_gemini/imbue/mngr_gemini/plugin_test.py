@@ -43,7 +43,7 @@ def test_gemini_agent_config_merge_with_replaces_cli_args() -> None:
     merged = base.merge_with(override)
 
     assert isinstance(merged, GeminiAgentConfig)
-    # base's --skip-trust is replaced, not concatenated; use cli_args__extend in TOML to keep it.
+    # Override's cli_args replaces (rather than concatenates onto) the base; use cli_args__extend in TOML to opt into additive behavior.
     assert merged.cli_args == ("--verbose",)
     assert str(merged.command) == "gemini"
 
