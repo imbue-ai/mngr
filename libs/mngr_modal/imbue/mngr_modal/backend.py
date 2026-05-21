@@ -136,7 +136,7 @@ def _lookup_persistent_app_with_env_retry(
     # Retry on PermissionDeniedError as well: after `modal environment create`
     # returns success, Modal's per-user permission entry is propagated
     # asynchronously and operations on the new env raise PermissionDeniedError
-    # for ~3s before catching up.
+    # for ~3-7 seconds before catching up.
     retry=retry_if_exception_type((ModalProxyNotFoundError, ModalProxyPermissionDeniedError)),
     stop=stop_after_attempt(5),
     wait=wait_exponential(multiplier=1, min=1, max=10),
@@ -183,7 +183,7 @@ def _enter_ephemeral_app_context_with_env_retry(
     # Retry on PermissionDeniedError as well: after `modal environment create`
     # returns success, Modal's per-user permission entry is propagated
     # asynchronously and operations on the new env raise PermissionDeniedError
-    # for ~3s before catching up.
+    # for ~3-7 seconds before catching up.
     retry=retry_if_exception_type((ModalProxyNotFoundError, ModalProxyPermissionDeniedError)),
     stop=stop_after_attempt(5),
     wait=wait_exponential(multiplier=1, min=1, max=10),

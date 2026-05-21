@@ -198,8 +198,8 @@ def _invoke_modal_sdk_delete_with_retry(delete_fn: Callable[[], object]) -> None
 
     Modal's per-user permission entry for a just-created resource propagates
     asynchronously, so deletes immediately after creation can spuriously fail
-    with PermissionDeniedError for ~3s before the permission system catches
-    up. Retry with exponential backoff to ride through that window.
+    with PermissionDeniedError for ~3-7 seconds before the permission system
+    catches up. Retry with exponential backoff to ride through that window.
     """
     delete_fn()
 
