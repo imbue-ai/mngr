@@ -24,6 +24,7 @@ from imbue.minds.bootstrap import MINDS_ROOT_NAME_ENV_VAR
 from imbue.minds.bootstrap import mngr_host_dir_for
 from imbue.minds.bootstrap import mngr_prefix_for
 from imbue.minds.bootstrap import root_name_for_env_name
+from imbue.minds.cli._activated_env import MODAL_PROFILE_ENV_VAR
 from imbue.minds.cli._activated_env import modal_profile_for_tier_or_none
 from imbue.minds.cli._activated_env import tier_for_env_name
 from imbue.minds.deployment_tests.data_types import SharedEnvHandle
@@ -69,7 +70,7 @@ def build_minds_env_subprocess_env(name: DevEnvName) -> dict[str, str]:
     env["MINDS_CLIENT_CONFIG_PATH"] = str(client_config_file(name))
     modal_profile = modal_profile_for_tier_or_none(tier_for_env_name(str(name)))
     if modal_profile is not None:
-        env["MODAL_PROFILE"] = modal_profile
+        env[MODAL_PROFILE_ENV_VAR] = modal_profile
     return env
 
 
@@ -218,7 +219,7 @@ def modal_env_exists(name: DevEnvName) -> bool:
     sub_env = dict(os.environ)
     modal_profile = modal_profile_for_tier_or_none(tier_for_env_name(str(name)))
     if modal_profile is not None:
-        sub_env["MODAL_PROFILE"] = modal_profile
+        sub_env[MODAL_PROFILE_ENV_VAR] = modal_profile
     result = subprocess.run(
         ["uv", "run", "modal", "environment", "list", "--json"],
         env=sub_env,
