@@ -227,6 +227,20 @@ class AntigravityAgent(InteractiveTuiAgent[AntigravityAgentConfig], HasCommonTra
     def _pre_trust_work_dir(self, host: OnlineHostInterface) -> None:
         settings_path = get_antigravity_user_settings_path()
         existing_settings = read_antigravity_settings(host, settings_path)
+        # Warn before invoking the @pure merge helper if the existing
+        # trustedWorkspaces value is the wrong shape: merge_trusted_workspace
+        # defensively replaces it with a fresh array containing only the new
+        # workspace, which silently destroys whatever was previously stored
+        # (e.g. an object form introduced by a future agy schema). Logging
+        # here keeps the helper pure while making the data loss visible.
+        existing_trusted = existing_settings.get("trustedWorkspaces")
+        if existing_trusted is not None and not isinstance(existing_trusted, list):
+            logger.warning(
+                "Antigravity settings at {} has a non-list trustedWorkspaces value ({}); "
+                "replacing with a fresh array.",
+                settings_path,
+                type(existing_trusted).__name__,
+            )
         workspace_path = str(self.work_dir)
         merged = merge_trusted_workspace(existing_settings, workspace_path)
         if merged is None:
