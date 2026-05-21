@@ -667,20 +667,20 @@ class AgentObserver(MutableModel):
         """
         live_agent_ids = {str(agent.id) for agent in agents}
 
-        # Update last-known details for everything we just observed
-        with self._lock:
-            for agent in agents:
-                self._last_known_details_by_id[str(agent.id)] = agent
-
-            # Snapshot the provider state for use outside the lock
-            errored_providers = set(self._currently_errored_providers)
-            known_providers = set(self._known_provider_names)
-            polling_crashed = self._polling_loop_crashed
-
-        # Build UNKNOWN synthetic entries and per-id drops
+        # Build UNKNOWN synthetic entries and per-id drops in a single locked
+        # region so the provider-error state we use to classify each missing
+        # agent stays consistent with the dict mutations we do below.
         unknown_agents: list[AgentDetails] = []
         ids_to_drop: list[str] = []
         with self._lock:
+            # First, record everything we just observed.
+            for agent in agents:
+                self._last_known_details_by_id[str(agent.id)] = agent
+
+            errored_providers = self._currently_errored_providers
+            known_providers = self._known_provider_names
+            polling_crashed = self._polling_loop_crashed
+
             for agent_id_str, last_details in self._last_known_details_by_id.items():
                 if agent_id_str in live_agent_ids:
                     continue
