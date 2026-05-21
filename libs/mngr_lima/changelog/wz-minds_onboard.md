@@ -1,0 +1,4 @@
+- mngr_lima: raise `MINIMUM_LIMA_VERSION` to 2.1.1 (the version the minds desktop app bundles), so a too-old `limactl` is rejected up front instead of failing obscurely mid-provision.
+- mngr_lima: use `tail -F` (capital, follow-by-name + retry) for the VM serial log. GNU-style `--follow=name --retry` is unsupported on macOS BSD `tail` and made the tailer exit immediately, losing all serial-log diagnostics during VM boot.
+- mngr_lima: raise the `limactl start` default timeout to 1800s; first-boot provisioning of a fresh VM (image download + cloud-init) regularly exceeds the previous 600s.
+- mngr_lima: replace `time.sleep` with `threading.Event().wait()` for the known_hosts retry; drop `is_shallow=True` on the remote-URL git mirror clone (a mirror push rejects shallow updates).
