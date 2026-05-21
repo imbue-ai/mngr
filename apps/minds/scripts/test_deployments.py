@@ -722,7 +722,7 @@ def services_against(env_name: str, tests: tuple[str, ...], no_fct_push: bool) -
     if not target_client_toml.is_file():
         raise click.ClickException(
             f"No client.toml found at {target_client_toml} for env {env_name!r}. "
-            f'Activate + deploy the env first: `eval "$(uv run minds env activate {env_name})" && uv run minds env deploy`.'
+            f'Activate + deploy the env first: `eval "$(uv run minds env activate --create --deploy {env_name})" && uv run minds env deploy`.'
         )
     if not target_secrets_toml.is_file():
         raise click.ClickException(
