@@ -433,10 +433,9 @@ def _build_mngr_create_command(
     ``system-services@<host_name>`` -- the agent name is constant across
     every minds workspace; the host name (the user's input from the
     create-project form) is the workspace identifier. Every mode passes
-    ``--new-host``, so ``--reuse`` is never passed: mngr rejects the two
-    together, and a fresh host has no agent to reuse. IMBUE_CLOUD's
-    pre-baked ``system-services`` agent is still adopted -- mngr's
-    duplicate-name check exempts ``host.pre_baked_agent_id``.
+    ``--new-host``, so ``--reuse`` is never passed -- mngr rejects that
+    combination. IMBUE_CLOUD's pre-baked ``system-services`` agent is
+    adopted anyway: mngr's duplicate-name check exempts it.
 
     Secrets (``ANTHROPIC_API_KEY``, ``ANTHROPIC_BASE_URL``, ``GH_TOKEN``)
     are forwarded by the FCT template's own ``pass_(host_)env`` declarations,
@@ -512,8 +511,7 @@ def _build_mngr_create_command(
         "is_primary=true",
     ]
 
-    # No ``--reuse``: every mode below passes ``--new-host``, and mngr rejects
-    # the two together (see the docstring for why it is safe to omit).
+    # ``--reuse`` is omitted: mngr rejects it together with ``--new-host``.
 
     # Per-mode template + per-mode runtime flags. All modes use
     # ``--template main --template <mode>``; the per-mode template provides

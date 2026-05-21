@@ -619,8 +619,6 @@ def create(ctx: click.Context, **kwargs) -> None:
         if opts.update and not opts.reuse:
             raise UserInputError("--update requires --reuse. Use --reuse --update together.")
 
-        # --reuse adopts an existing agent on an existing host; --new-host forces a
-        # fresh host, which by definition has no agent to adopt.
         if opts.reuse and opts.new_host:
             raise UserInputError(
                 "--reuse cannot be combined with --new-host: --reuse adopts an existing agent "
