@@ -23,20 +23,25 @@ from imbue.minds.config.loader import load_deploy_config
 PRODUCTION_ENV_NAME: Final[str] = "production"
 STAGING_ENV_NAME: Final[str] = "staging"
 DEV_TIER: Final[str] = "dev"
+CI_TIER: Final[str] = "ci"
 
 
 def tier_for_env_name(env_name: str) -> str:
     """Hard-coded env-name -> tier mapping.
 
     ``production`` -> ``production``; ``staging`` -> ``staging``;
-    everything else (the convention is ``<user>-<suffix>``) -> ``dev``.
-    Shared by ``minds env`` (deploy/destroy dispatch) and ``minds pool``
-    (tier-scoped Vault reads for the OVH admin credentials).
+    names starting with ``ci-`` -> ``ci`` (the CI-orchestrator-minted
+    ephemeral envs); everything else (the convention is
+    ``dev-<user>-<suffix>``) -> ``dev``. Shared by ``minds env``
+    (deploy/destroy dispatch) and ``minds pool`` (tier-scoped Vault
+    reads for the OVH admin credentials).
     """
     if env_name == PRODUCTION_ENV_NAME:
         return PRODUCTION_ENV_NAME
     if env_name == STAGING_ENV_NAME:
         return STAGING_ENV_NAME
+    if env_name.startswith(f"{CI_TIER}-"):
+        return CI_TIER
     return DEV_TIER
 
 

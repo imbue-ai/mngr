@@ -28,7 +28,6 @@ from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import CommandString
 from imbue.mngr.primitives import LifecycleHook
 from imbue.mngr.primitives import LogLevel
-from imbue.mngr.primitives import Permission
 from imbue.mngr.primitives import PluginName
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
@@ -166,14 +165,6 @@ def test_agent_type_config_merge_with_handles_empty_override_cli_args() -> None:
     override = AgentTypeConfig(cli_args=())
     merged = base.merge_with(override)
     assert merged.cli_args == ("--arg",)
-
-
-def test_agent_type_config_merge_with_concatenates_permissions() -> None:
-    """AgentTypeConfig.merge_with should concatenate permissions."""
-    base = AgentTypeConfig(permissions=[Permission("read")])
-    override = AgentTypeConfig(permissions=[Permission("write")])
-    merged = base.merge_with(override)
-    assert merged.permissions == [Permission("read"), Permission("write")]
 
 
 def test_agent_type_config_merge_with_concatenates_extra_provision_command() -> None:

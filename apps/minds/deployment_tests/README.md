@@ -6,8 +6,8 @@ End-to-end tests that exercise the real deployed minds services and the deploy p
 
 Every test in this directory carries one of:
 
-- `pytest.mark.minds_deployment` -- mints its own ephemeral dev env via `minds env deploy` (slow, costs real cloud resources).
-- `pytest.mark.minds_services` -- runs against a pre-stood-up shared dev env (fast).
+- `pytest.mark.minds_deployment` -- mints its own ephemeral ci env via `minds env deploy` (slow, costs real cloud resources).
+- `pytest.mark.minds_services` -- runs against a pre-stood-up shared ci env (fast).
 
 Both marks are explicitly excluded from the standard CI offload jobs and from `just test-quick`, so the tests only run when invoked via `just minds-test-deployment` (or one of its sibling recipes).
 

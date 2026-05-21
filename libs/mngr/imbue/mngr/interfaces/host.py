@@ -40,7 +40,6 @@ from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import HostNameStyle
 from imbue.mngr.primitives import HostState
-from imbue.mngr.primitives import Permission
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import SnapshotName
 from imbue.mngr.primitives import TransferMode
@@ -198,11 +197,6 @@ class HostInterface(MutableModel, ABC):
     # =========================================================================
     # Agent-Derived Information
     # =========================================================================
-
-    @abstractmethod
-    def get_permissions(self) -> list[str]:
-        """Return the union of all permissions granted to agents on this host."""
-        ...
 
     @abstractmethod
     def get_state(self) -> HostState:
@@ -743,15 +737,6 @@ class AgentLabelOptions(FrozenModel):
     )
 
 
-class AgentPermissionsOptions(FrozenModel):
-    """Permissions options for the agent."""
-
-    granted_permissions: tuple[Permission, ...] = Field(
-        default=(),
-        description="Permissions to grant to the agent",
-    )
-
-
 class UploadFileSpec(FrozenModel):
     """Specification for uploading a file: LOCAL:REMOTE."""
 
@@ -936,10 +921,6 @@ class CreateAgentOptions(FrozenModel):
     lifecycle: AgentLifecycleOptions = Field(
         default_factory=AgentLifecycleOptions,
         description="Lifecycle and idle detection options",
-    )
-    permissions: AgentPermissionsOptions = Field(
-        default_factory=AgentPermissionsOptions,
-        description="Permissions options",
     )
     label_options: AgentLabelOptions = Field(
         default_factory=AgentLabelOptions,
