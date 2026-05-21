@@ -379,10 +379,10 @@ jobs:
       - name: Set up Node.js for Electron e2e test
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '24.15.0'
 
       - name: Install pnpm
-        run: npm install --global pnpm@10
+        run: npm install --global pnpm@10.33.4
 
       - name: Install Electron + minds JS deps
         run: pnpm install --dir apps/minds --frozen-lockfile
