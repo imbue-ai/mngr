@@ -463,11 +463,14 @@ def modal_test_session_cleanup(
     sandboxes, so this fixture skips the env-wide app/volume sweep entirely
     -- ``delete_modal_apps_in_environment`` / ``delete_modal_volumes_in_environment``
     enumerate every resource in the env, which would stop other sandboxes'
-    in-flight apps and delete their live volumes. The justfile wrapper deletes
-    the env outright on EXIT (which cascades to every app), and per-test
-    fixtures still delete their own volumes individually, so nothing this
-    fixture would have swept up survives. The env itself is also not deleted
-    or registered for leak detection here.
+    in-flight apps and delete their live volumes. The justfile wrapper
+    deletes the env outright on EXIT, which per Modal's ``modal environment
+    delete`` confirmation message cascades to every Modal resource scoped
+    to the env (Apps, Volumes, Secrets, Dicts, Queues). Function-scoped
+    fixtures (``real_modal_provider`` and friends) still delete their own
+    volumes individually before the env goes away; subprocess-style tests
+    do not -- they rely entirely on that env-delete cascade. The env
+    itself is also not deleted or registered for leak detection here.
     """
     if read_shared_modal_env_name() is not None:
         yield
