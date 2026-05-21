@@ -23,6 +23,7 @@ SIGNAL_EXIT_CODE_DESTROY: Final[int] = 10
 SIGNAL_EXIT_CODE_STOP: Final[int] = 11
 
 
+@pure
 def build_post_attach_resize_script(session_name: str) -> str:
     """Build a shell command that resizes tmux windows and sends SIGWINCH.
 
@@ -53,6 +54,7 @@ def build_post_attach_resize_script(session_name: str) -> str:
     )
 
 
+@pure
 def _build_ssh_activity_wrapper_script(session_name: str, host_dir: Path) -> str:
     """Build a shell script that tracks SSH activity while running tmux.
 

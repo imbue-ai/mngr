@@ -1,6 +1,7 @@
 import shlex
 from typing import Final
 
+from imbue.imbue_common.pure import pure
 from imbue.mngr.interfaces.data_types import CommandResult
 from imbue.mngr.interfaces.host import OnlineHostInterface
 
@@ -12,6 +13,7 @@ _DEFAULT_CAPTURE_PANE_TIMEOUT_SECONDS: Final[float] = 5.0
 LONG_MESSAGE_THRESHOLD: Final[int] = 1024
 
 
+@pure
 def tmux_session_target(session_name: str) -> str:
     """Build a tmux ``-t`` target string for a command whose target resolves as a session.
 
@@ -31,6 +33,7 @@ def tmux_session_target(session_name: str) -> str:
     return f"={session_name}"
 
 
+@pure
 def tmux_window_target(session_name: str, window: int | str = 0) -> str:
     """Build a tmux ``-t`` target string for a command whose target resolves as a window or pane.
 
@@ -61,6 +64,7 @@ def tmux_window_target(session_name: str, window: int | str = 0) -> str:
     return f"={session_name}:{window}"
 
 
+@pure
 def build_tmux_capture_pane_command(target: str, include_scrollback: bool = False) -> str:
     """Build the tmux command string to capture pane content for a target.
 
