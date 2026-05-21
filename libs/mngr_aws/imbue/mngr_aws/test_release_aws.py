@@ -15,8 +15,9 @@ Three layers of damage control prevent leaked EC2 cost (see
 
 1. Each test's ``finally`` calls ``mngr destroy --force``.
 2. ``pytest_sessionfinish`` in ``conftest.py`` force-terminates any
-   instance still tagged with the test name prefix and older than the TTL
-   at session end and fails the session.
+   instance tagged ``mngr-pytest-launched=true`` (added by
+   ``AwsVpsClient.create_instance`` whenever ``PYTEST_CURRENT_TEST`` is
+   set) and older than the TTL at session end, and fails the session.
 3. The subprocess that runs ``mngr create`` is pointed at a temporary
    ``settings.toml`` (via ``MNGR_PROJECT_CONFIG_DIR``) that sets
    ``[providers.aws] auto_shutdown_minutes``. This propagates into
