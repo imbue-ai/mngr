@@ -243,6 +243,17 @@ def _build_electron_env(workspace_git_url: Path, workspace_name: str, mngr_forwa
     env["MINDS_WORKSPACE_GIT_URL"] = str(workspace_git_url)
     env["MINDS_WORKSPACE_NAME"] = workspace_name
     env["MINDS_MNGR_FORWARD_PORT"] = str(mngr_forward_port)
+    # Pin MNGR_ROOT_NAME back to "mngr" for the Electron child so the
+    # spawned `mngr create` subprocess finds FCT's .mngr/settings.toml
+    # (which defines the `main` + `docker` create templates). The minds
+    # project conftest sets MNGR_ROOT_NAME=mngr-test-<timestamp> for test
+    # isolation, but that would make mngr look for
+    # .mngr-test-<timestamp>/settings.toml inside the FCT clone -- a file
+    # that does not exist, causing mngr to abort with
+    # `Template 'main' not found. No templates are configured`. MNGR_PREFIX
+    # (the tmux session prefix) stays test-isolated so the spawned tmux
+    # session does not collide with other tests' sessions.
+    env["MNGR_ROOT_NAME"] = "mngr"
     env.pop("ANTHROPIC_API_KEY", None)
     env.pop("ANTHROPIC_BASE_URL", None)
     return env
