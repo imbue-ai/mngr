@@ -233,7 +233,6 @@ class AwsVpsClient(VpsClientInterface):
                 f"got region={region!r}. Instantiate a region-specific client.",
             )
 
-        # Mirrors the Modal pattern in ``mngr_modal.backend._create_environment``:
         sg_id = self.ensure_security_group()
 
         tag_specs: list[dict[str, str]] = [{"Key": k, "Value": v} for k, v in tags.items()]
