@@ -24,11 +24,13 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client.agent_creator import AgentCreationStatus
 from imbue.minds.desktop_client.agent_creator import AgentCreator
+from imbue.minds.desktop_client.agent_creator import _KEYCHAIN_API_KEY_ENV_VAR
 from imbue.minds.desktop_client.agent_creator import _build_mngr_create_command
 from imbue.minds.desktop_client.agent_creator import _is_git_worktree
 from imbue.minds.desktop_client.agent_creator import _is_local_path
 from imbue.minds.desktop_client.agent_creator import _redact_url_credentials
 from imbue.minds.desktop_client.agent_creator import _redact_url_credentials_in_text
+from imbue.minds.desktop_client.agent_creator import _resolve_subscription_anthropic_api_key
 from imbue.minds.desktop_client.agent_creator import extract_repo_name
 from imbue.minds.desktop_client.conftest import FAKE_CONNECTOR_URL
 from imbue.minds.desktop_client.conftest import FakeImbueCloudCli
@@ -537,3 +539,49 @@ def test_start_creation_api_key_ai_without_key_fails_with_clear_message(tmp_path
     assert info is not None
     assert info.status is AgentCreationStatus.FAILED
     assert info.error is not None and "API_KEY" in info.error
+
+
+# ---------------------------------------------------------------------------
+# Keychain credential forwarding tests
+#
+# The Electron main process reads the macOS "Claude Code" keychain entry
+# under minds.app's identity (apps/minds/electron/keychain.js) and exports
+# the value as ``MINDS_KEYCHAIN_ANTHROPIC_API_KEY`` before spawning the
+# Python backend. Forwarding that to ``mngr create``'s subprocess env keeps
+# mngr_claude from shelling out to ``/usr/bin/security`` from a Python
+# subprocess context, where the prompt is misattributed and the ACL grant
+# doesn't survive minds.app rebuilds.
+# ---------------------------------------------------------------------------
+
+
+def test_keychain_env_var_name_is_the_wire_format_string() -> None:
+    """Pin the env-var name. The Electron side writes this literal string in
+    ``apps/minds/electron/backend.js``; renaming requires both sides to update
+    together, so a unit assertion catches accidental drift on the Python side.
+    """
+    assert _KEYCHAIN_API_KEY_ENV_VAR == "MINDS_KEYCHAIN_ANTHROPIC_API_KEY"
+
+
+def test_resolve_subscription_anthropic_api_key_returns_none_when_env_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv(_KEYCHAIN_API_KEY_ENV_VAR, raising=False)
+    assert _resolve_subscription_anthropic_api_key() is None
+
+
+def test_resolve_subscription_anthropic_api_key_returns_value_when_env_set(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(_KEYCHAIN_API_KEY_ENV_VAR, "sk-ant-from-keychain")
+    assert _resolve_subscription_anthropic_api_key() == "sk-ant-from-keychain"
+
+
+def test_resolve_subscription_anthropic_api_key_treats_empty_as_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An empty-string env var (e.g. the Electron side resolved ``null`` and a
+    downstream code path still exported the key with no value) is equivalent
+    to "no key" -- forwarding ``""`` would just confuse mngr_claude.
+    """
+    monkeypatch.setenv(_KEYCHAIN_API_KEY_ENV_VAR, "")
+    assert _resolve_subscription_anthropic_api_key() is None

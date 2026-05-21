@@ -3,6 +3,7 @@ const net = require('net');
 const fs = require('fs');
 const path = require('path');
 const paths = require('./paths');
+const { readClaudeCodeApiKey } = require('./keychain');
 
 // Swallow EPIPE on the Electron main process's own stdout/stderr. When dev
 // launches go through a pipe (e.g. `just minds-start | head -30`), the
@@ -155,6 +156,16 @@ function startBackend(onProgress, onNotification, onAuthEvent, onMngrForwardStar
 
       onProgress('Starting Minds...');
 
+      // Resolve the Claude Code keychain API key here, in the Electron main
+      // process, so the macOS SecurityServer ACL prompt (if any) is
+      // attributed to minds.app's signing cert -- not the Python subprocess
+      // mngr_claude would otherwise spawn `security` from. The value is
+      // forwarded to mngr create through MINDS_KEYCHAIN_ANTHROPIC_API_KEY
+      // and from there into the agent env, so mngr_claude doesn't have to
+      // call `security` itself. `null` on non-macOS, on missing entries,
+      // and on user-denied access; nothing to forward in those cases.
+      const claudeCodeKeychainKey = await readClaudeCodeApiKey();
+
       let uvBin, args, cwd, env;
 
       const mindsRootName = paths.getMindsRootName();
@@ -191,6 +202,7 @@ function startBackend(onProgress, onNotification, onAuthEvent, onMngrForwardStar
           MNGR_PREFIX: mngrPrefix,
           MINDS_LATCHKEY_BINARY: paths.getLatchkeyPath(),
           MINDS_LATCHKEY_DIRECTORY: paths.getLatchkeyDirectory(),
+          ...(claudeCodeKeychainKey ? { MINDS_KEYCHAIN_ANTHROPIC_API_KEY: claudeCodeKeychainKey } : {}),
         };
       } else {
         // Packaged mode: use bundled uv with standalone pyproject
@@ -226,6 +238,7 @@ function startBackend(onProgress, onNotification, onAuthEvent, onMngrForwardStar
           MINDS_LATCHKEY_DIRECTORY: paths.getLatchkeyDirectory(),
           // Tell the packaged latchkey shim which Electron binary to use as Node.
           MINDS_ELECTRON_EXEC_PATH: process.execPath,
+          ...(claudeCodeKeychainKey ? { MINDS_KEYCHAIN_ANTHROPIC_API_KEY: claudeCodeKeychainKey } : {}),
         };
         // Remove VIRTUAL_ENV to avoid uv warnings about path mismatches
         delete env.VIRTUAL_ENV;

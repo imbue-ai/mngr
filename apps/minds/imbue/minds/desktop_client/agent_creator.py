@@ -71,6 +71,31 @@ from imbue.mngr_latchkey.store import LatchkeyStoreError
 # together.
 _MNGR_FORWARD_SESSION_COOKIE_NAME: Final[str] = "mngr_forward_session"
 
+# Env var set by the Electron main process (apps/minds/electron/backend.js)
+# after it reads the "Claude Code" macOS keychain entry under minds.app's
+# identity. Wire-format contract between the Electron side and the Python
+# side; renaming requires both sides to update together.
+_KEYCHAIN_API_KEY_ENV_VAR: Final[str] = "MINDS_KEYCHAIN_ANTHROPIC_API_KEY"
+
+
+def _resolve_subscription_anthropic_api_key() -> str | None:
+    """Return the keychain-provided Anthropic API key for SUBSCRIPTION mode, or None.
+
+    The Electron main process pre-reads the macOS "Claude Code" keychain
+    entry under minds.app's identity and exports the value through
+    ``MINDS_KEYCHAIN_ANTHROPIC_API_KEY`` before spawning the Python
+    backend. Forwarding that value as ``ANTHROPIC_API_KEY`` on the
+    ``mngr create`` subprocess env lets mngr_claude pick it up via the
+    FCT template's ``--pass-host-env ANTHROPIC_API_KEY`` instead of
+    shelling out to ``/usr/bin/security`` from its own subprocess
+    context (where the prompt is misattributed and the ACL grant
+    doesn't survive minds.app rebuilds).
+
+    Returns ``None`` when the env var is unset or empty -- the agent
+    then falls back to the existing interactive sign-in flow.
+    """
+    return os.environ.get(_KEYCHAIN_API_KEY_ENV_VAR) or None
+
 
 def make_workspace_probe_client(preauth_cookie: str, probe_timeout_seconds: float) -> httpx.Client:
     """Construct a reusable httpx.Client preconfigured for workspace probes.
@@ -1151,7 +1176,9 @@ class AgentCreator(MutableModel):
                 # Resolve the Anthropic credentials according to the AI
                 # provider choice. IMBUE_CLOUD mints a fresh LiteLLM key;
                 # API_KEY uses the user-supplied key directly; SUBSCRIPTION
-                # injects nothing so the agent prompts the user to log in.
+                # falls back to the macOS Claude Code keychain entry that
+                # the Electron main process pre-resolved (when present), so
+                # mngr_claude doesn't have to call `security` itself.
                 effective_anthropic_api_key: str | None = None
                 effective_anthropic_base_url: str | None = None
                 match ai_provider:
@@ -1179,7 +1206,7 @@ class AgentCreator(MutableModel):
                             raise MngrCommandError("AI provider API_KEY requires anthropic_api_key to be supplied")
                         effective_anthropic_api_key = anthropic_api_key
                     case AIProvider.SUBSCRIPTION:
-                        pass
+                        effective_anthropic_api_key = _resolve_subscription_anthropic_api_key()
                     case _ as unreachable:
                         assert_never(unreachable)
 
