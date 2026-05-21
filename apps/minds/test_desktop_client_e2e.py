@@ -435,14 +435,27 @@ def _destroy_agent_best_effort(workspace_name: str) -> None:
         )
 
 
-# No `@pytest.mark.tmux` here even though the workspace agent runs in a
-# tmux session: that tmux lives *inside* the docker container, not on the
-# host, so the host-side resource guard never sees a tmux invocation and
-# fails post-hoc with "marked tmux but never invoked tmux" if the mark is
-# present.
+# Carrying only the resource marks the *test process* sees a host-side
+# invocation of, after the test passes end-to-end:
+#
+# - `docker` (CLI) is invoked by the spawned `mngr create` subprocess to
+#   start the container; the PATH-injected resource-guard wrapper catches it.
+# - `rsync` is invoked by `mngr create` to overlay the FCT worktree onto
+#   the internal clone; same PATH wrapper.
+#
+# Marks we deliberately do *not* carry, and why:
+#
+# - `tmux` -- the workspace agent's tmux session lives *inside* the docker
+#   container, never on the host, so the host's tmux wrapper never ticks
+#   the counter and the guard fires post-hoc with "marked tmux but never
+#   invoked tmux".
+# - `docker_sdk` -- the Python `docker` SDK guard is a wrapper around the
+#   in-process SDK import, not a PATH wrapper, so it only sees uses from
+#   *this* pytest process. mngr's docker SDK calls happen in the spawned
+#   subprocess and never reach our SDK wrapper, so the mark fires the
+#   same "marked but never invoked" check.
 @pytest.mark.acceptance
 @pytest.mark.docker
-@pytest.mark.docker_sdk
 @pytest.mark.rsync
 @pytest.mark.timeout(900)
 def test_create_local_docker_workspace_via_electron(

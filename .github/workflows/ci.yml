@@ -328,7 +328,23 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y tmux git openssh-server unison
+          sudo apt-get install -y tmux git openssh-server unison xvfb
+
+      # Node + pnpm + Electron's transitive native deps are required by
+      # apps/minds/test_desktop_client_e2e.py, which launches the real
+      # Electron app via Playwright over CDP. Other docker-marked tests
+      # in this job do not need them, but installing them here is cheap
+      # and keeps the recipe co-located with the test that uses it.
+      - name: Set up Node.js for Electron e2e test
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install pnpm
+        run: npm install --global pnpm@10
+
+      - name: Install Electron + minds JS deps
+        run: pnpm install --dir apps/minds --frozen-lockfile
 
       - name: Configure Docker Hub mirror
         run: |
@@ -344,7 +360,11 @@ jobs:
         run: uv sync --all-packages
 
       - name: Run Docker acceptance tests
-        run: PYTEST_MAX_DURATION_SECONDS=600 uv run pytest -n 0 --timeout 300 --no-cov --cov-fail-under=0 -v --tb=short -m '(docker or docker_sdk) and not release'
+        # The Electron e2e test needs a display server; xvfb-run wraps the
+        # whole pytest invocation so the one Electron test can render into a
+        # virtual framebuffer while every other test in this batch is a
+        # no-display headless run that ignores the wrapper entirely.
+        run: xvfb-run -a env PYTEST_MAX_DURATION_SECONDS=600 uv run pytest -n 0 --timeout 300 --no-cov --cov-fail-under=0 -v --tb=short -m '(docker or docker_sdk) and not release'
 
   # Docker release tests - runs on a GitHub runner with a real Docker daemon,
   # since Docker-in-Docker under gVisor (offload-modal-release) is too flaky.
