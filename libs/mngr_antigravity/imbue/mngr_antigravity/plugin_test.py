@@ -16,6 +16,7 @@ from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import HostName
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
+from imbue.mngr.utils.testing import capture_loguru
 from imbue.mngr_antigravity.antigravity_config import get_antigravity_user_settings_path
 from imbue.mngr_antigravity.plugin import AntigravityAgent
 from imbue.mngr_antigravity.plugin import AntigravityAgentConfig
@@ -299,6 +300,40 @@ def test_provision_pre_trust_is_idempotent(
     settings = _read_user_settings(isolated_home)
     trusted = settings["trustedWorkspaces"]
     assert trusted.count(str(antigravity_agent.work_dir)) == 1
+
+
+def test_provision_pre_trust_warns_when_trustedworkspaces_has_non_list_value(
+    antigravity_agent: AntigravityAgent,
+    isolated_home: Path,
+) -> None:
+    """A future agy schema that stores `trustedWorkspaces` as a non-list value must surface a warning.
+
+    The @pure ``merge_trusted_workspace`` helper silently falls back to a
+    fresh array when the existing value is the wrong shape; without the
+    warning emitted by ``_pre_trust_work_dir`` the data loss is invisible.
+    This test pins both that the warning fires (with the path and the
+    unexpected type name) and that the merge recovers by writing the
+    new workspace into a fresh array.
+    """
+    settings_path = get_antigravity_user_settings_path()
+    settings_path.parent.mkdir(parents=True)
+    settings_path.write_text(json.dumps({"trustedWorkspaces": "not-a-list"}))
+
+    with capture_loguru(level="WARNING") as log_output:
+        antigravity_agent.provision(
+            host=antigravity_agent.host,
+            options=CreateAgentOptions(agent_type=AgentTypeName("antigravity")),
+            mngr_ctx=antigravity_agent.mngr_ctx,
+        )
+
+    output = log_output.getvalue()
+    assert "non-list trustedWorkspaces" in output
+    assert str(settings_path) in output
+    # The unexpected type's name (str) must appear so operators can grep for it.
+    assert "str" in output
+
+    settings = _read_user_settings(isolated_home)
+    assert settings["trustedWorkspaces"] == [str(antigravity_agent.work_dir)]
 
 
 def _provision(agent: AntigravityAgent) -> None:
