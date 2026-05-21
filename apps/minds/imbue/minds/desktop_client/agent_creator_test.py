@@ -329,10 +329,10 @@ def test_wait_for_workspace_ready_returns_when_probe_succeeds(tmp_path) -> None:
             probe_timeout_seconds=0.5,
         )
         log_q: queue.Queue[str] = queue.Queue()
-        # Use a localhost URL that resolves to the same server. Subdomains
-        # of localhost all resolve to 127.0.0.1, so an http.server bound to
-        # 127.0.0.1 answers regardless of the Host header. Construct a
-        # plausible-looking AgentId so the probe URL is well-formed.
+        # The probe connects to the plugin on loopback and carries the agent
+        # vhost only in the Host header, so the http.server bound to 127.0.0.1
+        # answers it without any ``*.localhost`` name resolution. Construct a
+        # plausible-looking AgentId so the Host header is well-formed.
         aid = AgentId.generate()
         creator._wait_for_workspace_ready(aid, log_q)
     finally:
@@ -341,7 +341,9 @@ def test_wait_for_workspace_ready_returns_when_probe_succeeds(tmp_path) -> None:
     while not log_q.empty():
         drained.append(log_q.get_nowait())
     assert any("Waiting for system interface" in line for line in drained)
-    assert any("ready" in line.lower() for line in drained)
+    # Assert the *success* line specifically -- the timeout-warning line also
+    # contains the word "ready", so a substring check would pass on a timeout.
+    assert any("System interface is ready" in line for line in drained)
 
 
 def test_wait_for_workspace_ready_calls_record_probe_success_on_ready(tmp_path) -> None:

@@ -88,8 +88,14 @@ def make_workspace_probe_client(preauth_cookie: str, probe_timeout_seconds: floa
     )
 
 
-def _probe_once(probe_client: httpx.Client, probe_url: str) -> int | None:
+def _probe_once(probe_client: httpx.Client, probe_url: str, host_header: str) -> int | None:
     """Issue a single GET through ``probe_client`` and return the status code.
+
+    ``probe_url`` targets loopback directly; ``host_header`` carries the
+    ``agent-<hex>.localhost`` vhost the plugin routes on. Sending the subdomain
+    as an explicit ``Host`` header rather than in the URL keeps the probe from
+    depending on ``*.localhost`` name resolution, which is not available on a
+    bare Linux host (only loopback ``localhost`` itself reliably resolves).
 
     Returns ``None`` if the probe failed at the transport layer (connect
     error, mid-stream EOF, read timeout). Module-private helper used by
@@ -97,7 +103,7 @@ def _probe_once(probe_client: httpx.Client, probe_url: str) -> int | None:
     project's no-inner-functions ratchet.
     """
     try:
-        response = probe_client.get(probe_url)
+        response = probe_client.get(probe_url, headers={"Host": host_header})
     except (httpx.ConnectError, httpx.RemoteProtocolError, httpx.ReadError, httpx.TimeoutException):
         return None
     return response.status_code
@@ -122,14 +128,19 @@ def probe_workspace_through_plugin(
     to reuse the connection pool across a tight poll loop. When omitted, a
     one-shot client is constructed for this single probe -- fine for
     one-off / sporadic callers but wasteful in a loop.
+
+    The request connects to the plugin on loopback and carries the agent's
+    ``agent-<hex>.localhost`` vhost in the ``Host`` header, so it does not
+    depend on ``*.localhost`` resolving.
     """
-    probe_url = f"http://{agent_id}.localhost:{mngr_forward_port}/"
+    probe_url = f"http://127.0.0.1:{mngr_forward_port}/"
+    host_header = f"{agent_id}.localhost"
     if client is not None:
-        return _probe_once(client, probe_url)
+        return _probe_once(client, probe_url, host_header)
     with make_workspace_probe_client(
         preauth_cookie=preauth_cookie, probe_timeout_seconds=probe_timeout_seconds
     ) as one_shot:
-        return _probe_once(one_shot, probe_url)
+        return _probe_once(one_shot, probe_url, host_header)
 
 
 def _make_child_cg(name: str, parent: ConcurrencyGroup | None) -> ConcurrencyGroup:
@@ -1414,8 +1425,9 @@ class AgentCreator(MutableModel):
     def _wait_for_workspace_ready(self, agent_id: AgentId, log_queue: queue.Queue[str]) -> None:
         """Poll the agent's system_interface through the plugin until it responds 200.
 
-        Probes ``http://<agent_id>.localhost:<plugin_port>/`` with the preauth
-        cookie set, treating any 200 as ready. Other status codes (typically
+        Probes the plugin on loopback (with the agent's ``agent-<hex>.localhost``
+        vhost in the ``Host`` header) and the preauth cookie set, treating any
+        200 as ready. Other status codes (typically
         503 from the plugin's auto-refresh page when the system_interface
         isn't yet listening, or 502 when SSH info hasn't propagated) are
         treated as not-yet-ready and re-polled until the timeout elapses.
