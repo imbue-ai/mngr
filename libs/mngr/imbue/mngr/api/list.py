@@ -287,12 +287,16 @@ def _maybe_write_full_discovery_snapshot(
     is_full_listing = provider_names is None and not include_filters and not exclude_filters
     if not is_full_listing:
         return
-    # Skip if any error is not attributable to a specific provider. The top-level
-    # `except MngrError` in `list_agents` adds plain `ErrorInfo` entries (not
-    # `ProviderErrorInfo`) for failures that aren't tied to a single provider;
-    # in that case the result may be structurally incomplete and the snapshot
-    # could mislead consumers. Per-provider errors are handled in-band via
-    # `error_by_provider_name`.
+    # Skip if any error is something other than a per-provider error. This
+    # filter currently lumps three classes together: plain `ErrorInfo` from the
+    # top-level `except MngrError` (truly non-attributable), plus `HostErrorInfo`
+    # and `AgentErrorInfo` (attributable to a host/agent but not modeled in the
+    # snapshot today). In all three cases the result may be structurally
+    # incomplete in ways the snapshot's `error_by_provider_name` field cannot
+    # represent, so we skip emission rather than mislead consumers. Only
+    # per-provider failures are handled in-band via `error_by_provider_name`;
+    # surfacing per-host / per-agent errors in the snapshot is out of scope for
+    # this change.
     non_provider_errors = [e for e in result.errors if not isinstance(e, ProviderErrorInfo)]
     if non_provider_errors:
         logger.trace(
