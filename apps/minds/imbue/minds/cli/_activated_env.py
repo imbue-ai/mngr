@@ -101,8 +101,16 @@ def modal_profile_for_tier_or_none(tier: str) -> str | None:
 def _modal_config_path() -> Path:
     """Resolve the path the Modal SDK reads for its config.
 
-    Mirrors Modal SDK's ``modal/config.py`` exactly:
-    ``os.environ.get('MODAL_CONFIG_PATH') or os.path.expanduser('~/.modal.toml')``.
+    Mirrors Modal SDK's ``modal/config.py`` selection rule
+    (``os.environ.get('MODAL_CONFIG_PATH') or os.path.expanduser('~/.modal.toml')``)
+    with one deliberate extension: we also run ``expanduser`` on the
+    ``MODAL_CONFIG_PATH`` override. The SDK passes the override straight
+    to ``open()``, so an operator who sets ``MODAL_CONFIG_PATH=~/foo.toml``
+    would crash with ENOENT on the next ``modal …`` shellout -- our
+    ``expanduser`` lets us surface that as a clean validation refusal
+    (or accept the file if it actually exists at the expanded path)
+    instead of a confusing SDK auth failure later.
+
     Honoring ``MODAL_CONFIG_PATH`` is essential -- if we hardcoded
     ``~/.modal.toml`` while the operator had pointed Modal at a
     different file via the env var, our deploy-mode validation would
