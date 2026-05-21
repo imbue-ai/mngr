@@ -18,7 +18,6 @@ from imbue.minds.config.data_types import MNGR_BINARY
 from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client.api_key_auth import CallerAgentIdDep
 from imbue.minds.desktop_client.deps import BackendResolverDep
-from imbue.minds.desktop_client.file_server import register_file_server_routes
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.notification import NotificationRequest
 from imbue.minds.desktop_client.notification import NotificationUrgency
@@ -199,8 +198,5 @@ def create_api_v1_router() -> APIRouter:
     router.post(
         "/notifications",
     )(_handle_notification)
-
-    # File server (read / list / stat / write under /api/v1/file-server)
-    register_file_server_routes(router)
 
     return router

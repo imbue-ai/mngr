@@ -66,21 +66,24 @@ request types:
   with typed convenience methods to extract the payload as a
   `PredefinedRequestPayload` / `FileSharingRequestPayload`.
 
-The Minds REST API ships a new `/api/v1/file-server` endpoint for
-reading, listing, stat-ing, and writing files on the desktop host:
+The Minds REST API ships a new WebDAV file-server mount at
+`/api/v1/files`, backed by [`wsgidav`](https://wsgidav.readthedocs.io/)
+wrapped in [`a2wsgi`](https://github.com/abersheeran/a2wsgi). Two
+share roots are exposed:
 
-* `GET /api/v1/file-server?path=<absolute>&operation=READ` streams a
-  file's bytes back to the caller.
-* `GET /api/v1/file-server?path=<absolute>&operation=LIST` returns a
-  JSON directory listing with per-entry type, size, and mtime.
-* `GET /api/v1/file-server?path=<absolute>&operation=STAT` returns
-  the same metadata for a single path (files, directories, and
-  symlinks classified via `lstat`).
-* `POST /api/v1/file-server?path=<absolute>` writes the raw request
-  body to disk. Defaults to refusing with `409 Conflict` when the
-  target already exists; pass `overwrite=true` to replace an existing
-  regular file. Missing parent directories are created on demand.
+* the current user's home directory (`Path.home()`); and
+* `/tmp`.
 
-The endpoint uses the same per-agent Bearer-token authentication as
-the rest of `/api/v1/` and is reachable from agents through the
+Each share is mounted at its on-disk path so the outward URL mirrors
+the absolute path one-to-one: `/home/<user>/foo.txt` is reached at
+`/api/v1/files/home/<user>/foo.txt`, `/tmp/blob.bin` at
+`/api/v1/files/tmp/blob.bin`. Any standard WebDAV verb works (`GET`,
+`PUT`, `PROPFIND`, `DELETE`, ...); paths outside the two shares are
+not served. The HTML directory browser is disabled.
+
+The mount uses the same per-agent Bearer-token authentication as the
+rest of `/api/v1/`: a thin ASGI wrapper verifies
+`Authorization: Bearer <api_key>` against `find_agent_by_api_key` and
+401s before any request reaches the filesystem; WsgiDAV itself runs
+anonymous. The mount is reachable from agents through the
 `minds-api-proxy` Latchkey extension.
