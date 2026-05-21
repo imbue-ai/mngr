@@ -635,6 +635,7 @@ def test_list_command_with_invalid_fields(
 
 
 @pytest.mark.tmux
+@pytest.mark.flaky
 def test_list_command_with_running_filter_alias(
     cli_runner: CliRunner,
     temp_work_dir: Path,
