@@ -305,6 +305,16 @@ def _launched_electron(
         str(_ELECTRON_BINARY),
         str(_ELECTRON_MAIN_JS),
         f"--remote-debugging-port={debug_port}",
+        # GitHub Actions runners ship Electron's chrome-sandbox binary
+        # without the setuid bit, so the renderer aborts on launch with
+        # `FATAL:setuid_sandbox_host.cc -- The SUID sandbox helper
+        # binary was found, but is not configured correctly`. Disabling
+        # the sandbox sidesteps the chown/chmod dance and matches the
+        # well-trodden CI pattern (Playwright's own electron docs ship
+        # `--no-sandbox` for the same reason). Acceptable here because
+        # the binary we drive is a dev-mode Electron launched against
+        # our own backend, not a downloaded one.
+        "--no-sandbox",
     ]
     logger.info("Launching Electron: {}", " ".join(cmd))
     process = subprocess.Popen(
