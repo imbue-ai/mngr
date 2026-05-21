@@ -102,7 +102,6 @@ def default_create_cli_opts() -> CreateCliOptions:
         worktree_base_folder=None,
         start_on_boot=False,
         start_host=True,
-        grant=(),
         extra_provision_command=(),
         upload_file=(),
         update=False,

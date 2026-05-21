@@ -1490,7 +1490,6 @@ def make_test_discovered_agent() -> DiscoveredAgent:
             "work_dir": "/tmp/test",
             "start_on_boot": False,
             "labels": {},
-            "permissions": [],
         },
     )
 
