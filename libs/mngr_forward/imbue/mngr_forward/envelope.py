@@ -24,7 +24,7 @@ from imbue.mngr.primitives import AgentId
 from imbue.mngr_forward.data_types import ListeningPayload
 from imbue.mngr_forward.data_types import LoginUrlPayload
 from imbue.mngr_forward.data_types import ReverseTunnelEstablishedPayload
-from imbue.mngr_forward.data_types import WorkspaceBackendFailurePayload
+from imbue.mngr_forward.data_types import SystemInterfaceBackendFailurePayload
 from imbue.mngr_forward.primitives import ForwardPort
 
 
@@ -94,8 +94,8 @@ class EnvelopeWriter(MutableModel):
             }
         )
 
-    def emit_workspace_backend_failure(self, payload: WorkspaceBackendFailurePayload) -> None:
-        """Emit a ``workspace_backend_failure`` plugin event.
+    def emit_system_interface_backend_failure(self, payload: SystemInterfaceBackendFailurePayload) -> None:
+        """Emit a ``system_interface_backend_failure`` plugin event.
 
         Surfaces a per-agent backend failure observed in the forwarding
         path so the minds-side health tracker can apply restart-recovery

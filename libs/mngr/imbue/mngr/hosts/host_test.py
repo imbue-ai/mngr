@@ -142,7 +142,6 @@ def test_discover_agents_returns_refs_with_certified_data(
         "id": str(agent_id),
         "name": "test-agent",
         "type": "claude",
-        "permissions": ["read", "write"],
         "work_dir": "/tmp/work",
     }
     (agent_dir / "data.json").write_text(json.dumps(agent_data))
@@ -155,7 +154,6 @@ def test_discover_agents_returns_refs_with_certified_data(
     assert refs[0].host_id == host.id
     assert refs[0].certified_data == agent_data
     assert refs[0].agent_type == "claude"
-    assert refs[0].permissions == ("read", "write")
     assert refs[0].work_dir == Path("/tmp/work")
 
 

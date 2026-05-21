@@ -58,7 +58,6 @@ mngr calls these at various points in the execution of any command:
 |----------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `on_post_install`          | Runs after the plugin is installed or upgraded. Good for setup tasks like prompting the user or downloading models. [future]                            |
 | `on_load_config`           | Runs when loading the global config. Receives the current config dict and can modify it before use.                                                     |
-| `on_validate_permissions`  | Runs when validating permissions. Should ensure that the correct environment variables and files are accessible. [future]                               |
 | `on_startup`               | Runs when `mngr` starts up, before any command runs. Good for registering other callbacks. See [the `mngr` API](./api.md) for more details on registration hooks. [experimental] |
 | `on_before_command`        | Runs before any command executes. Receives the command name and resolved parameters dict. Plugins can raise to abort execution. [experimental]          |
 | `on_after_command`         | Runs after a command completes successfully. Receives the command name and parameters dict. Useful for logging, cleanup, or post-processing. [experimental] |
@@ -87,8 +86,6 @@ The following host lifecycle hooks are planned but not yet implemented:
 | `on_before_machine_create`    | Before creating the underlying environment (machine, container, sandbox) for a host [future] |
 | `on_after_machine_create`     | After creating the underlying environment (machine, container, sandbox) for a host [future]  |
 | `on_host_state_dir_created`   | When creating the host's state directory [future]                                   |
-| `on_before_apply_permissions` | Before applying permissions to a host [future]                                      |
-| `on_after_apply_permissions`  | After applying permissions to a host [future]                                       |
 | `get_offline_agent_state`     | Use this to provide state for an offline agent [future]                              |
 
 Note that we cannot have callbacks for most host lifecycle events because they can happen outside the control of `mngr`. To implement such functionality, you should provision shell scripts into the appropriate location:
@@ -117,8 +114,6 @@ The following agent lifecycle hooks are planned but not yet implemented:
 | Hook                                | Description                                                                                           |
 |-------------------------------------|-------------------------------------------------------------------------------------------------------|
 | `on_agent_collected`                | Called once per agent (per command where we collect this agent.) [future]                             |
-| `on_before_apply_agent_permissions` | Before applying permissions to an agent [future]                                                      |
-| `on_after_apply_agent_permissions`  | After applying permissions to an agent [future]                                                       |
 
 ### Agent Provisioning Methods
 

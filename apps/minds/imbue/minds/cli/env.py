@@ -41,6 +41,7 @@ from imbue.minds.bootstrap import mngr_prefix_for
 from imbue.minds.bootstrap import root_name_for_env_name
 from imbue.minds.cli._activated_env import PRODUCTION_ENV_NAME as _PRODUCTION_ENV_NAME
 from imbue.minds.cli._activated_env import STAGING_ENV_NAME as _STAGING_ENV_NAME
+from imbue.minds.cli._activated_env import modal_profile_for_tier_or_none
 from imbue.minds.cli._activated_env import require_activated_env_name
 from imbue.minds.cli._activated_env import tier_for_env_name as _tier_for_env_name
 from imbue.minds.config.loader import EnvConfigError
@@ -65,6 +66,7 @@ from imbue.minds.envs.per_env_deploy import get_modal_app_latest_version as real
 from imbue.minds.envs.per_env_deploy import push_per_env_modal_secret as real_push_per_env_modal_secret
 from imbue.minds.envs.per_env_deploy import rollback_modal_app as real_rollback_modal_app
 from imbue.minds.envs.per_env_deploy import stop_modal_app as real_stop_modal_app
+from imbue.minds.envs.primitives import DeployStrategy
 from imbue.minds.envs.primitives import DevEnvName
 from imbue.minds.envs.primitives import DevEnvNotFoundError
 from imbue.minds.envs.primitives import InvalidDevEnvNameError
@@ -199,23 +201,43 @@ def _push_per_env_modal_secret_for_provider(
 
 
 def _deploy_litellm_proxy_for_provider(
-    modal_env: str, tier: str, min_containers: int, deploy_id: str, cg: ConcurrencyGroup
+    modal_env: str,
+    tier: str,
+    min_containers: int,
+    deploy_id: str,
+    strategy: DeployStrategy,
+    cg: ConcurrencyGroup,
 ) -> AnyUrl:
     return real_deploy_litellm_proxy(
-        modal_env=modal_env, tier=tier, min_containers=min_containers, deploy_id=deploy_id, parent_cg=cg
+        modal_env=modal_env,
+        tier=tier,
+        min_containers=min_containers,
+        deploy_id=deploy_id,
+        strategy=strategy,
+        parent_cg=cg,
     )
 
 
 def _deploy_connector_for_provider(
-    modal_env: str, tier: str, min_containers: int, deploy_id: str, cg: ConcurrencyGroup
+    modal_env: str,
+    tier: str,
+    min_containers: int,
+    deploy_id: str,
+    strategy: DeployStrategy,
+    cg: ConcurrencyGroup,
 ) -> AnyUrl:
     return real_deploy_remote_service_connector(
-        modal_env=modal_env, tier=tier, min_containers=min_containers, deploy_id=deploy_id, parent_cg=cg
+        modal_env=modal_env,
+        tier=tier,
+        min_containers=min_containers,
+        deploy_id=deploy_id,
+        strategy=strategy,
+        parent_cg=cg,
     )
 
 
-def _stop_modal_app_for_provider(app_name: str, modal_env: str, cg: ConcurrencyGroup) -> None:
-    real_stop_modal_app(app_name=app_name, modal_env=modal_env, parent_cg=cg)
+def _stop_modal_app_for_provider(app_name: str, modal_env: str, parent_cg: ConcurrencyGroup) -> None:
+    real_stop_modal_app(app_name=app_name, modal_env=modal_env, parent_cg=parent_cg)
 
 
 def _delete_modal_secret_for_provider(secret_name: str, modal_env: str, cg: ConcurrencyGroup) -> None:
@@ -234,8 +256,8 @@ def _get_modal_app_latest_version_for_provider(app_name: str, modal_env: str, cg
     return real_get_modal_app_latest_version(app_name=app_name, modal_env=modal_env, parent_cg=cg)
 
 
-def _rollback_modal_app_for_provider(app_name: str, version: str, modal_env: str, cg: ConcurrencyGroup) -> None:
-    real_rollback_modal_app(app_name=app_name, version=version, modal_env=modal_env, parent_cg=cg)
+def _rollback_modal_app_for_provider(app_name: str, version: str, modal_env: str, parent_cg: ConcurrencyGroup) -> None:
+    real_rollback_modal_app(app_name=app_name, version=version, modal_env=modal_env, parent_cg=parent_cg)
 
 
 def _create_neon_snapshot_branch_for_provider(
@@ -645,7 +667,7 @@ def env_activate(name: str, create: bool) -> None:
         "MNGR_PREFIX": mngr_prefix_for(root_name),
         "MINDS_CLIENT_CONFIG_PATH": str(config_path),
     }
-    modal_profile = _modal_profile_for_tier_or_none(_tier_for_env_name(name))
+    modal_profile = modal_profile_for_tier_or_none(_tier_for_env_name(name))
     if modal_profile is not None:
         exports["MODAL_PROFILE"] = modal_profile
     # Check the tier generation id + auto-wipe local state on mismatch.
@@ -693,7 +715,7 @@ def _activate_reserved_env(name: str) -> None:
         "MNGR_PREFIX": mngr_prefix_for(root_name),
         "MINDS_CLIENT_CONFIG_PATH": str(repo_client),
     }
-    modal_profile = _modal_profile_for_tier_or_none(name)
+    modal_profile = modal_profile_for_tier_or_none(name)
     if modal_profile is not None:
         exports["MODAL_PROFILE"] = modal_profile
     # Generation-id check applies to staging (the shared tier where
@@ -704,38 +726,6 @@ def _activate_reserved_env(name: str) -> None:
         env_root = mngr_host.parent
         _try_run_generation_check(env_name=name, client_config_path=repo_client, env_root=env_root)
     _print_activation_exports(name=name, exports=exports)
-
-
-def _modal_profile_for_tier_or_none(tier: str) -> str | None:
-    """Return the Modal profile name (``modal_workspace``) for ``tier``, or None.
-
-    Reads ``apps/minds/imbue/minds/config/envs/<tier>/deploy.toml`` and
-    pulls the committed ``modal_workspace`` value. We export this as
-    ``MODAL_PROFILE`` from ``minds env activate`` so every ``modal``
-    CLI shellout (deploy, secret create, environment create, etc.) is
-    pinned to the right workspace regardless of what's marked
-    ``active = true`` in ``~/.modal.toml``.
-
-    Returns ``None`` when the tier has no deploy.toml on disk (e.g.
-    a freshly-checked-out tree before tier config is committed) or
-    the committed value is still the literal ``CHANGE_ME`` placeholder.
-    Activation proceeds without ``MODAL_PROFILE`` in that case so the
-    operator's existing ``modal token set`` setup still works.
-    """
-    try:
-        deploy_config = load_deploy_config(tier)
-    except EnvConfigError as exc:
-        logger.warning(
-            "Could not load deploy.toml for tier {!r} ({}); MODAL_PROFILE will not be exported. "
-            "modal shellouts will fall back to ~/.modal.toml's active profile.",
-            tier,
-            exc,
-        )
-        return None
-    workspace = str(deploy_config.modal_workspace)
-    if not workspace or workspace == "CHANGE_ME":
-        return None
-    return workspace
 
 
 def _print_activation_exports(*, name: str, exports: dict[str, str]) -> None:
@@ -931,8 +921,38 @@ def env_list(ctx: click.Context) -> None:
     default=False,
     help="Required confirmation for deploying against the staging tier. Mirrors --yes-i-mean-production.",
 )
+@click.option(
+    "--hard",
+    "hard",
+    is_flag=True,
+    default=False,
+    help=(
+        "Force `modal deploy --strategy=recreate`: terminate all running containers "
+        "so the next request cold-boots a fresh container at the new version. "
+        "Mutually exclusive with --soft. Brief downtime / latency window; every "
+        "subsequent request is guaranteed to hit the new code."
+    ),
+)
+@click.option(
+    "--soft",
+    "soft",
+    is_flag=True,
+    default=False,
+    help=(
+        "Force `modal deploy --strategy=rolling`: prior-version containers stay "
+        "alive serving in-flight requests until they idle out. Mutually exclusive "
+        "with --hard. Zero-downtime but a stale-content window where new code is "
+        "deployed yet not actually serving traffic for several minutes."
+    ),
+)
 @click.pass_context
-def env_deploy(ctx: click.Context, yes_i_mean_production: bool, yes_i_mean_staging: bool) -> None:
+def env_deploy(
+    ctx: click.Context,
+    yes_i_mean_production: bool,
+    yes_i_mean_staging: bool,
+    hard: bool,
+    soft: bool,
+) -> None:
     """Provision or upgrade the currently-activated env.
 
     Refuses when a recover-target file exists at the monorepo root.
@@ -951,6 +971,13 @@ def env_deploy(ctx: click.Context, yes_i_mean_production: bool, yes_i_mean_stagi
 
     Idempotent: re-running picks up any new tier-shared Vault values and
     re-deploys in place.
+
+    When neither ``--hard`` nor ``--soft`` is passed, the deploy strategy
+    is chosen per :func:`resolve_deploy_strategy`: ``RECREATE`` whenever
+    a migration ran or the tier is ``dev`` (covers personal dev envs +
+    CI ephemeral envs), ``ROLLOVER`` for shared tiers with no migration
+    (staging / production prefer zero-downtime when nothing risky
+    happened).
     """
     output_format: OutputFormat = ctx.obj.get("output_format", OutputFormat.HUMAN)
     env_name = require_activated_env_name()
@@ -965,6 +992,18 @@ def env_deploy(ctx: click.Context, yes_i_mean_production: bool, yes_i_mean_stagi
         raise click.ClickException(
             "Refusing to deploy against tier 'staging' without --yes-i-mean-staging. Pass that flag to confirm."
         )
+
+    if hard and soft:
+        raise click.ClickException(
+            "--hard and --soft are mutually exclusive: pass at most one to force the "
+            "Modal deploy strategy, or omit both to let the default policy pick."
+        )
+    if hard:
+        explicit_strategy: DeployStrategy | None = DeployStrategy.RECREATE
+    elif soft:
+        explicit_strategy = DeployStrategy.ROLLOVER
+    else:
+        explicit_strategy = None
 
     try:
         deploy_config = load_deploy_config(tier)
@@ -1002,6 +1041,7 @@ def env_deploy(ctx: click.Context, yes_i_mean_production: bool, yes_i_mean_stagi
                 providers=providers,
                 parent_concurrency_group=cg,
                 credentials=credentials,
+                explicit_strategy=explicit_strategy,
             )
         except MindError as exc:
             # If a recover-target file was written before this failure

@@ -13,6 +13,29 @@ from imbue.mngr_vps_docker.errors import VpsApiError
 from imbue.mngr_vps_docker.errors import VpsProvisioningError
 from imbue.mngr_vps_docker.primitives import VpsInstanceId
 
+
+class OvhOrderDeliveryTimeoutError(VpsProvisioningError):
+    """Raised when an OVH order succeeds at checkout but doesn't deliver a VPS in time.
+
+    Carries ``order_id`` so the caller can write a pending-order marker
+    (see ``pending_orders.py``) for the next bake's
+    ``_reconcile_pending_orders`` sweep to pick up. Subclasses
+    :class:`VpsProvisioningError` so existing ``except VpsProvisioningError``
+    blocks (e.g. the cart-cleanup branch in :func:`order_and_wait_for_vps`)
+    still catch it; only the call sites that want to react to the order_id
+    need to special-case it.
+    """
+
+    def __init__(self, *, order_id: int, timeout_seconds: float, last_status: str) -> None:
+        self.order_id = order_id
+        self.timeout_seconds = timeout_seconds
+        self.last_status = last_status
+        super().__init__(
+            f"OVH order {order_id} did not produce a VPS serviceName within {timeout_seconds}s; "
+            f"last status: {last_status}"
+        )
+
+
 # OVH's ``billing.OrderDetail.domain`` is always the literal ``"*"`` for
 # VPS orders -- empirically verified on 2026-05-18 against the live OVH-US
 # API by walking every detail of a recent order. We never want to treat
@@ -164,6 +187,31 @@ def order_and_wait_for_vps(
             raise
 
 
+def try_poll_order_for_delivered_vps(
+    client: OvhVpsClient,
+    *,
+    order_id: int,
+    plan_code: str,
+) -> str | None:
+    """One-shot poll of an OVH order's details/operations chain. Returns the serviceName or None.
+
+    Wraps :func:`_try_fetch_order_service_name` with a public name + a
+    fixed "single sweep" semantic so callers (notably the
+    pending-orders reconcile sweep) don't accidentally drag in the
+    blocking poll loop ``_wait_for_service_name_from_order`` uses.
+    A bake under reconcile can have multiple pending orders to check;
+    waiting on each one would balloon the bake's startup time.
+
+    Returns ``None`` when:
+      - OVH hasn't yet allocated this order's VPS detail (delivery still pending).
+      - The fetch hit any transient API error (logged at DEBUG).
+    Either way the caller should leave the pending-order marker in
+    place so the next reconcile re-checks.
+    """
+    service_name, _status = _try_fetch_order_service_name(client, order_id=order_id, requested_plan_code=plan_code)
+    return service_name
+
+
 def _set_configuration(
     client: OvhVpsClient,
     cart_id: str,
@@ -255,7 +303,9 @@ def _wait_for_service_name_from_order(
     Polling is on a single sleep at the end of each iteration so the
     per-iteration latency is uniform.
 
-    Raises :class:`VpsProvisioningError` on timeout.
+    Raises :class:`OvhOrderDeliveryTimeoutError` on timeout (a
+    :class:`VpsProvisioningError` subclass that carries the order_id so the
+    caller can attempt a post-hoc adoption of any slowly-delivered VPS).
     """
     deadline = time.monotonic() + timeout_seconds
     last_log_message: str = "no successful poll yet"
@@ -266,9 +316,10 @@ def _wait_for_service_name_from_order(
         if service_name:
             return service_name
         time.sleep(_OVH_DELIVERY_POLL_INTERVAL_SECONDS)
-    raise VpsProvisioningError(
-        f"OVH order {order_id} did not produce a VPS serviceName within {timeout_seconds}s; "
-        f"last status: {last_log_message}"
+    raise OvhOrderDeliveryTimeoutError(
+        order_id=order_id,
+        timeout_seconds=timeout_seconds,
+        last_status=last_log_message,
     )
 
 

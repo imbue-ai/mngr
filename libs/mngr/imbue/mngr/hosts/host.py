@@ -13,6 +13,7 @@ from datetime import datetime
 from datetime import timezone
 from pathlib import Path
 from typing import Any
+from typing import ClassVar
 from typing import Final
 from typing import Iterator
 from typing import Mapping
@@ -49,7 +50,6 @@ from imbue.mngr.config.data_types import WorkDirExtraPathMode
 from imbue.mngr.errors import AgentNotFoundOnHostError
 from imbue.mngr.errors import AgentStartError
 from imbue.mngr.errors import BaseMngrError
-from imbue.mngr.errors import DuplicateAgentNameError
 from imbue.mngr.errors import HostConnectionError
 from imbue.mngr.errors import HostDataSchemaError
 from imbue.mngr.errors import InvalidActivityTypeError
@@ -61,6 +61,7 @@ from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.common import build_ssh_transport_command
 from imbue.mngr.hosts.common import get_ssh_known_hosts_file
 from imbue.mngr.hosts.offline_host import BaseHost
+from imbue.mngr.hosts.offline_host import apply_rename_to_agent_data
 from imbue.mngr.hosts.outer_host import OuterHost
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.data_types import CertifiedHostData
@@ -1223,10 +1224,19 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
             self._git_push_to_target(source_host, source_path, target_path)
 
             with log_span("Configuring target git repo"):
+                # -f / --force: the target's working tree may have
+                # pre-bootstrap files (e.g. an in-image keyframe extracted
+                # by a Dockerfile RUN, plus a post-extraction mutation to
+                # .mngr/image_commit_hash) that would otherwise trigger
+                # "Your local changes would be overwritten" / "untracked
+                # files in the way" errors. The whole point of the mirror
+                # push + checkout is to materialize the operator's branch
+                # tip on disk, so clobbering any pre-existing state is
+                # the intended behavior.
                 if new_branch_name:
-                    checkout_cmd = f"git checkout -B {shlex.quote(new_branch_name)} {shlex.quote(base_branch_name)}"
+                    checkout_cmd = f"git checkout -f -B {shlex.quote(new_branch_name)} {shlex.quote(base_branch_name)}"
                 else:
-                    checkout_cmd = f"git checkout {shlex.quote(base_branch_name)}"
+                    checkout_cmd = f"git checkout -f {shlex.quote(base_branch_name)}"
                 config_commands = [
                     "git config --bool core.bare false",
                     checkout_cmd,
@@ -1236,12 +1246,21 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
                 if git_author_email:
                     config_commands.append(f"git config user.email {shlex.quote(git_author_email)}")
                 if origin_url:
-                    # Use set-url if origin already exists (e.g. from mirror push),
-                    # otherwise add it.
+                    # Use set-url if origin already exists (e.g. from the
+                    # in-image keyframe's .git or the bare init), otherwise
+                    # add it. Written as an explicit if/else so a failure
+                    # in an earlier `&&`-chained command can't trigger
+                    # this clause as a `||` fallback (bash operator
+                    # precedence: `A && B || C` parses as `(A && B) || C`,
+                    # so if B fails, C runs unintentionally and `add`
+                    # errors with "remote origin already exists" -- a
+                    # confusing co-symptom of the real failure upstream).
+                    quoted_origin = shlex.quote(origin_url)
                     set_or_add = (
-                        f"git remote set-url origin {shlex.quote(origin_url)}"
-                        f" 2>/dev/null"
-                        f" || git remote add origin {shlex.quote(origin_url)}"
+                        f"if git remote get-url origin >/dev/null 2>&1; "
+                        f"then git remote set-url origin {quoted_origin}; "
+                        f"else git remote add origin {quoted_origin}; "
+                        f"fi"
                     )
                     config_commands.append(set_or_add)
 
@@ -1939,7 +1958,6 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
                 "initial_message": options.initial_message,
                 "resume_message": options.resume_message,
                 "ready_timeout_seconds": options.ready_timeout_seconds,
-                "permissions": [],
                 "start_on_boot": False,
                 "labels": dict(options.label_options.labels),
                 "created_branch_name": created_branch_name,
@@ -2114,9 +2132,10 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
             env_vars = self._collect_agent_env_vars(agent, options)
             self._write_agent_env_file(agent, env_vars)
 
-            # Ensure mngr_log.sh exists at both host and agent level so that
-            # all bash scripts can source it for logging and timestamp utilities.
-            ensure_log_thread = concurrency_group.start_new_thread(self._ensure_mngr_log_sh, (agent,))
+            # Ensure the shared shell libraries (mngr_log.sh, mngr_transcript_lib.sh)
+            # exist at both host and agent level so that all bash scripts can source
+            # them for logging, timestamp utilities, and raw-transcript primitives.
+            ensure_shared_libs_thread = concurrency_group.start_new_thread(self._ensure_shared_shell_libs, (agent,))
 
             # files need to be there before provisioning--even making this a thread was just a minor optimization:
             agent_file_transfer_thread.join(60.0)
@@ -2156,30 +2175,35 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
                         raise MngrError(f"Extra provision command failed: {cmd}\nstderr: {result.stderr}")
 
             # should be done by now
-            ensure_log_thread.join(60.0)
+            ensure_shared_libs_thread.join(60.0)
 
             # Call post-provisioning on agent
             with log_span("Calling on_after_provisioning for agent {}", agent.name):
                 agent.on_after_provisioning(host=self, options=options, mngr_ctx=mngr_ctx)
 
-    def _ensure_mngr_log_sh(self, agent: AgentInterface) -> None:
-        """Write mngr_log.sh to both host-level and agent-level commands directories.
+    _SHARED_SHELL_LIB_NAMES: ClassVar[tuple[str, ...]] = ("mngr_log.sh", "mngr_transcript_lib.sh")
 
-        mngr_log.sh provides shared JSONL logging and cross-platform timestamp
-        utilities for all mngr bash scripts.  Two identical copies are maintained:
+    def _ensure_shared_shell_libs(self, agent: AgentInterface) -> None:
+        """Write the shared shell libraries to host-level and agent-level commands dirs.
 
-        - ``<host_dir>/commands/mngr_log.sh``   (for host-level scripts such as
-          activity_watcher.sh)
-        - ``<agent_state_dir>/commands/mngr_log.sh``  (for agent-level scripts
-          such as stream_transcript.sh, chat.sh)
+        These libraries are sourced by mngr bash scripts and must exist on both
+        levels so host-level (``activity_watcher.sh``) and agent-level
+        (``stream_transcript.sh``, ``chat.sh``) scripts can source them
+        consistently.
+
+        - ``mngr_log.sh`` provides shared JSONL logging and cross-platform
+          timestamp utilities.
+        - ``mngr_transcript_lib.sh`` provides the raw-transcript primitives
+          (field extraction, id-set construction, offset reconciliation,
+          bounded sed-append, percent-encoded path keys) shared by per-agent
+          streamers such as claude's and gemini's ``stream_transcript.sh``.
         """
-        content_bytes = importlib.resources.files(mngr_resources).joinpath("mngr_log.sh").read_text().encode()
-
         host_commands = self.host_dir / "commands"
-        self.write_file(host_commands / "mngr_log.sh", content_bytes, mode="0755")
-
         agent_commands = self._get_agent_state_dir(agent) / "commands"
-        self.write_file(agent_commands / "mngr_log.sh", content_bytes, mode="0755")
+        for name in self._SHARED_SHELL_LIB_NAMES:
+            content_bytes = importlib.resources.files(mngr_resources).joinpath(name).read_text().encode()
+            self.write_file(host_commands / name, content_bytes, mode="0755")
+            self.write_file(agent_commands / name, content_bytes, mode="0755")
 
     def _execute_agent_file_transfers(
         self,
@@ -2221,11 +2245,11 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
 
     def rename_agent(
         self,
-        agent: AgentInterface,
+        agent_ref: DiscoveredAgent,
         new_name: AgentName,
         labels_to_merge: Mapping[str, str] | None = None,
-    ) -> AgentInterface:
-        """Rename an agent (optionally merging labels) and return the updated object.
+    ) -> DiscoveredAgent:
+        """Rename an agent (optionally merging labels) and return the updated ref.
 
         The operation is idempotent: if interrupted mid-rename, re-running
         will complete it. This works because data.json (the "commit point")
@@ -2237,15 +2261,20 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         an external observer of the agent's state never sees the rename without
         also seeing the new labels.
         """
-        with log_span("Renaming agent", agent_id=str(agent.id), old_name=str(agent.name), new_name=str(new_name)):
+        agent_id = agent_ref.agent_id
+        with log_span(
+            "Renaming agent",
+            agent_id=str(agent_id),
+            old_name=str(agent_ref.agent_name),
+            new_name=str(new_name),
+        ):
             # Prevent same-host name collisions (the tmux session name is derived
             # from the agent name, so duplicates would share a session).
-            for existing_agent in self.get_agents():
-                if existing_agent.name == new_name and existing_agent.id != agent.id:
-                    raise DuplicateAgentNameError(new_name, existing_agent.id)
+            self._check_rename_conflict(agent_id, new_name)
 
-            old_name = agent.name
-            data_path = self._get_agent_state_dir(agent) / "data.json"
+            old_name = agent_ref.agent_name
+            agent_state_dir = get_agent_state_dir_path(self.host_dir, agent_id)
+            data_path = agent_state_dir / "data.json"
 
             # Rename the tmux session first (idempotent -- no-ops if session doesn't exist with old name)
             old_session_name = f"{self.mngr_ctx.config.prefix}{old_name}"
@@ -2257,7 +2286,7 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
             logger.debug("Tmux rename result: success={}, stdout={}", result.success, result.stdout.strip())
 
             # Update the MNGR_AGENT_NAME env var in the agent's env file
-            env_path = self.get_agent_env_path(agent)
+            env_path = agent_state_dir / "env"
             try:
                 env_content = self.read_text_file(env_path)
                 updated_lines: list[str] = []
@@ -2268,7 +2297,7 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
                         updated_lines.append(line)
                 self.write_file(env_path, ("\n".join(updated_lines) + "\n").encode(), is_atomic=True)
             except FileNotFoundError:
-                logger.debug("No env file found for agent {}, skipping env update", agent.id)
+                logger.debug("No env file found for agent {}, skipping env update", agent_id)
 
             # Update data.json last (the "commit point" for the rename). Any
             # provided labels are merged into the existing labels in the same
@@ -2276,18 +2305,17 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
             # together.
             content = self.read_text_file(data_path)
             data = json.loads(content)
-            data["name"] = str(new_name)
-            if labels_to_merge:
-                current_labels = data.get("labels") or {}
-                data["labels"] = {**current_labels, **dict(labels_to_merge)}
-            self.write_file(data_path, json.dumps(data, indent=2).encode(), is_atomic=True)
-            self.save_agent_data(agent.id, data)
+            updated = apply_rename_to_agent_data(data, new_name, labels_to_merge)
+            self.write_file(data_path, json.dumps(updated, indent=2).encode(), is_atomic=True)
+            self.save_agent_data(agent_id, updated)
 
-            # Reload and return the updated agent
-            updated_agent = self._load_agent_from_dir(self._get_agent_state_dir(agent))
-            if updated_agent is None:
-                raise AgentNotFoundOnHostError(agent.id, self.id)
-            return updated_agent
+            return DiscoveredAgent(
+                host_id=self.id,
+                agent_id=agent_id,
+                agent_name=new_name,
+                provider_name=self.provider_instance.name,
+                certified_data=updated,
+            )
 
     def destroy_agent(self, agent: AgentInterface) -> None:
         """Destroy an agent and clean up its resources."""

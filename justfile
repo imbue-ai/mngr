@@ -110,7 +110,7 @@ _parallel := "-n 4 --dist=worksteal --max-worker-restart=0"
 # Default mark filter for local unit + integration recipes. Kept out of
 # pyproject addopts because it would collide with offload-modal-acceptance
 # (which runs the opposite filter). A later -m on CLI overrides this.
-_skip_acceptance_and_release := "-m 'not acceptance and not release'"
+_skip_acceptance_and_release := "-m 'not acceptance and not release and not minds_deployment and not minds_services'"
 
 test-unit:
   uv run pytest {{_parallel}} {{_skip_acceptance_and_release}} --cov-report=html --ignore-glob="**/test_*.py" --cov-fail-under=36
@@ -148,6 +148,35 @@ test-timings:
 # useful for running against a single test, regardless of how it is marked
 test target:
   PYTEST_MAX_DURATION_SECONDS=600 uv run pytest -sv --no-cov -n 0 -m "acceptance or not acceptance" "{{target}}"
+
+# === minds deployment / services test orchestrator ===
+# Wraps apps/minds/scripts/test_deployments.py. See specs/minds-deployment-tests.md
+# and apps/minds/deployment_tests/README.md for the full design + usage.
+
+# Full run: shared env stand-up + sequential pytest x2 + teardown.
+minds-test-deployment *args:
+  uv run python apps/minds/scripts/test_deployments.py run {{args}}
+
+# Wipe everything from prior runs that the ledger still tracks as active or leaked.
+minds-test-deployment-cleanup:
+  uv run python apps/minds/scripts/test_deployments.py cleanup
+
+# Local iterate: stand up one shared env + print a ready-to-paste pytest command.
+minds-test-deployment-up role="default":
+  uv run python apps/minds/scripts/test_deployments.py up "{{role}}"
+
+# Local iterate: tear down whatever `minds-test-deployment-up` last stood up.
+minds-test-deployment-down role="default":
+  uv run python apps/minds/scripts/test_deployments.py down "{{role}}"
+
+# Point minds_services tests at an already-deployed dev env (e.g. dev-josh).
+minds-test-services-against env_name *tests:
+  uv run python apps/minds/scripts/test_deployments.py services-against "{{env_name}}" {{tests}}
+
+# Run only the minds_deployment pytest batch (each test mints its own ephemeral env).
+# No shared env stand-up, no mail.tm account -- fast iteration for the deploy tests.
+minds-test-deployment-only *tests:
+  uv run python apps/minds/scripts/test_deployments.py deployment-only {{tests}}
 
 # Download the Tailwind Play CDN JS bundle for the minds desktop client.
 # Idempotent and SHA-pinned via apps/minds/scripts/fetch_tailwind.sh -- the
@@ -214,7 +243,8 @@ deploy *args:
     uv run minds env deploy {{args}}
 
 # Start the minds desktop client (electron) in dev mode against the
-# activated env. Sources .env (for ANTHROPIC_API_KEY etc.) and sets
+# activated env. Sources .env if present, scrubs any ambient
+# ANTHROPIC_API_KEY / ANTHROPIC_BASE_URL (see below), and sets
 # MINDS_WORKSPACE_* env vars so the create-form auto-fills "repository",
 # "name", and "branch":
 #   MINDS_WORKSPACE_GIT_URL = .external_worktrees/forever-claude-template/
@@ -304,6 +334,15 @@ minds-start agent_name="mindtest" branch="":
         . .env
         set +a
     fi
+    # Scrub ANTHROPIC_API_KEY / ANTHROPIC_BASE_URL from the environment
+    # the desktop client inherits. In dev these are typically exported by
+    # the shell rc of whoever runs `just minds-start`, and the client
+    # would otherwise forward them into every agent it creates -- silently
+    # overriding the auth mode picked in the create form. A real packaged
+    # macOS app launched from Finder never sources shell rc files, so this
+    # leak is a dev-environment artifact; unsetting here is the
+    # proportionate fix. `unset` of an already-unset var is a no-op.
+    unset ANTHROPIC_API_KEY ANTHROPIC_BASE_URL
     export MINDS_WORKSPACE_GIT_URL="$fct_wt"
     if [ -n "{{branch}}" ]; then
         export MINDS_WORKSPACE_BRANCH="{{branch}}"
