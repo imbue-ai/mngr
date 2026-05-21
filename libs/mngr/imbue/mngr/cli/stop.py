@@ -237,7 +237,17 @@ def stop(ctx: click.Context, **kwargs: Any) -> None:
                 if not opts.stop_host:
                     emit_discovery_events_for_host(mngr_ctx.config, online_host)
             case HostInterface():
-                raise HostOfflineError(f"Host '{host_id_str}' is offline. Cannot stop agents on offline hosts.")
+                if opts.stop_host:
+                    # The whole host is the stop target and it is already
+                    # offline -- the desired end state (host stopped) is
+                    # already reached, so this is an idempotent no-op rather
+                    # than an error. A plain ``mngr stop`` of individual
+                    # agents still cannot proceed on an offline host.
+                    _output(f"Host '{host_id_str}' is already stopped", output_opts)
+                else:
+                    raise HostOfflineError(
+                        f"Host '{host_id_str}' is offline. Cannot stop agents on offline hosts."
+                    )
             case _ as unreachable:
                 assert_never(unreachable)
 
