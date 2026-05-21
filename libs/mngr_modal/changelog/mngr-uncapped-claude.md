@@ -1,0 +1,1 @@
+The acceptance test for `mngr_claude_usage`'s statusline-shim provisioning on a real Modal host (`test_provision_statusline_shim_on_modal_host`) is updated to assert against the new host-stable shim path layout (`<host_dir>/commands/claude_statusline.sh`) and the per-agent sidecar (`<state_dir>/commands/user_statusline_cmd`).
