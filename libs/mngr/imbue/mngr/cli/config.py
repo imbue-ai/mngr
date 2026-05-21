@@ -896,7 +896,6 @@ def _get_config_template() -> str:
 # [agent_types.my_claude]
 # parent_type = "claude"
 # cli_args = "--env CLAUDE_MODEL=opus"
-# permissions = ["github", "npm"]
 
 # Provider instances
 # [providers.my-docker]

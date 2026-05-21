@@ -30,7 +30,6 @@ from imbue.mngr.primitives import CommandString
 from imbue.mngr.primitives import LifecycleHook
 from imbue.mngr.primitives import NewAgentLocation
 from imbue.mngr.primitives import OutputFormat
-from imbue.mngr.primitives import Permission
 from imbue.mngr.primitives import PluginName
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
@@ -304,10 +303,6 @@ class AgentTypeConfig(FrozenModel):
     cli_args: tuple[str, ...] = Field(
         default=(),
         description="Additional CLI arguments to pass to the agent",
-    )
-    permissions: list[Permission] = Field(
-        default_factory=list,
-        description="Explicit list of permissions (overrides parent type permissions)",
     )
     extra_provision_command: tuple[str, ...] = Field(
         default=(),
@@ -953,7 +948,6 @@ class CreateCliOptions(CommonCliOptions):
     worktree_base_folder: str | None
     start_on_boot: bool
     start_host: bool
-    grant: tuple[str, ...]
     extra_provision_command: tuple[str, ...]
     upload_file: tuple[str, ...]
     update: bool

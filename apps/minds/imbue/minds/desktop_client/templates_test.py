@@ -7,6 +7,7 @@ from imbue.minds.desktop_client.templates import render_create_form
 from imbue.minds.desktop_client.templates import render_landing_page
 from imbue.minds.desktop_client.templates import render_login_page
 from imbue.minds.desktop_client.templates import render_login_redirect_page
+from imbue.minds.desktop_client.templates import render_recovery_page
 from imbue.minds.desktop_client.templates import render_sidebar_page
 from imbue.minds.primitives import AIProvider
 from imbue.minds.primitives import LaunchMode
@@ -129,6 +130,65 @@ def test_render_create_form_shows_error_message_when_supplied() -> None:
     assert "Imbue cloud requires an account." in html
 
 
+def test_render_create_form_honors_workspace_env_vars_in_dev_tier(monkeypatch: pytest.MonkeyPatch) -> None:
+    """In a dev tier, the MINDS_WORKSPACE_* env vars pre-fill the create form.
+
+    Used by ``just minds-start`` to point the form at the operator's local
+    FCT worktree + current branch so the dev-iteration loop is one click.
+    """
+    monkeypatch.setenv("MINDS_ROOT_NAME", "minds-dev-josh")
+    monkeypatch.setenv("MINDS_WORKSPACE_GIT_URL", "/local/fct/path")
+    monkeypatch.setenv("MINDS_WORKSPACE_NAME", "mindtest")
+    monkeypatch.setenv("MINDS_WORKSPACE_BRANCH", "mngr/some-feature")
+    html = render_create_form()
+    assert "/local/fct/path" in html
+    assert "mindtest" in html
+    assert "mngr/some-feature" in html
+
+
+def test_render_create_form_ignores_workspace_env_vars_in_staging(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Staging must not honor MINDS_WORKSPACE_* env vars.
+
+    Without the gate, a stray ``MINDS_WORKSPACE_BRANCH=mngr/some-branch`` in
+    the operator's shell (e.g. left over from a prior ``just minds-start``
+    invocation) would pre-fill the form's branch field and propagate to
+    the imbue_cloud lease request as ``-b repo_branch_or_tag=...``, which
+    would silently fail to match any pool host baked with the tier's
+    canonical branch.
+    """
+    monkeypatch.setenv("MINDS_ROOT_NAME", "minds-staging")
+    monkeypatch.setenv("MINDS_WORKSPACE_GIT_URL", "/local/fct/path")
+    monkeypatch.setenv("MINDS_WORKSPACE_NAME", "mindtest")
+    monkeypatch.setenv("MINDS_WORKSPACE_BRANCH", "mngr/some-feature")
+    html = render_create_form()
+    assert "/local/fct/path" not in html
+    assert "mindtest" not in html
+    assert "mngr/some-feature" not in html
+    # And the hardcoded fallbacks DO appear (form is still usable).
+    assert "forever-claude-template" in html
+    assert "assistant" in html
+
+
+def test_render_create_form_ignores_workspace_env_vars_in_production(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Production -- like staging -- must not honor the dev-iteration env vars."""
+    monkeypatch.setenv("MINDS_ROOT_NAME", "minds")
+    monkeypatch.setenv("MINDS_WORKSPACE_BRANCH", "mngr/some-feature")
+    html = render_create_form()
+    assert "mngr/some-feature" not in html
+
+
+def test_render_create_form_ignores_workspace_env_vars_when_unactivated(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No activated env (no MINDS_ROOT_NAME) -- treat as non-dev and ignore env vars.
+
+    Mirrors the conservative default: a bare ``minds run`` without any
+    activation context shouldn't accidentally pull from ad-hoc env vars.
+    """
+    monkeypatch.delenv("MINDS_ROOT_NAME", raising=False)
+    monkeypatch.setenv("MINDS_WORKSPACE_BRANCH", "mngr/some-feature")
+    html = render_create_form()
+    assert "mngr/some-feature" not in html
+
+
 def test_render_login_page_shows_prompt() -> None:
     html = render_login_page()
     assert "login URL" in html.lower() or "Login" in html
@@ -167,3 +227,28 @@ def test_render_sidebar_page_contains_workspace_list() -> None:
     # The interactivity (including the SSE EventSource fallback) now lives
     # in the external /_static/sidebar.js file; the template should pull it in.
     assert "/_static/sidebar.js" in html
+
+
+def test_render_recovery_page_includes_agent_id_and_return_to() -> None:
+    html = render_recovery_page(
+        agent_id=_AGENT_A,
+        ws_name="my-workspace",
+        return_to="http://agent.localhost:8421/",
+        initial_status="stuck",
+    )
+    assert str(_AGENT_A) in html
+    assert "my-workspace" in html
+    assert "http://agent.localhost:8421/" in html
+    assert "/api/agents/" in html
+    assert "restart-system-interface" in html
+    assert 'data-initial-status="stuck"' in html
+
+
+def test_render_recovery_page_restarting_status() -> None:
+    html = render_recovery_page(
+        agent_id=_AGENT_B,
+        ws_name="ws",
+        return_to="",
+        initial_status="restarting",
+    )
+    assert 'data-initial-status="restarting"' in html

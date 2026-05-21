@@ -37,7 +37,6 @@ from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import ActivitySource
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import CommandString
-from imbue.mngr.primitives import Permission
 from imbue.mngr.utils.env_utils import parse_env_file
 
 _CAPTURE_PANE_TIMEOUT_SECONDS: Final[float] = 10.0
@@ -140,16 +139,6 @@ class BaseAgent(AgentInterface[AgentConfigT]):
         data = self._read_data()
         cmd = data.get("command")
         return CommandString(cmd) if cmd else CommandString("bash")
-
-    def get_permissions(self) -> list[Permission]:
-        data = self._read_data()
-        perms = data.get("permissions", [])
-        return [Permission(p) for p in perms]
-
-    def set_permissions(self, value: Sequence[Permission]) -> None:
-        data = self._read_data()
-        data["permissions"] = [str(p) for p in value]
-        self._write_data(data)
 
     def get_labels(self) -> dict[str, str]:
         data = self._read_data()

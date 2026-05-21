@@ -33,11 +33,24 @@ def test_prevent_while_true() -> None:
 
 
 def test_prevent_time_sleep() -> None:
-    # Two matches: ``destroying_test.py`` (a real test poll loop) and
+    # Six matches: ``destroying_test.py`` (a real test poll loop),
     # ``cli/env.py::_exec_into_recover`` (the 5-second auto-rollback
     # countdown -- a deliberate user-facing pause so the operator can
-    # Ctrl-C if they want to intervene before recover fires).
-    rc.check_time_sleep(_DIR, snapshot(2))
+    # Ctrl-C if they want to intervene before recover fires),
+    # ``deployment_tests/_mailtm.py::MailtmInbox._wait_for_message_body``
+    # (polling the mail.tm HTTP API for an inbound email -- no
+    # event-driven alternative without standing up an IMAP listener),
+    # ``deployment_tests/helpers.py::_wait_for_url_alive`` (polling
+    # the connector / litellm-proxy healthcheck URLs with cold-boot
+    # tolerance, mirroring what ``envs/health_check.py`` does
+    # deploy-side), ``deployment_tests/test_deploy_new_version.py::
+    # _poll_for_deploy_id_change`` (polling /version after a redeploy
+    # since Modal can keep routing to the stale container for a short
+    # window after the swap), and ``deployment_tests/test_deploy_rollback.py::
+    # _poll_for_deploy_id`` (polling /version after a forced auto-
+    # rollback to confirm the rolled-back version is the one actually
+    # serving traffic; same Modal swap-window justification).
+    rc.check_time_sleep(_DIR, snapshot(6))
 
 
 def test_prevent_global_keyword() -> None:
@@ -154,11 +167,11 @@ def test_prevent_num_prefix() -> None:
 
 
 def test_prevent_trailing_comments() -> None:
-    # ``forward_cli.py`` carries one ``# noqa: S603`` next to the
-    # ``subprocess.Popen`` call that spawns ``mngr forward``. The S603
-    # suppression must be on the same line as the call for ruff to
-    # recognize it; ``# noqa`` is intentionally not in the trailing-
-    # comment exempt list.
+    # ``forward_cli.py`` carries one ``noqa: S603`` suppression next to
+    # the ``subprocess.Popen`` call that spawns ``mngr forward``. The
+    # S603 suppression must be on the same line as the call for ruff to
+    # recognize it; the noqa marker is intentionally not in the
+    # trailing-comment exempt list.
     rc.check_trailing_comments(_DIR, snapshot(1))
 
 
@@ -269,6 +282,12 @@ def test_prevent_direct_subprocess() -> None:
         # so the destroy survives a minds-backend exit; same justification as
         # ``latchkey/_spawn.py``. See specs/detached-destroy-flow/spec.md.
         "*/desktop_client/destroying.py",
+        # ``deployment_tests/helpers.py`` is functionally test-helper code
+        # (only ever called from `*/deployment_tests/test_*.py`); it shells
+        # out to `modal environment list` for a one-shot read-only probe.
+        # Same exception as the ``testing.py`` pattern but lives under a
+        # different filename for the deployment_tests subpackage.
+        "*/deployment_tests/helpers.py",
     )
     # The one allowed match is ``cli/env.py::_exec_into_recover``,
     # which uses ``os.execvp`` to REPLACE the current process with

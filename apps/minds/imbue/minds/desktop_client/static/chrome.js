@@ -64,12 +64,62 @@
       currentTitleAgentId = null;
       return;
     }
+    if (currentTitleAgentId !== agentId) {
+      // Agent identity changed -- clear the recovery-redirect lock so a
+      // user who navigates back to a still-stuck workspace gets bounced
+      // to recovery again instead of landing on the 503 page.
+      delete redirectedAgents[agentId];
+    }
     currentTitleAgentId = agentId;
     getAccent(agentId, function (c) {
       if (currentTitleAgentId !== agentId) return;
       document.documentElement.style.setProperty('--workspace-accent', c);
       swatch.classList.remove('hidden');
     });
+    maybeRedirectToRecovery();
+  }
+
+  // -- System-interface recovery redirect -----------------------------------
+  //
+  // SSE pushes ``system_interface_status`` events whenever an agent transitions
+  // between healthy / stuck / restarting. When the currently-displayed agent
+  // goes STUCK we navigate the content view to the recovery page; the recovery
+  // page's own SSE subscription redirects back to ``return_to`` once the agent
+  // is healthy again. We redirect at most once per stuck episode (per agent),
+  // cleared by a subsequent ``healthy`` event, so the recovery page itself
+  // doesn't get clobbered on repeat STUCK transitions while the user is on it.
+  var systemInterfaceStatusByAgent = {};
+  var redirectedAgents = {};
+
+  function buildRecoveryUrl(agentId) {
+    var returnTo = '';
+    if (isElectron) {
+      returnTo = mngrForwardOrigin + '/goto/' + agentId + '/';
+    } else {
+      try { returnTo = document.getElementById('content-frame').contentWindow.location.href; } catch (e) {}
+      if (!returnTo) returnTo = mngrForwardOrigin + '/goto/' + agentId + '/';
+    }
+    return '/agents/' + encodeURIComponent(agentId) + '/recovery?return_to=' + encodeURIComponent(returnTo);
+  }
+
+  function maybeRedirectToRecovery() {
+    var aid = currentTitleAgentId;
+    if (!aid) return;
+    if (systemInterfaceStatusByAgent[aid] !== 'stuck') return;
+    if (redirectedAgents[aid]) return;
+    redirectedAgents[aid] = true;
+    navigateContent(buildRecoveryUrl(aid));
+  }
+
+  function handleSystemInterfaceStatus(agentId, status) {
+    if (!agentId) return;
+    if (status === 'healthy') {
+      delete systemInterfaceStatusByAgent[agentId];
+      delete redirectedAgents[agentId];
+      return;
+    }
+    systemInterfaceStatusByAgent[agentId] = status;
+    maybeRedirectToRecovery();
   }
 
   // -- Button wiring --------------------------------------------------------
@@ -101,19 +151,18 @@
         document.getElementById('page-title').textContent = title || 'Minds';
       });
     }
-    window.minds.onContentURLChange(function (url) {
+    window.minds.onContentURLChange(function () {
       refreshAuthStatus();
-      try {
-        var u = new URL(url);
-        var m = u.pathname.match(/^\/goto\/([^/]+)/);
-        applyTitleSwatch(m ? m[1] : null);
-      } catch (e) {}
     });
-    if (window.minds.onCurrentWorkspaceChanged) {
-      window.minds.onCurrentWorkspaceChanged(function (agentId) {
-        applyTitleSwatch(agentId || null);
-      });
-    }
+    // In Electron mode the current workspace is authoritative via IPC: main.js
+    // tracks the active workspace per bundle (handles both /goto/<id>/ URLs and
+    // post-redirect agent-<id>.localhost subdomains) and pushes it here. Deriving
+    // it from the content URL alone would clobber it to null on every navigation
+    // that doesn't match /goto/<id>/, which would prevent the recovery-page
+    // redirect from firing for the current agent.
+    window.minds.onCurrentWorkspaceChanged(function (agentId) {
+      applyTitleSwatch(agentId || null);
+    });
   } else {
     setInterval(function () {
       try {
@@ -207,6 +256,7 @@
       if (data.type === 'workspaces') renderWorkspaces(data.workspaces);
       if (data.type === 'auth_status') updateAuthUI(data);
       if (data.type === 'request_count') updateRequestsBadge(data.count);
+      if (data.type === 'system_interface_status') handleSystemInterfaceStatus(data.agent_id, data.status);
     } catch (e) {}
   }
 
