@@ -269,8 +269,6 @@ Provider: ovh
     --vps-plan=PLAN       OVH plan code (default: vps-2025-model1 = VPS-1)
     --git-depth=N         Shallow-clone build context to depth N before upload
 
-  OS image is set via default_image_name on the provider config (defaults to
-  'Debian 12 - Docker'); per-host overrides are not supported via build args.
   All other build args are passed to 'docker build' on the VPS.
   Example: -b --vps-plan=vps-2025-model1 -b --file=Dockerfile -b .
   Start args are passed directly to 'docker run'. Run 'docker run --help' for details.
@@ -296,8 +294,6 @@ Provider: vultr
     --vps-plan=PLAN      Vultr plan (default: vc2-2c-4gb)
     --git-depth=N        Shallow-clone build context to depth N before upload
 
-  OS image is set via default_os_id on the provider config (Debian 12 x64 by
-  default); per-host overrides are not supported via build args.
   All other build args are passed to 'docker build' on the VPS.
   Example: -b --vps-plan=vc2-2c-4gb -b --file=Dockerfile -b .
   Start args are passed directly to 'docker run'. Run 'docker run --help' for details.
