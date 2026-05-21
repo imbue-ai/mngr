@@ -44,7 +44,6 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Final
 from typing import IO
-from uuid import uuid4
 
 import httpx
 import pytest
@@ -54,6 +53,7 @@ from playwright.sync_api import Page
 from playwright.sync_api import sync_playwright
 
 from imbue.minds.config.loader import repo_tier_client_config_path
+from imbue.mngr.utils.testing import get_short_random_string
 
 _REPO_ROOT: Final[Path] = Path(__file__).resolve().parents[2]
 _FCT_EXTERNAL_WORKTREE: Final[Path] = _REPO_ROOT / ".external_worktrees" / "forever-claude-template"
@@ -445,7 +445,7 @@ def test_create_local_docker_workspace_via_electron(
     _resolve_minds_env(monkeypatch)
 
     fct_path = _resolve_fct_path(tmp_path)
-    workspace_name = f"forever-{uuid4().hex[:8]}"
+    workspace_name = f"forever-{get_short_random_string()}"
     debug_port = _find_free_port()
     mngr_forward_port = _find_free_port()
     logger.info(
