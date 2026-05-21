@@ -113,20 +113,36 @@ const FILE_SHARING_GATEWAY_HOST = 'latchkey-self.invalid';
 const FILE_SHARING_PROXY_PATH_PREFIX = '/extensions/minds-api-proxy/api/v1/files';
 const FILE_SHARING_SCOPE_SCHEMA_NAME = 'minds-file-server';
 const FILE_SHARING_PERMISSION_PREFIX = 'minds-file-server-';
-// WebDAV verbs an approved grant unlocks for the named file. ``GET`` /
-// ``HEAD`` read; ``PUT`` writes; ``DELETE`` removes; ``PROPFIND`` /
-// ``PROPPATCH`` query and set properties; ``MKCOL`` creates a
-// directory at the path; ``COPY`` / ``MOVE`` reshape; ``LOCK`` /
-// ``UNLOCK`` are WebDAV's advisory locking primitives; ``OPTIONS``
-// is the WebDAV capability probe a client typically issues before
-// anything else.
-const FILE_SHARING_ALLOWED_METHODS = [
-  'GET',
-  'HEAD',
-  'OPTIONS',
+
+// Access modes the agent can request for a file. ``READ`` grants the
+// non-mutating WebDAV verbs only; ``WRITE`` is a superset that also
+// grants the verbs that change the file or its properties. Read-only
+// and read-write grants live as distinct schemas in the user's
+// permissions.json (the per-file schema name is prefixed with the
+// access mode), so a user can independently hold either grant or both
+// for the same path.
+const FILE_SHARING_ACCESS_READ = 'READ';
+const FILE_SHARING_ACCESS_WRITE = 'WRITE';
+const VALID_FILE_SHARING_ACCESS_MODES = new Set([
+  FILE_SHARING_ACCESS_READ,
+  FILE_SHARING_ACCESS_WRITE,
+]);
+
+// WebDAV verbs that do not mutate the resource. ``GET``/``HEAD`` read
+// the body / metadata; ``OPTIONS`` is the capability probe a client
+// typically issues before anything else; ``PROPFIND`` reads
+// properties (incl. listing a collection at the path).
+const FILE_SHARING_READ_METHODS = ['GET', 'HEAD', 'OPTIONS', 'PROPFIND'];
+
+// WebDAV verbs that mutate the resource (or, in the case of
+// ``LOCK``/``UNLOCK``, server-side advisory state for it). Added on
+// top of the read methods for ``WRITE`` grants. ``MKCOL`` is
+// included for symmetry (the granted URL targets a single resource;
+// if the user is sharing a path that doesn't yet exist, ``MKCOL``
+// lets the agent create a collection there).
+const FILE_SHARING_WRITE_ONLY_METHODS = [
   'PUT',
   'DELETE',
-  'PROPFIND',
   'PROPPATCH',
   'MKCOL',
   'COPY',
@@ -134,6 +150,18 @@ const FILE_SHARING_ALLOWED_METHODS = [
   'LOCK',
   'UNLOCK',
 ];
+
+function allowedMethodsForAccess(access) {
+  if (access === FILE_SHARING_ACCESS_READ) {
+    return [...FILE_SHARING_READ_METHODS];
+  }
+  if (access === FILE_SHARING_ACCESS_WRITE) {
+    return [...FILE_SHARING_READ_METHODS, ...FILE_SHARING_WRITE_ONLY_METHODS];
+  }
+  // Caller is responsible for having validated the access mode
+  // earlier; this branch exists so the function is total.
+  throw new InvalidRequestBodyError(`unhandled file-sharing access mode '${access}'.`);
+}
 
 class PermissionRequestsExtensionError extends Error {
   constructor(statusCode, message) {
@@ -292,15 +320,30 @@ function validatePredefinedPayload(payload) {
 
 /**
  * Validate the payload object for a ``file-sharing`` permission request.
- * Returns the canonical payload shape (``{path}``).
+ * Returns the canonical payload shape (``{path, access}``).
+ *
+ * ``access`` is required and must be one of the documented modes
+ * (``READ`` / ``WRITE``). It is supplied by the agent rather than
+ * picked by the user so the agent's stated need is captured at
+ * request creation time -- a user who wants to grant something
+ * narrower can deny and ask the agent to re-request with a smaller
+ * mode (no downgrade-at-approval UI today).
  */
 function validateFileSharingPayload(payload) {
   if (typeof payload !== 'object' || payload === null || Array.isArray(payload)) {
     throw new InvalidRequestBodyError("'payload' must be a JSON object for type 'file-sharing'.");
   }
   validateAbsoluteFileSharingPath(payload.path);
-  ensureNoExtraneousFields('payload ', ['path'], payload);
-  return { path: payload.path };
+  ensureNonEmptyString('payload.', 'access', payload.access);
+  if (!VALID_FILE_SHARING_ACCESS_MODES.has(payload.access)) {
+    throw new InvalidRequestBodyError(
+      `payload.'access' must be one of ${[...VALID_FILE_SHARING_ACCESS_MODES]
+        .map((name) => `'${name}'`)
+        .join(', ')}; got '${payload.access}'.`,
+    );
+  }
+  ensureNoExtraneousFields('payload ', ['path', 'access'], payload);
+  return { path: payload.path, access: payload.access };
 }
 
 /**
@@ -377,7 +420,7 @@ function computeEffect(type, payload) {
         rules: [{ [payload.scope]: [...payload.permissions] }],
       };
     case REQUEST_TYPE_FILE_SHARING:
-      return computeFileSharingEffect(payload.path);
+      return computeFileSharingEffect(payload.path, payload.access);
     default:
       // Already validated by parsePermissionRequestBody; this branch
       // exists only to satisfy the type system / linters.
@@ -387,16 +430,28 @@ function computeEffect(type, payload) {
 
 /**
  * Derive a stable, filename-safe schema name for a file-sharing
- * permission targeted at ``filePath``. We hash the path so the
- * resulting schema name is bounded in length and free of
- * filesystem-significant characters, but deterministic (the same path
- * always maps to the same schema name, which makes idempotent
- * re-approvals work cleanly through the schema-by-name merge in the
- * approve handler).
+ * permission targeted at ``filePath`` at the named ``access`` mode.
+ *
+ * The name has the shape
+ * ``minds-file-server-<access_lower>-<sha256(filePath)[:32]>`` so:
+ *
+ *  * read and write grants for the same path are *different* schemas
+ *    -- both can coexist in a user's permissions.json, and a
+ *    later write grant does not silently replace an earlier read
+ *    grant (or vice versa);
+ *  * the schema name is human-debuggable (``read`` / ``write``
+ *    appears in plaintext);
+ *  * the name is filename-safe and bounded in length; and
+ *  * the per-mode-per-path mapping is deterministic, so idempotent
+ *    re-approval of the same (path, access) pair merges cleanly
+ *    through the schema-by-name merge in the approve handler.
  */
-function fileSharingPermissionSchemaName(filePath) {
+function fileSharingPermissionSchemaName(filePath, access) {
+  if (!VALID_FILE_SHARING_ACCESS_MODES.has(access)) {
+    throw new InvalidRequestBodyError(`unhandled file-sharing access mode '${access}'.`);
+  }
   const hash = createHash('sha256').update(filePath, 'utf-8').digest('hex').slice(0, 32);
-  return `${FILE_SHARING_PERMISSION_PREFIX}${hash}`;
+  return `${FILE_SHARING_PERMISSION_PREFIX}${access.toLowerCase()}-${hash}`;
 }
 
 /**
@@ -420,8 +475,8 @@ function fileSharingScopePathPattern() {
   return `^${escapeForRegex(FILE_SHARING_PROXY_PATH_PREFIX)}(/.*)?$`;
 }
 
-function computeFileSharingEffect(filePath) {
-  const permissionSchemaName = fileSharingPermissionSchemaName(filePath);
+function computeFileSharingEffect(filePath, access) {
+  const permissionSchemaName = fileSharingPermissionSchemaName(filePath, access);
   // WebDAV serves the on-disk path directly under the mount, so the
   // permission's URL path is the prefix + the absolute file path.
   // ``validateAbsoluteFileSharingPath`` has already guaranteed that
@@ -438,7 +493,7 @@ function computeFileSharingEffect(filePath) {
       },
       [permissionSchemaName]: {
         properties: {
-          method: { enum: [...FILE_SHARING_ALLOWED_METHODS] },
+          method: { enum: allowedMethodsForAccess(access) },
           path: { const: fileWebdavPath },
         },
         required: ['method', 'path'],

@@ -52,9 +52,17 @@
     delete the file: `GET`, `HEAD`, `OPTIONS`, `PUT`, `DELETE`,
     `PROPFIND`, `PROPPATCH`, `MKCOL`, `COPY`, `MOVE`, `LOCK`,
     `UNLOCK`.
-  - The wire shape and dedup behaviour of the request itself are
-    unchanged: the agent still POSTs
-    `{type: "file-sharing", payload: {path: "<absolute>"}}` and the
-    per-file permission schema name is still
-    `minds-file-server-<sha256(path)[:32]>`, so re-approving an
-    existing grant remains idempotent.
+  - The wire shape grew an `access` field; the agent now POSTs
+    `{type: "file-sharing", payload: {path: "<absolute>", access: "READ" | "WRITE"}}`.
+    `access` is required and must be one of the two literal strings
+    above (case-sensitive). `READ` unlocks only the non-mutating WebDAV
+    verbs (`GET`, `HEAD`, `OPTIONS`, `PROPFIND`); `WRITE` is a strict
+    superset that also unlocks the mutating ones (`PUT`, `DELETE`,
+    `PROPPATCH`, `MKCOL`, `COPY`, `MOVE`, `LOCK`, `UNLOCK`). Per-file
+    permission schemas now embed the access mode in their name
+    (`minds-file-server-read-<sha256(path)[:32]>` /
+    `minds-file-server-write-<sha256(path)[:32]>`) so a user can hold
+    both grants for the same path independently and a later WRITE
+    grant does not silently override an earlier READ grant (or vice
+    versa). Re-approving the same `(path, access)` pair remains
+    idempotent (same schema name, schemas merge by name on approve).

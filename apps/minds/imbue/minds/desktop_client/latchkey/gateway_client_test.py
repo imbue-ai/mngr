@@ -118,7 +118,7 @@ def test_iter_permission_requests_parses_jsonl_stream() -> None:
             "agent_id": "a2",
             "rationale": "test",
             "request_type": "file-sharing",
-            "payload": {"path": "/home/user/file.txt"},
+            "payload": {"path": "/home/user/file.txt", "access": "READ"},
             "target": "/tmp/permissions.json",
             "effect": {"rules": [{"minds-file-server": ["minds-file-server-cafef00d"]}]},
         },
@@ -138,7 +138,9 @@ def test_iter_permission_requests_parses_jsonl_stream() -> None:
     assert items[0].as_predefined_payload().scope == "slack-api"
     assert items[0].as_predefined_payload().permissions == ("slack-read-all",)
     assert items[1].request_type == "file-sharing"
-    assert items[1].as_file_sharing_payload().path == "/home/user/file.txt"
+    file_sharing_payload = items[1].as_file_sharing_payload()
+    assert file_sharing_payload.path == "/home/user/file.txt"
+    assert str(file_sharing_payload.access) == "READ"
 
 
 def test_iter_permission_requests_skips_malformed_lines() -> None:

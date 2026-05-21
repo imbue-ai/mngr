@@ -74,6 +74,8 @@ def render_file_sharing_permission_dialog(
     ws_name: str,
     rationale: str,
     file_path: str,
+    access: str,
+    access_human_label: str,
     mngr_forward_origin: str = "",
 ) -> str:
     """Render the file-sharing permission approval dialog.
@@ -82,6 +84,11 @@ def render_file_sharing_permission_dialog(
     submission JS (via the shared ``templates/permissions.html`` base);
     swaps the per-permission checkbox list for a short explanation of
     what the agent will be allowed to do with the path.
+
+    ``access`` carries the agent's requested access mode (``READ`` or
+    ``WRITE``) verbatim; ``access_human_label`` is the lower-case
+    human-readable rendering (``"read-only"`` / ``"read & write"``)
+    used in the dialog body.
 
     ``mngr_forward_origin`` is the bare origin of the ``mngr forward`` plugin;
     the workspace link in the dialog points at ``{mngr_forward_origin}/goto/<agent>/``.
@@ -92,6 +99,8 @@ def render_file_sharing_permission_dialog(
         ws_name=ws_name,
         rationale=rationale,
         file_path=file_path,
+        access=access,
+        access_human_label=access_human_label,
         display_name=file_path,
         accent=workspace_accent(agent_id),
         mngr_forward_origin=mngr_forward_origin,

@@ -38,10 +38,19 @@ request schema and a new approve endpoint:
   below: the scope schema matches any URL under
   `/extensions/minds-api-proxy/api/v1/files` via a `pattern`, and the
   per-file permission schema const-matches the URL path itself
-  (`/extensions/minds-api-proxy/api/v1/files<absolute_path>`) with a
-  WebDAV-verb method enum (`GET`, `HEAD`, `OPTIONS`, `PUT`, `DELETE`,
-  `PROPFIND`, `PROPPATCH`, `MKCOL`, `COPY`, `MOVE`, `LOCK`, `UNLOCK`).
-  The legacy `queryParams.path` constraint is gone.
+  (`/extensions/minds-api-proxy/api/v1/files<absolute_path>`). The
+  legacy `queryParams.path` constraint is gone.
+* File-sharing requests now carry a required `access` field on the
+  payload (`READ` / `WRITE`). `READ` unlocks the non-mutating WebDAV
+  verbs only (`GET`, `HEAD`, `OPTIONS`, `PROPFIND`); `WRITE` is a
+  strict superset that also unlocks `PUT`, `DELETE`, `PROPPATCH`,
+  `MKCOL`, `COPY`, `MOVE`, `LOCK`, `UNLOCK`. Per-file permission
+  schemas embed the access mode in their name
+  (`minds-file-server-read-<hash>` / `minds-file-server-write-<hash>`)
+  so the two grants are independent. The minds approval dialog shows
+  a green "read-only" or amber "read & write" badge and explains
+  what the agent will be allowed to do; the granted / denied
+  notification text reflects the mode as well.
 
 The minds desktop client's latchkey-permission handler code was
 reorganised so the two permission request types now live as siblings

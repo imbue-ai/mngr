@@ -112,9 +112,19 @@ class LatchkeyFileSharingPermissionRequestEvent(RequestEvent):
     splice the precomputed effect into the per-host
     ``latchkey_permissions.json``; on denial it falls back to the
     existing ``DELETE /permission-requests/<id>`` path.
+
+    ``access`` distinguishes a read-only grant from a read-write one;
+    the agent declares which it needs in the request, and the gateway's
+    effect grants only the WebDAV verbs that match.
     """
 
     path: str = Field(description="Absolute filesystem path the agent wants access to.")
+    access: str = Field(
+        description=(
+            "Access mode the agent is requesting (``READ`` for read-only, ``WRITE`` for "
+            "read+write). Carried verbatim from the streamed gateway payload."
+        ),
+    )
     rationale: str = Field(description="One-paragraph human-readable reason the agent needs this access.")
 
 
@@ -159,6 +169,7 @@ def create_latchkey_predefined_permission_request_event(
 def create_latchkey_file_sharing_permission_request_event(
     agent_id: str,
     path: str,
+    access: str,
     rationale: str,
     is_user_requested: bool = False,
 ) -> "LatchkeyFileSharingPermissionRequestEvent":
@@ -172,6 +183,7 @@ def create_latchkey_file_sharing_permission_request_event(
         request_type=str(RequestType.FILE_SHARING_PERMISSION),
         is_user_requested=is_user_requested,
         path=path,
+        access=access,
         rationale=rationale,
     )
 

@@ -30,6 +30,7 @@ import json
 import threading
 from collections.abc import Iterator
 from collections.abc import Sequence
+from enum import auto
 from pathlib import Path
 from typing import Final
 
@@ -40,6 +41,7 @@ from pydantic import JsonValue
 from pydantic import PrivateAttr
 from pydantic import ValidationError
 
+from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr_latchkey.core import Latchkey
@@ -106,10 +108,31 @@ class PredefinedRequestPayload(FrozenModel):
     )
 
 
+class FileSharingAccess(UpperCaseStrEnum):
+    """Access mode an agent requests for a file-sharing grant.
+
+    ``READ`` unlocks the non-mutating WebDAV verbs only (GET, HEAD,
+    OPTIONS, PROPFIND); ``WRITE`` is a strict superset that also unlocks
+    the verbs that mutate the resource (PUT, DELETE, PROPPATCH, MKCOL,
+    COPY, MOVE, LOCK, UNLOCK). Read-only and read-write grants for the
+    same path live as distinct schemas in the user's permissions.json
+    so the two can be held independently.
+    """
+
+    READ = auto()
+    WRITE = auto()
+
+
 class FileSharingRequestPayload(FrozenModel):
     """Payload for ``type == "file-sharing"`` permission requests."""
 
     path: str = Field(description="Absolute filesystem path the agent wants to share.")
+    access: FileSharingAccess = Field(
+        description=(
+            "Access mode the agent is requesting for ``path``. ``READ`` grants the non-mutating "
+            "WebDAV verbs; ``WRITE`` is a superset that also grants the mutating ones."
+        ),
+    )
 
 
 class StreamedPermissionRequest(FrozenModel):

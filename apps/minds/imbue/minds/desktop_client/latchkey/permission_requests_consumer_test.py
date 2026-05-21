@@ -43,6 +43,7 @@ def _make_streamed_file_sharing(
     request_id: str = "def456",
     agent_id: str = "agent-7",
     path: str = "/home/user/data.txt",
+    access: str = "READ",
     rationale: str = "needs data",
 ) -> StreamedPermissionRequest:
     return StreamedPermissionRequest(
@@ -50,7 +51,7 @@ def _make_streamed_file_sharing(
         agent_id=agent_id,
         rationale=rationale,
         request_type="file-sharing",
-        payload={"path": path},
+        payload={"path": path, "access": access},
         target="/tmp/permissions.json",
         effect={"rules": [{"minds-file-server": ["minds-file-server-deadbeef"]}]},
     )
@@ -70,11 +71,12 @@ def test_streamed_request_to_event_maps_predefined_fields() -> None:
 
 def test_streamed_request_to_event_maps_file_sharing_fields() -> None:
     """File-sharing-type streamed records translate to LatchkeyFileSharingPermissionRequestEvent."""
-    event = streamed_request_to_event(_make_streamed_file_sharing())
+    event = streamed_request_to_event(_make_streamed_file_sharing(access="WRITE"))
     assert isinstance(event, LatchkeyFileSharingPermissionRequestEvent)
     assert str(event.event_id) == "def456"
     assert event.agent_id == "agent-7"
     assert event.path == "/home/user/data.txt"
+    assert event.access == "WRITE"
     assert event.rationale == "needs data"
     assert event.request_type == str(RequestType.FILE_SHARING_PERMISSION)
 
@@ -109,7 +111,7 @@ def test_consumer_dispatches_each_streamed_request_to_on_request() -> None:
                 "agent_id": "a2",
                 "rationale": "y",
                 "request_type": "file-sharing",
-                "payload": {"path": "/home/user/log.txt"},
+                "payload": {"path": "/home/user/log.txt", "access": "READ"},
                 "target": "/tmp/permissions.json",
                 "effect": {"rules": [{"minds-file-server": ["minds-file-server-cafef00d"]}]},
             },

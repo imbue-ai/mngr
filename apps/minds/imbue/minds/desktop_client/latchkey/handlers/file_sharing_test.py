@@ -102,6 +102,7 @@ def test_display_name_returns_path(tmp_path: Path) -> None:
     event = create_latchkey_file_sharing_permission_request_event(
         agent_id=str(AgentId()),
         path="/home/user/data.txt",
+        access="READ",
         rationale="need data",
     )
     assert handler.display_name_for_event(event) == "/home/user/data.txt"
@@ -115,6 +116,7 @@ def test_render_request_page_shows_path_and_rationale(tmp_path: Path) -> None:
     event = create_latchkey_file_sharing_permission_request_event(
         agent_id=str(AgentId()),
         path="/home/user/important.txt",
+        access="READ",
         rationale="summarize the doc",
     )
     response = handler.render_request_page(
@@ -127,10 +129,34 @@ def test_render_request_page_shows_path_and_rationale(tmp_path: Path) -> None:
     assert "/home/user/important.txt" in body
     assert "summarize the doc" in body
     assert "Approve" in body and "Deny" in body
+    # The dialog must show the human-readable access label so the user
+    # knows what's being granted.
+    assert "read-only" in body
     # The dialog must escape user-controlled values; ensure quoting
     # uses HTML-safe attributes rather than raw interpolation.
     # Presence of the form-submit JS tag confirms the dialog wired in.
     assert "<script>" in body
+
+
+def test_render_request_page_marks_write_grants_distinctly(tmp_path: Path) -> None:
+    """WRITE grants render the broader human-readable access label."""
+    handler, _sender = _make_file_sharing_handler(tmp_path, lambda r: httpx.Response(200))
+    event = create_latchkey_file_sharing_permission_request_event(
+        agent_id=str(AgentId()),
+        path="/home/user/edit.txt",
+        access="WRITE",
+        rationale="edit it",
+    )
+    response = handler.render_request_page(
+        req_event=event,
+        backend_resolver=StaticBackendResolver(url_by_agent_and_service={}),
+        mngr_forward_origin="",
+    )
+    body = bytes(response.body).decode("utf-8")
+    assert "read &amp; write" in body or "read & write" in body
+    # The read-only label must not appear when WRITE access is being
+    # requested, otherwise the dialog would be misleading.
+    assert "read-only" not in body
 
 
 def test_render_request_page_escapes_html_in_inputs(tmp_path: Path) -> None:
@@ -138,6 +164,7 @@ def test_render_request_page_escapes_html_in_inputs(tmp_path: Path) -> None:
     event = create_latchkey_file_sharing_permission_request_event(
         agent_id=str(AgentId()),
         path="/tmp/<script>alert(1)</script>.txt",
+        access="READ",
         rationale="<img src=x onerror=alert(2)>",
     )
     response = handler.render_request_page(
@@ -168,6 +195,7 @@ def test_grant_calls_gateway_approve_writes_response_notifies_agent(tmp_path: Pa
     event = create_latchkey_file_sharing_permission_request_event(
         agent_id=str(agent_id),
         path="/home/user/data.txt",
+        access="WRITE",
         rationale="need data",
     )
     inbox = RequestInbox().add_request(event)
@@ -178,6 +206,9 @@ def test_grant_calls_gateway_approve_writes_response_notifies_agent(tmp_path: Pa
     body = response.json()
     assert body["outcome"] == "GRANTED"
     assert "/home/user/data.txt" in body["message"]
+    # Granted-message text reflects the access mode the agent asked for
+    # so the agent's response handler can see what it ended up with.
+    assert "read & write" in body["message"]
 
     # Gateway received the approve request.
     assert captured["method"] == "POST"
@@ -202,6 +233,7 @@ def test_grant_returns_502_when_gateway_rejects(tmp_path: Path) -> None:
     event = create_latchkey_file_sharing_permission_request_event(
         agent_id=str(AgentId()),
         path="/home/user/data.txt",
+        access="READ",
         rationale="need data",
     )
     inbox = RequestInbox().add_request(event)
@@ -230,6 +262,7 @@ def test_deny_calls_gateway_delete_writes_response_notifies_agent(tmp_path: Path
     event = create_latchkey_file_sharing_permission_request_event(
         agent_id=str(AgentId()),
         path="/home/user/secret.txt",
+        access="READ",
         rationale="please",
     )
     inbox = RequestInbox().add_request(event)
@@ -249,9 +282,10 @@ def test_deny_calls_gateway_delete_writes_response_notifies_agent(tmp_path: Path
     assert len(response_events) == 1
     assert response_events[0].status == "DENIED"
 
-    # Agent notified.
+    # Agent notified, with the access mode in the message text.
     assert len(sender.sent_messages) == 1
     assert "/home/user/secret.txt" in sender.sent_messages[0][1]
+    assert "read-only" in sender.sent_messages[0][1]
 
 
 def test_deny_still_writes_response_when_gateway_delete_fails(tmp_path: Path) -> None:
@@ -270,6 +304,7 @@ def test_deny_still_writes_response_when_gateway_delete_fails(tmp_path: Path) ->
     event = create_latchkey_file_sharing_permission_request_event(
         agent_id=str(AgentId()),
         path="/home/user/secret.txt",
+        access="WRITE",
         rationale="please",
     )
     inbox = RequestInbox().add_request(event)
@@ -291,6 +326,7 @@ def test_request_page_route_dispatches_to_handler(tmp_path: Path) -> None:
     event = create_latchkey_file_sharing_permission_request_event(
         agent_id=str(AgentId()),
         path="/home/user/x.txt",
+        access="READ",
         rationale="r",
     )
     inbox = RequestInbox().add_request(event)

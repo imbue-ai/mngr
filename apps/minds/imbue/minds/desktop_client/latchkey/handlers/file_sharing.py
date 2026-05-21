@@ -36,6 +36,7 @@ from pydantic import Field
 
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
+from imbue.minds.desktop_client.latchkey.gateway_client import FileSharingAccess
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClient
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClientError
 from imbue.minds.desktop_client.latchkey.handlers.messaging import MngrMessageSender
@@ -55,14 +56,30 @@ from imbue.mngr.primitives import AgentId
 _KIND_LABEL: Final[str] = "file sharing"
 
 
-def _format_granted_message(file_path: str) -> str:
+def _access_human_label(access: str) -> str:
+    """Lower-case human phrase for the access mode ("read-only" / "read & write")."""
+    if access == str(FileSharingAccess.READ):
+        return "read-only"
+    if access == str(FileSharingAccess.WRITE):
+        return "read & write"
+    # Unknown access values are unexpected but possible if the gateway
+    # ever grows a new mode -- surface the raw value rather than
+    # crashing so the dialog still renders.
+    return access
+
+
+def _format_granted_message(file_path: str, access: str) -> str:
     return (
-        f"Your file-sharing permission request for '{file_path}' was granted. Please retry the call that was blocked."
+        f"Your {_access_human_label(access)} file-sharing permission request for "
+        f"'{file_path}' was granted. Please retry the call that was blocked."
     )
 
 
-def _format_denied_message(file_path: str) -> str:
-    return f"Your file-sharing permission request for '{file_path}' was denied. Do not retry the blocked call."
+def _format_denied_message(file_path: str, access: str) -> str:
+    return (
+        f"Your {_access_human_label(access)} file-sharing permission request for "
+        f"'{file_path}' was denied. Do not retry the blocked call."
+    )
 
 
 def _json_error(message: str, status_code: int) -> Response:
@@ -138,6 +155,8 @@ class FileSharingGrantHandler(RequestEventHandler):
             ws_name=ws_name,
             rationale=req_event.rationale,
             file_path=req_event.path,
+            access=req_event.access,
+            access_human_label=_access_human_label(req_event.access),
             mngr_forward_origin=mngr_forward_origin,
         )
         return HTMLResponse(content=rendered)
@@ -167,7 +186,7 @@ class FileSharingGrantHandler(RequestEventHandler):
                 status_code=502,
             )
 
-        message = _format_granted_message(req_event.path)
+        message = _format_granted_message(req_event.path, req_event.access)
         response_event = self._write_response_and_notify(
             request_event_id=request_event_id,
             agent_id=parsed_agent_id,
@@ -204,7 +223,7 @@ class FileSharingGrantHandler(RequestEventHandler):
                 e,
             )
 
-        message = _format_denied_message(req_event.path)
+        message = _format_denied_message(req_event.path, req_event.access)
         response_event = self._write_response_and_notify(
             request_event_id=request_event_id,
             agent_id=parsed_agent_id,

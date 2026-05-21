@@ -42,13 +42,16 @@ _FILE_SHARING_SCOPE_SCHEMA_NAME: Final[str] = "minds-file-server"
 _FILE_SHARING_PROXY_PATH_PREFIX: Final[str] = "/extensions/minds-api-proxy/api/v1/files"
 _FILE_SHARING_GATEWAY_HOST: Final[str] = "latchkey-self.invalid"
 _FILE_SHARING_PERMISSION_PREFIX: Final[str] = "minds-file-server-"
-_FILE_SHARING_ALLOWED_METHODS: Final[tuple[str, ...]] = (
+_FILE_SHARING_READ_METHODS: Final[tuple[str, ...]] = (
     "GET",
     "HEAD",
     "OPTIONS",
+    "PROPFIND",
+)
+_FILE_SHARING_WRITE_METHODS: Final[tuple[str, ...]] = (
+    *_FILE_SHARING_READ_METHODS,
     "PUT",
     "DELETE",
-    "PROPFIND",
     "PROPPATCH",
     "MKCOL",
     "COPY",
@@ -61,10 +64,10 @@ _FILE_SHARING_ALLOWED_METHODS: Final[tuple[str, ...]] = (
 pytestmark = pytest.mark.skipif(_NODE_BINARY is None, reason="node binary not available on PATH")
 
 
-def _file_sharing_permission_name(path: str) -> str:
-    """Mirror the JS helper: SHA-256(path) truncated to 32 hex chars."""
+def _file_sharing_permission_name(path: str, access: str) -> str:
+    """Mirror the JS helper: ``minds-file-server-<access_lower>-sha256(path)[:32]``."""
     digest = hashlib.sha256(path.encode("utf-8")).hexdigest()[:32]
-    return f"{_FILE_SHARING_PERMISSION_PREFIX}{digest}"
+    return f"{_FILE_SHARING_PERMISSION_PREFIX}{access.lower()}-{digest}"
 
 
 # The Node driver mounts the extension under a HTTP server, passing a
@@ -238,8 +241,17 @@ def test_post_creates_predefined_request_with_target_and_effect(
     assert json.loads(stored.read_text()) == parsed
 
 
+@pytest.mark.parametrize(
+    ("access", "expected_methods"),
+    [
+        ("READ", _FILE_SHARING_READ_METHODS),
+        ("WRITE", _FILE_SHARING_WRITE_METHODS),
+    ],
+)
 def test_post_creates_file_sharing_request_with_schemas_and_rules(
     node_extension: tuple[str, Path, Path],
+    access: str,
+    expected_methods: tuple[str, ...],
 ) -> None:
     base_url, _latchkey_directory, _permissions_config_path = node_extension
     target_path = "/home/example/data.txt"
@@ -247,17 +259,17 @@ def test_post_creates_file_sharing_request_with_schemas_and_rules(
         f"{base_url}/permission-requests",
         {
             "agent_id": "agent-1",
-            "rationale": "needs to read example data",
+            "rationale": "needs to access example data",
             "type": "file-sharing",
-            "payload": {"path": target_path},
+            "payload": {"path": target_path, "access": access},
         },
     )
     assert status == 201
     parsed = json.loads(body)
     assert parsed["request_type"] == "file-sharing"
-    assert parsed["payload"] == {"path": target_path}
+    assert parsed["payload"] == {"path": target_path, "access": access}
     effect = parsed["effect"]
-    permission_name = _file_sharing_permission_name(target_path)
+    permission_name = _file_sharing_permission_name(target_path, access)
     assert effect["rules"] == [{_FILE_SHARING_SCOPE_SCHEMA_NAME: [permission_name]}]
     schemas = effect["schemas"]
     assert set(schemas.keys()) == {_FILE_SHARING_SCOPE_SCHEMA_NAME, permission_name}
@@ -278,11 +290,78 @@ def test_post_creates_file_sharing_request_with_schemas_and_rules(
     }
     # The per-path permission schema pins the URL path to the WebDAV
     # URL for this specific file and the method to the WebDAV verb
-    # whitelist.
+    # set for the requested access mode.
     perm_schema = schemas[permission_name]
     expected_webdav_path = f"{_FILE_SHARING_PROXY_PATH_PREFIX}{target_path}"
     assert perm_schema["properties"]["path"] == {"const": expected_webdav_path}
-    assert perm_schema["properties"]["method"] == {"enum": list(_FILE_SHARING_ALLOWED_METHODS)}
+    assert perm_schema["properties"]["method"] == {"enum": list(expected_methods)}
+
+
+def test_read_and_write_grants_for_same_path_coexist_in_persisted_record(
+    node_extension: tuple[str, Path, Path],
+) -> None:
+    """READ and WRITE grants for the same path use distinct permission schema names.
+
+    They must not collide so a user can hold one or both grants for the
+    same path independently (a WRITE grant does not silently overwrite
+    an earlier READ grant or vice versa).
+    """
+    base_url, _latchkey_directory, _permissions_config_path = node_extension
+    target_path = "/home/example/data.txt"
+    read_status, read_body = _post_json(
+        f"{base_url}/permission-requests",
+        {
+            "agent_id": "agent-1",
+            "rationale": "r",
+            "type": "file-sharing",
+            "payload": {"path": target_path, "access": "READ"},
+        },
+    )
+    write_status, write_body = _post_json(
+        f"{base_url}/permission-requests",
+        {
+            "agent_id": "agent-1",
+            "rationale": "w",
+            "type": "file-sharing",
+            "payload": {"path": target_path, "access": "WRITE"},
+        },
+    )
+    assert read_status == 201, read_body
+    assert write_status == 201, write_body
+    read_name = _file_sharing_permission_name(target_path, "READ")
+    write_name = _file_sharing_permission_name(target_path, "WRITE")
+    assert read_name != write_name
+    assert read_name.startswith(f"{_FILE_SHARING_PERMISSION_PREFIX}read-")
+    assert write_name.startswith(f"{_FILE_SHARING_PERMISSION_PREFIX}write-")
+
+
+@pytest.mark.parametrize(
+    ("missing_or_invalid_payload", "expected_message_fragment"),
+    [
+        ({"path": "/tmp/ok.txt"}, "access"),
+        ({"path": "/tmp/ok.txt", "access": ""}, "access"),
+        ({"path": "/tmp/ok.txt", "access": "ReadWrite"}, "access"),
+        ({"path": "/tmp/ok.txt", "access": "read"}, "access"),
+        ({"path": "/tmp/ok.txt", "access": None}, "access"),
+    ],
+)
+def test_post_rejects_missing_or_invalid_access_in_file_sharing(
+    node_extension: tuple[str, Path, Path],
+    missing_or_invalid_payload: dict[str, object],
+    expected_message_fragment: str,
+) -> None:
+    base_url, *_ = node_extension
+    status, body = _post_json(
+        f"{base_url}/permission-requests",
+        {
+            "agent_id": "agent-1",
+            "rationale": "x",
+            "type": "file-sharing",
+            "payload": missing_or_invalid_payload,
+        },
+    )
+    assert status == 400, body
+    assert expected_message_fragment in json.loads(body)["error"].lower()
 
 
 def test_post_rejects_unknown_type(node_extension: tuple[str, Path, Path]) -> None:
@@ -362,7 +441,7 @@ def test_post_rejects_extraneous_payload_field(node_extension: tuple[str, Path, 
             "agent_id": "agent-1",
             "rationale": "x",
             "type": "file-sharing",
-            "payload": {"path": "/tmp/ok.txt", "extra": "no"},
+            "payload": {"path": "/tmp/ok.txt", "access": "READ", "extra": "no"},
         },
     )
     assert status == 400
@@ -385,7 +464,7 @@ def test_get_returns_all_pending_requests(node_extension: tuple[str, Path, Path]
             "agent_id": "agent-2",
             "rationale": "y",
             "type": "file-sharing",
-            "payload": {"path": "/tmp/visible.txt"},
+            "payload": {"path": "/tmp/visible.txt", "access": "READ"},
         },
     ]
     for payload in payloads:
@@ -414,7 +493,7 @@ def test_approve_writes_target_permissions_for_file_sharing(
             "agent_id": "agent-1",
             "rationale": "needs to read example data",
             "type": "file-sharing",
-            "payload": {"path": target_path},
+            "payload": {"path": target_path, "access": "READ"},
         },
     )
     assert create_status == 201
@@ -428,7 +507,7 @@ def test_approve_writes_target_permissions_for_file_sharing(
 
     # The on-disk target was written with the effect applied.
     applied = json.loads(permissions_config_path.read_text())
-    permission_name = _file_sharing_permission_name(target_path)
+    permission_name = _file_sharing_permission_name(target_path, "READ")
     assert applied["rules"] == [{_FILE_SHARING_SCOPE_SCHEMA_NAME: [permission_name]}]
     assert _FILE_SHARING_SCOPE_SCHEMA_NAME in applied["schemas"]
     assert permission_name in applied["schemas"]
@@ -499,7 +578,7 @@ def test_delete_removes_pending_request(node_extension: tuple[str, Path, Path]) 
             "agent_id": "agent-1",
             "rationale": "x",
             "type": "file-sharing",
-            "payload": {"path": "/tmp/data.txt"},
+            "payload": {"path": "/tmp/data.txt", "access": "WRITE"},
         },
     )
     assert create_status == 201

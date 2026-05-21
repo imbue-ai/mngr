@@ -107,6 +107,7 @@ def streamed_request_to_event(streamed: StreamedPermissionRequest) -> RequestEve
             request_type=str(RequestType.FILE_SHARING_PERMISSION),
             is_user_requested=False,
             path=file_sharing.path,
+            access=str(file_sharing.access),
             rationale=streamed.rationale,
         )
     raise UnknownStreamedRequestTypeError(streamed.request_type)
