@@ -443,14 +443,13 @@ def modal_test_session_cleanup(
     fixture would have swept up survives. The env itself is also not deleted
     or registered for leak detection here.
     """
+    if read_shared_modal_env_name() is not None:
+        yield
+        return
     prefix = f"{modal_test_session_env_name}-"
     environment_name = f"{prefix}{modal_test_session_user_id}"
     if len(environment_name) > 64:
         environment_name = environment_name[:64]
-    is_shared = read_shared_modal_env_name() is not None
-    if is_shared:
-        yield
-        return
     register_modal_test_environment(environment_name)
     yield
     delete_modal_apps_in_environment(environment_name)
