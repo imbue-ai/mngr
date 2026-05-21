@@ -14,9 +14,9 @@ from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client.agent_creator import AgentCreationStatus
 from imbue.minds.desktop_client.agent_creator import AgentCreator
 from imbue.minds.desktop_client.agent_creator import LOG_SENTINEL
-from imbue.minds.desktop_client.app import _build_mngr_reachability_probe_argv
 from imbue.minds.desktop_client.app import _build_mngr_start_argv
 from imbue.minds.desktop_client.app import _build_mngr_stop_argv
+from imbue.minds.desktop_client.app import _classify_host_health
 from imbue.minds.desktop_client.app import _build_workspace_list
 from imbue.minds.desktop_client.app import _run_restart_sequence
 from imbue.minds.desktop_client.app import create_desktop_client
@@ -1508,18 +1508,37 @@ def test_build_mngr_start_argv_targets_the_agent() -> None:
     assert argv[:3] == ["/usr/local/bin/mngr", "start", str(aid)]
 
 
-def test_build_mngr_reachability_probe_argv_does_not_auto_start_the_host() -> None:
-    """The layer-2 probe must pass --no-start so it is a read, not a host start.
+def test_classify_host_health_running_host_is_reachable() -> None:
+    """A RUNNING host classifies as reachable -- the surgical restart applies."""
+    aid = AgentId.generate()
+    list_json = json.dumps({"agents": [{"id": str(aid), "host": {"state": "RUNNING"}}]})
+    assert _classify_host_health(list_json, aid) == {"reachable": True, "host_offline": False}
 
-    ``mngr exec`` defaults to ``--start``; without ``--no-start`` the probe
-    would start the stopped container it is meant to be inspecting, so a
-    stopped workspace would always misreport as reachable.
+
+def test_classify_host_health_stopped_host_is_offline() -> None:
+    """A STOPPED (or crashed) host classifies as offline -- safe to auto host-restart."""
+    aid = AgentId.generate()
+    for state in ("STOPPED", "CRASHED", "FAILED", "STOPPING"):
+        list_json = json.dumps({"agents": [{"id": str(aid), "host": {"state": state}}]})
+        assert _classify_host_health(list_json, aid) == {"reachable": False, "host_offline": True}, state
+
+
+def test_classify_host_health_ambiguous_state_is_neither() -> None:
+    """An ambiguous host state (or a missing agent / bad output) is neither.
+
+    The recovery page then falls back to a confirmed manual restart rather
+    than auto-dispatching a potentially destructive host restart.
     """
     aid = AgentId.generate()
-    argv = _build_mngr_reachability_probe_argv("/usr/local/bin/mngr", aid)
-    assert argv[:4] == ["/usr/local/bin/mngr", "exec", str(aid), "true"]
-    assert "--no-start" in argv
-    assert "--start" not in argv
+    # An ambiguous lifecycle state (host may still be running agents).
+    starting = json.dumps({"agents": [{"id": str(aid), "host": {"state": "STARTING"}}]})
+    assert _classify_host_health(starting, aid) == {"reachable": False, "host_offline": False}
+    # The probed agent is absent from the listing.
+    other = json.dumps({"agents": [{"id": "agent-other", "host": {"state": "STOPPED"}}]})
+    assert _classify_host_health(other, aid) == {"reachable": False, "host_offline": False}
+    # mngr produced no usable output at all.
+    assert _classify_host_health(None, aid) == {"reachable": False, "host_offline": False}
+    assert _classify_host_health("not json", aid) == {"reachable": False, "host_offline": False}
 
 
 def test_recovery_page_requires_authentication(tmp_path: Path) -> None:

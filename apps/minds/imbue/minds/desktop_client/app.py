@@ -1492,8 +1492,13 @@ _RESTART_COMMAND_TIMEOUT_SECONDS: Final[float] = 120.0
 _SYSTEM_INTERFACE_STARTUP_WAIT_SECONDS: Final[float] = 15.0
 # Poll cadence while waiting for the system interface to come back post-restart.
 _RESTART_PROBE_INTERVAL_SECONDS: Final[float] = 1.0
-# Hard timeout for the layer-2 host-reachability probe (``mngr exec ... true``).
-_HOST_REACHABILITY_PROBE_TIMEOUT_SECONDS: Final[float] = 10.0
+# ``HostState`` values (as ``mngr list`` reports them) that mean the workspace
+# container is down with nothing running. A host restart of such a host just
+# starts it back up and interrupts no agent, so the recovery page can dispatch
+# it without a confirmation. RUNNING is handled separately; every other state
+# (STARTING, PAUSED, DESTROYED, UNAUTHENTICATED, ...) is ambiguous and falls
+# back to a confirmed manual restart.
+_OFFLINE_HOST_STATES: Final[frozenset[str]] = frozenset({"STOPPED", "STOPPING", "CRASHED", "FAILED"})
 
 
 def _build_mngr_stop_argv(mngr_binary: str, agent_id: AgentId, is_host_restart: bool) -> list[str]:
@@ -1509,29 +1514,45 @@ def _build_mngr_start_argv(mngr_binary: str, agent_id: AgentId) -> list[str]:
     return [mngr_binary, "start", str(agent_id), "--quiet"]
 
 
-def _build_mngr_reachability_probe_argv(mngr_binary: str, agent_id: AgentId) -> list[str]:
-    """Build the argv for the layer-2 probe: a no-op command run in the agent's container.
+def _build_mngr_host_state_argv(mngr_binary: str) -> list[str]:
+    """Build the argv for the layer-2 probe: list agents to read each host's lifecycle state.
 
-    A clean exit means ``mngr`` can reach the container and run agent
-    operations there, so the surgical restart is worth attempting; a
-    failure means the recovery flow should go straight to a host restart.
-
-    ``--no-start`` keeps this a read-only check. ``mngr exec`` defaults to
-    ``--start``, which starts a stopped host before running the command --
-    that would make the probe start the very container it is meant to be
-    inspecting, so a genuinely stopped workspace would always misreport as
-    reachable and the host-restart tier would never be offered.
+    The recovery page keys its restart tier off the workspace host's state:
+    a RUNNING host can be recovered with the surgical system-interface
+    restart, while a stopped host needs a full host restart. ``mngr list``
+    is a pure read -- it never starts a stopped container.
     """
-    return [
-        mngr_binary,
-        "exec",
-        str(agent_id),
-        "true",
-        "--timeout",
-        str(_HOST_REACHABILITY_PROBE_TIMEOUT_SECONDS),
-        "--no-start",
-        "--quiet",
-    ]
+    return [mngr_binary, "list", "--format", "json", "--quiet"]
+
+
+def _classify_host_health(list_json: str | None, agent_id: AgentId) -> dict[str, bool]:
+    """Classify a workspace's host from ``mngr list --format json`` output.
+
+    Returns ``{"reachable": ..., "host_offline": ...}``:
+      - ``reachable`` -- the host is RUNNING, so the surgical system-interface
+        restart can recover the workspace.
+      - ``host_offline`` -- the host is stopped/crashed, so nothing is running
+        and a host restart is non-destructive (can be auto-dispatched).
+    A host whose state cannot be determined classifies as neither, so the
+    recovery page falls back to a confirmed manual restart.
+    """
+    if list_json is None:
+        return {"reachable": False, "host_offline": False}
+    try:
+        agents = json.loads(list_json).get("agents", [])
+    except (json.JSONDecodeError, AttributeError):
+        return {"reachable": False, "host_offline": False}
+    for agent in agents:
+        if not isinstance(agent, dict) or agent.get("id") != str(agent_id):
+            continue
+        host = agent.get("host")
+        state = str(host.get("state", "")).upper() if isinstance(host, dict) else ""
+        if state == "RUNNING":
+            return {"reachable": True, "host_offline": False}
+        if state in _OFFLINE_HOST_STATES:
+            return {"reachable": False, "host_offline": True}
+        return {"reachable": False, "host_offline": False}
+    return {"reachable": False, "host_offline": False}
 
 
 def _sanitize_recovery_return_to(raw: str) -> str:
@@ -1647,6 +1668,35 @@ def _run_mngr_command(concurrency_group: ConcurrencyGroup, argv: list[str], env:
         logger.warning("mngr command {} exited {}: {}", argv, finished.returncode, finished.stderr)
         return f"exited {finished.returncode}: {finished.stderr.strip()}"
     return None
+
+
+def _capture_mngr_command(concurrency_group: ConcurrencyGroup, argv: list[str], env: dict[str, str]) -> str | None:
+    """Run a read-only ``mngr`` subprocess and return its stdout, or None if it failed.
+
+    ``_run_mngr_command`` reports success/failure for restart steps and discards
+    stdout; this is the counterpart for ``mngr`` queries whose stdout the caller
+    needs to parse (currently the host-state probe).
+    """
+    try:
+        finished = concurrency_group.run_process_to_completion(
+            argv,
+            timeout=_RESTART_COMMAND_TIMEOUT_SECONDS,
+            is_checked_after=False,
+            env=env,
+        )
+    except (OSError, RuntimeError, subprocess.TimeoutExpired, ConcurrencyGroupError) as exc:
+        logger.warning("mngr command {} failed: {}", argv, exc)
+        return None
+    if finished.is_timed_out or finished.returncode != 0:
+        logger.warning(
+            "mngr command {} unsuccessful: timed_out={} returncode={} stderr={}",
+            argv,
+            finished.is_timed_out,
+            finished.returncode,
+            finished.stderr.strip(),
+        )
+        return None
+    return finished.stdout
 
 
 def _await_system_interface_ready(agent_id: AgentId, mngr_forward_port: int, preauth_cookie: str) -> bool:
@@ -1816,11 +1866,13 @@ def _handle_host_health_probe_api(
     request: Request,
     auth_store: AuthStoreDep,
 ) -> Response:
-    """Layer-2 probe: report whether ``mngr`` can reach this workspace's container.
+    """Layer-2 probe: classify the workspace host so the recovery page picks a tier.
 
-    The recovery page calls this on load to decide whether to offer the
-    surgical restart first (container reachable) or go straight to the
-    host restart (container unreachable).
+    Reads the host's lifecycle state from ``mngr list``. A RUNNING host can be
+    recovered with the surgical system-interface restart; a stopped host needs
+    a full host restart -- which the recovery page can auto-dispatch, since a
+    stopped container has nothing running to interrupt. Returns
+    ``{"reachable": ..., "host_offline": ...}``.
     """
     if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
         return _json_error("Not authenticated", status_code=403)
@@ -1830,13 +1882,13 @@ def _handle_host_health_probe_api(
         return _json_error("Host health probe is unavailable in this configuration", status_code=503)
     env = dict(os.environ)
     env["MNGR_HOST_DIR"] = str(request.app.state.mngr_host_dir)
-    probe_error = _run_mngr_command(
-        concurrency_group, _build_mngr_reachability_probe_argv(request.app.state.mngr_binary, aid), env
+    list_json = _capture_mngr_command(
+        concurrency_group, _build_mngr_host_state_argv(request.app.state.mngr_binary), env
     )
-    if probe_error is not None:
-        logger.info("Layer-2 host reachability probe for {} failed: {}", aid, probe_error)
+    health = _classify_host_health(list_json, aid)
+    logger.info("Layer-2 host-state probe for {}: {}", aid, health)
     return Response(
-        content=json.dumps({"reachable": probe_error is None}),
+        content=json.dumps(health),
         media_type="application/json",
     )
 

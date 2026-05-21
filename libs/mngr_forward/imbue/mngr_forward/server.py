@@ -462,6 +462,7 @@ _SERVICE_UNAVAILABLE_HTML = """\
         padding: 24px;
         max-width: 480px;
         width: 100%;
+        box-sizing: border-box;
         box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
       }
       .row { display: flex; align-items: center; gap: 12px; }
