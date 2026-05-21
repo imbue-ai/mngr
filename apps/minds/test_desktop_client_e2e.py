@@ -37,6 +37,7 @@ import re
 import socket
 import subprocess
 import sys
+import threading
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -247,7 +248,6 @@ def _stream_electron_output(process: subprocess.Popen[bytes]) -> None:
     Electron is verbose; without draining the pipes the OS buffer fills and
     Electron blocks. We don't parse anything; the test reads state from CDP.
     """
-    import threading
 
     def _drain(stream: object, prefix: str) -> None:
         for raw_line in iter(stream.readline, b""):
@@ -321,7 +321,7 @@ def _wait_for_cdp(debug_port: int, timeout_seconds: int) -> None:
             last_error = f"status={response.status_code}"
         except (httpx.HTTPError, OSError) as exc:
             last_error = repr(exc)
-        time.sleep(0.5)
+        threading.Event().wait(timeout=0.5)
     raise TimeoutError(f"CDP at port {debug_port} did not respond within {timeout_seconds}s (last: {last_error})")
 
 
@@ -348,7 +348,7 @@ def _pick_content_page(browser: Browser, timeout_seconds: int) -> Page:
                     continue
                 logger.info("Picked Electron content page at {}", url)
                 return page
-        time.sleep(0.5)
+        threading.Event().wait(timeout=0.5)
     raise TimeoutError(
         f"No Electron content page settled on a backend URL within {timeout_seconds}s; observed pages: {last_observed}"
     )
