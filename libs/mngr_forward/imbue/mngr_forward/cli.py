@@ -131,9 +131,7 @@ def _bind_listen_socket(host: str, requested_port: int | None) -> socket.socket:
             try:
                 sock.bind((host, requested_port))
             except OSError as e:
-                raise click.ClickException(
-                    f"Could not bind requested port {requested_port} on {host}: {e}"
-                ) from e
+                raise click.ClickException(f"Could not bind requested port {requested_port} on {host}: {e}") from e
         sock.set_inheritable(True)
         is_bound = True
         return sock
