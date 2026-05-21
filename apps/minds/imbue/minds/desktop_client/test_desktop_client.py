@@ -1,4 +1,5 @@
 import json
+import queue
 from pathlib import Path
 
 import httpx
@@ -10,7 +11,9 @@ from starlette.testclient import TestClient
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.minds.config.data_types import WorkspacePaths
+from imbue.minds.desktop_client.agent_creator import AgentCreationStatus
 from imbue.minds.desktop_client.agent_creator import AgentCreator
+from imbue.minds.desktop_client.agent_creator import LOG_SENTINEL
 from imbue.minds.desktop_client.app import _build_mngr_exec_argv
 from imbue.minds.desktop_client.app import _build_workspace_list
 from imbue.minds.desktop_client.app import create_desktop_client
@@ -31,9 +34,10 @@ from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.request_events import RequestInbox
 from imbue.minds.desktop_client.request_events import create_latchkey_permission_request_event
-from imbue.minds.desktop_client.workspace_server_health import AgentHealth
-from imbue.minds.desktop_client.workspace_server_health import WorkspaceServerHealthTracker
+from imbue.minds.desktop_client.system_interface_health import AgentHealth
+from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
 from imbue.minds.primitives import CreationId
+from imbue.minds.primitives import LaunchMode
 from imbue.minds.primitives import OneTimeCode
 from imbue.minds.primitives import ServiceName
 from imbue.mngr.primitives import AgentId
@@ -481,6 +485,7 @@ def _create_test_server_with_agent_creator(
         paths=WorkspacePaths(data_dir=tmp_path / "minds"),
         root_concurrency_group=root_cg,
         notification_dispatcher=NotificationDispatcher.create(is_electron=False, tkinter_module=None, is_macos=False),
+        system_interface_health_tracker=SystemInterfaceHealthTracker(),
     )
     client, auth_store = _create_test_desktop_client(
         tmp_path=tmp_path,
@@ -549,7 +554,7 @@ def test_create_agent_api_returns_agent_id(tmp_path: Path) -> None:
     assert response.status_code == 200
     data = response.json()
     assert "agent_id" in data
-    assert data["status"] == "CLONING"
+    assert data["status"] == "INITIALIZING"
     agent_creator.wait_for_all()
 
 
@@ -635,7 +640,16 @@ def test_creation_status_api_returns_status_for_tracked_agent(tmp_path: Path) ->
     # this test the create runs against a nonexistent repo so it may never
     # produce an agent_id; just check that the creation_id round-trips.
     assert data["creation_id"] == str(creation_id)
-    assert data["status"] in ("CLONING", "CREATING", "DONE", "FAILED")
+    assert data["status"] in (
+        "INITIALIZING",
+        "CLONING_REPO",
+        "CHECKING_OUT_BRANCH",
+        "PROVISIONING_AI",
+        "CREATING_WORKSPACE",
+        "WAITING_FOR_READY",
+        "DONE",
+        "FAILED",
+    )
     agent_creator.wait_for_all()
 
 
@@ -767,6 +781,74 @@ def test_creation_logs_sse_streams_events(tmp_path: Path) -> None:
         assert response.status_code == 200
         assert "text/event-stream" in response.headers.get("content-type", "")
     agent_creator.wait_for_all()
+
+
+def test_creation_logs_sse_emits_status_events(tmp_path: Path) -> None:
+    """The current ``AgentCreationStatus`` is surfaced as a ``{"_type": "status"}`` SSE event.
+
+    Regular log lines stay on the ``{"log": ...}`` channel. This test exercises
+    the polling dispatch in ``_stream_creation_logs`` by seeding a particular
+    status into the ``AgentCreator``'s private state and verifying the stream
+    emits a matching status event with the right ``status_text`` -- without
+    running a real agent creation (which would require Docker).
+    """
+    client, _, agent_creator = _create_test_server_with_agent_creator(tmp_path)
+
+    creation_id = CreationId()
+    log_queue: queue.Queue[str] = queue.Queue()
+    with agent_creator._lock:
+        agent_creator._statuses[str(creation_id)] = AgentCreationStatus.CREATING_WORKSPACE
+        agent_creator._launch_modes[str(creation_id)] = LaunchMode.LOCAL
+        agent_creator._log_queues[str(creation_id)] = log_queue
+
+    log_queue.put("regular log line")
+    log_queue.put(LOG_SENTINEL)
+
+    payloads: list[dict[str, object]] = []
+    with client.stream("GET", "/api/create-agent/{}/logs".format(creation_id)) as response:
+        assert response.status_code == 200
+        for line in response.iter_lines():
+            if not line.startswith("data: "):
+                continue
+            payloads.append(json.loads(line[len("data: ") :]))
+            if payloads[-1].get("_type") == "done":
+                break
+
+    status_events = [p for p in payloads if p.get("_type") == "status"]
+    log_events = [p for p in payloads if "log" in p]
+    assert len(status_events) == 1
+    assert status_events[0]["status"] == "CREATING_WORKSPACE"
+    assert status_events[0]["status_text"] == "Creating workspace..."
+    assert any(p["log"] == "regular log line" for p in log_events)
+
+
+def test_creation_logs_sse_emits_status_text_for_imbue_cloud(tmp_path: Path) -> None:
+    """Status captions are launch-mode-aware via ``_STATUS_TEXT_IMBUE_CLOUD``."""
+    client, _, agent_creator = _create_test_server_with_agent_creator(tmp_path)
+
+    creation_id = CreationId()
+    log_queue: queue.Queue[str] = queue.Queue()
+    with agent_creator._lock:
+        agent_creator._statuses[str(creation_id)] = AgentCreationStatus.CREATING_WORKSPACE
+        agent_creator._launch_modes[str(creation_id)] = LaunchMode.IMBUE_CLOUD
+        agent_creator._log_queues[str(creation_id)] = log_queue
+
+    log_queue.put(LOG_SENTINEL)
+
+    payloads: list[dict[str, object]] = []
+    with client.stream("GET", "/api/create-agent/{}/logs".format(creation_id)) as response:
+        assert response.status_code == 200
+        for line in response.iter_lines():
+            if not line.startswith("data: "):
+                continue
+            payloads.append(json.loads(line[len("data: ") :]))
+            if payloads[-1].get("_type") == "done":
+                break
+
+    status_events = [p for p in payloads if p.get("_type") == "status"]
+    assert status_events
+    assert status_events[0]["status"] == "CREATING_WORKSPACE"
+    assert status_events[0]["status_text"] == "Setting up agent..."
 
 
 def test_creating_page_rejects_unauthenticated(tmp_path: Path) -> None:
@@ -1338,7 +1420,7 @@ def _build_refresh_test_app(
 
 def test_refresh_event_posts_to_system_interface_broadcast(tmp_path: Path) -> None:
     """A refresh event on the mngr event stream triggers a POST to the
-    plugin's per-agent subdomain so the workspace server broadcasts. The URL
+    plugin's per-agent subdomain so the system interface broadcasts. The URL
     is on the plugin's port and the request carries the ``mngr_forward_session``
     cookie (set to the preauth value minds wired in)."""
     agent_id = AgentId()
@@ -1396,7 +1478,7 @@ def test_refresh_event_before_lifespan_is_dropped_without_raising(tmp_path: Path
     assert received == []
 
 
-# -- workspace-server restart + recovery tests --
+# -- system-interface restart + recovery tests --
 
 
 def test_build_mngr_exec_argv_includes_agent_id_and_command() -> None:
@@ -1421,8 +1503,11 @@ def test_recovery_page_requires_authentication(tmp_path: Path) -> None:
 
 
 def test_recovery_page_renders_for_authenticated_user(tmp_path: Path) -> None:
-    client, auth_store, agent_id = _setup_test_server(tmp_path)
-    _authenticate_client(client, auth_store)
+    # Mark stuck so the page renders -- a HEALTHY agent with a valid return_to
+    # 302s straight to return_to (covered by the healthy-redirect test below).
+    tracker = SystemInterfaceHealthTracker()
+    client, _, agent_id = _setup_test_server_with_tracker(tmp_path, tracker)
+    tracker.mark_stuck(agent_id)
 
     # Use a legitimate localhost-subdomain return_to (the real plugin-emitted form).
     safe_return_to = f"http://{agent_id}.localhost:8421/some/path"
@@ -1433,7 +1518,7 @@ def test_recovery_page_renders_for_authenticated_user(tmp_path: Path) -> None:
     assert response.status_code == 200
     assert str(agent_id) in response.text
     assert safe_return_to in response.text
-    assert "Restart workspace server" in response.text
+    assert "Restart system interface" in response.text
 
 
 def test_recovery_page_drops_open_redirect_return_to(tmp_path: Path) -> None:
@@ -1470,9 +1555,14 @@ def test_recovery_page_drops_protocol_relative_return_to(tmp_path: Path) -> None
 
 
 def test_recovery_page_allows_relative_return_to(tmp_path: Path) -> None:
-    """A same-origin relative path must be preserved."""
-    client, auth_store, agent_id = _setup_test_server(tmp_path)
-    _authenticate_client(client, auth_store)
+    """A same-origin relative path must be preserved.
+
+    Pre-arranges STUCK so the page renders (a HEALTHY agent with a valid
+    return_to 302s to it; that path is covered separately).
+    """
+    tracker = SystemInterfaceHealthTracker()
+    client, _, agent_id = _setup_test_server_with_tracker(tmp_path, tracker)
+    tracker.mark_stuck(agent_id)
 
     response = client.get(
         f"/agents/{agent_id}/recovery?return_to=/agents/{agent_id}/",
@@ -1484,32 +1574,32 @@ def test_recovery_page_allows_relative_return_to(tmp_path: Path) -> None:
 
 def test_restart_api_requires_authentication(tmp_path: Path) -> None:
     client, _, agent_id = _setup_test_server(tmp_path)
-    response = client.post(f"/api/agents/{agent_id}/restart-workspace-server")
+    response = client.post(f"/api/agents/{agent_id}/restart-system-interface")
     assert response.status_code == 403
 
 
-def test_create_desktop_client_stashes_workspace_health_tracker(tmp_path: Path) -> None:
+def test_create_desktop_client_stashes_system_interface_health_tracker(tmp_path: Path) -> None:
     """create_desktop_client should expose the tracker on app.state for handlers."""
     auth_dir = tmp_path / "auth"
     auth_store = FileAuthStore(data_directory=auth_dir)
-    tracker = WorkspaceServerHealthTracker()
+    tracker = SystemInterfaceHealthTracker()
     backend_resolver = StaticBackendResolver(url_by_agent_and_service={})
 
     app = create_desktop_client(
         auth_store=auth_store,
         backend_resolver=backend_resolver,
         http_client=None,
-        workspace_health_tracker=tracker,
+        system_interface_health_tracker=tracker,
     )
 
-    assert app.state.workspace_health_tracker is tracker
+    assert app.state.system_interface_health_tracker is tracker
 
 
 def _setup_test_server_with_tracker(
     tmp_path: Path,
-    tracker: WorkspaceServerHealthTracker,
+    tracker: SystemInterfaceHealthTracker,
 ) -> tuple[TestClient, FileAuthStore, AgentId]:
-    """Build a test client wired to a real WorkspaceServerHealthTracker.
+    """Build a test client wired to a real SystemInterfaceHealthTracker.
 
     The default ``_setup_test_server`` helper doesn't accept a tracker, and
     several tests need to verify the recovery page reads the tracker's
@@ -1524,7 +1614,7 @@ def _setup_test_server_with_tracker(
         auth_store=auth_store,
         backend_resolver=backend_resolver,
         http_client=None,
-        workspace_health_tracker=tracker,
+        system_interface_health_tracker=tracker,
     )
     client = TestClient(app, base_url="http://localhost")
     _authenticate_client(client=client, auth_store=auth_store)
@@ -1537,7 +1627,7 @@ def test_recovery_page_initial_status_reflects_tracker_stuck(tmp_path: Path) -> 
     Without this wiring the page would always render with ``data-initial-status="healthy"``,
     so the JS would not show the busy state when the user lands on the page mid-restart.
     """
-    tracker = WorkspaceServerHealthTracker()
+    tracker = SystemInterfaceHealthTracker()
     client, _, agent_id = _setup_test_server_with_tracker(tmp_path, tracker)
     tracker.mark_stuck(agent_id)
     assert tracker.get_health(agent_id) == AgentHealth.STUCK
@@ -1550,7 +1640,7 @@ def test_recovery_page_initial_status_reflects_tracker_stuck(tmp_path: Path) -> 
 
 def test_recovery_page_initial_status_reflects_tracker_restarting(tmp_path: Path) -> None:
     """A user landing on the recovery page during an in-flight restart must see RESTARTING."""
-    tracker = WorkspaceServerHealthTracker()
+    tracker = SystemInterfaceHealthTracker()
     client, _, agent_id = _setup_test_server_with_tracker(tmp_path, tracker)
     tracker.mark_restarting(agent_id)
     assert tracker.get_health(agent_id) == AgentHealth.RESTARTING
@@ -1559,3 +1649,64 @@ def test_recovery_page_initial_status_reflects_tracker_restarting(tmp_path: Path
 
     assert response.status_code == 200
     assert 'data-initial-status="restarting"' in response.text
+
+
+def test_recovery_page_redirects_to_return_to_when_agent_already_healthy(tmp_path: Path) -> None:
+    """Regression: if the tracker says HEALTHY at recovery-page-render time, 302 to return_to.
+
+    Catches a real-world race where the chrome SSE pushes ``stuck`` and the
+    chrome JS navigates to /recovery, but the background probe loop flips
+    the tracker back to HEALTHY in the brief window before the GET lands.
+    Without the redirect, ``initial_status="healthy"`` would render the
+    "System interface not responding" page and the JS would never auto-
+    reload (the SSE doesn't push events for HEALTHY agents).
+    """
+    tracker = SystemInterfaceHealthTracker()
+    client, _, agent_id = _setup_test_server_with_tracker(tmp_path, tracker)
+    # With no record in the tracker, get_health returns HEALTHY by default.
+    assert tracker.get_health(agent_id) == AgentHealth.HEALTHY
+    safe_return_to = f"http://{agent_id}.localhost:8421/"
+
+    response = client.get(
+        f"/agents/{agent_id}/recovery?return_to={safe_return_to}",
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 302
+    assert response.headers["location"] == safe_return_to
+
+
+def test_recovery_page_renders_normally_when_healthy_but_no_return_to(tmp_path: Path) -> None:
+    """No return_to + HEALTHY: render the page (with a working restart button) instead of erroring.
+
+    Falls back to the manual restart path. The page itself still renders
+    correctly with ``initial_status="healthy"``; the user can hit the
+    restart button if they want to.
+    """
+    tracker = SystemInterfaceHealthTracker()
+    client, _, agent_id = _setup_test_server_with_tracker(tmp_path, tracker)
+
+    response = client.get(f"/agents/{agent_id}/recovery", follow_redirects=False)
+
+    assert response.status_code == 200
+    assert 'data-initial-status="healthy"' in response.text
+
+
+def test_recovery_page_does_not_redirect_when_stuck_even_with_return_to(tmp_path: Path) -> None:
+    """STUCK + return_to: still render the page so the user sees the problem + restart button.
+
+    Defends against the cleanup-side regression where the new HEALTHY-only
+    redirect accidentally widens to all states.
+    """
+    tracker = SystemInterfaceHealthTracker()
+    client, _, agent_id = _setup_test_server_with_tracker(tmp_path, tracker)
+    tracker.mark_stuck(agent_id)
+    safe_return_to = f"http://{agent_id}.localhost:8421/"
+
+    response = client.get(
+        f"/agents/{agent_id}/recovery?return_to={safe_return_to}",
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 200
+    assert 'data-initial-status="stuck"' in response.text

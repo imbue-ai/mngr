@@ -113,8 +113,7 @@ Each tier has one committed file in
 apps/minds/imbue/minds/config/envs/
   dev/
     deploy.toml       # modal_workspace, modal_env, vault_path_prefix,
-                      # cloudflare_domain, oauth_*_client_id,
-                      # [secrets] services = [...]
+                      # cloudflare_domain, [secrets] services = [...]
   staging/
     client.toml       # connector_url, litellm_proxy_url
     deploy.toml       # same shape as dev/deploy.toml

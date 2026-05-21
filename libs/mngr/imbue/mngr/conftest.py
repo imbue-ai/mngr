@@ -1,8 +1,10 @@
 import importlib.metadata
+import importlib.resources
 import os
 import shutil
 import subprocess
 import sys
+import textwrap
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
@@ -22,6 +24,7 @@ from urwid.widget.listbox import SimpleFocusListWalker
 import imbue.mngr.main
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.mngr import resources as mngr_resources
 from imbue.mngr.agents.agent_registry import load_agents_from_plugins
 from imbue.mngr.agents.agent_registry import reset_agent_registry
 from imbue.mngr.api.providers import reset_provider_instances
@@ -106,6 +109,38 @@ def cg() -> Generator[ConcurrencyGroup, None, None]:
     """Provide a ConcurrencyGroup for tests that need to run processes."""
     with ConcurrencyGroup(name="test") as group:
         yield group
+
+
+@pytest.fixture
+def stub_mngr_log_sh() -> str:
+    """A no-op mngr_log.sh stub for testing shell scripts that source it.
+
+    Background scripts in mngr_claude/resources and mngr_gemini/resources
+    source $MNGR_AGENT_STATE_DIR/commands/mngr_log.sh for logging helpers.
+    In production the file is provisioned by Host.provision_agent(); tests
+    write this stub to the same path so the script under test can source it
+    without doing real I/O.
+    """
+    return textwrap.dedent("""\
+        #!/bin/bash
+        mngr_timestamp() { date -u +"%Y-%m-%dT%H:%M:%S.000000000Z"; }
+        log_info() { :; }
+        log_debug() { :; }
+        log_warn() { :; }
+        log_error() { :; }
+    """)
+
+
+@pytest.fixture
+def mngr_transcript_lib_sh() -> str:
+    """Real mngr_transcript_lib.sh contents for shell tests that source it.
+
+    Returns the actual library body (not a stub) because the streamer
+    scripts exercise the shared primitives end-to-end. Tests write this to
+    ``$MNGR_AGENT_STATE_DIR/commands/mngr_transcript_lib.sh`` to mirror the
+    production layout established by ``Host._ensure_shared_shell_libs``.
+    """
+    return importlib.resources.files(mngr_resources).joinpath("mngr_transcript_lib.sh").read_text()
 
 
 @pytest.fixture

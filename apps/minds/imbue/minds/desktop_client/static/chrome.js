@@ -79,16 +79,16 @@
     maybeRedirectToRecovery();
   }
 
-  // -- Workspace-server recovery redirect -----------------------------------
+  // -- System-interface recovery redirect -----------------------------------
   //
-  // SSE pushes ``workspace_server_status`` events whenever an agent transitions
+  // SSE pushes ``system_interface_status`` events whenever an agent transitions
   // between healthy / stuck / restarting. When the currently-displayed agent
   // goes STUCK we navigate the content view to the recovery page; the recovery
   // page's own SSE subscription redirects back to ``return_to`` once the agent
   // is healthy again. We redirect at most once per stuck episode (per agent),
   // cleared by a subsequent ``healthy`` event, so the recovery page itself
   // doesn't get clobbered on repeat STUCK transitions while the user is on it.
-  var workspaceStatusByAgent = {};
+  var systemInterfaceStatusByAgent = {};
   var redirectedAgents = {};
 
   function buildRecoveryUrl(agentId) {
@@ -105,20 +105,20 @@
   function maybeRedirectToRecovery() {
     var aid = currentTitleAgentId;
     if (!aid) return;
-    if (workspaceStatusByAgent[aid] !== 'stuck') return;
+    if (systemInterfaceStatusByAgent[aid] !== 'stuck') return;
     if (redirectedAgents[aid]) return;
     redirectedAgents[aid] = true;
     navigateContent(buildRecoveryUrl(aid));
   }
 
-  function handleWorkspaceServerStatus(agentId, status) {
+  function handleSystemInterfaceStatus(agentId, status) {
     if (!agentId) return;
     if (status === 'healthy') {
-      delete workspaceStatusByAgent[agentId];
+      delete systemInterfaceStatusByAgent[agentId];
       delete redirectedAgents[agentId];
       return;
     }
-    workspaceStatusByAgent[agentId] = status;
+    systemInterfaceStatusByAgent[agentId] = status;
     maybeRedirectToRecovery();
   }
 
@@ -256,7 +256,7 @@
       if (data.type === 'workspaces') renderWorkspaces(data.workspaces);
       if (data.type === 'auth_status') updateAuthUI(data);
       if (data.type === 'request_count') updateRequestsBadge(data.count);
-      if (data.type === 'workspace_server_status') handleWorkspaceServerStatus(data.agent_id, data.status);
+      if (data.type === 'system_interface_status') handleSystemInterfaceStatus(data.agent_id, data.status);
     } catch (e) {}
   }
 
