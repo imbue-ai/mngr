@@ -1258,6 +1258,15 @@ async def _handle_provider_toggle(
     except (json.JSONDecodeError, ValueError) as e:
         logger.warning("Provider toggle request body was not valid JSON: {}", e)
         return Response(status_code=400, content='{"error": "Body must be JSON"}', media_type="application/json")
+    # request.json() can return any JSON value (array, string, number, null, ...),
+    # not just objects. Reject non-dict bodies before calling .get() so we return
+    # a structured 400 rather than a 500 from an AttributeError.
+    if not isinstance(body, dict):
+        return Response(
+            status_code=400,
+            content='{"error": "Body must be a JSON object"}',
+            media_type="application/json",
+        )
     is_enabled = body.get("is_enabled")
     if not isinstance(is_enabled, bool):
         return Response(

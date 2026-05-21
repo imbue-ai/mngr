@@ -116,6 +116,36 @@ def test_provider_toggle_returns_400_when_is_enabled_missing_or_wrong_type(
     assert not settings_path.exists()
 
 
+@pytest.mark.parametrize(
+    "body",
+    [
+        [1, 2, 3],
+        "a string",
+        42,
+        True,
+        None,
+    ],
+)
+def test_provider_toggle_returns_400_on_non_object_json_body(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, body: object
+) -> None:
+    """A valid-JSON body that is not an object (array, string, number, bool, null) is rejected with 400.
+
+    Without the explicit isinstance(body, dict) guard, calling ``body.get(...)`` on a
+    non-dict crashes with AttributeError and the handler returns a 500 instead of the
+    expected 400. This test pins the structured rejection.
+    """
+    monkeypatch.setenv(MINDS_ROOT_NAME_ENV_VAR, _ROOT_NAME)
+    settings_path = stub_mngr_host_dir(monkeypatch, tmp_path, _ROOT_NAME)
+    client, auth_store = _make_test_client(tmp_path)
+    _authenticate(client, auth_store)
+
+    response = client.post("/api/providers/modal/toggle", json=body)
+
+    assert response.status_code == 400
+    assert not settings_path.exists()
+
+
 def test_provider_toggle_writes_settings_and_returns_changed_true(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
