@@ -344,13 +344,15 @@ class EnvelopeStreamConsumer(MutableModel):
             return
         if event is None:
             return
-        # Snapshot handler updates both last_event_at and last_full_snapshot_at;
-        # for non-snapshot events, bump last_event_at here.
-        if not isinstance(event, FullDiscoverySnapshotEvent):
-            self.resolver.record_discovery_event_received(datetime.now(timezone.utc))
+        # Snapshot handler bumps both last_event_at and last_full_snapshot_at
+        # via update_providers; it does not flow through the
+        # record_discovery_event_received path. Dispatch the snapshot first,
+        # then bump last_event_at once for every other event type below.
         if isinstance(event, FullDiscoverySnapshotEvent):
             self._handle_full_snapshot(event)
-        elif isinstance(event, HostSSHInfoEvent):
+            return
+        self.resolver.record_discovery_event_received(datetime.now(timezone.utc))
+        if isinstance(event, HostSSHInfoEvent):
             self._handle_host_ssh_info(event)
         elif isinstance(event, AgentDiscoveryEvent):
             self._handle_agent_discovered(event)
