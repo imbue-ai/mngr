@@ -40,6 +40,7 @@ from imbue.mngr.cli.create import create as create_command
 from imbue.mngr.config.consts import PROFILES_DIRNAME
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.errors import ConfigStructureError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.hosts.tmux import build_tmux_capture_pane_command
 from imbue.mngr.interfaces.data_types import AgentDetails
@@ -174,6 +175,50 @@ def generate_test_environment_name() -> str:
     now = datetime.now(timezone.utc)
     timestamp = now.strftime("%Y-%m-%d-%H-%M-%S")
     return f"{TEST_ENV_PREFIX}{timestamp}"
+
+
+SHARED_MODAL_ENV_NAME_VAR: Final[str] = "MNGR_TEST_SHARED_MODAL_ENV_NAME"
+
+# Matches a full shared Modal env name and splits it into:
+#   group 1: the bare timestamp portion (no trailing dash), matching the shape
+#            ``generate_test_environment_name()`` returns. Callers join with a
+#            dash to build ``MngrConfig.prefix`` or any other prefix-shape value.
+#   group 2: the non-empty suffix (feeds ``ModalProviderConfig.user_id``).
+# Unlike ``TEST_ENV_PATTERN`` (which only anchors the timestamp), this pattern
+# enforces a literal dash separator and a non-empty suffix that the docstring of
+# ``read_shared_modal_env_name`` promises, so malformed values raise loudly
+# instead of producing a half-formed split.
+_SHARED_MODAL_ENV_NAME_PATTERN: Final[re.Pattern[str]] = re.compile(
+    r"^(mngr_test-\d{4}-\d{2}-\d{2}-\d{2}-\d{2}-\d{2})-(.+)$"
+)
+
+
+def read_shared_modal_env_name() -> tuple[str, str] | None:
+    """Parse ``MNGR_TEST_SHARED_MODAL_ENV_NAME`` into ``(timestamp_name, user_id_suffix)``.
+
+    When the env var is unset or empty, returns ``None`` -- callers fall back
+    to per-test environment creation. Otherwise splits the shared env name on
+    the dash between the timestamp and the suffix, returning the bare timestamp
+    portion (same shape as ``generate_test_environment_name()``) and the
+    suffix. Callers join with ``-`` to reproduce the full shared env name.
+
+    Raises ``ConfigStructureError`` when the env var is set but the value does
+    not match the ``mngr_test-YYYY-MM-DD-HH-MM-SS-<suffix>`` pattern (the
+    dash separator and a non-empty suffix are both required) -- the justfile
+    generates conforming names, so a mismatch is a bug we want to surface
+    rather than silently fall back to per-test envs or produce a half-formed
+    split.
+    """
+    raw = os.environ.get(SHARED_MODAL_ENV_NAME_VAR, "")
+    if not raw:
+        return None
+    match = _SHARED_MODAL_ENV_NAME_PATTERN.match(raw)
+    if match is None:
+        raise ConfigStructureError(
+            f"{SHARED_MODAL_ENV_NAME_VAR}={raw!r} does not match the required "
+            "'mngr_test-YYYY-MM-DD-HH-MM-SS-<suffix>' pattern."
+        )
+    return match.group(1), match.group(2)
 
 
 def isolate_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
