@@ -442,7 +442,7 @@ _SERVICE_UNAVAILABLE_HTML = """\
   <head>
     <meta charset="utf-8">
     <meta http-equiv="refresh" content="1">
-    <title>System interface starting</title>
+    <title>Loading workspace</title>
     <style>
       html, body { height: 100%; margin: 0; }
       body {
@@ -484,8 +484,8 @@ _SERVICE_UNAVAILABLE_HTML = """\
       <div class="row">
         <div class="spinner" aria-hidden="true"></div>
         <div>
-          <h1>System interface starting</h1>
-          <p>This page will reload automatically once the workspace is ready.</p>
+          <h1>Loading workspace</h1>
+          <p>This page will reload automatically once your workspace is ready.</p>
         </div>
       </div>
     </div>

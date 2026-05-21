@@ -1710,9 +1710,10 @@ def test_recovery_page_redirects_to_return_to_when_agent_already_healthy(tmp_pat
 def test_recovery_page_renders_for_healthy_agent_with_explicit_restart_intent(tmp_path: Path) -> None:
     """``intent=restart`` makes the page render for a HEALTHY agent instead of 302ing back.
 
-    The home-page restart control navigates here explicitly so the user can
-    pick a restart tier. Without the intent marker the healthy-redirect guard
-    would bounce them straight back to ``return_to`` and nothing would happen.
+    The home-page restart control navigates here explicitly. Without the
+    intent marker the healthy-redirect guard would bounce the user straight
+    back to ``return_to`` and nothing would happen. With it, the page renders
+    as STUCK so its JS runs the probe and dispatches a restart.
     """
     tracker = SystemInterfaceHealthTracker()
     client, _, agent_id = _setup_test_server_with_tracker(tmp_path, tracker)
@@ -1726,7 +1727,9 @@ def test_recovery_page_renders_for_healthy_agent_with_explicit_restart_intent(tm
     )
 
     assert response.status_code == 200
-    assert 'data-initial-status="healthy"' in response.text
+    # An explicit restart of a healthy workspace renders as STUCK so the page
+    # probes and dispatches rather than sitting idle.
+    assert 'data-initial-status="stuck"' in response.text
 
 
 def test_recovery_page_renders_normally_when_healthy_but_no_return_to(tmp_path: Path) -> None:

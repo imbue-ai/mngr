@@ -1589,31 +1589,33 @@ def _handle_recovery_page(
     initial_status = tracker.get_health(aid).value if tracker is not None else AgentHealth.HEALTHY.value
     initial_error = (tracker.get_last_restart_error(aid) or "") if tracker is not None else ""
     return_to = _sanitize_recovery_return_to(request.query_params.get("return_to", ""))
-    # ``intent=restart`` means the user explicitly asked to restart this
-    # workspace (the home-page restart control). In that case the page must
-    # render even for a HEALTHY agent so the layer-2 probe can run and drive
-    # the restart flow -- the page's JS handles ``initial_status="healthy"``
-    # by running the probe, not by sitting on the "not responding" message.
     is_explicit_restart = request.query_params.get("intent", "") == "restart"
-    # If the agent has already recovered by the time the chrome navigates
-    # here (a real race: the background probe loop can flip the tracker
-    # back to HEALTHY in the brief window between the STUCK SSE push and
-    # the recovery-page GET landing), redirecting straight back to
-    # ``return_to`` is the right answer. Rendering the recovery page with
-    # ``initial_status="healthy"`` would otherwise wedge the user: the
-    # page's JS only auto-reloads on a streaming ``status=healthy`` SSE
-    # event, and the SSE doesn't push events for HEALTHY agents (the
-    # ``snapshot_all`` filter intentionally excludes them), so the user
-    # would sit on a misleading "not responding" page forever. This guard
-    # is for the *automatic* 503-redirect path only -- skip it when the
-    # user explicitly asked for a restart.
-    if initial_status == AgentHealth.HEALTHY.value and return_to and not is_explicit_restart:
-        return RedirectResponse(url=return_to, status_code=302)
+    # The recovery page renders from ``render_status`` and then auto-refreshes
+    # itself while a restart is in flight; every refresh re-runs this handler,
+    # so the live tracker state is re-read each tick. A HEALTHY tracker needs
+    # special handling rather than rendering a misleading "not responding" page.
+    render_status = initial_status
+    if initial_status == AgentHealth.HEALTHY.value:
+        if is_explicit_restart:
+            # The user explicitly asked to restart a currently-healthy
+            # workspace (the home-page restart control). Render as STUCK so
+            # the page runs the layer-2 probe and dispatches a restart instead
+            # of sitting idle on a "healthy" page.
+            render_status = AgentHealth.STUCK.value
+        elif return_to:
+            # The workspace recovered before this page loaded -- either a race
+            # (the chrome navigated here on STUCK but the agent recovered
+            # before this GET landed) or the page's own post-restart refresh
+            # observing success. Either way, send the user back to where they
+            # were going.
+            return RedirectResponse(url=return_to, status_code=302)
+        # else: HEALTHY with no return_to to redirect to -- fall through and
+        # render; the page then offers a manual restart button.
     html_body = render_recovery_page(
         agent_id=aid,
         ws_name=ws_name,
         return_to=return_to,
-        initial_status=initial_status,
+        initial_status=render_status,
         initial_error=initial_error,
     )
     return HTMLResponse(content=html_body)

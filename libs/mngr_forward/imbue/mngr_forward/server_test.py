@@ -421,7 +421,7 @@ def test_subdomain_forward_routes_loopback_without_tunnel_to_recovery(
 
     # HTML callers get the styled auto-refreshing loader, not raw 502 text.
     assert response.status_code == 503
-    assert "System interface starting" in response.text
+    assert "Loading workspace" in response.text
     assert captured == [], "request must NOT be forwarded to anything when loopback fallback is refused"
     # The failure envelope is what drives minds to the recovery page.
     lines = _envelope_lines(envelope_output)
@@ -520,7 +520,7 @@ def test_subdomain_forward_returns_retry_page_on_backend_connect_error(tmp_path:
     # HTML navigations get the auto-refresh retry page so the user lands on
     # something useful instead of a hard 502.
     assert html_response.status_code == 503
-    assert "System interface starting" in html_response.text
+    assert "Loading workspace" in html_response.text
     assert 'http-equiv="refresh"' in html_response.text
     # Non-HTML callers get a plain 503 they can interpret programmatically.
     assert json_response.status_code == 503
@@ -836,7 +836,7 @@ def test_subdomain_forward_emits_failure_on_ssh_tunnel_setup_error(tmp_path: Pat
 
     # HTML callers get the styled auto-refreshing loader, not raw 502 text.
     assert html_response.status_code == 503
-    assert "System interface starting" in html_response.text
+    assert "Loading workspace" in html_response.text
     # The failure envelope is what drives minds to the recovery page.
     lines = _envelope_lines(envelope_output)
     assert len(lines) == 1

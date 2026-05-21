@@ -8,21 +8,29 @@
          style="--workspace-accent: {{ accent }};"
          data-agent-id="{{ agent_id }}"
          data-return-to="{{ return_to }}"
-         data-initial-status="{{ initial_status }}"
-         data-initial-error="{{ initial_error }}">
-      <h1 id="recovery-title" class="text-xl font-semibold text-zinc-900 mb-2">System interface not responding</h1>
-      <p id="recovery-message" class="text-zinc-600 mb-4">
-        The system interface for <span class="font-mono">{{ ws_name }}</span> is unresponsive.
-      </p>
-      <div id="recovery-error"
-           class="hidden mb-4 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
-      </div>
+         data-initial-status="{{ initial_status }}">
       <div class="flex items-center gap-3">
+        <div id="recovery-spinner"
+             class="hidden h-5 w-5 shrink-0 animate-spin rounded-full border-2 border-zinc-200 border-t-zinc-900"
+             aria-hidden="true"></div>
+        <h1 id="recovery-title" class="text-xl font-semibold text-zinc-900">Loading workspace</h1>
+      </div>
+      <p class="mt-1 font-mono text-sm text-zinc-400">{{ ws_name }}</p>
+      <p id="recovery-message" class="mt-2 text-zinc-600">
+        This page will return you to your workspace once it is ready.
+      </p>
+      {% if initial_error %}
+      <details id="recovery-error"
+               class="hidden mt-4 rounded-md border border-amber-200 bg-amber-50 text-sm text-amber-800">
+        <summary class="cursor-pointer select-none px-3 py-2 font-medium">Show error details</summary>
+        <pre class="m-0 max-h-60 overflow-y-auto whitespace-pre-wrap break-words px-3 pb-3 font-mono text-xs leading-relaxed">{{ initial_error }}</pre>
+      </details>
+      {% endif %}
+      <div class="mt-4">
         <button id="recovery-host-btn"
                 class="hidden rounded-md bg-zinc-900 px-4 py-2 text-sm font-medium text-white hover:bg-zinc-700">
           Restart workspace
         </button>
-        <span id="recovery-status" class="text-sm text-zinc-500"></span>
       </div>
     </div>
   {% endcall %}
@@ -35,94 +43,94 @@
       var agentId = root.dataset.agentId;
       var returnTo = root.dataset.returnTo || '';
       var initialStatus = root.dataset.initialStatus || 'stuck';
-      var initialError = root.dataset.initialError || '';
 
       var titleEl = document.getElementById('recovery-title');
       var messageEl = document.getElementById('recovery-message');
-      var errorEl = document.getElementById('recovery-error');
-      var statusEl = document.getElementById('recovery-status');
+      var spinnerEl = document.getElementById('recovery-spinner');
+      var errorEl = document.getElementById('recovery-error');  // null unless restart_failed
       var hostBtn = document.getElementById('recovery-host-btn');
 
-      // The tier this page has dispatched this session. It stays null until a
-      // restart is dispatched (the auto-dispatched surgical restart, or a
-      // host-restart click); while null, SSE failure events are ignored
-      // because the page is still running the layer-2 probe.
-      var attemptedTier = null;
-
-      // Whether this page has observed the agent in a RESTARTING state -- via
-      // initial_status or an SSE event. A restart_failed event is only a real
-      // in-flight failure (rather than a stale snapshot for an idle agent) once
-      // a restart has been seen in flight, so this gates surfacing failures
-      // for restarts triggered outside this page (sidebar / landing page).
-      var hasSeenRestarting = false;
+      // How long to wait between auto-refreshes while a restart is in flight.
+      var REFRESH_INTERVAL_MS = 1500;
 
       function show(el, visible) {
-        el.classList.toggle('hidden', !visible);
+        if (el) el.classList.toggle('hidden', !visible);
       }
 
-      function setError(text) {
-        if (text) {
-          errorEl.textContent = text;
-          show(errorEl, true);
-        } else {
-          errorEl.textContent = '';
-          show(errorEl, false);
-        }
+      // While a restart is in flight the page just reloads itself on a timer:
+      // _handle_recovery_page re-renders from the live tracker state on every
+      // GET, so a reload IS the "is it healthy yet?" check. The poll URL
+      // deliberately omits intent=restart -- once the restart is dispatched, a
+      // healthy tracker state should 302 the user back to the workspace.
+      function pollUrl() {
+        var u = '/agents/' + encodeURIComponent(agentId) + '/recovery';
+        if (returnTo) u += '?return_to=' + encodeURIComponent(returnTo);
+        return u;
+      }
+      function scheduleRefresh() {
+        setTimeout(function () { window.location.assign(pollUrl()); }, REFRESH_INTERVAL_MS);
       }
 
-      function goBack() {
-        if (returnTo) {
-          window.location.assign(returnTo);
-        } else {
-          window.location.reload();
-        }
-      }
-
-      // -- UI modes -----------------------------------------------------------
-      function renderChecking() {
-        titleEl.textContent = 'System interface not responding';
-        messageEl.textContent = 'Checking host health…';
-        show(hostBtn, false);
-        statusEl.textContent = '';
-      }
-
-      function renderHostOffer(isEscalation) {
-        titleEl.textContent = 'System interface not responding';
-        messageEl.textContent = isEscalation
-          ? 'The system interface did not come back. Restarting the whole workspace should recover it. '
-            + 'In-progress work in all agents will be interrupted.'
-          : 'This workspace needs a full restart to recover. In-progress work in all agents will be interrupted.';
-        show(hostBtn, true);
-        hostBtn.textContent = 'Restart workspace';
-        statusEl.textContent = '';
-      }
-
-      function renderInFlight() {
-        // Tier-agnostic copy: the recovery flow may be restarting just the
-        // system interface or bouncing the whole workspace, but that
-        // distinction is not meaningful to the user, who only wants back
-        // into the workspace -- so this avoids naming which tier is running.
+      // -- UI states ----------------------------------------------------------
+      function renderLoading() {
         titleEl.textContent = 'Loading workspace';
-        messageEl.textContent =
-          'This page will return you to your workspace once it is ready.';
+        messageEl.textContent = 'This page will return you to your workspace once it is ready.';
+        show(spinnerEl, true);
+        show(errorEl, false);
         show(hostBtn, false);
-        statusEl.textContent = 'Loading…';
       }
 
-      function renderTerminal(reason) {
+      function renderHostOffer() {
+        titleEl.textContent = 'System interface not responding';
+        messageEl.textContent =
+          'This workspace needs a restart to recover. In-progress work in all agents will be interrupted.';
+        show(spinnerEl, false);
+        show(errorEl, false);
+        hostBtn.textContent = 'Restart workspace';
+        show(hostBtn, true);
+      }
+
+      function renderFailed() {
         titleEl.textContent = 'Restart failed';
         messageEl.textContent =
-          'The workspace restart did not recover the system interface. You can try again, '
-          + 'or contact support if the problem persists.';
-        setError(reason || 'The workspace restart did not recover the system interface.');
+          'The restart did not recover the workspace. You can try again, or contact support '
+          + 'if the problem persists.';
+        show(spinnerEl, false);
+        show(errorEl, true);
+        hostBtn.textContent = 'Restart workspace';
         show(hostBtn, true);
-        hostBtn.textContent = 'Try again';
-        statusEl.textContent = '';
+      }
+
+      function renderDispatchError() {
+        titleEl.textContent = 'System interface not responding';
+        messageEl.textContent = 'Could not start the restart. Check your connection and try again.';
+        show(spinnerEl, false);
+        show(errorEl, false);
+        hostBtn.textContent = 'Restart workspace';
+        show(hostBtn, true);
+      }
+
+      // -- Restart dispatch ---------------------------------------------------
+      function postRestart(path) {
+        renderLoading();
+        // The endpoint returns 202 once the tracker is RESTARTING; any other
+        // status means the dispatch did not start, so a refresh would just
+        // re-probe -- surface an error instead of looping.
+        fetch('/api/agents/' + encodeURIComponent(agentId) + path, {
+          method: 'POST',
+          credentials: 'same-origin',
+        }).then(function (resp) {
+          if (resp.ok) {
+            scheduleRefresh();
+          } else {
+            renderDispatchError();
+          }
+        }, renderDispatchError);
       }
 
       // -- Layer-2 probe ------------------------------------------------------
       function runProbe() {
-        renderChecking();
+        renderLoading();
         fetch('/api/agents/' + encodeURIComponent(agentId) + '/host-health', {
           credentials: 'same-origin',
         }).then(function (resp) {
@@ -132,110 +140,40 @@
             // The container is reachable, so the surgical system-interface
             // restart can recover the workspace without interrupting any
             // agents. Being non-destructive, it is dispatched immediately
-            // rather than gated behind a click; a failed surgical restart
-            // still escalates to the click-gated host restart.
-            postRestart('/restart-system-interface', 'system_interface');
+            // rather than gated behind a click.
+            postRestart('/restart-system-interface');
           } else {
-            renderHostOffer(false);
+            // An unreachable container can only be recovered by the full
+            // host restart, which the user must confirm by clicking.
+            renderHostOffer();
           }
         }, function () {
-          // If the probe itself fails to complete, the safe fallback is the
-          // full host restart -- it does not depend on the container being
-          // reachable for a lighter-weight fix.
-          renderHostOffer(false);
+          renderHostOffer();
         });
       }
 
-      // -- Restart dispatch ---------------------------------------------------
-      function postRestart(path, tier) {
-        attemptedTier = tier;
-        renderInFlight();
-        // A dispatch failure -- whether the POST never reached the server or it
-        // came back with an error status -- leaves the tracker untouched, so no
-        // SSE event will ever arrive. Surface a failure instead of hanging on
-        // "Restarting".
-        function handleDispatchFailure() {
-          if (tier === 'host') {
-            renderTerminal('Could not reach minds to start the restart.');
-          } else {
-            renderHostOffer(true);
-          }
-        }
-        fetch('/api/agents/' + encodeURIComponent(agentId) + path, {
-          method: 'POST',
-          credentials: 'same-origin',
-        }).then(function (resp) {
-          // fetch() only rejects on a network error; an error *status* (403 /
-          // 503 / 5xx) still resolves. The restart endpoint returns 202 once it
-          // has marked the tracker RESTARTING -- any other status means the
-          // dispatch did not start and the SSE-driven recovery will not happen.
-          if (!resp.ok) handleDispatchFailure();
-        }, handleDispatchFailure);
-      }
-
       hostBtn.addEventListener('click', function () {
-        postRestart('/restart-host', 'host');
+        postRestart('/restart-host');
       });
-
-      // -- SSE ----------------------------------------------------------------
-      function handleStatus(status, errorText) {
-        if (status === 'healthy') {
-          statusEl.textContent = 'Workspace is ready. Reloading…';
-          goBack();
-        } else if (status === 'restarting') {
-          hasSeenRestarting = true;
-          renderInFlight();
-        } else if (status === 'restart_failed') {
-          // Ignore failure events until a restart has actually been seen in
-          // flight -- otherwise the snapshot the SSE sends on connect would
-          // clobber the tier the layer-2 probe just chose for an idle agent.
-          if (attemptedTier === 'host') {
-            renderTerminal(errorText);
-          } else if (attemptedTier === 'system_interface') {
-            setError(errorText || 'The system interface did not come back.');
-            renderHostOffer(true);
-          } else if (hasSeenRestarting) {
-            // A restart that was triggered outside this page (sidebar or
-            // landing page) failed. We do not know which tier it was, so
-            // surface the reason and re-run the probe to drive the restart
-            // flow again rather than hang forever on "Restarting...".
-            setError(errorText || 'The restart did not recover the system interface.');
-            runProbe();
-          }
-        }
-      }
-
-      var es = null;
-      function connectSSE() {
-        if (es) es.close();
-        es = new EventSource('/_chrome/events');
-        es.onmessage = function (event) {
-          var data;
-          try { data = JSON.parse(event.data); } catch (e) { return; }
-          if (data.type !== 'system_interface_status' || data.agent_id !== agentId) return;
-          handleStatus(data.status, data.error);
-        };
-        es.onerror = function () {
-          if (!es) return;
-          es.close();
-          es = null;
-          setTimeout(connectSSE, 5000);
-        };
-      }
 
       // -- Initial state ------------------------------------------------------
       if (initialStatus === 'restarting') {
-        // A restart was already in flight when this page loaded. Record that
-        // so a later restart_failed SSE event is surfaced instead of dropped.
-        hasSeenRestarting = true;
-        renderInFlight();
+        // A restart is already in flight (dispatched here, or by the sidebar
+        // or landing-page controls). Keep refreshing until it resolves.
+        renderLoading();
+        scheduleRefresh();
+      } else if (initialStatus === 'restart_failed') {
+        renderFailed();
+      } else if (initialStatus === 'healthy') {
+        // Degenerate: rendered HEALTHY because there was no return_to to 302
+        // to. Offer a manual restart rather than auto-dispatching one on a
+        // workspace that looks healthy.
+        renderHostOffer();
       } else {
-        if (initialStatus === 'restart_failed' && initialError) {
-          setError(initialError);
-        }
+        // 'stuck' -- the automatic recovery path, or an explicit restart of a
+        // healthy workspace (_handle_recovery_page renders that as 'stuck').
         runProbe();
       }
-      connectSSE();
     })();
   </script>
 {% endblock %}
