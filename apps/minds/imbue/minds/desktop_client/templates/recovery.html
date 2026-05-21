@@ -97,24 +97,16 @@
         statusEl.textContent = '';
       }
 
-      function renderInFlight(tier) {
-        // The surgical system-interface restart is non-destructive -- it
-        // bounces only the system-services agent and does not interrupt the
-        // user's agents -- so its copy must not imply a full workspace
-        // restart. An unknown external restart may be destructive, so it
-        // falls back to the conservative "workspace" copy.
-        if (tier === 'system_interface') {
-          titleEl.textContent = 'Restarting system interface';
-          messageEl.textContent =
-            'Restarting now. Your agents will not be interrupted. This page '
-            + 'will return you to your workspace once it is ready.';
-        } else {
-          titleEl.textContent = 'Restarting workspace';
-          messageEl.textContent =
-            'Restarting now. This page will return you to your workspace once it is ready.';
-        }
+      function renderInFlight() {
+        // Tier-agnostic copy: the recovery flow may be restarting just the
+        // system interface or bouncing the whole workspace, but that
+        // distinction is not meaningful to the user, who only wants back
+        // into the workspace -- so this avoids naming which tier is running.
+        titleEl.textContent = 'Loading workspace';
+        messageEl.textContent =
+          'This page will return you to your workspace once it is ready.';
         show(hostBtn, false);
-        statusEl.textContent = 'Restarting…';
+        statusEl.textContent = 'Loading…';
       }
 
       function renderTerminal(reason) {
@@ -157,7 +149,7 @@
       // -- Restart dispatch ---------------------------------------------------
       function postRestart(path, tier) {
         attemptedTier = tier;
-        renderInFlight(tier);
+        renderInFlight();
         // A dispatch failure -- whether the POST never reached the server or it
         // came back with an error status -- leaves the tracker untouched, so no
         // SSE event will ever arrive. Surface a failure instead of hanging on
@@ -192,9 +184,7 @@
           goBack();
         } else if (status === 'restarting') {
           hasSeenRestarting = true;
-          // attemptedTier is the tier this page dispatched, or null for a
-          // restart triggered elsewhere (sidebar / landing page).
-          renderInFlight(attemptedTier);
+          renderInFlight();
         } else if (status === 'restart_failed') {
           // Ignore failure events until a restart has actually been seen in
           // flight -- otherwise the snapshot the SSE sends on connect would
@@ -238,8 +228,7 @@
         // A restart was already in flight when this page loaded. Record that
         // so a later restart_failed SSE event is surfaced instead of dropped.
         hasSeenRestarting = true;
-        // The tier is not known for a restart already in flight on load.
-        renderInFlight(attemptedTier);
+        renderInFlight();
       } else {
         if (initialStatus === 'restart_failed' && initialError) {
           setError(initialError);
