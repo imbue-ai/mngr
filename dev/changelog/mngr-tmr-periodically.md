@@ -1,0 +1,2 @@
+- The `TMR` GitHub Actions workflow now runs on a daily cron at 08:00 UTC (00:00 PST; shifts to 01:00 PDT in summer, since GitHub Actions cron has no timezone support) in addition to `workflow_dispatch`. Scheduled runs only fire from the default branch.
+- The default `test_paths` workflow input now points at the whole `libs/mngr/imbue/mngr/e2e/` directory instead of only `test_basic.py`, so both scheduled and one-click runs exercise the full e2e suite.

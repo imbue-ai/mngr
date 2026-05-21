@@ -1,12 +1,17 @@
 name: TMR
 
 on:
+  # 08:00 UTC = 00:00 PST (UTC-8). GitHub Actions cron does not support
+  # timezones, so this stays on PST year-round and shifts to 01:00 PDT in
+  # summer. Use the workflow_dispatch trigger for off-schedule runs.
+  schedule:
+    - cron: "0 8 * * *"
   workflow_dispatch:
     inputs:
       test_paths:
         description: "Test paths (space-separated, passed as positional args before --)"
         required: true
-        default: "libs/mngr/imbue/mngr/e2e/test_basic.py"
+        default: "libs/mngr/imbue/mngr/e2e/"
       pytest_args:
         description: "Pytest args after `--` (must be valid bash; quote values containing spaces, e.g. `-m \"foo and bar\"`)"
         required: true
@@ -52,6 +57,10 @@ jobs:
       - name: Run TMR orchestrator
         env:
           ADDITIONAL_AUTHORIZED_HOSTS: ${{ inputs.additional_authorized_hosts }}
+          # On schedule triggers `inputs.*` is unset, so fall back to the same
+          # defaults declared on the workflow_dispatch inputs above.
+          TEST_PATHS: ${{ inputs.test_paths || 'libs/mngr/imbue/mngr/e2e/' }}
+          PYTEST_ARGS: ${{ inputs.pytest_args || '-m release' }}
         run: |
           mkdir -p tmr-report
           # The "yolo" agent type is normally defined in the user's personal
@@ -99,8 +108,8 @@ jobs:
             "${run_name_args[@]}" \
             --output-dir tmr-report \
             --format jsonl \
-            ${{ inputs.test_paths }} \
-            -- ${{ inputs.pytest_args }} \
+            ${TEST_PATHS} \
+            -- ${PYTEST_ARGS} \
             | tee tmr-report/events.jsonl
 
       - name: Upload HTML report
