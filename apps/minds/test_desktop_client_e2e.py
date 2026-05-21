@@ -230,11 +230,6 @@ def _build_electron_env(workspace_git_url: Path, workspace_name: str) -> dict[st
     see ``_dev_only_workspace_default`` in templates.py), and scrubs any
     ANTHROPIC creds the operator's shell might have exported so they
     don't silently leak into every workspace the test creates.
-
-    The spawned ``mngr forward`` subprocess no longer needs a per-test
-    port: it tries its default and falls back to an OS-assigned port when
-    that is already held (e.g. by a concurrent ``just minds-start`` or a
-    prior crashed test), then reports the bound port back to ``minds run``.
     """
     env = dict(os.environ)
     env["MINDS_WORKSPACE_GIT_URL"] = str(workspace_git_url)

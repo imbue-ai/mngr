@@ -85,9 +85,9 @@ _AUTH_ERROR_TYPE: Final[str] = "ImbueCloudAuthError"
 
 # How long `minds run` waits for the spawned `mngr forward` plugin to report
 # its bound port via a `listening` envelope before treating startup as failed.
-# The plugin emits this from its FastAPI lifespan startup, so the only slow
-# part is the subprocess's own interpreter start -- 30s is generous headroom.
-_MNGR_FORWARD_LISTEN_TIMEOUT_SECONDS: Final[float] = 30.0
+# The plugin emits this from its FastAPI lifespan startup, so the wait only
+# needs to cover the subprocess's own interpreter start and imports.
+_MNGR_FORWARD_LISTEN_TIMEOUT_SECONDS: Final[float] = 10.0
 
 
 @click.command()
@@ -272,12 +272,12 @@ def run(
     # callback list and silently dropped.
     consumer.start(root_concurrency_group)
 
-    # Block until the plugin reports the port it bound. minds no longer
-    # dictates the port -- the plugin picks one (its default, or an
-    # OS-assigned fallback when the default is taken) and reports it via a
-    # ``listening`` envelope. Everything below that needs the port
-    # (AgentCreator, the desktop app, the health probe, the Electron
-    # ``mngr_forward_started`` event) is built only after this returns.
+    # Block until the plugin reports the port it bound. The plugin owns its
+    # port: it picks one (its default, or an OS-assigned fallback when the
+    # default is taken) and reports it via a ``listening`` envelope.
+    # Everything below that needs the port (AgentCreator, the desktop app,
+    # the health probe, the Electron ``mngr_forward_started`` event) is
+    # built only after this returns.
     mngr_forward_port = consumer.wait_for_listening(timeout=_MNGR_FORWARD_LISTEN_TIMEOUT_SECONDS)
     if mngr_forward_port is None:
         consumer.terminate()
