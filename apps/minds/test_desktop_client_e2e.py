@@ -435,10 +435,14 @@ def _destroy_agent_best_effort(workspace_name: str) -> None:
         )
 
 
+# No `@pytest.mark.tmux` here even though the workspace agent runs in a
+# tmux session: that tmux lives *inside* the docker container, not on the
+# host, so the host-side resource guard never sees a tmux invocation and
+# fails post-hoc with "marked tmux but never invoked tmux" if the mark is
+# present.
 @pytest.mark.acceptance
 @pytest.mark.docker
 @pytest.mark.docker_sdk
-@pytest.mark.tmux
 @pytest.mark.rsync
 @pytest.mark.timeout(900)
 def test_create_local_docker_workspace_via_electron(
