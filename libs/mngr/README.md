@@ -300,7 +300,6 @@ mngr <command> [options]
 - [`pair`](https://github.com/imbue-ai/mngr/blob/main/libs/mngr/docs/commands/primary/pair.md): Continually sync data with an agent
 - [`message`](https://github.com/imbue-ai/mngr/blob/main/libs/mngr/docs/commands/secondary/message.md): Send a message to an agent
 - [`transcript`](https://github.com/imbue-ai/mngr/blob/main/libs/mngr/docs/commands/secondary/transcript.md): View the message transcript for an agent
-- [`provision`](https://github.com/imbue-ai/mngr/blob/main/libs/mngr/docs/commands/secondary/provision.md): Re-run provisioning on an agent (useful for syncing config and auth)
 
 ### For maintenance:
 
@@ -388,6 +387,7 @@ As well as the code for some plugins that we maintain, including:
 
 - [libs/mngr_modal/](https://github.com/imbue-ai/mngr/blob/main/libs/mngr_modal/README.md)
 - [libs/mngr_claude/](https://github.com/imbue-ai/mngr/blob/main/libs/mngr_claude/README.md)
+- [libs/mngr_uncapped_claude/](https://github.com/imbue-ai/mngr/blob/main/libs/mngr_uncapped_claude/README.md)
 - [libs/mngr_pair/](https://github.com/imbue-ai/mngr/blob/main/libs/mngr_pair/README.md)
 - [libs/mngr_opencode/](https://github.com/imbue-ai/mngr/blob/main/libs/mngr_opencode/README.md)
 - [libs/mngr_antigravity/](https://github.com/imbue-ai/mngr/blob/main/libs/mngr_antigravity/README.md)

@@ -282,28 +282,28 @@ def supertokens_app_exists(*, name: DevEnvName, core_base_url: str, api_key: Sec
     )
 
 
-def load_dev_credentials_from_vault() -> dict[str, str]:
-    """Read the dev-tier vault entries the round-trip test needs.
+def load_ci_credentials_from_vault() -> dict[str, str]:
+    """Read the ci-tier vault entries the round-trip test needs.
 
     Returns a dict with NEON_ORG_ID, NEON_API_TOKEN, SUPERTOKENS_CONNECTION_URI,
-    SUPERTOKENS_API_KEY. Reads from ``secrets/minds/dev/neon-admin`` +
-    ``secrets/minds/dev/supertokens`` via the same ``read_vault_kv``
+    SUPERTOKENS_API_KEY. Reads from ``secrets/minds/ci/neon-admin`` +
+    ``secrets/minds/ci/supertokens`` via the same ``read_vault_kv``
     helper the CLI uses, so the test honors the operator's existing
-    Vault token / address.
+    Vault token / address. The ci tier's vault namespace mirrors the
+    dev tier's today; the two are kept separate so we can diverge
+    later without churning the test scaffolding.
     """
-    neon_kv = read_vault_kv(VaultPath("secrets/minds/dev/neon-admin"))
-    st_kv = read_vault_kv(VaultPath("secrets/minds/dev/supertokens"))
+    neon_kv = read_vault_kv(VaultPath("secrets/minds/ci/neon-admin"))
+    st_kv = read_vault_kv(VaultPath("secrets/minds/ci/supertokens"))
     missing: list[str] = []
     for key in ("NEON_ORG_ID", "NEON_API_TOKEN"):
         if not neon_kv.get(key):
-            missing.append(f"secrets/minds/dev/neon-admin.{key}")
+            missing.append(f"secrets/minds/ci/neon-admin.{key}")
     for key in ("SUPERTOKENS_CONNECTION_URI", "SUPERTOKENS_API_KEY"):
         if not st_kv.get(key):
-            missing.append(f"secrets/minds/dev/supertokens.{key}")
+            missing.append(f"secrets/minds/ci/supertokens.{key}")
     if missing:
-        raise MindError(
-            "Vault is missing required dev-tier credentials for the round-trip test: " + ", ".join(missing)
-        )
+        raise MindError("Vault is missing required ci-tier credentials for the round-trip test: " + ", ".join(missing))
     return {
         "NEON_ORG_ID": neon_kv["NEON_ORG_ID"],
         "NEON_API_TOKEN": neon_kv["NEON_API_TOKEN"],

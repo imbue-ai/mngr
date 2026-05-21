@@ -32,6 +32,7 @@ from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.hosts.host import ONBOARDING_TEXT
 from imbue.mngr.hosts.host import ONBOARDING_TEXT_TMUX_USER
+from imbue.mngr.hosts.host import _TMUX_STATUS_LEFT_LENGTH
 from imbue.mngr.hosts.host import _build_start_agent_shell_command
 from imbue.mngr.hosts.host import _format_env_file
 from imbue.mngr.hosts.host import _is_transient_ssh_error
@@ -2628,6 +2629,25 @@ def test_host_create_host_tmux_config_creates_file(
     assert "source-file" in content
     assert "C-q" in content
     assert "C-t" in content
+
+
+def test_host_create_host_tmux_config_widens_status_left_before_user_config(
+    local_host: Host,
+    temp_host_dir: Path,
+) -> None:
+    """The config must set status-left-length before sourcing the user's config.
+
+    Ordering is what makes the widening overridable: a status-left-length set in
+    the user's ~/.tmux.conf is sourced afterwards and therefore wins.
+    """
+    host = local_host
+    content = host._create_host_tmux_config().read_text()
+
+    widen_line = f"set -g status-left-length {_TMUX_STATUS_LEFT_LENGTH}"
+    assert widen_line in content
+    assert content.index(widen_line) < content.index("source-file"), (
+        "status-left-length must be set before the user config is sourced so the user can override it"
+    )
 
 
 # =========================================================================
