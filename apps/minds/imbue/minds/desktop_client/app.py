@@ -1623,10 +1623,17 @@ def _run_mngr_command(concurrency_group: ConcurrencyGroup, argv: list[str], env:
         )
     except (OSError, RuntimeError, subprocess.TimeoutExpired, ConcurrencyGroupError) as exc:
         # OSError covers fork/exec failures, RuntimeError the executor itself,
-        # TimeoutExpired the run_process_to_completion ceiling, and
-        # ConcurrencyGroupError the strand-level failures the group raises.
+        # ConcurrencyGroupError the strand-level failures the group raises, and
+        # TimeoutExpired any internal wait that surfaces it.
         logger.warning("mngr command {} failed: {}", argv, exc)
         return str(exc)
+    if finished.is_timed_out:
+        # With is_checked_after=False the timeout ceiling does not raise; it
+        # comes back as a finished process flagged is_timed_out (with a
+        # signal-based returncode), so it must be detected explicitly here --
+        # otherwise it would be misreported as a plain non-zero exit below.
+        logger.warning("mngr command {} timed out after {}s", argv, _RESTART_COMMAND_TIMEOUT_SECONDS)
+        return f"timed out after {int(_RESTART_COMMAND_TIMEOUT_SECONDS)}s"
     if finished.returncode != 0:
         logger.warning("mngr command {} exited {}: {}", argv, finished.returncode, finished.stderr)
         return f"exited {finished.returncode}: {finished.stderr.strip()}"
