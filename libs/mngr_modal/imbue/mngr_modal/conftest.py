@@ -134,7 +134,11 @@ def modal_mngr_ctx(
 
 
 def _cleanup_modal_test_resources(
-    app_name: str, volume_name: str, environment_name: str, is_env_owned_by_test: bool = True
+    app_name: str,
+    volume_name: str,
+    environment_name: str,
+    *,
+    is_env_owned_by_test: bool = True,
 ) -> None:
     """Clean up Modal test resources after a test completes.
 
