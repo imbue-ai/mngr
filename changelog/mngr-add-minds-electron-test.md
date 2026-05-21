@@ -1,0 +1,1 @@
+Adds an acceptance test for the minds desktop client that creates a local Docker workspace from forever-claude-template and verifies the workspace's `system_interface` is reachable through the desktop client proxy.
