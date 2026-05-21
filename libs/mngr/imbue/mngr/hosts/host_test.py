@@ -32,6 +32,7 @@ from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.hosts.host import ONBOARDING_TEXT
 from imbue.mngr.hosts.host import ONBOARDING_TEXT_TMUX_USER
+from imbue.mngr.hosts.host import _MAX_TMUX_STATUS_LEFT_LENGTH
 from imbue.mngr.hosts.host import _build_start_agent_shell_command
 from imbue.mngr.hosts.host import _format_env_file
 from imbue.mngr.hosts.host import _is_transient_ssh_error
@@ -884,6 +885,51 @@ def test_build_start_agent_shell_command_no_onboarding_hook_by_default(
     assert "set-hook" not in result
     assert "display-popup" not in result
     assert "client-attached" not in result
+
+
+def test_build_start_agent_shell_command_widens_status_left_to_fit_session_name(
+    local_provider: LocalProviderInstance,
+    temp_host_dir: Path,
+    temp_work_dir: Path,
+) -> None:
+    """status-left-length should be widened to fit the full session name.
+
+    tmux's default status-left-length of 10 truncates mngr session names. The
+    command must raise it to fit "[session_name] " -- the session name plus the
+    "[", "]" and trailing space of tmux's default status-left format.
+    """
+    agent = _create_test_agent(local_provider, temp_host_dir, temp_work_dir)
+    session_name = f"mngr-{agent.name}"
+    result = _build_command_with_defaults(agent, temp_host_dir)
+
+    expected_length = len(session_name) + 3
+    assert expected_length <= _MAX_TMUX_STATUS_LEFT_LENGTH, "test session name unexpectedly long"
+    assert f"status-left-length {expected_length}" in result
+
+    # It should read the current value and only widen, never shrink, the bar.
+    assert "show-option" in result and "status-left-length" in result
+    assert "-lt" in result
+
+
+def test_build_start_agent_shell_command_caps_status_left_length(
+    local_provider: LocalProviderInstance,
+    temp_host_dir: Path,
+    temp_work_dir: Path,
+) -> None:
+    """An overlong session name should cap status-left-length, not crowd the bar."""
+    agent = _create_test_agent(local_provider, temp_host_dir, temp_work_dir)
+    result = _build_start_agent_shell_command(
+        agent=agent,
+        session_name="mngr-" + "x" * 80,
+        command="sleep 1000",
+        additional_commands=[],
+        env_shell_cmd="bash -c 'true'",
+        tmux_config_path=Path("/tmp/tmux.conf"),
+        unset_vars=[],
+        host_dir=temp_host_dir,
+    )
+
+    assert f"status-left-length {_MAX_TMUX_STATUS_LEFT_LENGTH}" in result
 
 
 # =========================================================================

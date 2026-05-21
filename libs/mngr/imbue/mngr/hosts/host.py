@@ -13,6 +13,7 @@ from datetime import datetime
 from datetime import timezone
 from pathlib import Path
 from typing import Any
+from typing import Final
 from typing import Iterator
 from typing import Mapping
 from typing import Sequence
@@ -2773,6 +2774,11 @@ def _parse_porcelain_line(line: str) -> list[str]:
     return [filename]
 
 
+# Upper bound on the tmux status-left width mngr will set, so a long agent
+# name can't crowd out the window list. tmux's own default is 10.
+_MAX_TMUX_STATUS_LEFT_LENGTH: Final[int] = 40
+
+
 @pure
 def _build_start_agent_shell_command(
     agent: AgentInterface,
@@ -2850,6 +2856,19 @@ def _build_start_agent_shell_command(
     )
     steps.append("bash -c " + shlex.quote(save_user_shell_script))
     steps.append(f"tmux set-option -t {quoted_session} default-command {shlex.quote(env_shell_cmd)}")
+
+    # Widen status-left so the full session name shows; tmux's default
+    # status-left-length of 10 truncates it and mashes the window list onto
+    # the end. The +3 covers the "[", "]" and space of tmux's default
+    # status-left format. Only raised, never lowered, to leave a user's
+    # custom status bar intact.
+    status_left_length = min(len(session_name) + 3, _MAX_TMUX_STATUS_LEFT_LENGTH)
+    widen_status_left_script = (
+        f"C=$(tmux show-option -t {quoted_session} -Aqv status-left-length 2>/dev/null); "
+        f'[ "${{C:-0}}" -lt {status_left_length} ] '
+        f"&& tmux set-option -t {quoted_session} status-left-length {status_left_length} || true"
+    )
+    steps.append("bash -c " + shlex.quote(widen_status_left_script))
 
     # Set a one-shot client-attached hook that shows the onboarding popup
     # when the user first attaches to this tmux session. This must happen
