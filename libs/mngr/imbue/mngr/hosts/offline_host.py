@@ -233,17 +233,6 @@ class BaseHost(HostInterface):
         """Get the build log if this host failed during creation."""
         return self.get_certified_data().build_log
 
-    def get_permissions(self) -> list[str]:
-        """Get the union of all agent permissions on this host.
-
-        Uses persisted agent data from the provider to get permissions without
-        requiring the host to be online.
-        """
-        permissions: set[str] = set()
-        for agent_ref in self.discover_agents():
-            permissions.update(str(p) for p in agent_ref.permissions)
-        return list(permissions)
-
 
 def derive_offline_host_state(
     certified_data: CertifiedHostData,
