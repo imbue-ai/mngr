@@ -184,7 +184,7 @@ minds-test-deployment-only *tests:
 # a real display can run the underlying pytest directly without xvfb-run.
 # Requires apps/minds/node_modules/ to be installed (`cd apps/minds && pnpm install`).
 minds-test-electron *args:
-    xvfb-run -a uv run pytest apps/minds/test_desktop_client_e2e.py::test_create_local_docker_workspace_via_electron -v --no-cov --cov-fail-under=0 {{args}}
+  xvfb-run -a uv run pytest apps/minds/test_desktop_client_e2e.py::test_create_local_docker_workspace_via_electron -v --no-cov --cov-fail-under=0 {{args}}
 
 # Download the Tailwind Play CDN JS bundle for the minds desktop client.
 # Idempotent and SHA-pinned via apps/minds/scripts/fetch_tailwind.sh -- the
