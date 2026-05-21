@@ -433,23 +433,28 @@ def modal_test_session_cleanup(
 ) -> Generator[None, None, None]:
     """Session-scoped fixture that cleans up the Modal environment at session end.
 
-    In shared-env mode the env is owned by the justfile wrapper, so this
-    fixture stops apps and deletes volumes (per-session leftovers are still
-    worth sweeping) but does not delete the env or register it for leak
-    detection.
+    In shared-env mode the env is shared across many concurrent offload
+    sandboxes, so this fixture skips the env-wide app/volume sweep entirely
+    -- ``delete_modal_apps_in_environment`` / ``delete_modal_volumes_in_environment``
+    enumerate every resource in the env, which would stop other sandboxes'
+    in-flight apps and delete their live volumes. The justfile wrapper deletes
+    the env outright on EXIT (which cascades to every app), and per-test
+    fixtures still delete their own volumes individually, so nothing this
+    fixture would have swept up survives. The env itself is also not deleted
+    or registered for leak detection here.
     """
     prefix = f"{modal_test_session_env_name}-"
     environment_name = f"{prefix}{modal_test_session_user_id}"
     if len(environment_name) > 64:
         environment_name = environment_name[:64]
     is_shared = read_shared_modal_env_name() is not None
-    if not is_shared:
-        register_modal_test_environment(environment_name)
+    if is_shared:
+        yield
+        return
+    register_modal_test_environment(environment_name)
     yield
     delete_modal_apps_in_environment(environment_name)
     delete_modal_volumes_in_environment(environment_name)
-    if is_shared:
-        return
     # Deregister only on DELETED/NOT_FOUND (synchronous response is
     # authoritative). FAILED leaves the env tracked so the session-end
     # leak detector still surfaces it. See `_cleanup_modal_test_resources`
