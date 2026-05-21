@@ -1,1 +1,1 @@
-Make the minds desktop client's `pnpm-workspace.yaml` work on both pnpm 10 and 11. pnpm 11 replaced `onlyBuiltDependencies` with an `allowBuilds` map; we now write both forms (v10 reads the list, v11 reads the map, each ignores the other).
+Pin minds desktop client to pnpm 10.x. pnpm 11 is not yet supported; installs now fail fast with an engine mismatch instead of breaking in confusing ways.
