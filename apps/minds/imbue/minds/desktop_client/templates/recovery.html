@@ -18,10 +18,6 @@
            class="hidden mb-4 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
       </div>
       <div class="flex items-center gap-3">
-        <button id="recovery-surgical-btn"
-                class="hidden rounded-md bg-zinc-900 px-4 py-2 text-sm font-medium text-white hover:bg-zinc-700">
-          Restart system interface
-        </button>
         <button id="recovery-host-btn"
                 class="hidden rounded-md bg-zinc-900 px-4 py-2 text-sm font-medium text-white hover:bg-zinc-700">
           Restart workspace
@@ -45,12 +41,12 @@
       var messageEl = document.getElementById('recovery-message');
       var errorEl = document.getElementById('recovery-error');
       var statusEl = document.getElementById('recovery-status');
-      var surgicalBtn = document.getElementById('recovery-surgical-btn');
       var hostBtn = document.getElementById('recovery-host-btn');
 
-      // The tier the user triggered this session. Until they click a button
-      // it stays null, and SSE failure events are ignored (the page is still
-      // deciding which tier to offer from the layer-2 probe).
+      // The tier this page has dispatched this session. It stays null until a
+      // restart is dispatched (the auto-dispatched surgical restart, or a
+      // host-restart click); while null, SSE failure events are ignored
+      // because the page is still running the layer-2 probe.
       var attemptedTier = null;
 
       // Whether this page has observed the agent in a RESTARTING state -- via
@@ -86,16 +82,6 @@
       function renderChecking() {
         titleEl.textContent = 'System interface not responding';
         messageEl.textContent = 'Checking host health…';
-        show(surgicalBtn, false);
-        show(hostBtn, false);
-        statusEl.textContent = '';
-      }
-
-      function renderSurgicalOffer() {
-        titleEl.textContent = 'System interface not responding';
-        messageEl.textContent =
-          'Restarting the system interface should bring your workspace back. Your agents will not be interrupted.';
-        show(surgicalBtn, true);
         show(hostBtn, false);
         statusEl.textContent = '';
       }
@@ -106,14 +92,15 @@
           ? 'The system interface did not come back. Restarting the whole workspace should recover it. '
             + 'In-progress work in all agents will be interrupted.'
           : 'This workspace needs a full restart to recover. In-progress work in all agents will be interrupted.';
-        show(surgicalBtn, false);
         show(hostBtn, true);
         hostBtn.textContent = 'Restart workspace';
         statusEl.textContent = '';
       }
 
       function renderInFlight() {
-        show(surgicalBtn, false);
+        titleEl.textContent = 'Restarting workspace';
+        messageEl.textContent =
+          'Restarting now. This page will return you to your workspace once it is ready.';
         show(hostBtn, false);
         statusEl.textContent = 'Restarting…';
       }
@@ -124,7 +111,6 @@
           'The workspace restart did not recover the system interface. You can try again, '
           + 'or contact support if the problem persists.';
         setError(reason || 'The workspace restart did not recover the system interface.');
-        show(surgicalBtn, false);
         show(hostBtn, true);
         hostBtn.textContent = 'Try again';
         statusEl.textContent = '';
@@ -139,7 +125,12 @@
           return resp.json();
         }).then(function (data) {
           if (data && data.reachable) {
-            renderSurgicalOffer();
+            // The container is reachable, so the surgical system-interface
+            // restart can recover the workspace without interrupting any
+            // agents. Being non-destructive, it is dispatched immediately
+            // rather than gated behind a click; a failed surgical restart
+            // still escalates to the click-gated host restart.
+            postRestart('/restart-system-interface', 'system_interface');
           } else {
             renderHostOffer(false);
           }
@@ -178,9 +169,6 @@
         }, handleDispatchFailure);
       }
 
-      surgicalBtn.addEventListener('click', function () {
-        postRestart('/restart-system-interface', 'system_interface');
-      });
       hostBtn.addEventListener('click', function () {
         postRestart('/restart-host', 'host');
       });
@@ -205,8 +193,8 @@
           } else if (hasSeenRestarting) {
             // A restart that was triggered outside this page (sidebar or
             // landing page) failed. We do not know which tier it was, so
-            // surface the reason and re-run the probe to re-offer a tier
-            // rather than hang forever on "Restarting...".
+            // surface the reason and re-run the probe to drive the restart
+            // flow again rather than hang forever on "Restarting...".
             setError(errorText || 'The restart did not recover the system interface.');
             runProbe();
           }

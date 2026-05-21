@@ -1591,9 +1591,9 @@ def _handle_recovery_page(
     return_to = _sanitize_recovery_return_to(request.query_params.get("return_to", ""))
     # ``intent=restart`` means the user explicitly asked to restart this
     # workspace (the home-page restart control). In that case the page must
-    # render even for a HEALTHY agent so the layer-2 probe can run and offer
-    # a restart tier -- the page's JS handles ``initial_status="healthy"`` by
-    # running the probe, not by sitting on the "not responding" message.
+    # render even for a HEALTHY agent so the layer-2 probe can run and drive
+    # the restart flow -- the page's JS handles ``initial_status="healthy"``
+    # by running the probe, not by sitting on the "not responding" message.
     is_explicit_restart = request.query_params.get("intent", "") == "restart"
     # If the agent has already recovered by the time the chrome navigates
     # here (a real race: the background probe loop can flip the tracker

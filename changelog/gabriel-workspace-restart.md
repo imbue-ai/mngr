@@ -1,10 +1,11 @@
 Tiered system-interface restart for the minds recovery flow.
 
 - The workspace recovery page now has two restart tiers. On load it runs
-  a host-health check and shows "Checking host health" until it resolves;
-  it then offers a surgical "Restart system interface" (which does not
-  interrupt your agents) when the container is reachable, or goes
-  straight to a full "Restart workspace" when it is not.
+  a host-health check and shows "Checking host health" until it resolves.
+  When the container is reachable it immediately runs a surgical
+  system-interface restart (which does not interrupt your agents), so the
+  workspace recovers with no clicks; when the container is unreachable it
+  offers a full "Restart workspace" button instead.
 - If the surgical restart does not bring the workspace back, the page
   offers the full workspace restart as an escalation. If that also
   fails, it shows the failure reason with a try-again option.
