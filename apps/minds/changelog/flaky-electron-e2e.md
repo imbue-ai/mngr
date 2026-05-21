@@ -1,0 +1,1 @@
+Mark `test_create_local_docker_workspace_via_electron` as `@pytest.mark.flaky`. The test has intermittently timed out in CI on unrelated branches (e.g. waiting for `#create-form`, or for an Electron content page to settle), so offload will now retry it automatically while the underlying flakiness is investigated.
