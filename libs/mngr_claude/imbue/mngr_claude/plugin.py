@@ -726,19 +726,9 @@ def _read_macos_keychain_credential(label: str, concurrency_group: ConcurrencyGr
         result = concurrency_group.run_process_to_completion(
             ["security", "find-generic-password", "-l", label, "-w"],
             is_checked_after=False,
-            timeout=10.0,
         )
     except ProcessSetupError:
         logger.debug("macOS security binary not found")
-        return None
-    if result.is_timed_out:
-        logger.warning(
-            "macOS keychain read for label {!r} timed out (likely a hidden ACL prompt); "
-            "skipping. If you need this credential merged into the agent's config, "
-            "grant the running app access in Keychain Access.app or set "
-            "convert_macos_credentials=false in the agent config.",
-            label,
-        )
         return None
     if result.returncode != 0:
         logger.debug("No keychain credential found for label {!r}", label)
