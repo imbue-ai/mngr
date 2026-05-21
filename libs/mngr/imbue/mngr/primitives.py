@@ -472,10 +472,6 @@ class PluginName(NonEmptyStr):
     """Name of a plugin."""
 
 
-class Permission(NonEmptyStr):
-    """Permission identifier for agent access control."""
-
-
 class ImageReference(NonEmptyStr):
     """Reference to a container or VM image."""
 
@@ -581,12 +577,6 @@ class DiscoveredAgent(FrozenModel):
     def start_on_boot(self) -> bool:
         """Return whether this agent should start automatically on host boot."""
         return bool(self.certified_data.get("start_on_boot", False))
-
-    @property
-    def permissions(self) -> tuple["Permission", ...]:
-        """Return the list of permissions assigned to this agent."""
-        permissions_value = self.certified_data.get("permissions", [])
-        return tuple(Permission(p) for p in permissions_value)
 
     @property
     def created_branch_name(self) -> str | None:

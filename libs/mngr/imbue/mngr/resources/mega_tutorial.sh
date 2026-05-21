@@ -622,8 +622,8 @@ mngr snapshot destroy my-task --all-snapshots --dry-run
 
 ##############################################################################
 # MANAGING AGENT LIMITS
-#   Configure idle timeouts, activity tracking, permissions, and other
-#   runtime limits for agents and hosts.
+#   Configure idle timeouts, activity tracking, and other runtime limits
+#   for agents and hosts.
 ##############################################################################
 
 # "limit" is an experimental command. See "mngr limit --help" for current usage.
@@ -952,7 +952,7 @@ mngr list --format jsonl | jq --unbuffered 'select(.labels.priority == "high")'
 ##############################################################################
 # CREATE TEMPLATES
 #   Define reusable presets that bundle common options (provider, build
-#   args, permissions, environment, etc.) into a single template name.
+#   args, environment, etc.) into a single template name.
 ##############################################################################
 
 # templates are defined in your config (user, project, or local scope).
@@ -976,7 +976,7 @@ mngr create my-task --template modal-big --template with-tests
 ##############################################################################
 # CUSTOM AGENT TYPES
 #   Define your own agent types in config, or use the built-in `command` type
-#   to run any shell command. Wrap existing tools with custom defaults and permissions.
+#   to run any shell command. Wrap existing tools with custom defaults.
 ##############################################################################
 
 # mngr supports multiple agent types out of the box (claude, codex, etc.)
