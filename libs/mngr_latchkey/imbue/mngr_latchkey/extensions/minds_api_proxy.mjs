@@ -3,8 +3,8 @@
  * gateway to the minds desktop client's bare-origin "Minds API" server.
  *
  * Endpoints:
- *   ANY /extensions/minds-api-proxy            -> <minds-api>/
- *   ANY /extensions/minds-api-proxy/<rest>...  -> <minds-api>/<rest>...
+ *   ANY /minds-api-proxy            -> <minds-api>/
+ *   ANY /minds-api-proxy/<rest>...  -> <minds-api>/<rest>...
  *
  * Every other URL is left for the next extension (this handler returns
  * ``false`` without touching the response).
@@ -36,7 +36,7 @@
 import { request as httpRequest } from 'node:http';
 import { request as httpsRequest } from 'node:https';
 
-const PROXY_PATH_PREFIX = '/extensions/minds-api-proxy';
+const PROXY_PATH_PREFIX = '/minds-api-proxy';
 const MINDS_API_URL_ENV_VAR = 'LATCHKEY_EXTENSION_MINDS_API_URL';
 
 // Hop-by-hop headers per RFC 7230 section 6.1. Stripped from both the
@@ -114,17 +114,17 @@ function isProxyRoute(pathOnly) {
 /**
  * Compute the path-and-query string to send upstream. The request URL
  * is path-and-query only (no scheme/host) on Node's incoming request,
- * so we strip the ``/extensions/minds-api-proxy`` prefix and stitch the
+ * so we strip the ``/minds-api-proxy`` prefix and stitch the
  * remainder onto the upstream base's own path.
  *
  * Examples (with base ``http://127.0.0.1:8420``):
- *   /extensions/minds-api-proxy           -> /
- *   /extensions/minds-api-proxy/          -> /
- *   /extensions/minds-api-proxy/foo?x=1   -> /foo?x=1
+ *   /minds-api-proxy           -> /
+ *   /minds-api-proxy/          -> /
+ *   /minds-api-proxy/foo?x=1   -> /foo?x=1
  *
  * Examples (with base ``http://127.0.0.1:8420/api``):
- *   /extensions/minds-api-proxy           -> /api
- *   /extensions/minds-api-proxy/foo?x=1   -> /api/foo?x=1
+ *   /minds-api-proxy           -> /api
+ *   /minds-api-proxy/foo?x=1   -> /api/foo?x=1
  */
 function buildUpstreamPath(requestUrl, upstreamBase) {
   // ``requestUrl`` already starts with ``/``; use a placeholder origin
