@@ -229,10 +229,12 @@ class AntigravityAgent(InteractiveTuiAgent[AntigravityAgentConfig], HasCommonTra
         existing_settings = read_antigravity_settings(host, settings_path)
         # Warn before invoking the @pure merge helper if the existing
         # trustedWorkspaces value is the wrong shape: merge_trusted_workspace
-        # defensively replaces it with a fresh array containing only the new
-        # workspace, which silently destroys whatever was previously stored
-        # (e.g. an object form introduced by a future agy schema). Logging
-        # here keeps the helper pure while making the data loss visible.
+        # defensively replaces just that key with a fresh array containing
+        # only the new workspace (other top-level keys in the settings dict
+        # are preserved). Whatever was previously stored under
+        # trustedWorkspaces (e.g. an object form introduced by a future agy
+        # schema) is silently dropped by the fallback; logging here keeps the
+        # helper pure while making that drop visible.
         existing_trusted = existing_settings.get("trustedWorkspaces")
         if existing_trusted is not None and not isinstance(existing_trusted, list):
             logger.warning(
