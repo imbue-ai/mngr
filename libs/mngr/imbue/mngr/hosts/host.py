@@ -63,6 +63,8 @@ from imbue.mngr.hosts.common import get_ssh_known_hosts_file
 from imbue.mngr.hosts.offline_host import BaseHost
 from imbue.mngr.hosts.offline_host import apply_rename_to_agent_data
 from imbue.mngr.hosts.outer_host import OuterHost
+from imbue.mngr.hosts.tmux import tmux_session_target
+from imbue.mngr.hosts.tmux import tmux_window_target
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.interfaces.data_types import CommandResult
@@ -2283,9 +2285,10 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
             # Rename the tmux session first (idempotent -- no-ops if session doesn't exist with old name)
             old_session_name = f"{self.mngr_ctx.config.prefix}{old_name}"
             new_session_name = f"{self.mngr_ctx.config.prefix}{new_name}"
+            old_session_target = shlex.quote(tmux_session_target(old_session_name))
             result = self.execute_idempotent_command(
-                f"tmux has-session -t {shlex.quote('=' + old_session_name)} 2>/dev/null && "
-                f"tmux rename-session -t {shlex.quote('=' + old_session_name)} -- {shlex.quote(new_session_name)} || true"
+                f"tmux has-session -t {old_session_target} 2>/dev/null && "
+                f"tmux rename-session -t {old_session_target} -- {shlex.quote(new_session_name)} || true"
             )
             logger.debug("Tmux rename result: success={}, stdout={}", result.success, result.stdout.strip())
 
@@ -2541,7 +2544,9 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         return PIDs from a different session (e.g. 'mngr_foo-bar' when targeting 'mngr_foo').
         """
         # has-session supports = for exact matching -- bail out if session doesn't exist
-        has_result = self.execute_idempotent_command(f"tmux has-session -t '={session_name}' 2>/dev/null")
+        has_result = self.execute_idempotent_command(
+            f"tmux has-session -t {shlex.quote(tmux_session_target(session_name))} 2>/dev/null"
+        )
         if not has_result.success:
             return []
 
@@ -2662,7 +2667,9 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
             # Finally kill the tmux sessions themselves
             for agent in current_agents:
                 session_name = f"{self.mngr_ctx.config.prefix}{agent.name}"
-                self.execute_idempotent_command(f"tmux kill-session -t '={session_name}' 2>/dev/null || true")
+                self.execute_idempotent_command(
+                    f"tmux kill-session -t {shlex.quote(tmux_session_target(session_name))} 2>/dev/null || true"
+                )
 
     def _get_agent_by_id(self, agent_id: AgentId) -> AgentInterface | None:
         """Get an agent by ID."""
@@ -2847,11 +2854,13 @@ def _build_start_agent_shell_command(
     If the tmux session already exists, the command exits early (successfully)
     since everything has presumably already been set up.
     """
-    # Bail out early if the session already exists. Use = prefix for exact
-    # matching to avoid prefix-matching a different session (e.g. "mngr_foo"
-    # matching "mngr_foo-bar"). stderr is redirected to suppress the
-    # "can't find session" message when the session doesn't exist yet.
-    guard = f"tmux has-session -t {shlex.quote('=' + session_name)} 2>/dev/null && exit 0"
+    # Bail out early if the session already exists. tmux_session_target prepends
+    # the = exact-match prefix so we don't prefix-match a different session
+    # (e.g. "mngr_foo" matching "mngr_foo-bar"). stderr is redirected to
+    # suppress the "can't find session" message when the session doesn't exist
+    # yet.
+    quoted_exact_session = shlex.quote(tmux_session_target(session_name))
+    guard = f"tmux has-session -t {quoted_exact_session} 2>/dev/null && exit 0"
 
     steps: list[str] = []
 
@@ -2877,29 +2886,31 @@ def _build_start_agent_shell_command(
         f" {shlex.quote(env_shell_cmd)}"
     )
 
-    # NOTE: Commands below target a session that was just created above in the
-    # same && chain. The exact session definitely exists, so we do NOT use the
-    # = prefix here -- it's unnecessary. The = prefix only provides exact
-    # *session* matching for commands whose -t resolves as target-session (e.g.
-    # has-session, kill-session). For target-pane (e.g. set-option) or
-    # target-window (e.g. list-panes) commands, a bare '=name' is parsed as
-    # an exact window/pane match rather than an exact session match, so it
-    # does not prevent session prefix matching.
+    # Commands below target the session we just created in the same && chain.
+    # We still use the = exact-match prefix everywhere so the rule is uniform
+    # (always exact-match) and a future refactor that breaks the chain can't
+    # silently re-introduce prefix-matching bugs. quoted_exact_session is the
+    # =name form (for target-session subcommands like set-environment,
+    # new-window) and quoted_exact_agent_window is =name:0 (for target-window/-
+    # pane subcommands like set-option, set-hook, show-option, send-keys,
+    # select-window, list-panes -- a bare '=name' fails on these because tmux
+    # parses it as an exact match on a window/pane literally called '=name').
+    # See imbue.mngr.hosts.tmux.tmux_window_target.
+    quoted_exact_agent_window = shlex.quote(tmux_window_target(session_name, 0))
 
     # Save the user's original default-command (from their ~/.tmux.conf) into
     # the tmux session environment, then set default-command to env_shell_cmd.
     # Because env_shell_cmd uses ${MNGR_SAVED_DEFAULT_TMUX_COMMAND:-${SHELL:-bash}},
     # the initial agent window (created above, before this variable exists) gets
     # the user's login shell, while user-created windows get the saved default.
-    quoted_session = shlex.quote(session_name)
     save_user_shell_script = (
-        f"U=$(tmux show-option -t {quoted_session} -Aqv default-command 2>/dev/null); "
-        f'[ -z "$U" ] && U=$(tmux show-option -t {quoted_session} -Aqv default-shell 2>/dev/null) || true; '
+        f"U=$(tmux show-option -t {quoted_exact_agent_window} -Aqv default-command 2>/dev/null); "
+        f'[ -z "$U" ] && U=$(tmux show-option -t {quoted_exact_agent_window} -Aqv default-shell 2>/dev/null) || true; '
         '[ -z "$U" ] && U="${SHELL:-bash}"; '
-        f'tmux set-environment -t {quoted_session} MNGR_SAVED_DEFAULT_TMUX_COMMAND "$U"'
+        f'tmux set-environment -t {quoted_exact_session} MNGR_SAVED_DEFAULT_TMUX_COMMAND "$U"'
     )
     steps.append("bash -c " + shlex.quote(save_user_shell_script))
-    steps.append(f"tmux set-option -t {quoted_session} default-command {shlex.quote(env_shell_cmd)}")
+    steps.append(f"tmux set-option -t {quoted_exact_agent_window} default-command {shlex.quote(env_shell_cmd)}")
 
     # Set a one-shot client-attached hook that shows the onboarding popup
     # when the user first attaches to this tmux session. This must happen
@@ -2919,9 +2930,9 @@ def _build_start_agent_shell_command(
         tmux_escaped = popup_shell_cmd.replace('"', '\\"')
         hook_value = (
             f'display-popup -w {popup_w} -h {popup_h} -E "{tmux_escaped}"'
-            f" ; set-hook -u -t {session_name} client-attached[99]"
+            f" ; set-hook -u -t {tmux_window_target(session_name, 0)} client-attached[99]"
         )
-        steps.append(f"tmux set-hook -t {quoted_session} client-attached[99] {shlex.quote(hook_value)}")
+        steps.append(f"tmux set-hook -t {quoted_exact_agent_window} client-attached[99] {shlex.quote(hook_value)}")
 
     # Create additional windows BEFORE sending the agent command. This
     # ensures all windows exist before the agent starts, preventing a race
@@ -2929,28 +2940,27 @@ def _build_start_agent_shell_command(
     # additional windows can be created.
     for idx, named_cmd in enumerate(additional_commands):
         window_name = named_cmd.window_name if named_cmd.window_name else f"cmd-{idx + 1}"
-        window_target = f"{session_name}:{window_name}"
+        quoted_exact_named_window = shlex.quote(tmux_window_target(session_name, window_name))
 
         steps.append(
-            f"tmux new-window -t {shlex.quote(session_name)}"
+            f"tmux new-window -t {quoted_exact_session}"
             f" -n {shlex.quote(window_name)}"
             f" -c {shlex.quote(str(agent.work_dir))}"
             f" {shlex.quote(env_shell_cmd)}"
         )
-        steps.append(f"tmux send-keys -t {shlex.quote(window_target)} -l -- {shlex.quote(str(named_cmd.command))}")
-        steps.append(f"tmux send-keys -t {shlex.quote(window_target)} Enter")
+        steps.append(f"tmux send-keys -t {quoted_exact_named_window} -l -- {shlex.quote(str(named_cmd.command))}")
+        steps.append(f"tmux send-keys -t {quoted_exact_named_window} Enter")
 
     # If we created additional windows, select the first window (the main agent)
     # before sending the agent command
     if additional_commands:
-        steps.append(f"tmux select-window -t {shlex.quote(session_name + ':0')}")
+        steps.append(f"tmux select-window -t {quoted_exact_agent_window}")
 
     # Send the agent command as literal keys, then Enter to execute.
     # Target window :0 explicitly so this works even after additional windows
     # have been created (which changes the active window).
-    agent_window = shlex.quote(session_name + ":0")
-    steps.append(f"tmux send-keys -t {agent_window} -l -- {shlex.quote(command)}")
-    steps.append(f"tmux send-keys -t {agent_window} Enter")
+    steps.append(f"tmux send-keys -t {quoted_exact_agent_window} -l -- {shlex.quote(command)}")
+    steps.append(f"tmux send-keys -t {quoted_exact_agent_window} Enter")
 
     # Record START activity for idle detection by writing JSON to the activity file
     # The authoritative activity time is the file's mtime, not the JSON content
@@ -2969,9 +2979,7 @@ def _build_start_agent_shell_command(
     # Build the process activity monitor script (runs in the background, inspects window :0 where the agent is assumed to be running)
     # Wait up to 10 seconds for the PANE_PID to appear (tmux can take a moment to start)
     max_wait_seconds = 10
-    tmux_list_panes_cmd = (
-        f"tmux list-panes -t {shlex.quote(session_name + ':0')} -F '#{{pane_pid}}' 2>/dev/null | head -n 1"
-    )
+    tmux_list_panes_cmd = f"tmux list-panes -t {quoted_exact_agent_window} -F '#{{pane_pid}}' 2>/dev/null | head -n 1"
     process_activity_path = activity_dir / ActivitySource.PROCESS.value.lower()
     monitor_script = (
         f"PANE_PID=$({tmux_list_panes_cmd}); "

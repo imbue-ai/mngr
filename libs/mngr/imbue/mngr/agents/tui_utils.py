@@ -115,7 +115,7 @@ def _is_paste_visible(agent: BaseAgent[Any], tmux_target: str, message: str) -> 
 
 def send_enter_keystroke(agent: BaseAgent[Any], tmux_target: str) -> None:
     """Send a single Enter via ``tmux send-keys``; raise SendMessageError on failure."""
-    send_enter_cmd = f"tmux send-keys -t '{tmux_target}' Enter"
+    send_enter_cmd = f"tmux send-keys -t {shlex.quote(tmux_target)} Enter"
     result = agent.host.execute_stateful_command(send_enter_cmd)
     if not result.success:
         raise SendMessageError(

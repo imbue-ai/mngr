@@ -520,3 +520,27 @@ PREVENT_BARE_URWID_TTY_SIGNAL_KEYS = RegexRatchetRule(
     ),
     pattern_string=r"\.tty_signal_keys\(",
 )
+
+
+PREVENT_BARE_TMUX_TARGETS = RegexRatchetRule(
+    rule_name="bare tmux -t targets",
+    rule_description=(
+        "tmux -t targets must use exact-session matching to prevent silent prefix-matching "
+        "bugs. Without a leading equals-sign on the target, tmux falls back to session "
+        "prefix matching, so a query for a stopped agent's session can silently land on a "
+        "still-running sibling whose name starts with the same prefix -- making the "
+        "stopped agent report as WAITING because the lifecycle check read the other "
+        "agent's pane. Construct targets via tmux_session_target() / tmux_window_target() "
+        "from imbue.mngr.hosts.tmux, or write the leading equals-sign literally. For "
+        "target-window/-pane commands an explicit :window component is required so tmux "
+        "doesn't parse the equals-sign-prefixed name as a literal window/pane name -- see "
+        "the tmux_window_target docstring. (list-panes -s is a special case: cmd-find.c "
+        "ignores the equals-sign prefix even though -s is documented as a target-session "
+        "form; guard with a has-session call first.)"
+    ),
+    # Catch `tmux <subcmd> ... -t '<target>'` where the quoted target starts with anything
+    # other than `=` (the exact-match prefix). Variable-interpolated targets without outer
+    # quotes -- `-t {var}` -- are unmatched and assumed safe by convention (the variable
+    # should hold a `tmux_*_target()` result).
+    pattern_string=r"\btmux\b(?:\s+(?:-[a-zA-Z]\S*|[a-z][a-z-]*))*\s+-t\s+'(?!=)",
+)

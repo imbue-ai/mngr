@@ -26,7 +26,7 @@ SIGNAL_EXIT_CODE_STOP: Final[int] = 11
 def build_post_attach_resize_script(session_name: str) -> str:
     """Build a shell command that resizes tmux windows and sends SIGWINCH.
 
-    After a tmux client attaches, resize all windows to match the client
+    After a tmux client attaches, resize each window to match the client
     (resize-window -A), then explicitly send SIGWINCH to each pane's child
     processes. The explicit SIGWINCH is needed because resize-window -A can
     be a no-op (and thus not trigger SIGWINCH) when the window already
@@ -36,12 +36,20 @@ def build_post_attach_resize_script(session_name: str) -> str:
     dependency on matching the agent's process name, which is unreliable
     (on macOS, Claude's process title shows as its version number rather
     than "claude").
+
+    Every tmux ``-t`` target uses the ``=`` exact-session prefix (with an
+    explicit ``:$W`` window component on target-window/-pane commands) so the
+    script cannot misroute to a sibling session whose name is a prefix of
+    ``session_name``. See :func:`imbue.mngr.hosts.tmux.tmux_window_target` for
+    the parsing rule.
     """
     return (
         f"tmux list-windows -t '={session_name}' -F '#I' | "
-        f"xargs -I{{}} tmux resize-window -t '{session_name}':{{}} -A; "
-        f"tmux list-panes -t '{session_name}' -F '#{{pane_pid}}' | "
-        f"xargs -I{{}} sh -c 'kill -WINCH {{}} $(pgrep -P {{}})' 2>/dev/null"
+        f"while read W; do "
+        f"tmux resize-window -t '={session_name}':$W -A; "
+        f"tmux list-panes -t '={session_name}':$W -F '#{{pane_pid}}' "
+        f"| xargs -I{{}} sh -c 'kill -WINCH {{}} $(pgrep -P {{}})' 2>/dev/null; "
+        f"done"
     )
 
 

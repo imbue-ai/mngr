@@ -29,6 +29,7 @@ from imbue.mngr.hosts.common import check_agent_type_known
 from imbue.mngr.hosts.common import determine_lifecycle_state
 from imbue.mngr.hosts.tmux import LONG_MESSAGE_THRESHOLD
 from imbue.mngr.hosts.tmux import capture_tmux_pane_content
+from imbue.mngr.hosts.tmux import tmux_window_target
 from imbue.mngr.interfaces.agent import AgentConfigT
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.data_types import FileTransferSpec
@@ -188,9 +189,14 @@ class BaseAgent(AgentInterface[AgentConfigT]):
         try:
             session_name = f"{self.mngr_ctx.config.prefix}{self.name}"
 
-            # Get pane state and pid in one command
+            # Get pane state and pid in one command. Use tmux_window_target so the
+            # session name is matched exactly -- otherwise tmux's prefix matching
+            # would route this query to a sibling session whose name starts with
+            # session_name (e.g. 'mngr-gemini' silently matching 'mngr-gemini-foo')
+            # and we'd read the wrong pane's state.
+            quoted_target = shlex.quote(tmux_window_target(session_name, 0))
             result = self.host.execute_idempotent_command(
-                f"tmux list-panes -t '{session_name}:0' "
+                f"tmux list-panes -t {quoted_target} "
                 f"-F '#{{pane_dead}}|#{{pane_current_command}}|#{{pane_pid}}' 2>/dev/null | head -n 1",
                 timeout_seconds=5.0,
             )
@@ -267,11 +273,17 @@ class BaseAgent(AgentInterface[AgentConfigT]):
     def tmux_target(self) -> str:
         """Tmux target for the agent's primary window (window 0).
 
-        Agents always run in window 0 of their tmux session. Using the bare
-        session name as a tmux target selects the *currently active* window,
-        which is wrong when additional windows exist (e.g., watchers, ttyd).
+        Returns an exact-match target of the form ``=<session>:0``:
+
+        * Agents always run in window 0 of their tmux session. Using the bare
+          session name as a tmux target selects the *currently active* window,
+          which is wrong when additional windows exist (e.g., watchers, ttyd).
+        * The leading ``=`` forces exact session matching so the target cannot
+          be silently rerouted by tmux's session-name prefix matching when this
+          agent's session has been torn down but another session whose name
+          starts with the same prefix is still alive.
         """
-        return f"{self.session_name}:0"
+        return tmux_window_target(self.session_name, 0)
 
     @contextmanager
     def _message_lock(self) -> Generator[None, None, None]:
@@ -351,9 +363,14 @@ class BaseAgent(AgentInterface[AgentConfigT]):
         For long messages (>= 1024 chars), writes the text to a temp file on
         the host and uses ``tmux load-buffer`` + ``tmux paste-buffer`` to avoid
         the tmux "command too long" error.
+
+        ``tmux_target`` must be a fully-formed exact-match target produced via
+        :func:`imbue.mngr.hosts.tmux.tmux_window_target` (or the ``tmux_target``
+        property on this agent).
         """
+        quoted_target = shlex.quote(tmux_target)
         if len(message) < LONG_MESSAGE_THRESHOLD:
-            send_msg_cmd = f"tmux send-keys -t '{tmux_target}' -l -- {shlex.quote(message)}"
+            send_msg_cmd = f"tmux send-keys -t {quoted_target} -l -- {shlex.quote(message)}"
             result = self.host.execute_stateful_command(send_msg_cmd)
             if not result.success:
                 raise SendMessageError(str(self.name), f"tmux send-keys failed: {result.stderr or result.stdout}")
@@ -369,7 +386,7 @@ class BaseAgent(AgentInterface[AgentConfigT]):
                     raise SendMessageError(
                         str(self.name), f"tmux load-buffer failed: {result.stderr or result.stdout}"
                     )
-                paste_cmd = f"tmux paste-buffer -b {quoted_buffer} -t '{tmux_target}'"
+                paste_cmd = f"tmux paste-buffer -b {quoted_buffer} -t {quoted_target}"
                 result = self.host.execute_stateful_command(paste_cmd)
                 if not result.success:
                     raise SendMessageError(
@@ -384,7 +401,7 @@ class BaseAgent(AgentInterface[AgentConfigT]):
         """Send a message directly without waiting for paste confirmation."""
         self._send_tmux_literal_keys(tmux_target, message)
 
-        send_enter_cmd = f"tmux send-keys -t '{tmux_target}' Enter"
+        send_enter_cmd = f"tmux send-keys -t {shlex.quote(tmux_target)} Enter"
         result = self.host.execute_stateful_command(send_enter_cmd)
         if not result.success:
             raise SendMessageError(str(self.name), f"tmux send-keys Enter failed: {result.stderr or result.stdout}")

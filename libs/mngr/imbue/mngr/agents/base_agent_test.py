@@ -1,6 +1,7 @@
 """Tests for BaseAgent lifecycle state detection and data methods."""
 
 import json
+import shlex
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
@@ -14,6 +15,7 @@ from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import SendMessageError
 from imbue.mngr.errors import UserInputError
+from imbue.mngr.hosts.tmux import tmux_window_target
 from imbue.mngr.interfaces.data_types import CommandResult
 from imbue.mngr.interfaces.host import DEFAULT_AGENT_READY_TIMEOUT_SECONDS
 from imbue.mngr.primitives import ActivitySource
@@ -334,11 +336,18 @@ def test_get_expected_process_name_uses_command_basename(
     assert test_agent.get_expected_process_name() == "sleep"
 
 
-def test_tmux_target_appends_window_zero(
+def test_tmux_target_uses_exact_match_window_zero(
     test_agent: BaseAgent,
 ) -> None:
-    """tmux_target should return session_name:0 to always target window 0."""
-    assert test_agent.tmux_target == f"{test_agent.session_name}:0"
+    """tmux_target should return =session_name:0.
+
+    The ``:0`` always pins window 0 so additional windows (watchers, ttyd) don't
+    misroute the target. The leading ``=`` forces exact session-name matching;
+    without it, tmux silently falls back to prefix matching and a query for
+    ``mngr-foo`` would match a live session called ``mngr-foo-bar`` once
+    ``mngr-foo`` is gone.
+    """
+    assert test_agent.tmux_target == f"={test_agent.session_name}:0"
 
 
 @pytest.mark.tmux
@@ -352,7 +361,7 @@ def test_send_tmux_literal_keys_short_message_with_leading_dash(
     `invalid flag --`, so the message never reaches the pane.
     """
     session_name = f"{test_agent.mngr_ctx.config.prefix}{test_agent.name}"
-    tmux_target = f"{session_name}:0"
+    tmux_target = tmux_window_target(session_name, 0)
     message = "--model gemma --flag-leading-message"
 
     # `cat` echoes typed characters via the PTY's line discipline, so the
@@ -368,7 +377,7 @@ def test_send_tmux_literal_keys_short_message_with_leading_dash(
 
         def _message_visible() -> bool:
             result = test_agent.host.execute_idempotent_command(
-                f"tmux capture-pane -t '{tmux_target}' -p",
+                f"tmux capture-pane -t {shlex.quote(tmux_target)} -p",
                 timeout_seconds=5.0,
             )
             return message in result.stdout

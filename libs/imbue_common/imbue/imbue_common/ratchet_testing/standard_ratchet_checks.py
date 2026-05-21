@@ -6,6 +6,7 @@ from imbue.imbue_common.ratchet_testing.common_ratchets import PREVENT_ASYNCIO_I
 from imbue.imbue_common.ratchet_testing.common_ratchets import PREVENT_BARE_EXCEPT
 from imbue.imbue_common.ratchet_testing.common_ratchets import PREVENT_BARE_GENERIC_TYPES
 from imbue.imbue_common.ratchet_testing.common_ratchets import PREVENT_BARE_PRINT
+from imbue.imbue_common.ratchet_testing.common_ratchets import PREVENT_BARE_TMUX_TARGETS
 from imbue.imbue_common.ratchet_testing.common_ratchets import PREVENT_BARE_URWID_TTY_SIGNAL_KEYS
 from imbue.imbue_common.ratchet_testing.common_ratchets import PREVENT_BASE_EXCEPTION_CATCH
 from imbue.imbue_common.ratchet_testing.common_ratchets import PREVENT_BROAD_EXCEPTION_CATCH
@@ -318,6 +319,10 @@ def check_os_fork(source_dir: Path, max_count: int) -> None:
 def check_bare_urwid_tty_signal_keys(source_dir: Path, max_count: int) -> None:
     chunks = check_ratchet_rule(PREVENT_BARE_URWID_TTY_SIGNAL_KEYS, source_dir, _SELF_EXCLUSION + ("urwid_utils.py",))
     assert len(chunks) <= max_count, PREVENT_BARE_URWID_TTY_SIGNAL_KEYS.format_failure(chunks)
+
+
+def check_bare_tmux_targets(source_dir: Path, max_count: int) -> None:
+    assert_ratchet(PREVENT_BARE_TMUX_TARGETS, source_dir, max_count)
 
 
 def check_direct_subprocess(
