@@ -245,9 +245,7 @@ def stop(ctx: click.Context, **kwargs: Any) -> None:
                     # agents still cannot proceed on an offline host.
                     _output(f"Host '{host_id_str}' is already stopped", output_opts)
                 else:
-                    raise HostOfflineError(
-                        f"Host '{host_id_str}' is offline. Cannot stop agents on offline hosts."
-                    )
+                    raise HostOfflineError(f"Host '{host_id_str}' is offline. Cannot stop agents on offline hosts.")
             case _ as unreachable:
                 assert_never(unreachable)
 
