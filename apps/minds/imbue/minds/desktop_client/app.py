@@ -1516,46 +1516,47 @@ def _build_providers_state_payload(backend_resolver: BackendResolverInterface) -
     disabled_names = list_disabled_provider_names()
     last_event_at, last_full_snapshot_at = backend_resolver.get_freshness_timestamps()
 
-    entries: list[dict[str, Any]] = []
+    # De-duplicate by name with priority disabled > error > ok. A provider can
+    # appear in multiple source buckets during the window between a Disable click
+    # (writes to minds' settings) and mngr observe's restart (rewrites the snapshot
+    # to drop the now-disabled provider). In that window the same name shows up in
+    # both `disabled_names` and the resolver's errored or healthy set. The user's
+    # explicitly recorded intent (disabled-in-settings) wins; transient error state
+    # wins over stale healthy state.
+    entry_by_name: dict[str, dict[str, Any]] = {}
     for provider in providers:
         name = str(provider.provider_name)
         if name in _HIDDEN_PROVIDER_NAMES_IN_PANEL:
             continue
-        entries.append(
-            {
-                "name": name,
-                "backend": str(provider.config.backend),
-                "status": "ok",
-                "is_enabled": provider.config.is_enabled if provider.config.is_enabled is not None else True,
-            }
-        )
+        entry_by_name[name] = {
+            "name": name,
+            "backend": str(provider.config.backend),
+            "status": "ok",
+            "is_enabled": provider.config.is_enabled if provider.config.is_enabled is not None else True,
+        }
     for provider_name, error in errored.items():
         name = str(provider_name)
         if name in _HIDDEN_PROVIDER_NAMES_IN_PANEL:
             continue
-        entries.append(
-            {
-                "name": name,
-                "backend": None,
-                "status": "error",
-                "is_enabled": True,
-                "error_type": error.type_name,
-                "error_message": error.message,
-            }
-        )
+        entry_by_name[name] = {
+            "name": name,
+            "backend": None,
+            "status": "error",
+            "is_enabled": True,
+            "error_type": error.type_name,
+            "error_message": error.message,
+        }
     for name in disabled_names:
         if name in _HIDDEN_PROVIDER_NAMES_IN_PANEL:
             continue
-        entries.append(
-            {
-                "name": name,
-                "backend": None,
-                "status": "disabled",
-                "is_enabled": False,
-            }
-        )
+        entry_by_name[name] = {
+            "name": name,
+            "backend": None,
+            "status": "disabled",
+            "is_enabled": False,
+        }
     # Stable alphabetical order by name across all categories.
-    entries.sort(key=lambda entry: entry["name"])
+    entries = sorted(entry_by_name.values(), key=lambda entry: entry["name"])
     return {
         "providers": entries,
         "last_event_at": last_event_at.isoformat() if last_event_at is not None else None,

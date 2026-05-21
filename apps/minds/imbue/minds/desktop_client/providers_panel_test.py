@@ -256,3 +256,61 @@ def test_build_providers_state_payload_combines_ok_error_disabled(
     assert by_name["modal"]["error_message"] == "token missing"
     assert by_name["zzz_last"]["status"] == "ok"
     assert by_name["zzz_last"]["backend"] == "docker"
+
+
+def test_build_providers_state_payload_dedups_provider_appearing_in_multiple_buckets(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """When the same name shows up in both the resolver's errored set and the on-disk disabled set,
+    only the disabled entry should appear (user intent wins over transient error state).
+
+    This happens during the window between the user clicking Disable on an errored provider and
+    mngr observe restarting with the new is_enabled=false setting.
+    """
+    monkeypatch.setenv(MINDS_ROOT_NAME_ENV_VAR, _ROOT_NAME)
+    settings_path = stub_mngr_host_dir(monkeypatch, tmp_path, _ROOT_NAME)
+    settings_path.write_text("[providers.modal]\nis_enabled = false\n")
+
+    errored_name = ProviderInstanceName("modal")
+    resolver = MngrCliBackendResolver()
+    resolver.update_providers(
+        providers=(),
+        error_by_provider_name={
+            errored_name: DiscoveryError(
+                type_name="ImbueCloudAuthError",
+                message="token missing",
+                provider_name=errored_name,
+            ),
+        },
+        last_full_snapshot_at=datetime.now(timezone.utc),
+    )
+
+    payload = _build_providers_state_payload(resolver)
+    names = [entry["name"] for entry in payload["providers"]]
+
+    # Only one entry per provider name, with disabled winning over error.
+    assert names == ["modal"]
+    assert payload["providers"][0]["status"] == "disabled"
+    assert payload["providers"][0]["is_enabled"] is False
+
+
+def test_build_providers_state_payload_dedups_healthy_provider_also_in_disabled_set(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Healthy-in-snapshot + disabled-on-disk should yield only the disabled entry (user intent wins)."""
+    monkeypatch.setenv(MINDS_ROOT_NAME_ENV_VAR, _ROOT_NAME)
+    settings_path = stub_mngr_host_dir(monkeypatch, tmp_path, _ROOT_NAME)
+    settings_path.write_text("[providers.docker]\nis_enabled = false\n")
+
+    resolver = MngrCliBackendResolver()
+    resolver.update_providers(
+        providers=(_make_discovered_provider("docker"),),
+        error_by_provider_name={},
+        last_full_snapshot_at=datetime.now(timezone.utc),
+    )
+
+    payload = _build_providers_state_payload(resolver)
+    names = [entry["name"] for entry in payload["providers"]]
+
+    assert names == ["docker"]
+    assert payload["providers"][0]["status"] == "disabled"
