@@ -39,9 +39,23 @@ _NODE_READY_TIMEOUT_SECONDS: Final[float] = 15.0
 _POLL_INTERVAL_SECONDS: Final[float] = 0.02
 
 _FILE_SHARING_SCOPE_SCHEMA_NAME: Final[str] = "minds-file-server"
-_FILE_SHARING_PROXY_PATH: Final[str] = "/extensions/minds-api-proxy/api/v1/file-server"
+_FILE_SHARING_PROXY_PATH_PREFIX: Final[str] = "/extensions/minds-api-proxy/api/v1/files"
 _FILE_SHARING_GATEWAY_HOST: Final[str] = "latchkey-self.invalid"
 _FILE_SHARING_PERMISSION_PREFIX: Final[str] = "minds-file-server-"
+_FILE_SHARING_ALLOWED_METHODS: Final[tuple[str, ...]] = (
+    "GET",
+    "HEAD",
+    "OPTIONS",
+    "PUT",
+    "DELETE",
+    "PROPFIND",
+    "PROPPATCH",
+    "MKCOL",
+    "COPY",
+    "MOVE",
+    "LOCK",
+    "UNLOCK",
+)
 
 
 pytestmark = pytest.mark.skipif(_NODE_BINARY is None, reason="node binary not available on PATH")
@@ -247,14 +261,28 @@ def test_post_creates_file_sharing_request_with_schemas_and_rules(
     assert effect["rules"] == [{_FILE_SHARING_SCOPE_SCHEMA_NAME: [permission_name]}]
     schemas = effect["schemas"]
     assert set(schemas.keys()) == {_FILE_SHARING_SCOPE_SCHEMA_NAME, permission_name}
-    # The scope schema constrains the gateway-self host + proxy path.
+    # The scope schema constrains the gateway-self host + matches any
+    # URL under the WebDAV mount (per-file pinning happens at the
+    # permission-schema level below).
     scope_schema = schemas[_FILE_SHARING_SCOPE_SCHEMA_NAME]
     assert scope_schema["properties"]["domain"] == {"const": _FILE_SHARING_GATEWAY_HOST}
-    assert scope_schema["properties"]["path"] == {"const": _FILE_SHARING_PROXY_PATH}
-    # The per-path permission schema constrains queryParams.path.
+    # The JS escape on the extension side only escapes the regex
+    # metacharacters ``.*+?^${}()|[]\``; ASCII-letter / dash / slash
+    # segments of the prefix pass through verbatim. The pattern below
+    # mirrors that exactly so the assert catches schema drift but does
+    # not over-specify the escape policy.
+    expected_scope_path_pattern = r"^/extensions/minds-api-proxy/api/v1/files(/.*)?$"
+    assert scope_schema["properties"]["path"] == {
+        "type": "string",
+        "pattern": expected_scope_path_pattern,
+    }
+    # The per-path permission schema pins the URL path to the WebDAV
+    # URL for this specific file and the method to the WebDAV verb
+    # whitelist.
     perm_schema = schemas[permission_name]
-    assert perm_schema["properties"]["queryParams"]["properties"]["path"] == {"const": target_path}
-    assert perm_schema["properties"]["method"] == {"enum": ["GET", "POST"]}
+    expected_webdav_path = f"{_FILE_SHARING_PROXY_PATH_PREFIX}{target_path}"
+    assert perm_schema["properties"]["path"] == {"const": expected_webdav_path}
+    assert perm_schema["properties"]["method"] == {"enum": list(_FILE_SHARING_ALLOWED_METHODS)}
 
 
 def test_post_rejects_unknown_type(node_extension: tuple[str, Path, Path]) -> None:

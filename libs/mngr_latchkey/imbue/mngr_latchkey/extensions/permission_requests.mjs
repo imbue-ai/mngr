@@ -99,17 +99,41 @@ const VALID_REQUEST_TYPES = new Set([REQUEST_TYPE_PREDEFINED, REQUEST_TYPE_FILE_
 // Names and constants used when generating the ``effect`` for a
 // ``file-sharing`` request. The agent reaches the Minds API through
 // the gateway's ``minds-api-proxy`` extension, which mounts under
-// ``/extensions/minds-api-proxy/...``. ``/api/v1/file-server`` is the
-// Minds-side endpoint that actually serves files; granting access to a
-// specific file therefore means matching exactly the upstream proxy
-// path + the ``?path=<absolute>`` query parameter. We mint a dedicated
-// scope schema (``minds-file-server``) so the per-file permission
-// schemas have a clean place to attach without polluting the
-// generic ``latchkey-self`` scope used by the agent baseline.
+// ``/extensions/minds-api-proxy/...``. ``/api/v1/files`` is the
+// Minds-side WebDAV mount that actually serves files: a request for
+// the file ``/abs/path`` lands at the URL path
+// ``/api/v1/files/abs/path`` (the WebDAV share roots are mounted at
+// their on-disk path, so the outward URL mirrors the absolute path
+// one-to-one). Granting access to a specific file therefore means
+// matching the URL path exactly. We mint a dedicated scope schema
+// (``minds-file-server``) that catches every request under the
+// WebDAV mount and a per-file permission schema that nails it down
+// to the one allowed URL + a WebDAV method.
 const FILE_SHARING_GATEWAY_HOST = 'latchkey-self.invalid';
-const FILE_SHARING_PROXY_PATH = '/extensions/minds-api-proxy/api/v1/file-server';
+const FILE_SHARING_PROXY_PATH_PREFIX = '/extensions/minds-api-proxy/api/v1/files';
 const FILE_SHARING_SCOPE_SCHEMA_NAME = 'minds-file-server';
 const FILE_SHARING_PERMISSION_PREFIX = 'minds-file-server-';
+// WebDAV verbs an approved grant unlocks for the named file. ``GET`` /
+// ``HEAD`` read; ``PUT`` writes; ``DELETE`` removes; ``PROPFIND`` /
+// ``PROPPATCH`` query and set properties; ``MKCOL`` creates a
+// directory at the path; ``COPY`` / ``MOVE`` reshape; ``LOCK`` /
+// ``UNLOCK`` are WebDAV's advisory locking primitives; ``OPTIONS``
+// is the WebDAV capability probe a client typically issues before
+// anything else.
+const FILE_SHARING_ALLOWED_METHODS = [
+  'GET',
+  'HEAD',
+  'OPTIONS',
+  'PUT',
+  'DELETE',
+  'PROPFIND',
+  'PROPPATCH',
+  'MKCOL',
+  'COPY',
+  'MOVE',
+  'LOCK',
+  'UNLOCK',
+];
 
 class PermissionRequestsExtensionError extends Error {
   constructor(statusCode, message) {
@@ -375,29 +399,49 @@ function fileSharingPermissionSchemaName(filePath) {
   return `${FILE_SHARING_PERMISSION_PREFIX}${hash}`;
 }
 
+/**
+ * Escape a literal string for safe inclusion in a JavaScript regular
+ * expression. The proxy-path prefix is plain ASCII today, but we run
+ * it through this on the way into the scope-schema pattern so any
+ * future change that introduces a regex metacharacter doesn't
+ * silently broaden the match.
+ */
+function escapeForRegex(literal) {
+  return literal.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/**
+ * Compute the JSON-Schema ``pattern`` that matches every URL path
+ * under the WebDAV mount: the bare prefix (used by tooling that pokes
+ * the mount root) plus anything below it. We pin to ``^...$`` so the
+ * scope only catches requests that are *actually* on this mount.
+ */
+function fileSharingScopePathPattern() {
+  return `^${escapeForRegex(FILE_SHARING_PROXY_PATH_PREFIX)}(/.*)?$`;
+}
+
 function computeFileSharingEffect(filePath) {
   const permissionSchemaName = fileSharingPermissionSchemaName(filePath);
+  // WebDAV serves the on-disk path directly under the mount, so the
+  // permission's URL path is the prefix + the absolute file path.
+  // ``validateAbsoluteFileSharingPath`` has already guaranteed that
+  // ``filePath`` starts with ``/`` and is traversal-free.
+  const fileWebdavPath = `${FILE_SHARING_PROXY_PATH_PREFIX}${filePath}`;
   return {
     schemas: {
       [FILE_SHARING_SCOPE_SCHEMA_NAME]: {
         properties: {
           domain: { const: FILE_SHARING_GATEWAY_HOST },
-          path: { const: FILE_SHARING_PROXY_PATH },
+          path: { type: 'string', pattern: fileSharingScopePathPattern() },
         },
         required: ['domain', 'path'],
       },
       [permissionSchemaName]: {
         properties: {
-          method: { enum: ['GET', 'POST'] },
-          queryParams: {
-            type: 'object',
-            properties: {
-              path: { const: filePath },
-            },
-            required: ['path'],
-          },
+          method: { enum: [...FILE_SHARING_ALLOWED_METHODS] },
+          path: { const: fileWebdavPath },
         },
-        required: ['method', 'queryParams'],
+        required: ['method', 'path'],
       },
     },
     rules: [{ [FILE_SHARING_SCOPE_SCHEMA_NAME]: [permissionSchemaName] }],

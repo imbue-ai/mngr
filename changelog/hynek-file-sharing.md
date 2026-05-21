@@ -34,6 +34,14 @@ request schema and a new approve endpoint:
 * The legacy `DELETE /permission-requests/<id>` continues to remove
   a pending request without applying its effect; the minds desktop
   client uses it for the deny path.
+* The `file-sharing` effect now targets the WebDAV mount described
+  below: the scope schema matches any URL under
+  `/extensions/minds-api-proxy/api/v1/files` via a `pattern`, and the
+  per-file permission schema const-matches the URL path itself
+  (`/extensions/minds-api-proxy/api/v1/files<absolute_path>`) with a
+  WebDAV-verb method enum (`GET`, `HEAD`, `OPTIONS`, `PUT`, `DELETE`,
+  `PROPFIND`, `PROPPATCH`, `MKCOL`, `COPY`, `MOVE`, `LOCK`, `UNLOCK`).
+  The legacy `queryParams.path` constraint is gone.
 
 The minds desktop client's latchkey-permission handler code was
 reorganised so the two permission request types now live as siblings
