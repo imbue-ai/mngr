@@ -23,7 +23,6 @@ import pytest
 from starlette.testclient import TestClient
 
 from imbue.minds.bootstrap import MINDS_ROOT_NAME_ENV_VAR
-from imbue.minds.bootstrap import mngr_host_dir_for
 from imbue.minds.desktop_client.app import _build_providers_state_payload
 from imbue.minds.desktop_client.app import create_desktop_client
 from imbue.minds.desktop_client.auth import FileAuthStore
@@ -31,6 +30,7 @@ from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
 from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
 from imbue.minds.desktop_client.cookie_manager import create_session_cookie
+from imbue.minds.testing import stub_mngr_host_dir
 from imbue.mngr.api.discovery_events import DiscoveredProvider
 from imbue.mngr.api.discovery_events import DiscoveryError
 from imbue.mngr.api.discovery_events import make_discovered_provider
@@ -39,23 +39,6 @@ from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
 
 _ROOT_NAME = "minds-dev-tname"
-
-
-def _stub_mngr_host_dir(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, root_name: str) -> Path:
-    """Mirror of ``bootstrap_test._stub_mngr_host_dir``.
-
-    Redirect ``Path.home()`` to ``tmp_path`` and seed an empty mngr profile
-    so ``set_provider_is_enabled`` has a settings.toml path to write to.
-    Returns the active settings.toml path (which may not exist yet on entry).
-    """
-    monkeypatch.setenv("HOME", str(tmp_path))
-    mngr_host_dir = mngr_host_dir_for(root_name)
-    mngr_host_dir.mkdir(parents=True, exist_ok=True)
-    profile_id = "testprofile"
-    (mngr_host_dir / "config.toml").write_text(f'profile = "{profile_id}"\n')
-    settings_dir = mngr_host_dir / "profiles" / profile_id
-    settings_dir.mkdir(parents=True, exist_ok=True)
-    return settings_dir / "settings.toml"
 
 
 def _make_test_client(tmp_path: Path) -> tuple[TestClient, FileAuthStore]:
@@ -83,7 +66,7 @@ def _authenticate(client: TestClient, auth_store: FileAuthStore) -> None:
 def test_provider_toggle_requires_authentication(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """Unauthenticated POST is rejected with 403 and does not touch settings."""
     monkeypatch.setenv(MINDS_ROOT_NAME_ENV_VAR, _ROOT_NAME)
-    settings_path = _stub_mngr_host_dir(monkeypatch, tmp_path, _ROOT_NAME)
+    settings_path = stub_mngr_host_dir(monkeypatch, tmp_path, _ROOT_NAME)
     client, _ = _make_test_client(tmp_path)
 
     response = client.post("/api/providers/modal/toggle", json={"is_enabled": False})
@@ -95,7 +78,7 @@ def test_provider_toggle_requires_authentication(monkeypatch: pytest.MonkeyPatch
 def test_provider_toggle_returns_400_on_non_json_body(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """A non-JSON body is rejected with 400 and settings are not modified."""
     monkeypatch.setenv(MINDS_ROOT_NAME_ENV_VAR, _ROOT_NAME)
-    settings_path = _stub_mngr_host_dir(monkeypatch, tmp_path, _ROOT_NAME)
+    settings_path = stub_mngr_host_dir(monkeypatch, tmp_path, _ROOT_NAME)
     client, auth_store = _make_test_client(tmp_path)
     _authenticate(client, auth_store)
 
@@ -123,7 +106,7 @@ def test_provider_toggle_returns_400_when_is_enabled_missing_or_wrong_type(
 ) -> None:
     """``is_enabled`` must be present and a bool; otherwise 400 and no settings write."""
     monkeypatch.setenv(MINDS_ROOT_NAME_ENV_VAR, _ROOT_NAME)
-    settings_path = _stub_mngr_host_dir(monkeypatch, tmp_path, _ROOT_NAME)
+    settings_path = stub_mngr_host_dir(monkeypatch, tmp_path, _ROOT_NAME)
     client, auth_store = _make_test_client(tmp_path)
     _authenticate(client, auth_store)
 
@@ -138,7 +121,7 @@ def test_provider_toggle_writes_settings_and_returns_changed_true(
 ) -> None:
     """Happy path: flips ``is_enabled`` in the toml file and returns ``changed=True``."""
     monkeypatch.setenv(MINDS_ROOT_NAME_ENV_VAR, _ROOT_NAME)
-    settings_path = _stub_mngr_host_dir(monkeypatch, tmp_path, _ROOT_NAME)
+    settings_path = stub_mngr_host_dir(monkeypatch, tmp_path, _ROOT_NAME)
     client, auth_store = _make_test_client(tmp_path)
     _authenticate(client, auth_store)
 
@@ -154,7 +137,7 @@ def test_provider_toggle_writes_settings_and_returns_changed_true(
 def test_provider_toggle_is_idempotent(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """A second identical call returns ``changed=False`` without rewriting the file."""
     monkeypatch.setenv(MINDS_ROOT_NAME_ENV_VAR, _ROOT_NAME)
-    settings_path = _stub_mngr_host_dir(monkeypatch, tmp_path, _ROOT_NAME)
+    settings_path = stub_mngr_host_dir(monkeypatch, tmp_path, _ROOT_NAME)
     client, auth_store = _make_test_client(tmp_path)
     _authenticate(client, auth_store)
 
@@ -211,7 +194,7 @@ def test_build_providers_state_payload_combines_ok_error_disabled(
 ) -> None:
     """Healthy + errored + disabled providers all appear, sorted alphabetically."""
     monkeypatch.setenv(MINDS_ROOT_NAME_ENV_VAR, _ROOT_NAME)
-    settings_path = _stub_mngr_host_dir(monkeypatch, tmp_path, _ROOT_NAME)
+    settings_path = stub_mngr_host_dir(monkeypatch, tmp_path, _ROOT_NAME)
     # Seed a [providers.docker] is_enabled=false block on disk so
     # list_disabled_provider_names() surfaces it.
     settings_path.write_text("[providers.docker]\nis_enabled = false\n")

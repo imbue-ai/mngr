@@ -20,6 +20,7 @@ from imbue.minds.bootstrap import resolve_minds_root_name
 from imbue.minds.bootstrap import root_name_for_env_name
 from imbue.minds.bootstrap import set_imbue_cloud_provider_for_account
 from imbue.minds.bootstrap import set_provider_is_enabled
+from imbue.minds.testing import stub_mngr_host_dir
 
 
 def _clear_env(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -248,30 +249,11 @@ def test_minds_root_name_pattern_canonical_examples() -> None:
     assert re.fullmatch(MINDS_ROOT_NAME_PATTERN, "minds-ci-a") is None
 
 
-def _stub_mngr_host_dir(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, root_name: str) -> Path:
-    """Redirect ``Path.home()`` to ``tmp_path`` and seed a minimal mngr profile.
-
-    Returns the active ``settings.toml`` path. The bootstrap helpers refuse
-    to write anything until ``config.toml`` and the matching profile dir
-    exist, so we materialize them up front. ``Path.home()`` consults
-    ``$HOME`` on Linux/macOS, so swapping that in via monkeypatch.setenv
-    is enough to redirect the helpers without touching ``Path`` itself.
-    """
-    monkeypatch.setenv("HOME", str(tmp_path))
-    mngr_host_dir = mngr_host_dir_for(root_name)
-    mngr_host_dir.mkdir(parents=True, exist_ok=True)
-    profile_id = "testprofile"
-    (mngr_host_dir / "config.toml").write_text(f'profile = "{profile_id}"\n')
-    settings_dir = mngr_host_dir / "profiles" / profile_id
-    settings_dir.mkdir(parents=True, exist_ok=True)
-    return settings_dir / "settings.toml"
-
-
 _FAKE_CONNECTOR_URL = "https://test--rsc-api.modal.run"
 
 
 def test_set_imbue_cloud_provider_for_account_writes_block(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    settings_path = _stub_mngr_host_dir(monkeypatch, tmp_path, "minds-dev-tname")
+    settings_path = stub_mngr_host_dir(monkeypatch, tmp_path, "minds-dev-tname")
     changed = set_imbue_cloud_provider_for_account(
         "alice@example.com",
         connector_url=_FAKE_CONNECTOR_URL,
@@ -291,7 +273,7 @@ def test_set_imbue_cloud_provider_for_account_writes_block(monkeypatch: pytest.M
 def test_set_provider_is_enabled_flips_is_enabled_on_existing_block(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    settings_path = _stub_mngr_host_dir(monkeypatch, tmp_path, "minds-dev-tname")
+    settings_path = stub_mngr_host_dir(monkeypatch, tmp_path, "minds-dev-tname")
     set_imbue_cloud_provider_for_account(
         "alice@example.com",
         connector_url=_FAKE_CONNECTOR_URL,
@@ -316,7 +298,7 @@ def test_set_provider_is_enabled_creates_override_block_for_missing_provider(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """When [providers.<name>] doesn't exist in minds' settings, it's created with just is_enabled."""
-    settings_path = _stub_mngr_host_dir(monkeypatch, tmp_path, "minds-dev-tname")
+    settings_path = stub_mngr_host_dir(monkeypatch, tmp_path, "minds-dev-tname")
 
     changed = set_provider_is_enabled("docker", False, root_name="minds-dev-tname")
     assert changed is True
@@ -334,7 +316,7 @@ def test_set_provider_is_enabled_creates_settings_file_when_missing(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """If minds' active settings file does not yet exist, it is created."""
-    settings_path = _stub_mngr_host_dir(monkeypatch, tmp_path, "minds-dev-tname")
+    settings_path = stub_mngr_host_dir(monkeypatch, tmp_path, "minds-dev-tname")
     # Make sure no file exists yet
     if settings_path.exists():
         settings_path.unlink()
@@ -347,7 +329,7 @@ def test_set_provider_is_enabled_creates_settings_file_when_missing(
 
 
 def test_set_force_enable_re_enables_disabled_block(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    settings_path = _stub_mngr_host_dir(monkeypatch, tmp_path, "minds-dev-tname")
+    settings_path = stub_mngr_host_dir(monkeypatch, tmp_path, "minds-dev-tname")
     set_imbue_cloud_provider_for_account(
         "alice@example.com",
         connector_url=_FAKE_CONNECTOR_URL,
@@ -370,7 +352,7 @@ def test_set_preserve_does_not_re_enable_disabled_block(monkeypatch: pytest.Monk
     """The bootstrap reconcile path must leave a previously auto-disabled
     provider disabled -- only an explicit signin event force-enables.
     """
-    settings_path = _stub_mngr_host_dir(monkeypatch, tmp_path, "minds-dev-tname")
+    settings_path = stub_mngr_host_dir(monkeypatch, tmp_path, "minds-dev-tname")
     set_imbue_cloud_provider_for_account(
         "alice@example.com",
         connector_url=_FAKE_CONNECTOR_URL,
@@ -396,7 +378,7 @@ def test_ensure_mngr_settings_writes_default_imbue_cloud_disabled(
     instance so ``get_all_provider_instances`` doesn't auto-create one alongside
     the per-account ``imbue_cloud_<slug>`` entries.
     """
-    settings_path = _stub_mngr_host_dir(monkeypatch, tmp_path, "minds-dev-tname")
+    settings_path = stub_mngr_host_dir(monkeypatch, tmp_path, "minds-dev-tname")
     _ensure_mngr_settings("minds-dev-tname")
     parsed = tomllib.loads(settings_path.read_text())
     assert parsed["providers"]["imbue_cloud"] == {"backend": "imbue_cloud", "is_enabled": False}
@@ -418,7 +400,7 @@ def test_set_imbue_cloud_provider_for_account_also_writes_default_disabled_block
     dir doesn't exist yet at startup), so ``set_imbue_cloud_provider_for_account``
     has to ensure it as part of writing the per-account block.
     """
-    settings_path = _stub_mngr_host_dir(monkeypatch, tmp_path, "minds-staging")
+    settings_path = stub_mngr_host_dir(monkeypatch, tmp_path, "minds-staging")
     set_imbue_cloud_provider_for_account(
         "josh@imbue.com",
         connector_url=_FAKE_CONNECTOR_URL,
@@ -441,7 +423,7 @@ def test_set_imbue_cloud_provider_for_account_repairs_missing_default_block_on_r
     even when the per-account block itself is unchanged and the function
     short-circuits its per-account write path.
     """
-    settings_path = _stub_mngr_host_dir(monkeypatch, tmp_path, "minds-staging")
+    settings_path = stub_mngr_host_dir(monkeypatch, tmp_path, "minds-staging")
     # Pre-seed: a per-account block exists but the suppression block is missing
     # (mirrors the on-disk state of a staging env that signed in before the
     # fix landed).
