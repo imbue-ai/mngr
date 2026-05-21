@@ -155,19 +155,27 @@
       function postRestart(path, tier) {
         attemptedTier = tier;
         renderInFlight();
-        fetch('/api/agents/' + encodeURIComponent(agentId) + path, {
-          method: 'POST',
-          credentials: 'same-origin',
-        }).catch(function () {
-          // A failed dispatch POST still leaves the tracker untouched only if
-          // it never reached the server; the recovery path is SSE-driven, so
-          // surface a generic failure rather than hanging on "Restarting".
+        // A dispatch failure -- whether the POST never reached the server or it
+        // came back with an error status -- leaves the tracker untouched, so no
+        // SSE event will ever arrive. Surface a failure instead of hanging on
+        // "Restarting".
+        function handleDispatchFailure() {
           if (tier === 'host') {
             renderTerminal('Could not reach minds to start the restart.');
           } else {
             renderHostOffer(true);
           }
-        });
+        }
+        fetch('/api/agents/' + encodeURIComponent(agentId) + path, {
+          method: 'POST',
+          credentials: 'same-origin',
+        }).then(function (resp) {
+          // fetch() only rejects on a network error; an error *status* (403 /
+          // 503 / 5xx) still resolves. The restart endpoint returns 202 once it
+          // has marked the tracker RESTARTING -- any other status means the
+          // dispatch did not start and the SSE-driven recovery will not happen.
+          if (!resp.ok) handleDispatchFailure();
+        }, handleDispatchFailure);
       }
 
       surgicalBtn.addEventListener('click', function () {
