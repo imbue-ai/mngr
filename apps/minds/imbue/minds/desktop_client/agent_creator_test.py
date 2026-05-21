@@ -344,21 +344,22 @@ def test_wait_for_workspace_ready_returns_when_probe_succeeds(tmp_path) -> None:
     assert any("ready" in line.lower() for line in drained)
 
 
-def test_wait_for_workspace_ready_calls_record_success_on_ready(tmp_path) -> None:
+def test_wait_for_workspace_ready_calls_record_probe_success_on_ready(tmp_path) -> None:
     """Regression: a successful readiness probe must propagate to the health tracker.
 
-    Without the ``record_success`` call, a HEALTHY->STUCK timer armed by an
-    earlier ``system_interface_backend_failure`` envelope would fire AFTER readiness
-    returned, the chrome SSE would receive ``status=stuck``, and the user
-    would land on the workspace-recovery page seconds after their freshly
-    created agent appeared healthy. See ``system_interface_health.py`` for
-    the timer's lifecycle.
+    Without the ``record_probe_success`` call, the agent stays enrolled as a
+    suspect probe target after an earlier ``system_interface_backend_failure``
+    envelope, the background probe loop keeps accumulating a probe-failure run
+    while the container warms up, and the agent would be driven to STUCK --
+    landing the user on the recovery page seconds after their freshly created
+    agent appeared healthy. See ``system_interface_health.py`` for the
+    suspect / probe-failure-run lifecycle.
     """
     tracker = SystemInterfaceHealthTracker()
     aid = AgentId.generate()
-    # Pre-arm the STUCK timer the way an in-flight warmup failure would.
-    # The agent stays HEALTHY until the 5s timer fires; we want to verify
-    # ``record_success`` cancels the timer before that.
+    # Enroll the agent as a suspect the way an in-flight warmup failure would.
+    # The agent stays HEALTHY; we want to verify ``record_probe_success``
+    # de-enrolls it so the background probe loop stops polling it.
     tracker.record_failure(aid)
     assert tracker.get_health(aid) == AgentHealth.HEALTHY
     server, _thread, port = _start_scripted_server(not_ready_count=0)
@@ -375,11 +376,11 @@ def test_wait_for_workspace_ready_calls_record_success_on_ready(tmp_path) -> Non
         creator._wait_for_workspace_ready(aid, queue.Queue())
     finally:
         server.shutdown()
-    # ``record_success`` cancelled the timer + cleared first_failure_at, so
-    # any subsequent record_failure would arm a fresh timer (i.e. the
-    # tracker is no longer mid-failing-run for this agent).
+    # ``record_probe_success`` de-enrolled the agent, so it is no longer a
+    # probe target and the background loop will stop polling it.
     assert tracker.get_health(aid) == AgentHealth.HEALTHY
     assert aid not in tracker.snapshot_all()
+    assert aid not in tracker.snapshot_probe_targets()
 
 
 def test_wait_for_workspace_ready_publishes_anyway_on_timeout(tmp_path) -> None:

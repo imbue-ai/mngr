@@ -247,9 +247,9 @@ def run(
     # the plugin (registered as a callback below) and on the readiness-probe
     # success that ``_wait_for_workspace_ready`` reports through AgentCreator.
     # Constructed here (instead of inside create_desktop_client) so it can
-    # be threaded into both AgentCreator (for record_success) and consumer's
-    # failure callback (registered before consumer.start() below; otherwise
-    # early failures would dispatch against an empty list).
+    # be threaded into both AgentCreator (for record_probe_success) and the
+    # consumer's failure callback (registered before consumer.start() below;
+    # otherwise early failures would dispatch against an empty list).
     system_interface_health_tracker = SystemInterfaceHealthTracker()
     consumer.add_on_system_interface_backend_failure_callback(
         lambda agent_id, _reason, _status: system_interface_health_tracker.record_failure(agent_id)

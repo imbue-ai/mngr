@@ -908,11 +908,11 @@ class AgentCreator(MutableModel):
         description=(
             "Per-process health tracker shared with the ``mngr forward`` ``system_interface_backend_failure`` "
             "envelope consumer and the background system-interface-health probe loop. ``_wait_for_workspace_ready`` "
-            "calls ``record_success`` on the probe that breaks out of its readiness loop, which cancels "
-            "any pending HEALTHY->STUCK timer the warmup failures have already armed. Without this call, "
-            "every workspace creation that takes >5s for its container's ``system-interface`` to "
-            "bind ``:8000`` (i.e. most of them) trips a spurious STUCK transition and the chrome jumps "
-            "to the recovery page right after the user lands on the workspace."
+            "calls ``record_probe_success`` on the probe that breaks out of its readiness loop, which clears "
+            "the probe-failure run the container's warmup failures have accumulated. Without this call, "
+            "a workspace creation whose ``system-interface`` takes a while to bind ``:8000`` would let the "
+            "background probe loop drive the agent to STUCK and jump the chrome to the recovery page right "
+            "after the user lands on the workspace."
         ),
     )
     workspace_ready_timeout_seconds: float = Field(
@@ -1455,17 +1455,18 @@ class AgentCreator(MutableModel):
                         # Propagate the success into the shared health tracker.
                         # Earlier probes in this loop go through ``mngr forward``
                         # too, and each one's connect-refused failure trips a
-                        # ``system_interface_backend_failure`` envelope that arms
-                        # a 5-second HEALTHY->STUCK timer on the tracker. Without
-                        # this explicit ``record_success`` the timer fires
-                        # *after* we return (because no other success path
-                        # flows back into the tracker until the background
-                        # probe loop next ticks, ~2s later), the chrome jumps
-                        # to the recovery page, and the user sees a "System
-                        # interface not responding" page seconds after their
-                        # freshly-created agent appeared healthy. Idempotent
-                        # if the tracker has no record for this agent.
-                        self.system_interface_health_tracker.record_success(agent_id)
+                        # ``system_interface_backend_failure`` envelope that
+                        # enrolls the freshly-created agent as a suspect probe
+                        # target. The background probe loop then polls it and,
+                        # while the container's system-interface is still
+                        # warming up, accumulates a probe-failure run that would
+                        # transition the agent to STUCK. This explicit
+                        # ``record_probe_success`` clears the run and suspect
+                        # flag the moment readiness is confirmed, so the chrome
+                        # does not jump to the recovery page right after the
+                        # user lands on their freshly-created workspace.
+                        # Idempotent if the tracker has no record for this agent.
+                        self.system_interface_health_tracker.record_probe_success(agent_id)
                         return
                 threading.Event().wait(timeout=self.workspace_ready_poll_interval_seconds)
         logger.warning(

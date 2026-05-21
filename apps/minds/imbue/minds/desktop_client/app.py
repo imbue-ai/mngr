@@ -1779,11 +1779,11 @@ def _run_restart_sequence(
     # Without a plugin route there is no way to probe for recovery, so treat a
     # clean dispatch as success (mirrors the background probe loop being a no-op).
     if mngr_forward_port == 0 or not mngr_forward_preauth_cookie:
-        tracker.record_success(workspace_agent_id)
+        tracker.record_probe_success(workspace_agent_id)
         return
 
     if _await_system_interface_ready(workspace_agent_id, mngr_forward_port, mngr_forward_preauth_cookie):
-        tracker.record_success(workspace_agent_id)
+        tracker.record_probe_success(workspace_agent_id)
     else:
         tracker.mark_restart_failed(
             workspace_agent_id,
@@ -2828,9 +2828,10 @@ def create_desktop_client(
     return app
 
 
-# How often the background probe loop polls agents that are currently STUCK
-# or RESTARTING. Picked to match the old branch's recovery-poll cadence
-# (the plan's default for the open question on probe interval).
+# How often the background probe loop polls each suspect / non-HEALTHY agent.
+# This is also the resolution of the HEALTHY -> STUCK decision: a workspace is
+# marked STUCK once its probe-failure run reaches ``stuck_threshold_seconds``,
+# so STUCK fires at most one interval after the threshold elapses.
 _HEALTH_PROBE_INTERVAL_SECONDS: Final[float] = 2.0
 
 
@@ -2841,17 +2842,24 @@ def start_system_interface_health_probe_loop(
     mngr_forward_preauth_cookie: str | None,
     root_concurrency_group: ConcurrencyGroup | None,
 ) -> None:
-    """Start a background thread that probes STUCK / RESTARTING agents.
+    """Start a background thread that probes suspect / non-HEALTHY agents.
 
-    For each non-HEALTHY agent in the tracker, the thread polls the plugin's
-    per-agent subdomain every ``_HEALTH_PROBE_INTERVAL_SECONDS``. A 200
-    response flips the tracker back to HEALTHY (which fires the on-change
-    callback feeding the SSE stream). The thread silently no-ops when there
-    are no non-HEALTHY agents.
+    For each agent the tracker reports as a probe target (suspect agents
+    enrolled by a failure envelope, plus STUCK / RESTARTING / RESTART_FAILED
+    agents), the thread polls the plugin's per-agent subdomain every
+    ``_HEALTH_PROBE_INTERVAL_SECONDS``. A 200 response flips the tracker back
+    to HEALTHY; any other result is reported as a probe failure, and a run of
+    probe failures lasting ``stuck_threshold_seconds`` transitions a suspect
+    agent to STUCK. Either way the on-change callback feeding the SSE stream
+    fires. The thread silently no-ops when there are no probe targets.
+
+    This loop is the single authority on STUCK: a ``system_interface_backend_failure``
+    envelope only enrolls an agent as suspect, and STUCK is reached solely
+    through probe failures observed here.
 
     Probing is skipped entirely when the plugin port or preauth cookie are
     unset (e.g. minds running without the plugin) -- without a working
-    plugin route there is no way to ask whether the workspace recovered.
+    plugin route there is no way to ask whether the workspace is reachable.
     """
     if mngr_forward_port == 0 or not mngr_forward_preauth_cookie or root_concurrency_group is None:
         return
@@ -2887,7 +2895,7 @@ def _run_system_interface_health_probe_loop(
         probe_timeout_seconds=_WORKSPACE_PROBE_TIMEOUT_SECONDS,
     ) as probe_client:
         while not root_concurrency_group.is_shutting_down():
-            for aid in tracker.snapshot_all():
+            for aid in tracker.snapshot_probe_targets():
                 probe_status = probe_workspace_through_plugin(
                     mngr_forward_port=mngr_forward_port,
                     preauth_cookie=mngr_forward_preauth_cookie,
@@ -2896,5 +2904,7 @@ def _run_system_interface_health_probe_loop(
                     client=probe_client,
                 )
                 if probe_status == 200:
-                    tracker.record_success(aid)
+                    tracker.record_probe_success(aid)
+                else:
+                    tracker.record_probe_failure(aid)
             threading.Event().wait(timeout=_HEALTH_PROBE_INTERVAL_SECONDS)
