@@ -6,5 +6,7 @@ User-visible changes:
   `status-left-length` to fit the full session name. Previously tmux's default
   of 10 characters truncated names like `mngr-tmux-display` to `[mngr-tmux`,
   with the window list mashed onto the end. The width is capped at 40 so a very
-  long agent name cannot crowd out the window list, and is only ever raised --
-  never lowered -- so a user's custom tmux status bar is left intact.
+  long agent name cannot crowd out the window list.
+- The widening is applied only when `status-left-length` is still at tmux's
+  default of 10. Any value set in the user's `~/.tmux.conf` is left untouched,
+  even one too small to fit the name.

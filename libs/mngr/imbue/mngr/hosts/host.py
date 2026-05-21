@@ -2802,8 +2802,13 @@ def _parse_porcelain_line(line: str) -> list[str]:
     return [filename]
 
 
-# Upper bound on the tmux status-left width mngr will set, so a long agent
-# name can't crowd out the window list. tmux's own default is 10.
+# tmux's built-in default for status-left-length. mngr treats a session still
+# at this value as uncustomized and widens it; any other value is taken as a
+# user setting (from ~/.tmux.conf) and left untouched.
+_TMUX_DEFAULT_STATUS_LEFT_LENGTH: Final[int] = 10
+
+# Upper bound on the status-left width mngr will set, so a long agent name
+# can't crowd out the window list.
 _MAX_TMUX_STATUS_LEFT_LENGTH: Final[int] = 40
 
 
@@ -2888,12 +2893,13 @@ def _build_start_agent_shell_command(
     # Widen status-left so the full session name shows; tmux's default
     # status-left-length of 10 truncates it and mashes the window list onto
     # the end. The +3 covers the "[", "]" and space of tmux's default
-    # status-left format. Only raised, never lowered, to leave a user's
-    # custom status bar intact.
+    # status-left format. Applied only when status-left-length is still at
+    # tmux's default -- any value a user set in ~/.tmux.conf is left alone,
+    # even one too small to fit the name.
     status_left_length = min(len(session_name) + 3, _MAX_TMUX_STATUS_LEFT_LENGTH)
     widen_status_left_script = (
         f"C=$(tmux show-option -t {quoted_session} -Aqv status-left-length 2>/dev/null); "
-        f'[ "${{C:-0}}" -lt {status_left_length} ] '
+        f'[ "${{C:-{_TMUX_DEFAULT_STATUS_LEFT_LENGTH}}}" = {_TMUX_DEFAULT_STATUS_LEFT_LENGTH} ] '
         f"&& tmux set-option -t {quoted_session} status-left-length {status_left_length} || true"
     )
     steps.append("bash -c " + shlex.quote(widen_status_left_script))

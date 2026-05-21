@@ -33,6 +33,7 @@ from imbue.mngr.hosts.host import Host
 from imbue.mngr.hosts.host import ONBOARDING_TEXT
 from imbue.mngr.hosts.host import ONBOARDING_TEXT_TMUX_USER
 from imbue.mngr.hosts.host import _MAX_TMUX_STATUS_LEFT_LENGTH
+from imbue.mngr.hosts.host import _TMUX_DEFAULT_STATUS_LEFT_LENGTH
 from imbue.mngr.hosts.host import _build_start_agent_shell_command
 from imbue.mngr.hosts.host import _format_env_file
 from imbue.mngr.hosts.host import _is_transient_ssh_error
@@ -904,9 +905,25 @@ def test_build_start_agent_shell_command_widens_status_left_to_fit_session_name(
     assert expected_length <= _MAX_TMUX_STATUS_LEFT_LENGTH, "test session name unexpectedly long"
     assert f"status-left-length {expected_length}" in result
 
-    # It should read the current value and only widen, never shrink, the bar.
+
+def test_build_start_agent_shell_command_widens_status_left_only_when_default(
+    local_provider: LocalProviderInstance,
+    temp_host_dir: Path,
+    temp_work_dir: Path,
+) -> None:
+    """The widen step must be gated on status-left-length still being tmux's default.
+
+    A value the user set in ~/.tmux.conf (anything other than tmux's default of
+    10) must be left alone, so the guard reads the current value and only acts
+    when it equals the default.
+    """
+    agent = _create_test_agent(local_provider, temp_host_dir, temp_work_dir)
+    result = _build_command_with_defaults(agent, temp_host_dir)
+
+    # The guard reads the live value and compares it against tmux's default;
+    # it must not unconditionally lower or raise a user-customized value.
     assert "show-option" in result and "status-left-length" in result
-    assert "-lt" in result
+    assert f"= {_TMUX_DEFAULT_STATUS_LEFT_LENGTH} ]" in result
 
 
 def test_build_start_agent_shell_command_caps_status_left_length(
