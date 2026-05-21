@@ -157,7 +157,12 @@ class CronRunnerError(Exception):
 # the agent is still actively running. Mirror of the running subset of
 # `imbue.mngr.primitives.AgentLifecycleState`; verification.py defines the
 # deploy-side copy. Any change must be applied in both places.
-RUNNING_STATES: frozenset[str] = frozenset({"RUNNING", "WAITING", "REPLACED", "RUNNING_UNKNOWN_AGENT_TYPE"})
+#
+# ``UNKNOWN`` is included because it means "the provider that owns this agent
+# could not be accessed during the most recent discovery attempt" -- the agent
+# may still be running, we just can't currently see it. Treating it as terminal
+# would let a transient provider hiccup fail an otherwise-successful schedule.
+RUNNING_STATES: frozenset[str] = frozenset({"RUNNING", "WAITING", "REPLACED", "RUNNING_UNKNOWN_AGENT_TYPE", "UNKNOWN"})
 
 # Accepted values for the `verify_mode` parameter of `run_scheduled_trigger`.
 # Mirror of `imbue.mngr_schedule.data_types.VerifyMode` values (lowercased);

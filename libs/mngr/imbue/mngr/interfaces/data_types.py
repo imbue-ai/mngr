@@ -501,7 +501,7 @@ class AgentDetails(FrozenModel):
     start_on_boot: bool = Field(description="Whether agent starts on host boot")
 
     state: AgentLifecycleState = Field(
-        description="Agent lifecycle state (STOPPED/RUNNING/WAITING/REPLACED/RUNNING_UNKNOWN_AGENT_TYPE/DONE)"
+        description="Agent lifecycle state (STOPPED/RUNNING/WAITING/REPLACED/RUNNING_UNKNOWN_AGENT_TYPE/DONE/UNKNOWN)"
     )
     url: str | None = Field(default=None, description="Agent URL (reported)")
     start_time: datetime | None = Field(default=None, description="Last start time (reported)")
