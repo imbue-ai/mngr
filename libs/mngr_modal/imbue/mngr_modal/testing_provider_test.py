@@ -20,9 +20,11 @@ import pytest
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.model_update import to_update
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.errors import ConfigStructureError
 from imbue.mngr.errors import HostNameConflictError
 from imbue.mngr.errors import HostNotFoundError
 from imbue.mngr.errors import MngrError
+from imbue.mngr.errors import ProviderEmptyError
 from imbue.mngr.errors import SnapshotNotFoundError
 from imbue.mngr.hosts.offline_host import OfflineHost
 from imbue.mngr.interfaces.data_types import CertifiedHostData
@@ -35,11 +37,14 @@ from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import SnapshotId
 from imbue.mngr.primitives import SnapshotName
+from imbue.mngr.primitives import UserId
 from imbue.mngr.primitives import VolumeId
 from imbue.mngr.providers.listing_utils import build_listing_collection_script
 from imbue.mngr.providers.listing_utils import parse_optional_float
 from imbue.mngr.providers.listing_utils import parse_optional_int
+from imbue.mngr.utils.testing import SHARED_MODAL_ENV_NAME_VAR
 from imbue.mngr.utils.testing import generate_test_environment_name
+from imbue.mngr.utils.testing import read_shared_modal_env_name
 from imbue.mngr_modal.backend import MODAL_NAME_MAX_LENGTH
 from imbue.mngr_modal.backend import ModalAppContextHandle
 from imbue.mngr_modal.backend import ModalProviderBackend
@@ -77,7 +82,9 @@ from imbue.mngr_modal.volume import _proxy_file_entry_type_to_volume_file_type
 from imbue.modal_proxy.data_types import FileEntry
 from imbue.modal_proxy.data_types import FileEntryType as ProxyFileEntryType
 from imbue.modal_proxy.errors import ModalProxyError
+from imbue.modal_proxy.errors import ModalProxyNotFoundError
 from imbue.modal_proxy.errors import ModalProxyRateLimitError
+from imbue.modal_proxy.interface import AppInterface
 from imbue.modal_proxy.interface import VolumeInterface
 from imbue.modal_proxy.testing import TestingModalInterface
 
@@ -976,6 +983,92 @@ def test_derive_modal_names_truncates_long_app_name(
     assert len(app_name) <= MODAL_NAME_MAX_LENGTH
 
 
+# ---------------------------------------------------------------------------
+# Shared Modal env tests (MNGR_TEST_SHARED_MODAL_ENV_NAME)
+# ---------------------------------------------------------------------------
+
+
+def test_read_shared_modal_env_name_returns_none_when_unset(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv(SHARED_MODAL_ENV_NAME_VAR, raising=False)
+    assert read_shared_modal_env_name() is None
+
+
+def test_read_shared_modal_env_name_returns_none_when_empty(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Empty env var (e.g. `FOO=`) is treated as unset so callers fall back cleanly."""
+    monkeypatch.setenv(SHARED_MODAL_ENV_NAME_VAR, "")
+    assert read_shared_modal_env_name() is None
+
+
+def test_read_shared_modal_env_name_splits_into_timestamp_name_and_suffix(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Returns the bare timestamp portion (no trailing dash) and the user_id suffix;
+    callers join with ``-`` to reproduce the full shared env name.
+    """
+    full_name = "mngr_test-2026-05-20-12-00-00-shared-abc123def456"
+    monkeypatch.setenv(SHARED_MODAL_ENV_NAME_VAR, full_name)
+    result = read_shared_modal_env_name()
+    assert result == ("mngr_test-2026-05-20-12-00-00", "shared-abc123def456")
+    timestamp_name, suffix = result
+    assert f"{timestamp_name}-{suffix}" == full_name
+
+
+def test_read_shared_modal_env_name_raises_on_malformed_value(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A non-timestamp value must fail loudly -- the justfile generates conforming names."""
+    monkeypatch.setenv(SHARED_MODAL_ENV_NAME_VAR, "not-a-test-env-name")
+    with pytest.raises(ConfigStructureError, match="MNGR_TEST_SHARED_MODAL_ENV_NAME"):
+        read_shared_modal_env_name()
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        # Timestamp matches but no dash separator -- the pattern requires a
+        # literal dash before the suffix.
+        "mngr_test-2026-05-20-12-00-00suffix",
+        # Bare timestamp with no suffix -- the docstring requires a non-empty suffix.
+        "mngr_test-2026-05-20-12-00-00",
+        # Trailing dash but empty suffix -- still violates the non-empty suffix rule.
+        "mngr_test-2026-05-20-12-00-00-",
+    ],
+)
+def test_read_shared_modal_env_name_raises_when_dash_or_suffix_missing(
+    monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    """The dash separator and a non-empty suffix are both required by the contract."""
+    monkeypatch.setenv(SHARED_MODAL_ENV_NAME_VAR, value)
+    with pytest.raises(ConfigStructureError, match="MNGR_TEST_SHARED_MODAL_ENV_NAME"):
+        read_shared_modal_env_name()
+
+
+def test_derive_modal_names_reproduces_shared_env_via_prefix_and_user_id(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """Feeding the shared-env split through MngrConfig.prefix + ModalProviderConfig.user_id
+    reconstructs the original shared env name. Callers join the bare timestamp
+    name with ``-`` to build MngrConfig.prefix, then ``_derive_modal_names``
+    concatenates prefix + user_id with no extra separator.
+    """
+    full_name = "mngr_test-2026-05-20-12-00-00-shared-abc123def456"
+    timestamp_name = "mngr_test-2026-05-20-12-00-00"
+    user_id_suffix = "shared-abc123def456"
+
+    shared_config = temp_mngr_ctx.config.model_copy_update(
+        to_update(temp_mngr_ctx.config.field_ref().prefix, f"{timestamp_name}-")
+    )
+    shared_ctx = temp_mngr_ctx.model_copy_update(to_update(temp_mngr_ctx.field_ref().config, shared_config))
+    modal_config = ModalProviderConfig(
+        app_name="shared-env-test",
+        host_dir=shared_ctx.config.default_host_dir,
+        user_id=UserId(user_id_suffix),
+    )
+
+    environment_name, _, _ = ModalProviderBackend._derive_modal_names(
+        ProviderInstanceName("test"),
+        modal_config,
+        shared_ctx,
+    )
+    assert environment_name == full_name
+
+
 def test_construct_modal_provider_accepts_injected_modal_interface(
     temp_mngr_ctx: MngrContext,
     testing_modal: TestingModalInterface,
@@ -1013,6 +1106,110 @@ def test_construct_modal_provider_accepts_injected_modal_interface(
         create_if_missing=False,
         environment_name=instance.environment_name,
     )
+
+
+class _NoAutoCreateModalInterface(TestingModalInterface):
+    """``TestingModalInterface`` variant that does not auto-create the Modal env
+    on either ``app_lookup`` or ``app.run`` (the testing default is to silently
+    create the env for convenience, which would mask the
+    "env doesn't exist yet" code path we want to exercise here).
+
+    Mirrors ``DirectModalInterface``: persistent ``app_lookup`` raises
+    ``ModalProxyNotFoundError`` when the env is missing, and
+    ``volume_from_name`` raises the same when the env is missing.
+    """
+
+    def app_lookup(
+        self,
+        name: str,
+        *,
+        create_if_missing: bool = True,
+        environment_name: str,
+    ) -> AppInterface:
+        if environment_name not in self._environments:
+            raise ModalProxyNotFoundError(f"Environment not found: {environment_name}")
+        return super().app_lookup(name, create_if_missing=create_if_missing, environment_name=environment_name)
+
+    def volume_from_name(
+        self,
+        name: str,
+        *,
+        create_if_missing: bool = True,
+        environment_name: str,
+        version: int | None = None,
+    ) -> VolumeInterface:
+        if environment_name not in self._environments:
+            raise ModalProxyNotFoundError(f"Environment not found: {environment_name}")
+        return super().volume_from_name(
+            name,
+            create_if_missing=create_if_missing,
+            environment_name=environment_name,
+            version=version,
+        )
+
+
+def test_construct_modal_provider_disables_itself_when_env_missing_and_not_creating(
+    modal_mngr_ctx: MngrContext, tmp_path: Path, cg: ConcurrencyGroup
+) -> None:
+    """When the Modal env doesn't exist and we're not in the create-host path,
+    ``_construct_modal_provider`` must raise ``ProviderEmptyError`` so the
+    modal provider is filtered out of read flows (mngr list / gc / ...)
+    instead of being silently bootstrapped behind the user's back.
+
+    Uses ``modal_mngr_ctx`` so the derived env name matches the
+    ``mngr_test-`` prefix required by ``_create_environment``'s pytest guard;
+    that guard would otherwise mask the bug-under-test by raising before we
+    could observe whether env creation was attempted.
+    """
+    modal = _NoAutoCreateModalInterface(root_dir=tmp_path / "modal_testing", concurrency_group=cg)
+    config = ModalProviderConfig(
+        app_name="no-env-test",
+        host_dir=modal_mngr_ctx.config.default_host_dir,
+        # Persistent path goes through app_lookup, which is what _NoAutoCreateModalInterface gates on.
+        is_persistent=True,
+        is_snapshotted_after_create=False,
+    )
+
+    with pytest.raises(ProviderEmptyError, match="Modal environment"):
+        ModalProviderBackend._construct_modal_provider(
+            ProviderInstanceName("test"),
+            config,
+            modal_mngr_ctx,
+            modal,
+            is_for_host_creation=False,
+        )
+
+    # Verify the read-flow path did NOT create the Modal env behind our back.
+    assert modal._environments == set()
+
+
+def test_construct_modal_provider_bootstraps_env_when_for_host_creation(
+    modal_mngr_ctx: MngrContext, tmp_path: Path, cg: ConcurrencyGroup
+) -> None:
+    """The create-host path is the one place that *is* allowed to bootstrap a
+    missing Modal environment. ``is_for_host_creation=True`` opts in: the
+    backend calls ``_create_environment`` and construction succeeds.
+    """
+    modal = _NoAutoCreateModalInterface(root_dir=tmp_path / "modal_testing", concurrency_group=cg)
+    config = ModalProviderConfig(
+        app_name="create-host-test",
+        host_dir=modal_mngr_ctx.config.default_host_dir,
+        # Persistent path exercises the env-create retry in _lookup_persistent_app_with_env_retry.
+        is_persistent=True,
+        is_snapshotted_after_create=False,
+    )
+
+    instance = ModalProviderBackend._construct_modal_provider(
+        ProviderInstanceName("test"),
+        config,
+        modal_mngr_ctx,
+        modal,
+        is_for_host_creation=True,
+    )
+
+    assert isinstance(instance, ModalProviderInstance)
+    # The create-host path is allowed to create the env on the fly.
+    assert instance.environment_name in modal._environments
 
 
 def test_production_import_does_not_load_modal_proxy_testing() -> None:
@@ -1926,18 +2123,34 @@ def test_create_environment_rejects_non_test_prefix_during_pytest(tmp_path: Path
         _create_environment("mngr_test-not-a-timestamp", modal)
 
 
-def test_lookup_persistent_app_with_env_retry(tmp_path: Path, cg: ConcurrencyGroup) -> None:
+def test_lookup_persistent_app_with_env_retry_when_env_already_exists(tmp_path: Path, cg: ConcurrencyGroup) -> None:
     modal = make_testing_modal_interface(tmp_path, cg)
     modal.environment_create("env1")
-    app = _lookup_persistent_app_with_env_retry("my-app", "env1", modal)
+    app = _lookup_persistent_app_with_env_retry("my-app", "env1", modal, is_environment_creation_allowed=False)
     assert app.get_name() == "my-app"
+
+
+def test_lookup_persistent_app_with_env_retry_raises_when_env_missing_and_creation_not_allowed(
+    tmp_path: Path, cg: ConcurrencyGroup
+) -> None:
+    """When the Modal env doesn't exist and we don't authorize creating it, the
+    helper must surface the underlying ``ModalProxyNotFoundError`` rather than
+    silently bootstrapping a new Modal environment."""
+    # Use the NoAutoCreate variant so app_lookup mirrors real-Modal behavior
+    # (raise NotFound when env is missing) instead of the testing default
+    # (auto-create env for convenience), which would mask the gate-under-test.
+    modal = _NoAutoCreateModalInterface(root_dir=tmp_path / "modal_testing", concurrency_group=cg)
+    with pytest.raises(ModalProxyNotFoundError):
+        _lookup_persistent_app_with_env_retry("my-app", "missing-env", modal, is_environment_creation_allowed=False)
+    # Confirm the helper did NOT call _create_environment as a fallback.
+    assert "missing-env" not in modal._environments
 
 
 def test_enter_ephemeral_app_context_with_env_retry(tmp_path: Path, cg: ConcurrencyGroup) -> None:
     modal = make_testing_modal_interface(tmp_path, cg)
     modal.environment_create("env1")
     app = modal.app_create("eph-app")
-    gen = _enter_ephemeral_app_context_with_env_retry(app, "env1", modal)
+    gen = _enter_ephemeral_app_context_with_env_retry(app, "env1", modal, is_environment_creation_allowed=False)
     assert gen is not None
 
 

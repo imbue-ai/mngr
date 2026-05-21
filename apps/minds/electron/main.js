@@ -24,6 +24,7 @@ const mruWindows = []; // most recently focused first
 let appMenuInstalled = false;
 
 let backendBaseUrl = null;
+let mngrForwardBaseUrl = null;
 let workspaceList = []; // [{id, name, account}]
 let isShuttingDown = false;
 let initialBundle = null; // the first window created at startup
@@ -74,8 +75,15 @@ function toAbsoluteUrl(url) {
 // the agent's subdomain and redirects into the workspace's dockview UI.
 // Returns null if the backend hasn't come up yet.
 function workspaceUrlForAgent(agentId) {
-  if (!agentId || !backendBaseUrl) return null;
-  return `${backendBaseUrl}/goto/${encodeURIComponent(agentId)}/`;
+  // `/goto/` lives on the mngr_forward plugin (which owns subdomain
+  // forwarding), not the minds backend. Use mngrForwardBaseUrl when it has
+  // been received; fall back to backendBaseUrl during the startup window
+  // before the mngr_forward_started event arrives (rare -- the user can't
+  // open a workspace in that window).
+  if (!agentId) return null;
+  const origin = mngrForwardBaseUrl || backendBaseUrl;
+  if (!origin) return null;
+  return `${origin}/goto/${encodeURIComponent(agentId)}/`;
 }
 
 function findBundleForWorkspace(agentId) {
@@ -326,6 +334,7 @@ function createBundle() {
   // title bar otherwise has no way to learn its own window's title.
   chromeView.webContents.on('did-finish-load', () => {
     updateOsTitle(bundle);
+    sendCurrentWorkspaceToBundleViews(bundle);
     primeViewWithCachedChromeState(chromeView.webContents);
   });
 
@@ -355,7 +364,7 @@ function wireContentViewEvents(bundle, contentView) {
     const newAgentId = parseWorkspaceId(url);
     if (bundle.currentWorkspaceId !== newAgentId) {
       bundle.currentWorkspaceId = newAgentId;
-      sendCurrentWorkspaceToBundleSidebar(bundle);
+      sendCurrentWorkspaceToBundleViews(bundle);
     }
     updateOsTitle(bundle);
     if (bundle.chromeView && !bundle.chromeView.webContents.isDestroyed()) {
@@ -455,7 +464,7 @@ function openSidebar(bundle) {
     bundle.window.contentView.addChildView(sidebarView);
     registerShortcutsFor(bundle, sidebarView.webContents);
     sidebarView.webContents.on('did-finish-load', () => {
-      sendCurrentWorkspaceToBundleSidebar(bundle);
+      sendCurrentWorkspaceToBundleViews(bundle);
       primeViewWithCachedChromeState(sidebarView.webContents);
     });
     if (backendBaseUrl) {
@@ -554,10 +563,18 @@ function toggleRequestsPanel(bundle) {
   else openRequestsPanel(bundle);
 }
 
-function sendCurrentWorkspaceToBundleSidebar(bundle) {
-  if (!bundle || !bundle.sidebarView) return;
-  if (bundle.sidebarView.webContents.isDestroyed()) return;
-  bundle.sidebarView.webContents.send('current-workspace-changed', bundle.currentWorkspaceId);
+function sendCurrentWorkspaceToBundleViews(bundle) {
+  if (!bundle) return;
+  // Both the titlebar (chrome view) and the sidebar key UI off the current
+  // workspace -- the titlebar uses it to scope the per-agent accent swatch
+  // and the auto-redirect to the recovery page (which only fires when a
+  // system_interface_status event matches the currently-displayed agent).
+  if (bundle.chromeView && !bundle.chromeView.webContents.isDestroyed()) {
+    bundle.chromeView.webContents.send('current-workspace-changed', bundle.currentWorkspaceId);
+  }
+  if (bundle.sidebarView && !bundle.sidebarView.webContents.isDestroyed()) {
+    bundle.sidebarView.webContents.send('current-workspace-changed', bundle.currentWorkspaceId);
+  }
 }
 
 // -- Window opening / focusing --
@@ -577,7 +594,7 @@ function loadUrlIntoBundleContentView(bundle, url) {
     bundle.currentContentUrl = url;
     bundle.preErrorUrl = url;
     updateOsTitle(bundle);
-    sendCurrentWorkspaceToBundleSidebar(bundle);
+    sendCurrentWorkspaceToBundleViews(bundle);
   }
   if (bundle.contentView && !bundle.contentView.webContents.isDestroyed() && url) {
     bundle.contentView.webContents.loadURL(url);
@@ -968,6 +985,70 @@ async function runChromeSSELoop() {
     // Brief backoff before reconnecting.
     await sleepInterruptible(1500);
   }
+}
+
+// POST the system-interface restart API and resolve once the server has
+// acknowledged that the tmux kill dispatch finished (or the request
+// errors / times out). Callers navigate to the workspace URL afterward;
+// because the endpoint returns 200 only after the system_interface has
+// been killed, the plugin will then serve its 503 loader until the
+// workspace comes back -- giving the user a visible "System interface
+// starting" page instead of a silent reload onto the still-live
+// pre-restart UI.
+//
+// Always resolves (never rejects) so callers can chain navigation
+// regardless of network outcome.
+const RESTART_REQUEST_TIMEOUT_MS = 10000;
+function postRestartSystemInterface(agentId) {
+  return new Promise((resolve) => {
+    if (!agentId || !backendBaseUrl) {
+      resolve();
+      return;
+    }
+    let req;
+    try {
+      req = net.request({
+        url: `${backendBaseUrl}/api/agents/${encodeURIComponent(agentId)}/restart-system-interface`,
+        method: 'POST',
+        useSessionCookies: true,
+      });
+    } catch (e) {
+      console.warn('[restart] failed to construct restart request:', e);
+      resolve();
+      return;
+    }
+    let settled = false;
+    const settle = () => {
+      if (settled) return;
+      settled = true;
+      resolve();
+    };
+    const timer = setTimeout(() => {
+      console.warn(`[restart] restart API timed out for ${agentId} after ${RESTART_REQUEST_TIMEOUT_MS}ms`);
+      try { req.abort(); } catch (_) { /* ignore */ }
+      settle();
+    }, RESTART_REQUEST_TIMEOUT_MS);
+    req.on('response', (response) => {
+      response.on('data', () => {});
+      response.on('end', () => {
+        clearTimeout(timer);
+        settle();
+      });
+      response.on('error', () => {
+        clearTimeout(timer);
+        settle();
+      });
+      if (response.statusCode >= 400) {
+        console.warn(`[restart] restart API returned ${response.statusCode} for ${agentId}`);
+      }
+    });
+    req.on('error', (err) => {
+      console.warn(`[restart] restart API request failed for ${agentId}:`, err);
+      clearTimeout(timer);
+      settle();
+    });
+    req.end();
+  });
 }
 
 function sleepInterruptible(ms) {
@@ -1429,6 +1510,9 @@ async function handleMngrForwardStarted(event) {
     return;
   }
   const url = `http://localhost:${port}`;
+  // Cache the plugin origin so workspaceUrlForAgent() can build /goto/ URLs
+  // against the correct port (the plugin, not minds).
+  mngrForwardBaseUrl = url;
   const baseSpec = {
     url,
     name: 'mngr_forward_session',
@@ -1562,17 +1646,39 @@ ipcMain.on('navigate-to-request', (event, agentId, eventId) => {
 ipcMain.on('show-workspace-context-menu', (event, agentId, x, y) => {
   const bundle = getBundleFromEvent(event);
   if (!bundle || !agentId) return;
-  // Don't offer "Open in new window" if the sender's window is already on this workspace
-  if (bundle.currentWorkspaceId === agentId) return;
-  const menu = Menu.buildFromTemplate([
-    {
+  const isCurrent = bundle.currentWorkspaceId === agentId;
+  const workspaceUrl = workspaceUrlForAgent(agentId);
+  const template = [];
+  // Don't offer "Open in new window" if the sender's window is already on this workspace.
+  if (!isCurrent) {
+    template.push({
       label: 'Open in new window',
       click: () => {
-        openOrFocusWorkspace(agentId, workspaceUrlForAgent(agentId));
+        openOrFocusWorkspace(agentId, workspaceUrl);
         closeSidebar(bundle);
       },
+    });
+    template.push({ type: 'separator' });
+  }
+  template.push({
+    label: 'Restart system interface',
+    click: async () => {
+      // Close the sidebar first so the user gets immediate visual feedback
+      // while we wait for the restart dispatch to ack. The endpoint returns
+      // 200 once `mngr exec` finishes killing the system_interface tmux window;
+      // navigating before that ack would race against a still-live backend
+      // and leave the user looking at the unchanged iframe.
+      closeSidebar(bundle);
+      await postRestartSystemInterface(agentId);
+      if (workspaceUrl && bundle.contentView && !bundle.contentView.webContents.isDestroyed()) {
+        // The plugin now serves its styled 503 loader (the
+        // "System interface starting" page), which auto-refreshes into the
+        // workspace once the system interface is back.
+        bundle.contentView.webContents.loadURL(workspaceUrl);
+      }
     },
-  ]);
+  });
+  const menu = Menu.buildFromTemplate(template);
   // sidebar coords are relative to the sidebar view, which sits at (0, TITLEBAR_HEIGHT)
   const px = Math.round(x || 0);
   const py = Math.round((y || 0) + TITLEBAR_HEIGHT);
@@ -1635,6 +1741,20 @@ ipcMain.on('window-close', (event) => {
 
 function initiateFullQuit() {
   app.quit();
+}
+
+// Route POSIX SIGTERM / SIGINT through `app.quit()` so they trigger the
+// same `before-quit` chain that window-close uses (which already runs
+// `backend.shutdown()`, SIGTERMing the python backend and waiting for
+// uvicorn's graceful exit). Without these handlers Node's default for
+// these signals is to exit immediately, which orphans the python backend
+// and the `mngr forward` / `observe` subprocesses. The `just minds-stop`
+// recipe sends SIGTERM to this process so the clean-shutdown chain can run.
+for (const signal of ['SIGTERM', 'SIGINT']) {
+  process.on(signal, () => {
+    console.log(`[lifecycle] ${signal} received, requesting app.quit()`);
+    app.quit();
+  });
 }
 
 app.on('window-all-closed', async () => {

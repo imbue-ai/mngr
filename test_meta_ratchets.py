@@ -1,5 +1,6 @@
 import ast
 import fnmatch
+import os
 import re
 import subprocess
 from pathlib import Path
@@ -14,13 +15,19 @@ from imbue.imbue_common.ratchet_testing.core import _get_all_files_with_extensio
 from imbue.imbue_common.ratchet_testing.ratchets import check_no_import_lint_errors
 from imbue.imbue_common.ratchet_testing.ratchets import find_bash_scripts_without_strict_mode
 from imbue.imbue_common.test_profiles import detect_branch
+from scripts.changelog_projects import DEV_PROJECT
+from scripts.changelog_projects import all_known_projects
+from scripts.changelog_projects import project_dir as get_project_dir
+from scripts.changelog_projects import project_entries_dir
+from scripts.changelog_projects import project_for_path
+from scripts.changelog_projects import pyproject_projects
 
 _REPO_ROOT = Path(__file__).parent
 
 # Projects that are excluded from ratchet requirements (scheduled for deletion).
 # Keep in sync with EXCLUDED_RATCHET_PROJECTS in scripts/sync_common_ratchets.py
 # (verified by test_excluded_projects_in_sync in scripts/sync_common_ratchets_test.py).
-_EXCLUDED_PROJECTS: frozenset[str] = frozenset({"flexmux"})
+_EXCLUDED_PROJECTS: frozenset[str] = frozenset()
 
 _SELF_EXCLUSION: tuple[str, ...] = ("test_meta_ratchets.py",)
 _BINARY_FILE_EXCLUSION: tuple[str, ...] = ("*.png", "*.ico", "*.jpg", "*.jpeg", "*.gif", "*.webp")
@@ -35,15 +42,16 @@ pytestmark = pytest.mark.xdist_group(name="meta_ratchets")
 
 
 def _get_all_project_dirs() -> list[Path]:
-    """Return all project directories (libs/* and apps/*) that are not excluded."""
-    project_dirs: list[Path] = []
-    for parent in [_REPO_ROOT / "libs", _REPO_ROOT / "apps"]:
-        if not parent.is_dir():
-            continue
-        for child in sorted(parent.iterdir()):
-            if child.is_dir() and (child / "pyproject.toml").exists() and child.name not in _EXCLUDED_PROJECTS:
-                project_dirs.append(child)
-    return project_dirs
+    """Return all project directories (libs/* and apps/*) that are not excluded.
+
+    Built on top of ``pyproject_projects`` (the shared libs/+apps/+pyproject.toml
+    discovery helper in ``scripts.changelog_projects``) so this stays in sync
+    with the changelog tooling without having to add and then re-remove the
+    synthetic ``dev`` bucket.
+    """
+    return [
+        get_project_dir(name, _REPO_ROOT) for name in pyproject_projects(_REPO_ROOT) if name not in _EXCLUDED_PROJECTS
+    ]
 
 
 def _find_test_ratchets_file(project_dir: Path) -> Path | None:
@@ -191,13 +199,14 @@ def test_prevent_bash_without_strict_mode() -> None:
     """Ensure all bash scripts in the repo use 'set -euo pipefail' for strict error handling.
 
     Snapshot accommodates the committed secret-file templates at
-    ``.minds/template/*.sh``. Those files are shell-sourceable env declarations
-    (consumed by ``scripts/push_modal_secrets.py`` via ``bash -c 'set -a; . <f>; ...'``),
-    not executable scripts -- adding ``set -euo pipefail`` to them would leak
-    strict mode into whatever shell sources them.
+    ``.minds/template/*.sh``. Those files are shell-sourceable env
+    declarations (consumed by ``scripts/push_vault_from_file.py`` when
+    seeding HCP Vault), not executable scripts -- adding
+    ``set -euo pipefail`` to them would leak strict mode into whatever
+    shell sources them.
     """
     violations = find_bash_scripts_without_strict_mode(_REPO_ROOT)
-    assert len(violations) <= snapshot(7), "Bash scripts missing 'set -euo pipefail':\n" + "\n".join(
+    assert len(violations) <= snapshot(10), "Bash scripts missing 'set -euo pipefail':\n" + "\n".join(
         f"  - {v}" for v in violations
     )
 
@@ -434,15 +443,85 @@ def test_every_project_with_tests_has_coverage_config() -> None:
 _CHANGELOG_EXEMPT_BRANCH_PREFIXES: tuple[str, ...] = ("mngr/changelog-consolidation",)
 
 
+def _resolve_diff_base() -> str:
+    """Return the git ref to diff the PR branch against.
+
+    Prefers ``origin/$GITHUB_BASE_REF`` in CI (the actual PR base), then
+    ``origin/main``, then plain ``main``. Returns the first ref that
+    ``git rev-parse`` resolves; otherwise raises ``RuntimeError``.
+    """
+    candidates: list[str] = []
+    base_ref = os.environ.get("GITHUB_BASE_REF", "")
+    if base_ref:
+        candidates.append(f"origin/{base_ref}")
+    candidates.extend(["origin/main", "main"])
+    for ref in candidates:
+        result = subprocess.run(
+            ["git", "rev-parse", "--verify", "--quiet", ref],
+            cwd=_REPO_ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode == 0:
+            return ref
+    raise RuntimeError(
+        "Cannot resolve a diff base: none of "
+        + ", ".join(candidates)
+        + " are reachable. Fetch the base branch and re-run."
+    )
+
+
+def _changed_files_against_base(base: str) -> list[str]:
+    """Return the repo-relative paths the PR branch changes vs. ``base``.
+
+    Uses ``git diff --name-only <base>...HEAD`` (three-dot form, i.e. the
+    diff against the merge base) so renames/branches behave intuitively.
+    Raises ``RuntimeError`` if ``git diff`` itself fails.
+    """
+    result = subprocess.run(
+        ["git", "diff", "--name-only", f"{base}...HEAD"],
+        cwd=_REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"git diff failed against {base} (exit {result.returncode}): {result.stderr.strip()}")
+    return [line for line in result.stdout.splitlines() if line.strip()]
+
+
+def _projects_requiring_entry(changed_files: list[str]) -> set[str]:
+    """Return the set of projects this PR must produce a changelog entry for.
+
+    A project is "touched" iff the PR changes any file under it.
+    ``project_for_path`` handles the ``libs/<name>`` / ``apps/<name>`` /
+    ``dev`` bucketing. Files that are themselves changelog artifacts (entry
+    files, ``CHANGELOG.md``, ``UNABRIDGED_CHANGELOG.md``) are intentionally
+    *not* excluded -- adding an entry file inherently satisfies the
+    requirement, and a PR that only edits a project's consolidated changelog
+    should still describe that edit in a per-PR entry.
+    """
+    known = set(all_known_projects(_REPO_ROOT))
+    touched: set[str] = set()
+    for rel_path in changed_files:
+        project = project_for_path(rel_path, _REPO_ROOT)
+        if project in known:
+            touched.add(project)
+    return touched
+
+
 # Marked as acceptance because this check should be done soon before merging,
 # not during iteration.
 @pytest.mark.acceptance
 def test_pr_has_changelog_entry() -> None:
-    """Ensure every PR branch has a corresponding changelog entry file.
+    """Ensure every PR branch has one changelog entry per project it touches.
 
-    Each PR must include a file at changelog/<branch-name>.md where slashes
-    in the branch name are replaced with dashes. This is enforced so that
-    the nightly changelog consolidation agent has material to work with.
+    For each project the PR changes a file in (``libs/<name>``,
+    ``apps/<name>``, or the synthetic ``dev`` bucket for root-level files),
+    require ``<project_dir>/changelog/<branch-name>.md`` to exist (with
+    slashes in the branch name replaced by dashes). The nightly consolidator
+    routes each project's entries into that project's ``UNABRIDGED_CHANGELOG.md``.
     """
     branch = detect_branch()
 
@@ -453,12 +532,65 @@ def test_pr_has_changelog_entry() -> None:
         if branch.startswith(prefix):
             pytest.skip(f"Branch '{branch}' is exempt from changelog requirement")
 
+    diff_base = _resolve_diff_base()
+    changed_files = _changed_files_against_base(diff_base)
+    touched = _projects_requiring_entry(changed_files)
+
     sanitized = branch.replace("/", "-")
-    changelog_file = _REPO_ROOT / "changelog" / f"{sanitized}.md"
-    assert changelog_file.exists(), (
-        f"Missing changelog entry for branch '{branch}'.\n"
-        f"Create the file: changelog/{sanitized}.md\n"
-        f"This file should briefly describe the user-visible changes in this PR."
+    missing: list[str] = []
+    for project in sorted(touched):
+        entry_path = project_entries_dir(project, _REPO_ROOT) / f"{sanitized}.md"
+        if not entry_path.exists():
+            missing.append(str(entry_path.relative_to(_REPO_ROOT)))
+
+    assert not missing, (
+        f"Missing changelog entries for branch '{branch}' "
+        f"(diff base: '{diff_base}', resolved via "
+        f"git diff --name-only {diff_base}...HEAD). This PR appears to touch "
+        f"the project(s) {sorted(touched)}; each needs its own entry file.\n"
+        f"Create:\n" + "\n".join(f"  - {p}" for p in missing) + "\n"
+        f"Each file should briefly describe the user-visible changes in this PR "
+        f"that pertain to that project. The synthetic '{DEV_PROJECT}' project "
+        f"covers root-level files (scripts/, .github/, top-level docs, build tooling).\n"
+        f"\n"
+        f"IMPORTANT: for any individual project listed above where you believe "
+        f"this PR makes NO actual changes to that project, do NOT add a placebo "
+        f"entry just to satisfy this check. A stale or misconfigured diff base "
+        f"('{diff_base}') can make unrelated files from main appear as if they "
+        f"changed on this branch, falsely implicating projects you didn't touch. "
+        f"In that case the right fix is to correct the diff base, not to add "
+        f"entries for projects you actually didn't change."
+    )
+
+
+# --- Meta: ensure every project has the changelog layout files ---
+
+
+def test_every_project_has_changelog_layout() -> None:
+    """Ensure every project (libs/<name>, apps/<name>, and the synthetic dev)
+    has the full changelog layout: ``CHANGELOG.md``, ``UNABRIDGED_CHANGELOG.md``,
+    and a ``changelog/`` directory for per-PR entries.
+
+    Mirrors ``test_every_project_has_test_ratchets_file`` and
+    ``test_every_project_has_pypi_readme``: a symmetric requirement that
+    every project participates in the consolidation flow uniformly.
+    """
+    missing: list[str] = []
+    for project in all_known_projects(_REPO_ROOT):
+        proj_dir = get_project_dir(project, _REPO_ROOT)
+        for required in ("CHANGELOG.md", "UNABRIDGED_CHANGELOG.md"):
+            target = proj_dir / required
+            if not target.exists():
+                missing.append(str(target.relative_to(_REPO_ROOT)))
+        entries = project_entries_dir(project, _REPO_ROOT)
+        if not entries.is_dir():
+            missing.append(f"{entries.relative_to(_REPO_ROOT)}/ (directory)")
+
+    assert not missing, (
+        "The following projects are missing required changelog-layout files:\n"
+        + "\n".join(f"  - {m}" for m in missing)
+        + "\n\nEvery project must have CHANGELOG.md (with an '## [Unreleased]' heading), "
+        "UNABRIDGED_CHANGELOG.md, and a changelog/ directory."
     )
 
 

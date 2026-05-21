@@ -1,6 +1,7 @@
 from pydantic import Field
 
 from imbue.mngr import hookimpl
+from imbue.mngr.agents.base_agent import BaseAgent
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.errors import ConfigParseError
 from imbue.mngr.interfaces.agent import AgentInterface
@@ -35,21 +36,20 @@ class OpenCodeAgentConfig(AgentTypeConfig):
         # Merge cli_args (concatenate both tuples)
         merged_cli_args = self.cli_args + override.cli_args if override.cli_args else self.cli_args
 
-        # Merge permissions (list - concatenate if override is not None)
-        merged_permissions = self.permissions
-        if override.permissions is not None:
-            merged_permissions = list(self.permissions) + list(override.permissions)
-
         return self.__class__(
             parent_type=merged_parent_type,
             cli_args=merged_cli_args,
             command=merged_command,
-            permissions=merged_permissions,
         )
 
 
 # Module-level hook implementation for pluggy entry point discovery
 @hookimpl
 def register_agent_type() -> tuple[str, type[AgentInterface] | None, type[AgentTypeConfig]]:
-    """Register the opencode agent type."""
-    return ("opencode", None, OpenCodeAgentConfig)
+    """Register the opencode agent type.
+
+    Uses ``BaseAgent`` directly: ``OpenCodeAgentConfig.command`` defaults to
+    ``opencode``, so ``BaseAgent.assemble_command`` produces ``opencode`` plus
+    any ``cli_args`` / ``agent_args`` appended on top.
+    """
+    return ("opencode", BaseAgent, OpenCodeAgentConfig)

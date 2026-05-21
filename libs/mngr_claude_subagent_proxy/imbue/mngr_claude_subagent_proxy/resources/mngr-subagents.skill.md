@@ -65,6 +65,48 @@ If you do call `Task`, the plugin denies it with a reminder pointing
 back at this skill -- there is no separate wait-script convenience
 path. The two-command form above is the canonical and only interface.
 
+## Typed `subagent_type` (e.g. `imbue-code-guardian:verify-and-fix`)
+
+When you would have called `Task(subagent_type="X", prompt=Y)` with a
+specialized agent type (anything other than built-ins like
+`general-purpose` or `Explore`), Claude Code normally spawns the
+subagent with the system prompt baked into the agent definition file
+plus `Y` as the user message. The mngr subagent flow only has one
+input channel (`mngr create --message-file`), so you must inline the
+system prompt yourself: prepend the body of the agent definition `.md`
+file to your prompt file before running `mngr create`.
+
+The plugin's deny reason names the resolved path when it finds one.
+Resolution branches on whether the `subagent_type` contains a `:`:
+
+- Plugin-namespaced (`plugin:agent`): only
+  `~/.claude/plugins/marketplaces/*/plugins/<plugin>/agents/<agent>.md`
+  is checked.
+- Non-namespaced: `<work_dir>/.claude/agents/<name>.md` then
+  `~/.claude/agents/<name>.md` (project-local wins). The flat
+  agents/ directories are NOT a fallback for namespaced types.
+
+Write the prompt file like:
+
+    # System prompt for subagent_type 'imbue-code-guardian:verify-and-fix'
+
+    <verbatim body of the .md file, after the YAML frontmatter>
+
+    # Task from parent
+
+    <your original prompt>
+
+For built-in types (`general-purpose`, `Explore`, ...) there is no
+on-disk definition; just write the prompt as-is. The deny reason
+omits the typed-subagent pointer in that case.
+
+Known v1 limitation: tool restrictions declared in the agent
+definition frontmatter (`tools: [Read, Grep]`, etc.) are NOT honored
+-- the spawned mngr subagent inherits the user's full Claude config.
+If the original subagent's value depended on those restrictions, flag
+that explicitly to the user rather than silently spawning a broader
+subagent.
+
 ## Permission dialogs
 
 If the spawned subagent itself raises a permission dialog,

@@ -2,21 +2,25 @@
 
 Subclasses mngr's ``Host`` so the standard ``mngr create --provider
 imbue_cloud_<account> --new-host`` pipeline can adopt a pool host's
-pre-baked agent under the caller's chosen name when one exists, and
-fall back to mngr's standard create flow when it doesn't (e.g. after
-``mngr destroy`` has wiped the previous agent's state on the leased
-container). Adoption is purely an optimization that skips a slow
-file-transfer + provisioning round when we can.
+pre-baked agent when one exists, and fall back to mngr's standard
+create flow when it doesn't (e.g. after ``mngr destroy`` has wiped the
+previous agent's state on the leased container). Adoption is purely an
+optimization that skips a slow file-transfer + provisioning round when
+we can. The workspace identity lives on the *host name*; the adopted
+agent keeps the bake's name (a constant such as ``system-services``)
+verbatim.
 
 Overrides:
 
 - ``set_env_vars`` always merges into the pre-baked ``/mngr/env``
   (clobbering would lose ``MNGR_HOST_DIR``/``MNGR_PREFIX``/etc. that
   the pool baking wrote).
-- ``create_agent_state`` always pins ``options.agent_id`` to
-  ``pre_baked_agent_id`` so the lease's canonical id stays stable
-  across destroy/recreate cycles, regardless of whether on-disk state
-  survives. The parent's ``data.json`` write then runs as usual.
+- ``create_agent_state`` preserves the bake's name and patches the
+  on-disk ``data.json`` in place when the pre-baked agent state is
+  present. It rejects an ``options.agent_id`` that mismatches
+  ``pre_baked_agent_id`` (the lease dictates the id) and, in the
+  fallback path where ``data.json`` is missing, pins ``options.agent_id``
+  to the pre-baked id before delegating to ``super()``.
 - ``create_agent_work_dir`` and ``provision_agent`` short-circuit to a
   no-transfer + minimal-provision path *only* when the pre-baked
   agent's ``data.json`` is still on disk; otherwise they delegate to
@@ -63,18 +67,18 @@ def _parse_create_time(value: Any) -> datetime:
 class ImbueCloudHost(Host):
     """A leased pool host.
 
-    The pre-baked agent's id is captured at lease time so ``create_agent_state``
-    can adopt that agent under the caller's name instead of generating a new id.
+    The pre-baked agent's id is captured at lease time so
+    ``create_agent_state`` can adopt that agent (keeping the bake's name
+    and id) instead of generating a fresh ``data.json``. The workspace
+    identity is carried by the host name; the agent name is whatever the
+    bake wrote (typically a constant such as ``system-services``).
     """
 
-    pre_baked_agent_id: AgentId | None = Field(
-        default=None,
-        frozen=True,
-        description=(
-            "Agent id of the agent that was pre-provisioned on this pool host. "
-            "Set by the provider when the host is created via lease."
-        ),
-    )
+    # ``pre_baked_agent_id`` is inherited from the base ``Host`` class
+    # (default None on every other provider's hosts; this provider's
+    # ``create_host`` populates it from the lease). Keeping it on the base
+    # lets ``api/create.py``'s duplicate-name check recognize the adopt
+    # scenario without a getattr-on-host shim.
     lease_db_id: str | None = Field(
         default=None,
         frozen=True,
@@ -149,21 +153,14 @@ class ImbueCloudHost(Host):
         path), we *load* the existing ``data.json`` from the host -- which the
         bake wrote with ``--template main --template vultr`` and therefore
         already contains the ``additional_commands`` that start
-        ``minds-workspace-server``, ``cloudflared``, etc. -- and patch only
-        the minds-driven fields in place: ``name``, ``labels.workspace``,
-        and ``command`` (regenerated via ``assemble_command`` so the embedded
-        ``<MNGR_PREFIX><name>`` tmux session reference matches the new name).
-        Everything else (``additional_commands``, ``create_time``, ``work_dir``,
-        ``agent_type``, the agent UUID baked into the ``--session-id``
-        fallback) is preserved verbatim from the bake.
-
-        The previous version of this method just pinned ``options.agent_id``
-        and called ``super().create_agent_state``, which unconditionally
-        wrote a brand-new ``data.json`` from ``CreateAgentOptions``. For the
-        adopt path that clobbered the bake's ``additional_commands`` (so
-        the workspace server never started on lease) and was incompatible
-        with minds' newer "don't pre-generate an agent id" model anyway
-        (``options.agent_id`` is now always ``None`` from the minds side).
+        ``system-interface``, ``cloudflared``, etc. -- and patch only
+        the minds-driven fields in place: ``labels`` and ``command``
+        (regenerated via ``assemble_command`` so the embedded
+        ``<MNGR_PREFIX><name>`` tmux session reference still resolves).
+        Everything else (``name``, ``additional_commands``, ``create_time``,
+        ``work_dir``, ``agent_type``, the agent UUID baked into the
+        ``--session-id`` fallback) is preserved verbatim from the bake --
+        the workspace identity now lives on the *host*, not on the agent.
 
         Falls back to ``super()`` when ``pre_baked_agent_id`` is unset or
         the on-disk ``data.json`` is missing -- e.g. after ``mngr destroy``
@@ -188,17 +185,20 @@ class ImbueCloudHost(Host):
             options_with_id = options.model_copy(update={"agent_id": self.pre_baked_agent_id})
             return super().create_agent_state(work_dir_path, options_with_id, created_branch_name)
 
-        # Hydrate the agent class so we can re-run ``assemble_command`` against
-        # the user-supplied name + the bake's UUID-derived session-id fallback.
+        # Hydrate the agent class with the bake's name; minds no longer
+        # renames the pre-baked agent (the workspace identity lives on the
+        # host now). ``options.name`` is the minds-supplied default agent
+        # name ("system-services"), kept around for non-imbue_cloud modes;
+        # for adoption we ignore it.
         agent_type = AgentTypeName(str(existing.get("type", "claude")))
         resolved = resolve_agent_type(agent_type, self.mngr_ctx.config)
         baked_work_dir = Path(str(existing.get("work_dir", str(work_dir_path))))
         create_time = _parse_create_time(existing.get("create_time"))
-        new_name = options.name or AgentName(str(existing["name"]))
+        baked_name = AgentName(str(existing["name"]))
 
         agent = resolved.agent_class(
             id=self.pre_baked_agent_id,
-            name=new_name,
+            name=baked_name,
             agent_type=agent_type,
             work_dir=baked_work_dir,
             create_time=create_time,
@@ -215,20 +215,19 @@ class ImbueCloudHost(Host):
         )
 
         # Merge labels: bake's defaults + minds' user-supplied (latter wins).
-        # Update ``workspace`` to track the new name so the minds UI's "agents
-        # for workspace foo" lookup finds this agent.
+        # Minds passes ``--label workspace=<host_name>`` so the workspace
+        # identity is propagated via the caller's labels; we don't re-derive
+        # it from any agent name.
         merged_labels: dict[str, str] = dict(existing.get("labels") or {})
         merged_labels.update(options.label_options.labels)
-        merged_labels["workspace"] = str(new_name)
 
         # Build the new data dict by patching the existing one in place. Any
         # bake-time fields we don't explicitly touch (``additional_commands``,
         # ``permissions``, ``start_on_boot``, ``initial_message`` /
         # ``resume_message`` / ``ready_timeout_seconds`` if minds didn't
-        # supply replacements, etc.) survive untouched. ``agent_id`` stays
-        # the bake's pre-baked id by construction.
+        # supply replacements, etc.) survive untouched. ``agent_id`` and
+        # ``name`` stay the bake's by construction.
         patched: dict[str, Any] = dict(existing)
-        patched["name"] = str(new_name)
         patched["command"] = str(new_command)
         patched["labels"] = merged_labels
         if options.initial_message is not None:
@@ -237,6 +236,10 @@ class ImbueCloudHost(Host):
             patched["resume_message"] = options.resume_message
         if options.ready_timeout_seconds is not None:
             patched["ready_timeout_seconds"] = options.ready_timeout_seconds
+        # Retarget the bake's pre-set branch to the minds-supplied per-host
+        # branch when the caller passes one. Caller-supplied wins; otherwise
+        # leave the bake's value intact (e.g. when an external mngr CLI user
+        # invokes the lease flow without driving branch naming).
         if created_branch_name is not None:
             patched["created_branch_name"] = created_branch_name
 
@@ -394,8 +397,3 @@ def normalize_inject_args(
         "mngr_prefix": _ensure_no_quote_chars(mngr_prefix, "MNGR_PREFIX") if mngr_prefix else None,
         "extra_env": cleaned_extra or None,
     }
-
-
-def host_label_for_agent(agent_name: AgentName) -> str:
-    """Default host name suffix for an agent (matches today's minds convention)."""
-    return f"{agent_name}-host"

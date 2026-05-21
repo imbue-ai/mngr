@@ -40,7 +40,6 @@ Define a custom type in your config (run `mngr config edit`):
 [agent_types.my_claude]
 parent_type = "claude"
 cli_args = "--env CLAUDE_MODEL=opus"
-permissions = ["github"]  # [future] permissions field parsed but not applied
 ```
 
 Then use it like any built-in type:
@@ -67,7 +66,6 @@ mngr create my-task my_server
 
 - `command`: literal shell command to run as the agent. Typically set alongside `parent_type = "command"` to pin a fixed command for a reusable custom type, or alongside another `parent_type` to override the command inherited from that parent. Arguments passed after `--` at invocation time are appended to this command.
 - `cli_args`: configure any option found in the [`mngr create` command](../commands/primary/create.md) by just adding the corresponding flags.
-- `permissions`: an *explicit* list of permissions for the agent (overrides any permissions from the parent type). Is applied before `cli_args`.
 
 Because it would be confusing to merge or replace `cli_args`, it is invalid to set `parent_type` to a custom type--just use the base type directly.
 

@@ -18,6 +18,7 @@ import io
 import json
 import logging
 import os
+import re
 import shlex
 from collections.abc import Callable
 from collections.abc import Iterator
@@ -36,20 +37,16 @@ from fastapi import Request
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 from pydantic import Field
+from pydantic import field_validator
 from supertokens_python import InputAppInfo
 from supertokens_python import SupertokensConfig
 from supertokens_python import init as supertokens_init
-from supertokens_python.asyncio import list_users_by_account_info
+from supertokens_python.async_to_sync_wrapper import sync as _supertokens_sync_run
 from supertokens_python.exceptions import GeneralError as SuperTokensGeneralError
 from supertokens_python.recipe import emailpassword as st_emailpassword_recipe
 from supertokens_python.recipe import emailverification as st_emailverification_recipe
 from supertokens_python.recipe import session as st_session_recipe
 from supertokens_python.recipe import thirdparty as st_thirdparty_recipe
-from supertokens_python.recipe.emailpassword.asyncio import consume_password_reset_token
-from supertokens_python.recipe.emailpassword.asyncio import send_reset_password_email
-from supertokens_python.recipe.emailpassword.asyncio import sign_in as ep_sign_in
-from supertokens_python.recipe.emailpassword.asyncio import sign_up as ep_sign_up
-from supertokens_python.recipe.emailpassword.asyncio import update_email_or_password
 from supertokens_python.recipe.emailpassword.interfaces import ConsumePasswordResetTokenOkResult
 from supertokens_python.recipe.emailpassword.interfaces import EmailAlreadyExistsError
 from supertokens_python.recipe.emailpassword.interfaces import PasswordPolicyViolationError
@@ -57,24 +54,30 @@ from supertokens_python.recipe.emailpassword.interfaces import SignInOkResult as
 from supertokens_python.recipe.emailpassword.interfaces import SignUpOkResult as EPSignUpOkResult
 from supertokens_python.recipe.emailpassword.interfaces import UpdateEmailOrPasswordOkResult
 from supertokens_python.recipe.emailpassword.interfaces import WrongCredentialsError
+from supertokens_python.recipe.emailpassword.syncio import consume_password_reset_token
+from supertokens_python.recipe.emailpassword.syncio import send_reset_password_email
+from supertokens_python.recipe.emailpassword.syncio import sign_in as ep_sign_in
+from supertokens_python.recipe.emailpassword.syncio import sign_up as ep_sign_up
+from supertokens_python.recipe.emailpassword.syncio import update_email_or_password
 from supertokens_python.recipe.emailverification import EmailVerificationClaim
-from supertokens_python.recipe.emailverification.asyncio import is_email_verified
-from supertokens_python.recipe.emailverification.asyncio import send_email_verification_email
-from supertokens_python.recipe.emailverification.asyncio import verify_email_using_token
 from supertokens_python.recipe.emailverification.interfaces import VerifyEmailUsingTokenOkResult
-from supertokens_python.recipe.session.asyncio import create_new_session_without_request_response
-from supertokens_python.recipe.session.asyncio import refresh_session_without_request_response
-from supertokens_python.recipe.session.asyncio import revoke_all_sessions_for_user
+from supertokens_python.recipe.emailverification.syncio import is_email_verified
+from supertokens_python.recipe.emailverification.syncio import send_email_verification_email
+from supertokens_python.recipe.emailverification.syncio import verify_email_using_token
 from supertokens_python.recipe.session.exceptions import SuperTokensSessionError
+from supertokens_python.recipe.session.syncio import create_new_session_without_request_response
 from supertokens_python.recipe.session.syncio import get_session_without_request_response
-from supertokens_python.recipe.thirdparty.asyncio import get_provider
-from supertokens_python.recipe.thirdparty.asyncio import manually_create_or_update_user
+from supertokens_python.recipe.session.syncio import refresh_session_without_request_response
+from supertokens_python.recipe.session.syncio import revoke_all_sessions_for_user
 from supertokens_python.recipe.thirdparty.interfaces import ManuallyCreateOrUpdateUserOkResult
 from supertokens_python.recipe.thirdparty.provider import ProviderClientConfig
 from supertokens_python.recipe.thirdparty.provider import ProviderConfig
 from supertokens_python.recipe.thirdparty.provider import ProviderInput
 from supertokens_python.recipe.thirdparty.provider import RedirectUriInfo
+from supertokens_python.recipe.thirdparty.syncio import get_provider
+from supertokens_python.recipe.thirdparty.syncio import manually_create_or_update_user
 from supertokens_python.syncio import get_user
+from supertokens_python.syncio import list_users_by_account_info
 from supertokens_python.types import RecipeUserId
 from supertokens_python.types.base import AccountInfoInput
 
@@ -214,6 +217,14 @@ class TunnelComponentTooLongError(ValueError):
         super().__init__(f"{component_name} '{value}' exceeds maximum length of {max_length}")
 
 
+class InvalidHostNameError(ValueError):
+    """Raised when a host_name fails the SafeName regex on the lease request."""
+
+    def __init__(self, value: object) -> None:
+        self.value = value
+        super().__init__(f"host_name must be alphanumeric (with dashes/underscores allowed in the middle): {value!r}")
+
+
 # ---------------------------------------------------------------------------
 # Request / response models
 # ---------------------------------------------------------------------------
@@ -279,9 +290,34 @@ AuthResult = AdminAuth | AgentAuth
 
 # -- Host pool models --
 
+# Mirror of mngr's SafeName regex (libs/mngr/imbue/mngr/primitives.py:_SAFE_NAME_RE).
+# Duplicated here -- not imported -- because this file is self-contained and
+# must not depend on the monorepo. Keep this in sync if the mngr-side rule
+# changes (alphanumeric, dashes/underscores allowed in the middle only).
+_HOST_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]*[a-zA-Z0-9]$|^[a-zA-Z0-9]$")
+
+
+def _validate_host_name(value: str) -> str:
+    """Field validator: enforce the SafeName regex.
+
+    Rejects empty strings and anything outside the alphanumeric+``-``/``_``
+    middle-allowed shape so the connector cannot persist a host_name that
+    mngr's ``HostName`` would refuse on the client side.
+    """
+    stripped = value.strip() if isinstance(value, str) else value
+    if not isinstance(stripped, str) or not _HOST_NAME_RE.match(stripped):
+        raise InvalidHostNameError(value)
+    return stripped
+
 
 class LeaseHostRequest(BaseModel):
     ssh_public_key: str = Field(description="SSH public key to authorize on the leased host")
+    host_name: str = Field(
+        description=(
+            "User-chosen friendly name for the leased host. Must satisfy mngr's SafeName "
+            "regex (alphanumeric, dashes/underscores allowed in the middle). Required."
+        )
+    )
     attributes: dict[str, Any] = Field(
         description=(
             "Lease-attribute filter. Matches with PostgreSQL '@>' so only fields the request "
@@ -289,30 +325,48 @@ class LeaseHostRequest(BaseModel):
         ),
     )
 
+    _validate_host_name = field_validator("host_name")(_validate_host_name)
+
 
 class LeaseHostResponse(BaseModel):
     host_db_id: UUID = Field(description="Database ID of the leased host")
-    vps_ip: str = Field(description="VPS IP address")
+    vps_address: str = Field(
+        description=(
+            "SSH-reachable VPS address. Either a public IPv4 or a DNS hostname depending "
+            "on what the host's provider returned at bake time (OVH-backed rows are DNS "
+            "hostnames like ``vps-eec8860b.vps.ovh.us``)."
+        )
+    )
     ssh_port: int = Field(description="SSH port on the VPS")
     ssh_user: str = Field(description="SSH user on the VPS")
     container_ssh_port: int = Field(description="SSH port mapped to the Docker container")
     agent_id: str = Field(description="Pre-provisioned mngr agent ID")
     host_id: str = Field(description="Host ID in the mngr provider")
+    host_name: str = Field(description="User-chosen friendly name for the leased host")
     attributes: dict[str, Any] = Field(description="Attributes the row was matched against")
 
 
 class ReleaseHostResponse(BaseModel):
-    status: str = Field(description="Release status (e.g. 'released')")
+    status: str = Field(
+        description="Release status: 'released' on first call, 'already_released' on idempotent retries"
+    )
 
 
 class LeasedHostInfo(BaseModel):
     host_db_id: UUID = Field(description="Database ID of the leased host")
-    vps_ip: str = Field(description="VPS IP address")
+    vps_address: str = Field(
+        description=(
+            "SSH-reachable VPS address. Either a public IPv4 or a DNS hostname depending "
+            "on what the host's provider returned at bake time (OVH-backed rows are DNS "
+            "hostnames like ``vps-eec8860b.vps.ovh.us``)."
+        )
+    )
     ssh_port: int = Field(description="SSH port on the VPS")
     ssh_user: str = Field(description="SSH user on the VPS")
     container_ssh_port: int = Field(description="SSH port mapped to the Docker container")
     agent_id: str = Field(description="Pre-provisioned mngr agent ID")
     host_id: str = Field(description="Host ID in the mngr provider")
+    host_name: str = Field(description="User-chosen friendly name for the leased host")
     attributes: dict[str, Any] = Field(description="Attributes attached to the lease row")
     leased_at: str = Field(description="ISO 8601 timestamp when the host was leased")
 
@@ -389,8 +443,46 @@ def cf_list_all_pages(client: httpx.Client, url: str, params: dict[str, str]) ->
 # --- Tunnel operations ---
 
 
+# Env var the deployed connector reads at startup to identify which
+# minds env it belongs to. The value is pushed by ``minds env deploy``
+# into the per-tier ``litellm-connector-<tier>`` Modal Secret. For
+# dev-tier deploys this is the per-developer dev env name (e.g.
+# ``josh-3``); for tier deploys it's the tier itself (``staging`` /
+# ``production``). Used to tag every Cloudflare tunnel the connector
+# creates so the destroy-side can enumerate + delete only the tunnels
+# belonging to a specific minds env -- without it, deleting tunnels
+# would have to walk every tunnel on the dev-tier CF account
+# (potentially clobbering other devs' tunnels).
+_MINDS_ENV_NAME_VAR = "MINDS_ENV_NAME"
+
+
+def _current_minds_env_name() -> str:
+    """Return the value of ``MINDS_ENV_NAME`` or empty string.
+
+    Empty when the deploy didn't push one (e.g. a pre-this-branch
+    deploy). Callers must treat the empty case as "no env tag" -- the
+    tunnel will still be creatable, just without env-aware destroy
+    cleanup metadata.
+    """
+    return os.environ.get(_MINDS_ENV_NAME_VAR, "")
+
+
 def cf_create_tunnel(client: httpx.Client, account_id: str, name: str) -> dict[str, Any]:
-    response = client.post(f"/accounts/{account_id}/cfd_tunnel", json={"name": name, "config_src": "cloudflare"})
+    """Create a Cloudflare tunnel + tag it with the minds env name in metadata.
+
+    The ``metadata`` field on ``cfd_tunnel`` POST accepts arbitrary
+    string-keyed values; we shove ``{"env": "<minds-env-name>"}`` in so
+    ``minds env destroy`` can later filter the tier's tunnels by env.
+    Empty env_name still creates the tunnel (back-compat with older
+    connector deploys); destroy then filters by exact match, so empty
+    means "doesn't match any env" -- the operator can clean those up
+    manually.
+    """
+    body: dict[str, Any] = {"name": name, "config_src": "cloudflare"}
+    env_name = _current_minds_env_name()
+    if env_name:
+        body["metadata"] = {"env": env_name}
+    response = client.post(f"/accounts/{account_id}/cfd_tunnel", json=body)
     return cf_check(response)["result"]
 
 
@@ -1224,9 +1316,18 @@ def _authenticate_supertokens(
         raise HTTPException(status_code=401, detail="SuperTokens not configured")
 
     try:
+        # Pass ``override_global_claim_validators=lambda *_: []`` so the
+        # session getter does NOT auto-reject unverified-email tokens at
+        # the validator step. We want our own explicit
+        # ``if not is_verified: raise "Email not verified"`` below to
+        # fire instead, so the operator-facing error message tells the
+        # user what to fix (the SDK's default rejection surfaces as a
+        # generic ``SuperTokensSessionError`` → "Invalid token", which
+        # is misleading).
         session = session_getter(
             access_token=token,
             anti_csrf_check=False,
+            override_global_claim_validators=lambda *_args, **_kwargs: [],
         )
     except (ValueError, TypeError, SuperTokensSessionError, SuperTokensGeneralError) as exc:
         raise HTTPException(status_code=401, detail="Invalid token") from exc
@@ -1253,11 +1354,21 @@ def _get_user_id_from_access_token(token: str) -> str:
 
     Raises ``HTTPException(401)`` on any validation failure. Used by auth-proxy
     endpoints that need the full user_id to drive an API call (e.g. revoke).
+
+    Does NOT enforce email-verification at this layer -- callers like
+    ``/auth/session/revoke`` legitimately need to work for unverified
+    users (signing out a session you never finished verifying should
+    still succeed). The endpoints that DO want email-verified callers
+    only go through :func:`_authenticate_supertokens` instead.
     """
     if not os.environ.get("SUPERTOKENS_CONNECTION_URI"):
         raise HTTPException(status_code=401, detail="SuperTokens not configured")
     try:
-        session = get_session_without_request_response(access_token=token, anti_csrf_check=False)
+        session = get_session_without_request_response(
+            access_token=token,
+            anti_csrf_check=False,
+            override_global_claim_validators=lambda *_args, **_kwargs: [],
+        )
     except (ValueError, TypeError, SuperTokensSessionError, SuperTokensGeneralError) as exc:
         raise HTTPException(status_code=401, detail="Invalid token") from exc
     if session is None:
@@ -1427,6 +1538,97 @@ def _append_authorized_key(
 web_app = FastAPI()
 
 
+# Public env var name the deployed connector reads at startup to expose
+# the tier's generation id via ``GET /generation``. The id is minted by
+# ``minds env deploy`` and stored in HCP Vault at
+# ``secrets/minds/<tier>/generation``; the per-tier ``litellm-connector-<tier>``
+# Modal Secret carries it into the container. See
+# ``apps/minds/imbue/minds/envs/generation.py`` for the full lifecycle.
+# An empty string is the **steady state** for any tier whose
+# ``deploy.toml`` has ``[lifecycle].tracks_generation = false`` (dev tier
+# today) -- ``deploy_env`` only mints + pushes a generation id when the
+# flag is true, so the connector sees no value and ``/generation``
+# answers ``{"generation_id": ""}``. The activate-time auto-wipe in
+# ``minds env activate`` skips the wipe on empty, which is the right
+# no-op for untracked tiers. (Empty is also what an older pre-generation-
+# lifecycle deploy would produce, hence the matching legacy fallback.)
+_GENERATION_ID_ENV_VAR = "MINDS_TIER_GENERATION_ID"
+
+# Per-deploy timestamp threaded into the connector's process env by
+# ``minds env deploy``. Read at module-import time below to build the
+# Modal Secret bundle names, and re-read at request time by ``/version``
+# (see ``get_version``); kept in one place so the literal string never
+# drifts between those two call sites.
+_MINDS_DEPLOY_ID_ENV_VAR = "MINDS_DEPLOY_ID"
+
+# Test-only env var honored by ``/health/liveness``. When set to ``"1"``,
+# the liveness probe returns 500 unconditionally so the deployment-test
+# suite can drive the auto-rollback path in ``minds env deploy`` without
+# editing source. Unset in every non-test deploy. See
+# ``specs/minds-deployment-tests.md`` (``test_deploy_auto_rollback_on_broken_healthcheck``).
+_INJECT_BROKEN_HEALTHCHECK_ENV_VAR = "MINDS_INJECT_BROKEN_HEALTHCHECK"
+
+
+@web_app.get("/health/liveness")
+def get_health_liveness() -> dict[str, str]:
+    """Lightweight no-auth liveness probe.
+
+    Used by ``minds env deploy``'s post-deploy health check to confirm
+    the connector is reachable. Returns a fixed body so the poller has
+    something to assert on beyond a 200 status.
+
+    Honors ``MINDS_INJECT_BROKEN_HEALTHCHECK=1`` per-request so the
+    deployment-test suite can drive the auto-rollback flow. The env
+    var is unset in every non-test deploy.
+    """
+    if os.environ.get(_INJECT_BROKEN_HEALTHCHECK_ENV_VAR) == "1":
+        raise HTTPException(status_code=500, detail="liveness probe failed: MINDS_INJECT_BROKEN_HEALTHCHECK=1")
+    return {"status": "ok"}
+
+
+@web_app.get("/generation")
+def get_generation() -> dict[str, str]:
+    """Return the tier generation id minted at ``minds env deploy`` time.
+
+    ``minds env activate <tier>`` polls this on the client side: if the
+    returned id differs from the per-env ``last_seen_generation``
+    marker the dev has on disk, the tier has been destroyed + redeployed
+    since they last activated, and local state needs to be wiped.
+
+    Doesn't require auth -- the generation id is non-sensitive (just a
+    uuid the operator can read off ``minds env list`` or Vault anyway).
+    """
+    return {"generation_id": os.environ.get(_GENERATION_ID_ENV_VAR, "")}
+
+
+@web_app.get("/version")
+def get_version() -> dict[str, str]:
+    """Return the connector's deploy id + tier generation id.
+
+    Used by the deployment-test suite to assert that a re-deploy
+    actually advances the live Modal app version (the ``deploy_id``
+    field) and as part of the logged-in smoke test's "is this env
+    healthy" sanity check.
+
+    Reads two env vars that are already populated by ``minds env
+    deploy`` for every tier:
+
+    * ``MINDS_DEPLOY_ID`` -- the compact ISO-8601 timestamp minted by
+      ``secret_lifecycle.make_deploy_id`` and threaded through the
+      Modal Secret bundle; advances on every successful deploy.
+    * ``MINDS_TIER_GENERATION_ID`` -- the tier generation uuid;
+      empty for tiers that don't track generations (dev today).
+
+    No auth required (mirrors ``/generation`` -- the values are
+    non-sensitive and surfaceable from any operator's machine via
+    ``modal app describe``).
+    """
+    return {
+        "deploy_id": os.environ.get(_MINDS_DEPLOY_ID_ENV_VAR, ""),
+        "generation_id": os.environ.get(_GENERATION_ID_ENV_VAR, ""),
+    }
+
+
 @web_app.post("/tunnels")
 def create_tunnel(request: Request, body: CreateTunnelRequest) -> dict[str, object]:
     """Create a tunnel (idempotent) and return its info with token."""
@@ -1447,11 +1649,22 @@ def list_tunnels(request: Request) -> list[dict[str, object]]:
 
 @web_app.delete("/tunnels/{tunnel_name}")
 def delete_tunnel(request: Request, tunnel_name: str) -> dict[str, str]:
-    """Delete a tunnel and all its associated DNS records, Access Applications, ingress rules, and KV entries."""
+    """Delete a tunnel and all its associated DNS records, Access Applications, ingress rules, and KV entries.
+
+    Idempotent at the HTTP layer -- a second DELETE on an already-gone
+    tunnel returns 200 with ``status: already_deleted`` rather than
+    404. Clients retrying after a transient error therefore don't have
+    to special-case ``404 Not Found``.
+    """
     with handle_endpoint_errors():
         auth = authenticate_request(request, get_ctx().ops)
         admin = require_admin(auth)
-        get_ctx().delete_tunnel(tunnel_name, admin.username)
+        try:
+            get_ctx().delete_tunnel(tunnel_name, admin.username)
+        except HTTPException as exc:
+            if exc.status_code == 404:
+                return {"status": "already_deleted"}
+            raise
         return {"status": "deleted"}
 
 
@@ -1565,7 +1778,7 @@ def lease_host(request: Request, body: LeaseHostRequest) -> dict[str, object]:
             with conn:
                 with conn.cursor() as cur:
                     cur.execute(
-                        "SELECT id, vps_ip, ssh_port, ssh_user, container_ssh_port, agent_id, host_id, attributes "
+                        "SELECT id, vps_address, ssh_port, ssh_user, container_ssh_port, agent_id, host_id, attributes "
                         "FROM pool_hosts "
                         "WHERE status = 'available' AND attributes @> %s::jsonb "
                         "ORDER BY created_at ASC LIMIT 1 FOR UPDATE SKIP LOCKED",
@@ -1580,14 +1793,18 @@ def lease_host(request: Request, body: LeaseHostRequest) -> dict[str, object]:
                                 "Please ask Josh to provision more, or relax the attribute filter."
                             ),
                         )
-                    host_db_id, vps_ip, ssh_port, ssh_user, container_ssh_port, agent_id, host_id, attributes = row
+                    host_db_id, vps_address, ssh_port, ssh_user, container_ssh_port, agent_id, host_id, attributes = (
+                        row
+                    )
 
                     # Inject the user's SSH public key on VPS and container
                     management_key_pem = os.environ["POOL_SSH_PRIVATE_KEY"]
                     try:
-                        _append_authorized_key(vps_ip, ssh_port, ssh_user, management_key_pem, body.ssh_public_key)
                         _append_authorized_key(
-                            vps_ip, container_ssh_port, ssh_user, management_key_pem, body.ssh_public_key
+                            vps_address, ssh_port, ssh_user, management_key_pem, body.ssh_public_key
+                        )
+                        _append_authorized_key(
+                            vps_address, container_ssh_port, ssh_user, management_key_pem, body.ssh_public_key
                         )
                     except (paramiko.SSHException, OSError) as exc:
                         logger.warning("SSH key injection failed for host %s: %s", host_db_id, exc)
@@ -1595,29 +1812,39 @@ def lease_host(request: Request, body: LeaseHostRequest) -> dict[str, object]:
                             status_code=502, detail=f"Failed to inject SSH key on host: {exc}"
                         ) from exc
 
+                    # ``host_name`` is mutable per-lease: it gets overwritten with the
+                    # user-supplied name each time the pool row is leased (and could
+                    # later be patched by a rename endpoint).
                     cur.execute(
-                        "UPDATE pool_hosts SET status = 'leased', leased_to_user = %s, leased_at = NOW() "
-                        "WHERE id = %s",
-                        (admin.username, host_db_id),
+                        "UPDATE pool_hosts SET status = 'leased', leased_to_user = %s, "
+                        "leased_at = NOW(), host_name = %s WHERE id = %s",
+                        (admin.username, body.host_name, host_db_id),
                     )
         finally:
             conn.close()
         attrs_dict = attributes if isinstance(attributes, dict) else {}
         return LeaseHostResponse(
             host_db_id=host_db_id,
-            vps_ip=vps_ip,
+            vps_address=vps_address,
             ssh_port=ssh_port,
             ssh_user=ssh_user,
             container_ssh_port=container_ssh_port,
             agent_id=agent_id,
             host_id=host_id,
+            host_name=body.host_name,
             attributes=attrs_dict,
         ).model_dump()
 
 
 @web_app.post("/hosts/{host_db_id}/release")
 def release_host(request: Request, host_db_id: UUID) -> dict[str, object]:
-    """Release a leased host back to the pool."""
+    """Release a leased host back to the pool.
+
+    Idempotent at the HTTP layer: a second release on an already-
+    released host returns 200 ``status: already_released`` rather than
+    404. Ownership is still enforced -- if some other user leased the
+    row, the call returns 403 regardless of status.
+    """
     with handle_endpoint_errors():
         auth = authenticate_request(request, get_ctx().ops)
         admin = require_admin(auth)
@@ -1629,15 +1856,19 @@ def release_host(request: Request, host_db_id: UUID) -> dict[str, object]:
                 # Python ``UUID`` type that FastAPI parsed from the path
                 # (it raises "can't adapt type 'UUID'").
                 cur.execute(
-                    "SELECT leased_to_user FROM pool_hosts WHERE id = %s AND status = 'leased'",
+                    "SELECT leased_to_user, status FROM pool_hosts WHERE id = %s",
                     (str(host_db_id),),
                 )
                 row = cur.fetchone()
                 if row is None:
-                    raise HTTPException(status_code=404, detail="Leased host not found")
-                leased_to_user = row[0]
+                    raise HTTPException(status_code=404, detail="Host not found")
+                leased_to_user, status = row
+                # Ownership check first: we don't want to leak a status
+                # signal to other users via the response code.
                 if leased_to_user != admin.username:
                     raise HTTPException(status_code=403, detail="You do not own this host lease")
+                if status != "leased":
+                    return ReleaseHostResponse(status="already_released").model_dump()
                 cur.execute(
                     "UPDATE pool_hosts SET status = 'released', released_at = NOW() WHERE id = %s",
                     (str(host_db_id),),
@@ -1659,7 +1890,8 @@ def list_leased_hosts(request: Request) -> list[dict[str, object]]:
         try:
             with conn.cursor() as cur:
                 cur.execute(
-                    "SELECT id, vps_ip, ssh_port, ssh_user, container_ssh_port, agent_id, host_id, attributes, leased_at "
+                    "SELECT id, vps_address, ssh_port, ssh_user, container_ssh_port, agent_id, host_id, "
+                    "host_name, attributes, leased_at "
                     "FROM pool_hosts "
                     "WHERE status = 'leased' AND leased_to_user = %s",
                     (admin.username,),
@@ -1670,14 +1902,15 @@ def list_leased_hosts(request: Request) -> list[dict[str, object]]:
         return [
             LeasedHostInfo(
                 host_db_id=r[0],
-                vps_ip=r[1],
+                vps_address=r[1],
                 ssh_port=r[2],
                 ssh_user=r[3],
                 container_ssh_port=r[4],
                 agent_id=r[5],
                 host_id=r[6],
-                attributes=r[7] if isinstance(r[7], dict) else {},
-                leased_at=str(r[8]) if r[8] is not None else "",
+                host_name=r[7],
+                attributes=r[8] if isinstance(r[8], dict) else {},
+                leased_at=str(r[9]) if r[9] is not None else "",
             ).model_dump()
             for r in rows
         ]
@@ -1985,9 +2218,9 @@ class UserProviderInfo(BaseModel):
     provider: str = Field(description="Login method: 'email' or a third-party provider ID")
 
 
-async def _build_session_tokens(user_id: str) -> SessionTokens:
+def _build_session_tokens(user_id: str) -> SessionTokens:
     """Create a new SuperTokens session for the given user and return the tokens."""
-    session = await create_new_session_without_request_response(
+    session = create_new_session_without_request_response(
         tenant_id=_AUTH_TENANT_ID,
         recipe_user_id=RecipeUserId(user_id),
     )
@@ -2004,7 +2237,7 @@ def _require_supertokens_configured() -> None:
 
 
 @web_app.post("/auth/signup", response_model=AuthResponse)
-async def auth_signup(body: SignUpRequest) -> AuthResponse:
+def auth_signup(body: SignUpRequest) -> AuthResponse:
     """Create a new email/password account and return a session + user info.
 
     Any exception from the SuperTokens SDK (core unreachable, schema mismatch,
@@ -2012,104 +2245,107 @@ async def auth_signup(body: SignUpRequest) -> AuthResponse:
     so the desktop client receives a stable JSON shape rather than a FastAPI
     default 500 body that its typed client cannot parse.
     """
-    _require_supertokens_configured()
-    email = body.email.strip()
-    if not email or not body.password:
-        return AuthResponse(status="FIELD_ERROR", message="Email and password are required")
+    with handle_endpoint_errors():
+        _require_supertokens_configured()
+        email = body.email.strip()
+        if not email or not body.password:
+            return AuthResponse(status="FIELD_ERROR", message="Email and password are required")
 
-    try:
-        result = await ep_sign_up(tenant_id=_AUTH_TENANT_ID, email=email, password=body.password)
+        try:
+            result = ep_sign_up(tenant_id=_AUTH_TENANT_ID, email=email, password=body.password)
 
-        if isinstance(result, EmailAlreadyExistsError):
-            return AuthResponse(status="EMAIL_ALREADY_EXISTS", message="An account with this email already exists")
+            if isinstance(result, EmailAlreadyExistsError):
+                return AuthResponse(status="EMAIL_ALREADY_EXISTS", message="An account with this email already exists")
 
-        if not isinstance(result, EPSignUpOkResult):
-            return AuthResponse(status="ERROR", message="Sign-up failed")
+            if not isinstance(result, EPSignUpOkResult):
+                return AuthResponse(status="ERROR", message="Sign-up failed")
 
-        user = result.user
-        recipe_user_id = user.login_methods[0].recipe_user_id if user.login_methods else RecipeUserId(user.id)
-        tokens = await _build_session_tokens(user.id)
-        await send_email_verification_email(
-            tenant_id=_AUTH_TENANT_ID,
-            user_id=user.id,
-            recipe_user_id=recipe_user_id,
-            email=email,
+            user = result.user
+            recipe_user_id = user.login_methods[0].recipe_user_id if user.login_methods else RecipeUserId(user.id)
+            tokens = _build_session_tokens(user.id)
+            send_email_verification_email(
+                tenant_id=_AUTH_TENANT_ID,
+                user_id=user.id,
+                recipe_user_id=recipe_user_id,
+                email=email,
+            )
+        except (SuperTokensSessionError, SuperTokensGeneralError) as exc:
+            logger.error("SuperTokens SDK error during signup", exc_info=exc)
+            return AuthResponse(status="ERROR", message="Auth backend unavailable")
+        return AuthResponse(
+            status="OK",
+            user=AuthUser(user_id=user.id, email=email),
+            tokens=tokens,
+            needs_email_verification=True,
         )
-    except (SuperTokensSessionError, SuperTokensGeneralError) as exc:
-        logger.error("SuperTokens SDK error during signup", exc_info=exc)
-        return AuthResponse(status="ERROR", message="Auth backend unavailable")
-    return AuthResponse(
-        status="OK",
-        user=AuthUser(user_id=user.id, email=email),
-        tokens=tokens,
-        needs_email_verification=True,
-    )
 
 
 @web_app.post("/auth/signin", response_model=AuthResponse)
-async def auth_signin(body: SignInRequest) -> AuthResponse:
+def auth_signin(body: SignInRequest) -> AuthResponse:
     """Authenticate with email/password and return a session + user info.
 
     Any exception from the SuperTokens SDK is caught and returned as
     ``AuthResponse(status="ERROR")`` -- see the ``auth_signup`` docstring for
     the rationale.
     """
-    _require_supertokens_configured()
-    email = body.email.strip()
-    if not email or not body.password:
-        return AuthResponse(status="FIELD_ERROR", message="Email and password are required")
+    with handle_endpoint_errors():
+        _require_supertokens_configured()
+        email = body.email.strip()
+        if not email or not body.password:
+            return AuthResponse(status="FIELD_ERROR", message="Email and password are required")
 
-    try:
-        result = await ep_sign_in(tenant_id=_AUTH_TENANT_ID, email=email, password=body.password)
+        try:
+            result = ep_sign_in(tenant_id=_AUTH_TENANT_ID, email=email, password=body.password)
 
-        if isinstance(result, WrongCredentialsError):
-            return AuthResponse(status="WRONG_CREDENTIALS", message="Incorrect email or password")
+            if isinstance(result, WrongCredentialsError):
+                return AuthResponse(status="WRONG_CREDENTIALS", message="Incorrect email or password")
 
-        if not isinstance(result, EPSignInOkResult):
-            return AuthResponse(status="ERROR", message="Sign-in failed")
+            if not isinstance(result, EPSignInOkResult):
+                return AuthResponse(status="ERROR", message="Sign-in failed")
 
-        user = result.user
-        recipe_user_id = user.login_methods[0].recipe_user_id if user.login_methods else RecipeUserId(user.id)
-        verified = await is_email_verified(recipe_user_id=recipe_user_id, email=email)
-        tokens = await _build_session_tokens(user.id)
-        if not verified:
-            await send_email_verification_email(
-                tenant_id=_AUTH_TENANT_ID,
-                user_id=user.id,
-                recipe_user_id=recipe_user_id,
-                email=email,
-            )
-    except (SuperTokensSessionError, SuperTokensGeneralError) as exc:
-        logger.error("SuperTokens SDK error during signin", exc_info=exc)
-        return AuthResponse(status="ERROR", message="Auth backend unavailable")
-    return AuthResponse(
-        status="OK",
-        user=AuthUser(user_id=user.id, email=email),
-        tokens=tokens,
-        needs_email_verification=not verified,
-    )
+            user = result.user
+            recipe_user_id = user.login_methods[0].recipe_user_id if user.login_methods else RecipeUserId(user.id)
+            verified = is_email_verified(recipe_user_id=recipe_user_id, email=email)
+            tokens = _build_session_tokens(user.id)
+            if not verified:
+                send_email_verification_email(
+                    tenant_id=_AUTH_TENANT_ID,
+                    user_id=user.id,
+                    recipe_user_id=recipe_user_id,
+                    email=email,
+                )
+        except (SuperTokensSessionError, SuperTokensGeneralError) as exc:
+            logger.error("SuperTokens SDK error during signin", exc_info=exc)
+            return AuthResponse(status="ERROR", message="Auth backend unavailable")
+        return AuthResponse(
+            status="OK",
+            user=AuthUser(user_id=user.id, email=email),
+            tokens=tokens,
+            needs_email_verification=not verified,
+        )
 
 
 @web_app.post("/auth/session/refresh", response_model=RefreshSessionResponse)
-async def auth_refresh_session(body: RefreshSessionRequest) -> RefreshSessionResponse:
+def auth_refresh_session(body: RefreshSessionRequest) -> RefreshSessionResponse:
     """Exchange a refresh token for a fresh access/refresh token pair."""
-    _require_supertokens_configured()
-    try:
-        new_session = await refresh_session_without_request_response(refresh_token=body.refresh_token)
-    except (SuperTokensSessionError, SuperTokensGeneralError, ValueError, TypeError) as exc:
-        return RefreshSessionResponse(status="ERROR", message=str(exc))
-    raw = new_session.get_all_session_tokens_dangerously()
-    return RefreshSessionResponse(
-        status="OK",
-        tokens=SessionTokens(
-            access_token=raw["accessToken"],
-            refresh_token=raw["refreshToken"] or None,
-        ),
-    )
+    with handle_endpoint_errors():
+        _require_supertokens_configured()
+        try:
+            new_session = refresh_session_without_request_response(refresh_token=body.refresh_token)
+        except (SuperTokensSessionError, SuperTokensGeneralError, ValueError, TypeError) as exc:
+            return RefreshSessionResponse(status="ERROR", message=str(exc))
+        raw = new_session.get_all_session_tokens_dangerously()
+        return RefreshSessionResponse(
+            status="OK",
+            tokens=SessionTokens(
+                access_token=raw["accessToken"],
+                refresh_token=raw["refreshToken"] or None,
+            ),
+        )
 
 
 @web_app.post("/auth/session/revoke")
-async def auth_revoke_sessions(request: Request) -> dict[str, object]:
+def auth_revoke_sessions(request: Request) -> dict[str, object]:
     """Revoke every SuperTokens session for the caller's user.
 
     Authentication: the caller must send their own SuperTokens access token as
@@ -2122,47 +2358,50 @@ async def auth_revoke_sessions(request: Request) -> dict[str, object]:
     on the user's machine become useless even if copied off-box. Idempotent --
     no-op when the caller has no other active sessions.
     """
-    _require_supertokens_configured()
-    auth_header = request.headers.get("authorization", "")
-    if not auth_header.lower().startswith("bearer "):
-        raise HTTPException(status_code=401, detail="Missing Bearer credentials")
-    user_id = _get_user_id_from_access_token(auth_header[7:])
-    revoked = await revoke_all_sessions_for_user(user_id=user_id)
-    logger.info("Revoked %d sessions for user %s...", len(revoked), user_id[:8])
-    return {"status": "OK", "revoked_count": len(revoked)}
+    with handle_endpoint_errors():
+        _require_supertokens_configured()
+        auth_header = request.headers.get("authorization", "")
+        if not auth_header.lower().startswith("bearer "):
+            raise HTTPException(status_code=401, detail="Missing Bearer credentials")
+        user_id = _get_user_id_from_access_token(auth_header[7:])
+        revoked = revoke_all_sessions_for_user(user_id=user_id)
+        logger.info("Revoked %d sessions for user %s...", len(revoked), user_id[:8])
+        return {"status": "OK", "revoked_count": len(revoked)}
 
 
 @web_app.post("/auth/email/send-verification")
-async def auth_send_verification_email(body: SendVerificationEmailRequest) -> dict[str, str]:
+def auth_send_verification_email(body: SendVerificationEmailRequest) -> dict[str, str]:
     """(Re)send the verification email for a given user."""
-    _require_supertokens_configured()
-    user = get_user(body.user_id)
-    if user is None:
-        raise HTTPException(status_code=404, detail="User not found")
-    recipe_user_id = user.login_methods[0].recipe_user_id if user.login_methods else RecipeUserId(body.user_id)
-    await send_email_verification_email(
-        tenant_id=_AUTH_TENANT_ID,
-        user_id=body.user_id,
-        recipe_user_id=recipe_user_id,
-        email=body.email,
-    )
-    return {"status": "OK"}
+    with handle_endpoint_errors():
+        _require_supertokens_configured()
+        user = get_user(body.user_id)
+        if user is None:
+            raise HTTPException(status_code=404, detail="User not found")
+        recipe_user_id = user.login_methods[0].recipe_user_id if user.login_methods else RecipeUserId(body.user_id)
+        send_email_verification_email(
+            tenant_id=_AUTH_TENANT_ID,
+            user_id=body.user_id,
+            recipe_user_id=recipe_user_id,
+            email=body.email,
+        )
+        return {"status": "OK"}
 
 
 @web_app.post("/auth/email/is-verified")
-async def auth_is_email_verified(body: IsEmailVerifiedRequest) -> dict[str, bool]:
+def auth_is_email_verified(body: IsEmailVerifiedRequest) -> dict[str, bool]:
     """Return whether the given user's email is verified."""
-    _require_supertokens_configured()
-    user = get_user(body.user_id)
-    if user is None:
-        return {"verified": False}
-    recipe_user_id = user.login_methods[0].recipe_user_id if user.login_methods else RecipeUserId(body.user_id)
-    verified = await is_email_verified(recipe_user_id=recipe_user_id, email=body.email)
-    return {"verified": verified}
+    with handle_endpoint_errors():
+        _require_supertokens_configured()
+        user = get_user(body.user_id)
+        if user is None:
+            return {"verified": False}
+        recipe_user_id = user.login_methods[0].recipe_user_id if user.login_methods else RecipeUserId(body.user_id)
+        verified = is_email_verified(recipe_user_id=recipe_user_id, email=body.email)
+        return {"verified": verified}
 
 
 @web_app.get("/auth/verify-email", response_class=HTMLResponse)
-async def auth_verify_email_page(request: Request) -> HTMLResponse:
+def auth_verify_email_page(request: Request) -> HTMLResponse:
     """Handle an email verification link click from an email.
 
     Returns a human-readable HTML page indicating success or failure. Reads the
@@ -2170,19 +2409,20 @@ async def auth_verify_email_page(request: Request) -> HTMLResponse:
     them as function arguments, since SuperTokens camel-cases ``tenantId`` in
     emitted links and we do not want that to leak into the Python identifier.
     """
-    _require_supertokens_configured()
-    token = request.query_params.get("token", "")
-    tenant_id = request.query_params.get("tenantId") or _AUTH_TENANT_ID
-    if not token:
+    with handle_endpoint_errors():
+        _require_supertokens_configured()
+        token = request.query_params.get("token", "")
+        tenant_id = request.query_params.get("tenantId") or _AUTH_TENANT_ID
+        if not token:
+            return HTMLResponse(_VERIFY_EMAIL_FAILED_HTML, status_code=400)
+        try:
+            result = verify_email_using_token(tenant_id=tenant_id, token=token)
+        except (SuperTokensSessionError, SuperTokensGeneralError, ValueError) as exc:
+            logger.error("Email verification error", exc_info=exc)
+            return HTMLResponse(_VERIFY_EMAIL_FAILED_HTML, status_code=400)
+        if isinstance(result, VerifyEmailUsingTokenOkResult):
+            return HTMLResponse(_VERIFY_EMAIL_SUCCESS_HTML)
         return HTMLResponse(_VERIFY_EMAIL_FAILED_HTML, status_code=400)
-    try:
-        result = await verify_email_using_token(tenant_id=tenant_id, token=token)
-    except (SuperTokensSessionError, SuperTokensGeneralError, ValueError) as exc:
-        logger.error("Email verification error", exc_info=exc)
-        return HTMLResponse(_VERIFY_EMAIL_FAILED_HTML, status_code=400)
-    if isinstance(result, VerifyEmailUsingTokenOkResult):
-        return HTMLResponse(_VERIFY_EMAIL_SUCCESS_HTML)
-    return HTMLResponse(_VERIFY_EMAIL_FAILED_HTML, status_code=400)
 
 
 @web_app.get("/auth/reset-password", response_class=HTMLResponse)
@@ -2194,7 +2434,7 @@ def auth_reset_password_page(token: str = "") -> HTMLResponse:
 
 
 @web_app.post("/auth/password/forgot")
-async def auth_forgot_password(body: ForgotPasswordRequest) -> dict[str, str]:
+def auth_forgot_password(body: ForgotPasswordRequest) -> dict[str, str]:
     """Send a password reset email for the given address (always succeeds).
 
     Swallows any backend error (SuperTokens core unreachable, schema mismatch,
@@ -2204,111 +2444,131 @@ async def auth_forgot_password(body: ForgotPasswordRequest) -> dict[str, str]:
     500 on intermittent SuperTokens outages would violate the docstring's
     "always succeeds" contract.
     """
-    _require_supertokens_configured()
-    email = body.email.strip()
-    success = {"status": "OK", "message": "If an account exists, a reset email has been sent"}
-    if not email:
-        return success
-    try:
-        users = await list_users_by_account_info(
-            tenant_id=_AUTH_TENANT_ID,
-            account_info=AccountInfoInput(email=email),
-        )
-        if not users:
+    with handle_endpoint_errors():
+        _require_supertokens_configured()
+        email = body.email.strip()
+        success = {"status": "OK", "message": "If an account exists, a reset email has been sent"}
+        if not email:
             return success
-        user_id = users[0].id
-        result = await send_reset_password_email(tenant_id=_AUTH_TENANT_ID, user_id=user_id, email=email)
-        if result == "UNKNOWN_USER_ID_ERROR":
-            logger.warning("Failed to send password reset email for user %s", user_id)
-    except (SuperTokensSessionError, SuperTokensGeneralError) as exc:
-        logger.warning("Auth backend error during forgot-password; returning generic success: %s", exc)
-    return success
+        try:
+            users = list_users_by_account_info(
+                tenant_id=_AUTH_TENANT_ID,
+                account_info=AccountInfoInput(email=email),
+            )
+            if not users:
+                return success
+            user_id = users[0].id
+            result = send_reset_password_email(tenant_id=_AUTH_TENANT_ID, user_id=user_id, email=email)
+            if result == "UNKNOWN_USER_ID_ERROR":
+                logger.warning("Failed to send password reset email for user %s", user_id)
+        except (SuperTokensSessionError, SuperTokensGeneralError) as exc:
+            logger.warning("Auth backend error during forgot-password; returning generic success: %s", exc)
+        return success
 
 
 @web_app.post("/auth/password/reset")
-async def auth_reset_password(body: ResetPasswordRequest) -> dict[str, str]:
+def auth_reset_password(body: ResetPasswordRequest) -> dict[str, str]:
     """Consume a password reset token and set a new password."""
-    _require_supertokens_configured()
-    if not body.token or not body.new_password:
-        raise HTTPException(status_code=400, detail="Token and new password are required")
+    with handle_endpoint_errors():
+        _require_supertokens_configured()
+        if not body.token or not body.new_password:
+            raise HTTPException(status_code=400, detail="Token and new password are required")
 
-    consume_result = await consume_password_reset_token(tenant_id=_AUTH_TENANT_ID, token=body.token)
-    if not isinstance(consume_result, ConsumePasswordResetTokenOkResult):
-        return {"status": "INVALID_TOKEN", "message": "Invalid or expired reset token"}
+        consume_result = consume_password_reset_token(tenant_id=_AUTH_TENANT_ID, token=body.token)
+        if not isinstance(consume_result, ConsumePasswordResetTokenOkResult):
+            return {"status": "INVALID_TOKEN", "message": "Invalid or expired reset token"}
 
-    update_result = await update_email_or_password(
-        recipe_user_id=RecipeUserId(consume_result.user_id),
-        password=body.new_password,
-    )
-    if isinstance(update_result, PasswordPolicyViolationError):
-        return {"status": "FIELD_ERROR", "message": update_result.failure_reason}
-    if not isinstance(update_result, UpdateEmailOrPasswordOkResult):
-        raise HTTPException(status_code=500, detail="Failed to update password")
-    return {"status": "OK", "message": "Password has been reset"}
+        update_result = update_email_or_password(
+            recipe_user_id=RecipeUserId(consume_result.user_id),
+            password=body.new_password,
+        )
+        if isinstance(update_result, PasswordPolicyViolationError):
+            return {"status": "FIELD_ERROR", "message": update_result.failure_reason}
+        if not isinstance(update_result, UpdateEmailOrPasswordOkResult):
+            raise HTTPException(status_code=500, detail="Failed to update password")
+        return {"status": "OK", "message": "Password has been reset"}
 
 
 @web_app.post("/auth/oauth/authorize", response_model=OAuthAuthorizeResponse)
-async def auth_oauth_authorize(body: OAuthAuthorizeRequest) -> OAuthAuthorizeResponse:
+def auth_oauth_authorize(body: OAuthAuthorizeRequest) -> OAuthAuthorizeResponse:
     """Return the URL to which the user should be redirected to begin OAuth."""
-    _require_supertokens_configured()
-    provider = await get_provider(tenant_id=_AUTH_TENANT_ID, third_party_id=body.provider_id)
-    if provider is None:
-        return OAuthAuthorizeResponse(status="ERROR", message=f"Unknown provider: {body.provider_id}")
-    redirect = await provider.get_authorisation_redirect_url(
-        redirect_uri_on_provider_dashboard=body.callback_url,
-        user_context={},
-    )
-    return OAuthAuthorizeResponse(status="OK", url=redirect.url_with_query_params)
+    with handle_endpoint_errors():
+        _require_supertokens_configured()
+        provider = get_provider(tenant_id=_AUTH_TENANT_ID, third_party_id=body.provider_id)
+        if provider is None:
+            return OAuthAuthorizeResponse(status="ERROR", message=f"Unknown provider: {body.provider_id}")
+        # ``Provider.get_authorisation_redirect_url`` is async-only on the
+        # SuperTokens SDK (the ``syncio`` module exposes a sync ``get_provider``
+        # but the Provider object's methods are coroutines). We're inside a
+        # sync def endpoint that FastAPI runs in a threadpool worker -- the
+        # worker has no running event loop, so the SDK's own async-to-sync
+        # wrapper can spin up a fresh loop safely. Same pattern SuperTokens'
+        # own ``syncio`` helpers use internally.
+        redirect = _supertokens_sync_run(
+            provider.get_authorisation_redirect_url(
+                redirect_uri_on_provider_dashboard=body.callback_url,
+                user_context={},
+            )
+        )
+        return OAuthAuthorizeResponse(status="OK", url=redirect.url_with_query_params)
 
 
 @web_app.post("/auth/oauth/callback", response_model=AuthResponse)
-async def auth_oauth_callback(body: OAuthCallbackRequest) -> AuthResponse:
+def auth_oauth_callback(body: OAuthCallbackRequest) -> AuthResponse:
     """Exchange an OAuth callback's query params for a supertokens session."""
-    _require_supertokens_configured()
-    provider = await get_provider(tenant_id=_AUTH_TENANT_ID, third_party_id=body.provider_id)
-    if provider is None:
-        return AuthResponse(status="ERROR", message=f"Unknown provider: {body.provider_id}")
+    with handle_endpoint_errors():
+        _require_supertokens_configured()
+        provider = get_provider(tenant_id=_AUTH_TENANT_ID, third_party_id=body.provider_id)
+        if provider is None:
+            return AuthResponse(status="ERROR", message=f"Unknown provider: {body.provider_id}")
 
-    try:
-        oauth_tokens = await provider.exchange_auth_code_for_oauth_tokens(
-            redirect_uri_info=RedirectUriInfo(
-                redirect_uri_on_provider_dashboard=body.callback_url,
-                redirect_uri_query_params=dict(body.query_params),
-                pkce_code_verifier=None,
-            ),
-            user_context={},
+        try:
+            # ``Provider.exchange_auth_code_for_oauth_tokens`` and
+            # ``Provider.get_user_info`` are async-only on the SuperTokens SDK
+            # (see ``auth_oauth_authorize`` for the rationale). FastAPI runs
+            # this sync endpoint in a threadpool worker with no running event
+            # loop, so the SDK's async-to-sync wrapper is safe here.
+            oauth_tokens = _supertokens_sync_run(
+                provider.exchange_auth_code_for_oauth_tokens(
+                    redirect_uri_info=RedirectUriInfo(
+                        redirect_uri_on_provider_dashboard=body.callback_url,
+                        redirect_uri_query_params=dict(body.query_params),
+                        pkce_code_verifier=None,
+                    ),
+                    user_context={},
+                )
+            )
+            oauth_user = _supertokens_sync_run(provider.get_user_info(oauth_tokens=oauth_tokens, user_context={}))
+        except (ValueError, KeyError, OSError) as exc:
+            logger.error("OAuth callback failed for %s", body.provider_id, exc_info=exc)
+            return AuthResponse(status="ERROR", message=str(exc))
+
+        if oauth_user.email is None or oauth_user.email.id is None:
+            return AuthResponse(status="ERROR", message="No email provided by the OAuth provider")
+
+        email = oauth_user.email.id
+        result = manually_create_or_update_user(
+            tenant_id=_AUTH_TENANT_ID,
+            third_party_id=body.provider_id,
+            third_party_user_id=oauth_user.third_party_user_id,
+            email=email,
+            is_verified=oauth_user.email.is_verified,
         )
-        oauth_user = await provider.get_user_info(oauth_tokens=oauth_tokens, user_context={})
-    except (ValueError, KeyError, OSError) as exc:
-        logger.error("OAuth callback failed for %s", body.provider_id, exc_info=exc)
-        return AuthResponse(status="ERROR", message=str(exc))
+        if not isinstance(result, ManuallyCreateOrUpdateUserOkResult):
+            return AuthResponse(status="ERROR", message="Could not create or update account")
 
-    if oauth_user.email is None or oauth_user.email.id is None:
-        return AuthResponse(status="ERROR", message="No email provided by the OAuth provider")
+        display_name: str | None = None
+        if oauth_user.raw_user_info_from_provider and oauth_user.raw_user_info_from_provider.from_user_info_api:
+            raw = oauth_user.raw_user_info_from_provider.from_user_info_api
+            display_name = raw.get("name") or raw.get("login") or raw.get("displayName")
 
-    email = oauth_user.email.id
-    result = await manually_create_or_update_user(
-        tenant_id=_AUTH_TENANT_ID,
-        third_party_id=body.provider_id,
-        third_party_user_id=oauth_user.third_party_user_id,
-        email=email,
-        is_verified=oauth_user.email.is_verified,
-    )
-    if not isinstance(result, ManuallyCreateOrUpdateUserOkResult):
-        return AuthResponse(status="ERROR", message="Could not create or update account")
-
-    display_name: str | None = None
-    if oauth_user.raw_user_info_from_provider and oauth_user.raw_user_info_from_provider.from_user_info_api:
-        raw = oauth_user.raw_user_info_from_provider.from_user_info_api
-        display_name = raw.get("name") or raw.get("login") or raw.get("displayName")
-
-    tokens = await _build_session_tokens(result.user.id)
-    return AuthResponse(
-        status="OK",
-        user=AuthUser(user_id=result.user.id, email=email, display_name=display_name),
-        tokens=tokens,
-        needs_email_verification=not oauth_user.email.is_verified,
-    )
+        tokens = _build_session_tokens(result.user.id)
+        return AuthResponse(
+            status="OK",
+            user=AuthUser(user_id=result.user.id, email=email, display_name=display_name),
+            tokens=tokens,
+            needs_email_verification=not oauth_user.email.is_verified,
+        )
 
 
 @web_app.get("/auth/users/{user_id}", response_model=UserProviderInfo)
@@ -2343,24 +2603,50 @@ def auth_get_user(user_id: str) -> UserProviderInfo:
 
 _DEPLOY_ENV = os.environ.get("MNGR_DEPLOY_ENV", "production")
 
+# Per-deploy timestamp baked into the deployed function spec by ``minds
+# env deploy`` so the connector pins to the matching ``<svc>-<tier>-<id>``
+# Modal Secrets. Falls back to a sentinel value when unset so unit tests
+# can import the module without raising; the resulting
+# ``<svc>-<tier>-MINDS_DEPLOY_ID_UNSET`` secret name doesn't exist in
+# any Modal env so a real ``modal deploy`` invocation outside of
+# ``minds env deploy`` will fail with "Secret not found" -- the safety
+# property the timestamped-secret rollback model needs.
+_MINDS_DEPLOY_ID = os.environ.get(_MINDS_DEPLOY_ID_ENV_VAR, "MINDS_DEPLOY_ID_UNSET")
+
+# Warm-pool size for the deployed function. ``minds env deploy`` reads
+# the tier's ``[min_containers].connector`` from its committed
+# ``deploy.toml`` and threads the value here as
+# ``MINDS_CONNECTOR_MIN_CONTAINERS`` at ``modal deploy`` time -- which
+# is when this module is imported and the function spec is serialized.
+# Defaults to 0 so a deploy that forgets to set the env var gets the
+# cheapest possible warm pool (cold start on first hit).
+_MIN_CONTAINERS = int(os.environ.get("MINDS_CONNECTOR_MIN_CONTAINERS", "0"))
+
 image = modal.Image.debian_slim().pip_install(
     "fastapi[standard]", "httpx", "supertokens-python", "psycopg2-binary", "paramiko"
 )
-app = modal.App(name=f"remote-service-connector-{_DEPLOY_ENV}", image=image)
-
-
-# Modal URLs follow ``{workspace}--{app-name}-{function-name}.modal.run``, with
-# underscores in identifiers normalized to hyphens. For this deployment that's
-# ``joshalbrecht--remote-service-connector-<env>-fastapi-app.modal.run``. This
-# fallback is only used when AUTH_WEBSITE_DOMAIN is not set in the secret; in
-# practice we set it explicitly from ``.minds/<env>/supertokens.sh``.
-_MODAL_WORKSPACE = "joshalbrecht"
-_DEFAULT_CONNECTOR_DOMAIN = f"https://{_MODAL_WORKSPACE}--remote-service-connector-{_DEPLOY_ENV}-fastapi-app.modal.run"
+app = modal.App(name=f"rsc-{_DEPLOY_ENV}", image=image)
 
 
 def _get_auth_website_domain() -> str:
-    """Return the public URL used in outbound email links (verification, reset)."""
-    return os.environ.get("AUTH_WEBSITE_DOMAIN", _DEFAULT_CONNECTOR_DOMAIN)
+    """Return the public URL used in outbound email links (verification, reset).
+
+    Reads ``AUTH_WEBSITE_DOMAIN`` from the per-tier ``supertokens-<env>``
+    Modal secret. The value is **required**: it is the URL embedded into
+    password-reset and email-verification links, and it must match the
+    workspace this app is actually deployed under. Raises
+    :class:`RuntimeError` if the secret forgot to set it -- silently
+    falling back to a hardcoded workspace would be wrong for every
+    non-default tier.
+    """
+    value = os.environ.get("AUTH_WEBSITE_DOMAIN")
+    if not value:
+        raise RuntimeError(
+            "AUTH_WEBSITE_DOMAIN is not set. Populate it in the "
+            f"`supertokens-{_DEPLOY_ENV}-{_MINDS_DEPLOY_ID}` Modal secret (the deploy script "
+            "pushes it from the tier's Vault entry)."
+        )
+    return value
 
 
 def _build_oauth_providers() -> list[ProviderInput]:
@@ -2451,20 +2737,23 @@ def _init_supertokens() -> None:
 
 
 @app.function(
+    name="api",
     secrets=[
-        modal.Secret.from_name(f"cloudflare-{_DEPLOY_ENV}"),
-        modal.Secret.from_name(f"supertokens-{_DEPLOY_ENV}"),
-        modal.Secret.from_name(f"neon-{_DEPLOY_ENV}"),
-        modal.Secret.from_name(f"pool-ssh-{_DEPLOY_ENV}"),
-        modal.Secret.from_name(f"litellm-connector-{_DEPLOY_ENV}"),
-        modal.Secret.from_name(f"paid-accounts-{_DEPLOY_ENV}"),
-        modal.Secret.from_dict({"MNGR_DEPLOY_ENV": _DEPLOY_ENV}),
+        modal.Secret.from_name(f"cloudflare-{_DEPLOY_ENV}-{_MINDS_DEPLOY_ID}"),
+        modal.Secret.from_name(f"supertokens-{_DEPLOY_ENV}-{_MINDS_DEPLOY_ID}"),
+        modal.Secret.from_name(f"neon-{_DEPLOY_ENV}-{_MINDS_DEPLOY_ID}"),
+        modal.Secret.from_name(f"pool-ssh-{_DEPLOY_ENV}-{_MINDS_DEPLOY_ID}"),
+        modal.Secret.from_name(f"litellm-connector-{_DEPLOY_ENV}-{_MINDS_DEPLOY_ID}"),
+        modal.Secret.from_name(f"paid-accounts-{_DEPLOY_ENV}-{_MINDS_DEPLOY_ID}"),
+        modal.Secret.from_dict({"MNGR_DEPLOY_ENV": _DEPLOY_ENV, _MINDS_DEPLOY_ID_ENV_VAR: _MINDS_DEPLOY_ID}),
     ],
-    # Keep one container warm at all times so the desktop client (which
-    # hits this connector for auth, lease, and tunnel ops on every minds
-    # startup) doesn't pay a cold-boot penalty after a quiet period.
-    # Mirrors the litellm-proxy deployment in apps/modal_litellm/app.py.
-    min_containers=1,
+    # Warm-pool size driven by ``_MIN_CONTAINERS`` at the top of this
+    # module: defaults to 1 for production / staging (avoid cold-boot
+    # penalty on auth / lease / tunnel hits from the desktop client) and
+    # 0 for dev (per-developer envs sit idle most of the time). Override
+    # at deploy time with ``MINDS_MIN_CONTAINERS=<n>``. Mirrors the
+    # equivalent block in apps/modal_litellm/app.py.
+    min_containers=_MIN_CONTAINERS,
 )
 @modal.asgi_app()
 def fastapi_app() -> FastAPI:

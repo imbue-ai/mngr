@@ -197,7 +197,7 @@ def _make_remote_agent(
     return _TestAgent(
         id=AgentId(f"agent-{uuid4().hex}"),
         name=AgentName(agent_name),
-        agent_type=AgentTypeName("test"),
+        agent_type=AgentTypeName("generic"),
         work_dir=Path("/tmp/work"),
         create_time=datetime.now(timezone.utc),
         host_id=host.id,
@@ -615,7 +615,7 @@ def _make_local_host_and_agent(
     agent = _TestAgent(
         id=AgentId(f"agent-{uuid4().hex}"),
         name=AgentName(agent_name),
-        agent_type=AgentTypeName("test"),
+        agent_type=AgentTypeName("generic"),
         work_dir=Path("/tmp/work"),
         create_time=datetime.now(timezone.utc),
         host_id=host.id,

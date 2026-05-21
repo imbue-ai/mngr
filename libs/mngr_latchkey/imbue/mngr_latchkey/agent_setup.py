@@ -64,9 +64,29 @@ ENV_LATCHKEY_DISABLE_COUNTING: Final[str] = "LATCHKEY_DISABLE_COUNTING"
 _GATEWAY_SELF_HOST: Final[str] = "latchkey-self.invalid"
 _SCOPE_LATCHKEY_SELF: Final[str] = "latchkey-self"
 _PERM_CREATE_PERMISSION_REQUEST: Final[str] = "latchkey-self-create-permission-request"
+_PERM_READ_SELF_PERMISSIONS: Final[str] = "latchkey-self-read-self-permissions"
+_PERM_READ_AVAILABLE_PERMISSIONS: Final[str] = "latchkey-self-read-available-permissions"
+
+# Regex matching ``/permissions/available/<service_name>`` where the
+# service name segment is one or more lowercase letters, digits, and
+# hyphens (starting with a letter or digit). Mirrors the gateway
+# ``permissions.mjs`` extension's own ``VALID_SERVICE_NAME_PATTERN`` so
+# the agent baseline cannot reach paths the extension itself would
+# refuse to serve. The trailing ``$`` rules out the collection endpoint
+# at ``/permissions/available`` (no segment): the baseline only opens
+# up the per-service catalog endpoint.
+_AVAILABLE_PERMISSIONS_PATH_PATTERN: Final[str] = r"^/permissions/available/[a-z0-9][a-z0-9-]*$"
 
 _AGENT_BASELINE_PERMISSIONS: Final[LatchkeyPermissionsConfig] = LatchkeyPermissionsConfig(
-    rules=({_SCOPE_LATCHKEY_SELF: [_PERM_CREATE_PERMISSION_REQUEST]},),
+    rules=(
+        {
+            _SCOPE_LATCHKEY_SELF: [
+                _PERM_CREATE_PERMISSION_REQUEST,
+                _PERM_READ_SELF_PERMISSIONS,
+                _PERM_READ_AVAILABLE_PERMISSIONS,
+            ],
+        },
+    ),
     schemas={
         _SCOPE_LATCHKEY_SELF: {
             "properties": {"domain": {"const": _GATEWAY_SELF_HOST}},
@@ -76,6 +96,23 @@ _AGENT_BASELINE_PERMISSIONS: Final[LatchkeyPermissionsConfig] = LatchkeyPermissi
             "properties": {
                 "method": {"const": "POST"},
                 "path": {"const": "/permission-requests"},
+            },
+            "required": ["method", "path"],
+        },
+        _PERM_READ_SELF_PERMISSIONS: {
+            "properties": {
+                "method": {"const": "GET"},
+                "path": {"const": "/permissions/self"},
+            },
+            "required": ["method", "path"],
+        },
+        _PERM_READ_AVAILABLE_PERMISSIONS: {
+            "properties": {
+                "method": {"const": "GET"},
+                "path": {
+                    "type": "string",
+                    "pattern": _AVAILABLE_PERMISSIONS_PATH_PATTERN,
+                },
             },
             "required": ["method", "path"],
         },

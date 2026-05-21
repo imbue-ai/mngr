@@ -174,6 +174,82 @@ def _map_docker_status_to_host_state(status: str, exit_code: int) -> tuple[HostS
     return HostState.CRASHED, f"unrecognized docker status {status!r}"
 
 
+def _rewrite_container_host_name(
+    *,
+    vps_address: str,
+    container_ssh_port: int,
+    private_key_path: Path,
+    known_hosts_path: Path,
+    new_host_name: str,
+    data_json_path: str = "/mngr/data.json",
+    connect_timeout_seconds: float = 30.0,
+) -> None:
+    """Rewrite ``data.json``'s ``host_name`` field on the leased container.
+
+    The pool host's ``/mngr/data.json`` was written at bake time with the
+    bake's per-bake unique placeholder host name (``pool-<hex>-host``).
+    The FCT bootstrap reads that file to decide what to name the initial
+    chat agent (see ``forever-claude-template/libs/bootstrap/src/bootstrap/
+    manager.py:_read_host_name``). Without this rewrite, every lease would
+    end up with a chat agent named after the bake's placeholder instead
+    of the user's chosen workspace name.
+
+    Implementation: SFTP download -> mutate the parsed dict -> SFTP upload.
+    Avoids the shell-quoting hazards of an inline ``python3 -c`` over
+    ``exec_command`` (the host name flows through user input ultimately,
+    so single/double-quote escaping has to be 100% airtight).
+
+    Raises ``MngrError`` on any SSH, SFTP, or JSON failure -- a wrong
+    ``host_name`` is exactly the bug this exists to prevent, so a silent
+    fallback would re-introduce it.
+    """
+    client = paramiko.SSHClient()
+    try:
+        client.load_host_keys(str(known_hosts_path))
+    except OSError as exc:
+        raise MngrError(f"failed to load known_hosts {known_hosts_path} for host_name rewrite: {exc}") from exc
+    client.set_missing_host_key_policy(paramiko.RejectPolicy())
+    try:
+        client.connect(
+            hostname=vps_address,
+            port=container_ssh_port,
+            username="root",
+            key_filename=str(private_key_path),
+            allow_agent=False,
+            look_for_keys=False,
+            timeout=connect_timeout_seconds,
+        )
+    except (paramiko.SSHException, OSError) as exc:
+        raise MngrError(
+            f"SSH connect for host_name rewrite on {vps_address}:{container_ssh_port} failed: {exc}"
+        ) from exc
+    try:
+        sftp = client.open_sftp()
+        try:
+            with sftp.open(data_json_path, "r") as remote:
+                raw = remote.read()
+            try:
+                data = json.loads(raw)
+            except json.JSONDecodeError as exc:
+                raise MngrError(f"{data_json_path} on leased host {vps_address} is not valid JSON: {exc}") from exc
+            if not isinstance(data, dict):
+                raise MngrError(f"{data_json_path} on leased host {vps_address} did not parse to an object")
+            data["host_name"] = new_host_name
+            payload = json.dumps(data, indent=2).encode()
+            with sftp.open(data_json_path, "w") as remote:
+                remote.write(payload)
+        finally:
+            try:
+                sftp.close()
+            except (paramiko.SSHException, OSError):
+                pass
+    finally:
+        try:
+            client.close()
+        except (paramiko.SSHException, OSError):
+            pass
+
+
 def _scan_ssh_host_key(host: str, port: int) -> str | None:
     """Best-effort: pull a remote sshd's public key for known_hosts.
 
@@ -356,7 +432,7 @@ class ImbueCloudProvider(BaseProviderInstance):
         return [
             DiscoveredHost(
                 host_id=HostId(entry.host_id),
-                host_name=HostName(entry.host_id),
+                host_name=HostName(entry.host_name),
                 provider_name=self.name,
                 host_state=HostState.RUNNING,
             )
@@ -400,7 +476,7 @@ class ImbueCloudProvider(BaseProviderInstance):
                 fallback_state = HostState.UNAUTHENTICATED if is_auth_failure else HostState.CRASHED
                 host_ref = DiscoveredHost(
                     host_id=host_id,
-                    host_name=HostName(entry.host_id),
+                    host_name=HostName(entry.host_name),
                     provider_name=self.name,
                     host_state=fallback_state,
                 )
@@ -424,9 +500,12 @@ class ImbueCloudProvider(BaseProviderInstance):
             host_state = _derive_host_state_from_raw(raw)
             if host_state == HostState.DESTROYED and not include_destroyed:
                 continue
+            # ``entry.host_name`` is the canonical user-supplied name from the
+            # connector. On-host certified data may lag (e.g. the bake's
+            # initial value before a lease overwrites it), so the lease wins.
             host_ref = DiscoveredHost(
                 host_id=host_id,
-                host_name=HostName(_certified_host_name(raw) or entry.host_id),
+                host_name=HostName(entry.host_name),
                 provider_name=self.name,
                 host_state=host_state,
             )
@@ -577,7 +656,7 @@ class ImbueCloudProvider(BaseProviderInstance):
         error -- the caller's outer-SSH guard then maps that to the
         lease-only fallback.
         """
-        scanned_key = _scan_ssh_host_key(lease.vps_ip, 22)
+        scanned_key = _scan_ssh_host_key(lease.vps_address, 22)
         if scanned_key is None:
             return
         host_id = HostId(lease.host_id)
@@ -586,13 +665,13 @@ class ImbueCloudProvider(BaseProviderInstance):
             known_hosts_path.parent.mkdir(parents=True, exist_ok=True)
             if not known_hosts_path.exists():
                 known_hosts_path.touch()
-            add_host_to_known_hosts(known_hosts_path, lease.vps_ip, 22, scanned_key)
+            add_host_to_known_hosts(known_hosts_path, lease.vps_address, 22, scanned_key)
         except OSError as exc:
             logger.warning(
                 "imbue_cloud[{}] could not update known_hosts for host {} (vps {}): {}",
                 self.name,
                 host_id,
-                lease.vps_ip,
+                lease.vps_address,
                 exc,
             )
 
@@ -606,10 +685,10 @@ class ImbueCloudProvider(BaseProviderInstance):
         private_key_path, _ = self._host_keypair_paths(host_id)
         return SSHInfo(
             user=lease.ssh_user,
-            host=lease.vps_ip,
+            host=lease.vps_address,
             port=lease.container_ssh_port,
             key_path=private_key_path,
-            command=f"ssh -i {private_key_path} -p {lease.container_ssh_port} {lease.ssh_user}@{lease.vps_ip}",
+            command=f"ssh -i {private_key_path} -p {lease.container_ssh_port} {lease.ssh_user}@{lease.vps_address}",
         )
 
     def _build_offline_details_from_lease(
@@ -669,12 +748,14 @@ class ImbueCloudProvider(BaseProviderInstance):
             datetime.fromtimestamp(ssh_activity_mtime, tz=timezone.utc) if ssh_activity_mtime is not None else None
         )
         # ``certified_data`` is the host-level data.json the pool host
-        # baked at provision time. It carries name, image, idle settings,
-        # tags, plugin state, etc. -- richer than what the lease object
-        # alone tells us. Fall back to lease-level defaults when the
-        # remote read produced an empty dict.
+        # baked at provision time. It carries image, idle settings, tags,
+        # plugin state, etc. -- richer than what the lease object alone
+        # tells us. For the friendly name we trust the lease (the
+        # connector-side canonical, mutable per-lease) rather than the
+        # baked-in certified data, which may still hold the bake-time
+        # placeholder.
         certified = raw.get("certified_data") or {}
-        host_name_str = certified.get("host_name") or lease.host_id
+        host_name_str = lease.host_name
         image = certified.get("image", "")
         tags = dict(certified.get("user_tags", {}))
         plugin = dict(certified.get("plugin", {}))
@@ -783,7 +864,7 @@ class ImbueCloudProvider(BaseProviderInstance):
         host_id = HostId(lease.host_id)
         agent_id = AgentId(lease.agent_id)
         ssh_user = lease.ssh_user
-        vps_ip = lease.vps_ip
+        vps_address = lease.vps_address
         container_ssh_port = lease.container_ssh_port
         host_db_id = str(lease.host_db_id)
 
@@ -801,7 +882,7 @@ class ImbueCloudProvider(BaseProviderInstance):
             known_hosts_path.touch()
 
         pyinfra_host = create_pyinfra_host(
-            hostname=vps_ip,
+            hostname=vps_address,
             port=container_ssh_port,
             private_key_path=private_key_path,
             known_hosts_path=known_hosts_path,
@@ -810,7 +891,7 @@ class ImbueCloudProvider(BaseProviderInstance):
         connector = PyinfraConnector(pyinfra_host)
         host = ImbueCloudHost(
             id=host_id,
-            host_name=HostName(lease.host_id),
+            host_name=HostName(lease.host_name),
             connector=connector,
             provider_instance=self,
             mngr_ctx=self.mngr_ctx,
@@ -828,9 +909,9 @@ class ImbueCloudProvider(BaseProviderInstance):
         for entry in leased:
             if isinstance(host, HostId) and entry.host_id == str(host):
                 return self._build_host_object(entry)
-            if isinstance(host, HostName) and entry.host_id == str(host):
+            if isinstance(host, HostName) and entry.host_name == str(host):
                 return self._build_host_object(entry)
-        raise HostNotFoundError(host)
+        raise HostNotFoundError(self.name, host)
 
     def to_offline_host(self, host_id: HostId) -> OfflineHost:
         """Build an OfflineHost from the connector's lease metadata.
@@ -842,11 +923,11 @@ class ImbueCloudProvider(BaseProviderInstance):
         """
         lease = self._find_leased(host_id)
         if lease is None:
-            raise HostNotFoundError(host_id)
+            raise HostNotFoundError(self.name, host_id)
         now = datetime.now(timezone.utc)
         certified_host_data = CertifiedHostData(
             host_id=str(host_id),
-            host_name=lease.host_id,
+            host_name=lease.host_name,
             created_at=now,
             updated_at=now,
         )
@@ -931,7 +1012,10 @@ class ImbueCloudProvider(BaseProviderInstance):
         tmp_private_key, tmp_public_key = save_ssh_keypair(tmp_key_dir, "ssh_key")
         public_key_text = tmp_public_key.read_text().strip()
 
-        lease_result = self.client.lease_host(token, attributes, public_key_text)
+        # ``name`` is the user-supplied HostName; send it to the connector so
+        # the leased pool row carries the same friendly name minds renders to
+        # the user. The connector validates it server-side too.
+        lease_result = self.client.lease_host(token, attributes, public_key_text, str(name))
         self.reset_caches()
 
         host_id = HostId(lease_result.host_id)
@@ -957,7 +1041,7 @@ class ImbueCloudProvider(BaseProviderInstance):
         # Wait for the leased container's sshd to be ready before we hand the
         # host back to mngr's create pipeline (which will SSH in immediately
         # to write the agent env file and start tmux).
-        wait_for_sshd(lease_result.vps_ip, lease_result.container_ssh_port, _SSH_WAIT_TIMEOUT_SECONDS)
+        wait_for_sshd(lease_result.vps_address, lease_result.container_ssh_port, _SSH_WAIT_TIMEOUT_SECONDS)
 
         # Try to scan the container's host key so strict host-key checking
         # succeeds. This is best-effort: if the scan fails we leave the
@@ -966,23 +1050,39 @@ class ImbueCloudProvider(BaseProviderInstance):
         known_hosts_path.parent.mkdir(parents=True, exist_ok=True)
         if not known_hosts_path.exists():
             known_hosts_path.touch()
-        scanned_key = _scan_ssh_host_key(lease_result.vps_ip, lease_result.container_ssh_port)
+        scanned_key = _scan_ssh_host_key(lease_result.vps_address, lease_result.container_ssh_port)
         if scanned_key is not None:
             add_host_to_known_hosts(
                 known_hosts_path,
-                lease_result.vps_ip,
+                lease_result.vps_address,
                 lease_result.container_ssh_port,
                 scanned_key,
             )
 
+        # The pool host's ``/mngr/data.json`` was written at bake time with
+        # the bake's placeholder ``host_name`` (``pool-<hex>-host``). Rewrite
+        # it now to the user-supplied ``name`` so the FCT bootstrap (which
+        # reads that file to name the initial chat agent) inherits the
+        # user's chosen workspace name on the first start of the adopted
+        # services agent. Done after the host-key scan so strict
+        # host-key checking is enforceable during the SFTP round-trip.
+        _rewrite_container_host_name(
+            vps_address=lease_result.vps_address,
+            container_ssh_port=lease_result.container_ssh_port,
+            private_key_path=final_private_key,
+            known_hosts_path=known_hosts_path,
+            new_host_name=str(name),
+        )
+
         leased_info = LeasedHostInfo(
             host_db_id=lease_result.host_db_id,
-            vps_ip=lease_result.vps_ip,
+            vps_address=lease_result.vps_address,
             ssh_port=lease_result.ssh_port,
             ssh_user=lease_result.ssh_user,
             container_ssh_port=lease_result.container_ssh_port,
             agent_id=lease_result.agent_id,
             host_id=lease_result.host_id,
+            host_name=lease_result.host_name,
             attributes=lease_result.attributes,
             leased_at="",
         )
@@ -1056,7 +1156,7 @@ class ImbueCloudProvider(BaseProviderInstance):
         host_id = host.id if isinstance(host, HostInterface) else host
         leased = self._find_leased(host_id)
         if leased is None:
-            raise HostNotFoundError(host_id)
+            raise HostNotFoundError(self.name, host_id)
         if snapshot_id is not None:
             raise SnapshotsNotSupportedError(self.name)
         with self.outer_host_for(host_id) as outer:
@@ -1064,7 +1164,7 @@ class ImbueCloudProvider(BaseProviderInstance):
             container_id = self._resolve_container_id_on_outer(outer, host_id)
             if container_id is None:
                 raise MngrError(
-                    f"start_host: no docker container with label com.imbue.mngr.host-id={host_id} on {leased.vps_ip}"
+                    f"start_host: no docker container with label com.imbue.mngr.host-id={host_id} on {leased.vps_address}"
                 )
             self._run_outer_docker_command(
                 outer, f"start {shlex.quote(container_id)}", host_id=host_id, label="docker-start"
@@ -1172,22 +1272,22 @@ class ImbueCloudProvider(BaseProviderInstance):
         """Stable id for the outer (leased VPS) of host_id, keyed by VPS IP."""
         leased = self._find_leased(host_id)
         if leased is None:
-            raise HostNotFoundError(host_id)
-        return f"outer:{self.name}:{leased.vps_ip}"
+            raise HostNotFoundError(self.name, host_id)
+        return f"outer:{self.name}:{leased.vps_address}"
 
     @contextmanager
     def outer_host_for(self, host_id: HostId) -> Iterator[OuterHostInterface | None]:
-        """Open the outer host (the leased VPS itself, root@vps_ip:22).
+        """Open the outer host (the leased VPS itself, root@vps_address:22).
 
         Uses the per-host SSH key already on disk (the lease step authorized
         this key on both the container's sshd and the VPS root account).
         """
         leased = self._find_leased(host_id)
         if leased is None:
-            raise HostNotFoundError(host_id)
+            raise HostNotFoundError(self.name, host_id)
         private_key_path, _ = self._host_keypair_paths(host_id)
         if not private_key_path.exists():
-            raise HostNotFoundError(host_id)
+            raise HostNotFoundError(self.name, host_id)
 
         known_hosts_path = self._host_known_hosts_path(host_id)
         known_hosts_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1195,7 +1295,7 @@ class ImbueCloudProvider(BaseProviderInstance):
             known_hosts_path.touch()
 
         pyinfra_host = create_pyinfra_host(
-            hostname=leased.vps_ip,
+            hostname=leased.vps_address,
             port=22,
             private_key_path=private_key_path,
             known_hosts_path=known_hosts_path,

@@ -101,7 +101,6 @@ def default_create_cli_opts() -> CreateCliOptions:
         worktree_base_folder=None,
         start_on_boot=False,
         start_host=True,
-        grant=(),
         extra_provision_command=(),
         upload_file=(),
         update=False,
@@ -289,6 +288,7 @@ _NONEXISTENT_AGENT_CASES: list[tuple[click.Command, list[str], str]] = [
     (snapshot, ["create", "nonexistent-agent-xyz"], "snapshot_create"),
     (snapshot, ["list", "nonexistent-agent-xyz"], "snapshot_list"),
     (start, ["nonexistent-agent-98732"], "start"),
+    (start, ["nonexistent-agent-98733", "--restart"], "start_restart"),
     (stop, ["nonexistent-agent-45721"], "stop"),
 ]
 

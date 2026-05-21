@@ -4,6 +4,21 @@ const fs = require('fs');
 const path = require('path');
 const paths = require('./paths');
 
+// Swallow EPIPE on the Electron main process's own stdout/stderr. When dev
+// launches go through a pipe (e.g. `just minds-start | head -30`), the
+// reader can exit while the backend is still alive, leaving subsequent
+// writes from the dev-mode forwarder (below) to raise EPIPE asynchronously
+// as an 'error' event. Without this handler the unhandled error surfaces
+// as a JS alert in the Electron window. We log nothing because the
+// downstream consumer is gone -- the log file is the durable record.
+for (const stream of [process.stdout, process.stderr]) {
+  stream.on('error', (err) => {
+    if (!err || err.code !== 'EPIPE') {
+      throw err;
+    }
+  });
+}
+
 let backendProcess = null;
 
 /**
@@ -145,6 +160,14 @@ function startBackend(onProgress, onNotification, onAuthEvent, onMngrForwardStar
       const mindsRootName = paths.getMindsRootName();
       const mngrHostDir = paths.getMngrHostDir();
       const mngrPrefix = paths.getMngrPrefix();
+      // When build.js embedded a client.toml + root_name pair (production
+      // / staging / beta packaged builds), pass --config-file explicitly
+      // so the backend doesn't have to fall back to MINDS_CLIENT_CONFIG_PATH.
+      // Dev-mode builds (no bundle) inherit MINDS_CLIENT_CONFIG_PATH from
+      // the user's activated shell instead; the backend refuses to start
+      // if neither path is set.
+      const bundledClientConfig = paths.getBundledClientConfigPath();
+      const configFileArgs = bundledClientConfig ? ['--config-file', bundledClientConfig] : [];
 
       if (paths.isDev()) {
         // Dev mode: use system uv with the monorepo workspace venv
@@ -157,6 +180,7 @@ function startBackend(onProgress, onNotification, onAuthEvent, onMngrForwardStar
           '--host', '127.0.0.1',
           '--port', String(port),
           '--no-browser',
+          ...configFileArgs,
         ];
         cwd = paths.getMonorepoRoot();
         env = {
@@ -186,6 +210,7 @@ function startBackend(onProgress, onNotification, onAuthEvent, onMngrForwardStar
           '--host', '127.0.0.1',
           '--port', String(port),
           '--no-browser',
+          ...configFileArgs,
         ];
         cwd = pyprojectDir;
         env = {
@@ -253,12 +278,23 @@ function startBackend(onProgress, onNotification, onAuthEvent, onMngrForwardStar
         }
       });
 
-      // Stderr is human-readable logging -- capture to log file and console
+      // Stderr is human-readable logging -- capture to log file and console.
+      // The dev-mode forward to process.stderr can throw EPIPE if the parent
+      // (e.g. a `just` recipe whose stdout was piped through `head`) goes
+      // away while the backend is still emitting log lines. We swallow the
+      // error: the log file is the durable record, and a broken parent pipe
+      // should never bring down the Electron main process.
       child.stderr.on('data', (data) => {
         const text = data.toString();
         logStream.write(text);
         if (paths.isDev()) {
-          process.stderr.write(text);
+          try {
+            process.stderr.write(text);
+          } catch (err) {
+            if (err && err.code !== 'EPIPE') {
+              throw err;
+            }
+          }
         }
       });
 

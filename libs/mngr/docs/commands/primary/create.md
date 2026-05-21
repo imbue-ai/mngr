@@ -10,7 +10,7 @@ mngr [create|c] [<ADDRESS>] [<AGENT_TYPE>] [-t <TEMPLATE>] [--new-host] [-w WIND
     [--label KEY=VALUE] [--host-label KEY=VALUE] [--project <PROJECT>] [--from <SOURCE>] [--transfer <MODE>]
     [--[no-]rsync] [--rsync-args <ARGS>] [--branch [BASE][:NEW]] [--[no-]ensure-clean]
     [--snapshot <ID>] [-b <BUILD_ARG>] [-s <START_ARG>]
-    [--env <KEY=VALUE>] [--env-file <FILE>] [--pass-env <KEY>] [--grant <PERMISSION>] [--extra-provision-command <COMMAND>] [--upload-file <LOCAL:REMOTE>]
+    [--env <KEY=VALUE>] [--env-file <FILE>] [--pass-env <KEY>] [--extra-provision-command <COMMAND>] [--upload-file <LOCAL:REMOTE>]
     [--idle-timeout <SECONDS>] [--idle-mode <MODE>] [--start-on-boot|--no-start-on-boot] [--reuse|--no-reuse]
     [--message <TEXT>] [--message-file <FILE>] [--edit-message]
     [--[no-]connect] [--[no-]auto-start] [-y|--yes] [--] [<AGENT_ARGS>...]
@@ -27,9 +27,8 @@ or an rsync copy (for non-git projects). Specify a host in the agent address
 (e.g. NAME@HOST.PROVIDER) to target a remote host, or use NAME@.PROVIDER
 to create a new one.
 
-The agent type defaults to 'claude' if not specified. Arguments after --
-are passed directly to the agent command. To run an arbitrary shell
-command, use the built-in 'command' agent type:
+Arguments after -- are passed directly to the agent command. To run an
+arbitrary shell command, use the built-in 'command' agent type:
 `mngr create my-task --type command -- sleep 3600`.
 
 Headless agent types (those implementing StreamingHeadlessAgentMixin,
@@ -59,7 +58,7 @@ mngr create [OPTIONS] [POSITIONAL_NAME] [POSITIONAL_AGENT_TYPE] [AGENT_ARGS]...
   - `NAME@HOST.PROVIDER --new-host` -- agent on a new host with the given name
   - `NAME:PATH` -- agent with a target path for the working directory
   - `:PATH` -- auto-named agent with a target path (equivalent to omitting the name)
-- `AGENT_TYPE`: Which type of agent to run (default: `claude`). Can also be specified via `--type`
+- `AGENT_TYPE`: Which type of agent to run. Can also be specified via `--type`.
 - `AGENT_ARGS`: Additional arguments passed to the agent
 
 **Options:**
@@ -72,7 +71,7 @@ mngr create [OPTIONS] [POSITIONAL_NAME] [POSITIONAL_AGENT_TYPE] [AGENT_ARGS]...
 | `-n`, `--name` | new_agent_location | Agent address (alternative to positional argument, mutually exclusive) [default: auto-generated] | None |
 | `--id` | text | Explicit agent ID [default: auto-generated] | None |
 | `--name-style` | choice (`coolname` &#x7C; `english` &#x7C; `fantasy` &#x7C; `scifi` &#x7C; `painters` &#x7C; `authors` &#x7C; `artists` &#x7C; `musicians` &#x7C; `animals` &#x7C; `scientists` &#x7C; `demons`) | Auto-generated name style | `coolname` |
-| `--type` | text | Which type of agent to run | `claude` |
+| `--type` | text | Which type of agent to run | None |
 | `-w`, `--extra-window` | text | Run extra command in additional window. Use name="command" to set window name. Note: ALL_UPPERCASE names (e.g., FOO="bar") are treated as env var assignments, not window names | None |
 | `--label` | text | Agent label KEY=VALUE [repeatable] [experimental] | None |
 | `--project` | text | Project name for the agent (sets the 'project' label; '.' inherits from source agent's project label when --from references an agent, else uses the source's git remote origin, else the source's folder name) [default: .] | `.` |
@@ -136,7 +135,6 @@ By default, `mngr create` uses the local host. Use the agent address to specify 
 
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
-| `--grant` | text | Grant a permission to the agent [repeatable] | None |
 | `--extra-provision-command` | text | Run custom shell command during provisioning [repeatable] | None |
 | `--upload-file` | text | Upload LOCAL:REMOTE file pair [repeatable] | None |
 
@@ -217,8 +215,8 @@ Provider: lima
                           mngr pre-built image.
   Start args are passed directly to 'limactl start'. Common options:
     --cpus=N              Number of CPU cores (default: 4)
-    --memory=NGiB         Memory size (default: 4GiB)
-    --disk=NGiB           Disk size (default: 100GiB)
+    --memory=N            Memory in GiB (default: 4)
+    --disk=N              Disk in GiB (default: 100)
     --vm-type=TYPE        VM type: qemu or vz (default: auto-detected)
     --mount-writable      Make default mounts writable
   Run 'limactl start --help' for the full list.
@@ -251,6 +249,17 @@ Provider: modal
                           --docker-build-arg=CLAUDE_CODE_VERSION=2.1.50 sets the CLAUDE_CODE_VERSION
                           ARG during the image build. Can be specified multiple times.
   No start arguments are supported for the modal provider.
+
+Provider: ovh
+  VPS-specific args (consumed by provider, not passed to docker):
+    --vps-datacenter=DC   OVH datacenter (e.g. US-EAST-VA, US-WEST-OR)
+    --vps-plan=PLAN       OVH plan code (default: vps-2025-model1 = VPS-1)
+    --vps-os=NAME         OVH image name (default: 'Debian 12 - Docker')
+    --git-depth=N         Shallow-clone build context to depth N before upload
+
+  All other build args are passed to 'docker build' on the VPS.
+  Example: -b --vps-plan=vps-2025-model1 -b --file=Dockerfile -b .
+  Start args are passed directly to 'docker run'. Run 'docker run --help' for details.
 
 Provider: ssh
   The SSH provider does not support creating hosts dynamically.
@@ -318,7 +327,7 @@ $ mngr create my-agent --template modal
 $ mngr create my-agent -t modal -t codex
 ```
 
-**Create a codex agent instead of claude**
+**Create a codex agent instead of the default**
 
 ```bash
 $ mngr create my-agent codex

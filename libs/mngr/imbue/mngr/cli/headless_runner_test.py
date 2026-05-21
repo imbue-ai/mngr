@@ -9,7 +9,8 @@ from imbue.mngr.cli.headless_runner import accumulate_chunks
 from imbue.mngr.cli.headless_runner import check_streaming_headless_agent_type
 from imbue.mngr.cli.headless_runner import ephemeral_work_location
 from imbue.mngr.cli.headless_runner import stream_or_accumulate_response
-from imbue.mngr.config.agent_class_registry import set_default_agent_class
+from imbue.mngr.config.agent_class_registry import register_agent_class
+from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.errors import MngrError
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import HostName
@@ -25,9 +26,9 @@ from imbue.mngr.providers.local.instance import LocalProviderInstance
 def test_check_streaming_headless_agent_type_raises_for_non_streaming() -> None:
     """Non-streaming agent types should be rejected with a clear error."""
     reset_agent_registry()
-    set_default_agent_class(BaseAgent)
+    register_agent_class("non-streaming-fixture", BaseAgent)
     with pytest.raises(MngrError, match="does not support streaming headless output"):
-        check_streaming_headless_agent_type("headless_claude")
+        check_streaming_headless_agent_type("non-streaming-fixture", MngrConfig())
 
 
 # =============================================================================
