@@ -14,6 +14,7 @@ from datetime import timezone
 from pathlib import Path
 from typing import Any
 from typing import ClassVar
+from typing import Final
 from typing import Iterator
 from typing import Mapping
 from typing import Sequence
@@ -267,6 +268,10 @@ def _is_same_machine(a: OnlineHostInterface, b: OnlineHostInterface) -> bool:
     if a.id == b.id:
         return True
     return a.is_local and b.is_local
+
+
+# mngr's preferred length of tmux's status-left.
+_TMUX_STATUS_LEFT_LENGTH: Final[int] = 20
 
 
 class Host(OuterHost, BaseHost, OnlineHostInterface):
@@ -2354,9 +2359,10 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         """Create a tmux config file for the host with hotkeys for agent management.
 
         The config:
-        1. Sources the user's default tmux config if it exists (~/.tmux.conf)
-        2. Adds a Ctrl-q binding that detaches and destroys the current agent
-        3. Adds a Ctrl-t binding that detaches and stops the current agent
+        1. Use mngr's preferred status-left-length (tmux default is 10)
+        2. Sources the user's default tmux config if it exists (~/.tmux.conf)
+        3. Adds a Ctrl-q binding that detaches and destroys the current agent
+        4. Adds a Ctrl-t binding that detaches and stops the current agent
 
         This uses the tmux session_name format variable in the commands,
         which expands to the current session name at runtime. This approach
@@ -2379,6 +2385,9 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         lines = [
             "# Mngr host tmux config",
             "# Auto-generated - do not edit",
+            "",
+            "# Widen status-left to show more session name, i.e. '[mngr-<agent_name>]'",
+            f"set -g status-left-length {_TMUX_STATUS_LEFT_LENGTH}",
             "",
             "# Source user's default tmux config if it exists",
             "if-shell 'test -f ~/.tmux.conf' 'source-file ~/.tmux.conf'",

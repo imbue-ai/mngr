@@ -2,12 +2,12 @@
 
 Five fixtures, mirroring the spec:
 
-* ``shared_env(role)`` -- a pre-stood-up dev env reachable by URL.
+* ``shared_env(role)`` -- a pre-stood-up ci env reachable by URL.
 * ``fct_template_ref`` -- worktree path + (future) pushed ``ci-...`` branch
   ref for the FCT content under test.
 * ``verified_user`` -- function-scoped, pre-verified user created via the
   shared env's SuperTokens admin API and deleted in teardown.
-* ``ephemeral_env`` -- function-scoped, mints a fresh ``dev-ci-...`` env
+* ``ephemeral_env`` -- function-scoped, mints a fresh ``ci-...`` env
   via ``minds env deploy`` and unconditionally tears it down in finally.
 * ``signup_email`` -- function-scoped, fresh ``+<uuid>`` address against
   the per-run shared mail.tm account plus poll helpers.
@@ -182,7 +182,7 @@ def verified_user(
 
 @pytest.fixture
 def ephemeral_env(deployment_envs_config: DeploymentEnvsConfig) -> Generator[EphemeralEnvHandle, None, None]:
-    """Function-scoped fresh ``dev-ci-<timestamp>-<uuid>`` env for ``minds_deployment`` tests.
+    """Function-scoped fresh ``ci-<timestamp>-<uuid>`` env for ``minds_deployment`` tests.
 
     Shells out to ``minds env deploy`` (matching how an operator would
     invoke it) and unconditionally tears down via ``minds env destroy``
@@ -340,18 +340,19 @@ def _require_env_var(name: str) -> str:
 
 
 def _mint_ephemeral_env_name() -> DevEnvName:
-    """Build a ``dev-ci-<lowercased-timestamp>-<short-uuid>`` env name.
+    """Build a ``ci-<lowercased-timestamp>-<short-uuid>`` env name.
 
     Lowercased ``t`` / ``z`` because :class:`DevEnvName`'s validator
     enforces ``[a-z0-9][a-z0-9_-]{0,N}[a-z0-9]`` (the existing
     ``DeployId`` shape with uppercase ``T``/``Z`` is fine in Modal
-    Secret names but not in dev env names). The ``dev-ci-`` prefix lets
-    the name+age sweep target CI envs without colliding with
-    developer-owned ``dev-josh`` / ``dev-alice`` envs.
+    Secret names but not in env names). The ``ci-`` prefix routes the
+    name to the CI tier (see :func:`tier_for_env_name`) and lets the
+    name+age sweep target CI envs without colliding with developer-
+    owned ``dev-josh`` / ``dev-alice`` envs.
     """
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dt%H%M%Sz")
     short = get_short_random_string()
-    return DevEnvName(f"dev-ci-{stamp}-{short}")
+    return DevEnvName(f"ci-{stamp}-{short}")
 
 
 _MINDS_DEPLOY_TIMEOUT_SECONDS = 15 * 60
