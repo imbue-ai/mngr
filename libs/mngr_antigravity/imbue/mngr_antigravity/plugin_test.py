@@ -181,12 +181,19 @@ def test_modify_env_vars_exposes_agy_log_file_path(antigravity_agent: Antigravit
     assert "/agents/" in env_vars["ANTIGRAVITY_AGY_LOG_FILE"]
 
 
-def test_provision_does_not_create_workspace_subdirs(antigravity_agent: AntigravityAgent) -> None:
+def test_provision_does_not_create_workspace_subdirs(
+    antigravity_agent: AntigravityAgent,
+    isolated_home: Path,
+) -> None:
     """The plugin writes nothing to the user's work_dir.
 
     Antigravity reads workspace-tier files from `<work_dir>/.agents/` and
     `<work_dir>/.antigravityignore`; mngr leaves both alone so the user's
     project tree is untouched by ``mngr create``.
+
+    ``isolated_home`` redirects ``Path.home()`` to a tmpdir so the default
+    ``pre_trust_workspace=True`` branch in ``provision()`` does not write to
+    the developer's real ``~/.gemini/antigravity-cli/settings.json``.
     """
     antigravity_agent.provision(
         host=antigravity_agent.host,
