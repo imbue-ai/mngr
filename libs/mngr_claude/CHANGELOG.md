@@ -10,6 +10,11 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 - Added: `use_env_config_dir` option on the `claude` agent type config so local Claude agents share `$CLAUDE_CONFIG_DIR` instead of provisioning a per-agent dir.
 
+### Changed
+
+- Changed: `ClaudeAgent` satisfies the new `HasTranscriptMixin` / `HasCommonTranscriptMixin` mixins on `AgentInterface` (shared transcript-capture contract); `mngr transcript <claude-agent>` user-visible behavior unchanged.
+- Changed: Project now participates in the per-project changelog layout (per-project `changelog/`, `CHANGELOG.md`, `UNABRIDGED_CHANGELOG.md`).
+
 ### Fixed
 
 - Fixed: Cloned claude agent now actually resumes the source agent's conversation — `_adopt_cloned_session` renames the project subdir to the destination's realpath-resolved encoding, drops the stale `sessions-index.json`, writes the real `claude_session_id`, and carries forward `claude_session_id_history`.

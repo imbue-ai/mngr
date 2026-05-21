@@ -6,9 +6,22 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Added
+
+- Added: `ProviderEmptyError` (distinct from `ProviderUnavailableError`) raised by the Modal backend when its per-user environment doesn't exist yet, so `mngr list` skips the empty provider instead of aborting.
+
 ### Changed
 
 - Changed: CI acceptance wall-clock cut ~62% — `mngr_modal` session-end leak detector reshaped (typed `ModalCleanupOutcome`, `pytest_sessionfinish` hook so it runs after all session-scoped fixture teardowns).
+- Changed: Modal provider no longer auto-creates an environment from non-create commands (`mngr list`, `mngr gc`, etc.); only `mngr create` is allowed to bootstrap the per-user environment on first use.
+- Changed: Modal-env retry path now treats Modal's async permission propagation as transient — `_enter_ephemeral_app_context_with_retry` and `_lookup_persistent_app_with_retry` retry on `ModalProxyPermissionDeniedError` in addition to `ModalProxyNotFoundError`.
+- Changed: Offload-acceptance / offload-release runs can share a single Modal env via `MNGR_TEST_SHARED_MODAL_ENV_NAME`; fixtures thread the env name through `MngrConfig.prefix` + `ModalProviderConfig.user_id` and skip per-test env create/delete/leak-tracking.
+- Changed: Bumped pinned `modal` dependency from 1.3.1 to 1.4.3.
+- Changed: Project now participates in the per-project changelog layout (per-project `changelog/`, `CHANGELOG.md`, `UNABRIDGED_CHANGELOG.md`).
+
+### Fixed
+
+- Fixed: Modal resource leaks in `test_snapshot_and_shutdown.py` — fixture now passes `environment_name` to `deploy_function`; app-stop and volume-delete run in parallel with `check=True`.
 
 ## [v0.2.8] - 2026-05-13
 

@@ -6,6 +6,16 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Added
+
+- Added: Plugin now emits `system_interface_backend_failure` envelopes on connection errors / mid-SSE EOF / 5xx responses from the workspace backend, so consumers (minds) can drive a per-agent health state machine.
+
+### Changed
+
+- Changed: Renamed the workspace-server envelope contract to system-interface in lockstep with the mngr-side rename: `WorkspaceBackendFailure*` → `SystemInterfaceBackendFailure*`, envelope type `workspace_backend_failure` → `system_interface_backend_failure`; plugin 503 page now reads "System interface starting".
+- Changed: 503 fallback page is a styled card with a loading spinner (replacing the blank "Backend not yet available. Retrying..." page); spinner animation duration matches the 1-second auto-refresh interval.
+- Changed: Project now participates in the per-project changelog layout (per-project `changelog/`, `CHANGELOG.md`, `UNABRIDGED_CHANGELOG.md`).
+
 ## [v0.2.7] - 2026-05-11
 
 ### Added

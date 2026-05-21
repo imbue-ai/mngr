@@ -6,10 +6,25 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Added
+
+- Added: Per-project changelog layout — each `libs/<name>`, `apps/<name>`, and the synthetic top-level `dev/` now owns its own `changelog/` (per-PR entries), `CHANGELOG.md` (concise summary), and `UNABRIDGED_CHANGELOG.md` (verbatim sections). Per-PR entry files live at `<project_dir>/changelog/<branch>.md`, one per project the PR touches.
+- Added: New `test_every_project_has_changelog_layout` meta-ratchet enforcing that every project has `CHANGELOG.md`, `UNABRIDGED_CHANGELOG.md`, and a `changelog/` directory.
+- Added: New shared `scripts/changelog_projects.py` owning the path-to-project mapping (used by consolidator, ratchet, and release script).
+- Added: A new `TMR (reintegrate)` GitHub Actions workflow takes a run name as required input and runs `mngr tmr --reintegrate <run>`; the main `TMR` workflow accepts a corresponding `run_name` `workflow_dispatch` input. The two TMR workflows share a new `.github/actions/tmr-setup` composite action for common setup steps.
+- Added: TMR GitHub Actions workflow reads inbound-SSH authorized keys from a checked-in `.github/tmr-authorized-keys` file (in addition to the existing `additional_authorized_hosts` workflow input); defaults `MNGR_USER_ID` to the shared `tmr-ci` namespace.
+
 ### Changed
 
 - Changed: Bumped pinned Claude Code CLI version from `2.1.116` to `2.1.141` in the CI workflow installs.
 - Changed: CI acceptance wall-clock cut ~62% — `contents: write` granted so offload image-cache git notes push, `max_parallel` lowered 200→50 for better LPT packing.
+- Changed: Consolidator (`scripts/consolidate_changelog.py`) now walks each project's `<project_dir>/changelog/` and routes entries into `<project_dir>/UNABRIDGED_CHANGELOG.md`; machine-readable output is now one `SECTION <project> <date>` line per inserted section.
+- Changed: `test_pr_has_changelog_entry` ratchet now computes the projects the PR diff touches and requires `<project_dir>/changelog/<branch>.md` for each; the consolidation cron's own branch prefix is the only special-cased exemption. Failure message names the resolved diff base and warns about misconfigured / stale bases falsely implicating projects.
+- Changed: `scripts/release.py` finalizes each bumped (and first-time-publish) package's `libs/<name>/CHANGELOG.md` `[Unreleased]` section. `apps/<name>/CHANGELOG.md` and `dev/CHANGELOG.md` are not versioned, so their `[Unreleased]` accumulates entries indefinitely.
+- Changed: `scripts/release.py` refuses to cut a release when there are unconsolidated entries in `changelog/`; the gate prints the exact one-liner that triggers the `changelog-consolidation` schedule on demand.
+- Changed: Offload-acceptance / offload-release runs share a single Modal env (opt-in via `MNGR_TEST_SHARED_MODAL_ENV_NAME`) — justfile recipes pre-create one `mngr_test-YYYY-MM-DD-HH-MM-SS-shared-<uuid>` env, forward its name into every sandbox via `--env`, and `trap`-delete it at recipe exit, avoiding the 1500-env-per-workspace cap.
+- Changed: TMR GitHub Actions workflow passes AWS secrets through for the S3 report mirror and uses the public URL in the auto-opened PR body, falling back to the existing `tmr-report` artifact when no upload happened.
+- Changed: Existing top-level `CHANGELOG.md` and `UNABRIDGED_CHANGELOG.md` were retroactively split into per-project files; see each project's `CHANGELOG.md` for its history.
 
 ### Removed
 

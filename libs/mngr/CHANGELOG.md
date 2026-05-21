@@ -20,10 +20,12 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Changed: `mngr create` no longer hard-codes `claude` as the default agent type — it must come from a positional argument, `--type`, or `[commands.create] type` in user settings; the error lists registered types and points at `mngr config set`.
 - Changed: `scripts/install.sh` no longer carries custom shell logic for the default agent type — that prompt now runs inside `mngr extras -i` and is re-runnable via `mngr extras config`.
 - Changed: Bumped pinned Claude Code CLI version from `2.1.116` to `2.1.141` in the Dockerfile.
+- Changed: Renamed mngr-side "workspace server" feature to "system interface" — HTTP endpoint `/api/agents/{id}/restart-workspace-server` → `/restart-system-interface`; SSE event type `workspace_server_status` → `system_interface_status`.
 
 ### Fixed
 
 - Fixed: `tmux send-keys -l` and `tmux rename-session` now use the `--` end-of-options separator, so agent commands/messages and rename targets starting with `-` (e.g. `--model gemma`) are no longer misparsed by tmux.
+- Fixed: Generated `~/.mngr/tmux.conf` now sets `status-left-length=20` (written before the user's `~/.tmux.conf` is sourced) so a full `mngr-<session>` name shows in the tmux status bar instead of being truncated to 10 chars.
 
 ## [v0.2.8] - 2026-05-13
 
