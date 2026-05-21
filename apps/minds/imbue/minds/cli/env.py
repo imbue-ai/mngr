@@ -39,11 +39,14 @@ from imbue.minds.bootstrap import MINDS_ROOT_NAME_ENV_VAR
 from imbue.minds.bootstrap import mngr_host_dir_for
 from imbue.minds.bootstrap import mngr_prefix_for
 from imbue.minds.bootstrap import root_name_for_env_name
+from imbue.minds.cli._activated_env import MODAL_PROFILE_ENV_VAR
 from imbue.minds.cli._activated_env import PRODUCTION_ENV_NAME as _PRODUCTION_ENV_NAME
 from imbue.minds.cli._activated_env import STAGING_ENV_NAME as _STAGING_ENV_NAME
 from imbue.minds.cli._activated_env import modal_profile_for_tier_or_none
 from imbue.minds.cli._activated_env import require_activated_env_name
+from imbue.minds.cli._activated_env import require_deploy_mode_activation
 from imbue.minds.cli._activated_env import tier_for_env_name as _tier_for_env_name
+from imbue.minds.cli._activated_env import validate_modal_profile_exists_in_modal_toml
 from imbue.minds.config.loader import EnvConfigError
 from imbue.minds.config.loader import load_client_config
 from imbue.minds.config.loader import load_deploy_config
@@ -126,22 +129,22 @@ from imbue.mngr_ovh.iam_tags import IamResource
 # env.py -> pool.py back-reference.
 _RESERVED_TIER_ENV_NAMES: Final[frozenset[str]] = frozenset({"production", "staging"})
 
-# Env vars exported by ``activate`` (and unset by ``deactivate``). The
-# list lives here so the two sides stay in sync.
+# Env vars unset by ``deactivate``. Includes every var that any
+# activation mode (use-only or ``--deploy``) might have exported, so a
+# single ``deactivate`` fully clears the shell regardless of which mode
+# was used to activate it. ``MODAL_PROFILE`` is included even though
+# plain ``activate`` does not export it, because plain ``activate`` does
+# explicitly emit ``unset MODAL_PROFILE`` (so a previously-deploy-
+# activated shell flips back cleanly); ``deactivate`` mirrors that.
 _ACTIVATION_ENV_VARS: Final[tuple[str, ...]] = (
     MINDS_ROOT_NAME_ENV_VAR,
     "MNGR_HOST_DIR",
     "MNGR_PREFIX",
     "MINDS_CLIENT_CONFIG_PATH",
-    # Modal CLI workspace selector. Set to the tier's ``modal_workspace``
-    # so every subsequent ``modal`` shellout (``modal deploy``,
-    # ``modal secret create``, ``modal environment create``, etc.) targets
-    # the right Modal account, regardless of which profile is marked
-    # ``active = true`` in ``~/.modal.toml``. The user must have a
-    # matching profile entry in ``~/.modal.toml`` (run
-    # ``modal token set --profile <workspace>`` once per tier they
-    # operate against).
-    "MODAL_PROFILE",
+    # Modal CLI workspace selector. Only set by ``activate --deploy``;
+    # see :func:`_build_deploy_mode_exports` and the ``--deploy`` flag
+    # on ``minds env activate``.
+    MODAL_PROFILE_ENV_VAR,
 )
 
 
@@ -597,7 +600,24 @@ def env() -> None:
         "name (`staging` / `production` always auto-create)."
     ),
 )
-def env_activate(name: str, create: bool) -> None:
+@click.option(
+    "--deploy",
+    "is_deploy_mode",
+    is_flag=True,
+    default=False,
+    help=(
+        "Activate in deploy mode: in addition to the use-side env vars (MINDS_ROOT_NAME, "
+        "MNGR_HOST_DIR, MNGR_PREFIX, MINDS_CLIENT_CONFIG_PATH), export MODAL_PROFILE pinned "
+        "to the tier's modal_workspace from deploy.toml. Required for `minds env deploy`, "
+        "`minds env destroy`, and `minds env recover`. Without this flag (the default), "
+        "activate emits `unset MODAL_PROFILE` so a previously-deploy-activated shell flips "
+        "back to use-only -- the rest of the stack (mngr, minds run, Latchkey) no longer "
+        "tries to authenticate against a Modal workspace the operator may not have tokens "
+        "for. Fails up front if `~/.modal.toml` has no profile matching the tier's "
+        "modal_workspace (run `modal token set --profile <workspace>` first)."
+    ),
+)
+def env_activate(name: str, create: bool, is_deploy_mode: bool) -> None:
     """Print shell exports that activate env ``NAME`` in the calling shell.
 
     Refuses when a recover-target file exists at the monorepo root --
@@ -606,10 +626,26 @@ def env_activate(name: str, create: bool) -> None:
 
     Designed for ``eval "$(uv run minds env activate <name>)"``: after
     sourcing, ``mngr`` writes to ``~/.minds-<name>/mngr``, ``minds run``
-    picks up the per-env client config without a ``--config-file`` flag,
-    and ``minds env deploy`` / ``destroy`` operate on this env.
+    picks up the per-env client config without a ``--config-file`` flag.
+    ``minds env deploy`` / ``destroy`` / ``recover`` additionally require
+    ``--deploy`` activation (see below).
 
-    Emitted variables:
+    Activation modes:
+
+    - **Use-only (default)**: exports the four use-side env vars and
+      emits ``unset MODAL_PROFILE``. Lets the operator run the desktop
+      client, browse agents, hit Latchkey, etc. against the activated
+      env without touching their Modal CLI auth state. This is what
+      every non-deploying user wants.
+    - **Deploy mode (``--deploy``)**: additionally exports
+      ``MODAL_PROFILE=<tier's modal_workspace>`` so every subsequent
+      ``modal`` shellout (``modal deploy``, ``modal secret create``,
+      etc.) targets the right Modal account, regardless of which profile
+      is marked ``active = true`` in ``~/.modal.toml``. Pre-validates
+      that ``~/.modal.toml`` has a matching profile and refuses
+      otherwise (with a ``modal token set --profile <workspace>`` hint).
+
+    Emitted use-side variables (both modes):
 
     - ``MINDS_ROOT_NAME`` -- ``minds`` for the reserved ``production``
       name, ``minds-<name>`` for every other env. Validation runs at
@@ -639,7 +675,7 @@ def env_activate(name: str, create: bool) -> None:
     _refuse_if_any_recover_target_exists()
 
     if name in _RESERVED_TIER_ENV_NAMES or name == _PRODUCTION_ENV_NAME:
-        _activate_reserved_env(name)
+        _activate_reserved_env(name, is_deploy_mode=is_deploy_mode)
         return
 
     try:
@@ -663,15 +699,15 @@ def env_activate(name: str, create: bool) -> None:
 
     root_name = root_name_for_env_name(name)
     config_path = client_config_file(dev_env_name)
-    exports = {
+    use_side_exports = {
         MINDS_ROOT_NAME_ENV_VAR: root_name,
         "MNGR_HOST_DIR": str(mngr_host_dir_for(root_name)),
         "MNGR_PREFIX": mngr_prefix_for(root_name),
         "MINDS_CLIENT_CONFIG_PATH": str(config_path),
     }
-    modal_profile = modal_profile_for_tier_or_none(_tier_for_env_name(name))
-    if modal_profile is not None:
-        exports["MODAL_PROFILE"] = modal_profile
+    deploy_exports, deploy_unsets = _build_deploy_mode_exports(
+        tier=_tier_for_env_name(name), is_deploy_mode=is_deploy_mode
+    )
     # Check the tier generation id + auto-wipe local state on mismatch.
     # Skipped silently when the per-env client.toml doesn't exist yet
     # (fresh `activate --create` before the first deploy) -- the deploy
@@ -679,10 +715,15 @@ def env_activate(name: str, create: bool) -> None:
     # success, so subsequent activations have something to compare against.
     if config_path.is_file():
         _try_run_generation_check(env_name=name, client_config_path=config_path, env_root=target)
-    _print_activation_exports(name=name, exports=exports)
+    _print_activation_exports(
+        name=name,
+        exports={**use_side_exports, **deploy_exports},
+        unsets=deploy_unsets,
+        is_deploy_mode=is_deploy_mode,
+    )
 
 
-def _activate_reserved_env(name: str) -> None:
+def _activate_reserved_env(name: str, *, is_deploy_mode: bool) -> None:
     """Activate ``staging`` or ``production`` -- in-repo client.toml is the truth.
 
     Auto-creates the env root if missing so subsequent commands have
@@ -711,15 +752,13 @@ def _activate_reserved_env(name: str) -> None:
     mngr_host = mngr_host_dir_for(root_name)
     mngr_host.parent.mkdir(parents=True, exist_ok=True)
 
-    exports = {
+    use_side_exports = {
         MINDS_ROOT_NAME_ENV_VAR: root_name,
         "MNGR_HOST_DIR": str(mngr_host),
         "MNGR_PREFIX": mngr_prefix_for(root_name),
         "MINDS_CLIENT_CONFIG_PATH": str(repo_client),
     }
-    modal_profile = modal_profile_for_tier_or_none(name)
-    if modal_profile is not None:
-        exports["MODAL_PROFILE"] = modal_profile
+    deploy_exports, deploy_unsets = _build_deploy_mode_exports(tier=name, is_deploy_mode=is_deploy_mode)
     # Generation-id check applies to staging (the shared tier where
     # destroy/redeploy by one dev outdates everyone's local state).
     # Production destroy is hard-refused so a mismatch there is
@@ -727,13 +766,54 @@ def _activate_reserved_env(name: str) -> None:
     if name == _STAGING_ENV_NAME:
         env_root = mngr_host.parent
         _try_run_generation_check(env_name=name, client_config_path=repo_client, env_root=env_root)
-    _print_activation_exports(name=name, exports=exports)
+    _print_activation_exports(
+        name=name,
+        exports={**use_side_exports, **deploy_exports},
+        unsets=deploy_unsets,
+        is_deploy_mode=is_deploy_mode,
+    )
 
 
-def _print_activation_exports(*, name: str, exports: dict[str, str]) -> None:
-    write_stdout_line(f'# Activated env {name!r}. Source via: eval "$(uv run minds env activate {name})"')
+def _build_deploy_mode_exports(*, tier: str, is_deploy_mode: bool) -> tuple[dict[str, str], tuple[str, ...]]:
+    """Return ``(exports, unsets)`` for the deploy-side activation knobs.
+
+    Use-only activation (the default) emits ``unset MODAL_PROFILE`` so a
+    previously-deploy-activated shell flips back cleanly; deploy-mode
+    activation emits ``export MODAL_PROFILE=<workspace>`` after
+    validating that ``~/.modal.toml`` has a matching profile. Tiers
+    whose ``deploy.toml`` has no committed ``modal_workspace`` (or the
+    literal ``CHANGE_ME`` placeholder) skip both the export and the
+    unset -- there is no workspace to pin to, so plain-activate
+    inheritance of an operator-set ``MODAL_PROFILE`` stays the operator's
+    own concern.
+    """
+    workspace = modal_profile_for_tier_or_none(tier)
+    if workspace is None:
+        return {}, ()
+    if not is_deploy_mode:
+        return {}, (MODAL_PROFILE_ENV_VAR,)
+    validate_modal_profile_exists_in_modal_toml(workspace)
+    return {MODAL_PROFILE_ENV_VAR: workspace}, ()
+
+
+def _print_activation_exports(
+    *,
+    name: str,
+    exports: dict[str, str],
+    unsets: tuple[str, ...] = (),
+    is_deploy_mode: bool = False,
+) -> None:
+    # Mirror the invocation mode in the header so a user who copy-pastes
+    # the suggested re-source command back into a fresh shell lands in
+    # the same mode they started in -- otherwise re-sourcing a `--deploy`
+    # activation via the header would silently drop MODAL_PROFILE and
+    # trip the deploy-mode gate on the next minds env deploy/destroy.
+    deploy_flag = " --deploy" if is_deploy_mode else ""
+    write_stdout_line(f'# Activated env {name!r}. Source via: eval "$(uv run minds env activate{deploy_flag} {name})"')
     for key, value in exports.items():
         write_stdout_line(f"export {key}={shlex.quote(value)}")
+    for key in unsets:
+        write_stdout_line(f"unset {key}")
 
 
 # Trailing marker file name under each env root. Stores the generation
@@ -958,6 +1038,9 @@ def env_deploy(
     """Provision or upgrade the currently-activated env.
 
     Refuses when a recover-target file exists at the monorepo root.
+    Refuses unless the shell is *deploy-activated* (i.e. ``MODAL_PROFILE``
+    matches the tier's ``modal_workspace``); the refusal points the
+    operator at ``eval "$(uv run minds env activate --deploy <name>)"``.
 
     Reads the activated env from ``MINDS_ROOT_NAME`` (set by
     ``minds env activate``) and dispatches:
@@ -986,6 +1069,7 @@ def env_deploy(
     output_format: OutputFormat = ctx.obj.get("output_format", OutputFormat.HUMAN)
     env_name = require_activated_env_name()
     tier = _tier_for_env_name(env_name)
+    require_deploy_mode_activation(env_name=env_name, tier=tier)
     _refuse_if_this_env_recover_target_exists(env_name)
 
     if tier == _PRODUCTION_ENV_NAME and not yes_i_mean_production:
@@ -1096,7 +1180,8 @@ def env_destroy(ctx: click.Context, keep_agents: bool, yes_i_mean_staging: bool)
     Refuses hard-coded when no env is activated. Refuses hard-coded when
     the activated env is ``production`` (production teardown is
     operator-managed outside this CLI). ``staging`` requires
-    ``--yes-i-mean-staging``.
+    ``--yes-i-mean-staging``. Also refuses unless the shell is
+    *deploy-activated* (see :func:`env_deploy` for the same gate).
 
     The same destroy flow runs for every env type (see
     :func:`provisioning.destroy_env`). The only branches are the
@@ -1109,6 +1194,7 @@ def env_destroy(ctx: click.Context, keep_agents: bool, yes_i_mean_staging: bool)
     output_format: OutputFormat = ctx.obj.get("output_format", OutputFormat.HUMAN)
     env_name = require_activated_env_name()
     tier = _tier_for_env_name(env_name)
+    require_deploy_mode_activation(env_name=env_name, tier=tier)
     _refuse_if_this_env_recover_target_exists(env_name)
 
     if tier == _PRODUCTION_ENV_NAME:
@@ -1164,13 +1250,15 @@ def env_recover(_ctx: click.Context) -> None:
     recover after a partial recovery converges.
 
     Refuses to run if no recover-target file exists for the activated
-    env. To recover a different env, activate it first.
+    env. To recover a different env, activate it first. Also refuses
+    unless the shell is *deploy-activated* (see :func:`env_deploy`).
     """
     try:
         repo_root = find_monorepo_root()
     except MindError as exc:
         raise click.ClickException(str(exc)) from exc
     env_name = require_activated_env_name()
+    require_deploy_mode_activation(env_name=env_name, tier=_tier_for_env_name(env_name))
     if not recover_target_exists(repo_root=repo_root, env_name=env_name):
         # Help the operator if they have recover-target files for OTHER
         # envs sitting around (a common mistake when juggling several
@@ -1182,7 +1270,7 @@ def env_recover(_ctx: click.Context) -> None:
                 f"No recover-target file for activated env {env_name!r} at "
                 f"{recover_target_path(repo_root=repo_root, env_name=env_name)}. Other recover-target files exist:\n"
                 f"{leftover_list}\nActivate the env you want to recover (e.g. "
-                f'`eval "$(uv run minds env activate <env-name>)"`) and re-run.'
+                f'`eval "$(uv run minds env activate --deploy <env-name>)"`) and re-run.'
             )
         raise click.ClickException(
             f"No recover-target file at {recover_target_path(repo_root=repo_root, env_name=env_name)}; "
