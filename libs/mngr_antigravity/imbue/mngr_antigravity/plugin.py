@@ -146,10 +146,10 @@ class AntigravityAgent(InteractiveTuiAgent[AntigravityAgentConfig], HasCommonTra
         # Antigravity has no ``UserPromptSubmit`` analog (so the tmux wait-for
         # hook trick Claude uses doesn't apply) and its input row has no
         # placeholder that hides while text is typed and reappears after
-        # submission (unlike Gemini's "Type your message"), so we can't poll
-        # for a cleared indicator either. ``wait_for_paste_visible`` upstream
-        # already confirmed the message landed in the pane before we get here,
-        # so a best-effort Enter is the right strategy.
+        # submission, so we can't poll for a cleared indicator either.
+        # ``wait_for_paste_visible`` upstream already confirmed the message
+        # landed in the pane before we get here, so a best-effort Enter is
+        # the right strategy.
         send_enter_best_effort(self, tmux_target)
 
     @property
