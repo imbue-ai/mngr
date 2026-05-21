@@ -651,7 +651,7 @@ def get_modal_app_latest_version(*, app_name: str, modal_env: str, parent_cg: Co
 
 
 def rollback_modal_app(*, app_name: str, version: str, modal_env: str, parent_cg: ConcurrencyGroup) -> None:
-    """``modal app rollback <app> <version> --env=<env>``.
+    """``modal app rollback <app> <version> --env=<env>`` + force-terminate prior containers.
 
     Re-deploys the version that was active at ``version``, including the
     env vars (notably ``MINDS_DEPLOY_ID``) captured at that deploy time
@@ -659,6 +659,18 @@ def rollback_modal_app(*, app_name: str, version: str, modal_env: str, parent_cg
     ``<svc>-<tier>-<id>`` Modal Secrets minted under that prior deploy.
     Idempotent in the sense that re-running with the same target version
     is just a no-op redeploy.
+
+    Modal's ``app rollback`` CLI has no ``--strategy`` flag and always
+    uses rollover semantics: the new (rolled-back-spec) deployment goes
+    live while containers from the prior (broken) deploy keep serving
+    until they idle out. That is the wrong shape for ``minds env
+    recover`` -- by the time recover fires, we already know the prior
+    deploy was broken, so we want it gone ASAP, not gradually. We
+    follow the rollback with an immediate ``modal container stop`` of
+    every container belonging to this app; Modal sends SIGINT and
+    reschedules any in-flight inputs on cold-boots of the rolled-back
+    spec, so within seconds every served request is going to the
+    correct (rolled-back) code instead of the broken one.
     """
     command = ["modal", "app", "rollback", "--env", modal_env, app_name, version]
     cg = parent_cg.make_concurrency_group(name=f"modal-app-rollback-{app_name}")
@@ -674,6 +686,141 @@ def rollback_modal_app(*, app_name: str, version: str, modal_env: str, parent_cg
         raise ModalDeployError(
             f"`modal app rollback {app_name} {version} --env {modal_env}` failed (exit {result.returncode}): {stderr}"
         )
+
+    terminate_modal_app_containers(app_name=app_name, modal_env=modal_env, parent_cg=parent_cg)
+
+
+def terminate_modal_app_containers(*, app_name: str, modal_env: str, parent_cg: ConcurrencyGroup) -> None:
+    """Force-terminate every running container for ``app_name`` in ``modal_env``.
+
+    Used by :func:`rollback_modal_app` to convert Modal's rollover-style
+    rollback into recreate-style behavior: after the rollback's new
+    function spec goes live, we still need to kill the prior deploy's
+    warm containers so the next request cold-boots into the rolled-back
+    code instead of the broken one.
+
+    Two-step: ``modal app list --json`` to resolve the app's id (the
+    ``modal container list --app-id`` filter requires an id, not a name),
+    then ``modal container list --app-id <id> --env <env> --json`` to
+    enumerate containers, then ``modal container stop -y <container-id>``
+    on each. Container stop sends SIGINT; Modal handles graceful drain +
+    reschedules any in-flight inputs to fresh cold-boots of the live
+    (rolled-back) spec.
+
+    Idempotent: an empty container list (everything already drained) is
+    a no-op. A missing app is treated as success (recover is called from
+    failure paths where the app may already have been stopped). Per-
+    container stop failures are logged but do not raise -- the
+    operator's recover-time priority is "no broken containers serving
+    traffic", not "every container stopped cleanly".
+    """
+    app_id = _find_modal_app_id(app_name=app_name, modal_env=modal_env, parent_cg=parent_cg)
+    if app_id is None:
+        logger.info(
+            "terminate_modal_app_containers: no app named {!r} in env {!r}; nothing to do.", app_name, modal_env
+        )
+        return
+
+    container_ids = _list_modal_app_container_ids(app_id=app_id, modal_env=modal_env, parent_cg=parent_cg)
+    if not container_ids:
+        logger.info("terminate_modal_app_containers: app {!r} has no running containers.", app_name)
+        return
+
+    logger.info(
+        "terminate_modal_app_containers: stopping {} container(s) for app {!r} in env {!r}",
+        len(container_ids),
+        app_name,
+        modal_env,
+    )
+    cg = parent_cg.make_concurrency_group(name=f"modal-container-stop-{app_name}")
+    with cg:
+        for container_id in container_ids:
+            stop_result = cg.run_process_to_completion(
+                command=["modal", "container", "stop", "-y", container_id],
+                timeout=_MODAL_SECRET_TIMEOUT_SECONDS,
+                is_checked_after=False,
+                env=_modal_subprocess_env(),
+            )
+            if stop_result.returncode != 0:
+                stderr = stop_result.stderr.strip() or stop_result.stdout.strip()
+                logger.warning(
+                    "modal container stop {} failed (exit {}): {}; continuing.",
+                    container_id,
+                    stop_result.returncode,
+                    stderr,
+                )
+
+
+def _find_modal_app_id(*, app_name: str, modal_env: str, parent_cg: ConcurrencyGroup) -> str | None:
+    """Resolve ``app_name`` to its Modal app id via ``modal app list --json``, or return None."""
+    cg = parent_cg.make_concurrency_group(name=f"modal-app-list-{app_name}")
+    with cg:
+        result = cg.run_process_to_completion(
+            command=["modal", "app", "list", "--env", modal_env, "--json"],
+            timeout=_MODAL_SECRET_TIMEOUT_SECONDS,
+            is_checked_after=False,
+            env=_modal_subprocess_env(),
+        )
+    if result.returncode != 0:
+        stderr = result.stderr.strip() or result.stdout.strip()
+        raise ModalDeployError(
+            f"`modal app list --env {modal_env} --json` failed (exit {result.returncode}): {stderr}"
+        )
+    try:
+        rows = json.loads(result.stdout)
+    except (ValueError, json.JSONDecodeError) as exc:
+        raise ModalDeployError(f"`modal app list --json` returned non-JSON: {exc}") from exc
+    if not isinstance(rows, list):
+        return None
+    # Modal's column names have shifted across versions; check the common shapes
+    # for both name and id. Skip stopped apps so we don't try to stop containers
+    # for an already-terminated app.
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        name_value = row.get("Name") or row.get("name") or row.get("App")
+        state_value = (row.get("State") or row.get("state") or "").lower()
+        if name_value != app_name or "stop" in state_value:
+            continue
+        for id_key in ("App ID", "app_id", "AppID", "ID", "id"):
+            id_value = row.get(id_key)
+            if isinstance(id_value, str) and id_value:
+                return id_value
+    return None
+
+
+def _list_modal_app_container_ids(*, app_id: str, modal_env: str, parent_cg: ConcurrencyGroup) -> tuple[str, ...]:
+    """Return the container ids currently running for ``app_id`` in ``modal_env``."""
+    cg = parent_cg.make_concurrency_group(name=f"modal-container-list-{app_id}")
+    with cg:
+        result = cg.run_process_to_completion(
+            command=["modal", "container", "list", "--env", modal_env, "--app-id", app_id, "--json"],
+            timeout=_MODAL_SECRET_TIMEOUT_SECONDS,
+            is_checked_after=False,
+            env=_modal_subprocess_env(),
+        )
+    if result.returncode != 0:
+        stderr = result.stderr.strip() or result.stdout.strip()
+        raise ModalDeployError(
+            f"`modal container list --env {modal_env} --app-id {app_id} --json` "
+            f"failed (exit {result.returncode}): {stderr}"
+        )
+    try:
+        rows = json.loads(result.stdout)
+    except (ValueError, json.JSONDecodeError) as exc:
+        raise ModalDeployError(f"`modal container list --json` returned non-JSON: {exc}") from exc
+    if not isinstance(rows, list):
+        return ()
+    ids: list[str] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        for id_key in ("Container ID", "container_id", "ID", "id"):
+            value = row.get(id_key)
+            if isinstance(value, str) and value:
+                ids.append(value)
+                break
+    return tuple(ids)
 
 
 def per_env_secret_services() -> tuple[str, ...]:
