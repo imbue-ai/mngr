@@ -81,12 +81,19 @@ class LeaseResult(FrozenModel):
     """Server response from POST /hosts/lease."""
 
     host_db_id: LeaseDbId = Field(description="Database id of the leased host (UUID)")
-    vps_ip: str = Field(description="Public IPv4 of the VPS")
+    vps_address: str = Field(
+        description=(
+            "SSH-reachable address of the VPS -- either a public IPv4 or a DNS hostname, "
+            "depending on what the host's provider returned at bake time. OVH-backed "
+            "rows are DNS hostnames like ``vps-eec8860b.vps.ovh.us``."
+        )
+    )
     ssh_port: int = Field(description="SSH port for the VPS itself (root)")
     ssh_user: str = Field(description="SSH username on the VPS")
     container_ssh_port: int = Field(description="Port that maps to the docker container's sshd")
     agent_id: str = Field(description="Pre-baked mngr agent id on the host")
     host_id: str = Field(description="Pre-baked mngr host id")
+    host_name: str = Field(description="User-chosen friendly name for the leased host")
     attributes: dict[str, Any] = Field(default_factory=dict, description="Attributes the row was matched against")
 
 
@@ -94,12 +101,18 @@ class LeasedHostInfo(FrozenModel):
     """One entry from GET /hosts."""
 
     host_db_id: LeaseDbId
-    vps_ip: str
+    vps_address: str = Field(
+        description=(
+            "SSH-reachable address of the VPS. Public IPv4 for Vultr-backed rows, "
+            "DNS hostname (e.g. ``vps-eec8860b.vps.ovh.us``) for OVH-backed rows."
+        )
+    )
     ssh_port: int
     ssh_user: str
     container_ssh_port: int
     agent_id: str
     host_id: str
+    host_name: str = Field(description="User-chosen friendly name for the leased host")
     attributes: dict[str, Any] = Field(default_factory=dict)
     leased_at: str = Field(description="ISO-8601 timestamp")
 

@@ -56,7 +56,7 @@ class FakeLatchkey(Latchkey):
         # invariant check.
         self._is_initialized = True
 
-    def start_gateway(self, concurrency_group: ConcurrencyGroup) -> None:
+    def start_gateway(self, concurrency_group: ConcurrencyGroup) -> int:
         # The fake never actually spawns; the CG argument is accepted
         # only to mirror the production signature.
         del concurrency_group
@@ -67,17 +67,7 @@ class FakeLatchkey(Latchkey):
         parts = urlsplit(self._gateway_url)
         if parts.hostname is None or parts.port is None:
             raise LatchkeyError(f"FakeLatchkey: unparseable url: {self._gateway_url}")
-        # ``Latchkey`` exposes a ``gateway_port`` property; we shadow the
-        # private slot it reads so callers see the configured URL.
-        self._gateway_port = parts.port
-
-    @property
-    def gateway_url(self) -> str:
-        # Mirror Latchkey.gateway_url but use the configured URL verbatim
-        # (so test assertions can compare to whatever URL the fixture set).
-        if self._gateway_url is None:
-            raise LatchkeyError("FakeLatchkey: configure gateway_url before reading gateway_url")
-        return self._gateway_url
+        return parts.port
 
     def derive_gateway_password(self) -> str:
         if self._password_error is not None:

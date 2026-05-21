@@ -14,7 +14,7 @@ Latchkey gateway lifecycle and per-agent setup [experimental].
 Wires the shared Latchkey gateway and per-agent permissions
 without requiring the minds desktop app. Run ``mngr latchkey forward``
 once at startup, then call ``mngr latchkey create-agent-env`` /
-``mngr latchkey link-permissions`` per agent.
+``mngr latchkey link-permissions`` per host.
 
 Settings:
 
@@ -51,9 +51,10 @@ in tunneled mode and emits its result as a single JSON object on stdout:
 }
 ```
 
-Pipe the ``env`` values into ``mngr create --env KEY=VALUE``,
-then call ``mngr latchkey link-permissions`` with the
-``opaque_permissions_path`` and the canonical agent id once
+Pipe the ``env`` values into ``mngr create --host-env KEY=VALUE``
+so every agent on the host inherits the same gateway wiring, then
+call ``mngr latchkey link-permissions`` with the
+``opaque_permissions_path`` and the canonical host id once
 ``mngr create`` returns it. The gateway URL is always the constant
 agent-side loopback URL (``http://127.0.0.1:1989``); there is no
 on-host (DEV) mode -- a running ``mngr latchkey forward`` is
@@ -96,15 +97,15 @@ mngr latchkey create-agent-env [OPTIONS]
 **Wire env vars into mngr create**
 
 ```bash
-$ eval "$(mngr latchkey create-agent-env | jq -r '.env | to_entries[] | "--env \(.key)=\(.value)"')"
+$ eval "$(mngr latchkey create-agent-env | jq -r '.env | to_entries[] | "--host-env \(.key)=\(.value)"')"
 ```
 
 ## mngr latchkey link-permissions
 
-Link an opaque permissions handle to a canonical agent ID.
+Link an opaque permissions handle to a canonical host ID.
 
-Wraps :func:`imbue.mngr_latchkey.agent_setup.finalize_agent_permissions`.
-Idempotent: re-running for the same agent preserves prior grants and
+Wraps :func:`imbue.mngr_latchkey.agent_setup.finalize_host_permissions`.
+Idempotent: re-running for the same host preserves prior grants and
 discards the freshly-created baseline.
 
 **Usage:**
@@ -134,7 +135,7 @@ mngr latchkey link-permissions [OPTIONS]
 
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
-| `--agent-id` | text | Canonical agent ID returned by ``mngr create``. | None |
+| `--host-id` | text | Canonical host ID returned by ``mngr create``. | None |
 | `--opaque-path` | path | Opaque permissions handle emitted by ``mngr latchkey create-agent-env``. | None |
 | `--latchkey-binary` | text | Path to the upstream ``latchkey`` CLI. Falls back to $MNGR_LATCHKEY_BINARY, then ``[plugins.latchkey].latchkey_binary`` in settings.toml, then 'latchkey' on PATH. | None |
 | `--latchkey-directory` | path | Root directory for ``LATCHKEY_DIRECTORY`` and the plugin's ``mngr_latchkey/`` metadata subtree. Falls back to $MNGR_LATCHKEY_DIRECTORY, then ``[plugins.latchkey].directory`` in settings.toml, then '~/.mngr/latchkey'. | None |
@@ -142,10 +143,10 @@ mngr latchkey link-permissions [OPTIONS]
 
 ## Examples
 
-**Finalize permissions for a freshly-created agent**
+**Finalize permissions for a freshly-created host**
 
 ```bash
-$ mngr latchkey link-permissions --agent-id $AGENT_ID --opaque-path /path/from/create-agent-env.json
+$ mngr latchkey link-permissions --host-id $HOST_ID --opaque-path /path/from/create-agent-env.json
 ```
 
 ## mngr latchkey forward
@@ -217,6 +218,128 @@ $ mngr latchkey forward
 
 ```bash
 $ mngr latchkey forward --latchkey-binary /opt/latchkey/bin/latchkey
+```
+
+## mngr latchkey admin-jwt
+
+Mint a wildcard ``permissions-override`` JWT for the shared gateway.
+
+Materializes the admin permissions file at
+``<plugin_data_dir>/latchkey_admin_permissions.json`` (idempotent --
+an existing file is reused as-is) and mints a JWT signed for that
+path via ``latchkey gateway create-jwt --no-validate``. The JWT is
+printed on stdout as a single line.
+
+The returned token unlocks every service and every extension
+endpoint reachable through the gateway, so treat it like a root
+credential and pass it as the
+``X-Latchkey-Gateway-Permissions-Override`` header to gateway
+requests that need wildcard access (e.g. the minds desktop client
+streaming pending permission requests from the
+``permission-requests`` extension).
+
+**Usage:**
+
+```text
+mngr latchkey admin-jwt [OPTIONS]
+```
+**Options:**
+
+## Common
+
+| Name | Type | Description | Default |
+| ---- | ---- | ----------- | ------- |
+| `--format` | text | Output format (human, json, jsonl, FORMAT): Output format for results. When a template is provided, fields use standard python templating like 'name: {agent.name}' See below for available fields. | `human` |
+| `-q`, `--quiet` | boolean | Suppress all console output | `False` |
+| `-v`, `--verbose` | integer range | Increase verbosity (default: BUILD); -v for DEBUG, -vv for TRACE | `0` |
+| `--log-file` | path | Path to log file (overrides default ~/.mngr/events/logs/<timestamp>-<pid>.json) | None |
+| `--log-commands`, `--no-log-commands` | boolean | Log commands that were executed | None |
+| `--headless` | boolean | Disable all interactive behavior (prompts, TUI, editor). Also settable via MNGR_HEADLESS env var or 'headless' config key. | `False` |
+| `--safe` | boolean | Always query all providers during discovery (disable event-stream optimization). Use this when interfacing with mngr from multiple machines. | `False` |
+| `--plugin`, `--enable-plugin` | text | Enable a plugin [repeatable] | None |
+| `--disable-plugin` | text | Disable a plugin [repeatable] | None |
+| `-S`, `--setting` | text | Override a config setting for this invocation (KEY=VALUE, dot-separated paths) [repeatable] | None |
+| `-h`, `--help` | boolean | Show this message and exit. | `False` |
+
+## Other Options
+
+| Name | Type | Description | Default |
+| ---- | ---- | ----------- | ------- |
+| `--latchkey-binary` | text | Path to the upstream ``latchkey`` CLI. Falls back to $MNGR_LATCHKEY_BINARY, then ``[plugins.latchkey].latchkey_binary`` in settings.toml, then 'latchkey' on PATH. | None |
+| `--latchkey-directory` | path | Root directory for ``LATCHKEY_DIRECTORY`` and the plugin's ``mngr_latchkey/`` metadata subtree. Falls back to $MNGR_LATCHKEY_DIRECTORY, then ``[plugins.latchkey].directory`` in settings.toml, then '~/.mngr/latchkey'. | None |
+
+
+## Examples
+
+**Capture into a shell variable**
+
+```bash
+$ ADMIN_JWT=$(mngr latchkey admin-jwt)
+```
+
+## mngr latchkey gateway-info
+
+Print the running shared gateway's URL + password as JSON.
+
+Reads the supervised ``mngr latchkey forward`` record
+to discover the bound gateway port and derives the gateway password
+locally (via ``latchkey gateway create-jwt`` against a sentinel path,
+the same way :meth:`Latchkey.derive_gateway_password` does in
+Python). Emits a single JSON object on stdout:
+
+```
+{
+  "url": "http://127.0.0.1:32867",
+  "password": "<sha256-of-derived-jwt>"
+}
+```
+
+Fails with a non-zero exit when no supervisor is running for the
+active latchkey directory, or when the supervisor has not yet
+stamped its bound gateway port onto its on-disk record (i.e. the
+supervisor is still in its startup window).
+
+The password is intentionally NOT persisted on disk; this command
+is the supported way to retrieve it without writing your own
+Python integration.
+
+**Usage:**
+
+```text
+mngr latchkey gateway-info [OPTIONS]
+```
+**Options:**
+
+## Common
+
+| Name | Type | Description | Default |
+| ---- | ---- | ----------- | ------- |
+| `--format` | text | Output format (human, json, jsonl, FORMAT): Output format for results. When a template is provided, fields use standard python templating like 'name: {agent.name}' See below for available fields. | `human` |
+| `-q`, `--quiet` | boolean | Suppress all console output | `False` |
+| `-v`, `--verbose` | integer range | Increase verbosity (default: BUILD); -v for DEBUG, -vv for TRACE | `0` |
+| `--log-file` | path | Path to log file (overrides default ~/.mngr/events/logs/<timestamp>-<pid>.json) | None |
+| `--log-commands`, `--no-log-commands` | boolean | Log commands that were executed | None |
+| `--headless` | boolean | Disable all interactive behavior (prompts, TUI, editor). Also settable via MNGR_HEADLESS env var or 'headless' config key. | `False` |
+| `--safe` | boolean | Always query all providers during discovery (disable event-stream optimization). Use this when interfacing with mngr from multiple machines. | `False` |
+| `--plugin`, `--enable-plugin` | text | Enable a plugin [repeatable] | None |
+| `--disable-plugin` | text | Disable a plugin [repeatable] | None |
+| `-S`, `--setting` | text | Override a config setting for this invocation (KEY=VALUE, dot-separated paths) [repeatable] | None |
+| `-h`, `--help` | boolean | Show this message and exit. | `False` |
+
+## Other Options
+
+| Name | Type | Description | Default |
+| ---- | ---- | ----------- | ------- |
+| `--latchkey-binary` | text | Path to the upstream ``latchkey`` CLI. Falls back to $MNGR_LATCHKEY_BINARY, then ``[plugins.latchkey].latchkey_binary`` in settings.toml, then 'latchkey' on PATH. | None |
+| `--latchkey-directory` | path | Root directory for ``LATCHKEY_DIRECTORY`` and the plugin's ``mngr_latchkey/`` metadata subtree. Falls back to $MNGR_LATCHKEY_DIRECTORY, then ``[plugins.latchkey].directory`` in settings.toml, then '~/.mngr/latchkey'. | None |
+
+
+## Examples
+
+**Capture into shell variables**
+
+```bash
+$ eval "$(mngr latchkey gateway-info | jq -r '@text "GATEWAY_URL=\(.url); GATEWAY_PASSWORD=\(.password)"')"
 ```
 
 ## Examples

@@ -1,6 +1,7 @@
 """Tests for error classes."""
 
 import click
+import pytest
 from click.testing import CliRunner
 
 from imbue.mngr.errors import AgentNotFoundError
@@ -13,6 +14,7 @@ from imbue.mngr.errors import HostNotRunningError
 from imbue.mngr.errors import HostNotStoppedError
 from imbue.mngr.errors import ImageNotFoundError
 from imbue.mngr.errors import MngrError
+from imbue.mngr.errors import ProviderError
 from imbue.mngr.errors import ProviderInstanceNotFoundError
 from imbue.mngr.errors import ProviderNotAuthorizedError
 from imbue.mngr.errors import SendMessageError
@@ -27,6 +29,10 @@ from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ImageReference
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import SnapshotId
+from imbue.mngr.utils.testing import assert_init_first_param_is_provider_name
+from imbue.mngr.utils.testing import walk_concrete_subclasses
+
+_TEST_PROVIDER = ProviderInstanceName("test-provider")
 
 
 def test_agent_not_found_error_sets_agent_identifier() -> None:
@@ -40,7 +46,8 @@ def test_agent_not_found_error_sets_agent_identifier() -> None:
 def test_host_not_found_error_with_host_id() -> None:
     """HostNotFoundError should work with HostId."""
     host_id = HostId.generate()
-    error = HostNotFoundError(host_id)
+    error = HostNotFoundError(_TEST_PROVIDER, host_id)
+    assert error.provider_name == _TEST_PROVIDER
     assert error.host == host_id
     assert "Host not found" in str(error)
 
@@ -48,7 +55,8 @@ def test_host_not_found_error_with_host_id() -> None:
 def test_host_not_found_error_with_host_name() -> None:
     """HostNotFoundError should work with HostName."""
     host_name = HostName("test-host")
-    error = HostNotFoundError(host_name)
+    error = HostNotFoundError(_TEST_PROVIDER, host_name)
+    assert error.provider_name == _TEST_PROVIDER
     assert error.host == host_name
     assert "Host not found" in str(error)
 
@@ -56,7 +64,8 @@ def test_host_not_found_error_with_host_name() -> None:
 def test_image_not_found_error_sets_image() -> None:
     """ImageNotFoundError should set image attribute."""
     image = ImageReference("nonexistent:tag")
-    error = ImageNotFoundError(image)
+    error = ImageNotFoundError(_TEST_PROVIDER, image)
+    assert error.provider_name == _TEST_PROVIDER
     assert error.image == image
     assert "Image not found" in str(error)
 
@@ -64,7 +73,8 @@ def test_image_not_found_error_sets_image() -> None:
 def test_host_name_conflict_error_sets_name() -> None:
     """HostNameConflictError should set name attribute."""
     name = HostName("duplicate")
-    error = HostNameConflictError(name)
+    error = HostNameConflictError(_TEST_PROVIDER, name)
+    assert error.provider_name == _TEST_PROVIDER
     assert error.name == name
     assert "already exists" in str(error)
 
@@ -72,7 +82,8 @@ def test_host_name_conflict_error_sets_name() -> None:
 def test_host_not_running_error_includes_state() -> None:
     """HostNotRunningError should include state in message."""
     host_id = HostId.generate()
-    error = HostNotRunningError(host_id, HostState.STOPPED)
+    error = HostNotRunningError(_TEST_PROVIDER, host_id, HostState.STOPPED)
+    assert error.provider_name == _TEST_PROVIDER
     assert error.host_id == host_id
     assert error.state == HostState.STOPPED
     assert HostState.STOPPED.value in str(error)
@@ -81,7 +92,8 @@ def test_host_not_running_error_includes_state() -> None:
 def test_host_not_stopped_error_includes_state() -> None:
     """HostNotStoppedError should include state in message."""
     host_id = HostId.generate()
-    error = HostNotStoppedError(host_id, HostState.RUNNING)
+    error = HostNotStoppedError(_TEST_PROVIDER, host_id, HostState.RUNNING)
+    assert error.provider_name == _TEST_PROVIDER
     assert error.host_id == host_id
     assert error.state == HostState.RUNNING
     assert HostState.RUNNING.value in str(error)
@@ -90,7 +102,8 @@ def test_host_not_stopped_error_includes_state() -> None:
 def test_snapshot_not_found_error_sets_snapshot_id() -> None:
     """SnapshotNotFoundError should set snapshot_id attribute."""
     snapshot_id = SnapshotId("snap-test")
-    error = SnapshotNotFoundError(snapshot_id)
+    error = SnapshotNotFoundError(_TEST_PROVIDER, snapshot_id)
+    assert error.provider_name == _TEST_PROVIDER
     assert error.snapshot_id == snapshot_id
     assert "Snapshot not found" in str(error)
 
@@ -105,7 +118,8 @@ def test_snapshots_not_supported_error_includes_provider() -> None:
 
 def test_tag_limit_exceeded_error_includes_limit_and_actual() -> None:
     """TagLimitExceededError should include both limit and actual."""
-    error = TagLimitExceededError(limit=10, actual=15)
+    error = TagLimitExceededError(_TEST_PROVIDER, limit=10, actual=15)
+    assert error.provider_name == _TEST_PROVIDER
     assert error.limit == 10
     assert error.actual == 15
     assert "10" in str(error)
@@ -156,7 +170,7 @@ def test_agent_not_found_error_has_user_help_text() -> None:
 def test_host_not_found_error_has_user_help_text() -> None:
     """HostNotFoundError should have user_help_text."""
     host_name = HostName("test-host")
-    error = HostNotFoundError(host_name)
+    error = HostNotFoundError(_TEST_PROVIDER, host_name)
     assert error.user_help_text is not None
     assert "mngr list" in error.user_help_text
 
@@ -164,7 +178,7 @@ def test_host_not_found_error_has_user_help_text() -> None:
 def test_host_name_conflict_error_has_user_help_text() -> None:
     """HostNameConflictError should have user_help_text."""
     name = HostName("duplicate")
-    error = HostNameConflictError(name)
+    error = HostNameConflictError(_TEST_PROVIDER, name)
     assert error.user_help_text is not None
     assert "mngr destroy" in error.user_help_text
 
@@ -172,7 +186,7 @@ def test_host_name_conflict_error_has_user_help_text() -> None:
 def test_host_not_running_error_has_user_help_text() -> None:
     """HostNotRunningError should have user_help_text."""
     host_id = HostId.generate()
-    error = HostNotRunningError(host_id, HostState.STOPPED)
+    error = HostNotRunningError(_TEST_PROVIDER, host_id, HostState.STOPPED)
     assert error.user_help_text is not None
     assert "mngr start" in error.user_help_text
 
@@ -180,7 +194,7 @@ def test_host_not_running_error_has_user_help_text() -> None:
 def test_host_not_stopped_error_has_user_help_text() -> None:
     """HostNotStoppedError should have user_help_text."""
     host_id = HostId.generate()
-    error = HostNotStoppedError(host_id, HostState.RUNNING)
+    error = HostNotStoppedError(_TEST_PROVIDER, host_id, HostState.RUNNING)
     assert error.user_help_text is not None
     assert "mngr stop" in error.user_help_text
 
@@ -188,7 +202,7 @@ def test_host_not_stopped_error_has_user_help_text() -> None:
 def test_snapshot_not_found_error_has_user_help_text() -> None:
     """SnapshotNotFoundError should have user_help_text."""
     snapshot_id = SnapshotId("snap-test")
-    error = SnapshotNotFoundError(snapshot_id)
+    error = SnapshotNotFoundError(_TEST_PROVIDER, snapshot_id)
     assert error.user_help_text is not None
     assert "snapshot" in error.user_help_text.lower()
 
@@ -277,3 +291,13 @@ def test_agent_start_error_includes_agent_and_reason() -> None:
     assert error.reason == "session already exists"
     assert "my-agent" in str(error)
     assert "session already exists" in str(error)
+
+
+@pytest.mark.parametrize("subclass", walk_concrete_subclasses(ProviderError), ids=lambda c: c.__name__)
+def test_provider_error_subclass_takes_provider_name_first(subclass: type) -> None:
+    """Every ProviderError subclass must accept provider_name as its first parameter.
+
+    Enforces the contract declared on ProviderError: handlers that catch the base
+    class can rely on e.provider_name being present.
+    """
+    assert_init_first_param_is_provider_name(subclass)

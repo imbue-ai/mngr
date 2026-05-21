@@ -21,6 +21,14 @@ to determine outcome.
 If any step fails, your final message must be a `failed` JSON object
 with the failing step number and error detail in `notes`.
 
+Background: this repo uses an in-project changelog layout. Each project
+under `libs/`, `apps/`, plus the synthetic top-level `dev/` directory,
+owns three artifacts at its root: a `changelog/` directory for per-PR
+entry files (`<project_dir>/changelog/<branch>.md`), a `CHANGELOG.md`
+for the consolidated summary, and an `UNABRIDGED_CHANGELOG.md` for the
+verbatim per-date sections. Your job is to fan each pending entry into
+the right project's consolidated files.
+
 1. `cd "$MNGR_AGENT_WORK_DIR"`. Verify with `git rev-parse --abbrev-ref
    HEAD` that you are on a `mngr/changelog-consolidation-*` branch (not
    `HEAD`). If you are on detached HEAD, the schedule topology has
@@ -30,38 +38,83 @@ with the failing step number and error detail in `notes`.
 2. Run `python3 scripts/consolidate_changelog.py`. Capture stdout. If
    stdout contains the literal string "No changelog entries", emit
    `{"status": "skipped-no-entries", "pr_url": null, "notes": ""}` and
+   stop. Otherwise stdout contains one or more `SECTION <project>
+   <YYYY-MM-DD>` lines — each one is a `## YYYY-MM-DD` section the
+   consolidator just inserted at the top of
+   `<project_dir>/UNABRIDGED_CHANGELOG.md`, where `<project_dir>` is
+   `libs/<project>` for libs, `apps/<project>` for apps, and `dev/` for
+   the synthetic dev bucket (the same directory that holds the project's
+   `changelog/` entries dir).
+
+3. For each `SECTION <project> <date>` line: read that section's bullets
+   from the project's `UNABRIDGED_CHANGELOG.md` (the section sits
+   between `## <date>` and the next `## ` line) and generate a few
+   concise, human-friendly bullets for that project's `CHANGELOG.md`.
+   Each bullet MUST start with one of these Keep-a-Changelog categories
+   followed by `: ` and the description, e.g.:
+
+   ```
+   - Added: Nightly changelog consolidation cron with Pacific-time dating.
+   - Fixed: Race condition when two consolidation runs overlap.
+   - Changed: Renamed `_get_entry_added_datetime` to use first-parent committer date.
+   ```
+
+   The allowed categories are exactly: `Added`, `Changed`, `Deprecated`,
+   `Removed`, `Fixed`, `Security`. Use `Changed` as the catch-all for
+   internal refactors, doc edits, or test-only tweaks that don't fit
+   the other categories. One change → one bullet; merge near-duplicate
+   bullets across dates (within the same project) if they describe the
+   same user-visible effect.
+
+4. For each project that had at least one `SECTION` line: open that
+   project's `CHANGELOG.md` (resolve `<project_dir>` as in step 2).
+   Locate the `## [Unreleased]` heading (it sits directly below the
+   file header — `scripts/release.py` guarantees it is always present
+   after each release, and the initial one is created when the project's
+   changelog is set up). If it is *not* present, the invariant has been
+   broken for that project; emit a `failed` JSON object with "missing
+   [Unreleased] heading in <project_dir>/CHANGELOG.md" in `notes` and
    stop.
 
-3. Read `UNABRIDGED_CHANGELOG.md`. Find the most recent date section
-   (heading matching `## YYYY-MM-DD`). Extract the date string and the
-   bullet content under it.
+   Group the bullets you generated in step 3 for that project (across
+   all dates for that project) by category and merge them into the
+   `[Unreleased]` section under `### <Category>` subheadings, in the
+   canonical order: Added, Changed, Deprecated, Removed, Fixed,
+   Security. Append to any existing bullets under each subheading; do
+   not delete or rewrite pre-existing bullets. (`scripts/release.py`
+   renames `[Unreleased]` to `[vX.Y.Z] - YYYY-MM-DD` at release time
+   and inserts a fresh empty `[Unreleased]` above it, so each
+   project's section accumulates across consolidation runs within a
+   release window.)
 
-4. Generate a concise, human-friendly summary of that section: a few
-   markdown bullets, no preamble, no trailing prose. Group related
-   changes. Use natural language.
-
-5. Insert the summary into `CHANGELOG.md` under the same date heading,
-   immediately above any prior date sections (so dates remain in
-   reverse-chronological order). Preserve the existing file header.
+5. Refinement pass: re-read just the `[Unreleased]` section of each
+   `CHANGELOG.md` you touched. Tighten any wordy bullets (cut filler
+   words; keep names of changed APIs/files); merge bullets that
+   describe the same user-visible change within that project; confirm
+   every bullet has a category prefix in the exact `- <Category>:
+   <description>` format.
 
 6. Configure git: `git config user.email "bot@imbue.com"`,
    `git config user.name "Changelog Bot"`, `gh auth setup-git`.
 
-7. `git add -A` and `git commit -m "Consolidate changelog entries for <date>"`,
-   substituting the date from step 3.
+7. Capture today's date in Pacific time: `RUN_DATE=$(TZ=America/Los_Angeles
+   date +%Y-%m-%d)`. This identifies *when this consolidation run
+   happened*, distinct from the per-entry `## YYYY-MM-DD` section
+   headings in each `UNABRIDGED_CHANGELOG.md` (which identify when each
+   entry was written). `git add -A` and `git commit -m "Consolidate
+   changelog entries (run <RUN_DATE>)"`.
 
 8. Capture the current branch name with `BRANCH=$(git rev-parse
    --abbrev-ref HEAD)` and push it: `git push --set-upstream origin
-   "$BRANCH"`. The schedule's `--branch` flag already created this
-   branch off the deployed-code HEAD; once the changelog scripts ship
-   on `main`, every cron deploy will be from main, so the branch's
-   parentage is automatically `origin/main` and the eventual PR diff
+   "$BRANCH"`. The schedule's auto-merge step ran `git fetch && checkout
+   && merge origin/main` before this agent started, so the per-run
+   branch is forked off current `origin/main` and the eventual PR diff
    contains only the consolidation commit.
 
 9. Open a PR with `gh pr create --base main --title "Changelog
-   consolidation <date>" --body "Automated changelog consolidation for
-   <date>."`. Capture the URL from stdout into `PR_URL` while diverting
-   stderr to a temp file, e.g.
+   consolidation (run <RUN_DATE>)" --body "Automated changelog
+   consolidation run on <RUN_DATE>."`. Capture the URL from stdout
+   into `PR_URL` while diverting stderr to a temp file, e.g.
    `PR_URL=$(gh pr create --base main --title "..." --body "..." 2>/tmp/gh_stderr)`.
    **Do not** fold stderr in via `2>&1` — `gh pr create` writes progress
    lines (e.g. "Creating pull request for X into Y in Z") to stderr

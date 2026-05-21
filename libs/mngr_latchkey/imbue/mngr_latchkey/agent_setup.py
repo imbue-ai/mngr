@@ -9,11 +9,11 @@ The lifecycle for a new agent has three latchkey-aware steps:
    ``LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE``,
    ``LATCHKEY_DISABLE_COUNTING``). See :func:`prepare_agent_latchkey`.
 
-2. *After* ``mngr create`` returns the canonical agent id: replace the
-   opaque handle with a symlink to the canonical agent-keyed
+2. *After* ``mngr create`` returns the canonical host id: replace the
+   opaque handle with a symlink to the canonical host-keyed
    ``latchkey_permissions.json`` so the desktop's permission-grant flow
    writes to the canonical path while the gateway reads through the
-   symlink. See :func:`finalize_agent_permissions`.
+   symlink. See :func:`finalize_host_permissions`.
 
 3. (Out of scope here.) When the agent is later discovered, the
    :class:`LatchkeyDiscoveryHandler` ensures the shared gateway is up
@@ -39,18 +39,17 @@ from pydantic import Field
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.frozen_model import FrozenModel
-from imbue.mngr.primitives import AgentId
+from imbue.mngr.primitives import HostId
 from imbue.mngr_latchkey.core import AGENT_SIDE_LATCHKEY_PORT
 from imbue.mngr_latchkey.core import Latchkey
 from imbue.mngr_latchkey.core import LatchkeyError
 from imbue.mngr_latchkey.store import LatchkeyPermissionsConfig
-from imbue.mngr_latchkey.store import link_opaque_permissions_to_agent
+from imbue.mngr_latchkey.store import link_opaque_permissions_to_host
 from imbue.mngr_latchkey.store import new_opaque_permissions_path
 from imbue.mngr_latchkey.store import save_permissions
 
 # Env-var names baked into the upstream latchkey CLI's wire contract.
-# Kept as constants so callers building ``--env`` flags or ``mngr provision``
-# arguments do not have to repeat them.
+# Kept as constants so callers building ``--env`` flags do not have to repeat them.
 ENV_LATCHKEY_GATEWAY: Final[str] = "LATCHKEY_GATEWAY"
 ENV_LATCHKEY_GATEWAY_PASSWORD: Final[str] = "LATCHKEY_GATEWAY_PASSWORD"
 ENV_LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE: Final[str] = "LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE"
@@ -58,16 +57,79 @@ ENV_LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE: Final[str] = "LATCHKEY_GATEWAY_PERMIS
 # always set it so each agent does not get counted as a separate user.
 ENV_LATCHKEY_DISABLE_COUNTING: Final[str] = "LATCHKEY_DISABLE_COUNTING"
 
+# Detent schema names and host string for the gateway-self baseline that
+# every agent inherits. Defined inline (in the agent's permissions file)
+# rather than relying on detent's built-in catalog so the names are
+# self-contained and the grant is exactly the endpoints we want.
+_GATEWAY_SELF_HOST: Final[str] = "latchkey-self.invalid"
+_SCOPE_LATCHKEY_SELF: Final[str] = "latchkey-self"
+_PERM_CREATE_PERMISSION_REQUEST: Final[str] = "latchkey-self-create-permission-request"
+_PERM_READ_SELF_PERMISSIONS: Final[str] = "latchkey-self-read-self-permissions"
+_PERM_READ_AVAILABLE_PERMISSIONS: Final[str] = "latchkey-self-read-available-permissions"
+
+# Regex matching ``/permissions/available/<service_name>`` where the
+# service name segment is one or more lowercase letters, digits, and
+# hyphens (starting with a letter or digit). Mirrors the gateway
+# ``permissions.mjs`` extension's own ``VALID_SERVICE_NAME_PATTERN`` so
+# the agent baseline cannot reach paths the extension itself would
+# refuse to serve. The trailing ``$`` rules out the collection endpoint
+# at ``/permissions/available`` (no segment): the baseline only opens
+# up the per-service catalog endpoint.
+_AVAILABLE_PERMISSIONS_PATH_PATTERN: Final[str] = r"^/permissions/available/[a-z0-9][a-z0-9-]*$"
+
+_AGENT_BASELINE_PERMISSIONS: Final[LatchkeyPermissionsConfig] = LatchkeyPermissionsConfig(
+    rules=(
+        {
+            _SCOPE_LATCHKEY_SELF: [
+                _PERM_CREATE_PERMISSION_REQUEST,
+                _PERM_READ_SELF_PERMISSIONS,
+                _PERM_READ_AVAILABLE_PERMISSIONS,
+            ],
+        },
+    ),
+    schemas={
+        _SCOPE_LATCHKEY_SELF: {
+            "properties": {"domain": {"const": _GATEWAY_SELF_HOST}},
+            "required": ["domain"],
+        },
+        _PERM_CREATE_PERMISSION_REQUEST: {
+            "properties": {
+                "method": {"const": "POST"},
+                "path": {"const": "/permission-requests"},
+            },
+            "required": ["method", "path"],
+        },
+        _PERM_READ_SELF_PERMISSIONS: {
+            "properties": {
+                "method": {"const": "GET"},
+                "path": {"const": "/permissions/self"},
+            },
+            "required": ["method", "path"],
+        },
+        _PERM_READ_AVAILABLE_PERMISSIONS: {
+            "properties": {
+                "method": {"const": "GET"},
+                "path": {
+                    "type": "string",
+                    "pattern": _AVAILABLE_PERMISSIONS_PATH_PATTERN,
+                },
+            },
+            "required": ["method", "path"],
+        },
+    },
+)
+
 
 class AgentLatchkeySetup(FrozenModel):
     """Outputs of :func:`prepare_agent_latchkey`.
 
     The caller is expected to:
 
-    * Inject every ``env`` entry into the agent's environment (typically
-      via ``mngr create --env KEY=VALUE`` flags).
+    * Inject every ``env`` entry into the agent's *host* environment
+      (typically via ``mngr create --host-env KEY=VALUE`` flags so every
+      agent that ever runs on the host inherits the same wiring).
     * Pass ``opaque_permissions_path`` back to
-      :func:`finalize_agent_permissions` once the canonical agent id is
+      :func:`finalize_host_permissions` once the canonical host id is
       known (skipped when ``opaque_permissions_path`` is ``None``, which
       happens only in the no-``Latchkey`` degraded mode).
     """
@@ -87,10 +149,10 @@ class AgentLatchkeySetup(FrozenModel):
     opaque_permissions_path: Path | None = Field(
         default=None,
         description=(
-            "Path to the agent's freshly-allocated opaque permissions handle "
+            "Path to the freshly-allocated opaque permissions handle "
             "(``<plugin_data_dir>/permissions/<uuid>.json``), materialized "
             "with deny-all baseline rules. Pass to "
-            ":func:`finalize_agent_permissions` once the canonical agent id "
+            ":func:`finalize_host_permissions` once the canonical host id "
             "is known. ``None`` when no ``Latchkey`` was supplied; otherwise "
             "always set on a successful return."
         ),
@@ -154,8 +216,8 @@ def prepare_agent_latchkey(
             "prepare_agent_latchkey(is_tunneled=False) needs a concurrency_group to own the spawned gateway subprocess"
         )
     else:
-        latchkey.start_gateway(concurrency_group)
-        gateway_url = latchkey.gateway_url
+        gateway_port = latchkey.start_gateway(concurrency_group)
+        gateway_url = f"http://{latchkey.listen_host}:{gateway_port}"
 
     env: dict[str, str] = {ENV_LATCHKEY_GATEWAY: gateway_url}
     opaque_path: Path | None = None
@@ -163,7 +225,7 @@ def prepare_agent_latchkey(
     if latchkey is not None:
         env[ENV_LATCHKEY_GATEWAY_PASSWORD] = latchkey.derive_gateway_password()
         opaque_path = new_opaque_permissions_path(latchkey.plugin_data_dir)
-        save_permissions(opaque_path, LatchkeyPermissionsConfig())
+        save_permissions(opaque_path, _AGENT_BASELINE_PERMISSIONS)
         env[ENV_LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE] = latchkey.create_permissions_override_jwt(opaque_path)
 
     # Always set the disable-counting flag whenever we're injecting a
@@ -174,12 +236,12 @@ def prepare_agent_latchkey(
     return AgentLatchkeySetup(env=env, opaque_permissions_path=opaque_path)
 
 
-def finalize_agent_permissions(
+def finalize_host_permissions(
     latchkey: Latchkey,
     opaque_permissions_path: Path | None,
-    agent_id: AgentId,
+    host_id: HostId,
 ) -> None:
-    """Replace the opaque permissions handle with a symlink to the canonical agent path.
+    """Replace the opaque permissions handle with a symlink to the canonical host path.
 
     No-op when ``opaque_permissions_path`` is ``None`` -- that's the
     sentinel :func:`prepare_agent_latchkey` returns in the
@@ -192,9 +254,9 @@ def finalize_agent_permissions(
     against the deny-all baseline file the JWT references directly
     (the opaque file itself, which already exists), but subsequent
     UI-driven permission grants will not take effect because the UI
-    writes to the canonical agent-keyed path that this function would
+    writes to the canonical host-keyed path that this function would
     have linked.
     """
     if opaque_permissions_path is None:
         return
-    link_opaque_permissions_to_agent(latchkey.plugin_data_dir, opaque_permissions_path, agent_id)
+    link_opaque_permissions_to_host(latchkey.plugin_data_dir, opaque_permissions_path, host_id)

@@ -2,22 +2,12 @@ help:
     @just --list
 
 build target:
-  @if [ "{{target}}" = "flexmux" ]; then \
-    cd libs/flexmux/frontend && pnpm install && pnpm run build; \
-  elif [ -d "apps/{{target}}" ]; then \
+  @if [ -d "apps/{{target}}" ]; then \
     uvx --from build pyproject-build --installer=uv --outdir=dist --wheel apps/{{target}}; \
   elif [ -d "libs/{{target}}" ]; then \
     uvx --from build pyproject-build --installer=uv --outdir=dist --wheel libs/{{target}}; \
   else \
     echo "Error: Target '{{target}}' not found in apps/ or libs/"; \
-    exit 1; \
-  fi
-
-run target:
-  @if [ "{{target}}" = "flexmux" ]; then \
-    uv run flexmux; \
-  else \
-    echo "Error: No run command defined for '{{target}}'"; \
     exit 1; \
   fi
 
@@ -76,11 +66,22 @@ test-offload-acceptance args="":
     : "${MODAL_TOKEN_ID:?must be set}"
     : "${MODAL_TOKEN_SECRET:?must be set}"
     just _generate-dockerignore
-    trap "rm -f .dockerignore" EXIT
+    # Pre-create a single shared Modal environment for this offload run so
+    # every fanned-out sandbox lands in the same env (Modal caps workspaces
+    # at 1500 envs; without this, a single run mints dozens to hundreds).
+    # The shared env name matches mngr_test-YYYY-MM-DD-HH-MM-SS-* so the
+    # hourly cleanup script will sweep it if the trap below ever fails.
+    SHARED_ENV="mngr_test-$(date -u +%Y-%m-%d-%H-%M-%S)-shared-$(uuidgen | tr 'A-Z' 'a-z' | tr -d '-' | cut -c1-12)"
+    # Install the trap *before* `modal environment create` so a SIGINT
+    # between create and the next line still cleans up; '|| true' on delete
+    # absorbs the not-found case if the env is already gone.
+    trap 'uv run modal environment delete "$SHARED_ENV" --yes >/dev/null 2>&1 || true; rm -f .dockerignore' EXIT
+    uv run modal environment create "$SHARED_ENV"
     # MODAL_IMAGE_BUILDER_VERSION=2025.06 is required for enable_docker support (Docker-in-Docker alpha).
     MODAL_IMAGE_BUILDER_VERSION=2025.06 offload -c offload-modal-acceptance.toml run --trace \
         --env "MODAL_TOKEN_ID=$MODAL_TOKEN_ID" \
         --env "MODAL_TOKEN_SECRET=$MODAL_TOKEN_SECRET" \
+        --env "MNGR_TEST_SHARED_MODAL_ENV_NAME=$SHARED_ENV" \
         --env "GITHUB_HEAD_REF=${GITHUB_HEAD_REF:-}" \
         --env "GITHUB_REF_NAME=${GITHUB_REF_NAME:-}" {{args}} || [[ $? -eq 2 ]]
 
@@ -96,13 +97,18 @@ test-offload-release args="":
     # so the two stay in sync.
     just _generate-release-dockerfile
     just _generate-dockerignore
-    trap "rm -f .dockerignore" EXIT
+    # Pre-create a single shared Modal environment for this offload run.
+    # See `test-offload-acceptance` for the full rationale.
+    SHARED_ENV="mngr_test-$(date -u +%Y-%m-%d-%H-%M-%S)-shared-$(uuidgen | tr 'A-Z' 'a-z' | tr -d '-' | cut -c1-12)"
+    trap 'uv run modal environment delete "$SHARED_ENV" --yes >/dev/null 2>&1 || true; rm -f .dockerignore' EXIT
+    uv run modal environment create "$SHARED_ENV"
 
     # MODAL_IMAGE_BUILDER_VERSION=2025.06 is required for enable_docker support (Docker-in-Docker alpha).
     MODAL_IMAGE_BUILDER_VERSION=2025.06 offload -c offload-modal-release.toml run --trace \
         --env "MODAL_TOKEN_ID=$MODAL_TOKEN_ID" \
         --env "MODAL_TOKEN_SECRET=$MODAL_TOKEN_SECRET" \
         --env "ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY" \
+        --env "MNGR_TEST_SHARED_MODAL_ENV_NAME=$SHARED_ENV" \
         --env "IS_RELEASE=1" \
         --env "GITHUB_HEAD_REF=${GITHUB_HEAD_REF:-}" \
         --env "GITHUB_REF_NAME=${GITHUB_REF_NAME:-}" {{args}} || [[ $? -eq 2 ]]
@@ -120,7 +126,7 @@ _parallel := "-n 4 --dist=worksteal --max-worker-restart=0"
 # Default mark filter for local unit + integration recipes. Kept out of
 # pyproject addopts because it would collide with offload-modal-acceptance
 # (which runs the opposite filter). A later -m on CLI overrides this.
-_skip_acceptance_and_release := "-m 'not acceptance and not release'"
+_skip_acceptance_and_release := "-m 'not acceptance and not release and not minds_deployment and not minds_services'"
 
 test-unit:
   uv run pytest {{_parallel}} {{_skip_acceptance_and_release}} --cov-report=html --ignore-glob="**/test_*.py" --cov-fail-under=36
@@ -158,6 +164,43 @@ test-timings:
 # useful for running against a single test, regardless of how it is marked
 test target:
   PYTEST_MAX_DURATION_SECONDS=600 uv run pytest -sv --no-cov -n 0 -m "acceptance or not acceptance" "{{target}}"
+
+# === minds deployment / services test orchestrator ===
+# Wraps apps/minds/scripts/test_deployments.py. See specs/minds-deployment-tests.md
+# and apps/minds/deployment_tests/README.md for the full design + usage.
+
+# Full run: shared env stand-up + sequential pytest x2 + teardown.
+minds-test-deployment *args:
+  uv run python apps/minds/scripts/test_deployments.py run {{args}}
+
+# Wipe everything from prior runs that the ledger still tracks as active or leaked.
+minds-test-deployment-cleanup:
+  uv run python apps/minds/scripts/test_deployments.py cleanup
+
+# Local iterate: stand up one shared env + print a ready-to-paste pytest command.
+minds-test-deployment-up role="default":
+  uv run python apps/minds/scripts/test_deployments.py up "{{role}}"
+
+# Local iterate: tear down whatever `minds-test-deployment-up` last stood up.
+minds-test-deployment-down role="default":
+  uv run python apps/minds/scripts/test_deployments.py down "{{role}}"
+
+# Point minds_services tests at an already-deployed dev env (e.g. dev-josh).
+minds-test-services-against env_name *tests:
+  uv run python apps/minds/scripts/test_deployments.py services-against "{{env_name}}" {{tests}}
+
+# Run only the minds_deployment pytest batch (each test mints its own ephemeral env).
+# No shared env stand-up, no mail.tm account -- fast iteration for the deploy tests.
+minds-test-deployment-only *tests:
+  uv run python apps/minds/scripts/test_deployments.py deployment-only {{tests}}
+
+# End-to-end acceptance test that drives the real Electron minds app to create
+# a local Docker workspace from forever-claude-template. Wraps the invocation
+# with `xvfb-run` so it works on headless Linux CI runners. macOS users with
+# a real display can run the underlying pytest directly without xvfb-run.
+# Requires apps/minds/node_modules/ to be installed (`cd apps/minds && pnpm install`).
+minds-test-electron *args:
+  xvfb-run -a uv run pytest apps/minds/test_desktop_client_e2e.py::test_create_local_docker_workspace_via_electron -v --no-cov --cov-fail-under=0 {{args}}
 
 # Download the Tailwind Play CDN JS bundle for the minds desktop client.
 # Idempotent and SHA-pinned via apps/minds/scripts/fetch_tailwind.sh -- the
@@ -208,49 +251,45 @@ sync-vendor-mngr fct="$HOME/project/forever-claude-template":
 
 # === Modal deploy / minds iteration helpers ===
 #
-# All of these read per-env config from .minds/<env>/ (gitignored). The
-# `<env>` name is whatever directory you have under .minds/ -- e.g.
-# `production`, `staging`. The matching templates live in .minds/template/.
+# Every recipe below requires an activated minds env. Activate first via
+# `eval "$(uv run minds env activate <name>)"`, then run the recipe in
+# the same shell. Tier (dev / staging / production) is derived from the
+# activated env name -- see `apps/minds/imbue/minds/cli/env.py`.
 
-# Validate that .minds/<env>/*.sh files declare every key the templates
-# declare, and print the modal-secret commands that `push-secrets` would
-# run. Does NOT touch Modal. Run this first when you change a template
-# or add a new per-env file.
-push-secrets-dry-run env="production":
-    uv run scripts/push_modal_secrets.py {{env}} --dry-run
+# Push every tier-shared Vault secret to Modal Secrets AND deploy both
+# Modal apps (litellm-proxy, remote-service-connector) for the activated
+# env. For the dev tier this provisions / re-deploys a per-developer
+# Modal env, Neon DB, and SuperTokens app and writes the result to
+# ~/.minds-<env>/client.toml + secrets.toml. For staging / production
+# (which require --yes-i-mean-<tier>) this only pushes Vault secrets
+# to Modal and runs `modal deploy`; no local files change.
+deploy *args:
+    uv run minds env deploy {{args}}
 
-# Upsert every per-env Modal secret declared in .minds/template/ for the
-# given env. Reads .minds/<env>/<service>.sh and writes <service>-<env>
-# secrets to Modal. Idempotent (uses --force).
-push-secrets env="production":
-    uv run scripts/push_modal_secrets.py {{env}}
-
-# Deploy the remote_service_connector Modal app for the given env.
-# Does NOT push secrets first -- run `just push-secrets <env>` if any
-# .minds/<env>/*.sh files have changed since the last deploy.
-deploy-connector env="production":
-    bash scripts/deploy_remote_service_connector.sh {{env}}
-
-# Deploy the modal_litellm proxy Modal app for the given env.
-# Does NOT push secrets first -- run `just push-secrets <env>` if
-# .minds/<env>/litellm.sh has changed since the last deploy.
-deploy-litellm env="production":
-    bash scripts/deploy_litellm.sh {{env}}
-
-# Push every per-env secret then deploy every Modal app for the given
-# env. Equivalent to push-secrets + deploy-connector + deploy-litellm.
-deploy-all env="production": (push-secrets env) (deploy-connector env) (deploy-litellm env)
-
-# Start the minds desktop client (electron) in dev mode.
-# Sources .env (for ANTHROPIC_API_KEY etc.) and sets MINDS_WORKSPACE_*
-# env vars so the create-form auto-fills "repository", "name", and
-# "branch":
+# Start the minds desktop client (electron) in dev mode against the
+# activated env. Sources .env if present, scrubs any ambient
+# ANTHROPIC_API_KEY / ANTHROPIC_BASE_URL (see below), and sets
+# MINDS_WORKSPACE_* env vars so the create-form auto-fills "repository",
+# "name", and "branch":
 #   MINDS_WORKSPACE_GIT_URL = .external_worktrees/forever-claude-template/
 #       (REQUIRED -- recipe fails if missing; create the worktree with
 #       `git -C ~/project/forever-claude-template worktree add` before
 #       running minds-start).
 #   MINDS_WORKSPACE_BRANCH  = the FCT worktree's current branch.
 #   MINDS_WORKSPACE_NAME    = "mindtest".
+#
+# Always re-syncs the live mngr working tree into the FCT worktree's
+# vendor/mngr/ first, so the very first Create after starting the app
+# picks up your local mngr code rather than whatever stale snapshot the
+# FCT worktree was created from. Uses rsync (vs `just sync-vendor-mngr`'s
+# git archive) so uncommitted mngr changes flow through and the FCT
+# worktree's git state stays as a normal diff.
+#
+# Requires that you've activated a minds env in this shell first --
+# `eval "$(uv run minds env activate <your-user>-dev)"` is the typical
+# dev case. Refuses without activation so the recipe never silently
+# writes to the wrong env's data root.
+#
 # Override agent_name / branch via positional args:
 #   just minds-start agent_name=foo branch=some-branch
 # Refuses to start if another minds-start is already running in this
@@ -260,13 +299,43 @@ minds-start agent_name="mindtest" branch="":
     #!/bin/bash
     set -ueo pipefail
     if [ -z "${MINDS_ROOT_NAME:-}" ]; then
-        echo "error: MINDS_ROOT_NAME is not set." >&2
-        echo "       Add \`export MINDS_ROOT_NAME=devminds\` (or your chosen root name) to your ~/.bashrc" >&2
-        echo "       so that minds bootstrap can derive MNGR_HOST_DIR / MNGR_PREFIX correctly." >&2
-        echo "       Without an explicit MINDS_ROOT_NAME, an inherited MNGR_HOST_DIR from the parent" >&2
-        echo "       shell wins and minds reads a different mngr settings.toml than its bootstrap writes." >&2
+        echo "error: no minds env activated in this shell." >&2
+        echo "       Run \`eval \"\$(uv run minds env activate <name>)\"\` first" >&2
+        echo "       (e.g. \`<your-user>-dev\` for your personal dev env), then" >&2
+        echo "       re-run \`just minds-start\` from the same shell." >&2
+        echo "" >&2
+        echo "       Without activation, an inherited MNGR_HOST_DIR from the parent" >&2
+        echo "       shell would silently win and minds would read a different mngr" >&2
+        echo "       settings.toml than its bootstrap writes to." >&2
         exit 2
     fi
+    fct_wt="$(pwd)/.external_worktrees/forever-claude-template"
+    if [ ! -e "$fct_wt/.git" ]; then
+        echo "error: no FCT worktree at $fct_wt" >&2
+        echo "       run \`git -C ~/project/forever-claude-template worktree add -b <branch> $fct_wt <base>\`" >&2
+        echo "       (e.g. base = josh/start-minds) before re-running minds-start." >&2
+        exit 2
+    fi
+    vendor_mngr="$fct_wt/vendor/mngr"
+    mkdir -p "$vendor_mngr"
+    echo "Syncing $(pwd) -> $vendor_mngr (rsync, uncommitted-friendly, no FCT commit)"
+    # Exclusions must match _RSYNC_MANUAL_EXCLUDES + _GITIGNORE_RSYNC_FILTER
+    # in libs/mngr_imbue_cloud/.../cli/admin.py and apps/minds/.../cli/pool.py,
+    # and the RSYNC_EXCLUDES array in apps/minds/scripts/propagate_changes --
+    # all four paths populate the same vendor/mngr/ destination.
+    #
+    # `--filter=:- .gitignore` reads .gitignore at each directory level under
+    # the source and applies its exclude rules, so __pycache__, .venv,
+    # node_modules, .test_output, .mypy_cache, .ruff_cache, .pytest_cache,
+    # .external_worktrees, etc. are all covered without listing them here.
+    # `.git` and `uv.lock` aren't in .gitignore (`.git` is git's internal
+    # dir; `uv.lock` is intentionally committed but each install context
+    # regenerates its own), so we exclude those manually.
+    rsync -a --delete \
+        --filter=':- .gitignore' \
+        --exclude=.git \
+        --exclude=uv.lock \
+        ./ "$vendor_mngr/"
     pid_file="/tmp/minds-start-$(echo -n "$PWD" | sha1sum | cut -c1-12).pid"
     if [ -f "$pid_file" ]; then
         existing=$(cat "$pid_file" 2>/dev/null || echo "")
@@ -289,6 +358,15 @@ minds-start agent_name="mindtest" branch="":
         . .env
         set +a
     fi
+    # Scrub ANTHROPIC_API_KEY / ANTHROPIC_BASE_URL from the environment
+    # the desktop client inherits. In dev these are typically exported by
+    # the shell rc of whoever runs `just minds-start`, and the client
+    # would otherwise forward them into every agent it creates -- silently
+    # overriding the auth mode picked in the create form. A real packaged
+    # macOS app launched from Finder never sources shell rc files, so this
+    # leak is a dev-environment artifact; unsetting here is the
+    # proportionate fix. `unset` of an already-unset var is a no-op.
+    unset ANTHROPIC_API_KEY ANTHROPIC_BASE_URL
     export MINDS_WORKSPACE_GIT_URL="$fct_wt"
     if [ -n "{{branch}}" ]; then
         export MINDS_WORKSPACE_BRANCH="{{branch}}"
@@ -301,11 +379,54 @@ minds-start agent_name="mindtest" branch="":
     echo "MINDS_WORKSPACE_BRANCH=$MINDS_WORKSPACE_BRANCH"
     echo "$$" > "$pid_file"
     trap 'rm -f "$pid_file"' EXIT
+    # Bail with a copy-pasteable install + build hint if the electron
+    # node_modules tree isn't there yet. `pnpm start` would otherwise
+    # die with a confusing "electron: not found" + WARN-about-missing-
+    # node_modules message.
+    if [ ! -x "apps/minds/node_modules/.bin/electron" ]; then
+        echo "" >&2
+        echo "error: minds desktop client isn't installed/built yet in this worktree." >&2
+        echo "       Run:" >&2
+        echo "         cd apps/minds && pnpm install && cd -" >&2
+        echo "         just minds-build" >&2
+        echo "       (~2 min on first run; subsequent rebuilds are seconds)." >&2
+        echo "       Then re-run \`just minds-start\`." >&2
+        exit 2
+    fi
     cd apps/minds && pnpm start
 
 # Stop the minds desktop client started in this worktree by `just minds-start`.
-# Reads the PID file written by minds-start and SIGTERMs the recipe shell;
-# pnpm and electron follow on cascade. Idempotent (no-op if nothing running).
+#
+# Strategy: walk the recipe shell's process tree, find Electron's main
+# process, and SIGTERM that specifically. The Electron main process has a
+# `process.on('SIGTERM', () => app.quit())` handler (apps/minds/electron/
+# main.js) that triggers the `before-quit` chain -- which already
+# SIGTERMs the python backend and waits for uvicorn's graceful exit.
+# After electron exits cleanly: its zygotes / utility children die via
+# PR_SET_DEATHSIG, the python backend's grandparent-death watcher (which
+# already exists in apps/minds/imbue/minds/cli/run.py) sees electron die
+# and exits cleanly itself, pnpm / node / sh / the recipe shell exit as
+# their children terminate. Whole tree gone in <2s typically.
+#
+# Why we don't just SIGTERM the recipe shell (the PID stored in pid_file):
+#   `kill <pid>` signals only that PID. Bash's default SIGTERM behavior is
+#   to exit cleanly without forwarding the signal to its children, so
+#   children become orphans and survive indefinitely. We saw this
+#   empirically -- the previous version of this recipe always fell through
+#   to the SIGKILL fallback because nothing was telling electron to quit.
+#
+# Why not kill the recipe shell's process group with `kill -- -<pgid>`:
+#   In this stack the PGID leader is `just` itself (one level above the
+#   recipe shell), and the group cleanly contains only this minds
+#   invocation. That's safe-by-inspection here but brittle as a general
+#   rule -- nothing prevents some future change to the harness from
+#   placing unrelated processes in the same PGID. PID-by-PID via pstree
+#   can't accidentally touch anything outside the tree.
+#
+# Idempotent (no-op if nothing running). Falls back to SIGTERM-the-recipe
+# if electron hasn't reached its main process yet (rare startup race), and
+# to SIGKILLing specific surviving PIDs if the graceful path doesn't
+# finish within 10s.
 minds-stop:
     #!/bin/bash
     set -ueo pipefail
@@ -320,18 +441,53 @@ minds-stop:
         rm -f "$pid_file"
         exit 0
     fi
-    echo "Stopping minds-start (pid=$pid)"
-    kill "$pid"
-    # Wait up to 10s for graceful shutdown, then SIGKILL.
+    # Snapshot the full descendant tree. pstree -p -T walks PPID links and
+    # gives PIDs in flat form. We'll use this both to identify electron's
+    # main process and to verify the whole tree exits.
+    descendants=$(pstree -p -T "$pid" 2>/dev/null | grep -oE '\([0-9]+\)' | tr -d '()' | sort -u)
+    # Locate Electron's main process: the descendant whose cmd contains the
+    # electron binary path and is NOT a `--type=zygote` / `--type=utility`
+    # / `--type=...` subprocess. There's exactly one such process per
+    # session (the rest are renderer / GPU / network helpers it spawned).
+    electron_main_pid=""
+    for d in $descendants; do
+        cmd=$(ps -o cmd= -p "$d" 2>/dev/null || true)
+        if [[ "$cmd" == *"node_modules/electron/dist/electron "* && "$cmd" != *"--type="* ]]; then
+            electron_main_pid="$d"
+            break
+        fi
+    done
+    if [ -n "$electron_main_pid" ]; then
+        echo "Stopping minds (recipe=$pid, electron=$electron_main_pid) via clean shutdown"
+        kill -TERM "$electron_main_pid"
+    else
+        # Pre-electron startup race: electron hasn't been exec'd yet. Fall
+        # back to the recipe shell, which at least kills the bash sitting
+        # in `pnpm install` / similar.
+        echo "Stopping minds-start (pid=$pid, electron not yet spawned)"
+        kill -TERM "$pid"
+    fi
+    # Wait up to 10s for the whole tree to exit.
     for i in $(seq 1 10); do
-        if ! kill -0 "$pid" 2>/dev/null; then
+        still_alive=""
+        for descendant in $descendants; do
+            if kill -0 "$descendant" 2>/dev/null; then
+                still_alive="$still_alive $descendant"
+            fi
+        done
+        if [ -z "$still_alive" ]; then
             rm -f "$pid_file"
             exit 0
         fi
         sleep 1
     done
-    echo "minds-start (pid=$pid) did not exit after SIGTERM; sending SIGKILL"
-    kill -9 "$pid" 2>/dev/null || true
+    # Force-kill anything that survived the grace period. Each kill targets
+    # a specific PID we observed under the recipe shell -- never a broad
+    # pgrep-style match.
+    echo "Tree did not exit after 10s SIGTERM grace; force-killing leftovers:$still_alive"
+    for descendant in $still_alive; do
+        kill -9 "$descendant" 2>/dev/null || true
+    done
     rm -f "$pid_file"
 
 # Build the minds desktop client distributable (slow; uses todesktop).
@@ -342,15 +498,24 @@ minds-build:
 # into a running Docker agent's container, then restart the agent and the
 # desktop client. Wraps apps/minds/scripts/propagate_changes by auto-
 # discovering the agent's Docker SSH port (via `docker port`) and the
-# minds-side SSH key (under MNGR_HOST_DIR's profiles/.../docker/.../keys/).
-# Defaults MNGR_HOST_DIR to ~/.minds/mngr (production minds); pass
-# mngr_host_dir=$HOME/.devminds/mngr if you're on a dev profile.
-propagate-changes agent_name mngr_host_dir="$HOME/.minds/mngr":
+# minds-side SSH key (under the activated env's MNGR_HOST_DIR's
+# profiles/.../docker/.../keys/).
+#
+# Requires an activated minds env: reads MNGR_HOST_DIR from the shell
+# (set by `minds env activate`). Refuses without activation so this
+# recipe never silently targets the wrong env's docker keys.
+propagate-changes agent_name:
     #!/bin/bash
     set -ueo pipefail
+    if [ -z "${MNGR_HOST_DIR:-}" ]; then
+        echo "error: MNGR_HOST_DIR is not set. Run" >&2
+        echo "       \`eval \"\$(uv run minds env activate <name>)\"\` first" >&2
+        echo "       then re-run \`just propagate-changes ${1}\` from the same shell." >&2
+        exit 2
+    fi
     agent_name="{{agent_name}}"
-    mngr_host_dir="{{mngr_host_dir}}"
-    container_name="mngr-${agent_name}-host"
+    mngr_host_dir="${MNGR_HOST_DIR}"
+    container_name="${MNGR_PREFIX:-mngr-}${agent_name}-host"
     if ! docker inspect "$container_name" >/dev/null 2>&1; then
         echo "error: no docker container named '$container_name'" >&2
         echo "       run \`docker ps\` to see running containers" >&2
@@ -365,15 +530,14 @@ propagate-changes agent_name mngr_host_dir="$HOME/.minds/mngr":
     keys=$(find "$mngr_host_dir/profiles" -path "*/docker/*/keys/docker_ssh_key" 2>/dev/null || true)
     if [ -z "$keys" ]; then
         echo "error: no docker_ssh_key found under $mngr_host_dir/profiles" >&2
-        echo "       try mngr_host_dir=\$HOME/.devminds/mngr if you're on a dev profile," >&2
-        echo "       or pass mngr_host_dir=<custom path>." >&2
+        echo "       (is the right minds env activated for this agent?)" >&2
         exit 2
     fi
     key_count=$(echo "$keys" | wc -l)
     if [ "$key_count" -gt 1 ]; then
         echo "error: multiple docker_ssh_key files found under $mngr_host_dir/profiles:" >&2
         echo "$keys" >&2
-        echo "       narrow with mngr_host_dir=<more specific path>." >&2
+        echo "       narrow the activated env if you have multiple envs sharing one host_dir." >&2
         exit 2
     fi
     key="$keys"
@@ -389,18 +553,18 @@ propagate-changes agent_name mngr_host_dir="$HOME/.minds/mngr":
 # resulting public hostname. Idempotent: tunnels create returns the
 # existing tunnel if one already exists; service add no-ops if the same
 # DNS+target is already registered.
-# Forward system_interface for a minds-profile agent.
-forward-minds-system-interface agent_name: (_forward-system-interface agent_name "$HOME/.minds/mngr" "minds-")
-
-# Same as forward-minds-system-interface but for the dev (devminds) profile.
-forward-devminds-system-interface agent_name: (_forward-system-interface agent_name "$HOME/.devminds/mngr" "devminds-")
-
-[private]
-_forward-system-interface agent_name mngr_host_dir mngr_prefix:
+#
+# Requires an activated minds env: reads MNGR_HOST_DIR / MNGR_PREFIX from
+# the shell (set by `minds env activate`).
+forward-system-interface agent_name:
     #!/bin/bash
     set -ueo pipefail
-    export MNGR_HOST_DIR="{{mngr_host_dir}}"
-    export MNGR_PREFIX="{{mngr_prefix}}"
+    if [ -z "${MNGR_HOST_DIR:-}" ] || [ -z "${MNGR_PREFIX:-}" ]; then
+        echo "error: MNGR_HOST_DIR / MNGR_PREFIX are not set. Run" >&2
+        echo "       \`eval \"\$(uv run minds env activate <name>)\"\` first" >&2
+        echo "       then re-run \`just forward-system-interface ${1}\` from the same shell." >&2
+        exit 2
+    fi
     AGENT_NAME="{{agent_name}}"
 
     # Resolve agent name to its full agent_id from local mngr state. The

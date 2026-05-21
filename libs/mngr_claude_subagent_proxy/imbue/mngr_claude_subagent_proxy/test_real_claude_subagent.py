@@ -48,6 +48,7 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.mngr.errors import MngrError
 from imbue.mngr.utils.polling import poll_for_value
 from imbue.mngr.utils.testing import init_git_repo
+from imbue.mngr_claude_subagent_proxy.hooks.mngr_api import PARENT_ID_LABEL
 
 _CLAUDE_BINARY: Final[str] = "claude"
 _DEFAULT_SPAWN_TIMEOUT_SECONDS: Final[float] = 300.0
@@ -235,21 +236,19 @@ def _write_trusted_claude_json(home: Path, trusted_dirs: list[Path]) -> None:
     (home / ".claude.json").write_text(json.dumps(base))
 
 
-@pytest.fixture
-def _mngr_subprocess_env(
+def _build_mngr_subprocess_env(
     tmp_path: Path,
     temp_host_dir: Path,
     mngr_test_prefix: str,
     mngr_test_root_name: str,
-    _source_repo: Path,
+    source_repo: Path,
+    extra_settings_toml: str = "",
 ) -> _MngrSubprocess:
-    """Build a subprocess env that isolates ``mngr`` calls to this test.
+    """Shared builder for ``_mngr_subprocess_env`` and its deny-mode variant.
 
-    Inherits the current environment (so ANTHROPIC_API_KEY and the uv cache
-    are available) but overrides MNGR_HOST_DIR / MNGR_PREFIX / MNGR_ROOT_NAME
-    so the test does not touch the developer's real mngr state. Also
-    pre-writes a trusted ``~/.claude.json`` in the test-isolated HOME so
-    that dialog prompts don't block the agent at startup.
+    ``extra_settings_toml`` is appended to the per-test profile's
+    ``settings.toml`` so callers can opt in to additional plugin
+    configuration (e.g. ``[plugins.claude_subagent_proxy]\\nmode = "DENY"``).
     """
     home_dir = Path(os.environ["HOME"])
     # Safety belt: the autouse setup_test_mngr_env fixture must have set
@@ -260,7 +259,7 @@ def _mngr_subprocess_env(
         f"Refusing to write .claude.json into unexpected HOME={home_dir!r}. "
         f"Expected a pytest tmp_path under {tmp_path.parent!r}."
     )
-    _write_trusted_claude_json(home_dir, [_source_repo])
+    _write_trusted_claude_json(home_dir, [source_repo])
 
     env = os.environ.copy()
     env["MNGR_HOST_DIR"] = str(temp_host_dir)
@@ -277,7 +276,10 @@ def _mngr_subprocess_env(
     profile_dir = mngr_root / "profiles" / profile_name
     profile_dir.mkdir(parents=True, exist_ok=True)
     (mngr_root / "config.toml").write_text(f'profile = "{profile_name}"\n')
-    (profile_dir / "settings.toml").write_text("[providers.modal]\nis_enabled = false\n")
+    settings_toml = "[providers.modal]\nis_enabled = false\n"
+    if extra_settings_toml:
+        settings_toml += "\n" + extra_settings_toml
+    (profile_dir / "settings.toml").write_text(settings_toml)
 
     here = Path(__file__).resolve()
     repo_root: Path | None = None
@@ -287,7 +289,51 @@ def _mngr_subprocess_env(
             break
     if repo_root is None:
         raise MngrError(f"could not locate repo root from {here!r}")
-    return _MngrSubprocess(env=env, cwd=_source_repo, repo_root=repo_root)
+    return _MngrSubprocess(env=env, cwd=source_repo, repo_root=repo_root)
+
+
+@pytest.fixture
+def _mngr_subprocess_env(
+    tmp_path: Path,
+    temp_host_dir: Path,
+    mngr_test_prefix: str,
+    mngr_test_root_name: str,
+    _source_repo: Path,
+) -> _MngrSubprocess:
+    """Build a subprocess env that isolates ``mngr`` calls to this test.
+
+    Inherits the current environment (so ANTHROPIC_API_KEY and the uv cache
+    are available) but overrides MNGR_HOST_DIR / MNGR_PREFIX / MNGR_ROOT_NAME
+    so the test does not touch the developer's real mngr state. Also
+    pre-writes a trusted ``~/.claude.json`` in the test-isolated HOME so
+    that dialog prompts don't block the agent at startup.
+    """
+    return _build_mngr_subprocess_env(tmp_path, temp_host_dir, mngr_test_prefix, mngr_test_root_name, _source_repo)
+
+
+@pytest.fixture
+def _mngr_subprocess_env_deny_mode(
+    tmp_path: Path,
+    temp_host_dir: Path,
+    mngr_test_prefix: str,
+    mngr_test_root_name: str,
+    _source_repo: Path,
+) -> _MngrSubprocess:
+    """Like ``_mngr_subprocess_env`` but with subagent_proxy plugin in DENY mode.
+
+    Adds ``[plugins.claude_subagent_proxy]\\nmode = "DENY"`` to the per-test
+    profile's settings.toml. With this setting, on_after_provisioning
+    installs only the PreToolUse:Agent deny hook; no PostToolUse,
+    SessionStart reaper, mngr-proxy.md, or stop-hook guarding.
+    """
+    return _build_mngr_subprocess_env(
+        tmp_path,
+        temp_host_dir,
+        mngr_test_prefix,
+        mngr_test_root_name,
+        _source_repo,
+        extra_settings_toml='[plugins.claude_subagent_proxy]\nmode = "DENY"\n',
+    )
 
 
 def _make_parent_agent_name() -> str:
@@ -840,3 +886,300 @@ def test_plan_mode_propagates_to_subagent(
         )
     finally:
         _destroy_agents_quietly(mngr, iter(created_agents))
+
+
+# ============================================================================
+# Deny mode release tests
+# ============================================================================
+#
+# In deny mode the plugin replaces its proxy machinery with a single
+# PreToolUse:Agent hook that DENIES the Task tool with a short
+# skill-pointer reason directing Claude at the `mngr-subagents` skill.
+# The skill (installed at `.claude/skills/mngr-subagents/SKILL.md`)
+# teaches the two-command `mngr create` + `subagent_wait` protocol
+# Claude is expected to run itself via Bash; the copy-pasteable commands
+# live in the skill, not in the deny reason.
+#
+# These tests verify the OBSERVABLE plugin behavior end-to-end:
+#   1. Provisioning installs the deny hook + shared reaper (no PROXY-only
+#      spawn/cleanup/guard hooks).
+#   2. A real Claude agent invoking Task sees a deny tool_result, not a
+#      successful Task tool_result.
+#   3. Claude follows the skill's protocol and successfully spawns an
+#      mngr child with the `mngr_claude_subagent_proxy_parent_id` label
+#      pointing at the parent. (DENY mode's user-visible promise is that
+#      Claude can still delegate via mngr; if that doesn't happen the
+#      feature is broken even if the hook plumbing is fine.)
+#   4. No proxy machinery sidefiles (subagent_map, proxy_commands) appear
+#      on the parent -- the deny hook never stages anything itself.
+
+
+# A short, explicit prompt that asks for a Task call and tells Claude
+# what to do after the deny. We instruct the follow-through because we
+# want to verify the end-to-end skill protocol works, not just that
+# the hook fires; an under-specified prompt would let Claude give up
+# after the deny and the test would silently pass while shipping a
+# broken feature.
+_DENY_MODE_PROMPT: Final[str] = (
+    "Use the Task tool exactly once. Set subagent_type to 'general-purpose'. "
+    "Set the prompt to: Say exactly the word BANANA and nothing else, then end your turn. "
+    "If Task is denied, read the deny reason carefully and follow whatever protocol it points you at "
+    "to delegate the same prompt to a subagent. After you have the subagent's reply, echo it back to me "
+    "in exactly this form: SUBAGENT_SAID=<their-reply>. Do not retry Task after the deny."
+)
+
+
+@pytest.mark.release
+@pytest.mark.tmux
+@pytest.mark.rsync
+@pytest.mark.timeout(900)
+def test_deny_mode_intercepts_task_with_deny_reason(
+    _skip_if_no_real_claude: None,
+    _mngr_subprocess_env_deny_mode: _MngrSubprocess,
+    _source_repo: Path,
+    temp_host_dir: Path,
+) -> None:
+    """Golden path: deny mode intercepts Task AND Claude successfully delegates via the skill.
+
+    End-to-end verification that:
+    1. With ``[plugins.claude_subagent_proxy] mode = "DENY"`` in the user's
+       settings.toml, the provisioned parent agent's
+       ``.claude/settings.local.json`` has the PreToolUse:Agent deny
+       hook plus the shared SessionStart reaper (the same label-driven
+       ``hooks/reap.py`` PROXY uses), and crucially does NOT have the
+       PROXY-only spawn / cleanup hooks.
+    2. ``.claude/agents/mngr-proxy.md`` is NOT written (no Haiku
+       dispatcher needed in deny mode).
+    3. When the parent Claude agent calls Task, the parent's transcript
+       contains the deny-reason text (``deny mode`` /
+       ``mngr-subagents``) -- proving both that the model attempted
+       Task (else the PreToolUse hook would not have fired) and that
+       our deny hook returned the expected short skill-pointer reason.
+    4. **Claude follows the skill protocol and successfully spawns a
+       child mngr agent** carrying the
+       ``mngr_claude_subagent_proxy_parent_id`` label pointing at the
+       parent. This is the user-visible promise of DENY mode -- if
+       Claude can't delegate via mngr after the deny, the feature is
+       broken even when the hook plumbing is fine, so the regression
+       test asserts the full skill round-trip. Side-effect on a real
+       mngr resource, not Claude's prose, so it's not brittle.
+    5. The deny hook does NOT write any sidefiles (no subagent_map,
+       subagent_prompts, subagent_results, or proxy_commands) on the
+       parent. The skill teaches Claude to write its own prompt file
+       before running ``mngr create --message-file``; the plugin's deny
+       hook has no business pre-staging anything.
+    """
+    mngr = _mngr_subprocess_env_deny_mode
+    parent_name = _make_parent_agent_name()
+    created_agents: list[str] = [parent_name]
+
+    try:
+        create_result = _create_parent_claude_agent(mngr, parent_name, _DENY_MODE_PROMPT)
+        assert create_result.returncode == 0, (
+            f"mngr create failed (exit={create_result.returncode})\n"
+            f"stderr:\n{create_result.stderr}\nstdout:\n{create_result.stdout}"
+        )
+
+        # Provisioning checks: settings.local.json must have the deny hook
+        # plus the shared SessionStart reaper, and crucially must NOT have
+        # the PROXY-only spawn / cleanup hooks. We check immediately after
+        # create so the state is not racing with anything Claude does.
+        settings_text = _agent_settings_local_json(parent_name, _source_repo)
+        assert "imbue.mngr_claude_subagent_proxy.hooks.deny" in settings_text, (
+            f"Parent's settings.local.json does NOT contain the deny hook command. "
+            f"This means deny mode did not take effect at provisioning time. "
+            f"settings.local.json:\n{settings_text}"
+        )
+        assert "imbue.mngr_claude_subagent_proxy.hooks.reap" in settings_text, (
+            f"Parent's settings.local.json does NOT contain the shared SessionStart "
+            f"reaper command. DENY mode installs the same label-driven hooks/reap.py "
+            f"PROXY uses (commit 97d04090a); its absence means deny-mode provisioning "
+            f"is not picking up the shared reaper. settings.local.json:\n{settings_text}"
+        )
+        assert "imbue.mngr_claude_subagent_proxy.hooks.spawn" not in settings_text, (
+            f"Parent's settings.local.json STILL contains the spawn hook -- "
+            f"deny mode should replace, not add. settings.local.json:\n{settings_text}"
+        )
+        assert "imbue.mngr_claude_subagent_proxy.hooks.cleanup" not in settings_text, (
+            "Parent's settings.local.json STILL contains the cleanup hook in deny mode."
+        )
+
+        # mngr-proxy.md is the Haiku dispatcher; deny mode does not need it.
+        proxy_md = _source_repo / ".claude" / "agents" / "mngr-proxy.md"
+        assert not proxy_md.exists(), (
+            f"Deny mode wrote the Haiku-dispatcher agent definition at {proxy_md}. "
+            f"It should not be written -- there is no Haiku to dispatch to in deny mode."
+        )
+
+        # Wait for the parent to finish its turn. We don't care how many
+        # tool calls it made, only that it eventually settles. DENY-mode
+        # parents legitimately take longer than the default wait window
+        # because the skill teaches a multi-step workflow (write prompt
+        # file -> mngr create -> subagent_wait, possibly via
+        # Bash run_in_background + BashOutput polling), so we use a
+        # longer per-test timeout here.
+        deny_mode_wait_timeout = 600.0
+        final_parent = _poll_for_agent_state(
+            mngr,
+            parent_name,
+            _is_waiting_end_of_turn,
+            timeout=deny_mode_wait_timeout,
+        )
+        if final_parent is None or not _is_waiting_end_of_turn(final_parent):
+            diagnostics = _diagnose_subagent_proxy_failure(mngr, parent_name, _source_repo, temp_host_dir)
+            pytest.fail(
+                f"Parent {parent_name!r} never reached WAITING/END_OF_TURN within "
+                f"{deny_mode_wait_timeout}s in deny mode. The deny hook itself emits a "
+                f"quick deny, but Claude then runs the skill's spawn-and-wait protocol "
+                f"which can take a few minutes for a real subagent."
+                f"{diagnostics}"
+            )
+
+        # The deny-reason content is the load-bearing assertion. It is what
+        # Claude sees as the tool_result for the denied Task call. If these
+        # strings appear in the transcript, the model emitted Task (else no
+        # PreToolUse:Agent hook would have fired) AND our deny hook returned
+        # the expected short skill-pointer reason.
+        transcript = _agent_transcript_text(final_parent, temp_host_dir)
+        deny_reason_markers = [
+            "deny mode",
+            "mngr-subagents",
+        ]
+        missing = [m for m in deny_reason_markers if m not in transcript]
+        assert not missing, (
+            f"Parent's transcript is missing deny-reason markers: {missing!r}. "
+            f"This means the deny hook either did not fire or returned different "
+            f"text than expected. Transcript length: {len(transcript)} chars.\n"
+            f"Transcript tail (last 4000 chars):\n{transcript[-4000:]}"
+        )
+
+        # The deny hook does NOT write any sidefiles. The skill teaches
+        # Claude to stage its own prompt file before running mngr
+        # create --message-file; the plugin's deny hook has no
+        # business pre-staging anything.
+        agent_id = final_parent.get("id")
+        assert isinstance(agent_id, str)
+        state_dir = temp_host_dir / "agents" / agent_id
+        if state_dir.is_dir():
+            for sidefile_dir in ("subagent_map", "subagent_results", "subagent_prompts", "proxy_commands"):
+                assert not (state_dir / sidefile_dir).exists(), (
+                    f"Deny mode unexpectedly created {sidefile_dir}/ in {state_dir}. "
+                    f"The deny hook should write nothing to the parent's state dir; "
+                    f"the skill teaches Claude to stage anything it needs itself."
+                )
+
+        # Claude must have followed the skill protocol and spawned at
+        # least one child mngr agent carrying the parent-id label. This
+        # is the load-bearing user-visible promise of DENY mode -- the
+        # deny hook firing means nothing if Claude can't actually
+        # delegate after seeing the deny reason. We assert on the
+        # *label* rather than the child's name because the skill lets
+        # Claude pick its own slug, so a name-prefix check would be
+        # brittle.
+        all_agents = mngr.list_agents()
+        children_by_label = [
+            agent
+            for agent in all_agents
+            if isinstance(agent, dict)
+            and isinstance(agent.get("labels"), dict)
+            and agent["labels"].get(PARENT_ID_LABEL) == agent_id
+        ]
+        for child in children_by_label:
+            child_name = child.get("name")
+            if isinstance(child_name, str):
+                created_agents.append(child_name)
+        assert children_by_label, (
+            f"Parent {parent_name!r} (id={agent_id!r}) did not spawn any child mngr "
+            f"agent carrying labels.{PARENT_ID_LABEL}=<parent_id>. Either Claude did "
+            f"not follow the mngr-subagents skill after the Task deny, or it spawned "
+            f"a child without the parent-id label (skill bug). DENY mode's user-visible "
+            f"promise is that Claude can delegate via mngr after the deny -- failing "
+            f"this assertion means the feature is broken end-to-end even though the "
+            f"hook plumbing is fine.\n"
+            f"All agents at end of test:\n"
+            + "\n".join(
+                f"  - {a.get('name')!r} state={a.get('state')!r} labels={a.get('labels')!r}" for a in all_agents
+            )
+        )
+    finally:
+        _destroy_agents_quietly(mngr, iter(created_agents))
+
+
+@pytest.mark.release
+@pytest.mark.tmux
+@pytest.mark.rsync
+@pytest.mark.timeout(900)
+def test_deny_mode_settings_file_is_minimal_compared_to_proxy_mode(
+    _skip_if_no_real_claude: None,
+    _mngr_subprocess_env_deny_mode: _MngrSubprocess,
+    _source_repo: Path,
+) -> None:
+    """The settings.local.json hooks dict in deny mode is strictly smaller than in proxy mode.
+
+    Specifically: deny mode installs exactly two subagent_proxy hook
+    commands -- the PreToolUse:Agent deny hook and the shared
+    SessionStart reaper (same ``hooks/reap.py`` PROXY uses). PROXY
+    mode installs four (spawn, cleanup, reap, guard_stop_hooks), so
+    deny mode is strictly smaller. We don't assert on third-party
+    hook entries (mngr_claude readiness, user-installed hooks) --
+    those are the same in both modes.
+    """
+    mngr = _mngr_subprocess_env_deny_mode
+    parent_name = _make_parent_agent_name()
+    created_agents: list[str] = [parent_name]
+
+    try:
+        # The prompt content does not matter -- we only inspect the
+        # provisioned settings file, not the agent's behavior. Use a
+        # trivial one to keep the test fast.
+        create_result = _create_parent_claude_agent(
+            mngr, parent_name, "Reply with the literal string OK and end your turn."
+        )
+        assert create_result.returncode == 0
+
+        settings_path = _source_repo / ".claude" / "settings.local.json"
+        assert settings_path.is_file(), f"Provisioning did not write {settings_path}"
+        settings = json.loads(settings_path.read_text())
+        hooks = settings.get("hooks", {})
+        assert isinstance(hooks, dict)
+
+        # All subagent_proxy-specific hook commands across all events.
+        proxy_commands: list[str] = []
+        for entries in hooks.values():
+            if not isinstance(entries, list):
+                continue
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    continue
+                inner = entry.get("hooks")
+                if not isinstance(inner, list):
+                    continue
+                for cmd_entry in inner:
+                    if not isinstance(cmd_entry, dict):
+                        continue
+                    command = cmd_entry.get("command", "")
+                    if "imbue.mngr_claude_subagent_proxy" in command:
+                        proxy_commands.append(command)
+
+        assert len(proxy_commands) == 2, (
+            f"Deny mode should install exactly two subagent_proxy hook commands "
+            f"(PreToolUse:Agent deny + SessionStart reap), got {len(proxy_commands)}: "
+            f"{proxy_commands!r}"
+        )
+        assert any("imbue.mngr_claude_subagent_proxy.hooks.deny" in cmd for cmd in proxy_commands), (
+            f"Deny mode should install hooks.deny command. Got: {proxy_commands!r}"
+        )
+        assert any("imbue.mngr_claude_subagent_proxy.hooks.reap" in cmd for cmd in proxy_commands), (
+            f"Deny mode should install the shared hooks.reap SessionStart command. Got: {proxy_commands!r}"
+        )
+    finally:
+        _destroy_agents_quietly(mngr, iter(created_agents))
+
+
+# Note: there is intentionally no DENY-mode background-Task release
+# test. The deny reason no longer branches on run_in_background --
+# Claude Code's Bash tool already accepts run_in_background=true, so a
+# Task call that wanted backgrounding can just run the skill's
+# subagent_wait command that way. A separate DENY-specific test would
+# have asserted that we surface a redundant --spawn-only flag, which
+# we deliberately do not.

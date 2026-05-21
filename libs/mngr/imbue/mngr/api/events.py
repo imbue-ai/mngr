@@ -25,10 +25,9 @@ from imbue.imbue_common.logging import ROTATED_JSONL_PATTERN
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.pure import pure
-from imbue.mngr.api.discover import discover_by_address
 from imbue.mngr.api.discover import discover_hosts_and_agents
-from imbue.mngr.api.find import filter_one_agent
 from imbue.mngr.api.find import filter_one_host
+from imbue.mngr.api.find import find_one_agent
 from imbue.mngr.api.providers import get_provider_instance
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import MalformedJsonlLineError
@@ -37,9 +36,11 @@ from imbue.mngr.interfaces.data_types import VolumeFileType
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.interfaces.volume import Volume
 from imbue.mngr.primitives import AgentAddress
+from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentOrHostAddress
 from imbue.mngr.primitives import HostAddress
 from imbue.mngr.primitives import HostId
+from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.providers.base_provider import BaseProviderInstance
 from imbue.mngr.utils.cel_utils import apply_cel_filters_to_context
 from imbue.mngr.utils.jsonl_warn import MalformedJsonLineWarner
@@ -130,6 +131,44 @@ class _AllEventsStreamState(MutableModel):
     )
 
 
+def try_build_events_target_for_agent(
+    *,
+    mngr_ctx: MngrContext,
+    agent_id: AgentId,
+    agent_name: str,
+    host_id: HostId,
+    provider_name: ProviderInstanceName,
+) -> EventsTarget | None:
+    """Build an ``EventsTarget`` for an agent given its identity, or None if unreadable.
+
+    Unlike ``resolve_events_target``, this skips the agent-name discovery step
+    -- it assumes the caller already has an ``AgentDetails`` (e.g. from
+    ``list_agents``) and just wants the events handle. Returns ``None`` when
+    the agent's host has neither a volume nor an online interface to read
+    events from (rather than raising) so a multi-agent walker can skip the
+    agent and continue with the others.
+    """
+    provider = get_provider_instance(provider_name, mngr_ctx)
+    host_volume = provider.get_volume_for_host(host_id)
+    events_volume: Volume | None = None
+    if host_volume is not None:
+        agent_volume = host_volume.get_agent_volume(agent_id)
+        events_volume = agent_volume.scoped("events")
+    agent_events_subpath = Path("agents") / str(agent_id) / "events"
+    online_host, events_path = _try_get_online_host_for_events(provider, host_id, agent_events_subpath)
+    if events_volume is None and online_host is None:
+        return None
+    return EventsTarget(
+        volume=events_volume,
+        online_host=online_host,
+        events_path=events_path,
+        display_name=f"agent '{agent_name}'",
+        provider=provider,
+        host_id=host_id,
+        events_subpath=agent_events_subpath,
+    )
+
+
 def resolve_events_target(
     address: AgentOrHostAddress,
     mngr_ctx: MngrContext,
@@ -147,36 +186,21 @@ def resolve_events_target(
 
 
 def _resolve_agent_events_target(address: AgentAddress, mngr_ctx: MngrContext) -> EventsTarget:
-    with log_span("Loading agents and hosts"):
-        filtered_agents_by_host, _providers = discover_by_address(address, mngr_ctx, include_destroyed=False)
-    host_ref, agent_ref = filter_one_agent(address.agent, None, filtered_agents_by_host)
+    host_ref, agent_ref = find_one_agent(address, mngr_ctx)
     with log_span("Getting events access for agent {}", agent_ref.agent_name):
-        provider = get_provider_instance(host_ref.provider_name, mngr_ctx)
-
-        host_volume = provider.get_volume_for_host(host_ref.host_id)
-        events_volume: Volume | None = None
-        if host_volume is not None:
-            agent_volume = host_volume.get_agent_volume(agent_ref.agent_id)
-            events_volume = agent_volume.scoped("events")
-
-        agent_events_subpath = Path("agents") / str(agent_ref.agent_id) / "events"
-        online_host, events_path = _try_get_online_host_for_events(provider, host_ref.host_id, agent_events_subpath)
-
-        if events_volume is None and online_host is None:
-            raise MngrError(
-                f"Provider '{host_ref.provider_name}' does not support volumes and the host is not online. "
-                "Cannot read events for this agent."
-            )
-
-    return EventsTarget(
-        volume=events_volume,
-        online_host=online_host,
-        events_path=events_path,
-        display_name=f"agent '{agent_ref.agent_name}'",
-        provider=provider,
-        host_id=host_ref.host_id,
-        events_subpath=agent_events_subpath,
-    )
+        target = try_build_events_target_for_agent(
+            mngr_ctx=mngr_ctx,
+            agent_id=agent_ref.agent_id,
+            agent_name=str(agent_ref.agent_name),
+            host_id=host_ref.host_id,
+            provider_name=host_ref.provider_name,
+        )
+    if target is None:
+        raise MngrError(
+            f"Provider '{host_ref.provider_name}' does not support volumes and the host is not online. "
+            "Cannot read events for this agent."
+        )
+    return target
 
 
 def _resolve_host_events_target(address: HostAddress, mngr_ctx: MngrContext) -> EventsTarget:

@@ -16,6 +16,7 @@ from tabulate import tabulate
 
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.pure import pure
+from imbue.mngr.cli.address_params import AGENT_OR_HOST_ADDRESS
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
 from imbue.mngr.cli.output_helpers import emit_final_json
@@ -28,6 +29,7 @@ from imbue.mngr.errors import MngrError
 from imbue.mngr.interfaces.data_types import VolumeFileType
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.interfaces.volume import Volume
+from imbue.mngr.primitives import AgentOrHostAddress
 from imbue.mngr.primitives import OutputFormat
 from imbue.mngr_file.cli.group import file_group
 from imbue.mngr_file.cli.target import compute_volume_path
@@ -116,7 +118,7 @@ else:
 class _FileListCliOptions(CommonCliOptions):
     """Options for the file list subcommand."""
 
-    target: str
+    target: AgentOrHostAddress
     path: str | None
     relative_to: str
     fields: str | None
@@ -317,7 +319,7 @@ def _emit_list_result(
 
 
 @file_group.command(name="list")
-@click.argument("target")
+@click.argument("target", type=AGENT_OR_HOST_ADDRESS)
 @click.argument("path", required=False, default=None)
 @optgroup.group("Path Resolution")
 @optgroup.option(
@@ -361,7 +363,7 @@ def file_list(ctx: click.Context, **kwargs: Any) -> None:
     # Resolve target
     with log_span("Resolving file target"):
         resolved = resolve_file_target(
-            target_identifier=opts.target,
+            target=opts.target,
             mngr_ctx=mngr_ctx,
             relative_to=relative_to,
         )

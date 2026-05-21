@@ -7,27 +7,27 @@ subclass so we can drive the various success / failure permutations
 deterministically.
 """
 
+import json
 from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
-from imbue.mngr.primitives import AgentId
+from imbue.mngr.primitives import HostId
 from imbue.mngr_latchkey.agent_setup import AgentLatchkeySetup
 from imbue.mngr_latchkey.agent_setup import ENV_LATCHKEY_DISABLE_COUNTING
 from imbue.mngr_latchkey.agent_setup import ENV_LATCHKEY_GATEWAY
 from imbue.mngr_latchkey.agent_setup import ENV_LATCHKEY_GATEWAY_PASSWORD
 from imbue.mngr_latchkey.agent_setup import ENV_LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE
-from imbue.mngr_latchkey.agent_setup import finalize_agent_permissions
+from imbue.mngr_latchkey.agent_setup import finalize_host_permissions
 from imbue.mngr_latchkey.agent_setup import prepare_agent_latchkey
 from imbue.mngr_latchkey.core import AGENT_SIDE_LATCHKEY_PORT
 from imbue.mngr_latchkey.core import LatchkeyError
 from imbue.mngr_latchkey.core import LatchkeyJwtMintError
 from imbue.mngr_latchkey.store import LatchkeyStoreError
-from imbue.mngr_latchkey.store import load_permissions
 from imbue.mngr_latchkey.store import opaque_permissions_dir
-from imbue.mngr_latchkey.store import permissions_path_for_agent
+from imbue.mngr_latchkey.store import permissions_path_for_host
 from imbue.mngr_latchkey.testing import FakeLatchkey
 from imbue.mngr_latchkey.testing import make_full_fake_latchkey
 
@@ -73,10 +73,38 @@ def test_prepare_full_wiring_tunneled(tmp_path: Path) -> None:
     assert setup.env[ENV_LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE] == "header.payload.signature"
     assert setup.env[ENV_LATCHKEY_DISABLE_COUNTING] == "1"
     assert setup.opaque_permissions_path is not None
-    # The opaque path lives under the plugin's data subdir and was
-    # materialized with deny-all baseline rules.
     assert setup.opaque_permissions_path.parent == opaque_permissions_dir(fake.plugin_data_dir)
-    assert load_permissions(setup.opaque_permissions_path).rules == ()
+    on_disk = json.loads(setup.opaque_permissions_path.read_text())
+    # Every new agent gets three baseline permissions under the
+    # ``latchkey-self`` scope: create a permission request, read its own
+    # current permissions, and read the per-service permissions catalog.
+    assert on_disk["rules"] == [
+        {
+            "latchkey-self": [
+                "latchkey-self-create-permission-request",
+                "latchkey-self-read-self-permissions",
+                "latchkey-self-read-available-permissions",
+            ],
+        },
+    ]
+    schemas = on_disk["schemas"]
+    assert schemas["latchkey-self"]["properties"]["domain"] == {"const": "latchkey-self.invalid"}
+    assert schemas["latchkey-self-create-permission-request"]["properties"] == {
+        "method": {"const": "POST"},
+        "path": {"const": "/permission-requests"},
+    }
+    assert schemas["latchkey-self-read-self-permissions"]["properties"] == {
+        "method": {"const": "GET"},
+        "path": {"const": "/permissions/self"},
+    }
+    # The available-catalog permission uses a path pattern so the agent
+    # can read any service's entry; it must not be a ``const`` (which
+    # would pin it to one service).
+    available_path_schema = schemas["latchkey-self-read-available-permissions"]["properties"]["path"]
+    assert available_path_schema == {
+        "type": "string",
+        "pattern": r"^/permissions/available/[a-z0-9][a-z0-9-]*$",
+    }
 
 
 def test_prepare_full_wiring_on_host_uses_live_port(tmp_path: Path) -> None:
@@ -141,19 +169,19 @@ def test_prepare_jwt_mint_failure_propagates(tmp_path: Path) -> None:
         prepare_agent_latchkey(fake, is_tunneled=True)
 
 
-# -- finalize_agent_permissions ----------------------------------------------
+# -- finalize_host_permissions ----------------------------------------------
 
 
 def test_finalize_links_opaque_to_canonical(tmp_path: Path) -> None:
     fake = _full_fake(tmp_path)
     setup = prepare_agent_latchkey(fake, is_tunneled=True)
     assert setup.opaque_permissions_path is not None
-    agent_id = AgentId()
+    host_id = HostId()
 
-    finalize_agent_permissions(fake, setup.opaque_permissions_path, agent_id)
+    finalize_host_permissions(fake, setup.opaque_permissions_path, host_id)
 
-    # The opaque path is now a symlink pointing at the canonical agent path.
-    canonical = permissions_path_for_agent(fake.plugin_data_dir, agent_id)
+    # The opaque path is now a symlink pointing at the canonical host path.
+    canonical = permissions_path_for_host(fake.plugin_data_dir, host_id)
     assert canonical.is_file()
     assert setup.opaque_permissions_path.is_symlink()
     assert setup.opaque_permissions_path.resolve() == canonical.resolve()
@@ -162,8 +190,8 @@ def test_finalize_links_opaque_to_canonical(tmp_path: Path) -> None:
 def test_finalize_with_none_path_is_a_noop(tmp_path: Path) -> None:
     """``opaque_permissions_path=None`` is what ``prepare_agent_latchkey`` returns on JWT-mint failure."""
     fake = _full_fake(tmp_path)
-    finalize_agent_permissions(fake, None, AgentId())
-    assert not (fake.plugin_data_dir / "agents").exists()
+    finalize_host_permissions(fake, None, HostId())
+    assert not (fake.plugin_data_dir / "hosts").exists()
 
 
 def test_finalize_propagates_link_errors(tmp_path: Path) -> None:
@@ -174,10 +202,10 @@ def test_finalize_propagates_link_errors(tmp_path: Path) -> None:
     """
     fake = _full_fake(tmp_path)
     # Pass an opaque path the helper cannot operate on (it doesn't
-    # exist), forcing ``link_opaque_permissions_to_agent`` to raise.
+    # exist), forcing ``link_opaque_permissions_to_host`` to raise.
     missing_path = tmp_path / "definitely-not-there.json"
     with pytest.raises(LatchkeyStoreError):
-        finalize_agent_permissions(fake, missing_path, AgentId())
+        finalize_host_permissions(fake, missing_path, HostId())
 
 
 # -- AgentLatchkeySetup model -------------------------------------------------

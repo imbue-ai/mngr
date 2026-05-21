@@ -112,6 +112,24 @@ def get_user_claude_config_dir() -> Path:
     return get_claude_config_dir()
 
 
+def resolve_shared_claude_config_dir() -> Path:
+    """Return $CLAUDE_CONFIG_DIR, falling back to ``~/.claude/`` when unset.
+
+    Used by the ``use_env_config_dir`` mode of ``ClaudeAgentConfig`` where mngr
+    delegates the claude config dir to whatever the user has in their shell env
+    rather than provisioning a per-agent dir. The fallback to ``~/.claude/``
+    matches the directory claude itself picks when ``CLAUDE_CONFIG_DIR`` is
+    unset, so ``use_env_config_dir=True`` effectively means "don't touch the
+    config dir at all -- inherit whatever the parent shell would have used."
+    The fallback path is shared (not per-agent), which is the whole point of
+    the flag.
+    """
+    env_dir = os.environ.get("CLAUDE_CONFIG_DIR")
+    if env_dir:
+        return Path(env_dir)
+    return Path.home() / ".claude"
+
+
 def find_user_claude_config() -> Path:
     """Find the user-scope Claude config file (.claude.json).
 

@@ -17,9 +17,9 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import AgentNotFoundError
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.host import Host
-from imbue.mngr.hosts.host import HostLocation
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.host import HostInterface
+from imbue.mngr.interfaces.host import HostLocation
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import AgentAddress
 from imbue.mngr.primitives import AgentId
@@ -30,9 +30,9 @@ from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import DiscoveredHost
 from imbue.mngr.primitives import HostAddress
 from imbue.mngr.primitives import HostId
+from imbue.mngr.primitives import HostLocationAddress
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import HostNameOrId
-from imbue.mngr.primitives import HostedLocation
 from imbue.mngr.primitives import LOCAL_PROVIDER_NAME
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.providers.base_provider import BaseProviderInstance
@@ -113,7 +113,7 @@ def filter_one_host(
 
 
 @pure
-def filter_all_agents(
+def _filter_all_agents(
     agent: AgentNameOrId,
     agents_by_host: Mapping[DiscoveredHost, Sequence[DiscoveredAgent]],
     resolved_host: DiscoveredHost | None = None,
@@ -131,7 +131,7 @@ def filter_all_agents(
 
 
 @pure
-def filter_one_agent(
+def _filter_one_agent(
     agent: AgentNameOrId,
     resolved_host: DiscoveredHost | None,
     agents_by_host: Mapping[DiscoveredHost, Sequence[DiscoveredAgent]],
@@ -147,7 +147,7 @@ def filter_one_agent(
     The multi-match error lists each matching agent in ``NAME@HOST.PROVIDER``
     form so the user can disambiguate.
     """
-    matches = filter_all_agents(agent, agents_by_host, resolved_host)
+    matches = _filter_all_agents(agent, agents_by_host, resolved_host)
     if len(matches) == 0:
         if isinstance(agent, AgentId):
             raise AgentNotFoundError(str(agent))
@@ -164,8 +164,8 @@ def filter_one_agent(
     return matches[0]
 
 
-class ResolvedHostedLocation(FrozenModel):
-    """Result of resolving a :class:`HostedLocation`, including the discovered agent when available."""
+class ResolvedHostLocationAddress(FrozenModel):
+    """Result of resolving a :class:`HostLocationAddress`, including the discovered agent when available."""
 
     model_config = {"arbitrary_types_allowed": True}
 
@@ -174,14 +174,14 @@ class ResolvedHostedLocation(FrozenModel):
 
 
 @log_call
-def resolve_hosted_location(
-    parsed: HostedLocation,
+def resolve_host_location_address(
+    parsed: HostLocationAddress,
     agents_by_host: Mapping[DiscoveredHost, Sequence[DiscoveredAgent]],
     mngr_ctx: MngrContext,
     *,
     is_start_desired: bool = True,
-) -> ResolvedHostedLocation:
-    """Resolve a :class:`HostedLocation` to a concrete host, path, and optional agent.
+) -> ResolvedHostLocationAddress:
+    """Resolve a :class:`HostLocationAddress` to a concrete host, path, and optional agent.
 
     Resolves agent/host references against the discovered hosts and agents.
     If the resolved host is offline, it will be started if ``is_start_desired``
@@ -205,7 +205,7 @@ def resolve_hosted_location(
     resolved_agent: DiscoveredAgent | None = None
     if parsed.agent is not None:
         with log_span("Resolving agent reference"):
-            resolved_host, resolved_agent = filter_one_agent(parsed.agent, resolved_host, agents_by_host)
+            resolved_host, resolved_agent = _filter_one_agent(parsed.agent, resolved_host, agents_by_host)
 
     with log_span("Getting host interface from provider"):
         if resolved_host is None:
@@ -235,7 +235,7 @@ def resolve_hosted_location(
         agent_work_dir_if_available=agent_work_dir,
     )
 
-    return ResolvedHostedLocation(
+    return ResolvedHostLocationAddress(
         location=HostLocation(host=online_host, path=resolved_path),
         agent=resolved_agent,
     )
@@ -315,40 +315,6 @@ def ensure_agent_started(agent: AgentInterface, host: OnlineHostInterface, is_st
                 f"Agent '{agent.name}' is stopped and automatic starting is disabled. "
                 "Enable automatic agent starting to proceed."
             )
-
-
-def materialize_agent(
-    host_ref: DiscoveredHost,
-    agent_ref: DiscoveredAgent,
-    mngr_ctx: MngrContext,
-    is_start_desired: bool = False,
-    skip_agent_state_check: bool = False,
-) -> tuple[AgentInterface, OnlineHostInterface]:
-    """Materialize discovered refs into live :class:`AgentInterface` and :class:`OnlineHostInterface`.
-
-    Brings the host online (starting it if ``is_start_desired`` and offline),
-    then looks the agent up on the live host. If ``skip_agent_state_check`` is
-    False (the default) and the agent is stopped, raises unless
-    ``is_start_desired`` is also True.
-
-    Raises :class:`UserInputError` if the host is offline and
-    ``is_start_desired`` is False. Raises :class:`RuntimeError` if the agent
-    was present at discovery time but is no longer on the live host
-    (a stale-cache / inconsistency case).
-    """
-    provider = get_provider_instance(host_ref.provider_name, mngr_ctx)
-    host = provider.get_host(host_ref.host_id)
-    online_host, _was_started = ensure_host_started(host, is_start_desired=is_start_desired, provider=provider)
-    for live_agent in online_host.get_agents():
-        if live_agent.id == agent_ref.agent_id:
-            if not skip_agent_state_check:
-                ensure_agent_started(live_agent, online_host, is_start_desired=is_start_desired)
-            return live_agent, online_host
-    raise RuntimeError(
-        f"Agent '{agent_ref.agent_name}' (ID: {agent_ref.agent_id}) was found during discovery but is "
-        f"no longer present on host {host_ref.host_name}.{host_ref.provider_name}. "
-        "This indicates a stale discovery cache or host state inconsistency."
-    )
 
 
 class AgentMatch(FrozenModel):
@@ -571,31 +537,101 @@ def _post_filter_matches_by_addresses(
     return filtered
 
 
-def find_one_agent(
+def find_one_agent_and_agents_by_host(
     address: AgentAddress,
     mngr_ctx: MngrContext,
-    is_start_desired: bool = False,
-    skip_agent_state_check: bool = False,
-) -> tuple[AgentInterface, OnlineHostInterface]:
-    """Find an agent by :class:`AgentAddress` and return live interfaces.
+) -> tuple[DiscoveredHost, DiscoveredAgent, Mapping[DiscoveredHost, Sequence[DiscoveredAgent]]]:
+    """Find an agent by :class:`AgentAddress` and return its refs plus the full discovery result.
 
-    Runs discovery (skipping irrelevant providers), matches the address's
-    agent identifier against discovered agents (filtered by the address's
-    host constraint if any), then materializes live interfaces.
+    Performs discovery (skipping irrelevant providers) and matches the
+    address's agent identifier against the discovered agents (filtered by
+    the address's host constraint if any). Returns the matching refs and
+    the unfiltered ``agents_by_host`` mapping so callers that need the
+    whole discovery result (for example to check name conflicts across
+    other agents) can reuse it instead of running discovery a second time.
+
+    Returns only metadata. Callers that need a live ``AgentInterface`` or
+    ``OnlineHostInterface`` should compose with
+    :func:`resolve_to_started_host_and_agent` or
+    :func:`resolve_to_started_host_and_running_agent`.
 
     Raises :class:`UserInputError` if the host constraint matches no hosts.
     Raises :class:`AgentNotFoundError` / :class:`UserInputError` if the
-    agent cannot be resolved (see :func:`filter_one_agent`).
+    agent cannot be resolved (see :func:`_filter_one_agent`).
     """
     agents_by_host, _providers = discover_by_address(address, mngr_ctx, include_destroyed=False)
     if not agents_by_host and address.host is not None:
         raise UserInputError(f"No hosts found matching {address.host}")
 
-    host_ref, agent_ref = filter_one_agent(address.agent, resolved_host=None, agents_by_host=agents_by_host)
-    return materialize_agent(
-        host_ref,
-        agent_ref,
-        mngr_ctx,
-        is_start_desired=is_start_desired,
-        skip_agent_state_check=skip_agent_state_check,
+    host_ref, agent_ref = _filter_one_agent(address.agent, resolved_host=None, agents_by_host=agents_by_host)
+    return host_ref, agent_ref, agents_by_host
+
+
+def find_one_agent(
+    address: AgentAddress,
+    mngr_ctx: MngrContext,
+) -> tuple[DiscoveredHost, DiscoveredAgent]:
+    """Find an agent by :class:`AgentAddress` and return its discovery refs.
+
+    Thin wrapper around :func:`find_one_agent_and_agents_by_host` that
+    drops the full discovery mapping. See that function for the contract
+    and error behaviour.
+    """
+    host_ref, agent_ref, _ = find_one_agent_and_agents_by_host(address, mngr_ctx)
+    return host_ref, agent_ref
+
+
+def resolve_to_started_host_and_agent(
+    host_ref: DiscoveredHost,
+    agent_ref: DiscoveredAgent,
+    allow_auto_start: bool,
+    mngr_ctx: MngrContext,
+) -> tuple[AgentInterface, OnlineHostInterface]:
+    """Resolve discovery refs to a live ``(AgentInterface, OnlineHostInterface)``.
+
+    Composes :func:`ensure_host_started` with the metadata-to-live lookup
+    step: brings the host online (auto-starting it iff ``allow_auto_start``
+    is True), then locates ``agent_ref`` on the live host. The agent's
+    lifecycle state is *not* checked -- the returned ``AgentInterface``
+    may represent a stopped agent. Callers that need the agent process to
+    be running should use :func:`resolve_to_started_host_and_running_agent`
+    instead.
+
+    Raises :class:`UserInputError` when the host is offline and
+    ``allow_auto_start`` is False. Raises :class:`RuntimeError` if the
+    agent was found during discovery but is missing on the live host (a
+    stale-cache / host state inconsistency case).
+    """
+    provider = get_provider_instance(host_ref.provider_name, mngr_ctx)
+    host = provider.get_host(host_ref.host_id)
+    online_host, _was_started = ensure_host_started(host, is_start_desired=allow_auto_start, provider=provider)
+    for live_agent in online_host.get_agents():
+        if live_agent.id == agent_ref.agent_id:
+            return live_agent, online_host
+    raise RuntimeError(
+        f"Agent '{agent_ref.agent_name}' (ID: {agent_ref.agent_id}) was found during discovery but is "
+        f"no longer present on host {host_ref.host_name}.{host_ref.provider_name}. "
+        "This indicates a stale discovery cache or host state inconsistency."
     )
+
+
+def resolve_to_started_host_and_running_agent(
+    host_ref: DiscoveredHost,
+    agent_ref: DiscoveredAgent,
+    allow_auto_start: bool,
+    mngr_ctx: MngrContext,
+) -> tuple[AgentInterface, OnlineHostInterface]:
+    """Resolve discovery refs to live interfaces, requiring the agent to be running.
+
+    Same as :func:`resolve_to_started_host_and_agent` but additionally
+    ensures the agent process is running (auto-starting it iff
+    ``allow_auto_start`` is True) via :func:`ensure_agent_started`.
+
+    Raises :class:`UserInputError` when the host is offline or the agent
+    is stopped and ``allow_auto_start`` is False. Raises
+    :class:`RuntimeError` if the agent was found during discovery but is
+    missing on the live host.
+    """
+    agent, online_host = resolve_to_started_host_and_agent(host_ref, agent_ref, allow_auto_start, mngr_ctx)
+    ensure_agent_started(agent, online_host, is_start_desired=allow_auto_start)
+    return agent, online_host

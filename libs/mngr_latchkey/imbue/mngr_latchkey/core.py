@@ -26,6 +26,7 @@ import threading
 import time
 from collections.abc import Mapping
 from enum import auto
+from importlib import resources
 from pathlib import Path
 from typing import Final
 from typing import IO
@@ -35,6 +36,7 @@ from packaging.version import InvalidVersion
 from packaging.version import Version
 from pydantic import Field
 from pydantic import PrivateAttr
+from pydantic import SecretStr
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyExceptionGroup
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
@@ -45,8 +47,11 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr_latchkey._spawn import spawn_detached_latchkey_ensure_browser
+from imbue.mngr_latchkey.encryption_key import LatchkeyEncryptionKeyPermissionError
+from imbue.mngr_latchkey.encryption_key import load_or_create_encryption_key
 from imbue.mngr_latchkey.store import LatchkeyPermissionsConfig
 from imbue.mngr_latchkey.store import default_permissions_path
+from imbue.mngr_latchkey.store import ensure_admin_permissions_file
 from imbue.mngr_latchkey.store import ensure_browser_log_path
 from imbue.mngr_latchkey.store import gateway_log_path
 from imbue.mngr_latchkey.store import plugin_data_dir as _plugin_data_dir
@@ -79,8 +84,10 @@ _CREATE_JWT_TIMEOUT_SECONDS: Final[float] = 15.0
 _VERSION_CHECK_TIMEOUT_SECONDS: Final[float] = 5.0
 
 # Minimum version of the upstream ``latchkey`` CLI this package will
-# operate against.
-LATCHKEY_MIN_VERSION: Final[str] = "2.8.0"
+# operate against. 2.9.0 is the first release that ships the gateway
+# extension loader this package depends on (see ``extensions/`` for the
+# .mjs files it materializes into ``LATCHKEY_DIRECTORY/extensions/``).
+LATCHKEY_MIN_VERSION: Final[str] = "2.9.0"
 
 # Fixed port that every containerized/VM/VPS agent sees on its own 127.0.0.1
 # when reaching the Latchkey gateway. A per-agent SSH reverse tunnel bridges
@@ -98,6 +105,19 @@ AGENT_SIDE_LATCHKEY_PORT: Final[int] = 1989
 # Latchkey encryption key, so it survives desktop-client restarts without
 # us having to persist it in plaintext.
 _GATEWAY_PASSWORD_SENTINEL_PATH: Final[str] = "/__minds_gateway_password__/sentinel"
+
+# Env-var name read by the bundled permissions extension to clamp the
+# set of files it will read or write. We pin it to the plugin data dir
+# so the extension can edit per-host ``latchkey_permissions.json`` files
+# under ``<plugin_data_dir>/hosts/<host_id>/`` and the admin permissions
+# file at the data-dir root, but cannot reach anything else on disk.
+_ENV_EXTENSION_PERMISSIONS_ROOT: Final[str] = "LATCHKEY_EXTENSION_PERMISSIONS_ROOT"
+
+# Subdirectory of ``LATCHKEY_DIRECTORY`` from which the upstream
+# ``latchkey gateway`` (>= 2.9.0) loads ``.mjs`` extension files. This
+# package drops its bundled ``permissions.mjs`` and
+# ``permission_requests.mjs`` files there at gateway-spawn time.
+_GATEWAY_EXTENSIONS_SUBDIR: Final[str] = "extensions"
 
 
 class LatchkeyError(Exception):
@@ -272,7 +292,25 @@ def _parse_set_credentials_example(payload: Mapping[str, object], service_name: 
     return raw_example
 
 
-def _build_local_latchkey_env(latchkey_directory: Path | None) -> dict[str, str]:
+def _inject_encryption_key(env: dict[str, str], encryption_key: SecretStr | None) -> None:
+    """Set ``LATCHKEY_ENCRYPTION_KEY`` in ``env`` from the per-env key.
+
+    Operator's shell ``LATCHKEY_ENCRYPTION_KEY`` always wins (it's
+    already in ``env`` via ``dict(os.environ)``); the per-env key only
+    fills it in when the operator hasn't set one globally.
+    """
+    if encryption_key is None:
+        return
+    if env.get("LATCHKEY_ENCRYPTION_KEY"):
+        return
+    env["LATCHKEY_ENCRYPTION_KEY"] = encryption_key.get_secret_value()
+
+
+def _build_local_latchkey_env(
+    latchkey_directory: Path | None,
+    *,
+    encryption_key: SecretStr | None = None,
+) -> dict[str, str]:
     """Build an env override for *local* ``latchkey`` invocations.
 
     ``LATCHKEY_GATEWAY`` is explicitly cleared so commands that refuse to
@@ -285,19 +323,26 @@ def _build_local_latchkey_env(latchkey_directory: Path | None) -> dict[str, str]
     env.pop("LATCHKEY_GATEWAY", None)
     if latchkey_directory is not None:
         env["LATCHKEY_DIRECTORY"] = str(latchkey_directory)
+    _inject_encryption_key(env, encryption_key)
     return env
 
 
-def _build_env_with_latchkey_directory(latchkey_directory: Path | None) -> dict[str, str] | None:
+def _build_env_with_latchkey_directory(
+    latchkey_directory: Path | None,
+    *,
+    encryption_key: SecretStr | None = None,
+) -> dict[str, str] | None:
     """Build an env override that pins ``LATCHKEY_DIRECTORY`` for a child process.
 
     Returns ``None`` when no override is requested so the child inherits
     the parent environment unchanged.
     """
-    if latchkey_directory is None:
+    if latchkey_directory is None and encryption_key is None:
         return None
     env = dict(os.environ)
-    env["LATCHKEY_DIRECTORY"] = str(latchkey_directory)
+    if latchkey_directory is not None:
+        env["LATCHKEY_DIRECTORY"] = str(latchkey_directory)
+    _inject_encryption_key(env, encryption_key)
     return env
 
 
@@ -307,6 +352,8 @@ def _build_gateway_env(
     latchkey_directory: Path,
     permissions_config_path: Path,
     listen_password: str,
+    extension_permissions_root: Path,
+    encryption_key: SecretStr | None = None,
 ) -> dict[str, str]:
     """Build the env dict for the ``latchkey gateway`` subprocess.
 
@@ -314,7 +361,9 @@ def _build_gateway_env(
     used to set up. The gateway reads its listen host/port + permissions
     config path + listen password from these env vars (the upstream
     ``latchkey`` CLI exposes them as the documented gateway-config
-    surface).
+    surface). ``extension_permissions_root`` is consumed by the bundled
+    ``permissions.mjs`` extension to clamp the set of files it will
+    read or write.
     """
     latchkey_directory.mkdir(parents=True, exist_ok=True)
     env = dict(os.environ)
@@ -323,7 +372,38 @@ def _build_gateway_env(
     env["LATCHKEY_DIRECTORY"] = str(latchkey_directory)
     env["LATCHKEY_PERMISSIONS_CONFIG"] = str(permissions_config_path)
     env["LATCHKEY_GATEWAY_LISTEN_PASSWORD"] = listen_password
+    env[_ENV_EXTENSION_PERMISSIONS_ROOT] = str(extension_permissions_root)
+    _inject_encryption_key(env, encryption_key)
     return env
+
+
+_BUNDLED_EXTENSION_SUFFIXES: Final[tuple[str, ...]] = (".mjs", ".json")
+
+
+def _materialize_bundled_extensions(latchkey_directory: Path) -> Path:
+    """Copy this package's bundled gateway extensions into ``LATCHKEY_DIRECTORY/extensions/``.
+
+    The upstream ``latchkey gateway`` (>= 2.9.0) auto-loads every
+    ``.mjs`` file in this directory at startup. We also ship sibling
+    ``.json`` data files (e.g. ``services.json``) that the ``.mjs``
+    extensions read at request time; those are copied next to the
+    ``.mjs`` files so the extensions can locate them via
+    ``import.meta.url``. We rewrite the bundled files unconditionally
+    on every spawn so a package upgrade always wins over a stale
+    on-disk copy. The directory is created with ``mode=0o700`` because
+    it shares the same trust boundary as the rest of
+    ``LATCHKEY_DIRECTORY``.
+    """
+    extensions_dir = latchkey_directory / _GATEWAY_EXTENSIONS_SUBDIR
+    extensions_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    source_package = resources.files("imbue.mngr_latchkey.extensions")
+    for entry in source_package.iterdir():
+        name = entry.name
+        if not any(name.endswith(suffix) for suffix in _BUNDLED_EXTENSION_SUFFIXES):
+            continue
+        destination = extensions_dir / name
+        destination.write_text(entry.read_text(encoding="utf-8"), encoding="utf-8")
+    return extensions_dir
 
 
 class _GatewayLogWriter(MutableModel):
@@ -358,6 +438,29 @@ class _GatewayLogWriter(MutableModel):
                 logger.warning("Failed to write latchkey gateway log line to {}: {}", self.log_path, e)
 
 
+class _RunningGateway(FrozenModel):
+    """In-memory record of the live gateway subprocess for one :class:`Latchkey`.
+
+    A single ``Latchkey`` only ever owns at most one running gateway,
+    so this is stored as a private ``_running_gateway: _RunningGateway | None``
+    field. ``None`` means "not running"; non-``None`` carries both the
+    bound listen port (cached so idempotent :meth:`Latchkey.start_gateway`
+    calls can return the port without re-deriving it from the spawned
+    subprocess) and the :class:`RunningProcess` so :meth:`stop_gateway`
+    can terminate the child.
+    """
+
+    port: int = Field(description="TCP port the spawned ``latchkey gateway`` subprocess bound to.")
+    process: RunningProcess = Field(
+        description="Owning :class:`RunningProcess` returned by the spawning :class:`ConcurrencyGroup`.",
+    )
+
+    # ``RunningProcess`` is not pydantic-native; tolerate it through
+    # the model so we can keep the field properly typed without
+    # falling back to ``Any``.
+    model_config = {"arbitrary_types_allowed": True, "frozen": True, "extra": "forbid"}
+
+
 class Latchkey(MutableModel):
     """Wraps every interaction with the upstream ``latchkey`` CLI.
 
@@ -385,17 +488,21 @@ class Latchkey(MutableModel):
             "subprocesses as ``LATCHKEY_DIRECTORY`` so the upstream ``latchkey`` CLI's "
             "credential / config files live here, and also used as the parent of the "
             "plugin's own metadata subdirectory (``mngr_latchkey/``, accessible via "
-            ":attr:`plugin_data_dir`). Required."
+            ":attr:`plugin_data_dir`). The per-directory encryption key is also rooted "
+            "here -- see :func:`load_or_create_encryption_key` and "
+            ":meth:`_load_encryption_key`. Required."
         ),
     )
 
-    # ``_gateway_port`` doubles as the "is the gateway running?" flag
-    # (None means not running). ``_gateway_process`` is kept around so
-    # ``stop_gateway`` can SIGTERM the child via the :class:`RunningProcess`
-    # the spawning :class:`ConcurrencyGroup` returned.
-    _gateway_port: int | None = PrivateAttr(default=None)
-    _gateway_process: RunningProcess | None = PrivateAttr(default=None)
+    # ``_running_gateway`` is the single source of truth for the
+    # gateway's lifecycle: ``None`` means "not running"; non-``None``
+    # carries both the bound listen port (for return-value caching
+    # across idempotent :meth:`start_gateway` calls) and the
+    # :class:`RunningProcess` so :meth:`stop_gateway` can SIGTERM the
+    # child.
+    _running_gateway: _RunningGateway | None = PrivateAttr(default=None)
     _gateway_password: str | None = PrivateAttr(default=None)
+    _admin_jwt: str | None = PrivateAttr(default=None)
     _lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
     # Held *only* across the slow spawn path so two concurrent
     # ``start_gateway`` callers cannot both decide to spawn a fresh
@@ -452,8 +559,8 @@ class Latchkey(MutableModel):
         with self._lock:
             self._is_initialized = True
 
-    def start_gateway(self, concurrency_group: ConcurrencyGroup) -> None:
-        """Start the shared gateway if this :class:`Latchkey` has not spawned one yet.
+    def start_gateway(self, concurrency_group: ConcurrencyGroup) -> int:
+        """Start the shared gateway and return its bound listen port.
 
         ``concurrency_group`` owns the gateway subprocess: when it exits
         (e.g. on ``mngr latchkey forward`` shutdown), the gateway is
@@ -462,30 +569,33 @@ class Latchkey(MutableModel):
         gateway is ``mngr latchkey forward``, and the supervisor wrapper
         makes sure at most one such process runs per latchkey directory.
 
-        In-process idempotent: subsequent calls observe :attr:`is_gateway_running`
-        and return immediately. Thread-safe within a single process via
+        In-process idempotent: subsequent calls observe the cached
+        :class:`_RunningGateway` and return the already-bound port
+        without re-spawning. Thread-safe within a single process via
         ``_spawn_lock``.
 
-        After a successful call, callers can read :attr:`gateway_port`
-        / :attr:`gateway_url` to learn where the gateway is listening.
+        Pair the returned port with :attr:`listen_host` to build the
+        gateway URL (``http://<listen_host>:<port>``).
         """
         # Fast path: already running.
         with self._lock:
             self._require_initialized_locked()
-            if self._gateway_port is not None:
-                return
+            running = self._running_gateway
+            if running is not None:
+                return running.port
         plugin_dir = self.plugin_data_dir
         # Slow path: serialize spawning. Double-check after acquiring
         # the spawn lock so a concurrent caller that already spawned
         # is observed before we duplicate the work.
         with self._spawn_lock:
             with self._lock:
-                if self._gateway_port is not None:
-                    return
+                running = self._running_gateway
+                if running is not None:
+                    return running.port
             port, process = self._spawn_gateway(concurrency_group, plugin_dir)
             with self._lock:
-                self._gateway_port = port
-                self._gateway_process = process
+                self._running_gateway = _RunningGateway(port=port, process=process)
+        return port
 
     def stop_gateway(self) -> None:
         """Terminate the gateway tracked by this :class:`Latchkey` instance.
@@ -505,14 +615,16 @@ class Latchkey(MutableModel):
         reboots.
         """
         with self._lock:
-            port = self._gateway_port
-            process = self._gateway_process
-            self._gateway_port = None
-            self._gateway_process = None
-        if process is not None and port is not None:
-            logger.info("Stopping shared Latchkey gateway ({}:{})", self.listen_host, port)
+            running = self._running_gateway
+            self._running_gateway = None
+        if running is not None:
+            logger.info(
+                "Stopping shared Latchkey gateway ({}:{})",
+                self.listen_host,
+                running.port,
+            )
             try:
-                process.terminate()
+                running.process.terminate()
             except (OSError, RuntimeError) as e:
                 logger.warning("Failed to terminate Latchkey gateway cleanly: {}", e)
 
@@ -520,30 +632,7 @@ class Latchkey(MutableModel):
     def is_gateway_running(self) -> bool:
         """Whether this :class:`Latchkey` has spawned a gateway and not yet stopped it."""
         with self._lock:
-            return self._gateway_port is not None
-
-    @property
-    def gateway_port(self) -> int:
-        """Port the shared gateway is listening on.
-
-        Raises :class:`LatchkeyNotInitializedError` when no gateway has
-        been started. Pair with :attr:`listen_host` to build a URL, or
-        use :attr:`gateway_url` directly.
-        """
-        with self._lock:
-            port = self._gateway_port
-        if port is None:
-            raise LatchkeyNotInitializedError("Latchkey gateway has not been started")
-        return port
-
-    @property
-    def gateway_url(self) -> str:
-        """``http://<listen_host>:<gateway_port>`` for the running gateway.
-
-        Raises :class:`LatchkeyNotInitializedError` when no gateway has
-        been started.
-        """
-        return f"http://{self.listen_host}:{self.gateway_port}"
+            return self._running_gateway is not None
 
     # -- Password / JWT derivation ------------------------------------------
 
@@ -576,6 +665,38 @@ class Latchkey(MutableModel):
             self._gateway_password = password
         return password
 
+    def create_admin_permissions_jwt(self) -> str:
+        """Mint (and cache) the JWT for the admin permissions file.
+
+        Materializes the admin permissions file at
+        :func:`admin_permissions_path` if it does not already exist
+        (idempotent) and returns a JWT pointing at it. The returned
+        token is what callers send in the
+        ``X-Latchkey-Gateway-Permissions-Override`` header when they
+        want to reach the gateway's bundled ``permissions`` /
+        ``permission-requests`` extensions with admin-level
+        permissions.
+
+        Cached on the :class:`Latchkey` instance after the first
+        successful mint -- subsequent calls return the same string
+        without shelling out again.
+
+        Raises:
+            LatchkeyJwtMintError: if ``latchkey gateway create-jwt``
+                fails (e.g. no encryption key configured).
+            LatchkeyStoreError: if the admin permissions file cannot be
+                materialized on disk.
+        """
+        with self._lock:
+            cached = self._admin_jwt
+        if cached is not None:
+            return cached
+        admin_path = ensure_admin_permissions_file(self.plugin_data_dir)
+        jwt = self.create_permissions_override_jwt(admin_path)
+        with self._lock:
+            self._admin_jwt = jwt
+        return jwt
+
     def create_permissions_override_jwt(self, permissions_path: Path) -> str:
         """Mint an HS256 JWT that points the gateway at ``permissions_path``.
 
@@ -602,7 +723,7 @@ class Latchkey(MutableModel):
         ``gateway create-jwt`` in gateway-client mode, and the user
         might have it set in their shell.
         """
-        env = _build_local_latchkey_env(self.latchkey_directory)
+        env = _build_local_latchkey_env(self.latchkey_directory, encryption_key=self._load_encryption_key())
         cg = ConcurrencyGroup(name="latchkey-create-jwt")
         try:
             with cg:
@@ -649,7 +770,7 @@ class Latchkey(MutableModel):
         empty ``auth_options``, so the caller can fall back to its legacy
         behaviour rather than wrongly assuming credentials are valid.
         """
-        env = _build_env_with_latchkey_directory(self.latchkey_directory)
+        env = _build_env_with_latchkey_directory(self.latchkey_directory, encryption_key=self._load_encryption_key())
         cg = ConcurrencyGroup(name="latchkey-services-info")
         try:
             with cg:
@@ -707,7 +828,7 @@ class Latchkey(MutableModel):
         returns ``(False, message)`` where ``message`` carries the latchkey
         stderr (or stdout, or a generic fallback).
         """
-        env = _build_env_with_latchkey_directory(self.latchkey_directory)
+        env = _build_env_with_latchkey_directory(self.latchkey_directory, encryption_key=self._load_encryption_key())
         cg = ConcurrencyGroup(name="latchkey-auth-browser")
         with cg:
             # No timeout: this command waits on a real human completing
@@ -738,6 +859,26 @@ class Latchkey(MutableModel):
                 "Latchkey.initialize() must be called before use",
             )
 
+    def _load_encryption_key(self) -> SecretStr:
+        """Load (or, on first call against this directory, mint) the per-directory encryption key.
+
+        Re-reads the on-disk key on every subprocess-spawn call rather
+        than caching it on ``self`` so the secret only lives in
+        parent-process memory for the duration of a single
+        env-builder + process-spawn call frame. The on-disk file (and
+        the spawned child's own copy of the env var) are the only
+        steady-state holders.
+
+        Re-raises :class:`LatchkeyEncryptionKeyPermissionError` as a
+        :class:`LatchkeyError` so callers catching the latter (e.g.
+        the ``mngr latchkey`` CLI's ``ClickException`` translator)
+        get the friendly path.
+        """
+        try:
+            return load_or_create_encryption_key(self.latchkey_directory)
+        except LatchkeyEncryptionKeyPermissionError as e:
+            raise LatchkeyError(str(e)) from e
+
     def _check_minimum_version(self) -> None:
         """Refuse to initialize if the installed latchkey CLI is too old.
 
@@ -748,7 +889,7 @@ class Latchkey(MutableModel):
         if shutil.which(self.latchkey_binary) is None and not Path(self.latchkey_binary).is_file():
             raise LatchkeyBinaryNotFoundError(f"Latchkey binary not found: {self.latchkey_binary}")
 
-        env = _build_local_latchkey_env(self.latchkey_directory)
+        env = _build_local_latchkey_env(self.latchkey_directory, encryption_key=self._load_encryption_key())
         cg = ConcurrencyGroup(name="latchkey-version")
         try:
             with cg:
@@ -825,6 +966,11 @@ class Latchkey(MutableModel):
         except LatchkeyJwtMintError as e:
             raise LatchkeyError(f"Failed to derive gateway password: {e}") from e
 
+        # Drop the bundled gateway extensions into LATCHKEY_DIRECTORY so
+        # ``latchkey gateway`` picks them up at startup. Always rewrites
+        # so a package upgrade overrides any stale on-disk copy.
+        _materialize_bundled_extensions(self.latchkey_directory)
+
         port = _allocate_free_port(self.listen_host)
         log_path = gateway_log_path(plugin_dir)
         env = _build_gateway_env(
@@ -833,6 +979,8 @@ class Latchkey(MutableModel):
             latchkey_directory=self.latchkey_directory,
             permissions_config_path=default_perms,
             listen_password=password,
+            extension_permissions_root=plugin_dir,
+            encryption_key=self._load_encryption_key(),
         )
 
         with log_span(

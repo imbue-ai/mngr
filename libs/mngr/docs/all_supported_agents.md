@@ -21,6 +21,7 @@ The following agent types require installing an external plugin:
 | Type | Command | Description | Plugin |
 |------|---------|-------------|--------|
 | `opencode` | `opencode` | [OpenCode](https://github.com/sst/opencode) - An open-source AI coding assistant. | `imbue-mngr-opencode` |
+| `gemini` | `gemini` | [Gemini CLI](https://geminicli.com) - Google's coding agent. | `imbue-mngr-gemini` |
 
 ## Using Agent Types
 
@@ -59,7 +60,6 @@ mngr config edit
 [agent_types.my_claude]
 parent_type = "claude"
 cli_args = "--env CLAUDE_MODEL=opus"
-permissions = ["github"]  # [future] not yet enforced
 ```
 
 For more details, see [Agent Types](./concepts/agent_types.md).

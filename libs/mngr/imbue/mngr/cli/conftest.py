@@ -24,7 +24,6 @@ from imbue.mngr.cli.label import label
 from imbue.mngr.cli.limit import limit
 from imbue.mngr.cli.message import message
 from imbue.mngr.cli.migrate import migrate
-from imbue.mngr.cli.provision import provision
 from imbue.mngr.cli.pull import pull
 from imbue.mngr.cli.push import push
 from imbue.mngr.cli.rename import rename
@@ -58,7 +57,7 @@ def default_create_cli_opts() -> CreateCliOptions:
         positional_agent_type=None,
         agent_args=(),
         template=(),
-        type=None,
+        type="claude",
         reuse=False,
         connect=True,
         foreground=False,
@@ -100,9 +99,8 @@ def default_create_cli_opts() -> CreateCliOptions:
         idle_mode=None,
         activity_sources=None,
         worktree_base_folder=None,
-        start_on_boot=None,
+        start_on_boot=False,
         start_host=True,
-        grant=(),
         extra_provision_command=(),
         upload_file=(),
         update=False,
@@ -245,7 +243,6 @@ _HELP_TEST_CASES: list[tuple[click.Command, list[str], str]] = [
     (transcript, ["--help"], "transcript"),
     (message, ["--help"], "message"),
     (migrate, ["--help"], "migrate"),
-    (provision, ["--help"], "provision"),
     (pull, ["--help"], "pull"),
     (push, ["--help"], "push"),
     (rename, ["--help"], "rename"),
@@ -285,13 +282,13 @@ _NONEXISTENT_AGENT_CASES: list[tuple[click.Command, list[str], str]] = [
     (limit, ["nonexistent-agent-77234", "--idle-timeout", "300"], "limit"),
     (events, ["nonexistent-agent-34892"], "event"),
     (transcript, ["nonexistent-agent-82341"], "transcript"),
-    (provision, ["nonexistent-agent-77412"], "provision"),
     (pull, ["nonexistent-agent-66201"], "pull"),
     (push, ["nonexistent-agent-77312"], "push"),
     (rename, ["nonexistent-agent-99812", "new-name"], "rename"),
     (snapshot, ["create", "nonexistent-agent-xyz"], "snapshot_create"),
     (snapshot, ["list", "nonexistent-agent-xyz"], "snapshot_list"),
     (start, ["nonexistent-agent-98732"], "start"),
+    (start, ["nonexistent-agent-98733", "--restart"], "start_restart"),
     (stop, ["nonexistent-agent-45721"], "stop"),
 ]
 

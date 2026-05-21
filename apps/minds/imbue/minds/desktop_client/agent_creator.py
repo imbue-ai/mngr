@@ -45,18 +45,21 @@ from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import LiteLLMKeyMaterial
 from imbue.minds.desktop_client.notification import NotificationDispatcher
+from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
 from imbue.minds.errors import GitCloneError
 from imbue.minds.errors import GitOperationError
 from imbue.minds.errors import MngrCommandError
 from imbue.minds.primitives import AIProvider
-from imbue.minds.primitives import AgentName
 from imbue.minds.primitives import CreationId
 from imbue.minds.primitives import GitBranch
 from imbue.minds.primitives import GitUrl
 from imbue.minds.primitives import LaunchMode
 from imbue.mngr.primitives import AgentId
+from imbue.mngr.primitives import AgentName
+from imbue.mngr.primitives import HostId
+from imbue.mngr.primitives import HostName
 from imbue.mngr_latchkey.agent_setup import AgentLatchkeySetup
-from imbue.mngr_latchkey.agent_setup import finalize_agent_permissions
+from imbue.mngr_latchkey.agent_setup import finalize_host_permissions
 from imbue.mngr_latchkey.agent_setup import prepare_agent_latchkey
 from imbue.mngr_latchkey.core import Latchkey
 from imbue.mngr_latchkey.core import LatchkeyError
@@ -68,6 +71,64 @@ from imbue.mngr_latchkey.store import LatchkeyStoreError
 # contract; if the plugin ever renames its session cookie, both sides update
 # together.
 _MNGR_FORWARD_SESSION_COOKIE_NAME: Final[str] = "mngr_forward_session"
+
+
+def make_workspace_probe_client(preauth_cookie: str, probe_timeout_seconds: float) -> httpx.Client:
+    """Construct a reusable httpx.Client preconfigured for workspace probes.
+
+    Callers that probe in a tight poll loop should construct one of these and
+    pass it to ``probe_workspace_through_plugin`` on each iteration, instead
+    of letting the helper construct a one-shot client per call.
+    """
+    return httpx.Client(
+        timeout=probe_timeout_seconds,
+        follow_redirects=False,
+        cookies={_MNGR_FORWARD_SESSION_COOKIE_NAME: preauth_cookie},
+    )
+
+
+def _probe_once(probe_client: httpx.Client, probe_url: str) -> int | None:
+    """Issue a single GET through ``probe_client`` and return the status code.
+
+    Returns ``None`` if the probe failed at the transport layer (connect
+    error, mid-stream EOF, read timeout). Module-private helper used by
+    ``probe_workspace_through_plugin``; hoisted out to satisfy the minds
+    project's no-inner-functions ratchet.
+    """
+    try:
+        response = probe_client.get(probe_url)
+    except (httpx.ConnectError, httpx.RemoteProtocolError, httpx.ReadError, httpx.TimeoutException):
+        return None
+    return response.status_code
+
+
+def probe_workspace_through_plugin(
+    mngr_forward_port: int,
+    preauth_cookie: str,
+    agent_id: AgentId,
+    probe_timeout_seconds: float,
+    client: httpx.Client | None = None,
+) -> int | None:
+    """Issue a single probe through the plugin to the agent's system_interface.
+
+    Returns the HTTP status code observed (any 200 means ready), or ``None``
+    if the probe failed at the transport layer (connect error, mid-stream
+    EOF, read timeout). Shared by ``_wait_for_workspace_ready`` (creation
+    flow) and the system-interface-health tracker's background probe loop
+    so both paths agree on what "ready" means.
+
+    Pass a pre-constructed ``client`` (via ``make_workspace_probe_client``)
+    to reuse the connection pool across a tight poll loop. When omitted, a
+    one-shot client is constructed for this single probe -- fine for
+    one-off / sporadic callers but wasteful in a loop.
+    """
+    probe_url = f"http://{agent_id}.localhost:{mngr_forward_port}/"
+    if client is not None:
+        return _probe_once(client, probe_url)
+    with make_workspace_probe_client(
+        preauth_cookie=preauth_cookie, probe_timeout_seconds=probe_timeout_seconds
+    ) as one_shot:
+        return _probe_once(one_shot, probe_url)
 
 
 def _make_child_cg(name: str, parent: ConcurrencyGroup | None) -> ConcurrencyGroup:
@@ -95,10 +156,24 @@ def make_log_callback(log_queue: queue.Queue[str]) -> OutputCallback:
 
 
 class AgentCreationStatus(UpperCaseStrEnum):
-    """Status of a background agent creation."""
+    """Status of a background agent creation.
 
-    CLONING = auto()
-    CREATING = auto()
+    The non-terminal values correspond to the ordered phases the worker
+    thread walks through; ``_stream_creation_logs`` polls the current
+    status and emits a SSE event each time it changes so the UI spinner
+    caption stays in sync with what the backend is actually doing.
+    Conditional phases (``CHECKING_OUT_BRANCH`` only if a branch was
+    given, ``PROVISIONING_AI`` only for ``IMBUE_CLOUD`` AI provider) are
+    skipped when they don't apply -- the status simply jumps to the next
+    applicable phase.
+    """
+
+    INITIALIZING = auto()
+    CLONING_REPO = auto()
+    CHECKING_OUT_BRANCH = auto()
+    PROVISIONING_AI = auto()
+    CREATING_WORKSPACE = auto()
+    WAITING_FOR_READY = auto()
     DONE = auto()
     FAILED = auto()
 
@@ -123,6 +198,12 @@ class AgentCreationInfo(FrozenModel):
         description="Canonical mngr agent id; populated once ``mngr create`` returns, ``None`` while in-flight",
     )
     status: AgentCreationStatus = Field(description="Current creation status")
+    launch_mode: LaunchMode = Field(
+        description=(
+            "Launch mode for this creation. Carried alongside status so consumers can resolve "
+            "mode-aware status captions without a separate lookup."
+        ),
+    )
     redirect_url: str | None = Field(default=None, description="URL to redirect to when creation is done")
     error: str | None = Field(default=None, description="Error message, set when status is FAILED")
 
@@ -336,17 +417,16 @@ def _rsync_worktree_over_clone(
         )
 
 
-def _make_host_name(agent_name: AgentName) -> str:
-    """Build the host name for an agent.
-
-    Uses ``{agent_name}-host`` so it is obvious why the host was created.
-    """
-    return f"{agent_name}-host"
+# Constant agent name for every minds-created agent. Minds runs one agent
+# per host, so the agent name carries no per-workspace information; the
+# workspace is identified by its host name. Kept as a SafeName-typed
+# constant so callers can pass it to ``mngr`` without re-validating.
+_DEFAULT_AGENT_NAME: Final[AgentName] = AgentName("system-services")
 
 
 def _build_mngr_create_command(
     launch_mode: LaunchMode,
-    agent_name: AgentName,
+    host_name: HostName,
     imbue_cloud_account: str | None = None,
     imbue_cloud_repo_url: str | None = None,
     imbue_cloud_branch_or_tag: str | None = None,
@@ -367,15 +447,17 @@ def _build_mngr_create_command(
     CLOUD mode: --template main --template vultr (runs in Docker on a Vultr VPS)
     IMBUE_CLOUD mode: --new-host on the imbue_cloud_<slug> provider (the
         plugin's create_host adopts the pool's pre-baked agent under
-        ``agent_name``); ``imbue_cloud_*`` arguments encode the lease
-        attributes (--build-arg).
+        the lease's baked name); ``imbue_cloud_*`` arguments encode the
+        lease attributes (--build-arg).
 
     Every mode creates a separate host, so the agent address uses
-    ``agent_name@{agent_name}-host`` so hosts are clearly attributable.
-    ``--reuse`` and ``--update`` are passed for the non-IMBUE_CLOUD modes
-    so re-deploying resets the agent on the same host instead of failing
-    on a duplicate name (IMBUE_CLOUD's lease flow is one-shot per pool
-    host, so reuse is not meaningful there).
+    ``system-services@<host_name>`` -- the agent name is constant across
+    every minds workspace; the host name (the user's input from the
+    create-project form) is the workspace identifier. ``--reuse`` and
+    ``--update`` are passed for the non-IMBUE_CLOUD modes so re-deploying
+    resets the agent on the same host instead of failing on a duplicate
+    name (IMBUE_CLOUD's lease flow is one-shot per pool host, so reuse
+    is not meaningful there).
 
     Secrets (``ANTHROPIC_API_KEY``, ``ANTHROPIC_BASE_URL``, ``GH_TOKEN``)
     are forwarded by the FCT template's own ``pass_(host_)env`` declarations,
@@ -389,21 +471,23 @@ def _build_mngr_create_command(
     :func:`imbue.mngr_latchkey.agent_setup.prepare_agent_latchkey`. The
     caller decides whether the agent is tunneled (constant agent-side
     loopback URL) or running on the bare host (live gateway port);
-    this function just lifts the entries into ``--env`` flags. Pass
-    ``None`` or an empty dict to opt the agent out of latchkey wiring.
+    this function just lifts the entries into ``--host-env`` flags so
+    every agent that ever runs on the new host inherits the same
+    gateway wiring. Pass ``None`` or an empty dict to opt the host out
+    of latchkey wiring.
     """
     match launch_mode:
         case LaunchMode.LOCAL:
-            address = f"{agent_name}@{_make_host_name(agent_name)}.docker"
+            address = f"{_DEFAULT_AGENT_NAME}@{host_name}.docker"
         case LaunchMode.LIMA:
-            address = f"{agent_name}@{_make_host_name(agent_name)}.lima"
+            address = f"{_DEFAULT_AGENT_NAME}@{host_name}.lima"
         case LaunchMode.CLOUD:
-            address = f"{agent_name}@{_make_host_name(agent_name)}.vultr"
+            address = f"{_DEFAULT_AGENT_NAME}@{host_name}.vultr"
         case LaunchMode.IMBUE_CLOUD:
             if not imbue_cloud_account:
                 raise MngrCommandError("IMBUE_CLOUD mode requires imbue_cloud_account")
             slug = _slugify_account(imbue_cloud_account)
-            address = f"{agent_name}@{_make_host_name(agent_name)}.imbue_cloud_{slug}"
+            address = f"{_DEFAULT_AGENT_NAME}@{host_name}.imbue_cloud_{slug}"
         case _ as unreachable:
             assert_never(unreachable)
 
@@ -413,11 +497,15 @@ def _build_mngr_create_command(
     # [create_templates.main] section, so we no longer pass `--message` here.
     # ``--format jsonl`` makes mngr emit ``{"event": "created", "agent_id": ..., "host_id": ...}``
     # as the final stdout line; ``run_mngr_create`` parses that to recover
-    # the canonical agent id.
-    latchkey_env_args: list[str] = []
+    # the canonical agent id (and the canonical host id, used to swing
+    # the latchkey opaque permissions handle onto its canonical path).
+    latchkey_host_env_args: list[str] = []
     if latchkey_env:
         for key, value in latchkey_env.items():
-            latchkey_env_args.extend(["--env", f"{key}={value}"])
+            # ``--host-env`` (not ``--env``) so the wiring is written to
+            # the host's env file once and every agent on the host
+            # inherits the same gateway URL / password / JWT.
+            latchkey_host_env_args.extend(["--host-env", f"{key}={value}"])
 
     mngr_command: list[str] = [
         MNGR_BINARY,
@@ -427,22 +515,41 @@ def _build_mngr_create_command(
         "--format",
         "jsonl",
         "--label",
-        f"workspace={agent_name}",
+        f"workspace={host_name}",
+        # Pin the agent's per-workspace branch to the host name. mngr's
+        # default for ``--branch`` is ``:mngr/*`` where ``*`` expands to the
+        # agent name, but our agent name is the constant ``system-services``
+        # -- without this override every workspace would share the same
+        # branch ``mngr/system-services``. ``:`` keeps the base branch as
+        # ``current`` so we just rename the *new* branch.
+        "--branch",
+        f":mngr/{host_name}",
         "--env",
         f"MINDS_API_KEY={api_key}",
         "--label",
         "user_created=true",
-        *latchkey_env_args,
+        *latchkey_host_env_args,
         "--label",
         "is_primary=true",
     ]
 
     match launch_mode:
         case LaunchMode.IMBUE_CLOUD:
-            # Each lease is one-shot, so --reuse / --update would be confusing.
-            # The id is dictated by the pool's pre-baked agent and read back
-            # from the JSONL "created" event below.
-            pass
+            # The pool host already has a baked ``system-services`` agent
+            # (per ``_BAKED_SERVICES_AGENT_NAME`` in
+            # ``mngr_imbue_cloud/cli/admin.py``) which the lease/adopt path
+            # in ``ImbueCloudHost.create_agent_state`` will hydrate in
+            # place. mngr's core create flow runs an "agent already
+            # exists on this host" pre-flight that fires before the
+            # adopt path -- without ``--reuse`` it aborts with
+            # ``An agent named 'system-services' already exists``.
+            # ``--reuse`` tells mngr's pre-flight to expect the existing
+            # agent; the adopt path then keeps the baked id intact.
+            # ``--update`` is intentionally NOT passed: the adopt path
+            # already patches the labels + command in place; running
+            # mngr's standard provisioning on top would re-do the file
+            # transfer + provisioning round the bake already paid for.
+            mngr_command.append("--reuse")
         case _:
             mngr_command.extend(["--reuse", "--update"])
 
@@ -498,11 +605,12 @@ def _remote_host_env_flags() -> list[str]:
     Remote containers always store their mngr state under ``/mngr`` (the
     conventional container-internal path -- this is also what
     ``_REMOTE_HOST_DIR`` in ``runner.py`` looks for when writing reverse-tunnel
-    API URLs), independent of the local ``MNGR_HOST_DIR`` (which could be
-    ``~/.minds/mngr`` or ``~/.devminds/mngr``). We only propagate
-    ``MNGR_PREFIX`` so the inner mngr's tmux/session names match the local
-    ones, avoiding confusion when the same name has to refer to the "same"
-    thing on both sides.
+    API URLs), independent of the local ``MNGR_HOST_DIR`` (which could
+    be ``~/.minds/mngr`` for production or ``~/.minds-<env-name>/mngr``
+    for any other activated env). We only propagate ``MNGR_PREFIX`` so
+    the inner mngr's tmux/session names match the local ones, avoiding
+    confusion when the same name has to refer to the "same" thing on
+    both sides.
     """
     return [
         "--host-env",
@@ -612,7 +720,7 @@ class _CreateEventCapture(MutableModel):
 def run_mngr_create(
     launch_mode: LaunchMode,
     workspace_dir: Path | None,
-    agent_name: AgentName,
+    host_name: HostName,
     on_output: OutputCallback | None = None,
     imbue_cloud_account: str | None = None,
     imbue_cloud_repo_url: str | None = None,
@@ -623,7 +731,7 @@ def run_mngr_create(
     latchkey_env: Mapping[str, str] | None = None,
     *,
     parent_cg: ConcurrencyGroup | None = None,
-) -> tuple[str, AgentId]:
+) -> tuple[str, AgentId, HostId]:
     """Create an mngr agent via ``mngr create --format jsonl``.
 
     The repo's own ``.mngr/settings.toml`` defines agent types, templates,
@@ -638,16 +746,18 @@ def run_mngr_create(
     the FCT template's own ``pass_(host_)env`` declarations cause mngr to
     forward them onto the host as appropriate.
 
-    Returns ``(api_key, canonical_agent_id)``. The canonical id is parsed
-    out of the ``"event": "created"`` JSONL line that ``mngr create``
-    emits as its final stdout record.
+    Returns ``(api_key, canonical_agent_id, canonical_host_id)``. Both
+    canonical ids are parsed out of the ``"event": "created"`` JSONL
+    line that ``mngr create`` emits as its final stdout record; the host
+    id is what minds keys per-host latchkey state (permissions, opaque
+    handle symlink target) by.
 
     Raises ``MngrCommandError`` if the command fails or never emits a
     ``created`` event (e.g. crashed before final-output stage).
     """
     mngr_command, api_key = _build_mngr_create_command(
         launch_mode,
-        agent_name,
+        host_name,
         imbue_cloud_account=imbue_cloud_account,
         imbue_cloud_repo_url=imbue_cloud_repo_url,
         imbue_cloud_branch_or_tag=imbue_cloud_branch_or_tag,
@@ -690,7 +800,7 @@ def run_mngr_create(
             )
         )
 
-    if capture.canonical_agent_id is None:
+    if capture.canonical_agent_id is None or capture.canonical_host_id is None:
         # Exit-zero without a created event almost certainly means the
         # JSONL output got mangled or some pre-emit error path took over.
         # Fail loudly rather than fall through with a sentinel id.
@@ -700,7 +810,12 @@ def run_mngr_create(
             )
         )
 
-    return api_key, capture.canonical_agent_id
+    try:
+        canonical_host_id = HostId(capture.canonical_host_id)
+    except ValueError as e:
+        raise MngrCommandError(f"mngr create emitted an invalid host_id {capture.canonical_host_id!r}: {e}") from e
+
+    return api_key, capture.canonical_agent_id, canonical_host_id
 
 
 class AgentCreator(MutableModel):
@@ -740,15 +855,14 @@ class AgentCreator(MutableModel):
         frozen=True,
         description=(
             "Latchkey wrapper that owns the shared ``latchkey gateway`` subprocess. When "
-            "provided, agent creation derives the gateway's shared password and injects it as "
-            "``LATCHKEY_GATEWAY_PASSWORD`` into the ``mngr create`` env (so the agent's "
-            "``latchkey`` CLI authenticates), and after creation succeeds, mints a per-agent "
-            "permissions-override JWT and injects it via ``mngr provision --env --no-restart`` "
-            "so the gateway evaluates the agent's calls against its own deny-all-by-default "
-            "``latchkey_permissions.json`` instead of the gateway's shared default. ``None`` "
-            "degrades gracefully: the agent still gets ``LATCHKEY_GATEWAY=...`` (the URL is "
-            "useful by itself for tests / non-password-protected gateways), but no password "
-            "or JWT injection happens."
+            "provided, agent creation derives the gateway's shared password and a per-host "
+            "permissions-override JWT, injecting both into the ``mngr create`` env "
+            "(``LATCHKEY_GATEWAY_PASSWORD`` so the agent's ``latchkey`` CLI authenticates, "
+            "and ``LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE`` so the gateway evaluates the "
+            "agent's calls against its own deny-all-by-default ``latchkey_permissions.json`` "
+            "instead of the gateway's shared default). ``None`` degrades gracefully: the "
+            "agent still gets ``LATCHKEY_GATEWAY=...`` (the URL is useful by itself for "
+            "tests / non-password-protected gateways), but no password or JWT injection happens."
         ),
     )
     root_concurrency_group: ConcurrencyGroup = Field(
@@ -772,7 +886,7 @@ class AgentCreator(MutableModel):
         frozen=True,
         description=(
             "Port the ``mngr forward`` plugin is bound to. Used by ``_wait_for_workspace_ready`` to "
-            "probe the freshly-created agent's workspace_server through the plugin's per-subdomain "
+            "probe the freshly-created agent's system_interface through the plugin's per-subdomain "
             "endpoint before publishing the redirect URL. The default of 0 disables readiness "
             "probing -- only appropriate for tests that never exercise the happy-path redirect."
         ),
@@ -786,15 +900,27 @@ class AgentCreator(MutableModel):
             "readiness probing alongside ``mngr_forward_port=0``."
         ),
     )
+    system_interface_health_tracker: SystemInterfaceHealthTracker = Field(
+        frozen=True,
+        description=(
+            "Per-process health tracker shared with the ``mngr forward`` ``system_interface_backend_failure`` "
+            "envelope consumer and the background system-interface-health probe loop. ``_wait_for_workspace_ready`` "
+            "calls ``record_success`` on the probe that breaks out of its readiness loop, which cancels "
+            "any pending HEALTHY->STUCK timer the warmup failures have already armed. Without this call, "
+            "every workspace creation that takes >5s for its container's ``system-interface`` to "
+            "bind ``:8000`` (i.e. most of them) trips a spurious STUCK transition and the chrome jumps "
+            "to the recovery page right after the user lands on the workspace."
+        ),
+    )
     workspace_ready_timeout_seconds: float = Field(
         default=60.0,
         frozen=True,
-        description="Maximum time to wait for the new agent's workspace_server to return HTTP 200.",
+        description="Maximum time to wait for the new agent's system_interface to return HTTP 200.",
     )
     workspace_ready_poll_interval_seconds: float = Field(
         default=0.5,
         frozen=True,
-        description="Sleep between probe attempts when the workspace_server is not yet ready.",
+        description="Sleep between probe attempts when the system_interface is not yet ready.",
     )
     workspace_ready_probe_timeout_seconds: float = Field(
         default=2.0,
@@ -811,6 +937,7 @@ class AgentCreator(MutableModel):
     _canonical_agent_ids: dict[str, AgentId] = PrivateAttr(default_factory=dict)
     _redirect_urls: dict[str, str] = PrivateAttr(default_factory=dict)
     _errors: dict[str, str] = PrivateAttr(default_factory=dict)
+    _launch_modes: dict[str, LaunchMode] = PrivateAttr(default_factory=dict)
     _log_queues: dict[str, queue.Queue[str]] = PrivateAttr(default_factory=dict)
     _threads: list[threading.Thread] = PrivateAttr(default_factory=list)
     _lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
@@ -818,7 +945,7 @@ class AgentCreator(MutableModel):
     def start_creation(
         self,
         repo_source: str,
-        agent_name: str = "",
+        host_name: str = "",
         branch: str = "",
         launch_mode: LaunchMode = LaunchMode.LOCAL,
         ai_provider: AIProvider = AIProvider.SUBSCRIPTION,
@@ -867,13 +994,20 @@ class AgentCreator(MutableModel):
         ``RandomId`` prefixes) so they can never accidentally be swapped.
         """
         log_queue: queue.Queue[str] = queue.Queue()
-        effective_name = agent_name.strip() if agent_name.strip() else extract_repo_name(repo_source)
+        # ``host_name`` falls back to a repo-derived name when blank so the
+        # API path (``/api/create-agent``) doesn't need to compute it itself.
+        # The form path already requires the field. ``HostName(...)`` is
+        # invoked downstream in ``_create_agent_background`` so any invalid
+        # input fails inside the background thread with an error_message
+        # rather than crashing this synchronous entry point.
+        effective_name = host_name.strip() if host_name.strip() else extract_repo_name(repo_source)
         effective_branch = branch.strip()
 
         creation_id = CreationId()
 
         with self._lock:
-            self._statuses[str(creation_id)] = AgentCreationStatus.CLONING
+            self._statuses[str(creation_id)] = AgentCreationStatus.INITIALIZING
+            self._launch_modes[str(creation_id)] = launch_mode
             self._log_queues[str(creation_id)] = log_queue
 
         thread = threading.Thread(
@@ -925,6 +1059,7 @@ class AgentCreator(MutableModel):
                 creation_id=creation_id,
                 agent_id=self._canonical_agent_ids.get(cid_str),
                 status=status,
+                launch_mode=self._launch_modes.get(cid_str, LaunchMode.LOCAL),
                 redirect_url=self._redirect_urls.get(cid_str),
                 error=self._errors.get(cid_str),
             )
@@ -938,7 +1073,7 @@ class AgentCreator(MutableModel):
         self,
         creation_id: CreationId,
         repo_source: str,
-        agent_name: str,
+        host_name: str,
         branch: str,
         log_queue: queue.Queue[str],
         launch_mode: LaunchMode,
@@ -986,6 +1121,13 @@ class AgentCreator(MutableModel):
                 # the imbue_cloud command-construction drift from the other
                 # modes' (and was hard to keep in sync with the bake's view
                 # of the same config).
+                # Worker thread takes over from the initial ``INITIALIZING``
+                # status that ``start_creation`` set; cloning is the first
+                # real action. The caption rendered for this status is
+                # launch-mode-aware via ``_STATUS_TEXT_IMBUE_CLOUD``.
+                with self._lock:
+                    self._statuses[cid_str] = AgentCreationStatus.CLONING_REPO
+
                 if _is_local_path(repo_source):
                     resolved_path = Path(os.path.expanduser(repo_source)).resolve()
                     if not resolved_path.is_dir():
@@ -1040,6 +1182,8 @@ class AgentCreator(MutableModel):
                     workspace_dir = clone_target
 
                 if branch:
+                    with self._lock:
+                        self._statuses[cid_str] = AgentCreationStatus.CHECKING_OUT_BRANCH
                     log_queue.put("[minds] Checking out branch '{}'...".format(branch))
                     checkout_branch(
                         workspace_dir,
@@ -1060,6 +1204,8 @@ class AgentCreator(MutableModel):
                             raise MngrCommandError("AI provider IMBUE_CLOUD requires imbue_cloud_cli to be configured")
                         if not account_email:
                             raise MngrCommandError("AI provider IMBUE_CLOUD requires an account_email to be supplied")
+                        with self._lock:
+                            self._statuses[cid_str] = AgentCreationStatus.PROVISIONING_AI
                         log_queue.put(f"[minds] Minting LiteLLM virtual key for account {account_email}...")
                         try:
                             key_material: LiteLLMKeyMaterial = self.imbue_cloud_cli.create_litellm_key(
@@ -1067,7 +1213,7 @@ class AgentCreator(MutableModel):
                                 alias=None,
                                 max_budget=100.0,
                                 budget_duration="1d",
-                                metadata={"agent_name": agent_name},
+                                metadata={"host_name": host_name},
                             )
                         except ImbueCloudCliError as exc:
                             raise MngrCommandError(f"Failed to create LiteLLM key: {exc}") from exc
@@ -1084,23 +1230,22 @@ class AgentCreator(MutableModel):
                         assert_never(unreachable)
 
                 with self._lock:
-                    self._statuses[cid_str] = AgentCreationStatus.CREATING
+                    self._statuses[cid_str] = AgentCreationStatus.CREATING_WORKSPACE
 
                 # Pre-create the shared latchkey gateway password and a
-                # per-agent permissions-override JWT before invoking
+                # per-host permissions-override JWT before invoking
                 # ``mngr create``. The JWT references an *opaque*
                 # UUID-named permissions handle that we materialize
                 # here with a deny-all baseline; after ``mngr create``
-                # returns the canonical agent id, ``finalize_agent_permissions``
+                # returns the canonical host id, ``finalize_host_permissions``
                 # replaces that handle with a symlink to the canonical
-                # ``permissions_path_for_agent`` location. This avoids
-                # the post-create ``mngr provision --env`` step (which
-                # was fragile and could silently leave
-                # ``LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE`` missing in
-                # the agent env). Every launch mode is ``is_tunneled=True``
-                # since the only on-host launch mode (DEV) was removed --
-                # all remaining modes reach the gateway via the reverse
-                # tunnel ``LatchkeyDiscoveryHandler`` sets up post-discovery.
+                # ``permissions_path_for_host`` location. The env vars are
+                # injected into the ``mngr create`` env so they are present
+                # from the start, avoiding any post-create re-provisioning
+                # step. Every launch mode is ``is_tunneled=True`` since the
+                # only on-host launch mode (DEV) was removed -- all remaining
+                # modes reach the gateway via the reverse tunnel
+                # ``LatchkeyDiscoveryHandler`` sets up post-discovery.
                 #
                 # ``prepare_agent_latchkey`` raises on infrastructure
                 # failures (latchkey CLI broken, on-disk write failed,
@@ -1112,12 +1257,12 @@ class AgentCreator(MutableModel):
                 # re-creating the agent.
                 latchkey_setup = self._prepare_latchkey_or_warn(log_queue)
 
-                parsed_name = AgentName(agent_name)
-                log_queue.put("[minds] Creating agent '{}' (mode: {})...".format(agent_name, launch_mode.value))
-                api_key, canonical_id = run_mngr_create(
+                parsed_host = HostName(host_name)
+                log_queue.put("[minds] Creating workspace '{}' (mode: {})...".format(host_name, launch_mode.value))
+                api_key, canonical_id, canonical_host_id = run_mngr_create(
                     launch_mode=launch_mode,
                     workspace_dir=workspace_dir,
-                    agent_name=parsed_name,
+                    host_name=parsed_host,
                     on_output=emit_log,
                     latchkey_env=latchkey_setup.env,
                     imbue_cloud_account=account_email if launch_mode is LaunchMode.IMBUE_CLOUD else None,
@@ -1146,12 +1291,15 @@ class AgentCreator(MutableModel):
                 save_api_key_hash(self.paths.data_dir, canonical_id, key_hash)
                 log_queue.put("[minds] API key generated and hash stored.")
 
-                # Now that we know the canonical agent id, point the
+                # Now that we know the canonical host id, point the
                 # opaque permissions handle (which the JWT references)
-                # at the canonical agent-keyed permissions file. After
+                # at the canonical host-keyed permissions file. After
                 # this, ``LatchkeyPermissionGrantHandler`` can write to
                 # the canonical path and the gateway will see the
-                # changes via the symlink.
+                # changes via the symlink. Keying by host (not agent)
+                # matches the ``--host-env`` injection above: every
+                # agent on the host shares the same gateway wiring and
+                # the same permissions file.
                 #
                 # We downgrade ``LatchkeyStoreError`` here to a warning
                 # rather than failing agent creation: the gateway still
@@ -1162,33 +1310,35 @@ class AgentCreator(MutableModel):
                 # agent.
                 if self.latchkey is not None:
                     try:
-                        finalize_agent_permissions(
+                        finalize_host_permissions(
                             self.latchkey,
                             latchkey_setup.opaque_permissions_path,
-                            canonical_id,
+                            canonical_host_id,
                         )
                     except LatchkeyStoreError as link_error:
                         logger.warning(
-                            "Failed to link latchkey permissions handle for agent {}: {}",
-                            canonical_id,
+                            "Failed to link latchkey permissions handle for host {}: {}",
+                            canonical_host_id,
                             link_error,
                         )
                         log_queue.put(
                             "[minds] Warning: could not link latchkey permissions handle to "
-                            f"canonical path for agent {canonical_id}; permission grants will not "
+                            f"canonical path for host {canonical_host_id}; permission grants will not "
                             f"take effect until the agent is re-created. Reason: {link_error}"
                         )
 
                 log_queue.put("[minds] Agent created successfully.")
 
-                # Wait for the agent's workspace_server to actually answer 200
+                # Wait for the agent's system_interface to actually answer 200
                 # through the plugin before publishing the redirect. Without
                 # this poll, the user gets dropped on a hard error page (404
                 # /503) for the few seconds between ``mngr create`` returning
-                # and the workspace_server inside the agent finishing
+                # and the system_interface inside the agent finishing
                 # startup. The probe is best-effort: if it times out, we
                 # publish anyway so the user at least lands on the retry
                 # page rather than spinning forever (PR 1471 part 1).
+                with self._lock:
+                    self._statuses[cid_str] = AgentCreationStatus.WAITING_FOR_READY
                 self._wait_for_workspace_ready(canonical_id, log_queue)
 
                 # The redirect URL is *absolute* and points at the plugin's
@@ -1259,11 +1409,11 @@ class AgentCreator(MutableModel):
         return f"http://localhost:{self.mngr_forward_port}/goto/{agent_id}/"
 
     def _wait_for_workspace_ready(self, agent_id: AgentId, log_queue: queue.Queue[str]) -> None:
-        """Poll the agent's workspace_server through the plugin until it responds 200.
+        """Poll the agent's system_interface through the plugin until it responds 200.
 
         Probes ``http://<agent_id>.localhost:<plugin_port>/`` with the preauth
         cookie set, treating any 200 as ready. Other status codes (typically
-        503 from the plugin's auto-refresh page when the workspace_server
+        503 from the plugin's auto-refresh page when the system_interface
         isn't yet listening, or 502 when SSH info hasn't propagated) are
         treated as not-yet-ready and re-polled until the timeout elapses.
 
@@ -1277,40 +1427,49 @@ class AgentCreator(MutableModel):
             logger.debug("Workspace readiness probe disabled (port=0 or empty preauth); skipping")
             return
 
-        probe_url = f"http://{agent_id}.localhost:{self.mngr_forward_port}/"
         deadline = time.monotonic() + self.workspace_ready_timeout_seconds
-        log_queue.put("[minds] Waiting for workspace server to be ready...")
+        log_queue.put("[minds] Waiting for system interface to be ready...")
         last_status: int | None = None
-        last_error: str | None = None
         attempt = 0
-        with httpx.Client(
-            timeout=self.workspace_ready_probe_timeout_seconds,
-            follow_redirects=False,
-            cookies={_MNGR_FORWARD_SESSION_COOKIE_NAME: self.mngr_forward_preauth_cookie},
-        ) as client:
+        with make_workspace_probe_client(
+            preauth_cookie=self.mngr_forward_preauth_cookie,
+            probe_timeout_seconds=self.workspace_ready_probe_timeout_seconds,
+        ) as probe_client:
             while time.monotonic() < deadline:
                 attempt += 1
-                try:
-                    response = client.get(probe_url)
-                    last_status = response.status_code
-                    if response.status_code == 200:
-                        logger.debug(
-                            "Workspace ready for {} after {} probe(s)",
-                            agent_id,
-                            attempt,
-                        )
-                        log_queue.put("[minds] Workspace server is ready.")
+                status = probe_workspace_through_plugin(
+                    mngr_forward_port=self.mngr_forward_port,
+                    preauth_cookie=self.mngr_forward_preauth_cookie,
+                    agent_id=agent_id,
+                    probe_timeout_seconds=self.workspace_ready_probe_timeout_seconds,
+                    client=probe_client,
+                )
+                if status is not None:
+                    last_status = status
+                    if status == 200:
+                        logger.debug("Workspace ready for {} after {} probe(s)", agent_id, attempt)
+                        log_queue.put("[minds] System interface is ready.")
+                        # Propagate the success into the shared health tracker.
+                        # Earlier probes in this loop go through ``mngr forward``
+                        # too, and each one's connect-refused failure trips a
+                        # ``system_interface_backend_failure`` envelope that arms
+                        # a 5-second HEALTHY->STUCK timer on the tracker. Without
+                        # this explicit ``record_success`` the timer fires
+                        # *after* we return (because no other success path
+                        # flows back into the tracker until the background
+                        # probe loop next ticks, ~2s later), the chrome jumps
+                        # to the recovery page, and the user sees a "System
+                        # interface not responding" page seconds after their
+                        # freshly-created agent appeared healthy. Idempotent
+                        # if the tracker has no record for this agent.
+                        self.system_interface_health_tracker.record_success(agent_id)
                         return
-                except (httpx.ConnectError, httpx.RemoteProtocolError, httpx.ReadError, httpx.TimeoutException) as e:
-                    last_error = f"{type(e).__name__}: {e}"
                 threading.Event().wait(timeout=self.workspace_ready_poll_interval_seconds)
         logger.warning(
-            "Workspace readiness probe for {} timed out after {:.0f}s "
-            "(last status={}, last error={}); publishing redirect anyway",
+            "Workspace readiness probe for {} timed out after {:.0f}s (last status={}); publishing redirect anyway",
             agent_id,
             self.workspace_ready_timeout_seconds,
             last_status,
-            last_error,
         )
         log_queue.put(
             "[minds] Warning: workspace did not become ready within "

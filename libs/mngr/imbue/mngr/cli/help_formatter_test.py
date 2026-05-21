@@ -589,7 +589,6 @@ _SYNOPSIS_OPTOUT_FLAGS: dict[str, frozenset[str]] = {
     "destroy": frozenset(),
     "message": frozenset({"--provider"}),
     "exec": frozenset(),
-    "provision": frozenset({"--bootstrap", "--destroy-on-fail", "--host", "--pass-env"}),
     "cleanup": frozenset({"--action", "--snapshot-before"}),
     "limit": frozenset(
         {
@@ -647,6 +646,27 @@ _SYNOPSIS_OPTOUT_FLAGS: dict[str, frozenset[str]] = {
             "--source-host",
             "--source-path",
             "--uncommitted-changes",
+        }
+    ),
+    # ``mngr usage wait``'s synopsis enumerates the wait-specific predicate and
+    # wait-control options (--until / --timeout / --interval). The standard
+    # agent-filter flags (--include / --exclude / --local / ... / --provider)
+    # are inherited via ``add_agent_filter_options`` and listed in the OPTIONS
+    # section of help/docs; keeping them out of the synopsis keeps it readable.
+    "usage.wait": frozenset(
+        {
+            "--active",
+            "--archived",
+            "--exclude",
+            "--host-label",
+            "--include",
+            "--label",
+            "--local",
+            "--project",
+            "--provider",
+            "--remote",
+            "--running",
+            "--stopped",
         }
     ),
 }

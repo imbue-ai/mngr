@@ -3,6 +3,7 @@ import shlex
 import sys
 from collections.abc import Callable
 from collections.abc import Iterator
+from collections.abc import Sequence
 from contextlib import contextmanager
 from contextlib import nullcontext
 from pathlib import Path
@@ -22,7 +23,8 @@ from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.pure import pure
-from imbue.mngr.api.address_parsers import parse_hosted_location
+from imbue.mngr.agents.agent_registry import list_available_agent_types
+from imbue.mngr.api.address_parsers import parse_host_location_address
 from imbue.mngr.api.connect import connect_to_agent
 from imbue.mngr.api.connect import resolve_connect_command
 from imbue.mngr.api.connect import run_connect_command
@@ -30,11 +32,11 @@ from imbue.mngr.api.create import create as api_create
 from imbue.mngr.api.data_types import ConnectionOptions
 from imbue.mngr.api.data_types import CreateAgentResult
 from imbue.mngr.api.discover import discover_hosts_and_agents
-from imbue.mngr.api.find import ResolvedHostedLocation
+from imbue.mngr.api.find import ResolvedHostLocationAddress
 from imbue.mngr.api.find import ensure_agent_started
 from imbue.mngr.api.find import ensure_host_started
 from imbue.mngr.api.find import get_host_from_list_by_id
-from imbue.mngr.api.find import resolve_hosted_location
+from imbue.mngr.api.find import resolve_host_location_address
 from imbue.mngr.api.gc import register_generated_source_dir
 from imbue.mngr.api.providers import get_provider_instance
 from imbue.mngr.cli.address_params import NEW_AGENT_LOCATION
@@ -57,7 +59,6 @@ from imbue.mngr.config.data_types import OutputOptions
 from imbue.mngr.errors import AgentNotFoundError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import UserInputError
-from imbue.mngr.hosts.host import HostLocation
 from imbue.mngr.hosts.host import get_agent_state_dir_path
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.agent import StreamingHeadlessAgentMixin
@@ -67,10 +68,10 @@ from imbue.mngr.interfaces.host import AgentEnvironmentOptions
 from imbue.mngr.interfaces.host import AgentGitOptions
 from imbue.mngr.interfaces.host import AgentLabelOptions
 from imbue.mngr.interfaces.host import AgentLifecycleOptions
-from imbue.mngr.interfaces.host import AgentPermissionsOptions
 from imbue.mngr.interfaces.host import AgentProvisioningOptions
 from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.interfaces.host import HostEnvironmentOptions
+from imbue.mngr.interfaces.host import HostLocation
 from imbue.mngr.interfaces.host import NamedCommand
 from imbue.mngr.interfaces.host import NewHostBuildOptions
 from imbue.mngr.interfaces.host import NewHostOptions
@@ -91,7 +92,6 @@ from imbue.mngr.primitives import LOCAL_PROVIDER_NAME
 from imbue.mngr.primitives import LogLevel
 from imbue.mngr.primitives import NewAgentLocation
 from imbue.mngr.primitives import OutputFormat
-from imbue.mngr.primitives import Permission
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import SnapshotName
 from imbue.mngr.primitives import TransferMode
@@ -135,17 +135,47 @@ class _CachedAgentHostLoader(MutableModel):
 @pure
 def _resolve_agent_type_name(
     type_flag: str | None,
+    is_type_explicit: bool,
     positional_agent_type: str | None,
-) -> str | None:
+    available_agent_types: Sequence[str],
+) -> str:
     """Resolve the agent type name from CLI options.
 
-    Shared logic for both the early headless detection path and the full
-    _parse_agent_opts path. Returns the resolved type name, or None when
-    neither --type nor positional agent type is set (caller defaults to "claude").
+    Called once from create() before headless detection; the resolved
+    value is then forwarded to _parse_agent_opts so both paths agree on
+    a single agent type.
 
-    Precedence: --type flag > positional argument.
+    ``type_flag`` is ``opts.type`` -- the value of ``--type`` after CLI,
+    config (``[commands.create]``), and template (``[create_templates.X]``)
+    resolution. ``--type`` has no click-side default, so a value of None
+    means nothing was supplied anywhere. ``is_type_explicit`` is True only
+    when the user passed ``--type`` on the command line.
+
+    ``available_agent_types`` is the union of plugin-registered agent type
+    names (``list_registered_agent_types()``) and user-config-defined ones
+    (``mngr_ctx.config.agent_types`` keys). Used only to make the error
+    message concrete; never affects which value is returned.
+
+    Precedence:
+      1. an explicitly-set ``--type`` flag (``is_type_explicit`` is True),
+      2. otherwise the positional agent type if given,
+      3. otherwise ``type_flag`` (i.e. the value supplied by config/template).
+
+    Raises UserInputError if none of the three sources supplied a value.
     """
-    return type_flag if type_flag is not None else positional_agent_type
+    if not is_type_explicit and positional_agent_type is not None:
+        return positional_agent_type
+    if type_flag is None:
+        available_hint = (
+            f"Available agent types: {', '.join(available_agent_types)}.\n" if available_agent_types else ""
+        )
+        raise UserInputError(
+            "No agent type provided. Set a default with:\n"
+            "\n"
+            "    mngr config set commands.create.type <name> --scope user\n"
+            "\n" + available_hint + "Or see `mngr create --help` for how to set it per-command."
+        )
+    return type_flag
 
 
 def _resolve_or_generate_agent_name(address: NewAgentLocation, opts: CreateCliOptions) -> AgentName:
@@ -175,7 +205,7 @@ _HEADLESS_INCOMPATIBLE_BOOLEAN_PAIR_FLAGS: tuple[tuple[str, Callable[[CreateCliO
     ("reconnect", lambda o: o.reconnect, "--reconnect"),
     ("reuse", lambda o: o.reuse, "--reuse"),
     ("update", lambda o: o.update, "--update"),
-    ("start_on_boot", lambda o: bool(o.start_on_boot), "--start-on-boot"),
+    ("start_on_boot", lambda o: o.start_on_boot, "--start-on-boot"),
 )
 
 
@@ -311,7 +341,11 @@ class _CreateCommand(click.Command):
     show_default=True,
     help="Auto-generated name style",
 )
-@optgroup.option("--type", help="Which type of agent to run [default: claude]")
+@optgroup.option(
+    "--type",
+    default=None,
+    help="Which type of agent to run",
+)
 # FOLLOWUP: hmm... I wonder if the name of this should be changed to something more like "window" to be more closely aligned with the tmux primitive it actually creates...
 #  more generally, we probably need to do a pass at refining *all* of these option names...
 @optgroup.option(
@@ -437,7 +471,7 @@ class _CreateCommand(click.Command):
     "--worktree-base-folder",
     default=None,
     type=click.Path(),
-    help="Base folder for git worktrees [default: ~/.mngr/worktrees/]",
+    help="Base folder for git worktrees [default: <host_dir>/worktrees]",
 )
 @optgroup.group("Environment Variables")
 @optgroup.option("--env", multiple=True, help="Set environment variable KEY=VALUE")
@@ -449,7 +483,6 @@ class _CreateCommand(click.Command):
 )
 @optgroup.option("--pass-env", multiple=True, help="Forward variable from shell")
 @optgroup.group("Provisioning")
-@optgroup.option("--grant", "grant", multiple=True, help="Grant a permission to the agent [repeatable]")
 @optgroup.option(
     "--extra-provision-command",
     "extra_provision_command",
@@ -485,7 +518,11 @@ class _CreateCommand(click.Command):
 )
 @optgroup.option("--activity-sources", help="Activity sources for idle detection (comma-separated)")
 @optgroup.option(
-    "--start-on-boot/--no-start-on-boot", "start_on_boot", default=None, help="Restart on host boot [default: no]"
+    "--start-on-boot/--no-start-on-boot",
+    "start_on_boot",
+    default=False,
+    show_default=True,
+    help="Restart on host boot",
 )
 @optgroup.group("Connection Options")
 @optgroup.option(
@@ -580,9 +617,11 @@ def create(ctx: click.Context, **kwargs) -> None:
             raise UserInputError("--update requires --reuse. Use --reuse --update together.")
 
         # Validate conflicting agent types early (before the headless path
-        # returns). This is the single check; _parse_agent_opts uses the
-        # shared _resolve_agent_type_name helper which assumes no conflict.
-        if opts.positional_agent_type and opts.type and opts.type != opts.positional_agent_type:
+        # returns). This is the single check; the resolution helper below
+        # (and _parse_agent_opts, which receives the resolved value) assume
+        # no conflict.
+        is_type_explicit = is_param_explicit(ctx, "type")
+        if opts.positional_agent_type and is_type_explicit and opts.type != opts.positional_agent_type:
             raise UserInputError(
                 f"Conflicting agent types: positional argument says '{opts.positional_agent_type}' "
                 f"but --type says '{opts.type}'. Use one or the other."
@@ -591,8 +630,13 @@ def create(ctx: click.Context, **kwargs) -> None:
         # Detect headless agent types and enforce the --foreground flag.
         # --foreground is required for headless types (makes the behavior explicit)
         # and rejected for non-headless types (it doesn't apply).
-        resolved_agent_type = _resolve_agent_type_name(opts.type, opts.positional_agent_type)
-        is_headless = resolved_agent_type is not None and is_streaming_headless_agent_type(resolved_agent_type)
+        resolved_agent_type = _resolve_agent_type_name(
+            opts.type,
+            is_type_explicit,
+            opts.positional_agent_type,
+            list_available_agent_types(mngr_ctx.config),
+        )
+        is_headless = is_streaming_headless_agent_type(resolved_agent_type, mngr_ctx.config)
 
         if is_headless and not opts.foreground:
             raise UserInputError(
@@ -600,13 +644,11 @@ def create(ctx: click.Context, **kwargs) -> None:
                 f"Use --foreground to run it (streams output and auto-destroys when done)."
             )
         if opts.foreground and not is_headless:
-            type_desc = f"'{resolved_agent_type}'" if resolved_agent_type else "'claude' (default)"
             raise UserInputError(
-                f"--foreground is only valid with headless agent types, but {type_desc} is not headless."
+                f"--foreground is only valid with headless agent types, but '{resolved_agent_type}' is not headless."
             )
 
         if is_headless:
-            assert resolved_agent_type is not None
             _reject_incompatible_headless_flags(ctx, resolved_agent_type, opts)
 
         # Collect plugin-registered CLI params so they can be merged into plugin_data.
@@ -623,7 +665,7 @@ def create(ctx: click.Context, **kwargs) -> None:
         # the same way for both. The fork is what happens afterwards: a
         # headless agent is streamed and destroyed; an interactive agent
         # is connected to and the command returns after finish.
-        create_result, connection_opts = _create_agent(mngr_ctx, output_opts, opts, setup)
+        create_result, connection_opts = _create_agent(mngr_ctx, output_opts, opts, setup, resolved_agent_type)
 
         if is_headless:
             _stream_and_destroy_headless_agent(create_result, output_opts)
@@ -656,7 +698,9 @@ class _CreateSetup(FrozenModel):
     )
     editor_session: EditorSession | None = Field(default=None, description="Editor session for --edit-message")
     agent_and_host_loader: _CachedAgentHostLoader = Field(description="Lazy loader for agents grouped by host")
-    resolved_source: ResolvedHostedLocation = Field(description="Resolved source location and optional source agent")
+    resolved_source: ResolvedHostLocationAddress = Field(
+        description="Resolved source location and optional source agent"
+    )
     auto_labels: _AutoLabels = Field(description="Auto-derived labels for the new agent")
     host_lifecycle: HostLifecycleOptions = Field(description="Host lifecycle options")
     plugin_cli_params: dict[str, Any] = Field(
@@ -737,6 +781,7 @@ def _create_agent(
     output_opts: OutputOptions,
     opts: CreateCliOptions,
     setup: _CreateSetup,
+    resolved_agent_type: str,
 ) -> tuple[CreateAgentResult, ConnectionOptions]:
     """Parse opts, resolve host, create agent."""
     address = setup.address
@@ -760,11 +805,15 @@ def _create_agent(
             "Use a remote provider (e.g. --provider modal) for idle detection."
         )
 
-    # Compute source agent state dir from the resolved agent ID
-    source_agent_state_dir: Path | None = None
+    # Compute source agent state location from the resolved agent. The host
+    # carried alongside the path may be remote (e.g. cloning a modal agent).
+    source_agent_state_location: HostLocation | None = None
     if setup.resolved_source.agent is not None:
-        source_agent_state_dir = get_agent_state_dir_path(
-            setup.resolved_source.location.host.host_dir, setup.resolved_source.agent.agent_id
+        source_agent_state_location = HostLocation(
+            host=setup.resolved_source.location.host,
+            path=get_agent_state_dir_path(
+                setup.resolved_source.location.host.host_dir, setup.resolved_source.agent.agent_id
+            ),
         )
 
     # Parse agent options
@@ -774,9 +823,10 @@ def _create_agent(
         target_host=target_host,
         initial_message=setup.initial_message,
         source_location=setup.resolved_source.location,
-        source_agent_state_dir=source_agent_state_dir,
+        source_agent_state_location=source_agent_state_location,
         mngr_ctx=mngr_ctx,
         target_path=setup.target_path,
+        resolved_agent_type=resolved_agent_type,
     )
 
     # Merge plugin-registered CLI params into plugin_data so plugin hooks can access them
@@ -1078,7 +1128,7 @@ def _get_source_remote_url(source_location: HostLocation) -> str | None:
 
 
 def _parse_project_name(
-    resolved_source: ResolvedHostedLocation,
+    resolved_source: ResolvedHostLocationAddress,
     opts: CreateCliOptions,
     remote_url: str | None,
 ) -> str:
@@ -1190,7 +1240,7 @@ def _resolve_source_location(
     mngr_ctx: MngrContext,
     *,
     is_start_desired: bool,
-) -> ResolvedHostedLocation:
+) -> ResolvedHostLocationAddress:
     """Resolve the source location and optionally the source agent ID and labels."""
     if opts.source is None:
         # No --from specified: default to git root
@@ -1206,7 +1256,7 @@ def _resolve_source_location(
         provider = get_provider_instance(LOCAL_PROVIDER_NAME, mngr_ctx)
         host = provider.get_host(HostName(LOCAL_HOST_NAME))
         online_host, _ = ensure_host_started(host, is_start_desired=is_start_desired, provider=provider)
-        return ResolvedHostedLocation(location=HostLocation(host=online_host, path=Path(source_path)))
+        return ResolvedHostLocationAddress(location=HostLocation(host=online_host, path=Path(source_path)))
 
     # Git URL: clone to a managed directory and treat as a local path
     if is_git_url(opts.source):
@@ -1221,10 +1271,10 @@ def _resolve_source_location(
         name_hint = pick_agent_name_hint(positional_hint, name_hint_arg, parse_project_name_from_url(opts.source))
         cloned_path = clone_git_url_to_managed_dir(opts.source, clones_base, name_hint, mngr_ctx.concurrency_group)
         register_generated_source_dir(online_host, cloned_path)
-        return ResolvedHostedLocation(location=HostLocation(host=online_host, path=cloned_path))
+        return ResolvedHostLocationAddress(location=HostLocation(host=online_host, path=cloned_path))
 
     # Parse the --from string once
-    parsed = parse_hosted_location(opts.source)
+    parsed = parse_host_location_address(opts.source)
 
     # When --from is just a local path (no agent or host component),
     # resolve it locally without loading all providers. Loading all
@@ -1236,11 +1286,11 @@ def _resolve_source_location(
         provider = get_provider_instance(LOCAL_PROVIDER_NAME, mngr_ctx)
         host = provider.get_host(HostName(LOCAL_HOST_NAME))
         online_host, _ = ensure_host_started(host, is_start_desired=is_start_desired, provider=provider)
-        return ResolvedHostedLocation(location=HostLocation(host=online_host, path=Path(source_path)))
+        return ResolvedHostLocationAddress(location=HostLocation(host=online_host, path=Path(source_path)))
 
     # Need full resolution across providers
     agents_by_host = agent_and_host_loader()
-    return resolve_hosted_location(
+    return resolve_host_location_address(
         parsed,
         agents_by_host,
         mngr_ctx,
@@ -1406,7 +1456,8 @@ def _parse_agent_opts(
     initial_message: str | None,
     source_location: HostLocation,
     mngr_ctx: MngrContext,
-    source_agent_state_dir: Path | None = None,
+    resolved_agent_type: str,
+    source_agent_state_location: HostLocation | None = None,
     target_path: Path | None = None,
 ) -> tuple[CreateAgentOptions, bool]:
     # Get agent name from address (which incorporates both positional and --name),
@@ -1463,11 +1514,6 @@ def _parse_agent_opts(
         is_start_on_boot=opts.start_on_boot,
     )
 
-    # Parse permissions options
-    permissions = AgentPermissionsOptions(
-        granted_permissions=tuple(Permission(p) for p in opts.grant),
-    )
-
     # Parse label options
     label_options = resolve_labels(opts.label)
 
@@ -1483,19 +1529,15 @@ def _parse_agent_opts(
 
     # target_path comes from :PATH in the address or --target-path (merged upstream)
 
-    # Determine agent type using the shared resolution logic.
-    # Conflicting types are already validated in the create() entry point.
+    # Agent type is resolved in the create() entry point and passed in.
     resolved_agent_args = opts.agent_args
-    resolved_agent_type = _resolve_agent_type_name(opts.type, opts.positional_agent_type)
-
-    is_clone = source_agent_state_dir is not None
 
     # Parse worktree base folder
     parsed_worktree_base_folder = Path(opts.worktree_base_folder).expanduser() if opts.worktree_base_folder else None
 
     agent_opts = CreateAgentOptions(
         agent_id=AgentId(opts.id) if opts.id else None,
-        agent_type=AgentTypeName(resolved_agent_type) if resolved_agent_type else None,
+        agent_type=AgentTypeName(resolved_agent_type),
         name=parsed_agent_name,
         additional_commands=tuple(NamedCommand.from_string(c) for c in opts.extra_window),
         agent_args=resolved_agent_args,
@@ -1507,10 +1549,9 @@ def _parse_agent_opts(
         git=git,
         environment=environment,
         lifecycle=lifecycle,
-        permissions=permissions,
         label_options=label_options,
         provisioning=provisioning,
-        source_agent_state_dir=source_agent_state_dir if is_clone else None,
+        source_agent_state_location=source_agent_state_location,
     )
     return agent_opts, has_explicit_base
 
@@ -1759,7 +1800,7 @@ _CREATE_HELP_METADATA = CommandHelpMetadata(
     [--label KEY=VALUE] [--host-label KEY=VALUE] [--project <PROJECT>] [--from <SOURCE>] [--transfer <MODE>]
     [--[no-]rsync] [--rsync-args <ARGS>] [--branch [BASE][:NEW]] [--[no-]ensure-clean]
     [--snapshot <ID>] [-b <BUILD_ARG>] [-s <START_ARG>]
-    [--env <KEY=VALUE>] [--env-file <FILE>] [--pass-env <KEY>] [--grant <PERMISSION>] [--extra-provision-command <COMMAND>] [--upload-file <LOCAL:REMOTE>]
+    [--env <KEY=VALUE>] [--env-file <FILE>] [--pass-env <KEY>] [--extra-provision-command <COMMAND>] [--upload-file <LOCAL:REMOTE>]
     [--idle-timeout <SECONDS>] [--idle-mode <MODE>] [--start-on-boot|--no-start-on-boot] [--reuse|--no-reuse]
     [--message <TEXT>] [--message-file <FILE>] [--edit-message]
     [--[no-]connect] [--[no-]auto-start] [-y|--yes] [--] [<AGENT_ARGS>...]""",
@@ -1772,7 +1813,7 @@ _CREATE_HELP_METADATA = CommandHelpMetadata(
   - `NAME@HOST.PROVIDER --new-host` -- agent on a new host with the given name
   - `NAME:PATH` -- agent with a target path for the working directory
   - `:PATH` -- auto-named agent with a target path (equivalent to omitting the name)
-- `AGENT_TYPE`: Which type of agent to run (default: `claude`). Can also be specified via `--type`
+- `AGENT_TYPE`: Which type of agent to run. Can also be specified via `--type`.
 - `AGENT_ARGS`: Additional arguments passed to the agent""",
     description="""This command sets up an agent's working directory, optionally provisions a
 new host (or uses an existing one), runs the specified agent process, and
@@ -1783,9 +1824,8 @@ or an rsync copy (for non-git projects). Specify a host in the agent address
 (e.g. NAME@HOST.PROVIDER) to target a remote host, or use NAME@.PROVIDER
 to create a new one.
 
-The agent type defaults to 'claude' if not specified. Arguments after --
-are passed directly to the agent command. To run an arbitrary shell
-command, use the built-in 'command' agent type:
+Arguments after -- are passed directly to the agent command. To run an
+arbitrary shell command, use the built-in 'command' agent type:
 `mngr create my-task --type command -- sleep 3600`.
 
 Headless agent types (those implementing StreamingHeadlessAgentMixin,
@@ -1803,7 +1843,7 @@ pushing all local branches and tags via git. Use --transfer to override the defa
         ("Create an agent in a new Modal sandbox", "mngr create my-agent@.modal"),
         ("Create using a named template", "mngr create my-agent --template modal"),
         ("Stack multiple templates", "mngr create my-agent -t modal -t codex"),
-        ("Create a codex agent instead of claude", "mngr create my-agent codex"),
+        ("Create a codex agent instead of the default", "mngr create my-agent codex"),
         ("Pass arguments to the agent", "mngr create my-agent -- --model opus"),
         ("Create on an existing host", "mngr create my-agent@my-dev-box"),
         ("Create on existing host with provider", "mngr create my-agent@my-dev-box.modal"),
@@ -1825,10 +1865,6 @@ pushing all local branches and tags via git. Use --transfer to override the defa
         (
             "Connection Options",
             "See [connect options](./connect.md) for full details (only applies if `--connect` is specified).",
-        ),
-        (
-            "Agent Provisioning",
-            "See [Provision Options](../secondary/provision.md) for full details.",
         ),
         (
             "Host Options",

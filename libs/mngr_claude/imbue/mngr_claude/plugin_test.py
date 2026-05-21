@@ -30,6 +30,7 @@ from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.interfaces.host import AgentEnvironmentOptions
 from imbue.mngr.interfaces.host import CreateAgentOptions
+from imbue.mngr.interfaces.host import HostLocation
 from imbue.mngr.interfaces.host import NewHostOptions
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.plugins.hookspecs import OnBeforeCreateArgs
@@ -877,12 +878,12 @@ def test_get_expected_process_name_returns_claude(
     assert agent.get_expected_process_name() == "claude"
 
 
-def test_uses_paste_detection_send_returns_true(
+def test_tui_ready_indicator_is_claude_code(
     local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
 ) -> None:
-    """ClaudeAgent.uses_paste_detection_send should return True."""
+    """ClaudeAgent inherits InteractiveTuiAgent's TUI_READY_INDICATOR class var."""
     agent, _ = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
-    assert agent.uses_paste_detection_send() is True
+    assert agent.get_tui_ready_indicator() == "Claude Code"
 
 
 def test_preflight_check_raises_when_not_gitignored(
@@ -1648,6 +1649,75 @@ def test_on_before_provisioning_skips_trust_check_when_git_common_dir_is_none(
     agent.on_before_provisioning(host=host, options=_WORKTREE_OPTIONS, mngr_ctx=temp_mngr_ctx)
 
 
+def test_on_before_provisioning_shared_mode_succeeds_without_dialog_checks(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+    temp_mngr_ctx: MngrContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """In shared mode, on_before_provisioning does NOT validate dialog dismissal in user config."""
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "shared"))
+    agent, host = make_claude_agent(
+        local_provider,
+        tmp_path,
+        temp_mngr_ctx,
+        agent_config=ClaudeAgentConfig(check_installation=False, use_env_config_dir=True),
+    )
+    # Deliberately leave ~/.claude.json with no dialogs dismissed -- a non-shared
+    # agent would fail here.
+
+    options = CreateAgentOptions(agent_type=AgentTypeName("claude"))
+
+    agent.on_before_provisioning(host=host, options=options, mngr_ctx=temp_mngr_ctx)
+
+
+def test_on_before_provisioning_shared_mode_raises_for_remote_host(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+    temp_mngr_ctx: MngrContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """use_env_config_dir is local-only; remote host raises UserInputError."""
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "shared"))
+    agent, _ = make_claude_agent(
+        local_provider,
+        tmp_path,
+        temp_mngr_ctx,
+        agent_config=ClaudeAgentConfig(check_installation=False, use_env_config_dir=True),
+    )
+    remote_host = cast(
+        OnlineHostInterface,
+        FakeHost(is_local=False, host_dir=tmp_path / "remote_host_dir"),
+    )
+
+    options = CreateAgentOptions(agent_type=AgentTypeName("claude"))
+
+    with pytest.raises(UserInputError, match="local hosts"):
+        agent.on_before_provisioning(host=remote_host, options=options, mngr_ctx=temp_mngr_ctx)
+
+
+def test_on_before_provisioning_shared_mode_passes_when_env_unset(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+    temp_mngr_ctx: MngrContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With use_env_config_dir=True and $CLAUDE_CONFIG_DIR unset, on_before_provisioning falls
+    back to ``~/.claude/`` and does not raise (it's the "don't touch the config" path)."""
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    agent, host = make_claude_agent(
+        local_provider,
+        tmp_path,
+        temp_mngr_ctx,
+        agent_config=ClaudeAgentConfig(check_installation=False, use_env_config_dir=True),
+    )
+
+    options = CreateAgentOptions(agent_type=AgentTypeName("claude"))
+
+    # Should not raise.
+    agent.on_before_provisioning(host=host, options=options, mngr_ctx=temp_mngr_ctx)
+
+
 def test_on_destroy_removes_trust(
     local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
 ) -> None:
@@ -1777,6 +1847,73 @@ def test_on_destroy_handles_no_session_data(
     assert not dest_dir.exists()
 
 
+def test_on_destroy_skips_keychain_cleanup_in_shared_mode(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+    temp_mngr_ctx: MngrContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """In shared mode, on_destroy must NOT call the macOS keychain delete -- the
+    shared $CLAUDE_CONFIG_DIR exists, so the per-agent-keychain branch would
+    otherwise hash the user's own config dir and delete the user's real
+    credentials.
+    """
+    shared_dir = tmp_path / "shared"
+    shared_dir.mkdir()
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(shared_dir))
+    agent, host = make_claude_agent(
+        local_provider,
+        tmp_path,
+        temp_mngr_ctx,
+        agent_config=ClaudeAgentConfig(check_installation=False, use_env_config_dir=True),
+    )
+
+    delete_calls: list[str] = []
+
+    def _fake_delete(label: str, _cg: object) -> bool:
+        delete_calls.append(label)
+        return False
+
+    with (
+        patch(f"{_CLAUDE_AGENT_MODULE}.is_macos", return_value=True),
+        patch(f"{_CLAUDE_AGENT_MODULE}._delete_macos_keychain_credential", side_effect=_fake_delete),
+    ):
+        agent.on_destroy(host)
+
+    assert delete_calls == []
+
+
+def test_on_destroy_still_calls_keychain_cleanup_in_default_mode(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """Default (per-agent) mode must keep invoking the macOS keychain delete on
+    its own per-agent config dir -- this is the existing behavior, kept stable
+    by the shared-mode fix.
+    """
+    agent, host = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
+    # Ensure per-agent config dir exists on disk so the keychain branch fires.
+    agent.get_claude_config_dir().mkdir(parents=True, exist_ok=True)
+
+    delete_calls: list[str] = []
+
+    def _fake_delete(label: str, _cg: object) -> bool:
+        delete_calls.append(label)
+        return False
+
+    with (
+        patch(f"{_CLAUDE_AGENT_MODULE}.is_macos", return_value=True),
+        patch(f"{_CLAUDE_AGENT_MODULE}._delete_macos_keychain_credential", side_effect=_fake_delete),
+    ):
+        agent.on_destroy(host)
+
+    # Two labels: API key and OAuth credentials.
+    assert len(delete_calls) == 2
+    assert any(label.startswith("Claude Code-") for label in delete_calls)
+    assert any(label.startswith("Claude Code-credentials-") for label in delete_calls)
+
+
 @pytest.mark.rsync
 def test_preserve_session_files_partial_data(
     local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
@@ -1799,6 +1936,57 @@ def test_preserve_session_files_partial_data(
     assert not (dest_dir / "projects").exists()
     assert not (dest_dir / "common_transcript").exists()
     assert not (dest_dir / "claude_session_id_history").exists()
+
+
+@pytest.mark.rsync
+def test_preserve_session_files_skips_projects_in_shared_mode(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+    temp_mngr_ctx: MngrContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """In use_env_config_dir mode, _preserve_session_files must NOT copy the
+    user's $CLAUDE_CONFIG_DIR/projects/ directory -- that directory holds the
+    user's full cross-project session history and is not deleted with the
+    agent state. Transcripts and history (under the agent state dir) are
+    still preserved.
+    """
+    shared_dir = tmp_path / "shared"
+    shared_dir.mkdir()
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(shared_dir))
+    agent, host = make_claude_agent(
+        local_provider,
+        tmp_path,
+        temp_mngr_ctx,
+        agent_config=ClaudeAgentConfig(check_installation=False, use_env_config_dir=True),
+    )
+    agent_dir = agent._get_agent_dir()
+    agent_dir.mkdir(parents=True, exist_ok=True)
+
+    # Populate the shared projects dir with an "unrelated" project sub-dir
+    # that, if naively copied, would leak the user's other-project sessions
+    # into the preserved-sessions store.
+    unrelated_project = shared_dir / "projects" / "-Users-someone-other-project"
+    unrelated_project.mkdir(parents=True)
+    (unrelated_project / "deadbeef.jsonl").write_text('{"private":"data"}\n')
+
+    # Populate the per-agent transcript + history (these live under the agent
+    # state dir, so they DO need preservation regardless of shared mode).
+    raw_transcript_dir = agent_dir / "logs" / "claude_transcript"
+    raw_transcript_dir.mkdir(parents=True, exist_ok=True)
+    (raw_transcript_dir / "events.jsonl").write_text('{"type":"message"}\n')
+    history_file = agent_dir / "claude_session_id_history"
+    history_file.write_text("abc123 create\n")
+
+    _preserve_session_files(agent, host)
+
+    dest_dir = _get_preserved_sessions_dir(agent)
+    assert dest_dir.exists()
+    # Projects dir must NOT be preserved (it would contain unrelated user data).
+    assert not (dest_dir / "projects").exists()
+    # Transcript and history must still be preserved.
+    assert (dest_dir / "raw_transcript" / "events.jsonl").read_text() == '{"type":"message"}\n'
+    assert (dest_dir / "claude_session_id_history").read_text() == "abc123 create\n"
 
 
 def test_provision_prompts_for_all_dialogs_when_interactive(
@@ -3011,6 +3199,29 @@ def test_on_before_create_rejects_non_claude_agent_type() -> None:
         on_before_create(args=args)
 
 
+def test_on_before_create_rejects_adopt_session_with_clone_source(
+    local_provider: LocalProviderInstance, tmp_path: Path
+) -> None:
+    """on_before_create should raise UserInputError when both --adopt-session
+    and a clone source (source_agent_state_location) are passed: each is its
+    own session-adoption directive and on_after_provisioning would silently
+    pick one and drop the other otherwise.
+    """
+    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
+    assert isinstance(host, Host)
+    args = OnBeforeCreateArgs(
+        agent_options=CreateAgentOptions(
+            agent_type=AgentTypeName("claude"),
+            plugin_data={"adopt_session": ("some-id",)},
+            source_agent_state_location=HostLocation(host=host, path=tmp_path / "src"),
+        ),
+        target_host=NewHostOptions(provider=ProviderInstanceName("local")),
+        create_work_dir=True,
+    )
+    with pytest.raises(UserInputError, match="incompatible with cloning via --from"):
+        on_before_create(args=args)
+
+
 # =============================================================================
 # on_after_provisioning Session Adoption Tests
 # =============================================================================
@@ -3168,15 +3379,31 @@ def test_on_after_provisioning_adopts_session_from_jsonl_path(
 
 
 # =============================================================================
-# _transfer_source_plugin_data Tests
+# Clone session-adoption tests
+#
+# Drive both halves of the clone flow as it runs in production:
+# (1) ``_transfer_source_plugin_data`` rsyncs source plugin/ over;
+# (2) ``_adopt_cloned_session`` (later, from on_after_provisioning) renames
+#     the project subdir, drops the stale sessions-index, writes
+#     claude_session_id.
 # =============================================================================
 
 
+def _run_clone_adoption(agent: ClaudeAgent, host: OnlineHostInterface, source_dir: Path) -> None:
+    """Drive both clone steps in order against the test agent/host."""
+    location = HostLocation(host=host, path=source_dir)
+    agent._transfer_source_plugin_data(location)
+    agent._adopt_cloned_session(host, location)
+
+
 @pytest.mark.rsync
-def test_transfer_source_plugin_data_copies_plugin_dir(
+def test_clone_adoption_copies_plugin_dir(
     local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
 ) -> None:
-    """_transfer_source_plugin_data should copy the plugin/ directory via rsync."""
+    """Top-of-state files (e.g. ``.claude.json``) under plugin/ are preserved
+    as-is, and the agent's state dir's own ``data.json`` is untouched (only
+    plugin/ is rsynced).
+    """
     agent, host = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
 
     dest_dir = agent._get_agent_dir()
@@ -3190,24 +3417,31 @@ def test_transfer_source_plugin_data_copies_plugin_dir(
     plugin_dir = source_dir / "plugin" / "claude" / "anthropic"
     plugin_dir.mkdir(parents=True)
     (plugin_dir / ".claude.json").write_text('{"trust": true}')
-    projects_dir = plugin_dir / "projects" / "test-project"
+    source_project_subdir = "source-encoded-work-dir"
+    projects_dir = plugin_dir / "projects" / source_project_subdir
     projects_dir.mkdir(parents=True)
     (projects_dir / "session.jsonl").write_text('{"type":"message"}\n')
 
-    agent._transfer_source_plugin_data(host, source_dir)
+    _run_clone_adoption(agent, host, source_dir)
 
-    # data.json should be untouched (only plugin/ is copied)
+    # data.json (outside plugin/) untouched.
     assert json.loads((dest_dir / "data.json").read_text())["id"] == "new-agent"
-
-    # Plugin files should have been copied
+    # Plugin files under plugin/ are preserved as-is.
     assert (dest_dir / "plugin" / "claude" / "anthropic" / ".claude.json").exists()
-    assert (dest_dir / "plugin" / "claude" / "anthropic" / "projects" / "test-project" / "session.jsonl").exists()
+    # The session JSONL ended up under the destination's encoded work_dir,
+    # not the source's -- verified more directly in
+    # test_clone_adoption_rekeys_project_dir below.
+    dest_project_name = encode_claude_project_dir_name(agent.work_dir)
+    assert (dest_dir / "plugin" / "claude" / "anthropic" / "projects" / dest_project_name / "session.jsonl").exists()
+    assert not (dest_dir / "plugin" / "claude" / "anthropic" / "projects" / source_project_subdir).exists()
 
 
-def test_transfer_source_plugin_data_skips_when_no_plugin_dir(
+def test_clone_adoption_skips_when_no_plugin_dir(
     local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
 ) -> None:
-    """_transfer_source_plugin_data should skip gracefully when source has no plugin/ dir."""
+    """The rsync step is a no-op when the source has no plugin/ dir, and the
+    subsequent adopt step bails (logs a warning) without raising.
+    """
     agent, host = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
 
     dest_dir = agent._get_agent_dir()
@@ -3217,7 +3451,138 @@ def test_transfer_source_plugin_data_skips_when_no_plugin_dir(
     source_dir.mkdir()
 
     # Should not raise
-    agent._transfer_source_plugin_data(host, source_dir)
+    _run_clone_adoption(agent, host, source_dir)
+
+
+@pytest.mark.rsync
+def test_clone_adoption_rekeys_project_dir(
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """After clone adoption, the project subdir under plugin/claude/anthropic/projects/
+    should be renamed from the source agent's encoded work_dir to the
+    destination agent's, so ``claude --resume`` on the destination finds the
+    session JSONL. The destination's ``claude_session_id`` should be set to
+    the JSONL filename's stem so the startup command's
+    ``claude --resume "$MAIN_CLAUDE_SESSION_ID"`` targets that file.
+    """
+    agent, host = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
+    dest_dir = agent._get_agent_dir()
+    dest_dir.mkdir(parents=True, exist_ok=True)
+
+    source_dir = tmp_path / "source_agent_state"
+    plugin_dir = source_dir / "plugin" / "claude" / "anthropic"
+    # Project subdir name uses the source's (different) work_dir encoding.
+    src_project = plugin_dir / "projects" / "-Users-ev-some-source-workdir"
+    src_project.mkdir(parents=True)
+    session_id = "11111111-2222-3333-4444-555555555555"
+    (src_project / f"{session_id}.jsonl").write_text('{"type":"message"}\n')
+
+    _run_clone_adoption(agent, host, source_dir)
+
+    dest_project_name = encode_claude_project_dir_name(agent.work_dir)
+    rekeyed = dest_dir / "plugin" / "claude" / "anthropic" / "projects" / dest_project_name
+    assert (rekeyed / f"{session_id}.jsonl").exists(), (
+        f"Expected session JSONL under {rekeyed}, dest projects dir is "
+        f"{[p.name for p in (dest_dir / 'plugin' / 'claude' / 'anthropic' / 'projects').iterdir()]}"
+    )
+    # Source-encoded subdir should be gone.
+    assert not (dest_dir / "plugin" / "claude" / "anthropic" / "projects" / "-Users-ev-some-source-workdir").exists()
+    # Session id should be the JSONL stem so ``claude --resume`` finds the file.
+    assert (dest_dir / "claude_session_id").read_text().strip() == session_id
+
+
+@pytest.mark.rsync
+def test_clone_adoption_uses_jsonl_filename_not_source_session_id_file(
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """``claude_session_id`` on the destination must be the *actual* session
+    JSONL filename's stem, not the contents of the source's
+    ``claude_session_id`` file. When the source ran ``claude -p``, claude's
+    ``--session-id`` flag was ignored and claude auto-generated its own id,
+    so the source's ``claude_session_id`` file (which the SessionStart hook
+    default-fills with the agent UUID) doesn't agree with the JSONL on disk.
+    The JSONL filename is the ground truth for what ``claude --resume <id>``
+    can find.
+    """
+    agent, host = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
+    dest_dir = agent._get_agent_dir()
+    dest_dir.mkdir(parents=True, exist_ok=True)
+
+    source_dir = tmp_path / "source_agent_state"
+    plugin_dir = source_dir / "plugin" / "claude" / "anthropic"
+    src_project = plugin_dir / "projects" / "-source-encoded"
+    src_project.mkdir(parents=True)
+
+    actual_session_id_from_jsonl = "aaaa1111-bbbb-2222-cccc-333344445555"
+    stale_agent_uuid = "ffffffff-eeee-dddd-cccc-bbbbbbbbbbbb"
+    (src_project / f"{actual_session_id_from_jsonl}.jsonl").write_text('{"type":"message"}\n')
+    # The source's claude_session_id contains a *different* id (the agent
+    # UUID written by the SessionStart hook default).
+    (source_dir / "claude_session_id").write_text(f"{stale_agent_uuid}\n")
+    (source_dir / "claude_session_id_history").write_text(f"{stale_agent_uuid} startup\n")
+
+    _run_clone_adoption(agent, host, source_dir)
+
+    # Destination's claude_session_id must be the JSONL filename's stem,
+    # not the source's claude_session_id contents.
+    assert (dest_dir / "claude_session_id").read_text().strip() == actual_session_id_from_jsonl, (
+        f"claude_session_id on destination should be {actual_session_id_from_jsonl} "
+        f"(JSONL stem), got {(dest_dir / 'claude_session_id').read_text().strip()}"
+    )
+    # History is still carried verbatim for traceability.
+    assert stale_agent_uuid in (dest_dir / "claude_session_id_history").read_text()
+
+
+@pytest.mark.rsync
+def test_clone_adoption_refuses_to_clobber_existing_target(
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """When the source has a project subdir whose name coincidentally matches
+    the destination's encoded work_dir AND a separate, more-recently-active
+    source-encoded subdir, the rsync brings both over and the rekey ``mv``
+    would clobber the pre-existing target. _adopt_cloned_session refuses
+    the clobber and returns without writing claude_session_id, leaving
+    both subdirs intact for manual inspection. This guards a defensive
+    branch designed to prevent silent data loss when source has visited
+    multiple cwds.
+    """
+    agent, host = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
+    dest_dir = agent._get_agent_dir()
+    dest_dir.mkdir(parents=True, exist_ok=True)
+
+    source_dir = tmp_path / "source_agent_state"
+    plugin_dir = source_dir / "plugin" / "claude" / "anthropic"
+
+    # (a) A project subdir whose name happens to equal the destination's
+    # encoded work_dir -- this becomes the pre-existing target after rsync.
+    dest_project_name = encode_claude_project_dir_name(agent.work_dir)
+    coincident_subdir = plugin_dir / "projects" / dest_project_name
+    coincident_subdir.mkdir(parents=True)
+    older_session_id = "00000000-0000-0000-0000-000000000001"
+    older_jsonl = coincident_subdir / f"{older_session_id}.jsonl"
+    older_jsonl.write_text('{"type":"older"}\n')
+
+    # (b) A separate source-encoded subdir holding the most-recently-active
+    # session JSONL so ``ls -t`` picks it as latest_on_source.
+    src_project = plugin_dir / "projects" / "-Users-ev-some-source-workdir"
+    src_project.mkdir(parents=True)
+    newer_session_id = "11111111-2222-3333-4444-555555555555"
+    newer_jsonl = src_project / f"{newer_session_id}.jsonl"
+    newer_jsonl.write_text('{"type":"newer"}\n')
+
+    # Set explicit mtimes so ``ls -t`` ordering is deterministic regardless
+    # of write-order timing.
+    os.utime(older_jsonl, (1_000_000_000, 1_000_000_000))
+    os.utime(newer_jsonl, (2_000_000_000, 2_000_000_000))
+
+    _run_clone_adoption(agent, host, source_dir)
+
+    dest_projects = dest_dir / "plugin" / "claude" / "anthropic" / "projects"
+    # Both subdirs survive: the rekey was refused, no clobber happened.
+    assert (dest_projects / dest_project_name / f"{older_session_id}.jsonl").exists()
+    assert (dest_projects / "-Users-ev-some-source-workdir" / f"{newer_session_id}.jsonl").exists()
+    # claude_session_id was NOT written: the function bailed before finalize.
+    assert not (dest_dir / "claude_session_id").exists()
 
 
 # =============================================================================
@@ -3890,7 +4255,7 @@ def test_should_preserve_sessions_false_for_non_claude_agent() -> None:
         agent_id=AgentId.generate(),
         agent_name=AgentName("test"),
         provider_name=ProviderInstanceName("local"),
-        certified_data={"type": "echo"},
+        certified_data={"type": "generic"},
     )
     assert _should_preserve_sessions(ref) is False
 
@@ -3977,6 +4342,88 @@ def test_modify_env_vars_sets_claude_config_dirs(
     # only assert it is set to a non-empty string; the exact path depends on
     # the running user's $HOME and is not load-bearing for this test.
     assert env_vars["ORIGINAL_CLAUDE_CONFIG_DIR"]
+
+
+def test_modify_env_vars_omits_claude_config_dir_in_shared_mode(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+    temp_mngr_ctx: MngrContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """In shared mode, modify_env_vars leaves CLAUDE_CONFIG_DIR / ORIGINAL_CLAUDE_CONFIG_DIR
+    untouched so the agent inherits the parent shell's values, and adds no other env vars."""
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "shared"))
+    agent, host = make_claude_agent(
+        local_provider,
+        tmp_path,
+        temp_mngr_ctx,
+        agent_config=ClaudeAgentConfig(check_installation=False, use_env_config_dir=True),
+    )
+    env_vars: dict[str, str] = {}
+
+    agent.modify_env_vars(host, env_vars)
+
+    # In shared mode there's nothing to add: the transcript opt-out is
+    # gated at provisioning time (on-disk script presence), not via env var.
+    assert env_vars == {}
+
+
+# =============================================================================
+# get_claude_config_dir Tests
+# =============================================================================
+
+
+def test_get_claude_config_dir_returns_per_agent_dir_by_default(
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """Without use_env_config_dir, get_claude_config_dir returns the per-agent path."""
+    agent, _ = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
+
+    config_dir = agent.get_claude_config_dir()
+
+    assert config_dir == agent._get_agent_dir() / "plugin" / "claude" / "anthropic"
+
+
+def test_get_claude_config_dir_returns_shared_env_value_in_shared_mode(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+    temp_mngr_ctx: MngrContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """In shared mode, get_claude_config_dir returns the value of $CLAUDE_CONFIG_DIR."""
+    shared = tmp_path / "shared-claude"
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(shared))
+    agent, _ = make_claude_agent(
+        local_provider,
+        tmp_path,
+        temp_mngr_ctx,
+        agent_config=ClaudeAgentConfig(check_installation=False, use_env_config_dir=True),
+    )
+
+    assert agent.get_claude_config_dir() == shared
+
+
+def test_get_claude_config_dir_falls_back_to_home_in_shared_mode_when_env_unset(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+    temp_mngr_ctx: MngrContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """In shared mode with $CLAUDE_CONFIG_DIR unset, get_claude_config_dir falls back
+    to ``~/.claude/`` (claude's own default), so ``use_env_config_dir=True`` effectively
+    means "don't touch the config dir at all -- inherit whatever the parent shell would
+    have used."
+    """
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    agent, _ = make_claude_agent(
+        local_provider,
+        tmp_path,
+        temp_mngr_ctx,
+        agent_config=ClaudeAgentConfig(check_installation=False, use_env_config_dir=True),
+    )
+
+    assert agent.get_claude_config_dir() == Path.home() / ".claude"
 
 
 # =============================================================================

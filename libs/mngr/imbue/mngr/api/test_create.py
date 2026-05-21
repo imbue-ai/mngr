@@ -19,16 +19,18 @@ from imbue.mngr.api.data_types import CreateAgentResult
 from imbue.mngr.api.providers import get_provider_instance
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import DuplicateAgentNameError
+from imbue.mngr.errors import UnknownAgentTypeError
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.host import Host
-from imbue.mngr.hosts.host import HostLocation
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.host import AgentGitOptions
 from imbue.mngr.interfaces.host import AgentLabelOptions
 from imbue.mngr.interfaces.host import CreateAgentOptions
+from imbue.mngr.interfaces.host import HostLocation
 from imbue.mngr.interfaces.host import NewHostOptions
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.plugins.hookspecs import OnBeforeCreateArgs
+from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import CommandString
@@ -37,6 +39,7 @@ from imbue.mngr.primitives import LOCAL_PROVIDER_NAME
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import TransferMode
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
+from imbue.mngr.utils.plugin_testing import PLACEHOLDER_AGENT_TYPE
 from imbue.mngr.utils.testing import init_git_repo
 from imbue.mngr.utils.testing import make_ctx_with_plugins
 from imbue.mngr.utils.testing import tmux_session_cleanup
@@ -73,6 +76,39 @@ def _get_agent_from_create_result(result: CreateAgentResult, temp_mngr_ctx: Mngr
     return agent
 
 
+def _make_options(
+    name: AgentName,
+    command: str | None = "sleep 60",
+    *,
+    agent_type: str = PLACEHOLDER_AGENT_TYPE,
+    transfer_mode: TransferMode = TransferMode.NONE,
+    git: AgentGitOptions | None = None,
+    target_path: Path | None = None,
+    worktree_base_folder: Path | None = None,
+    label_options: AgentLabelOptions | None = None,
+    agent_id: AgentId | None = None,
+    is_update: bool = False,
+) -> CreateAgentOptions:
+    """Build CreateAgentOptions with sensible defaults for tests.
+
+    Wraps the plain-string ``command`` and ``agent_type`` arguments in their
+    primitive types. Pass ``command=None`` to leave ``CreateAgentOptions.command``
+    unset (e.g. when the agent type's registered config supplies the command).
+    """
+    return CreateAgentOptions(
+        name=name,
+        agent_type=AgentTypeName(agent_type),
+        command=CommandString(command) if command is not None else None,
+        transfer_mode=transfer_mode,
+        git=git,
+        target_path=target_path,
+        worktree_base_folder=worktree_base_folder,
+        label_options=label_options if label_options is not None else AgentLabelOptions(),
+        agent_id=agent_id,
+        is_update=is_update,
+    )
+
+
 def _setup_claude_trust_config(work_dir: Path, tmp_home_dir: Path) -> None:
     """Create a Claude trust config marking work_dir as trusted.
 
@@ -100,11 +136,7 @@ def test_create_simple_echo_agent(
     with tmux_session_cleanup(session_name):
         local_host, source_location = _get_local_host_and_location(temp_mngr_ctx, temp_work_dir)
 
-        agent_options = CreateAgentOptions(
-            agent_type=AgentTypeName("command"),
-            name=agent_name,
-            command=CommandString("echo 'Hello from mngr test' && sleep 365817"),
-        )
+        agent_options = _make_options(agent_name, "echo 'Hello from mngr test' && sleep 365817", agent_type="command")
 
         result = create(
             source_location=source_location,
@@ -134,11 +166,7 @@ def test_create_agent_with_new_host(
     with tmux_session_cleanup(session_name):
         local_host, source_location = _get_local_host_and_location(temp_mngr_ctx, temp_work_dir)
 
-        agent_options = CreateAgentOptions(
-            agent_type=AgentTypeName("command"),
-            name=agent_name,
-            command=CommandString("echo 'Created with new host' && sleep 816394"),
-        )
+        agent_options = _make_options(agent_name, "echo 'Created with new host' && sleep 816394", agent_type="command")
 
         target_host = NewHostOptions(
             provider=LOCAL_PROVIDER_NAME,
@@ -172,11 +200,7 @@ def test_create_agent_work_dir_is_created(
 
         local_host, source_location = _get_local_host_and_location(temp_mngr_ctx, temp_work_dir)
 
-        agent_options = CreateAgentOptions(
-            agent_type=AgentTypeName("test"),
-            name=agent_name,
-            command=CommandString("cat test_marker.txt && sleep 30"),
-        )
+        agent_options = _make_options(agent_name, "cat test_marker.txt && sleep 30")
 
         result = create(
             source_location=source_location,
@@ -202,11 +226,7 @@ def test_agent_state_is_persisted(
     with tmux_session_cleanup(session_name):
         local_host, source_location = _get_local_host_and_location(temp_mngr_ctx, temp_work_dir)
 
-        agent_options = CreateAgentOptions(
-            agent_type=AgentTypeName("persist-test"),
-            name=agent_name,
-            command=CommandString("sleep 60"),
-        )
+        agent_options = _make_options(agent_name, "sleep 60")
 
         result = create(
             source_location=source_location,
@@ -228,7 +248,7 @@ def test_agent_state_is_persisted(
         data = json.loads(data_file.read_text())
         assert data["id"] == str(result.agent.id)
         assert data["name"] == str(agent_name)
-        assert data["type"] == "persist-test"
+        assert data["type"] == PLACEHOLDER_AGENT_TYPE
 
 
 # =============================================================================
@@ -236,32 +256,41 @@ def test_agent_state_is_persisted(
 # =============================================================================
 
 
-def test_create_agent_with_unknown_type_and_no_command_raises(
+def test_create_agent_with_unknown_type_raises(
     temp_mngr_ctx: MngrContext,
     temp_work_dir: Path,
 ) -> None:
-    """Test that creating an agent with an unknown type and no command raises UserInputError.
+    """An unknown agent type should fail fast with UnknownAgentTypeError.
 
-    With no registered type and no command_override / config command / agent_args,
-    BaseAgent.assemble_command has nothing to build into a shell command, so it
-    raises UserInputError with a message pointing the user at `--type command`.
+    Previously this silently resolved to BaseAgent + empty config and only
+    failed later inside ``assemble_command``; now the type gate in
+    ``resolve_agent_type`` catches it up front. The attached
+    ``user_help_text`` (from ``get_plugin_install_hint``) tells the user
+    that the name is not recognized and suggests installing a plugin that
+    provides it.
     """
-    agent_name = AgentName(f"test-unknown-type-no-cmd-{int(time.time())}")
+    agent_name = AgentName(f"test-unknown-type-{int(time.time())}")
 
     local_host, source_location = _get_local_host_and_location(temp_mngr_ctx, temp_work_dir)
 
-    agent_options = CreateAgentOptions(
-        agent_type=AgentTypeName("my-custom-command"),
-        name=agent_name,
-    )
+    agent_options = _make_options(agent_name, command=None, agent_type="my-custom-command")
 
-    with pytest.raises(UserInputError, match=r"has no command configured"):
+    with pytest.raises(UnknownAgentTypeError, match="Unknown agent type 'my-custom-command'") as exc_info:
         create(
             source_location=source_location,
             target_host=local_host,
             agent_options=agent_options,
             mngr_ctx=temp_mngr_ctx,
         )
+
+    # Pin the user-facing help text contract promised by the docstring:
+    # get_plugin_install_hint is invoked for the unknown name (yielding the
+    # generic "do not recognize" fallback because the name is uncataloged),
+    # and the agent-type-kind branch appends the shell-command escape hatch.
+    user_help_text = exc_info.value.user_help_text
+    assert user_help_text is not None
+    assert "do not recognize 'my-custom-command'" in user_help_text
+    assert "--type command" in user_help_text
 
 
 # =============================================================================
@@ -281,10 +310,9 @@ def test_create_agent_with_worktree(
     with tmux_session_cleanup(session_name):
         local_host, source_location = _get_local_host_and_location(temp_mngr_ctx, temp_git_repo)
 
-        agent_options = CreateAgentOptions(
-            agent_type=AgentTypeName("worktree-test"),
-            name=agent_name,
-            command=CommandString("sleep 527146"),
+        agent_options = _make_options(
+            agent_name,
+            "sleep 527146",
             transfer_mode=TransferMode.GIT_WORKTREE,
             git=AgentGitOptions(
                 new_branch_name=f"mngr/{agent_name}",
@@ -344,10 +372,9 @@ def test_worktree_with_custom_branch_name(
     with tmux_session_cleanup(session_name):
         local_host, source_location = _get_local_host_and_location(temp_mngr_ctx, temp_git_repo)
 
-        agent_options = CreateAgentOptions(
-            agent_type=AgentTypeName("worktree-test"),
-            name=agent_name,
-            command=CommandString("sleep 60"),
+        agent_options = _make_options(
+            agent_name,
+            "sleep 60",
             transfer_mode=TransferMode.GIT_WORKTREE,
             git=AgentGitOptions(
                 base_branch=current_branch,
@@ -402,10 +429,9 @@ def test_worktree_with_existing_branch(
     with tmux_session_cleanup(session_name):
         local_host, source_location = _get_local_host_and_location(temp_mngr_ctx, temp_git_repo)
 
-        agent_options = CreateAgentOptions(
-            agent_type=AgentTypeName("worktree-test"),
-            name=agent_name,
-            command=CommandString("sleep 60"),
+        agent_options = _make_options(
+            agent_name,
+            "sleep 60",
             transfer_mode=TransferMode.GIT_WORKTREE,
             git=AgentGitOptions(
                 base_branch=existing_branch,
@@ -457,10 +483,9 @@ def test_worktree_already_checked_out_gives_helpful_error(
 
     local_host, source_location = _get_local_host_and_location(temp_mngr_ctx, temp_git_repo)
 
-    agent_options = CreateAgentOptions(
-        agent_type=AgentTypeName("worktree-test"),
-        name=AgentName("test-already-checked-out"),
-        command=CommandString("sleep 60"),
+    agent_options = _make_options(
+        AgentName("test-already-checked-out"),
+        "sleep 60",
         transfer_mode=TransferMode.GIT_WORKTREE,
         git=AgentGitOptions(
             base_branch=current_branch,
@@ -493,10 +518,9 @@ def test_worktree_in_repo_with_no_commits_gives_helpful_error(
 
     local_host, source_location = _get_local_host_and_location(temp_mngr_ctx, empty_repo)
 
-    agent_options = CreateAgentOptions(
-        agent_type=AgentTypeName("worktree-test"),
-        name=AgentName("test-no-commits"),
-        command=CommandString("sleep 60"),
+    agent_options = _make_options(
+        AgentName("test-no-commits"),
+        "sleep 60",
         transfer_mode=TransferMode.GIT_WORKTREE,
         git=AgentGitOptions(
             base_branch="main",
@@ -575,10 +599,9 @@ def test_worktree_branch_is_cleaned_up_when_create_fails(
     test_ctx = make_ctx_with_plugins(temp_mngr_ctx, [_RaiseAfterFileCopy()])
     local_host, source_location = _get_local_host_and_location(test_ctx, temp_git_repo)
 
-    agent_options = CreateAgentOptions(
-        agent_type=AgentTypeName("worktree-test"),
-        name=agent_name,
-        command=CommandString("sleep 60"),
+    agent_options = _make_options(
+        agent_name,
+        "sleep 60",
         transfer_mode=TransferMode.GIT_WORKTREE,
         git=AgentGitOptions(new_branch_name=leaked_branch),
     )
@@ -628,10 +651,9 @@ def test_preexisting_branch_is_preserved_when_create_fails(
     test_ctx = make_ctx_with_plugins(temp_mngr_ctx, [_RaiseAfterFileCopy()])
     local_host, source_location = _get_local_host_and_location(test_ctx, temp_git_repo)
 
-    agent_options = CreateAgentOptions(
-        agent_type=AgentTypeName("worktree-test"),
-        name=AgentName(f"test-preserve-{int(time.time())}"),
-        command=CommandString("sleep 60"),
+    agent_options = _make_options(
+        AgentName(f"test-preserve-{int(time.time())}"),
+        "sleep 60",
         transfer_mode=TransferMode.GIT_WORKTREE,
         # No new_branch_name -- agent attaches to the existing branch.
         git=AgentGitOptions(base_branch=existing_branch),
@@ -679,12 +701,7 @@ def test_in_place_mode_sets_is_generated_work_dir_false(
     with tmux_session_cleanup(session_name):
         local_host, source_location = _get_local_host_and_location(temp_mngr_ctx, temp_work_dir)
 
-        agent_options = CreateAgentOptions(
-            agent_type=AgentTypeName("in-place-test"),
-            name=agent_name,
-            command=CommandString("sleep 60"),
-            transfer_mode=TransferMode.NONE,
-        )
+        agent_options = _make_options(agent_name, "sleep 60", transfer_mode=TransferMode.NONE)
 
         result = create(
             source_location=source_location,
@@ -739,12 +756,7 @@ def test_in_place_preserves_generated_work_dir_entry(
         assert str(temp_work_dir) in certified_data.generated_work_dirs
 
         # Create an in-place agent (transfer_mode=NONE means in-place, no transfer)
-        agent_options = CreateAgentOptions(
-            agent_type=AgentTypeName("in-place-preserve-test"),
-            name=agent_name,
-            command=CommandString("sleep 60"),
-            transfer_mode=TransferMode.NONE,
-        )
+        agent_options = _make_options(agent_name, "sleep 60", transfer_mode=TransferMode.NONE)
 
         create(
             source_location=source_location,
@@ -779,10 +791,9 @@ def test_worktree_mode_sets_is_generated_work_dir_true(
     with tmux_session_cleanup(session_name):
         local_host, source_location = _get_local_host_and_location(temp_mngr_ctx, temp_git_repo)
 
-        agent_options = CreateAgentOptions(
-            agent_type=AgentTypeName("worktree-gen-test"),
-            name=agent_name,
-            command=CommandString("sleep 60"),
+        agent_options = _make_options(
+            agent_name,
+            "sleep 60",
             transfer_mode=TransferMode.GIT_WORKTREE,
             git=AgentGitOptions(
                 new_branch_name=f"mngr/{agent_name}",
@@ -831,10 +842,9 @@ def test_worktree_base_folder_overrides_default_worktree_location(
     with tmux_session_cleanup(session_name):
         local_host, source_location = _get_local_host_and_location(temp_mngr_ctx, temp_git_repo)
 
-        agent_options = CreateAgentOptions(
-            agent_type=AgentTypeName("wt-base-test"),
-            name=agent_name,
-            command=CommandString("sleep 60"),
+        agent_options = _make_options(
+            agent_name,
+            "sleep 60",
             transfer_mode=TransferMode.GIT_WORKTREE,
             worktree_base_folder=custom_base,
             git=AgentGitOptions(
@@ -874,13 +884,7 @@ def test_target_path_different_from_source_sets_is_generated_work_dir_true(
     with tmux_session_cleanup(session_name):
         local_host, source_location = _get_local_host_and_location(temp_mngr_ctx, temp_work_dir)
 
-        agent_options = CreateAgentOptions(
-            agent_type=AgentTypeName("target-diff-test"),
-            name=agent_name,
-            command=CommandString("sleep 60"),
-            target_path=target_dir,
-            transfer_mode=TransferMode.RSYNC,
-        )
+        agent_options = _make_options(agent_name, "sleep 60", target_path=target_dir, transfer_mode=TransferMode.RSYNC)
 
         result = create(
             source_location=source_location,
@@ -919,12 +923,7 @@ def test_target_path_same_as_source_sets_is_generated_work_dir_false(
     with tmux_session_cleanup(session_name):
         local_host, source_location = _get_local_host_and_location(temp_mngr_ctx, temp_work_dir)
 
-        agent_options = CreateAgentOptions(
-            agent_type=AgentTypeName("target-same-test"),
-            name=agent_name,
-            command=CommandString("sleep 60"),
-            target_path=temp_work_dir,
-        )
+        agent_options = _make_options(agent_name, "sleep 60", target_path=temp_work_dir)
 
         result = create(
             source_location=source_location,
@@ -970,12 +969,7 @@ def test_create_work_dir_false_uses_target_path(
     with tmux_session_cleanup(session_name):
         local_host, source_location = _get_local_host_and_location(temp_mngr_ctx, temp_work_dir)
 
-        agent_options = CreateAgentOptions(
-            agent_type=AgentTypeName("no-create-test"),
-            name=agent_name,
-            command=CommandString("sleep 60"),
-            target_path=target_dir,
-        )
+        agent_options = _make_options(agent_name, "sleep 60", target_path=target_dir)
 
         result = create(
             source_location=source_location,
@@ -1009,11 +1003,7 @@ def test_create_work_dir_false_without_target_path_uses_source(
     with tmux_session_cleanup(session_name):
         local_host, source_location = _get_local_host_and_location(temp_mngr_ctx, temp_work_dir)
 
-        agent_options = CreateAgentOptions(
-            agent_type=AgentTypeName("no-create-src-test"),
-            name=agent_name,
-            command=CommandString("sleep 60"),
-        )
+        agent_options = _make_options(agent_name, "sleep 60")
 
         result = create(
             source_location=source_location,
@@ -1049,11 +1039,7 @@ def test_create_rejects_duplicate_agent_name_on_same_host(
     with tmux_session_cleanup(session_name):
         local_host, source_location = _get_local_host_and_location(temp_mngr_ctx, temp_work_dir)
 
-        agent_options = CreateAgentOptions(
-            agent_type=AgentTypeName("command"),
-            name=agent_name,
-            command=CommandString("sleep 847291"),
-        )
+        agent_options = _make_options(agent_name, "sleep 847291", agent_type="command")
 
         # First create succeeds
         result = create(
@@ -1069,11 +1055,7 @@ def test_create_rejects_duplicate_agent_name_on_same_host(
             create(
                 source_location=source_location,
                 target_host=local_host,
-                agent_options=CreateAgentOptions(
-                    agent_type=AgentTypeName("command"),
-                    name=agent_name,
-                    command=CommandString("sleep 847292"),
-                ),
+                agent_options=_make_options(agent_name, "sleep 847292", agent_type="command"),
                 mngr_ctx=temp_mngr_ctx,
             )
 
@@ -1102,10 +1084,10 @@ def test_create_with_update_flag_updates_existing_agent(
         local_host, source_location = _get_local_host_and_location(temp_mngr_ctx, temp_work_dir)
 
         # Step 1: Create the agent normally
-        original_options = CreateAgentOptions(
-            agent_type=AgentTypeName("command"),
-            name=agent_name,
-            command=CommandString("sleep 847291"),
+        original_options = _make_options(
+            agent_name,
+            "sleep 847291",
+            agent_type="command",
             label_options=AgentLabelOptions(labels={"project": "old-project"}),
         )
         original_result = create(
@@ -1122,11 +1104,11 @@ def test_create_with_update_flag_updates_existing_agent(
         local_host.stop_agents([original_agent_id])
 
         # Step 3: Call create() with is_update=True and the same agent_id + work_dir
-        update_options = CreateAgentOptions(
+        update_options = _make_options(
+            agent_name,
+            "sleep 847292",
+            agent_type="command",
             agent_id=original_agent_id,
-            agent_type=AgentTypeName("command"),
-            name=agent_name,
-            command=CommandString("sleep 847292"),
             target_path=original_work_dir,
             label_options=AgentLabelOptions(labels={"project": "new-project"}),
             is_update=True,
@@ -1230,11 +1212,7 @@ def test_on_before_create_hook_modifies_agent_options(
 
     local_host = _get_local_host_for_test(test_ctx)
 
-    agent_options = CreateAgentOptions(
-        agent_type=AgentTypeName("test"),
-        name=AgentName("original-name"),
-        command=CommandString("sleep 1"),
-    )
+    agent_options = _make_options(AgentName("original-name"), "sleep 1")
 
     # Call the hook helper directly to verify modification
     target_host, modified_options, create_work_dir = _call_on_before_create_hooks(
@@ -1255,11 +1233,7 @@ def test_on_before_create_hook_modifies_create_work_dir(
 
     local_host = _get_local_host_for_test(test_ctx)
 
-    agent_options = CreateAgentOptions(
-        agent_type=AgentTypeName("test"),
-        name=AgentName("test-agent"),
-        command=CommandString("sleep 1"),
-    )
+    agent_options = _make_options(AgentName("test-agent"), "sleep 1")
 
     # Call with create_work_dir=True, plugin should change it to False
     target_host, modified_options, create_work_dir = _call_on_before_create_hooks(
@@ -1279,11 +1253,7 @@ def test_on_before_create_hook_returning_none_passes_through(
     local_host = _get_local_host_for_test(test_ctx)
 
     original_name = AgentName("unchanged-name")
-    agent_options = CreateAgentOptions(
-        agent_type=AgentTypeName("test"),
-        name=original_name,
-        command=CommandString("sleep 1"),
-    )
+    agent_options = _make_options(original_name, "sleep 1")
 
     target_host, modified_options, create_work_dir = _call_on_before_create_hooks(
         test_ctx, local_host, agent_options, True
@@ -1304,11 +1274,7 @@ def test_on_before_create_hooks_chain_in_order(
 
     local_host = _get_local_host_for_test(test_ctx)
 
-    agent_options = CreateAgentOptions(
-        agent_type=AgentTypeName("test"),
-        name=AgentName("base"),
-        command=CommandString("sleep 1"),
-    )
+    agent_options = _make_options(AgentName("base"), "sleep 1")
 
     target_host, modified_options, create_work_dir = _call_on_before_create_hooks(
         test_ctx, local_host, agent_options, True

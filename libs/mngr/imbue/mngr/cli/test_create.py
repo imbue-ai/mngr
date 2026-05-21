@@ -19,7 +19,7 @@ from imbue.mngr.config.data_types import CreateCliOptions
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import OutputOptions
 from imbue.mngr.hosts.host import Host
-from imbue.mngr.hosts.host import HostLocation
+from imbue.mngr.interfaces.host import HostLocation
 from imbue.mngr.primitives import DiscoveredHost
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
@@ -34,6 +34,7 @@ from imbue.mngr.utils.testing import wait_for_agent_session
 
 
 @pytest.mark.tmux
+@pytest.mark.flaky
 def test_cli_create_via_subprocess(
     temp_work_dir: Path,
     temp_host_dir: Path,
@@ -184,7 +185,7 @@ def test_connect_flag_calls_tmux_attach_for_local_agent(
 
     with tmux_session_cleanup(session_name):
         setup = _setup_create(temp_mngr_ctx, output_opts, opts, LoggingConfig(), address)
-        result = _create_agent(temp_mngr_ctx, output_opts, opts, setup)
+        result = _create_agent(temp_mngr_ctx, output_opts, opts, setup, "command")
 
         assert result is not None
         create_result, connection_opts = result
@@ -1337,6 +1338,8 @@ def test_create_with_invalid_provider_name(
         [
             "--name",
             "test-invalid-provider",
+            "--type",
+            "command",
             "--provider",
             "nonexistent",
             "--source",

@@ -18,7 +18,13 @@ import imbue.mngr.main
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mngr.agents.agent_registry import load_agents_from_plugins
 from imbue.mngr.agents.agent_registry import reset_agent_registry
+from imbue.mngr.agents.base_agent import BaseAgent
+from imbue.mngr.config.agent_class_registry import is_agent_class_registered
+from imbue.mngr.config.agent_class_registry import register_agent_class
+from imbue.mngr.config.agent_config_registry import is_agent_config_registered
+from imbue.mngr.config.agent_config_registry import register_agent_config
 from imbue.mngr.config.consts import PROFILES_DIRNAME
+from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.main import load_plugin_hookspecs
@@ -32,6 +38,32 @@ from imbue.mngr.utils.testing import isolate_git
 from imbue.mngr.utils.testing import isolate_tmux_server
 from imbue.mngr.utils.testing import make_mngr_ctx
 from imbue.mngr.utils.testing import setup_mngr_test_environment
+
+# Canonical placeholder agent type used across the test suite as an
+# "any agent type" stand-in. ``resolve_agent_type`` requires every name to
+# be known, so this gets pre-registered by the ``plugin_manager`` fixture
+# below. Tests that need a placeholder type should use this name -- helpers
+# like ``create_test_agent`` also default to it.
+PLACEHOLDER_AGENT_TYPE: str = "generic"
+
+
+def register_placeholder_agent_type(name: str) -> None:
+    """Register a single agent-type name as BaseAgent + base AgentTypeConfig if unregistered.
+
+    Idempotent: existing registrations under ``name`` are left alone. Use this
+    in test helpers that take an arbitrary agent-type name and want it to
+    pass through ``resolve_agent_type``'s known-type gate without scattering
+    register_agent_class / register_agent_config calls across the suite.
+    """
+    if not is_agent_class_registered(name):
+        register_agent_class(name, BaseAgent)
+    if not is_agent_config_registered(name):
+        register_agent_config(name, AgentTypeConfig)
+
+
+def register_test_placeholder_agent_type() -> None:
+    """Register the canonical placeholder agent type as a BaseAgent fixture."""
+    register_placeholder_agent_type(PLACEHOLDER_AGENT_TYPE)
 
 
 @pytest.fixture
@@ -60,6 +92,7 @@ def plugin_manager() -> Generator[pluggy.PluginManager, None, None]:
     load_plugin_hookspecs(pm)
     load_local_backend_only(pm)
     load_agents_from_plugins(pm)
+    register_test_placeholder_agent_type()
 
     yield pm
 

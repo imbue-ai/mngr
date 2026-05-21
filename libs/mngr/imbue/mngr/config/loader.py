@@ -13,6 +13,7 @@ from pydantic import BaseModel
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.model_update import to_update
 from imbue.mngr.config.agent_config_registry import get_agent_config_class
+from imbue.mngr.config.agent_config_registry import is_agent_config_registered
 from imbue.mngr.config.consts import PROFILES_DIRNAME
 from imbue.mngr.config.consts import ROOT_CONFIG_FILENAME
 from imbue.mngr.config.data_types import AGENT_TYPE_CONCAT_TUPLE_FIELDS
@@ -41,6 +42,7 @@ from imbue.mngr.errors import UnknownBackendError
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.plugin_catalog import get_plugin_install_hint
 from imbue.mngr.primitives import AgentTypeName
+from imbue.mngr.primitives import PluginKind
 from imbue.mngr.primitives import PluginName
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.utils.env_utils import parse_bool_env
@@ -342,6 +344,7 @@ def _check_unknown_fields(
     *,
     strict: bool = True,
     silent: bool = False,
+    extra_hint: str | None = None,
 ) -> None:
     """Check for unknown fields in raw_config and either raise or warn.
 
@@ -352,18 +355,19 @@ def _check_unknown_fields(
     ``mngr plugin add``, where the config is expected to reference plugins that
     are not yet installed; the warnings are noise that resolve themselves once
     the install completes.
+
+    `extra_hint` is appended to the error/warning message after the field listing
+    when there are unknown fields. Used to suggest causes (e.g. a missing plugin).
     """
     known_fields = set(model_class.model_fields.keys())
     unknown = set(raw_config.keys()) - known_fields
     if unknown:
+        base_msg = f"Unknown fields in {context}: {sorted(unknown)}. Valid fields: {sorted(known_fields)}"
+        full_msg = f"{base_msg}\n{extra_hint}" if extra_hint else base_msg
         if strict:
-            raise ConfigParseError(
-                f"Unknown fields in {context}: {sorted(unknown)}. Valid fields: {sorted(known_fields)}"
-            )
+            raise ConfigParseError(full_msg)
         if not silent:
-            logger.warning(
-                "Unknown fields in {}: {}. Valid fields: {}", context, sorted(unknown), sorted(known_fields)
-            )
+            logger.warning(full_msg)
         for key in unknown:
             del raw_config[key]
 
@@ -416,7 +420,7 @@ def _parse_providers(
                     f" block. Currently disabled plugins: {', '.join(sorted(disabled_plugins))}"
                 )
             else:
-                msg += f" {get_plugin_install_hint(backend)}"
+                msg += f" {get_plugin_install_hint(backend, kind=PluginKind.PROVIDER)}"
             if strict:
                 raise ConfigParseError(msg) from e
             if not silent:
@@ -519,8 +523,39 @@ def _parse_agent_types(
         # any ancestor depends on a disabled plugin.
         if _has_disabled_ancestor(name, raw_types, disabled_plugins):
             continue
-        config_class = get_agent_config_class(parent_type if parent_type is not None else name)
-        _check_unknown_fields(raw_config, config_class, f"agent_types.{name}", strict=strict, silent=silent)
+        effective_type = parent_type if parent_type is not None else name
+        config_class = get_agent_config_class(effective_type)
+        # If no specific config class is registered for this type, the field
+        # set we'll validate against is the bare base AgentTypeConfig -- which
+        # will reject any plugin-specific fields (e.g. claude's `sync_home_settings`).
+        # Mirror the hint shape used by _parse_providers so users learn whether
+        # the cause is a missing plugin (or a typo) rather than thinking they
+        # mistyped a field name. The "type name matches a disabled plugin"
+        # case is already handled upstream by _has_disabled_ancestor (the
+        # entire block is skipped), so it isn't surfaced here.
+        if is_agent_config_registered(effective_type):
+            extra_hint = None
+        elif disabled_plugins:
+            extra_hint = (
+                f"If '{effective_type}' is provided by a disabled plugin, enable it. "
+                f"Currently disabled plugins: {', '.join(sorted(disabled_plugins))}. "
+                "Otherwise the plugin package that provides this agent type may not be "
+                "installed, or one or more field names are misspelled."
+            )
+        else:
+            extra_hint = (
+                f"The plugin package that provides agent type '{effective_type}' may not be "
+                "installed. Otherwise the agent type name or one of the field names may be "
+                "misspelled."
+            )
+        _check_unknown_fields(
+            raw_config,
+            config_class,
+            f"agent_types.{name}",
+            strict=strict,
+            silent=silent,
+            extra_hint=extra_hint,
+        )
         normalized_config = _normalize_tuple_fields_for_construct(raw_config)
         agent_types[AgentTypeName(name)] = config_class.model_construct(**normalized_config)
 

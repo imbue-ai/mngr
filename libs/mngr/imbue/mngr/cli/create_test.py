@@ -13,7 +13,7 @@ from click.testing import CliRunner
 
 from imbue.imbue_common.model_update import to_update
 from imbue.mngr.api.address_parsers import parse_new_agent_location
-from imbue.mngr.api.find import ResolvedHostedLocation
+from imbue.mngr.api.find import ResolvedHostLocationAddress
 from imbue.mngr.cli.create import _AutoLabels
 from imbue.mngr.cli.create import _CreateCommand
 from imbue.mngr.cli.create import _RECOVERED_MESSAGE_FILENAME
@@ -39,9 +39,9 @@ from imbue.mngr.config.data_types import CreateCliOptions
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.loader import get_or_create_profile_dir
 from imbue.mngr.errors import UserInputError
-from imbue.mngr.hosts.host import HostLocation
 from imbue.mngr.interfaces.data_types import HostLifecycleOptions
 from imbue.mngr.interfaces.host import CreateAgentOptions
+from imbue.mngr.interfaces.host import HostLocation
 from imbue.mngr.interfaces.host import NewHostOptions
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import ActivitySource
@@ -568,7 +568,7 @@ def test_parse_project_name_returns_explicit_project(
 ) -> None:
     """When --project is specified, return it directly."""
     local_host = cast(OnlineHostInterface, local_provider.get_host(HostName(LOCAL_HOST_NAME)))
-    resolved = ResolvedHostedLocation(location=HostLocation(host=local_host, path=temp_work_dir))
+    resolved = ResolvedHostLocationAddress(location=HostLocation(host=local_host, path=temp_work_dir))
     opts = default_create_cli_opts.model_copy_update(
         to_update(default_create_cli_opts.field_ref().project, "explicit-project"),
     )
@@ -587,7 +587,7 @@ def test_parse_project_name_treats_dot_as_default_derivation(
     some_dir = tmp_path / "some-source"
     some_dir.mkdir()
     local_host = cast(OnlineHostInterface, local_provider.get_host(HostName(LOCAL_HOST_NAME)))
-    resolved = ResolvedHostedLocation(location=HostLocation(host=local_host, path=some_dir))
+    resolved = ResolvedHostLocationAddress(location=HostLocation(host=local_host, path=some_dir))
     opts = default_create_cli_opts.model_copy_update(
         to_update(default_create_cli_opts.field_ref().project, "."),
     )
@@ -606,7 +606,7 @@ def test_parse_project_name_inherits_from_source_agent(
     some_dir = tmp_path / "local-folder"
     some_dir.mkdir()
     local_host = cast(OnlineHostInterface, local_provider.get_host(HostName(LOCAL_HOST_NAME)))
-    resolved = ResolvedHostedLocation(
+    resolved = ResolvedHostLocationAddress(
         location=HostLocation(host=local_host, path=some_dir),
         agent=DiscoveredAgent(
             host_id=local_host.id,
@@ -631,7 +631,7 @@ def test_parse_project_name_derives_from_remote_url(
     some_dir = tmp_path / "local-folder"
     some_dir.mkdir()
     local_host = cast(OnlineHostInterface, local_provider.get_host(HostName(LOCAL_HOST_NAME)))
-    resolved = ResolvedHostedLocation(location=HostLocation(host=local_host, path=some_dir))
+    resolved = ResolvedHostLocationAddress(location=HostLocation(host=local_host, path=some_dir))
 
     result = _parse_project_name(resolved, default_create_cli_opts, remote_url="https://github.com/owner/my-repo.git")
 
@@ -647,7 +647,7 @@ def test_parse_project_name_falls_back_to_folder_name(
     some_dir = tmp_path / "some-project"
     some_dir.mkdir()
     local_host = cast(OnlineHostInterface, local_provider.get_host(HostName(LOCAL_HOST_NAME)))
-    resolved = ResolvedHostedLocation(location=HostLocation(host=local_host, path=some_dir))
+    resolved = ResolvedHostLocationAddress(location=HostLocation(host=local_host, path=some_dir))
 
     result = _parse_project_name(resolved, default_create_cli_opts, remote_url=None)
 
@@ -774,18 +774,47 @@ def test_split_cli_args_empty() -> None:
 
 
 def test_resolve_agent_type_name_type_flag_wins() -> None:
-    """--type flag takes precedence over positional."""
-    assert _resolve_agent_type_name("headless_command", "claude") == "headless_command"
+    """Explicit --type flag takes precedence over positional."""
+    assert _resolve_agent_type_name("headless_command", True, "claude", ()) == "headless_command"
 
 
 def test_resolve_agent_type_name_positional_fallback() -> None:
-    """Positional arg used when --type is None."""
-    assert _resolve_agent_type_name(None, "headless_claude") == "headless_claude"
+    """Positional arg used when --type is not explicit."""
+    assert _resolve_agent_type_name("claude", False, "headless_claude", ()) == "headless_claude"
 
 
-def test_resolve_agent_type_name_all_none() -> None:
-    """All None returns None (default to claude)."""
-    assert _resolve_agent_type_name(None, None) is None
+def test_resolve_agent_type_name_returns_config_value_when_no_cli_signal() -> None:
+    """When neither --type nor a positional is given, the config/template-supplied value is used."""
+    assert _resolve_agent_type_name("from_config", False, None, ()) == "from_config"
+
+
+def test_resolve_agent_type_name_raises_when_nothing_supplied() -> None:
+    """With no CLI, no positional, and no config-supplied value, the resolver must reject.
+
+    The click option no longer carries a source-level default; the user
+    is expected to either pass a value or have install.sh write one to
+    their user settings.
+    """
+    with pytest.raises(UserInputError, match="No agent type provided"):
+        _resolve_agent_type_name(None, False, None, ())
+
+
+def test_resolve_agent_type_name_error_mentions_available_types() -> None:
+    """The 'no type provided' error must list every available type so the user can copy-paste one."""
+    with pytest.raises(UserInputError, match="claude.*my-custom"):
+        _resolve_agent_type_name(None, False, None, ("claude", "my-custom"))
+
+
+def test_resolve_agent_type_name_positional_beats_config_supplied_type() -> None:
+    """A positional agent type beats a config/template-supplied --type value.
+
+    Config defaults applied via apply_config_defaults / apply_create_template
+    update opts.type but do NOT change the click parameter source, so
+    is_type_explicit stays False. The positional argument is therefore the
+    only command-line signal and wins, matching the general "CLI > config"
+    precedence used elsewhere in the create flow.
+    """
+    assert _resolve_agent_type_name("from_config", False, "from_positional", ()) == "from_positional"
 
 
 # =============================================================================
@@ -1097,11 +1126,16 @@ def test_create_foreground_with_non_headless_type_is_rejected(
     assert "not headless" in result.output
 
 
-def test_create_foreground_without_type_is_rejected(
+def test_create_without_any_type_is_rejected(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
 ) -> None:
-    """--foreground without any agent type (default claude) should be rejected."""
+    """Invoking `mngr create` with no positional, no --type, and no config-supplied type must error.
+
+    There is no source-level default for --type; the installer is expected
+    to seed [commands.create] type into user settings. This test pins the
+    contract that the user gets a helpful error when nothing is set.
+    """
     result = cli_runner.invoke(
         create,
         ["--foreground"],
@@ -1109,7 +1143,7 @@ def test_create_foreground_without_type_is_rejected(
     )
 
     assert result.exit_code != 0
-    assert "--foreground" in result.output
+    assert "No agent type provided" in result.output
 
 
 # =============================================================================
@@ -1252,6 +1286,7 @@ def test_parse_agent_opts_includes_labels(
         initial_message=None,
         source_location=source_location,
         mngr_ctx=temp_mngr_ctx,
+        resolved_agent_type="claude",
     )
 
     assert result.label_options.labels == {"project": "mngr", "env": "prod"}
@@ -1278,6 +1313,7 @@ def test_parse_agent_opts_label_invalid_format_raises(
             initial_message=None,
             source_location=source_location,
             mngr_ctx=temp_mngr_ctx,
+            resolved_agent_type="claude",
         )
 
 
@@ -1298,6 +1334,7 @@ def test_parse_agent_opts_empty_labels_by_default(
         initial_message=None,
         source_location=source_location,
         mngr_ctx=temp_mngr_ctx,
+        resolved_agent_type="claude",
     )
 
     assert result.label_options.labels == {}
@@ -1324,6 +1361,7 @@ def test_parse_agent_opts_with_agent_id(
         initial_message=None,
         source_location=source_location,
         mngr_ctx=temp_mngr_ctx,
+        resolved_agent_type="claude",
     )
 
     assert result.agent_id == explicit_id
@@ -1346,6 +1384,7 @@ def test_parse_agent_opts_agent_id_none_by_default(
         initial_message=None,
         source_location=source_location,
         mngr_ctx=temp_mngr_ctx,
+        resolved_agent_type="claude",
     )
 
     assert result.agent_id is None
@@ -1372,6 +1411,7 @@ def test_parse_agent_opts_matching_type_and_positional_ok(
         initial_message=None,
         source_location=source_location,
         mngr_ctx=temp_mngr_ctx,
+        resolved_agent_type="claude",
     )
 
     assert result.agent_type is not None

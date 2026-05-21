@@ -11,18 +11,20 @@ command group.
 ## CLI
 
 Once `imbue-mngr-latchkey` is installed, `mngr` discovers the plugin
-via the standard entry-point mechanism and exposes three subcommands:
+via the standard entry-point mechanism and exposes:
 
 ```
 mngr latchkey forward            # long-running supervisor: gateway + reverse tunnels
 mngr latchkey create-agent-env   # emit LATCHKEY_* env vars + opaque permissions handle as JSON
-mngr latchkey link-permissions   # swing the opaque handle's symlink to the canonical agent path
+mngr latchkey link-permissions   # swing the opaque handle's symlink to the canonical host path
+mngr latchkey admin-jwt          # mint a wildcard permissions-override JWT for the gateway
+mngr latchkey gateway-info       # print the running gateway's URL + listen password as JSON
 ```
 
 `mngr latchkey forward` spawns the shared gateway eagerly on startup
 and stops it on `SIGINT`/`SIGTERM` (coupled lifetime). Any in-flight
 agents lose their gateway endpoint until the next `mngr latchkey
-forward` is started; the per-agent permissions files survive across
+forward` is started; the per-host permissions files survive across
 restarts.
 
 ### Wiring a new agent using the CLI interface
@@ -32,16 +34,19 @@ restarts.
 export MNGR_LATCHKEY_DIRECTORY=~/.minds/latchkey
 mngr latchkey forward
 
-# In another terminal, per agent:
+# In another terminal, per host:
 export MNGR_LATCHKEY_DIRECTORY=~/.minds/latchkey
 mngr latchkey create-agent-env > /tmp/lk.json
 OPAQUE_PATH=$(jq -r .opaque_permissions_path /tmp/lk.json)
-ENV_ARGS=$(jq -r '.env | to_entries[] | "--env \(.key)=\(.value)"' /tmp/lk.json)
+HOST_ENV_ARGS=$(jq -r '.env | to_entries[] | "--host-env \(.key)=\(.value)"' /tmp/lk.json)
 
-# Substitute your preferred mngr create invocation here.
-AGENT_ID=$(mngr create my-template $ENV_ARGS --format json | jq -r .agent_id)
+# Substitute your preferred mngr create invocation here. The latchkey
+# env is passed via --host-env so every agent on the new host inherits
+# the same gateway wiring.
+CREATED=$(mngr create my-template $HOST_ENV_ARGS --format json)
+HOST_ID=$(echo "$CREATED" | jq -r .host_id)
 
-mngr latchkey link-permissions --agent-id "$AGENT_ID" --opaque-path "$OPAQUE_PATH"
+mngr latchkey link-permissions --host-id "$HOST_ID" --opaque-path "$OPAQUE_PATH"
 ```
 
 ### Settings
@@ -89,7 +94,7 @@ remains importable for embedders such as the minds desktop client.
 from imbue.mngr_latchkey.core import Latchkey
 from imbue.mngr_latchkey.agent_setup import (
     prepare_agent_latchkey,
-    finalize_agent_permissions,
+    finalize_host_permissions,
 )
 from imbue.mngr_latchkey.discovery import (
     LatchkeyDiscoveryHandler,
@@ -103,15 +108,15 @@ latchkey = Latchkey(
 )
 latchkey.initialize()
 
-# (a) Pre-create env vars + opaque permissions handle for a new agent.
+# (a) Pre-create env vars + opaque permissions handle for a new host.
 setup = prepare_agent_latchkey(latchkey, is_tunneled=True)
 # setup.env: LATCHKEY_GATEWAY[_PASSWORD,_PERMISSIONS_OVERRIDE,_DISABLE_COUNTING]
-# setup.opaque_permissions_path: pass to finalize_agent_permissions later
+# setup.opaque_permissions_path: pass to finalize_host_permissions later
 
-# ... mngr create returns the canonical agent id ...
+# ... mngr create returns the canonical host id ...
 
-# (b) Point the opaque handle at the canonical agent permissions path.
-finalize_agent_permissions(latchkey, setup.opaque_permissions_path, agent_id)
+# (b) Point the opaque handle at the canonical host permissions path.
+finalize_host_permissions(latchkey, setup.opaque_permissions_path, host_id)
 # Raises LatchkeyStoreError on failure -- callers decide whether to abort
 # or just surface a warning.
 
@@ -134,6 +139,98 @@ via `Latchkey.plugin_data_dir`).
 ## Permissions config
 
 The package owns the `latchkey_permissions.json` schema (a subset of
-detent's rule format). UI surfaces (such as the minds permission
-dialog) read and update it via the helpers in
-`imbue.mngr_latchkey.store`.
+detent's rule format). Per-host edits go through the gateway's
+bundled `permissions` extension (see below); only the deny-all
+default, the admin file, and the per-agent opaque baseline are
+written directly via `imbue.mngr_latchkey.store.save_permissions`.
+
+## Gateway HTTP extensions
+
+`mngr latchkey forward` drops two `.mjs` extensions into
+`<latchkey-directory>/extensions/`. Both expose plain HTTP endpoints
+on the gateway's listen port and authenticate the caller via two
+headers:
+
+* `X-Latchkey-Gateway-Password: <password>` -- the gateway listen
+  password from `mngr latchkey gateway-info`.
+* `X-Latchkey-Gateway-Permissions-Override: <jwt>` -- a JWT minted
+  for the permissions file you want the gateway to evaluate the
+  request against. For full access to both extensions, use the JWT
+  from `mngr latchkey admin-jwt`.
+
+A shell client would typically wire these up once:
+
+```sh
+ADMIN_JWT=$(mngr latchkey admin-jwt)
+eval "$(mngr latchkey gateway-info | jq -r '@text "GATEWAY_URL=\(.url); GATEWAY_PASSWORD=\(.password)"')"
+auth=(-H "X-Latchkey-Gateway-Password: $GATEWAY_PASSWORD" -H "X-Latchkey-Gateway-Permissions-Override: $ADMIN_JWT")
+```
+
+### `permission-requests` extension
+
+A pending-permission queue. Agents submit a request when they hit a
+blocked service; UIs (the minds desktop client, your own front-end)
+consume the stream and DELETE on resolution.
+
+* `POST /permission-requests` with body
+  `{"agent_id": "...", "scope": "...", "permissions": ["...", ...], "rationale": "..."}`.
+  The extension generates a `request_id` server-side and returns the
+  full record. Available to agents.
+* `GET /permission-requests` returns the current queue as
+  newline-delimited JSON. Add `?follow=true` to keep the connection
+  open and stream every newly-POSTed request as it arrives.
+  Available to the admin.
+* `DELETE /permission-requests/<request_id>` removes a single pending
+  request. UIs call this on grant or deny so a fresh `?follow=true`
+  consumer never sees the resolved request again. Available to
+  the admin.
+
+Pending requests are stored as one JSON file per request under
+`<latchkey-directory>/permission_requests/v1/`. The `v1` segment is
+part of the on-disk schema version, so any pre-v1 files that happen
+to live in the parent directory are ignored.
+
+### `permissions` extension
+
+Reads and edits a detent permissions file at a caller-supplied path.
+The gateway is launched with the environment variable
+`LATCHKEY_EXTENSION_PERMISSIONS_ROOT` pointing at this package's data
+directory; any `path` query parameter that resolves outside that
+root is rejected with HTTP 403.
+
+* `GET /permissions?path=<file>` returns the full permissions file.
+* `GET /permissions/available` returns the full permission catalog as
+  a JSON object keyed by raw service name. Each value has the shape
+  `{"scope": "<schema_name>", "display_name": "...", "permissions":
+  ["...", ...]}`.
+* `GET /permissions/available/<service_name>` returns the permission
+  catalog entry for `<service_name>` (e.g. `slack`, `google-gmail`)
+  using the same value shape, or 404 if the service is unknown. Both
+  endpoints are backed by a `services.json` file (keyed by raw
+  service name) that ships alongside the extension; the path query
+  parameter is not consulted.
+* `GET /permissions/rules?path=<file>&rule_key=<scope>` returns the
+  rule for `<scope>`, or 404 if absent.
+* `POST /permissions/rules?path=<file>&rule_key=<scope>` with a JSON
+  body of permission-schema names (`["any"]`,
+  `["slack-read-all", ...]`, ...) adds or replaces the rule for
+  `<scope>`. Everything in the file other than the matching rule is
+  preserved verbatim.
+* `DELETE /permissions/rules?path=<file>&rule_key=<scope>` removes
+  the named rule.
+
+A typical end-to-end shell flow:
+
+```sh
+# Stream pending requests as they come in.
+curl -N "${auth[@]}" "$GATEWAY_URL/permission-requests?follow=true"
+
+# Grant the agent slack-read-all on its host's permissions file.
+HOST_PERMS=$MNGR_LATCHKEY_DIRECTORY/mngr_latchkey/hosts/$HOST_ID/latchkey_permissions.json
+curl -X POST "${auth[@]}" \
+  -H "Content-Type: application/json" -d '["slack-read-all"]' \
+  "$GATEWAY_URL/permissions/rules?path=$HOST_PERMS&rule_key=slack-api"
+
+# Clear the pending request now that it has been resolved.
+curl -X DELETE "${auth[@]}" "$GATEWAY_URL/permission-requests/$REQUEST_ID"
+```

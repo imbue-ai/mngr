@@ -48,6 +48,8 @@ class TestVultrProviderLifecycle:
         result = _run_mngr(
             "create",
             agent_name,
+            "--type",
+            "claude",
             "--provider",
             "vultr",
             "--no-connect",
@@ -93,6 +95,8 @@ class TestVultrProviderLifecycle:
         result = _run_mngr(
             "create",
             agent_name,
+            "--type",
+            "claude",
             "--provider",
             "vultr",
             "--no-connect",
@@ -137,6 +141,8 @@ class TestVultrProviderLifecycle:
         result = _run_mngr(
             "create",
             agent_name,
+            "--type",
+            "claude",
             "--provider",
             "vultr",
             "--no-connect",

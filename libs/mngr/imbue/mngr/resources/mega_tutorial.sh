@@ -13,9 +13,12 @@ set -euo pipefail
 
 # running mngr create is strictly better than running claude!
 # (if you use the alias `mngr c`, it's no more letters to type :-D)
-# running this command launches claude (Claude Code) immediately *in a new worktree*
+# running this command launches your default agent immediately *in a new worktree*
 mngr create
-# the defaults are the following: agent=claude, provider=local, project=current dir
+# the defaults are the following: agent=your configured default (stored under `[commands.create] type`
+# in user settings; `scripts/install.sh` interactively prompts you to pick one as part of
+# `mngr extras -i`, and you can re-run `mngr extras config` later to pick or change it),
+# provider=local, project=current dir
 
 # you can run the agent in-place (directly in your source directory) without any transfer:
 mngr create my-task --transfer=none
@@ -26,7 +29,9 @@ mngr create my-task --transfer=none
 mngr create my-task
 # that command gives the agent a name of "my-task". If you don't specify a name, mngr will generate a random one for you.
 
-# you can use a short form for most commands (like create) as well--the above command is the same as these:
+# you can name the agent type explicitly as a positional argument, or use the short form for the
+# command itself (`mngr c` is an alias for `mngr create`). For example, when claude is your default
+# agent type, `mngr c my-task` is equivalent to `mngr create my-task claude`:
 mngr create my-task claude
 mngr c my-task
 
@@ -37,12 +42,13 @@ mngr c my-task
 # you can also specify a different agent (ex: codex)
 mngr create my-task codex
 
-# you can specify the arguments to the *agent* (ie, send args to claude rather than mngr)
+# you can specify the arguments to the *agent* (ie, send args to the agent rather than mngr)
 # by using `--` to separate the agent arguments from the mngr arguments:
 mngr create my-task -- --model opus
-# that command launches claude with the "opus" model instead of the default
+# that command passes the "--model opus" flag to your default agent (e.g. claude, when claude
+# is configured as the default)
 
-# you can also launch claude remotely in Modal:
+# you can also launch your default agent remotely in Modal:
 mngr create my-task --provider modal
 # see more details below in "CREATING AGENTS REMOTELY" for relevant options
 
@@ -616,8 +622,8 @@ mngr snapshot destroy my-task --all-snapshots --dry-run
 
 ##############################################################################
 # MANAGING AGENT LIMITS
-#   Configure idle timeouts, activity tracking, permissions, and other
-#   runtime limits for agents and hosts.
+#   Configure idle timeouts, activity tracking, and other runtime limits
+#   for agents and hosts.
 ##############################################################################
 
 # "limit" is an experimental command. See "mngr limit --help" for current usage.
@@ -946,7 +952,7 @@ mngr list --format jsonl | jq --unbuffered 'select(.labels.priority == "high")'
 ##############################################################################
 # CREATE TEMPLATES
 #   Define reusable presets that bundle common options (provider, build
-#   args, permissions, environment, etc.) into a single template name.
+#   args, environment, etc.) into a single template name.
 ##############################################################################
 
 # templates are defined in your config (user, project, or local scope).
@@ -970,7 +976,7 @@ mngr create my-task --template modal-big --template with-tests
 ##############################################################################
 # CUSTOM AGENT TYPES
 #   Define your own agent types in config, or use the built-in `command` type
-#   to run any shell command. Wrap existing tools with custom defaults and permissions.
+#   to run any shell command. Wrap existing tools with custom defaults.
 ##############################################################################
 
 # mngr supports multiple agent types out of the box (claude, codex, etc.)
@@ -1178,7 +1184,18 @@ mngr observe --discovery-only | while read -r line; do
   echo "$line" | python -c "import sys, json; d=json.load(sys.stdin); print(d.get('name', 'unknown'))"
 done
 
-# TODO: make examples of using "mngr wait"
+# `mngr usage wait` blocks until a CEL predicate over the current usage snapshot
+# evaluates true, then exits 0 (exit 2 on --timeout). Compose it with `mngr create`
+# to opportunistically spawn work when you're near the end of a rate-limit window
+# with spare capacity -- the predicate below means "more than 75% of the 5h
+# window has elapsed AND under half the limit has been used", so there's budget
+# headroom that would otherwise reset unused.
+# The CEL context per source matches `mngr usage --format json` sources[i]; see
+# the `mngr usage wait --help` page for the full field list.
+mngr usage wait --until 'five_hour.elapsed_percentage > 75 && five_hour.used_percentage < 50' \
+  && mngr create chore@.modal --no-connect --message "Find and fix an issue in the codebase."
+
+# TODO: make examples of using "mngr wait" (lifecycle-state wait, distinct from `mngr usage wait` above)
 
 # TODO: make more examples here (observe, events, streaming, transcript, using jq and python, etc)
 

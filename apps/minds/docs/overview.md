@@ -12,9 +12,9 @@ The desktop client (`minds run`) provides:
 - Authentication via one-time codes and signed cookies
 - A landing page listing all accessible workspaces (or a creation form if none exist)
 - Agent creation from git repositories or local paths via a web form or API
-- Byte-forwarding of HTTP and WebSocket traffic from `<agent-id>.localhost:8420/*` to the workspace's own workspace server (the `minds-workspace-server` CLI, source at `forever-claude-template/apps/system_interface/`; optionally through an SSH tunnel for remote agents)
+- Byte-forwarding of HTTP and WebSocket traffic from `<agent-id>.localhost:8420/*` to the workspace's own system interface (the `system-interface` CLI, source at `forever-claude-template/apps/system_interface/`; optionally through an SSH tunnel for remote agents)
 
-Each workspace runs its own workspace server (the `minds-workspace-server` CLI, source at `forever-claude-template/apps/system_interface/`), which serves the dockview UI and multiplexes the workspace's services under `/service/<name>/...` paths (Service Worker bootstrap, HTML/cookie rewriting, and WebSocket shims live there, not in the desktop client). Browsers access a workspace at `http://<agent-id>.localhost:8420/` and its individual services at `http://<agent-id>.localhost:8420/service/<service_name>/`.
+Each workspace runs its own system interface (the `system-interface` CLI, source at `forever-claude-template/apps/system_interface/`), which serves the dockview UI and multiplexes the workspace's services under `/service/<name>/...` paths (Service Worker bootstrap, HTML/cookie rewriting, and WebSocket shims live there, not in the desktop client). Browsers access a workspace at `http://<agent-id>.localhost:8420/` and its individual services at `http://<agent-id>.localhost:8420/service/<service_name>/`.
 
 ### Agent container (runs in Docker)
 
@@ -46,14 +46,14 @@ global = true
 ```
 
 Each application gets two URLs:
-1. **Local**: `http://{agent_id}.localhost:8420/service/{service_name}/` (the desktop client byte-forwards the subdomain request to the workspace's workspace server, which serves the service under `/service/<name>/`)
+1. **Local**: `http://{agent_id}.localhost:8420/service/{service_name}/` (the desktop client byte-forwards the subdomain request to the workspace's system interface, which serves the service under `/service/<name>/`)
 2. **Global**: `https://{service}--{agent_id}--{username}.{domain}` (via Cloudflare tunnel)
 
 The `global` flag indicates whether the agent wants Cloudflare forwarding enabled. The Share modal inside the workspace's dockview UI is authoritative for the actual state.
 
 ## Cloudflare tunnel integration
 
-The remote service connector URL comes from `MindsConfig.remote_service_connector_url`, loaded from `~/.<MINDS_ROOT_NAME>/config.toml` or the `REMOTE_SERVICE_CONNECTOR_URL` environment variable (env overrides file), with a dev-deployed default baked in. Every tunnel request authenticates with the signed-in user's SuperTokens session -- no Basic-auth credentials or `OWNER_EMAIL` need to be configured on the client. Once signed in:
+The remote service connector URL comes from the per-tier `client.toml` loaded via `minds run --config-file <path>` (see `apps/minds/docs/environments.md`). When `--config-file` is not passed, the default resolves to `apps/minds/imbue/minds/config/envs/_bundled/client.toml` (written by the Electron production build), then falls back to `apps/minds/imbue/minds/config/envs/dev/client.toml` shipped with the wheel. Every tunnel request authenticates with the signed-in user's SuperTokens session -- no Basic-auth credentials or `OWNER_EMAIL` need to be configured on the client. Once signed in:
 
 1. A tunnel is created automatically after each agent is created
 2. The tunnel token is injected into the agent's `runtime/secrets`

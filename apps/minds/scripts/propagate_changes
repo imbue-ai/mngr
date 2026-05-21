@@ -36,14 +36,26 @@ if [[ ! -d "${TEMPLATE_DIR}" ]]; then
 fi
 
 # ---------------------------------------------------------------------------
-# Point mngr at the minds host_dir so list/stop/start find minds agents,
-# not mngr's default ~/.mngr agents. Mirrors imbue.minds.bootstrap.
+# Require an activated minds env -- no implicit default to production.
+# Without activation we'd silently talk to ~/.minds/ (production), which
+# is almost never what an iteration-loop script should be doing. Mirrors
+# the `minds run` / `minds env deploy` activation check in
+# imbue.minds.bootstrap + apps/minds/imbue/minds/cli/env.py.
 # ---------------------------------------------------------------------------
 
-MINDS_ROOT_NAME="${MINDS_ROOT_NAME:-minds}"
-export MINDS_ROOT_NAME
-export MNGR_HOST_DIR="${MNGR_HOST_DIR:-${HOME}/.${MINDS_ROOT_NAME}/mngr}"
-export MNGR_PREFIX="${MNGR_PREFIX:-${MINDS_ROOT_NAME}-}"
+if [[ -z "${MINDS_ROOT_NAME:-}" ]]; then
+    echo "ERROR: MINDS_ROOT_NAME is not set." >&2
+    echo "       Run \`eval \"\$(uv run minds env activate <name>)\"\` first" >&2
+    echo "       (e.g. \`dev-<your-user>\` for your personal dev env), then" >&2
+    echo "       re-run propagate_changes from the same shell." >&2
+    exit 2
+fi
+if [[ -z "${MNGR_HOST_DIR:-}" || -z "${MNGR_PREFIX:-}" ]]; then
+    echo "ERROR: MNGR_HOST_DIR and MNGR_PREFIX must both be set." >&2
+    echo "       \`minds env activate\` exports both alongside MINDS_ROOT_NAME -- " >&2
+    echo "       did you eval its output?" >&2
+    exit 2
+fi
 
 # ---------------------------------------------------------------------------
 # Argument parsing
@@ -125,19 +137,25 @@ fi
 
 # ---------------------------------------------------------------------------
 # Shared rsync exclusions
+#
+# `:- .gitignore` is rsync's dir-merge filter: it reads .gitignore at each
+# directory level under the source and applies its "-" (exclude) rules.
+# That covers __pycache__, .venv, node_modules, .test_output, .mypy_cache,
+# .ruff_cache, .pytest_cache, .external_worktrees, and anything else listed
+# in the source repo's gitignore. We layer two manual excludes on top for
+# things gitignore deliberately doesn't list:
+#   - .git: gitignore never lists it (git's internal dir).
+#   - uv.lock: committed at the mngr root on purpose, but each install
+#     context regenerates its own.
+# Both rsync sources (mngr monorepo for step 1, FCT template for step 2/3)
+# carry their own .gitignore at the root, so the same filter applies cleanly
+# to all three rsync calls below.
 # ---------------------------------------------------------------------------
 
 RSYNC_EXCLUDES=(
+    --filter=':- .gitignore'
     --exclude='.git'
-    --exclude='__pycache__'
-    --exclude='.venv'
-    --exclude='node_modules'
-    --exclude='.test_output'
-    --exclude='.mypy_cache'
-    --exclude='.ruff_cache'
-    --exclude='.pytest_cache'
     --exclude='uv.lock'
-    --exclude='.external_worktrees'
 )
 
 # ---------------------------------------------------------------------------

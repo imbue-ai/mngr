@@ -47,7 +47,12 @@ def register_agent_type() -> tuple[str, type[AgentInterface] | None, type | None
     Types should implement this hook as a static method to register themselves.
     Return a tuple of (agent_type_name, agent_class, config_class) or None.
     - agent_type_name: The string name for this agent type (e.g., "claude", "codex")
-    - agent_class: The AgentInterface implementation class (or None to use BaseAgent)
+    - agent_class: The AgentInterface implementation class. Return ``BaseAgent``
+      explicitly if all you need is a config-driven shell command (see
+      ``command_agent.py``/``codex_agent.py``). Returning ``None`` skips class
+      registration entirely, which means ``resolve_agent_type`` will reject the
+      name for ``mngr create``; only do this for config-only registrations that
+      pair with a separate class registration elsewhere.
     - config_class: The AgentTypeConfig subclass (or None to use AgentTypeConfig)
     """
 
@@ -132,8 +137,7 @@ def on_agent_state_dir_created(agent: AgentInterface, host: OnlineHostInterface)
 def on_before_provisioning(agent: AgentInterface, host: OnlineHostInterface, mngr_ctx: MngrContext) -> None:
     """[experimental] Called before provisioning an agent.
 
-    This hook fires before host.provision_agent() is called during `mngr create`
-    and `mngr provision`.
+    This hook fires before host.provision_agent() is called during `mngr create`.
     """
 
 
@@ -141,8 +145,7 @@ def on_before_provisioning(agent: AgentInterface, host: OnlineHostInterface, mng
 def on_after_provisioning(agent: AgentInterface, host: OnlineHostInterface, mngr_ctx: MngrContext) -> None:
     """[experimental] Called after provisioning an agent.
 
-    This hook fires after host.provision_agent() completes during `mngr create`
-    and `mngr provision`.
+    This hook fires after host.provision_agent() completes during `mngr create`.
     """
 
 
