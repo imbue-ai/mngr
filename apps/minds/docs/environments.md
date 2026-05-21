@@ -116,7 +116,7 @@ Behaviour by env type:
   in one line:
 
   ```bash
-  eval "$(uv run minds env activate --create dev-<your-user>)"
+  eval "$(uv run minds env activate --create --deploy dev-<your-user>)"
   uv run minds env deploy
   ```
 
