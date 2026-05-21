@@ -1,7 +1,7 @@
 """Predefined-permission grant/deny flow (``RequestType.LATCHKEY_PERMISSION``).
 
 This module is one of the two sibling handlers under
-:mod:`imbue.minds.desktop_client.latchkey.permissions`. It owns the
+:mod:`imbue.minds.desktop_client.latchkey.handlers`. It owns the
 flow for *predefined* (catalog-backed) permission requests: rendering
 the per-permission dialog, probing credential status, running
 ``latchkey auth browser`` when needed, rewriting the per-host
@@ -43,8 +43,8 @@ from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClient
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClientError
-from imbue.minds.desktop_client.latchkey.permissions.messaging import MngrMessageSender
-from imbue.minds.desktop_client.latchkey.permissions.templates import render_predefined_permission_dialog
+from imbue.minds.desktop_client.latchkey.handlers.messaging import MngrMessageSender
+from imbue.minds.desktop_client.latchkey.handlers.templates import render_predefined_permission_dialog
 from imbue.minds.desktop_client.latchkey.services_catalog import ServicePermissionInfo
 from imbue.minds.desktop_client.latchkey.services_catalog import ServicesCatalog
 from imbue.minds.desktop_client.request_events import LatchkeyPredefinedPermissionRequestEvent

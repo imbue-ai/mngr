@@ -1,7 +1,7 @@
 """File-sharing permission grant/deny flow (``RequestType.FILE_SHARING_PERMISSION``).
 
 This module is one of the two sibling handlers under
-:mod:`imbue.minds.desktop_client.latchkey.permissions`. It owns the
+:mod:`imbue.minds.desktop_client.latchkey.handlers`. It owns the
 flow for *file-sharing* permission requests: rendering the yes/no
 dialog for a single absolute file path, calling the gateway's
 ``permission-requests`` extension to approve or drop the request,
@@ -38,8 +38,8 @@ from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClient
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClientError
-from imbue.minds.desktop_client.latchkey.permissions.messaging import MngrMessageSender
-from imbue.minds.desktop_client.latchkey.permissions.templates import render_file_sharing_permission_dialog
+from imbue.minds.desktop_client.latchkey.handlers.messaging import MngrMessageSender
+from imbue.minds.desktop_client.latchkey.handlers.templates import render_file_sharing_permission_dialog
 from imbue.minds.desktop_client.request_events import LatchkeyFileSharingPermissionRequestEvent
 from imbue.minds.desktop_client.request_events import RequestEvent
 from imbue.minds.desktop_client.request_events import RequestInbox

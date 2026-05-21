@@ -6,10 +6,10 @@ import pytest
 from starlette.responses import HTMLResponse
 
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
-from imbue.minds.desktop_client.latchkey.permissions.messaging import MngrMessageSender
-from imbue.minds.desktop_client.latchkey.permissions.predefined import GrantOutcome
-from imbue.minds.desktop_client.latchkey.permissions.predefined import LatchkeyPermissionFlowError
-from imbue.minds.desktop_client.latchkey.permissions.predefined import LatchkeyPermissionGrantHandler
+from imbue.minds.desktop_client.latchkey.handlers.messaging import MngrMessageSender
+from imbue.minds.desktop_client.latchkey.handlers.predefined import GrantOutcome
+from imbue.minds.desktop_client.latchkey.handlers.predefined import LatchkeyPermissionFlowError
+from imbue.minds.desktop_client.latchkey.handlers.predefined import LatchkeyPermissionGrantHandler
 from imbue.minds.desktop_client.latchkey.services_catalog import ServicePermissionInfo
 from imbue.minds.desktop_client.latchkey.services_catalog import ServicesCatalog
 from imbue.minds.desktop_client.latchkey.testing import FakeLatchkeyGatewayClient

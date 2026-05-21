@@ -37,7 +37,7 @@ request schema and a new approve endpoint:
 
 The minds desktop client's latchkey-permission handler code was
 reorganised so the two permission request types now live as siblings
-under a single `imbue.minds.desktop_client.latchkey.permissions`
+under a single `imbue.minds.desktop_client.latchkey.handlers`
 package: `.predefined` (the existing catalog-backed flow, moved from
 `latchkey/permissions.py`) and `.file_sharing` (moved from
 `latchkey/file_sharing.py`). Their shared helpers (`MngrMessageSender`

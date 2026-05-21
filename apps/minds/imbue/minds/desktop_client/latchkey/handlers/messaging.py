@@ -2,8 +2,9 @@
 
 Both sibling handlers in this package (:mod:`.predefined` and
 :mod:`.file_sharing`) notify the waiting agent on resolution by
-spawning ``mngr message``. The class lives here -- one level above the
-handlers -- so neither sibling has to import from the other.
+spawning ``mngr message``. The class lives alongside them rather than
+inside either handler module so neither sibling has to import from
+the other.
 """
 
 from typing import Final

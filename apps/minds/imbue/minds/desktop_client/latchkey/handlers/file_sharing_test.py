@@ -19,8 +19,8 @@ from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
 from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
 from imbue.minds.desktop_client.cookie_manager import create_session_cookie
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClient
-from imbue.minds.desktop_client.latchkey.permissions.file_sharing import FileSharingGrantHandler
-from imbue.minds.desktop_client.latchkey.permissions.messaging import MngrMessageSender
+from imbue.minds.desktop_client.latchkey.handlers.file_sharing import FileSharingGrantHandler
+from imbue.minds.desktop_client.latchkey.handlers.messaging import MngrMessageSender
 from imbue.minds.desktop_client.request_events import LatchkeyFileSharingPermissionRequestEvent
 from imbue.minds.desktop_client.request_events import RequestEvent
 from imbue.minds.desktop_client.request_events import RequestInbox
