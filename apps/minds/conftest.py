@@ -37,6 +37,12 @@ register_marker(
     "Driven by `just minds-test-deployment`; never collected by the standard CI test runs or "
     "`just test-quick`."
 )
+register_marker(
+    "minds_electron: tests that drive the Electron minds desktop app end-to-end via Playwright "
+    "over CDP. Need Node, pnpm, Electron's native deps, and a display server (`xvfb-run` on "
+    "Linux). Split out into its own CI job (`test-docker-electron`) so the heavyweight "
+    "Electron + docker spin-up does not serialize behind every other docker-marked test."
+)
 register_conftest_hooks(globals())
 register_plugin_test_fixtures(globals())
 
