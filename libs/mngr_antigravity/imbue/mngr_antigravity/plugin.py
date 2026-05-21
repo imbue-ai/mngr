@@ -18,14 +18,21 @@ Capabilities deliberately scoped out of v0:
   hook *execution* is gated behind the ``json-hooks-enabled`` experiment
   flag, which Google must enable per-account. Re-introduce when the
   experiment ships GA.
-* No ``mngr transcript`` support yet -- the JSONL transcript file is at a
-  known path (``~/.gemini/antigravity-cli/brain/<conv_id>/.system_generated/
-  logs/transcript.jsonl``) but plumbing it through mngr's streamer
-  infrastructure is deferred to a follow-up commit on this branch.
+
+Transcript support: enabled by default. ``stream_transcript.sh`` tails agy's
+per-conversation JSONL files at
+``~/.gemini/antigravity-cli/brain/<conv_id>/.system_generated/logs/transcript.jsonl``,
+filtered to conversation IDs that *this* agent created (discovered by
+grepping agy's own ``--log-file``). ``common_transcript.sh`` converts to
+the agent-agnostic schema that ``mngr transcript`` reads.
 """
 
 from __future__ import annotations
 
+import importlib.resources
+import shlex
+from collections.abc import Mapping
+from pathlib import Path
 from typing import ClassVar
 from typing import Final
 
@@ -34,14 +41,19 @@ from pydantic import Field
 
 from imbue.imbue_common.logging import log_span
 from imbue.mngr import hookimpl
+from imbue.mngr.agents.common_transcript import maybe_provision_common_transcript_scripts
+from imbue.mngr.agents.common_transcript import provision_raw_transcript_scripts
+from imbue.mngr.agents.common_transcript import provision_scripts_to_commands_dir
 from imbue.mngr.agents.tui_agent import InteractiveTuiAgent
 from imbue.mngr.agents.tui_utils import send_enter_best_effort
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.interfaces.agent import AgentInterface
+from imbue.mngr.interfaces.agent import HasCommonTranscriptMixin
 from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import CommandString
+from imbue.mngr_antigravity import resources as _antigravity_resources
 from imbue.mngr_antigravity.antigravity_config import get_antigravity_user_settings_path
 from imbue.mngr_antigravity.antigravity_config import merge_trusted_workspace
 from imbue.mngr_antigravity.antigravity_config import read_antigravity_settings
@@ -50,6 +62,29 @@ from imbue.mngr_antigravity.antigravity_config import serialize_antigravity_sett
 # Top-level CLI flag exposed by `agy --help`; auto-approves every tool call.
 # Same spelling as Claude Code's flag.
 _DANGEROUSLY_SKIP_PERMISSIONS_FLAG: Final[str] = "--dangerously-skip-permissions"
+
+_COMMON_TRANSCRIPT_SCRIPT_NAME: Final[str] = "common_transcript.sh"
+_RAW_TRANSCRIPT_SCRIPT_NAME: Final[str] = "stream_transcript.sh"
+
+# Supervisor script provisioned into the agent's commands/ dir; owns the
+# lifecycle of the raw streamer and (when enabled) the common-transcript
+# converter. Mirrors the mngr_claude background-tasks pattern.
+_BACKGROUND_TASKS_SCRIPT_NAME: Final[str] = "antigravity_background_tasks.sh"
+
+# Env var consumed by stream_transcript.sh to locate agy's --log-file. We
+# also pass `--log-file <path>` to agy itself in ``assemble_command`` so
+# the conversation-id discovery has something to grep against.
+_AGY_LOG_FILE_ENV_VAR: Final[str] = "ANTIGRAVITY_AGY_LOG_FILE"
+
+# Relative path under $MNGR_AGENT_STATE_DIR for the agy --log-file. Keeping
+# it under logs/ groups it with the other per-agent log artifacts.
+_AGY_LOG_FILE_RELATIVE_PATH: Final[str] = "logs/agy_cli.log"
+
+
+def _load_antigravity_resource_script(filename: str) -> str:
+    """Load a resource script from the mngr_antigravity resources package."""
+    resource_files = importlib.resources.files(_antigravity_resources)
+    return resource_files.joinpath(filename).read_text()
 
 
 class AntigravityAgentConfig(AgentTypeConfig):
@@ -83,9 +118,19 @@ class AntigravityAgentConfig(AgentTypeConfig):
         "left alone. Disable to fall back to the interactive dialog (useful if you want "
         "the user to consciously accept each new agent's workspace).",
     )
+    emit_common_transcript: bool = Field(
+        default=True,
+        description="Emit a common, agent-agnostic transcript at "
+        "events/antigravity/common_transcript/events.jsonl. When enabled, a background "
+        "process tails agy's per-conversation JSONL transcripts and converts user, "
+        "assistant, and tool-call/result events into the common schema that "
+        "`mngr transcript` reads. The raw transcript at "
+        "logs/antigravity_transcript/events.jsonl is always captured (required by "
+        "HasTranscriptMixin); only the common-format converter is gated by this flag.",
+    )
 
 
-class AntigravityAgent(InteractiveTuiAgent[AntigravityAgentConfig]):
+class AntigravityAgent(InteractiveTuiAgent[AntigravityAgentConfig], HasCommonTranscriptMixin):
     """Agent implementation for Google's Antigravity CLI (``agy``)."""
 
     # Stable substring of the splash banner that the Antigravity TUI renders
@@ -107,29 +152,77 @@ class AntigravityAgent(InteractiveTuiAgent[AntigravityAgentConfig]):
         # so a best-effort Enter is the right strategy.
         send_enter_best_effort(self, tmux_target)
 
+    @property
+    def is_common_transcript_enabled(self) -> bool:
+        return self.agent_config.emit_common_transcript
+
+    def get_raw_transcript_scripts(self) -> Mapping[str, str]:
+        """Return the antigravity raw-transcript streamer.
+
+        Always provisioned per :class:`HasTranscriptMixin`: the raw bytes are
+        the source of truth that the common-transcript converter and any
+        future tooling read from.
+        """
+        return {_RAW_TRANSCRIPT_SCRIPT_NAME: _load_antigravity_resource_script(_RAW_TRANSCRIPT_SCRIPT_NAME)}
+
+    def get_common_transcript_scripts(self) -> Mapping[str, str]:
+        """Return the antigravity common-transcript converter."""
+        return {_COMMON_TRANSCRIPT_SCRIPT_NAME: _load_antigravity_resource_script(_COMMON_TRANSCRIPT_SCRIPT_NAME)}
+
+    def _get_agy_log_file_path(self) -> Path:
+        """Path agy is told to write its --log-file to.
+
+        Lives under the agent's state dir so it is per-agent and durable.
+        The streamer reads this file to discover which conversation IDs
+        belong to this agent.
+        """
+        return self._get_agent_dir() / _AGY_LOG_FILE_RELATIVE_PATH
+
+    def modify_env_vars(self, host: OnlineHostInterface, env_vars: dict[str, str]) -> None:
+        """Expose the agy --log-file path to stream_transcript.sh.
+
+        The streamer needs to grep agy's own log for ``Created conversation
+        <uuid>`` lines to scope its watch to this agent's conversations.
+        Setting the env var here keeps the script-side path consistent with
+        the value we pass to ``agy --log-file`` in ``assemble_command``.
+        """
+        env_vars[_AGY_LOG_FILE_ENV_VAR] = str(self._get_agy_log_file_path())
+
     def provision(
         self,
         host: OnlineHostInterface,
         options: CreateAgentOptions,
         mngr_ctx: MngrContext,
     ) -> None:
-        """Pre-trust ``work_dir`` in Antigravity's user-tier ``settings.json`` when enabled.
+        """Pre-trust ``work_dir``, then install the background-tasks supervisor + transcript scripts.
 
-        Without this step, every fresh ``work_dir`` triggers Antigravity's
-        "Do you trust the contents of this project?" dialog on first launch
-        -- the dialog consumes the first keystroke sent to the tmux pane and
-        therefore breaks any automation that pastes an initial message
-        immediately after start.
-
-        The trust list lives in a single user-global file. We append to it
-        rather than overwriting; an already-trusted path is left alone. This
-        is the closest analog to Claude Code's settings-file approach since
-        Antigravity exposes no env-var override and no per-workspace
-        settings file that the CLI reads at startup.
+        The trust step matches what Claude Code does for its workspace-trust
+        gate (writes to a settings file before launch). The transcript scripts
+        are then installed under ``$MNGR_AGENT_STATE_DIR/commands/`` so the
+        backgrounded supervisor (launched from ``assemble_command``) can
+        invoke them.
         """
-        if not self.agent_config.pre_trust_workspace:
-            return
-        self._pre_trust_work_dir(host)
+        if self.agent_config.pre_trust_workspace:
+            self._pre_trust_work_dir(host)
+        with mngr_ctx.concurrency_group.make_concurrency_group("antigravity_provisioning") as concurrency_group:
+            provision_raw_transcript_scripts(
+                self,
+                host,
+                self._get_agent_dir(),
+                concurrency_group,
+            )
+            maybe_provision_common_transcript_scripts(
+                self,
+                host,
+                self._get_agent_dir(),
+                concurrency_group,
+            )
+            provision_scripts_to_commands_dir(
+                host,
+                self._get_agent_dir(),
+                {_BACKGROUND_TASKS_SCRIPT_NAME: _load_antigravity_resource_script(_BACKGROUND_TASKS_SCRIPT_NAME)},
+                concurrency_group,
+            )
 
     def _pre_trust_work_dir(self, host: OnlineHostInterface) -> None:
         settings_path = get_antigravity_user_settings_path()
@@ -142,6 +235,18 @@ class AntigravityAgent(InteractiveTuiAgent[AntigravityAgentConfig]):
         with log_span("Pre-trusting workspace {} in {}", workspace_path, settings_path):
             host.write_text_file(settings_path, serialize_antigravity_settings(merged))
 
+    def _build_background_tasks_command(self) -> str:
+        """Shell snippet that launches the background-tasks supervisor.
+
+        Identical structure to mngr_claude's: one backgrounded subshell that
+        owns the lifecycle of every watcher (pidfile-deduped, restart-on-
+        death). Re-running ``assemble_command`` (e.g. on agent restart) is
+        therefore safe because the supervisor's pidfile check causes a
+        duplicate launch to exit immediately.
+        """
+        script_path = f"$MNGR_AGENT_STATE_DIR/commands/{_BACKGROUND_TASKS_SCRIPT_NAME}"
+        return f"( bash {script_path} {shlex.quote(self.session_name)} ) &"
+
     def assemble_command(
         self,
         host: OnlineHostInterface,
@@ -149,16 +254,34 @@ class AntigravityAgent(InteractiveTuiAgent[AntigravityAgentConfig]):
         command_override: CommandString | None,
         initial_message: str | None = None,
     ) -> CommandString:
-        """Append ``--dangerously-skip-permissions`` when ``auto_allow_permissions`` is set.
+        """Build the full launch command.
 
-        The flag is a top-level CLI flag (documented in ``agy --help``); position
-        doesn't matter, so we append it after the user's ``cli_args`` and
-        ``agent_args`` rather than interleaving.
+        Composition (left to right):
+
+        1. ``( bash background_tasks.sh <session> ) &`` -- backgrounded
+           supervisor for the transcript streamer + converter.
+        2. ``agy <user_args> --log-file <state>/logs/agy_cli.log
+           [--dangerously-skip-permissions]`` -- foreground process.
+
+        Bash precedence note: ``A & B`` runs A in the background and B in
+        the foreground, so the supervisor's subshell is naturally scoped to
+        ``&`` and ``agy`` stays in the foreground. No ``&&`` chain is
+        needed because the supervisor's pidfile check tolerates being
+        launched before agy is ready.
+
+        The ``--log-file`` arg pipes agy's internal log to a per-agent
+        path; stream_transcript.sh greps it for ``Created conversation
+        <uuid>`` to scope its watch to this agent. We append the flag
+        unconditionally and mngr ensures the directory exists via the
+        supervisor's ``mkdir -p`` in resources/.
         """
-        base_command = super().assemble_command(host, agent_args, command_override, initial_message)
+        log_file_arg = f"--log-file {shlex.quote(str(self._get_agy_log_file_path()))}"
+        extra_args: list[str] = [log_file_arg]
         if self.agent_config.auto_allow_permissions:
-            return CommandString(f"{base_command} {_DANGEROUSLY_SKIP_PERMISSIONS_FLAG}")
-        return base_command
+            extra_args.append(_DANGEROUSLY_SKIP_PERMISSIONS_FLAG)
+        base_command = super().assemble_command(host, agent_args, command_override, initial_message)
+        background_cmd = self._build_background_tasks_command()
+        return CommandString(f"{background_cmd} {base_command} {' '.join(extra_args)}")
 
 
 @hookimpl

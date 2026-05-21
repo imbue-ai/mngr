@@ -111,16 +111,23 @@ def antigravity_agent_pre_trust_disabled(
     return _make_antigravity_agent(local_provider, tmp_path, AntigravityAgentConfig(pre_trust_workspace=False))
 
 
-def test_assemble_command_uses_bare_agy_command_with_no_default_cli_args(
-    antigravity_agent: AntigravityAgent,
-) -> None:
-    command = antigravity_agent.assemble_command(antigravity_agent.host, (), command_override=None)
-    assert str(command) == "agy"
+_BACKGROUND_TASKS_LAUNCH_PREFIX = "( bash $MNGR_AGENT_STATE_DIR/commands/antigravity_background_tasks.sh"
+
+
+def test_assemble_command_invokes_agy_with_log_file(antigravity_agent: AntigravityAgent) -> None:
+    """The foreground command runs `agy ... --log-file <agent-state>/logs/agy_cli.log`."""
+    command = str(antigravity_agent.assemble_command(antigravity_agent.host, (), command_override=None))
+    assert " agy " in command
+    assert "--log-file" in command
+    assert "logs/agy_cli.log" in command
 
 
 def test_assemble_command_appends_user_agent_args(antigravity_agent: AntigravityAgent) -> None:
-    command = antigravity_agent.assemble_command(antigravity_agent.host, ("--add-dir", "/tmp"), command_override=None)
-    assert str(command) == "agy --add-dir /tmp"
+    """User agent_args land between the agy command and the appended log-file/auto-allow flags."""
+    command = str(
+        antigravity_agent.assemble_command(antigravity_agent.host, ("--add-dir", "/tmp"), command_override=None)
+    )
+    assert "agy --add-dir /tmp --log-file" in command
 
 
 def test_assemble_command_omits_dangerously_skip_permissions_when_auto_allow_disabled(
@@ -136,7 +143,7 @@ def test_assemble_command_appends_dangerously_skip_permissions_when_auto_allow_e
     """`auto_allow_permissions=True` wires Antigravity's documented auto-approve flag."""
     agent = antigravity_agent_auto_allow
     command = str(agent.assemble_command(agent.host, (), command_override=None))
-    assert command == "agy --dangerously-skip-permissions"
+    assert command.endswith("--dangerously-skip-permissions")
 
 
 def test_assemble_command_preserves_user_args_when_auto_allow_enabled(
@@ -145,7 +152,17 @@ def test_assemble_command_preserves_user_args_when_auto_allow_enabled(
     """User-supplied agent_args still land before the auto-allow flag."""
     agent = antigravity_agent_auto_allow
     command = str(agent.assemble_command(agent.host, ("--add-dir", "/tmp"), command_override=None))
-    assert command == "agy --add-dir /tmp --dangerously-skip-permissions"
+    assert "agy --add-dir /tmp --log-file" in command
+    assert command.endswith("--dangerously-skip-permissions")
+
+
+def test_assemble_command_launches_background_tasks_supervisor(antigravity_agent: AntigravityAgent) -> None:
+    """The supervisor is the single backgrounded subshell; it owns the watchers."""
+    command = str(antigravity_agent.assemble_command(antigravity_agent.host, (), command_override=None))
+    assert command.startswith(_BACKGROUND_TASKS_LAUNCH_PREFIX), command
+    # No bare watcher subshells: the supervisor is the single entry point.
+    assert "( bash $MNGR_AGENT_STATE_DIR/commands/stream_transcript.sh ) &" not in command
+    assert "( bash $MNGR_AGENT_STATE_DIR/commands/common_transcript.sh ) &" not in command
 
 
 def test_get_expected_process_name_returns_agy(antigravity_agent: AntigravityAgent) -> None:
@@ -153,16 +170,15 @@ def test_get_expected_process_name_returns_agy(antigravity_agent: AntigravityAge
     assert antigravity_agent.get_expected_process_name() == "agy"
 
 
-def test_modify_env_vars_is_a_noop(antigravity_agent: AntigravityAgent) -> None:
-    """Antigravity has no equivalent of Gemini's GEMINI_CLI_SYSTEM_SETTINGS_PATH/GEMINI_CLI_TRUST_WORKSPACE env vars.
-
-    ``modify_env_vars`` therefore inherits the no-op default; this test pins
-    that contract so a future re-introduction of env-var injection has to be
-    explicit.
-    """
-    env_vars = {"PRE_EXISTING": "kept"}
+def test_modify_env_vars_exposes_agy_log_file_path(antigravity_agent: AntigravityAgent) -> None:
+    """The streamer needs the agy --log-file location to grep for `Created conversation`."""
+    env_vars: dict[str, str] = {"PRE_EXISTING": "kept"}
     antigravity_agent.modify_env_vars(antigravity_agent.host, env_vars)
-    assert env_vars == {"PRE_EXISTING": "kept"}
+    assert env_vars["PRE_EXISTING"] == "kept"
+    assert "ANTIGRAVITY_AGY_LOG_FILE" in env_vars
+    assert env_vars["ANTIGRAVITY_AGY_LOG_FILE"].endswith("logs/agy_cli.log")
+    # Must be inside the per-agent state dir so the path is unique per agent.
+    assert "/agents/" in env_vars["ANTIGRAVITY_AGY_LOG_FILE"]
 
 
 def test_provision_does_not_create_workspace_subdirs(antigravity_agent: AntigravityAgent) -> None:
@@ -262,3 +278,89 @@ def test_provision_pre_trust_is_idempotent(
     settings = _read_user_settings(isolated_home)
     trusted = settings["trustedWorkspaces"]
     assert trusted.count(str(antigravity_agent.work_dir)) == 1
+
+
+def _provision(agent: AntigravityAgent) -> None:
+    agent.provision(
+        host=agent.host,
+        options=CreateAgentOptions(agent_type=AgentTypeName("antigravity")),
+        mngr_ctx=agent.mngr_ctx,
+    )
+
+
+@pytest.fixture
+def antigravity_agent_without_common_transcript(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+) -> AntigravityAgent:
+    return _make_antigravity_agent(local_provider, tmp_path, AntigravityAgentConfig(emit_common_transcript=False))
+
+
+def test_provision_writes_raw_transcript_streamer(antigravity_agent: AntigravityAgent, isolated_home: Path) -> None:
+    """The raw streamer is required by HasTranscriptMixin and is provisioned unconditionally."""
+    _provision(antigravity_agent)
+    expected = antigravity_agent._get_agent_dir() / "commands" / "stream_transcript.sh"
+    assert expected.exists()
+    body = expected.read_text()
+    assert body.startswith("#!/usr/bin/env bash")
+    assert "antigravity_transcript/events.jsonl" in body
+    assert expected.stat().st_mode & 0o111
+
+
+def test_provision_writes_raw_streamer_even_when_common_transcript_disabled(
+    antigravity_agent_without_common_transcript: AntigravityAgent,
+    isolated_home: Path,
+) -> None:
+    """Raw capture is required regardless of the common-transcript flag."""
+    _provision(antigravity_agent_without_common_transcript)
+    expected = antigravity_agent_without_common_transcript._get_agent_dir() / "commands" / "stream_transcript.sh"
+    assert expected.exists()
+
+
+def test_provision_with_common_transcript_writes_converter(
+    antigravity_agent: AntigravityAgent, isolated_home: Path
+) -> None:
+    """`emit_common_transcript=True` (default) provisions common_transcript.sh."""
+    _provision(antigravity_agent)
+    expected = antigravity_agent._get_agent_dir() / "commands" / "common_transcript.sh"
+    assert expected.exists()
+    body = expected.read_text()
+    assert body.startswith("#!/usr/bin/env bash")
+    assert "events/antigravity/common_transcript/events.jsonl" in body
+    assert expected.stat().st_mode & 0o111
+
+
+def test_provision_without_common_transcript_omits_converter(
+    antigravity_agent_without_common_transcript: AntigravityAgent,
+    isolated_home: Path,
+) -> None:
+    """Disabling emit_common_transcript suppresses the converter script."""
+    _provision(antigravity_agent_without_common_transcript)
+    expected = antigravity_agent_without_common_transcript._get_agent_dir() / "commands" / "common_transcript.sh"
+    assert not expected.exists()
+
+
+def test_provision_writes_background_tasks_supervisor(
+    antigravity_agent: AntigravityAgent, isolated_home: Path
+) -> None:
+    """The supervisor is the single backgrounded entry point launched from assemble_command."""
+    _provision(antigravity_agent)
+    expected = antigravity_agent._get_agent_dir() / "commands" / "antigravity_background_tasks.sh"
+    assert expected.exists()
+    body = expected.read_text()
+    assert body.startswith("#!/usr/bin/env bash")
+    assert "stream_transcript.sh" in body
+    assert "common_transcript.sh" in body
+    assert expected.stat().st_mode & 0o111
+
+
+def test_provision_writes_supervisor_even_when_common_transcript_disabled(
+    antigravity_agent_without_common_transcript: AntigravityAgent,
+    isolated_home: Path,
+) -> None:
+    """The supervisor is unconditional; the converter check inside it is the gate."""
+    _provision(antigravity_agent_without_common_transcript)
+    expected = (
+        antigravity_agent_without_common_transcript._get_agent_dir() / "commands" / "antigravity_background_tasks.sh"
+    )
+    assert expected.exists()
