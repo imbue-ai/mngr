@@ -232,10 +232,12 @@ def _build_electron_env(workspace_git_url: Path, workspace_name: str, mngr_forwa
     don't silently leak into every workspace the test creates.
 
     Passes ``MINDS_MNGR_FORWARD_PORT`` so the spawned ``mngr forward``
-    subprocess binds to a per-test free port -- the click default 8421 is
-    hardcoded in ``backend.js`` and collides with any concurrent
-    ``just minds-start`` (or with a prior crashed test that didn't fully
-    tear down its forward supervisor).
+    subprocess binds to a per-test free port -- ``backend.js`` never
+    passes ``--mngr-forward-port`` so ``minds run`` falls back to the
+    click default (``_DEFAULT_MNGR_FORWARD_PORT = 8421`` in
+    ``apps/minds/imbue/minds/cli/run.py``), which collides with any
+    concurrent ``just minds-start`` (or with a prior crashed test that
+    didn't fully tear down its forward supervisor).
     """
     env = dict(os.environ)
     env["MINDS_WORKSPACE_GIT_URL"] = str(workspace_git_url)
