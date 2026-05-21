@@ -69,8 +69,15 @@ def test_prevent_silent_decode_error_catches() -> None:
 # --- Import style ---
 
 
+# The count here is dominated by string-literal misfires, not real inline
+# imports in module bodies: resource_guards_test.py uses pytester to compile
+# small test files at runtime, and the Python source for those files lives
+# inside triple-quoted strings with indented `import` lines that the regex
+# matches the same way it would match a real inline import. Tightening the
+# rule to skip string literals lives in imbue_common, not this package, so
+# the snapshot bump is intentional.
 def test_prevent_inline_imports() -> None:
-    rc.check_inline_imports(_DIR, snapshot(16))
+    rc.check_inline_imports(_DIR, snapshot(85))
 
 
 def test_prevent_relative_imports() -> None:
@@ -86,7 +93,7 @@ def test_prevent_importlib_import_module() -> None:
 
 
 def test_prevent_getattr() -> None:
-    rc.check_getattr(_DIR, snapshot(2))
+    rc.check_getattr(_DIR, snapshot(1))
 
 
 def test_prevent_setattr() -> None:
@@ -145,8 +152,12 @@ def test_prevent_num_prefix() -> None:
 # --- Documentation ---
 
 
+# The +1 here is `# pragma: no cover` after the `case _:` exhaustiveness
+# sentinels in _check_fixture_setup_violations / _check_guard_violations.
+# The pragma has to be on the same line as the case clause; moving it
+# above would silently disable the directive.
 def test_prevent_trailing_comments() -> None:
-    rc.check_trailing_comments(_DIR, snapshot(1))
+    rc.check_trailing_comments(_DIR, snapshot(3))
 
 
 def test_prevent_init_docstrings() -> None:
@@ -211,8 +222,17 @@ def test_prevent_unittest_mock_imports() -> None:
     rc.check_unittest_mock_imports(_DIR, snapshot(1))
 
 
+# The +1 here is the new `monkeypatch.setattr(resource_guards,
+# "_fixture_resource_marks", {})` line in testing.py::isolate_guard_state.
+# It mirrors the existing pattern of resetting every module-level guard state
+# attribute via monkeypatch so each test gets a clean slate; the new decorator
+# storage needs the same treatment to keep tests isolated.
+# The +1 after that is the new unit test for _pytest_runtest_setup that needs
+# to pretend the session-level guard wrapper directory exists; it sets the
+# module-level _guard_wrapper_dir via monkeypatch.setattr for the same reason
+# isolate_guard_state does.
 def test_prevent_monkeypatch_setattr() -> None:
-    rc.check_monkeypatch_setattr(_DIR, snapshot(9))
+    rc.check_monkeypatch_setattr(_DIR, snapshot(11))
 
 
 def test_prevent_test_container_classes() -> None:
@@ -245,8 +265,15 @@ def test_prevent_if_elif_without_else() -> None:
     rc.check_if_elif_without_else(_DIR, snapshot(0))
 
 
+# The +1 here comes from the new closures introduced by
+# @fixture_uses_resources and _make_guarded_fixture_wrapper in
+# resource_guards.py -- canonical decorator/generator-wrapper patterns
+# (an inner `decorator(func)` returned by the decorator factory and the
+# generator/plain wrappers closed over `fixture_env`). The ratchet flags
+# nested defs uniformly, so the bump is the cost of the feature rather
+# than a structural smell.
 def test_prevent_inline_functions() -> None:
-    rc.check_inline_functions(_DIR, snapshot(3))
+    rc.check_inline_functions(_DIR, snapshot(5))
 
 
 def test_prevent_underscore_imports() -> None:

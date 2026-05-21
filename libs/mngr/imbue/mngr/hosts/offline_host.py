@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
@@ -11,7 +12,10 @@ from pydantic import Field
 
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.model_update import to_update
+from imbue.imbue_common.pure import pure
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.errors import AgentNotFoundOnHostError
+from imbue.mngr.errors import DuplicateAgentNameError
 from imbue.mngr.interfaces.data_types import ActivityConfig
 from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.interfaces.data_types import SnapshotInfo
@@ -67,6 +71,26 @@ def validate_and_create_discovered_agent(
         provider_name=provider_name,
         certified_data=agent_data,
     )
+
+
+@pure
+def apply_rename_to_agent_data(
+    data: Mapping[str, Any],
+    new_name: AgentName,
+    labels_to_merge: Mapping[str, str] | None,
+) -> dict[str, Any]:
+    """Return a new agent data dict with the name updated and labels merged.
+
+    Shared by online and offline rename paths so the read-modify rule for
+    ``data.json`` is identical regardless of where the data is persisted.
+    Existing label keys are overwritten by ``labels_to_merge``.
+    """
+    updated = dict(data)
+    updated["name"] = str(new_name)
+    if labels_to_merge:
+        current_labels = dict(updated.get("labels") or {})
+        updated["labels"] = {**current_labels, **dict(labels_to_merge)}
+    return updated
 
 
 class BaseHost(HostInterface):
@@ -174,6 +198,17 @@ class BaseHost(HostInterface):
 
         return agent_refs
 
+    def _check_rename_conflict(self, agent_id: AgentId, new_name: AgentName) -> None:
+        """Raise DuplicateAgentNameError if another agent on this host uses ``new_name``.
+
+        Uses ``discover_agents()`` so the check is identical for online and
+        offline hosts (online overrides discovery to read straight from the
+        host filesystem; offline reads from the provider's persisted data).
+        """
+        for existing in self.discover_agents():
+            if existing.agent_name == new_name and existing.agent_id != agent_id:
+                raise DuplicateAgentNameError(new_name, existing.agent_id)
+
     # =========================================================================
     # Agent-Derived Information
     # =========================================================================
@@ -197,17 +232,6 @@ class BaseHost(HostInterface):
     def get_build_log(self) -> str | None:
         """Get the build log if this host failed during creation."""
         return self.get_certified_data().build_log
-
-    def get_permissions(self) -> list[str]:
-        """Get the union of all agent permissions on this host.
-
-        Uses persisted agent data from the provider to get permissions without
-        requiring the host to be online.
-        """
-        permissions: set[str] = set()
-        for agent_ref in self.discover_agents():
-            permissions.update(str(p) for p in agent_ref.permissions)
-        return list(permissions)
 
 
 def derive_offline_host_state(
@@ -297,3 +321,45 @@ class OfflineHost(BaseHost):
             to_update(data.field_ref().updated_at, datetime.now(timezone.utc)),
         )
         self.on_updated_host_data(self.id, stamped_data)
+
+    # =========================================================================
+    # Agent Operations
+    # =========================================================================
+
+    def rename_agent(
+        self,
+        agent_ref: DiscoveredAgent,
+        new_name: AgentName,
+        labels_to_merge: Mapping[str, str] | None = None,
+    ) -> DiscoveredAgent:
+        """Rename an agent on this offline host by editing the provider's persisted data.
+
+        Tmux sessions and on-host env files are not touched -- the host is
+        offline, so no tmux session exists, and the env file (which contains
+        ``MNGR_AGENT_NAME``) is regenerated when the agent is next
+        provisioned. ``data.json`` is the source of truth for the agent name.
+
+        Raises :class:`AgentNotFoundOnHostError` if the agent is missing
+        from the persisted records.
+        """
+        with log_span(
+            "Renaming offline agent",
+            agent_id=str(agent_ref.agent_id),
+            old_name=str(agent_ref.agent_name),
+            new_name=str(new_name),
+        ):
+            self._check_rename_conflict(agent_ref.agent_id, new_name)
+            target_id_str = str(agent_ref.agent_id)
+            for record in self.provider_instance.list_persisted_agent_data_for_host(self.id):
+                if record.get("id") != target_id_str:
+                    continue
+                updated = apply_rename_to_agent_data(record, new_name, labels_to_merge)
+                self.provider_instance.persist_agent_data(self.id, updated)
+                return DiscoveredAgent(
+                    host_id=self.id,
+                    agent_id=agent_ref.agent_id,
+                    agent_name=new_name,
+                    provider_name=self.provider_instance.name,
+                    certified_data=updated,
+                )
+            raise AgentNotFoundOnHostError(agent_ref.agent_id, self.id)

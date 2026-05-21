@@ -1,4 +1,4 @@
-# Minds Workspace Server: Tab Action Buttons and Sharing
+# Minds System Interface: Tab Action Buttons and Sharing
 > Note: minds_workspace_server has since been moved out of mngr to `forever-claude-template/apps/system_interface/`. Path references to `apps/minds_workspace_server/...` describe state at the time this spec was written.
 
 ## Overview

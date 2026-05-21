@@ -1,4 +1,5 @@
 import os
+import uuid
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Final
@@ -33,12 +34,19 @@ from imbue.mngr_ovh.client import build_ovh_client
 from imbue.mngr_ovh.config import OvhProviderConfig
 from imbue.mngr_ovh.iam_tags import MNGR_HOST_ID_TAG_KEY
 from imbue.mngr_ovh.iam_tags import MNGR_PROVIDER_TAG_KEY
+from imbue.mngr_ovh.iam_tags import attach_tag
 from imbue.mngr_ovh.iam_tags import attach_tags
+from imbue.mngr_ovh.iam_tags import iam_region_code_for_endpoint
 from imbue.mngr_ovh.iam_tags import list_vps_resources_for_provider
 from imbue.mngr_ovh.iam_tags import parse_extra_tags_env
 from imbue.mngr_ovh.iam_tags import vps_urn_for
+from imbue.mngr_ovh.ordering import OvhOrderDeliveryTimeoutError
 from imbue.mngr_ovh.ordering import order_and_wait_for_vps
 from imbue.mngr_ovh.ordering import rebuild_vps_with_public_key
+from imbue.mngr_ovh.ordering import try_poll_order_for_delivered_vps
+from imbue.mngr_ovh.pending_orders import delete_pending_order_marker
+from imbue.mngr_ovh.pending_orders import read_pending_order_markers
+from imbue.mngr_ovh.pending_orders import write_pending_order_marker
 from imbue.mngr_ovh.recycle import abort_recycle
 from imbue.mngr_ovh.recycle import finalize_recycle
 from imbue.mngr_ovh.recycle import try_recycle_cancelled_vps
@@ -140,6 +148,132 @@ class OvhProvider(VpsDockerProvider):
         hostnames = [r.name for r in resources if r.name]
         self._vps_iam_cache = hostnames
         return list(hostnames)
+
+    # =========================================================================
+    # Pending-order reconciliation -- adopt VPSes from previously-timed-out orders
+    # =========================================================================
+
+    def _provider_state_dir(self) -> Path:
+        """``<profile_dir>/providers/<backend>/<instance_name>/`` -- mngr's per-instance state dir.
+
+        Mirrors :meth:`VpsDockerProvider._key_dir` minus the ``keys/``
+        leaf -- this is the dir under which all per-instance state lives
+        (SSH keys, pending-order markers, ...).
+        """
+        state_dir = self.mngr_ctx.profile_dir / "providers" / str(self.config.backend) / str(self.name)
+        state_dir.mkdir(parents=True, exist_ok=True)
+        return state_dir
+
+    def _reconcile_pending_orders(self) -> None:
+        """Walk pending-order markers and adopt any newly-delivered VPSes as recycle candidates.
+
+        Runs at the top of every :meth:`_provision_vps`. For each marker
+        under ``<provider_state_dir>/pending_orders/``:
+
+        - One short poll of OVH (``try_poll_order_for_delivered_vps``).
+        - If the order has delivered: attach the ``mngr-provider`` /
+          ``mngr-host-id`` IAM tags, flip ``deleteAtExpiration=true``,
+          delete the marker. The VPS is now a recycle candidate; the
+          following ``_maybe_claim_recycled_vps`` call in the same bake
+          can pick it up immediately.
+        - If still pending: keep the marker for the next bake's reconcile.
+
+        Failure modes are all swallowed (logged at WARNING) so a
+        broken marker / transient OVH error doesn't block the current
+        bake from proceeding to its normal recycle/order path. Worst
+        case the orphan VPS gets retried on the next bake.
+        """
+        try:
+            markers = read_pending_order_markers(self._provider_state_dir())
+        except MngrError as exc:
+            logger.warning("OVH pending-orders reconcile: marker read failed ({}); skipping reconcile", exc)
+            return
+        if not markers:
+            return
+        region_code = iam_region_code_for_endpoint(self.ovh_config.endpoint)
+        provider_name = str(self.name)
+        for record in markers:
+            try:
+                service_name = try_poll_order_for_delivered_vps(
+                    self.ovh_client,
+                    order_id=record.order_id,
+                    plan_code=record.plan_code,
+                )
+            except (VpsApiError, MngrError) as exc:
+                logger.warning(
+                    "OVH pending-orders reconcile: poll for order {} failed ({}); keeping marker for next bake",
+                    record.order_id,
+                    exc,
+                )
+                continue
+            if service_name is None:
+                logger.info(
+                    "OVH pending-orders reconcile: order {} still has no delivered VPS; keeping marker",
+                    record.order_id,
+                )
+                continue
+            try:
+                self._adopt_delivered_orphan(
+                    service_name=service_name,
+                    order_id=record.order_id,
+                    provider_name=provider_name,
+                    region_code=region_code,
+                )
+            except (VpsApiError, MngrError) as exc:
+                logger.warning(
+                    "OVH pending-orders reconcile: adoption of {} (order {}) failed ({}); keeping marker",
+                    service_name,
+                    record.order_id,
+                    exc,
+                )
+                continue
+            try:
+                delete_pending_order_marker(self._provider_state_dir(), order_id=record.order_id)
+            except MngrError as exc:
+                logger.warning(
+                    "OVH pending-orders reconcile: marker delete for order {} failed ({}); "
+                    "VPS was adopted but the marker stays -- next bake will poll once and no-op",
+                    record.order_id,
+                    exc,
+                )
+
+    def _adopt_delivered_orphan(
+        self,
+        *,
+        service_name: str,
+        order_id: int,
+        provider_name: str,
+        region_code: str,
+    ) -> None:
+        """Tag a newly-discovered post-timeout VPS + flip cancel, so the recycle path sees it.
+
+        Three operations, in order:
+          1. Attach ``mngr-provider=<provider_name>`` (the recycle path's
+             primary filter).
+          2. Attach ``mngr-host-id=host-orphan-from-order-<id>-<uuid>``
+             so the orphan is traceable in ``mngr ovh list --all``.
+             The recycle path swaps this tag for the new host's real id
+             at claim time, so the placeholder value doesn't have to
+             match any in-mngr record.
+          3. ``set_renew_at_expiration(..., True)`` so the VPS satisfies
+             the recycle path's ``deleteAtExpiration`` eligibility filter.
+        """
+        placeholder_host_id = f"host-orphan-from-order-{order_id}-{uuid.uuid4().hex}"
+        urn = vps_urn_for(service_name, region_code=region_code)
+        attach_tag(self.ovh_client, urn, MNGR_PROVIDER_TAG_KEY, provider_name)
+        attach_tag(self.ovh_client, urn, MNGR_HOST_ID_TAG_KEY, placeholder_host_id)
+        self.ovh_client.set_renew_at_expiration(service_name, True)
+        # Invalidate the cached IAM list so the in-process recycle check
+        # immediately after sees the freshly-tagged VPS.
+        self._vps_iam_cache = None
+        logger.warning(
+            "OVH pending-orders reconcile: adopted slowly-delivered VPS {} from order {} "
+            "(provider={}, host_id={}); cancelled so the recycle path treats it as a candidate.",
+            service_name,
+            order_id,
+            provider_name,
+            placeholder_host_id,
+        )
 
     # =========================================================================
     # VPS provisioning -- OVH order + rebuild + TOFU + IAM tag attach
@@ -262,6 +396,11 @@ class OvhProvider(VpsDockerProvider):
         extra_tags = parse_extra_tags_env(os.environ.get("MNGR_VPS_EXTRA_TAGS", ""))
 
         with log_span("OVH provisioning for host {} ({})", name, host_id):
+            # Reconcile any previous-bake delivery-timeout markers BEFORE
+            # the recycle check, so a VPS whose order completed slowly
+            # between two bakes is immediately a recycle candidate for
+            # this bake (no extra round-trip latency in the failure case).
+            self._reconcile_pending_orders()
             recycle_handle = self._maybe_claim_recycled_vps(
                 new_host_id=host_id, requested_plan=plan, requested_region=region
             )
@@ -284,15 +423,37 @@ class OvhProvider(VpsDockerProvider):
             fresh_order_service_name: str | None = None
             try:
                 if recycle_handle is None:
-                    service_name = order_and_wait_for_vps(
-                        self.ovh_client,
-                        plan_code=plan,
-                        datacenter=region,
-                        image_name=image_name,
-                        pricing_mode=self.ovh_config.pricing_mode.to_wire_value(),
-                        duration=self.ovh_config.duration,
-                        deliver_timeout_seconds=self.ovh_config.vps_boot_timeout,
-                    )
+                    try:
+                        service_name = order_and_wait_for_vps(
+                            self.ovh_client,
+                            plan_code=plan,
+                            datacenter=region,
+                            image_name=image_name,
+                            pricing_mode=self.ovh_config.pricing_mode.to_wire_value(),
+                            duration=self.ovh_config.duration,
+                            deliver_timeout_seconds=self.ovh_config.vps_boot_timeout,
+                        )
+                    except OvhOrderDeliveryTimeoutError as exc:
+                        # OVH accepted the order but the VPS didn't deliver
+                        # within ``vps_boot_timeout``. Without intervention,
+                        # any later delivery becomes an unmanaged orphan
+                        # (no ``mngr-provider`` tag => invisible to
+                        # ``list_vps_resources_for_provider`` => the next
+                        # bake's recycle path can't see it => we leak a
+                        # full month of billing). Write a pending-order
+                        # marker so :meth:`_reconcile_pending_orders` on
+                        # the next ``mngr create`` polls OVH for this
+                        # order's VPS and tags it as a recycle candidate
+                        # once it surfaces. The bake still fails here --
+                        # the marker is the only recovery mechanism, and
+                        # it runs out-of-band on the next bake.
+                        write_pending_order_marker(
+                            self._provider_state_dir(),
+                            order_id=exc.order_id,
+                            plan_code=plan,
+                            region=region,
+                        )
+                        raise
                     fresh_order_service_name = service_name
                 else:
                     service_name = recycle_handle.service_name
@@ -309,7 +470,7 @@ class OvhProvider(VpsDockerProvider):
                 # `mngr-host-id` to the new host id under a cooperative
                 # lock -- so we skip the re-tag there to avoid two
                 # redundant POST /tag calls per recycled host.
-                urn = vps_urn_for(service_name, region_code=_iam_region_code(self.ovh_config.endpoint))
+                urn = vps_urn_for(service_name, region_code=iam_region_code_for_endpoint(self.ovh_config.endpoint))
                 if recycle_handle is None:
                     # F1: ``extra_tags`` was parsed at the very top of
                     # ``_provision_vps`` so a typo / reserved key has
@@ -432,23 +593,6 @@ class OvhProvider(VpsDockerProvider):
                 service_name,
                 e,
             )
-
-
-def _iam_region_code(endpoint: str) -> str:
-    """Map a python-ovh endpoint id (``ovh-us``) to the URN's region segment (``us``).
-
-    Recognises the ``ovh-*`` family (which is what mngr's OVH backend
-    supports). Raises ``MngrError`` for unrecognised endpoints rather
-    than silently defaulting; a wrong URN region segment makes IAM v2
-    tag operations target a non-existent resource, which would surface
-    as a confusing 404 deep inside the recycle path.
-    """
-    if endpoint.startswith("ovh-"):
-        return endpoint.removeprefix("ovh-")
-    raise MngrError(
-        f"Cannot derive IAM URN region from OVH endpoint {endpoint!r}; "
-        "expected an ``ovh-*`` endpoint id (e.g. 'ovh-us', 'ovh-eu', 'ovh-ca')."
-    )
 
 
 class OvhProviderBackend(ProviderBackendInterface):
