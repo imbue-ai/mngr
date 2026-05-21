@@ -98,44 +98,66 @@ def modal_profile_for_tier_or_none(tier: str) -> str | None:
     return workspace
 
 
+def _modal_config_path() -> Path:
+    """Resolve the path the Modal SDK reads for its config.
+
+    Mirrors Modal SDK's ``modal/config.py`` exactly:
+    ``os.environ.get('MODAL_CONFIG_PATH') or os.path.expanduser('~/.modal.toml')``.
+    Honoring ``MODAL_CONFIG_PATH`` is essential -- if we hardcoded
+    ``~/.modal.toml`` while the operator had pointed Modal at a
+    different file via the env var, our deploy-mode validation would
+    read a different file than the subsequent ``modal …`` shellout
+    actually uses, defeating the whole point of pre-validation.
+    """
+    override = os.environ.get("MODAL_CONFIG_PATH")
+    if override:
+        return Path(os.path.expanduser(override))
+    return Path.home() / ".modal.toml"
+
+
 def validate_modal_profile_exists_in_modal_toml(workspace: str) -> None:
-    """Raise ``ClickException`` if ``~/.modal.toml`` has no profile named ``workspace``.
+    """Raise ``ClickException`` if Modal's config file has no profile named ``workspace``.
 
     Called by ``minds env activate --deploy`` so the operator hits a clean
     error at activation time (with a copy-pasteable ``modal token set``
     hint) instead of a confusing Modal SDK auth failure on the first
     subsequent ``modal …`` shellout.
 
-    Reads ``$HOME/.modal.toml`` (which is also what the Modal SDK reads
-    by default). The file is TOML with one section per profile, keyed by
-    the workspace name; a matching profile is any section whose key
-    equals ``workspace`` and whose value is a table.
+    Reads the same file the Modal SDK reads: ``$MODAL_CONFIG_PATH`` if
+    set, otherwise ``$HOME/.modal.toml`` (see :func:`_modal_config_path`).
+    The file is TOML with one section per profile, keyed by the workspace
+    name; a matching profile is any section whose key equals ``workspace``
+    and whose value is a table.
 
-    A missing or unparseable ``~/.modal.toml`` is treated the same as a
-    missing profile -- the operator's mitigation is the same in either
-    case.
+    Raises a distinct ``ClickException`` for each of three failure modes
+    -- file missing, file unparseable, profile section missing -- so the
+    operator's error message names the actual cause. All three messages
+    include a copy-pasteable ``modal token set --profile <workspace>``
+    hint and name the exact config path being checked (so an operator
+    with a non-default ``MODAL_CONFIG_PATH`` doesn't get a misleading
+    pointer to ``~/.modal.toml``).
     """
-    modal_toml = Path.home() / ".modal.toml"
+    modal_toml = _modal_config_path()
     if not modal_toml.is_file():
         raise click.ClickException(
-            f"~/.modal.toml not found, so the Modal profile {workspace!r} required for "
-            f"deploy-mode activation cannot exist. Run `modal token set --profile {workspace}` "
-            f"(after `uvx modal token new` if you have no Modal account on this machine yet) "
-            f"and re-run."
+            f"Modal config file {str(modal_toml)!r} not found, so the Modal profile "
+            f"{workspace!r} required for deploy-mode activation cannot exist. Run "
+            f"`modal token set --profile {workspace}` (after `uvx modal token new` if you "
+            f"have no Modal account on this machine yet) and re-run."
         )
     try:
         data = tomllib.loads(modal_toml.read_text())
     except (OSError, tomllib.TOMLDecodeError) as exc:
         raise click.ClickException(
-            f"Could not read ~/.modal.toml ({exc}); cannot verify the {workspace!r} profile "
-            f"required for deploy-mode activation."
+            f"Could not read Modal config file {str(modal_toml)!r} ({exc}); cannot verify "
+            f"the {workspace!r} profile required for deploy-mode activation."
         ) from exc
     if not isinstance(data.get(workspace), dict):
         raise click.ClickException(
-            f"~/.modal.toml has no profile named {workspace!r}, which deploy-mode activation "
-            f"of this tier requires. Run `modal token set --profile {workspace}` (after "
-            f"`uvx modal token new` if you have no Modal account on this machine yet) and "
-            f"re-run."
+            f"Modal config file {str(modal_toml)!r} has no profile named {workspace!r}, "
+            f"which deploy-mode activation of this tier requires. Run "
+            f"`modal token set --profile {workspace}` (after `uvx modal token new` if you "
+            f"have no Modal account on this machine yet) and re-run."
         )
 
 

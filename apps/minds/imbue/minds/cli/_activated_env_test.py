@@ -50,6 +50,7 @@ def test_tier_for_env_name_dev_prefixed_with_ci_substring_still_dev() -> None:
 
 def test_validate_modal_profile_accepts_matching_section(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("MODAL_CONFIG_PATH", raising=False)
     modal_toml = tmp_path / ".modal.toml"
     modal_toml.write_text('[minds-dev]\ntoken_id = "ak-1"\ntoken_secret = "as-1"\n')
     # No exception.
@@ -58,40 +59,81 @@ def test_validate_modal_profile_accepts_matching_section(tmp_path: Path, monkeyp
 
 def test_validate_modal_profile_rejects_missing_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("MODAL_CONFIG_PATH", raising=False)
     with pytest.raises(click.ClickException) as excinfo:
         validate_modal_profile_exists_in_modal_toml("minds-staging")
-    assert "~/.modal.toml not found" in str(excinfo.value)
-    assert "modal token set --profile minds-staging" in str(excinfo.value)
+    message = str(excinfo.value)
+    assert "not found" in message
+    assert str(tmp_path / ".modal.toml") in message
+    assert "modal token set --profile minds-staging" in message
 
 
 def test_validate_modal_profile_rejects_missing_section(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("MODAL_CONFIG_PATH", raising=False)
     modal_toml = tmp_path / ".modal.toml"
     modal_toml.write_text('[minds-dev]\ntoken_id = "ak-1"\ntoken_secret = "as-1"\n')
     with pytest.raises(click.ClickException) as excinfo:
         validate_modal_profile_exists_in_modal_toml("minds-staging")
-    assert "no profile named 'minds-staging'" in str(excinfo.value)
-    assert "modal token set --profile minds-staging" in str(excinfo.value)
+    message = str(excinfo.value)
+    assert "no profile named 'minds-staging'" in message
+    assert "modal token set --profile minds-staging" in message
 
 
 def test_validate_modal_profile_rejects_unparseable_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("MODAL_CONFIG_PATH", raising=False)
     modal_toml = tmp_path / ".modal.toml"
     modal_toml.write_text("this is not valid toml = = =")
     with pytest.raises(click.ClickException) as excinfo:
         validate_modal_profile_exists_in_modal_toml("minds-dev")
-    assert "Could not read ~/.modal.toml" in str(excinfo.value)
+    message = str(excinfo.value)
+    assert "Could not read" in message
+    assert str(tmp_path / ".modal.toml") in message
 
 
 def test_validate_modal_profile_rejects_non_table_section(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A bare scalar at the workspace key is not a valid profile."""
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("MODAL_CONFIG_PATH", raising=False)
     modal_toml = tmp_path / ".modal.toml"
     # A top-level scalar key collides namespace-wise with the workspace
     # name but does not satisfy "section named workspace".
     modal_toml.write_text('"minds-dev" = "not a table"\n')
     with pytest.raises(click.ClickException):
         validate_modal_profile_exists_in_modal_toml("minds-dev")
+
+
+def test_validate_modal_profile_honors_modal_config_path_override(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When MODAL_CONFIG_PATH is set, validation must read that file (matching the Modal SDK)."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    # Profile lives in the override path, NOT in ~/.modal.toml.
+    override_path = tmp_path / "alt-modal-config.toml"
+    override_path.write_text('[minds-dev]\ntoken_id = "ak-1"\ntoken_secret = "as-1"\n')
+    monkeypatch.setenv("MODAL_CONFIG_PATH", str(override_path))
+    # Validation reads the override path and finds the profile.
+    validate_modal_profile_exists_in_modal_toml("minds-dev")
+
+
+def test_validate_modal_profile_rejects_when_override_lacks_profile_even_if_home_has_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With MODAL_CONFIG_PATH set, ~/.modal.toml is ignored entirely (mirrors Modal SDK)."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    # Profile present in HOME but not the override -- validation must
+    # still fail, because Modal SDK would read the override and miss it.
+    home_toml = tmp_path / ".modal.toml"
+    home_toml.write_text('[minds-dev]\ntoken_id = "ak-1"\ntoken_secret = "as-1"\n')
+    override_path = tmp_path / "alt-modal-config.toml"
+    override_path.write_text('[some-other-profile]\ntoken_id = "ak-1"\ntoken_secret = "as-1"\n')
+    monkeypatch.setenv("MODAL_CONFIG_PATH", str(override_path))
+    with pytest.raises(click.ClickException) as excinfo:
+        validate_modal_profile_exists_in_modal_toml("minds-dev")
+    message = str(excinfo.value)
+    assert str(override_path) in message
+    assert "no profile named 'minds-dev'" in message
 
 
 # -- require_deploy_mode_activation --

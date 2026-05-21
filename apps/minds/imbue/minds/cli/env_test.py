@@ -31,6 +31,9 @@ def _isolated_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.delenv("MINDS_ROOT_NAME", raising=False)
     monkeypatch.delenv(MODAL_PROFILE_ENV_VAR, raising=False)
+    # Make sure no inherited MODAL_CONFIG_PATH redirects deploy-mode
+    # validation away from the test's ~/.modal.toml fixture file.
+    monkeypatch.delenv("MODAL_CONFIG_PATH", raising=False)
     return tmp_path
 
 
