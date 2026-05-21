@@ -28,7 +28,6 @@ from imbue.mngr.primitives import CommandString
 from imbue.mngr.primitives import LifecycleHook
 from imbue.mngr.primitives import NewAgentLocation
 from imbue.mngr.primitives import OutputFormat
-from imbue.mngr.primitives import Permission
 from imbue.mngr.primitives import PluginName
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
@@ -186,10 +185,6 @@ class AgentTypeConfig(FrozenModel):
         default=(),
         description="Additional CLI arguments to pass to the agent",
     )
-    permissions: list[Permission] = Field(
-        default_factory=list,
-        description="Explicit list of permissions (overrides parent type permissions)",
-    )
     extra_provision_command: tuple[str, ...] = Field(
         default=(),
         description="Shell commands to run during provisioning",
@@ -229,7 +224,6 @@ class AgentTypeConfig(FrozenModel):
 
         Scalar fields: override wins if explicitly set
         Tuple fields (see AGENT_TYPE_CONCAT_TUPLE_FIELDS): concatenate
-        Lists (permissions): concatenate if explicitly set
         """
         # Allow override to be the same class or a base class of self (e.g., when
         # a secondary config file defines the same custom type without repeating
@@ -249,8 +243,6 @@ class AgentTypeConfig(FrozenModel):
         for field_name in explicitly_set:
             if field_name in AGENT_TYPE_CONCAT_TUPLE_FIELDS:
                 updates.append((field_name, merge_tuples(base_values[field_name], override_values[field_name])))
-            elif field_name == "permissions":
-                updates.append((field_name, merge_list_fields(self.permissions, override_values[field_name])))
             else:
                 updates.append((field_name, override_values[field_name]))
 
@@ -926,7 +918,6 @@ class CreateCliOptions(CommonCliOptions):
     worktree_base_folder: str | None
     start_on_boot: bool
     start_host: bool
-    grant: tuple[str, ...]
     extra_provision_command: tuple[str, ...]
     upload_file: tuple[str, ...]
     update: bool
