@@ -70,7 +70,6 @@ SECONDARY_COMMANDS = {
     "observe",
     "ovh",
     "plugin",
-    "provision",
     "schedule",
     "snapshot",
     "tmr",

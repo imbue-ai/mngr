@@ -862,15 +862,14 @@ class AgentCreator(MutableModel):
         frozen=True,
         description=(
             "Latchkey wrapper that owns the shared ``latchkey gateway`` subprocess. When "
-            "provided, agent creation derives the gateway's shared password and injects it as "
-            "``LATCHKEY_GATEWAY_PASSWORD`` into the ``mngr create`` env (so the agent's "
-            "``latchkey`` CLI authenticates), and after creation succeeds, mints a per-agent "
-            "permissions-override JWT and injects it via ``mngr provision --env --no-restart`` "
-            "so the gateway evaluates the agent's calls against its own deny-all-by-default "
-            "``latchkey_permissions.json`` instead of the gateway's shared default. ``None`` "
-            "degrades gracefully: the agent still gets ``LATCHKEY_GATEWAY=...`` (the URL is "
-            "useful by itself for tests / non-password-protected gateways), but no password "
-            "or JWT injection happens."
+            "provided, agent creation derives the gateway's shared password and a per-host "
+            "permissions-override JWT, injecting both into the ``mngr create`` env "
+            "(``LATCHKEY_GATEWAY_PASSWORD`` so the agent's ``latchkey`` CLI authenticates, "
+            "and ``LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE`` so the gateway evaluates the "
+            "agent's calls against its own deny-all-by-default ``latchkey_permissions.json`` "
+            "instead of the gateway's shared default). ``None`` degrades gracefully: the "
+            "agent still gets ``LATCHKEY_GATEWAY=...`` (the URL is useful by itself for "
+            "tests / non-password-protected gateways), but no password or JWT injection happens."
         ),
     )
     root_concurrency_group: ConcurrencyGroup = Field(
@@ -1256,14 +1255,13 @@ class AgentCreator(MutableModel):
                 # here with a deny-all baseline; after ``mngr create``
                 # returns the canonical host id, ``finalize_host_permissions``
                 # replaces that handle with a symlink to the canonical
-                # ``permissions_path_for_host`` location. This avoids
-                # the post-create ``mngr provision --env`` step (which
-                # was fragile and could silently leave
-                # ``LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE`` missing in
-                # the agent env). Every launch mode is ``is_tunneled=True``
-                # since the only on-host launch mode (DEV) was removed --
-                # all remaining modes reach the gateway via the reverse
-                # tunnel ``LatchkeyDiscoveryHandler`` sets up post-discovery.
+                # ``permissions_path_for_host`` location. The env vars are
+                # injected into the ``mngr create`` env so they are present
+                # from the start, avoiding any post-create re-provisioning
+                # step. Every launch mode is ``is_tunneled=True`` since the
+                # only on-host launch mode (DEV) was removed -- all remaining
+                # modes reach the gateway via the reverse tunnel
+                # ``LatchkeyDiscoveryHandler`` sets up post-discovery.
                 #
                 # ``prepare_agent_latchkey`` raises on infrastructure
                 # failures (latchkey CLI broken, on-disk write failed,

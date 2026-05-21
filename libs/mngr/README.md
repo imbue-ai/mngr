@@ -300,7 +300,6 @@ mngr <command> [options]
 - [`pair`](https://github.com/imbue-ai/mngr/blob/main/libs/mngr/docs/commands/primary/pair.md): Continually sync data with an agent
 - [`message`](https://github.com/imbue-ai/mngr/blob/main/libs/mngr/docs/commands/secondary/message.md): Send a message to an agent
 - [`transcript`](https://github.com/imbue-ai/mngr/blob/main/libs/mngr/docs/commands/secondary/transcript.md): View the message transcript for an agent
-- [`provision`](https://github.com/imbue-ai/mngr/blob/main/libs/mngr/docs/commands/secondary/provision.md): Re-run provisioning on an agent (useful for syncing config and auth)
 
 ### For maintenance:
 
