@@ -667,10 +667,11 @@ def resolve_provider_names_for_identifiers(
         )
     except DiscoverySchemaChangedError as e:
         logger.warning("Discovery event schema mismatch; regenerating snapshot and retrying ({})", e)
-        # _write_unfiltered_full_snapshot retries a few times internally on
-        # transient errors, so the previously-flagged "rare failure during
-        # upgrade if schema shifted and a transient error happened" is now
-        # less brittle.
+        # _write_unfiltered_full_snapshot uses ErrorBehavior.CONTINUE, so a
+        # provider that raises during this regen still produces a fresh
+        # snapshot (with the failure surfaced via error_by_provider_name).
+        # Transient retries are the providers' responsibility, not this
+        # layer's, so a hard failure inside list_agents itself will bubble.
         _write_unfiltered_full_snapshot(mngr_ctx)
         # after we've regenerated the list, we should no longer get the DiscoverySchemaChangedError anymore
         provider_by_agent_id, name_by_agent_id, destroyed_agent_ids = _replay_discovery_events_for_resolution(
