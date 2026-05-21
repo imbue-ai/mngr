@@ -2,11 +2,9 @@ Show the full agent name in the tmux status bar.
 
 User-visible changes:
 
-- When an agent's tmux session is created, mngr now widens tmux's
-  `status-left-length` to fit the full session name. Previously tmux's default
-  of 10 characters truncated names like `mngr-tmux-display` to `[mngr-tmux`,
-  with the window list mashed onto the end. The width is capped at 20 so a very
-  long agent name cannot crowd out the window list.
-- The widening is applied only when `status-left-length` is still at tmux's
-  default of 10. Any value set in the user's `~/.tmux.conf` is left untouched,
-  even one too small to fit the name.
+- mngr's generated tmux config (`~/.mngr/tmux.conf`) now sets
+  `status-left-length` to 20 so a full `mngr-...` session name shows in the
+  status bar. Previously tmux's default of 10 truncated names like
+  `mngr-tmux-display` to `[mngr-tmux`, with the window list mashed onto the end.
+- The widening is written before the user's `~/.tmux.conf` is sourced, so a
+  `status-left-length` set in the user's own config overrides it.

@@ -270,6 +270,13 @@ def _is_same_machine(a: OnlineHostInterface, b: OnlineHostInterface) -> bool:
     return a.is_local and b.is_local
 
 
+# Width mngr gives tmux's status-left so a full "mngr-..." session name shows;
+# tmux's default of 10 truncates it. status-left-length is a maximum, not a
+# fixed width, so this caps the region without padding short names. Kept small
+# so a long name can't crowd out the window list.
+_TMUX_STATUS_LEFT_LENGTH: Final[int] = 20
+
+
 class Host(OuterHost, BaseHost, OnlineHostInterface):
     """Host implementation that proxies operations through a pyinfra connector.
 
@@ -2355,9 +2362,11 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         """Create a tmux config file for the host with hotkeys for agent management.
 
         The config:
-        1. Sources the user's default tmux config if it exists (~/.tmux.conf)
-        2. Adds a Ctrl-q binding that detaches and destroys the current agent
-        3. Adds a Ctrl-t binding that detaches and stops the current agent
+        1. Widens status-left-length so full session names show, set before
+           sourcing the user config so a status-left-length in ~/.tmux.conf wins
+        2. Sources the user's default tmux config if it exists (~/.tmux.conf)
+        3. Adds a Ctrl-q binding that detaches and destroys the current agent
+        4. Adds a Ctrl-t binding that detaches and stops the current agent
 
         This uses the tmux session_name format variable in the commands,
         which expands to the current session name at runtime. This approach
@@ -2380,6 +2389,11 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         lines = [
             "# Mngr host tmux config",
             "# Auto-generated - do not edit",
+            "",
+            "# Widen status-left so full 'mngr-...' session names show instead of",
+            "# being truncated by tmux's default status-left-length of 10. Set before",
+            "# sourcing the user config so a status-left-length in ~/.tmux.conf wins.",
+            f"set -g status-left-length {_TMUX_STATUS_LEFT_LENGTH}",
             "",
             "# Source user's default tmux config if it exists",
             "if-shell 'test -f ~/.tmux.conf' 'source-file ~/.tmux.conf'",
@@ -2802,16 +2816,6 @@ def _parse_porcelain_line(line: str) -> list[str]:
     return [filename]
 
 
-# tmux's built-in default for status-left-length. mngr treats a session still
-# at this value as uncustomized and widens it; any other value is taken as a
-# user setting (from ~/.tmux.conf) and left untouched.
-_TMUX_DEFAULT_STATUS_LEFT_LENGTH: Final[int] = 10
-
-# Upper bound on the status-left width mngr will set, so a long agent name
-# can't crowd out the window list.
-_MAX_TMUX_STATUS_LEFT_LENGTH: Final[int] = 20
-
-
 @pure
 def _build_start_agent_shell_command(
     agent: AgentInterface,
@@ -2889,20 +2893,6 @@ def _build_start_agent_shell_command(
     )
     steps.append("bash -c " + shlex.quote(save_user_shell_script))
     steps.append(f"tmux set-option -t {quoted_session} default-command {shlex.quote(env_shell_cmd)}")
-
-    # Widen status-left so the full session name shows; tmux's default
-    # status-left-length of 10 truncates it and mashes the window list onto
-    # the end. The +3 covers the "[", "]" and space of tmux's default
-    # status-left format. Applied only when status-left-length is still at
-    # tmux's default -- any value a user set in ~/.tmux.conf is left alone,
-    # even one too small to fit the name.
-    status_left_length = min(len(session_name) + 3, _MAX_TMUX_STATUS_LEFT_LENGTH)
-    widen_status_left_script = (
-        f"C=$(tmux show-option -t {quoted_session} -Aqv status-left-length 2>/dev/null); "
-        f'[ "${{C:-{_TMUX_DEFAULT_STATUS_LEFT_LENGTH}}}" = {_TMUX_DEFAULT_STATUS_LEFT_LENGTH} ] '
-        f"&& tmux set-option -t {quoted_session} status-left-length {status_left_length} || true"
-    )
-    steps.append("bash -c " + shlex.quote(widen_status_left_script))
 
     # Set a one-shot client-attached hook that shows the onboarding popup
     # when the user first attaches to this tmux session. This must happen
