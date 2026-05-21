@@ -1541,7 +1541,8 @@ def _classify_host_health(list_json: str | None, agent_id: AgentId) -> dict[str,
         return {"reachable": False, "host_offline": False}
     try:
         agents = json.loads(list_json).get("agents", [])
-    except (json.JSONDecodeError, AttributeError):
+    except (json.JSONDecodeError, AttributeError) as e:
+        logger.warning("Could not parse `mngr list` output for host-health classification of {}: {}", agent_id, e)
         return {"reachable": False, "host_offline": False}
     for agent in agents:
         if not isinstance(agent, dict) or agent.get("id") != str(agent_id):
@@ -1626,8 +1627,11 @@ def _handle_recovery_page(
             # observing success. Either way, send the user back to where they
             # were going.
             return RedirectResponse(url=return_to, status_code=302)
-        # else: HEALTHY with no return_to to redirect to -- fall through and
-        # render; the page then offers a manual restart button.
+        else:
+            # HEALTHY with no return_to to redirect to: fall through and render
+            # with render_status still HEALTHY -- the page then offers a manual
+            # restart button. This is the correct no-op; nothing more to do.
+            pass
     html_body = render_recovery_page(
         agent_id=aid,
         return_to=return_to,

@@ -16,8 +16,8 @@ from imbue.minds.desktop_client.agent_creator import AgentCreator
 from imbue.minds.desktop_client.agent_creator import LOG_SENTINEL
 from imbue.minds.desktop_client.app import _build_mngr_start_argv
 from imbue.minds.desktop_client.app import _build_mngr_stop_argv
-from imbue.minds.desktop_client.app import _classify_host_health
 from imbue.minds.desktop_client.app import _build_workspace_list
+from imbue.minds.desktop_client.app import _classify_host_health
 from imbue.minds.desktop_client.app import _run_restart_sequence
 from imbue.minds.desktop_client.app import create_desktop_client
 from imbue.minds.desktop_client.auth import FileAuthStore
