@@ -266,6 +266,48 @@ def test_code_action_pairs_with_preceding_planner_response_tool_call(state_dir: 
     assert tool_result["is_error"] is False
 
 
+def test_planner_response_with_multiple_tool_calls_pairs_last_with_code_action(state_dir: Path) -> None:
+    """A multi-tool-call PLANNER_RESPONSE lists every tool_call but only the last one
+    gets paired with the subsequent CODE_ACTION.
+
+    This documents the converter's current behavior: agy emits one CODE_ACTION
+    per planner response (per the script's top-level docstring) regardless of
+    how many tool_calls the response contained, so only the last tool_call has
+    a matching tool_result event. The earlier tool_calls still appear in the
+    assistant_message.tool_calls array. If agy's emit pattern ever changes to
+    one CODE_ACTION per tool_call, this test (and the pairing logic) will need
+    to be revisited.
+    """
+    _write_raw_transcript(
+        state_dir,
+        [
+            _user_input("conv-A", 0, "do two things"),
+            _planner_response(
+                "conv-A",
+                2,
+                tool_calls=[
+                    {"name": "first_tool", "args": {"a": 1}},
+                    {"name": "second_tool", "args": {"b": 2}},
+                ],
+            ),
+            _code_action("conv-A", 3, content="paired output"),
+        ],
+    )
+
+    _run_converter(state_dir)
+
+    events = _read_common_events(state_dir)
+    assistant = next(e for e in events if e["type"] == "assistant_message")
+    assert [tc["tool_name"] for tc in assistant["tool_calls"]] == ["first_tool", "second_tool"]
+    assert [tc["tool_call_id"] for tc in assistant["tool_calls"]] == ["conv-A-2-tc0", "conv-A-2-tc1"]
+
+    tool_results = [e for e in events if e["type"] == "tool_result"]
+    assert len(tool_results) == 1
+    # The CODE_ACTION pairs with the LAST tool_call (tc1), not the first.
+    assert tool_results[0]["tool_call_id"] == "conv-A-2-tc1"
+    assert tool_results[0]["tool_name"] == "second_tool"
+
+
 def test_code_action_with_failed_status_marks_is_error(state_dir: Path) -> None:
     _write_raw_transcript(
         state_dir,
