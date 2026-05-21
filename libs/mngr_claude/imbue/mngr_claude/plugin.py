@@ -1434,8 +1434,8 @@ class ClaudeAgent(InteractiveTuiAgent[ClaudeAgentConfig], HasCommonTranscriptMix
 
         When ``use_env_config_dir=True``: resolve to the value of
         ``$CLAUDE_CONFIG_DIR`` (the user's shared config dir), so multiple
-        agents share a single directory. Raises ``UserInputError`` if the env
-        var is unset.
+        agents share a single directory. When the env var is unset, falls
+        back to ``~/.claude/`` so the agent uses claude's own default.
         """
         if self.agent_config.use_env_config_dir:
             return resolve_shared_claude_config_dir()
@@ -1646,9 +1646,9 @@ class ClaudeAgent(InteractiveTuiAgent[ClaudeAgentConfig], HasCommonTranscriptMix
         Interactive and auto-approve runs skip these checks because
         provision() will handle them.
 
-        In ``use_env_config_dir`` mode: enforce local-only + require
-        $CLAUDE_CONFIG_DIR to be set, and skip the dialog-dismissal
-        validation entirely (user is responsible for their own config).
+        In ``use_env_config_dir`` mode: enforce local-only, and skip the
+        dialog-dismissal validation entirely (user is responsible for their
+        own config; mngr makes no writes to it).
         """
         config = self.agent_config
 
@@ -1659,9 +1659,6 @@ class ClaudeAgent(InteractiveTuiAgent[ClaudeAgentConfig], HasCommonTranscriptMix
                     "this agent targets a non-local host. Disable use_env_config_dir "
                     "or move the agent to a local host."
                 )
-            # Side-effect: raises if $CLAUDE_CONFIG_DIR is unset, surfacing the
-            # error inside on_before_provisioning's normal error path.
-            resolve_shared_claude_config_dir()
         # Validate dialogs for non-interactive local runs so we fail early with
         # a clear message. Skip when auto_dismiss_dialogs is True because
         # provision() will auto-dismiss all dialogs in that case. Skip entirely
