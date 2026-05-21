@@ -52,7 +52,6 @@ Many (most) programs that you want to run as agents will support additional "cap
 - Agents can expose URLs for web interfaces (and the default plugins automatically create a secure web terminal via ttyd for CLI agents [future])
 - Agents can be sent messages via `mngr message` (for example, to provide user input or commands). This applies to all unix process (since we're just writing to stdin).
 - Agents can be created recursively (and, with the `recursive_mngr` plugin, understand their "parent" agents and create remote child agents as well).
-- Agents can have a list of "permissions" that control both what they are allowed to do and what information they have access to. See [permissions](./permissions.md) for more details.
 - Agents can define custom properties for any additional functionality (e.g., providing a stream of events, exposing a REST API, etc.)
 
 ## Hierarchy
