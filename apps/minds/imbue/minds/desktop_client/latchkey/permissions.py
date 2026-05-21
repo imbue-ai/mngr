@@ -22,7 +22,6 @@ import asyncio
 import html as html_module
 import json
 import shlex
-import subprocess
 from collections.abc import Sequence
 from enum import auto
 from pathlib import Path
@@ -197,86 +196,6 @@ def _resolve_workspace_name(
 
 
 _MNGR_LIST_FALLBACK_TIMEOUT_SECONDS: Final[float] = 15.0
-
-
-def _resolve_host_id_via_mngr_list(agent_id: AgentId) -> HostId | None:
-    """Authoritative agent_id -> host_id lookup via ``mngr list --format json``.
-
-    Used as a cache-miss fallback for the in-memory discovery view, which
-    can lag for agents created after stream start. Uses ``--on-error
-    continue`` so a single unreachable provider does not collapse the
-    answer for agents on the providers that are reachable.
-    """
-    try:
-        completed = subprocess.run(
-            [MNGR_BINARY, "list", "--format", "json", "--on-error", "continue"],
-            capture_output=True,
-            text=True,
-            timeout=_MNGR_LIST_FALLBACK_TIMEOUT_SECONDS,
-            check=False,
-        )
-    except (OSError, subprocess.TimeoutExpired) as e:
-        logger.warning("mngr list fallback for agent {} failed: {}", agent_id, e)
-        return None
-    if completed.returncode != 0:
-        logger.warning(
-            "mngr list fallback for agent {} exited {}: {}",
-            agent_id,
-            completed.returncode,
-            completed.stderr.strip()[-500:],
-        )
-        return None
-    try:
-        payload = json.loads(completed.stdout)
-    except json.JSONDecodeError as e:
-        logger.warning("mngr list fallback for agent {} returned non-JSON: {}", agent_id, e)
-        return None
-    target = str(agent_id)
-    for agent in payload.get("agents", ()):
-        if agent.get("id") != target:
-            continue
-        host = agent.get("host") or {}
-        raw_host_id = host.get("id")
-        if not isinstance(raw_host_id, str):
-            return None
-        try:
-            return HostId(raw_host_id)
-        except ValueError:
-            return None
-    return None
-
-
-def _resolve_host_id(
-    backend_resolver: BackendResolverInterface,
-    agent_id: AgentId,
-) -> HostId | None:
-    """Resolve the host an agent runs on, or ``None`` when no provider knows it.
-
-    Latchkey permissions are stored per-host (see :func:`permissions_path_for_host`):
-    every agent on the same host shares the same gateway wiring and the
-    same ``latchkey_permissions.json``. The handler maps the incoming
-    agent_id (carried by the permission request event) to its host_id
-    via the backend resolver, which has the discovery-stream view of
-    which agents live on which hosts. On a cache miss (the stream lags
-    for agents created after subscription), fall back to ``mngr list
-    --format json`` for an authoritative answer; this is the same data
-    source the stream is built from. Static / in-memory resolvers used
-    by tests report a non-``HostId`` placeholder; that is treated as
-    unknown so callers skip the existing-grants lookup rather than
-    crash on every dialog render.
-    """
-    info = backend_resolver.get_agent_display_info(agent_id)
-    if info is None:
-        return _resolve_host_id_via_mngr_list(agent_id)
-    try:
-        return HostId(info.host_id)
-    except ValueError:
-        logger.debug(
-            "Backend resolver reported non-HostId host {!r} for agent {}; treating as unknown",
-            info.host_id,
-            agent_id,
-        )
-        return None
 
 
 def _render_unknown_scope_page(request_id: str, scope: str) -> Response:
@@ -484,6 +403,78 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
         )
         return message, response_event
 
+    # -- Host resolution -----------------------------------------------------
+
+    def _resolve_host_id(self, backend_resolver: BackendResolverInterface, agent_id: AgentId) -> HostId | None:
+        """Resolve the host an agent runs on, or ``None`` when no provider knows it.
+
+        Latchkey permissions are stored per-host (see
+        :func:`permissions_path_for_host`): every agent on a host shares
+        the same gateway wiring and ``latchkey_permissions.json``. On a
+        cache miss -- the discovery stream lags for agents created after
+        subscription -- fall back to ``mngr list`` for an authoritative
+        answer. A non-``HostId`` placeholder (the static resolver's
+        ``"localhost"``) is treated as unknown so callers skip the
+        existing-grants lookup rather than mis-key state.
+        """
+        info = backend_resolver.get_agent_display_info(agent_id)
+        if info is None:
+            return self._resolve_host_id_via_mngr_list(agent_id)
+        try:
+            return HostId(info.host_id)
+        except ValueError:
+            logger.debug(
+                "Backend resolver reported non-HostId host {!r} for agent {}; treating as unknown",
+                info.host_id,
+                agent_id,
+            )
+            return None
+
+    def _resolve_host_id_via_mngr_list(self, agent_id: AgentId) -> HostId | None:
+        """Authoritative agent_id -> host_id lookup via ``mngr list --format json``.
+
+        ``--on-error continue`` keeps one unreachable provider from
+        collapsing the answer for agents on reachable providers. Tests
+        override this with a concrete stub so the unit suite never shells
+        out.
+        """
+        cg = ConcurrencyGroup(name="mngr-list-host-resolve")
+        with cg:
+            result = cg.run_process_to_completion(
+                command=[MNGR_BINARY, "list", "--format", "json", "--on-error", "continue"],
+                timeout=_MNGR_LIST_FALLBACK_TIMEOUT_SECONDS,
+                is_checked_after=False,
+            )
+        if result.is_timed_out:
+            logger.warning("mngr list fallback for agent {} timed out", agent_id)
+            return None
+        if result.returncode != 0:
+            logger.warning(
+                "mngr list fallback for agent {} exited {}: {}",
+                agent_id,
+                result.returncode,
+                result.stderr.strip()[-500:],
+            )
+            return None
+        try:
+            payload = json.loads(result.stdout)
+        except json.JSONDecodeError as e:
+            logger.warning("mngr list fallback for agent {} returned non-JSON: {}", agent_id, e)
+            return None
+        target = str(agent_id)
+        for agent in payload.get("agents", ()):
+            if agent.get("id") != target:
+                continue
+            host = agent.get("host") or {}
+            raw_host_id = host.get("id")
+            if not isinstance(raw_host_id, str):
+                return None
+            try:
+                return HostId(raw_host_id)
+            except ValueError:
+                return None
+        return None
+
     # -- RequestEventHandler interface ---------------------------------------
 
     def handles_request_type(self) -> str:
@@ -526,7 +517,7 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
 
         parsed_id = AgentId(req_event.agent_id)
         ws_name = _resolve_workspace_name(backend_resolver, parsed_id, fallback=req_event.agent_id)
-        host_id = _resolve_host_id(backend_resolver, parsed_id)
+        host_id = self._resolve_host_id(backend_resolver, parsed_id)
         pre_checked = self._initial_checked_permissions(host_id, service_info, req_event.permissions)
 
         # Match ``grant()``: ``latchkey auth browser`` runs only when
@@ -581,7 +572,7 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
         request_event_id = str(req_event.event_id)
         parsed_agent_id = AgentId(req_event.agent_id)
         backend_resolver: BackendResolverInterface = request.app.state.backend_resolver
-        host_id = _resolve_host_id(backend_resolver, parsed_agent_id)
+        host_id = self._resolve_host_id(backend_resolver, parsed_agent_id)
         if host_id is None:
             return _json_error(
                 f"Could not resolve host for agent {parsed_agent_id}; cannot apply grant.",

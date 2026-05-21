@@ -9,7 +9,6 @@ import uuid
 from collections.abc import Sequence
 from pathlib import Path
 
-import pytest
 from fastapi import FastAPI
 from fastapi import Request
 from fastapi.responses import Response
@@ -28,7 +27,6 @@ from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
 from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
 from imbue.minds.desktop_client.cookie_manager import create_session_cookie
-from imbue.minds.desktop_client.latchkey import permissions as permissions_module
 from imbue.minds.desktop_client.latchkey.permissions import GrantOutcome
 from imbue.minds.desktop_client.latchkey.permissions import GrantResult
 from imbue.minds.desktop_client.latchkey.permissions import LatchkeyPermissionGrantHandler
@@ -80,6 +78,10 @@ class _RecordingHandler(LatchkeyPermissionGrantHandler):
     deny_message: str = Field(default="denied")
     grant_calls: list[dict[str, object]] = Field(default_factory=list)
     deny_calls: list[dict[str, object]] = Field(default_factory=list)
+    mngr_list_host_id: HostId | None = Field(
+        default=None,
+        description="Host id the stubbed mngr-list fallback returns; None means the fallback finds nothing.",
+    )
 
     def grant(
         self,
@@ -144,6 +146,10 @@ class _RecordingHandler(LatchkeyPermissionGrantHandler):
         )
         return self.deny_message, response_event
 
+    def _resolve_host_id_via_mngr_list(self, agent_id: AgentId) -> HostId | None:
+        """Stub the ``mngr list`` fallback so routing tests never shell out."""
+        return self.mngr_list_host_id
+
 
 def _get_app_request_inbox(client: TestClient) -> RequestInbox:
     """Pull the live request inbox out of the FastAPI app behind a TestClient."""
@@ -177,6 +183,7 @@ def _make_recording_handler(
     grant_outcome: GrantOutcome = GrantOutcome.GRANTED,
     grant_message: str = "granted",
     grant_set_credentials_example: str | None = None,
+    mngr_list_host_id: HostId | None = None,
 ) -> _RecordingHandler:
     """Build a ``_RecordingHandler`` with stub probes that won't be exercised in routing tests."""
     gateway_client = build_fake_gateway_client()
@@ -190,6 +197,7 @@ def _make_recording_handler(
         grant_outcome=grant_outcome,
         grant_message=grant_message,
         grant_set_credentials_example=grant_set_credentials_example,
+        mngr_list_host_id=mngr_list_host_id,
     )
 
 
@@ -566,18 +574,16 @@ def test_get_permission_request_page_pre_checks_union_of_existing_and_requested(
     assert "checked" not in body[read_all_tag_start:read_all_tag_end]
 
 
-def test_post_permission_grant_returns_503_when_host_not_yet_discovered(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_post_permission_grant_returns_503_when_host_not_yet_discovered(tmp_path: Path) -> None:
     """Grant fails fast when the agent's host can't be resolved.
 
     Latchkey state is keyed by host_id; if the backend resolver hasn't
     seen the agent yet (or only reports a non-:class:`HostId` placeholder
     like the static resolver's default ``"localhost"``) the route would
     otherwise write the grant to the wrong file. 503 tells the UI to
-    retry, instead of silently mis-keying state. The ``mngr list``
-    fallback is patched to also return ``None`` so both resolution
-    paths fail and the 503 path is exercised in isolation.
+    retry, instead of silently mis-keying state. The handler's stubbed
+    ``mngr list`` fallback also returns ``None`` (its default) so both
+    resolution paths fail and the 503 path is exercised in isolation.
     """
     agent_id = AgentId()
     request = create_latchkey_permission_request_event(
@@ -588,7 +594,6 @@ def test_post_permission_grant_returns_503_when_host_not_yet_discovered(
     inbox = RequestInbox().add_request(request)
     handler = _make_recording_handler(tmp_path)
     client = _build_authenticated_client(tmp_path, handler, inbox)
-    monkeypatch.setattr(permissions_module, "_resolve_host_id_via_mngr_list", lambda _agent_id: None)
 
     response = client.post(
         f"/requests/{request.event_id}/grant",
@@ -601,14 +606,12 @@ def test_post_permission_grant_returns_503_when_host_not_yet_discovered(
     assert final_inbox.get_pending_count() == 1
 
 
-def test_post_permission_grant_uses_mngr_list_fallback_when_cache_misses(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_post_permission_grant_uses_mngr_list_fallback_when_cache_misses(tmp_path: Path) -> None:
     """Grant succeeds when the resolver's cache misses but ``mngr list`` knows the agent.
 
     The desktop client's in-memory discovery cache can lag behind agents
     created after subscription (the bug observed with Lima/Docker child
-    agents). The route layer falls back to ``mngr list --format json
+    agents). The handler falls back to ``mngr list --format json
     --on-error continue`` for an authoritative agent_id -> host_id
     lookup; without that fallback an Approve click would 503 every time
     the cache hadn't caught up.
@@ -621,14 +624,9 @@ def test_post_permission_grant_uses_mngr_list_fallback_when_cache_misses(
         rationale="reason",
     )
     inbox = RequestInbox().add_request(request)
-    handler = _make_recording_handler(tmp_path)
     # No ``agent_id=`` kwarg -> default ``StaticBackendResolver`` -> cache miss.
+    handler = _make_recording_handler(tmp_path, mngr_list_host_id=fallback_host_id)
     client = _build_authenticated_client(tmp_path, handler, inbox)
-    monkeypatch.setattr(
-        permissions_module,
-        "_resolve_host_id_via_mngr_list",
-        lambda _agent_id: fallback_host_id,
-    )
 
     response = client.post(
         f"/requests/{request.event_id}/grant",
