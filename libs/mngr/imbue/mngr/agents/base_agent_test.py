@@ -24,7 +24,6 @@ from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import CommandString
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import InvalidName
-from imbue.mngr.primitives import Permission
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr.utils.polling import wait_for
 from imbue.mngr.utils.testing import cleanup_tmux_session
@@ -565,29 +564,6 @@ def test_get_command_returns_bash_when_no_command(
     data_path.write_text(json.dumps(data, indent=2))
 
     assert test_agent.get_command() == CommandString("bash")
-
-
-# =========================================================================
-# get_permissions / set_permissions tests
-# =========================================================================
-
-
-def test_get_permissions_returns_empty_list_by_default(
-    test_agent: BaseAgent,
-) -> None:
-    """Test that get_permissions returns an empty list when none are set."""
-    assert test_agent.get_permissions() == []
-
-
-def test_set_and_get_permissions(
-    test_agent: BaseAgent,
-) -> None:
-    """Test that set_permissions persists and get_permissions retrieves them."""
-    perms = [Permission("read"), Permission("write"), Permission("execute")]
-    test_agent.set_permissions(perms)
-
-    result = test_agent.get_permissions()
-    assert result == perms
 
 
 # =========================================================================

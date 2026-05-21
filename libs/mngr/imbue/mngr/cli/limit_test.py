@@ -6,7 +6,6 @@ from click.testing import CliRunner
 
 from imbue.mngr.cli.limit import LimitCliOptions
 from imbue.mngr.cli.limit import _build_updated_activity_config
-from imbue.mngr.cli.limit import _build_updated_permissions
 from imbue.mngr.cli.limit import _has_agent_level_settings
 from imbue.mngr.cli.limit import _has_any_setting
 from imbue.mngr.cli.limit import _has_host_level_settings
@@ -19,7 +18,6 @@ from imbue.mngr.primitives import AgentAddress
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import IdleMode
 from imbue.mngr.primitives import OutputFormat
-from imbue.mngr.primitives import Permission
 
 
 def _make_limit_opts(
@@ -29,8 +27,6 @@ def _make_limit_opts(
     add_activity_source: tuple[str, ...] = (),
     remove_activity_source: tuple[str, ...] = (),
     start_on_boot: bool | None = None,
-    grant: tuple[str, ...] = (),
-    revoke: tuple[str, ...] = (),
 ) -> LimitCliOptions:
     """Create a LimitCliOptions with sensible defaults, allowing overrides."""
     return LimitCliOptions(
@@ -43,8 +39,6 @@ def _make_limit_opts(
         activity_sources=activity_sources,
         add_activity_source=add_activity_source,
         remove_activity_source=remove_activity_source,
-        grant=grant,
-        revoke=revoke,
         refresh_ssh_keys=False,
         add_ssh_key=(),
         remove_ssh_key=(),
@@ -70,8 +64,6 @@ def test_limit_cli_options_fields() -> None:
         activity_sources=None,
         add_activity_source=(),
         remove_activity_source=(),
-        grant=(),
-        revoke=(),
         refresh_ssh_keys=False,
         add_ssh_key=(),
         remove_ssh_key=(),
@@ -134,48 +126,6 @@ def test_limit_host_only_rejects_agent_settings(
 
     assert result.exit_code != 0
     assert "Agent-level settings" in result.output
-
-
-def test_build_updated_permissions_grant() -> None:
-    """Test that grant adds permissions."""
-    current = [Permission("read")]
-    result = _build_updated_permissions(
-        current=current,
-        grant=("write", "execute"),
-        revoke=(),
-    )
-    result_strs = [str(p) for p in result]
-    assert "read" in result_strs
-    assert "write" in result_strs
-    assert "execute" in result_strs
-
-
-def test_build_updated_permissions_revoke() -> None:
-    """Test that revoke removes permissions."""
-    current = [Permission("read"), Permission("write"), Permission("execute")]
-    result = _build_updated_permissions(
-        current=current,
-        grant=(),
-        revoke=("write",),
-    )
-    result_strs = [str(p) for p in result]
-    assert "read" in result_strs
-    assert "write" not in result_strs
-    assert "execute" in result_strs
-
-
-def test_build_updated_permissions_grant_and_revoke() -> None:
-    """Test grant and revoke in one call."""
-    current = [Permission("read"), Permission("write")]
-    result = _build_updated_permissions(
-        current=current,
-        grant=("network",),
-        revoke=("write",),
-    )
-    result_strs = [str(p) for p in result]
-    assert "read" in result_strs
-    assert "network" in result_strs
-    assert "write" not in result_strs
 
 
 def test_build_updated_activity_config_idle_timeout() -> None:
@@ -339,8 +289,6 @@ def test_has_host_level_settings(opts: LimitCliOptions, expected: bool) -> None:
     ("opts", "expected"),
     [
         pytest.param(_make_limit_opts(start_on_boot=True), True, id="start_on_boot"),
-        pytest.param(_make_limit_opts(grant=("read",)), True, id="grant"),
-        pytest.param(_make_limit_opts(revoke=("write",)), True, id="revoke"),
         pytest.param(_make_limit_opts(), False, id="none"),
     ],
 )

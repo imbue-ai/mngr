@@ -99,7 +99,14 @@ class OvhProviderConfig(VpsDockerProviderConfig):
     )
     vps_boot_timeout: float = Field(
         default=600.0,
-        description="Seconds to wait for an OVH order to deliver a VPS (slower than direct-create APIs).",
+        description=(
+            "Seconds to wait for an OVH order to deliver a VPS (slower than direct-create APIs). "
+            "On timeout, ``_provision_vps`` writes a pending-order marker under the provider's "
+            "state dir; the next ``mngr create`` runs ``_reconcile_pending_orders`` at the top "
+            "of ``_provision_vps`` and adopts any VPS that has since delivered as a recycle "
+            "candidate. No inline extended wait happens here -- the failing bake exits at this "
+            "timeout, and recovery is eventually-consistent across subsequent bakes."
+        ),
     )
     ovh_subsidiary: str = Field(
         default="US",
