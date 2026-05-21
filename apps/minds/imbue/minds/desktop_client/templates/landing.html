@@ -100,6 +100,9 @@
         } else if (status === 'restarting') {
           badge.textContent = 'Restarting...';
           badge.className = 'landing-health-badge inline-flex items-center px-2 py-0.5 rounded text-sm font-medium bg-amber-100 text-amber-800';
+        } else if (status === 'restart_failed') {
+          badge.textContent = 'Restart failed';
+          badge.className = 'landing-health-badge inline-flex items-center px-2 py-0.5 rounded text-sm font-medium bg-amber-100 text-amber-800';
         } else {
           badge.textContent = '';
           badge.className = 'landing-health-badge hidden inline-flex items-center px-2 py-0.5 rounded text-sm font-medium';
@@ -109,7 +112,7 @@
       window.landingRowClick = function (row) {
         var agentId = row.dataset.agentId;
         var status = healthStatusByAgent[agentId];
-        if (status === 'stuck' || status === 'restarting') {
+        if (status === 'stuck' || status === 'restarting' || status === 'restart_failed') {
           var ret = row.dataset.defaultHref || '';
           window.location = '/agents/' + encodeURIComponent(agentId) + '/recovery?return_to=' + encodeURIComponent(ret);
         } else {
