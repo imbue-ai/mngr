@@ -9,10 +9,18 @@ it) and the fixture deploying to the default `main` environment, leaked
 apps accumulated silently in `main` until they hit the workspace's deployed-
 app cap.
 
-This change adds `register_modal_test_app(app_name)` to the fixture setup
-so the leak detector can surface any future failures.
+This change:
 
-This is a partial fix focused on detection. The underlying design issues
-(`deploy_function(..., environment_name=None, ...)` deploying to `main`,
-and `_stop_app` not actually deleting the app) are tracked separately and
-require a larger refactor of the fixture's env routing.
+- Adds `register_modal_test_app(app_name)` to the fixture setup so the leak
+  detector can surface any future failures.
+- Hardens `_stop_app` and `_delete_volume` in the same file: explicit
+  `--env main` (since the fixture deploys there), explicit `--yes` instead
+  of feeding stdin, and a `logger.warning` when the subprocess returns
+  non-zero so silent cleanup failures stop being invisible.
+
+This is a partial fix focused on detection and visibility. The underlying
+design issue -- `deploy_function(..., environment_name=None, ...)` deploying
+to `main` and `modal app stop` only transitioning the row to `stopped` (not
+deleting it) -- still requires a larger refactor that routes the fixture
+through a per-test Modal env so `modal environment delete` can cascade the
+app away on teardown.
