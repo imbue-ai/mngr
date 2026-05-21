@@ -1270,7 +1270,7 @@ def env_recover(_ctx: click.Context) -> None:
                 f"No recover-target file for activated env {env_name!r} at "
                 f"{recover_target_path(repo_root=repo_root, env_name=env_name)}. Other recover-target files exist:\n"
                 f"{leftover_list}\nActivate the env you want to recover (e.g. "
-                f'`eval "$(uv run minds env activate <env-name>)"`) and re-run.'
+                f'`eval "$(uv run minds env activate --deploy <env-name>)"`) and re-run.'
             )
         raise click.ClickException(
             f"No recover-target file at {recover_target_path(repo_root=repo_root, env_name=env_name)}; "
