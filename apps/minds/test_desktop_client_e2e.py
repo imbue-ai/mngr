@@ -467,6 +467,7 @@ def _destroy_agent_best_effort(workspace_name: str) -> None:
 @pytest.mark.acceptance
 @pytest.mark.docker
 @pytest.mark.rsync
+@pytest.mark.minds_electron
 @pytest.mark.timeout(900)
 def test_create_local_docker_workspace_via_electron(
     tmp_path: Path,
