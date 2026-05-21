@@ -2550,29 +2550,34 @@ def _parse_refresh_service_name(raw_line: str) -> str | None:
 async def _dispatch_refresh_broadcast(app: FastAPI, agent_id: AgentId, service_name: str) -> None:
     """POST to the agent's system interface so it emits a refresh_service WS broadcast.
 
-    Routed through the ``mngr forward`` plugin's per-agent subdomain
-    (``<agent>.localhost:<plugin_port>``) so we reuse the plugin's existing
-    SSH tunnel to the agent rather than maintaining one in minds. Auth on
-    the plugin uses the same ``preauth_cookie`` value the plugin trusts for
-    the Electron-shell pre-set; minds knows that value because it minted it
-    in ``cli/run.py``. Errors are logged but swallowed -- a missed refresh
-    is never worth crashing on.
+    Routed through the ``mngr forward`` plugin's per-agent subdomain so we
+    reuse the plugin's existing SSH tunnel to the agent rather than
+    maintaining one in minds. The request connects to the plugin on loopback
+    and carries the agent's ``agent-<hex>.localhost`` vhost in the ``Host``
+    header (the plugin routes on that header), so it does not depend on
+    ``*.localhost`` name resolution. Auth on the plugin uses the same
+    ``preauth_cookie`` value the plugin trusts for the Electron-shell
+    pre-set; minds knows that value because it minted it in ``cli/run.py``.
+    Errors are logged but swallowed -- a missed refresh is never worth
+    crashing on.
     """
     plugin_port: int = app.state.mngr_forward_port or 8421
     preauth_cookie: str | None = app.state.mngr_forward_preauth_cookie
     if preauth_cookie is None:
         logger.debug("Refresh broadcast skipped for {}/{}: no preauth cookie wired", agent_id, service_name)
         return
-    url = f"http://{agent_id}.localhost:{plugin_port}/api/refresh-service/{service_name}/broadcast"
+    url = f"http://127.0.0.1:{plugin_port}/api/refresh-service/{service_name}/broadcast"
+    host_header = f"{agent_id}.localhost"
     http_client: httpx.AsyncClient = app.state.http_client
     try:
         response = await http_client.post(
             url,
+            headers={"Host": host_header},
             cookies={"mngr_forward_session": preauth_cookie},
         )
         response.raise_for_status()
     except httpx.HTTPError as e:
-        logger.warning("Refresh broadcast POST to {} failed: {}", url, e)
+        logger.warning("Refresh broadcast POST to {} ({}) failed: {}", url, host_header, e)
 
 
 def _log_refresh_dispatch_result(

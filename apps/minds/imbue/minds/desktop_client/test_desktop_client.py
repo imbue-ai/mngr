@@ -1428,9 +1428,10 @@ def _build_refresh_test_app(
 
 def test_refresh_event_posts_to_system_interface_broadcast(tmp_path: Path) -> None:
     """A refresh event on the mngr event stream triggers a POST to the
-    plugin's per-agent subdomain so the system interface broadcasts. The URL
-    is on the plugin's port and the request carries the ``mngr_forward_session``
-    cookie (set to the preauth value minds wired in)."""
+    plugin so the system interface broadcasts. The request connects to the
+    plugin on loopback, carries the agent's ``agent-<hex>.localhost`` vhost in
+    the ``Host`` header, and carries the ``mngr_forward_session`` cookie (set
+    to the preauth value minds wired in)."""
     agent_id = AgentId()
     service_name = "web"
 
@@ -1453,10 +1454,10 @@ def test_refresh_event_posts_to_system_interface_broadcast(tmp_path: Path) -> No
     assert len(received) == 1, f"expected one POST, got {len(received)}: {[str(r.url) for r in received]}"
     request = received[0]
     assert request.method == "POST"
-    expected_url = (
-        f"http://{agent_id}.localhost:{_TEST_MNGR_FORWARD_PORT}/api/refresh-service/{service_name}/broadcast"
-    )
+    expected_url = f"http://127.0.0.1:{_TEST_MNGR_FORWARD_PORT}/api/refresh-service/{service_name}/broadcast"
     assert str(request.url) == expected_url
+    # The agent vhost rides in the Host header so routing does not need DNS.
+    assert request.headers.get("host") == f"{agent_id}.localhost"
     cookie_header = request.headers.get("cookie", "")
     assert f"mngr_forward_session={_TEST_PREAUTH_COOKIE}" in cookie_header
 

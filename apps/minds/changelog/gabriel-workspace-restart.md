@@ -34,8 +34,10 @@ Tiered system-interface restart for the minds recovery flow.
   probe loop confirms it unreachable with a sustained run of failed HTTP
   probes; a single transient backend hiccup (such as a recycled SSE
   stream) merely starts active probing instead of triggering recovery.
-- The workspace-readiness and health probes now reach the forwarding
-  plugin over loopback and carry the agent's ``agent-<hex>.localhost``
-  vhost in the ``Host`` header, instead of putting the subdomain in the
-  request URL. This makes probing independent of ``*.localhost`` name
-  resolution, which is not available on every host.
+- Minds' HTTP calls through the forwarding plugin -- the
+  workspace-readiness / health probes and the refresh-service broadcast
+  POST -- now connect to the plugin over loopback and carry the agent's
+  ``agent-<hex>.localhost`` vhost in the ``Host`` header, instead of
+  putting the subdomain in the request URL. The plugin already routes on
+  the ``Host`` header, so this makes those calls independent of
+  ``*.localhost`` name resolution, which is not available on every host.
