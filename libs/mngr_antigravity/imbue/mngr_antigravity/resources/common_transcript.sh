@@ -217,7 +217,8 @@ def convert():
                 event_id = f"{conv_id}-{step_index}-tool_result"
                 if event_id in existing_ids:
                     continue
-                output = _truncate(raw.get("content", ""), _MAX_OUTPUT_LENGTH)
+                raw_content = raw.get("content", "")
+                output = _truncate(raw_content if isinstance(raw_content, str) else "", _MAX_OUTPUT_LENGTH)
                 new_events.append((timestamp, {
                     "timestamp": timestamp,
                     "type": "tool_result",

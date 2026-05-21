@@ -286,6 +286,44 @@ def test_code_action_with_failed_status_marks_is_error(state_dir: Path) -> None:
     assert tool_result["is_error"] is True
 
 
+def test_code_action_with_null_content_is_converted_to_empty_output(state_dir: Path) -> None:
+    """A CODE_ACTION whose `content` is JSON null must not abort the conversion pass.
+
+    `_truncate(None, ...)` would crash with TypeError, taking down every
+    event in the same pass. The converter must defensively coerce
+    non-string content to an empty string -- mirroring the guard the
+    PLANNER_RESPONSE and USER_INPUT branches already apply.
+    """
+    code_action_null = json.dumps(
+        {
+            "step_index": 3,
+            "source": "MODEL",
+            "type": "CODE_ACTION",
+            "status": "DONE",
+            "created_at": "2026-05-21T07:00:00Z",
+            "_mngr_conv_id": "conv-A",
+            "content": None,
+        }
+    )
+    _write_raw_transcript(
+        state_dir,
+        [
+            _planner_response(
+                "conv-A",
+                2,
+                tool_calls=[{"name": "write_to_file", "args": {}}],
+            ),
+            code_action_null,
+        ],
+    )
+
+    _run_converter(state_dir)
+
+    events = _read_common_events(state_dir)
+    tool_result = next(e for e in events if e["type"] == "tool_result")
+    assert tool_result["output"] == ""
+
+
 def test_code_action_without_preceding_tool_call_is_dropped(state_dir: Path) -> None:
     """A bare CODE_ACTION (no PLANNER_RESPONSE tool_calls earlier) has nothing to pair with."""
     _write_raw_transcript(
