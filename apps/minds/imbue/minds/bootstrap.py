@@ -31,19 +31,20 @@ _MINDS_PREFIX: Final[str] = "minds"
 # :mod:`imbue.minds.cli.env`:
 #
 #   * ``staging`` -- the reserved staging tier name.
-#   * ``dev-<rest>`` -- any dev env. ``<rest>`` matches
-#     :data:`imbue.minds.envs.primitives.DEV_ENV_NAME_PATTERN` after the
-#     ``dev-`` prefix; kept inlined here so this module stays free of
-#     ``imbue.mngr.*`` / pydantic imports (see module docstring).
+#   * ``dev-<rest>`` / ``ci-<rest>`` -- any dynamic env (developer dev
+#     env or CI ephemeral env, respectively). Together they mirror
+#     :data:`imbue.minds.envs.primitives.DEV_ENV_NAME_PATTERN`; kept
+#     inlined here so this module stays free of ``imbue.mngr.*`` /
+#     pydantic imports (see module docstring).
 #
 # Production has no suffix (``minds`` alone). Anything that does not
 # fit this pattern is treated as ``unset`` by ``resolve_minds_root_name``
 # and falls back to production with a warning.
 _STAGING_SUFFIX_PATTERN: Final[str] = r"staging"
-_DEV_SUFFIX_PATTERN: Final[str] = r"dev-[a-z0-9][a-z0-9_-]{0,33}[a-z0-9]"
-_ENV_NAME_PATTERN: Final[str] = rf"(?:{_STAGING_SUFFIX_PATTERN}|{_DEV_SUFFIX_PATTERN})"
+_DYNAMIC_SUFFIX_PATTERN: Final[str] = r"(?:dev|ci)-[a-z0-9][a-z0-9_-]{0,33}[a-z0-9]"
+_ENV_NAME_PATTERN: Final[str] = rf"(?:{_STAGING_SUFFIX_PATTERN}|{_DYNAMIC_SUFFIX_PATTERN})"
 # The full set of legal MINDS_ROOT_NAME values is ``minds`` (production),
-# ``minds-staging``, or ``minds-dev-<rest>``.
+# ``minds-staging``, ``minds-dev-<rest>``, or ``minds-ci-<rest>``.
 MINDS_ROOT_NAME_PATTERN: Final[str] = rf"{_MINDS_PREFIX}(-{_ENV_NAME_PATTERN})?"
 
 

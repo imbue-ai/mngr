@@ -49,8 +49,7 @@ from imbue.mngr_latchkey.store import new_opaque_permissions_path
 from imbue.mngr_latchkey.store import save_permissions
 
 # Env-var names baked into the upstream latchkey CLI's wire contract.
-# Kept as constants so callers building ``--env`` flags or ``mngr provision``
-# arguments do not have to repeat them.
+# Kept as constants so callers building ``--env`` flags do not have to repeat them.
 ENV_LATCHKEY_GATEWAY: Final[str] = "LATCHKEY_GATEWAY"
 ENV_LATCHKEY_GATEWAY_PASSWORD: Final[str] = "LATCHKEY_GATEWAY_PASSWORD"
 ENV_LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE: Final[str] = "LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE"

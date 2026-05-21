@@ -163,13 +163,13 @@ class ProviderCredentials(FrozenModel):
 
 
 # Tiers whose default deploy strategy is RECREATE: dev (every personal
-# dev env and every CI ephemeral env, since both deploy with
-# ``tier="dev"``). Operator deploys against these almost always follow
-# a "deploy then immediately observe" pattern where a stale warm
+# dev env) and ci (every CI ephemeral env stood up by the deployment-
+# tests orchestrator). Operator deploys against these almost always
+# follow a "deploy then immediately observe" pattern where a stale warm
 # container that keeps serving the prior version's behavior is the
 # opposite of what the operator wants. Shared tiers (staging,
 # production) fall through to ROLLOVER for zero-downtime.
-_DEFAULT_RECREATE_TIERS: Final[frozenset[str]] = frozenset({"dev"})
+_DEFAULT_RECREATE_TIERS: Final[frozenset[str]] = frozenset({"dev", "ci"})
 
 
 def resolve_deploy_strategy(
@@ -191,11 +191,12 @@ def resolve_deploy_strategy(
        deployed binary has not been tested against; cycling all
        containers immediately is the safe choice even for a
        "backwards-compatible" migration.
-    3. Otherwise, ``RECREATE`` for ``dev``-tier deploys (personal dev
-       envs + CI ephemeral envs). The operator's flow is "deploy and
-       immediately observe", and the stale-warm-container window
-       (several minutes for Modal's default rollover) silently masks
-       new code's behavior.
+    3. Otherwise, ``RECREATE`` for the per-env tiers (``dev`` for
+       personal dev envs and ``ci`` for CI ephemeral envs stood up by
+       the deployment-tests orchestrator). The operator's flow on
+       these tiers is "deploy and immediately observe", and the
+       stale-warm-container window (several minutes for Modal's
+       default rollover) silently masks new code's behavior.
     4. Otherwise (staging / production with no migration applied),
        ``ROLLOVER``. Shared tiers prioritize zero-downtime; the
        operator can opt in to ``RECREATE`` with ``--hard`` when they
@@ -1007,11 +1008,12 @@ def _resolve_host_pool_dsn_for_migrations(
 ) -> SecretStr:
     """Return the DSN ``apply_pool_hosts_migrations`` should target for this tier.
 
-    Dev tier (``creates_resources=true``): use the per-env host_pool DSN
-    from the freshly-created or adopted Neon project record. Shared
-    tier (``creates_resources=false``): read ``DATABASE_URL`` from the
-    operator-managed ``secrets/minds/<tier>/neon`` Vault entry (single
-    shared DB where pool_hosts + litellm tables co-exist).
+    Per-env tiers (dev / ci, ``creates_resources=true``): use the per-env
+    host_pool DSN from the freshly-created or adopted Neon project
+    record. Shared tier (``creates_resources=false``): read
+    ``DATABASE_URL`` from the operator-managed
+    ``secrets/minds/<tier>/neon`` Vault entry (single shared DB where
+    pool_hosts + litellm tables co-exist).
 
     Raises :class:`MindError` if the shared-tier Vault entry is missing
     or lacks ``DATABASE_URL`` -- we'd otherwise silently skip migrations

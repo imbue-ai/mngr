@@ -1,0 +1,1 @@
+Applied `@fixture_uses_resources` to `deployed_snapshot_function` in `test_snapshot_and_shutdown.py` to fix `test_snapshot_and_shutdown_missing_host_id` and `test_snapshot_and_shutdown_missing_sandbox_id` failing on the modal resource guard.
