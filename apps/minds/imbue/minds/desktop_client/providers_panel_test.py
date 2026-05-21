@@ -31,6 +31,7 @@ from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
 from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
 from imbue.minds.desktop_client.cookie_manager import create_session_cookie
+from imbue.mngr.api.discovery_events import DiscoveredProvider
 from imbue.mngr.api.discovery_events import DiscoveryError
 from imbue.mngr.api.discovery_events import make_discovered_provider
 from imbue.mngr.config.data_types import ProviderInstanceConfig
@@ -172,7 +173,7 @@ def test_provider_toggle_is_idempotent(monkeypatch: pytest.MonkeyPatch, tmp_path
 # -- _build_providers_state_payload ----------------------------------------
 
 
-def _make_discovered_provider(name: str, backend: str = "docker") -> object:
+def _make_discovered_provider(name: str, backend: str = "docker") -> DiscoveredProvider:
     return make_discovered_provider(
         ProviderInstanceName(name),
         ProviderInstanceConfig(backend=ProviderBackendName(backend), is_enabled=True),
