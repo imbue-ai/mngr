@@ -80,12 +80,6 @@ def env(tmp_path: Path) -> dict[str, Any]:
     commands = state_dir / "commands"
     commands.mkdir(parents=True)
     (commands / "mngr_log.sh").write_text(_stub_mngr_log_sh())
-    # mngr_transcript_lib.sh is still referenced by the streamer's source
-    # line, but only for future-compat; the streamer does not currently use
-    # any of its helpers (step_index isn't a globally unique correlation
-    # key so the shared id-set reconciliation does not apply). A tiny stub
-    # is enough to make the source line succeed.
-    (commands / "mngr_transcript_lib.sh").write_text("#!/bin/bash\n# stub for tests\n")
 
     app_data_dir = tmp_path / "app_data"
     (app_data_dir / "brain").mkdir(parents=True)
