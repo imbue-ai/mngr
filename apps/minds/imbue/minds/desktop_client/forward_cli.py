@@ -216,10 +216,14 @@ class EnvelopeStreamConsumer(MutableModel):
     def bounce_observe(self) -> None:
         """Send ``SIGHUP`` to the plugin so its observe child is bounced.
 
-        Used after writing a new ``[providers.imbue_cloud_<slug>]`` block so
-        the freshly-registered provider becomes visible. Per-agent event
-        subprocesses, SSH tunnels, and the FastAPI app on the plugin side
-        stay alive (the plugin's SIGHUP handler only restarts ``mngr observe``).
+        Used whenever minds writes a change to its providers settings that
+        should take effect on the next discovery poll: either after a new
+        ``[providers.imbue_cloud_<slug>]`` block is registered on signin,
+        or after the providers panel's Enable/Disable toggle flips
+        ``is_enabled`` on any provider block via ``set_provider_is_enabled``.
+        Per-agent event subprocesses, SSH tunnels, and the FastAPI app on
+        the plugin side stay alive (the plugin's SIGHUP handler only
+        restarts ``mngr observe``).
 
         No-op if the plugin process is no longer running.
         """
