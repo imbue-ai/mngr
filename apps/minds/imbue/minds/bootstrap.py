@@ -380,9 +380,8 @@ def reconcile_imbue_cloud_providers_from_sessions(connector_url: str, *, root_na
             continue
         try:
             # Reconcile only fills in missing blocks; it must not re-enable a
-            # provider that was previously auto-disabled by an auth-error
-            # observation. Re-enable happens only on an explicit signin
-            # event.
+            # provider that the user previously disabled via the providers
+            # panel. Re-enable happens only on an explicit signin event.
             set_imbue_cloud_provider_for_account(
                 email,
                 connector_url=connector_url,
@@ -504,10 +503,10 @@ def set_imbue_cloud_provider_for_account(
     loaded ``ClientEnvConfig``.
 
     When ``force_enable`` is True (signin events), ``is_enabled`` is set to
-    True even if the block was previously disabled by an auth-error
-    auto-disable. When False (bootstrap reconcile on a returning user),
-    any pre-existing ``is_enabled`` value is preserved so a previously
-    auto-disabled account stays disabled until the user signs in again.
+    True even if the block was previously disabled (e.g. via the providers
+    panel's Disable button). When False (bootstrap reconcile on a returning
+    user), any pre-existing ``is_enabled`` value is preserved so an account
+    the user previously disabled stays disabled until they sign in again.
 
     Returns ``True`` when the file was modified, so callers know whether
     to bounce ``mngr observe`` (the running process needs a restart to
@@ -564,9 +563,9 @@ def is_imbue_cloud_provider_enabled_for_account(email: str, *, root_name: str | 
     """Return whether ``[providers.imbue_cloud_<slug>]`` is currently enabled.
 
     Reads the ``is_enabled`` field from the active mngr settings.toml so
-    the desktop UI can render "Signed out" on a chip whose provider was
-    auto-disabled by an observed auth error. Treats a missing entry or
-    a missing ``is_enabled`` field as enabled (per mngr's default), and
+    the desktop UI can render "Signed out" on a chip whose provider the
+    user disabled via the providers panel. Treats a missing entry or a
+    missing ``is_enabled`` field as enabled (per mngr's default), and
     returns True when the settings file can't be located so the UI never
     erroneously claims an account is signed out before the bootstrap
     has finished writing the block.
