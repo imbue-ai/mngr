@@ -715,7 +715,12 @@ def env_activate(name: str, create: bool, is_deploy_mode: bool) -> None:
     # success, so subsequent activations have something to compare against.
     if config_path.is_file():
         _try_run_generation_check(env_name=name, client_config_path=config_path, env_root=target)
-    _print_activation_exports(name=name, exports={**use_side_exports, **deploy_exports}, unsets=deploy_unsets)
+    _print_activation_exports(
+        name=name,
+        exports={**use_side_exports, **deploy_exports},
+        unsets=deploy_unsets,
+        is_deploy_mode=is_deploy_mode,
+    )
 
 
 def _activate_reserved_env(name: str, *, is_deploy_mode: bool) -> None:
@@ -761,7 +766,12 @@ def _activate_reserved_env(name: str, *, is_deploy_mode: bool) -> None:
     if name == _STAGING_ENV_NAME:
         env_root = mngr_host.parent
         _try_run_generation_check(env_name=name, client_config_path=repo_client, env_root=env_root)
-    _print_activation_exports(name=name, exports={**use_side_exports, **deploy_exports}, unsets=deploy_unsets)
+    _print_activation_exports(
+        name=name,
+        exports={**use_side_exports, **deploy_exports},
+        unsets=deploy_unsets,
+        is_deploy_mode=is_deploy_mode,
+    )
 
 
 def _build_deploy_mode_exports(*, tier: str, is_deploy_mode: bool) -> tuple[dict[str, str], tuple[str, ...]]:
@@ -786,8 +796,20 @@ def _build_deploy_mode_exports(*, tier: str, is_deploy_mode: bool) -> tuple[dict
     return {MODAL_PROFILE_ENV_VAR: workspace}, ()
 
 
-def _print_activation_exports(*, name: str, exports: dict[str, str], unsets: tuple[str, ...] = ()) -> None:
-    write_stdout_line(f'# Activated env {name!r}. Source via: eval "$(uv run minds env activate {name})"')
+def _print_activation_exports(
+    *,
+    name: str,
+    exports: dict[str, str],
+    unsets: tuple[str, ...] = (),
+    is_deploy_mode: bool = False,
+) -> None:
+    # Mirror the invocation mode in the header so a user who copy-pastes
+    # the suggested re-source command back into a fresh shell lands in
+    # the same mode they started in -- otherwise re-sourcing a `--deploy`
+    # activation via the header would silently drop MODAL_PROFILE and
+    # trip the deploy-mode gate on the next minds env deploy/destroy.
+    deploy_flag = " --deploy" if is_deploy_mode else ""
+    write_stdout_line(f'# Activated env {name!r}. Source via: eval "$(uv run minds env activate{deploy_flag} {name})"')
     for key, value in exports.items():
         write_stdout_line(f"export {key}={shlex.quote(value)}")
     for key in unsets:

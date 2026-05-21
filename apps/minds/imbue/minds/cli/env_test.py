@@ -85,6 +85,24 @@ def test_activate_dev_env_deploy_mode_exports_modal_profile(_isolated_env: Path)
     assert "unset MODAL_PROFILE" not in result.output
 
 
+def test_activate_use_only_header_omits_deploy_flag(_isolated_env: Path) -> None:
+    """The 'Source via:' header should omit --deploy when the user did not pass it."""
+    runner = CliRunner()
+    result = runner.invoke(env, ["activate", "--create", "dev-foo"])
+    assert result.exit_code == 0, result.output
+    assert 'eval "$(uv run minds env activate dev-foo)"' in result.output
+    assert "--deploy" not in result.output
+
+
+def test_activate_deploy_mode_header_includes_deploy_flag(_isolated_env: Path) -> None:
+    """The 'Source via:' header should include --deploy so re-sourcing preserves the mode."""
+    _write_modal_toml_with_profile(_isolated_env, "minds-dev")
+    runner = CliRunner()
+    result = runner.invoke(env, ["activate", "--create", "--deploy", "dev-foo"])
+    assert result.exit_code == 0, result.output
+    assert 'eval "$(uv run minds env activate --deploy dev-foo)"' in result.output
+
+
 def test_activate_deploy_mode_refuses_when_modal_toml_lacks_profile(_isolated_env: Path) -> None:
     """No matching ``~/.modal.toml`` profile = clean refusal with a ``modal token set`` hint."""
     runner = CliRunner()
