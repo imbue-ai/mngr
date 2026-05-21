@@ -157,9 +157,9 @@ URL -- env selection happens via `MINDS_CLIENT_CONFIG_PATH` /
 
 ### Installing the pinned toolchain
 
-Pick one path for Node and one for pnpm.
+The pins are exact patches (`24.15.0`, `10.33.4`) and `engine-strict=true` will reject anything else. Use the recipes below -- they're the paths that reliably hit the exact versions on any given day.
 
-**Node.js 24.15.0** -- recommended via a version manager so you can keep other projects on their own Node version:
+**Node.js 24.15.0** -- via a version manager:
 
 ```bash
 # nvm (https://github.com/nvm-sh/nvm)
@@ -169,28 +169,19 @@ nvm use             # also reads .nvmrc
 # fnm (https://github.com/Schniz/fnm)
 fnm install         # reads .nvmrc
 fnm use             # reads .nvmrc
-
-# Homebrew (system-wide, no per-project switching)
-brew install node@24
-brew link --overwrite node@24
 ```
 
 Run `node --version` from inside `apps/minds/` -- it must print `v24.15.0`.
 
-**pnpm 10.33.4** -- either path works:
+**pnpm 10.33.4** -- via npm:
 
 ```bash
-# npm (simplest; works on any platform once Node is installed)
 npm install --global pnpm@10.33.4
-
-# Homebrew (macOS / Linuxbrew); the pnpm@10 keg tracks the latest 10.x
-brew install pnpm@10
-brew unlink pnpm 2>/dev/null; brew link --overwrite pnpm@10
 ```
 
-Run `pnpm --version` -- it must print `10.33.4`. If Homebrew's `pnpm@10` keg has moved past 10.33.4, switch to the `npm install --global pnpm@10.33.4` path instead so the exact pin lines up.
+Run `pnpm --version` -- it must print `10.33.4`. To swap back to a newer pnpm after working on minds: `npm install --global pnpm@latest`.
 
-To swap back to a newer pnpm after working on minds: `brew unlink pnpm@10 && brew link --overwrite pnpm` (Homebrew) or `npm install --global pnpm@latest` (npm).
+**A note on Homebrew**: `brew install node@24` and `brew install pnpm@10` work *if* the kegs currently happen to point at `24.15.0` / `10.33.4`, but Homebrew's `@<major>` formulae move forward through patch releases and there's no clean way to ask for an exact historical patch. Once a keg drifts past the pin, `engine-strict` will reject `pnpm install` and you'll need to switch to the version-manager / npm paths above anyway. If you already have these installed via brew and they still match, great -- just verify with `node --version` / `pnpm --version` before running `pnpm install`.
 
 ### Running locally
 
