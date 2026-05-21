@@ -1,0 +1,1 @@
+Bumped pinned `modal` dependency from 1.3.1 to 1.4.3, and updated `libs/modal_proxy/imbue/modal_proxy/log_utils.py` to use Modal 1.4.x's new `RichOutputManager` ABC (the private `OutputManager` API the prior implementation depended on was refactored).
