@@ -153,6 +153,45 @@ URL -- env selection happens via `MINDS_CLIENT_CONFIG_PATH` /
 - pnpm 10.33.4 (pinned via `engines.pnpm`)
 - Python 3.12, uv, git (for the Python backend)
 
+`apps/minds/.npmrc` sets `engine-strict=true`, so `pnpm install` refuses to run on any other Node or pnpm version instead of silently producing a broken install.
+
+### Installing the pinned toolchain
+
+Pick one path for Node and one for pnpm.
+
+**Node.js 24.15.0** -- recommended via a version manager so you can keep other projects on their own Node version:
+
+```bash
+# nvm (https://github.com/nvm-sh/nvm)
+nvm install         # reads apps/minds/.nvmrc
+nvm use             # also reads .nvmrc
+
+# fnm (https://github.com/Schniz/fnm)
+fnm install         # reads .nvmrc
+fnm use             # reads .nvmrc
+
+# Homebrew (system-wide, no per-project switching)
+brew install node@24
+brew link --overwrite node@24
+```
+
+Run `node --version` from inside `apps/minds/` -- it must print `v24.15.0`.
+
+**pnpm 10.33.4** -- either path works:
+
+```bash
+# npm (simplest; works on any platform once Node is installed)
+npm install --global pnpm@10.33.4
+
+# Homebrew (macOS / Linuxbrew); the pnpm@10 keg tracks the latest 10.x
+brew install pnpm@10
+brew unlink pnpm 2>/dev/null; brew link --overwrite pnpm@10
+```
+
+Run `pnpm --version` -- it must print `10.33.4`. If Homebrew's `pnpm@10` keg has moved past 10.33.4, switch to the `npm install --global pnpm@10.33.4` path instead so the exact pin lines up.
+
+To swap back to a newer pnpm after working on minds: `brew unlink pnpm@10 && brew link --overwrite pnpm` (Homebrew) or `npm install --global pnpm@latest` (npm).
+
 ### Running locally
 
 ```bash
