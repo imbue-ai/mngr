@@ -14,10 +14,12 @@ from typing import Any
 import httpx
 import modal
 import pytest
+from loguru import logger
 
 from imbue.mngr.primitives import HostState
 from imbue.mngr.utils.polling import wait_for
 from imbue.mngr.utils.testing import get_short_random_string
+from imbue.mngr.utils.testing import register_modal_test_app
 from imbue.mngr.utils.testing import register_modal_test_volume
 from imbue.mngr_modal.constants import MODAL_TEST_APP_PREFIX
 from imbue.mngr_modal.routes.deployment import deploy_function
@@ -43,22 +45,42 @@ def _get_test_app_name() -> str:
 
 
 def _stop_app(app_name: str) -> None:
-    """Stop and clean up a Modal app."""
-    subprocess.run(
-        ["uv", "run", "modal", "app", "stop", app_name],
-        input=b"y\n",
+    """Stop a Modal app in the `main` env (where the fixture deploys to).
+
+    Uses `--yes` and explicit `--env main` so the call is deterministic and
+    independent of the active local profile / `MODAL_ENVIRONMENT`. Note this
+    transitions the app to `stopped`, not deleted; the row still exists in
+    `modal app list`. Proper deletion needs the fixture to live inside a
+    per-test env that gets `modal environment delete`d in teardown.
+    """
+    result = subprocess.run(
+        ["uv", "run", "modal", "app", "stop", "--yes", "--env", "main", app_name],
         capture_output=True,
         timeout=60,
     )
+    if result.returncode != 0:
+        logger.warning(
+            "modal app stop failed for {} (rc={}): {}",
+            app_name,
+            result.returncode,
+            (result.stderr or result.stdout).decode("utf-8", errors="replace").strip(),
+        )
 
 
 def _delete_volume(volume_name: str) -> None:
-    """Delete a Modal volume."""
-    subprocess.run(
-        ["uv", "run", "modal", "volume", "delete", volume_name, "--yes"],
+    """Delete a Modal volume in the `main` env."""
+    result = subprocess.run(
+        ["uv", "run", "modal", "volume", "delete", "--yes", "--env", "main", volume_name],
         capture_output=True,
         timeout=60,
     )
+    if result.returncode != 0:
+        logger.warning(
+            "modal volume delete failed for {} (rc={}): {}",
+            volume_name,
+            result.returncode,
+            (result.stderr or result.stdout).decode("utf-8", errors="replace").strip(),
+        )
 
 
 def _warmup_function(url: str) -> None:
@@ -140,6 +162,7 @@ def deployed_snapshot_function() -> Generator[tuple[str, str], None, None]:
     app_name = _get_test_app_name()
     # The deployed function creates a volume named {app_name}-state
     volume_name = f"{app_name}-state"
+    register_modal_test_app(app_name)
     register_modal_test_volume(volume_name)
 
     try:
