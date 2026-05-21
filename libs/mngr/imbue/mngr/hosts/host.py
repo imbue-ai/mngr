@@ -2809,7 +2809,7 @@ _TMUX_DEFAULT_STATUS_LEFT_LENGTH: Final[int] = 10
 
 # Upper bound on the status-left width mngr will set, so a long agent name
 # can't crowd out the window list.
-_MAX_TMUX_STATUS_LEFT_LENGTH: Final[int] = 40
+_MAX_TMUX_STATUS_LEFT_LENGTH: Final[int] = 20
 
 
 @pure

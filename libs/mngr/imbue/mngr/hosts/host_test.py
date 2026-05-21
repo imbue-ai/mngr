@@ -893,16 +893,26 @@ def test_build_start_agent_shell_command_widens_status_left_to_fit_session_name(
 ) -> None:
     """status-left-length should be widened to fit the full session name.
 
-    tmux's default status-left-length of 10 truncates mngr session names. The
-    command must raise it to fit "[session_name] " -- the session name plus the
-    "[", "]" and trailing space of tmux's default status-left format.
+    tmux's default status-left-length of 10 truncates mngr session names. For a
+    session name short enough to fit under the cap, the command must set it to
+    fit "[session_name] " -- the session name plus the "[", "]" and trailing
+    space of tmux's default status-left format.
     """
     agent = _create_test_agent(local_provider, temp_host_dir, temp_work_dir)
-    session_name = f"mngr-{agent.name}"
-    result = _build_command_with_defaults(agent, temp_host_dir)
-
+    session_name = "mngr-short-name"
     expected_length = len(session_name) + 3
-    assert expected_length <= _MAX_TMUX_STATUS_LEFT_LENGTH, "test session name unexpectedly long"
+    assert expected_length < _MAX_TMUX_STATUS_LEFT_LENGTH, "test session name should fit under the cap"
+    result = _build_start_agent_shell_command(
+        agent=agent,
+        session_name=session_name,
+        command="sleep 1000",
+        additional_commands=[],
+        env_shell_cmd="bash -c 'true'",
+        tmux_config_path=Path("/tmp/tmux.conf"),
+        unset_vars=[],
+        host_dir=temp_host_dir,
+    )
+
     assert f"status-left-length {expected_length}" in result
 
 
