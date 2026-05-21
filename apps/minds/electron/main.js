@@ -1662,8 +1662,8 @@ ipcMain.on('show-workspace-context-menu', (event, agentId, x, y) => {
     if (bundle.contentView && !bundle.contentView.webContents.isDestroyed()) {
       // The restart POST has already moved the health tracker to RESTARTING,
       // so the recovery page renders its "Restarting…" progress state and
-      // polls (via SSE) until the workspace is healthy again, then navigates
-      // back to ``workspaceUrl``. Reloading the workspace URL directly would
+      // auto-refreshes itself until the workspace is healthy again, then
+      // navigates back to ``workspaceUrl``. Reloading the workspace URL directly would
       // instead race the restart: the container is still up at dispatch
       // time, so the reload would just show the pre-restart workspace.
       bundle.contentView.webContents.loadURL(
