@@ -55,11 +55,14 @@ def project_entries_dir(project: str, repo_root: Path) -> Path:
     return project_dir(project, repo_root) / "changelog"
 
 
-def all_known_projects(repo_root: Path) -> list[str]:
-    """Return all known project names: every ``libs/<name>`` and ``apps/<name>``
-    with a ``pyproject.toml``, plus the synthetic ``dev`` bucket.
+def pyproject_projects(repo_root: Path) -> list[str]:
+    """Return every ``libs/<name>`` and ``apps/<name>`` with a ``pyproject.toml``,
+    sorted alphabetically. Excludes the synthetic ``dev`` bucket.
 
-    Sorted alphabetically with ``dev`` always last.
+    Shared discovery helper for callers that want only the "real" projects
+    (e.g. the meta-ratchets that look for per-project ``test_ratchets.py``,
+    coverage configuration, PyPI readme, etc., none of which apply to
+    ``dev/``).
     """
     names: list[str] = []
     for parent_name in ("libs", "apps"):
@@ -70,5 +73,14 @@ def all_known_projects(repo_root: Path) -> list[str]:
             if child.is_dir() and (child / "pyproject.toml").exists():
                 names.append(child.name)
     names.sort()
-    names.append(DEV_PROJECT)
     return names
+
+
+def all_known_projects(repo_root: Path) -> list[str]:
+    """Return every known project name, including the synthetic ``dev``.
+
+    Composed of ``pyproject_projects(repo_root)`` plus ``DEV_PROJECT`` appended
+    last, so changelog-aware callers iterate libs/apps in alphabetical order
+    and then ``dev``.
+    """
+    return [*pyproject_projects(repo_root), DEV_PROJECT]

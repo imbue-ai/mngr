@@ -20,6 +20,7 @@ from scripts.changelog_projects import all_known_projects
 from scripts.changelog_projects import project_dir as get_project_dir
 from scripts.changelog_projects import project_entries_dir
 from scripts.changelog_projects import project_for_path
+from scripts.changelog_projects import pyproject_projects
 
 _REPO_ROOT = Path(__file__).parent
 
@@ -43,15 +44,13 @@ pytestmark = pytest.mark.xdist_group(name="meta_ratchets")
 def _get_all_project_dirs() -> list[Path]:
     """Return all project directories (libs/* and apps/*) that are not excluded.
 
-    Built on top of ``all_known_projects`` to keep the libs/+apps/+pyproject.toml
-    discovery rule in one place (``scripts.changelog_projects``). Filters out the
-    synthetic ``dev`` bucket (it has no test/coverage/ratchet structure) and any
-    project listed in ``_EXCLUDED_PROJECTS``.
+    Built on top of ``pyproject_projects`` (the shared libs/+apps/+pyproject.toml
+    discovery helper in ``scripts.changelog_projects``) so this stays in sync
+    with the changelog tooling without having to add and then re-remove the
+    synthetic ``dev`` bucket.
     """
     return [
-        get_project_dir(name, _REPO_ROOT)
-        for name in all_known_projects(_REPO_ROOT)
-        if name != DEV_PROJECT and name not in _EXCLUDED_PROJECTS
+        get_project_dir(name, _REPO_ROOT) for name in pyproject_projects(_REPO_ROOT) if name not in _EXCLUDED_PROJECTS
     ]
 
 

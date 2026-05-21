@@ -7,6 +7,7 @@ from scripts.changelog_projects import all_known_projects
 from scripts.changelog_projects import project_dir
 from scripts.changelog_projects import project_entries_dir
 from scripts.changelog_projects import project_for_path
+from scripts.changelog_projects import pyproject_projects
 
 
 def _seed_repo(tmp_path: Path) -> Path:
@@ -83,6 +84,12 @@ def test_project_entries_dir_apps(tmp_path: Path) -> None:
 def test_project_entries_dir_dev(tmp_path: Path) -> None:
     repo = _seed_repo(tmp_path)
     assert project_entries_dir(DEV_PROJECT, repo) == repo / DEV_PROJECT / "changelog"
+
+
+def test_pyproject_projects_excludes_dev(tmp_path: Path) -> None:
+    repo = _seed_repo(tmp_path)
+    # libs/garbage is excluded (no pyproject.toml). dev is not included.
+    assert pyproject_projects(repo) == ["minds", "mngr", "mngr_lima"]
 
 
 def test_all_known_projects_includes_libs_apps_and_dev(tmp_path: Path) -> None:
