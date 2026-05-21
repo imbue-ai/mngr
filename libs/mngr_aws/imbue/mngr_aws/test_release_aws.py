@@ -4,9 +4,10 @@ These tests provision and destroy real EC2 instances on AWS. They cost
 real money — typically a few cents per run for a ~5-minute t3.small —
 and are double-gated:
 
-- AWS credentials must be available -- specifically, either ``AWS_ACCESS_KEY_ID``
-  or ``AWS_PROFILE`` must be set in the environment (this is the same probe
-  used by the session-end cleanup hook; see ``testing.aws_credentials_available``).
+- AWS credentials must be resolvable via boto3's default credential chain
+  (env vars, shared credentials file, AWS_PROFILE, or EC2 IMDS). See
+  ``testing.aws_credentials_available`` -- this is the same probe used by
+  the session-end cleanup hook.
 - ``MNGR_AWS_RELEASE_TESTS=1`` must be set explicitly
 
 Three layers of damage control prevent leaked EC2 cost (see
