@@ -48,14 +48,18 @@ _FILE_SHARING_READ_METHODS: Final[tuple[str, ...]] = (
     "OPTIONS",
     "PROPFIND",
 )
+# Note: ``COPY`` and ``MOVE`` are intentionally not in this list -- both
+# carry a second path in the ``Destination`` header that the per-file
+# permission schema does not constrain, so granting either would let an
+# agent write to a different file inside the WebDAV mount than the one
+# the user actually shared. See ``permission_requests.mjs`` for the
+# explanation.
 _FILE_SHARING_WRITE_METHODS: Final[tuple[str, ...]] = (
     *_FILE_SHARING_READ_METHODS,
     "PUT",
     "DELETE",
     "PROPPATCH",
     "MKCOL",
-    "COPY",
-    "MOVE",
     "LOCK",
     "UNLOCK",
 )

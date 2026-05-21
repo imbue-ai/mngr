@@ -140,13 +140,23 @@ const FILE_SHARING_READ_METHODS = ['GET', 'HEAD', 'OPTIONS', 'PROPFIND'];
 // included for symmetry (the granted URL targets a single resource;
 // if the user is sharing a path that doesn't yet exist, ``MKCOL``
 // lets the agent create a collection there).
+//
+// ``COPY`` and ``MOVE`` are intentionally *not* in this list. Both
+// carry a second path in the ``Destination`` HTTP header, and the
+// per-file permission schema we emit only constrains the request URL.
+// Granting ``COPY``/``MOVE`` on the source would therefore let the
+// agent write to any path inside the WebDAV mount's share roots
+// (``~/`` or ``/tmp/``) via the ``Destination`` header, regardless of
+// what was actually shared. A single-file ``WRITE`` grant means "change
+// this one file"; cross-path copy/move requires an explicit grant on
+// the destination too. Agents that need copy semantics can ``GET``
+// the source and ``PUT`` to a destination they have a separate grant
+// for; likewise for move (``GET`` + ``PUT`` + ``DELETE``).
 const FILE_SHARING_WRITE_ONLY_METHODS = [
   'PUT',
   'DELETE',
   'PROPPATCH',
   'MKCOL',
-  'COPY',
-  'MOVE',
   'LOCK',
   'UNLOCK',
 ];

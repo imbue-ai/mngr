@@ -57,8 +57,8 @@
     `access` is required and must be one of the two literal strings
     above (case-sensitive). `READ` unlocks only the non-mutating WebDAV
     verbs (`GET`, `HEAD`, `OPTIONS`, `PROPFIND`); `WRITE` is a strict
-    superset that also unlocks the mutating ones (`PUT`, `DELETE`,
-    `PROPPATCH`, `MKCOL`, `COPY`, `MOVE`, `LOCK`, `UNLOCK`). Per-file
+    superset that also unlocks the single-path mutating ones (`PUT`,
+    `DELETE`, `PROPPATCH`, `MKCOL`, `LOCK`, `UNLOCK`). Per-file
     permission schemas now embed the access mode in their name
     (`minds-file-server-read-<sha256(path)[:32]>` /
     `minds-file-server-write-<sha256(path)[:32]>`) so a user can hold
@@ -66,3 +66,14 @@
     grant does not silently override an earlier READ grant (or vice
     versa). Re-approving the same `(path, access)` pair remains
     idempotent (same schema name, schemas merge by name on approve).
+  - `COPY` and `MOVE` are intentionally **not** in the WRITE verb set.
+    Both carry a second path in the WebDAV `Destination` HTTP header,
+    and the per-file permission schema only constrains the request
+    URL; granting either would let an agent write to any file under
+    the WebDAV mount's share roots (`~/` or `/tmp/`) via the
+    `Destination` header, regardless of what was actually shared. A
+    single-file WRITE grant means "change this one file"; cross-path
+    copy/move requires an explicit grant on the destination too.
+    Agents that need copy semantics can `GET` the source and `PUT` to
+    a destination they have a separate grant for; likewise for move
+    (`GET` + `PUT` + `DELETE`).

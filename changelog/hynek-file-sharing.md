@@ -43,9 +43,13 @@ request schema and a new approve endpoint:
 * File-sharing requests now carry a required `access` field on the
   payload (`READ` / `WRITE`). `READ` unlocks the non-mutating WebDAV
   verbs only (`GET`, `HEAD`, `OPTIONS`, `PROPFIND`); `WRITE` is a
-  strict superset that also unlocks `PUT`, `DELETE`, `PROPPATCH`,
-  `MKCOL`, `COPY`, `MOVE`, `LOCK`, `UNLOCK`. Per-file permission
-  schemas embed the access mode in their name
+  strict superset that also unlocks the single-path mutating verbs
+  `PUT`, `DELETE`, `PROPPATCH`, `MKCOL`, `LOCK`, `UNLOCK`. `COPY` and
+  `MOVE` are intentionally excluded -- both carry a second path in
+  the WebDAV `Destination` header that the per-file permission schema
+  cannot constrain, so granting either would let an agent write to a
+  different file in the share than the one actually shared. Per-file
+  permission schemas embed the access mode in their name
   (`minds-file-server-read-<hash>` / `minds-file-server-write-<hash>`)
   so the two grants are independent. The minds approval dialog shows
   a green "read-only" or amber "read & write" badge and explains
