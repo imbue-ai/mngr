@@ -61,10 +61,12 @@ become Vault entries in step 4.
   Verify a `[minds-staging]` block landed in `~/.modal.toml`. The
   `MODAL_PROFILE` export in `minds env activate --deploy staging` (see
   step 6) pins every subsequent `modal` shellout to this profile -- the
-  account you're logged into via `active = true` is irrelevant.
-  Without `--deploy`, the `[minds-staging]` block is still checked at
-  *deploy* time (by the activate-time validator) but not needed for
-  *use*-time activation.
+  account you're logged into via `active = true` is irrelevant. The
+  presence of the `[minds-staging]` block is only checked when you pass
+  `--deploy` (which pre-validates `~/.modal.toml` and fails fast with a
+  `modal token set --profile minds-staging` hint if the block is
+  missing). Plain `minds env activate staging` -- use-only activation --
+  does not need the block and never reads `~/.modal.toml`.
 
 - [ ] **Neon project for staging.** Create a single project under your
   Neon org (any name; the staging tier uses `creates_resources=false`
