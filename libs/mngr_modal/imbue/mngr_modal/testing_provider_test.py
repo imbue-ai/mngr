@@ -1016,6 +1016,28 @@ def test_read_shared_modal_env_name_raises_on_malformed_value(monkeypatch: pytes
         read_shared_modal_env_name()
 
 
+@pytest.mark.parametrize(
+    "value",
+    [
+        # Timestamp matches but no dash separator -- callers downstream concatenate
+        # `prefix + user_id` with no extra separator and would produce a malformed
+        # Modal env name.
+        "mngr_test-2026-05-20-12-00-00suffix",
+        # Bare timestamp with no suffix -- the docstring requires a non-empty suffix.
+        "mngr_test-2026-05-20-12-00-00",
+        # Trailing dash but empty suffix -- still violates the non-empty suffix rule.
+        "mngr_test-2026-05-20-12-00-00-",
+    ],
+)
+def test_read_shared_modal_env_name_raises_when_dash_or_suffix_missing(
+    monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    """The trailing dash and a non-empty suffix are both required by the contract."""
+    monkeypatch.setenv(SHARED_MODAL_ENV_NAME_VAR, value)
+    with pytest.raises(ConfigStructureError, match="MNGR_TEST_SHARED_MODAL_ENV_NAME"):
+        read_shared_modal_env_name()
+
+
 def test_derive_modal_names_reproduces_shared_env_via_prefix_and_user_id(
     temp_mngr_ctx: MngrContext,
 ) -> None:

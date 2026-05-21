@@ -179,6 +179,19 @@ def generate_test_environment_name() -> str:
 
 SHARED_MODAL_ENV_NAME_VAR: Final[str] = "MNGR_TEST_SHARED_MODAL_ENV_NAME"
 
+# Matches a full shared Modal env name and splits it into:
+#   group 1: the timestamp prefix INCLUDING the trailing dash (feeds
+#            ``MngrConfig.prefix``, which is concatenated with ``user_id`` with
+#            no extra separator).
+#   group 2: the non-empty suffix (feeds ``ModalProviderConfig.user_id``).
+# Unlike ``TEST_ENV_PATTERN`` (which only anchors the timestamp), this pattern
+# enforces the dash separator and a non-empty suffix that the docstring of
+# ``read_shared_modal_env_name`` promises, so malformed values raise loudly
+# instead of silently producing a prefix without a trailing dash.
+_SHARED_MODAL_ENV_NAME_PATTERN: Final[re.Pattern[str]] = re.compile(
+    r"^(mngr_test-\d{4}-\d{2}-\d{2}-\d{2}-\d{2}-\d{2}-)(.+)$"
+)
+
 
 def read_shared_modal_env_name() -> tuple[str, str] | None:
     """Parse ``MNGR_TEST_SHARED_MODAL_ENV_NAME`` into ``(prefix, user_id_suffix)``.
@@ -191,24 +204,22 @@ def read_shared_modal_env_name() -> tuple[str, str] | None:
     the full shared env name.
 
     Raises ``ConfigStructureError`` when the env var is set but the value does
-    not match the ``mngr_test-YYYY-MM-DD-HH-MM-SS`` timestamp pattern -- the
-    justfile generates conforming names, so a mismatch is a bug we want to
-    surface rather than silently fall back to per-test envs.
+    not match the ``mngr_test-YYYY-MM-DD-HH-MM-SS-<suffix>`` pattern (the
+    trailing dash and a non-empty suffix are both required) -- the justfile
+    generates conforming names, so a mismatch is a bug we want to surface
+    rather than silently fall back to per-test envs or produce a malformed
+    prefix.
     """
     raw = os.environ.get(SHARED_MODAL_ENV_NAME_VAR, "")
     if not raw:
         return None
-    match = TEST_ENV_PATTERN.match(raw)
+    match = _SHARED_MODAL_ENV_NAME_PATTERN.match(raw)
     if match is None:
         raise ConfigStructureError(
             f"{SHARED_MODAL_ENV_NAME_VAR}={raw!r} does not match the required "
             "'mngr_test-YYYY-MM-DD-HH-MM-SS-<suffix>' pattern."
         )
-    # Include the dash separator after the timestamp in the prefix so callers
-    # can feed it straight into MngrConfig.prefix (which is concatenated with
-    # the user_id, no extra separator).
-    split_at = match.end() + 1
-    return raw[:split_at], raw[split_at:]
+    return match.group(1), match.group(2)
 
 
 def isolate_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
