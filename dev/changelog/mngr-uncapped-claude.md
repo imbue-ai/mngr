@@ -1,0 +1,1 @@
+Root-level surface changes for the `mngr_uncapped_claude` plugin: README updated to advertise the new `uncapped-claude` command and link to the new sub-project, and the auto-generated CLI docs gained an entry at `libs/mngr/docs/commands/secondary/uncapped-claude.md` so `mngr ask` and `mngr --help` know about the command.
