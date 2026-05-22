@@ -8,6 +8,7 @@ from typing import Any
 
 import pytest
 
+from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.model_update import to_update
 from imbue.mngr.agents.tui_agent import InteractiveTuiAgent
 from imbue.mngr.errors import UserInputError
@@ -128,6 +129,42 @@ class _DecliningAntigravityAgent(AntigravityAgent):
 
     def _prompt_user_to_trust_workspace(self, source_path: Path, settings_path: Path) -> bool:
         return False
+
+
+class _ConfirmingAgentWithFakeSourceRoot(AntigravityAgent):
+    """Test subclass that auto-accepts the trust prompt AND fakes a source repo root.
+
+    Used to exercise the worktree-of-trusted-source branches without actually
+    creating a git repo on disk. The fake source path is just ``work_dir.parent``
+    so the test can assert on a stable, predictable value.
+    """
+
+    def _prompt_user_to_trust_workspace(self, source_path: Path, settings_path: Path) -> bool:
+        return True
+
+    def _find_git_source_path(self, concurrency_group: ConcurrencyGroup) -> Path | None:
+        return self.work_dir.parent
+
+
+class _DecliningAgentWithFakeSourceRoot(AntigravityAgent):
+    """Auto-declines and fakes a source repo root different from work_dir.
+
+    Used to verify the source-already-trusted short-circuit doesn't prompt
+    (the prompt is wired to decline, so reaching it would raise SystemExit).
+    """
+
+    def _prompt_user_to_trust_workspace(self, source_path: Path, settings_path: Path) -> bool:
+        return False
+
+    def _find_git_source_path(self, concurrency_group: ConcurrencyGroup) -> Path | None:
+        return self.work_dir.parent
+
+
+class _AntigravityAgentWithFakeSourceRoot(AntigravityAgent):
+    """Plain agent with a fake source repo root for non-prompted paths (auto-approve, auto_dismiss)."""
+
+    def _find_git_source_path(self, concurrency_group: ConcurrencyGroup) -> Path | None:
+        return self.work_dir.parent
 
 
 def _make_subclassed_agent_with_flags(
@@ -462,6 +499,96 @@ def test_provision_already_trusted_workspace_does_not_reprompt(
     )
     # The file is unchanged because the workspace was already trusted.
     assert json.loads(settings_path.read_text()) == {"trustedWorkspaces": [str(agent.work_dir)]}
+
+
+def test_provision_silently_extends_trust_when_source_repo_already_trusted(
+    local_provider: LocalProviderInstance, tmp_path: Path, isolated_home: Path
+) -> None:
+    """A worktree of an already-trusted source repo gets trusted silently, no prompt.
+
+    The declining-prompt subclass would raise SystemExit if the prompt fired;
+    reaching the silent branch is what makes this test pass. Mirrors the UX
+    goal: once you've granted trust to a source repo, spawning another worktree
+    of the same repo shouldn't re-prompt.
+    """
+    agent = _make_subclassed_agent_with_flags(
+        _DecliningAgentWithFakeSourceRoot, local_provider, tmp_path, AntigravityAgentConfig(), is_interactive=True
+    )
+    fake_source = str(agent.work_dir.parent)
+    settings_path = get_antigravity_user_settings_path()
+    settings_path.parent.mkdir(parents=True)
+    settings_path.write_text(json.dumps({"trustedWorkspaces": [fake_source]}))
+
+    agent.provision(
+        host=agent.host,
+        options=CreateAgentOptions(agent_type=AgentTypeName("antigravity")),
+        mngr_ctx=agent.mngr_ctx,
+    )
+
+    settings = _read_user_settings(isolated_home)
+    assert settings["trustedWorkspaces"] == [fake_source, str(agent.work_dir)]
+
+
+def test_provision_pre_trusts_both_source_and_workspace_under_auto_approve(
+    local_provider: LocalProviderInstance, tmp_path: Path, isolated_home: Path
+) -> None:
+    """`--yes` adds the source repo root AND the work_dir, so future worktrees take the silent branch."""
+    agent = _make_subclassed_agent_with_flags(
+        _AntigravityAgentWithFakeSourceRoot, local_provider, tmp_path, AntigravityAgentConfig(), is_auto_approve=True
+    )
+
+    agent.provision(
+        host=agent.host,
+        options=CreateAgentOptions(agent_type=AgentTypeName("antigravity")),
+        mngr_ctx=agent.mngr_ctx,
+    )
+
+    settings = _read_user_settings(isolated_home)
+    fake_source = str(agent.work_dir.parent)
+    assert settings["trustedWorkspaces"] == [fake_source, str(agent.work_dir)]
+
+
+def test_provision_prompt_accept_trusts_both_source_and_workspace(
+    local_provider: LocalProviderInstance, tmp_path: Path, isolated_home: Path
+) -> None:
+    """When the user accepts the interactive prompt, both source and work_dir get trusted."""
+    agent = _make_subclassed_agent_with_flags(
+        _ConfirmingAgentWithFakeSourceRoot, local_provider, tmp_path, AntigravityAgentConfig(), is_interactive=True
+    )
+
+    agent.provision(
+        host=agent.host,
+        options=CreateAgentOptions(agent_type=AgentTypeName("antigravity")),
+        mngr_ctx=agent.mngr_ctx,
+    )
+
+    settings = _read_user_settings(isolated_home)
+    fake_source = str(agent.work_dir.parent)
+    assert settings["trustedWorkspaces"] == [fake_source, str(agent.work_dir)]
+
+
+def test_provision_does_not_duplicate_source_when_already_present(
+    local_provider: LocalProviderInstance, tmp_path: Path, isolated_home: Path
+) -> None:
+    """The silent-extend branch must not re-append the source path that's already trusted."""
+    agent = _make_subclassed_agent_with_flags(
+        _DecliningAgentWithFakeSourceRoot, local_provider, tmp_path, AntigravityAgentConfig(), is_interactive=True
+    )
+    fake_source = str(agent.work_dir.parent)
+    settings_path = get_antigravity_user_settings_path()
+    settings_path.parent.mkdir(parents=True)
+    settings_path.write_text(json.dumps({"trustedWorkspaces": [fake_source, "/some/unrelated/path"]}))
+
+    agent.provision(
+        host=agent.host,
+        options=CreateAgentOptions(agent_type=AgentTypeName("antigravity")),
+        mngr_ctx=agent.mngr_ctx,
+    )
+
+    settings = _read_user_settings(isolated_home)
+    assert settings["trustedWorkspaces"].count(fake_source) == 1
+    assert str(agent.work_dir) in settings["trustedWorkspaces"]
+    assert "/some/unrelated/path" in settings["trustedWorkspaces"]
 
 
 def test_provision_errors_when_trustedworkspaces_has_non_list_value(

@@ -261,46 +261,66 @@ class AntigravityAgent(InteractiveTuiAgent[AntigravityAgentConfig], HasCommonTra
     def _interactively_dismiss_antigravity_dialogs(self, host: OnlineHostInterface, mngr_ctx: MngrContext) -> None:
         """Ensure agy's first-launch trust dialog won't intercept tmux input.
 
-        Three branches, matching ``mngr_claude``'s dismiss flow:
+        Branches, matching ``mngr_claude``'s dismiss flow's user-visible
+        posture while compensating for agy's exact-match trust check:
 
+        * ``work_dir`` already in ``trustedWorkspaces`` -> no-op (idempotent
+          re-provision).
+        * ``source_path`` already in ``trustedWorkspaces`` -> silently add
+          ``work_dir`` too. The user has previously trusted the source repo
+          (interactively or via opt-in); spawning another worktree of the
+          same repo shouldn't re-prompt, even though agy needs the worktree
+          path written explicitly.
         * ``auto_dismiss_dialogs=True`` or ``mngr_ctx.is_auto_approve``:
-          silently trust the work_dir.
-        * Interactive mode (``mngr_ctx.is_interactive``): prompt the user
-          via ``click.confirm`` before mutating the global settings file.
-          The prompt references the source repo root (when work_dir is a
-          worktree of one) -- the analog of how Claude phrases this --
-          even though the actual settings write is for the work_dir,
-          because agy's ``trustedWorkspaces`` is exact-match and only the
-          work_dir entry will suppress the first-launch dialog.
-        * Non-interactive mode with neither auto-approve nor opt-in:
-          raise. The operator likely intended to opt in and didn't.
+          silently add both ``source_path`` and ``work_dir`` so future
+          worktrees of the same source benefit from the silent-extend path
+          above.
+        * Interactive (``mngr_ctx.is_interactive``): prompt via
+          ``click.confirm``. The prompt references ``source_path`` for stable
+          wording across worktrees. On accept, add both ``source_path`` and
+          ``work_dir``.
+        * Non-interactive without opt-in, or user declines: log an explicit
+          ``logger.error`` and ``raise SystemExit(1)``.
 
-        If the work_dir is already trusted (idempotent re-provision) the
-        method short-circuits without prompting.
-
-        Decline / non-interactive paths exit via ``raise SystemExit(1)``
-        rather than ``UserInputError`` because ``provision_agent`` wraps
-        its body in a ``ConcurrencyExceptionGroup`` (see
-        ``imbue.concurrency_group.concurrency_group.ConcurrencyGroup._exit``);
-        the wrapping turns a regular ``Exception`` into a noisy traceback
-        with mngr's auto-diagnostics handler. ``SystemExit`` is a
-        ``BaseException``, which the concurrency group re-raises unwrapped
-        (line 190-191 in that module), giving the operator a clean exit
-        with the logged reason.
+        Why ``SystemExit`` and not ``UserInputError``: ``provision_agent``
+        wraps its body in a ``ConcurrencyExceptionGroup`` (see
+        ``imbue.concurrency_group.concurrency_group.ConcurrencyGroup._exit``).
+        Regular ``Exception`` raises get wrapped and surface as a noisy
+        auto-diagnostics traceback; ``SystemExit`` is a ``BaseException``
+        which the same ``_exit`` re-raises unwrapped (line 190-191),
+        producing a clean exit.
         """
         workspace_path = str(self.work_dir)
         settings_path = get_antigravity_user_settings_path()
         existing_settings = read_antigravity_settings(host, settings_path)
         self._check_existing_trustedworkspaces_shape(settings_path, existing_settings)
-        if workspace_path in existing_settings.get(TRUSTED_WORKSPACES_KEY, []):
+        existing_trusted: list[str] = list(existing_settings.get(TRUSTED_WORKSPACES_KEY, []))
+
+        if workspace_path in existing_trusted:
             logger.debug("Workspace {} already trusted in {}", workspace_path, settings_path)
             return
 
-        if self.agent_config.auto_dismiss_dialogs or mngr_ctx.is_auto_approve:
-            self._write_workspace_trust(host, settings_path, existing_settings, workspace_path)
+        source_path = self._find_git_source_path(mngr_ctx.concurrency_group) or self.work_dir
+        source_path_str = str(source_path)
+        is_worktree_of_trusted_source = source_path_str != workspace_path and source_path_str in existing_trusted
+
+        if is_worktree_of_trusted_source:
+            logger.debug(
+                "Source {} is already trusted; silently extending trust to worktree {}",
+                source_path_str,
+                workspace_path,
+            )
+            self._write_workspace_trust(host, settings_path, existing_settings, [workspace_path])
             return
 
-        source_path = self._find_git_source_path(mngr_ctx.concurrency_group) or self.work_dir
+        if self.agent_config.auto_dismiss_dialogs or mngr_ctx.is_auto_approve:
+            self._write_workspace_trust(
+                host,
+                settings_path,
+                existing_settings,
+                self._paths_to_add(workspace_path, source_path_str, existing_trusted),
+            )
+            return
 
         if not mngr_ctx.is_interactive:
             logger.error(
@@ -321,7 +341,29 @@ class AntigravityAgent(InteractiveTuiAgent[AntigravityAgentConfig], HasCommonTra
                 settings_path,
             )
             raise SystemExit(1)
-        self._write_workspace_trust(host, settings_path, existing_settings, workspace_path)
+        self._write_workspace_trust(
+            host,
+            settings_path,
+            existing_settings,
+            self._paths_to_add(workspace_path, source_path_str, existing_trusted),
+        )
+
+    @staticmethod
+    def _paths_to_add(workspace_path: str, source_path_str: str, existing_trusted: list[str]) -> list[str]:
+        """Return the paths to append to ``trustedWorkspaces``, deduped against existing entries.
+
+        Always includes ``workspace_path`` (this is what agy's exact-match
+        check needs to suppress the first-launch dialog) and additionally
+        ``source_path_str`` when it differs and isn't already trusted (so
+        future worktrees of the same source repo can take the silent-extend
+        branch in ``_interactively_dismiss_antigravity_dialogs``).
+        """
+        paths: list[str] = []
+        if source_path_str != workspace_path and source_path_str not in existing_trusted:
+            paths.append(source_path_str)
+        if workspace_path not in existing_trusted:
+            paths.append(workspace_path)
+        return paths
 
     def _prompt_user_to_trust_workspace(self, source_path: Path, settings_path: Path) -> bool:
         """Prompt the user to trust the agent's source directory in Antigravity's settings.
@@ -371,14 +413,28 @@ class AntigravityAgent(InteractiveTuiAgent[AntigravityAgentConfig], HasCommonTra
         host: OnlineHostInterface,
         settings_path: Path,
         existing_settings: Mapping[str, Any],
-        workspace_path: str,
+        paths_to_add: list[str],
     ) -> None:
-        """Append ``workspace_path`` to the user-tier settings' trust list and write it back."""
-        merged = merge_trusted_workspace(existing_settings, workspace_path)
-        if merged is None:
-            logger.debug("Workspace {} already trusted in {}", workspace_path, settings_path)
+        """Append each of ``paths_to_add`` to the user-tier settings' trust list and write it back.
+
+        Iterates so already-trusted entries are skipped (each
+        ``merge_trusted_workspace`` call is a no-op when the path is already
+        present); writes the combined result once at the end. Passing an
+        empty list is a no-op.
+        """
+        if not paths_to_add:
             return
-        with log_span("Pre-trusting workspace {} in {}", workspace_path, settings_path):
+        merged: Mapping[str, Any] = existing_settings
+        actually_added: list[str] = []
+        for path in paths_to_add:
+            updated = merge_trusted_workspace(merged, path)
+            if updated is not None:
+                merged = updated
+                actually_added.append(path)
+        if not actually_added:
+            logger.debug("All requested paths already trusted in {}; skipping write", settings_path)
+            return
+        with log_span("Pre-trusting workspace(s) {} in {}", actually_added, settings_path):
             host.write_text_file(settings_path, serialize_antigravity_settings(merged))
 
     def _build_background_tasks_command(self) -> str:
