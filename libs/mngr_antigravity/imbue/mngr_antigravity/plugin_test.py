@@ -395,7 +395,7 @@ def test_provision_pre_trusts_workspace_under_auto_approve(
         mngr_ctx=agent.mngr_ctx,
     )
     settings = _read_user_settings(isolated_home)
-    assert str(agent.work_dir) in settings["trustedWorkspaces"]
+    assert agent._get_agy_workspace_symlink_path() in settings["trustedWorkspaces"]
 
 
 def test_provision_pre_trusts_workspace_under_auto_dismiss_dialogs(
@@ -410,7 +410,7 @@ def test_provision_pre_trusts_workspace_under_auto_dismiss_dialogs(
         mngr_ctx=agent.mngr_ctx,
     )
     settings = _read_user_settings(isolated_home)
-    assert str(agent.work_dir) in settings["trustedWorkspaces"]
+    assert agent._get_agy_workspace_symlink_path() in settings["trustedWorkspaces"]
 
 
 def test_provision_prompts_user_then_trusts_when_interactive_and_user_accepts(
@@ -425,7 +425,7 @@ def test_provision_prompts_user_then_trusts_when_interactive_and_user_accepts(
         mngr_ctx=agent.mngr_ctx,
     )
     settings = _read_user_settings(isolated_home)
-    assert str(agent.work_dir) in settings["trustedWorkspaces"]
+    assert agent._get_agy_workspace_symlink_path() in settings["trustedWorkspaces"]
 
 
 def test_provision_aborts_when_interactive_and_user_declines(
@@ -493,7 +493,7 @@ def test_provision_dialog_dismissal_preserves_existing_settings(
 
     settings = _read_user_settings(isolated_home)
     assert "/prior/workspace" in settings["trustedWorkspaces"]
-    assert str(agent.work_dir) in settings["trustedWorkspaces"]
+    assert agent._get_agy_workspace_symlink_path() in settings["trustedWorkspaces"]
     assert settings["colorScheme"] == "dark"
 
 
@@ -509,7 +509,7 @@ def test_provision_dialog_dismissal_is_idempotent(
 
     settings = _read_user_settings(isolated_home)
     trusted = settings["trustedWorkspaces"]
-    assert trusted.count(str(agent.work_dir)) == 1
+    assert trusted.count(agent._get_agy_workspace_symlink_path()) == 1
 
 
 def test_provision_already_trusted_workspace_does_not_reprompt(
@@ -524,7 +524,8 @@ def test_provision_already_trusted_workspace_does_not_reprompt(
     agent = interactive_ctx_with_declination
     settings_path = get_antigravity_user_settings_path()
     settings_path.parent.mkdir(parents=True)
-    settings_path.write_text(json.dumps({"trustedWorkspaces": [str(agent.work_dir)]}))
+    pre_trusted = [agent._get_agy_workspace_symlink_path()]
+    settings_path.write_text(json.dumps({"trustedWorkspaces": pre_trusted}))
 
     agent.provision(
         host=agent.host,
@@ -532,7 +533,7 @@ def test_provision_already_trusted_workspace_does_not_reprompt(
         mngr_ctx=agent.mngr_ctx,
     )
     # The file is unchanged because the workspace was already trusted.
-    assert json.loads(settings_path.read_text()) == {"trustedWorkspaces": [str(agent.work_dir)]}
+    assert json.loads(settings_path.read_text()) == {"trustedWorkspaces": pre_trusted}
 
 
 def test_provision_silently_extends_trust_when_source_repo_already_trusted(
@@ -560,7 +561,7 @@ def test_provision_silently_extends_trust_when_source_repo_already_trusted(
     )
 
     settings = _read_user_settings(isolated_home)
-    assert settings["trustedWorkspaces"] == [fake_source, str(agent.work_dir)]
+    assert settings["trustedWorkspaces"] == [fake_source, agent._get_agy_workspace_symlink_path()]
 
 
 def test_provision_pre_trusts_both_source_and_workspace_under_auto_approve(
@@ -579,7 +580,7 @@ def test_provision_pre_trusts_both_source_and_workspace_under_auto_approve(
 
     settings = _read_user_settings(isolated_home)
     fake_source = str(agent.work_dir.parent)
-    assert settings["trustedWorkspaces"] == [fake_source, str(agent.work_dir)]
+    assert settings["trustedWorkspaces"] == [fake_source, agent._get_agy_workspace_symlink_path()]
 
 
 def test_provision_prompt_accept_trusts_both_source_and_workspace(
@@ -598,7 +599,7 @@ def test_provision_prompt_accept_trusts_both_source_and_workspace(
 
     settings = _read_user_settings(isolated_home)
     fake_source = str(agent.work_dir.parent)
-    assert settings["trustedWorkspaces"] == [fake_source, str(agent.work_dir)]
+    assert settings["trustedWorkspaces"] == [fake_source, agent._get_agy_workspace_symlink_path()]
 
 
 def test_provision_does_not_duplicate_source_when_already_present(
@@ -621,7 +622,7 @@ def test_provision_does_not_duplicate_source_when_already_present(
 
     settings = _read_user_settings(isolated_home)
     assert settings["trustedWorkspaces"].count(fake_source) == 1
-    assert str(agent.work_dir) in settings["trustedWorkspaces"]
+    assert agent._get_agy_workspace_symlink_path() in settings["trustedWorkspaces"]
     assert "/some/unrelated/path" in settings["trustedWorkspaces"]
 
 

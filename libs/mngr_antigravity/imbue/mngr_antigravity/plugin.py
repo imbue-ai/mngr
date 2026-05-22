@@ -290,23 +290,30 @@ class AntigravityAgent(InteractiveTuiAgent[AntigravityAgentConfig], HasCommonTra
         Branches, matching ``mngr_claude``'s dismiss flow's user-visible
         posture while compensating for agy's exact-match trust check:
 
-        * ``work_dir`` already in ``trustedWorkspaces`` -> no-op (idempotent
-          re-provision).
+        * Effective workspace path (the agy-cwd symlink, see
+          ``_get_agy_workspace_symlink_path``) already in
+          ``trustedWorkspaces`` -> no-op (idempotent re-provision).
         * ``source_path`` already in ``trustedWorkspaces`` -> silently add
-          ``work_dir`` too. The user has previously trusted the source repo
-          (interactively or via opt-in); spawning another worktree of the
-          same repo shouldn't re-prompt, even though agy needs the worktree
-          path written explicitly.
+          the effective workspace path. The user has previously trusted
+          the source repo (interactively or via opt-in); spawning another
+          agent for the same repo shouldn't re-prompt.
         * ``auto_dismiss_dialogs=True`` or ``mngr_ctx.is_auto_approve``:
-          silently add both ``source_path`` and ``work_dir`` so future
-          worktrees of the same source benefit from the silent-extend path
-          above.
+          silently add both ``source_path`` and the effective workspace
+          path so future agents for the same source benefit from the
+          silent-extend path above.
         * Interactive (``mngr_ctx.is_interactive``): prompt via
-          ``click.confirm``. The prompt references ``source_path`` for stable
-          wording across worktrees. On accept, add both ``source_path`` and
-          ``work_dir``.
+          ``click.confirm``. The prompt references ``source_path`` for
+          stable wording across worktrees. On accept, add both.
         * Non-interactive without opt-in, or user declines: log an explicit
           ``logger.error`` and ``raise SystemExit(1)``.
+
+        Note on "effective workspace path" vs ``work_dir``: agy is launched
+        with cwd set to a /tmp symlink (the workaround for agy's hidden-
+        path rejection of ``~/.mngr/worktrees/...``). agy treats the
+        symlink path as its workspace identity and checks
+        ``trustedWorkspaces`` against that path. So that's what we have to
+        write -- writing ``work_dir`` would not silence the first-launch
+        dialog. See ``_AGY_WORKSPACE_SYMLINK_PARENT``.
 
         Why ``SystemExit`` and not ``UserInputError``: ``provision_agent``
         wraps its body in a ``ConcurrencyExceptionGroup`` (see
@@ -316,27 +323,32 @@ class AntigravityAgent(InteractiveTuiAgent[AntigravityAgentConfig], HasCommonTra
         which the same ``_exit`` re-raises unwrapped (line 190-191),
         producing a clean exit.
         """
-        workspace_path = str(self.work_dir)
+        # The "workspace path" agy will actually see and check is the /tmp
+        # symlink, NOT self.work_dir. Pre-trusting work_dir doesn't silence
+        # the dialog because agy never sees that path.
+        effective_workspace_path = self._get_agy_workspace_symlink_path()
         settings_path = get_antigravity_user_settings_path()
         existing_settings = read_antigravity_settings(host, settings_path)
         self._check_existing_trustedworkspaces_shape(settings_path, existing_settings)
         existing_trusted: list[str] = list(existing_settings.get(TRUSTED_WORKSPACES_KEY, []))
 
-        if workspace_path in existing_trusted:
-            logger.debug("Workspace {} already trusted in {}", workspace_path, settings_path)
+        if effective_workspace_path in existing_trusted:
+            logger.debug("Workspace {} already trusted in {}", effective_workspace_path, settings_path)
             return
 
         source_path = self._find_git_source_path(mngr_ctx.concurrency_group) or self.work_dir
         source_path_str = str(source_path)
-        is_worktree_of_trusted_source = source_path_str != workspace_path and source_path_str in existing_trusted
+        is_worktree_of_trusted_source = (
+            source_path_str != effective_workspace_path and source_path_str in existing_trusted
+        )
 
         if is_worktree_of_trusted_source:
             logger.debug(
-                "Source {} is already trusted; silently extending trust to worktree {}",
+                "Source {} is already trusted; silently extending trust to workspace {}",
                 source_path_str,
-                workspace_path,
+                effective_workspace_path,
             )
-            self._write_workspace_trust(host, settings_path, existing_settings, [workspace_path])
+            self._write_workspace_trust(host, settings_path, existing_settings, [effective_workspace_path])
             return
 
         if self.agent_config.auto_dismiss_dialogs or mngr_ctx.is_auto_approve:
@@ -344,7 +356,7 @@ class AntigravityAgent(InteractiveTuiAgent[AntigravityAgentConfig], HasCommonTra
                 host,
                 settings_path,
                 existing_settings,
-                self._paths_to_add(workspace_path, source_path_str, existing_trusted),
+                self._paths_to_add(effective_workspace_path, source_path_str, existing_trusted),
             )
             return
 
@@ -371,7 +383,7 @@ class AntigravityAgent(InteractiveTuiAgent[AntigravityAgentConfig], HasCommonTra
             host,
             settings_path,
             existing_settings,
-            self._paths_to_add(workspace_path, source_path_str, existing_trusted),
+            self._paths_to_add(effective_workspace_path, source_path_str, existing_trusted),
         )
 
     @staticmethod
