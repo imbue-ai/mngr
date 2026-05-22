@@ -240,14 +240,14 @@ def test_prevent_bare_urwid_tty_signal_keys() -> None:
     rc.check_bare_urwid_tty_signal_keys(_DIR, snapshot(0))
 
 
-# The single allowed violation is `list-panes -s -t '{session_name}'` in
-# hosts/host.py's `_collect_session_pids` -- guarded by a preceding `has-session
-# -t '={session_name}'` check so the bare name cannot misroute. tmux's `=`
-# exact-match prefix is not honored on `list-panes -s` (cmd-find.c resolves -t
-# via window resolution despite the man page calling it a target-session form),
-# so the has-session guard is the only safe pattern there.
+# Primary enforcement lives in the type system: TmuxSessionTarget and
+# TmuxWindowTarget (in hosts/tmux.py) emit exact-match `=` targets via
+# .as_shell_arg(). This ratchet is the regex-level backstop for shell-template
+# strings (e.g. bash heredocs in providers/listing_utils.py and connect.py)
+# where Python types don't reach -- it catches any literal `tmux <subcmd> -t
+# '<bare-name>'` form that bypasses the helpers.
 def test_prevent_bare_tmux_targets() -> None:
-    rc.check_bare_tmux_targets(_DIR, snapshot(1))
+    rc.check_bare_tmux_targets(_DIR, snapshot(0))
 
 
 def test_prevent_direct_subprocess() -> None:

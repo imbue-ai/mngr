@@ -7,7 +7,6 @@ import datetime as dt
 import fcntl
 import json
 import os
-import shlex
 import stat
 import subprocess
 import threading
@@ -34,9 +33,9 @@ from imbue.mngr.errors import LockNotHeldError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.hosts.common import is_macos
 from imbue.mngr.hosts.host import Host
+from imbue.mngr.hosts.tmux import TmuxSessionTarget
+from imbue.mngr.hosts.tmux import TmuxWindowTarget
 from imbue.mngr.hosts.tmux import capture_tmux_pane_content
-from imbue.mngr.hosts.tmux import tmux_session_target
-from imbue.mngr.hosts.tmux import tmux_window_target
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.data_types import ActivityConfig
 from imbue.mngr.interfaces.host import AgentDataOptions
@@ -781,15 +780,16 @@ def test_unset_vars_applied_during_agent_start(
     host.start_agents([agent.id])
 
     session_name = f"{mngr_test_prefix}{agent.name}"
-    quoted_session_target = shlex.quote(tmux_session_target(session_name))
-    quoted_window_target = shlex.quote(tmux_window_target(session_name, 0))
+    quoted_session_target = TmuxSessionTarget(session_name=session_name).as_shell_arg()
+    window_target = TmuxWindowTarget(session_name=session_name, window=0)
+    quoted_window_target = window_target.as_shell_arg()
 
     # Wait for the tmux session to exist
     def session_ready() -> bool:
         result = host.execute_idempotent_command(f"tmux has-session -t {quoted_session_target}")
         if not result.success:
             return False
-        pane_content = capture_tmux_pane_content(host, tmux_window_target(session_name, 0))
+        pane_content = capture_tmux_pane_content(host, window_target)
         return pane_content is not None and "sleep 736249" in pane_content
 
     wait_for(session_ready, timeout=30.0, poll_interval=0.5, error_message="tmux session not ready")
@@ -814,7 +814,7 @@ def test_unset_vars_applied_during_agent_start(
     )
 
     def check_output() -> bool:
-        output = capture_tmux_pane_content(host, tmux_window_target(session_name, 0))
+        output = capture_tmux_pane_content(host, window_target)
         if output is None:
             return False
         has_histfile = "HISTFILE_VALUE=UNSET" in output or "HISTFILE_VALUE=" in output
@@ -1035,7 +1035,7 @@ def test_stop_agent_kills_multi_pane_processes(
     host.start_agents([agent.id])
     session_name = f"{mngr_test_prefix}{agent.name}"
 
-    quoted_window_target = shlex.quote(tmux_window_target(session_name, 0))
+    quoted_window_target = TmuxWindowTarget(session_name=session_name, window=0).as_shell_arg()
     host._run_shell_command(StringCommand(f"tmux split-window -t {quoted_window_target} 'sleep 2000'"))
     host._run_shell_command(StringCommand(f"tmux split-window -t {quoted_window_target} 'sleep 3000'"))
 
@@ -1240,7 +1240,8 @@ def test_start_agent_creates_process_group(
     try:
         success, output = host._run_shell_command(
             StringCommand(
-                f"tmux list-panes -t {shlex.quote(tmux_window_target(session_name, 0))} -F '#{{pane_pid}}' 2>/dev/null"
+                f"tmux list-panes -t {TmuxWindowTarget(session_name=session_name, window=0).as_shell_arg()}"
+                " -F '#{pane_pid}' 2>/dev/null"
             )
         )
         assert success
@@ -1474,7 +1475,8 @@ def test_start_agent_additional_windows_run_commands(
         def check_output() -> bool:
             capture_result = host._run_shell_command(
                 StringCommand(
-                    f"tmux capture-pane -t {shlex.quote(tmux_window_target(session_name, 'cmd-1'))} -p 2>/dev/null"
+                    f"tmux capture-pane -t {TmuxWindowTarget(session_name=session_name, window='cmd-1').as_shell_arg()}"
+                    " -p 2>/dev/null"
                 )
             )
             if not capture_result[0]:
@@ -2583,7 +2585,7 @@ def test_new_tmux_window_inherits_env_vars(
                 "tmux",
                 "new-window",
                 "-t",
-                session_name,
+                TmuxSessionTarget(session_name=session_name).as_shell_arg(),
                 "-n",
                 "user-window",
                 "-e",
@@ -2596,14 +2598,14 @@ def test_new_tmux_window_inherits_env_vars(
         )
 
         # Wait for the shell to be ready before sending keys
-        window_target = f"{session_name}:user-window"
+        window_target = TmuxWindowTarget(session_name=session_name, window="user-window")
 
         def shell_prompt_visible() -> bool:
-            pane = capture_tmux_pane_contents(window_target)
+            pane = capture_tmux_pane_contents(session_name, window="user-window")
             return prompt_sentinel in pane
 
         if not poll_until(shell_prompt_visible, timeout=10.0):
-            pane_stdout = capture_tmux_pane_contents(window_target)
+            pane_stdout = capture_tmux_pane_contents(session_name, window="user-window")
             raise AssertionError(
                 f"Shell prompt did not appear in new tmux window within 10s.\nPane content:\n{pane_stdout}"
             )
@@ -2613,7 +2615,7 @@ def test_new_tmux_window_inherits_env_vars(
                 "tmux",
                 "send-keys",
                 "-t",
-                window_target,
+                window_target.as_shell_arg(),
                 f"echo NEW_WINDOW_VAR=$NEW_WINDOW_VAR > {marker_file}",
                 "Enter",
             ],
@@ -2629,7 +2631,7 @@ def test_new_tmux_window_inherits_env_vars(
             return "NEW_WINDOW_VAR=new_window_value_123456" in content
 
         if not poll_until(check_marker_file, timeout=10.0):
-            pane_stdout = capture_tmux_pane_contents(window_target)
+            pane_stdout = capture_tmux_pane_contents(session_name, window="user-window")
             marker_content = marker_file.read_text() if marker_file.exists() else "<file does not exist>"
             raise AssertionError(
                 f"New tmux window did not inherit environment variables.\n"

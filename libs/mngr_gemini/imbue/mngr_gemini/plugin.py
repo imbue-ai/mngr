@@ -21,6 +21,7 @@ from imbue.mngr.agents.tui_utils import send_enter_and_poll_for_cleared_indicato
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import AgentStartError
+from imbue.mngr.hosts.tmux import TmuxWindowTarget
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.agent import HasCommonTranscriptMixin
 from imbue.mngr.interfaces.host import CreateAgentOptions
@@ -154,7 +155,7 @@ class GeminiAgent(InteractiveTuiAgent[GeminiAgentConfig], HasCommonTranscriptMix
         # `node` in ps/tmux. Report that so lifecycle detection finds it.
         return "node"
 
-    def _send_enter_and_validate(self, tmux_target: str) -> None:
+    def _send_enter_and_validate(self, tmux_target: TmuxWindowTarget) -> None:
         # Gemini has no UserPromptSubmit-style hook, so confirm submission by
         # polling for the input-row placeholder to reappear once Enter clears
         # the typed text.

@@ -63,8 +63,8 @@ from imbue.mngr.hosts.common import get_ssh_known_hosts_file
 from imbue.mngr.hosts.offline_host import BaseHost
 from imbue.mngr.hosts.offline_host import apply_rename_to_agent_data
 from imbue.mngr.hosts.outer_host import OuterHost
-from imbue.mngr.hosts.tmux import tmux_session_target
-from imbue.mngr.hosts.tmux import tmux_window_target
+from imbue.mngr.hosts.tmux import TmuxSessionTarget
+from imbue.mngr.hosts.tmux import TmuxWindowTarget
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.interfaces.data_types import CommandResult
@@ -2285,7 +2285,7 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
             # Rename the tmux session first (idempotent -- no-ops if session doesn't exist with old name)
             old_session_name = f"{self.mngr_ctx.config.prefix}{old_name}"
             new_session_name = f"{self.mngr_ctx.config.prefix}{new_name}"
-            old_session_target = shlex.quote(tmux_session_target(old_session_name))
+            old_session_target = TmuxSessionTarget(session_name=old_session_name).as_shell_arg()
             result = self.execute_idempotent_command(
                 f"tmux has-session -t {old_session_target} 2>/dev/null && "
                 f"tmux rename-session -t {old_session_target} -- {shlex.quote(new_session_name)} || true"
@@ -2533,32 +2533,38 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
     def _collect_session_pids(self, session_name: str) -> list[str]:
         """Collect all pane PIDs and their descendants for a tmux session.
 
-        Uses -s flag to list panes across ALL windows in the session, not just the
-        current window. This is important for sessions with additional command windows.
-
-        Guards with has-session first because list-panes -s does not support the =
-        prefix for exact session matching. Despite the man page saying "if -s is given,
-        target is a session", list-panes resolves its -t via CMD_FIND_WINDOW, so a bare
-        '=name' is parsed as an exact window match, not an exact session match. Without
-        this guard, list-panes -s would fall back to session prefix matching and could
-        return PIDs from a different session (e.g. 'mngr_foo-bar' when targeting 'mngr_foo').
+        Iterates the session's windows and calls ``list-panes`` per window so
+        every operation uses an exact-match target (``=<session>:<window>``).
+        We avoid ``list-panes -s`` for the whole-session case: despite the man
+        page calling its ``-t`` a target-session, tmux's ``cmd-find.c`` ignores
+        the ``=`` exact-match prefix on ``-s``, so a bare-name target would
+        silently fall back to session prefix matching -- letting a colliding
+        sibling session's PIDs leak into the result and get killed downstream.
+        The per-window iteration costs one extra tmux roundtrip per window
+        (cheap, and this is a cleanup path) and removes the prefix-matching
+        risk entirely.
         """
-        # has-session supports = for exact matching -- bail out if session doesn't exist
-        has_result = self.execute_idempotent_command(
-            f"tmux has-session -t {shlex.quote(tmux_session_target(session_name))} 2>/dev/null"
+        windows_result = self.execute_idempotent_command(
+            f"tmux list-windows -t {TmuxSessionTarget(session_name=session_name).as_shell_arg()} -F '#I' 2>/dev/null"
         )
-        if not has_result.success:
+        if not windows_result.success or not windows_result.stdout.strip():
             return []
 
         all_pids: list[str] = []
-        result = self.execute_idempotent_command(
-            f"tmux list-panes -s -t '{session_name}' -F '#{{pane_pid}}' 2>/dev/null || true"
-        )
-        if result.success and result.stdout.strip():
-            for pane_pid in result.stdout.strip().split("\n"):
-                if pane_pid:
-                    all_pids.append(pane_pid)
-                    all_pids.extend(self._get_all_descendant_pids(pane_pid))
+        for window_idx in windows_result.stdout.strip().split("\n"):
+            window_idx = window_idx.strip()
+            if not window_idx:
+                continue
+            window_target = TmuxWindowTarget(session_name=session_name, window=window_idx)
+            result = self.execute_idempotent_command(
+                f"tmux list-panes -t {window_target.as_shell_arg()} -F '#{{pane_pid}}' 2>/dev/null"
+            )
+            if result.success and result.stdout.strip():
+                for pane_pid in result.stdout.strip().split("\n"):
+                    pane_pid = pane_pid.strip()
+                    if pane_pid:
+                        all_pids.append(pane_pid)
+                        all_pids.extend(self._get_all_descendant_pids(pane_pid))
         return all_pids
 
     def _collect_pids_by_agent_id_env(self, agent_id: AgentId) -> list[str]:
@@ -2668,7 +2674,7 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
             for agent in current_agents:
                 session_name = f"{self.mngr_ctx.config.prefix}{agent.name}"
                 self.execute_idempotent_command(
-                    f"tmux kill-session -t {shlex.quote(tmux_session_target(session_name))} 2>/dev/null || true"
+                    f"tmux kill-session -t {TmuxSessionTarget(session_name=session_name).as_shell_arg()} 2>/dev/null || true"
                 )
 
     def _get_agent_by_id(self, agent_id: AgentId) -> AgentInterface | None:
@@ -2854,12 +2860,12 @@ def _build_start_agent_shell_command(
     If the tmux session already exists, the command exits early (successfully)
     since everything has presumably already been set up.
     """
-    # Bail out early if the session already exists. tmux_session_target prepends
+    # Bail out early if the session already exists. TmuxSessionTarget prepends
     # the = exact-match prefix so we don't prefix-match a different session
     # (e.g. "mngr_foo" matching "mngr_foo-bar"). stderr is redirected to
     # suppress the "can't find session" message when the session doesn't exist
     # yet.
-    quoted_exact_session = shlex.quote(tmux_session_target(session_name))
+    quoted_exact_session = TmuxSessionTarget(session_name=session_name).as_shell_arg()
     guard = f"tmux has-session -t {quoted_exact_session} 2>/dev/null && exit 0"
 
     steps: list[str] = []
@@ -2895,8 +2901,8 @@ def _build_start_agent_shell_command(
     # pane subcommands like set-option, set-hook, show-option, send-keys,
     # select-window, list-panes -- a bare '=name' fails on these because tmux
     # parses it as an exact match on a window/pane literally called '=name').
-    # See imbue.mngr.hosts.tmux.tmux_window_target.
-    quoted_exact_agent_window = shlex.quote(tmux_window_target(session_name, 0))
+    # See imbue.mngr.hosts.tmux.TmuxWindowTarget.
+    quoted_exact_agent_window = TmuxWindowTarget(session_name=session_name, window=0).as_shell_arg()
 
     # Save the user's original default-command (from their ~/.tmux.conf) into
     # the tmux session environment, then set default-command to env_shell_cmd.
@@ -2930,7 +2936,8 @@ def _build_start_agent_shell_command(
         tmux_escaped = popup_shell_cmd.replace('"', '\\"')
         hook_value = (
             f'display-popup -w {popup_w} -h {popup_h} -E "{tmux_escaped}"'
-            f" ; set-hook -u -t {tmux_window_target(session_name, 0)} client-attached[99]"
+            f" ; set-hook -u -t {TmuxWindowTarget(session_name=session_name, window=0).as_shell_arg()}"
+            f" client-attached[99]"
         )
         steps.append(f"tmux set-hook -t {quoted_exact_agent_window} client-attached[99] {shlex.quote(hook_value)}")
 
@@ -2940,7 +2947,7 @@ def _build_start_agent_shell_command(
     # additional windows can be created.
     for idx, named_cmd in enumerate(additional_commands):
         window_name = named_cmd.window_name if named_cmd.window_name else f"cmd-{idx + 1}"
-        quoted_exact_named_window = shlex.quote(tmux_window_target(session_name, window_name))
+        quoted_exact_named_window = TmuxWindowTarget(session_name=session_name, window=window_name).as_shell_arg()
 
         steps.append(
             f"tmux new-window -t {quoted_exact_session}"

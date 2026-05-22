@@ -4,44 +4,59 @@ The prefix-collision tests in this file exist because of a recurring class of bu
 tmux's ``-t <target>`` resolution falls back to *session prefix matching* when no
 exact session matches. If a session named ``mngr-foo`` is gone but ``mngr-foo-bar``
 is alive, ``tmux ... -t 'mngr-foo:0'`` silently lands on ``mngr-foo-bar`` and the
-caller never knows. That caused stopped agents to report as ``WAITING`` because
-the lifecycle check read another agent's pane (see git log for ``mngr-gemini`` /
-``mngr-gemini-to-antigravity``).
+caller never knows. That can deliver keystrokes to the wrong agent, kill the
+wrong session, or capture the wrong agent's pane content.
 
 These tests set up the exact collision scenario and verify that targets built
-via the helpers (which prepend ``=`` for exact matching) refuse to misroute.
-They also document the parsing nuances that are easy to get wrong: for
-target-window/-pane commands, the ``:window`` component is *required*, and for
-``list-panes -s`` the ``=`` prefix is *ignored* (cmd-find.c routes ``-t`` through
-window resolution despite the man page).
+via :class:`TmuxSessionTarget` / :class:`TmuxWindowTarget` (which always render
+with a leading ``=``) refuse to misroute. They also document the parsing nuances
+that are easy to get wrong: for target-window/-pane commands, the ``:window``
+component is *required*, and for ``list-panes -s`` the ``=`` prefix is *ignored*
+(cmd-find.c routes ``-t`` through window resolution despite the man page).
 """
 
 import subprocess
 from collections.abc import Generator
 
+import pydantic
 import pytest
 
+from imbue.mngr.hosts.tmux import TmuxSessionTarget
+from imbue.mngr.hosts.tmux import TmuxWindowTarget
 from imbue.mngr.hosts.tmux import build_tmux_capture_pane_command
-from imbue.mngr.hosts.tmux import tmux_session_target
-from imbue.mngr.hosts.tmux import tmux_window_target
 from imbue.mngr.utils.testing import get_short_random_string
 
 
-def test_tmux_session_target_prepends_exact_match_prefix() -> None:
-    assert tmux_session_target("mngr-my-agent") == "=mngr-my-agent"
+def test_tmux_session_target_renders_with_exact_match_prefix() -> None:
+    target = TmuxSessionTarget(session_name="mngr-my-agent")
+    assert target.session_name == "mngr-my-agent"
+    assert target.as_shell_arg() == "=mngr-my-agent"
 
 
 def test_tmux_window_target_default_window_is_zero() -> None:
-    assert tmux_window_target("mngr-my-agent") == "=mngr-my-agent:0"
+    target = TmuxWindowTarget(session_name="mngr-my-agent")
+    assert target.session_name == "mngr-my-agent"
+    assert target.window == 0
+    assert target.as_shell_arg() == "=mngr-my-agent:0"
 
 
 def test_tmux_window_target_with_explicit_window() -> None:
-    assert tmux_window_target("mngr-my-agent", 2) == "=mngr-my-agent:2"
-    assert tmux_window_target("mngr-my-agent", "watcher") == "=mngr-my-agent:watcher"
+    assert TmuxWindowTarget(session_name="mngr-my-agent", window=2).as_shell_arg() == "=mngr-my-agent:2"
+    assert TmuxWindowTarget(session_name="mngr-my-agent", window="watcher").as_shell_arg() == "=mngr-my-agent:watcher"
+
+
+def test_tmux_session_target_rejects_empty_session_name() -> None:
+    with pytest.raises(pydantic.ValidationError):
+        TmuxSessionTarget(session_name="")
+
+
+def test_tmux_window_target_rejects_empty_session_name() -> None:
+    with pytest.raises(pydantic.ValidationError):
+        TmuxWindowTarget(session_name="")
 
 
 def test_build_tmux_capture_pane_command_visible_only() -> None:
-    result = build_tmux_capture_pane_command(tmux_window_target("mngr-my-agent"))
+    result = build_tmux_capture_pane_command(TmuxWindowTarget(session_name="mngr-my-agent"))
     # shlex.quote leaves =, :, -, alnum unquoted (none are shell-special), so the
     # rendered target appears bare. The leading '=' still forces exact session
     # matching at the tmux argv level.
@@ -49,7 +64,7 @@ def test_build_tmux_capture_pane_command_visible_only() -> None:
 
 
 def test_build_tmux_capture_pane_command_with_scrollback() -> None:
-    result = build_tmux_capture_pane_command(tmux_window_target("mngr-my-agent"), include_scrollback=True)
+    result = build_tmux_capture_pane_command(TmuxWindowTarget(session_name="mngr-my-agent"), include_scrollback=True)
     assert result == "tmux capture-pane -t =mngr-my-agent:0 -S - -p"
 
 
@@ -79,14 +94,14 @@ def colliding_session_pair() -> Generator[tuple[str, str], None, None]:
     # Tear down the shorter-named session so a bare-name query for it would
     # fall back to prefix matching and land on alive_name.
     subprocess.run(
-        ["tmux", "kill-session", "-t", tmux_session_target(stopped_name)],
+        ["tmux", "kill-session", "-t", f"={stopped_name}"],
         check=True,
     )
     try:
         yield (stopped_name, alive_name)
     finally:
         subprocess.run(
-            ["tmux", "kill-session", "-t", tmux_session_target(alive_name)],
+            ["tmux", "kill-session", "-t", f"={alive_name}"],
             check=False,
         )
 
@@ -114,7 +129,7 @@ def test_bare_session_target_silently_matches_sibling(
     assert result.stdout.strip() == alive, (
         "tmux prefix-matching behavior changed; the bare-name fallback no "
         "longer routes to the sibling session. Re-evaluate whether the "
-        "tmux_*_target helpers are still needed."
+        "TmuxSessionTarget / TmuxWindowTarget helpers are still needed."
     )
 
 
@@ -122,10 +137,10 @@ def test_bare_session_target_silently_matches_sibling(
 def test_tmux_window_target_blocks_prefix_match_on_list_panes(
     colliding_session_pair: tuple[str, str],
 ) -> None:
-    """``tmux list-panes -t <tmux_window_target(stopped)>`` must NOT find the sibling."""
+    """``tmux list-panes -t <TmuxWindowTarget(stopped).as_shell_arg()>`` must NOT find the sibling."""
     stopped, _ = colliding_session_pair
     result = subprocess.run(
-        ["tmux", "list-panes", "-t", tmux_window_target(stopped, 0)],
+        ["tmux", "list-panes", "-t", TmuxWindowTarget(session_name=stopped, window=0).as_shell_arg()],
         capture_output=True,
         text=True,
     )
@@ -139,13 +154,20 @@ def test_tmux_window_target_blocks_prefix_match_on_list_panes(
 def test_tmux_window_target_blocks_prefix_match_on_send_keys(
     colliding_session_pair: tuple[str, str],
 ) -> None:
-    """``tmux send-keys -t <tmux_window_target(stopped)>`` must NOT deliver to the sibling."""
+    """``tmux send-keys -t <TmuxWindowTarget(stopped).as_shell_arg()>`` must NOT deliver to the sibling."""
     stopped, alive = colliding_session_pair
     # The sibling started with ``sleep 60`` -- if send-keys misroutes, an
     # interrupt or any command would change its observable state. We test the
     # cleanest signal: tmux's own error.
     result = subprocess.run(
-        ["tmux", "send-keys", "-t", tmux_window_target(stopped, 0), "echo hi", "Enter"],
+        [
+            "tmux",
+            "send-keys",
+            "-t",
+            TmuxWindowTarget(session_name=stopped, window=0).as_shell_arg(),
+            "echo hi",
+            "Enter",
+        ],
         capture_output=True,
         text=True,
     )
@@ -159,7 +181,7 @@ def test_tmux_window_target_blocks_prefix_match_on_send_keys(
 def test_tmux_window_target_blocks_prefix_match_on_capture_pane(
     colliding_session_pair: tuple[str, str],
 ) -> None:
-    """``tmux capture-pane -t <tmux_window_target(stopped)>`` must NOT capture the sibling.
+    """``tmux capture-pane -t <TmuxWindowTarget(stopped).as_shell_arg()>`` must NOT capture the sibling.
 
     Regression for the original bug: BaseAgent.get_lifecycle_state() captured
     the sibling's pane state, saw a live ``claude`` process there, and reported
@@ -167,7 +189,7 @@ def test_tmux_window_target_blocks_prefix_match_on_capture_pane(
     """
     stopped, _ = colliding_session_pair
     result = subprocess.run(
-        ["tmux", "capture-pane", "-t", tmux_window_target(stopped, 0), "-p"],
+        ["tmux", "capture-pane", "-t", TmuxWindowTarget(session_name=stopped, window=0).as_shell_arg(), "-p"],
         capture_output=True,
         text=True,
     )
@@ -179,10 +201,10 @@ def test_tmux_window_target_blocks_prefix_match_on_capture_pane(
 def test_tmux_session_target_blocks_prefix_match_on_has_session(
     colliding_session_pair: tuple[str, str],
 ) -> None:
-    """``tmux has-session -t <tmux_session_target(stopped)>`` must report not-found."""
+    """``tmux has-session -t <TmuxSessionTarget(stopped).as_shell_arg()>`` must report not-found."""
     stopped, _ = colliding_session_pair
     result = subprocess.run(
-        ["tmux", "has-session", "-t", tmux_session_target(stopped)],
+        ["tmux", "has-session", "-t", TmuxSessionTarget(session_name=stopped).as_shell_arg()],
         capture_output=True,
         text=True,
     )
@@ -195,7 +217,7 @@ def test_tmux_session_target_blocks_prefix_match_on_has_session(
 def test_tmux_session_target_blocks_prefix_match_on_kill_session(
     colliding_session_pair: tuple[str, str],
 ) -> None:
-    """``tmux kill-session -t <tmux_session_target(stopped)>`` must NOT kill the sibling.
+    """``tmux kill-session -t <TmuxSessionTarget(stopped).as_shell_arg()>`` must NOT kill the sibling.
 
     This is the worst-case misrouting: a cleanup operation aimed at a dead
     agent accidentally tears down a live sibling. The ``=`` prefix prevents
@@ -204,14 +226,14 @@ def test_tmux_session_target_blocks_prefix_match_on_kill_session(
     stopped, alive = colliding_session_pair
     # Should fail (session is gone) without affecting the sibling.
     result = subprocess.run(
-        ["tmux", "kill-session", "-t", tmux_session_target(stopped)],
+        ["tmux", "kill-session", "-t", TmuxSessionTarget(session_name=stopped).as_shell_arg()],
         capture_output=True,
         text=True,
     )
     assert result.returncode != 0
     # Sibling must still be alive.
     sibling_check = subprocess.run(
-        ["tmux", "has-session", "-t", tmux_session_target(alive)],
+        ["tmux", "has-session", "-t", TmuxSessionTarget(session_name=alive).as_shell_arg()],
         capture_output=True,
     )
     assert sibling_check.returncode == 0, "kill-session misrouted and tore down the sibling"

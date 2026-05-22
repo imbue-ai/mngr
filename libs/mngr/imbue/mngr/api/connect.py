@@ -41,7 +41,7 @@ def build_post_attach_resize_script(session_name: str) -> str:
     Every tmux ``-t`` target uses the ``=`` exact-session prefix (with an
     explicit ``:$W`` window component on target-window/-pane commands) so the
     script cannot misroute to a sibling session whose name is a prefix of
-    ``session_name``. See :func:`imbue.mngr.hosts.tmux.tmux_window_target` for
+    ``session_name``. See :class:`imbue.mngr.hosts.tmux.TmuxWindowTarget` for
     the parsing rule.
     """
     return (
