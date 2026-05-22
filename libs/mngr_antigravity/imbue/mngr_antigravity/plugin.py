@@ -352,11 +352,18 @@ class AntigravityAgent(InteractiveTuiAgent[AntigravityAgentConfig], HasCommonTra
     def _paths_to_add(workspace_path: str, source_path_str: str, existing_trusted: list[str]) -> list[str]:
         """Return the paths to append to ``trustedWorkspaces``, deduped against existing entries.
 
-        Always includes ``workspace_path`` (this is what agy's exact-match
-        check needs to suppress the first-launch dialog) and additionally
-        ``source_path_str`` when it differs and isn't already trusted (so
-        future worktrees of the same source repo can take the silent-extend
-        branch in ``_interactively_dismiss_antigravity_dialogs``).
+        Includes (in order):
+
+        * ``source_path_str`` -- when it differs from ``workspace_path`` and
+          isn't already trusted, so future worktrees of the same source repo
+          can take the silent-extend branch in
+          ``_interactively_dismiss_antigravity_dialogs``.
+        * ``workspace_path`` -- when it isn't already trusted; this is what
+          agy's exact-match check needs to suppress the first-launch dialog.
+
+        Each path is independently deduped, so the returned list may be empty,
+        single-entry, or two-entry depending on what is already in
+        ``existing_trusted``.
         """
         paths: list[str] = []
         if source_path_str != workspace_path and source_path_str not in existing_trusted:
