@@ -86,6 +86,21 @@ _AGY_LOG_FILE_ENV_VAR: Final[str] = "ANTIGRAVITY_AGY_LOG_FILE"
 # it under logs/ groups it with the other per-agent log artifacts.
 _AGY_LOG_FILE_RELATIVE_PATH: Final[str] = "logs/agy_cli.log"
 
+# Parent directory for the per-agent symlinks that work around agy's
+# refusal to treat hidden paths (anything with a dot-prefixed segment, like
+# ``.mngr/...``) as a workspace. agy logs ``Failed to add workspace folder
+# /path/.mngr/...: is hidden: ignore uri`` and falls back to the user's
+# home directory as the project root, which means workspace-scoped tooling
+# (file search, project_id, .agents/) operates against the wrong tree.
+#
+# Verified via google-forum bug report (no flag override exists) and
+# confirmed live: launching agy with cwd set to a /tmp symlink that targets
+# the dotted ``work_dir`` produces ``project: using project "/tmp/..."``
+# (the symlink path, not the resolved target), and the workspace-add error
+# disappears. The symlink is recreated on every ``assemble_command`` call
+# via ``mkdir -p`` + ``ln -sfn`` so /tmp wipes self-repair on next launch.
+_AGY_WORKSPACE_SYMLINK_PARENT: Final[str] = "/tmp/mngr_antigravity_workspaces"
+
 
 def _load_antigravity_resource_script(filename: str) -> str:
     """Load a resource script from the mngr_antigravity resources package."""
@@ -467,6 +482,17 @@ class AntigravityAgent(InteractiveTuiAgent[AntigravityAgentConfig], HasCommonTra
         script_path = f"$MNGR_AGENT_STATE_DIR/commands/{_BACKGROUND_TASKS_SCRIPT_NAME}"
         return f"( bash {script_path} {shlex.quote(self.session_name)} ) &"
 
+    def _get_agy_workspace_symlink_path(self) -> str:
+        """Per-agent symlink target that agy will treat as its workspace.
+
+        Lives under ``/tmp/mngr_antigravity_workspaces/<agent_id>`` -- a
+        non-dotted path, which is required because agy refuses to add any
+        path with a dot-prefixed segment as a workspace (see the constant
+        docstring above for the bug background). Per-agent so multiple
+        antigravity agents don't share a workspace identity.
+        """
+        return f"{_AGY_WORKSPACE_SYMLINK_PARENT}/{self.id}"
+
     def assemble_command(
         self,
         host: OnlineHostInterface,
@@ -480,17 +506,27 @@ class AntigravityAgent(InteractiveTuiAgent[AntigravityAgentConfig], HasCommonTra
 
         1. ``( bash background_tasks.sh <session> ) &`` -- backgrounded
            supervisor for the transcript streamer + converter.
-        2. ``mkdir -p <state>/logs`` -- foreground step that guarantees the
-           directory exists before agy attempts to open its ``--log-file``.
-           The supervisor runs concurrently with agy, so we cannot rely on
-           the supervisor (or any background watcher) creating this
-           directory in time.
-        3. ``agy <user_args> --log-file <state>/logs/agy_cli.log
+        2. ``mkdir -p <state>/logs <symlink_parent>`` -- guarantees both
+           the agy ``--log-file`` directory and the workspace-symlink
+           parent exist before the symlink + agy launch run.
+        3. ``ln -sfn <work_dir> <symlink>`` -- creates / refreshes the
+           non-dotted workspace symlink that agy will treat as its
+           workspace root. Workaround for agy's hidden-path rejection;
+           see ``_AGY_WORKSPACE_SYMLINK_PARENT``.
+        4. ``cd <symlink>`` -- launches agy with cwd set to the symlink,
+           so agy's "project: using project ..." log line names the
+           symlink path (not the resolved dotted target).
+        5. ``agy <user_args> --log-file <state>/logs/agy_cli.log
            [--dangerously-skip-permissions]`` -- foreground process.
 
-        Bash precedence note: ``A & B && C`` parses as ``A &`` followed by
-        ``B && C``. The supervisor's subshell is therefore scoped to ``&``,
-        while ``mkdir -p`` and ``agy`` form a foreground sequential chain.
+        Bash precedence note: ``A & B && C && D && E`` parses as ``A &``
+        followed by ``B && C && D && E``. The supervisor's subshell is
+        therefore scoped to ``&``, while ``mkdir`` / ``ln`` / ``cd`` / ``agy``
+        form a foreground sequential chain.
+
+        ``ln -sfn`` is idempotent: re-running on every launch (including
+        restarts) updates the symlink in place; ``/tmp`` wipes self-repair
+        on the next launch.
 
         The ``--log-file`` arg pipes agy's internal log to a per-agent
         path; stream_transcript.sh greps it for ``Created conversation
@@ -503,8 +539,15 @@ class AntigravityAgent(InteractiveTuiAgent[AntigravityAgentConfig], HasCommonTra
             extra_args.append(_DANGEROUSLY_SKIP_PERMISSIONS_FLAG)
         base_command = super().assemble_command(host, agent_args, command_override, initial_message)
         background_cmd = self._build_background_tasks_command()
-        mkdir_cmd = f"mkdir -p {shlex.quote(str(log_file_path.parent))}"
-        return CommandString(f"{background_cmd} {mkdir_cmd} && {base_command} {' '.join(extra_args)}")
+
+        symlink_path = self._get_agy_workspace_symlink_path()
+        mkdir_cmd = f"mkdir -p {shlex.quote(str(log_file_path.parent))} {shlex.quote(_AGY_WORKSPACE_SYMLINK_PARENT)}"
+        ln_cmd = f"ln -sfn {shlex.quote(str(self.work_dir))} {shlex.quote(symlink_path)}"
+        cd_cmd = f"cd {shlex.quote(symlink_path)}"
+
+        return CommandString(
+            f"{background_cmd} {mkdir_cmd} && {ln_cmd} && {cd_cmd} && {base_command} {' '.join(extra_args)}"
+        )
 
 
 @hookimpl

@@ -283,17 +283,44 @@ def test_assemble_command_launches_background_tasks_supervisor(antigravity_agent
 
 
 def test_assemble_command_pre_creates_agy_log_directory(antigravity_agent: AntigravityAgent) -> None:
-    """A foreground `mkdir -p <logs_dir>` runs before agy so --log-file does not fail on a fresh agent.
+    """A foreground `mkdir -p <logs_dir> ...` runs before agy so --log-file does not fail on a fresh agent.
 
     The supervisor runs concurrently with agy, so we cannot rely on a
     watcher's own `mkdir -p` to create the directory in time. The mkdir
     must be in the foreground chain, ordered before the agy invocation.
+    The same `mkdir -p` also creates the workspace-symlink parent
+    (``/tmp/mngr_antigravity_workspaces``); the test allows either path
+    to appear inside the mkdir argument list.
     """
     command = str(antigravity_agent.assemble_command(antigravity_agent.host, (), command_override=None))
     log_dir = str(antigravity_agent._get_agent_dir() / "logs")
-    assert f"mkdir -p {log_dir} && " in command, command
+    assert "mkdir -p " in command
+    assert log_dir in command.split(" agy ")[0]
     # And it must come before agy, not after.
     assert command.index("mkdir -p") < command.index(" agy "), command
+
+
+def test_assemble_command_symlinks_workspace_to_a_non_hidden_path(antigravity_agent: AntigravityAgent) -> None:
+    """agy refuses dotted-path workspaces, so launch via a `/tmp/.../<id>` symlink and `cd` to it.
+
+    Verified live: agy logs ``Failed to add workspace folder ... is hidden:
+    ignore uri`` for paths containing a dot-prefixed segment (e.g. anything
+    under ``~/.mngr/``). Launching with cwd set to a symlink under
+    ``/tmp/mngr_antigravity_workspaces/<agent_id>`` -> ``work_dir`` produces
+    ``project: using project "/tmp/..."`` instead, with no hidden-path error.
+    The symlink is recreated via ``ln -sfn`` so it's safe to re-run.
+    """
+    agent = antigravity_agent
+    command = str(agent.assemble_command(agent.host, (), command_override=None))
+    expected_symlink = f"/tmp/mngr_antigravity_workspaces/{agent.id}"
+    assert f"ln -sfn {agent.work_dir} {expected_symlink}" in command
+    assert f"cd {expected_symlink} &&" in command
+    # Ordering: mkdir -> ln -> cd -> agy
+    mkdir_idx = command.index("mkdir -p")
+    ln_idx = command.index("ln -sfn")
+    cd_idx = command.index(f"cd {expected_symlink}")
+    agy_idx = command.index(" agy ")
+    assert mkdir_idx < ln_idx < cd_idx < agy_idx, command
 
 
 def test_get_expected_process_name_returns_agy(antigravity_agent: AntigravityAgent) -> None:
