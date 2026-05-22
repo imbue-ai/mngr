@@ -77,6 +77,12 @@ jobs:
             .external_worktrees/forever-claude-template
 
       - name: Run launch smoke test
+        # SKIP_AUTH=1 bypasses the one-time-code login (same as the minds
+        # e2e test). Electron consumes the single-use code on startup, so the
+        # CDP-driven content view integ_check.py drives cannot consume it
+        # again; SKIP_AUTH makes the backend treat every session as authed.
+        env:
+          SKIP_AUTH: '1'
         run: |
           eval "$(uv run minds env activate production)"
           uv run python apps/minds/scripts/integ_check.py --launch-only
