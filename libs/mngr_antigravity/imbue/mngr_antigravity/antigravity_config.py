@@ -22,9 +22,8 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from loguru import logger
-
 from imbue.imbue_common.pure import pure
+from imbue.mngr.errors import UserInputError
 from imbue.mngr.interfaces.host import OnlineHostInterface
 
 
@@ -39,12 +38,15 @@ TRUSTED_WORKSPACES_KEY: str = "trustedWorkspaces"
 def read_antigravity_settings(host: OnlineHostInterface, settings_path: Path) -> dict[str, Any]:
     """Read Antigravity's ``settings.json`` via the host filesystem.
 
-    A missing file, a malformed top-level JSON document, or a valid JSON
-    document whose top-level value is not an object all yield an empty dict
-    so that downstream provisioning can fall through into a clean write.
-    The non-object case is logged at warning level (the same level used for
-    malformed JSON) so that overwriting the file is not silent. Any other
-    read failure (permission denied, IO error) is allowed to propagate.
+    A missing or empty file yields an empty dict so that downstream
+    provisioning can fall through into a clean write. Any other unexpected
+    shape -- malformed JSON, or a valid JSON document whose top-level value
+    is not an object -- raises ``UserInputError``: the file is user-tier
+    state agy itself reads at every launch, and silently treating it as
+    empty would let mngr overwrite content the user hand-edited (or that
+    a future agy schema put there). Aligns with the
+    ``check_silent_decode_error_catches`` ratchet's user-authored-config
+    rule: re-raise rather than swallow.
     """
     try:
         content = host.read_text_file(settings_path)
@@ -55,15 +57,17 @@ def read_antigravity_settings(host: OnlineHostInterface, settings_path: Path) ->
     try:
         parsed: Any = json.loads(content)
     except json.JSONDecodeError as exc:
-        logger.warning("Malformed JSON in Antigravity settings at {}: {}. Treating as empty.", settings_path, exc)
-        return {}
+        raise UserInputError(
+            f"Antigravity settings at {settings_path} contain malformed JSON ({exc}); "
+            f"refusing to overwrite. Inspect the file by hand and either fix it or remove it, "
+            f"then re-run."
+        ) from exc
     if not isinstance(parsed, dict):
-        logger.warning(
-            "Antigravity settings at {} has a non-object top-level value ({}). Treating as empty.",
-            settings_path,
-            type(parsed).__name__,
+        raise UserInputError(
+            f"Antigravity settings at {settings_path} has a non-object top-level value "
+            f"({type(parsed).__name__}); refusing to overwrite. Inspect the file by hand "
+            f"and either fix it or remove it, then re-run."
         )
-        return {}
     return parsed
 
 

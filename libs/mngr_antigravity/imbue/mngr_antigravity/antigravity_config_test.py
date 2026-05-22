@@ -6,6 +6,7 @@ from typing import Any
 
 import pytest
 
+from imbue.mngr.errors import UserInputError
 from imbue.mngr.primitives import HostName
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
@@ -79,22 +80,30 @@ def test_read_antigravity_settings_returns_empty_dict_for_empty_file(
     assert read_antigravity_settings(host, settings_path) == {}
 
 
-def test_read_antigravity_settings_returns_empty_dict_for_malformed_json(
+def test_read_antigravity_settings_raises_for_malformed_json(
     local_provider: LocalProviderInstance, tmp_path: Path
 ) -> None:
+    """Malformed JSON in user-authored settings is surfaced; we refuse to overwrite it."""
     host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
     settings_path = tmp_path / "bad.json"
     settings_path.write_text("{ not really json")
-    assert read_antigravity_settings(host, settings_path) == {}
+    with pytest.raises(UserInputError) as excinfo:
+        read_antigravity_settings(host, settings_path)
+    assert "malformed JSON" in str(excinfo.value)
+    assert str(settings_path) in str(excinfo.value)
 
 
-def test_read_antigravity_settings_returns_empty_dict_for_non_object_top_level(
+def test_read_antigravity_settings_raises_for_non_object_top_level(
     local_provider: LocalProviderInstance, tmp_path: Path
 ) -> None:
+    """A non-object top-level value (e.g. a JSON array) means an unknown schema; refuse to overwrite."""
     host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
     settings_path = tmp_path / "array.json"
     settings_path.write_text("[1, 2, 3]")
-    assert read_antigravity_settings(host, settings_path) == {}
+    with pytest.raises(UserInputError) as excinfo:
+        read_antigravity_settings(host, settings_path)
+    assert "non-object top-level value" in str(excinfo.value)
+    assert "list" in str(excinfo.value)
 
 
 @pytest.fixture
