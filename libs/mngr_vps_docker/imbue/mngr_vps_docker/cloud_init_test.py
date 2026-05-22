@@ -55,13 +55,23 @@ def test_generate_cloud_init_disables_password_auth() -> None:
 
 
 def test_generate_cloud_init_installs_docker() -> None:
+    """Docker comes from the Debian ``docker.io`` package, installed inline by
+    cloud-init's package handler. The ``curl get.docker.com | sh`` installer
+    script (used in an earlier revision) made provisioning take 60-120s on a
+    ``t3.small``; the packaged install takes 5-15s by piggybacking on the
+    same apt run as ca-certificates/rsync.
+    """
     result = generate_cloud_init_user_data(
         host_private_key="fake-key",
         host_public_key="ssh-ed25519 AAAA fake",
     )
-    assert "get.docker.com" in result
+    assert "- docker.io" in result
     assert "systemctl enable docker" in result
     assert "systemctl start docker" in result
+    # The slow installer-script approach must NOT come back -- it was the
+    # root cause of the EC2 lifecycle test hitting the 300s subprocess
+    # timeout on the ``mngr create`` flow.
+    assert "get.docker.com" not in result
 
 
 def test_generate_cloud_init_creates_ready_marker() -> None:

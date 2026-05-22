@@ -6,7 +6,11 @@ def generate_cloud_init_user_data(
     """Generate a cloud-init user_data script for VPS provisioning.
 
     Injects the SSH host key so we know it before the VPS boots (no TOFU),
-    disables password authentication, installs Docker, and bumps sshd's
+    disables password authentication, installs Docker via the Debian
+    ``docker.io`` package (handled inline by cloud-init's package handler
+    -- about 5-15s on a ``t3.small``, vs 60-120s for the official
+    ``curl get.docker.com | sh`` installer script which downloads the full
+    docker-ce stack and configures Docker's own apt repo), and bumps sshd's
     ``MaxStartups`` / ``MaxSessions`` so the provisioning round-trips
     (image build + per-host setup + the imbue_cloud pool baking's many
     concurrent ``mngr exec`` / ``rsync`` / ``ssh`` calls) don't trip the
@@ -52,9 +56,9 @@ ssh_keys:
 ssh_pwauth: false
 package_update: true
 packages:
-  - curl
   - ca-certificates
   - rsync
+  - docker.io
 write_files:
   - path: /etc/ssh/sshd_config.d/99-mngr.conf
     permissions: '0644'
@@ -62,7 +66,6 @@ write_files:
       MaxSessions 100
       MaxStartups 100:30:200
 runcmd:
-  - curl -fsSL https://get.docker.com | sh
   - systemctl enable docker
   - systemctl start docker
   # Apply the MaxSessions/MaxStartups bump without killing in-flight SSH
