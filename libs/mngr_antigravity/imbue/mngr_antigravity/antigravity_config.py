@@ -64,7 +64,7 @@ def read_antigravity_settings(host: OnlineHostInterface, settings_path: Path) ->
         ) from exc
     if not isinstance(parsed, dict):
         raise UserInputError(
-            f"Antigravity settings at {settings_path} has a non-object top-level value "
+            f"Antigravity settings at {settings_path} have a non-object top-level value "
             f"({type(parsed).__name__}); refusing to overwrite. Inspect the file by hand "
             f"and either fix it or remove it, then re-run."
         )
