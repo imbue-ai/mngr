@@ -20,7 +20,7 @@ from imbue.minds.envs.primitives import DevEnvName
 
 
 class SharedEnvUrls(FrozenModel):
-    """Public URLs for one shared dev env, keyed by role in :class:`DeploymentEnvsConfig`.
+    """Public URLs for one shared env, keyed by role in :class:`DeploymentEnvsConfig`.
 
     Secrets (Neon DSNs, SuperTokens admin key) for the same env live in
     env vars prefixed ``MINDS_DEPLOYMENT_TEST_SHARED_<ROLE_UPPER>_`` so
@@ -28,7 +28,7 @@ class SharedEnvUrls(FrozenModel):
     """
 
     role: SharedEnvRole = Field(description="The role name this env serves (e.g. 'default').")
-    env_name: DevEnvName = Field(description="The actual dev env name on disk (e.g. 'dev-ci-20260518t140212z').")
+    env_name: DevEnvName = Field(description="The actual env name on disk (e.g. 'ci-20260518t140212z').")
     connector_url: AnyUrl = Field(description="Base URL of the deployed ``remote_service_connector`` for this env.")
     litellm_proxy_url: AnyUrl = Field(description="Base URL of the deployed ``litellm`` proxy for this env.")
 
@@ -128,7 +128,7 @@ class EphemeralEnvHandle(FrozenModel):
     """What the ``ephemeral_env`` fixture yields to a test.
 
     The fixture shells out to ``minds env deploy`` for a fresh
-    ``dev-ci-<timestamp>-<short-uuid>`` env, yields this handle, then
+    ``ci-<timestamp>-<short-uuid>`` env, yields this handle, then
     unconditionally tears the env down (idempotent against an
     already-destroyed env, so a test that destroys the env itself does
     not double-destroy).

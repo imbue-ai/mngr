@@ -1,6 +1,6 @@
 # Unabridged Changelog - mngr
 
-Full, unedited changelog entries consolidated nightly from individual files in the `changelog/mngr/` directory.
+Full, unedited changelog entries consolidated nightly from individual files in `libs/mngr/changelog/`.
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 

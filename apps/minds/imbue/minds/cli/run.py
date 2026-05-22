@@ -113,7 +113,14 @@ MINDS_API_PROXY_URL_ENV_VAR: Final[str] = "LATCHKEY_EXTENSION_MINDS_API_URL"
     "--mngr-forward-port",
     default=_DEFAULT_MNGR_FORWARD_PORT,
     show_default=True,
-    help="Port to bind the spawned `mngr forward` subprocess to",
+    envvar="MINDS_MNGR_FORWARD_PORT",
+    help=(
+        "Port to bind the spawned `mngr forward` subprocess to. "
+        "Falls back to the MINDS_MNGR_FORWARD_PORT env var so test "
+        "harnesses can dodge a hardcoded port collision when an "
+        "existing `just minds-start` (or a prior crashed run) still "
+        "holds the default."
+    ),
 )
 @click.option(
     "--no-browser",

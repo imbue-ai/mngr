@@ -29,13 +29,19 @@ from imbue.mngr.utils.testing import generate_test_environment_name
 suppress_warnings()
 register_marker(
     "minds_deployment: tests that exercise the minds deploy process itself by minting their own "
-    "ephemeral dev env. Driven by `just minds-test-deployment`; never collected by the standard "
+    "ephemeral CI env. Driven by `just minds-test-deployment`; never collected by the standard "
     "CI test runs or `just test-quick`."
 )
 register_marker(
-    "minds_services: tests that exercise the deployed services of a pre-stood-up shared dev env. "
+    "minds_services: tests that exercise the deployed services of a pre-stood-up shared CI env. "
     "Driven by `just minds-test-deployment`; never collected by the standard CI test runs or "
     "`just test-quick`."
+)
+register_marker(
+    "minds_electron: tests that drive the Electron minds desktop app end-to-end via Playwright "
+    "over CDP. Need Node, pnpm, Electron's native deps, and a display server (`xvfb-run` on "
+    "Linux). Split out into its own CI job (`test-docker-electron`) so the heavyweight "
+    "Electron + docker spin-up does not serialize behind every other docker-marked test."
 )
 register_conftest_hooks(globals())
 register_plugin_test_fixtures(globals())

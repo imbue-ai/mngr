@@ -105,7 +105,7 @@ per-developer dev envs.
 ## Step 4: Push the Vault changes to Modal and redeploy
 
 ```bash
-eval "$(uv run minds env activate production)"
+eval "$(uv run minds env activate --deploy production)"
 uv run minds env deploy --yes-i-mean-production
 ```
 
