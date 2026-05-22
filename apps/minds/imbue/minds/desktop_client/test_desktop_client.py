@@ -798,7 +798,7 @@ def test_creation_logs_sse_emits_status_events(tmp_path: Path) -> None:
     log_queue: queue.Queue[str] = queue.Queue()
     with agent_creator._lock:
         agent_creator._statuses[str(creation_id)] = AgentCreationStatus.CREATING_WORKSPACE
-        agent_creator._launch_modes[str(creation_id)] = LaunchMode.LOCAL
+        agent_creator._launch_modes[str(creation_id)] = LaunchMode.DOCKER
         agent_creator._log_queues[str(creation_id)] = log_queue
 
     log_queue.put("regular log line")
@@ -873,7 +873,7 @@ def test_create_form_submit_passes_launch_mode(tmp_path: Path) -> None:
         data={
             "git_url": "file:///nonexistent-repo",
             "host_name": "my-agent",
-            "launch_mode": "LOCAL",
+            "launch_mode": "DOCKER",
         },
         follow_redirects=False,
     )
@@ -890,7 +890,7 @@ def test_create_agent_api_passes_launch_mode(tmp_path: Path) -> None:
         json={
             "git_url": "file:///nonexistent-repo",
             "host_name": "my-agent",
-            "launch_mode": "LOCAL",
+            "launch_mode": "DOCKER",
         },
     )
     assert response.status_code == 200
@@ -922,7 +922,7 @@ def test_create_form_shows_launch_mode_dropdown(tmp_path: Path) -> None:
     response = client.get("/create")
     assert response.status_code == 200
     assert "launch_mode" in response.text
-    assert "local" in response.text
+    assert "docker" in response.text
     assert "cloud" in response.text
     assert "lima" in response.text
     assert "imbue_cloud" in response.text
@@ -986,7 +986,7 @@ def test_create_form_submit_rejects_imbue_cloud_ai_without_account(tmp_path: Pat
         data={
             "git_url": "file:///nonexistent-repo",
             "host_name": "my-agent",
-            "launch_mode": "LOCAL",
+            "launch_mode": "DOCKER",
             "ai_provider": "IMBUE_CLOUD",
             "account_id": "",
         },
@@ -1005,7 +1005,7 @@ def test_create_form_submit_rejects_api_key_provider_without_key(tmp_path: Path)
         data={
             "git_url": "file:///nonexistent-repo",
             "host_name": "my-agent",
-            "launch_mode": "LOCAL",
+            "launch_mode": "DOCKER",
             "ai_provider": "API_KEY",
             "anthropic_api_key": "",
         },
@@ -1024,7 +1024,7 @@ def test_create_form_submit_accepts_subscription_with_no_account(tmp_path: Path)
         data={
             "git_url": "file:///nonexistent-repo",
             "host_name": "my-agent",
-            "launch_mode": "LOCAL",
+            "launch_mode": "DOCKER",
             "ai_provider": "SUBSCRIPTION",
             "account_id": "",
         },
@@ -1089,7 +1089,7 @@ def test_create_agent_api_rejects_imbue_cloud_ai_without_account(tmp_path: Path)
         "/api/create-agent",
         json={
             "git_url": "file:///nonexistent-repo",
-            "launch_mode": "LOCAL",
+            "launch_mode": "DOCKER",
             "ai_provider": "IMBUE_CLOUD",
         },
     )
@@ -1110,7 +1110,7 @@ def test_create_form_submit_preserves_account_id_on_validation_error(tmp_path: P
         data={
             "git_url": "file:///nonexistent-repo",
             "host_name": "my-agent",
-            "launch_mode": "LOCAL",
+            "launch_mode": "DOCKER",
             "ai_provider": "IMBUE_CLOUD",
             "account_id": "",
         },

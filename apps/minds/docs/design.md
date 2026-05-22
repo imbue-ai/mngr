@@ -23,7 +23,7 @@ Some workspace dependencies (currently Playwright's Chromium browser + its apt s
 
 ## Configuration
 
-All configuration lives in the template repository's `.mngr/settings.toml`. The desktop client passes `--template main` plus a mode-specific template (`--template docker` for LOCAL, `--template lima` for LIMA, `--template vultr` for CLOUD, or `--template imbue_cloud` for IMBUE_CLOUD) when running `mngr create`. The template's settings file defines everything the agent needs.
+All configuration lives in the template repository's `.mngr/settings.toml`. The desktop client passes `--template main` plus a mode-specific template (`--template docker` for DOCKER, `--template lima` for LIMA, `--template vultr` for CLOUD, or `--template imbue_cloud` for IMBUE_CLOUD) when running `mngr create`. The template's settings file defines everything the agent needs.
 
 ## Data and services
 

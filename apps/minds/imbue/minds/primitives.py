@@ -35,7 +35,7 @@ class OutputFormat(UpperCaseStrEnum):
 class LaunchMode(UpperCaseStrEnum):
     """How a workspace agent should be launched."""
 
-    LOCAL = auto()
+    DOCKER = auto()
     CLOUD = auto()
     LIMA = auto()
     IMBUE_CLOUD = auto()
