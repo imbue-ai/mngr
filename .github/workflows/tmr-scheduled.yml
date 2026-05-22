@@ -8,11 +8,11 @@ name: TMR (scheduled)
 #   - one open, > 4 days old    -> close it (deleting its branch), then
 #                                  proceed; the new run's PR is linked back
 #                                  as a follow-up comment on the closed PR.
-#   - one open, <= 4 days old   -> skip this firing and upsert a single
-#                                  sticky comment on the open PR explaining
-#                                  the policy. Sticky-editing via
-#                                  `gh pr comment --edit-last --create-if-none`
-#                                  prevents N comments after N skipped days.
+#   - one open, <= 4 days old   -> skip this firing and post a comment on
+#                                  the open PR explaining the policy. The
+#                                  comment is posted fresh each skipped day
+#                                  (intentional: the recurring pings are the
+#                                  nudge to act on the open PR).
 #
 # Manual `workflow_dispatch` runs of TMR are intentionally independent of
 # this logic: they don't touch the label and don't go through this gate.
@@ -99,12 +99,8 @@ jobs:
             echo "proceed=true" >> "$GITHUB_OUTPUT"
             echo "supersedes_pr=$pr_number" >> "$GITHUB_OUTPUT"
           else
-            # Sticky comment: edit the bot's last comment if one exists,
-            # otherwise create one. Avoids N daily skip comments piling up.
             gh pr comment "$pr_number" \
               --repo "${{ github.repository }}" \
-              --edit-last \
-              --create-if-none \
               --body "Skipping today's scheduled TMR run because this PR (from a prior periodic run) is still open. Current age: ${age_days}d. Policy: scheduled runs are skipped while a periodic PR is open; once the PR is more than ${STALE_DAYS} days old it will be auto-closed and a fresh scheduled run will start. To resume periodic runs sooner, review and close this PR."
             echo "Skipping; PR #${pr_number} is ${age_days}d old (threshold: ${STALE_DAYS}d)."
             echo "proceed=false" >> "$GITHUB_OUTPUT"

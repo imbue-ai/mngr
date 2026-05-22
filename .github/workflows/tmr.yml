@@ -169,10 +169,12 @@ jobs:
             report_line="HTML report: attached as the \`tmr-report\` artifact on the workflow run; download and open \`index.html\`. (AWS credentials missing, so no s3 mirror was published.)"
           fi
           # Scheduled runs label the auto-opened PR so the next day's gate
-          # can find it. Manual runs leave it unlabeled.
-          label_args=()
+          # can find it, and assign it to the periodic-run owners. Manual
+          # runs leave it unlabeled and unassigned.
+          scheduled_args=()
           if [ "$IS_SCHEDULED" = "true" ]; then
-            label_args+=(--label tmr-periodic)
+            scheduled_args+=(--label tmr-periodic)
+            scheduled_args+=(--assignee qi-imbue --assignee joshalbrecht)
           fi
           new_pr_url=$(gh pr create \
             --base "${{ github.ref_name }}" \
@@ -182,7 +184,7 @@ jobs:
 
           $report_line" \
             --draft \
-            "${label_args[@]}")
+            "${scheduled_args[@]}")
           echo "Opened $new_pr_url"
           # If this scheduled run superseded a stale prior periodic PR
           # (closed up front by the gate), leave a breadcrumb on it pointing
