@@ -48,7 +48,7 @@ from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.config.loader import load_client_config
 from imbue.minds.desktop_client.agent_creator import AgentCreator
 from imbue.minds.desktop_client.app import create_desktop_client
-from imbue.minds.desktop_client.app import start_workspace_health_probe_loop
+from imbue.minds.desktop_client.app import start_system_interface_health_probe_loop
 from imbue.minds.desktop_client.auth import FileAuthStore
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
@@ -70,7 +70,7 @@ from imbue.minds.desktop_client.request_events import LatchkeyPermissionRequestE
 from imbue.minds.desktop_client.request_events import RequestInbox
 from imbue.minds.desktop_client.request_events import load_response_events
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
-from imbue.minds.desktop_client.workspace_server_health import WorkspaceServerHealthTracker
+from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
 from imbue.minds.primitives import OneTimeCode
 from imbue.minds.primitives import OutputFormat
 from imbue.minds.telegram.setup import TelegramSetupOrchestrator
@@ -102,7 +102,14 @@ _AUTH_ERROR_TYPE: Final[str] = "ImbueCloudAuthError"
     "--mngr-forward-port",
     default=_DEFAULT_MNGR_FORWARD_PORT,
     show_default=True,
-    help="Port to bind the spawned `mngr forward` subprocess to",
+    envvar="MINDS_MNGR_FORWARD_PORT",
+    help=(
+        "Port to bind the spawned `mngr forward` subprocess to. "
+        "Falls back to the MINDS_MNGR_FORWARD_PORT env var so test "
+        "harnesses can dodge a hardcoded port collision when an "
+        "existing `just minds-start` (or a prior crashed run) still "
+        "holds the default."
+    ),
 )
 @click.option(
     "--no-browser",
@@ -236,6 +243,18 @@ def run(
         notification_dispatcher=notification_dispatcher,
     )
 
+    # System-interface health tracker: feeds on backend failures observed by
+    # the plugin (registered as a callback below) and on the readiness-probe
+    # success that ``_wait_for_workspace_ready`` reports through AgentCreator.
+    # Constructed here (instead of inside create_desktop_client) so it can
+    # be threaded into both AgentCreator (for record_success) and consumer's
+    # failure callback (registered before consumer.start() below; otherwise
+    # early failures would dispatch against an empty list).
+    system_interface_health_tracker = SystemInterfaceHealthTracker()
+    consumer.add_on_system_interface_backend_failure_callback(
+        lambda agent_id, _reason, _status: system_interface_health_tracker.record_failure(agent_id)
+    )
+
     # AgentCreator is constructed *after* ``start_mngr_forward`` so the
     # readiness probe can use the same preauth cookie the plugin accepts and
     # Electron pre-sets. Building it earlier would force us to either pre-mint
@@ -250,6 +269,7 @@ def run(
         notification_dispatcher=notification_dispatcher,
         mngr_forward_port=mngr_forward_port,
         mngr_forward_preauth_cookie=preauth_cookie,
+        system_interface_health_tracker=system_interface_health_tracker,
     )
 
     # Local-agent ``minds_api_url`` writes (Cloudflare-token re-injection
@@ -272,15 +292,6 @@ def run(
     # instead of every observe poll re-trying the dead session.
     consumer.add_on_provider_error_callback(
         _ImbueCloudAuthErrorDisabler(consumer=consumer, session_store=session_store)
-    )
-
-    # Workspace-server health tracker: feeds on backend failures observed by
-    # the plugin. Constructed here (instead of inside create_desktop_client)
-    # so the envelope-failure callback is registered before consumer.start()
-    # below; otherwise early failures would dispatch against an empty list.
-    workspace_health_tracker = WorkspaceServerHealthTracker()
-    consumer.add_on_workspace_backend_failure_callback(
-        lambda agent_id, _reason, _status: workspace_health_tracker.record_failure(agent_id)
     )
 
     # All callbacks registered -- now safe to start the envelope reader
@@ -330,7 +341,7 @@ def run(
         mngr_forward_preauth_cookie=preauth_cookie,
         output_format=output_format,
         root_concurrency_group=root_concurrency_group,
-        workspace_health_tracker=workspace_health_tracker,
+        system_interface_health_tracker=system_interface_health_tracker,
         mngr_binary=MNGR_BINARY,
         mngr_host_dir=mngr_host_dir,
     )
@@ -339,8 +350,8 @@ def run(
     # once the plugin probe sees a 200. Started here (not inside
     # ``create_desktop_client``) so test factories that build the app can
     # skip the probe thread by simply not calling this function.
-    start_workspace_health_probe_loop(
-        tracker=workspace_health_tracker,
+    start_system_interface_health_probe_loop(
+        tracker=system_interface_health_tracker,
         backend_resolver=backend_resolver,
         mngr_forward_port=mngr_forward_port,
         mngr_forward_preauth_cookie=preauth_cookie,

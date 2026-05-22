@@ -69,7 +69,6 @@ def _create_running_test_agent(
         "command": _AGENT_COMMAND,
         "work_dir": str(work_dir),
         "create_time": datetime.now(timezone.utc).isoformat(),
-        "permissions": [],
         "start_on_boot": False,
     }
     (agent_dir / "data.json").write_text(json.dumps(data, indent=2))

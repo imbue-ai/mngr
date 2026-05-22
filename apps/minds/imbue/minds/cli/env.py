@@ -39,10 +39,14 @@ from imbue.minds.bootstrap import MINDS_ROOT_NAME_ENV_VAR
 from imbue.minds.bootstrap import mngr_host_dir_for
 from imbue.minds.bootstrap import mngr_prefix_for
 from imbue.minds.bootstrap import root_name_for_env_name
+from imbue.minds.cli._activated_env import MODAL_PROFILE_ENV_VAR
 from imbue.minds.cli._activated_env import PRODUCTION_ENV_NAME as _PRODUCTION_ENV_NAME
 from imbue.minds.cli._activated_env import STAGING_ENV_NAME as _STAGING_ENV_NAME
+from imbue.minds.cli._activated_env import modal_profile_for_tier_or_none
 from imbue.minds.cli._activated_env import require_activated_env_name
+from imbue.minds.cli._activated_env import require_deploy_mode_activation
 from imbue.minds.cli._activated_env import tier_for_env_name as _tier_for_env_name
+from imbue.minds.cli._activated_env import validate_modal_profile_exists_in_modal_toml
 from imbue.minds.config.loader import EnvConfigError
 from imbue.minds.config.loader import load_client_config
 from imbue.minds.config.loader import load_deploy_config
@@ -65,6 +69,7 @@ from imbue.minds.envs.per_env_deploy import get_modal_app_latest_version as real
 from imbue.minds.envs.per_env_deploy import push_per_env_modal_secret as real_push_per_env_modal_secret
 from imbue.minds.envs.per_env_deploy import rollback_modal_app as real_rollback_modal_app
 from imbue.minds.envs.per_env_deploy import stop_modal_app as real_stop_modal_app
+from imbue.minds.envs.primitives import DeployStrategy
 from imbue.minds.envs.primitives import DevEnvName
 from imbue.minds.envs.primitives import DevEnvNotFoundError
 from imbue.minds.envs.primitives import InvalidDevEnvNameError
@@ -112,32 +117,34 @@ from imbue.minds.primitives import OutputFormat
 from imbue.minds.utils.output import write_stdout_line
 from imbue.mngr_ovh.iam_tags import IamResource
 
-# Reserved env names that map to named tiers; everything else is the
-# ``dev`` tier. Mirrors the spec's hard-coded tier mapping and lets
-# ``minds env deploy`` / ``destroy`` dispatch on env name alone.
-# The individual ``_PRODUCTION_ENV_NAME`` / ``_STAGING_ENV_NAME`` /
-# ``_DEV_TIER`` constants + the ``_tier_for_env_name`` mapper live in
-# ``_activated_env.py`` so ``minds pool`` (which also needs to derive
-# the tier for its Vault-scoped OVH credentials read) can share them
-# without an env.py -> pool.py back-reference.
+# Reserved env names that map to named tiers; names starting with
+# ``ci-`` map to the ``ci`` tier (CI-orchestrator-minted ephemeral envs),
+# and everything else maps to the ``dev`` tier. Mirrors the spec's
+# hard-coded tier mapping and lets ``minds env deploy`` / ``destroy``
+# dispatch on env name alone. The individual ``_PRODUCTION_ENV_NAME`` /
+# ``_STAGING_ENV_NAME`` / ``_DEV_TIER`` / ``_CI_TIER`` constants + the
+# ``_tier_for_env_name`` mapper live in ``_activated_env.py`` so
+# ``minds pool`` (which also needs to derive the tier for its
+# Vault-scoped OVH credentials read) can share them without an
+# env.py -> pool.py back-reference.
 _RESERVED_TIER_ENV_NAMES: Final[frozenset[str]] = frozenset({"production", "staging"})
 
-# Env vars exported by ``activate`` (and unset by ``deactivate``). The
-# list lives here so the two sides stay in sync.
+# Env vars unset by ``deactivate``. Includes every var that any
+# activation mode (use-only or ``--deploy``) might have exported, so a
+# single ``deactivate`` fully clears the shell regardless of which mode
+# was used to activate it. ``MODAL_PROFILE`` is included even though
+# plain ``activate`` does not export it, because plain ``activate`` does
+# explicitly emit ``unset MODAL_PROFILE`` (so a previously-deploy-
+# activated shell flips back cleanly); ``deactivate`` mirrors that.
 _ACTIVATION_ENV_VARS: Final[tuple[str, ...]] = (
     MINDS_ROOT_NAME_ENV_VAR,
     "MNGR_HOST_DIR",
     "MNGR_PREFIX",
     "MINDS_CLIENT_CONFIG_PATH",
-    # Modal CLI workspace selector. Set to the tier's ``modal_workspace``
-    # so every subsequent ``modal`` shellout (``modal deploy``,
-    # ``modal secret create``, ``modal environment create``, etc.) targets
-    # the right Modal account, regardless of which profile is marked
-    # ``active = true`` in ``~/.modal.toml``. The user must have a
-    # matching profile entry in ``~/.modal.toml`` (run
-    # ``modal token set --profile <workspace>`` once per tier they
-    # operate against).
-    "MODAL_PROFILE",
+    # Modal CLI workspace selector. Only set by ``activate --deploy``;
+    # see :func:`_build_deploy_mode_exports` and the ``--deploy`` flag
+    # on ``minds env activate``.
+    MODAL_PROFILE_ENV_VAR,
 )
 
 
@@ -199,23 +206,43 @@ def _push_per_env_modal_secret_for_provider(
 
 
 def _deploy_litellm_proxy_for_provider(
-    modal_env: str, tier: str, min_containers: int, deploy_id: str, cg: ConcurrencyGroup
+    modal_env: str,
+    tier: str,
+    min_containers: int,
+    deploy_id: str,
+    strategy: DeployStrategy,
+    cg: ConcurrencyGroup,
 ) -> AnyUrl:
     return real_deploy_litellm_proxy(
-        modal_env=modal_env, tier=tier, min_containers=min_containers, deploy_id=deploy_id, parent_cg=cg
+        modal_env=modal_env,
+        tier=tier,
+        min_containers=min_containers,
+        deploy_id=deploy_id,
+        strategy=strategy,
+        parent_cg=cg,
     )
 
 
 def _deploy_connector_for_provider(
-    modal_env: str, tier: str, min_containers: int, deploy_id: str, cg: ConcurrencyGroup
+    modal_env: str,
+    tier: str,
+    min_containers: int,
+    deploy_id: str,
+    strategy: DeployStrategy,
+    cg: ConcurrencyGroup,
 ) -> AnyUrl:
     return real_deploy_remote_service_connector(
-        modal_env=modal_env, tier=tier, min_containers=min_containers, deploy_id=deploy_id, parent_cg=cg
+        modal_env=modal_env,
+        tier=tier,
+        min_containers=min_containers,
+        deploy_id=deploy_id,
+        strategy=strategy,
+        parent_cg=cg,
     )
 
 
-def _stop_modal_app_for_provider(app_name: str, modal_env: str, cg: ConcurrencyGroup) -> None:
-    real_stop_modal_app(app_name=app_name, modal_env=modal_env, parent_cg=cg)
+def _stop_modal_app_for_provider(app_name: str, modal_env: str, parent_cg: ConcurrencyGroup) -> None:
+    real_stop_modal_app(app_name=app_name, modal_env=modal_env, parent_cg=parent_cg)
 
 
 def _delete_modal_secret_for_provider(secret_name: str, modal_env: str, cg: ConcurrencyGroup) -> None:
@@ -234,8 +261,8 @@ def _get_modal_app_latest_version_for_provider(app_name: str, modal_env: str, cg
     return real_get_modal_app_latest_version(app_name=app_name, modal_env=modal_env, parent_cg=cg)
 
 
-def _rollback_modal_app_for_provider(app_name: str, version: str, modal_env: str, cg: ConcurrencyGroup) -> None:
-    real_rollback_modal_app(app_name=app_name, version=version, modal_env=modal_env, parent_cg=cg)
+def _rollback_modal_app_for_provider(app_name: str, version: str, modal_env: str, parent_cg: ConcurrencyGroup) -> None:
+    real_rollback_modal_app(app_name=app_name, version=version, modal_env=modal_env, parent_cg=parent_cg)
 
 
 def _create_neon_snapshot_branch_for_provider(
@@ -573,7 +600,24 @@ def env() -> None:
         "name (`staging` / `production` always auto-create)."
     ),
 )
-def env_activate(name: str, create: bool) -> None:
+@click.option(
+    "--deploy",
+    "is_deploy_mode",
+    is_flag=True,
+    default=False,
+    help=(
+        "Activate in deploy mode: in addition to the use-side env vars (MINDS_ROOT_NAME, "
+        "MNGR_HOST_DIR, MNGR_PREFIX, MINDS_CLIENT_CONFIG_PATH), export MODAL_PROFILE pinned "
+        "to the tier's modal_workspace from deploy.toml. Required for `minds env deploy`, "
+        "`minds env destroy`, and `minds env recover`. Without this flag (the default), "
+        "activate emits `unset MODAL_PROFILE` so a previously-deploy-activated shell flips "
+        "back to use-only -- the rest of the stack (mngr, minds run, Latchkey) no longer "
+        "tries to authenticate against a Modal workspace the operator may not have tokens "
+        "for. Fails up front if `~/.modal.toml` has no profile matching the tier's "
+        "modal_workspace (run `modal token set --profile <workspace>` first)."
+    ),
+)
+def env_activate(name: str, create: bool, is_deploy_mode: bool) -> None:
     """Print shell exports that activate env ``NAME`` in the calling shell.
 
     Refuses when a recover-target file exists at the monorepo root --
@@ -582,10 +626,26 @@ def env_activate(name: str, create: bool) -> None:
 
     Designed for ``eval "$(uv run minds env activate <name>)"``: after
     sourcing, ``mngr`` writes to ``~/.minds-<name>/mngr``, ``minds run``
-    picks up the per-env client config without a ``--config-file`` flag,
-    and ``minds env deploy`` / ``destroy`` operate on this env.
+    picks up the per-env client config without a ``--config-file`` flag.
+    ``minds env deploy`` / ``destroy`` / ``recover`` additionally require
+    ``--deploy`` activation (see below).
 
-    Emitted variables:
+    Activation modes:
+
+    - **Use-only (default)**: exports the four use-side env vars and
+      emits ``unset MODAL_PROFILE``. Lets the operator run the desktop
+      client, browse agents, hit Latchkey, etc. against the activated
+      env without touching their Modal CLI auth state. This is what
+      every non-deploying user wants.
+    - **Deploy mode (``--deploy``)**: additionally exports
+      ``MODAL_PROFILE=<tier's modal_workspace>`` so every subsequent
+      ``modal`` shellout (``modal deploy``, ``modal secret create``,
+      etc.) targets the right Modal account, regardless of which profile
+      is marked ``active = true`` in ``~/.modal.toml``. Pre-validates
+      that ``~/.modal.toml`` has a matching profile and refuses
+      otherwise (with a ``modal token set --profile <workspace>`` hint).
+
+    Emitted use-side variables (both modes):
 
     - ``MINDS_ROOT_NAME`` -- ``minds`` for the reserved ``production``
       name, ``minds-<name>`` for every other env. Validation runs at
@@ -615,7 +675,7 @@ def env_activate(name: str, create: bool) -> None:
     _refuse_if_any_recover_target_exists()
 
     if name in _RESERVED_TIER_ENV_NAMES or name == _PRODUCTION_ENV_NAME:
-        _activate_reserved_env(name)
+        _activate_reserved_env(name, is_deploy_mode=is_deploy_mode)
         return
 
     try:
@@ -639,15 +699,15 @@ def env_activate(name: str, create: bool) -> None:
 
     root_name = root_name_for_env_name(name)
     config_path = client_config_file(dev_env_name)
-    exports = {
+    use_side_exports = {
         MINDS_ROOT_NAME_ENV_VAR: root_name,
         "MNGR_HOST_DIR": str(mngr_host_dir_for(root_name)),
         "MNGR_PREFIX": mngr_prefix_for(root_name),
         "MINDS_CLIENT_CONFIG_PATH": str(config_path),
     }
-    modal_profile = _modal_profile_for_tier_or_none(_tier_for_env_name(name))
-    if modal_profile is not None:
-        exports["MODAL_PROFILE"] = modal_profile
+    deploy_exports, deploy_unsets = _build_deploy_mode_exports(
+        tier=_tier_for_env_name(name), is_deploy_mode=is_deploy_mode
+    )
     # Check the tier generation id + auto-wipe local state on mismatch.
     # Skipped silently when the per-env client.toml doesn't exist yet
     # (fresh `activate --create` before the first deploy) -- the deploy
@@ -655,10 +715,15 @@ def env_activate(name: str, create: bool) -> None:
     # success, so subsequent activations have something to compare against.
     if config_path.is_file():
         _try_run_generation_check(env_name=name, client_config_path=config_path, env_root=target)
-    _print_activation_exports(name=name, exports=exports)
+    _print_activation_exports(
+        name=name,
+        exports={**use_side_exports, **deploy_exports},
+        unsets=deploy_unsets,
+        is_deploy_mode=is_deploy_mode,
+    )
 
 
-def _activate_reserved_env(name: str) -> None:
+def _activate_reserved_env(name: str, *, is_deploy_mode: bool) -> None:
     """Activate ``staging`` or ``production`` -- in-repo client.toml is the truth.
 
     Auto-creates the env root if missing so subsequent commands have
@@ -687,15 +752,13 @@ def _activate_reserved_env(name: str) -> None:
     mngr_host = mngr_host_dir_for(root_name)
     mngr_host.parent.mkdir(parents=True, exist_ok=True)
 
-    exports = {
+    use_side_exports = {
         MINDS_ROOT_NAME_ENV_VAR: root_name,
         "MNGR_HOST_DIR": str(mngr_host),
         "MNGR_PREFIX": mngr_prefix_for(root_name),
         "MINDS_CLIENT_CONFIG_PATH": str(repo_client),
     }
-    modal_profile = _modal_profile_for_tier_or_none(name)
-    if modal_profile is not None:
-        exports["MODAL_PROFILE"] = modal_profile
+    deploy_exports, deploy_unsets = _build_deploy_mode_exports(tier=name, is_deploy_mode=is_deploy_mode)
     # Generation-id check applies to staging (the shared tier where
     # destroy/redeploy by one dev outdates everyone's local state).
     # Production destroy is hard-refused so a mismatch there is
@@ -703,45 +766,54 @@ def _activate_reserved_env(name: str) -> None:
     if name == _STAGING_ENV_NAME:
         env_root = mngr_host.parent
         _try_run_generation_check(env_name=name, client_config_path=repo_client, env_root=env_root)
-    _print_activation_exports(name=name, exports=exports)
+    _print_activation_exports(
+        name=name,
+        exports={**use_side_exports, **deploy_exports},
+        unsets=deploy_unsets,
+        is_deploy_mode=is_deploy_mode,
+    )
 
 
-def _modal_profile_for_tier_or_none(tier: str) -> str | None:
-    """Return the Modal profile name (``modal_workspace``) for ``tier``, or None.
+def _build_deploy_mode_exports(*, tier: str, is_deploy_mode: bool) -> tuple[dict[str, str], tuple[str, ...]]:
+    """Return ``(exports, unsets)`` for the deploy-side activation knobs.
 
-    Reads ``apps/minds/imbue/minds/config/envs/<tier>/deploy.toml`` and
-    pulls the committed ``modal_workspace`` value. We export this as
-    ``MODAL_PROFILE`` from ``minds env activate`` so every ``modal``
-    CLI shellout (deploy, secret create, environment create, etc.) is
-    pinned to the right workspace regardless of what's marked
-    ``active = true`` in ``~/.modal.toml``.
-
-    Returns ``None`` when the tier has no deploy.toml on disk (e.g.
-    a freshly-checked-out tree before tier config is committed) or
-    the committed value is still the literal ``CHANGE_ME`` placeholder.
-    Activation proceeds without ``MODAL_PROFILE`` in that case so the
-    operator's existing ``modal token set`` setup still works.
+    Use-only activation (the default) emits ``unset MODAL_PROFILE`` so a
+    previously-deploy-activated shell flips back cleanly; deploy-mode
+    activation emits ``export MODAL_PROFILE=<workspace>`` after
+    validating that ``~/.modal.toml`` has a matching profile. Tiers
+    whose ``deploy.toml`` has no committed ``modal_workspace`` (or the
+    literal ``CHANGE_ME`` placeholder) skip both the export and the
+    unset -- there is no workspace to pin to, so plain-activate
+    inheritance of an operator-set ``MODAL_PROFILE`` stays the operator's
+    own concern.
     """
-    try:
-        deploy_config = load_deploy_config(tier)
-    except EnvConfigError as exc:
-        logger.warning(
-            "Could not load deploy.toml for tier {!r} ({}); MODAL_PROFILE will not be exported. "
-            "modal shellouts will fall back to ~/.modal.toml's active profile.",
-            tier,
-            exc,
-        )
-        return None
-    workspace = str(deploy_config.modal_workspace)
-    if not workspace or workspace == "CHANGE_ME":
-        return None
-    return workspace
+    workspace = modal_profile_for_tier_or_none(tier)
+    if workspace is None:
+        return {}, ()
+    if not is_deploy_mode:
+        return {}, (MODAL_PROFILE_ENV_VAR,)
+    validate_modal_profile_exists_in_modal_toml(workspace)
+    return {MODAL_PROFILE_ENV_VAR: workspace}, ()
 
 
-def _print_activation_exports(*, name: str, exports: dict[str, str]) -> None:
-    write_stdout_line(f'# Activated env {name!r}. Source via: eval "$(uv run minds env activate {name})"')
+def _print_activation_exports(
+    *,
+    name: str,
+    exports: dict[str, str],
+    unsets: tuple[str, ...] = (),
+    is_deploy_mode: bool = False,
+) -> None:
+    # Mirror the invocation mode in the header so a user who copy-pastes
+    # the suggested re-source command back into a fresh shell lands in
+    # the same mode they started in -- otherwise re-sourcing a `--deploy`
+    # activation via the header would silently drop MODAL_PROFILE and
+    # trip the deploy-mode gate on the next minds env deploy/destroy.
+    deploy_flag = " --deploy" if is_deploy_mode else ""
+    write_stdout_line(f'# Activated env {name!r}. Source via: eval "$(uv run minds env activate{deploy_flag} {name})"')
     for key, value in exports.items():
         write_stdout_line(f"export {key}={shlex.quote(value)}")
+    for key in unsets:
+        write_stdout_line(f"unset {key}")
 
 
 # Trailing marker file name under each env root. Stores the generation
@@ -931,11 +1003,44 @@ def env_list(ctx: click.Context) -> None:
     default=False,
     help="Required confirmation for deploying against the staging tier. Mirrors --yes-i-mean-production.",
 )
+@click.option(
+    "--hard",
+    "hard",
+    is_flag=True,
+    default=False,
+    help=(
+        "Force `modal deploy --strategy=recreate`: terminate all running containers "
+        "so the next request cold-boots a fresh container at the new version. "
+        "Mutually exclusive with --soft. Brief downtime / latency window; every "
+        "subsequent request is guaranteed to hit the new code."
+    ),
+)
+@click.option(
+    "--soft",
+    "soft",
+    is_flag=True,
+    default=False,
+    help=(
+        "Force `modal deploy --strategy=rolling`: prior-version containers stay "
+        "alive serving in-flight requests until they idle out. Mutually exclusive "
+        "with --hard. Zero-downtime but a stale-content window where new code is "
+        "deployed yet not actually serving traffic for several minutes."
+    ),
+)
 @click.pass_context
-def env_deploy(ctx: click.Context, yes_i_mean_production: bool, yes_i_mean_staging: bool) -> None:
+def env_deploy(
+    ctx: click.Context,
+    yes_i_mean_production: bool,
+    yes_i_mean_staging: bool,
+    hard: bool,
+    soft: bool,
+) -> None:
     """Provision or upgrade the currently-activated env.
 
     Refuses when a recover-target file exists at the monorepo root.
+    Refuses unless the shell is *deploy-activated* (i.e. ``MODAL_PROFILE``
+    matches the tier's ``modal_workspace``); the refusal points the
+    operator at ``eval "$(uv run minds env activate --deploy <name>)"``.
 
     Reads the activated env from ``MINDS_ROOT_NAME`` (set by
     ``minds env activate``) and dispatches:
@@ -945,16 +1050,26 @@ def env_deploy(ctx: click.Context, yes_i_mean_production: bool, yes_i_mean_stagi
       env. Writes nothing to disk. Requires
       ``--yes-i-mean-production`` (or ``--yes-i-mean-staging``) so an
       accidental invocation can never silently fire.
-    - Anything else: dev-tier deploy -- provisions the Modal env, Neon
-      DB, SuperTokens app, pushes per-env Modal Secrets, deploys both
-      apps, and writes ``~/.minds-<name>/client.toml`` + ``secrets.toml``.
+    - Anything else: per-env-tier deploy (``dev`` for ``dev-<user>``
+      envs, ``ci`` for ``ci-<...>`` envs minted by the deployment-tests
+      orchestrator) -- provisions the Modal env, Neon DB, SuperTokens
+      app, pushes per-env Modal Secrets, deploys both apps, and writes
+      ``~/.minds-<name>/client.toml`` + ``secrets.toml``.
 
     Idempotent: re-running picks up any new tier-shared Vault values and
     re-deploys in place.
+
+    When neither ``--hard`` nor ``--soft`` is passed, the deploy strategy
+    is chosen per :func:`resolve_deploy_strategy`: ``RECREATE`` whenever
+    a migration ran or the tier is ``dev`` or ``ci`` (the per-env tiers
+    -- personal dev envs and CI ephemeral envs respectively), ``ROLLOVER``
+    for shared tiers with no migration (staging / production prefer
+    zero-downtime when nothing risky happened).
     """
     output_format: OutputFormat = ctx.obj.get("output_format", OutputFormat.HUMAN)
     env_name = require_activated_env_name()
     tier = _tier_for_env_name(env_name)
+    require_deploy_mode_activation(env_name=env_name, tier=tier)
     _refuse_if_this_env_recover_target_exists(env_name)
 
     if tier == _PRODUCTION_ENV_NAME and not yes_i_mean_production:
@@ -965,6 +1080,18 @@ def env_deploy(ctx: click.Context, yes_i_mean_production: bool, yes_i_mean_stagi
         raise click.ClickException(
             "Refusing to deploy against tier 'staging' without --yes-i-mean-staging. Pass that flag to confirm."
         )
+
+    if hard and soft:
+        raise click.ClickException(
+            "--hard and --soft are mutually exclusive: pass at most one to force the "
+            "Modal deploy strategy, or omit both to let the default policy pick."
+        )
+    if hard:
+        explicit_strategy: DeployStrategy | None = DeployStrategy.RECREATE
+    elif soft:
+        explicit_strategy = DeployStrategy.ROLLOVER
+    else:
+        explicit_strategy = None
 
     try:
         deploy_config = load_deploy_config(tier)
@@ -1002,6 +1129,7 @@ def env_deploy(ctx: click.Context, yes_i_mean_production: bool, yes_i_mean_stagi
                 providers=providers,
                 parent_concurrency_group=cg,
                 credentials=credentials,
+                explicit_strategy=explicit_strategy,
             )
         except MindError as exc:
             # If a recover-target file was written before this failure
@@ -1052,7 +1180,8 @@ def env_destroy(ctx: click.Context, keep_agents: bool, yes_i_mean_staging: bool)
     Refuses hard-coded when no env is activated. Refuses hard-coded when
     the activated env is ``production`` (production teardown is
     operator-managed outside this CLI). ``staging`` requires
-    ``--yes-i-mean-staging``.
+    ``--yes-i-mean-staging``. Also refuses unless the shell is
+    *deploy-activated* (see :func:`env_deploy` for the same gate).
 
     The same destroy flow runs for every env type (see
     :func:`provisioning.destroy_env`). The only branches are the
@@ -1065,6 +1194,7 @@ def env_destroy(ctx: click.Context, keep_agents: bool, yes_i_mean_staging: bool)
     output_format: OutputFormat = ctx.obj.get("output_format", OutputFormat.HUMAN)
     env_name = require_activated_env_name()
     tier = _tier_for_env_name(env_name)
+    require_deploy_mode_activation(env_name=env_name, tier=tier)
     _refuse_if_this_env_recover_target_exists(env_name)
 
     if tier == _PRODUCTION_ENV_NAME:
@@ -1120,13 +1250,15 @@ def env_recover(_ctx: click.Context) -> None:
     recover after a partial recovery converges.
 
     Refuses to run if no recover-target file exists for the activated
-    env. To recover a different env, activate it first.
+    env. To recover a different env, activate it first. Also refuses
+    unless the shell is *deploy-activated* (see :func:`env_deploy`).
     """
     try:
         repo_root = find_monorepo_root()
     except MindError as exc:
         raise click.ClickException(str(exc)) from exc
     env_name = require_activated_env_name()
+    require_deploy_mode_activation(env_name=env_name, tier=_tier_for_env_name(env_name))
     if not recover_target_exists(repo_root=repo_root, env_name=env_name):
         # Help the operator if they have recover-target files for OTHER
         # envs sitting around (a common mistake when juggling several
@@ -1138,7 +1270,7 @@ def env_recover(_ctx: click.Context) -> None:
                 f"No recover-target file for activated env {env_name!r} at "
                 f"{recover_target_path(repo_root=repo_root, env_name=env_name)}. Other recover-target files exist:\n"
                 f"{leftover_list}\nActivate the env you want to recover (e.g. "
-                f'`eval "$(uv run minds env activate <env-name>)"`) and re-run.'
+                f'`eval "$(uv run minds env activate --deploy <env-name>)"`) and re-run.'
             )
         raise click.ClickException(
             f"No recover-target file at {recover_target_path(repo_root=repo_root, env_name=env_name)}; "

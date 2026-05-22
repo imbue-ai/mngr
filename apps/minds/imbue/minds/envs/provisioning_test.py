@@ -224,8 +224,8 @@ def _build_fake_providers(
             raise ModalDeployError("push secret boom")
         pushed_secrets_state[modal_env].add(secret_name)
 
-    def deploy_litellm_proxy(modal_env, tier, min_containers, deploy_id, cg):
-        call_log["calls"].append(("deploy_litellm_proxy", modal_env, tier, min_containers, deploy_id))
+    def deploy_litellm_proxy(modal_env, tier, min_containers, deploy_id, strategy, cg):
+        call_log["calls"].append(("deploy_litellm_proxy", modal_env, tier, min_containers, deploy_id, strategy))
         if fail_step == "deploy_litellm":
             raise ModalDeployError("litellm deploy boom")
         # Track the deploy id as the "version" of the deployed app for
@@ -238,8 +238,10 @@ def _build_fake_providers(
             return AnyUrl(f"https://{_TEST_MODAL_WORKSPACE}-{modal_env}--llm-dev-proxy.modal.run")
         return AnyUrl(f"https://{_TEST_MODAL_WORKSPACE}--llm-{tier}-proxy.modal.run")
 
-    def deploy_remote_service_connector(modal_env, tier, min_containers, deploy_id, cg):
-        call_log["calls"].append(("deploy_remote_service_connector", modal_env, tier, min_containers, deploy_id))
+    def deploy_remote_service_connector(modal_env, tier, min_containers, deploy_id, strategy, cg):
+        call_log["calls"].append(
+            ("deploy_remote_service_connector", modal_env, tier, min_containers, deploy_id, strategy)
+        )
         if fail_step == "deploy_connector":
             raise ModalDeployError("connector deploy boom")
         deployed_app_versions[(modal_env, f"rsc-{tier}")] = deploy_id

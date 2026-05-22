@@ -1,18 +1,18 @@
 ---
 name: minds-dev-workflow
-description: End-to-end dev workflow for the minds app stack -- first-time bring-up, every-startup vendor/mngr sync, and the iteration loop against a running Docker agent. Use this when starting or restarting the dev Electron app, or after changing any minds component (mngr, the workspace server, the FCT template).
+description: End-to-end dev workflow for the minds app stack -- first-time bring-up, every-startup vendor/mngr sync, and the iteration loop against a running Docker agent. Use this when starting or restarting the dev Electron app, or after changing any minds component (mngr, the system interface, the FCT template).
 ---
 
 # Minds Dev Workflow
 
-This skill covers the full minds dev cycle: standing up an FCT worktree, syncing the live mngr code into that worktree's `vendor/mngr/`, activating a per-developer dev env, starting the dev Electron app, and iterating against a running Docker agent. Use it whenever you're about to start the dev app (the vendor/mngr sync needs to happen *every* startup) or after editing any component (mngr, the system_interface workspace server, the FCT template).
+This skill covers the full minds dev cycle: standing up an FCT worktree, syncing the live mngr code into that worktree's `vendor/mngr/`, activating a per-developer dev env, starting the dev Electron app, and iterating against a running Docker agent. Use it whenever you're about to start the dev app (the vendor/mngr sync needs to happen *every* startup) or after editing any component (mngr, the system_interface, the FCT template).
 
 ## Architecture Overview
 
 The minds stack has four components that need to stay in sync:
 
 1. **minds desktop client** (`apps/minds/`) -- Electron app + FastAPI backend that runs locally, proxies to agent web servers
-2. **system_interface workspace server** (lives in `forever-claude-template/apps/system_interface/`, distributed as the `minds-workspace-server` CLI) -- FastAPI + web UI that runs INSIDE the agent's Docker container as a background service
+2. **system_interface** (lives in `forever-claude-template/apps/system_interface/`, distributed as the `system-interface` CLI) -- FastAPI + web UI that runs INSIDE the agent's Docker container as a background service
 3. **mngr core** (`libs/mngr/`) -- the agent management CLI
 4. **forever-claude-template** -- the template repo that defines the Docker container (Dockerfile, services.toml, skills, scripts)
 
@@ -25,7 +25,7 @@ local mngr repo  -->  FCT worktree's vendor/mngr/  -->  Docker container's /code
                       (under .external_worktrees/)     (via rsync over SSH)
 ```
 
-The desktop client runs on the host (via Electron). The workspace server + mngr run inside the container. The vendor/mngr/ sync is what makes the dev loop work end-to-end.
+The desktop client runs on the host (via Electron). The system interface + mngr run inside the container. The vendor/mngr/ sync is what makes the dev loop work end-to-end.
 
 ### Critical: the vendor/mngr/ sync must happen BEFORE every Create
 
@@ -75,7 +75,7 @@ If you want to run against prod / staging instead of a personal dev env, use `ev
 
 ## Iterating on a running agent
 
-After making changes to any component (mngr, the template's system_interface workspace server, the template, etc.), sync them into a running agent's container:
+After making changes to any component (mngr, the template's system_interface, the template, etc.), sync them into a running agent's container:
 
 ```bash
 eval "$(uv run minds env activate <your-user>-dev)"
@@ -90,7 +90,7 @@ This:
 2. Rsyncs the mngr repo into the FCT worktree's `vendor/mngr/` (same step `just minds-start` does, idempotent)
 3. Stops the agent (`mngr stop`)
 4. Rsyncs the full template (with updated vendor/mngr/) into `/code/` in the container
-5. Rebuilds the workspace server frontend (`npm run build` via SSH)
+5. Rebuilds the system interface frontend (`npm run build` via SSH)
 6. Starts the agent (`mngr start`)
 7. Stops and restarts the Electron desktop client (clean SIGTERM shutdown)
 
@@ -179,7 +179,7 @@ The two manual excludes are for things gitignore deliberately doesn't list:
 
 ### Editable installs
 
-The Dockerfile uses `uv tool install -e` for mngr (vendored under `vendor/mngr/`) and for the system_interface workspace server (at `apps/system_interface/`), so Python code changes in either location are picked up immediately after rsync. Frontend changes require the `npm run build` step (done automatically by `propagate_changes`).
+The Dockerfile uses `uv tool install -e` for mngr (vendored under `vendor/mngr/`) and for the system_interface (at `apps/system_interface/`), so Python code changes in either location are picked up immediately after rsync. Frontend changes require the `npm run build` step (done automatically by `propagate_changes`).
 
 ### Template settings
 

@@ -13,9 +13,6 @@ modal_workspace = "minds-dev"
 vault_path_prefix = "secrets/minds/dev"
 cloudflare_domain = "minds-dev.com"
 
-oauth_google_client_id = ""
-oauth_github_client_id = ""
-
 # Vault-backed per-env Modal Secrets. Each name corresponds to a
 # Vault entry at `<vault_path_prefix>/<name>` -- the deploy reads that
 # entry, adds any deploy-time-computed overrides (URLs, DSNs, app

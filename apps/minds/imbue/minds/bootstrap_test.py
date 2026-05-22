@@ -223,6 +223,10 @@ def test_minds_root_name_pattern_canonical_examples() -> None:
     assert re.fullmatch(MINDS_ROOT_NAME_PATTERN, "minds-staging") is not None
     assert re.fullmatch(MINDS_ROOT_NAME_PATTERN, "minds-dev-josh-3") is not None
     assert re.fullmatch(MINDS_ROOT_NAME_PATTERN, "minds-dev-tname") is not None
+    # CI ephemeral envs (minted by the deployment-tests orchestrator)
+    # share the same shape as dev envs but with a ``ci-`` prefix.
+    assert re.fullmatch(MINDS_ROOT_NAME_PATTERN, "minds-ci-20260518t140212z") is not None
+    assert re.fullmatch(MINDS_ROOT_NAME_PATTERN, "minds-ci-20260518t140212z-abcd") is not None
     assert re.fullmatch(MINDS_ROOT_NAME_PATTERN, "devminds") is None
     # Bare `minds-` with no suffix is rejected -- the env-name regex
     # forbids an empty suffix.
@@ -230,15 +234,18 @@ def test_minds_root_name_pattern_canonical_examples() -> None:
     # Single-char env-name suffixes are rejected -- DEV_ENV_NAME_PATTERN
     # requires both a leading and a trailing alphanumeric (2+ chars).
     assert re.fullmatch(MINDS_ROOT_NAME_PATTERN, "minds-a") is None
-    # Dev envs MUST lead with ``dev-``; anything else under the prefix
-    # is rejected as not matching either the staging or dev shape.
+    # Dynamic envs MUST lead with ``dev-`` or ``ci-``; anything else
+    # under the prefix is rejected as not matching either the staging
+    # or dynamic-env shape.
     assert re.fullmatch(MINDS_ROOT_NAME_PATTERN, "minds-josh-3") is None
     assert re.fullmatch(MINDS_ROOT_NAME_PATTERN, "minds-josh") is None
     assert re.fullmatch(MINDS_ROOT_NAME_PATTERN, "minds-production") is None
-    # Bare ``dev-`` with nothing after is rejected (the suffix needs 2+
-    # chars of [a-z0-9_-]).
+    # Bare ``dev-`` / ``ci-`` with nothing after is rejected (the
+    # suffix needs 2+ chars of [a-z0-9_-]).
     assert re.fullmatch(MINDS_ROOT_NAME_PATTERN, "minds-dev-") is None
     assert re.fullmatch(MINDS_ROOT_NAME_PATTERN, "minds-dev-a") is None
+    assert re.fullmatch(MINDS_ROOT_NAME_PATTERN, "minds-ci-") is None
+    assert re.fullmatch(MINDS_ROOT_NAME_PATTERN, "minds-ci-a") is None
 
 
 def _stub_mngr_host_dir(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, root_name: str) -> Path:
@@ -352,6 +359,69 @@ def test_ensure_mngr_settings_writes_default_imbue_cloud_disabled(
     """
     settings_path = _stub_mngr_host_dir(monkeypatch, tmp_path, "minds-dev-tname")
     _ensure_mngr_settings("minds-dev-tname")
+    parsed = tomllib.loads(settings_path.read_text())
+    assert parsed["providers"]["imbue_cloud"] == {"backend": "imbue_cloud", "is_enabled": False}
+    assert parsed["plugins"]["recursive"]["enabled"] is False
+
+
+def test_set_imbue_cloud_provider_for_account_also_writes_default_disabled_block(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Regression: a first signin on a fresh ``MINDS_ROOT_NAME`` must land
+    both the per-account block AND the default-disabled
+    ``[providers.imbue_cloud]`` suppression block.
+
+    Without the suppression block, ``mngr observe`` auto-creates a phantom
+    default ``imbue_cloud`` instance with no ``connector_url``, which
+    raises ``MissingConnectorUrlError`` on every discovery cycle and
+    breaks ``mngr create`` against the env. ``apply_bootstrap``'s call
+    to ``_ensure_mngr_settings`` no-ops on a fresh env (the mngr profile
+    dir doesn't exist yet at startup), so ``set_imbue_cloud_provider_for_account``
+    has to ensure it as part of writing the per-account block.
+    """
+    settings_path = _stub_mngr_host_dir(monkeypatch, tmp_path, "minds-staging")
+    set_imbue_cloud_provider_for_account(
+        "josh@imbue.com",
+        connector_url=_FAKE_CONNECTOR_URL,
+        root_name="minds-staging",
+    )
+    parsed = tomllib.loads(settings_path.read_text())
+    # The per-account block lands as before.
+    assert parsed["providers"]["imbue_cloud_josh-imbue-com"]["connector_url"] == _FAKE_CONNECTOR_URL
+    # AND the suppression block + recursive-disable land in the same pass.
+    assert parsed["providers"]["imbue_cloud"] == {"backend": "imbue_cloud", "is_enabled": False}
+    assert parsed["plugins"]["recursive"]["enabled"] is False
+
+
+def test_set_imbue_cloud_provider_for_account_repairs_missing_default_block_on_resignin(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """An already-signed-in user whose settings.toml is missing the
+    suppression block (because the original signin happened on a build
+    that didn't write it) gets the block back on the next signin event,
+    even when the per-account block itself is unchanged and the function
+    short-circuits its per-account write path.
+    """
+    settings_path = _stub_mngr_host_dir(monkeypatch, tmp_path, "minds-staging")
+    # Pre-seed: a per-account block exists but the suppression block is missing
+    # (mirrors the on-disk state of a staging env that signed in before the
+    # fix landed).
+    settings_path.write_text(
+        "[providers.imbue_cloud_josh-imbue-com]\n"
+        'backend = "imbue_cloud"\n'
+        'account = "josh@imbue.com"\n'
+        f'connector_url = "{_FAKE_CONNECTOR_URL}"\n'
+        "is_enabled = true\n"
+    )
+
+    changed = set_imbue_cloud_provider_for_account(
+        "josh@imbue.com",
+        connector_url=_FAKE_CONNECTOR_URL,
+        root_name="minds-staging",
+    )
+    # The per-account write itself is a no-op (existing block already matches),
+    # but the file is still modified because the suppression block lands.
+    assert changed is False
     parsed = tomllib.loads(settings_path.read_text())
     assert parsed["providers"]["imbue_cloud"] == {"backend": "imbue_cloud", "is_enabled": False}
     assert parsed["plugins"]["recursive"]["enabled"] is False

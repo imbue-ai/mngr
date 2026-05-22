@@ -35,7 +35,6 @@ _POSITIONAL_COMPLETION_SPEC: Final[dict[str, list[list[str]]]] = {
     "label": [["agent_names"]],
     "message": [["agent_names"]],
     "pair": [["agent_names"]],
-    "provision": [["agent_names"]],
     "pull": [["agent_names"], []],
     "push": [["agent_names"], []],
     "rename": [["agent_names"], []],

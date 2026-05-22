@@ -31,19 +31,20 @@ _MINDS_PREFIX: Final[str] = "minds"
 # :mod:`imbue.minds.cli.env`:
 #
 #   * ``staging`` -- the reserved staging tier name.
-#   * ``dev-<rest>`` -- any dev env. ``<rest>`` matches
-#     :data:`imbue.minds.envs.primitives.DEV_ENV_NAME_PATTERN` after the
-#     ``dev-`` prefix; kept inlined here so this module stays free of
-#     ``imbue.mngr.*`` / pydantic imports (see module docstring).
+#   * ``dev-<rest>`` / ``ci-<rest>`` -- any dynamic env (developer dev
+#     env or CI ephemeral env, respectively). Together they mirror
+#     :data:`imbue.minds.envs.primitives.DEV_ENV_NAME_PATTERN`; kept
+#     inlined here so this module stays free of ``imbue.mngr.*`` /
+#     pydantic imports (see module docstring).
 #
 # Production has no suffix (``minds`` alone). Anything that does not
 # fit this pattern is treated as ``unset`` by ``resolve_minds_root_name``
 # and falls back to production with a warning.
 _STAGING_SUFFIX_PATTERN: Final[str] = r"staging"
-_DEV_SUFFIX_PATTERN: Final[str] = r"dev-[a-z0-9][a-z0-9_-]{0,33}[a-z0-9]"
-_ENV_NAME_PATTERN: Final[str] = rf"(?:{_STAGING_SUFFIX_PATTERN}|{_DEV_SUFFIX_PATTERN})"
+_DYNAMIC_SUFFIX_PATTERN: Final[str] = r"(?:dev|ci)-[a-z0-9][a-z0-9_-]{0,33}[a-z0-9]"
+_ENV_NAME_PATTERN: Final[str] = rf"(?:{_STAGING_SUFFIX_PATTERN}|{_DYNAMIC_SUFFIX_PATTERN})"
 # The full set of legal MINDS_ROOT_NAME values is ``minds`` (production),
-# ``minds-staging``, or ``minds-dev-<rest>``.
+# ``minds-staging``, ``minds-dev-<rest>``, or ``minds-ci-<rest>``.
 MINDS_ROOT_NAME_PATTERN: Final[str] = rf"{_MINDS_PREFIX}(-{_ENV_NAME_PATTERN})?"
 
 
@@ -349,6 +350,12 @@ def reconcile_imbue_cloud_providers_from_sessions(connector_url: str, *, root_na
     """
     if root_name is None:
         root_name = resolve_minds_root_name()
+    # Same rationale as in ``set_imbue_cloud_provider_for_account``: the
+    # startup ``apply_bootstrap`` call no-ops on a freshly-created
+    # MINDS_ROOT_NAME (mngr profile dir doesn't exist yet). Re-run here
+    # so existing users who never re-signin still get the suppression
+    # block on their next minds startup.
+    _ensure_mngr_settings(root_name)
     accounts_path = _imbue_cloud_accounts_path(root_name)
     if accounts_path is None or not accounts_path.is_file():
         return
@@ -505,9 +512,22 @@ def set_imbue_cloud_provider_for_account(
     Returns ``True`` when the file was modified, so callers know whether
     to bounce ``mngr observe`` (the running process needs a restart to
     see the new provider instance).
+
+    Always (re-)runs :func:`_ensure_mngr_settings` before touching the
+    per-account block. ``apply_bootstrap`` calls ``_ensure_mngr_settings``
+    at minds-startup, but for a freshly-created ``MINDS_ROOT_NAME`` the
+    mngr profile dir doesn't exist yet at that point, so the call
+    silently no-ops. By the time a signin fires this function, mngr has
+    been initialized (the in-process ``mngr forward`` subprocess does
+    that), so the second call lands the suppression block + recursive-
+    disable that the first call missed. Without this, the auto-created
+    default ``[providers.imbue_cloud]`` instance trips every
+    ``mngr observe`` cycle with ``MissingConnectorUrlError`` and the
+    first ``mngr create`` against this env fails outright.
     """
     if root_name is None:
         root_name = resolve_minds_root_name()
+    _ensure_mngr_settings(root_name)
     settings_path = _resolve_active_settings_path(root_name)
     if settings_path is None:
         return False
