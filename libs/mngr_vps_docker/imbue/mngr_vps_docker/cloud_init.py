@@ -6,6 +6,9 @@ def generate_cloud_init_user_data(
     """Generate a cloud-init user_data script for VPS provisioning.
 
     Injects the SSH host key so we know it before the VPS boots (no TOFU),
+    forwards the provider's SSH key from the cloud-image default user
+    (admin / ec2-user / ubuntu / etc.) into root's authorized_keys so
+    mngr can SSH in as root on AMIs that don't put the key there directly,
     disables password authentication, installs Docker via the Debian
     ``docker.io`` package (handled inline by cloud-init's package handler
     -- about 5-15s on a ``t3.small``, vs 60-120s for the official
@@ -73,6 +76,15 @@ write_files:
       MaxSessions 100
       MaxStartups 100:30:200
 runcmd:
+  # Some cloud images install the provider-side SSH key into the default
+  # user's authorized_keys (e.g. AWS Debian AMIs use 'admin', AL2/AL2023
+  # use 'ec2-user', Ubuntu uses 'ubuntu') rather than root's. mngr_vps_docker
+  # SSHes in as root (see ``_make_outer_for_vps_ip``), so without this
+  # copy the provisioning poll loop would hang trying to authenticate.
+  # Vultr / OVH put the key on root directly so this is a no-op there.
+  - mkdir -p /root/.ssh && chmod 0700 /root/.ssh
+  - for u in admin ec2-user ubuntu debian fedora centos; do if [ -f "/home/$u/.ssh/authorized_keys" ]; then cat "/home/$u/.ssh/authorized_keys" >> /root/.ssh/authorized_keys; fi; done
+  - touch /root/.ssh/authorized_keys && chmod 0600 /root/.ssh/authorized_keys
   - systemctl enable docker
   - systemctl start docker
   # Apply the MaxSessions/MaxStartups bump without killing in-flight SSH

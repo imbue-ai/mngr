@@ -74,6 +74,28 @@ def test_generate_cloud_init_installs_docker() -> None:
     assert "get.docker.com" not in result
 
 
+def test_generate_cloud_init_forwards_ssh_key_to_root() -> None:
+    """Regression: AMIs whose cloud image installs the provider SSH key on the
+    default user (admin / ec2-user / ubuntu / etc.) instead of root would make
+    mngr's root-targeted SSH hang (we connect as root per ``ssh_user="root"``
+    in ``mngr_vps_docker.instance._make_outer_for_vps_ip``). cloud-init's
+    runcmd copies the default user's authorized_keys into ``/root/.ssh``
+    before mngr's provisioning poll loop runs, so root SSH always works.
+
+    Vultr / OVH already install the key on root directly so this is a no-op
+    there -- but emitting the shell on every provider is cheaper than
+    branching in Python by provider.
+    """
+    result = generate_cloud_init_user_data(
+        host_private_key="fake-key",
+        host_public_key="ssh-ed25519 AAAA fake",
+    )
+    assert "/root/.ssh/authorized_keys" in result
+    assert "admin" in result
+    assert "ec2-user" in result
+    assert "ubuntu" in result
+
+
 def test_generate_cloud_init_installs_curl() -> None:
     """``curl`` must stay in the cloud-init package list because
     ``_DEPOT_INSTALL_CMD`` in ``instance.py`` shells out to

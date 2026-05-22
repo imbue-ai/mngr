@@ -114,17 +114,43 @@ def _run_mngr(
     ``cwd`` must be inside a git repository -- ``mngr create`` reads the
     source from the current git checkout unless ``--from`` is passed. The
     release tests supply the ``temp_git_repo`` fixture for this.
+
+    Streams stdout+stderr to a file under ``project_config_dir`` rather
+    than buffering with ``capture_output=True``. The buffered mode loses
+    everything on ``TimeoutExpired``, which makes diagnosing a stuck
+    ``mngr create`` impossible -- the assertion message just says "the
+    subprocess timed out" with no provisioning-phase context.
     """
     env = os.environ.copy()
     env["MNGR_PROJECT_CONFIG_DIR"] = str(project_config_dir)
     cmd = ["uv", "run", "mngr", *args]
-    return subprocess.run(
-        cmd,
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-        cwd=str(cwd),
-        env=env,
+    log_path = Path(project_config_dir) / f"mngr-{args[0] if args else 'cmd'}.log"
+    with log_path.open("w") as log_file:
+        proc = subprocess.Popen(
+            cmd,
+            stdout=log_file,
+            stderr=subprocess.STDOUT,
+            text=True,
+            cwd=str(cwd),
+            env=env,
+        )
+        try:
+            returncode = proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+            returncode = 124  # GNU-coreutils ``timeout`` convention.
+    log_text = log_path.read_text()
+    return subprocess.CompletedProcess(
+        args=cmd,
+        returncode=returncode,
+        stdout=log_text,
+        stderr=""
+        if returncode == 0
+        else (
+            "see stdout (subprocess stderr was merged into stdout)\n"
+            + (f"subprocess timed out after {timeout}s\n" if returncode == 124 else "")
+        ),
     )
 
 
