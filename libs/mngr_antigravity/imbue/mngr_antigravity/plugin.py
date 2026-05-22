@@ -146,10 +146,21 @@ class AntigravityAgentConfig(AgentTypeConfig):
 class AntigravityAgent(InteractiveTuiAgent[AntigravityAgentConfig], HasCommonTranscriptMixin):
     """Agent implementation for Google's Antigravity CLI (``agy``)."""
 
-    # Stable substring of the splash banner that the Antigravity TUI renders
-    # once startup completes. Polled by ``InteractiveTuiAgent.wait_for_ready_signal``.
-    # Captured live from `agy` 1.0.0; the full string is "Antigravity CLI <version>".
-    TUI_READY_INDICATOR: ClassVar[str] = "Antigravity CLI"
+    # Stable substring of the footer hint that agy renders ONLY once the
+    # input prompt is fully drawn and ready to receive keystrokes. Polled by
+    # ``InteractiveTuiAgent.wait_for_ready_signal``.
+    #
+    # We deliberately do NOT key off the "Antigravity CLI <version>" splash
+    # banner: agy renders an early "Welcome to the Antigravity CLI. You are
+    # currently not signed in." line *before* OAuth completes, which also
+    # contains the substring "Antigravity CLI" but does NOT mean the input
+    # row is ready. If mngr starts pasting at that point, agy drops the
+    # keystrokes on the floor (no input row yet to receive them) and
+    # ``wait_for_paste_visible`` times out, surfacing as a noisy
+    # ``mngr create --message`` timeout. The "? for shortcuts" footer string
+    # appears only with the rendered input prompt, so it's a reliable
+    # ready signal.
+    TUI_READY_INDICATOR: ClassVar[str] = "? for shortcuts"
 
     def get_expected_process_name(self) -> str:
         # `agy` is a single-file Go binary; ps/tmux show the literal command name.

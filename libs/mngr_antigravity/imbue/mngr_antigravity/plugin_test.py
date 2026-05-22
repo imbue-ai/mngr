@@ -55,8 +55,15 @@ def test_antigravity_agent_subclasses_interactive_tui_agent() -> None:
 
 
 def test_antigravity_agent_advertises_tui_ready_indicator() -> None:
-    """Ready indicator is the stable splash-banner substring captured from `agy` 1.0.0."""
-    assert AntigravityAgent.TUI_READY_INDICATOR == "Antigravity CLI"
+    """Ready indicator is a footer-hint substring that only appears once the input prompt is drawn.
+
+    Pinned because the obvious-but-wrong choice ("Antigravity CLI" from the
+    splash banner) matches earlier than the input row is actually ready --
+    agy emits a "Welcome to the Antigravity CLI. You are currently not
+    signed in." line while still authing, which is too early to paste
+    into. See plugin.py for the rationale.
+    """
+    assert AntigravityAgent.TUI_READY_INDICATOR == "? for shortcuts"
 
 
 def test_antigravity_agent_implements_send_enter_and_validate() -> None:
