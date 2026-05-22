@@ -213,8 +213,8 @@ rather than trying to migrate files in place.
 Transparent HTTP reverse proxy from the gateway to an embedder-supplied
 "Minds API" base URL.
 
-* `ANY /extensions/minds-api-proxy` forwards to `<minds-api>/`.
-* `ANY /extensions/minds-api-proxy/<rest>...` forwards to
+* `ANY /minds-api-proxy` forwards to `<minds-api>/`.
+* `ANY /minds-api-proxy/<rest>...` forwards to
   `<minds-api>/<rest>...`, preserving the inbound method, query
   string, headers (minus hop-by-hop entries and the gateway-internal
   password / permissions-override headers), and body. The upstream

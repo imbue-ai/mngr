@@ -1,6 +1,6 @@
 - Latchkey gateway ships a new bundled `minds-api-proxy` extension that
   transparently reverse-proxies requests under
-  `/extensions/minds-api-proxy` to the minds desktop client's bare-origin
+  `/minds-api-proxy` to the minds desktop client's bare-origin
   "Minds API". The upstream URL is read at request time from the
   `LATCHKEY_EXTENSION_MINDS_API_URL` environment variable, and is
   published to the detached `mngr latchkey forward` supervisor (via the
@@ -44,9 +44,9 @@
   - The per-file permission schema now pins `path` (the URL path) to
     the WebDAV URL for the requested file -- the WebDAV mount serves
     each absolute path at the URL
-    `/extensions/minds-api-proxy/api/v1/files<absolute_path>`, so a
+    `/minds-api-proxy/api/v1/files<absolute_path>`, so a
     grant for `/home/user/foo.txt` matches exactly
-    `/extensions/minds-api-proxy/api/v1/files/home/user/foo.txt`. The
+    `/minds-api-proxy/api/v1/files/home/user/foo.txt`. The
     legacy `queryParams.path` constraint is gone (WebDAV identifies
     the file in the URL path, not via a query parameter).
   - The allowed `method` enum grew from `GET` / `POST` to the full set

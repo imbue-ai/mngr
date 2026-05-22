@@ -290,7 +290,7 @@ def test_proxy_forwards_get_request_to_upstream(
         headers={"Content-Type": "text/plain"},
         body=b"hello from minds",
     )
-    status, headers, body = _http_request(f"{proxy_url}/extensions/minds-api-proxy/health?x=1")
+    status, headers, body = _http_request(f"{proxy_url}/minds-api-proxy/health?x=1")
     assert status == 200
     assert headers.get("Content-Type") == "text/plain"
     assert body == b"hello from minds"
@@ -303,10 +303,10 @@ def test_proxy_forwards_get_request_to_upstream(
 def test_proxy_strips_extension_prefix_when_no_subpath(
     node_proxy: tuple[str, _FakeMindsApiState],
 ) -> None:
-    """``/extensions/minds-api-proxy`` (no trailing slash) maps to upstream ``/``."""
+    """``/minds-api-proxy`` (no trailing slash) maps to upstream ``/``."""
     proxy_url, state = node_proxy
     state.next_response = _StagedResponse(status=204, headers={}, body=b"")
-    status, _headers, body = _http_request(f"{proxy_url}/extensions/minds-api-proxy")
+    status, _headers, body = _http_request(f"{proxy_url}/minds-api-proxy")
     assert status == 204
     assert body == b""
     assert len(state.received) == 1
@@ -320,7 +320,7 @@ def test_proxy_forwards_post_body_and_method(
     state.next_response = _StagedResponse(status=201, headers={}, body=b"created")
     payload = b'{"hello":"world"}'
     status, _headers, body = _http_request(
-        f"{proxy_url}/extensions/minds-api-proxy/items",
+        f"{proxy_url}/minds-api-proxy/items",
         method="POST",
         headers={"Content-Type": "application/json", "X-Custom": "value"},
         body=payload,
@@ -343,7 +343,7 @@ def test_proxy_strips_gateway_internal_headers_before_forwarding(
     proxy_url, state = node_proxy
     state.next_response = _StagedResponse(status=200, headers={}, body=b"ok")
     _http_request(
-        f"{proxy_url}/extensions/minds-api-proxy/echo",
+        f"{proxy_url}/minds-api-proxy/echo",
         headers={
             "X-Latchkey-Gateway-Password": "secret-password",
             "X-Latchkey-Gateway-Permissions-Override": "secret-jwt",
@@ -369,7 +369,7 @@ def test_proxy_relays_upstream_status_and_headers(
         headers={"Content-Type": "application/json", "X-Custom-Response": "from-upstream"},
         body=b'{"teapot":true}',
     )
-    status, headers, body = _http_request(f"{proxy_url}/extensions/minds-api-proxy/teapot")
+    status, headers, body = _http_request(f"{proxy_url}/minds-api-proxy/teapot")
     assert status == 418
     assert headers.get("Content-Type") == "application/json"
     assert headers.get("X-Custom-Response") == "from-upstream"
@@ -382,7 +382,7 @@ def test_non_proxy_paths_return_404(
     """The extension must defer (return ``false``) for unrelated paths.
 
     The driver script handles a ``false`` return by writing a 404. So
-    any path outside ``/extensions/minds-api-proxy`` exercises that
+    any path outside ``/minds-api-proxy`` exercises that
     'not handled' branch end-to-end.
     """
     proxy_url, state = node_proxy
@@ -413,7 +413,7 @@ def test_proxy_returns_503_when_env_var_unset(
     )
     try:
         port = _wait_for_node_port(process)
-        status, headers, body = _http_request(f"http://127.0.0.1:{port}/extensions/minds-api-proxy/foo")
+        status, headers, body = _http_request(f"http://127.0.0.1:{port}/minds-api-proxy/foo")
         assert status == 503
         assert "application/json" in headers.get("Content-Type", "")
         assert "LATCHKEY_EXTENSION_MINDS_API_URL" in json.loads(body)["error"]

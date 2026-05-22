@@ -1,5 +1,5 @@
 Latchkey gateway ships a new bundled `minds-api-proxy` extension that
-transparently reverse-proxies requests under `/extensions/minds-api-proxy`
+transparently reverse-proxies requests under `/minds-api-proxy`
 to the minds desktop client's bare-origin "Minds API". The upstream URL
 is read at request time from the `LATCHKEY_EXTENSION_MINDS_API_URL`
 environment variable, and is published to the detached
@@ -39,7 +39,7 @@ request schema and a new approve endpoint:
   pre-existing `latchkey-self` scope from the agent baseline rather
   than minting its own scope schema. The per-file permission schema
   const-matches the URL path itself
-  (`/extensions/minds-api-proxy/api/v1/files<absolute_path>`). The
+  (`/minds-api-proxy/api/v1/files<absolute_path>`). The
   legacy `queryParams.path` constraint is gone.
 * File-sharing requests now carry a required `access` field on the
   payload (`READ` / `WRITE`). `READ` unlocks the non-mutating WebDAV
