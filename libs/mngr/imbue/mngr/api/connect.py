@@ -50,13 +50,20 @@ def build_post_attach_resize_script(session_name: str) -> str:
     :class:`imbue.mngr.hosts.tmux.TmuxWindowTarget` for the parsing rule.
     """
     session_target = TmuxSessionTarget(session_name=session_name).as_shell_arg()
+    # The inner `kill -WINCH` step is intentionally noisy-tolerant: pgrep -P
+    # may find no children (kill exits 1 on empty arg list) or find a pid that
+    # has just died (kill exits 1 with "no such process"). Either case is a
+    # benign no-op for the resize, so swallow both. We also append a trailing
+    # `; true` so the *whole* script exits 0 -- without it, xargs propagates
+    # any non-zero child status (exit 123) and `subprocess.run(..., check=True)`
+    # callers see a CalledProcessError even though the resize succeeded.
     return (
         f"tmux list-windows -t {session_target} -F '#I' | "
         f"while read W; do "
         f"tmux resize-window -t {session_target}:$W -A; "
         f"tmux list-panes -t {session_target}:$W -F '#{{pane_pid}}' "
-        f"| xargs -I{{}} sh -c 'kill -WINCH {{}} $(pgrep -P {{}})' 2>/dev/null; "
-        f"done"
+        f"| xargs -I{{}} sh -c 'kill -WINCH {{}} $(pgrep -P {{}}) 2>/dev/null || true'; "
+        f"done; true"
     )
 
 
