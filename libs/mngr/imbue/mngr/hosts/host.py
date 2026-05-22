@@ -2936,7 +2936,7 @@ def _build_start_agent_shell_command(
         tmux_escaped = popup_shell_cmd.replace('"', '\\"')
         hook_value = (
             f'display-popup -w {popup_w} -h {popup_h} -E "{tmux_escaped}"'
-            f" ; set-hook -u -t {TmuxWindowTarget(session_name=session_name, window=0).as_shell_arg()}"
+            f" ; set-hook -u -t {quoted_exact_agent_window}"
             f" client-attached[99]"
         )
         steps.append(f"tmux set-hook -t {quoted_exact_agent_window} client-attached[99] {shlex.quote(hook_value)}")
