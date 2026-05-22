@@ -96,6 +96,22 @@ def test_generate_cloud_init_forwards_ssh_key_to_root() -> None:
     assert "ubuntu" in result
 
 
+def test_generate_cloud_init_disables_root_lockout() -> None:
+    """Cloud-init defaults to ``disable_root: true``, which prefixes root's
+    authorized_keys with a ``no-port-forwarding,no-X11-forwarding,no-agent-
+    forwarding,no-pty,command="echo 'Please login as the user ...'"``
+    wrapper. mngr_vps_docker SSHes in as root and runs shell-y pyinfra
+    commands via that account, so the wrapper would silently break every
+    poll. The generated cloud-init must set ``disable_root: false`` so the
+    forwarded key lands without the wrapper.
+    """
+    result = generate_cloud_init_user_data(
+        host_private_key="fake-key",
+        host_public_key="ssh-ed25519 AAAA fake",
+    )
+    assert "disable_root: false" in result
+
+
 def test_generate_cloud_init_installs_curl() -> None:
     """``curl`` must stay in the cloud-init package list because
     ``_DEPOT_INSTALL_CMD`` in ``instance.py`` shells out to

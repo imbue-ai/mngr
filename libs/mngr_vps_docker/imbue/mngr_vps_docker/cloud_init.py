@@ -63,6 +63,13 @@ ssh_keys:
 {_indent(host_private_key, 4)}
   ed25519_public: {host_public_key}
 ssh_pwauth: false
+# Cloud-init disables root SSH by default (``disable_root: true``), which
+# prefixes root's authorized_keys with a ``no-port-forwarding,no-X11-forwarding,
+# no-agent-forwarding,no-pty,command="echo 'Please login as the user...'"``
+# wrapper. mngr_vps_docker SSHes in as root and runs interactive shell-y
+# commands via pyinfra, so that wrapper would silently break every poll.
+# Set to false so root's authorized_keys takes the keys verbatim.
+disable_root: false
 package_update: true
 packages:
   - ca-certificates
@@ -82,6 +89,9 @@ runcmd:
   # SSHes in as root (see ``_make_outer_for_vps_ip``), so without this
   # copy the provisioning poll loop would hang trying to authenticate.
   # Vultr / OVH put the key on root directly so this is a no-op there.
+  # Paired with ``disable_root: false`` above so cloud-init doesn't prefix
+  # root's keys with a ``no-pty,command="echo 'Please login as ...'"``
+  # wrapper that would silently break every poll command.
   - mkdir -p /root/.ssh && chmod 0700 /root/.ssh
   - for u in admin ec2-user ubuntu debian fedora centos; do if [ -f "/home/$u/.ssh/authorized_keys" ]; then cat "/home/$u/.ssh/authorized_keys" >> /root/.ssh/authorized_keys; fi; done
   - touch /root/.ssh/authorized_keys && chmod 0600 /root/.ssh/authorized_keys
