@@ -1,53 +1,24 @@
 name: minds macOS smoke test
 
-# Smoke test for the minds desktop app on a real macOS environment. Two
-# independent jobs:
+# Launch smoke test for the minds desktop app on a GitHub-hosted macOS runner.
 #
-#   * dev-source-smoke -- launches Electron from source (apps/minds) and runs
-#     apps/minds/scripts/integ_check.py: create a Lima agent from
-#     forever-claude-template, then assert the chat UI mounts ("launch to
-#     first message").
-#   * packaged-smoke   -- installs an already-built minds.app and runs
-#     apps/minds/scripts/drive-minds.sh against it. Needs a published artifact
-#     URL (packaged_app_url input); skipped when that input is empty.
+# Hosted macOS runners cannot run the Lima VM (or Docker) a real minds agent
+# needs -- they provide no nested virtualization. So this verifies everything
+# up to and including the create form rendering: app install, Electron launch,
+# backend startup, one-time-code auth, landing page, create form. It does not
+# create an agent (that needs a self-hosted macOS runner; see PR #1729).
 #
 # Trigger from the Actions tab ("Run workflow") or:
 #   gh workflow run minds-mac-smoke.yml --ref <branch>
-#
-# minds creates its agents inside a Lima VM. GitHub-hosted macOS runners do
-# not guarantee hardware nested virtualization, so Lima can fall back to slow
-# software emulation -- the timeouts below are deliberately generous.
 
 # NOTE: the `push` trigger is temporary -- it exists only so the smoke test
 # can be exercised on the `mngr/minds-mac-ci` branch before it reaches `main`
 # (a `workflow_dispatch`-only workflow is not dispatchable until its file is
-# on the default branch). Remove it before merging; `workflow_dispatch` is the
-# intended long-term interface.
+# on the default branch). Remove it before merging.
 on:
   push:
     branches: [mngr/minds-mac-ci]
   workflow_dispatch:
-    inputs:
-      fct_branch:
-        description: forever-claude-template branch used as the agent template
-        type: string
-        default: pilot
-      run_dev_source:
-        description: Run the dev-source (integ_check.py) smoke test
-        type: boolean
-        default: true
-      require_chat_mount:
-        description: Fail the dev-source test if the chat UI never mounts
-        type: boolean
-        default: true
-      run_packaged:
-        description: Run the packaged-app (drive-minds.sh) smoke test
-        type: boolean
-        default: false
-      packaged_app_url:
-        description: Direct download URL of a packaged minds .dmg or .zip (required by the packaged job)
-        type: string
-        default: ''
 
 concurrency:
   group: minds-mac-smoke-${{ github.ref }}
@@ -57,24 +28,9 @@ permissions:
   contents: read
 
 jobs:
-  # Dev-source path: Electron launched from apps/minds via `npm start`, agent
-  # created in a Lima VM. This is the path integ_check.py was written for.
-  dev-source-smoke:
-    if: ${{ github.event_name != 'workflow_dispatch' || inputs.run_dev_source }}
+  launch-smoke:
     runs-on: macos-15
-    timeout-minutes: 90
-    env:
-      # The in-VM agent needs an API key to reach a first response. Already a
-      # repo secret (used by ci.yml's release tests).
-      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-      FCT_BRANCH: ${{ inputs.fct_branch || 'pilot' }}
-      # Cold Lima boots on a hosted runner are slow; give the in-VM bootstrap
-      # and the workspace server room before integ_check.py gives up.
-      MINDS_INTEG_DISCOVERY_TIMEOUT_SECONDS: '300'
-      MINDS_INTEG_CHAT_TIMEOUT_SECONDS: '600'
-      # On a plain branch push, chat-mount stays best-effort; a `workflow_dispatch`
-      # run respects the require_chat_mount input (default: required).
-      MINDS_INTEG_REQUIRE_CHAT_MOUNT: ${{ inputs.require_chat_mount && '1' || '0' }}
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v6
 
@@ -102,9 +58,6 @@ jobs:
           cache: pnpm
           cache-dependency-path: apps/minds/pnpm-lock.yaml
 
-      - name: Install Lima
-        run: brew install lima
-
       - name: Install Python dependencies
         run: uv sync --all-packages
 
@@ -115,16 +68,18 @@ jobs:
       - name: Fetch Tailwind bundle
         run: bash apps/minds/scripts/fetch_tailwind.sh
 
+      # integ_check.py points MINDS_WORKSPACE_GIT_URL at this path to pre-fill
+      # the create form. Launch-only never clones it, but the path must exist.
       - name: Check out forever-claude-template
         run: |
-          git clone --depth 1 --branch "$FCT_BRANCH" \
+          git clone --depth 1 --branch pilot \
             https://github.com/imbue-ai/forever-claude-template.git \
             .external_worktrees/forever-claude-template
 
-      - name: Run dev-source smoke test
+      - name: Run launch smoke test
         run: |
           eval "$(uv run minds env activate production)"
-          uv run python apps/minds/scripts/integ_check.py
+          uv run python apps/minds/scripts/integ_check.py --launch-only
 
       - name: Collect logs
         if: always()
@@ -133,93 +88,11 @@ jobs:
           cp /tmp/minds-integ-test.log smoke-logs/ 2>/dev/null || true
           cp ~/.minds/logs/minds.log smoke-logs/ 2>/dev/null || true
           cp ~/.minds/logs/minds-events.jsonl smoke-logs/ 2>/dev/null || true
-          limactl list > smoke-logs/lima-list.txt 2>&1 || true
 
       - name: Upload logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: dev-source-smoke-logs
-          path: smoke-logs/
-          retention-days: 14
-
-  # Packaged path: install an already-built minds.app and drive it over HTTP.
-  # Needs a published artifact URL -- there is no ToDesktop build step here, so
-  # supply packaged_app_url (e.g. the dl.todesktop.com link from `pnpm dist`).
-  packaged-smoke:
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_packaged && inputs.packaged_app_url != '' }}
-    runs-on: macos-15
-    timeout-minutes: 90
-    env:
-      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-      FCT_BRANCH: ${{ inputs.fct_branch || 'pilot' }}
-      PACKAGED_APP_URL: ${{ inputs.packaged_app_url }}
-    steps:
-      - uses: actions/checkout@v6
-
-      - name: Install Lima
-        run: brew install lima
-
-      - name: Download and install minds.app
-        run: |
-          set -eux
-          curl -fL "$PACKAGED_APP_URL" -o /tmp/minds-artifact
-          file /tmp/minds-artifact
-          case "$PACKAGED_APP_URL" in
-            *.dmg)
-              hdiutil attach /tmp/minds-artifact -nobrowse -noautoopen -mountpoint /Volumes/minds-ci
-              cp -R /Volumes/minds-ci/*.app /Applications/minds.app
-              hdiutil detach /Volumes/minds-ci
-              ;;
-            *)
-              ditto -x -k /tmp/minds-artifact /tmp/minds-extract
-              cp -R /tmp/minds-extract/*.app /Applications/minds.app
-              ;;
-          esac
-          xattr -dr com.apple.quarantine /Applications/minds.app || true
-
-      - name: Launch packaged backend
-        run: |
-          set -eux
-          mkdir -p ~/.minds/logs
-          nohup env -i HOME="$HOME" USER="$USER" \
-            PATH="$HOME/.minds/lima/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin" \
-            ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY" \
-            MNGR_HOST_DIR="$HOME/.minds/mngr" MNGR_PREFIX=minds- \
-            /Applications/minds.app/Contents/Resources/pyproject/.venv/bin/minds \
-            --format jsonl --log-file ~/.minds/logs/minds-events.jsonl forward \
-            --host 127.0.0.1 --port 8430 --no-browser \
-            > /tmp/minds-backend.log 2>&1 &
-          disown
-          for _ in $(seq 1 90); do
-            if grep -q "Login URL" ~/.minds/logs/minds-events.jsonl 2>/dev/null; then
-              echo "backend ready"; exit 0
-            fi
-            sleep 2
-          done
-          echo "backend did not emit a Login URL within 180s"
-          cat /tmp/minds-backend.log || true
-          exit 1
-
-      - name: Run drive-minds smoke test
-        run: |
-          BASELINE=$(grep -c 'Login URL' ~/.minds/logs/minds-events.jsonl || true)
-          BASELINE_LOGIN_COUNT="${BASELINE:-0}" GIT_BRANCH="$FCT_BRANCH" \
-            bash apps/minds/scripts/drive-minds.sh
-
-      - name: Collect logs
-        if: always()
-        run: |
-          mkdir -p smoke-logs
-          cp /tmp/minds-backend.log smoke-logs/ 2>/dev/null || true
-          cp /tmp/drive-minds.out smoke-logs/ 2>/dev/null || true
-          cp ~/.minds/logs/minds-events.jsonl smoke-logs/ 2>/dev/null || true
-          limactl list > smoke-logs/lima-list.txt 2>&1 || true
-
-      - name: Upload logs
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: packaged-smoke-logs
+          name: launch-smoke-logs
           path: smoke-logs/
           retention-days: 14

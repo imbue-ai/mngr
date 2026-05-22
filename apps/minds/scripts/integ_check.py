@@ -12,6 +12,11 @@ Flow:
   8. Assert the chat UI DOM is present.
   9. Tear down.
 
+With --launch-only (or MINDS_INTEG_LAUNCH_ONLY=1) the run stops after step 5,
+once the create form is confirmed to render: it does not submit the form or
+create an agent. Use this where no Lima VM / Docker is available to host an
+agent (e.g. GitHub-hosted macOS runners, which lack nested virtualization).
+
 Exit 0 on PASS, non-zero on FAIL with a human-readable last-failure line on stderr.
 
 Designed to be driven by `/minds-ops integ-test`. No pytest / no external test
@@ -46,6 +51,10 @@ APP_DIR = REPO_ROOT / "apps" / "minds"
 LOG_PATH = Path("/tmp/minds-integ-test.log")
 CDP_PORT = 9222
 DEFAULT_AGENT_NAME = os.environ.get("MINDS_INTEG_AGENT_NAME", "integtest")
+
+# When set, stop after the create form renders -- do not submit it or create an
+# agent. For environments without a Lima VM / Docker to host an agent.
+LAUNCH_ONLY = os.environ.get("MINDS_INTEG_LAUNCH_ONLY", "0") == "1"
 
 
 class MindsIntegTestError(MngrError):
@@ -367,6 +376,18 @@ async def run() -> list[StepResult]:
             rec("Navigated to /create", False, str(e))
             return results
 
+        # In launch-only mode, stop here: confirm the create form rendered but
+        # do not submit it. Submitting starts real agent creation, which needs
+        # a Lima VM / Docker -- unavailable on GitHub-hosted macOS runners.
+        if LAUNCH_ONLY:
+            try:
+                form_present = bool(await cdp_eval(ws_url, "!!document.querySelector('#create-form')"))
+            except _TRANSIENT as e:
+                rec("Create form rendered", False, str(e))
+                return results
+            rec("Create form rendered", form_present, "" if form_present else "#create-form not found")
+            return results
+
         # Fill + submit the create form. create.html: <form id="create-form" action="/create">.
         submit_js = (
             "(function() {"
@@ -568,12 +589,19 @@ async def run() -> list[StepResult]:
 
 
 def main() -> int:
-    # Declare DEFAULT_AGENT_NAME global before any read below.
-    global DEFAULT_AGENT_NAME
+    # Declare globals before any read below.
+    global DEFAULT_AGENT_NAME, LAUNCH_ONLY
     parser = argparse.ArgumentParser()
     parser.add_argument("--agent-name", default=DEFAULT_AGENT_NAME)
+    parser.add_argument(
+        "--launch-only",
+        action="store_true",
+        default=LAUNCH_ONLY,
+        help="Stop after the create form renders; do not create an agent.",
+    )
     args = parser.parse_args()
     DEFAULT_AGENT_NAME = args.agent_name
+    LAUNCH_ONLY = args.launch_only
 
     try:
         results = asyncio.run(run())
