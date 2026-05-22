@@ -537,7 +537,7 @@ class ResolvedAgentHost(FrozenModel):
 
 
 class _ResolutionMaps(FrozenModel):
-    """Mutable-by-replacement bundle of the maps built while replaying discovery events."""
+    """Bundle of the maps built (and mutated in place) while replaying discovery events."""
 
     model_config = {"frozen": False}
 
