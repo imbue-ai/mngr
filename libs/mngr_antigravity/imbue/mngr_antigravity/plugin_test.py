@@ -567,7 +567,7 @@ def test_provision_silently_extends_trust_when_source_repo_already_trusted(
 def test_provision_pre_trusts_both_source_and_workspace_under_auto_approve(
     local_provider: LocalProviderInstance, tmp_path: Path, isolated_home: Path
 ) -> None:
-    """`--yes` adds the source repo root AND the work_dir, so future worktrees take the silent branch."""
+    """`--yes` adds the source repo root AND the agy workspace symlink path, so future worktrees take the silent branch."""
     agent = _make_subclassed_agent_with_flags(
         _AntigravityAgentWithFakeSourceRoot, local_provider, tmp_path, AntigravityAgentConfig(), is_auto_approve=True
     )
