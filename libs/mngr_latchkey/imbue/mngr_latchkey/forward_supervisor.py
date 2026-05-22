@@ -18,6 +18,7 @@ side-by-side is intentional.
 """
 
 import threading
+from collections.abc import Mapping
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
@@ -170,6 +171,20 @@ class LatchkeyForwardSupervisor(MutableModel):
             "Also used as the location of this supervisor's own on-disk record."
         ),
     )
+    extra_env: Mapping[str, str] = Field(
+        default_factory=dict,
+        frozen=True,
+        description=(
+            "Extra environment variables to set on the spawned ``mngr latchkey forward`` "
+            "process (in addition to the supervisor's own ``os.environ``). The forward "
+            "process inherits these into the ``latchkey gateway`` subprocess it owns and "
+            "from there into any gateway extension's ``process.env``. The minds desktop "
+            "client uses this to publish the current ``LATCHKEY_EXTENSION_MINDS_API_URL`` "
+            "to the bundled ``minds-api-proxy`` extension on every supervisor restart, so "
+            "the proxy always points at the live Minds API port without any cross-process "
+            "port-discovery dance."
+        ),
+    )
 
     _lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
     # PID of the forward child we most recently spawned (or adopted) so
@@ -244,6 +259,7 @@ class LatchkeyForwardSupervisor(MutableModel):
                         latchkey_binary=self.latchkey_binary,
                         latchkey_directory=self.latchkey_directory,
                         log_path=log_path,
+                        extra_env=self.extra_env,
                     )
                 except OSError as e:
                     raise LatchkeyError(f"Failed to spawn 'mngr latchkey forward': {e}") from e

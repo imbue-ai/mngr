@@ -12,9 +12,10 @@ import httpx
 import pytest
 
 from imbue.minds.desktop_client.latchkey.gateway_client import AvailableServiceEntry
+from imbue.minds.desktop_client.latchkey.gateway_client import FileSharingRequestPayload
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClient
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClientError
-from imbue.minds.desktop_client.latchkey.gateway_client import StreamedPermissionRequest
+from imbue.minds.desktop_client.latchkey.gateway_client import PredefinedRequestPayload
 
 
 def _build_client(handler: Callable[[httpx.Request], httpx.Response]) -> LatchkeyGatewayClient:
@@ -108,16 +109,20 @@ def test_iter_permission_requests_parses_jsonl_stream() -> None:
         {
             "request_id": "abc",
             "agent_id": "a1",
-            "scope": "slack-api",
-            "permissions": ["slack-read-all"],
             "rationale": "why",
+            "request_type": "predefined",
+            "payload": {"scope": "slack-api", "permissions": ["slack-read-all"]},
+            "target": "/tmp/permissions.json",
+            "effect": {"rules": [{"slack-api": ["slack-read-all"]}]},
         },
         {
             "request_id": "def",
             "agent_id": "a2",
-            "scope": "github-rest-api",
-            "permissions": [],
             "rationale": "test",
+            "request_type": "file-sharing",
+            "payload": {"path": "/home/user/file.txt", "access": "READ"},
+            "target": "/tmp/permissions.json",
+            "effect": {"rules": [{"latchkey-self": ["minds-file-server-cafef00d"]}]},
         },
     ]
     body = "".join(json.dumps(item) + "\n" for item in requests_payload).encode("utf-8")
@@ -130,31 +135,31 @@ def test_iter_permission_requests_parses_jsonl_stream() -> None:
 
     client = _build_client(_handler)
     items = list(client.iter_permission_requests())
-    assert items == [
-        StreamedPermissionRequest(
-            request_id="abc",
-            agent_id="a1",
-            scope="slack-api",
-            permissions=("slack-read-all",),
-            rationale="why",
-        ),
-        StreamedPermissionRequest(
-            request_id="def",
-            agent_id="a2",
-            scope="github-rest-api",
-            permissions=(),
-            rationale="test",
-        ),
-    ]
+    assert [item.request_id for item in items] == ["abc", "def"]
+    assert items[0].request_type == "predefined"
+    predefined_payload = items[0].payload
+    assert isinstance(predefined_payload, PredefinedRequestPayload)
+    assert predefined_payload.scope == "slack-api"
+    assert predefined_payload.permissions == ("slack-read-all",)
+    assert items[1].request_type == "file-sharing"
+    file_sharing_payload = items[1].payload
+    assert isinstance(file_sharing_payload, FileSharingRequestPayload)
+    assert file_sharing_payload.path == "/home/user/file.txt"
+    assert str(file_sharing_payload.access) == "READ"
 
 
 def test_iter_permission_requests_skips_malformed_lines() -> None:
     """Garbage lines (non-JSON or wrong shape) are dropped with a warning, not raised."""
-    payload = (
-        b"not valid json\n"
-        b'{"agent_id": "a1"}\n'
-        b'{"request_id":"x","agent_id":"a2","scope":"s-api","permissions":["p"],"rationale":"r"}\n'
-    )
+    valid_record = {
+        "request_id": "x",
+        "agent_id": "a2",
+        "rationale": "r",
+        "request_type": "predefined",
+        "payload": {"scope": "s-api", "permissions": ["p"]},
+        "target": "/tmp/permissions.json",
+        "effect": {"rules": [{"s-api": ["p"]}]},
+    }
+    payload = b'not valid json\n{"agent_id": "a1"}\n' + json.dumps(valid_record).encode("utf-8") + b"\n"
 
     def _handler(request: httpx.Request) -> httpx.Response:
         del request
@@ -162,15 +167,39 @@ def test_iter_permission_requests_skips_malformed_lines() -> None:
 
     client = _build_client(_handler)
     items = list(client.iter_permission_requests())
-    assert items == [
-        StreamedPermissionRequest(
-            request_id="x",
-            agent_id="a2",
-            scope="s-api",
-            permissions=("p",),
-            rationale="r",
-        ),
-    ]
+    assert [item.request_id for item in items] == ["x"]
+    assert items[0].request_type == "predefined"
+    predefined_payload = items[0].payload
+    assert isinstance(predefined_payload, PredefinedRequestPayload)
+    assert predefined_payload.scope == "s-api"
+
+
+def test_approve_permission_request_posts_through_gateway() -> None:
+    """``approve_permission_request`` POSTs to /permission-requests/approve/<id> and tolerates the gateway's 200."""
+    captured: dict[str, object] = {}
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        captured["method"] = request.method
+        captured["path"] = request.url.path
+        return httpx.Response(200, json={"request_id": "evt-abc", "target": "/tmp/p.json", "applied": {}})
+
+    client = _build_client(_handler)
+    # Must not raise.
+    client.approve_permission_request("evt-abc")
+    assert captured == {"method": "POST", "path": "/permission-requests/approve/evt-abc"}
+
+
+def test_approve_permission_request_raises_on_4xx() -> None:
+    """Unlike ``delete``, ``approve`` does *not* swallow 404 / 4xx: a missing grant is a hard error."""
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        del request
+        return httpx.Response(404, json={"error": "not found"})
+
+    client = _build_client(_handler)
+    with pytest.raises(LatchkeyGatewayClientError) as exc_info:
+        client.approve_permission_request("evt-abc")
+    assert "404" in str(exc_info.value)
 
 
 def test_get_available_services_returns_typed_entries() -> None:
