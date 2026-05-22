@@ -41,11 +41,13 @@ request schema and a new approve endpoint:
   matches the URL path via a regex `pattern` rooted at the WebDAV
   URL for the requested resource
   (`/minds-api-proxy/api/v1/files<absolute_path>`): the exact path,
-  the same path with a trailing slash, and any non-traversing
-  sub-path nested below it (a `..` segment anywhere in the sub-path
-  is rejected). A grant on a directory therefore transitively
-  covers every file and sub-directory inside it. The legacy
-  `queryParams.path` constraint is gone.
+  the same path with a trailing slash, and any sub-path nested
+  below it. A grant on a directory therefore transitively covers
+  every file and sub-directory inside it. `..` segments do not need
+  to be rejected by the pattern because the gateway's permission
+  check sees the WHATWG-normalised `pathname`, which has already
+  collapsed both literal `..` and percent-encoded `%2e%2e` away.
+  The legacy `queryParams.path` constraint is gone.
 * File-sharing requests now carry a required `access` field on the
   payload (`READ` / `WRITE`). `READ` unlocks the non-mutating WebDAV
   verbs only (`GET`, `HEAD`, `OPTIONS`, `PROPFIND`); `WRITE` is a

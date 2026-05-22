@@ -505,23 +505,24 @@ function escapeForRegex(literal) {
  *     one, so a grant on a directory transitively covers every file
  *     and sub-directory inside it.
  *
- * Each segment of ``<sub-path>`` is non-empty and must not be exactly
- * ``..``: a grant on ``/home/user/share`` does not cover
- * ``/home/user/share/..`` (which would escape the share). ``.``
- * segments are not rejected here -- they are redundant but not a
- * traversal threat. The lookahead enforces the constraint segment by
- * segment so neither leading (``/../foo``), interior (``/foo/../bar``),
- * nor trailing (``/foo/..``) ``..`` segments slip through.
+ * We deliberately do not try to reject ``..`` segments in the regex
+ * itself: the gateway feeds the permission check a ``Request`` built
+ * from a WHATWG URL, and the WHATWG URL parser collapses both literal
+ * ``..`` and percent-encoded ``%2e%2e`` segments out of ``pathname``
+ * before detent ever runs this pattern. By the time we see the path,
+ * ``<base>/foo/../bar`` has already been normalised to
+ * ``<base>/bar`` (and ``<base>/..`` to the parent of ``<base>``,
+ * which doesn't start with ``<base>`` and so doesn't match anyway).
+ * That makes the literal ``..``-stripping job belong upstream of the
+ * permission check, not in this regex.
+ *
+ * The leading ``/`` anchors the sub-path: a path like ``<base>foo``
+ * (no separator) does not match, so the grant cannot be used to
+ * access a sibling whose path happens to share a prefix with the
+ * granted resource.
  */
 function fileSharingPermissionPathPattern(fileWebdavPath) {
-  const escapedBase = escapeForRegex(fileWebdavPath);
-  // ``(?:/(?!\.\.(?:/|$))[^/]+)+`` -- one or more ``/<segment>``
-  // chunks where each segment is non-empty and not exactly ``..``.
-  // The ``/`` lives inside the iteration so multi-segment sub-paths
-  // like ``/a/b/c`` accumulate cleanly; the trailing ``/?$`` admits
-  // an optional trailing slash on either the base path or the
-  // deepest sub-path.
-  return `^${escapedBase}(?:(?:/(?!\\.\\.(?:/|$))[^/]+)+)?/?$`;
+  return `^${escapeForRegex(fileWebdavPath)}(/.*)?$`;
 }
 
 function computeFileSharingEffect(filePath, access) {

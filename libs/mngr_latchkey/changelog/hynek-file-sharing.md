@@ -47,16 +47,18 @@
     `/minds-api-proxy/api/v1/files<absolute_path>`, so a
     grant for `/home/user/foo.txt` matches exactly
     `/minds-api-proxy/api/v1/files/home/user/foo.txt`. The match is a
-    regex `pattern`, not a `const`, so the grant also admits the same
-    URL with a trailing slash (WebDAV clients commonly emit one when
-    treating the target as a collection) and any non-traversing
-    sub-path nested below it: a grant on `/home/user/share` therefore
-    transitively covers every file and sub-directory inside the
-    share. A segment of exactly `..` is rejected anywhere in the
-    sub-path (leading, interior, or trailing), so the grant cannot be
-    used to escape the shared resource. The legacy
-    `queryParams.path` constraint is gone (WebDAV identifies the file
-    in the URL path, not via a query parameter).
+    regex `pattern` (`^<base>(/.*)?$`), not a `const`, so the grant
+    also admits the same URL with a trailing slash (WebDAV clients
+    commonly emit one when treating the target as a collection) and
+    any sub-path nested below it: a grant on `/home/user/share`
+    therefore transitively covers every file and sub-directory
+    inside the share. We do not need to reject `..` segments in the
+    pattern itself because the gateway feeds the permission check a
+    WHATWG `Request`, and the WHATWG URL parser already collapses
+    both literal `..` and percent-encoded `%2e%2e` segments out of
+    `pathname` before the pattern is ever applied. The legacy
+    `queryParams.path` constraint is gone (WebDAV identifies the
+    file in the URL path, not via a query parameter).
   - The allowed `method` enum grew from `GET` / `POST` to the full set
     of WebDAV verbs needed to read, write, query, lock, copy, and
     delete the file: `GET`, `HEAD`, `OPTIONS`, `PUT`, `DELETE`,
