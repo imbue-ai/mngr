@@ -1,6 +1,6 @@
 # Unabridged Changelog - dev
 
-Full, unedited changelog entries consolidated nightly from individual files in the `changelog/dev/` directory. Covers repo-level dev tooling: CI workflows, repo scripts, top-level configuration, build tooling, ratchets, and the changelog tooling itself.
+Full, unedited changelog entries consolidated nightly from individual files in `dev/changelog/`. Covers repo-level dev tooling: CI workflows, repo scripts, top-level configuration, build tooling, ratchets, and the changelog tooling itself.
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
