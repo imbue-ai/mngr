@@ -453,6 +453,13 @@ class OuterHost(OuterHostInterface):
         with self._notify_on_connection_error():
             try:
                 return self._get_file_with_transient_retry(remote_filename, filename_or_io, remote_temp_filename)
+            except TimeoutError as e:
+                # ``TimeoutError`` is a subclass of ``OSError`` and must
+                # precede the OSError branch below. Reached when the retry
+                # decorator has exhausted its attempts on transient SSH read
+                # timeouts; surface as a structured HostConnectionError so
+                # callers don't see a raw timeout.
+                raise HostConnectionError("SSH read timed out while reading file") from e
             except OSError as e:
                 if "Socket is closed" in str(e):
                     raise HostConnectionError("Connection was closed while reading file") from e
@@ -479,6 +486,16 @@ class OuterHost(OuterHostInterface):
                 filename_or_io,
                 remote_temp_filename=remote_temp_filename,
             )
+        except TimeoutError as e:
+            # pyinfra/paramiko read timeout fired -- the channel is dead but
+            # the connection may still appear open. Force a disconnect so the
+            # retry rebuilds the connection from scratch. ``TimeoutError`` is
+            # a subclass of ``OSError`` so this must precede the OSError
+            # branch below to avoid the file-not-found / socket-closed
+            # string-matches running against the wrong exception class.
+            logger.debug("SSH read timed out while reading {}: {}, disconnecting for retry", remote_filename, e)
+            self.connector.host.disconnect()
+            raise
         except OSError as e:
             error_msg = str(e)
             if "No such file or directory" in error_msg or "cannot stat" in error_msg:
@@ -542,6 +559,13 @@ class OuterHost(OuterHostInterface):
         with self._notify_on_connection_error():
             try:
                 return self._put_file_with_transient_retry(filename_or_io, remote_filename, remote_temp_filename)
+            except TimeoutError as e:
+                # ``TimeoutError`` is a subclass of ``OSError`` and must
+                # precede the OSError branch below. Reached when the retry
+                # decorator has exhausted its attempts on transient SSH
+                # write timeouts; surface as a structured
+                # HostConnectionError so callers don't see a raw timeout.
+                raise HostConnectionError("SSH write timed out while writing file") from e
             except OSError as e:
                 if "Socket is closed" in str(e):
                     raise HostConnectionError("Connection was closed while writing file") from e
@@ -567,6 +591,15 @@ class OuterHost(OuterHostInterface):
                 remote_filename,
                 remote_temp_filename=remote_temp_filename,
             )
+        except TimeoutError as e:
+            # pyinfra/paramiko write timeout fired -- the channel is dead
+            # but the connection may still appear open. Force a disconnect so
+            # the retry rebuilds the connection from scratch. ``TimeoutError``
+            # is a subclass of ``OSError`` so this must precede the OSError
+            # branch below.
+            logger.debug("SSH write timed out while writing {}: {}, disconnecting for retry", remote_filename, e)
+            self.connector.host.disconnect()
+            raise
         except OSError as e:
             if "Socket is closed" in str(e):
                 logger.debug("Socket closed while writing {}, disconnecting for retry", remote_filename)
@@ -670,6 +703,13 @@ class OuterHost(OuterHostInterface):
         with self._notify_on_connection_error():
             try:
                 return self._execute_streaming_ssh_with_retry(command, on_line, env, timeout_seconds)
+            except TimeoutError as e:
+                # ``TimeoutError`` is a subclass of ``OSError`` and must
+                # precede the OSError branch below. Reached when the retry
+                # decorator has exhausted its attempts on transient SSH
+                # read timeouts; surface as a structured
+                # HostConnectionError so callers don't see a raw timeout.
+                raise HostConnectionError("SSH streaming command timed out reading output") from e
             except OSError as e:
                 if "Socket is closed" in str(e):
                     raise HostConnectionError("Connection was closed during streaming command") from e
