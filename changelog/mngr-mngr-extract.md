@@ -1,2 +1,0 @@
-- `mngr create --provider lima` help text and docs now show `--memory=N` / `--disk=N` (plain integers, no `GiB` suffix), matching what `limactl start` expects.
-- `mngr_imbue_cloud` and `mngr_latchkey` bump their pinned `imbue-mngr` / `imbue-common` / `concurrency-group` versions to match the current monorepo.

@@ -1,6 +1,6 @@
 # Unabridged Changelog - concurrency_group
 
-Full, unedited changelog entries consolidated nightly from individual files in the `changelog/concurrency_group/` directory.
+Full, unedited changelog entries consolidated nightly from individual files in `libs/concurrency_group/changelog/`.
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 

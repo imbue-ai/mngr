@@ -1,6 +1,6 @@
 # Unabridged Changelog - mngr_claude_subagent_proxy
 
-Full, unedited changelog entries consolidated nightly from individual files in the `changelog/mngr_claude_subagent_proxy/` directory.
+Full, unedited changelog entries consolidated nightly from individual files in `libs/mngr_claude_subagent_proxy/changelog/`.
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
