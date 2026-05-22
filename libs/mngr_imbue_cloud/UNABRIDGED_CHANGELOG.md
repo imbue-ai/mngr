@@ -1,6 +1,6 @@
 # Unabridged Changelog - mngr_imbue_cloud
 
-Full, unedited changelog entries consolidated nightly from individual files in the `changelog/mngr_imbue_cloud/` directory.
+Full, unedited changelog entries consolidated nightly from individual files in `libs/mngr_imbue_cloud/changelog/`.
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 

@@ -1,0 +1,1 @@
+- `mngr create --provider lima` docs now show `--memory=N` / `--disk=N` (plain integers, no `GiB` suffix), matching what `limactl start` expects.
