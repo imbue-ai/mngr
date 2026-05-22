@@ -1,6 +1,6 @@
 # Unabridged Changelog - minds
 
-Full, unedited changelog entries consolidated nightly from individual files in the `changelog/minds/` directory.
+Full, unedited changelog entries consolidated nightly from individual files in `apps/minds/changelog/`.
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
