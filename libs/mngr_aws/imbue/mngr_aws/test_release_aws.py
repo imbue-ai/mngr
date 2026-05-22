@@ -166,11 +166,14 @@ def test_provider_lifecycle_create_exec_and_destroy(
 ) -> None:
     agent_name = f"{AWS_TEST_NAME_PREFIX}{int(time.time()) % 100000}"
 
-    # ``command`` runs a long-lived interactive shell -- no agent-specific
+    # ``command`` runs a long-lived shell command -- no agent-specific
     # setup required (unlike ``claude``, which needs
-    # ``.claude/settings.local.json`` gitignored), and ``mngr exec`` runs
-    # against the host's shell regardless of the agent type. The test is
-    # exercising the AWS provider lifecycle, not the agent.
+    # ``.claude/settings.local.json`` gitignored). ``mngr exec`` runs
+    # against the host's shell regardless of the agent type, so the test
+    # is exercising the AWS provider lifecycle, not the agent itself.
+    # ``-- sleep 99999`` matches the convention used elsewhere
+    # (``base_agent.py``'s error-message hint, ``test_create_commands``,
+    # ``test_create_basic``); the test never connects to its session.
     result = _run_mngr(
         aws_test_settings_dir,
         temp_git_repo,
@@ -181,9 +184,12 @@ def test_provider_lifecycle_create_exec_and_destroy(
         "--provider",
         "aws",
         "--no-connect",
+        "--",
+        "sleep",
+        "99999",
     )
-    assert result.returncode == 0, f"Create failed: {result.stderr}"
-    assert "Done" in result.stdout
+    assert result.returncode == 0, f"Create failed: {result.stderr}\n--- stdout ---\n{result.stdout}"
+    assert "successfully" in result.stdout.lower(), f"unexpected create output: {result.stdout}"
 
     try:
         result = _run_mngr(aws_test_settings_dir, temp_git_repo, "exec", agent_name, "echo hello-from-aws")
@@ -221,8 +227,11 @@ def test_provider_lifecycle_create_stop_start_destroy(
         "--provider",
         "aws",
         "--no-connect",
+        "--",
+        "sleep",
+        "99999",
     )
-    assert result.returncode == 0, f"Create failed: {result.stderr}"
+    assert result.returncode == 0, f"Create failed: {result.stderr}\n--- stdout ---\n{result.stdout}"
 
     try:
         result = _run_mngr(aws_test_settings_dir, temp_git_repo, "stop", agent_name)
