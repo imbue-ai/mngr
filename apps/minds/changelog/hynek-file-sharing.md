@@ -112,3 +112,17 @@ rest of `/api/v1/`: a thin ASGI wrapper verifies
 401s before any request reaches the filesystem; WsgiDAV itself runs
 anonymous. The mount is reachable from agents through the
 `minds-api-proxy` Latchkey extension.
+
+`MINDS_API_KEY` is now written to the workspace host's env file via
+`--host-env` (instead of the system-services agent's per-agent env via
+`--env`) when running `mngr create` for a new workspace. Each workspace
+now spawns multiple agents on the same host (the initial
+`system-services` agent plus the chat agents the FCT bootstrap and the
+system_interface's "New Chat" button create), and only the
+system-services agent's `mngr create` is invoked by minds itself. Moving
+the variable to the host env file lets every agent on the host inherit
+the same key, so chat agents can authenticate against the desktop
+client's `/api/v1/...` routes (including the new file-sharing endpoints)
+just like the system-services agent. The API-key hash is still stored
+once under the system-services agent's id, so all workspace-side
+requests resolve to that id for caller identification.
