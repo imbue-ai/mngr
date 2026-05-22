@@ -417,6 +417,13 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         with self._notify_on_connection_error():
             try:
                 return self._run_shell_command_with_transient_retry(command, pyinfra_kwargs)
+            except TimeoutError as e:
+                # ``TimeoutError`` is a subclass of ``OSError``, so this
+                # must precede the OSError branch below. Reached when the
+                # retry decorator has exhausted its attempts on transient
+                # SSH read timeouts; surface as a structured
+                # HostConnectionError so callers don't see a raw timeout.
+                raise HostConnectionError("SSH command timed out reading output") from e
             except OSError as e:
                 if "Socket is closed" in str(e):
                     raise HostConnectionError("Connection was closed while running command") from e

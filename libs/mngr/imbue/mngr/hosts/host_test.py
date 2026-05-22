@@ -1788,6 +1788,40 @@ def test_run_shell_command_wraps_ssh_exception_in_host_connection_error(
         host._run_shell_command(StringCommand("echo hello"))
 
 
+def test_run_shell_command_wraps_timeout_error_in_host_connection_error(
+    local_provider: LocalProviderInstance,
+) -> None:
+    """After all retries are exhausted, TimeoutError must be wrapped in HostConnectionError.
+
+    ``TimeoutError`` is an ``OSError`` subclass on Python 3, so the outer
+    handler's ordering matters: the TimeoutError branch must precede the
+    narrow "Socket is closed" OSError check, otherwise post-retry timeouts
+    leak to callers as raw ``OSError`` rather than the structured
+    ``HostConnectionError`` wrapper.
+    """
+
+    class _HostWithImmediateTimeout(Host):
+        def _run_shell_command_with_transient_retry(
+            self,
+            command: StringCommand,
+            pyinfra_kwargs: dict[str, Any],
+        ) -> tuple[bool, CommandOutput]:
+            raise TimeoutError("Timed out reading output")
+
+    fake = _FakePyinfraHost()
+    connector = PyinfraConnector(cast(PyinfraHost, fake))
+    host = _HostWithImmediateTimeout(
+        id=HostId.generate(),
+        host_name=HostName("test"),
+        connector=connector,
+        provider_instance=local_provider,
+        mngr_ctx=local_provider.mngr_ctx,
+    )
+
+    with pytest.raises(HostConnectionError, match="timed out reading output"):
+        host._run_shell_command(StringCommand("echo hello"))
+
+
 # =========================================================================
 # Tests for disconnect / _close_paramiko_client
 # =========================================================================
