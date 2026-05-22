@@ -57,13 +57,16 @@ from imbue.minds.desktop_client.forward_cli import start_mngr_forward
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClient
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClientError
+from imbue.minds.desktop_client.latchkey.handlers.file_sharing import FileSharingGrantHandler
+from imbue.minds.desktop_client.latchkey.handlers.messaging import MngrMessageSender
+from imbue.minds.desktop_client.latchkey.handlers.predefined import LatchkeyPermissionGrantHandler
 from imbue.minds.desktop_client.latchkey.permission_requests_consumer import PermissionRequestsConsumer
-from imbue.minds.desktop_client.latchkey.permissions import LatchkeyPermissionGrantHandler
-from imbue.minds.desktop_client.latchkey.permissions import MngrMessageSender
 from imbue.minds.desktop_client.latchkey.services_catalog import ServicesCatalog
 from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.notification import NotificationDispatcher
-from imbue.minds.desktop_client.request_events import LatchkeyPermissionRequestEvent
+from imbue.minds.desktop_client.request_events import LatchkeyFileSharingPermissionRequestEvent
+from imbue.minds.desktop_client.request_events import LatchkeyPredefinedPermissionRequestEvent
+from imbue.minds.desktop_client.request_events import RequestEvent
 from imbue.minds.desktop_client.request_events import RequestInbox
 from imbue.minds.desktop_client.request_events import load_response_events
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
@@ -83,6 +86,14 @@ from imbue.mngr_latchkey.forward_supervisor import LatchkeyForwardSupervisor
 # The plugin emits this from its FastAPI lifespan startup, so the wait only
 # needs to cover the subprocess's own interpreter start and imports.
 _MNGR_FORWARD_LISTEN_TIMEOUT_SECONDS: Final[float] = 5.0
+
+# Env var read by the bundled ``minds-api-proxy`` gateway extension to
+# decide where to forward inbound proxy requests. Published to the
+# detached ``mngr latchkey forward`` supervisor (and from there to the
+# gateway, and from there to the extension) on every minds startup so
+# the proxy always points at the current bare-origin port, even when
+# minds re-binds to a different port across restarts.
+MINDS_API_PROXY_URL_ENV_VAR: Final[str] = "LATCHKEY_EXTENSION_MINDS_API_URL"
 
 
 @click.command()
@@ -181,7 +192,7 @@ def run(
     # process lifetime.
     root_concurrency_group.start_new_thread(
         _restart_supervisor_then_prewarm_gateway_client,
-        args=(latchkey, gateway_client),
+        args=(latchkey, gateway_client, port),
         name="mngr-latchkey-supervisor-and-gateway-init",
     )
 
@@ -194,12 +205,18 @@ def run(
     # orphan tree running across restarts.
     start_grandparent_death_watcher(root_concurrency_group)
 
+    mngr_message_sender = MngrMessageSender()
     latchkey_permission_handler = LatchkeyPermissionGrantHandler(
         data_dir=data_directory,
         latchkey=latchkey,
         services_catalog=ServicesCatalog(gateway_client=gateway_client),
-        mngr_message_sender=MngrMessageSender(),
+        mngr_message_sender=mngr_message_sender,
         gateway_client=gateway_client,
+    )
+    file_sharing_handler = FileSharingGrantHandler(
+        data_dir=data_directory,
+        gateway_client=gateway_client,
+        mngr_message_sender=mngr_message_sender,
     )
     imbue_cloud_cli = ImbueCloudCli(
         parent_concurrency_group=root_concurrency_group,
@@ -326,7 +343,7 @@ def run(
         minds_config=minds_config,
         client_env_config=client_env_config,
         request_inbox=request_inbox,
-        request_event_handlers=(latchkey_permission_handler,),
+        request_event_handlers=(latchkey_permission_handler, file_sharing_handler),
         server_port=port,
         mngr_forward_port=mngr_forward_port,
         mngr_forward_preauth_cookie=preauth_cookie,
@@ -464,7 +481,7 @@ class _StreamedPermissionRequestHandler(FrozenModel):
     # natives; tolerate them with ``arbitrary_types_allowed``.
     model_config = {"arbitrary_types_allowed": True, "frozen": True, "extra": "forbid"}
 
-    def __call__(self, event: LatchkeyPermissionRequestEvent) -> None:
+    def __call__(self, event: RequestEvent) -> None:
         current: RequestInbox | None = self.app.state.request_inbox
         if current is None:
             return
@@ -478,12 +495,27 @@ class _StreamedPermissionRequestHandler(FrozenModel):
         if current.get_request_by_id(str(event.event_id)) is not None:
             return
         self.app.state.request_inbox = current.add_request(event)
-        logger.info(
-            "Streamed latchkey permission request for agent {} (scope={}, request_id={})",
-            event.agent_id,
-            event.scope,
-            event.event_id,
-        )
+        if isinstance(event, LatchkeyPredefinedPermissionRequestEvent):
+            logger.info(
+                "Streamed latchkey permission request for agent {} (scope={}, request_id={})",
+                event.agent_id,
+                event.scope,
+                event.event_id,
+            )
+        elif isinstance(event, LatchkeyFileSharingPermissionRequestEvent):
+            logger.info(
+                "Streamed file-sharing permission request for agent {} (path={}, request_id={})",
+                event.agent_id,
+                event.path,
+                event.event_id,
+            )
+        else:
+            logger.info(
+                "Streamed permission request for agent {} (request_type={}, request_id={})",
+                event.agent_id,
+                event.request_type,
+                event.event_id,
+            )
         self.backend_resolver.notify_change()
 
 
@@ -530,14 +562,23 @@ def _sleep_then_open(url: str, delay: float = 1.0) -> None:
 def _restart_supervisor_then_prewarm_gateway_client(
     latchkey: Latchkey,
     gateway_client: LatchkeyGatewayClient,
+    minds_api_port: int,
 ) -> None:
     """Restart the latchkey supervisor, then pre-warm the gateway client.
 
     Order matters: the gateway client's ``ensure_initialized`` reads
     the bound port from the supervisor's on-disk record, so it must
     run after the supervisor restart has stamped the fresh port.
+
+    ``minds_api_port`` is the port the minds bare-origin server is
+    bound to in *this* process; it's threaded through to the
+    supervisor as ``LATCHKEY_EXTENSION_MINDS_API_URL`` so the gateway's
+    bundled ``minds-api-proxy`` extension knows where to forward agent
+    traffic. Restarting the supervisor on every minds start is what
+    makes this work across port changes: the env var is re-read at
+    spawn time, not cached anywhere.
     """
-    _ensure_mngr_latchkey_forward_supervisor(latchkey)
+    _ensure_mngr_latchkey_forward_supervisor(latchkey, minds_api_port)
     try:
         gateway_client.ensure_initialized()
     except LatchkeyGatewayClientError as e:
@@ -547,7 +588,7 @@ def _restart_supervisor_then_prewarm_gateway_client(
         )
 
 
-def _ensure_mngr_latchkey_forward_supervisor(latchkey: Latchkey) -> None:
+def _ensure_mngr_latchkey_forward_supervisor(latchkey: Latchkey, minds_api_port: int) -> None:
     """Restart the detached ``mngr latchkey forward`` supervisor on minds startup.
 
     Reuses ``latchkey``'s already-resolved binary + directory paths so
@@ -558,6 +599,13 @@ def _ensure_mngr_latchkey_forward_supervisor(latchkey: Latchkey) -> None:
     :class:`MngrMessageSender` and ``mngr forward`` subprocess paths
     already make the same assumption).
 
+    ``minds_api_port`` is published to the spawned supervisor as the
+    ``LATCHKEY_EXTENSION_MINDS_API_URL`` env var so the gateway's
+    bundled ``minds-api-proxy`` extension knows the bare-origin URL
+    to forward agent traffic to. The supervisor inherits this env var
+    into the ``latchkey gateway`` subprocess it owns and from there
+    into the extension's ``process.env``.
+
     Uses :meth:`LatchkeyForwardSupervisor.restart` rather than
     ``ensure_running`` so that minds upgrades always run with a
     freshly-spawned supervisor: an older supervisor running stale
@@ -565,7 +613,10 @@ def _ensure_mngr_latchkey_forward_supervisor(latchkey: Latchkey) -> None:
     on every minds start. A running supervisor that minds is happy
     to adopt does not exist in practice -- the supervisor's lifetime
     is tied to the gateway it owns, and the gateway is a minds-only
-    consumer today.
+    consumer today. Restarting on every minds start is also what
+    keeps ``LATCHKEY_EXTENSION_MINDS_API_URL`` in sync with the
+    current bare-origin port -- minds re-binds its server on every
+    start, and the supervisor restart re-publishes the env var.
 
     Failures are logged as warnings rather than raised: a broken
     supervisor degrades latchkey to "unreachable from inside agents"
@@ -575,6 +626,7 @@ def _ensure_mngr_latchkey_forward_supervisor(latchkey: Latchkey) -> None:
         mngr_binary=MNGR_BINARY,
         latchkey_binary=latchkey.latchkey_binary,
         latchkey_directory=latchkey.latchkey_directory,
+        extra_env={MINDS_API_PROXY_URL_ENV_VAR: f"http://127.0.0.1:{minds_api_port}"},
     )
     try:
         info = supervisor.restart()
