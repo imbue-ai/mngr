@@ -36,8 +36,6 @@ from pydantic import Field
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.frozen_model import FrozenModel
-from imbue.minds.bootstrap import disable_imbue_cloud_provider_for_account
-from imbue.minds.bootstrap import imbue_cloud_provider_name_for_account
 from imbue.minds.bootstrap import minds_data_dir_for
 from imbue.minds.bootstrap import reconcile_imbue_cloud_providers_from_sessions
 from imbue.minds.bootstrap import resolve_minds_root_name
@@ -52,7 +50,6 @@ from imbue.minds.desktop_client.app import start_system_interface_health_probe_l
 from imbue.minds.desktop_client.auth import FileAuthStore
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
-from imbue.minds.desktop_client.forward_cli import EnvelopeStreamConsumer
 from imbue.minds.desktop_client.forward_cli import ForwardSubprocessConfig
 from imbue.minds.desktop_client.forward_cli import LocalAgentDiscoveryHandler
 from imbue.minds.desktop_client.forward_cli import MindsApiUrlWriter
@@ -81,8 +78,11 @@ from imbue.mngr_latchkey.core import Latchkey
 from imbue.mngr_latchkey.core import LatchkeyError
 from imbue.mngr_latchkey.forward_supervisor import LatchkeyForwardSupervisor
 
-_DEFAULT_MNGR_FORWARD_PORT: Final[int] = 8421
-_AUTH_ERROR_TYPE: Final[str] = "ImbueCloudAuthError"
+# How long `minds run` waits for the spawned `mngr forward` plugin to report
+# its bound port via a `listening` envelope before treating startup as failed.
+# The plugin emits this from its FastAPI lifespan startup, so the wait only
+# needs to cover the subprocess's own interpreter start and imports.
+_MNGR_FORWARD_LISTEN_TIMEOUT_SECONDS: Final[float] = 5.0
 
 
 @click.command()
@@ -97,19 +97,6 @@ _AUTH_ERROR_TYPE: Final[str] = "ImbueCloudAuthError"
     default=DEFAULT_DESKTOP_CLIENT_PORT,
     show_default=True,
     help="Port to bind the minds bare-origin server to",
-)
-@click.option(
-    "--mngr-forward-port",
-    default=_DEFAULT_MNGR_FORWARD_PORT,
-    show_default=True,
-    envvar="MINDS_MNGR_FORWARD_PORT",
-    help=(
-        "Port to bind the spawned `mngr forward` subprocess to. "
-        "Falls back to the MINDS_MNGR_FORWARD_PORT env var so test "
-        "harnesses can dodge a hardcoded port collision when an "
-        "existing `just minds-start` (or a prior crashed run) still "
-        "holds the default."
-    ),
 )
 @click.option(
     "--no-browser",
@@ -136,11 +123,9 @@ def run(
     ctx: click.Context,
     host: str,
     port: int,
-    mngr_forward_port: int,
     no_browser: bool,
     config_file: Path | None,
 ) -> None:
-    # noqa: PLR0913 — flag count matches the legacy `minds forward` interface
     """Run the minds bare-origin server with `mngr forward` as a subprocess."""
     # The bare-origin port is reused as the local end of the plugin's
     # ``--reverse 0:<port>`` SSH-tunnel spec, which mngr_forward requires
@@ -149,8 +134,6 @@ def run(
     # subprocess crashing later with a less obvious "local port must be > 0".
     if port <= 0:
         raise click.UsageError(f"--port must be > 0, got {port}")
-    if mngr_forward_port <= 0:
-        raise click.UsageError(f"--mngr-forward-port must be > 0, got {mngr_forward_port}")
     if config_file is None:
         raise click.ClickException(
             "No client config file is set. Activate an env first: "
@@ -167,7 +150,6 @@ def run(
 
     logger.info("Starting `minds run`...")
     logger.info("  Bare-origin: http://{}:{}", host, port)
-    logger.info("  mngr forward: http://127.0.0.1:{}", mngr_forward_port)
     logger.info("  MINDS_ROOT_NAME: {}", root_name)
     logger.info("  Data directory: {}", data_directory)
     logger.info("  Config file: {}", client_config_path)
@@ -242,7 +224,6 @@ def run(
     mngr_host_dir_str = os.environ.get("MNGR_HOST_DIR")
     mngr_host_dir = Path(mngr_host_dir_str).expanduser() if mngr_host_dir_str else (Path.home() / ".mngr")
     forward_config = ForwardSubprocessConfig(
-        port=mngr_forward_port,
         reverse_specs=(f"0:{port}",),
         mngr_host_dir=mngr_host_dir,
     )
@@ -264,23 +245,6 @@ def run(
         lambda agent_id, _reason, _status: system_interface_health_tracker.record_failure(agent_id)
     )
 
-    # AgentCreator is constructed *after* ``start_mngr_forward`` so the
-    # readiness probe can use the same preauth cookie the plugin accepts and
-    # Electron pre-sets. Building it earlier would force us to either pre-mint
-    # the cookie out of band or expose a setter on AgentCreator, both of which
-    # are worse than just keeping the construction order linear.
-    agent_creator = AgentCreator(
-        paths=paths,
-        server_port=port,
-        imbue_cloud_cli=imbue_cloud_cli,
-        latchkey=latchkey,
-        root_concurrency_group=root_concurrency_group,
-        notification_dispatcher=notification_dispatcher,
-        mngr_forward_port=mngr_forward_port,
-        mngr_forward_preauth_cookie=preauth_cookie,
-        system_interface_health_tracker=system_interface_health_tracker,
-    )
-
     # Local-agent ``minds_api_url`` writes (Cloudflare-token re-injection
     # has moved into the agent's own container; see commit 97f40d02d).
     consumer.add_on_agent_discovered_callback(
@@ -296,19 +260,44 @@ def run(
     # ``mngr latchkey forward`` subprocess started above; no callbacks to
     # register here.
 
-    # Auto-disable an ``imbue_cloud_<slug>`` provider if its session is
-    # revoked server-side, so the rest of the user's accounts keep working
-    # instead of every observe poll re-trying the dead session.
-    consumer.add_on_provider_error_callback(
-        _ImbueCloudAuthErrorDisabler(consumer=consumer, session_store=session_store)
-    )
-
     # All callbacks registered -- now safe to start the envelope reader
     # threads. Doing this earlier (e.g. inside ``start_mngr_forward``)
     # would open a race window where envelopes arriving before the
     # callbacks were registered would be dispatched against an empty
     # callback list and silently dropped.
     consumer.start(root_concurrency_group)
+
+    # Block until the plugin reports the port it bound. The plugin owns its
+    # port: it picks one (its default, or an OS-assigned fallback when the
+    # default is taken) and reports it via a ``listening`` envelope.
+    # Everything below that needs the port (AgentCreator, the desktop app,
+    # the health probe, the Electron ``mngr_forward_started`` event) is
+    # built only after this returns.
+    mngr_forward_port = consumer.wait_for_listening(timeout=_MNGR_FORWARD_LISTEN_TIMEOUT_SECONDS)
+    if mngr_forward_port is None:
+        consumer.terminate()
+        raise click.ClickException(
+            "`mngr forward` did not report a listening port within "
+            f"{_MNGR_FORWARD_LISTEN_TIMEOUT_SECONDS:.0f}s; the plugin likely failed to start. "
+            "Check the logs above for its stderr and retry."
+        )
+    logger.info("  mngr forward: http://127.0.0.1:{}", mngr_forward_port)
+
+    # AgentCreator is constructed *after* ``start_mngr_forward`` so the
+    # readiness probe can use the same preauth cookie the plugin accepts and
+    # Electron pre-sets, and after ``wait_for_listening`` so it has the
+    # plugin's actual bound port.
+    agent_creator = AgentCreator(
+        paths=paths,
+        server_port=port,
+        imbue_cloud_cli=imbue_cloud_cli,
+        latchkey=latchkey,
+        root_concurrency_group=root_concurrency_group,
+        notification_dispatcher=notification_dispatcher,
+        mngr_forward_port=mngr_forward_port,
+        mngr_forward_preauth_cookie=preauth_cookie,
+        system_interface_health_tracker=system_interface_health_tracker,
+    )
 
     # Emit the started event so Electron can pre-set the cookie before the
     # first navigation. ``minds run`` itself does not open the browser at
@@ -600,63 +589,3 @@ def _ensure_mngr_latchkey_forward_supervisor(latchkey: Latchkey) -> None:
         logger.warning("Could not start detached mngr latchkey forward supervisor: {}", e)
         return
     logger.info("mngr latchkey forward supervisor running (pid={})", info.pid)
-
-
-class _ImbueCloudAuthErrorDisabler(FrozenModel):
-    """Auto-disables an ``imbue_cloud_<slug>`` provider on session-revoke errors.
-
-    Discovery surfaces ``ImbueCloudAuthError`` whenever the connector
-    rejects a refresh (token theft detected, refresh token expired past
-    the family lifetime, etc.). Without intervention every subsequent
-    ``mngr observe`` poll re-tries the same dead session and the whole
-    discovery stream errors out, blocking the rest of the user's
-    accounts. ``__call__`` walks ``session_store`` to map the offending
-    provider name back to an email, flips ``is_enabled = false`` on the
-    block in settings.toml, and bounces the plugin's observe child so the
-    change takes effect within the same minds session. Re-enabling
-    happens only on an explicit signin
-    (``set_imbue_cloud_provider_for_account(..., force_enable=True)``).
-
-    The bounce is dispatched onto a daemon thread because ``__call__``
-    runs on ``EnvelopeStreamConsumer``'s envelope-stream reader thread --
-    sending ``SIGHUP`` is itself non-blocking, but keeping the off-thread
-    dispatch matches the prior ``MngrStreamManager.restart_observe()``
-    behaviour and isolates any future expansion of the bounce path from
-    the reader thread.
-    """
-
-    consumer: EnvelopeStreamConsumer = Field(
-        frozen=True, description="Envelope consumer to bounce observe on after disable"
-    )
-    session_store: MultiAccountSessionStore = Field(
-        frozen=True, description="Session mirror used to map provider name to account email"
-    )
-
-    def __call__(self, provider_name: str, error_type: str, error_message: str) -> None:
-        if error_type != _AUTH_ERROR_TYPE:
-            return
-        offending_email: str | None = None
-        for account in self.session_store.list_accounts():
-            try:
-                if imbue_cloud_provider_name_for_account(str(account.email)) == provider_name:
-                    offending_email = str(account.email)
-                    break
-            except ValueError:
-                continue
-        if offending_email is None:
-            logger.warning(
-                "Auth error from provider {} but no matching minds session found; skipping auto-disable",
-                provider_name,
-            )
-            return
-        if disable_imbue_cloud_provider_for_account(offending_email):
-            logger.warning(
-                "Auto-disabled imbue_cloud provider for {} after auth error: {}",
-                offending_email,
-                error_message,
-            )
-            threading.Thread(
-                target=self.consumer.bounce_observe,
-                name=f"bounce-observe-after-disable-{provider_name}",
-                daemon=True,
-            ).start()
