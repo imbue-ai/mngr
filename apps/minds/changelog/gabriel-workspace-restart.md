@@ -29,6 +29,9 @@ Tiered system-interface restart for the minds recovery flow.
 - The recovery page's "Loading workspace" state no longer shows the
   explanatory "This page will reload automatically..." line -- it just
   shows the heading.
+- The recovery page now auto-refreshes on a 1s cadence rather than
+  1.5s, so its self-reload coincides with a completed rotation of the
+  loading spinner instead of jumping the spinner back mid-rotation.
 - The recovery page no longer flashes up for a workspace that is actually
   healthy. A workspace is now only treated as stuck after the background
   probe loop confirms it unreachable with a sustained run of failed HTTP

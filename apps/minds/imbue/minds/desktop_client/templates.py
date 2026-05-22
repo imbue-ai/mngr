@@ -363,7 +363,13 @@ _RECOVERY_SCRIPT: Final[str] = """\
         var errorEl = document.getElementById('recovery-error');  // null unless restart_failed
         var hostBtn = document.getElementById('recovery-host-btn');
 
-        var REFRESH_INTERVAL_MS = 1500;
+        // A timed reload restarts the spinner's CSS animation from 0deg, so the
+        // interval must be a whole multiple of the spinner's 1s rotation period
+        // (see LOADING_PAGE_CSS' ``spin`` keyframe) -- otherwise the spinner
+        // visibly jumps back mid-rotation on every refresh. 1000ms also matches
+        // the mngr_forward proxy loader's 1s meta refresh, keeping the two
+        // loading pages a user may see during recovery in lockstep.
+        var REFRESH_INTERVAL_MS = 1000;
 
         function show(el, visible) {
           if (el) el.classList.toggle('hidden', !visible);
