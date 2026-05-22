@@ -7,7 +7,9 @@ from typing import assert_never
 import click
 from click_option_group import optgroup
 
+from imbue.mngr.api.discovery_events import ResolvedAgentHost
 from imbue.mngr.api.discovery_events import emit_discovery_events_for_host
+from imbue.mngr.api.discovery_events import resolve_hosts_for_identifiers
 from imbue.mngr.api.find import AgentMatch
 from imbue.mngr.api.find import find_all_agents
 from imbue.mngr.api.find import group_agents_by_host
@@ -27,7 +29,9 @@ from imbue.mngr.cli.output_helpers import write_human_line
 from imbue.mngr.cli.stdin_utils import STDIN_PLACEHOLDER
 from imbue.mngr.cli.stdin_utils import expand_stdin_placeholder
 from imbue.mngr.config.data_types import CommonCliOptions
+from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import OutputOptions
+from imbue.mngr.errors import AgentNotFoundError
 from imbue.mngr.errors import HostOfflineError
 from imbue.mngr.errors import HostShutdownNotSupportedError
 from imbue.mngr.errors import UserInputError
@@ -35,6 +39,7 @@ from imbue.mngr.interfaces.host import HostInterface
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import AgentAddress
 from imbue.mngr.primitives import AgentLifecycleState
+from imbue.mngr.primitives import HostAddress
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import OutputFormat
 from imbue.mngr.providers.base_provider import BaseProviderInstance
@@ -59,6 +64,63 @@ def _ensure_providers_support_host_shutdown(providers: Sequence[BaseProviderInst
     for provider in providers:
         if not provider.supports_shutdown_hosts:
             raise HostShutdownNotSupportedError(provider.name)
+
+
+def _stop_hosts_for_addresses(
+    agent_addresses: Sequence[AgentAddress],
+    mngr_ctx: MngrContext,
+    output_opts: OutputOptions,
+) -> list[str]:
+    """Stop the entire host of each agent address, resolving the host without SSH.
+
+    ``mngr stop --stop-host`` is a daemon-level operation: stopping a host does
+    not require enumerating the agents on it (which would SSH into the host).
+    This resolves each agent identifier to its host via the SSH-free discovery
+    event stream + host-discovery cross-check, so it still works when the
+    container is running but its sshd is unreachable.
+
+    Returns the list of agent identifiers whose host was stopped (or was
+    already stopped).
+    """
+    resolved_by_identifier = resolve_hosts_for_identifiers(
+        mngr_ctx, [str(addr.agent) for addr in agent_addresses]
+    )
+
+    # Apply any explicit @HOST[.PROVIDER] qualifier from the address as a
+    # constraint on the resolved host, mirroring the non-stop-host path.
+    hosts_to_stop: dict[HostId, ResolvedAgentHost] = {}
+    for address in agent_addresses:
+        resolved = resolved_by_identifier[str(address.agent)]
+        if address.host is not None:
+            concrete = HostAddress(host=resolved.host_name, provider=resolved.provider_name)
+            if not address.host.matches(concrete):
+                raise AgentNotFoundError(f"No agent found matching address: {address}")
+        hosts_to_stop[resolved.host_id] = resolved
+
+    providers = [get_provider_instance(r.provider_name, mngr_ctx) for r in hosts_to_stop.values()]
+    _ensure_providers_support_host_shutdown(providers)
+
+    stopped_identifiers: list[str] = []
+    for resolved in hosts_to_stop.values():
+        provider = get_provider_instance(resolved.provider_name, mngr_ctx)
+        host = provider.get_host(resolved.host_id)
+        match host:
+            case OnlineHostInterface() as online_host:
+                # No snapshot: native start_host preserves the container
+                # filesystem anyway. No discovery-event emission: the host is
+                # offline afterwards, so an online-host sweep would fail.
+                provider.stop_host(online_host, create_snapshot=False)
+                _output(f"Stopped host: {resolved.host_name}", output_opts)
+            case HostInterface():
+                # The host is already offline -- the desired end state is
+                # already reached, so this is an idempotent no-op.
+                _output(f"Host '{resolved.host_name}' is already stopped", output_opts)
+            case _ as unreachable:
+                assert_never(unreachable)
+
+    for address in agent_addresses:
+        stopped_identifiers.append(str(address.agent))
+    return stopped_identifiers
 
 
 def _output(message: str, output_opts: OutputOptions) -> None:
@@ -179,6 +241,17 @@ def stop(ctx: click.Context, **kwargs: Any) -> None:
             raise click.UsageError("Must specify at least one agent (use '-' to read from stdin)")
         return
 
+    # --stop-host stops the agent's whole host. Stopping a host is a
+    # daemon-level operation that does NOT require enumerating the agents on
+    # it, so resolve the host without SSH and stop it directly. This avoids
+    # the agent-enumeration scan, which SSHes into the host and would fail
+    # when the container is running but its sshd is unreachable -- the exact
+    # situation --stop-host exists to recover from.
+    if opts.stop_host:
+        stopped_host_agents = _stop_hosts_for_addresses(agent_addresses, mngr_ctx, output_opts)
+        _output_result(stopped_host_agents, output_opts)
+        return
+
     # Find agents to stop (RUNNING agents)
     agents_to_stop = find_all_agents(
         addresses=agent_addresses,
@@ -198,13 +271,6 @@ def stop(ctx: click.Context, **kwargs: Any) -> None:
     # Group agents by host to stop them together
     agents_by_host = group_agents_by_host(agents_to_stop)
 
-    # When stopping whole hosts, verify every provider involved supports it
-    # before stopping anything, so we don't stop one host and then fail.
-    if opts.stop_host:
-        _ensure_providers_support_host_shutdown(
-            [get_provider_instance(agent_list[0].provider_name, mngr_ctx) for agent_list in agents_by_host.values()]
-        )
-
     for host_key, agent_list in agents_by_host.items():
         host_id_str, _ = host_key.split(":", 1)
         # Get provider from first agent (all agents in list have same provider)
@@ -216,36 +282,19 @@ def stop(ctx: click.Context, **kwargs: Any) -> None:
         # Ensure host is online (can't stop agents on offline hosts)
         match host:
             case OnlineHostInterface() as online_host:
-                if opts.stop_host:
-                    # Stop the whole host. This takes down every agent on it,
-                    # not just the ones named. No snapshot: native start_host
-                    # preserves the container filesystem anyway.
-                    provider.stop_host(online_host, create_snapshot=False)
-                else:
-                    # Stop each named agent on this host
-                    agent_ids_to_stop = [m.agent_id for m in agent_list]
-                    online_host.stop_agents(agent_ids_to_stop)
+                # Stop each named agent on this host
+                agent_ids_to_stop = [m.agent_id for m in agent_list]
+                online_host.stop_agents(agent_ids_to_stop)
 
                 for m in agent_list:
                     stopped_agents.append(str(m.agent_name))
                     stopped_matches.append(m)
                     _output(f"Stopped agent: {m.agent_name}", output_opts)
 
-                # Emit discovery events for stopped agents and host. Skip when
-                # the host itself was stopped: the host is offline now, so an
-                # online-host discovery sweep would fail.
-                if not opts.stop_host:
-                    emit_discovery_events_for_host(mngr_ctx.config, online_host)
+                # Emit discovery events for stopped agents and host.
+                emit_discovery_events_for_host(mngr_ctx.config, online_host)
             case HostInterface():
-                if opts.stop_host:
-                    # The whole host is the stop target and it is already
-                    # offline -- the desired end state (host stopped) is
-                    # already reached, so this is an idempotent no-op rather
-                    # than an error. A plain ``mngr stop`` of individual
-                    # agents still cannot proceed on an offline host.
-                    _output(f"Host '{host_id_str}' is already stopped", output_opts)
-                else:
-                    raise HostOfflineError(f"Host '{host_id_str}' is offline. Cannot stop agents on offline hosts.")
+                raise HostOfflineError(f"Host '{host_id_str}' is offline. Cannot stop agents on offline hosts.")
             case _ as unreachable:
                 assert_never(unreachable)
 

@@ -27,14 +27,17 @@ from imbue.imbue_common.event_envelope import EventEnvelope
 from imbue.imbue_common.event_envelope import EventId
 from imbue.imbue_common.event_envelope import EventSource
 from imbue.imbue_common.event_envelope import IsoTimestamp
+from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import cleanup_old_rotated_files
 from imbue.imbue_common.logging import format_nanosecond_iso_timestamp
 from imbue.imbue_common.logging import generate_log_event_id
 from imbue.imbue_common.logging import generate_rotation_timestamp
 from imbue.imbue_common.logging import rotation_lock
 from imbue.imbue_common.pure import pure
+from imbue.mngr.api.providers import get_all_provider_instances
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.errors import AgentNotFoundError
 from imbue.mngr.errors import BaseMngrError
 from imbue.mngr.errors import DiscoverySchemaChangedError
 from imbue.mngr.errors import ProviderDiscoveryError
@@ -519,20 +522,73 @@ def find_latest_full_snapshot_offset(events_path: Path) -> int:
     return last_full_offset
 
 
-def _replay_discovery_events_for_resolution(
-    events_path: Path,
-) -> tuple[dict[str, str], dict[str, str], set[str]]:
-    """Replay events from the latest full snapshot into resolution maps.
+class ResolvedAgentHost(FrozenModel):
+    """The host an agent identifier resolves to, as reconstructed from the event stream.
 
-    Returns ``(provider_by_agent_id, name_by_agent_id, destroyed_agent_ids)``.
+    All three components are needed by ``mngr stop --stop-host``: the
+    provider to obtain a provider instance, and the host_id to fetch and
+    stop the host. ``host_name`` is carried for diagnostics and so callers
+    can honor an explicit ``@HOST`` qualifier on the agent address.
+    """
+
+    host_id: HostId = Field(description="ID of the host the agent runs on")
+    host_name: HostName = Field(description="Name of the host the agent runs on")
+    provider_name: ProviderInstanceName = Field(description="Provider instance that owns the host")
+
+
+class _ResolutionMaps(FrozenModel):
+    """Mutable-by-replacement bundle of the maps built while replaying discovery events."""
+
+    model_config = {"frozen": False}
+
+    # agent_id -> provider_name
+    provider_by_agent_id: dict[str, str] = Field(default_factory=dict)
+    # agent_id -> agent_name
+    name_by_agent_id: dict[str, str] = Field(default_factory=dict)
+    # agent_id -> host_id
+    host_id_by_agent_id: dict[str, str] = Field(default_factory=dict)
+    # host_id -> host_name
+    host_name_by_host_id: dict[str, str] = Field(default_factory=dict)
+    # agent ids known to be destroyed
+    destroyed_agent_ids: set[str] = Field(default_factory=set)
+    # host ids known to be destroyed
+    destroyed_host_ids: set[str] = Field(default_factory=set)
+
+    def reset(self) -> None:
+        """Clear every map -- used when a full snapshot supersedes prior state."""
+        self.provider_by_agent_id.clear()
+        self.name_by_agent_id.clear()
+        self.host_id_by_agent_id.clear()
+        self.host_name_by_host_id.clear()
+        self.destroyed_agent_ids.clear()
+        self.destroyed_host_ids.clear()
+
+
+def _record_agent(maps: _ResolutionMaps, agent: DiscoveredAgent) -> None:
+    """Record a single discovered agent into the resolution maps."""
+    id_str = str(agent.agent_id)
+    maps.provider_by_agent_id[id_str] = str(agent.provider_name)
+    maps.name_by_agent_id[id_str] = str(agent.agent_name)
+    maps.host_id_by_agent_id[id_str] = str(agent.host_id)
+    maps.destroyed_agent_ids.discard(id_str)
+
+
+def _record_host(maps: _ResolutionMaps, host: DiscoveredHost) -> None:
+    """Record a single discovered host into the resolution maps."""
+    host_id_str = str(host.host_id)
+    maps.host_name_by_host_id[host_id_str] = str(host.host_name)
+    maps.destroyed_host_ids.discard(host_id_str)
+
+
+def _replay_discovery_events_into_maps(events_path: Path) -> _ResolutionMaps:
+    """Replay events from the latest full snapshot into a :class:`_ResolutionMaps`.
+
     Raises DiscoverySchemaChangedError if any event line in the file fails
     schema validation (the caller is responsible for regenerating and retrying).
     Raises OSError on file I/O failure.
     """
     offset = find_latest_full_snapshot_offset(events_path)
-    provider_by_agent_id: dict[str, str] = {}
-    name_by_agent_id: dict[str, str] = {}
-    destroyed_agent_ids: set[str] = set()
+    maps = _ResolutionMaps()
 
     warner = MalformedJsonLineWarner(source_description=f"discovery events file '{events_path}'")
     with open(events_path) as f:
@@ -541,30 +597,42 @@ def _replay_discovery_events_for_resolution(
             parsed = warner.parse(line)
             if parsed is None:
                 continue
-            data, stripped_line = parsed
+            _data, stripped_line = parsed
             event = parse_discovery_event_line(stripped_line)
             if isinstance(event, FullDiscoverySnapshotEvent):
                 # Reset maps -- this snapshot supersedes everything before it
-                provider_by_agent_id.clear()
-                name_by_agent_id.clear()
-                destroyed_agent_ids.clear()
+                maps.reset()
                 for agent in event.agents:
-                    id_str = str(agent.agent_id)
-                    provider_by_agent_id[id_str] = str(agent.provider_name)
-                    name_by_agent_id[id_str] = str(agent.agent_name)
+                    _record_agent(maps, agent)
+                for host in event.hosts:
+                    _record_host(maps, host)
             elif isinstance(event, AgentDiscoveryEvent):
-                agent = event.agent
-                id_str = str(agent.agent_id)
-                provider_by_agent_id[id_str] = str(agent.provider_name)
-                name_by_agent_id[id_str] = str(agent.agent_name)
-                destroyed_agent_ids.discard(id_str)
+                _record_agent(maps, event.agent)
+            elif isinstance(event, HostDiscoveryEvent):
+                _record_host(maps, event.host)
             elif isinstance(event, AgentDestroyedEvent):
-                destroyed_agent_ids.add(str(event.agent_id))
+                maps.destroyed_agent_ids.add(str(event.agent_id))
+            elif isinstance(event, HostDestroyedEvent):
+                maps.destroyed_host_ids.add(str(event.host_id))
             else:
-                # Host events and other types are not relevant for provider resolution
+                # SSH info and error events are not relevant for resolution
                 pass
 
-    return provider_by_agent_id, name_by_agent_id, destroyed_agent_ids
+    return maps
+
+
+def _replay_discovery_events_for_resolution(
+    events_path: Path,
+) -> tuple[dict[str, str], dict[str, str], set[str]]:
+    """Replay events from the latest full snapshot into provider-resolution maps.
+
+    Returns ``(provider_by_agent_id, name_by_agent_id, destroyed_agent_ids)``.
+    Raises DiscoverySchemaChangedError if any event line in the file fails
+    schema validation (the caller is responsible for regenerating and retrying).
+    Raises OSError on file I/O failure.
+    """
+    maps = _replay_discovery_events_into_maps(events_path)
+    return maps.provider_by_agent_id, maps.name_by_agent_id, maps.destroyed_agent_ids
 
 
 def resolve_provider_names_for_identifiers(
@@ -633,6 +701,134 @@ def resolve_provider_names_for_identifiers(
             return None
 
     return tuple(sorted(resolved_providers))
+
+
+def _discover_all_hosts_ssh_free(mngr_ctx: MngrContext) -> dict[str, DiscoveredHost]:
+    """Discover every host across all providers without connecting over SSH.
+
+    ``provider.discover_hosts()`` is SSH-free for every provider (Docker reads
+    container labels and host records; the local provider has a single fixed
+    host). It deliberately does *not* enumerate agents, which is the operation
+    that requires SSH into the host. Returns a map of ``host_id`` (str) ->
+    :class:`DiscoveredHost`.
+    """
+    hosts_by_id: dict[str, DiscoveredHost] = {}
+    for provider in get_all_provider_instances(mngr_ctx):
+        try:
+            discovered = provider.discover_hosts(cg=mngr_ctx.concurrency_group, include_destroyed=False)
+        except BaseMngrError as e:
+            logger.warning("SSH-free host discovery failed for provider {}: {}", provider.name, e)
+            continue
+        for host in discovered:
+            hosts_by_id[str(host.host_id)] = host
+    return hosts_by_id
+
+
+def resolve_hosts_for_identifiers(
+    mngr_ctx: MngrContext,
+    identifiers: Sequence[str],
+) -> dict[str, ResolvedAgentHost]:
+    """Resolve agent identifiers to the hosts that run them, without any SSH.
+
+    Reads the latest DISCOVERY_FULL snapshot and replays incremental events to
+    map each agent identifier (name or ID) to its ``host_id`` and provider.
+    Each candidate host is then cross-checked against an SSH-free host
+    discovery scan (``provider.discover_hosts()`` -- container labels and host
+    records for Docker, the fixed host for local) so that a stale event stream
+    cannot point ``mngr stop --stop-host`` at a host that no longer exists.
+    The host scan also supplies the authoritative ``host_name``.
+
+    This deliberately avoids :func:`discover_hosts_and_agents` / the base
+    ``discover_agents`` path, which reads each host's agent directory over SSH
+    and therefore fails when a container is running but its sshd is dead --
+    the exact situation ``mngr stop --stop-host`` exists to recover from.
+
+    Returns a map from each input identifier to its :class:`ResolvedAgentHost`.
+
+    Raises :class:`AgentNotFoundError` if any identifier cannot be mapped to a
+    live host (unknown identifier, destroyed agent/host, or a host that the
+    SSH-free discovery scan no longer reports).
+
+    If the on-disk events are stale relative to the current model schema, this
+    regenerates the snapshot once and retries, mirroring
+    :func:`resolve_provider_names_for_identifiers`.
+    """
+    host_scan = _discover_all_hosts_ssh_free(mngr_ctx)
+
+    events_path = get_discovery_events_path(mngr_ctx.config)
+    if not events_path.exists():
+        raise AgentNotFoundError(
+            f"Could not resolve a host for: {', '.join(identifiers)} "
+            "(no discovery event stream available)"
+        )
+
+    try:
+        maps = _replay_discovery_events_into_maps(events_path)
+    except DiscoverySchemaChangedError as e:
+        logger.warning("Discovery event schema mismatch; regenerating snapshot and retrying ({})", e)
+        _write_unfiltered_full_snapshot(mngr_ctx)
+        maps = _replay_discovery_events_into_maps(events_path)
+
+    # Drop destroyed agents so they cannot resolve.
+    for destroyed_id in maps.destroyed_agent_ids:
+        maps.provider_by_agent_id.pop(destroyed_id, None)
+        maps.name_by_agent_id.pop(destroyed_id, None)
+        maps.host_id_by_agent_id.pop(destroyed_id, None)
+
+    # Build agent_name -> set of agent_ids for name-based lookup.
+    agent_ids_by_name: dict[str, set[str]] = {}
+    for agent_id_str, name_str in maps.name_by_agent_id.items():
+        agent_ids_by_name.setdefault(name_str, set()).add(agent_id_str)
+
+    resolved: dict[str, ResolvedAgentHost] = {}
+    for identifier in identifiers:
+        if identifier in maps.provider_by_agent_id:
+            candidate_agent_ids = {identifier}
+        elif identifier in agent_ids_by_name:
+            candidate_agent_ids = agent_ids_by_name[identifier]
+        else:
+            raise AgentNotFoundError(
+                f"Could not resolve a host for agent '{identifier}' from the discovery event stream"
+            )
+
+        # Collect the distinct live hosts the candidate agent(s) run on, after
+        # cross-checking against the SSH-free host discovery scan.
+        candidate_hosts: dict[str, ResolvedAgentHost] = {}
+        for agent_id_str in candidate_agent_ids:
+            host_id_str = maps.host_id_by_agent_id.get(agent_id_str)
+            provider_str = maps.provider_by_agent_id.get(agent_id_str)
+            if host_id_str is None or provider_str is None:
+                continue
+            if host_id_str in maps.destroyed_host_ids:
+                continue
+            discovered_host = host_scan.get(host_id_str)
+            if discovered_host is None:
+                # The event stream pointed at a host the SSH-free scan no
+                # longer reports -- treat the event stream as stale for this
+                # identifier rather than acting on a vanished host.
+                continue
+            candidate_hosts[host_id_str] = ResolvedAgentHost(
+                host_id=discovered_host.host_id,
+                host_name=discovered_host.host_name,
+                provider_name=discovered_host.provider_name,
+            )
+
+        if not candidate_hosts:
+            raise AgentNotFoundError(
+                f"Could not resolve a live host for agent '{identifier}' "
+                "(the discovery event stream is stale or the host no longer exists)"
+            )
+        if len(candidate_hosts) > 1:
+            host_descriptions = ", ".join(
+                f"{h.host_name}.{h.provider_name}" for h in candidate_hosts.values()
+            )
+            raise AgentNotFoundError(
+                f"Agent identifier '{identifier}' matches agents on multiple hosts ({host_descriptions}); "
+                "disambiguate using NAME@HOST.PROVIDER"
+            )
+        resolved[identifier] = next(iter(candidate_hosts.values()))
+
+    return resolved
 
 
 def extract_agents_and_hosts_from_full_listing(

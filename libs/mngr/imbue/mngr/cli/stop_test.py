@@ -8,17 +8,27 @@ import pluggy
 import pytest
 from click.testing import CliRunner
 
+from imbue.mngr.api.discovery_events import write_full_discovery_snapshot
 from imbue.mngr.cli.stop import StopCliOptions
 from imbue.mngr.cli.stop import _ensure_providers_support_host_shutdown
 from imbue.mngr.cli.stop import _output_result
+from imbue.mngr.cli.stop import _stop_hosts_for_addresses
 from imbue.mngr.cli.stop import stop
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import OutputOptions
+from imbue.mngr.errors import AgentNotFoundError
 from imbue.mngr.errors import HostShutdownNotSupportedError
+from imbue.mngr.errors import LocalHostNotStoppableError
 from imbue.mngr.primitives import AgentAddress
+from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
+from imbue.mngr.primitives import DiscoveredAgent
+from imbue.mngr.primitives import DiscoveredHost
+from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import OutputFormat
 from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
+from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr.providers.mock_provider_test import MockProviderInstance
 
 
@@ -153,6 +163,102 @@ def test_ensure_providers_support_host_shutdown_raises_for_unsupported(
     with pytest.raises(HostShutdownNotSupportedError) as exc_info:
         _ensure_providers_support_host_shutdown(providers)
     assert exc_info.value.provider_name == ProviderInstanceName("bad")
+
+
+# =============================================================================
+# --stop-host SSH-free host resolution
+# =============================================================================
+
+
+def _seed_local_agent_snapshot(
+    mngr_ctx: MngrContext,
+    local_provider: LocalProviderInstance,
+    agent_name: str,
+) -> None:
+    """Write a DISCOVERY_FULL snapshot with one agent on the real local host.
+
+    This is the only state ``--stop-host`` needs: it resolves the host from
+    the event stream, without ever enumerating agents over SSH.
+    """
+    host_id = local_provider.host_id
+    agent = DiscoveredAgent(
+        host_id=host_id,
+        agent_id=AgentId.generate(),
+        agent_name=AgentName(agent_name),
+        provider_name=ProviderInstanceName("local"),
+        certified_data={},
+    )
+    host = DiscoveredHost(
+        host_id=host_id,
+        host_name=HostName(LOCAL_HOST_NAME),
+        provider_name=ProviderInstanceName("local"),
+    )
+    write_full_discovery_snapshot(mngr_ctx.config, [agent], [host])
+
+
+def test_stop_hosts_for_addresses_routes_to_provider_stop_host(
+    temp_mngr_ctx: MngrContext,
+    local_provider: LocalProviderInstance,
+) -> None:
+    """``--stop-host`` resolves the host from the event stream and calls stop_host.
+
+    The agent is never started -- only a discovery snapshot exists -- which
+    proves the host is resolved without any agent enumeration. The local
+    provider rejects the actual stop, and reaching that rejection proves the
+    call routed all the way through to ``provider.stop_host``.
+    """
+    _seed_local_agent_snapshot(temp_mngr_ctx, local_provider, "stop-host-agent")
+
+    output_opts = OutputOptions(output_format=OutputFormat.HUMAN)
+    with pytest.raises(LocalHostNotStoppableError):
+        _stop_hosts_for_addresses(
+            [AgentAddress(agent=AgentName("stop-host-agent"))],
+            temp_mngr_ctx,
+            output_opts,
+        )
+
+
+def test_stop_hosts_for_addresses_raises_for_unknown_agent(
+    temp_mngr_ctx: MngrContext,
+    local_provider: LocalProviderInstance,
+) -> None:
+    """An agent identifier absent from the event stream raises AgentNotFoundError."""
+    _seed_local_agent_snapshot(temp_mngr_ctx, local_provider, "known-agent")
+
+    output_opts = OutputOptions(output_format=OutputFormat.HUMAN)
+    with pytest.raises(AgentNotFoundError):
+        _stop_hosts_for_addresses(
+            [AgentAddress(agent=AgentName("missing-agent"))],
+            temp_mngr_ctx,
+            output_opts,
+        )
+
+
+def test_stop_host_uses_ssh_free_resolution(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    temp_mngr_ctx: MngrContext,
+    local_provider: LocalProviderInstance,
+) -> None:
+    """``mngr stop --stop-host`` resolves the host from the event stream only.
+
+    With only a discovery snapshot on disk (no running agent, no tmux), the
+    command still reaches ``provider.stop_host`` -- proving the ``--stop-host``
+    path never performs the agent-enumeration scan that would SSH into the
+    host. The local provider then rejects the stop, surfacing as a non-zero
+    exit with the local-host error message.
+    """
+    _seed_local_agent_snapshot(temp_mngr_ctx, local_provider, "ssh-free-agent")
+
+    result = cli_runner.invoke(
+        stop,
+        ["ssh-free-agent", "--stop-host"],
+        obj=plugin_manager,
+        catch_exceptions=True,
+    )
+
+    assert result.exit_code != 0
+    assert "Cannot stop the local host" in result.output
 
 
 # =============================================================================
