@@ -12,6 +12,12 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Added: `mngr extras config` subcommand walking user-scope config gaps (today: default agent type for `mngr create`).
 - Added: `mngr plugin list --kind {agent-type,provider}` filter projecting to canonical agent-type or provider backend names.
 - Added: urwid single-select picker for `mngr extras` Install/Skip prompts (completion, claude-plugin) and the default agent type step inside `mngr extras -i`.
+- Added: `HasTranscriptMixin` on `AgentInterface` formalises the raw-capture contract used by `mngr transcript`; `HasCommonTranscriptMixin` extends it with the gated common converter so future agent types get `mngr transcript` support by implementing two methods.
+- Added: `--restart` and `--no-resume` flags on `mngr start` (restart-fresh and skip the resume message).
+- Added: `read_shared_modal_env_name` helper plus `MNGR_TEST_SHARED_MODAL_ENV_NAME` opt-in for sharing a single Modal env across an offload-acceptance / offload-release run.
+- Added: New `ProviderEmptyError` (distinct from `ProviderUnavailableError`) — providers raise it when the backend answered that there's nothing to list; the listing pipeline silently skips empty providers in every mode.
+- Added: `pre_baked_agent_id` field on `HostInterface` (default `None`) so the duplicate-agent-name check in `api/create.py` skips the raise when the existing agent matches the host's pre-baked agent (lease-adopt scenario).
+- Added: `is_for_host_creation: bool = False` parameter on `ProviderBackendInterface.build_provider_instance` so only `mngr create` can bootstrap host-creation state; read flows leave the default.
 
 ### Changed
 
@@ -20,10 +26,27 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Changed: `mngr create` no longer hard-codes `claude` as the default agent type — it must come from a positional argument, `--type`, or `[commands.create] type` in user settings; the error lists registered types and points at `mngr config set`.
 - Changed: `scripts/install.sh` no longer carries custom shell logic for the default agent type — that prompt now runs inside `mngr extras -i` and is re-runnable via `mngr extras config`.
 - Changed: Bumped pinned Claude Code CLI version from `2.1.116` to `2.1.141` in the Dockerfile.
+- Changed: Removed `mngr provision` (aka `mngr prov`) subcommand and its docs; provisioning still runs automatically during `mngr create`.
+- Changed: Single-agent address resolution refactored — the "find" stage is strictly separate from the "ensure live" stage, with new `resolve_to_started_host_and_agent` / `resolve_to_started_host_and_running_agent` helpers and a unified `--start/--no-start` flag; `push`, `pull`, `provision`, and `rename` no longer require the agent to be running.
+- Changed: Renamed the address-side `HostedLocation` type to `HostLocationAddress` to match its peers (`HostAddress`, `AgentAddress`); cascading internal renames across parsers and Click param types. No behavior change.
+- Changed: `mngr rename` now works against offline hosts by writing the rename and labels into the provider's persisted agent data without starting the host; default flipped from `--start` to `--no-start`.
+- Changed: `mngr create --type X` now fails fast with `UnknownAgentTypeError` when `X` does not resolve to a registered agent class (instead of silently falling back to `BaseAgent`); `--type X -- ...` is no longer a hidden alias for `--type command -- ...`.
+- Changed: Removed the unused `Permission` primitive, `AgentPermissionsOptions`, `NoPermissionsAgentMixin`, host/agent `get_permissions`/`set_permissions`, the `--grant`/`--revoke` flags on `mngr limit`, and the `--grant` flag on `mngr create`. Higher-level libraries (latchkey, minds) keep their own permissions concepts.
+- Changed: `ProviderError` and all subclasses now require `provider_name` as the first constructor argument; handlers can read `e.provider_name` without `isinstance` narrowing.
+- Changed: Renamed mngr's "workspace server" feature to "system interface" — `/api/agents/{id}/restart-workspace-server` → `/api/agents/{id}/restart-system-interface`, SSE event `workspace_server_status` → `system_interface_status`.
+- Changed: `mngr connect` no longer falls back to "most recently created agent" when run non-interactively without an explicit agent; cancelling the interactive selector now exits cleanly via `click.Abort`.
+- Changed: `mngr create` for IMBUE_CLOUD adopts the lease scenario — `--reuse` signals the lease's pre-baked agent isn't a duplicate-name collision; the bake's services agent is now named `system-services` to match the user's expected name.
+- Changed: mngr's generated tmux config (`~/.mngr/tmux.conf`) sets `status-left-length` to 20 so a full `mngr-...` session name shows in the status bar, written before the user's `~/.tmux.conf` is sourced.
+- Changed: `mngr create --provider lima` help text shows `--memory=N` / `--disk=N` (plain integers, no `GiB` suffix).
+- Changed: Adopted per-project changelog layout (`changelog/` dir, `CHANGELOG.md`, `UNABRIDGED_CHANGELOG.md` at the project root).
 
 ### Fixed
 
 - Fixed: `tmux send-keys -l` and `tmux rename-session` now use the `--` end-of-options separator, so agent commands/messages and rename targets starting with `-` (e.g. `--model gemma`) are no longer misparsed by tmux.
+- Fixed: `mngr list` no longer aborts with "Provider 'modal' is not available" when the Modal per-user environment hasn't been created yet — the Modal backend raises `ProviderEmptyError` and the listing pipeline silently skips it.
+- Fixed: `Host._get_all_descendant_pids` now tracks a `visited` set so a PID-reuse cycle in the process tree can no longer drive the walker past Python's recursion limit; `host.stop_agents` no longer crashes with `RecursionError` on long-lived agents.
+- Fixed: Two flaky destroy tests (`test_destroy_via_stdin`, `test_destroy_multiple_agents`) now use `@pytest.mark.timeout(60)` to accommodate modal-offload contention.
+- Fixed: `mngr config` help text and the docs example now show the correct `--scope user` (was `--user`).
 
 ## [v0.2.8] - 2026-05-13
 

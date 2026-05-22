@@ -6,6 +6,16 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Added
+
+- Added: `mngr_forward` emits `workspace_backend_failure` envelopes (now renamed `system_interface_backend_failure`) on connection errors, mid-SSE EOF, or 5xx responses from the workspace backend, so consumers can track per-agent health as a state machine and drive a recovery UI.
+
+### Changed
+
+- Changed: Renamed the workspace-server envelope contract to system-interface in lockstep with the mngr-side rename — `WorkspaceBackendFailure*` → `SystemInterfaceBackendFailure*`, envelope type literal `workspace_backend_failure` → `system_interface_backend_failure`, and the plugin's 503 loader page reads "System interface starting".
+- Changed: The 503 fallback page is now a styled card with a loading spinner instead of the blank "Backend not yet available. Retrying..." page; the spinner's animation duration matches the page's 1-second auto-refresh interval.
+- Changed: Adopted per-project changelog layout (`changelog/` dir, `CHANGELOG.md`, `UNABRIDGED_CHANGELOG.md` at the project root).
+
 ## [v0.2.7] - 2026-05-11
 
 ### Added

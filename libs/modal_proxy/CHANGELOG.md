@@ -6,6 +6,15 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Added
+
+- Added: New `ModalProxyPermissionDeniedError` translating `modal.exception.PermissionDeniedError` so callers can retry through Modal's new asynchronous permission-propagation window.
+
+### Changed
+
+- Changed: Bumped pinned `modal` dependency from 1.3.1 to 1.4.3; updated `log_utils.py` to use Modal 1.4.x's new `RichOutputManager` ABC (the private `OutputManager` API was refactored).
+- Changed: Adopted per-project changelog layout (`changelog/` dir, `CHANGELOG.md`, `UNABRIDGED_CHANGELOG.md` at the project root).
+
 ## [v0.2.7] - 2026-05-11
 
 ### Changed

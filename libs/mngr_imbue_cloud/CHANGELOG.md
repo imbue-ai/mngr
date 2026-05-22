@@ -6,6 +6,18 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Changed
+
+- Changed: Swapped the imbue-cloud pool bake walker from Vultr to OVH — `mngr imbue_cloud admin pool create` is now provider-generic, requires `--region` and repeatable `--tag KEY=VALUE`, lands on `--template main --template ovh` with `--provider ovh`, and installs `ufw` on every leased VPS before the row hits `pool_hosts`.
+- Changed: Bake produces a leasable state aligned with the adopt path — services agent renamed to constant `system-services`, FCT-bootstrap-created chat agent is destroyed at bake time, and subsequent `mngr stop` / `mngr exec` calls use the full `system-services@<host_name>.ovh` address.
+- Changed: `ImbueCloudProvider.create_host` now SFTPs into the leased container and rewrites `/mngr/data.json`'s `host_name` to the user-supplied `HostName` so the FCT bootstrap's freshly-recreated chat agent uses the user's chosen workspace name.
+- Changed: Bumped pinned `imbue-mngr` / `imbue-common` / `concurrency-group` versions to match the current monorepo.
+- Changed: Adopted per-project changelog layout (`changelog/` dir, `CHANGELOG.md`, `UNABRIDGED_CHANGELOG.md` at the project root).
+
+### Fixed
+
+- Fixed: `pool_hosts` INSERT now picks up the schema's `host_name` column — every successful pool bake previously died at the last step with a NOT-NULL violation, leaking a fully-provisioned VPS because the cleanup path doesn't run on psycopg2 errors. SQL is now a module-level constant covered by a regression test.
+
 ## [v0.2.8] - 2026-05-13
 
 ### Changed

@@ -9,12 +9,24 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 ### Added
 
 - Added: `mngr latchkey admin-jwt` and `mngr latchkey gateway-info` subcommands; `LatchkeyForwardInfo.gateway_port` stamped for non-spawning consumers.
+- Added: `GET /permissions/available` and `GET /permissions/available/<service_name>` catalog endpoints on the `permissions` gateway extension, backed by a `services.json` data file materialized into `LATCHKEY_DIRECTORY/extensions/` alongside the `.mjs` files.
+- Added: `LatchkeyEncryptionKeyPermissionError` raised on every load when the on-disk key file isn't owner-only, with a copy-pasteable `chmod 600` hint.
 
 ### Changed
 
 - Changed: Bumped bundled Latchkey to 2.11.1.
 - Changed: Switched mngr-latchkey + minds permission management to latchkey 2.9.0's `permission_requests` / `permissions` gateway extensions; `LATCHKEY_MIN_VERSION` bumped to 2.9.0.
 - Changed: Regenerated CLI docs for `mngr latchkey`.
+- Changed: `permission-requests` POST bodies now use `agent_id` / `scope` / `permissions` / `rationale` (replacing `service_name`); pending requests live under `<latchkey-directory>/permission_requests/v1/`.
+- Changed: Default agent permissions broadened to allow reading the agent's own permissions (`GET /permissions/self`) and the per-service catalog entry (`GET /permissions/available/<service_name>`).
+- Changed: `LatchkeyGatewayClient.get_available_services` now returns a typed `dict[str, AvailableServiceEntry]` (pydantic-validated); wire-shape validation surfaces as `LatchkeyGatewayClientError`.
+- Changed: Per-directory encryption key is no longer cached on the long-lived `Latchkey` model; `_load_encryption_key()` reads (and on first call mints) the key per subprocess-spawn call, so the secret only lives in parent-process memory for the duration of one call frame.
+- Changed: Bumped pinned `imbue-mngr` / `imbue-common` / `concurrency-group` versions to match the current monorepo.
+- Changed: Adopted per-project changelog layout (`changelog/` dir, `CHANGELOG.md`, `UNABRIDGED_CHANGELOG.md` at the project root).
+
+### Fixed
+
+- Fixed: Race condition in per-directory encryption-key resolution where a concurrent caller could read the on-disk key file mid-write — the key file is now published atomically via a sibling temp file + `fsync` + `os.link`.
 
 ## [v0.2.8] - 2026-05-13
 

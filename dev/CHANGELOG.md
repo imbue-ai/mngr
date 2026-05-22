@@ -6,10 +6,23 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Added
+
+- Added: TMR GitHub Actions workflow now runs on a daily cron at 08:00 UTC via a new `TMR (scheduled)` wrapper workflow that gates on a prior periodic PR (`tmr-periodic` label) and invokes the main `TMR` workflow via `workflow_call`; auto-opened PRs are labeled `tmr-periodic` and assigned to `qi-imbue` and `joshalbrecht`.
+- Added: `just minds-test-electron` recipe wrapping `test_create_local_docker_workspace_via_electron` in `xvfb-run -a`; the existing `test-docker` CI job now installs Node, pnpm, xvfb, and the minds pnpm dependencies so the Electron binary is available.
+- Added: `CLAUDE.local.md` is now copied into agent workdirs by default so user-specific Claude instructions from the host repo are available inside agents.
+- Added: New `TMR (reintegrate)` workflow taking a `run_name` input and running `mngr tmr --reintegrate <run>`; a shared `.github/actions/tmr-setup` composite action covers common setup between the two TMR workflows.
+- Added: `specs/minds-env-activate-split/concise.md` design for splitting `minds env activate` into use-mode (default) and `--deploy` mode.
+
 ### Changed
 
 - Changed: Bumped pinned Claude Code CLI version from `2.1.116` to `2.1.141` in the CI workflow installs.
 - Changed: CI acceptance wall-clock cut ~62% — `contents: write` granted so offload image-cache git notes push, `max_parallel` lowered 200→50 for better LPT packing.
+- Changed: Restructured the changelog system from a single repo-wide changelog into per-project artifacts — each project (`libs/<name>`, `apps/<name>`, plus the synthetic top-level `dev/`) now owns its own `changelog/`, `CHANGELOG.md`, and `UNABRIDGED_CHANGELOG.md` at its root; the consolidator routes entries per project and emits `SECTION <project> <date>` lines; a new `test_every_project_has_changelog_layout` meta-ratchet enforces the layout. `scripts/release.py` finalizes each bumped package's `CHANGELOG.md` `[Unreleased]`.
+- Changed: TMR workflow defaults `MNGR_USER_ID` to the shared `tmr-ci` namespace and reads inbound-SSH authorized keys from a checked-in `.github/tmr-authorized-keys` file; the workflow passes AWS secrets through for the S3 report mirror and uses the public URL in the auto-opened PR body.
+- Changed: Default TMR `test_paths` workflow input now points at the whole `libs/mngr/imbue/mngr/e2e/` directory instead of only `test_basic.py`.
+- Changed: Modal envs can be collapsed across offload-acceptance / offload-release runs to a single shared env via `MNGR_TEST_SHARED_MODAL_ENV_NAME`; `just test-offload-{acceptance,release}` pre-create one env and `trap`-delete it at recipe exit.
+- Changed: `scripts/release.py` now refuses to cut a release when there are unconsolidated entries in any `<project_dir>/changelog/`, printing the on-demand one-liner that triggers the consolidation schedule.
 
 ### Removed
 

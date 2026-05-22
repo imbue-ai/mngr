@@ -4,6 +4,58 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-05-21
+
+Fix the intro in `UNABRIDGED_CHANGELOG.md` so it references the correct entries directory. The path was `changelog/<project>/` (which never existed); the actual layout is `<project_dir>/changelog/`.
+
+- Bumped pinned `imbue-mngr` / `imbue-common` / `concurrency-group` versions to match the current monorepo.
+
+## 2026-05-20
+
+- The `permission-requests` latchkey gateway extension now expects POST
+  bodies with the fields `agent_id`, `scope` (string), `permissions`
+  (list of strings), and `rationale` in place of the previous
+  `service_name` field. Pending requests are stored under
+  `<latchkey-directory>/permission_requests/v1/` so any existing files
+  left over from the old shape are silently ignored.
+- The `permissions` latchkey gateway extension now exposes two new
+  catalog endpoints: `GET /permissions/available` returns the full
+  catalog as a JSON object keyed by raw service name, and
+  `GET /permissions/available/<service_name>` returns a single entry
+  (or 404 if the service is unknown). Each catalog value has the
+  shape `{"scope": "<schema_name>", "display_name": "...",
+  "permissions": [...]}`. The catalog is backed by a `services.json`
+  data file that ships alongside the extensions and is materialized
+  into `LATCHKEY_DIRECTORY/extensions/` together with the `.mjs` files
+  at gateway-spawn time.
+- The default permissions seeded for every new agent are broadened to
+  let the agent read its own current permissions
+  (`GET /permissions/self`) and read the per-service catalog entry
+  (`GET /permissions/available/<service_name>`) in addition to the
+  existing ability to file a new permission request
+  (`POST /permission-requests`). The catalog read is granted under a
+  path-pattern Detent permission schema (matching
+  `/permissions/available/<service_name>` only) so the agent baseline
+  does not also expose the unbounded collection endpoint.
+- ``LatchkeyGatewayClient.get_available_services`` now returns a typed
+  ``dict[str, AvailableServiceEntry]`` (pydantic-validated) instead of
+  the previous untyped ``dict[str, object]``. Wire-shape validation
+  (missing fields, wrong types, empty strings) now happens inside the
+  client and surfaces as ``LatchkeyGatewayClientError``.
+
+Fixed a race condition in `mngr_latchkey`'s per-directory encryption-key
+resolution where a concurrent caller could read the on-disk key file
+while another process was mid-write, observing an empty string. The key
+file is now published atomically by writing to a sibling temp file,
+`fsync`ing it, and `os.link`-ing it into the final path -- so the final
+path only ever exists with complete contents.
+
+Project now participates in the per-project changelog layout: a `changelog/` subdirectory holds per-PR entry files, and `CHANGELOG.md` / `UNABRIDGED_CHANGELOG.md` at the project root hold the consolidated history. See the full rationale in `dev/changelog/mngr-changelog-per-project.md`.
+
+Stop caching the latchkey per-directory encryption key on the long-lived `Latchkey` pydantic model. The optional `encryption_key: SecretStr | None` field is gone; instead, `Latchkey._load_encryption_key()` reads (and on first call mints) the key on every subprocess-spawn call, so the secret only lives in parent-process memory for the duration of a single env-builder + process-spawn call frame. `apps/minds/imbue/minds/cli/run.py:_build_latchkey` and `libs/mngr_latchkey/imbue/mngr_latchkey/cli.py:_build_initialized_latchkey` no longer pre-load the key at construction time.
+
+`load_or_create_encryption_key` now validates the on-disk key file's permission bits every load. Any group or other access bit set (i.e. anything that isn't owner-only -- `0o400`, `0o600`, `0o700` are accepted) raises a new `LatchkeyEncryptionKeyPermissionError` with a copy-pasteable `chmod 600 <path>` hint, so an operator who relaxed the mode finds out loudly instead of silently leaking the key to other local users. The operator override branch (`LATCHKEY_ENCRYPTION_KEY` in the env) still wins and is unaffected. Adds `encryption_key_test.py` covering precedence, idempotence, owner-only mode acceptance, group/other rejection, and the umask-permissive minting path.
+
 ## 2026-05-14
 
 ## mngr-latchkey: switch permission management to the latchkey 2.9.0 gateway extensions
