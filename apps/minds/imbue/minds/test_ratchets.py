@@ -119,12 +119,15 @@ def test_prevent_setattr() -> None:
 
 
 def test_prevent_asyncio_import() -> None:
-    # app.py uses ``asyncio.get_running_loop()`` and ``asyncio.run_coroutine_threadsafe``
-    # for HTTP route handlers; latchkey/permissions.py uses ``run_in_executor`` to run the
-    # blocking grant/deny path off the event loop. Both are intrinsic to FastAPI integration.
-    # +1 for scripts/integ_check.py: Chrome DevTools Protocol over websockets is inherently
-    # async; the script drives multiple CDP sessions concurrently.
-    rc.check_asyncio_import(_DIR, snapshot(3))
+    # Four: app.py uses ``asyncio.get_running_loop()`` and
+    # ``asyncio.run_coroutine_threadsafe`` for HTTP route handlers; the two
+    # sibling permission handlers under ``latchkey/handlers/`` (``predefined.py``
+    # and ``file_sharing.py``) both use ``run_in_executor`` to run the blocking
+    # grant/deny path off the event loop -- all three intrinsic to FastAPI
+    # integration. The fourth is scripts/integ_check.py: Chrome DevTools
+    # Protocol over websockets is inherently async; the script drives multiple
+    # CDP sessions concurrently.
+    rc.check_asyncio_import(_DIR, snapshot(4))
 
 
 def test_prevent_pandas_import() -> None:

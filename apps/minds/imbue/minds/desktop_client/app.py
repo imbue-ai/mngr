@@ -95,6 +95,7 @@ from imbue.minds.desktop_client.templates import render_welcome_page
 from imbue.minds.desktop_client.templates import render_workspace_settings
 from imbue.minds.desktop_client.templates import status_text_for
 from imbue.minds.desktop_client.templates import workspace_accent
+from imbue.minds.desktop_client.webdav import create_webdav_app
 from imbue.minds.primitives import AIProvider
 from imbue.minds.primitives import CreationId
 from imbue.minds.primitives import LaunchMode
@@ -2720,6 +2721,11 @@ def create_desktop_client(
     if paths is not None:
         api_v1_router = create_api_v1_router()
         app.include_router(api_v1_router, prefix="/api/v1")
+        # Mount the WebDAV file server under /api/v1/files. Each share
+        # root maps URL-path == on-disk-path (``~`` and ``/tmp``); the
+        # mount itself is gated by the same per-agent Bearer-token check
+        # that protects the rest of /api/v1.
+        app.mount("/api/v1/files", create_webdav_app(paths))
 
     # Static assets: Tailwind Play CDN JS + hand-written tokens.css +
     # per-page JS. The Tailwind JS is fetched once by `just minds-tailwind`

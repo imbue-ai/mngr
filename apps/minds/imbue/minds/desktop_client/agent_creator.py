@@ -435,12 +435,22 @@ def _build_mngr_create_command(
     """Build the mngr create command and generate an API key for the agent.
 
     Returns (command_list, api_key) where api_key is a UUID4 string injected
-    as MINDS_API_KEY into the agent's environment via --env. ``--format jsonl``
-    is appended so the caller can parse the canonical ``AgentId`` out of
-    the trailing ``"event": "created"`` line; minds no longer pre-generates
-    an id because for imbue_cloud the lease forces it back to the pool
-    host's pre-baked id anyway, and pre-generating one led to bugs (e.g.
-    keying gateway state under a fictional id).
+    as MINDS_API_KEY into the host's env file via ``--host-env`` so every
+    agent that ever runs on this host (the system-services agent created
+    here plus the chat agents that the FCT bootstrap and the system
+    interface's "New Chat" button later spawn on the same host) inherits
+    the same key. Without this, only the system-services agent would see
+    ``MINDS_API_KEY`` and the chat agents' calls to the desktop client's
+    ``/api/v1/...`` routes would 401. The API-key hash is still stored
+    once under the system-services agent's canonical id; ``find_agent_by_api_key``
+    will resolve every workspace-side caller to that id, which is fine
+    for authentication but means notifications etc. surface under the
+    system-services agent's display name. ``--format jsonl`` is appended
+    so the caller can parse the canonical ``AgentId`` out of the trailing
+    ``"event": "created"`` line; minds no longer pre-generates an id
+    because for imbue_cloud the lease forces it back to the pool host's
+    pre-baked id anyway, and pre-generating one led to bugs (e.g. keying
+    gateway state under a fictional id).
 
     LOCAL mode: --template main --template docker (runs in Docker container)
     LIMA mode: --template main --template lima (runs in Lima VM)
@@ -524,7 +534,14 @@ def _build_mngr_create_command(
         # ``current`` so we just rename the *new* branch.
         "--branch",
         f":mngr/{host_name}",
-        "--env",
+        # ``--host-env`` (not ``--env``) so MINDS_API_KEY is written to
+        # the host's env file once and every agent on the host -- the
+        # system-services agent created here plus the chat agents the
+        # FCT bootstrap and system_interface's "New Chat" button later
+        # spawn on the same host -- inherits the same key for
+        # authenticating against the desktop client's ``/api/v1/...``
+        # routes.
+        "--host-env",
         f"MINDS_API_KEY={api_key}",
         "--label",
         "user_created=true",
