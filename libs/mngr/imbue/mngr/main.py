@@ -29,6 +29,7 @@ from imbue.mngr.cli.events import events
 from imbue.mngr.cli.exec import exec_command
 from imbue.mngr.cli.extras import extras
 from imbue.mngr.cli.gc import gc
+from imbue.mngr.cli.git import git_command
 from imbue.mngr.cli.help import help_command
 from imbue.mngr.cli.help_formatter import get_help_metadata
 from imbue.mngr.cli.issue_reporting import handle_not_implemented_error
@@ -41,9 +42,8 @@ from imbue.mngr.cli.migrate import migrate
 from imbue.mngr.cli.observe import observe
 from imbue.mngr.cli.plugin import plugin as plugin_command
 from imbue.mngr.cli.provision import provision
-from imbue.mngr.cli.pull import pull
-from imbue.mngr.cli.push import push
 from imbue.mngr.cli.rename import rename
+from imbue.mngr.cli.rsync import rsync_command
 from imbue.mngr.cli.snapshot import snapshot
 from imbue.mngr.cli.start import start
 from imbue.mngr.cli.stop import stop
@@ -337,8 +337,8 @@ BUILTIN_COMMANDS: list[click.Command] = [
     connect,
     message,
     provision,
-    pull,
-    push,
+    rsync_command,
+    git_command,
     rename,
     start,
     stop,

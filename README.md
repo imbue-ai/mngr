@@ -197,9 +197,11 @@ mngr schedule --template my-daily-hook "look at any flaky tests over the past da
 
 ```bash
 mngr connect my-agent       # directly connect to remote agents via SSH for debugging
-mngr pull my-agent          # pull changes from an agent to your local machine
-mngr push my-agent          # push your changes to an agent
-mngr pair my-agent          # or sync changes continuously!
+mngr rsync my-agent ./       # rsync changes from an agent to your local machine
+mngr rsync ./ my-agent       # rsync your changes to an agent
+mngr git pull my-agent       # pull git commits from an agent
+mngr git push my-agent       # push git commits to an agent
+mngr pair my-agent           # or sync changes continuously!
 ```
 
 **mngr is easy to learn:**

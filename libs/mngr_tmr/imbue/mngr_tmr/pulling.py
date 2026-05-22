@@ -15,8 +15,8 @@ from loguru import logger
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.errors import ProcessError
 from imbue.mngr.api.providers import get_provider_instance
-from imbue.mngr.api.pull import pull_files
-from imbue.mngr.api.pull import pull_git
+from imbue.mngr.api.sync import git_pull
+from imbue.mngr.api.sync import rsync_from_remote
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import AgentNotFoundOnHostError
 from imbue.mngr.errors import HostError
@@ -233,11 +233,10 @@ def pull_integrator_outputs(
     local_dest = destination_dir / str(agent_name)
     local_dest.mkdir(parents=True, exist_ok=True)
     try:
-        pull_files(
-            agent=agent,
-            host=host,
-            destination=local_dest,
-            source_path=agent.work_dir / ".test_output",
+        rsync_from_remote(
+            remote_host=host,
+            remote_path=agent.work_dir / ".test_output",
+            local_path=local_dest,
             is_dry_run=False,
             is_delete=False,
             uncommitted_changes=UncommittedChangesMode.CLOBBER,
@@ -273,10 +272,11 @@ def pull_agent_branch(
         if base_commit is not None:
             _create_local_branch(destination, branch_name, base_commit, cg)
 
-        pull_git(
-            agent=_get_agent_from_host(host, agent_id),
-            host=host,
-            destination=destination,
+        agent_for_branch = _get_agent_from_host(host, agent_id)
+        git_pull(
+            local_path=destination,
+            remote_host=host,
+            remote_path=agent_for_branch.work_dir,
             source_branch=branch_name,
             target_branch=branch_name,
             is_dry_run=False,

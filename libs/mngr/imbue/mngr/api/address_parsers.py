@@ -197,8 +197,8 @@ def parse_host_location_address(s: str) -> HostLocationAddress:
     """Parse a ``[NAME[@HOST[.PROVIDER]]][:PATH]`` string into a :class:`HostLocationAddress`.
 
     Used for any CLI argument that designates "a location on some host" --
-    sources (``mngr create --from``, ``mngr pair``) and targets
-    (``mngr push``, ``mngr pull``).
+    sources (``mngr create --from``, ``mngr pair``), the source/destination of
+    ``mngr rsync``, and the target of ``mngr git push``/``mngr git pull``.
 
     Bare paths (starting with ``/``, ``./``, ``~/``, or ``../``) are recognized
     as a convenience. A bare name like ``foo`` always refers to an agent named

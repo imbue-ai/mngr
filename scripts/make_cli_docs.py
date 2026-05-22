@@ -42,11 +42,11 @@ PRIMARY_COMMANDS = {
     "create",
     "destroy",
     "exec",
+    "git",
     "list",
     "pair",
-    "pull",
-    "push",
     "rename",
+    "rsync",
     "start",
     "stop",
 }

@@ -168,17 +168,6 @@ class UncommittedChangesMode(UpperCaseStrEnum):
     FAIL = auto()
 
 
-class SyncMode(UpperCaseStrEnum):
-    """Direction of sync operation.
-
-    PUSH: local -> agent
-    PULL: agent -> local
-    """
-
-    PUSH = auto()
-    PULL = auto()
-
-
 class SyncDirection(UpperCaseStrEnum):
     """Direction for file synchronization in pair mode."""
 
@@ -439,9 +428,9 @@ class HostLocationAddress(FrozenModel):
     """A location that lives on some host: ``[NAME[@HOST[.PROVIDER]]][:PATH]`` or a bare path.
 
     Used wherever a CLI command needs to designate "a place on any host" -- the
-    source for ``mngr create --from``/``mngr pair``, or the target for
-    ``mngr push``/``mngr pull``. The host may be local or remote; "hosted"
-    captures both.
+    source for ``mngr create --from``/``mngr pair``, the source/destination for
+    ``mngr rsync``, and the target for ``mngr git push``/``mngr git pull``. The
+    host may be local or remote; "hosted" captures both.
 
     Every component is optional. The four meaningful shapes (in addition to a
     bare path string) are:

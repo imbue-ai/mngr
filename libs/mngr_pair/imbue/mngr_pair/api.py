@@ -15,8 +15,8 @@ from imbue.concurrency_group.errors import ProcessError
 from imbue.concurrency_group.local_process import RunningProcess
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
-from imbue.mngr.api.pull import pull_git
-from imbue.mngr.api.push import push_git
+from imbue.mngr.api.sync import git_pull
+from imbue.mngr.api.sync import git_push
 from imbue.mngr.errors import MngrError
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.host import OnlineHostInterface
@@ -302,10 +302,10 @@ def sync_git_state(
 
     if git_sync_action.agent_is_ahead:
         logger.debug("Pulling git state from agent to local")
-        pull_git(
-            agent=agent,
-            host=host,
-            destination=local_path,
+        git_pull(
+            local_path=local_path,
+            remote_host=host,
+            remote_path=agent.work_dir,
             source_branch=git_sync_action.agent_branch,
             target_branch=git_sync_action.local_branch,
             is_dry_run=False,
@@ -316,10 +316,10 @@ def sync_git_state(
 
     if git_sync_action.local_is_ahead:
         logger.debug("Pushing git state from local to agent")
-        push_git(
-            agent=agent,
-            host=host,
-            source=local_path,
+        git_push(
+            local_path=local_path,
+            remote_host=host,
+            remote_path=agent.work_dir,
             source_branch=git_sync_action.local_branch,
             target_branch=git_sync_action.agent_branch,
             is_dry_run=False,

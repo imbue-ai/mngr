@@ -9,11 +9,10 @@ from typing import assert_never
 from loguru import logger
 
 from imbue.imbue_common.pure import pure
-from imbue.mngr.api.sync import SyncFilesResult
-from imbue.mngr.api.sync import SyncGitResult
+from imbue.mngr.api.sync import GitSyncResult
+from imbue.mngr.api.sync import RsyncResult
 from imbue.mngr.primitives import ErrorBehavior
 from imbue.mngr.primitives import OutputFormat
-from imbue.mngr.primitives import SyncMode
 
 
 def _write_json_line(data: Mapping[str, Any]) -> None:
@@ -220,15 +219,11 @@ def emit_format_template_lines(
     sys.stdout.flush()
 
 
-def output_sync_files_result(
-    result: SyncFilesResult,
+def output_rsync_result(
+    result: RsyncResult,
     output_format: OutputFormat,
 ) -> None:
-    """Output a file sync result in the appropriate format.
-
-    Works for both push and pull operations, using result.mode to determine
-    the event name and human-readable message.
-    """
+    """Output an rsync result in the appropriate format."""
     result_data = {
         "files_transferred": result.files_transferred,
         "bytes_transferred": result.bytes_transferred,
@@ -236,21 +231,18 @@ def output_sync_files_result(
         "destination_path": str(result.destination_path),
         "is_dry_run": result.is_dry_run,
     }
-    mode_label = "Push" if result.mode == SyncMode.PUSH else "Pull"
-    event_name = f"{mode_label.lower()}_complete"
 
     match output_format:
         case OutputFormat.JSON:
             emit_final_json(result_data)
         case OutputFormat.JSONL:
-            emit_event(event_name, result_data, OutputFormat.JSONL)
+            emit_event("rsync_complete", result_data, OutputFormat.JSONL)
         case OutputFormat.HUMAN:
             if result.is_dry_run:
                 write_human_line("Dry run complete: {} files would be transferred", result.files_transferred)
             else:
                 write_human_line(
-                    "{} complete: {} files, {} bytes transferred",
-                    mode_label,
+                    "Rsync complete: {} files, {} bytes transferred",
                     result.files_transferred,
                     result.bytes_transferred,
                 )
@@ -258,15 +250,15 @@ def output_sync_files_result(
             assert_never(unreachable)
 
 
-def output_sync_git_result(
-    result: SyncGitResult,
+def _output_git_sync_result(
+    result: GitSyncResult,
     output_format: OutputFormat,
+    event_name: str,
+    verb: str,
+    verb_past: str,
+    preposition: str,
 ) -> None:
-    """Output a git sync result in the appropriate format.
-
-    Works for both push and pull operations, using result.mode to determine
-    the event name and human-readable message.
-    """
+    """Shared implementation for git push and git pull result output."""
     result_data = {
         "source_branch": result.source_branch,
         "target_branch": result.target_branch,
@@ -275,11 +267,6 @@ def output_sync_git_result(
         "is_dry_run": result.is_dry_run,
         "commits_transferred": result.commits_transferred,
     }
-    is_push = result.mode == SyncMode.PUSH
-    event_name = "push_git_complete" if is_push else "pull_git_complete"
-    verb = "push" if is_push else "merge"
-    verb_past = "pushed" if is_push else "merged"
-    preposition = "to" if is_push else "into"
 
     match output_format:
         case OutputFormat.JSON:
@@ -308,3 +295,27 @@ def output_sync_git_result(
                 )
         case _ as unreachable:
             assert_never(unreachable)
+
+
+def output_git_push_result(result: GitSyncResult, output_format: OutputFormat) -> None:
+    """Output a git push result in the appropriate format."""
+    _output_git_sync_result(
+        result=result,
+        output_format=output_format,
+        event_name="git_push_complete",
+        verb="push",
+        verb_past="pushed",
+        preposition="to",
+    )
+
+
+def output_git_pull_result(result: GitSyncResult, output_format: OutputFormat) -> None:
+    """Output a git pull result in the appropriate format."""
+    _output_git_sync_result(
+        result=result,
+        output_format=output_format,
+        event_name="git_pull_complete",
+        verb="merge",
+        verb_past="merged",
+        preposition="into",
+    )

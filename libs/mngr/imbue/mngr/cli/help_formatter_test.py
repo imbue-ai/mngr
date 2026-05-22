@@ -601,43 +601,38 @@ _SYNOPSIS_OPTOUT_FLAGS: dict[str, frozenset[str]] = {
             "--remove-ssh-key",
         }
     ),
-    "pull": frozenset(
+    "rsync": frozenset(
+        {
+            "--exclude",
+            "--exclude-file",
+            "--include",
+            "--include-file",
+            "--include-gitignored",
+            "--rsync-arg",
+            "--rsync-args",
+            "--uncommitted-changes",
+        }
+    ),
+    "git.push": frozenset(
         {
             "--all-branches",
             "--branch",
-            "--delete",
-            "--destination",
-            "--exclude",
-            "--exclude-file",
-            "--force-git",
-            "--include-file",
-            "--include-gitignored",
-            "--merge",
-            "--rebase",
-            "--rsync-arg",
-            "--rsync-args",
-            "--source-host",
-            "--source-path",
-            "--stdin",
+            "--start",
             "--tags",
-            "--target",
-            "--target-agent",
-            "--target-branch",
-            "--target-host",
-            "--target-path",
             "--uncommitted-changes",
-            "--uncommitted-source",
         }
     ),
-    "push": frozenset(
+    "git.pull": frozenset(
         {
-            "--delete",
-            "--exclude",
-            "--rsync-only",
-            "--source-branch",
-            "--target-host",
-            "--target-path",
+            "--all-branches",
+            "--branch",
+            "--force-git",
+            "--merge",
+            "--rebase",
+            "--start",
+            "--tags",
             "--uncommitted-changes",
+            "--uncommitted-source",
         }
     ),
     "pair": frozenset(

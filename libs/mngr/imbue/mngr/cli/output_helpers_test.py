@@ -5,8 +5,8 @@ from pathlib import Path
 
 import pytest
 
-from imbue.mngr.api.sync import SyncFilesResult
-from imbue.mngr.api.sync import SyncGitResult
+from imbue.mngr.api.sync import GitSyncResult
+from imbue.mngr.api.sync import RsyncResult
 from imbue.mngr.cli.output_helpers import AbortError
 from imbue.mngr.cli.output_helpers import _write_json_line
 from imbue.mngr.cli.output_helpers import emit_event
@@ -15,14 +15,14 @@ from imbue.mngr.cli.output_helpers import emit_format_template_lines
 from imbue.mngr.cli.output_helpers import emit_info
 from imbue.mngr.cli.output_helpers import format_size
 from imbue.mngr.cli.output_helpers import on_error
-from imbue.mngr.cli.output_helpers import output_sync_files_result
-from imbue.mngr.cli.output_helpers import output_sync_git_result
+from imbue.mngr.cli.output_helpers import output_git_pull_result
+from imbue.mngr.cli.output_helpers import output_git_push_result
+from imbue.mngr.cli.output_helpers import output_rsync_result
 from imbue.mngr.cli.output_helpers import render_format_template
 from imbue.mngr.cli.output_helpers import write_human_line
 from imbue.mngr.errors import MngrError
 from imbue.mngr.primitives import ErrorBehavior
 from imbue.mngr.primitives import OutputFormat
-from imbue.mngr.primitives import SyncMode
 
 # =============================================================================
 # Tests for AbortError
@@ -339,161 +339,143 @@ def test_emit_format_template_lines_empty_list(capsys: pytest.CaptureFixture[str
 
 
 # =============================================================================
-# Tests for output_sync_files_result
+# Tests for output_rsync_result
 # =============================================================================
 
 
-def test_output_sync_files_result_json(capsys: pytest.CaptureFixture[str]) -> None:
-    """output_sync_files_result with JSON should output structured data."""
-    result = SyncFilesResult(
+def test_output_rsync_result_json(capsys: pytest.CaptureFixture[str]) -> None:
+    result = RsyncResult(
         files_transferred=5,
         bytes_transferred=1024,
         source_path=Path("/src"),
         destination_path=Path("/dst"),
         is_dry_run=False,
-        mode=SyncMode.PUSH,
     )
-    output_sync_files_result(result, OutputFormat.JSON)
+    output_rsync_result(result, OutputFormat.JSON)
     captured = capsys.readouterr()
     output = json.loads(captured.out.strip())
     assert output["files_transferred"] == 5
     assert output["bytes_transferred"] == 1024
 
 
-def test_output_sync_files_result_jsonl(capsys: pytest.CaptureFixture[str]) -> None:
-    """output_sync_files_result with JSONL should emit event."""
-    result = SyncFilesResult(
+def test_output_rsync_result_jsonl(capsys: pytest.CaptureFixture[str]) -> None:
+    result = RsyncResult(
         files_transferred=3,
         bytes_transferred=512,
         source_path=Path("/src"),
         destination_path=Path("/dst"),
         is_dry_run=False,
-        mode=SyncMode.PULL,
     )
-    output_sync_files_result(result, OutputFormat.JSONL)
+    output_rsync_result(result, OutputFormat.JSONL)
     captured = capsys.readouterr()
     output = json.loads(captured.out.strip())
-    assert output["event"] == "pull_complete"
+    assert output["event"] == "rsync_complete"
 
 
-def test_output_sync_files_result_human(capsys: pytest.CaptureFixture[str]) -> None:
-    """output_sync_files_result with HUMAN should output human-readable line."""
-    result = SyncFilesResult(
+def test_output_rsync_result_human(capsys: pytest.CaptureFixture[str]) -> None:
+    result = RsyncResult(
         files_transferred=5,
         bytes_transferred=1024,
         source_path=Path("/src"),
         destination_path=Path("/dst"),
         is_dry_run=False,
-        mode=SyncMode.PUSH,
     )
-    output_sync_files_result(result, OutputFormat.HUMAN)
+    output_rsync_result(result, OutputFormat.HUMAN)
     captured = capsys.readouterr()
-    assert "Push complete" in captured.out
+    assert "Rsync complete" in captured.out
     assert "5 files" in captured.out
 
 
-def test_output_sync_files_result_human_dry_run(capsys: pytest.CaptureFixture[str]) -> None:
-    """output_sync_files_result dry run should say would be transferred."""
-    result = SyncFilesResult(
+def test_output_rsync_result_human_dry_run(capsys: pytest.CaptureFixture[str]) -> None:
+    result = RsyncResult(
         files_transferred=2,
         bytes_transferred=256,
         source_path=Path("/src"),
         destination_path=Path("/dst"),
         is_dry_run=True,
-        mode=SyncMode.PUSH,
     )
-    output_sync_files_result(result, OutputFormat.HUMAN)
+    output_rsync_result(result, OutputFormat.HUMAN)
     captured = capsys.readouterr()
     assert "Dry run complete" in captured.out
     assert "would be transferred" in captured.out
 
 
 # =============================================================================
-# Tests for output_sync_git_result
+# Tests for output_git_push_result and output_git_pull_result
 # =============================================================================
 
 
-def test_output_sync_git_result_json(capsys: pytest.CaptureFixture[str]) -> None:
-    """output_sync_git_result with JSON should output structured data."""
-    result = SyncGitResult(
+def test_output_git_push_result_json(capsys: pytest.CaptureFixture[str]) -> None:
+    result = GitSyncResult(
         source_branch="main",
         target_branch="main",
         source_path=Path("/src"),
         destination_path=Path("/dst"),
         is_dry_run=False,
         commits_transferred=3,
-        mode=SyncMode.PUSH,
     )
-    output_sync_git_result(result, OutputFormat.JSON)
+    output_git_push_result(result, OutputFormat.JSON)
     captured = capsys.readouterr()
     output = json.loads(captured.out.strip())
     assert output["commits_transferred"] == 3
     assert output["source_branch"] == "main"
 
 
-def test_output_sync_git_result_jsonl(capsys: pytest.CaptureFixture[str]) -> None:
-    """output_sync_git_result with JSONL should emit event."""
-    result = SyncGitResult(
+def test_output_git_pull_result_jsonl(capsys: pytest.CaptureFixture[str]) -> None:
+    result = GitSyncResult(
         source_branch="main",
         target_branch="main",
         source_path=Path("/src"),
         destination_path=Path("/dst"),
         is_dry_run=False,
         commits_transferred=3,
-        mode=SyncMode.PULL,
     )
-    output_sync_git_result(result, OutputFormat.JSONL)
+    output_git_pull_result(result, OutputFormat.JSONL)
     captured = capsys.readouterr()
     output = json.loads(captured.out.strip())
-    assert output["event"] == "pull_git_complete"
+    assert output["event"] == "git_pull_complete"
 
 
-def test_output_sync_git_result_human_push(capsys: pytest.CaptureFixture[str]) -> None:
-    """output_sync_git_result with HUMAN should output push message."""
-    result = SyncGitResult(
+def test_output_git_push_result_human(capsys: pytest.CaptureFixture[str]) -> None:
+    result = GitSyncResult(
         source_branch="main",
         target_branch="main",
         source_path=Path("/src"),
         destination_path=Path("/dst"),
         is_dry_run=False,
         commits_transferred=3,
-        mode=SyncMode.PUSH,
     )
-    output_sync_git_result(result, OutputFormat.HUMAN)
+    output_git_push_result(result, OutputFormat.HUMAN)
     captured = capsys.readouterr()
     assert "Git push complete" in captured.out
     assert "pushed" in captured.out
 
 
-def test_output_sync_git_result_human_pull(capsys: pytest.CaptureFixture[str]) -> None:
-    """output_sync_git_result with HUMAN should output merge message."""
-    result = SyncGitResult(
+def test_output_git_pull_result_human(capsys: pytest.CaptureFixture[str]) -> None:
+    result = GitSyncResult(
         source_branch="feature",
         target_branch="main",
         source_path=Path("/src"),
         destination_path=Path("/dst"),
         is_dry_run=False,
         commits_transferred=5,
-        mode=SyncMode.PULL,
     )
-    output_sync_git_result(result, OutputFormat.HUMAN)
+    output_git_pull_result(result, OutputFormat.HUMAN)
     captured = capsys.readouterr()
     assert "Git merge complete" in captured.out
     assert "merged" in captured.out
 
 
-def test_output_sync_git_result_human_dry_run(capsys: pytest.CaptureFixture[str]) -> None:
-    """output_sync_git_result dry run should say would push/merge."""
-    result = SyncGitResult(
+def test_output_git_push_result_human_dry_run(capsys: pytest.CaptureFixture[str]) -> None:
+    result = GitSyncResult(
         source_branch="main",
         target_branch="main",
         source_path=Path("/src"),
         destination_path=Path("/dst"),
         is_dry_run=True,
         commits_transferred=3,
-        mode=SyncMode.PUSH,
     )
-    output_sync_git_result(result, OutputFormat.HUMAN)
+    output_git_push_result(result, OutputFormat.HUMAN)
     captured = capsys.readouterr()
     assert "Dry run complete" in captured.out
     assert "would push" in captured.out
@@ -540,60 +522,35 @@ def test_write_json_line_terminates_with_newline(capsys: pytest.CaptureFixture[s
 
 
 # =============================================================================
-# Tests for output_sync_files_result (JSONL push event name)
+# Tests for output_git_push_result (JSONL event name)
 # =============================================================================
 
 
-def test_output_sync_files_result_jsonl_push(capsys: pytest.CaptureFixture[str]) -> None:
-    """output_sync_files_result with JSONL for PUSH should emit push_complete event."""
-    result = SyncFilesResult(
-        files_transferred=3,
-        bytes_transferred=512,
-        source_path=Path("/src"),
-        destination_path=Path("/dst"),
-        is_dry_run=False,
-        mode=SyncMode.PUSH,
-    )
-    output_sync_files_result(result, OutputFormat.JSONL)
-    captured = capsys.readouterr()
-    output = json.loads(captured.out.strip())
-    assert output["event"] == "push_complete"
-
-
-# =============================================================================
-# Tests for output_sync_git_result (JSONL push event name)
-# =============================================================================
-
-
-def test_output_sync_git_result_jsonl_push(capsys: pytest.CaptureFixture[str]) -> None:
-    """output_sync_git_result with JSONL for PUSH should emit push_git_complete event."""
-    result = SyncGitResult(
+def test_output_git_push_result_jsonl(capsys: pytest.CaptureFixture[str]) -> None:
+    result = GitSyncResult(
         source_branch="main",
         target_branch="main",
         source_path=Path("/src"),
         destination_path=Path("/dst"),
         is_dry_run=False,
         commits_transferred=3,
-        mode=SyncMode.PUSH,
     )
-    output_sync_git_result(result, OutputFormat.JSONL)
+    output_git_push_result(result, OutputFormat.JSONL)
     captured = capsys.readouterr()
     output = json.loads(captured.out.strip())
-    assert output["event"] == "push_git_complete"
+    assert output["event"] == "git_push_complete"
 
 
-def test_output_sync_git_result_human_pull_dry_run(capsys: pytest.CaptureFixture[str]) -> None:
-    """output_sync_git_result dry run with PULL should say would merge."""
-    result = SyncGitResult(
+def test_output_git_pull_result_human_dry_run(capsys: pytest.CaptureFixture[str]) -> None:
+    result = GitSyncResult(
         source_branch="feature",
         target_branch="main",
         source_path=Path("/src"),
         destination_path=Path("/dst"),
         is_dry_run=True,
         commits_transferred=2,
-        mode=SyncMode.PULL,
     )
-    output_sync_git_result(result, OutputFormat.HUMAN)
+    output_git_pull_result(result, OutputFormat.HUMAN)
     captured = capsys.readouterr()
     assert "would merge" in captured.out
 

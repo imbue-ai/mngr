@@ -86,8 +86,8 @@ mngr pair [OPTIONS] SOURCE
 
 ## See Also
 
-- [mngr push](./push.md) - Push files or git commits to an agent
-- [mngr pull](./pull.md) - Pull files or git commits from an agent
+- [mngr help push](mngr help push) - Push files or git commits to an agent
+- [mngr help pull](mngr help pull) - Pull files or git commits from an agent
 - [mngr create](./create.md) - Create a new agent
 - [mngr list](./list.md) - List agents to find one to pair with
 

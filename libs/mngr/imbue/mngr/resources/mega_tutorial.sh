@@ -454,7 +454,8 @@ mngr exec -a --on-error continue "git log --oneline -5"
 #   sync your local changes to an agent's workspace.
 ##############################################################################
 
-# "push" is an experimental command. See "mngr push --help" for current usage.
+# Use "mngr rsync <local> <agent>" to push files. See "mngr rsync --help".
+# Use "mngr git push <agent>" to push git commits. See "mngr git push --help".
 
 ##############################################################################
 # PULLING FILES FROM AGENTS
@@ -462,7 +463,8 @@ mngr exec -a --on-error continue "git log --oneline -5"
 #   This is how you retrieve an agent's work.
 ##############################################################################
 
-# "pull" is an experimental command. See "mngr pull --help" for current usage.
+# Use "mngr rsync <agent> <local>" to pull files. See "mngr rsync --help".
+# Use "mngr git pull <agent>" to pull git commits. See "mngr git pull --help".
 
 ##############################################################################
 # PAIRING WITH AGENTS

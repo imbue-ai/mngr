@@ -8,52 +8,37 @@ import pytest
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mngr.api.sync import GitSyncError
+from imbue.mngr.api.sync import GitSyncResult
 from imbue.mngr.api.sync import LocalGitContext
 from imbue.mngr.api.sync import NotAGitRepositoryError
 from imbue.mngr.api.sync import RemoteGitContext
-from imbue.mngr.api.sync import SyncFilesResult
-from imbue.mngr.api.sync import SyncGitResult
+from imbue.mngr.api.sync import RsyncEndpointError
+from imbue.mngr.api.sync import RsyncResult
 from imbue.mngr.api.sync import UncommittedChangesError
 from imbue.mngr.api.sync import _build_remote_rsync_command
 from imbue.mngr.api.sync import _build_rsync_command
 from imbue.mngr.api.sync import _build_ssh_git_url
-from imbue.mngr.api.sync import sync_git
-from imbue.mngr.api.testing import FakeAgent
+from imbue.mngr.api.sync import git_pull
+from imbue.mngr.api.sync import rsync
 from imbue.mngr.api.testing import FakeHost
 from imbue.mngr.errors import MngrError
-from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.host import OnlineHostInterface
-from imbue.mngr.primitives import SyncMode
 from imbue.mngr.primitives import UncommittedChangesMode
 from imbue.mngr.utils.testing import init_git_repo
 from imbue.mngr.utils.testing import run_git_command
 
 # =============================================================================
-# SyncMode enum tests
+# RsyncResult model tests
 # =============================================================================
 
 
-def test_sync_mode_push_has_correct_value() -> None:
-    assert SyncMode.PUSH.value == "PUSH"
-
-
-def test_sync_mode_pull_has_correct_value() -> None:
-    assert SyncMode.PULL.value == "PULL"
-
-
-# =============================================================================
-# SyncFilesResult model tests
-# =============================================================================
-
-
-def test_sync_files_result_can_be_created_with_all_fields() -> None:
-    result = SyncFilesResult(
+def test_rsync_result_can_be_created_with_all_fields() -> None:
+    result = RsyncResult(
         files_transferred=10,
         bytes_transferred=1024,
         source_path=Path("/source"),
         destination_path=Path("/dest"),
         is_dry_run=False,
-        mode=SyncMode.PUSH,
     )
 
     assert result.files_transferred == 10
@@ -61,53 +46,48 @@ def test_sync_files_result_can_be_created_with_all_fields() -> None:
     assert result.source_path == Path("/source")
     assert result.destination_path == Path("/dest")
     assert result.is_dry_run is False
-    assert result.mode == SyncMode.PUSH
 
 
-def test_sync_files_result_supports_dry_run_mode() -> None:
-    result = SyncFilesResult(
+def test_rsync_result_supports_dry_run() -> None:
+    result = RsyncResult(
         files_transferred=5,
         bytes_transferred=0,
         source_path=Path("/source"),
         destination_path=Path("/dest"),
         is_dry_run=True,
-        mode=SyncMode.PULL,
     )
 
     assert result.is_dry_run is True
-    assert result.mode == SyncMode.PULL
 
 
-def test_sync_files_result_can_be_serialized_to_dict() -> None:
-    result = SyncFilesResult(
+def test_rsync_result_can_be_serialized_to_dict() -> None:
+    result = RsyncResult(
         files_transferred=3,
         bytes_transferred=500,
         source_path=Path("/src"),
         destination_path=Path("/dst"),
         is_dry_run=False,
-        mode=SyncMode.PUSH,
     )
 
     data = result.model_dump()
     assert data["files_transferred"] == 3
     assert data["bytes_transferred"] == 500
-    assert data["mode"] == SyncMode.PUSH
+    assert "mode" not in data
 
 
 # =============================================================================
-# SyncGitResult model tests
+# GitSyncResult model tests
 # =============================================================================
 
 
-def test_sync_git_result_can_be_created_with_all_fields() -> None:
-    result = SyncGitResult(
+def test_git_sync_result_can_be_created_with_all_fields() -> None:
+    result = GitSyncResult(
         source_branch="feature",
         target_branch="main",
         source_path=Path("/source"),
         destination_path=Path("/dest"),
         is_dry_run=False,
         commits_transferred=5,
-        mode=SyncMode.PUSH,
     )
 
     assert result.source_branch == "feature"
@@ -116,22 +96,19 @@ def test_sync_git_result_can_be_created_with_all_fields() -> None:
     assert result.destination_path == Path("/dest")
     assert result.is_dry_run is False
     assert result.commits_transferred == 5
-    assert result.mode == SyncMode.PUSH
 
 
-def test_sync_git_result_supports_dry_run_mode() -> None:
-    result = SyncGitResult(
+def test_git_sync_result_supports_dry_run() -> None:
+    result = GitSyncResult(
         source_branch="dev",
         target_branch="main",
         source_path=Path("/src"),
         destination_path=Path("/dst"),
         is_dry_run=True,
         commits_transferred=0,
-        mode=SyncMode.PULL,
     )
 
     assert result.is_dry_run is True
-    assert result.mode == SyncMode.PULL
 
 
 # =============================================================================
@@ -169,7 +146,7 @@ def test_not_a_git_repository_error_contains_path_in_message() -> None:
 
 def test_not_a_git_repository_error_provides_user_help_text() -> None:
     error = NotAGitRepositoryError(Path("/some/path"))
-    assert "sync-mode=files" in error.user_help_text
+    assert "mngr rsync" in error.user_help_text
 
 
 def test_not_a_git_repository_error_stores_path() -> None:
@@ -467,14 +444,14 @@ def test_build_rsync_command_adds_delete_flag() -> None:
     assert "--delete" in cmd
 
 
-def test_build_remote_rsync_command_push_mode_uses_remote_destination() -> None:
+def test_build_remote_rsync_command_push_uses_remote_destination() -> None:
     ssh_info = ("root", "example.com", 22, Path("/tmp/key"))
     cmd = _build_remote_rsync_command(
-        source_path=Path("/local/src"),
-        destination_path=Path("/remote/dst"),
+        local_path=Path("/local/src"),
+        remote_path=Path("/remote/dst"),
         ssh_info=ssh_info,
         known_hosts_file=None,
-        mode=SyncMode.PUSH,
+        is_push=True,
         is_dry_run=False,
         is_delete=False,
     )
@@ -483,14 +460,14 @@ def test_build_remote_rsync_command_push_mode_uses_remote_destination() -> None:
     assert "-e" in cmd
 
 
-def test_build_remote_rsync_command_pull_mode_uses_remote_source() -> None:
+def test_build_remote_rsync_command_pull_uses_remote_source() -> None:
     ssh_info = ("user", "host.com", 2222, Path("/key"))
     cmd = _build_remote_rsync_command(
-        source_path=Path("/remote/src"),
-        destination_path=Path("/local/dst"),
+        local_path=Path("/local/dst"),
+        remote_path=Path("/remote/src"),
         ssh_info=ssh_info,
         known_hosts_file=None,
-        mode=SyncMode.PULL,
+        is_push=False,
         is_dry_run=False,
         is_delete=False,
     )
@@ -501,11 +478,11 @@ def test_build_remote_rsync_command_pull_mode_uses_remote_source() -> None:
 def test_build_remote_rsync_command_includes_dry_run_and_delete() -> None:
     ssh_info = ("root", "host", 22, Path("/key"))
     cmd = _build_remote_rsync_command(
-        source_path=Path("/src"),
-        destination_path=Path("/dst"),
+        local_path=Path("/src"),
+        remote_path=Path("/dst"),
         ssh_info=ssh_info,
         known_hosts_file=None,
-        mode=SyncMode.PUSH,
+        is_push=True,
         is_dry_run=True,
         is_delete=True,
     )
@@ -514,15 +491,39 @@ def test_build_remote_rsync_command_includes_dry_run_and_delete() -> None:
 
 
 # =============================================================================
-# sync_git safe.directory regression test
+# rsync endpoint validation
 # =============================================================================
 
 
-def test_sync_git_adds_safe_directory_for_non_local_host(
+def test_rsync_rejects_remote_to_remote_transfers(
     tmp_path: Path,
     cg: ConcurrencyGroup,
 ) -> None:
-    """Regression test: sync_git must add safe.directory for non-local hosts.
+    source_host = cast(OnlineHostInterface, FakeHost(is_local=False))
+    destination_host = cast(OnlineHostInterface, FakeHost(is_local=False))
+    with pytest.raises(RsyncEndpointError):
+        rsync(
+            source_host=source_host,
+            source_path=tmp_path / "src",
+            destination_host=destination_host,
+            destination_path=tmp_path / "dst",
+            is_dry_run=False,
+            is_delete=False,
+            uncommitted_changes=UncommittedChangesMode.FAIL,
+            cg=cg,
+        )
+
+
+# =============================================================================
+# git_pull safe.directory regression test
+# =============================================================================
+
+
+def test_git_pull_adds_safe_directory_for_non_local_host(
+    tmp_path: Path,
+    cg: ConcurrencyGroup,
+) -> None:
+    """Regression test: git_pull must add safe.directory for non-local hosts.
 
     Without this, git operations on remote hosts can fail with "detected dubious
     ownership" when file ownership differs from the SSH user (e.g., after rsync
@@ -543,23 +544,20 @@ def test_sync_git_adds_safe_directory_for_non_local_host(
     run_git_command(agent_dir, "config", "user.name", "Test User")
 
     host = cast(OnlineHostInterface, FakeHost(is_local=False))
-    agent = cast(AgentInterface, FakeAgent(work_dir=agent_dir))
 
     # Add a commit to agent so there's something to pull
     (agent_dir / "agent_file.txt").write_text("agent content")
     run_git_command(agent_dir, "add", "agent_file.txt")
     run_git_command(agent_dir, "commit", "-m", "Agent commit")
 
-    sync_git(
-        agent=agent,
-        host=host,
-        mode=SyncMode.PULL,
+    git_pull(
         local_path=local_dir,
+        remote_host=host,
+        remote_path=agent_dir,
         source_branch=None,
         target_branch=None,
         is_dry_run=False,
         uncommitted_changes=UncommittedChangesMode.FAIL,
-        is_mirror=False,
         cg=cg,
     )
 
