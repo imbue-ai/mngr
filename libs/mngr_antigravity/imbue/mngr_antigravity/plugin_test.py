@@ -119,14 +119,14 @@ def antigravity_agent_auto_dismiss(
 class _ConfirmingAntigravityAgent(AntigravityAgent):
     """Test subclass whose trust prompt auto-accepts without invoking click.confirm."""
 
-    def _prompt_user_to_trust_workspace(self, workspace_path: str, settings_path: Path) -> bool:
+    def _prompt_user_to_trust_workspace(self, source_path: Path, settings_path: Path) -> bool:
         return True
 
 
 class _DecliningAntigravityAgent(AntigravityAgent):
     """Test subclass whose trust prompt auto-declines without invoking click.confirm."""
 
-    def _prompt_user_to_trust_workspace(self, workspace_path: str, settings_path: Path) -> bool:
+    def _prompt_user_to_trust_workspace(self, source_path: Path, settings_path: Path) -> bool:
         return False
 
 
@@ -361,15 +361,21 @@ def test_provision_aborts_when_interactive_and_user_declines(
     interactive_ctx_with_declination: AntigravityAgent,
     isolated_home: Path,
 ) -> None:
-    """If the user declines the prompt, abort with a clear UserInputError."""
+    """If the user declines the prompt, exit cleanly via SystemExit.
+
+    Using SystemExit (a ``BaseException``) rather than ``UserInputError``
+    lets the abort propagate through ``provision_agent``'s
+    ``ConcurrencyExceptionGroup`` wrapping unwrapped, so the operator sees
+    a clean exit rather than a noisy auto-diagnostics traceback.
+    """
     agent = interactive_ctx_with_declination
-    with pytest.raises(UserInputError) as excinfo:
+    with pytest.raises(SystemExit) as excinfo:
         agent.provision(
             host=agent.host,
             options=CreateAgentOptions(agent_type=AgentTypeName("antigravity")),
             mngr_ctx=agent.mngr_ctx,
         )
-    assert "declined" in str(excinfo.value).lower()
+    assert excinfo.value.code == 1
     settings_path = get_antigravity_user_settings_path()
     assert not settings_path.exists()
 
@@ -378,22 +384,22 @@ def test_provision_aborts_in_non_interactive_mode_without_opt_in(
     antigravity_agent: AntigravityAgent,
     isolated_home: Path,
 ) -> None:
-    """Non-interactive without --yes or auto_dismiss_dialogs: raise rather than silently fail.
+    """Non-interactive without --yes or auto_dismiss_dialogs: exit cleanly rather than silently fail.
 
     Default mngr_ctx has is_interactive=False and is_auto_approve=False;
     the antigravity_agent fixture defaults auto_dismiss_dialogs=False, so
     no path to a trust write exists and we must abort. Mirrors Claude's
-    ClaudeDirectoryNotTrustedError behavior.
+    ClaudeDirectoryNotTrustedError behavior; uses ``SystemExit`` rather
+    than ``UserInputError`` to bypass provision_agent's concurrency-group
+    exception wrapping.
     """
-    with pytest.raises(UserInputError) as excinfo:
+    with pytest.raises(SystemExit) as excinfo:
         antigravity_agent.provision(
             host=antigravity_agent.host,
             options=CreateAgentOptions(agent_type=AgentTypeName("antigravity")),
             mngr_ctx=antigravity_agent.mngr_ctx,
         )
-    message = str(excinfo.value)
-    assert "not trusted" in message
-    assert "--yes" in message or "auto_dismiss_dialogs" in message
+    assert excinfo.value.code == 1
     settings_path = get_antigravity_user_settings_path()
     assert not settings_path.exists()
 
@@ -441,8 +447,8 @@ def test_provision_already_trusted_workspace_does_not_reprompt(
 ) -> None:
     """If the workspace is already in trustedWorkspaces, no prompt fires.
 
-    The declining-user fixture stubs click.confirm to return False; if the
-    short-circuit weren't in place, this test would raise UserInputError.
+    The declining-user fixture's prompt returns False; if the short-circuit
+    weren't in place, this test would raise SystemExit.
     """
     agent = interactive_ctx_with_declination
     settings_path = get_antigravity_user_settings_path()

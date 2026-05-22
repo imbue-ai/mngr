@@ -41,6 +41,7 @@ import click
 from loguru import logger
 from pydantic import Field
 
+from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.logging import log_span
 from imbue.mngr import hookimpl
 from imbue.mngr.agents.common_transcript import maybe_provision_common_transcript_scripts
@@ -56,6 +57,7 @@ from imbue.mngr.interfaces.agent import HasCommonTranscriptMixin
 from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import CommandString
+from imbue.mngr.utils.git_utils import find_git_common_dir
 from imbue.mngr_antigravity import resources as _antigravity_resources
 from imbue.mngr_antigravity.antigravity_config import TRUSTED_WORKSPACES_KEY
 from imbue.mngr_antigravity.antigravity_config import get_antigravity_user_settings_path
@@ -241,6 +243,21 @@ class AntigravityAgent(InteractiveTuiAgent[AntigravityAgentConfig], HasCommonTra
                 concurrency_group,
             )
 
+    def _find_git_source_path(self, concurrency_group: ConcurrencyGroup) -> Path | None:
+        """Find the source repo root for this agent's ``work_dir``, if it's inside a git repo.
+
+        Returns the parent of the git common dir (the source repo root), or
+        ``None`` if ``work_dir`` is not inside a git repo. Mirrors
+        ``mngr_claude``'s helper of the same name -- the source-path concept
+        is what makes a single trust grant cover every worktree of the same
+        repo (in Claude's per-project storage; for Antigravity it is the
+        human-visible reference but doesn't change agy's exact-match check).
+        """
+        git_common_dir = find_git_common_dir(self.work_dir, concurrency_group)
+        if git_common_dir is None:
+            return None
+        return git_common_dir.parent
+
     def _interactively_dismiss_antigravity_dialogs(self, host: OnlineHostInterface, mngr_ctx: MngrContext) -> None:
         """Ensure agy's first-launch trust dialog won't intercept tmux input.
 
@@ -250,14 +267,26 @@ class AntigravityAgent(InteractiveTuiAgent[AntigravityAgentConfig], HasCommonTra
           silently trust the work_dir.
         * Interactive mode (``mngr_ctx.is_interactive``): prompt the user
           via ``click.confirm`` before mutating the global settings file.
-          If the user declines, raise ``UserInputError`` so the agent
-          creation aborts cleanly instead of leaving the operator stuck
-          inside agy's TUI dialog.
+          The prompt references the source repo root (when work_dir is a
+          worktree of one) -- the analog of how Claude phrases this --
+          even though the actual settings write is for the work_dir,
+          because agy's ``trustedWorkspaces`` is exact-match and only the
+          work_dir entry will suppress the first-launch dialog.
         * Non-interactive mode with neither auto-approve nor opt-in:
           raise. The operator likely intended to opt in and didn't.
 
         If the work_dir is already trusted (idempotent re-provision) the
         method short-circuits without prompting.
+
+        Decline / non-interactive paths exit via ``raise SystemExit(1)``
+        rather than ``UserInputError`` because ``provision_agent`` wraps
+        its body in a ``ConcurrencyExceptionGroup`` (see
+        ``imbue.concurrency_group.concurrency_group.ConcurrencyGroup._exit``);
+        the wrapping turns a regular ``Exception`` into a noisy traceback
+        with mngr's auto-diagnostics handler. ``SystemExit`` is a
+        ``BaseException``, which the concurrency group re-raises unwrapped
+        (line 190-191 in that module), giving the operator a clean exit
+        with the logged reason.
         """
         workspace_path = str(self.work_dir)
         settings_path = get_antigravity_user_settings_path()
@@ -271,35 +300,46 @@ class AntigravityAgent(InteractiveTuiAgent[AntigravityAgentConfig], HasCommonTra
             self._write_workspace_trust(host, settings_path, existing_settings, workspace_path)
             return
 
-        if not mngr_ctx.is_interactive:
-            raise UserInputError(
-                f"Antigravity workspace {workspace_path} is not trusted in {settings_path}. "
-                f"agy's first-launch trust dialog would consume the first keystroke sent to "
-                f"the tmux pane and break `mngr message`. Re-run with `--yes`, or set "
-                f"`auto_dismiss_dialogs = true` on the antigravity agent type."
-            )
+        source_path = self._find_git_source_path(mngr_ctx.concurrency_group) or self.work_dir
 
-        if not self._prompt_user_to_trust_workspace(workspace_path, settings_path):
-            raise UserInputError(
-                f"User declined to trust {workspace_path} in {settings_path}. "
-                f"Antigravity's first-launch trust dialog would block tmux input."
+        if not mngr_ctx.is_interactive:
+            logger.error(
+                "Source directory {} is not trusted by the Antigravity CLI. "
+                "agy's first-launch trust dialog would consume the first keystroke sent to "
+                "the tmux pane and break `mngr message`. Re-run interactively to be prompted, "
+                "re-run with `--yes`, or set `auto_dismiss_dialogs = true` on the antigravity "
+                "agent type.",
+                source_path,
             )
+            raise SystemExit(1)
+
+        if not self._prompt_user_to_trust_workspace(source_path, settings_path):
+            logger.error(
+                "User declined to trust {} in {}. Antigravity's first-launch trust dialog "
+                "would block tmux input. Aborting agent creation.",
+                source_path,
+                settings_path,
+            )
+            raise SystemExit(1)
         self._write_workspace_trust(host, settings_path, existing_settings, workspace_path)
 
-    def _prompt_user_to_trust_workspace(self, workspace_path: str, settings_path: Path) -> bool:
-        """Prompt the user to trust the agent's work_dir in Antigravity's user-tier settings.
+    def _prompt_user_to_trust_workspace(self, source_path: Path, settings_path: Path) -> bool:
+        """Prompt the user to trust the agent's source directory in Antigravity's settings.
 
         Returns True iff the user confirms. Pattern matches ``mngr_claude``'s
-        ``_prompt_user_for_trust`` (`libs/mngr_claude/imbue/mngr_claude/plugin.py`).
+        ``_prompt_user_for_trust`` (`libs/mngr_claude/imbue/mngr_claude/plugin.py`):
+        the message refers to the *source* directory (the git repo root, or
+        the bare work_dir if not in a git repo) so the user sees a stable
+        path across worktrees rather than the per-worktree transient path.
         Defaults to ``False`` so a stray Enter doesn't grant trust silently.
         Exposed as a method (rather than a module-level function) so tests
         can subclass and override without monkeypatching.
         """
         logger.info(
-            "\nWorkspace {} is not yet trusted by the Antigravity CLI.\n"
+            "\nSource directory {} is not yet trusted by the Antigravity CLI.\n"
             "mngr needs to add a trust entry for this directory to {}\n"
             "so that agy's first-launch trust dialog doesn't intercept tmux input.\n",
-            workspace_path,
+            source_path,
             settings_path,
         )
         return click.confirm(
