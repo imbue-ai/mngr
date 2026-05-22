@@ -1,6 +1,6 @@
 # Unabridged Changelog - remote_service_connector
 
-Full, unedited changelog entries consolidated nightly from individual files in the `changelog/remote_service_connector/` directory.
+Full, unedited changelog entries consolidated nightly from individual files in `apps/remote_service_connector/changelog/`.
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
