@@ -7,9 +7,10 @@ routed the query to the sibling session. The lifecycle check then read the sibli
 pane, saw a live `claude` process, and reported the stopped agent as `WAITING`.
 
 Changes:
-- Introduce `tmux_session_target()` and `tmux_window_target()` helpers in
-  `imbue.mngr.hosts.tmux` that prepend `=` (and, for window/pane commands, an
-  explicit `:window` component, which is required for those commands to honor `=`).
+- Introduce `TmuxSessionTarget` and `TmuxWindowTarget` Pydantic classes in
+  `imbue.mngr.hosts.tmux` whose `.as_shell_arg()` renders the `-t` argument with
+  a leading `=` (and, for window/pane commands, an explicit `:window` component,
+  which is required for those commands to honor `=`).
 - Route every tmux `-t` call site through the helpers: lifecycle check, send-keys /
   paste-buffer / capture-pane in `BaseAgent`, post-attach resize script in `connect.py`,
   `_build_start_agent_shell_command` in `host.py`, rename / kill / has-session paths,

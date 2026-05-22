@@ -530,13 +530,14 @@ PREVENT_BARE_TMUX_TARGETS = RegexRatchetRule(
         "aimed at a stopped session whose name is a prefix of a still-running session's "
         "name will land on the wrong session. This can deliver keystrokes to the wrong "
         "agent (send-keys), kill the wrong session (kill-session), or capture the wrong "
-        "agent's pane content (capture-pane). Construct targets via tmux_session_target() "
-        "/ tmux_window_target() from imbue.mngr.hosts.tmux, or write the leading "
-        "equals-sign literally. For target-window/-pane commands an explicit :window "
-        "component is required so tmux doesn't parse the equals-sign-prefixed name as a "
-        "literal window/pane name -- see the tmux_window_target docstring. (list-panes -s "
-        "is a special case: cmd-find.c ignores the equals-sign prefix even though -s is "
-        "documented as a target-session form; guard with a has-session call first.)"
+        "agent's pane content (capture-pane). Construct targets via TmuxSessionTarget / "
+        "TmuxWindowTarget from imbue.mngr.hosts.tmux (call .as_shell_arg() to render), "
+        "or write the leading equals-sign literally. For target-window/-pane commands "
+        "an explicit :window component is required so tmux doesn't parse the "
+        "equals-sign-prefixed name as a literal window/pane name -- see the "
+        "TmuxWindowTarget docstring. (list-panes -s is a special case: cmd-find.c "
+        "ignores the equals-sign prefix even though -s is documented as a "
+        "target-session form; guard with a has-session call first.)"
     ),
     # Catch `tmux <subcmd> ... -t '<target>'` where the quoted target starts with anything
     # other than `=` (the exact-match prefix). `^(?!\s*#).*` at the start, with multiline,
