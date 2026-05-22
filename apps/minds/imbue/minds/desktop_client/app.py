@@ -1484,10 +1484,15 @@ async def _handle_chrome_events(
     )
 
 
-# The `local` provider is always present and always healthy; it would just be
-# noise in the providers panel. Other consumers (e.g. `mngr list` CLI) keep
-# showing it normally -- this hide applies only to minds' panel.
-_HIDDEN_PROVIDER_NAMES_IN_PANEL: Final[frozenset[str]] = frozenset({"local"})
+# Provider names that are always hidden from minds' providers panel:
+# - ``local``: always present, always healthy; nothing actionable.
+# - ``imbue_cloud``: the default singleton instance is non-functional. Minds
+#   uses the multi-account variant (``imbue_cloud_<slug>`` per signed-in
+#   account), so the default block is dead weight and surfacing it would
+#   confuse users into thinking they need to enable / disable it.
+# Other consumers (e.g. `mngr list` CLI) keep showing both normally -- the
+# hide applies only to minds' panel.
+_HIDDEN_PROVIDER_NAMES_IN_PANEL: Final[frozenset[str]] = frozenset({"local", "imbue_cloud"})
 
 
 def _build_providers_state_payload(backend_resolver: BackendResolverInterface) -> dict[str, Any]:

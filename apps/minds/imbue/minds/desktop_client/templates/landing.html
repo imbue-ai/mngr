@@ -64,19 +64,27 @@
     {% endif %}
 
     {# Providers panel: rendered empty server-side, populated by the SSE
-       providers_state event. Shows all configured providers (except `local`)
-       with a status badge, last error when applicable, and an Enable/Disable
-       button. The two freshness counters at the top tick locally between
-       server-pushed timestamp updates. #}
+       providers_state event. Shows all configured providers (except
+       `local` and the default `imbue_cloud` singleton) with a status
+       badge, last error when applicable, and an Enable/Disable button.
+       Collapsed by default to a one-line summary ("X providers enabled
+       (N errors)" + chevron); user clicks the summary to expand into
+       the full list + freshness counters. #}
     <section class="mt-10 pt-6 border-t border-zinc-200" data-providers-panel hidden>
-      <div class="flex items-center justify-between mb-3">
-        <h2 class="text-base font-semibold text-zinc-900">Providers</h2>
-        <div class="text-xs text-zinc-500 flex gap-4">
-          <span>last event <span data-providers-last-event>—</span></span>
-          <span>last snapshot <span data-providers-last-snapshot>—</span></span>
+      <button type="button" data-providers-toggle
+              class="w-full flex items-center justify-between text-left text-sm text-zinc-600 hover:text-zinc-900 bg-transparent border-0 cursor-pointer p-0">
+        <span data-providers-summary>0 providers enabled</span>
+        <span data-providers-chevron class="text-zinc-400 ml-2">▸</span>
+      </button>
+      <div data-providers-details class="mt-3" hidden>
+        <div class="flex items-center justify-end mb-3">
+          <div class="text-xs text-zinc-500 flex gap-4">
+            <span>last event <span data-providers-last-event>—</span></span>
+            <span>last snapshot <span data-providers-last-snapshot>—</span></span>
+          </div>
         </div>
+        <div class="flex flex-col gap-1.5" data-providers-list></div>
       </div>
-      <div class="flex flex-col gap-1.5" data-providers-list></div>
     </section>
   {% endcall %}
 {% endblock %}
@@ -169,6 +177,25 @@
         return status;
       }
 
+      function renderProvidersSummary(entries) {
+        var summary = document.querySelector('[data-providers-summary]');
+        if (!summary) return;
+        // "enabled" = anything that isn't currently disabled.
+        var enabledCount = 0;
+        var errorCount = 0;
+        entries.forEach(function (entry) {
+          if (entry.status !== 'disabled') enabledCount += 1;
+          if (entry.status === 'error') errorCount += 1;
+        });
+        var providerWord = enabledCount === 1 ? 'provider' : 'providers';
+        var text = enabledCount + ' ' + providerWord + ' enabled';
+        if (errorCount > 0) {
+          var errorWord = errorCount === 1 ? 'error' : 'errors';
+          text += ' (' + errorCount + ' ' + errorWord + ')';
+        }
+        summary.textContent = text;
+      }
+
       function renderProviders(payload) {
         var panel = document.querySelector('[data-providers-panel]');
         var list = document.querySelector('[data-providers-list]');
@@ -182,6 +209,7 @@
           return;
         }
         panel.hidden = false;
+        renderProvidersSummary(entries);
         // Bulk re-render (entries are stably alphabetical from the server).
         list.innerHTML = '';
         entries.forEach(function (entry) {
@@ -268,6 +296,22 @@
           renderProviders({ providers: renderedProviders || [] });
         });
       }
+
+      // Collapsed-by-default expand toggle. The details (full per-provider
+      // rows + freshness counters) stay hidden until the user clicks the
+      // summary; the summary itself is always visible (when the panel is
+      // showing at all). Front-end-only -- not persisted across reloads.
+      (function wireProvidersToggle() {
+        var btn = document.querySelector('[data-providers-toggle]');
+        var details = document.querySelector('[data-providers-details]');
+        var chevron = document.querySelector('[data-providers-chevron]');
+        if (!btn || !details || !chevron) return;
+        btn.addEventListener('click', function () {
+          var willShow = details.hidden;
+          details.hidden = !willShow;
+          chevron.textContent = willShow ? '▾' : '▸';
+        });
+      })();
 
       var es = null;
       function connect() {

@@ -219,6 +219,36 @@ def test_build_providers_state_payload_hides_local_provider() -> None:
     assert payload["last_event_at"] == now.isoformat()
 
 
+def test_build_providers_state_payload_hides_default_imbue_cloud_provider() -> None:
+    """The default ``imbue_cloud`` singleton is hidden -- minds uses per-account variants."""
+    resolver = MngrCliBackendResolver()
+    now = datetime.now(timezone.utc)
+    resolver.update_providers(
+        providers=(_make_discovered_provider("imbue_cloud", backend="imbue_cloud"),),
+        error_by_provider_name={},
+        last_full_snapshot_at=now,
+    )
+
+    payload = _build_providers_state_payload(resolver)
+
+    assert payload["providers"] == []
+
+
+def test_build_providers_state_payload_keeps_per_account_imbue_cloud_provider() -> None:
+    """Per-account ``imbue_cloud_<slug>`` providers are NOT hidden; only the default is."""
+    resolver = MngrCliBackendResolver()
+    now = datetime.now(timezone.utc)
+    resolver.update_providers(
+        providers=(_make_discovered_provider("imbue_cloud_alice-example-com", backend="imbue_cloud"),),
+        error_by_provider_name={},
+        last_full_snapshot_at=now,
+    )
+
+    payload = _build_providers_state_payload(resolver)
+
+    assert [entry["name"] for entry in payload["providers"]] == ["imbue_cloud_alice-example-com"]
+
+
 def test_build_providers_state_payload_combines_ok_error_disabled(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
