@@ -1,6 +1,6 @@
 # Unabridged Changelog - mngr_latchkey
 
-Full, unedited changelog entries consolidated nightly from individual files in the `changelog/mngr_latchkey/` directory.
+Full, unedited changelog entries consolidated nightly from individual files in `libs/mngr_latchkey/changelog/`.
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 

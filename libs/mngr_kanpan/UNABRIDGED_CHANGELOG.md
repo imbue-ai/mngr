@@ -1,6 +1,6 @@
 # Unabridged Changelog - mngr_kanpan
 
-Full, unedited changelog entries consolidated nightly from individual files in the `changelog/mngr_kanpan/` directory.
+Full, unedited changelog entries consolidated nightly from individual files in `libs/mngr_kanpan/changelog/`.
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 

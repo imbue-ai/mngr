@@ -2,6 +2,4 @@ Adds `test_create_local_docker_workspace_via_electron`: an acceptance test that 
 
 Adds the `MINDS_MNGR_FORWARD_PORT` env var to `minds run` so test harnesses (and concurrent `just minds-start` invocations) can dodge the hardcoded default port 8421 collision.
 
-Adds a `just minds-test-electron` recipe that wraps the test in `xvfb-run -a`, and wires the existing `test-docker` CI job to install Node, pnpm, xvfb, and the apps/minds pnpm dependencies so the Electron binary is available for the run.
-
 Replaces the stale skipped `test_create_agent_e2e` (which never drove Electron and carried an out-of-date "TUI send-enter timeout" skip reason that no longer applies after FCT split its services agent from its chat agent).

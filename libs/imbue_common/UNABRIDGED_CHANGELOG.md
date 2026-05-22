@@ -1,6 +1,6 @@
 # Unabridged Changelog - imbue_common
 
-Full, unedited changelog entries consolidated nightly from individual files in the `changelog/imbue_common/` directory.
+Full, unedited changelog entries consolidated nightly from individual files in `libs/imbue_common/changelog/`.
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
