@@ -13,9 +13,13 @@ def generate_cloud_init_user_data(
     default 10:30:100 pre-auth cap and lose connections mid-transfer.
     Mirrors the equivalent ``MaxSessions=100`` / ``MaxStartups=100:30:200``
     knob the lima provider applies to its VMs. The bump lives in a
-    ``/etc/ssh/sshd_config.d/`` drop-in written via ``write_files`` so
-    sshd reads it on first start; the follow-up ``systemctl reload ssh``
-    is belt-and-suspenders only and sends SIGHUP (no connection drop).
+    ``/etc/ssh/sshd_config.d/`` drop-in written via ``write_files``; sshd
+    is already running with the cloud image's default config by the time
+    cloud-init reaches this stage, so ``systemctl reload ssh`` (SIGHUP)
+    in ``runcmd`` is what makes sshd re-read its config and pick up the
+    drop-in. Reload is chosen over restart because SIGHUP preserves
+    in-flight SSH sessions, which keeps the provisioning poll loop's
+    connections alive across the bootstrap window.
 
     When ``auto_shutdown_minutes`` is set, the VPS schedules a
     ``shutdown -P +N`` from cloud-init, so the OS halts itself after the
@@ -62,14 +66,12 @@ runcmd:
   - systemctl enable docker
   - systemctl start docker
   # Apply the MaxSessions/MaxStartups bump without killing in-flight SSH
-  # connections. ``systemctl reload`` sends SIGHUP, which sshd handles by
-  # re-execing itself -- existing sessions stay alive. ``systemctl restart``
-  # would tear them down, racing the provisioning poll loop and hanging
-  # in-flight reads until pyinfra's 10s timeout fires (which is not
-  # retried, so it would kill host creation outright). The drop-in config
-  # file is written by ``write_files`` before sshd starts using it, so
-  # the reload is purely belt-and-suspenders for the case where sshd
-  # somehow started reading the old config first.
+  # connections. ``systemctl reload`` sends SIGHUP, which makes sshd
+  # re-read its config (picking up the drop-in under
+  # /etc/ssh/sshd_config.d/) while leaving existing sessions alive.
+  # ``systemctl restart`` would tear those sessions down and race the
+  # provisioning poll loop, hanging in-flight reads until pyinfra's
+  # 10s per-command timeout fires.
   - systemctl reload ssh 2>/dev/null || systemctl reload sshd 2>/dev/null || service ssh reload 2>/dev/null || true
   - touch /var/run/mngr-ready
 {shutdown_block}"""
