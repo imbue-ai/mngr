@@ -10,6 +10,7 @@ from imbue.mngr.api.data_types import ConnectionOptions
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import NestedTmuxError
+from imbue.mngr.hosts.tmux import TmuxSessionTarget
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.utils.duration import parse_duration_to_seconds
@@ -41,14 +42,19 @@ def build_post_attach_resize_script(session_name: str) -> str:
     Every tmux ``-t`` target uses the ``=`` exact-session prefix (with an
     explicit ``:$W`` window component on target-window/-pane commands) so the
     script cannot misroute to a sibling session whose name is a prefix of
-    ``session_name``. See :class:`imbue.mngr.hosts.tmux.TmuxWindowTarget` for
-    the parsing rule.
+    ``session_name``. The session component is rendered via
+    :class:`imbue.mngr.hosts.tmux.TmuxSessionTarget` so any shell-special
+    characters in ``session_name`` are escaped uniformly with the rest of the
+    codebase; ``:$W`` stays as a literal shell-variable suffix so the loop
+    iterates over windows at runtime. See
+    :class:`imbue.mngr.hosts.tmux.TmuxWindowTarget` for the parsing rule.
     """
+    session_target = TmuxSessionTarget(session_name=session_name).as_shell_arg()
     return (
-        f"tmux list-windows -t '={session_name}' -F '#I' | "
+        f"tmux list-windows -t {session_target} -F '#I' | "
         f"while read W; do "
-        f"tmux resize-window -t '={session_name}':$W -A; "
-        f"tmux list-panes -t '={session_name}':$W -F '#{{pane_pid}}' "
+        f"tmux resize-window -t {session_target}:$W -A; "
+        f"tmux list-panes -t {session_target}:$W -F '#{{pane_pid}}' "
         f"| xargs -I{{}} sh -c 'kill -WINCH {{}} $(pgrep -P {{}})' 2>/dev/null; "
         f"done"
     )
