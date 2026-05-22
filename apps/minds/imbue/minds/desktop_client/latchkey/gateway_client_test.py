@@ -12,8 +12,10 @@ import httpx
 import pytest
 
 from imbue.minds.desktop_client.latchkey.gateway_client import AvailableServiceEntry
+from imbue.minds.desktop_client.latchkey.gateway_client import FileSharingRequestPayload
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClient
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClientError
+from imbue.minds.desktop_client.latchkey.gateway_client import PredefinedRequestPayload
 
 
 def _build_client(handler: Callable[[httpx.Request], httpx.Response]) -> LatchkeyGatewayClient:
@@ -135,10 +137,13 @@ def test_iter_permission_requests_parses_jsonl_stream() -> None:
     items = list(client.iter_permission_requests())
     assert [item.request_id for item in items] == ["abc", "def"]
     assert items[0].request_type == "predefined"
-    assert items[0].as_predefined_payload().scope == "slack-api"
-    assert items[0].as_predefined_payload().permissions == ("slack-read-all",)
+    predefined_payload = items[0].payload
+    assert isinstance(predefined_payload, PredefinedRequestPayload)
+    assert predefined_payload.scope == "slack-api"
+    assert predefined_payload.permissions == ("slack-read-all",)
     assert items[1].request_type == "file-sharing"
-    file_sharing_payload = items[1].as_file_sharing_payload()
+    file_sharing_payload = items[1].payload
+    assert isinstance(file_sharing_payload, FileSharingRequestPayload)
     assert file_sharing_payload.path == "/home/user/file.txt"
     assert str(file_sharing_payload.access) == "READ"
 
@@ -164,7 +169,9 @@ def test_iter_permission_requests_skips_malformed_lines() -> None:
     items = list(client.iter_permission_requests())
     assert [item.request_id for item in items] == ["x"]
     assert items[0].request_type == "predefined"
-    assert items[0].as_predefined_payload().scope == "s-api"
+    predefined_payload = items[0].payload
+    assert isinstance(predefined_payload, PredefinedRequestPayload)
+    assert predefined_payload.scope == "s-api"
 
 
 def test_approve_permission_request_posts_through_gateway() -> None:

@@ -8,7 +8,10 @@ from typing import Final
 import httpx
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.minds.desktop_client.latchkey.gateway_client import FileSharingRequestPayload
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClient
+from imbue.minds.desktop_client.latchkey.gateway_client import PermissionEffect
+from imbue.minds.desktop_client.latchkey.gateway_client import PredefinedRequestPayload
 from imbue.minds.desktop_client.latchkey.gateway_client import StreamedPermissionRequest
 from imbue.minds.desktop_client.latchkey.permission_requests_consumer import PermissionRequestsConsumer
 from imbue.minds.desktop_client.latchkey.permission_requests_consumer import streamed_request_to_event
@@ -33,9 +36,9 @@ def _make_streamed_predefined(
         agent_id=agent_id,
         rationale=rationale,
         request_type="predefined",
-        payload={"scope": scope, "permissions": list(permissions)},
+        payload=PredefinedRequestPayload(scope=scope, permissions=permissions),
         target="/tmp/permissions.json",
-        effect={"rules": [{scope: list(permissions)}]},
+        effect=PermissionEffect(rules=({scope: permissions},)),
     )
 
 
@@ -51,9 +54,9 @@ def _make_streamed_file_sharing(
         agent_id=agent_id,
         rationale=rationale,
         request_type="file-sharing",
-        payload={"path": path, "access": access},
+        payload=FileSharingRequestPayload.model_validate({"path": path, "access": access}),
         target="/tmp/permissions.json",
-        effect={"rules": [{"minds-file-server": ["minds-file-server-deadbeef"]}]},
+        effect=PermissionEffect(rules=({"minds-file-server": ("minds-file-server-deadbeef",)},)),
     )
 
 

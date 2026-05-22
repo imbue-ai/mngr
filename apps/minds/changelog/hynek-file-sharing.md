@@ -83,9 +83,13 @@ request types:
   `latchkey_permissions.json` by hand for that, for now.
 * `LatchkeyGatewayClient` gains an `approve_permission_request`
   method. The `StreamedPermissionRequest` model carries the new
-  wire shape (`request_type` + `payload` + `target` + `effect`)
-  with typed convenience methods to extract the payload as a
-  `PredefinedRequestPayload` / `FileSharingRequestPayload`.
+  wire shape (`request_type` + `payload` + `target` + `effect`).
+  `payload` is typed directly as the `PredefinedRequestPayload |
+  FileSharingRequestPayload` union (pydantic's smart-union mode
+  resolves the two disjoint shapes at decode time), and `effect` is
+  typed as a `PermissionEffect` model with `rules` and `schemas`
+  fields. Consumers dispatch via `isinstance` on `payload` rather
+  than re-validating the dict at the call site.
 
 The Minds REST API ships a new WebDAV file-server mount at
 `/api/v1/files`, backed by [`wsgidav`](https://wsgidav.readthedocs.io/)
