@@ -243,12 +243,15 @@ def connect_to_agent(
             # Copy and remove TMUX so tmux allows the nested attachment
             env = dict(os.environ)
             del env["TMUX"]
-        # Validate via TmuxSessionTarget (also documents the intent) and pass
-        # the raw `=name` form to argv -- argv is verbatim, so we must NOT
-        # shell-quote here (as_shell_arg() would wrong-shape the argument when
-        # session_name contains a shell-special character).
-        session_target = TmuxSessionTarget(session_name=session_name)
-        os.execvpe("tmux", ["tmux", "attach", "-t", f"={session_target.session_name}"], env)
+        # Pass the raw `=name` form straight to argv. We deliberately do NOT
+        # route this through TmuxSessionTarget.as_shell_arg() (the helper used
+        # everywhere else in the codebase): as_shell_arg() shlex-quotes the
+        # value for safe interpolation into a shell command string, but argv
+        # to os.execvpe is verbatim, so an extra layer of shell-quoting would
+        # wrong-shape the argument whenever session_name contains a
+        # shell-special character. The leading `=` still forces tmux's
+        # exact-session matching (same rule TmuxSessionTarget encodes).
+        os.execvpe("tmux", ["tmux", "attach", "-t", f"={session_name}"], env)
     else:
         ssh_args = _build_ssh_args(host, connection_opts)
 
