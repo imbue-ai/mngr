@@ -394,7 +394,7 @@ _RECOVERY_SCRIPT: Final[str] = """\
           show(hostBtn, false);
         }
         function renderHostOffer() {
-          titleEl.textContent = 'System interface not responding';
+          titleEl.textContent = 'Workspace unresponsive';
           messageEl.textContent =
             'This workspace needs a restart to recover. In-progress work in all agents will be interrupted.';
           show(spinnerEl, false);
@@ -403,17 +403,17 @@ _RECOVERY_SCRIPT: Final[str] = """\
           show(hostBtn, true);
         }
         function renderFailed() {
-          titleEl.textContent = 'Restart failed';
+          titleEl.textContent = 'Workspace unresponsive';
           messageEl.textContent =
-            'The restart did not recover the workspace. You can try again, or contact support '
-            + 'if the problem persists.';
+            'This workspace needs a restart to recover. In-progress work in all agents will be '
+            + 'interrupted. If the problem persists, contact support.';
           show(spinnerEl, false);
           show(errorEl, true);
           hostBtn.textContent = 'Restart workspace';
           show(hostBtn, true);
         }
         function renderDispatchError() {
-          titleEl.textContent = 'System interface not responding';
+          titleEl.textContent = 'Workspace unresponsive';
           messageEl.textContent = 'Could not start the restart. Check your connection and try again.';
           show(spinnerEl, false);
           show(errorEl, false);
