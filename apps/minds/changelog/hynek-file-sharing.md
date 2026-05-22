@@ -35,9 +35,10 @@ request schema and a new approve endpoint:
   a pending request without applying its effect; the minds desktop
   client uses it for the deny path.
 * The `file-sharing` effect now targets the WebDAV mount described
-  below: the scope schema matches any URL under
-  `/extensions/minds-api-proxy/api/v1/files` via a `pattern`, and the
-  per-file permission schema const-matches the URL path itself
+  below. The effect attaches a per-file permission to the
+  pre-existing `latchkey-self` scope from the agent baseline rather
+  than minting its own scope schema. The per-file permission schema
+  const-matches the URL path itself
   (`/extensions/minds-api-proxy/api/v1/files<absolute_path>`). The
   legacy `queryParams.path` constraint is gone.
 * File-sharing requests now carry a required `access` field on the

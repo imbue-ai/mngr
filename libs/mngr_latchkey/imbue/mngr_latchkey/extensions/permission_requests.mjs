@@ -105,13 +105,17 @@ const VALID_REQUEST_TYPES = new Set([REQUEST_TYPE_PREDEFINED, REQUEST_TYPE_FILE_
 // ``/api/v1/files/abs/path`` (the WebDAV share roots are mounted at
 // their on-disk path, so the outward URL mirrors the absolute path
 // one-to-one). Granting access to a specific file therefore means
-// matching the URL path exactly. We mint a dedicated scope schema
-// (``minds-file-server``) that catches every request under the
-// WebDAV mount and a per-file permission schema that nails it down
-// to the one allowed URL + a WebDAV method.
-const FILE_SHARING_GATEWAY_HOST = 'latchkey-self.invalid';
+// matching the URL path exactly via a per-file permission schema.
+//
+// We do *not* mint a scope schema here: the file-sharing rule reuses
+// the agent baseline's ``latchkey-self`` scope (defined in
+// ``agent_setup.py``), which already matches any request whose
+// ``domain`` is ``latchkey-self.invalid``. The per-file permission
+// schema is what restricts the grant to a single WebDAV URL + verb
+// set; the scope just identifies which rule list the permission
+// belongs to.
 const FILE_SHARING_PROXY_PATH_PREFIX = '/minds-api-proxy/api/v1/files';
-const FILE_SHARING_SCOPE_SCHEMA_NAME = 'minds-file-server';
+const FILE_SHARING_SCOPE_NAME = 'latchkey-self';
 const FILE_SHARING_PERMISSION_PREFIX = 'minds-file-server-';
 
 // Access modes the agent can request for a file. ``READ`` grants the
@@ -419,10 +423,13 @@ async function parsePermissionRequestBody(request) {
  * use built-in detent schemas (slack-api, github-rest-api, ...) so
  * the effect carries no ``schemas`` field; only the new
  * scope-to-permissions rule is included. ``file-sharing`` requests
- * need a custom scope schema + custom per-path permission schema
- * because the proxy-mediated endpoint isn't in detent's built-in
- * catalog -- both end up in ``effect.schemas``, and ``effect.rules``
- * carries the grant that activates them.
+ * need a custom per-path permission schema because the proxy-mediated
+ * endpoint isn't in detent's built-in catalog -- that single schema
+ * goes in ``effect.schemas``. The scope it activates under is the
+ * pre-existing ``latchkey-self`` scope from the agent baseline, so
+ * the effect does *not* emit a scope schema of its own; only
+ * ``effect.rules`` carries the grant that wires the new permission
+ * onto that scope.
  */
 function computeEffect(type, payload) {
   switch (type) {
@@ -475,27 +482,6 @@ function fileSharingPermissionSchemaName(filePath, access) {
   return `${FILE_SHARING_PERMISSION_PREFIX}${access.toLowerCase()}-${filePath}`;
 }
 
-/**
- * Escape a literal string for safe inclusion in a JavaScript regular
- * expression. The proxy-path prefix is plain ASCII today, but we run
- * it through this on the way into the scope-schema pattern so any
- * future change that introduces a regex metacharacter doesn't
- * silently broaden the match.
- */
-function escapeForRegex(literal) {
-  return literal.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
-
-/**
- * Compute the JSON-Schema ``pattern`` that matches every URL path
- * under the WebDAV mount: the bare prefix (used by tooling that pokes
- * the mount root) plus anything below it. We pin to ``^...$`` so the
- * scope only catches requests that are *actually* on this mount.
- */
-function fileSharingScopePathPattern() {
-  return `^${escapeForRegex(FILE_SHARING_PROXY_PATH_PREFIX)}(/.*)?$`;
-}
-
 function computeFileSharingEffect(filePath, access) {
   const permissionSchemaName = fileSharingPermissionSchemaName(filePath, access);
   // WebDAV serves the on-disk path directly under the mount, so the
@@ -505,13 +491,6 @@ function computeFileSharingEffect(filePath, access) {
   const fileWebdavPath = `${FILE_SHARING_PROXY_PATH_PREFIX}${filePath}`;
   return {
     schemas: {
-      [FILE_SHARING_SCOPE_SCHEMA_NAME]: {
-        properties: {
-          domain: { const: FILE_SHARING_GATEWAY_HOST },
-          path: { type: 'string', pattern: fileSharingScopePathPattern() },
-        },
-        required: ['domain', 'path'],
-      },
       [permissionSchemaName]: {
         properties: {
           method: { enum: allowedMethodsForAccess(access) },
@@ -520,7 +499,14 @@ function computeFileSharingEffect(filePath, access) {
         required: ['method', 'path'],
       },
     },
-    rules: [{ [FILE_SHARING_SCOPE_SCHEMA_NAME]: [permissionSchemaName] }],
+    // The rule attaches the new per-file permission to the
+    // pre-existing ``latchkey-self`` scope from the agent baseline
+    // (defined in ``agent_setup.py``). We deliberately do not mint a
+    // scope schema here -- the baseline already declares one that
+    // matches any request with ``domain == latchkey-self.invalid``,
+    // and the merge logic in ``handleApproveRequest`` unions the new
+    // permission name into that scope's existing permission list.
+    rules: [{ [FILE_SHARING_SCOPE_NAME]: [permissionSchemaName] }],
   };
 }
 

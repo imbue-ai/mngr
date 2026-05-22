@@ -37,9 +37,11 @@ _EXTENSION_PATH: Final[Path] = Path(__file__).resolve().parent / "permission_req
 _NODE_READY_TIMEOUT_SECONDS: Final[float] = 15.0
 _POLL_INTERVAL_SECONDS: Final[float] = 0.02
 
-_FILE_SHARING_SCOPE_SCHEMA_NAME: Final[str] = "minds-file-server"
-_FILE_SHARING_PROXY_PATH_PREFIX: Final[str] = "/extensions/minds-api-proxy/api/v1/files"
-_FILE_SHARING_GATEWAY_HOST: Final[str] = "latchkey-self.invalid"
+# The file-sharing rule attaches to the pre-existing ``latchkey-self``
+# scope from the agent baseline (defined in ``agent_setup.py``) rather
+# than minting its own scope schema.
+_FILE_SHARING_SCOPE_NAME: Final[str] = "latchkey-self"
+_FILE_SHARING_PROXY_PATH_PREFIX: Final[str] = "/minds-api-proxy/api/v1/files"
 _FILE_SHARING_PERMISSION_PREFIX: Final[str] = "minds-file-server-"
 _FILE_SHARING_READ_METHODS: Final[tuple[str, ...]] = (
     "GET",
@@ -272,24 +274,12 @@ def test_post_creates_file_sharing_request_with_schemas_and_rules(
     assert parsed["payload"] == {"path": target_path, "access": access}
     effect = parsed["effect"]
     permission_name = _file_sharing_permission_name(target_path, access)
-    assert effect["rules"] == [{_FILE_SHARING_SCOPE_SCHEMA_NAME: [permission_name]}]
+    # The rule attaches the new per-file permission to the pre-existing
+    # ``latchkey-self`` scope from the agent baseline; we do not mint a
+    # scope schema of our own here.
+    assert effect["rules"] == [{_FILE_SHARING_SCOPE_NAME: [permission_name]}]
     schemas = effect["schemas"]
-    assert set(schemas.keys()) == {_FILE_SHARING_SCOPE_SCHEMA_NAME, permission_name}
-    # The scope schema constrains the gateway-self host + matches any
-    # URL under the WebDAV mount (per-file pinning happens at the
-    # permission-schema level below).
-    scope_schema = schemas[_FILE_SHARING_SCOPE_SCHEMA_NAME]
-    assert scope_schema["properties"]["domain"] == {"const": _FILE_SHARING_GATEWAY_HOST}
-    # The JS escape on the extension side only escapes the regex
-    # metacharacters ``.*+?^${}()|[]\``; ASCII-letter / dash / slash
-    # segments of the prefix pass through verbatim. The pattern below
-    # mirrors that exactly so the assert catches schema drift but does
-    # not over-specify the escape policy.
-    expected_scope_path_pattern = r"^/extensions/minds-api-proxy/api/v1/files(/.*)?$"
-    assert scope_schema["properties"]["path"] == {
-        "type": "string",
-        "pattern": expected_scope_path_pattern,
-    }
+    assert set(schemas.keys()) == {permission_name}
     # The per-path permission schema pins the URL path to the WebDAV
     # URL for this specific file and the method to the WebDAV verb
     # set for the requested access mode.
@@ -507,12 +497,16 @@ def test_approve_writes_target_permissions_for_file_sharing(
     assert response["request_id"] == request_id
     assert response["target"] == str(permissions_config_path)
 
-    # The on-disk target was written with the effect applied.
+    # The on-disk target was written with the effect applied. The
+    # file-sharing effect adds *only* the per-file permission schema;
+    # the scope (``latchkey-self``) is assumed to already exist in the
+    # agent baseline, so the merged schemas should contain just the
+    # one new entry.
     applied = json.loads(permissions_config_path.read_text())
     permission_name = _file_sharing_permission_name(target_path, "READ")
-    assert applied["rules"] == [{_FILE_SHARING_SCOPE_SCHEMA_NAME: [permission_name]}]
-    assert _FILE_SHARING_SCOPE_SCHEMA_NAME in applied["schemas"]
+    assert applied["rules"] == [{_FILE_SHARING_SCOPE_NAME: [permission_name]}]
     assert permission_name in applied["schemas"]
+    assert _FILE_SHARING_SCOPE_NAME not in applied["schemas"]
 
     # Pending request file was removed.
     pending_dir = latchkey_directory / "permission_requests" / "v2"

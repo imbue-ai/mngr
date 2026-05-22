@@ -34,11 +34,13 @@
     client uses it for the deny path.
 - The `file-sharing` permission effect was rewritten to target the new
   WebDAV mount that replaced `/api/v1/file-server` on the minds side:
-  - The scope schema (`minds-file-server`) now matches any URL under
-    `/extensions/minds-api-proxy/api/v1/files` via a `pattern`
-    (`^/extensions/minds-api-proxy/api/v1/files(/.*)?$`) instead of a
-    `const`. The synthetic gateway host (`latchkey-self.invalid`) is
-    unchanged.
+  - The effect no longer mints its own scope schema. The rule now
+    attaches the per-file permission to the pre-existing `latchkey-self`
+    scope from the agent baseline (defined in `agent_setup.py`), which
+    already matches any request whose `domain` is
+    `latchkey-self.invalid`. The per-file permission schema is what
+    restricts the grant to a single WebDAV URL + verb set; the scope
+    just identifies which rule list the permission belongs to.
   - The per-file permission schema now pins `path` (the URL path) to
     the WebDAV URL for the requested file -- the WebDAV mount serves
     each absolute path at the URL

@@ -56,7 +56,7 @@ def _make_streamed_file_sharing(
         request_type="file-sharing",
         payload=FileSharingRequestPayload.model_validate({"path": path, "access": access}),
         target="/tmp/permissions.json",
-        effect=PermissionEffect(rules=({"minds-file-server": ("minds-file-server-deadbeef",)},)),
+        effect=PermissionEffect(rules=({"latchkey-self": ("minds-file-server-deadbeef",)},)),
     )
 
 
@@ -116,7 +116,7 @@ def test_consumer_dispatches_each_streamed_request_to_on_request() -> None:
                 "request_type": "file-sharing",
                 "payload": {"path": "/home/user/log.txt", "access": "READ"},
                 "target": "/tmp/permissions.json",
-                "effect": {"rules": [{"minds-file-server": ["minds-file-server-cafef00d"]}]},
+                "effect": {"rules": [{"latchkey-self": ["minds-file-server-cafef00d"]}]},
             },
         )
     )

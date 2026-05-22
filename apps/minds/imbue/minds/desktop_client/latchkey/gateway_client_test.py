@@ -122,7 +122,7 @@ def test_iter_permission_requests_parses_jsonl_stream() -> None:
             "request_type": "file-sharing",
             "payload": {"path": "/home/user/file.txt", "access": "READ"},
             "target": "/tmp/permissions.json",
-            "effect": {"rules": [{"minds-file-server": ["minds-file-server-cafef00d"]}]},
+            "effect": {"rules": [{"latchkey-self": ["minds-file-server-cafef00d"]}]},
         },
     ]
     body = "".join(json.dumps(item) + "\n" for item in requests_payload).encode("utf-8")
