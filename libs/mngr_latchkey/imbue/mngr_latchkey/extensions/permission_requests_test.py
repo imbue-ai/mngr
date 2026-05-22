@@ -17,6 +17,7 @@ minds-api-proxy test module.
 """
 
 import json
+import re
 import shutil
 import socket
 import subprocess
@@ -280,12 +281,49 @@ def test_post_creates_file_sharing_request_with_schemas_and_rules(
     assert effect["rules"] == [{_FILE_SHARING_SCOPE_NAME: [permission_name]}]
     schemas = effect["schemas"]
     assert set(schemas.keys()) == {permission_name}
-    # The per-path permission schema pins the URL path to the WebDAV
-    # URL for this specific file and the method to the WebDAV verb
-    # set for the requested access mode.
+    # The per-path permission schema constrains the URL path via a
+    # regex ``pattern`` (not a ``const``): granting access to a
+    # resource at ``<base>`` admits the exact path, the same path
+    # with a trailing slash, and any non-traversing sub-path nested
+    # below it (so a grant on a directory transitively covers files
+    # inside). ``method`` stays a plain enum of WebDAV verbs for the
+    # requested access mode.
     perm_schema = schemas[permission_name]
     expected_webdav_path = f"{_FILE_SHARING_PROXY_PATH_PREFIX}{target_path}"
-    assert perm_schema["properties"]["path"] == {"const": expected_webdav_path}
+    assert perm_schema["properties"]["path"]["type"] == "string"
+    path_pattern = re.compile(perm_schema["properties"]["path"]["pattern"])
+    # The pattern admits the exact resource and any non-traversing
+    # sub-path below it...
+    for url_path in (
+        expected_webdav_path,
+        f"{expected_webdav_path}/",
+        f"{expected_webdav_path}/sub",
+        f"{expected_webdav_path}/sub/",
+        f"{expected_webdav_path}/a/b/c",
+        f"{expected_webdav_path}/a/b/c/",
+        # ``.hidden`` / ``..foo`` / ``...`` are not the literal ``..``
+        # segment and so must not be rejected.
+        f"{expected_webdav_path}/.hidden",
+        f"{expected_webdav_path}/..foo",
+        f"{expected_webdav_path}/...",
+    ):
+        assert path_pattern.fullmatch(url_path), url_path
+    # ...and rejects ``..`` segments anywhere in the sub-path,
+    # empty segments (``//``), a sibling under the share, and the
+    # base path with a trailing string that does not start with
+    # ``/`` (so the grant does not cover ``<base>foo``).
+    for url_path in (
+        f"{expected_webdav_path}/..",
+        f"{expected_webdav_path}/../foo",
+        f"{expected_webdav_path}/foo/..",
+        f"{expected_webdav_path}/foo/../bar",
+        f"{expected_webdav_path}/foo/../",
+        f"{expected_webdav_path}//double",
+        f"{expected_webdav_path}/foo//bar",
+        f"{expected_webdav_path}suffix",
+        f"{_FILE_SHARING_PROXY_PATH_PREFIX}/home/example/other.txt",
+    ):
+        assert not path_pattern.fullmatch(url_path), url_path
     assert perm_schema["properties"]["method"] == {"enum": list(expected_methods)}
 
 

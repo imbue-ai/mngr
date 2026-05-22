@@ -38,9 +38,14 @@ request schema and a new approve endpoint:
   below. The effect attaches a per-file permission to the
   pre-existing `latchkey-self` scope from the agent baseline rather
   than minting its own scope schema. The per-file permission schema
-  const-matches the URL path itself
-  (`/minds-api-proxy/api/v1/files<absolute_path>`). The
-  legacy `queryParams.path` constraint is gone.
+  matches the URL path via a regex `pattern` rooted at the WebDAV
+  URL for the requested resource
+  (`/minds-api-proxy/api/v1/files<absolute_path>`): the exact path,
+  the same path with a trailing slash, and any non-traversing
+  sub-path nested below it (a `..` segment anywhere in the sub-path
+  is rejected). A grant on a directory therefore transitively
+  covers every file and sub-directory inside it. The legacy
+  `queryParams.path` constraint is gone.
 * File-sharing requests now carry a required `access` field on the
   payload (`READ` / `WRITE`). `READ` unlocks the non-mutating WebDAV
   verbs only (`GET`, `HEAD`, `OPTIONS`, `PROPFIND`); `WRITE` is a

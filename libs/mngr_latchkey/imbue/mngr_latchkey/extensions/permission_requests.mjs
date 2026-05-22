@@ -482,6 +482,48 @@ function fileSharingPermissionSchemaName(filePath, access) {
   return `${FILE_SHARING_PERMISSION_PREFIX}${access.toLowerCase()}-${filePath}`;
 }
 
+/**
+ * Escape a literal string for safe inclusion in a JavaScript regular
+ * expression. Used to embed the WebDAV URL prefix into the per-file
+ * permission schema's ``pattern`` without letting a literal ``.`` in
+ * the file path (e.g. ``data.txt``) broaden the match.
+ */
+function escapeForRegex(literal) {
+  return literal.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/**
+ * Build the JSON-Schema ``pattern`` for the per-file permission's
+ * ``path`` property. Granting access to ``<base>`` (the WebDAV URL
+ * for the shared file or directory) admits:
+ *
+ *   * ``<base>`` itself,
+ *   * ``<base>/`` (the same resource with a trailing slash, which
+ *     WebDAV clients commonly emit when treating the target as a
+ *     collection), and
+ *   * ``<base>/<sub-path>``: any resource nested below the shared
+ *     one, so a grant on a directory transitively covers every file
+ *     and sub-directory inside it.
+ *
+ * Each segment of ``<sub-path>`` is non-empty and must not be exactly
+ * ``..``: a grant on ``/home/user/share`` does not cover
+ * ``/home/user/share/..`` (which would escape the share). ``.``
+ * segments are not rejected here -- they are redundant but not a
+ * traversal threat. The lookahead enforces the constraint segment by
+ * segment so neither leading (``/../foo``), interior (``/foo/../bar``),
+ * nor trailing (``/foo/..``) ``..`` segments slip through.
+ */
+function fileSharingPermissionPathPattern(fileWebdavPath) {
+  const escapedBase = escapeForRegex(fileWebdavPath);
+  // ``(?:/(?!\.\.(?:/|$))[^/]+)+`` -- one or more ``/<segment>``
+  // chunks where each segment is non-empty and not exactly ``..``.
+  // The ``/`` lives inside the iteration so multi-segment sub-paths
+  // like ``/a/b/c`` accumulate cleanly; the trailing ``/?$`` admits
+  // an optional trailing slash on either the base path or the
+  // deepest sub-path.
+  return `^${escapedBase}(?:(?:/(?!\\.\\.(?:/|$))[^/]+)+)?/?$`;
+}
+
 function computeFileSharingEffect(filePath, access) {
   const permissionSchemaName = fileSharingPermissionSchemaName(filePath, access);
   // WebDAV serves the on-disk path directly under the mount, so the
@@ -494,7 +536,10 @@ function computeFileSharingEffect(filePath, access) {
       [permissionSchemaName]: {
         properties: {
           method: { enum: allowedMethodsForAccess(access) },
-          path: { const: fileWebdavPath },
+          path: {
+            type: 'string',
+            pattern: fileSharingPermissionPathPattern(fileWebdavPath),
+          },
         },
         required: ['method', 'path'],
       },
