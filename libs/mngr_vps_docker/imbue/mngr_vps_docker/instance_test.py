@@ -1,10 +1,19 @@
 """Tests for VPS Docker provider instance utilities."""
 
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
+from typing import cast
 
 import pytest
+from pydantic import ConfigDict
+from pydantic import Field
 
+from imbue.imbue_common.mutable_model import MutableModel
+from imbue.mngr.errors import HostConnectionError
 from imbue.mngr.errors import MngrError
+from imbue.mngr.interfaces.data_types import CommandResult
+from imbue.mngr.interfaces.host import OuterHostInterface
 from imbue.mngr.primitives import HostId
 from imbue.mngr_vps_docker.instance import ParsedVpsBuildOptions
 from imbue.mngr_vps_docker.instance import _emit_docker_build_output
@@ -13,6 +22,7 @@ from imbue.mngr_vps_docker.instance import _parse_build_args
 from imbue.mngr_vps_docker.instance import _redact_secret_env
 from imbue.mngr_vps_docker.instance import _remove_host_from_known_hosts
 from imbue.mngr_vps_docker.instance import _resolve_dockerfile_paths
+from imbue.mngr_vps_docker.instance import _wait_for_cloud_init_marker
 from imbue.mngr_vps_docker.instance import build_vps_tags
 
 _DEFAULT_REGION = "ewr"
@@ -313,3 +323,179 @@ def test_emit_docker_build_output_skips_whitespace_only() -> None:
     _emit_docker_build_output("")
     _emit_docker_build_output("   ")
     _emit_docker_build_output("\n")
+
+
+# =============================================================================
+# _wait_for_cloud_init_marker
+# =============================================================================
+
+
+class _ScriptedOuter(MutableModel):
+    """Outer host whose ``execute_idempotent_command`` is driven by a callable.
+
+    ``responder`` is invoked on each call with the issued command and returns
+    either a ``CommandResult`` (used as the return value) or raises an
+    exception (propagated to the caller). This lets one test mix exceptions
+    and successful responses in any order.
+    """
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    responder: Callable[[str], CommandResult] = Field(description="Per-call responder")
+    call_count: int = Field(default=0, description="Number of execute_idempotent_command calls observed")
+
+    def execute_idempotent_command(
+        self,
+        command: str,
+        user: str | None = None,
+        cwd: Any = None,
+        env: Any = None,
+        timeout_seconds: float | None = None,
+    ) -> CommandResult:
+        self.call_count += 1
+        return self.responder(command)
+
+
+def _scripted_outer(responder: Callable[[str], CommandResult]) -> tuple[OuterHostInterface, _ScriptedOuter]:
+    """Build a ``_ScriptedOuter`` typed as ``OuterHostInterface``.
+
+    Returns the stub typed as the interface (for the helper under test) plus
+    the concrete stub (for the test to introspect call_count).
+    """
+    stub = _ScriptedOuter(responder=responder)
+    return cast(OuterHostInterface, stub), stub
+
+
+class _VirtualClock(MutableModel):
+    """Injectable clock/sleeper pair backed by a single float counter.
+
+    ``now()`` returns the current virtual time. ``sleep(seconds)`` advances
+    virtual time by ``seconds`` (clamped to a positive minimum so timeouts
+    are still reached when callers pass ``0.0``). Combined, these let tests
+    fully control the elapsed-time logic of poll loops without any real
+    sleeps.
+    """
+
+    elapsed_seconds: float = Field(default=0.0, description="Current virtual time in seconds")
+
+    def now(self) -> float:
+        return self.elapsed_seconds
+
+    def sleep(self, seconds: float) -> None:
+        self.elapsed_seconds += max(seconds, 0.001)
+
+
+def test_wait_for_cloud_init_marker_returns_when_marker_appears() -> None:
+    """Returns immediately on the first poll where /var/run/mngr-ready exists."""
+
+    def responder(_command: str) -> CommandResult:
+        return CommandResult(stdout="", stderr="", success=True)
+
+    outer, stub = _scripted_outer(responder)
+    clock = _VirtualClock()
+    _wait_for_cloud_init_marker(
+        outer,
+        timeout_seconds=10.0,
+        poll_interval_seconds=0.0,
+        clock=clock.now,
+        sleeper=clock.sleep,
+    )
+    assert stub.call_count == 1
+
+
+def test_wait_for_cloud_init_marker_keeps_polling_while_marker_missing() -> None:
+    """Keeps polling as long as the marker is missing; returns once it appears."""
+    poll_count = 0
+
+    def responder(_command: str) -> CommandResult:
+        nonlocal poll_count
+        poll_count += 1
+        success = poll_count >= 3
+        return CommandResult(stdout="", stderr="", success=success)
+
+    outer, stub = _scripted_outer(responder)
+    clock = _VirtualClock()
+    _wait_for_cloud_init_marker(
+        outer,
+        timeout_seconds=10.0,
+        poll_interval_seconds=0.0,
+        clock=clock.now,
+        sleeper=clock.sleep,
+    )
+    assert stub.call_count == 3
+
+
+def test_wait_for_cloud_init_marker_swallows_transient_connection_errors() -> None:
+    """Per-poll ``HostConnectionError`` must NOT abort the wait loop.
+
+    Regression test for the cloud-init bootstrap reliability fix: while
+    cloud-init reloads sshd to pick up the MaxSessions/MaxStartups
+    drop-in, an in-flight ``execute_idempotent_command`` can surface as
+    ``HostConnectionError``. The wait loop should swallow it, sleep, and
+    retry until the marker appears or ``timeout_seconds`` is exhausted.
+    """
+    poll_count = 0
+
+    def responder(_command: str) -> CommandResult:
+        nonlocal poll_count
+        poll_count += 1
+        if poll_count == 1:
+            raise HostConnectionError("connection reset during sshd reload")
+        if poll_count == 2:
+            return CommandResult(stdout="", stderr="", success=False)
+        return CommandResult(stdout="", stderr="", success=True)
+
+    outer, stub = _scripted_outer(responder)
+    clock = _VirtualClock()
+    _wait_for_cloud_init_marker(
+        outer,
+        timeout_seconds=10.0,
+        poll_interval_seconds=0.0,
+        clock=clock.now,
+        sleeper=clock.sleep,
+    )
+    assert stub.call_count == 3
+
+
+def test_wait_for_cloud_init_marker_raises_mngr_error_on_timeout() -> None:
+    """When the marker never appears within the timeout, raise ``MngrError``."""
+
+    def responder(_command: str) -> CommandResult:
+        return CommandResult(stdout="", stderr="", success=False)
+
+    outer, stub = _scripted_outer(responder)
+    clock = _VirtualClock()
+    with pytest.raises(MngrError, match="Cloud-init did not complete"):
+        _wait_for_cloud_init_marker(
+            outer,
+            timeout_seconds=10.0,
+            poll_interval_seconds=1.0,
+            clock=clock.now,
+            sleeper=clock.sleep,
+        )
+    # The virtual clock advances by 1.0s per sleep, so the loop runs ~10 times.
+    assert stub.call_count >= 1
+
+
+def test_wait_for_cloud_init_marker_raises_on_persistent_connection_error() -> None:
+    """If every poll raises ``HostConnectionError`` until the timeout, raise ``MngrError``.
+
+    The connection errors are absorbed per-poll, so the failure mode after
+    exhausting the timeout budget is the normal "did not complete" error,
+    not a leaked ``HostConnectionError``.
+    """
+
+    def responder(_command: str) -> CommandResult:
+        raise HostConnectionError("sshd never recovered")
+
+    outer, stub = _scripted_outer(responder)
+    clock = _VirtualClock()
+    with pytest.raises(MngrError, match="Cloud-init did not complete"):
+        _wait_for_cloud_init_marker(
+            outer,
+            timeout_seconds=10.0,
+            poll_interval_seconds=1.0,
+            clock=clock.now,
+            sleeper=clock.sleep,
+        )
+    assert stub.call_count >= 2

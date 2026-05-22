@@ -316,6 +316,46 @@ def _check_file_exists_on_outer(outer: OuterHostInterface, path: str) -> bool:
     return result.success
 
 
+def _wait_for_cloud_init_marker(
+    outer: OuterHostInterface,
+    timeout_seconds: float,
+    *,
+    poll_interval_seconds: float = 5.0,
+    slow_threshold_seconds: float = 30.0,
+    clock: Callable[[], float] = time.monotonic,
+    sleeper: Callable[[float], None] = time.sleep,
+) -> None:
+    """Poll the VPS for /var/run/mngr-ready, the cloud-init completion marker.
+
+    Returns once the marker file appears. Swallows ``HostConnectionError``
+    from each poll: cloud-init runs ``apt-get install`` and Docker setup
+    which can momentarily disrupt SSH (e.g. ``systemctl reload ssh`` after
+    writing a sshd_config drop-in). Each poll's underlying retry budget
+    already absorbs single in-flight disruptions; a connection error that
+    propagates past that means the system is still settling. Keep polling
+    -- ``timeout_seconds`` is the hard wall.
+
+    ``poll_interval_seconds`` and ``slow_threshold_seconds`` are parameters
+    so tests can drive this without slow real-time waits; defaults preserve
+    the production cadence (poll every 5s, warn if total > 30s).
+
+    ``clock`` and ``sleeper`` are injected so tests can run against a
+    virtual clock and avoid any real-time sleep.
+    """
+    start = clock()
+    while clock() - start < timeout_seconds:
+        try:
+            if _check_file_exists_on_outer(outer, "/var/run/mngr-ready"):
+                elapsed = clock() - start
+                if elapsed > slow_threshold_seconds:
+                    logger.warning("Cloud-init took {:.1f}s (threshold: {:.0f}s)", elapsed, slow_threshold_seconds)
+                return
+        except HostConnectionError as e:
+            logger.debug("Transient SSH error during cloud-init poll (will retry): {}", e)
+        sleeper(poll_interval_seconds)
+    raise MngrError(f"Cloud-init did not complete within {timeout_seconds}s. Docker may not be installed on the VPS.")
+
+
 def _exec_in_container(
     outer: OuterHostInterface,
     container_name: str,
@@ -825,30 +865,8 @@ class VpsDockerProvider(BaseProviderInstance):
     # =========================================================================
 
     def _wait_for_cloud_init(self, outer: OuterHostInterface, timeout_seconds: float) -> None:
-        """Wait for cloud-init to finish (Docker installed, marker file present).
-
-        Swallows ``HostConnectionError`` from each poll: cloud-init runs
-        ``apt-get install`` and Docker setup which can momentarily disrupt
-        SSH (e.g. ``systemctl reload ssh`` after writing a sshd_config
-        drop-in). Each poll's underlying retry budget already absorbs
-        single in-flight disruptions; a connection error that propagates
-        past that means the system is still settling. Keep polling -- the
-        outer ``timeout_seconds`` budget is the hard wall.
-        """
-        start = time.monotonic()
-        while time.monotonic() - start < timeout_seconds:
-            try:
-                if _check_file_exists_on_outer(outer, "/var/run/mngr-ready"):
-                    elapsed = time.monotonic() - start
-                    if elapsed > 30.0:
-                        logger.warning("Cloud-init took {:.1f}s (threshold: 30s)", elapsed)
-                    return
-            except HostConnectionError as e:
-                logger.debug("Transient SSH error during cloud-init poll (will retry): {}", e)
-            time.sleep(5.0)
-        raise MngrError(
-            f"Cloud-init did not complete within {timeout_seconds}s. Docker may not be installed on the VPS."
-        )
+        """Wait for cloud-init to finish (Docker installed, marker file present)."""
+        _wait_for_cloud_init_marker(outer, timeout_seconds=timeout_seconds)
 
     def _wait_for_sshd_on_vps(self, vps_ip: str, timeout_seconds: float) -> None:
         """Wait for sshd on the VPS to be ready."""
