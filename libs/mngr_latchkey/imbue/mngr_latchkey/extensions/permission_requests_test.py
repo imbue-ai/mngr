@@ -16,7 +16,6 @@ Tests skip cleanly when Node is unavailable, mirroring the
 minds-api-proxy test module.
 """
 
-import hashlib
 import json
 import shutil
 import socket
@@ -69,9 +68,8 @@ pytestmark = pytest.mark.skipif(_NODE_BINARY is None, reason="node binary not av
 
 
 def _file_sharing_permission_name(path: str, access: str) -> str:
-    """Mirror the JS helper: ``minds-file-server-<access_lower>-sha256(path)[:32]``."""
-    digest = hashlib.sha256(path.encode("utf-8")).hexdigest()[:32]
-    return f"{_FILE_SHARING_PERMISSION_PREFIX}{access.lower()}-{digest}"
+    """Mirror the JS helper: ``minds-file-server-<access_lower>-<path>``."""
+    return f"{_FILE_SHARING_PERMISSION_PREFIX}{access.lower()}-{path}"
 
 
 # The Node driver mounts the extension under a HTTP server, passing a

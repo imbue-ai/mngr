@@ -59,9 +59,10 @@
     verbs (`GET`, `HEAD`, `OPTIONS`, `PROPFIND`); `WRITE` is a strict
     superset that also unlocks the single-path mutating ones (`PUT`,
     `DELETE`, `PROPPATCH`, `MKCOL`, `LOCK`, `UNLOCK`). Per-file
-    permission schemas now embed the access mode in their name
-    (`minds-file-server-read-<sha256(path)[:32]>` /
-    `minds-file-server-write-<sha256(path)[:32]>`) so a user can hold
+    permission schemas now embed the access mode and the full file
+    path in their name (`minds-file-server-read-<absolute-path>` /
+    `minds-file-server-write-<absolute-path>`, e.g.
+    `minds-file-server-read-/home/user/notes.txt`) so a user can hold
     both grants for the same path independently and a later WRITE
     grant does not silently override an earlier READ grant (or vice
     versa). Re-approving the same `(path, access)` pair remains

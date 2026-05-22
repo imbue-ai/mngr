@@ -68,7 +68,7 @@
  * There are potential race conditions but we ignore them for now.
  */
 
-import { createHash, randomBytes, randomUUID } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import {
   existsSync,
   mkdirSync,
@@ -99,7 +99,7 @@ const VALID_REQUEST_TYPES = new Set([REQUEST_TYPE_PREDEFINED, REQUEST_TYPE_FILE_
 // Names and constants used when generating the ``effect`` for a
 // ``file-sharing`` request. The agent reaches the Minds API through
 // the gateway's ``minds-api-proxy`` extension, which mounts under
-// ``/extensions/minds-api-proxy/...``. ``/api/v1/files`` is the
+// ``/minds-api-proxy/...``. ``/api/v1/files`` is the
 // Minds-side WebDAV mount that actually serves files: a request for
 // the file ``/abs/path`` lands at the URL path
 // ``/api/v1/files/abs/path`` (the WebDAV share roots are mounted at
@@ -110,7 +110,7 @@ const VALID_REQUEST_TYPES = new Set([REQUEST_TYPE_PREDEFINED, REQUEST_TYPE_FILE_
 // WebDAV mount and a per-file permission schema that nails it down
 // to the one allowed URL + a WebDAV method.
 const FILE_SHARING_GATEWAY_HOST = 'latchkey-self.invalid';
-const FILE_SHARING_PROXY_PATH_PREFIX = '/extensions/minds-api-proxy/api/v1/files';
+const FILE_SHARING_PROXY_PATH_PREFIX = '/minds-api-proxy/api/v1/files';
 const FILE_SHARING_SCOPE_SCHEMA_NAME = 'minds-file-server';
 const FILE_SHARING_PERMISSION_PREFIX = 'minds-file-server-';
 
@@ -221,6 +221,7 @@ function resolveLatchkeyDirectory() {
 }
 
 function resolvePermissionRequestsDirectory() {
+  // Bump the version when doing backwards incompatible changes to the data model so that we don't need to deal with old permission requests.
   return join(resolveLatchkeyDirectory(), 'permission_requests', 'v2');
 }
 
@@ -439,29 +440,39 @@ function computeEffect(type, payload) {
 }
 
 /**
- * Derive a stable, filename-safe schema name for a file-sharing
+ * Derive a stable, human-readable schema name for a file-sharing
  * permission targeted at ``filePath`` at the named ``access`` mode.
  *
  * The name has the shape
- * ``minds-file-server-<access_lower>-<sha256(filePath)[:32]>`` so:
+ * ``minds-file-server-<access_lower>-<filePath>`` (e.g.
+ * ``minds-file-server-read-/abs/path/to/file.txt``) so:
  *
  *  * read and write grants for the same path are *different* schemas
  *    -- both can coexist in a user's permissions.json, and a
  *    later write grant does not silently replace an earlier read
  *    grant (or vice versa);
- *  * the schema name is human-debuggable (``read`` / ``write``
- *    appears in plaintext);
- *  * the name is filename-safe and bounded in length; and
- *  * the per-mode-per-path mapping is deterministic, so idempotent
- *    re-approval of the same (path, access) pair merges cleanly
- *    through the schema-by-name merge in the approve handler.
+ *  * the schema name is human-readable -- both the access mode and
+ *    the full file path appear in plaintext, which makes
+ *    permissions.json easy to audit by eye;
+ *  * the per-mode-per-path mapping is deterministic *and* injective
+ *    (the path is embedded verbatim, so distinct paths cannot
+ *    collide), so idempotent re-approval of the same (path, access)
+ *    pair merges cleanly through the schema-by-name merge in the
+ *    approve handler.
+ *
+ * The schema name is only ever used as a JSON object key / string
+ * value inside permissions.json, so it has no filename-safety or
+ * length constraints beyond what JSON itself allows. ``filePath``
+ * has already been validated by ``validateAbsoluteFileSharingPath``
+ * to start with ``/`` and to be traversal-free, which makes the
+ * ``<access_lower>-/<...>`` boundary in the resulting name
+ * unambiguous.
  */
 function fileSharingPermissionSchemaName(filePath, access) {
   if (!VALID_FILE_SHARING_ACCESS_MODES.has(access)) {
     throw new InvalidRequestBodyError(`unhandled file-sharing access mode '${access}'.`);
   }
-  const hash = createHash('sha256').update(filePath, 'utf-8').digest('hex').slice(0, 32);
-  return `${FILE_SHARING_PERMISSION_PREFIX}${access.toLowerCase()}-${hash}`;
+  return `${FILE_SHARING_PERMISSION_PREFIX}${access.toLowerCase()}-${filePath}`;
 }
 
 /**
