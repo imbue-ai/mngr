@@ -393,16 +393,13 @@ _RECOVERY_SCRIPT: Final[str] = """\
           show(errorEl, false);
           show(hostBtn, false);
         }
-        function renderHostOffer() {
-          titleEl.textContent = 'Workspace unresponsive';
-          messageEl.textContent =
-            'This workspace needs a restart to recover. In-progress work in all agents will be interrupted.';
-          show(spinnerEl, false);
-          show(errorEl, false);
-          hostBtn.textContent = 'Restart workspace';
-          show(hostBtn, true);
-        }
-        function renderFailed() {
+        // The single "Workspace unresponsive" state -- shown both before any
+        // restart (ambiguous host state) and after a restart failed to
+        // recover the workspace. These were two near-identical screens; they
+        // are one page now. The error <details> is only in the DOM when a
+        // failure reason exists, so showing it is a no-op when there is none:
+        // the same page renders correctly with or without the detail.
+        function renderUnresponsive() {
           titleEl.textContent = 'Workspace unresponsive';
           messageEl.textContent =
             'This workspace needs a restart to recover. In-progress work in all agents will be '
@@ -452,10 +449,10 @@ _RECOVERY_SCRIPT: Final[str] = """\
             } else {
               // Ambiguous host state: a host restart could interrupt running
               // agents, so make the user confirm by clicking.
-              renderHostOffer();
+              renderUnresponsive();
             }
           }, function () {
-            renderHostOffer();
+            renderUnresponsive();
           });
         }
 
@@ -467,11 +464,11 @@ _RECOVERY_SCRIPT: Final[str] = """\
           renderLoading();
           scheduleRefresh();
         } else if (initialStatus === 'restart_failed') {
-          renderFailed();
+          renderUnresponsive();
         } else if (initialStatus === 'healthy') {
           // Degenerate: rendered HEALTHY with no return_to to 302 to. Offer a
           // manual restart rather than auto-dispatching one on a healthy page.
-          renderHostOffer();
+          renderUnresponsive();
         } else {
           runProbe();
         }

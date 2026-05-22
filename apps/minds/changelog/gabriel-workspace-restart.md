@@ -11,14 +11,14 @@ Tiered system-interface restart for the minds recovery flow.
   (nothing is running, so there is nothing to interrupt). Only an
   ambiguous host state falls back to a confirmed "Restart workspace"
   button.
-- If a restart fails, the page shows the workspace as unresponsive and
-  offers a full workspace restart, with the error detail collapsed by
-  default (expandable, and it wraps instead of overflowing its
-  container). All of the recovery page's non-loading states share one
-  "Workspace unresponsive" heading; the post-failure state in particular
-  no longer says "Restart failed" -- the automatic restart runs
-  invisibly behind the "Loading workspace" state, so naming a failed
-  attempt the user never saw was just confusing.
+- The recovery page's pre-restart prompt and its post-failure state are
+  now one identical "Workspace unresponsive" page: same heading, same
+  body, a "Restart workspace" button, and a collapsed error detail that
+  appears only when a restart actually failed (expandable, and it wraps
+  instead of overflowing its container). The post-failure state no
+  longer says "Restart failed" -- the automatic restart runs invisibly
+  behind the "Loading workspace" state, so naming a failed attempt the
+  user never saw was just confusing.
 - The surgical restart cleanly stops and starts the system-services
   agent instead of poking its tmux window; the full restart bounces the
   whole workspace container.
