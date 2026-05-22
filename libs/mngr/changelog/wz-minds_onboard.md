@@ -1,0 +1,1 @@
+- `libs/mngr`: regenerate the `mngr forward` CLI reference (`docs/commands/secondary/forward.md`). The `--port` option's help text and default drifted out of sync with the dynamic-port behavior; the regenerated doc now describes the "try 8421, fall back to an OS-assigned port" semantics.
