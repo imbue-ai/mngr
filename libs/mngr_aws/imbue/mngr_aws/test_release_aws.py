@@ -139,7 +139,8 @@ def _run_mngr(
         except subprocess.TimeoutExpired:
             proc.kill()
             proc.wait()
-            returncode = 124  # GNU-coreutils ``timeout`` convention.
+            # 124 is the GNU-coreutils ``timeout`` convention.
+            returncode = 124
     log_text = log_path.read_text()
     return subprocess.CompletedProcess(
         args=cmd,
