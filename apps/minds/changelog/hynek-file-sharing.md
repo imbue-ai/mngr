@@ -52,8 +52,9 @@ request schema and a new approve endpoint:
   permission schemas embed the access mode in their name
   (`minds-file-server-read-<hash>` / `minds-file-server-write-<hash>`)
   so the two grants are independent. The minds approval dialog shows
-  a green "read-only" or amber "read & write" badge and explains
-  what the agent will be allowed to do; the granted / denied
+  a green "read-only" or amber "read & write" badge inline next to
+  the requested file path and explains what the agent will be allowed
+  to do; the granted / denied
   notification text reflects the mode as well.
 
 The minds desktop client's latchkey-permission handler code was
