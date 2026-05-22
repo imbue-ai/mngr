@@ -11,13 +11,7 @@ name: minds macOS smoke test
 # Trigger from the Actions tab ("Run workflow") or:
 #   gh workflow run minds-mac-smoke.yml --ref <branch>
 
-# NOTE: the `push` trigger is temporary -- it exists only so the smoke test
-# can be exercised on the `mngr/minds-mac-ci` branch before it reaches `main`
-# (a `workflow_dispatch`-only workflow is not dispatchable until its file is
-# on the default branch). Remove it before merging.
 on:
-  push:
-    branches: [mngr/minds-mac-ci]
   workflow_dispatch:
 
 concurrency:
