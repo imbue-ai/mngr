@@ -698,15 +698,19 @@ def mngr_agent_cleanup(
         run_mngr_subprocess(*args, env=env)
 
 
-def capture_tmux_pane_contents(session_name: str, window: int | str = 0) -> str:
-    """Capture the contents of a tmux session's pane via local subprocess.
+def capture_tmux_pane_contents(target: TmuxWindowTarget) -> str:
+    """Capture the contents of a tmux pane via local subprocess.
 
     This is the local-only variant for test code that doesn't have a host object.
     For the host-based version (works over SSH), use
     imbue.mngr.hosts.tmux.capture_tmux_pane_content.
+
+    The :class:`TmuxWindowTarget` argument mirrors the host-version signature so
+    callers that already hold a structured target can pass it through without
+    deconstructing.
     """
     result = subprocess.run(
-        shlex.split(build_tmux_capture_pane_command(TmuxWindowTarget(session_name=session_name, window=window))),
+        shlex.split(build_tmux_capture_pane_command(target)),
         capture_output=True,
         text=True,
     )
