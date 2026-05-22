@@ -40,6 +40,12 @@ def generate_cloud_init_user_data(
     by default so this is belt-and-suspenders on cloud-init backends;
     non-cloud-init backends (e.g. OVH) install it from their own
     bootstrap path.
+
+    ``curl`` is explicit because the depot CLI installer used at docker
+    build time when ``builder=DEPOT`` shells out to
+    ``curl -fsSL https://depot.dev/install-cli.sh | sh`` (see
+    ``_DEPOT_INSTALL_CMD`` in ``instance.py``), and Debian cloud images
+    ship ``wget`` but not ``curl`` by default.
     """
     shutdown_block = ""
     if auto_shutdown_minutes is not None:
@@ -57,6 +63,7 @@ ssh_pwauth: false
 package_update: true
 packages:
   - ca-certificates
+  - curl
   - rsync
   - docker.io
 write_files:

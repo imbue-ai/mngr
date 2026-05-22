@@ -59,7 +59,7 @@ def test_generate_cloud_init_installs_docker() -> None:
     cloud-init's package handler. The ``curl get.docker.com | sh`` installer
     script (used in an earlier revision) made provisioning take 60-120s on a
     ``t3.small``; the packaged install takes 5-15s by piggybacking on the
-    same apt run as ca-certificates/rsync.
+    same apt run as ca-certificates/curl/rsync.
     """
     result = generate_cloud_init_user_data(
         host_private_key="fake-key",
@@ -72,6 +72,21 @@ def test_generate_cloud_init_installs_docker() -> None:
     # root cause of the EC2 lifecycle test hitting the 300s subprocess
     # timeout on the ``mngr create`` flow.
     assert "get.docker.com" not in result
+
+
+def test_generate_cloud_init_installs_curl() -> None:
+    """``curl`` must stay in the cloud-init package list because
+    ``_DEPOT_INSTALL_CMD`` in ``instance.py`` shells out to
+    ``curl -fsSL https://depot.dev/install-cli.sh | sh`` on the
+    cloud-init-provisioned VPS whenever ``builder=DEPOT``. Debian cloud
+    images ship ``wget`` but not ``curl`` by default, so dropping it
+    here silently regresses the depot build path.
+    """
+    result = generate_cloud_init_user_data(
+        host_private_key="fake-key",
+        host_public_key="ssh-ed25519 AAAA fake",
+    )
+    assert "- curl" in result
 
 
 def test_generate_cloud_init_creates_ready_marker() -> None:
