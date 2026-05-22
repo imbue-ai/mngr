@@ -2601,11 +2601,11 @@ def test_new_tmux_window_inherits_env_vars(
         window_target = TmuxWindowTarget(session_name=session_name, window="user-window")
 
         def shell_prompt_visible() -> bool:
-            pane = capture_tmux_pane_contents(TmuxWindowTarget(session_name=session_name, window="user-window"))
+            pane = capture_tmux_pane_contents(window_target)
             return prompt_sentinel in pane
 
         if not poll_until(shell_prompt_visible, timeout=10.0):
-            pane_stdout = capture_tmux_pane_contents(TmuxWindowTarget(session_name=session_name, window="user-window"))
+            pane_stdout = capture_tmux_pane_contents(window_target)
             raise AssertionError(
                 f"Shell prompt did not appear in new tmux window within 10s.\nPane content:\n{pane_stdout}"
             )
@@ -2631,7 +2631,7 @@ def test_new_tmux_window_inherits_env_vars(
             return "NEW_WINDOW_VAR=new_window_value_123456" in content
 
         if not poll_until(check_marker_file, timeout=10.0):
-            pane_stdout = capture_tmux_pane_contents(TmuxWindowTarget(session_name=session_name, window="user-window"))
+            pane_stdout = capture_tmux_pane_contents(window_target)
             marker_content = marker_file.read_text() if marker_file.exists() else "<file does not exist>"
             raise AssertionError(
                 f"New tmux window did not inherit environment variables.\n"
