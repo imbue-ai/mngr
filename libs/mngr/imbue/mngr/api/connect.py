@@ -92,8 +92,11 @@ def _build_ssh_activity_wrapper_script(session_name: str, host_dir: Path) -> str
         "MNGR_ACTIVITY_PID=$!; "
         # Force a terminal resize after attaching to trigger SIGWINCH delivery.
         f"(sleep 3; {build_post_attach_resize_script(session_name)}) 2>/dev/null & "
-        # actually attach
-        f"tmux attach -t '={session_name}'; "
+        # actually attach. Route the -t target through TmuxSessionTarget so the
+        # = exact-match prefix and shell-escaping rule are uniform with the rest
+        # of the codebase (see TmuxSessionTarget docstring for the prefix-matching
+        # bug this guards against).
+        f"tmux attach -t {TmuxSessionTarget(session_name=session_name).as_shell_arg()}; "
         "kill $MNGR_ACTIVITY_PID 2>/dev/null; "
         # Check for signal files written by tmux key bindings (Ctrl-q writes "destroy", Ctrl-t writes "stop")
         f"SIGNAL_FILE='{signal_file}'; "
@@ -240,7 +243,12 @@ def connect_to_agent(
             # Copy and remove TMUX so tmux allows the nested attachment
             env = dict(os.environ)
             del env["TMUX"]
-        os.execvpe("tmux", ["tmux", "attach", "-t", f"={session_name}"], env)
+        # Validate via TmuxSessionTarget (also documents the intent) and pass
+        # the raw `=name` form to argv -- argv is verbatim, so we must NOT
+        # shell-quote here (as_shell_arg() would wrong-shape the argument when
+        # session_name contains a shell-special character).
+        session_target = TmuxSessionTarget(session_name=session_name)
+        os.execvpe("tmux", ["tmux", "attach", "-t", f"={session_target.session_name}"], env)
     else:
         ssh_args = _build_ssh_args(host, connection_opts)
 
