@@ -147,11 +147,7 @@ def test_build_mngr_create_command_lifts_minds_api_key_to_host_env() -> None:
         )
         # Belt-and-suspenders: ensure no ``--env MINDS_API_KEY=...`` slipped
         # back in alongside the host-env version.
-        env_pairs = [
-            (command[i], command[i + 1])
-            for i, arg in enumerate(command[:-1])
-            if arg == "--env"
-        ]
+        env_pairs = [(command[i], command[i + 1]) for i, arg in enumerate(command[:-1]) if arg == "--env"]
         assert not any(value.startswith("MINDS_API_KEY=") for _, value in env_pairs), (
             f"{mode}: MINDS_API_KEY must not also be set via --env"
         )

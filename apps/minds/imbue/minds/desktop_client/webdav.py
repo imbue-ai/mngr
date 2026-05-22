@@ -22,10 +22,10 @@ itself runs with anonymous auth -- the ASGI gate is the only thing
 between the network and the filesystem.
 """
 
+import tempfile
 from pathlib import Path
 from typing import Any
 from typing import Final
-import tempfile
 
 from a2wsgi import WSGIMiddleware
 from loguru import logger
