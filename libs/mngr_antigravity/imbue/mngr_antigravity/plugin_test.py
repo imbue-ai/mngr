@@ -402,7 +402,7 @@ def test_provision_pre_trusts_workspace_under_auto_dismiss_dialogs(
     antigravity_agent_auto_dismiss: AntigravityAgent,
     isolated_home: Path,
 ) -> None:
-    """`auto_dismiss_dialogs=True` (per-agent-type opt-in) silently trusts work_dir."""
+    """`auto_dismiss_dialogs=True` (per-agent-type opt-in) silently trusts the agy workspace symlink path."""
     agent = antigravity_agent_auto_dismiss
     agent.provision(
         host=agent.host,
