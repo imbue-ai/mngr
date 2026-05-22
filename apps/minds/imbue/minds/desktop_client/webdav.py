@@ -1,8 +1,8 @@
 """WebDAV file server mounted under ``/api/v1/files``.
 
-Replaces the ad-hoc ``/api/v1/file-server`` GET/POST endpoints with a
-standards-compliant WebDAV mount backed by `wsgidav
-<https://wsgidav.readthedocs.io/>`_.  Two share roots are exposed:
+Backed by `wsgidav <https://wsgidav.readthedocs.io/>`.
+
+Two share roots are exposed:
 
 * the current user's home directory (``Path.home()``); and
 * ``/tmp``.
@@ -25,6 +25,7 @@ between the network and the filesystem.
 from pathlib import Path
 from typing import Any
 from typing import Final
+import tempfile
 
 from a2wsgi import WSGIMiddleware
 from loguru import logger
@@ -125,11 +126,11 @@ def _build_wsgidav_config(share_roots: tuple[Path, ...]) -> dict[str, Any]:
 def create_webdav_app(paths: WorkspacePaths) -> ASGIApp:
     """Build the ASGI app to mount under ``/api/v1/files``.
 
-    The returned callable serves ``Path.home()`` and ``/tmp`` via
+    The returned callable serves ``Path.home()`` and ``tempfile.gettempdir()`` (typically /tmp) via
     WebDAV, gated by a per-agent Bearer token.
     """
     home_root = Path.home()
-    tmp_root = Path("/tmp")
+    tmp_root = Path(tempfile.gettempdir())
     share_roots = (home_root, tmp_root)
     config = _build_wsgidav_config(share_roots)
     wsgi_app = WsgiDAVApp(config)
