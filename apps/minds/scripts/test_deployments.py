@@ -8,13 +8,13 @@ Plain-Python (click-driven) entrypoint -- NOT a pytest wrapper. Owns:
   unchanged.
 * The per-run mail.tm account: creation via the public mail.tm HTTP
   API, env-var threading into pytest, and deletion in cleanup.
-* Shared dev env stand-up via ``minds env deploy`` (subprocess), serial
+* Shared CI env stand-up via ``minds env deploy`` (subprocess), serial
   for the initial single-``default``-env roster.
 * Sequential dispatch of the two pytest invocations
   (``-m minds_deployment`` first, then ``-m minds_services``).
 * Per-run ledger at ``.minds/ci-test-deploys.jsonl``: append-on-create,
   walked for end-of-run teardown, paired cleanup mode for prior runs.
-* Name + age sweep: enumerates ``dev-ci-*`` envs and ``ci-*`` FCT
+* Name + age sweep: enumerates ``ci-*`` envs and ``ci-*`` FCT
   branches, destroys anything older than 4 hours.
 
 Wired up to satisfy the spec's command surface; the heavyweight steps
@@ -333,10 +333,22 @@ def _delete_mailtm_account(account_id: NonEmptyStr, jwt: SecretStr, *, run_id: R
 
 
 def _mint_shared_env_name(*, run_id: RunId, role: SharedEnvRole) -> DevEnvName:
-    """``dev-ci-<run-id>`` for the only-shared-env case; appends role only when >1 shared envs."""
+    """``ci-<run-id>-<short>`` (default role), or with the role appended otherwise.
+
+    Every CI env name MUST include both a timestamp AND a random suffix:
+    the timestamp is what the name+age sweep parses to decide which envs
+    are old enough to destroy (regex :data:`_CI_ENV_NAME_PATTERN`
+    anchors on ``^ci-<timestamp>``), and the random suffix prevents
+    name collisions between two runs that happen to start in the same
+    UTC second (e.g. two concurrent orchestrator invocations, or a
+    re-run within a single second of the prior one). The role -- when
+    not ``default`` -- is appended LAST so the timestamp stays at
+    position 2 and the sweep regex matches every shape uniformly.
+    """
+    short = get_short_random_string()
     if role == SharedEnvRole("default"):
-        return DevEnvName(f"dev-ci-{run_id}")
-    return DevEnvName(f"dev-ci-{role}-{run_id}")
+        return DevEnvName(f"ci-{run_id}-{short}")
+    return DevEnvName(f"ci-{run_id}-{short}-{role}")
 
 
 def _deploy_shared_env(*, name: DevEnvName, run_id: RunId, role: SharedEnvRole) -> SharedEnvUrls:
@@ -374,20 +386,20 @@ def _destroy_env(name: DevEnvName, *, run_id: RunId) -> None:
 # ---------------------------------------------------------------------------
 
 
-_DEV_CI_ENV_NAME_PATTERN: Final[re.Pattern[str]] = re.compile(r"^dev-ci-(\d{8}t\d{6}z)")
+_CI_ENV_NAME_PATTERN: Final[re.Pattern[str]] = re.compile(r"^ci-(\d{8}t\d{6}z)")
 
 
 def _sweep_stale_envs(max_age_hours: int = _DEFAULT_MAX_RESOURCE_AGE_HOURS) -> None:
-    """Enumerate ``dev-ci-*`` envs; destroy anything older than ``max_age_hours``.
+    """Enumerate ``ci-*`` envs; destroy anything older than ``max_age_hours``.
 
     Stub: real implementation needs to shell out to ``uv run minds env
     list`` (parses its output), parse the embedded timestamp from each
-    ``dev-ci-<YYYYMMDDtHHMMSSz>...`` name, and call destroy on stale
+    ``ci-<YYYYMMDDtHHMMSSz>...`` name, and call destroy on stale
     ones. Tracked separately; the name pattern is fixed here.
     """
     cutoff = datetime.now(timezone.utc) - timedelta(hours=max_age_hours)
     logger.info(
-        "Name+age sweep is stubbed -- would destroy any dev-ci-* env older than {} ({}h).",
+        "Name+age sweep is stubbed -- would destroy any ci-* env older than {} ({}h).",
         cutoff.isoformat(),
         max_age_hours,
     )
@@ -528,7 +540,7 @@ def run(keep_on_failure: bool) -> None:
     )
 
     # minds_deployment tests use only the ephemeral_env fixture (they mint
-    # their own dev-ci-* env per test) and do not depend on the shared envs,
+    # their own ci-* env per test) and do not depend on the shared envs,
     # so they run regardless of whether the shared-env stand-up succeeded.
     # minds_services tests depend on shared_env(role=...) URLs+secrets, so
     # they are skipped when shared-env deploy failed.
@@ -710,7 +722,7 @@ def services_against(env_name: str, tests: tuple[str, ...], no_fct_push: bool) -
     if not target_client_toml.is_file():
         raise click.ClickException(
             f"No client.toml found at {target_client_toml} for env {env_name!r}. "
-            f'Activate + deploy the env first: `eval "$(uv run minds env activate {env_name})" && uv run minds env deploy`.'
+            f'Activate + deploy the env first: `eval "$(uv run minds env activate --create --deploy {env_name})" && uv run minds env deploy`.'
         )
     if not target_secrets_toml.is_file():
         raise click.ClickException(

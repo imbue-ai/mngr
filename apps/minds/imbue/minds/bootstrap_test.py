@@ -223,6 +223,10 @@ def test_minds_root_name_pattern_canonical_examples() -> None:
     assert re.fullmatch(MINDS_ROOT_NAME_PATTERN, "minds-staging") is not None
     assert re.fullmatch(MINDS_ROOT_NAME_PATTERN, "minds-dev-josh-3") is not None
     assert re.fullmatch(MINDS_ROOT_NAME_PATTERN, "minds-dev-tname") is not None
+    # CI ephemeral envs (minted by the deployment-tests orchestrator)
+    # share the same shape as dev envs but with a ``ci-`` prefix.
+    assert re.fullmatch(MINDS_ROOT_NAME_PATTERN, "minds-ci-20260518t140212z") is not None
+    assert re.fullmatch(MINDS_ROOT_NAME_PATTERN, "minds-ci-20260518t140212z-abcd") is not None
     assert re.fullmatch(MINDS_ROOT_NAME_PATTERN, "devminds") is None
     # Bare `minds-` with no suffix is rejected -- the env-name regex
     # forbids an empty suffix.
@@ -230,15 +234,18 @@ def test_minds_root_name_pattern_canonical_examples() -> None:
     # Single-char env-name suffixes are rejected -- DEV_ENV_NAME_PATTERN
     # requires both a leading and a trailing alphanumeric (2+ chars).
     assert re.fullmatch(MINDS_ROOT_NAME_PATTERN, "minds-a") is None
-    # Dev envs MUST lead with ``dev-``; anything else under the prefix
-    # is rejected as not matching either the staging or dev shape.
+    # Dynamic envs MUST lead with ``dev-`` or ``ci-``; anything else
+    # under the prefix is rejected as not matching either the staging
+    # or dynamic-env shape.
     assert re.fullmatch(MINDS_ROOT_NAME_PATTERN, "minds-josh-3") is None
     assert re.fullmatch(MINDS_ROOT_NAME_PATTERN, "minds-josh") is None
     assert re.fullmatch(MINDS_ROOT_NAME_PATTERN, "minds-production") is None
-    # Bare ``dev-`` with nothing after is rejected (the suffix needs 2+
-    # chars of [a-z0-9_-]).
+    # Bare ``dev-`` / ``ci-`` with nothing after is rejected (the
+    # suffix needs 2+ chars of [a-z0-9_-]).
     assert re.fullmatch(MINDS_ROOT_NAME_PATTERN, "minds-dev-") is None
     assert re.fullmatch(MINDS_ROOT_NAME_PATTERN, "minds-dev-a") is None
+    assert re.fullmatch(MINDS_ROOT_NAME_PATTERN, "minds-ci-") is None
+    assert re.fullmatch(MINDS_ROOT_NAME_PATTERN, "minds-ci-a") is None
 
 
 def _stub_mngr_host_dir(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, root_name: str) -> Path:

@@ -1,6 +1,6 @@
 # Unabridged Changelog - mngr_gemini
 
-Full, unedited changelog entries consolidated nightly from individual files in the `changelog/mngr_gemini/` directory.
+Full, unedited changelog entries consolidated nightly from individual files in `libs/mngr_gemini/changelog/`.
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
