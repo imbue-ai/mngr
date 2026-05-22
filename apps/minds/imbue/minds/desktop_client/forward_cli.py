@@ -96,7 +96,6 @@ class ForwardSubprocessConfig(FrozenModel):
     ``mngr_forward_session=<value>`` on ``localhost:<port>``.
     """
 
-    port: int = Field(description="Plugin bind port (e.g. 8421)")
     service: str = Field(default="system_interface", description="Service name to forward")
     agent_include: tuple[str, ...] = Field(
         default=("has(agent.labels.workspace) && has(agent.labels.is_primary)",),
@@ -139,6 +138,11 @@ class EnvelopeStreamConsumer(MutableModel):
     _process: subprocess.Popen[bytes] | None = PrivateAttr(default=None)
     _has_notified_exit: bool = PrivateAttr(default=False)
     _intentional_shutdown: bool = PrivateAttr(default=False)
+    # Set once the plugin emits its `listening` envelope; `_listening_port`
+    # then holds the port the plugin actually bound. `wait_for_listening`
+    # blocks on the event so `minds run` can learn the port at startup.
+    _listening_event: threading.Event = PrivateAttr(default_factory=threading.Event)
+    _listening_port: int | None = PrivateAttr(default=None)
 
     # -- Public callback registration -------------------------------------
 
@@ -212,6 +216,23 @@ class EnvelopeStreamConsumer(MutableModel):
             daemon=True,
             is_checked=False,
         )
+
+    def wait_for_listening(self, timeout: float) -> int | None:
+        """Block until the plugin reports its bound port, or ``timeout`` elapses.
+
+        The plugin emits a single ``listening`` envelope once its FastAPI app
+        is ready, carrying the port it actually bound (which differs from the
+        default when that port was already in use). Returns that port, or
+        ``None`` if no ``listening`` envelope arrived within ``timeout``
+        seconds -- e.g. the subprocess died during startup.
+
+        Must be called after ``start()``; otherwise the reader thread that
+        consumes the envelope stream is not running and this always times out.
+        """
+        if not self._listening_event.wait(timeout=timeout):
+            return None
+        with self._lock:
+            return self._listening_port
 
     def bounce_observe(self) -> None:
         """Send ``SIGHUP`` to the plugin so its observe child is bounced.
@@ -578,10 +599,33 @@ class EnvelopeStreamConsumer(MutableModel):
                     callback(agent_id, reason, status_code)
                 except (OSError, RuntimeError, ValueError) as e:
                     logger.warning("system_interface_backend_failure callback failed for {}: {}", agent_id, e)
-        elif payload_type in ("login_url", "listening"):
+        elif payload_type == "listening":
+            self._handle_listening(payload)
+        elif payload_type == "login_url":
             logger.debug("Forward stream payload {}: {}", payload_type, payload)
         else:
             logger.trace("Unknown forward payload type {!r}", payload_type)
+
+    def _handle_listening(self, payload: dict[str, Any]) -> None:
+        """Record the plugin's bound port from a ``listening`` envelope.
+
+        Fires ``_listening_event`` so a ``wait_for_listening`` caller unblocks.
+        A malformed payload is logged and dropped -- the waiter then times out
+        rather than proceeding with a bogus port.
+        """
+        raw_port = payload.get("port")
+        if raw_port is None:
+            logger.warning("`listening` envelope is missing its port: {}", payload)
+            return
+        try:
+            port = int(raw_port)
+        except (TypeError, ValueError):
+            logger.warning("Could not parse port from `listening` envelope: {}", payload)
+            return
+        with self._lock:
+            self._listening_port = port
+        self._listening_event.set()
+        logger.info("`mngr forward` is listening on port {}", port)
 
 
 # -- Helpers run from the consumer's callbacks ------------------------------
@@ -708,8 +752,6 @@ def start_mngr_forward(
         "forward",
         "--host",
         "127.0.0.1",
-        "--port",
-        str(config.port),
         "--service",
         config.service,
         "--preauth-cookie",

@@ -2,6 +2,7 @@
 
 import secrets
 import signal
+import socket
 import subprocess
 import threading
 import time
@@ -52,7 +53,7 @@ class ForwardCliOptions(CommonCliOptions):
     """Options for ``mngr forward``. Backed by the click flags below."""
 
     host: str = _DEFAULT_HOST
-    port: int = _DEFAULT_PORT
+    port: int | None = None
     service: str | None = None
     forward_port: int | None = None
     reverse: tuple[str, ...] = ()
@@ -94,9 +95,63 @@ def _resolve_plugin_state_dir(mngr_host_dir: Path) -> Path:
     return mngr_host_dir / "plugin" / "forward"
 
 
+def _bind_listen_socket(host: str, requested_port: int | None) -> socket.socket:
+    """Bind the TCP socket the forward server will listen on.
+
+    ``requested_port`` semantics:
+
+    - ``None`` (``--port`` not supplied): bind ``_DEFAULT_PORT``; if it is
+      already in use, fall back to an OS-assigned ephemeral port.
+    - an explicit value: bind exactly that port. If it is unavailable a
+      ``click.ClickException`` is raised -- a caller that picked a specific
+      port did so deliberately, so silently moving would hide a real conflict.
+
+    The returned socket is bound but not listening; uvicorn calls ``listen()``
+    on it via ``loop.create_server``.
+    """
+    family = socket.AF_INET6 if ":" in host else socket.AF_INET
+    sock = socket.socket(family=family)
+    # Close the socket if anything below fails (the caller only ever gets a
+    # socket back on the success path); ``finally`` covers every exit,
+    # including KeyboardInterrupt, without catching and re-raising.
+    is_bound = False
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        if requested_port is None:
+            try:
+                sock.bind((host, _DEFAULT_PORT))
+            except OSError as e:
+                logger.warning(
+                    "Default forward port {} is unavailable ({}); requesting an OS-assigned port instead.",
+                    _DEFAULT_PORT,
+                    e,
+                )
+                sock.bind((host, 0))
+        else:
+            try:
+                sock.bind((host, requested_port))
+            except OSError as e:
+                raise click.ClickException(f"Could not bind requested port {requested_port} on {host}: {e}") from e
+        sock.set_inheritable(True)
+        is_bound = True
+        return sock
+    finally:
+        if not is_bound:
+            sock.close()
+
+
 @click.command(name="forward")
 @click.option("--host", default=_DEFAULT_HOST, show_default=True, help="Bind host")
-@click.option("--port", default=_DEFAULT_PORT, show_default=True, help="Bind port")
+@click.option(
+    "--port",
+    type=int,
+    default=None,
+    help=(
+        f"Bind port. When omitted, the server tries {_DEFAULT_PORT} and falls back to an "
+        "OS-assigned port if it is already in use. When supplied explicitly, the server "
+        "binds exactly that port and fails if it is unavailable."
+    ),
+)
 @click.option("--service", default=None, help="Service name to forward (e.g. 'system_interface')")
 @click.option(
     "--forward-port",
@@ -174,6 +229,14 @@ def forward(ctx: click.Context, **kwargs: Any) -> None:
 
     start_parent_death_watcher(mngr_ctx.concurrency_group)
 
+    # Bind the listen socket up front so the rest of startup (login URL,
+    # app construction, the `listening` envelope) all uses the port the
+    # server actually bound -- which may differ from `--port` when the
+    # default was unavailable. Binding here also fails fast when an
+    # explicitly-requested port is already in use.
+    listen_socket = _bind_listen_socket(host=opts.host, requested_port=opts.port)
+    listen_port = ForwardPort(listen_socket.getsockname()[1])
+
     envelope_writer = EnvelopeWriter()
 
     strategy = _build_strategy(opts)
@@ -218,7 +281,7 @@ def forward(ctx: click.Context, **kwargs: Any) -> None:
     one_time_code = OneTimeCode(secrets.token_urlsafe(_OTP_LENGTH))
     auth_store.add_one_time_code(code=one_time_code)
     login_host = "localhost" if opts.host in {"127.0.0.1", "0.0.0.0", "::1", "::"} else opts.host
-    login_url = f"http://{login_host}:{opts.port}/login?one_time_code={one_time_code}"
+    login_url = f"http://{login_host}:{listen_port}/login?one_time_code={one_time_code}"
 
     logger.info("Login URL (one-time use): {}", login_url)
     envelope_writer.emit_login_url(login_url)
@@ -232,8 +295,6 @@ def forward(ctx: click.Context, **kwargs: Any) -> None:
         ).start()
 
     _install_sighup_handler(stream_manager, opts, resolver, reverse_handler, mngr_ctx.concurrency_group)
-
-    listen_port = ForwardPort(opts.port)
 
     def _on_listening() -> None:
         envelope_writer.emit_listening(host=opts.host, port=listen_port)
@@ -251,14 +312,13 @@ def forward(ctx: click.Context, **kwargs: Any) -> None:
     )
 
     try:
-        uvicorn.run(
-            app,
-            host=opts.host,
-            port=opts.port,
-            timeout_graceful_shutdown=1,
-            log_level="warning",
-        )
+        # Hand uvicorn the socket we already bound rather than a host/port
+        # pair, so there is no window between resolving the port and the
+        # server claiming it (and no chance uvicorn binds a different one).
+        server = uvicorn.Server(uvicorn.Config(app, timeout_graceful_shutdown=1, log_level="warning"))
+        server.run(sockets=[listen_socket])
     finally:
+        listen_socket.close()
         if stream_manager is not None:
             stream_manager.stop()
         tunnel_manager.cleanup()
