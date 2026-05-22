@@ -182,7 +182,7 @@ def test_provider_lifecycle_create_exec_and_destroy(
         "--no-connect",
     )
     assert result.returncode == 0, f"Create failed: {result.stderr}"
-    assert "Done" in result.stdout or "created successfully" in result.stderr
+    assert "Done" in result.stdout
 
     try:
         result = _run_mngr(aws_test_settings_dir, temp_git_repo, "exec", agent_name, "echo hello-from-aws")
