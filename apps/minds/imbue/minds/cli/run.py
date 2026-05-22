@@ -36,8 +36,6 @@ from pydantic import Field
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.frozen_model import FrozenModel
-from imbue.minds.bootstrap import disable_imbue_cloud_provider_for_account
-from imbue.minds.bootstrap import imbue_cloud_provider_name_for_account
 from imbue.minds.bootstrap import minds_data_dir_for
 from imbue.minds.bootstrap import reconcile_imbue_cloud_providers_from_sessions
 from imbue.minds.bootstrap import resolve_minds_root_name
@@ -52,7 +50,6 @@ from imbue.minds.desktop_client.app import start_system_interface_health_probe_l
 from imbue.minds.desktop_client.auth import FileAuthStore
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
-from imbue.minds.desktop_client.forward_cli import EnvelopeStreamConsumer
 from imbue.minds.desktop_client.forward_cli import ForwardSubprocessConfig
 from imbue.minds.desktop_client.forward_cli import LocalAgentDiscoveryHandler
 from imbue.minds.desktop_client.forward_cli import MindsApiUrlWriter
@@ -82,7 +79,6 @@ from imbue.mngr_latchkey.core import LatchkeyError
 from imbue.mngr_latchkey.forward_supervisor import LatchkeyForwardSupervisor
 
 _DEFAULT_MNGR_FORWARD_PORT: Final[int] = 8421
-_AUTH_ERROR_TYPE: Final[str] = "ImbueCloudAuthError"
 
 
 @click.command()
@@ -286,13 +282,6 @@ def run(
     # Latchkey discovery / destruction wiring now lives in the detached
     # ``mngr latchkey forward`` subprocess started above; no callbacks to
     # register here.
-
-    # Auto-disable an ``imbue_cloud_<slug>`` provider if its session is
-    # revoked server-side, so the rest of the user's accounts keep working
-    # instead of every observe poll re-trying the dead session.
-    consumer.add_on_provider_error_callback(
-        _ImbueCloudAuthErrorDisabler(consumer=consumer, session_store=session_store)
-    )
 
     # All callbacks registered -- now safe to start the envelope reader
     # threads. Doing this earlier (e.g. inside ``start_mngr_forward``)
@@ -591,63 +580,3 @@ def _ensure_mngr_latchkey_forward_supervisor(latchkey: Latchkey) -> None:
         logger.warning("Could not start detached mngr latchkey forward supervisor: {}", e)
         return
     logger.info("mngr latchkey forward supervisor running (pid={})", info.pid)
-
-
-class _ImbueCloudAuthErrorDisabler(FrozenModel):
-    """Auto-disables an ``imbue_cloud_<slug>`` provider on session-revoke errors.
-
-    Discovery surfaces ``ImbueCloudAuthError`` whenever the connector
-    rejects a refresh (token theft detected, refresh token expired past
-    the family lifetime, etc.). Without intervention every subsequent
-    ``mngr observe`` poll re-tries the same dead session and the whole
-    discovery stream errors out, blocking the rest of the user's
-    accounts. ``__call__`` walks ``session_store`` to map the offending
-    provider name back to an email, flips ``is_enabled = false`` on the
-    block in settings.toml, and bounces the plugin's observe child so the
-    change takes effect within the same minds session. Re-enabling
-    happens only on an explicit signin
-    (``set_imbue_cloud_provider_for_account(..., force_enable=True)``).
-
-    The bounce is dispatched onto a daemon thread because ``__call__``
-    runs on ``EnvelopeStreamConsumer``'s envelope-stream reader thread --
-    sending ``SIGHUP`` is itself non-blocking, but keeping the off-thread
-    dispatch matches the prior ``MngrStreamManager.restart_observe()``
-    behaviour and isolates any future expansion of the bounce path from
-    the reader thread.
-    """
-
-    consumer: EnvelopeStreamConsumer = Field(
-        frozen=True, description="Envelope consumer to bounce observe on after disable"
-    )
-    session_store: MultiAccountSessionStore = Field(
-        frozen=True, description="Session mirror used to map provider name to account email"
-    )
-
-    def __call__(self, provider_name: str, error_type: str, error_message: str) -> None:
-        if error_type != _AUTH_ERROR_TYPE:
-            return
-        offending_email: str | None = None
-        for account in self.session_store.list_accounts():
-            try:
-                if imbue_cloud_provider_name_for_account(str(account.email)) == provider_name:
-                    offending_email = str(account.email)
-                    break
-            except ValueError:
-                continue
-        if offending_email is None:
-            logger.warning(
-                "Auth error from provider {} but no matching minds session found; skipping auto-disable",
-                provider_name,
-            )
-            return
-        if disable_imbue_cloud_provider_for_account(offending_email):
-            logger.warning(
-                "Auto-disabled imbue_cloud provider for {} after auth error: {}",
-                offending_email,
-                error_message,
-            )
-            threading.Thread(
-                target=self.consumer.bounce_observe,
-                name=f"bounce-observe-after-disable-{provider_name}",
-                daemon=True,
-            ).start()

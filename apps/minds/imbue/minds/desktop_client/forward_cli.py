@@ -28,6 +28,8 @@ import signal
 import subprocess
 import threading
 from collections.abc import Callable
+from datetime import datetime
+from datetime import timezone
 from pathlib import Path
 from typing import Any
 from typing import Final
@@ -71,7 +73,6 @@ _PREAUTH_TOKEN_LENGTH: Final[int] = 64
 OnAgentDiscoveredCallback = Callable[[AgentId, RemoteSSHInfo | None, str], None]
 OnAgentDestroyedCallback = Callable[[AgentId], None]
 OnReverseTunnelEstablishedCallback = Callable[["ReverseTunnelEstablishedInfo"], None]
-OnProviderErrorCallback = Callable[[str, str, str], None]
 OnSystemInterfaceBackendFailureCallback = Callable[[AgentId, SystemInterfaceBackendFailureReason, int | None], None]
 
 
@@ -132,7 +133,6 @@ class EnvelopeStreamConsumer(MutableModel):
     _on_reverse_tunnel_established_callbacks: list[OnReverseTunnelEstablishedCallback] = PrivateAttr(
         default_factory=list
     )
-    _on_provider_error_callbacks: list[OnProviderErrorCallback] = PrivateAttr(default_factory=list)
     _on_system_interface_backend_failure_callbacks: list[OnSystemInterfaceBackendFailureCallback] = PrivateAttr(
         default_factory=list
     )
@@ -170,19 +170,6 @@ class EnvelopeStreamConsumer(MutableModel):
         """
         with self._lock:
             self._on_system_interface_backend_failure_callbacks.append(callback)
-
-    def add_on_provider_error_callback(self, callback: OnProviderErrorCallback) -> None:
-        """Register a callback fired for each ``DiscoveryErrorEvent`` attributable to a provider.
-
-        The callback receives ``(provider_name, error_type, error_message)``.
-        Used by minds to auto-disable an imbue_cloud account whose session has
-        been revoked server-side. Callbacks should be fast and non-blocking;
-        they run on the envelope-stream reader thread, so any work that needs
-        to terminate other subprocesses (e.g. bouncing observe) must dispatch
-        onto a worker thread itself.
-        """
-        with self._lock:
-            self._on_provider_error_callbacks.append(callback)
 
     # -- Subprocess lifecycle ---------------------------------------------
 
@@ -229,10 +216,14 @@ class EnvelopeStreamConsumer(MutableModel):
     def bounce_observe(self) -> None:
         """Send ``SIGHUP`` to the plugin so its observe child is bounced.
 
-        Used after writing a new ``[providers.imbue_cloud_<slug>]`` block so
-        the freshly-registered provider becomes visible. Per-agent event
-        subprocesses, SSH tunnels, and the FastAPI app on the plugin side
-        stay alive (the plugin's SIGHUP handler only restarts ``mngr observe``).
+        Used whenever minds writes a change to its providers settings that
+        should take effect on the next discovery poll: either after a new
+        ``[providers.imbue_cloud_<slug>]`` block is registered on signin,
+        or after the providers panel's Enable/Disable toggle flips
+        ``is_enabled`` on any provider block via ``set_provider_is_enabled``.
+        Per-agent event subprocesses, SSH tunnels, and the FastAPI app on
+        the plugin side stay alive (the plugin's SIGHUP handler only
+        restarts ``mngr observe``).
 
         No-op if the plugin process is no longer running.
         """
@@ -353,9 +344,15 @@ class EnvelopeStreamConsumer(MutableModel):
             return
         if event is None:
             return
+        # Snapshot handler bumps both last_event_at and last_full_snapshot_at
+        # via update_providers; it does not flow through the
+        # record_discovery_event_received path. Dispatch the snapshot first,
+        # then bump last_event_at once for every other event type below.
         if isinstance(event, FullDiscoverySnapshotEvent):
             self._handle_full_snapshot(event)
-        elif isinstance(event, HostSSHInfoEvent):
+            return
+        self.resolver.record_discovery_event_received(datetime.now(timezone.utc))
+        if isinstance(event, HostSSHInfoEvent):
             self._handle_host_ssh_info(event)
         elif isinstance(event, AgentDiscoveryEvent):
             self._handle_agent_discovered(event)
@@ -370,8 +367,6 @@ class EnvelopeStreamConsumer(MutableModel):
             logger.warning(
                 "Discovery error from {}: {} ({})", event.source_name, event.error_message, event.error_type
             )
-            if event.provider_name is not None:
-                self._fire_provider_error(event.provider_name, event.error_type, event.error_message)
         else:
             # parse_discovery_event_line returns the union we already
             # exhaustively enumerated above; an unknown event type means
@@ -402,6 +397,14 @@ class EnvelopeStreamConsumer(MutableModel):
                 discovered_agents=event.agents,
                 ssh_info_by_agent_id=ssh_info_by_agent,
             )
+        )
+        # Push provider state + freshness timestamp through the resolver so the
+        # providers panel can render OK / Error badges and "time since last full
+        # discovery event" without parsing the discovery stream itself.
+        self.resolver.update_providers(
+            providers=event.providers,
+            error_by_provider_name=event.error_by_provider_name,
+            last_full_snapshot_at=datetime.now(timezone.utc),
         )
         for aid_str in removed:
             self._fire_destroyed(AgentId(aid_str))
@@ -503,15 +506,6 @@ class EnvelopeStreamConsumer(MutableModel):
                 callback(agent_id)
             except (OSError, RuntimeError, ValueError) as e:
                 logger.warning("on_agent_destroyed callback failed for {}: {}", agent_id, e)
-
-    def _fire_provider_error(self, provider_name: str, error_type: str, error_message: str) -> None:
-        with self._lock:
-            callbacks = list(self._on_provider_error_callbacks)
-        for callback in callbacks:
-            try:
-                callback(provider_name, error_type, error_message)
-            except (OSError, RuntimeError, ValueError) as e:
-                logger.warning("on_provider_error callback failed for {}: {}", provider_name, e)
 
     # -- Per-agent event lines (services / requests / refresh) ------------
 

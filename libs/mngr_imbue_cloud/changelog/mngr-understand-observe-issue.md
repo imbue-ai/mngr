@@ -1,0 +1,3 @@
+## No more silent auto-disable on auth errors
+
+- Previously, when `ImbueCloudAuthError` was raised during discovery, minds would silently rewrite the user's settings to set `is_enabled = false` for the offending `imbue_cloud_<slug>` block. That behavior is gone (see the `apps/minds` changelog for details). `mngr_imbue_cloud` itself is unchanged -- it still raises `ImbueCloudAuthError` on session-revoke errors; the difference is that those errors now propagate to the providers panel in minds (where the user can choose to disable the provider explicitly) instead of triggering a hidden config rewrite.

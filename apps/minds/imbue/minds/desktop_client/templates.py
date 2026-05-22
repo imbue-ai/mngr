@@ -473,8 +473,8 @@ def render_accounts_page(
     ``enabled_by_user_id`` maps each account's user_id to whether its
     ``[providers.imbue_cloud_<slug>]`` block is enabled in settings.toml.
     The template renders a "Signed out" indicator when an account is
-    present (still in sessions.json) but the block has been
-    auto-disabled by an observed auth error.
+    present (still in sessions.json) but the user disabled the block
+    via the providers panel.
     """
     return JINJA_ENV.get_template("accounts.html").render(
         accounts=accounts,
