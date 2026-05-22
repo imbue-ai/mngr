@@ -586,7 +586,7 @@ def test_provision_pre_trusts_both_source_and_workspace_under_auto_approve(
 def test_provision_prompt_accept_trusts_both_source_and_workspace(
     local_provider: LocalProviderInstance, tmp_path: Path, isolated_home: Path
 ) -> None:
-    """When the user accepts the interactive prompt, both source and work_dir get trusted."""
+    """When the user accepts the interactive prompt, both source and the agy workspace symlink path get trusted."""
     agent = _make_subclassed_agent_with_flags(
         _ConfirmingAgentWithFakeSourceRoot, local_provider, tmp_path, AntigravityAgentConfig(), is_interactive=True
     )
