@@ -1,4 +1,5 @@
 import json
+import threading
 from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
@@ -36,6 +37,34 @@ from imbue.mngr_kanpan.data_types import DataSourceConfig
 
 _BASE_FIELDS = "number,title,state,headRefName,url,isDraft"
 _OPEN_FIELDS = f"{_BASE_FIELDS},statusCheckRollup"
+
+# Serializes every gh invocation in this process. gh's HTTP cache writes are
+# not atomic: two gh processes that hit the same cache key concurrently can
+# interleave their writes and corrupt the cache file. The SearchType
+# introspection used by `gh pr list` is the frequent victim. Once the file
+# is corrupt, every subsequent gh call that touches that entry fails with
+# "invalid character '{' after array element" until the 24h TTL expires.
+# The lock is held for the full gh process lifecycle (launch + wait), not
+# just launch, because gh writes to the cache while the request is in flight.
+_GH_LOCK = threading.Lock()
+
+
+def _run_gh(
+    cg: ConcurrencyGroup,
+    cmd: Sequence[str],
+    timeout: float,
+    cwd: Path | None = None,
+) -> RunningProcess:
+    """Run a gh CLI invocation under `_GH_LOCK` and return the finished process."""
+    with _GH_LOCK:
+        proc = cg.run_process_in_background(
+            cmd,
+            timeout=timeout,
+            cwd=cwd,
+            is_checked_by_group=False,
+        )
+        proc.wait()
+    return proc
 
 
 class PrState(UpperCaseStrEnum):
@@ -199,7 +228,7 @@ def _build_gh_pr_list_cmd(
 
 
 def fetch_all_prs(cg: ConcurrencyGroup, cwd: Path | None = None, repo: str | None = None) -> FetchPrsResult:
-    """Fetch PRs from a repo using gh CLI, in two parallel passes.
+    """Fetch PRs from a repo using gh CLI, in two sequential passes.
 
     Repo is identified by repo ('owner/repo' string passed via --repo) or
     by cwd (a directory inside the target git repository). Prefer repo
@@ -211,23 +240,13 @@ def fetch_all_prs(cg: ConcurrencyGroup, cwd: Path | None = None, repo: str | Non
     Pass 2: all PRs without statusCheckRollup (lightweight metadata only). This
     provides branch matching for closed/merged PRs without the expensive CI
     status resolution that causes GitHub API 504 timeouts.
+
+    The two passes used to launch in parallel; they now run sequentially via
+    `_run_gh` to avoid corrupting gh's HTTP cache (see `_GH_LOCK`).
     """
     try:
-        open_proc = cg.run_process_in_background(
-            _build_gh_pr_list_cmd("open", _OPEN_FIELDS, 100, repo),
-            timeout=30,
-            cwd=cwd,
-            is_checked_by_group=False,
-        )
-        all_proc = cg.run_process_in_background(
-            _build_gh_pr_list_cmd("all", _BASE_FIELDS, 500, repo),
-            timeout=30,
-            cwd=cwd,
-            is_checked_by_group=False,
-        )
-
-        open_proc.wait()
-        all_proc.wait()
+        open_proc = _run_gh(cg, _build_gh_pr_list_cmd("open", _OPEN_FIELDS, 100, repo), timeout=30, cwd=cwd)
+        all_proc = _run_gh(cg, _build_gh_pr_list_cmd("all", _BASE_FIELDS, 500, repo), timeout=30, cwd=cwd)
     except (ProcessError, OSError) as e:
         logger.debug("Failed to launch gh pr list: {}", e)
         return FetchPrsResult(prs=(), error=f"gh pr list failed: {e}")
@@ -689,58 +708,41 @@ def _fetch_pr_metadata(
     if not agents_with_prs:
         return extra_fields, errors
 
-    # Fetch conflicts and unresolved in parallel per agent
-    processes: list[tuple[AgentName, str, int, RunningProcess | None, RunningProcess | None]] = []
-
+    # Fetch conflicts and unresolved sequentially via `_run_gh`. The pair used to
+    # launch in parallel per agent (and across agents) but that races on gh's
+    # shared HTTP cache; see `_GH_LOCK`.
     for agent_name, repo, pr_number in agents_with_prs:
-        conflict_proc: RunningProcess | None = None
-        unresolved_proc: RunningProcess | None = None
-
-        if config.conflicts:
-            try:
-                conflict_proc = cg.run_process_in_background(
-                    ["gh", "pr", "view", str(pr_number), "--repo", repo, "--json", "mergeable"],
-                    timeout=15.0,
-                    is_checked_by_group=False,
-                )
-            except (ProcessError, OSError) as e:
-                logger.debug("Failed to launch gh pr view for conflicts: {}", e)
-
-        if config.unresolved:
-            try:
-                query = _build_unresolved_query(repo, pr_number)
-                unresolved_proc = cg.run_process_in_background(
-                    ["gh", "api", "graphql", "-f", f"query={query}"],
-                    timeout=15.0,
-                    is_checked_by_group=False,
-                )
-            except (ProcessError, OSError) as e:
-                logger.debug("Failed to launch gh api graphql for unresolved: {}", e)
-
-        processes.append((agent_name, repo, pr_number, conflict_proc, unresolved_proc))
-
-    for agent_name, repo, pr_number, conflict_proc, unresolved_proc in processes:
         agent_extra: dict[str, FieldValue] = {}
         # Conflicts/unresolved are derived from the same cached repo_path -> agent
         # mapping as PrField, so they inherit the same staleness.
         this_created = agent_created[agent_name]
 
-        if conflict_proc is not None:
+        if config.conflicts:
             try:
-                conflict_proc.wait()
+                conflict_proc = _run_gh(
+                    cg,
+                    ["gh", "pr", "view", str(pr_number), "--repo", repo, "--json", "mergeable"],
+                    timeout=15.0,
+                )
                 if conflict_proc.returncode == 0:
-                    stdout = conflict_proc.read_stdout()
-                    has_conflicts = _parse_conflicts(stdout)
+                    has_conflicts = _parse_conflicts(conflict_proc.read_stdout())
                     agent_extra[FIELD_CONFLICTS] = ConflictsField(has_conflicts=has_conflicts, created=this_created)
             except Exception as e:
                 logger.debug("Failed to check conflicts for PR #{} in {}: {}", pr_number, repo, e)
 
-        if unresolved_proc is not None:
+        if config.unresolved:
             try:
-                unresolved_proc.wait()
+                query = _build_unresolved_query(repo, pr_number)
+                unresolved_proc = _run_gh(
+                    cg,
+                    ["gh", "api", "graphql", "-f", f"query={query}"],
+                    timeout=15.0,
+                )
                 if unresolved_proc.returncode == 0:
-                    stdout = unresolved_proc.read_stdout()
-                    has_unresolved = _parse_unresolved(stdout, ignore_user=config.unresolved_ignore_user)
+                    has_unresolved = _parse_unresolved(
+                        unresolved_proc.read_stdout(),
+                        ignore_user=config.unresolved_ignore_user,
+                    )
                     agent_extra[FIELD_UNRESOLVED] = UnresolvedField(
                         has_unresolved=has_unresolved, created=this_created
                     )
