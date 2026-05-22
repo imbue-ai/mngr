@@ -2551,20 +2551,17 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
             return []
 
         all_pids: list[str] = []
-        for window_idx in windows_result.stdout.strip().split("\n"):
-            window_idx = window_idx.strip()
-            if not window_idx:
-                continue
+        window_indices = [w.strip() for w in windows_result.stdout.strip().split("\n") if w.strip()]
+        for window_idx in window_indices:
             window_target = TmuxWindowTarget(session_name=session_name, window=window_idx)
             result = self.execute_idempotent_command(
                 f"tmux list-panes -t {window_target.as_shell_arg()} -F '#{{pane_pid}}' 2>/dev/null"
             )
             if result.success and result.stdout.strip():
-                for pane_pid in result.stdout.strip().split("\n"):
-                    pane_pid = pane_pid.strip()
-                    if pane_pid:
-                        all_pids.append(pane_pid)
-                        all_pids.extend(self._get_all_descendant_pids(pane_pid))
+                pane_pids = [p.strip() for p in result.stdout.strip().split("\n") if p.strip()]
+                for pane_pid in pane_pids:
+                    all_pids.append(pane_pid)
+                    all_pids.extend(self._get_all_descendant_pids(pane_pid))
         return all_pids
 
     def _collect_pids_by_agent_id_env(self, agent_id: AgentId) -> list[str]:
