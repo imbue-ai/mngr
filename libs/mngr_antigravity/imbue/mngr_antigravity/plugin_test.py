@@ -387,7 +387,7 @@ def test_provision_pre_trusts_workspace_under_auto_approve(
     auto_approve_ctx: AntigravityAgent,
     isolated_home: Path,
 ) -> None:
-    """``mngr create --yes`` (mngr_ctx.is_auto_approve) silently trusts work_dir."""
+    """``mngr create --yes`` (mngr_ctx.is_auto_approve) silently trusts the agy workspace symlink path."""
     agent = auto_approve_ctx
     agent.provision(
         host=agent.host,
