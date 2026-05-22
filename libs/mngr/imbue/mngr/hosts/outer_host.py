@@ -112,6 +112,16 @@ def _is_transient_ssh_error(exception: BaseException) -> bool:
         return True
     if isinstance(exception, EOFError):
         return True
+    # pyinfra raises a bare ``TimeoutError`` from
+    # ``pyinfra.connectors.util.read_output_buffers`` when an SSH command
+    # response doesn't arrive within the per-command timeout -- e.g. when
+    # the remote sshd is reloaded mid-read during cloud-init bootstrap.
+    # Treat that as transient: the underlying channel is dead, but a fresh
+    # connection on retry should succeed once the disruption settles.
+    # ``TimeoutError`` is a subclass of ``OSError`` on Python 3, so this
+    # check must precede any general OSError handling.
+    if isinstance(exception, TimeoutError):
+        return True
     return False
 
 
@@ -317,6 +327,13 @@ class OuterHost(OuterHostInterface):
         with self._notify_on_connection_error():
             try:
                 return self._run_shell_command_with_transient_retry(command, pyinfra_kwargs)
+            except TimeoutError as e:
+                # ``TimeoutError`` is a subclass of ``OSError``, so this
+                # must precede the OSError branch below. Reached when the
+                # retry decorator has exhausted its attempts on transient
+                # SSH read timeouts; surface as a structured
+                # HostConnectionError so callers don't see a raw timeout.
+                raise HostConnectionError("SSH command timed out reading output") from e
             except OSError as e:
                 if "Socket is closed" in str(e):
                     raise HostConnectionError("Connection was closed while running command") from e
@@ -348,6 +365,16 @@ class OuterHost(OuterHostInterface):
             raise
         except EOFError as e:
             logger.debug("SSH error while running command: {}, disconnecting for retry", e)
+            self.connector.host.disconnect()
+            raise
+        except TimeoutError as e:
+            # pyinfra's read timeout fired -- the channel is dead but the
+            # connection may still appear open. Force a disconnect so the
+            # retry rebuilds the connection from scratch. ``TimeoutError``
+            # is a subclass of ``OSError`` so this must precede the
+            # OSError branch below to avoid string-matching the wrong code
+            # path.
+            logger.debug("SSH command timed out while reading output: {}, disconnecting for retry", e)
             self.connector.host.disconnect()
             raise
         except OSError as e:

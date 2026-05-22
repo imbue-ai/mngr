@@ -154,12 +154,18 @@ def _is_transient_ssh_error(exception: BaseException) -> bool:
       including ChannelException (server refused to open a new channel,
       e.g. MaxSessions limit -- the transport may still be alive)
     - EOFError (remote end closed connection)
+    - TimeoutError (pyinfra read_output_buffers timeout when the remote
+      sshd is reloaded mid-command, e.g. during cloud-init bootstrap).
+      Note: ``TimeoutError`` is an OSError subclass on Python 3, so this
+      check must precede any narrower OSError handling.
     """
     if isinstance(exception, OSError) and "Socket is closed" in str(exception):
         return True
     if isinstance(exception, SSHException):
         return True
     if isinstance(exception, EOFError):
+        return True
+    if isinstance(exception, TimeoutError):
         return True
     return False
 

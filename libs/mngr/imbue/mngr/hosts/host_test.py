@@ -1088,8 +1088,17 @@ def _create_host_with_fake_connector(
         (SSHException("SSH session not active"), True),
         (ChannelException(2, "open failed"), True),
         (EOFError(), True),
+        (TimeoutError("Timed out reading output"), True),
     ],
-    ids=["socket-closed", "other-os-error", "non-os-error", "ssh-exception", "channel-exception", "eof-error"],
+    ids=[
+        "socket-closed",
+        "other-os-error",
+        "non-os-error",
+        "ssh-exception",
+        "channel-exception",
+        "eof-error",
+        "timeout-error",
+    ],
 )
 def test_is_transient_ssh_error(exception: BaseException, expected: bool) -> None:
     assert _is_transient_ssh_error(exception) is expected

@@ -12,7 +12,10 @@ def generate_cloud_init_user_data(
     concurrent ``mngr exec`` / ``rsync`` / ``ssh`` calls) don't trip the
     default 10:30:100 pre-auth cap and lose connections mid-transfer.
     Mirrors the equivalent ``MaxSessions=100`` / ``MaxStartups=100:30:200``
-    knob the lima provider applies to its VMs.
+    knob the lima provider applies to its VMs. The bump lives in a
+    ``/etc/ssh/sshd_config.d/`` drop-in written via ``write_files`` so
+    sshd reads it on first start; the follow-up ``systemctl reload ssh``
+    is belt-and-suspenders only and sends SIGHUP (no connection drop).
 
     When ``auto_shutdown_minutes`` is set, the VPS schedules a
     ``shutdown -P +N`` from cloud-init, so the OS halts itself after the
@@ -48,18 +51,26 @@ packages:
   - curl
   - ca-certificates
   - rsync
+write_files:
+  - path: /etc/ssh/sshd_config.d/99-mngr.conf
+    permissions: '0644'
+    content: |
+      MaxSessions 100
+      MaxStartups 100:30:200
 runcmd:
   - curl -fsSL https://get.docker.com | sh
   - systemctl enable docker
   - systemctl start docker
-  - |
-    if ! grep -q '^MaxSessions' /etc/ssh/sshd_config 2>/dev/null; then
-        cat >> /etc/ssh/sshd_config <<SSHD_EOF
-    MaxSessions 100
-    MaxStartups 100:30:200
-    SSHD_EOF
-        systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null || service ssh restart 2>/dev/null || true
-    fi
+  # Apply the MaxSessions/MaxStartups bump without killing in-flight SSH
+  # connections. ``systemctl reload`` sends SIGHUP, which sshd handles by
+  # re-execing itself -- existing sessions stay alive. ``systemctl restart``
+  # would tear them down, racing the provisioning poll loop and hanging
+  # in-flight reads until pyinfra's 10s timeout fires (which is not
+  # retried, so it would kill host creation outright). The drop-in config
+  # file is written by ``write_files`` before sshd starts using it, so
+  # the reload is purely belt-and-suspenders for the case where sshd
+  # somehow started reading the old config first.
+  - systemctl reload ssh 2>/dev/null || systemctl reload sshd 2>/dev/null || service ssh reload 2>/dev/null || true
   - touch /var/run/mngr-ready
 {shutdown_block}"""
 

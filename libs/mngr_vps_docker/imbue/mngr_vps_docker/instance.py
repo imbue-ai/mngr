@@ -825,14 +825,26 @@ class VpsDockerProvider(BaseProviderInstance):
     # =========================================================================
 
     def _wait_for_cloud_init(self, outer: OuterHostInterface, timeout_seconds: float) -> None:
-        """Wait for cloud-init to finish (Docker installed, marker file present)."""
+        """Wait for cloud-init to finish (Docker installed, marker file present).
+
+        Swallows ``HostConnectionError`` from each poll: cloud-init runs
+        ``apt-get install`` and Docker setup which can momentarily disrupt
+        SSH (e.g. ``systemctl reload ssh`` after writing a sshd_config
+        drop-in). Each poll's underlying retry budget already absorbs
+        single in-flight disruptions; a connection error that propagates
+        past that means the system is still settling. Keep polling -- the
+        outer ``timeout_seconds`` budget is the hard wall.
+        """
         start = time.monotonic()
         while time.monotonic() - start < timeout_seconds:
-            if _check_file_exists_on_outer(outer, "/var/run/mngr-ready"):
-                elapsed = time.monotonic() - start
-                if elapsed > 30.0:
-                    logger.warning("Cloud-init took {:.1f}s (threshold: 30s)", elapsed)
-                return
+            try:
+                if _check_file_exists_on_outer(outer, "/var/run/mngr-ready"):
+                    elapsed = time.monotonic() - start
+                    if elapsed > 30.0:
+                        logger.warning("Cloud-init took {:.1f}s (threshold: 30s)", elapsed)
+                    return
+            except HostConnectionError as e:
+                logger.debug("Transient SSH error during cloud-init poll (will retry): {}", e)
             time.sleep(5.0)
         raise MngrError(
             f"Cloud-init did not complete within {timeout_seconds}s. Docker may not be installed on the VPS."
