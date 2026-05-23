@@ -115,10 +115,12 @@ def test_prevent_setattr() -> None:
 
 
 def test_prevent_asyncio_import() -> None:
-    # Two: app.py uses ``asyncio.get_running_loop()`` and ``asyncio.run_coroutine_threadsafe``
-    # for HTTP route handlers; latchkey/permissions.py uses ``run_in_executor`` to run the
-    # blocking grant/deny path off the event loop. Both are intrinsic to FastAPI integration.
-    rc.check_asyncio_import(_DIR, snapshot(2))
+    # Three: app.py uses ``asyncio.get_running_loop()`` and ``asyncio.run_coroutine_threadsafe``
+    # for HTTP route handlers; the two sibling permission handlers under
+    # ``latchkey/handlers/`` (``predefined.py`` and ``file_sharing.py``) both use
+    # ``run_in_executor`` to run the blocking grant/deny path off the event loop. All three
+    # are intrinsic to FastAPI integration.
+    rc.check_asyncio_import(_DIR, snapshot(3))
 
 
 def test_prevent_pandas_import() -> None:
