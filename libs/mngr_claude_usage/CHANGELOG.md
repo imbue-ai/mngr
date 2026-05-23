@@ -9,6 +9,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 ### Changed
 
 - Changed: Statusline writer captures `rate_limits` + per-render `session_id` + `cost.*` from Claude Code's statusline JSON into `events/claude/usage/events.jsonl` (renamed from `events/claude/rate_limits/`); no longer skips emission when only `cost` is present, so cost tracking now works for direct `ANTHROPIC_API_KEY` users.
+- Changed: Statusline shim and writer scripts moved to host-stable paths (`<host_dir>/commands/claude_statusline.sh`, `<host_dir>/commands/claude_usage_writer.sh`) so `settings.local.json`'s `statusLine.command` stays valid across agent lifecycles; runtime sidecar (captured user command) remains per-agent. Fixes infinite recursion when running successive claude agents in the same `work_dir` (as `mngr uncapped-claude` does). Shim exits 0 silently when `MNGR_AGENT_STATE_DIR` is unset.
 
 ## [v0.2.8] - 2026-05-13
 

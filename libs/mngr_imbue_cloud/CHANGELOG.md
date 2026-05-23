@@ -6,6 +6,20 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Changed
+
+- Changed: `mngr imbue_cloud admin pool create` is now provider-generic — drops `MINDS_ROOT_NAME` env detection, adds a required `--region` and repeatable `--tag`, lands on `--template main --template ovh` with `@host.ovh`, and installs/configures `ufw` on every leased VPS before the row hits `pool_hosts`.
+- Changed: `mngr_imbue_cloud` no longer triggers a silent auto-disable on `ImbueCloudAuthError`; the error now propagates to the minds providers panel for explicit user action.
+- Changed: Bumped pinned `imbue-mngr` / `imbue-common` / `concurrency-group` versions to match the current monorepo.
+
+### Fixed
+
+- Fixed: `pool_hosts` INSERT now writes the schema's required `host_name` column — every successful pool bake was previously dying at the very last step with `null value in column "host_name"`, leaking a fully-provisioned VPS each time. SQL extracted into a `_INSERT_POOL_HOST_SQL` constant with a regression test.
+- Fixed: Bake's services agent now uses the constant `system-services` name (matching the user's adopt-time `mngr create` invocation) and tears down the FCT-bootstrap-created chat agent + `initial_chat_created` sentinel so the user's first start hydrates fresh chat agents under the correct host name.
+- Fixed: `_get_agent_info` now filters by both agent name and `host.name` so sequential bakes on different VPSes can't return a prior bake's stale agent.
+- Fixed: `ImbueCloudProvider.create_host` SFTPs into the leased container and rewrites `/mngr/data.json`'s `host_name` to the user-supplied value so the FCT bootstrap's first-start chat-agent naming uses the user's workspace name.
+- Fixed: Multi-token `mngr exec` commands are packed into a single `shlex.join`'d positional string (avoids Click's `AGENTS... COMMAND` parser munging the inner `mngr destroy <name> --force`).
+
 ## [v0.2.8] - 2026-05-13
 
 ### Changed

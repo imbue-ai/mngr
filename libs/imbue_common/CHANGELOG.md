@@ -6,6 +6,14 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Added
+
+- Added: Shared conftest hooks set `LATCHKEY_DISABLE_COUNTING=1` in `os.environ` once per pytest session so test subprocesses (including the Latchkey Gateway spawned by the minds Electron e2e test) no longer count toward Latchkey's public daily usage counter.
+
+### Changed
+
+- Changed: Project adopted the per-project changelog layout (`changelog/`, `CHANGELOG.md`, `UNABRIDGED_CHANGELOG.md` at the project root).
+
 ## [v0.2.7] - 2026-05-11
 
 ### Changed

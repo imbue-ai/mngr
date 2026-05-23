@@ -5,3 +5,7 @@ A concise, human-friendly summary of changes to the `slack_exporter` project. En
 For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDGED_CHANGELOG.md).
 
 ## [Unreleased]
+
+### Changed
+
+- Changed: Project adopted the per-project changelog layout (`changelog/`, `CHANGELOG.md`, `UNABRIDGED_CHANGELOG.md` at the project root).

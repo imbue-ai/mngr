@@ -6,10 +6,17 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Added
+
+- Added: `--run-name` flag to `mngr tmr` to override the auto-generated run name.
+- Added: TMR HTML report is now mirrored to `s3://int8-shared-internal/tmr-reports/<run>.html` on every regeneration (when AWS credentials are set), with the public URL printed and emitted as a structured `report_url` event.
+
 ### Changed
 
 - Changed: `mngr tmr` testing agents now publish a single `outputs.tar.gz` archive into the per-agent volume API, replacing the rsync + git-pull finalization; SSH provider no longer supported for testing-agent outputs.
 - Changed: Regenerated CLI docs for `mngr tmr`.
+- Changed: TMR run names are now a single compact timestamp `YYYYMMDDHHMMSS` used consistently across the output directory, the `tmr_run_name` agent label, and every spawned entity (testing agents `tmr-<run>-<test_name>`, branches `mngr-tmr/<run>/<test_name>`, snapshotter/integrator/host-pool). New `tmr_role` label (`testing` / `snapshotter` / `integrator`) replaces name-prefix matching.
+- Changed: Project adopted the per-project changelog layout (`changelog/`, `CHANGELOG.md`, `UNABRIDGED_CHANGELOG.md` at the project root).
 
 ## [v0.2.8] - 2026-05-13
 

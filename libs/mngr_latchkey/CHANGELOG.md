@@ -9,12 +9,24 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 ### Added
 
 - Added: `mngr latchkey admin-jwt` and `mngr latchkey gateway-info` subcommands; `LatchkeyForwardInfo.gateway_port` stamped for non-spawning consumers.
+- Added: New typed permission-request schema (`{agent_id, rationale, type, payload}`) with `predefined` and `file-sharing` variants; pending requests stored under `permission_requests/v2/`; new `POST /permission-requests/approve/<id>` merges precomputed `effect.rules`/`effect.schemas` into the target permissions file.
+- Added: Bundled `minds-api-proxy` Latchkey extension that reverse-proxies `/minds-api-proxy` to a minds-supplied upstream URL (`LATCHKEY_EXTENSION_MINDS_API_URL`); returns 503 when the env var is unset.
+- Added: WebDAV-aware `file-sharing` permission effect with required `access: READ | WRITE` field; READ unlocks non-mutating verbs (`GET`/`HEAD`/`OPTIONS`/`PROPFIND`), WRITE adds the single-path mutating verbs (`PUT`/`DELETE`/`PROPPATCH`/`MKCOL`/`LOCK`/`UNLOCK`). `COPY`/`MOVE` are intentionally excluded. Per-file permission schema attaches to the pre-existing `latchkey-self` scope.
+- Added: `GET /permissions/available` and `GET /permissions/available/<service_name>` catalog endpoints backed by a `services.json` data file materialized into `LATCHKEY_DIRECTORY/extensions/` at spawn time; agent baseline broadened to allow reading own permissions and per-service catalog entries.
+- Added: `LatchkeyForwardSupervisor.extra_env` for publishing per-startup env vars (e.g. minds-api upstream URL) to the detached supervisor.
 
 ### Changed
 
 - Changed: Bumped bundled Latchkey to 2.11.1.
 - Changed: Switched mngr-latchkey + minds permission management to latchkey 2.9.0's `permission_requests` / `permissions` gateway extensions; `LATCHKEY_MIN_VERSION` bumped to 2.9.0.
 - Changed: Regenerated CLI docs for `mngr latchkey`.
+- Changed: `LatchkeyGatewayClient.get_available_services` now returns a typed `dict[str, AvailableServiceEntry]` (pydantic-validated) instead of an untyped dict; wire-shape validation surfaces as `LatchkeyGatewayClientError`.
+- Changed: Per-directory encryption key is no longer cached on the `Latchkey` model — `_load_encryption_key()` reads/mints on each subprocess-spawn so the secret only lives in memory for one env-builder call frame.
+- Changed: `load_or_create_encryption_key` validates the on-disk key file's permission bits every load; group/other access bits raise the new `LatchkeyEncryptionKeyPermissionError` with a copy-pasteable `chmod 600 <path>` hint.
+
+### Fixed
+
+- Fixed: Race condition in per-directory encryption-key resolution where a concurrent reader could observe an empty key string mid-write — the key file is now published atomically via write + `fsync` + `os.link`.
 
 ## [v0.2.8] - 2026-05-13
 

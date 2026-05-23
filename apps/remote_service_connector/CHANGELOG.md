@@ -6,6 +6,22 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Added
+
+- Added: Connector exposes a new no-auth `GET /health/liveness` route returning `{"status": "ok"}`.
+
+### Changed
+
+- Changed: Project adopted the per-project changelog layout (`changelog/`, `CHANGELOG.md`, `UNABRIDGED_CHANGELOG.md` at the project root).
+- Changed: Renamed `vps_ip` → `vps_address` end-to-end (API models, all Python call sites, and `pool_hosts.vps_ip` DB column); migration `003_vps_address.sql` ships as an idempotent rename. The field can hold a public IPv4 or a DNS hostname (e.g. OVH's `vps-eec8860b.vps.ovh.us`).
+- Changed: `DELETE /tunnels/{name}` and `POST /hosts/{id}/release` are now idempotent at the HTTP layer — second call returns 200 with `{"status": "already_deleted"}` / `{"status": "already_released"}` instead of 404.
+- Changed: Connector auth endpoints converted from `async def` to sync `def` (twelve endpoints + `_build_session_tokens`); SuperTokens recipe imports switched to their `syncio` equivalents. OAuth callback endpoints bridge to async-only methods via `supertokens_python.async_to_sync_wrapper.sync`.
+
+### Fixed
+
+- Fixed: `/auth/session/revoke`, `/auth/email/is-verified`, `/auth/email/send-verification` no longer 500 — the `async def` + `syncio.*` combination tripped `RuntimeError: This event loop is already running`; the sync-def conversion makes the bug class structurally impossible.
+- Fixed: `_authenticate_supertokens` passes `override_global_claim_validators=lambda *_: []` so the explicit "Email not verified" 401 fires for unverified tokens instead of being shadowed by the SDK's generic `Invalid token`; `_get_user_id_from_access_token` likewise skips claim validation so unverified users can sign out.
+
 ## [v0.2.7] - 2026-05-11
 
 ### Changed
