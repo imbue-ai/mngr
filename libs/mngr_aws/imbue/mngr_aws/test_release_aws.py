@@ -232,6 +232,7 @@ def test_provider_lifecycle_create_stop_start_destroy(
         "99999",
     )
     assert result.returncode == 0, f"Create failed: {result.stderr}\n--- stdout ---\n{result.stdout}"
+    assert "successfully" in result.stdout.lower(), f"unexpected create output: {result.stdout}"
 
     try:
         result = _run_mngr(aws_test_settings_dir, temp_git_repo, "stop", agent_name)
