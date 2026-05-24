@@ -225,8 +225,8 @@ def _store_session_from_auth_result(
     if minds_config is not None and minds_config.get_default_account_id() is None:
         minds_config.set_default_account_id(result.user.user_id)
 
-    # Explicit signin -- always re-enable the provider entry, even if a
-    # previous run auto-disabled it after an auth error.
+    # Explicit signin -- always re-enable the provider entry, even if the
+    # user previously clicked Disable on it in the providers panel.
     connector_url = _get_connector_url(request)
     if set_imbue_cloud_provider_for_account(
         result.user.email,
@@ -507,10 +507,10 @@ def _run_oauth_subprocess(
     the OAuth callback, exchanges the code, and writes the session to its own
     state directory. We then mirror the resulting account identity into
     ``MultiAccountSessionStore`` so the desktop UI can render it, register
-    a ``[providers.imbue_cloud_<slug>]`` entry (force-enabled, even if a
-    previous run auto-disabled it after an auth error), and bounce the
-    ``mngr forward`` plugin's observe child so the new provider config is
-    picked up immediately -- mirroring what the email/password
+    a ``[providers.imbue_cloud_<slug>]`` entry (force-enabled, even if the
+    user previously clicked Disable on it in the providers panel), and
+    bounce the ``mngr forward`` plugin's observe child so the new provider
+    config is picked up immediately -- mirroring what the email/password
     ``_store_session_from_auth_result`` path does for non-OAuth signins.
     """
     try:

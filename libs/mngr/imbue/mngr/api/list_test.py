@@ -713,15 +713,19 @@ def test_maybe_write_full_discovery_snapshot_writes_when_unfiltered_and_error_fr
     assert "snapshot-agent" in content
 
 
-def test_maybe_write_full_discovery_snapshot_skips_when_errors_present(
+def test_maybe_write_full_discovery_snapshot_skips_when_non_provider_error_present(
     temp_mngr_ctx: MngrContext,
 ) -> None:
-    """_maybe_write_full_discovery_snapshot does not write when errors are present."""
+    """Non-provider-attributable errors (plain ErrorInfo) skip the snapshot.
+
+    These come from the top-level `except MngrError` in list_agents and indicate
+    the result may be structurally incomplete in ways the snapshot cannot model.
+    """
     host_details = _make_host_details()
     agent = _make_agent_details("error-agent", host_details)
     result = ListResult()
     result.agents.append(agent)
-    result.errors.append(ErrorInfo.build(RuntimeError("provider failed")))
+    result.errors.append(ErrorInfo.build(RuntimeError("non-provider failure")))
 
     _maybe_write_full_discovery_snapshot(
         mngr_ctx=temp_mngr_ctx,
@@ -733,6 +737,36 @@ def test_maybe_write_full_discovery_snapshot_skips_when_errors_present(
 
     events_path = get_discovery_events_path(temp_mngr_ctx.config)
     assert not events_path.exists()
+
+
+def test_maybe_write_full_discovery_snapshot_emits_with_error_by_provider_name_for_provider_errors(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """Per-provider errors emit a snapshot with error_by_provider_name populated."""
+    host_details = _make_host_details()
+    agent = _make_agent_details("ok-agent", host_details)
+    result = ListResult()
+    result.agents.append(agent)
+    failing_provider = ProviderInstanceName("modal")
+    result.errors.append(
+        ProviderErrorInfo.build_for_provider(RuntimeError("modal token missing"), failing_provider),
+    )
+
+    _maybe_write_full_discovery_snapshot(
+        mngr_ctx=temp_mngr_ctx,
+        result=result,
+        provider_names=None,
+        include_filters=(),
+        exclude_filters=(),
+    )
+
+    events_path = get_discovery_events_path(temp_mngr_ctx.config)
+    assert events_path.exists()
+    content = events_path.read_text()
+    assert "DISCOVERY_FULL" in content
+    assert "modal token missing" in content
+    assert "RuntimeError" in content
+    assert "modal" in content
 
 
 def test_maybe_write_full_discovery_snapshot_skips_when_provider_filter_set(

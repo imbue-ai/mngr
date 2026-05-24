@@ -1,0 +1,1 @@
+- The shared conftest hooks now set `LATCHKEY_DISABLE_COUNTING=1` in `os.environ` once per pytest session. Any subprocess spawned by a test (directly or transitively, e.g. the Latchkey Gateway started by the minds Electron e2e test) inherits the opt-out, so test runs no longer count toward Latchkey's public daily usage counter.
