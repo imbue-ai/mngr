@@ -539,11 +539,17 @@ PREVENT_BARE_TMUX_TARGETS = RegexRatchetRule(
         "ignores the equals-sign prefix even though -s is documented as a "
         "target-session form; guard with a has-session call first.)"
     ),
-    # Catch `tmux <subcmd> ... -t '<target>'` where the quoted target starts with anything
-    # other than `=` (the exact-match prefix). `^(?!\s*#).*` at the start, with multiline,
-    # skips Python comment lines so commented-out historical examples don't get flagged.
-    # Variable-interpolated targets without outer quotes -- `-t {var}` -- are unmatched
-    # and assumed safe by convention (the variable should hold a `tmux_*_target()` result).
-    pattern_string=r"^(?!\s*#).*\btmux\b(?:\s+(?:-[a-zA-Z]\S*|[a-z][a-z-]*))*\s+-t\s+'(?!=)",
+    # Catch `tmux <subcmd> ... -t '<target>'` or `... -t "<target>"` where the quoted
+    # target starts with anything other than `=` (the exact-match prefix). Covers both
+    # Python single-quoted f-strings AND shell/Python double-quoted variable
+    # interpolations (e.g. `tmux has-session -t "$SESSION"` in bash, or
+    # `tmux kill-window -t f"{prefix}foo"` in Python). `^(?!\s*#).*` at the start,
+    # with multiline, skips Python comment lines so commented-out historical examples
+    # don't get flagged. Bash `# ...` comments are also skipped by the same predicate
+    # since `\s*#` matches both. Variable-interpolated targets without outer quotes
+    # -- `-t {var}` -- are unmatched and assumed safe by convention (the variable
+    # should hold a `TmuxSessionTarget.as_shell_arg()` / `TmuxWindowTarget.as_shell_arg()`
+    # result).
+    pattern_string=r"""^(?!\s*#).*\btmux\b(?:\s+(?:-[a-zA-Z]\S*|[a-z][a-z-]*))*\s+-t\s+["'](?!=)""",
     is_multiline=True,
 )
