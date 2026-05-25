@@ -43,3 +43,36 @@ baseline:
 there is exactly one `MINDS_API_KEY` per minds installation now, the
 latchkey gateway injects it transparently, and agents never see the
 value -- so there is nothing to push down onto a leased pool host.
+
+## Consolidation: shared `SSHTunnelManager`
+
+The `SSHTunnelManager` (and `RemoteSSHInfo`, `ReverseTunnelInfo`,
+`SSHTunnelError`) used to exist in two places: this package's own
+`mngr_latchkey/ssh_tunnel.py` (driving the latchkey gateway's
+reverse-into-each-agent tunnels) and the `mngr_forward` plugin's
+`mngr_forward/ssh_tunnel.py` (driving forward + `--reverse` tunnels).
+The two implementations were ~70% verbatim duplicates that diverged on
+three things: latchkey added a per-tunnel exponential backoff for the
+repair loop (capped at 5 minutes), an `agent_id` tag on each
+`ReverseTunnelInfo`, and a `remove_reverse_tunnels_for_agent` cleanup
+hook used by the destruction path.
+
+All three latchkey improvements moved into the `mngr_forward` manager
+(they're strictly better behavior for both callers), and
+`mngr_latchkey/ssh_tunnel.py` is gone:
+
+- `mngr_latchkey/discovery.py`, `cli.py`, `discovery_stream.py`,
+  `discovery_stream_test.py`, and `core_test.py` now import
+  `RemoteSSHInfo`, `SSHTunnelError`, `SSHTunnelManager` from
+  `imbue.mngr_forward.ssh_tunnel` instead.
+- The 635-line `mngr_latchkey/ssh_tunnel_test.py` has been
+  consolidated into `mngr_forward/ssh_tunnel_test.py` (which now
+  carries the previously-thin manager unit tests plus the new
+  exponential-backoff + `remove_reverse_tunnels_for_agent` coverage).
+- The reverse-tunnel repair loop in `mngr_forward` no longer uses a
+  flat 30s retry; it uses per-tunnel exponential backoff with a 5min
+  cap. Same recovery latency for healthy targets; much less wasted
+  paramiko handshake against permanently-gone ones.
+- `remove_reverse_tunnels_for_agent` is careful not to close an SSH
+  client out from under any live *forward* tunnel using the same
+  host, so the two flavors of tunnel can coexist on one connection.

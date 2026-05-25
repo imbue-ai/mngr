@@ -100,7 +100,7 @@ from imbue.mngr_latchkey.discovery import (
     LatchkeyDiscoveryHandler,
     LatchkeyDestructionHandler,
 )
-from imbue.mngr_latchkey.ssh_tunnel import SSHTunnelManager
+from imbue.mngr_forward.ssh_tunnel import SSHTunnelManager
 
 latchkey = Latchkey(
     latchkey_binary="/path/to/latchkey",  # default: "latchkey" on PATH

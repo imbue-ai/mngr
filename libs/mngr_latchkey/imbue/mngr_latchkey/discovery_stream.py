@@ -46,7 +46,7 @@ from imbue.mngr.api.discovery_events import parse_discovery_event_line
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import SSHInfo
-from imbue.mngr_latchkey.ssh_tunnel import RemoteSSHInfo
+from imbue.mngr_forward.ssh_tunnel import RemoteSSHInfo
 
 # Bare-name default for the ``mngr`` CLI; callers can pass an absolute
 # path via the ``mngr_binary`` field for environments where ``mngr`` is
