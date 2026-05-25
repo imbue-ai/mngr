@@ -45,8 +45,18 @@ HOST_ENV_ARGS=$(jq -r '.env | to_entries[] | "--host-env \(.key)=\(.value)"' /tm
 # the same gateway wiring.
 CREATED=$(mngr create my-template $HOST_ENV_ARGS --format json)
 HOST_ID=$(echo "$CREATED" | jq -r .host_id)
+AGENT_ID=$(echo "$CREATED" | jq -r .agent_id)
 
+# Finalize the opaque permissions handle: swing its symlink to the
+# canonical host-keyed permissions path.
 mngr latchkey link-permissions --host-id "$HOST_ID" --opaque-path "$OPAQUE_PATH"
+
+# Allow this agent's id through the host's Minds API proxy gate. The
+# baseline rule rejects every ``/minds-api-proxy/api/v1/agents/<id>/...``
+# request whose ``<id>`` is not in the host's allowed-agent enum, so
+# every minds agent that wants to call the Minds API must be added
+# here. Idempotent: re-running for an already-allowed agent is a no-op.
+mngr latchkey allow-agent --host-id "$HOST_ID" --agent-id "$AGENT_ID"
 ```
 
 ### Settings

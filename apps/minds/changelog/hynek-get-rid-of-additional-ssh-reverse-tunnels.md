@@ -30,15 +30,24 @@ machinery is gone:
 - The notifications endpoint moved from `POST /api/v1/notifications`
   to `POST /api/v1/agents/<agent_id>/notifications`, matching the
   Telegram routes. Every `/api/v1` route is now per-agent.
-- Every agent created by minds gets a per-agent rule + schemas
-  installed in its host's latchkey permissions file at
-  finalize-host-permissions time. The rule narrows what the gateway
-  will let that agent reach through `minds-api-proxy` to its own
-  `/api/v1/agents/<agent_id>/...` subtree.
-- The agent baseline (in `mngr_latchkey/agent_setup.py`) additionally
-  grants every agent a blanket
-  `POST /minds-api-proxy/api/v1/agents/<...>/notifications` permission
-  so notifications work without any extra per-agent grant.
+- Every agent created by minds gets added to the host's
+  `minds-api-proxy-allowed-agent` enum at finalize-host-permissions
+  time. The baseline permissions file's first rule rejects any
+  `/minds-api-proxy/api/v1/agents/<id>/...` whose `<id>` is not in
+  that enum, so an agent on host A cannot reach the Minds API on
+  behalf of an agent on host B (B's id only appears in B's host's
+  permissions file).
+- The desktop client now calls
+  `imbue.mngr_latchkey.agent_setup.allow_agent_for_host(...)` directly
+  -- a single library call that does an atomic file edit -- instead of
+  the previous gateway-extension dance that POSTed two schemas + one
+  rule per agent. The `gateway_client` field on `AgentCreator` is
+  gone; `LatchkeyGatewayClient` keeps its existing user-grant API
+  (`set_permission_rule`, etc.) but no longer ships the low-level
+  schema-altering methods (`set_permission_schema`,
+  `delete_permission_schema`, `delete_permission_rule`).
+- The operator-facing equivalent is the new
+  `mngr latchkey allow-agent --host-id ID --agent-id ID` CLI command.
 - The `inject_tunnel_token_into_agent` helper moved out of
   `api_v1.py` into its own module so it can be imported without
   pulling the FastAPI router in.

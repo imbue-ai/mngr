@@ -357,9 +357,11 @@ def link_opaque_permissions_to_host(
 def save_permissions(path: Path, config: LatchkeyPermissionsConfig) -> None:
     """Atomically write the permissions config to disk with mode 0o600.
 
-    Used only for the pre-gateway-startup write paths (deny-all default,
-    admin file, per-agent opaque baseline). Reads + per-host edits go
-    through the gateway's ``permissions`` extension instead.
+    Used by the pre-gateway-startup write paths (deny-all default,
+    admin file, per-agent opaque baseline) and by the host-allowed-agent
+    editor (:func:`imbue.mngr_latchkey.agent_setup.allow_agent_for_host`).
+    User-driven per-service grants still go through the gateway's
+    ``permissions`` extension instead.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -372,3 +374,61 @@ def save_permissions(path: Path, config: LatchkeyPermissionsConfig) -> None:
     tmp_path.chmod(0o600)
     os.replace(tmp_path, path)
     logger.debug("Wrote permissions config to {} ({} rule(s))", path, len(config.rules))
+
+
+def load_permissions(path: Path) -> LatchkeyPermissionsConfig:
+    """Read a permissions config from disk.
+
+    Used by the host-allowed-agent editor (and tests) to read + extend
+    an existing permissions file. The reverse of :func:`save_permissions`:
+    parses the JSON object shape and returns a typed config. Any field
+    that isn't part of the documented schema is dropped silently, matching
+    what ``save_permissions`` would write back out.
+
+    Raises:
+        LatchkeyStoreError: if the file is missing, unreadable, not
+            valid JSON, or doesn't have the expected top-level shape.
+    """
+    if not path.is_file():
+        raise LatchkeyStoreError(f"Permissions file does not exist: {path}")
+    try:
+        raw = path.read_text()
+    except OSError as e:
+        raise LatchkeyStoreError(f"Failed to read permissions file {path}: {e}") from e
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as e:
+        raise LatchkeyStoreError(f"Permissions file {path} is not valid JSON: {e}") from e
+    if not isinstance(parsed, dict):
+        raise LatchkeyStoreError(
+            f"Permissions file {path} top-level value is not a JSON object: {type(parsed).__name__}"
+        )
+    raw_rules = parsed.get("rules", [])
+    if not isinstance(raw_rules, list):
+        raise LatchkeyStoreError(f"Permissions file {path} has non-list ``rules``: {type(raw_rules).__name__}")
+    rules: list[dict[str, list[str]]] = []
+    for index, raw_rule in enumerate(raw_rules):
+        if not isinstance(raw_rule, dict):
+            raise LatchkeyStoreError(f"Permissions file {path} rules[{index}] is not a JSON object")
+        # The pydantic model expects ``dict[str, list[str]]``; tolerate
+        # the inner list being a tuple-like JSON array and rebuild as
+        # ``list[str]``, raising if the values aren't strings.
+        cleaned_rule: dict[str, list[str]] = {}
+        for scope, permissions in raw_rule.items():
+            if not isinstance(scope, str):
+                raise LatchkeyStoreError(f"Permissions file {path} rules[{index}] has non-string scope: {scope!r}")
+            if not isinstance(permissions, list):
+                raise LatchkeyStoreError(f"Permissions file {path} rules[{index}][{scope!r}] is not a list")
+            cleaned_permissions: list[str] = []
+            for raw_perm in permissions:
+                if not isinstance(raw_perm, str):
+                    raise LatchkeyStoreError(
+                        f"Permissions file {path} rules[{index}][{scope!r}] contains non-string entry: {raw_perm!r}"
+                    )
+                cleaned_permissions.append(raw_perm)
+            cleaned_rule[scope] = cleaned_permissions
+        rules.append(cleaned_rule)
+    raw_schemas = parsed.get("schemas", {})
+    if not isinstance(raw_schemas, dict):
+        raise LatchkeyStoreError(f"Permissions file {path} has non-object ``schemas``: {type(raw_schemas).__name__}")
+    return LatchkeyPermissionsConfig(rules=tuple(rules), schemas=raw_schemas)

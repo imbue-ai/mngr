@@ -41,13 +41,17 @@ from pydantic import JsonValue
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
 from imbue.mngr_latchkey.core import AGENT_SIDE_LATCHKEY_PORT
 from imbue.mngr_latchkey.core import Latchkey
 from imbue.mngr_latchkey.core import LatchkeyError
 from imbue.mngr_latchkey.store import LatchkeyPermissionsConfig
+from imbue.mngr_latchkey.store import LatchkeyStoreError
 from imbue.mngr_latchkey.store import link_opaque_permissions_to_host
+from imbue.mngr_latchkey.store import load_permissions
 from imbue.mngr_latchkey.store import new_opaque_permissions_path
+from imbue.mngr_latchkey.store import permissions_path_for_host
 from imbue.mngr_latchkey.store import save_permissions
 
 # Env-var names baked into the upstream latchkey CLI's wire contract.
@@ -79,30 +83,145 @@ _PERM_READ_AVAILABLE_PERMISSIONS: Final[str] = "latchkey-self-read-available-per
 # up the per-service catalog endpoint.
 _AVAILABLE_PERMISSIONS_PATH_PATTERN: Final[str] = r"^/permissions/available/[a-z0-9][a-z0-9-]*$"
 
-# Path pattern for the ``minds-api-proxy`` gateway extension. This is
-# the *only* path under ``latchkey-self.invalid`` an agent may reach
-# via the proxy by default; per-agent rules added at finalize-host-
-# permissions time narrow this further to the specific
-# ``/api/v1/agents/<agent_id>/`` subtree the agent is allowed to talk
-# about. The notifications endpoint lives under that subtree and is
-# therefore reachable by every agent the desktop client provisions
-# without any extra grant -- it carries no per-user-grant decision and
-# should always be available.
+# Detent schema names + URL prefix the Minds API proxy lives under.
+# The first rule in :data:`_AGENT_BASELINE_PERMISSIONS` uses these two
+# schemas to gate every ``/minds-api-proxy/api/v1/agents/<id>/...``
+# request: the scope schema matches *any* such request, and the single
+# permission schema's path pattern constrains the ``<id>`` segment to a
+# regex-alternation enum of allowed agent ids (initially empty -- no
+# agent allowed). New agents are added via :func:`allow_agent_for_host`
+# (or its CLI wrapper, ``mngr latchkey allow-agent``).
+#
+# Because detent evaluates rules top-to-bottom and stops at the first
+# rule whose scope matches, this guarantees that an unauthorized
+# agent_id is rejected by the first rule and never accidentally inherits
+# any subsequent rule's grant. (The remaining baseline rules are scoped
+# to ``/permission-requests``, ``/permissions/self``, etc., so they
+# don't match minds-api-proxy paths and don't interfere.)
 _MINDS_API_PROXY_PATH_PREFIX: Final[str] = "/minds-api-proxy/api/v1/agents/"
-_PERM_MINDS_API_PROXY_NOTIFICATIONS: Final[str] = "minds-api-proxy-notifications"
+_SCOPE_MINDS_API_PROXY: Final[str] = "minds-api-proxy"
+_PERM_MINDS_API_PROXY_ALLOWED_AGENT: Final[str] = "minds-api-proxy-allowed-agent"
+
+# Scope schema's path pattern. Matches any request under the proxy's
+# ``/api/v1/agents/<id>/...`` subtree (with or without a trailing
+# segment), so the rule that uses this scope fires for every such
+# request regardless of method or endpoint.
+_MINDS_API_PROXY_SCOPE_PATH_PATTERN: Final[str] = rf"^{_MINDS_API_PROXY_PATH_PREFIX}[^/]+(/.*)?$"
+
+# Sentinel that ``_build_allowed_agent_path_pattern`` writes when the
+# enum is empty. ``(?!)`` is a negative-empty-lookahead -- it matches no
+# string of any length, so the resulting path pattern rejects every
+# request that gets past the scope schema. Encoded as a stand-alone
+# constant so the round-trip ``build -> parse -> build`` is provably
+# stable even with no ids in the list.
+_ALLOWED_AGENT_EMPTY_SENTINEL: Final[str] = "(?!)"
+
+# Anchored regex that parses a populated allowed-agent path pattern
+# back into the list of agent ids encoded into its alternation group.
+# Agent ids are validated to ``[A-Za-z0-9_-]+`` (mngr's ``RandomId``
+# format: ``<prefix>-<32 hex>``) so the alternation body is restricted
+# to those characters plus the ``|`` separator. The non-capturing
+# ``(?:...)`` wrapper around the alternation is part of the format
+# this module writes; tolerating a wider grammar invites the file's
+# regex to drift from what the writer produces. The empty sentinel is
+# handled separately as a whole-string equality check below.
+_ALLOWED_AGENT_PATTERN_RE: Final[re.Pattern[str]] = re.compile(
+    r"^\^/minds-api-proxy/api/v1/agents/\(\?:(?P<body>[A-Za-z0-9_\-|]+)\)\(/\.\*\)\?\$$"
+)
+
+
+def _empty_allowed_agent_path_pattern() -> str:
+    """Whole-string form of the path pattern when the allowed-agent enum is empty."""
+    return rf"^/minds-api-proxy/api/v1/agents/(?:{_ALLOWED_AGENT_EMPTY_SENTINEL})(/.*)?$"
+
+
+def _build_allowed_agent_path_pattern(agent_ids: tuple[str, ...]) -> str:
+    """Build the path-pattern regex that gates the ``minds-api-proxy`` permission.
+
+    Format: ``^/minds-api-proxy/api/v1/agents/(?:<id1>|<id2>|...|<idN>)(/.*)?$``
+    when ``agent_ids`` is non-empty, or
+    ``^/minds-api-proxy/api/v1/agents/(?:(?!))(/.*)?$`` when it is empty.
+    The empty form uses a negative-empty-lookahead inside the
+    non-capturing group so the surrounding regex shape stays uniform
+    (which keeps the round-trip parser simple) while still matching no
+    real agent id.
+    """
+    if agent_ids:
+        body = "|".join(agent_ids)
+    else:
+        body = _ALLOWED_AGENT_EMPTY_SENTINEL
+    return rf"^/minds-api-proxy/api/v1/agents/(?:{body})(/.*)?$"
+
+
+def _parse_allowed_agent_path_pattern(pattern: str) -> tuple[str, ...]:
+    """Inverse of :func:`_build_allowed_agent_path_pattern`.
+
+    Raises :class:`LatchkeyStoreError` if ``pattern`` does not match the
+    format this module writes. Callers should treat that as "the
+    permissions file was hand-edited into a shape we cannot safely
+    extend" and surface the error rather than silently rebuilding the
+    list from scratch (which would discard the hand-edit).
+    """
+    # The empty form contains a ``(?!)`` whose embedded ``)`` upsets the
+    # ``[A-Za-z0-9_\-|]+`` body regex; check for it as a whole-string
+    # equality first.
+    if pattern == _empty_allowed_agent_path_pattern():
+        return ()
+    match = _ALLOWED_AGENT_PATTERN_RE.match(pattern)
+    if match is None:
+        raise LatchkeyStoreError(
+            f"Unrecognized {_PERM_MINDS_API_PROXY_ALLOWED_AGENT!r} path pattern; "
+            "refusing to overwrite a hand-edited permissions file. "
+            f"Got: {pattern!r}"
+        )
+    body = match.group("body")
+    return tuple(body.split("|"))
+
 
 _AGENT_BASELINE_PERMISSIONS: Final[LatchkeyPermissionsConfig] = LatchkeyPermissionsConfig(
     rules=(
+        # First rule: gate the Minds API proxy. The scope schema
+        # matches every ``/minds-api-proxy/api/v1/agents/<id>/...``
+        # request, and the single permission schema constrains <id>
+        # to the allowed-agent enum (initially empty -- no agent
+        # allowed). Because detent stops at the first matching
+        # scope, an unauthorized agent_id is rejected here and does
+        # NOT fall through to the gateway-self rule below.
+        {_SCOPE_MINDS_API_PROXY: [_PERM_MINDS_API_PROXY_ALLOWED_AGENT]},
+        # Remaining rules: gateway-self endpoints (permission requests,
+        # self-permissions read, services catalog). These scopes do NOT
+        # match minds-api-proxy paths, so they are reached only by
+        # requests that targeted ``/permission-requests`` /
+        # ``/permissions/self`` / ``/permissions/available/<service>``
+        # in the first place.
         {
             _SCOPE_LATCHKEY_SELF: [
                 _PERM_CREATE_PERMISSION_REQUEST,
                 _PERM_READ_SELF_PERMISSIONS,
                 _PERM_READ_AVAILABLE_PERMISSIONS,
-                _PERM_MINDS_API_PROXY_NOTIFICATIONS,
             ],
         },
     ),
     schemas={
+        _SCOPE_MINDS_API_PROXY: {
+            "properties": {
+                "domain": {"const": _GATEWAY_SELF_HOST},
+                "path": {
+                    "type": "string",
+                    "pattern": _MINDS_API_PROXY_SCOPE_PATH_PATTERN,
+                },
+            },
+            "required": ["domain", "path"],
+        },
+        _PERM_MINDS_API_PROXY_ALLOWED_AGENT: {
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "pattern": _build_allowed_agent_path_pattern(()),
+                },
+            },
+            "required": ["path"],
+        },
         _SCOPE_LATCHKEY_SELF: {
             "properties": {"domain": {"const": _GATEWAY_SELF_HOST}},
             "required": ["domain"],
@@ -131,87 +250,97 @@ _AGENT_BASELINE_PERMISSIONS: Final[LatchkeyPermissionsConfig] = LatchkeyPermissi
             },
             "required": ["method", "path"],
         },
-        # Notifications endpoint is reachable by every agent the
-        # desktop client provisions; the ``{agent_id}`` segment is not
-        # constrained here so the schema is shared across all agents.
-        # Per-agent isolation (this caller may only POST to
-        # ``/api/v1/agents/<its own id>/notifications``) is enforced by
-        # the per-agent permission schema + rule that
-        # :func:`agent_minds_api_proxy_schema_name` describes; this
-        # baseline grant is intentionally narrower than that (it does
-        # not cover Telegram or future routes) so the only blanket
-        # baseline grant we hand out is for the notification path.
-        _PERM_MINDS_API_PROXY_NOTIFICATIONS: {
-            "properties": {
-                "method": {"const": "POST"},
-                "path": {
-                    "type": "string",
-                    "pattern": rf"^{_MINDS_API_PROXY_PATH_PREFIX}[^/]+/notifications/?$",
-                },
-            },
-            "required": ["method", "path"],
-        },
     },
 )
 
 
-def agent_minds_api_proxy_scope_name(agent_id: str) -> str:
-    """Return the scope-schema (rule_key) name reserved for ``agent_id``.
+def allow_agent_for_host(
+    plugin_data_dir: Path,
+    host_id: HostId,
+    agent_id: AgentId,
+) -> None:
+    """Add ``agent_id`` to the host's allowed-agent enum on the Minds API proxy.
 
-    Each minds agent gets its own per-agent rule in the host's
-    permissions file, keyed by a scope schema name unique to that agent.
-    The scope schema itself is just ``latchkey-self.invalid`` (the
-    gateway-self host); naming it per-agent is what lets us POST a
-    fresh rule without disturbing other agents' rules or the baseline.
+    Reads the host's ``latchkey_permissions.json`` (writing a fresh baseline
+    if it does not yet exist), parses the current allowed-agent list out of
+    the ``minds-api-proxy-allowed-agent`` schema's path pattern, appends
+    ``agent_id`` if it is not already there, deduplicates + sorts, and
+    writes the updated config back atomically. Idempotent: re-allowing an
+    agent already in the list is a no-op write.
+
+    This is the *only* public way to grant a minds agent access to the
+    Minds API proxy. The matching CLI wrapper is ``mngr latchkey
+    allow-agent --host-id ID --agent-id ID``; the desktop client and any
+    other Python caller goes through this function directly. The previous
+    per-agent rule/schema dance and the corresponding low-level
+    ``POST /permissions/schemas`` gateway-extension endpoint are gone --
+    the only knob to turn is the allowed-agent enum.
+
+    Raises :class:`LatchkeyStoreError` if the on-disk permissions file
+    has been hand-edited into a shape we cannot safely extend (the
+    parse of the existing pattern fails); callers should surface the
+    error and let the operator fix the file manually rather than
+    overwrite an arbitrary edit.
     """
-    return f"minds-api-self-{agent_id}"
+    path = permissions_path_for_host(plugin_data_dir, host_id)
+    if path.is_file():
+        config = load_permissions(path)
+    else:
+        # First agent on this host: start from the baseline so the
+        # gateway-self rules and the minds-api-proxy gate are present.
+        config = _AGENT_BASELINE_PERMISSIONS
 
+    schemas: dict[str, JsonValue] = dict(config.schemas)
+    permission_schema = schemas.get(_PERM_MINDS_API_PROXY_ALLOWED_AGENT)
+    # Use ``dict`` (concrete type) rather than ``Mapping`` because
+    # ``JsonValue``'s mapping arm is ``dict[str, JsonValue]``
+    # specifically; ``isinstance(x, Mapping)`` lets the type checker
+    # narrow to ``Mapping[Unknown, Unknown]`` which then can't be
+    # subscripted with a ``str`` key.
+    if not isinstance(permission_schema, dict):
+        raise LatchkeyStoreError(
+            f"Permissions file {path} is missing the "
+            f"{_PERM_MINDS_API_PROXY_ALLOWED_AGENT!r} schema; cannot extend the allowed-agent enum."
+        )
+    properties = permission_schema.get("properties")
+    if not isinstance(properties, dict):
+        raise LatchkeyStoreError(
+            f"Permissions file {path}'s {_PERM_MINDS_API_PROXY_ALLOWED_AGENT!r} schema is malformed: "
+            f"missing or non-object ``properties``."
+        )
+    path_schema = properties.get("path")
+    if not isinstance(path_schema, dict):
+        raise LatchkeyStoreError(
+            f"Permissions file {path}'s {_PERM_MINDS_API_PROXY_ALLOWED_AGENT!r} schema is malformed: "
+            f"missing or non-object ``properties.path``."
+        )
+    pattern = path_schema.get("pattern")
+    if not isinstance(pattern, str):
+        raise LatchkeyStoreError(
+            f"Permissions file {path}'s {_PERM_MINDS_API_PROXY_ALLOWED_AGENT!r} schema is malformed: "
+            f"missing or non-string ``properties.path.pattern``."
+        )
 
-def agent_minds_api_proxy_permission_name(agent_id: str) -> str:
-    """Return the permission-schema name reserved for ``agent_id``.
+    existing_ids = _parse_allowed_agent_path_pattern(pattern)
+    if str(agent_id) in existing_ids:
+        # No-op: agent already allowed.
+        return
+    updated_ids = tuple(sorted(set(existing_ids) | {str(agent_id)}))
+    new_pattern = _build_allowed_agent_path_pattern(updated_ids)
 
-    The permission schema encodes the path pattern that constrains the
-    agent to its own ``/api/v1/agents/<agent_id>/`` subtree on the
-    Minds API proxy.
-    """
-    return f"minds-api-proxy-call-{agent_id}"
-
-
-def build_agent_minds_api_proxy_schemas(agent_id: str) -> dict[str, JsonValue]:
-    """Return the two inline schemas a per-agent rule references.
-
-    * ``scope`` -- mirrors ``latchkey-self`` (domain ==
-      ``latchkey-self.invalid``); named uniquely per agent so the rule
-      keyed on it doesn't collide with the baseline ``latchkey-self``
-      rule.
-    * ``permission`` -- matches every method on every path under
-      ``/minds-api-proxy/api/v1/agents/<agent_id>/`` (with or without
-      a trailing path). The path is anchored on the agent id literal
-      so an agent on host A cannot reach ``/api/v1/agents/<B's id>/...``
-      even though A and B share the gateway: B's id only appears in
-      *B's host*'s permissions file.
-    """
-    # ``re.escape`` keeps us safe against any character classes the
-    # detent path pattern would otherwise interpret; agent ids are
-    # UUID-shaped (hex + dashes) today, but encoding it through the
-    # escape removes any future surprise.
-    safe_agent_id = re.escape(agent_id)
-    return {
-        agent_minds_api_proxy_scope_name(agent_id): {
-            "properties": {"domain": {"const": _GATEWAY_SELF_HOST}},
-            "required": ["domain"],
-        },
-        agent_minds_api_proxy_permission_name(agent_id): {
-            "properties": {
-                "method": {"type": "string", "pattern": r"^[A-Z]+$"},
-                "path": {
-                    "type": "string",
-                    "pattern": rf"^{_MINDS_API_PROXY_PATH_PREFIX}{safe_agent_id}(/.*)?$",
-                },
-            },
-            "required": ["method", "path"],
-        },
-    }
+    # Build the updated schema body by copy-on-write so we do not
+    # mutate the input config in place (it might be the shared baseline
+    # constant). The explicit ``dict[str, JsonValue]`` annotations
+    # keep the type checker happy as we rebuild the nested structure.
+    new_path_schema: dict[str, JsonValue] = dict(path_schema)
+    new_path_schema["pattern"] = new_pattern
+    new_properties: dict[str, JsonValue] = dict(properties)
+    new_properties["path"] = new_path_schema
+    new_permission_schema: dict[str, JsonValue] = dict(permission_schema)
+    new_permission_schema["properties"] = new_properties
+    schemas[_PERM_MINDS_API_PROXY_ALLOWED_AGENT] = new_permission_schema
+    new_config = LatchkeyPermissionsConfig(rules=config.rules, schemas=schemas)
+    save_permissions(path, new_config)
 
 
 class AgentLatchkeySetup(FrozenModel):

@@ -44,9 +44,11 @@ from imbue.mngr.cli.output_helpers import emit_final_json
 from imbue.mngr.cli.output_helpers import write_human_line
 from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import PluginName
 from imbue.mngr_forward.ssh_tunnel import SSHTunnelManager
+from imbue.mngr_latchkey.agent_setup import allow_agent_for_host
 from imbue.mngr_latchkey.agent_setup import finalize_host_permissions
 from imbue.mngr_latchkey.agent_setup import prepare_agent_latchkey
 from imbue.mngr_latchkey.config import LatchkeyPluginConfig
@@ -102,6 +104,13 @@ class _LinkPermissionsCliOptions(_LatchkeyCommonCliOptions):
 
     host_id: str
     opaque_path: str
+
+
+class _AllowAgentCliOptions(_LatchkeyCommonCliOptions):
+    """Backing options object for ``mngr latchkey allow-agent``."""
+
+    host_id: str
+    agent_id: str
 
 
 class _ForwardCliOptions(_LatchkeyCommonCliOptions):
@@ -365,6 +374,88 @@ discards the freshly-created baseline.""",
 ).register()
 
 add_pager_help_option(_link_permissions_command)
+
+
+# =============================================================================
+# Subcommand: allow-agent
+# =============================================================================
+
+
+@click.command(name="allow-agent")
+@click.option(
+    "--host-id",
+    "host_id",
+    required=True,
+    help="Canonical host ID the agent runs on. Identifies which per-host permissions file to edit.",
+)
+@click.option(
+    "--agent-id",
+    "agent_id",
+    required=True,
+    help="Canonical agent ID to add to the host's allowed-agent enum.",
+)
+@add_common_options
+@click.pass_context
+def _allow_agent_command(ctx: click.Context, **kwargs: Any) -> None:
+    """Allow ``agent_id`` to call ``/minds-api-proxy/api/v1/agents/<agent_id>/...``.
+
+    Wraps :func:`imbue.mngr_latchkey.agent_setup.allow_agent_for_host`.
+    The default per-host permissions baseline rejects every Minds API
+    proxy request with an empty allowed-agent enum; this command
+    appends the supplied ``agent_id`` to the enum so the gateway will
+    let that agent through to its own ``/api/v1/agents/<id>/...``
+    subtree. Idempotent: re-running for an already-allowed agent is a
+    no-op.
+    """
+    del kwargs
+    mngr_ctx, _output_opts, opts = setup_command_context(
+        ctx=ctx,
+        command_name="latchkey.allow-agent",
+        command_class=_AllowAgentCliOptions,
+        is_format_template_supported=False,
+    )
+
+    latchkey = _build_initialized_latchkey(mngr_ctx, opts.latchkey_directory, opts.latchkey_binary)
+
+    try:
+        host_id = HostId(opts.host_id)
+    except ValueError as e:
+        raise click.UsageError(f"--host-id is not a valid host ID: {e}") from e
+    try:
+        agent_id = AgentId(opts.agent_id)
+    except ValueError as e:
+        raise click.UsageError(f"--agent-id is not a valid agent ID: {e}") from e
+
+    try:
+        allow_agent_for_host(latchkey.plugin_data_dir, host_id, agent_id)
+    except LatchkeyStoreError as e:
+        raise click.ClickException(f"allow_agent_for_host failed: {e}") from e
+
+    logger.info("Allowed agent {} to call the Minds API proxy on host {}", agent_id, host_id)
+
+
+_add_common_latchkey_options(_allow_agent_command)
+
+CommandHelpMetadata(
+    key="latchkey.allow-agent",
+    one_line_description="Allow an agent ID to call the Minds API proxy on a host",
+    synopsis="mngr latchkey allow-agent --host-id ID --agent-id ID [OPTIONS]",
+    description="""Wraps :func:`imbue.mngr_latchkey.agent_setup.allow_agent_for_host`.
+The per-host ``latchkey_permissions.json`` ships with an empty
+allowed-agent enum on the first rule (the one that gates
+``/minds-api-proxy/api/v1/agents/<id>/...``); this command appends
+the supplied agent ID to that enum so the gateway will let that
+agent through to its own ``/api/v1/agents/<id>/...`` subtree.
+Idempotent: re-running for an already-allowed agent is a no-op.""",
+    examples=(
+        (
+            "Allow an agent to call the Minds API proxy",
+            "mngr latchkey allow-agent --host-id $HOST_ID --agent-id $AGENT_ID",
+        ),
+    ),
+).register()
+
+add_pager_help_option(_allow_agent_command)
 
 
 # =============================================================================
@@ -712,6 +803,7 @@ add_pager_help_option(_gateway_info_command)
 
 latchkey.add_command(_create_agent_env_command)
 latchkey.add_command(_link_permissions_command)
+latchkey.add_command(_allow_agent_command)
 latchkey.add_command(_forward_command)
 latchkey.add_command(_admin_jwt_command)
 latchkey.add_command(_gateway_info_command)
