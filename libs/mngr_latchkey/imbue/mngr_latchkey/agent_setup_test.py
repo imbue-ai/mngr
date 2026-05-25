@@ -14,12 +14,16 @@ from pathlib import Path
 import pytest
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
 from imbue.mngr_latchkey.agent_setup import AgentLatchkeySetup
 from imbue.mngr_latchkey.agent_setup import ENV_LATCHKEY_DISABLE_COUNTING
 from imbue.mngr_latchkey.agent_setup import ENV_LATCHKEY_GATEWAY
 from imbue.mngr_latchkey.agent_setup import ENV_LATCHKEY_GATEWAY_PASSWORD
 from imbue.mngr_latchkey.agent_setup import ENV_LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE
+from imbue.mngr_latchkey.agent_setup import _build_allowed_agent_path_pattern
+from imbue.mngr_latchkey.agent_setup import _parse_allowed_agent_path_pattern
+from imbue.mngr_latchkey.agent_setup import allow_agent_for_host
 from imbue.mngr_latchkey.agent_setup import finalize_host_permissions
 from imbue.mngr_latchkey.agent_setup import prepare_agent_latchkey
 from imbue.mngr_latchkey.core import AGENT_SIDE_LATCHKEY_PORT
@@ -75,23 +79,40 @@ def test_prepare_full_wiring_tunneled(tmp_path: Path) -> None:
     assert setup.opaque_permissions_path is not None
     assert setup.opaque_permissions_path.parent == opaque_permissions_dir(fake.plugin_data_dir)
     on_disk = json.loads(setup.opaque_permissions_path.read_text())
-    # Every new agent gets four baseline permissions under the
-    # ``latchkey-self`` scope: create a permission request, read its own
-    # current permissions, read the per-service permissions catalog, and
-    # POST to the shared ``minds-api-proxy`` notifications endpoint (the
-    # one Minds API route every agent the desktop client provisions can
-    # always reach without an extra grant).
+    # Two rules now ship in the baseline:
+    #
+    # 1. ``minds-api-proxy`` (first): matches any
+    #    ``/minds-api-proxy/api/v1/agents/<id>/...`` request and
+    #    constrains <id> to the empty allowed-agent enum -- detent
+    #    stops at the first matching scope and rejects, so an
+    #    unauthorized agent_id never falls through to the
+    #    gateway-self rule below.
+    # 2. ``latchkey-self`` (after): the three gateway-self endpoints
+    #    every agent needs (create permission request, read own
+    #    permissions, read services catalog).
     assert on_disk["rules"] == [
+        {"minds-api-proxy": ["minds-api-proxy-allowed-agent"]},
         {
             "latchkey-self": [
                 "latchkey-self-create-permission-request",
                 "latchkey-self-read-self-permissions",
                 "latchkey-self-read-available-permissions",
-                "minds-api-proxy-notifications",
             ],
         },
     ]
     schemas = on_disk["schemas"]
+    # The minds-api-proxy scope matches every agents/<id>/... request
+    # under the gateway-self domain.
+    minds_proxy_scope = schemas["minds-api-proxy"]["properties"]
+    assert minds_proxy_scope["domain"] == {"const": "latchkey-self.invalid"}
+    assert minds_proxy_scope["path"]["type"] == "string"
+    assert minds_proxy_scope["path"]["pattern"] == r"^/minds-api-proxy/api/v1/agents/[^/]+(/.*)?$"
+    # The allowed-agent permission starts with an empty enum (the
+    # ``(?!)`` negative-empty-lookahead sentinel) -- no agent_id is
+    # allowed until ``mngr latchkey allow-agent`` appends to it.
+    allowed_agent_pattern = schemas["minds-api-proxy-allowed-agent"]["properties"]["path"]["pattern"]
+    assert allowed_agent_pattern == r"^/minds-api-proxy/api/v1/agents/(?:(?!))(/.*)?$"
+    # And the gateway-self baseline rule's schemas are unchanged.
     assert schemas["latchkey-self"]["properties"]["domain"] == {"const": "latchkey-self.invalid"}
     assert schemas["latchkey-self-create-permission-request"]["properties"] == {
         "method": {"const": "POST"},
@@ -109,15 +130,6 @@ def test_prepare_full_wiring_tunneled(tmp_path: Path) -> None:
         "type": "string",
         "pattern": r"^/permissions/available/[a-z0-9][a-z0-9-]*$",
     }
-    notifications_schema = schemas["minds-api-proxy-notifications"]["properties"]
-    assert notifications_schema["method"] == {"const": "POST"}
-    assert notifications_schema["path"]["type"] == "string"
-    # The pattern must constrain the URL to the Minds API proxy's
-    # ``/api/v1/agents/<...>/notifications`` route specifically -- not
-    # everything under ``/minds-api-proxy/`` and not a single literal
-    # agent id.
-    assert notifications_schema["path"]["pattern"].startswith("^/minds-api-proxy/api/v1/agents/")
-    assert notifications_schema["path"]["pattern"].endswith("/notifications/?$")
 
 
 def test_prepare_full_wiring_on_host_uses_live_port(tmp_path: Path) -> None:
@@ -228,3 +240,107 @@ def test_agent_latchkey_setup_default_opaque_path_is_none() -> None:
     setup = AgentLatchkeySetup(env={})
     assert setup.opaque_permissions_path is None
     assert isinstance(setup.env, Mapping)
+
+
+# -- Allowed-agent path pattern helpers --------------------------------------
+
+
+def test_allowed_agent_path_pattern_round_trip_empty() -> None:
+    assert _parse_allowed_agent_path_pattern(_build_allowed_agent_path_pattern(())) == ()
+
+
+def test_allowed_agent_path_pattern_round_trip_single() -> None:
+    ids = ("agent-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",)
+    assert _parse_allowed_agent_path_pattern(_build_allowed_agent_path_pattern(ids)) == ids
+
+
+def test_allowed_agent_path_pattern_round_trip_multiple() -> None:
+    ids = (
+        "agent-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "agent-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "agent-cccccccccccccccccccccccccccccccc",
+    )
+    assert _parse_allowed_agent_path_pattern(_build_allowed_agent_path_pattern(ids)) == ids
+
+
+def test_parse_allowed_agent_path_pattern_raises_on_hand_edited_pattern() -> None:
+    """An unrecognized pattern must raise rather than silently rebuild from scratch.
+
+    Otherwise a hand-edited permissions file would get its custom
+    pattern overwritten on the next ``allow_agent_for_host`` call.
+    """
+    with pytest.raises(LatchkeyStoreError):
+        _parse_allowed_agent_path_pattern("^/totally/not/the/expected/shape$")
+
+
+# -- allow_agent_for_host ----------------------------------------------------
+
+
+def test_allow_agent_for_host_creates_baseline_when_file_absent(tmp_path: Path) -> None:
+    """First call for a host writes the baseline + adds the agent."""
+    host_id = HostId.generate()
+    agent_id = AgentId.generate()
+    allow_agent_for_host(tmp_path, host_id, agent_id)
+    path = permissions_path_for_host(tmp_path, host_id)
+    assert path.is_file()
+    config_text = path.read_text()
+    assert str(agent_id) in config_text
+    # The baseline rule structure must be present (first rule = minds
+    # api proxy, second = latchkey-self).
+    assert "minds-api-proxy" in config_text
+    assert "latchkey-self" in config_text
+
+
+def test_allow_agent_for_host_is_idempotent(tmp_path: Path) -> None:
+    """Re-allowing an already-allowed agent is a no-op."""
+    host_id = HostId.generate()
+    agent_id = AgentId.generate()
+    allow_agent_for_host(tmp_path, host_id, agent_id)
+    allow_agent_for_host(tmp_path, host_id, agent_id)
+    path = permissions_path_for_host(tmp_path, host_id)
+    # The agent id appears exactly once in the path pattern.
+    config_text = path.read_text()
+    assert config_text.count(str(agent_id)) == 1
+
+
+def test_allow_agent_for_host_accumulates_across_agents(tmp_path: Path) -> None:
+    """Multiple agents on the same host are all listed in the allowed enum."""
+    host_id = HostId.generate()
+    agent_a = AgentId.generate()
+    agent_b = AgentId.generate()
+    agent_c = AgentId.generate()
+    allow_agent_for_host(tmp_path, host_id, agent_a)
+    allow_agent_for_host(tmp_path, host_id, agent_b)
+    allow_agent_for_host(tmp_path, host_id, agent_c)
+    path = permissions_path_for_host(tmp_path, host_id)
+    config = json.loads(path.read_text())
+    pattern = config["schemas"]["minds-api-proxy-allowed-agent"]["properties"]["path"]["pattern"]
+    parsed = _parse_allowed_agent_path_pattern(pattern)
+    assert set(parsed) == {str(agent_a), str(agent_b), str(agent_c)}
+
+
+def test_allow_agent_for_host_preserves_other_grants(tmp_path: Path) -> None:
+    """Allowing a new agent does not disturb the baseline rules or other schemas."""
+    host_id = HostId.generate()
+    agent_id = AgentId.generate()
+    allow_agent_for_host(tmp_path, host_id, agent_id)
+    path = permissions_path_for_host(tmp_path, host_id)
+    config = json.loads(path.read_text())
+    rule_keys = [next(iter(rule.keys())) for rule in config["rules"]]
+    # The minds-api-proxy rule must come first so detent stops at it
+    # for an unauthorized agent_id rather than falling through.
+    assert rule_keys == ["minds-api-proxy", "latchkey-self"]
+
+
+def test_allow_agent_for_host_raises_when_pattern_was_hand_edited(tmp_path: Path) -> None:
+    """A corrupted / hand-edited permissions file is not silently overwritten."""
+    host_id = HostId.generate()
+    agent_id = AgentId.generate()
+    # Bootstrap with the baseline, then mangle the path pattern.
+    allow_agent_for_host(tmp_path, host_id, AgentId.generate())
+    path = permissions_path_for_host(tmp_path, host_id)
+    config = json.loads(path.read_text())
+    config["schemas"]["minds-api-proxy-allowed-agent"]["properties"]["path"]["pattern"] = "^/no-longer-recognized$"
+    path.write_text(json.dumps(config))
+    with pytest.raises(LatchkeyStoreError):
+        allow_agent_for_host(tmp_path, host_id, agent_id)

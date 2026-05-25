@@ -44,6 +44,58 @@ there is exactly one `MINDS_API_KEY` per minds installation now, the
 latchkey gateway injects it transparently, and agents never see the
 value -- so there is nothing to push down onto a leased pool host.
 
+## Narrower interface for per-agent Minds API proxy permissions
+
+The per-agent `minds-api-proxy` permissioning model has been simplified.
+Instead of installing a per-agent scope schema + per-agent permission
+schema + per-agent rule at agent creation time (via the
+low-level `POST /permissions/schemas` extension endpoint), the baseline
+permissions file now ships with **one** fixed scope schema plus **one**
+fixed permission schema whose path pattern carries the list of allowed
+agent ids as a regex alternation. To allow a new agent, the desktop
+client (or an operator running the CLI) just appends the agent's id to
+that list.
+
+Concretely:
+
+- New baseline rule order: `{minds-api-proxy: [minds-api-proxy-allowed-agent]}`
+  comes **first** in `_AGENT_BASELINE_PERMISSIONS.rules`, ahead of the
+  existing gateway-self baseline. The scope schema matches every
+  `/minds-api-proxy/api/v1/agents/<id>/...` request; the single
+  permission schema's path pattern constrains `<id>` to the
+  allowed-agent enum (initially empty -- no agent allowed).
+- Detent evaluates rules top to bottom and stops at the first matching
+  scope, so an unauthorized `agent_id` is rejected by the first rule
+  and does NOT inherit any subsequent rule's grant. The shared
+  `minds-api-proxy-notifications` baseline grant that the previous
+  design hand-listed is gone entirely; notifications are reached via
+  the same allowed-agent enum as every other `/api/v1/agents/<id>/`
+  endpoint.
+- New library helper: `imbue.mngr_latchkey.agent_setup.allow_agent_for_host(plugin_data_dir, host_id, agent_id)`.
+  Reads the host's permissions file (or starts from the baseline if it
+  doesn't yet exist), parses the existing allowed-agent list out of the
+  permission schema's path pattern, appends the new id, dedupes + sorts,
+  and writes back atomically. Idempotent.
+- New CLI: `mngr latchkey allow-agent --host-id ID --agent-id ID` wraps
+  the helper for operators. Now documented in the README's "Wiring a
+  new agent using the CLI interface" section.
+- `imbue.mngr_latchkey.store.load_permissions` is the new public
+  reader that `allow_agent_for_host` uses; symmetric with `save_permissions`.
+- The per-agent helpers `agent_minds_api_proxy_scope_name`,
+  `agent_minds_api_proxy_permission_name`, and `build_agent_minds_api_proxy_schemas`
+  are gone -- nobody needs to mint a per-agent schema name anymore.
+- The `POST /permissions/schemas` and `DELETE /permissions/schemas`
+  endpoints I added to `permissions.mjs` in the previous round of this
+  branch are gone. The user-facing interface for granting Minds API
+  access is now "add the agent id to the host's allowed-agent enum"
+  (via the helper or the CLI), not "install arbitrary inline schemas".
+
+A permissions file whose `minds-api-proxy-allowed-agent` path pattern
+has been hand-edited into a shape the parser doesn't recognize is
+left alone (the helper raises `LatchkeyStoreError` rather than
+rebuild from scratch), so operators who customize the file by hand
+won't lose their edits silently.
+
 ## Consolidation: shared `SSHTunnelManager`
 
 The `SSHTunnelManager` (and `RemoteSSHInfo`, `ReverseTunnelInfo`,

@@ -310,7 +310,6 @@ def run(
         server_port=port,
         imbue_cloud_cli=imbue_cloud_cli,
         latchkey=latchkey,
-        gateway_client=gateway_client,
         root_concurrency_group=root_concurrency_group,
         notification_dispatcher=notification_dispatcher,
         mngr_forward_port=mngr_forward_port,

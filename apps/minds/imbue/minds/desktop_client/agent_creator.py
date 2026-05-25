@@ -41,8 +41,6 @@ from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import LiteLLMKeyMaterial
-from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClient
-from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClientError
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
 from imbue.minds.errors import GitCloneError
@@ -58,15 +56,12 @@ from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr_latchkey.agent_setup import AgentLatchkeySetup
-from imbue.mngr_latchkey.agent_setup import agent_minds_api_proxy_permission_name
-from imbue.mngr_latchkey.agent_setup import agent_minds_api_proxy_scope_name
-from imbue.mngr_latchkey.agent_setup import build_agent_minds_api_proxy_schemas
+from imbue.mngr_latchkey.agent_setup import allow_agent_for_host
 from imbue.mngr_latchkey.agent_setup import finalize_host_permissions
 from imbue.mngr_latchkey.agent_setup import prepare_agent_latchkey
 from imbue.mngr_latchkey.core import Latchkey
 from imbue.mngr_latchkey.core import LatchkeyError
 from imbue.mngr_latchkey.store import LatchkeyStoreError
-from imbue.mngr_latchkey.store import permissions_path_for_host
 
 # Inlined to avoid pulling the ``imbue-mngr-forward`` package into minds'
 # import graph -- minds spawns the plugin as a subprocess and otherwise has
@@ -867,20 +862,7 @@ class AgentCreator(MutableModel):
             "tests / non-password-protected gateways), but no password or JWT injection happens."
         ),
     )
-    gateway_client: "LatchkeyGatewayClient | None" = Field(
-        default=None,
-        frozen=True,
-        description=(
-            "Latchkey gateway HTTP client used to install per-agent permissions in the"
-            " host's ``latchkey_permissions.json`` once the canonical agent id and host"
-            " id are known. The per-agent rule narrows what the gateway's"
-            " ``minds-api-proxy`` extension will let this agent reach to its own"
-            " ``/api/v1/agents/<agent_id>/`` subtree on the Minds API. ``None``"
-            " disables that install step entirely (tests / fully-local fixtures); the"
-            " agent then can only reach the shared ``minds-api-proxy-notifications``"
-            " baseline endpoint."
-        ),
-    )
+
     root_concurrency_group: ConcurrencyGroup = Field(
         frozen=True,
         description=(
@@ -1336,14 +1318,16 @@ class AgentCreator(MutableModel):
                             f"canonical path for host {canonical_host_id}; permission grants will not "
                             f"take effect until the agent is re-created. Reason: {link_error}"
                         )
-                    # Install the per-agent rule + schemas that let
-                    # this agent reach its own ``/api/v1/agents/<id>/...``
-                    # subtree through the latchkey ``minds-api-proxy``
-                    # extension. Best-effort: a failure leaves the
-                    # agent functional but unable to call the Minds API
-                    # (only the shared baseline notifications grant is
-                    # available without this).
-                    self._install_per_agent_minds_api_permissions(
+                    # Allow this agent's id through the host's
+                    # ``minds-api-proxy`` permission gate. Without this
+                    # the host's permissions file would still have the
+                    # baseline empty allowed-agent enum and reject every
+                    # ``/api/v1/agents/<id>/...`` request from this
+                    # agent. Best-effort: a failure logs a warning and
+                    # leaves the agent functional but unable to call
+                    # the Minds API; the operator can recover with
+                    # ``mngr latchkey allow-agent``.
+                    self._allow_agent_in_minds_api_proxy(
                         agent_id=canonical_id,
                         host_id=canonical_host_id,
                         log_queue=log_queue,
@@ -1395,60 +1379,38 @@ class AgentCreator(MutableModel):
         finally:
             log_queue.put(LOG_SENTINEL)
 
-    def _install_per_agent_minds_api_permissions(
+    def _allow_agent_in_minds_api_proxy(
         self,
         agent_id: AgentId,
         host_id: HostId,
         log_queue: queue.Queue[str],
     ) -> None:
-        """Add the per-agent ``minds-api-proxy`` rule + schemas for ``agent_id``.
+        """Add ``agent_id`` to the host's allowed-agent enum on the Minds API proxy.
 
-        Edits the host's ``latchkey_permissions.json`` (via the gateway's
-        ``permissions`` extension so the write is atomic, mode-0o600, and
-        consistent with every other on-disk grant minds makes). Two
-        inline schemas are installed first: a per-agent scope schema
-        matching ``latchkey-self.invalid`` and a per-agent permission
-        schema constraining the path to ``/minds-api-proxy/api/v1/agents/<agent_id>/...``.
-        Then a rule is installed that pairs them, so the gateway accepts
-        the agent's calls into its own subtree -- but not into any other
-        agent's subtree, even one that shares the same host.
-
-        Best-effort: a failure leaves the agent functional but unable
-        to reach anything but the shared notifications baseline. The
-        user can recover by re-creating the agent (which re-runs this
-        method).
+        Thin wrapper around :func:`allow_agent_for_host` that downgrades
+        :class:`LatchkeyStoreError` to a warning so an unparseable /
+        hand-edited permissions file does not fail agent creation
+        outright. A skipped grant leaves the agent unable to reach any
+        ``/api/v1/agents/<agent_id>/...`` endpoint; the operator can run
+        ``mngr latchkey allow-agent`` manually once the underlying file
+        issue is resolved.
         """
-        if self.gateway_client is None or self.latchkey is None:
+        if self.latchkey is None:
             return
-        host_permissions_path = permissions_path_for_host(self.latchkey.plugin_data_dir, host_id)
-        schemas = build_agent_minds_api_proxy_schemas(str(agent_id))
-        scope_name = agent_minds_api_proxy_scope_name(str(agent_id))
-        permission_name = agent_minds_api_proxy_permission_name(str(agent_id))
         try:
-            # Install the schemas first so the rule that references
-            # them by name never refers to an undefined schema, even
-            # if the gateway happens to load the file mid-install.
-            for schema_name, schema_body in schemas.items():
-                self.gateway_client.set_permission_schema(
-                    permissions_file_path=host_permissions_path,
-                    schema_name=schema_name,
-                    schema_body=schema_body,
-                )
-            self.gateway_client.set_permission_rule(
-                permissions_file_path=host_permissions_path,
-                rule_key=scope_name,
-                granted_permissions=(permission_name,),
-            )
-        except LatchkeyGatewayClientError as e:
+            allow_agent_for_host(self.latchkey.plugin_data_dir, host_id, agent_id)
+        except LatchkeyStoreError as e:
             logger.warning(
-                "Failed to install per-agent minds-api-proxy permissions for agent {} (host {}): {}",
+                "Failed to allow agent {} on host {} in latchkey permissions: {}",
                 agent_id,
                 host_id,
                 e,
             )
             log_queue.put(
-                f"[minds] Warning: could not install per-agent Minds API permissions for {agent_id}; "
-                f"the agent will only be able to reach the shared notifications endpoint. Reason: {e}"
+                f"[minds] Warning: could not allow agent {agent_id} on host {host_id} in the "
+                f"latchkey permissions file; the agent will not be able to call the Minds API "
+                f"until you run ``mngr latchkey allow-agent --host-id {host_id} "
+                f"--agent-id {agent_id}`` manually. Reason: {e}"
             )
 
     def _prepare_latchkey_or_warn(
