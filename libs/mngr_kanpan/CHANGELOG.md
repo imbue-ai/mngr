@@ -6,6 +6,14 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Changed
+
+- Changed: Adopted the new per-project changelog layout.
+
+### Fixed
+
+- Fixed: `UNABRIDGED_CHANGELOG.md` intro now references the correct entries directory.
+
 ## [v0.2.7] - 2026-05-11
 
 ### Added
