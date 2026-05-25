@@ -549,10 +549,6 @@ PREVENT_BARE_TMUX_TARGETS = RegexRatchetRule(
     # both. Variable-interpolated targets without outer quotes -- `-t {var}` -- are
     # unmatched and assumed safe by convention (the variable should hold a
     # `TmuxSessionTarget.as_shell_arg()` / `TmuxWindowTarget.as_shell_arg()` result).
-    # Note: a string-prefixed Python f-string used directly as the target argument
-    # (e.g. `-t f"{prefix}foo"`) is also unmatched, because the `f` sits between the
-    # whitespace after `-t` and the opening quote; treat those the same as the
-    # bare-variable case and route them through `.as_shell_arg()`.
     pattern_string=r"""^(?!\s*#).*\btmux\b(?:\s+(?:-[a-zA-Z]\S*|[a-z][a-z-]*))*\s+-t\s+["'](?!=)""",
     is_multiline=True,
 )
