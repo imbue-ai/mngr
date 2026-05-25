@@ -43,7 +43,6 @@ from imbue.minds.desktop_client.agent_creator import make_workspace_probe_client
 from imbue.minds.desktop_client.agent_creator import probe_workspace_through_plugin
 from imbue.minds.desktop_client.agent_creator import resolve_template_version
 from imbue.minds.desktop_client.api_v1 import create_api_v1_router
-from imbue.minds.desktop_client.api_v1 import inject_tunnel_token_into_agent
 from imbue.minds.desktop_client.auth import AuthStoreInterface
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
@@ -95,6 +94,7 @@ from imbue.minds.desktop_client.templates import render_welcome_page
 from imbue.minds.desktop_client.templates import render_workspace_settings
 from imbue.minds.desktop_client.templates import status_text_for
 from imbue.minds.desktop_client.templates import workspace_accent
+from imbue.minds.desktop_client.tunnel_token_injection import inject_tunnel_token_into_agent
 from imbue.minds.desktop_client.webdav import create_webdav_app
 from imbue.minds.primitives import AIProvider
 from imbue.minds.primitives import CreationId
@@ -2595,6 +2595,7 @@ def create_desktop_client(
     system_interface_health_tracker: SystemInterfaceHealthTracker | None = None,
     mngr_binary: str = "mngr",
     mngr_host_dir: Path | None = None,
+    minds_api_key: str | None = None,
 ) -> FastAPI:
     """Create the bare-origin minds FastAPI application.
 
@@ -2676,6 +2677,10 @@ def create_desktop_client(
     # ``app.state.api_v1_paths`` instead of using a defaulting attribute
     # lookup -- the latter is flagged by the project ratchet.
     app.state.api_v1_paths = paths
+    # Central minds API key. Required for ``/api/v1/...`` and the WebDAV
+    # mount; tests that don't exercise those routes can leave it as
+    # ``None`` (the bearer-auth gates fail closed when the key is None).
+    app.state.minds_api_key = minds_api_key
     if http_client is not None:
         app.state.http_client = http_client
 
@@ -2702,9 +2707,11 @@ def create_desktop_client(
         app.include_router(api_v1_router, prefix="/api/v1")
         # Mount the WebDAV file server under /api/v1/files. Each share
         # root maps URL-path == on-disk-path (``~`` and ``/tmp``); the
-        # mount itself is gated by the same per-agent Bearer-token check
-        # that protects the rest of /api/v1.
-        app.mount("/api/v1/files", create_webdav_app(paths))
+        # mount itself is gated by the same central-key Bearer check
+        # that protects the rest of /api/v1, via a closure that reads
+        # ``app.state.minds_api_key`` on every request so the gate
+        # stays in sync if a future code path ever rotates the key.
+        app.mount("/api/v1/files", create_webdav_app(lambda: app.state.minds_api_key))
 
     # Static assets: Tailwind Play CDN JS + hand-written tokens.css +
     # per-page JS. The Tailwind JS is fetched once by `just minds-tailwind`

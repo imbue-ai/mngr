@@ -38,12 +38,11 @@ from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.minds.config.data_types import MNGR_BINARY
 from imbue.minds.config.data_types import WorkspacePaths
-from imbue.minds.desktop_client.api_key_store import generate_api_key
-from imbue.minds.desktop_client.api_key_store import hash_api_key
-from imbue.minds.desktop_client.api_key_store import save_api_key_hash
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import LiteLLMKeyMaterial
+from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClient
+from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClientError
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
 from imbue.minds.errors import GitCloneError
@@ -59,11 +58,15 @@ from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr_latchkey.agent_setup import AgentLatchkeySetup
+from imbue.mngr_latchkey.agent_setup import agent_minds_api_proxy_permission_name
+from imbue.mngr_latchkey.agent_setup import agent_minds_api_proxy_scope_name
+from imbue.mngr_latchkey.agent_setup import build_agent_minds_api_proxy_schemas
 from imbue.mngr_latchkey.agent_setup import finalize_host_permissions
 from imbue.mngr_latchkey.agent_setup import prepare_agent_latchkey
 from imbue.mngr_latchkey.core import Latchkey
 from imbue.mngr_latchkey.core import LatchkeyError
 from imbue.mngr_latchkey.store import LatchkeyStoreError
+from imbue.mngr_latchkey.store import permissions_path_for_host
 
 # Inlined to avoid pulling the ``imbue-mngr-forward`` package into minds'
 # import graph -- minds spawns the plugin as a subprocess and otherwise has
@@ -431,26 +434,19 @@ def _build_mngr_create_command(
     imbue_cloud_repo_url: str | None = None,
     imbue_cloud_branch_or_tag: str | None = None,
     latchkey_env: Mapping[str, str] | None = None,
-) -> tuple[list[str], str]:
-    """Build the mngr create command and generate an API key for the agent.
+) -> list[str]:
+    """Build the ``mngr create`` command for a freshly-provisioned workspace.
 
-    Returns (command_list, api_key) where api_key is a UUID4 string injected
-    as MINDS_API_KEY into the host's env file via ``--host-env`` so every
-    agent that ever runs on this host (the system-services agent created
-    here plus the chat agents that the FCT bootstrap and the system
-    interface's "New Chat" button later spawn on the same host) inherits
-    the same key. Without this, only the system-services agent would see
-    ``MINDS_API_KEY`` and the chat agents' calls to the desktop client's
-    ``/api/v1/...`` routes would 401. The API-key hash is still stored
-    once under the system-services agent's canonical id; ``find_agent_by_api_key``
-    will resolve every workspace-side caller to that id, which is fine
-    for authentication but means notifications etc. surface under the
-    system-services agent's display name. ``--format jsonl`` is appended
-    so the caller can parse the canonical ``AgentId`` out of the trailing
-    ``"event": "created"`` line; minds no longer pre-generates an id
-    because for imbue_cloud the lease forces it back to the pool host's
-    pre-baked id anyway, and pre-generating one led to bugs (e.g. keying
-    gateway state under a fictional id).
+    The Minds API key is no longer injected per agent: there is exactly
+    one ``MINDS_API_KEY`` per minds installation, the latchkey gateway's
+    ``minds-api-proxy`` extension adds it as ``Authorization: Bearer
+    <key>`` on every forwarded request, and the agent itself never
+    sees the value. ``--format jsonl`` is appended so the caller can
+    parse the canonical ``AgentId`` out of the trailing ``"event":
+    "created"`` line; minds no longer pre-generates an id because for
+    imbue_cloud the lease forces it back to the pool host's pre-baked
+    id anyway, and pre-generating one led to bugs (e.g. keying gateway
+    state under a fictional id).
 
     LOCAL mode: --template main --template docker (runs in Docker container)
     LIMA mode: --template main --template lima (runs in Lima VM)
@@ -501,8 +497,6 @@ def _build_mngr_create_command(
         case _ as unreachable:
             assert_never(unreachable)
 
-    api_key = generate_api_key()
-
     # The `/welcome` initial message is now baked into the FCT template's
     # [create_templates.main] section, so we no longer pass `--message` here.
     # ``--format jsonl`` makes mngr emit ``{"event": "created", "agent_id": ..., "host_id": ...}``
@@ -534,15 +528,6 @@ def _build_mngr_create_command(
         # ``current`` so we just rename the *new* branch.
         "--branch",
         f":mngr/{host_name}",
-        # ``--host-env`` (not ``--env``) so MINDS_API_KEY is written to
-        # the host's env file once and every agent on the host -- the
-        # system-services agent created here plus the chat agents the
-        # FCT bootstrap and system_interface's "New Chat" button later
-        # spawn on the same host -- inherits the same key for
-        # authenticating against the desktop client's ``/api/v1/...``
-        # routes.
-        "--host-env",
-        f"MINDS_API_KEY={api_key}",
         "--label",
         "user_created=true",
         *latchkey_host_env_args,
@@ -599,7 +584,7 @@ def _build_mngr_create_command(
         case _ as unreachable:
             assert_never(unreachable)
 
-    return mngr_command, api_key
+    return mngr_command
 
 
 def _slugify_account(account: str) -> str:
@@ -748,7 +733,7 @@ def run_mngr_create(
     latchkey_env: Mapping[str, str] | None = None,
     *,
     parent_cg: ConcurrencyGroup | None = None,
-) -> tuple[str, AgentId, HostId]:
+) -> tuple[AgentId, HostId]:
     """Create an mngr agent via ``mngr create --format jsonl``.
 
     The repo's own ``.mngr/settings.toml`` defines agent types, templates,
@@ -763,16 +748,16 @@ def run_mngr_create(
     the FCT template's own ``pass_(host_)env`` declarations cause mngr to
     forward them onto the host as appropriate.
 
-    Returns ``(api_key, canonical_agent_id, canonical_host_id)``. Both
-    canonical ids are parsed out of the ``"event": "created"`` JSONL
-    line that ``mngr create`` emits as its final stdout record; the host
-    id is what minds keys per-host latchkey state (permissions, opaque
-    handle symlink target) by.
+    Returns ``(canonical_agent_id, canonical_host_id)``. Both canonical
+    ids are parsed out of the ``"event": "created"`` JSONL line that
+    ``mngr create`` emits as its final stdout record; the host id is
+    what minds keys per-host latchkey state (permissions, opaque handle
+    symlink target) by.
 
     Raises ``MngrCommandError`` if the command fails or never emits a
     ``created`` event (e.g. crashed before final-output stage).
     """
-    mngr_command, api_key = _build_mngr_create_command(
+    mngr_command = _build_mngr_create_command(
         launch_mode,
         host_name,
         imbue_cloud_account=imbue_cloud_account,
@@ -832,7 +817,7 @@ def run_mngr_create(
     except ValueError as e:
         raise MngrCommandError(f"mngr create emitted an invalid host_id {capture.canonical_host_id!r}: {e}") from e
 
-    return api_key, capture.canonical_agent_id, canonical_host_id
+    return capture.canonical_agent_id, canonical_host_id
 
 
 class AgentCreator(MutableModel):
@@ -880,6 +865,20 @@ class AgentCreator(MutableModel):
             "instead of the gateway's shared default). ``None`` degrades gracefully: the "
             "agent still gets ``LATCHKEY_GATEWAY=...`` (the URL is useful by itself for "
             "tests / non-password-protected gateways), but no password or JWT injection happens."
+        ),
+    )
+    gateway_client: "LatchkeyGatewayClient | None" = Field(
+        default=None,
+        frozen=True,
+        description=(
+            "Latchkey gateway HTTP client used to install per-agent permissions in the"
+            " host's ``latchkey_permissions.json`` once the canonical agent id and host"
+            " id are known. The per-agent rule narrows what the gateway's"
+            " ``minds-api-proxy`` extension will let this agent reach to its own"
+            " ``/api/v1/agents/<agent_id>/`` subtree on the Minds API. ``None``"
+            " disables that install step entirely (tests / fully-local fixtures); the"
+            " agent then can only reach the shared ``minds-api-proxy-notifications``"
+            " baseline endpoint."
         ),
     )
     root_concurrency_group: ConcurrencyGroup = Field(
@@ -1276,7 +1275,7 @@ class AgentCreator(MutableModel):
 
                 parsed_host = HostName(host_name)
                 log_queue.put("[minds] Creating workspace '{}' (mode: {})...".format(host_name, launch_mode.value))
-                api_key, canonical_id, canonical_host_id = run_mngr_create(
+                canonical_id, canonical_host_id = run_mngr_create(
                     launch_mode=launch_mode,
                     workspace_dir=workspace_dir,
                     host_name=parsed_host,
@@ -1301,12 +1300,6 @@ class AgentCreator(MutableModel):
                     gh_token=gh_token if gh_token else None,
                     parent_cg=self.root_concurrency_group,
                 )
-
-                # Persist the API key hash under the canonical id so future
-                # ``/api/<agent_id>`` requests authenticate against it.
-                key_hash = hash_api_key(api_key)
-                save_api_key_hash(self.paths.data_dir, canonical_id, key_hash)
-                log_queue.put("[minds] API key generated and hash stored.")
 
                 # Now that we know the canonical host id, point the
                 # opaque permissions handle (which the JWT references)
@@ -1343,6 +1336,18 @@ class AgentCreator(MutableModel):
                             f"canonical path for host {canonical_host_id}; permission grants will not "
                             f"take effect until the agent is re-created. Reason: {link_error}"
                         )
+                    # Install the per-agent rule + schemas that let
+                    # this agent reach its own ``/api/v1/agents/<id>/...``
+                    # subtree through the latchkey ``minds-api-proxy``
+                    # extension. Best-effort: a failure leaves the
+                    # agent functional but unable to call the Minds API
+                    # (only the shared baseline notifications grant is
+                    # available without this).
+                    self._install_per_agent_minds_api_permissions(
+                        agent_id=canonical_id,
+                        host_id=canonical_host_id,
+                        log_queue=log_queue,
+                    )
 
                 log_queue.put("[minds] Agent created successfully.")
 
@@ -1389,6 +1394,62 @@ class AgentCreator(MutableModel):
                 self._errors[cid_str] = str(e)
         finally:
             log_queue.put(LOG_SENTINEL)
+
+    def _install_per_agent_minds_api_permissions(
+        self,
+        agent_id: AgentId,
+        host_id: HostId,
+        log_queue: queue.Queue[str],
+    ) -> None:
+        """Add the per-agent ``minds-api-proxy`` rule + schemas for ``agent_id``.
+
+        Edits the host's ``latchkey_permissions.json`` (via the gateway's
+        ``permissions`` extension so the write is atomic, mode-0o600, and
+        consistent with every other on-disk grant minds makes). Two
+        inline schemas are installed first: a per-agent scope schema
+        matching ``latchkey-self.invalid`` and a per-agent permission
+        schema constraining the path to ``/minds-api-proxy/api/v1/agents/<agent_id>/...``.
+        Then a rule is installed that pairs them, so the gateway accepts
+        the agent's calls into its own subtree -- but not into any other
+        agent's subtree, even one that shares the same host.
+
+        Best-effort: a failure leaves the agent functional but unable
+        to reach anything but the shared notifications baseline. The
+        user can recover by re-creating the agent (which re-runs this
+        method).
+        """
+        if self.gateway_client is None or self.latchkey is None:
+            return
+        host_permissions_path = permissions_path_for_host(self.latchkey.plugin_data_dir, host_id)
+        schemas = build_agent_minds_api_proxy_schemas(str(agent_id))
+        scope_name = agent_minds_api_proxy_scope_name(str(agent_id))
+        permission_name = agent_minds_api_proxy_permission_name(str(agent_id))
+        try:
+            # Install the schemas first so the rule that references
+            # them by name never refers to an undefined schema, even
+            # if the gateway happens to load the file mid-install.
+            for schema_name, schema_body in schemas.items():
+                self.gateway_client.set_permission_schema(
+                    permissions_file_path=host_permissions_path,
+                    schema_name=schema_name,
+                    schema_body=schema_body,
+                )
+            self.gateway_client.set_permission_rule(
+                permissions_file_path=host_permissions_path,
+                rule_key=scope_name,
+                granted_permissions=(permission_name,),
+            )
+        except LatchkeyGatewayClientError as e:
+            logger.warning(
+                "Failed to install per-agent minds-api-proxy permissions for agent {} (host {}): {}",
+                agent_id,
+                host_id,
+                e,
+            )
+            log_queue.put(
+                f"[minds] Warning: could not install per-agent Minds API permissions for {agent_id}; "
+                f"the agent will only be able to reach the shared notifications endpoint. Reason: {e}"
+            )
 
     def _prepare_latchkey_or_warn(
         self,

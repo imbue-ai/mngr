@@ -285,7 +285,6 @@ def build_combined_inject_command(
     agent_id: AgentId,
     agent_env_path: str,
     host_env_path: str,
-    minds_api_key: str | None,
     anthropic_api_key: str | None,
     anthropic_base_url: str | None,
     mngr_prefix: str | None,
@@ -299,11 +298,18 @@ def build_combined_inject_command(
     half-injected state.
 
     Returns None when there is nothing to inject (caller should skip the exec).
-    """
-    pieces: list[str] = []
 
-    if minds_api_key is not None:
-        pieces.append(_sed_replace_env_line(agent_env_path, "MINDS_API_KEY", minds_api_key))
+    ``MINDS_API_KEY`` is intentionally absent from this helper: there is
+    exactly one ``MINDS_API_KEY`` per minds installation now, the latchkey
+    gateway's ``minds-api-proxy`` extension injects it on behalf of every
+    agent, and the agent itself never sees the value -- so there is
+    nothing to push down onto a leased pool host.
+    """
+    # ``agent_env_path`` is unused now that ``MINDS_API_KEY`` is no
+    # longer per-agent; kept in the signature so the claim CLI's
+    # existing call site does not need to change.
+    del agent_env_path
+    pieces: list[str] = []
 
     if anthropic_api_key is not None:
         pieces.append(_sed_replace_env_line(host_env_path, "ANTHROPIC_API_KEY", anthropic_api_key))
@@ -370,7 +376,6 @@ def _ensure_no_quote_chars(value: str, field_name: str) -> str:
 
 
 def normalize_inject_args(
-    minds_api_key: str | None,
     anthropic_api_key: str | None,
     anthropic_base_url: str | None,
     mngr_prefix: str | None,
@@ -387,7 +392,6 @@ def normalize_inject_args(
                 raise ValueError(f"Invalid env var name: {key!r}")
             cleaned_extra[key] = _ensure_no_quote_chars(value, f"env[{key}]")
     return {
-        "minds_api_key": _ensure_no_quote_chars(minds_api_key, "MINDS_API_KEY") if minds_api_key else None,
         "anthropic_api_key": _ensure_no_quote_chars(anthropic_api_key, "ANTHROPIC_API_KEY")
         if anthropic_api_key
         else None,

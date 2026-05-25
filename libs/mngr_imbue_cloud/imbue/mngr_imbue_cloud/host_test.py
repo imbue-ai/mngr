@@ -11,14 +11,12 @@ def test_build_combined_inject_command_minimal() -> None:
         agent_id=agent_id,
         agent_env_path="/mngr/agents/X/env",
         host_env_path="/mngr/env",
-        minds_api_key="secret-api-key",
-        anthropic_api_key=None,
+        anthropic_api_key="secret-api-key",
         anthropic_base_url=None,
         mngr_prefix=None,
     )
     assert cmd is not None
-    assert "MINDS_API_KEY=secret-api-key" in cmd
-    assert "ANTHROPIC_API_KEY" not in cmd
+    assert "ANTHROPIC_API_KEY=secret-api-key" in cmd
     assert "MNGR_PREFIX" not in cmd
 
 
@@ -28,7 +26,6 @@ def test_build_combined_inject_command_returns_none_when_nothing() -> None:
         agent_id=agent_id,
         agent_env_path="/x",
         host_env_path="/y",
-        minds_api_key=None,
         anthropic_api_key=None,
         anthropic_base_url=None,
         mngr_prefix=None,
@@ -42,7 +39,6 @@ def test_build_combined_inject_command_chains_with_ampersand() -> None:
         agent_id=agent_id,
         agent_env_path="/mngr/agents/X/env",
         host_env_path="/mngr/env",
-        minds_api_key="k1",
         anthropic_api_key="k2",
         anthropic_base_url="https://example.com",
         mngr_prefix="mngr-",
@@ -55,8 +51,7 @@ def test_build_combined_inject_command_chains_with_ampersand() -> None:
 def test_normalize_inject_args_rejects_newlines() -> None:
     with pytest.raises(ValueError):
         normalize_inject_args(
-            minds_api_key="evil\ninjection",
-            anthropic_api_key=None,
+            anthropic_api_key="evil\ninjection",
             anthropic_base_url=None,
             mngr_prefix=None,
             extra_env=None,
@@ -66,7 +61,6 @@ def test_normalize_inject_args_rejects_newlines() -> None:
 def test_normalize_inject_args_rejects_invalid_env_keys() -> None:
     with pytest.raises(ValueError):
         normalize_inject_args(
-            minds_api_key=None,
             anthropic_api_key=None,
             anthropic_base_url=None,
             mngr_prefix=None,
@@ -76,12 +70,11 @@ def test_normalize_inject_args_rejects_invalid_env_keys() -> None:
 
 def test_normalize_inject_args_passes_clean_input_through() -> None:
     cleaned = normalize_inject_args(
-        minds_api_key="abc",
-        anthropic_api_key=None,
+        anthropic_api_key="anth-key",
         anthropic_base_url=None,
         mngr_prefix="mngr-",
         extra_env={"FOO": "bar"},
     )
-    assert cleaned["minds_api_key"] == "abc"
+    assert cleaned["anthropic_api_key"] == "anth-key"
     assert cleaned["mngr_prefix"] == "mngr-"
     assert cleaned["extra_env"] == {"FOO": "bar"}

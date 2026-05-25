@@ -13,16 +13,16 @@ is reached via ``/api/v1/files/home/<user>/foo.txt``, a file at
 ``/tmp/blob.bin`` via ``/api/v1/files/tmp/blob.bin``. Paths outside
 those two roots are not served.
 
-Authentication piggy-backs on the same per-agent Bearer-token check
+Authentication piggy-backs on the same central-key Bearer-token check
 that gates the rest of ``/api/v1/...`` (see :mod:`api_key_auth`): an
-ASGI wrapper extracts the ``Authorization: Bearer <api_key>`` header,
-maps it to an :class:`AgentId` via
-:func:`find_agent_by_api_key`, and 401s when the lookup fails. WsgiDAV
-itself runs with anonymous auth -- the ASGI gate is the only thing
-between the network and the filesystem.
+ASGI wrapper extracts the ``Authorization: Bearer <key>`` header and
+401s unless it matches ``app.state.minds_api_key``. WsgiDAV itself
+runs with anonymous auth -- the ASGI gate is the only thing between
+the network and the filesystem.
 """
 
 import tempfile
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 from typing import Final
@@ -36,26 +36,26 @@ from starlette.types import Send
 from wsgidav.fs_dav_provider import FilesystemProvider
 from wsgidav.wsgidav_app import WsgiDAVApp
 
-from imbue.minds.config.data_types import WorkspacePaths
-from imbue.minds.desktop_client.api_key_store import find_agent_by_api_key
+from imbue.minds.desktop_client.api_key_auth import is_request_authenticated
 
-_BEARER_PREFIX: Final[str] = "Bearer "
+# Callable that resolves the current central minds API key. Wrapped so
+# the WebDAV gate can look it up fresh on every request via
+# ``app.state.minds_api_key`` instead of capturing a stale value at
+# gate-build time.
+ExpectedKeyProvider = Callable[[], str | None]
+
 _AUTHORIZATION_HEADER: Final[bytes] = b"authorization"
 _UNAUTHORIZED_BODY: Final[bytes] = b'{"error": "Unauthorized"}'
 
 
-def _extract_bearer_token(scope: Scope) -> str | None:
-    """Return the Bearer token from ``Authorization`` or ``None`` if absent / malformed."""
+def _extract_authorization_header(scope: Scope) -> str | None:
+    """Return the raw ``Authorization`` header value or ``None`` if absent."""
     for name, value in scope.get("headers", ()):
         if name == _AUTHORIZATION_HEADER:
             try:
-                decoded = value.decode("latin-1")
+                return value.decode("latin-1")
             except UnicodeDecodeError:
                 return None
-            if not decoded.startswith(_BEARER_PREFIX):
-                return None
-            token = decoded[len(_BEARER_PREFIX) :]
-            return token or None
     return None
 
 
@@ -75,18 +75,23 @@ async def _send_unauthorized(send: Send) -> None:
     await send({"type": "http.response.body", "body": _UNAUTHORIZED_BODY, "more_body": False})
 
 
-def _build_bearer_auth_gate(inner: ASGIApp, paths: WorkspacePaths) -> ASGIApp:
-    """Wrap ``inner`` so every HTTP request must carry a valid ``Bearer <api_key>``."""
+def _build_bearer_auth_gate(inner: ASGIApp, expected_key_provider: ExpectedKeyProvider) -> ASGIApp:
+    """Wrap ``inner`` so every HTTP request must carry the central minds API key.
+
+    ``expected_key_provider`` resolves the live ``app.state.minds_api_key``
+    on each request rather than capturing the value at gate-build time;
+    that way an empty / unset key fails closed and tests that construct
+    the app without populating ``app.state`` still see 401s rather than
+    AttributeError 500s.
+    """
 
     async def app(scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
             await _send_unauthorized(send)
             return
-        token = _extract_bearer_token(scope)
-        if token is None:
-            await _send_unauthorized(send)
-            return
-        if find_agent_by_api_key(paths.data_dir, token) is None:
+        authorization = _extract_authorization_header(scope)
+        expected_key = expected_key_provider()
+        if expected_key is None or not is_request_authenticated(authorization, expected_key):
             await _send_unauthorized(send)
             return
         await inner(scope, receive, send)
@@ -123,11 +128,12 @@ def _build_wsgidav_config(share_roots: tuple[Path, ...]) -> dict[str, Any]:
     }
 
 
-def create_webdav_app(paths: WorkspacePaths) -> ASGIApp:
+def create_webdav_app(expected_key_provider: ExpectedKeyProvider) -> ASGIApp:
     """Build the ASGI app to mount under ``/api/v1/files``.
 
     The returned callable serves ``Path.home()`` and ``tempfile.gettempdir()`` (typically /tmp) via
-    WebDAV, gated by a per-agent Bearer token.
+    WebDAV, gated by the central minds-api Bearer token resolved through
+    ``expected_key_provider`` on each request.
     """
     home_root = Path.home()
     tmp_root = Path(tempfile.gettempdir())
@@ -144,4 +150,4 @@ def create_webdav_app(paths: WorkspacePaths) -> ASGIApp:
         "Mounted WebDAV file server with shares: {}",
         ", ".join(str(root) for root in share_roots),
     )
-    return _build_bearer_auth_gate(asgi_wsgi_app, paths)
+    return _build_bearer_auth_gate(asgi_wsgi_app, expected_key_provider)
