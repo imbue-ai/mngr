@@ -328,10 +328,9 @@ def check_bare_tmux_targets(source_dir: Path, max_count: int) -> None:
     # non-Python files routinely construct tmux commands too, and they need
     # the same exact-match enforcement.
     #
-    # Exclude `changelog/` and `future_specs/`: those directories hold prose
-    # that describes the bug (so the regex would flag the documentation
-    # itself), not executed code.
-    excluded = _SELF_EXCLUSION + ("changelog/*", "future_specs/*", "future_specs/**/*") + BINARY_FILE_EXCLUSION
+    # Exclude `changelog/`: entries there quote the previous buggy form as
+    # historical context, which the regex would otherwise flag.
+    excluded = _SELF_EXCLUSION + ("changelog/*",) + BINARY_FILE_EXCLUSION
     chunks = check_ratchet_rule_all_files(PREVENT_BARE_TMUX_TARGETS, source_dir, excluded)
     assert len(chunks) <= max_count, PREVENT_BARE_TMUX_TARGETS.format_failure(chunks)
 
