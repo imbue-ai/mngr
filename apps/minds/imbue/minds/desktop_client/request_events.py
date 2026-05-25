@@ -41,6 +41,7 @@ class RequestType(UpperCaseStrEnum):
 
     PERMISSIONS = auto()
     LATCHKEY_PERMISSION = auto()
+    FILE_SHARING_PERMISSION = auto()
 
 
 class RequestStatus(UpperCaseStrEnum):
@@ -76,7 +77,7 @@ class PermissionsRequestEvent(RequestEvent):
     description: str = Field(default="", description="Human-readable description of the request")
 
 
-class LatchkeyPermissionRequestEvent(RequestEvent):
+class LatchkeyPredefinedPermissionRequestEvent(RequestEvent):
     """A request for the user to authorize the agent to use a latchkey-managed scope.
 
     The agent declares which Detent scope schema it wants (e.g.
@@ -100,6 +101,33 @@ class LatchkeyPermissionRequestEvent(RequestEvent):
     rationale: str = Field(description="One-paragraph human-readable reason the agent needs this access.")
 
 
+class LatchkeyFileSharingPermissionRequestEvent(RequestEvent):
+    """A request for the user to grant the agent access to a single file path.
+
+    Delivered to the inbox when an agent submits a ``type=file-sharing``
+    permission request to the gateway. The dialog is presented as a
+    yes/no on a specific absolute path (no per-permission editing): on
+    approval the desktop client calls
+    ``POST /permission-requests/approve/<id>`` and lets the gateway
+    splice the precomputed effect into the per-host
+    ``latchkey_permissions.json``; on denial it falls back to the
+    existing ``DELETE /permission-requests/<id>`` path.
+
+    ``access`` distinguishes a read-only grant from a read-write one;
+    the agent declares which it needs in the request, and the gateway's
+    effect grants only the WebDAV verbs that match.
+    """
+
+    path: str = Field(description="Absolute filesystem path the agent wants access to.")
+    access: str = Field(
+        description=(
+            "Access mode the agent is requesting (``READ`` for read-only, ``WRITE`` for "
+            "read+write). Carried verbatim from the streamed gateway payload."
+        ),
+    )
+    rationale: str = Field(description="One-paragraph human-readable reason the agent needs this access.")
+
+
 class RequestResponseEvent(EventEnvelope):
     """A response to a request, written by the desktop client."""
 
@@ -116,15 +144,15 @@ class RequestResponseEvent(EventEnvelope):
     request_type: str = Field(description="Type of request that was responded to")
 
 
-def create_latchkey_permission_request_event(
+def create_latchkey_predefined_permission_request_event(
     agent_id: str,
     scope: str,
     rationale: str,
     permissions: tuple[str, ...] = (),
     is_user_requested: bool = False,
-) -> "LatchkeyPermissionRequestEvent":
+) -> "LatchkeyPredefinedPermissionRequestEvent":
     """Create a new latchkey-permission request event with auto-generated metadata."""
-    return LatchkeyPermissionRequestEvent(
+    return LatchkeyPredefinedPermissionRequestEvent(
         timestamp=_now_iso(),
         type=EventType("latchkey_permission_request"),
         event_id=_generate_event_id(),
@@ -134,6 +162,28 @@ def create_latchkey_permission_request_event(
         is_user_requested=is_user_requested,
         scope=scope,
         permissions=permissions,
+        rationale=rationale,
+    )
+
+
+def create_latchkey_file_sharing_permission_request_event(
+    agent_id: str,
+    path: str,
+    access: str,
+    rationale: str,
+    is_user_requested: bool = False,
+) -> "LatchkeyFileSharingPermissionRequestEvent":
+    """Create a new file-sharing permission request event with auto-generated metadata."""
+    return LatchkeyFileSharingPermissionRequestEvent(
+        timestamp=_now_iso(),
+        type=EventType("file_sharing_permission_request"),
+        event_id=_generate_event_id(),
+        source=EventSource(REQUESTS_EVENT_SOURCE_NAME),
+        agent_id=agent_id,
+        request_type=str(RequestType.FILE_SHARING_PERMISSION),
+        is_user_requested=is_user_requested,
+        path=path,
+        access=access,
         rationale=rationale,
     )
 
@@ -160,12 +210,25 @@ def create_request_response_event(
 
 
 def _dedup_key(event: RequestEvent | RequestResponseEvent) -> tuple[str, str | None, str]:
-    """Compute the deduplication key for a request or response event."""
-    if isinstance(event, (LatchkeyPermissionRequestEvent, RequestResponseEvent)):
-        scope = event.scope
+    """Compute the deduplication key for a request or response event.
+
+    Latchkey-permission requests are deduplicated by ``(agent_id,
+    scope, request_type)``: a fresh request for the same scope replaces
+    the earlier one in the pending list. File-sharing requests are
+    deduplicated by ``(agent_id, path, request_type)`` -- the file
+    path takes the role of the scope, so the same agent re-requesting
+    the same path collapses to one card while different paths stay
+    separate.
+    """
+    if isinstance(event, LatchkeyPredefinedPermissionRequestEvent):
+        scope_or_path = event.scope
+    elif isinstance(event, LatchkeyFileSharingPermissionRequestEvent):
+        scope_or_path = event.path
+    elif isinstance(event, RequestResponseEvent):
+        scope_or_path = event.scope
     else:
-        scope = None
-    return (event.agent_id, scope, event.request_type)
+        scope_or_path = None
+    return (event.agent_id, scope_or_path, event.request_type)
 
 
 class RequestInbox(FrozenModel):
@@ -234,7 +297,9 @@ def parse_request_event(line: str) -> RequestEvent | None:
         if request_type == str(RequestType.PERMISSIONS):
             return PermissionsRequestEvent.model_validate(data)
         elif request_type == str(RequestType.LATCHKEY_PERMISSION):
-            return LatchkeyPermissionRequestEvent.model_validate(data)
+            return LatchkeyPredefinedPermissionRequestEvent.model_validate(data)
+        elif request_type == str(RequestType.FILE_SHARING_PERMISSION):
+            return LatchkeyFileSharingPermissionRequestEvent.model_validate(data)
         else:
             return RequestEvent.model_validate(data)
     except (json.JSONDecodeError, ValueError, TypeError) as e:
