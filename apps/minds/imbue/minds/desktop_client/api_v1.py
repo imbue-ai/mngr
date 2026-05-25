@@ -54,14 +54,7 @@ async def _handle_telegram_setup(
     request: Request,
     _auth: MindsApiAuthDep,
 ) -> Response:
-    """Start Telegram bot setup for an agent.
-
-    ``agent_id`` is taken from the URL path. The latchkey gateway has
-    already restricted which ``agent_id`` values can appear here to
-    those that live on the caller's host (via the per-agent permission
-    rule installed at agent creation time), so we can trust the path
-    segment as the agent's self-declared identity.
-    """
+    """Start Telegram bot setup for an agent."""
     telegram_orchestrator: TelegramSetupOrchestrator | None = request.app.state.telegram_orchestrator
     if telegram_orchestrator is None:
         return _json_error("Telegram setup not configured", 501)
@@ -132,12 +125,7 @@ async def _handle_notification(
     _auth: MindsApiAuthDep,
     backend_resolver: BackendResolverDep,
 ) -> Response:
-    """Send a notification on behalf of the named agent.
-
-    Like the Telegram routes, the ``agent_id`` path segment is trusted
-    because the gateway has already narrowed the caller's permission
-    rule to the agents that live on its host.
-    """
+    """Send a notification on behalf of the named agent."""
     dispatcher: NotificationDispatcher | None = request.app.state.notification_dispatcher
     if dispatcher is None:
         return _json_error("Notification dispatch not configured", 501)
