@@ -39,10 +39,12 @@ baseline:
 - `build_agent_minds_api_proxy_schemas(agent_id)`
 
 `mngr_imbue_cloud/host.py`'s `build_combined_inject_command` /
-`normalize_inject_args` no longer take a `minds_api_key` argument:
-there is exactly one `MINDS_API_KEY` per minds installation now, the
-latchkey gateway injects it transparently, and agents never see the
-value -- so there is nothing to push down onto a leased pool host.
+`normalize_inject_args` (and the helpers only they called) are
+gone entirely: there is exactly one `MINDS_API_KEY` per minds
+installation now, the latchkey gateway injects it transparently, and
+agents never see the value -- so there was nothing left to push
+down onto a leased pool host, and the functions had no caller in
+the monorepo outside their own tests.
 
 ## Narrower interface for per-agent Minds API proxy permissions
 
