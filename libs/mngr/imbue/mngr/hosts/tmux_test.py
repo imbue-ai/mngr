@@ -157,11 +157,25 @@ def test_bare_session_target_silently_matches_sibling(
     )
 
 
+# These behavioral tests pass the exact-match `=<session>[:<window>]` form
+# directly as a subprocess argv element rather than routing it through
+# TmuxSessionTarget / TmuxWindowTarget's ``.as_shell_arg()``. The helpers
+# shlex-quote their output for embedding into a shell f-string; subprocess
+# argv mode bypasses the shell, so the extra layer of shell quoting is at
+# best a no-op (for the alphanumeric+hex session names this fixture
+# produces) and at worst would wrong-shape the argument when the session
+# name contains shell-special characters. The rendering contract of the
+# helpers is covered by the unit tests above
+# (``test_tmux_session_target_renders_with_exact_match_prefix`` et al.);
+# these tests cover the orthogonal tmux-level behavior that the exact-match
+# form refuses to misroute to a sibling session. Same convention as the
+# mngr_claude / mngr_gemini ``test_background_tasks_prefix_collision.py``
+# fixtures.
 @pytest.mark.tmux
 def test_tmux_window_target_refuses_dead_session_on_list_panes(dead_session_name: str) -> None:
-    """``tmux list-panes -t <TmuxWindowTarget(stopped).as_shell_arg()>`` must fail, not resolve."""
+    """``tmux list-panes -t =<stopped>:0`` must fail, not resolve."""
     result = subprocess.run(
-        ["tmux", "list-panes", "-t", TmuxWindowTarget(session_name=dead_session_name, window=0).as_shell_arg()],
+        ["tmux", "list-panes", "-t", f"={dead_session_name}:0"],
         capture_output=True,
         text=True,
     )
@@ -175,13 +189,13 @@ def test_tmux_window_target_refuses_dead_session_on_list_panes(dead_session_name
 
 @pytest.mark.tmux
 def test_tmux_window_target_refuses_dead_session_on_send_keys(dead_session_name: str) -> None:
-    """``tmux send-keys -t <TmuxWindowTarget(stopped).as_shell_arg()>`` must fail, not deliver."""
+    """``tmux send-keys -t =<stopped>:0`` must fail, not deliver."""
     result = subprocess.run(
         [
             "tmux",
             "send-keys",
             "-t",
-            TmuxWindowTarget(session_name=dead_session_name, window=0).as_shell_arg(),
+            f"={dead_session_name}:0",
             "echo hi",
             "Enter",
         ],
@@ -193,7 +207,7 @@ def test_tmux_window_target_refuses_dead_session_on_send_keys(dead_session_name:
 
 @pytest.mark.tmux
 def test_tmux_window_target_refuses_dead_session_on_capture_pane(dead_session_name: str) -> None:
-    """``tmux capture-pane -t <TmuxWindowTarget(stopped).as_shell_arg()>`` must fail, not capture.
+    """``tmux capture-pane -t =<stopped>:0`` must fail, not capture.
 
     Regression for the original bug: BaseAgent.get_lifecycle_state() captured
     a sibling pane's state, saw a live ``claude`` process there, and reported
@@ -204,7 +218,7 @@ def test_tmux_window_target_refuses_dead_session_on_capture_pane(dead_session_na
             "tmux",
             "capture-pane",
             "-t",
-            TmuxWindowTarget(session_name=dead_session_name, window=0).as_shell_arg(),
+            f"={dead_session_name}:0",
             "-p",
         ],
         capture_output=True,
@@ -220,9 +234,9 @@ def test_tmux_window_target_refuses_dead_session_on_capture_pane(dead_session_na
 
 @pytest.mark.tmux
 def test_tmux_session_target_refuses_dead_session_on_has_session(dead_session_name: str) -> None:
-    """``tmux has-session -t <TmuxSessionTarget(stopped).as_shell_arg()>`` must report not-found."""
+    """``tmux has-session -t =<stopped>`` must report not-found."""
     result = subprocess.run(
-        ["tmux", "has-session", "-t", TmuxSessionTarget(session_name=dead_session_name).as_shell_arg()],
+        ["tmux", "has-session", "-t", f"={dead_session_name}"],
         capture_output=True,
         text=True,
     )
@@ -233,9 +247,9 @@ def test_tmux_session_target_refuses_dead_session_on_has_session(dead_session_na
 
 @pytest.mark.tmux
 def test_tmux_session_target_refuses_dead_session_on_kill_session(dead_session_name: str) -> None:
-    """``tmux kill-session -t <TmuxSessionTarget(stopped).as_shell_arg()>`` must fail, not kill another."""
+    """``tmux kill-session -t =<stopped>`` must fail, not kill another."""
     result = subprocess.run(
-        ["tmux", "kill-session", "-t", TmuxSessionTarget(session_name=dead_session_name).as_shell_arg()],
+        ["tmux", "kill-session", "-t", f"={dead_session_name}"],
         capture_output=True,
         text=True,
     )
