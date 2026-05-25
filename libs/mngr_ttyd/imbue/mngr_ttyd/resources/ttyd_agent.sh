@@ -19,4 +19,8 @@ else
     _SESSION=$(tmux display-message -p '#{session_name}')
 fi
 unset TMUX
-exec tmux attach -t "$_SESSION":0
+# The leading `=` forces tmux exact-session matching. Without it, tmux falls back
+# to session-name prefix matching, so attaching to an agent whose session is gone
+# could silently land on a sibling session whose name shares the requested name
+# as a prefix (matches TmuxSessionTarget.as_shell_arg() on the Python side).
+exec tmux attach -t "=$_SESSION:0"
