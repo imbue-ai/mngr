@@ -15,7 +15,6 @@ from pathlib import Path
 import pytest
 
 from imbue.mngr import resources as _mngr_resources
-from imbue.mngr.hosts.tmux import TmuxSessionTarget
 from imbue.mngr.utils.testing import get_short_random_string
 from imbue.mngr_gemini import resources as _gemini_resources
 
@@ -27,17 +26,14 @@ def colliding_session_pair() -> Generator[tuple[str, str], None, None]:
     alive_name = f"{stopped_name}-sibling"
     subprocess.run(["tmux", "new-session", "-d", "-s", stopped_name, "sleep", "60"], check=True)
     subprocess.run(["tmux", "new-session", "-d", "-s", alive_name, "sleep", "60"], check=True)
-    subprocess.run(
-        ["tmux", "kill-session", "-t", TmuxSessionTarget(session_name=stopped_name).as_shell_arg()],
-        check=True,
-    )
+    # Pass the exact-match `=` form directly: in subprocess-argv mode there is
+    # no shell to interpret quoting, so the TmuxSessionTarget.as_shell_arg()
+    # helper (which shlex-quotes for shell embedding) is the wrong tool here.
+    subprocess.run(["tmux", "kill-session", "-t", f"={stopped_name}"], check=True)
     try:
         yield (stopped_name, alive_name)
     finally:
-        subprocess.run(
-            ["tmux", "kill-session", "-t", TmuxSessionTarget(session_name=alive_name).as_shell_arg()],
-            check=False,
-        )
+        subprocess.run(["tmux", "kill-session", "-t", f"={alive_name}"], check=False)
 
 
 @pytest.fixture
