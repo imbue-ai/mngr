@@ -18,18 +18,11 @@
  * unset / empty / unparseable, the proxy responds 503 so callers see a
  * deterministic "not configured" failure rather than a hung connection.
  *
- * The proxy authenticates *to* the Minds API on behalf of the agent:
- * if ``LATCHKEY_EXTENSION_MINDS_API_KEY`` is set, the proxy overwrites
- * the inbound ``Authorization`` header with
- * ``Bearer <LATCHKEY_EXTENSION_MINDS_API_KEY>`` before forwarding. The
- * minds desktop client persists the same value to disk and matches it
- * on every ``/api/v1/...`` request; agents themselves never see the
- * key. Any inbound ``Authorization`` value is dropped on the floor --
- * agents have no business injecting one for the Minds API and the
- * overwrite prevents them from trying. When the env var is not set,
- * the inbound ``Authorization`` header is passed through unchanged
- * (the Minds API will then 401 the request); this keeps the proxy
- * useful for tests that don't bother stubbing the key.
+ * The proxy authenticates *to* the Minds API using the Authorization Bearer
+ * header populated from the ``LATCHKEY_EXTENSION_MINDS_API_KEY`` environment
+ * variable. When the env var is not set, the inbound ``Authorization`` header
+ * is passed through unchanged (the Minds API will then 401 the request); this
+ * keeps the proxy useful for tests that don't bother stubbing the key.
  *
  * The proxy is intentionally transparent in every other respect: it
  * forwards the request method, the path-and-query suffix, the inbound
