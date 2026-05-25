@@ -29,7 +29,6 @@ from imbue.minds.desktop_client.forward_cli import EnvelopeStreamConsumer
 from imbue.minds.desktop_client.forward_cli import _redact_secrets
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.notification import NotificationRequest
-from imbue.minds.desktop_client.ssh_tunnel import RemoteSSHInfo
 from imbue.minds.primitives import ServiceName
 from imbue.mngr.api.discovery_events import AgentDestroyedEvent
 from imbue.mngr.api.discovery_events import FullDiscoverySnapshotEvent
@@ -41,6 +40,7 @@ from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import SSHInfo
+from imbue.mngr_forward.ssh_tunnel import RemoteSSHInfo
 
 _TIMESTAMP = IsoTimestamp("2026-05-03T00:00:00.000000000+00:00")
 _EVENT_SOURCE = EventSource("mngr/discovery")

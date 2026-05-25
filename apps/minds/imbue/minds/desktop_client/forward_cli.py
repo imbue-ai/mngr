@@ -55,7 +55,6 @@ from imbue.minds.desktop_client.backend_resolver import parse_service_log_record
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.notification import NotificationRequest
 from imbue.minds.desktop_client.notification import NotificationUrgency
-from imbue.minds.desktop_client.ssh_tunnel import RemoteSSHInfo
 from imbue.mngr.api.discovery_events import AgentDestroyedEvent
 from imbue.mngr.api.discovery_events import AgentDiscoveryEvent
 from imbue.mngr.api.discovery_events import DiscoveryErrorEvent
@@ -66,6 +65,7 @@ from imbue.mngr.api.discovery_events import parse_discovery_event_line
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr_forward.data_types import SystemInterfaceBackendFailureReason
+from imbue.mngr_forward.ssh_tunnel import RemoteSSHInfo
 
 _DEFAULT_MNGR_HOST_DIR: Final[Path] = Path.home() / ".mngr"
 _PREAUTH_TOKEN_LENGTH: Final[int] = 64
