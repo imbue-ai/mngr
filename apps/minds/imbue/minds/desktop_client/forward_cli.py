@@ -12,10 +12,7 @@ spawning code; this file replaces them with a thin consumer that:
   ``on_agent_destroyed`` callbacks; ``event`` lines drive the resolver's
   service map and fan out to request / refresh callbacks; ``forward`` lines
   feed the ``system_interface_backend_failure`` health tracker and the
-  ``listening`` port handshake (the per-agent reverse-tunnel callback
-  used to publish ``minds_api_url`` files is gone -- agents reach the
-  Minds API through the latchkey gateway's ``minds-api-proxy``
-  extension instead);
+  ``listening`` port handshake;
 - exposes ``bounce_observe()`` (sends ``SIGHUP`` to the plugin's PID), used
   by ``supertokens_routes`` after a freshly-written
   ``[providers.imbue_cloud_<slug>]`` block in ``settings.toml``;
@@ -543,13 +540,6 @@ class EnvelopeStreamConsumer(MutableModel):
     def _handle_forward_payload(self, payload: dict[str, Any]) -> None:
         payload_type = payload.get("type")
         if payload_type == "reverse_tunnel_established":
-            # The mngr_forward plugin still emits these envelopes when
-            # any caller (e.g. the latchkey supervisor) requests a
-            # ``--reverse`` pair; minds itself no longer requests any
-            # for its bare-origin server, so we just log at trace level
-            # and move on. Kept handled (instead of falling through to
-            # the "unknown" branch) so a future minds consumer can
-            # re-add its own handler without churn.
             logger.trace("Ignoring reverse_tunnel_established envelope: {}", payload)
         elif payload_type == "system_interface_backend_failure":
             try:
