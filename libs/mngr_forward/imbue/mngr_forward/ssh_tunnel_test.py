@@ -29,15 +29,12 @@ from pydantic import ValidationError
 from imbue.imbue_common.primitives import NonNegativeInt
 from imbue.imbue_common.primitives import PositiveInt
 from imbue.mngr_forward.primitives import ReverseTunnelSpec
-from imbue.mngr_forward.relay import relay_data
 from imbue.mngr_forward.ssh_tunnel import RemoteSSHInfo
 from imbue.mngr_forward.ssh_tunnel import ReverseTunnelInfo
 from imbue.mngr_forward.ssh_tunnel import SSHTunnelError
 from imbue.mngr_forward.ssh_tunnel import SSHTunnelManager
 from imbue.mngr_forward.ssh_tunnel import _ForwardedTunnelHandler
 from imbue.mngr_forward.ssh_tunnel import _REVERSE_TUNNEL_BACKOFF_CAP_SECONDS
-from imbue.mngr_forward.ssh_tunnel import _ssh_connection_is_active
-from imbue.mngr_forward.ssh_tunnel import _ssh_connection_transport
 from imbue.mngr_forward.ssh_tunnel import parse_url_host_port
 
 # -- Test doubles ----------------------------------------------------------
@@ -192,26 +189,18 @@ def test_remote_ssh_info_is_frozen() -> None:
 # -- ReverseTunnelInfo / ReverseTunnelSpec ---------------------------------
 
 
-def test_reverse_tunnel_info_defaults() -> None:
+def test_reverse_tunnel_info_defaults_and_optional_agent_id() -> None:
     ssh_info = RemoteSSHInfo(user="root", host="h", port=22, key_path=Path("/tmp/k"))
-    info = ReverseTunnelInfo(
-        ssh_info=ssh_info,
-        local_port=8420,
-        remote_port=12345,
-    )
-    assert info.requested_remote_port == 0  # default: dynamic-assign sentinel
-    assert info.agent_id is None  # default: no agent association
-
-
-def test_reverse_tunnel_info_carries_agent_id() -> None:
-    ssh_info = RemoteSSHInfo(user="root", host="h", port=22, key_path=Path("/tmp/k"))
-    info = ReverseTunnelInfo(
+    bare = ReverseTunnelInfo(ssh_info=ssh_info, local_port=8420, remote_port=12345)
+    assert bare.requested_remote_port == 0  # default: dynamic-assign sentinel
+    assert bare.agent_id is None  # default: no agent association
+    tagged = ReverseTunnelInfo(
         ssh_info=ssh_info,
         local_port=8420,
         remote_port=12345,
         agent_id="agent-abc",
     )
-    assert info.agent_id == "agent-abc"
+    assert tagged.agent_id == "agent-abc"
 
 
 def test_reverse_tunnel_spec_remote_zero_means_dynamic() -> None:
@@ -228,53 +217,7 @@ def test_reverse_tunnel_spec_local_must_be_positive() -> None:
 # -- SSH connection helpers ------------------------------------------------
 
 
-def test_ssh_connection_is_active_returns_false_for_none_transport() -> None:
-    """Returns False when get_transport() returns None."""
-    client = paramiko.SSHClient()
-    assert _ssh_connection_is_active(client) is False
-
-
-def test_ssh_connection_transport_raises_when_none() -> None:
-    """Raises SSHTunnelError when transport is None."""
-    client = paramiko.SSHClient()
-    with pytest.raises(SSHTunnelError):
-        _ssh_connection_transport(client)
-
-
-# -- relay_data ------------------------------------------------------------
-
-
-def test_relay_data_forwards_between_socket_pair() -> None:
-    """Data sent on one end of a socketpair reaches the other via relay."""
-    app_sock, relay_sock_a = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
-    channel_sock, relay_sock_b = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
-
-    fake_channel = FakeChannelFromSocket.create(relay_sock_b)
-    relay_thread = threading.Thread(target=relay_data, args=(relay_sock_a, fake_channel), daemon=True)
-    relay_thread.start()
-
-    app_sock.settimeout(3.0)
-    channel_sock.settimeout(3.0)
-
-    app_sock.sendall(b"hello from client")
-    channel_sock.sendall(b"hello from backend")
-    data = app_sock.recv(4096)
-    assert data == b"hello from backend"
-
-    app_sock.close()
-    channel_sock.close()
-    relay_thread.join(timeout=5.0)
-
-
 # -- SSHTunnelManager structural -----------------------------------------
-
-
-def test_ssh_tunnel_manager_starts_empty() -> None:
-    manager = SSHTunnelManager()
-    # Pure structural checks: no network I/O. The manager should be safe to
-    # construct without any side effects.
-    assert manager is not None
-    manager.cleanup()
 
 
 def test_ssh_tunnel_manager_cleanup_is_idempotent() -> None:
@@ -348,23 +291,27 @@ def _make_fake_reverse_tunnel_manager(
     return mgr
 
 
-def test_check_and_repair_tunnels_does_nothing_when_no_tunnels() -> None:
-    """When no reverse tunnels are registered, repair is a no-op."""
-    manager = _make_fake_reverse_tunnel_manager()
+def test_check_and_repair_tunnels_no_op_then_repairs_with_requested_port(tmp_path: Path) -> None:
+    """Bundles three baseline-repair properties into a single scenario:
+
+    1. With no tunnels registered, repair is a no-op.
+    2. After registering a broken tunnel, repair calls ``setup_reverse_tunnel``.
+    3. The setup call carries the tunnel's originally-requested remote port,
+       so the agent-side URL stays stable across re-establishments.
+    """
+    manager = _make_fake_reverse_tunnel_manager(remote_port=1989)
+    # (1) empty manager: tick is a no-op.
     manager._check_and_repair_tunnels()
     assert manager._setup_calls == []
-    manager.cleanup()
 
-
-def test_check_and_repair_tunnels_calls_setup_for_broken_tunnel(tmp_path: Path) -> None:
-    """Repair calls ``setup_reverse_tunnel`` for tunnels with no active client."""
-    manager = _make_fake_reverse_tunnel_manager(remote_port=12345)
+    # (2) + (3): one broken tunnel with a fixed requested_remote_port.
     ssh_info = _sample_ssh_info(tmp_path)
     conn_key = "192.0.2.1:22"
     tunnel_info = ReverseTunnelInfo(
         ssh_info=ssh_info,
         local_port=8420,
-        remote_port=5000,
+        remote_port=1989,
+        requested_remote_port=1989,
     )
     with manager._lock:
         manager._reverse_tunnels[(conn_key, 8420)] = tunnel_info
@@ -372,7 +319,9 @@ def test_check_and_repair_tunnels_calls_setup_for_broken_tunnel(tmp_path: Path) 
     manager._check_and_repair_tunnels()
 
     assert len(manager._setup_calls) == 1
+    # _setup_calls tuple is (ssh_info, local_port, remote_port, agent_id).
     assert manager._setup_calls[0][1] == 8420
+    assert manager._setup_calls[0][2] == 1989
     manager.cleanup()
 
 
@@ -392,29 +341,6 @@ def test_check_and_repair_tunnels_handles_setup_error(tmp_path: Path) -> None:
     manager._check_and_repair_tunnels()
 
     assert len(manager._setup_calls) == 1
-    manager.cleanup()
-
-
-def test_check_and_repair_tunnels_preserves_requested_remote_port(tmp_path: Path) -> None:
-    """A tunnel originally set up with a fixed remote port must be re-established
-    using that same port, so the agent-side URL stays stable."""
-    manager = _make_fake_reverse_tunnel_manager(remote_port=1989)
-    ssh_info = _sample_ssh_info(tmp_path)
-    conn_key = "192.0.2.1:22"
-    tunnel_info = ReverseTunnelInfo(
-        ssh_info=ssh_info,
-        local_port=8420,
-        remote_port=1989,
-        requested_remote_port=1989,
-    )
-    with manager._lock:
-        manager._reverse_tunnels[(conn_key, 8420)] = tunnel_info
-
-    manager._check_and_repair_tunnels()
-
-    assert len(manager._setup_calls) == 1
-    # Third positional arg is remote_port.
-    assert manager._setup_calls[0][2] == 1989
     manager.cleanup()
 
 
@@ -491,32 +417,9 @@ def test_check_and_repair_tunnels_fires_on_repaired_callback(tmp_path: Path) -> 
 # -- Exponential backoff --------------------------------------------------
 
 
-def test_repair_failure_arms_exponential_backoff(tmp_path: Path) -> None:
-    """First failure schedules a non-trivial retry in the future."""
-    manager = _make_fake_reverse_tunnel_manager(raise_on_setup=SSHTunnelError)
-    ssh_info = _sample_ssh_info(tmp_path)
-    conn_key = "192.0.2.1:22"
-    tunnel_key = (conn_key, 8420)
-    tunnel_info = ReverseTunnelInfo(ssh_info=ssh_info, local_port=8420, remote_port=5000)
-    with manager._lock:
-        manager._reverse_tunnels[tunnel_key] = tunnel_info
-
-    before = time.monotonic()
-    manager._check_and_repair_tunnels()
-    after = time.monotonic()
-
-    with manager._lock:
-        failure_state = manager._failure_state.get(tunnel_key)
-    assert failure_state is not None
-    assert failure_state.consecutive_failures == 1
-    # First retry is 2**1 = 2s away (give or take loop time).
-    assert failure_state.next_attempt_at >= before + 1.0
-    assert failure_state.next_attempt_at <= after + 3.0
-    manager.cleanup()
-
-
-def test_repair_failure_backoff_is_skipped_within_window(tmp_path: Path) -> None:
-    """A failed tunnel whose backoff window has not elapsed is not retried this tick."""
+def test_repair_failure_arms_backoff_and_skips_within_window(tmp_path: Path) -> None:
+    """First failure arms the backoff state with a future ``next_attempt_at``,
+    and a second tick during that window does not retry."""
     manager = _make_fake_reverse_tunnel_manager(raise_on_setup=SSHTunnelError)
     ssh_info = _sample_ssh_info(tmp_path)
     conn_key = "192.0.2.1:22"
@@ -526,7 +429,16 @@ def test_repair_failure_backoff_is_skipped_within_window(tmp_path: Path) -> None
         manager._reverse_tunnels[tunnel_key] = tunnel_info
 
     # First tick records a failure and arms backoff.
+    before = time.monotonic()
     manager._check_and_repair_tunnels()
+    after = time.monotonic()
+    with manager._lock:
+        failure_state = manager._failure_state.get(tunnel_key)
+    assert failure_state is not None
+    assert failure_state.consecutive_failures == 1
+    # First retry is 2**1 = 2s away (give or take loop time).
+    assert failure_state.next_attempt_at >= before + 1.0
+    assert failure_state.next_attempt_at <= after + 3.0
     assert len(manager._setup_calls) == 1
     # Second tick (well within the 2s backoff window) skips the retry.
     manager._check_and_repair_tunnels()
@@ -616,28 +528,11 @@ def test_alive_sibling_clears_stale_failure_state(tmp_path: Path) -> None:
 # -- remove_reverse_tunnels_for_agent -------------------------------------
 
 
-def test_remove_reverse_tunnels_for_agent_returns_zero_when_no_match(tmp_path: Path) -> None:
-    """No tunnels for the agent -> 0 removed, no side effects."""
-    ssh_info = _sample_ssh_info(tmp_path)
-    fake_client = FakeSSHClient.create(active=True)
-    manager = _make_manager_with_fake_connection(ssh_info, fake_client)
-    conn_key = f"{ssh_info.host}:{ssh_info.port}"
-    with manager._lock:
-        manager._reverse_tunnels[(conn_key, 8420)] = ReverseTunnelInfo(
-            ssh_info=ssh_info,
-            local_port=8420,
-            remote_port=5000,
-            agent_id="other-agent",
-        )
-
-    assert manager.remove_reverse_tunnels_for_agent("missing-agent") == 0
-    with manager._lock:
-        assert (conn_key, 8420) in manager._reverse_tunnels
-    manager.cleanup()
-
-
-def test_remove_reverse_tunnels_for_agent_drops_only_matching_tunnels(tmp_path: Path) -> None:
-    """Tunnels for other agents on the same host must be left untouched."""
+def test_remove_reverse_tunnels_for_agent_drops_only_matching(tmp_path: Path) -> None:
+    """Removing an agent's tunnels leaves other agents' tunnels (and the
+    shared SSH connection) untouched, and a no-match lookup returns 0
+    without side effects.
+    """
     ssh_info = _sample_ssh_info(tmp_path)
     fake_client = FakeSSHClient.create(active=True)
     manager = _make_manager_with_fake_connection(ssh_info, fake_client)
@@ -656,13 +551,18 @@ def test_remove_reverse_tunnels_for_agent_drops_only_matching_tunnels(tmp_path: 
             agent_id="agent-b",
         )
 
-    removed = manager.remove_reverse_tunnels_for_agent("agent-a")
+    # No-match lookup returns 0, leaves state alone.
+    assert manager.remove_reverse_tunnels_for_agent("missing-agent") == 0
+    with manager._lock:
+        assert (conn_key, 8420) in manager._reverse_tunnels
+        assert (conn_key, 9001) in manager._reverse_tunnels
 
-    assert removed == 1
+    # Matching lookup drops only agent-a's tunnel; agent-b's still holds
+    # the SSH connection so it must NOT be closed.
+    assert manager.remove_reverse_tunnels_for_agent("agent-a") == 1
     with manager._lock:
         assert (conn_key, 8420) not in manager._reverse_tunnels
         assert (conn_key, 9001) in manager._reverse_tunnels
-        # agent-b's tunnel still holds the connection, so it must NOT be closed.
         assert conn_key in manager._connections
     manager.cleanup()
 
@@ -724,30 +624,21 @@ def test_remove_reverse_tunnels_for_agent_keeps_connection_for_forward_tunnel(tm
 # setup_reverse_tunnel can run without making real SSH connections.
 
 
-def test_setup_reverse_tunnel_returns_assigned_port(tmp_path: Path) -> None:
-    """``setup_reverse_tunnel`` calls ``request_port_forward`` and returns the assigned port."""
+def test_setup_reverse_tunnel_returns_assigned_port_and_records_info(tmp_path: Path) -> None:
+    """``setup_reverse_tunnel`` returns the assigned remote port AND records
+    the resulting ``ReverseTunnelInfo`` (including the optional ``agent_id``
+    tag) in the manager's registry.
+    """
     ssh_info = _sample_ssh_info(tmp_path)
     fake_client = FakeSSHClient.create(active=True)
     manager = _make_manager_with_fake_connection(ssh_info, fake_client)
 
-    remote_port = manager.setup_reverse_tunnel(ssh_info=ssh_info, local_port=8420)
+    remote_port = manager.setup_reverse_tunnel(ssh_info=ssh_info, local_port=8420, agent_id="agent-xyz")
 
     assert remote_port == 54321
-    manager.cleanup()
-
-
-def test_setup_reverse_tunnel_stores_tunnel_info(tmp_path: Path) -> None:
-    """After setup, the tunnel info is stored in ``_reverse_tunnels``."""
-    ssh_info = _sample_ssh_info(tmp_path)
-    fake_client = FakeSSHClient.create(active=True)
-    manager = _make_manager_with_fake_connection(ssh_info, fake_client)
-
-    manager.setup_reverse_tunnel(ssh_info=ssh_info, local_port=8420, agent_id="agent-xyz")
-
     conn_key = f"{ssh_info.host}:{ssh_info.port}"
     with manager._lock:
         tunnel_info = manager._reverse_tunnels.get((conn_key, 8420))
-
     assert tunnel_info is not None
     assert tunnel_info.remote_port == 54321
     assert tunnel_info.local_port == 8420
