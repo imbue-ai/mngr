@@ -1491,8 +1491,14 @@ def _build_restart_shell_command() -> str:
     ``mngr exec`` runs commands in the agent's work_dir by default, so
     ``services.toml`` is referenced as a relative path.
     """
+    # The leading `=` on the target forces tmux exact-session matching.
+    # Without it, tmux falls back to session-name prefix matching, so if
+    # `${MNGR_PREFIX}system-services` is gone but a sibling-prefix session
+    # is alive (e.g. `${MNGR_PREFIX}system-services-other`), the kill-window
+    # would silently land on the wrong session. Mirrors the pattern used by
+    # TmuxSessionTarget / TmuxWindowTarget in `imbue.mngr.hosts.tmux`.
     return (
-        f'tmux kill-window -t "${{MNGR_PREFIX}}{_SERVICES_AGENT_NAME}:{_RESTART_TMUX_WINDOW}" '
+        f'tmux kill-window -t "=${{MNGR_PREFIX}}{_SERVICES_AGENT_NAME}:{_RESTART_TMUX_WINDOW}" '
         f"2>/dev/null; touch services.toml"
     )
 
