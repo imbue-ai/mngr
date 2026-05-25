@@ -270,14 +270,6 @@ def run(
         lambda agent_id, _reason, _status: system_interface_health_tracker.record_failure(agent_id)
     )
 
-    # Latchkey discovery / destruction wiring lives in the detached
-    # ``mngr latchkey forward`` subprocess started above; no callbacks
-    # to register here. (The Minds API used to be reached over a
-    # per-agent reverse SSH tunnel, with ``LocalAgentDiscoveryHandler``
-    # / ``MindsApiUrlWriter`` writing ``minds_api_url`` files per agent;
-    # both are gone now that the latchkey ``minds-api-proxy`` extension
-    # is the only path agents use.)
-
     # All callbacks registered -- now safe to start the envelope reader
     # threads. Doing this earlier (e.g. inside ``start_mngr_forward``)
     # would open a race window where envelopes arriving before the

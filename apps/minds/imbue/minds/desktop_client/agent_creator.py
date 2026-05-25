@@ -432,11 +432,7 @@ def _build_mngr_create_command(
 ) -> list[str]:
     """Build the ``mngr create`` command for a freshly-provisioned workspace.
 
-    The Minds API key is no longer injected per agent: there is exactly
-    one ``MINDS_API_KEY`` per minds installation, the latchkey gateway's
-    ``minds-api-proxy`` extension adds it as ``Authorization: Bearer
-    <key>`` on every forwarded request, and the agent itself never
-    sees the value. ``--format jsonl`` is appended so the caller can
+    ``--format jsonl`` is appended so the caller can
     parse the canonical ``AgentId`` out of the trailing ``"event":
     "created"`` line; minds no longer pre-generates an id because for
     imbue_cloud the lease forces it back to the pool host's pre-baked
