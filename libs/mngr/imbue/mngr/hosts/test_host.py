@@ -2580,12 +2580,16 @@ def test_new_tmux_window_inherits_env_vars(
         # reads our controlled rc files (tmux overrides HOME from the passwd
         # database for new window processes, so we must re-override it).
         fake_home = str(tmp_home_dir)
+        # Pass the exact-match `=` form directly: in subprocess-argv mode there is
+        # no shell to interpret quoting, so the TmuxSessionTarget.as_shell_arg() /
+        # TmuxWindowTarget.as_shell_arg() helpers (which shlex-quote for shell
+        # embedding) are the wrong tool here.
         subprocess.run(
             [
                 "tmux",
                 "new-window",
                 "-t",
-                TmuxSessionTarget(session_name=session_name).as_shell_arg(),
+                f"={session_name}",
                 "-n",
                 "user-window",
                 "-e",
@@ -2615,7 +2619,7 @@ def test_new_tmux_window_inherits_env_vars(
                 "tmux",
                 "send-keys",
                 "-t",
-                window_target.as_shell_arg(),
+                f"={session_name}:user-window",
                 f"echo NEW_WINDOW_VAR=$NEW_WINDOW_VAR > {marker_file}",
                 "Enter",
             ],
