@@ -44,7 +44,7 @@ from imbue.minds.config.data_types import MNGR_BINARY
 from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.config.loader import load_client_config
 from imbue.minds.desktop_client.agent_creator import AgentCreator
-from imbue.minds.desktop_client.api_key_store import load_or_create_minds_api_key
+from imbue.minds.desktop_client.api_key_store import generate_api_key
 from imbue.minds.desktop_client.app import create_desktop_client
 from imbue.minds.desktop_client.app import start_system_interface_health_probe_loop
 from imbue.minds.desktop_client.auth import FileAuthStore
@@ -95,9 +95,11 @@ MINDS_API_PROXY_URL_ENV_VAR: Final[str] = "LATCHKEY_EXTENSION_MINDS_API_URL"
 
 # Env var read by the bundled ``minds-api-proxy`` gateway extension on
 # each request; the proxy injects this value as ``Authorization: Bearer
-# <key>`` on every forwarded request. Persisted to disk by
-# :func:`load_or_create_minds_api_key` so it survives desktop-client
-# restarts.
+# <key>`` on every forwarded request. Freshly generated per ``minds
+# run`` and never persisted to disk -- the supervisor is restarted on
+# every minds startup and gets the current value in its env, the bare-
+# origin server sees the same in-memory value, and the agent itself
+# never sees the key at all.
 MINDS_API_PROXY_KEY_ENV_VAR: Final[str] = "LATCHKEY_EXTENSION_MINDS_API_KEY"
 
 
@@ -177,12 +179,15 @@ def run(
     latchkey = _build_latchkey(data_directory=data_directory)
     latchkey.initialize()
 
-    # Load (or generate) the single central minds API key. The same
+    # Mint a fresh central minds API key for this process. The same
     # value is handed to the latchkey gateway's ``minds-api-proxy``
-    # extension (so it can inject ``Authorization: Bearer <key>`` on
-    # every forwarded request) and to the desktop client's own bearer-
-    # auth gates (so they accept the header the proxy just injected).
-    minds_api_key = load_or_create_minds_api_key(data_directory)
+    # extension (via the supervisor restart below, so it can inject
+    # ``Authorization: Bearer <key>`` on every forwarded request) and
+    # to the desktop client's own bearer-auth gates (so they accept
+    # the header the proxy just injected). Generated in memory rather
+    # than persisted because the supervisor is always restarted on
+    # minds startup and there is no other cross-process consumer.
+    minds_api_key = generate_api_key()
 
     root_concurrency_group = ConcurrencyGroup(name="minds-run")
     root_concurrency_group.__enter__()

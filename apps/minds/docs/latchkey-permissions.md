@@ -113,13 +113,16 @@ gateway they use for every other outbound HTTP call, via the bundled
 `minds-api-proxy` extension at `/minds-api-proxy/api/v1/...`. There is
 no per-agent reverse SSH tunnel for the Minds API anymore.
 
-Authentication uses one central `MINDS_API_KEY` per minds installation,
-persisted at `<data_dir>/minds_api_key` and never handed to agents.
+Authentication uses one central `MINDS_API_KEY` per `minds run`,
+freshly generated in memory at startup and never handed to agents.
 The `minds-api-proxy` extension reads it from the
 `LATCHKEY_EXTENSION_MINDS_API_KEY` env var (published to the supervisor
-by `minds run`) and injects `Authorization: Bearer <key>` on every
-forwarded request, overwriting any header the agent supplied. The
-desktop client matches the same value on the inbound side.
+by `minds run`, which restarts the supervisor on every startup so the
+current key always wins) and injects `Authorization: Bearer <key>` on
+every forwarded request, overwriting any header the agent supplied.
+The desktop client matches the same value on the inbound side. The
+key rotates per minds startup; nothing else in the monorepo reads it
+from disk, so there is no on-disk copy to keep in sync.
 
 Per-agent isolation comes from the latchkey gateway's permissions
 file. The agent baseline grants every agent one shared call --

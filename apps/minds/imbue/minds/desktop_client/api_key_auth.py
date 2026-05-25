@@ -1,9 +1,9 @@
 """Bearer-token authentication for ``/api/v1/...`` endpoints.
 
-Every minds installation has exactly one central ``MINDS_API_KEY``
-(persisted under ``<data_dir>/minds_api_key`` -- see
-:mod:`imbue.minds.desktop_client.api_key_store`). The latchkey gateway's
-bundled ``minds-api-proxy`` extension injects it as
+Every ``minds run`` has exactly one central ``MINDS_API_KEY``,
+freshly generated in memory at startup (see
+:mod:`imbue.minds.desktop_client.api_key_store`). The latchkey
+gateway's bundled ``minds-api-proxy`` extension injects it as
 ``Authorization: Bearer <key>`` on every request it proxies into the
 desktop client, so the request-handling code only has to confirm the
 header carries the same key.

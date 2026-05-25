@@ -18,10 +18,13 @@ machinery is gone:
   no longer stores any per-agent `api_key_hash` file. Workspaces no
   longer carry the env var at all.
 - The `apps/minds/imbue/minds/desktop_client/api_key_store.py` module
-  has been rewritten around a single central key:
-  `load_or_create_minds_api_key(<data_dir>)` lazily creates
-  `<data_dir>/minds_api_key` (mode 0o600) on first use and reuses it
-  across desktop-client restarts.
+  has been rewritten around a single central key, freshly generated
+  in memory on every `minds run` via `generate_api_key()`. The key is
+  not persisted to disk -- the supervisor is always restarted on
+  minds startup and gets the current value in its env, the bare-
+  origin auth gate sees the same in-memory value, and no other
+  process reads the key. Rotating per-startup removes a long-lived
+  secret from the filesystem.
 - The `/api/v1/...` bearer-auth gate (used by both `api_v1.py` and the
   WebDAV mount under `/api/v1/files`) now compares the inbound
   `Authorization: Bearer <key>` against that single value with a
