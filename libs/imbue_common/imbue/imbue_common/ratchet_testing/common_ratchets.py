@@ -541,15 +541,18 @@ PREVENT_BARE_TMUX_TARGETS = RegexRatchetRule(
     ),
     # Catch `tmux <subcmd> ... -t '<target>'` or `... -t "<target>"` where the quoted
     # target starts with anything other than `=` (the exact-match prefix). Covers both
-    # Python single-quoted f-strings AND shell/Python double-quoted variable
-    # interpolations (e.g. `tmux has-session -t "$SESSION"` in bash, or
-    # `tmux kill-window -t f"{prefix}foo"` in Python). `^(?!\s*#).*` at the start,
-    # with multiline, skips Python comment lines so commented-out historical examples
-    # don't get flagged. Bash `# ...` comments are also skipped by the same predicate
-    # since `\s*#` matches both. Variable-interpolated targets without outer quotes
-    # -- `-t {var}` -- are unmatched and assumed safe by convention (the variable
-    # should hold a `TmuxSessionTarget.as_shell_arg()` / `TmuxWindowTarget.as_shell_arg()`
-    # result).
+    # single- and double-quoted forms, so it fires on shell variable interpolations
+    # like `tmux has-session -t "$SESSION"` (bash) as well as Python literal targets
+    # like `tmux send-keys -t 'foo' Enter`. `^(?!\s*#).*` at the start, with multiline,
+    # skips Python comment lines so commented-out historical examples don't get flagged.
+    # Bash `# ...` comments are also skipped by the same predicate since `\s*#` matches
+    # both. Variable-interpolated targets without outer quotes -- `-t {var}` -- are
+    # unmatched and assumed safe by convention (the variable should hold a
+    # `TmuxSessionTarget.as_shell_arg()` / `TmuxWindowTarget.as_shell_arg()` result).
+    # Note: a string-prefixed Python f-string used directly as the target argument
+    # (e.g. `-t f"{prefix}foo"`) is also unmatched, because the `f` sits between the
+    # whitespace after `-t` and the opening quote; treat those the same as the
+    # bare-variable case and route them through `.as_shell_arg()`.
     pattern_string=r"""^(?!\s*#).*\btmux\b(?:\s+(?:-[a-zA-Z]\S*|[a-z][a-z-]*))*\s+-t\s+["'](?!=)""",
     is_multiline=True,
 )
