@@ -324,11 +324,9 @@ def check_bare_urwid_tty_signal_keys(source_dir: Path, max_count: int) -> None:
 
 
 def check_bare_tmux_targets(source_dir: Path, max_count: int) -> None:
-    # Scan all tracked file types (not just .py): shell scripts (.sh) are a
-    # common place to build tmux commands, and they need the same exact-match
-    # enforcement -- bugs found in claude_background_tasks.sh,
-    # gemini_background_tasks.sh, and ttyd_agent.sh proved that the .py-only
-    # scan was missing real prefix-matching bugs.
+    # Scan all tracked file types (not just .py): shell scripts and other
+    # non-Python files routinely construct tmux commands too, and they need
+    # the same exact-match enforcement.
     #
     # Exclude `changelog/` and `future_specs/`: those directories hold prose
     # that describes the bug (so the regex would flag the documentation
