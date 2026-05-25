@@ -111,9 +111,10 @@ def test_claude_background_tasks_exits_when_target_session_is_gone_despite_prefi
         )
 
     # The script's inner sleep is 15s. If the bug is back, the first iteration
-    # finds the sibling (prefix match), sleeps 15s, finds it again, ... The
-    # subprocess.run timeout (20s) would fire before the script gives up.
-    # With the fix, the loop never enters and the script exits well under 20s.
+    # finds the sibling (prefix match) and enters the loop, so the 5s
+    # subprocess.run timeout fires inside the first sleep and raises
+    # TimeoutExpired, failing this test. With the fix, the loop never enters
+    # and the script exits well within the timeout.
     assert result.returncode == 0, (
         f"Background script exited non-zero: returncode={result.returncode}\n"
         f"stdout: {result.stdout!r}\nstderr: {result.stderr!r}"
