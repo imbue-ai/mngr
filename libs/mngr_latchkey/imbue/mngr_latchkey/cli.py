@@ -46,6 +46,7 @@ from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import PluginName
+from imbue.mngr_forward.ssh_tunnel import SSHTunnelManager
 from imbue.mngr_latchkey.agent_setup import finalize_host_permissions
 from imbue.mngr_latchkey.agent_setup import prepare_agent_latchkey
 from imbue.mngr_latchkey.config import LatchkeyPluginConfig
@@ -56,7 +57,6 @@ from imbue.mngr_latchkey.discovery import LatchkeyDestructionHandler
 from imbue.mngr_latchkey.discovery import LatchkeyDiscoveryHandler
 from imbue.mngr_latchkey.discovery_stream import DiscoveryStreamConsumer
 from imbue.mngr_latchkey.forward_supervisor import is_forward_info_alive
-from imbue.mngr_latchkey.ssh_tunnel import SSHTunnelManager
 from imbue.mngr_latchkey.store import LatchkeyForwardInfo
 from imbue.mngr_latchkey.store import LatchkeyStoreError
 from imbue.mngr_latchkey.store import delete_forward_info

@@ -1,9 +1,9 @@
 """SSH endpoint data model used by the minds desktop client.
 
-The actual tunnel managers live in :mod:`imbue.mngr_forward.ssh_tunnel`
-(forward tunnels owned by the ``mngr forward`` plugin) and in
-:mod:`imbue.mngr_latchkey.ssh_tunnel` (the latchkey gateway reverse
-tunnel). Minds itself only needs the connection-info model -- the
+The actual tunnel manager lives in :mod:`imbue.mngr_forward.ssh_tunnel`
+(used by both the ``mngr forward`` plugin's forward + reverse paths and
+by the ``mngr latchkey forward`` supervisor's reverse-tunnel-the-gateway
+path). Minds itself only needs the connection-info model -- the
 ``open_ssh_client`` / ``_create_ssh_client`` helpers and the
 ``SSHTunnelError`` exception that used to live here were the last
 callers of paramiko in this package, and both went away with the
