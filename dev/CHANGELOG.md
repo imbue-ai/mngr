@@ -6,14 +6,32 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Added
+
+- Added: Per-project changelog layout — each project under `libs/`, `apps/`, plus a synthetic top-level `dev/` directory, owns its own `changelog/` entries dir, `CHANGELOG.md`, and `UNABRIDGED_CHANGELOG.md`. The `test_pr_has_changelog_entry` ratchet now computes touched projects from the PR diff and requires `<project_dir>/changelog/<branch>.md` for each. New `test_every_project_has_changelog_layout` meta-ratchet enforces the layout.
+- Added: New shared `scripts/changelog_projects.py` owns the path-to-project mapping (used by the consolidator, the ratchet, and the release script).
+- Added: TMR daily cron workflow at 08:00 UTC with a `tmr-periodic` label gate; auto-opened PRs are labelled and assigned to `qi-imbue` and `joshalbrecht`. Default `test_paths` now points at the whole `libs/mngr/imbue/mngr/e2e/` directory.
+- Added: `CLAUDE.local.md` is now copied into agent workdirs by default so user-specific Claude instructions from the host repo are available inside agents.
+- Added: `just minds-test-electron` recipe wraps the new Electron acceptance test in `xvfb-run -a`; the `test-docker` CI job now installs Node, pnpm, xvfb, and apps/minds pnpm deps.
+- Added: `wsgidav` and `a2wsgi` direct dependencies in `uv.lock` to support the minds WebDAV file-server mount.
+- Added: Specs `specs/discovery-providers-and-errors/concise.md` and `specs/minds-env-activate-split/concise.md`.
+- Added: Auto-generated CLI docs entry at `libs/mngr/docs/commands/secondary/uncapped-claude.md` so `mngr ask` and `mngr --help` know about the new `mngr_uncapped_claude` command.
+
 ### Changed
 
 - Changed: Bumped pinned Claude Code CLI version from `2.1.116` to `2.1.141` in the CI workflow installs.
 - Changed: CI acceptance wall-clock cut ~62% — `contents: write` granted so offload image-cache git notes push, `max_parallel` lowered 200→50 for better LPT packing.
+- Changed: Per-PR entry files now live at `<project_dir>/changelog/<branch>.md` (one per project the PR touches), instead of a single repo-root `changelog/<branch>.md`. Consolidator's machine-readable output is now one `SECTION <project> <date>` line per inserted section.
+- Changed: `scripts/release.py` finalizes each bumped package's and each first-time-publish package's `libs/<name>/CHANGELOG.md` `[Unreleased]` section. Releases now refuse to cut when unconsolidated entries remain, printing the exact one-liner that triggers the consolidation schedule on demand.
+- Changed: Modal offload-acceptance/release runs now share a single Modal env (`mngr_test-YYYY-MM-DD-HH-MM-SS-shared-<uuid>`) pre-created and `trap`-deleted by the justfile recipes; opt-in via `MNGR_TEST_SHARED_MODAL_ENV_NAME`.
+- Changed: TMR GitHub Actions defaults `MNGR_USER_ID` to the shared `tmr-ci` namespace and reads inbound-SSH keys from `.github/tmr-authorized-keys`; passes AWS secrets through for the S3 report mirror.
+- Changed: TMR `run_name` workflow_dispatch input; new `TMR (reintegrate)` workflow re-runs just the integrator phase against a prior run name.
+- Changed: README updated to advertise the new `uncapped-claude` command and link to the new sub-project.
 
 ### Removed
 
 - Removed: Unused `libs/flexmux/` project and all references (justfile recipes, `EXCLUDED_RATCHET_PROJECTS` exclusions, `uv.lock` workspace member).
+- Removed: The top-level repo-wide `CHANGELOG.md` and `UNABRIDGED_CHANGELOG.md` were retroactively split into per-project files.
 
 ## 2026-05-13
 

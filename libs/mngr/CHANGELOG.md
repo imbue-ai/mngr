@@ -12,6 +12,12 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Added: `mngr extras config` subcommand walking user-scope config gaps (today: default agent type for `mngr create`).
 - Added: `mngr plugin list --kind {agent-type,provider}` filter projecting to canonical agent-type or provider backend names.
 - Added: urwid single-select picker for `mngr extras` Install/Skip prompts (completion, claude-plugin) and the default agent type step inside `mngr extras -i`.
+- Added: `UNKNOWN` value on `AgentLifecycleState` and `HostState` — provider that owns the agent/host could not be accessed during the most recent discovery attempt.
+- Added: `providers` and `error_by_provider_name` fields on `FullDiscoverySnapshotEvent` so consumers can see per-provider success/failure; older `mngr_forward`/`mngr_latchkey`/`mngr_notifications` builds raise `DiscoverySchemaChangedError` against new snapshots until rebuilt.
+- Added: `--restart` and `--no-resume` flags to `mngr start`.
+- Added: `HasTranscriptMixin` on `AgentInterface` formalises the raw-capture contract; `HasCommonTranscriptMixin` adds the gated common converter.
+- Added: `--start/--no-start` flag on `push`, `pull`, `provision`, and `rename` (default `--start`).
+- Added: Shell-level integration tests for `scripts/install.sh` (`test_install_script.py`) covering `uv tool upgrade`/`install` branches, PATH-not-set, and `-i` continue-on-failure paths.
 
 ### Changed
 
@@ -20,10 +26,32 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Changed: `mngr create` no longer hard-codes `claude` as the default agent type — it must come from a positional argument, `--type`, or `[commands.create] type` in user settings; the error lists registered types and points at `mngr config set`.
 - Changed: `scripts/install.sh` no longer carries custom shell logic for the default agent type — that prompt now runs inside `mngr extras -i` and is re-runnable via `mngr extras config`.
 - Changed: Bumped pinned Claude Code CLI version from `2.1.116` to `2.1.141` in the Dockerfile.
+- Changed: Renamed the mngr-side "workspace server" feature to "system interface", matching the upstream rename of `minds_workspace_server` to `system_interface`. `/api/agents/{id}/restart-workspace-server` → `/api/agents/{id}/restart-system-interface`; SSE event `workspace_server_status` → `system_interface_status`.
+- Changed: `mngr push`, `pull`, and `provision` no longer require the agent to be running.
+- Changed: `mngr connect` no longer falls back to "most recently created agent" when run non-interactively; pass an agent name or use the interactive selector.
+- Changed: `mngr observe --discovery-only` always emits a `FullDiscoverySnapshotEvent` (even when zero providers succeeded); per-provider failures land in `error_by_provider_name` and consumers drop agents/hosts whose provider is errored. The discovery polling path no longer retries failures at the top level.
+- Changed: `mngr rename` now works against offline hosts (writes go to provider-persisted agent data); `--start` defaults to `--no-start` (was the implicit default `--start`).
+- Changed: Renamed address-side `HostedLocation` to `HostLocationAddress` (with cascading internal renames for parsers, param types, and resolvers); Click param-type display name `hosted_location` → `host_location_address`.
+- Changed: `ProviderError` now carries `provider_name` on the base class; every subclass requires it as its first constructor argument.
+- Changed: Provider gating — `mngr list`, `mngr gc`, etc. no longer silently bootstrap provider-side state. Only `mngr create` may bootstrap host-creation state (new `is_for_host_creation` parameter on `ProviderBackendInterface.build_provider_instance`). Modal raises `ProviderUnavailableError` until its env exists.
+- Changed: Address resolution refactored: `find_one_agent` / `find_agent_for_command` lose `is_start_desired` / `skip_agent_state_check`; two new helpers `resolve_to_started_host_and_agent` and `resolve_to_started_host_and_running_agent` separate the "find" stage from "ensure live".
+- Changed: `mngr create --provider lima` docs now show `--memory=N` / `--disk=N` (plain integers, no `GiB` suffix).
+- Changed: mngr's generated tmux config sets `status-left-length` to 20 so a full `mngr-...` session name shows in the status bar.
+- Changed: `mngr create --type X -- ...` no longer silently aliases `--type command -- ...`; bare or unknown types fail fast with `UnknownAgentTypeError`. Use `--type command -- <shell command>` to run an arbitrary shell command.
+
+### Removed
+
+- Removed: `mngr provision` (aka `mngr prov`) subcommand and its docs — provisioning still runs automatically during `mngr create`.
+- Removed: The `Permission` primitive, `AgentPermissionsOptions`, `NoPermissionsAgentMixin`, `get_permissions`/`set_permissions` host/agent methods, the `--grant`/`--revoke` flags on `mngr limit`, and the `--grant` flag on `mngr create`. Higher-level libraries (latchkey, minds) keep their own permissions concepts.
 
 ### Fixed
 
 - Fixed: `tmux send-keys -l` and `tmux rename-session` now use the `--` end-of-options separator, so agent commands/messages and rename targets starting with `-` (e.g. `--model gemma`) are no longer misparsed by tmux.
+- Fixed: `mngr observe` no longer kills its inner `mngr observe --discovery-only` child on every startup — the unsupported `--on-error continue` flag is gone.
+- Fixed: `Host._get_all_descendant_pids` now tracks a `visited` set so a PID-reuse cycle in the process tree no longer drives the walker past Python's recursion limit; unsticks `host.stop_agents` on long-lived agents' cleanup paths.
+- Fixed: `mngr clone` and `mngr migrate` cross-host moves now pass the source agent's host location through `CreateAgentOptions` so the plugin-state rsync runs from source to destination.
+- Fixed: `mngr create` no longer silently rejects the lease-adopt scenario for imbue_cloud — duplicate-agent-name check now honors `host.pre_baked_agent_id`.
+- Fixed: Two flaky destroy tests now carry `@pytest.mark.timeout(60)` (`test_destroy_via_stdin`, `test_destroy_multiple_agents`).
 
 ## [v0.2.8] - 2026-05-13
 

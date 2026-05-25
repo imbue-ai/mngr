@@ -6,6 +6,10 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Changed
+
+- Changed: Shared pytest conftest hooks set `LATCHKEY_DISABLE_COUNTING=1` once per session so test-spawned subprocesses (including the Latchkey Gateway started by the minds Electron e2e test) no longer count toward Latchkey's daily usage counter.
+
 ## [v0.2.7] - 2026-05-11
 
 ### Changed

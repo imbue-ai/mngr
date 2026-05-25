@@ -6,9 +6,22 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Added
+
+- Added: New `ProviderEmptyError` (distinct from `ProviderUnavailableError`) — Modal raises it when its per-user environment doesn't exist yet, so `mngr list` silently skips the empty provider instead of aborting.
+- Added: Shared Modal env across offload-acceptance / offload-release runs via `MNGR_TEST_SHARED_MODAL_ENV_NAME` opt-in; modal test fixtures thread the env name through `MngrConfig.prefix` + `ModalProviderConfig.user_id` and skip per-sandbox env creation/deletion to stay under Modal's 1500-env-per-workspace cap.
+
 ### Changed
 
 - Changed: CI acceptance wall-clock cut ~62% — `mngr_modal` session-end leak detector reshaped (typed `ModalCleanupOutcome`, `pytest_sessionfinish` hook so it runs after all session-scoped fixture teardowns).
+- Changed: Modal provider no longer auto-creates an environment from non-create commands; only `mngr create` may bootstrap the environment on first use. Modal backend raises `ProviderUnavailableError` until its env exists.
+- Changed: Retry on Modal's async permission propagation — both `_enter_ephemeral_app_context_with_retry` and `_lookup_persistent_app_with_retry` now retry on `ModalProxyPermissionDeniedError` in addition to `ModalProxyNotFoundError`. Adds ~3-7s on first `mngr create` against a brand-new environment.
+- Changed: Bumped pinned `modal` dependency from 1.3.1 to 1.4.3.
+- Changed: `mngr_claude_usage` statusline-shim acceptance test on Modal updated to assert against the new host-stable shim path layout.
+
+### Fixed
+
+- Fixed: Modal resource leaks in `test_snapshot_and_shutdown.py` — teardown's `modal app stop` and `modal volume delete` calls were silently failing; the session-scoped Modal env is now passed to deploy, sandbox lookup, volume operations, and cleanup, and app-stop/volume-delete run in parallel with `check=True`.
 
 ## [v0.2.8] - 2026-05-13
 

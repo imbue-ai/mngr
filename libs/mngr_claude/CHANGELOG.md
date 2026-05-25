@@ -9,6 +9,11 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 ### Added
 
 - Added: `use_env_config_dir` option on the `claude` agent type config so local Claude agents share `$CLAUDE_CONFIG_DIR` instead of provisioning a per-agent dir.
+- Added: `ClaudeAgent` satisfies the new `HasTranscriptMixin` / `HasCommonTranscriptMixin` mixins from mngr core; `mngr transcript <claude-agent>` user-visible behavior is unchanged.
+
+### Changed
+
+- Changed: `resolve_shared_claude_config_dir()` (used when `use_env_config_dir=True`) now falls back to `~/.claude/` when `$CLAUDE_CONFIG_DIR` is unset, instead of raising. Also drops `ORIGINAL_CLAUDE_CONFIG_DIR` from the agent env in the `mngr uncapped-claude` flow.
 
 ### Fixed
 

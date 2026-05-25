@@ -6,6 +6,14 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Added
+
+- Added: New `ModalProxyPermissionDeniedError` in `imbue.modal_proxy.errors`; `_translate_modal_error` maps `modal.exception.PermissionDeniedError` to it (was falling through to bare `ModalProxyError`). Surfaces Modal's async permission-propagation window after `modal environment create`.
+
+### Changed
+
+- Changed: Bumped pinned `modal` dependency from 1.3.1 to 1.4.3; `log_utils.py` updated to use Modal 1.4.x's new `RichOutputManager` ABC.
+
 ## [v0.2.7] - 2026-05-11
 
 ### Changed
