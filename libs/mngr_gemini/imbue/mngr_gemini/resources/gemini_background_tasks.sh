@@ -86,10 +86,8 @@ trap _cleanup EXIT
 
 log_info "Background tasks started for session $SESSION_NAME"
 
-# The leading `=` forces tmux exact-session matching. Without it, tmux falls back
-# to session-name prefix matching, so this loop would never exit when our session
-# is gone but a sibling session whose name shares this name as a prefix is still
-# alive (matches TmuxSessionTarget.as_shell_arg() on the Python side).
+# `=` is tmux's exact-match prefix; without it the loop would never exit when
+# our session is gone but a prefix-collision sibling is alive.
 while tmux has-session -t "=$SESSION_NAME" 2>/dev/null; do
     # Restart raw transcript streamer if it died unexpectedly
     if [ -n "$_STREAM_PID" ] && ! kill -0 "$_STREAM_PID" 2>/dev/null; then

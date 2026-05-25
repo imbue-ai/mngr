@@ -187,12 +187,7 @@ class BaseAgent(AgentInterface[AgentConfigT]):
         determine_lifecycle_state pure function for the actual state logic.
         """
         try:
-            # Get pane state and pid in one command. Use self.tmux_target (a
-            # TmuxWindowTarget) so the session name is matched exactly --
-            # otherwise tmux's prefix matching would route this query to a
-            # sibling session whose name starts with the same prefix (e.g.
-            # 'mngr-gemini' silently matching 'mngr-gemini-foo') and we'd read
-            # the wrong pane's state.
+            # Get pane state and pid in one command.
             result = self.host.execute_idempotent_command(
                 f"tmux list-panes -t {self.tmux_target.as_shell_arg()} "
                 f"-F '#{{pane_dead}}|#{{pane_current_command}}|#{{pane_pid}}' 2>/dev/null | head -n 1",
@@ -274,12 +269,6 @@ class BaseAgent(AgentInterface[AgentConfigT]):
         Always pins window 0 because agents run there; using the session
         without a window component selects the *currently active* window, which
         is wrong when additional windows exist (e.g., watchers, ttyd).
-
-        Pass to shell commands via ``.as_shell_arg()`` -- the leading ``=`` in
-        the rendered form forces exact session matching so the target cannot
-        be silently rerouted by tmux's session-name prefix matching when this
-        agent's session has been torn down but another session whose name
-        starts with the same prefix is still alive.
         """
         return TmuxWindowTarget(session_name=self.session_name, window=0)
 

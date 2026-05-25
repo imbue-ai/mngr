@@ -27,10 +27,6 @@ class TmuxSessionTarget(FrozenModel):
     query for ``mngr-foo`` would match a live session called ``mngr-foo-bar`` when
     the exact session no longer exists. That misrouting can deliver keystrokes to
     the wrong agent, kill the wrong session, or capture the wrong pane.
-
-    Storing the session_name structurally (rather than emitting a fully-formed
-    string upfront) lets callers introspect / reuse the target without re-parsing,
-    and centralizes the shell-escaping responsibility in one place.
     """
 
     session_name: str = Field(min_length=1)
@@ -38,8 +34,7 @@ class TmuxSessionTarget(FrozenModel):
     def as_shell_arg(self) -> str:
         """Return the shell-quoted, exact-match ``-t`` argument string.
 
-        Equivalent to ``shlex.quote(f"={self.session_name}")``. Drop directly into
-        a shell f-string after ``-t``::
+        Drop directly into a shell f-string after ``-t``::
 
             cmd = f"tmux has-session -t {target.as_shell_arg()}"
         """
@@ -54,34 +49,23 @@ class TmuxWindowTarget(FrozenModel):
     ``paste-buffer``, ``set-option``, ``select-window``, ``new-window``,
     ``resize-window``, ``split-window``).
 
-    :meth:`as_shell_arg` renders ``={session_name}:{window}``. Two non-obvious
-    points:
+    Same exact-session-matching motivation as :class:`TmuxSessionTarget`, with one
+    extra twist: the explicit ``:window`` component is *required* for target-window/
+    -pane commands. Without it, tmux parses ``=name`` as a literal window/pane name
+    (which never exists) and the command fails with ``can't find pane: =name``.
 
-    * The leading ``=`` forces exact session-name matching (preventing tmux's
-      default prefix matching from misrouting the command to a sibling session
-      whose name starts with ``session_name``).
-    * The explicit ``:window`` component is *required* for target-window/-pane
-      commands. Without it, tmux parses ``=name`` as an exact match on a
-      *window or pane* literally called ``=name`` (which never exists) and the
-      command fails with ``can't find pane: =name``. With ``:window``, tmux
-      parses ``=name`` as the session component (exact match) and ``window`` as
-      the window component, which is what we want.
-
-    Note: ``list-panes -s`` is not a valid use case here -- its ``-t`` is
-    documented as a target-session form but tmux's ``cmd-find.c`` ignores the
-    ``=`` prefix on it regardless. For "all panes in this session", iterate
-    windows via :class:`TmuxSessionTarget` + ``list-windows``, then call
-    ``list-panes`` per window with a :class:`TmuxWindowTarget`.
+    Note: ``list-panes -s`` is NOT covered by this helper. Despite its ``-t`` being
+    documented as a target-session form, tmux's ``cmd-find.c`` ignores the ``=``
+    prefix on it. For "all panes in this session", iterate windows via
+    :class:`TmuxSessionTarget` + ``list-windows``, then call ``list-panes`` per
+    window with a :class:`TmuxWindowTarget`.
     """
 
     session_name: str = Field(min_length=1)
     window: int | str = Field(default=0)
 
     def as_shell_arg(self) -> str:
-        """Return the shell-quoted, exact-match ``-t`` argument string.
-
-        Equivalent to ``shlex.quote(f"={self.session_name}:{self.window}")``.
-        """
+        """Return the shell-quoted, exact-match ``-t`` argument string."""
         return shlex.quote(f"={self.session_name}:{self.window}")
 
 

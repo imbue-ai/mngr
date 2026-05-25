@@ -2857,11 +2857,8 @@ def _build_start_agent_shell_command(
     If the tmux session already exists, the command exits early (successfully)
     since everything has presumably already been set up.
     """
-    # Bail out early if the session already exists. TmuxSessionTarget prepends
-    # the = exact-match prefix so we don't prefix-match a different session
-    # (e.g. "mngr_foo" matching "mngr_foo-bar"). stderr is redirected to
-    # suppress the "can't find session" message when the session doesn't exist
-    # yet.
+    # Bail out early if the session already exists. stderr is redirected to
+    # suppress the "can't find session" message when the session doesn't exist yet.
     quoted_exact_session = TmuxSessionTarget(session_name=session_name).as_shell_arg()
     guard = f"tmux has-session -t {quoted_exact_session} 2>/dev/null && exit 0"
 
@@ -2889,16 +2886,6 @@ def _build_start_agent_shell_command(
         f" {shlex.quote(env_shell_cmd)}"
     )
 
-    # Commands below target the session we just created in the same && chain.
-    # We still use the = exact-match prefix everywhere so the rule is uniform
-    # (always exact-match) and a future refactor that breaks the chain can't
-    # silently re-introduce prefix-matching bugs. quoted_exact_session is the
-    # =name form (for target-session subcommands like set-environment,
-    # new-window) and quoted_exact_agent_window is =name:0 (for target-window/-
-    # pane subcommands like set-option, set-hook, show-option, send-keys,
-    # select-window, list-panes -- a bare '=name' fails on these because tmux
-    # parses it as an exact match on a window/pane literally called '=name').
-    # See imbue.mngr.hosts.tmux.TmuxWindowTarget.
     quoted_exact_agent_window = TmuxWindowTarget(session_name=session_name, window=0).as_shell_arg()
 
     # Save the user's original default-command (from their ~/.tmux.conf) into

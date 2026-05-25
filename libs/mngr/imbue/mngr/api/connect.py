@@ -39,15 +39,9 @@ def build_post_attach_resize_script(session_name: str) -> str:
     (on macOS, Claude's process title shows as its version number rather
     than "claude").
 
-    Every tmux ``-t`` target uses the ``=`` exact-session prefix (with an
-    explicit ``:$W`` window component on target-window/-pane commands) so the
-    script cannot misroute to a sibling session whose name is a prefix of
-    ``session_name``. The session component is rendered via
-    :class:`imbue.mngr.hosts.tmux.TmuxSessionTarget` so any shell-special
-    characters in ``session_name`` are escaped uniformly with the rest of the
-    codebase; ``:$W`` stays as a literal shell-variable suffix so the loop
-    iterates over windows at runtime. See
-    :class:`imbue.mngr.hosts.tmux.TmuxWindowTarget` for the parsing rule.
+    The session component is rendered via :class:`TmuxSessionTarget`;
+    ``:$W`` stays as a literal shell-variable suffix so the loop iterates
+    over windows at runtime.
     """
     session_target = TmuxSessionTarget(session_name=session_name).as_shell_arg()
     return (

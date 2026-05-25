@@ -631,8 +631,9 @@ def cleanup_tmux_session(session_name: str) -> None:
     a hung ``tmux`` step can't block the rest of the cleanup.
     """
     # Collect all pane PIDs and their descendants before killing the session.
-    # Guard with has-session first: list-panes -s does not support the = prefix for
-    # exact matching, so it would prefix-match a different session if this one is gone.
+    # Guard with has-session first: list-panes -s does not honor the = exact-match
+    # prefix (cmd-find.c quirk), so without the guard a bare-name list-panes -s
+    # would silently misroute when this session is gone.
     has_result = _run_with_timeout("tmux", "has-session", "-t", f"={session_name}")
     all_pids: list[str] = []
     if has_result.returncode == 0:

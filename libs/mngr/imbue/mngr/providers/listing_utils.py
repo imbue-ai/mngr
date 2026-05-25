@@ -85,13 +85,9 @@ if [ -d '{host_dir}/agents' ]; then
         echo "START_MTIME=$(stat -c %Y "${{agent_dir}}activity/start" 2>/dev/null)"
         agent_name=$(jq -r '.name // empty' "$data_file" 2>/dev/null)
         session_name='{prefix}'"$agent_name"
-        # =$session:0 matches the session exactly (the ':0' window component is
-        # required because list-panes resolves -t as a target-window/-pane; a bare
-        # '=name' would be parsed as a literal window/pane named '=name'). Without
-        # the leading '=', tmux would fall back to session prefix matching and
-        # surface another agent's pane state for stopped agents whose name is a
-        # prefix of a still-running agent's name. See TmuxWindowTarget in
-        # imbue.mngr.hosts.tmux for the full parsing rule.
+        # `=$session:0` mirrors TmuxWindowTarget; required for list-panes since `-t`
+        # resolves as target-window/-pane (a bare `=name` would be parsed as a literal
+        # window/pane name).
         tmux_info=$(tmux list-panes -t "=${{session_name}}:0" -F '#{{pane_dead}}|#{{pane_current_command}}|#{{pane_pid}}' 2>/dev/null | head -n 1)
         echo "TMUX_INFO=$tmux_info"
         if [ -f "${{agent_dir}}active" ]; then
