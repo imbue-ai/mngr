@@ -477,16 +477,6 @@ class SSHTunnelManager(MutableModel):
         self._connections.clear()
 
 
-def open_ssh_client(ssh_info: RemoteSSHInfo) -> paramiko.SSHClient:
-    """Open a paramiko SSH client to the given host using the cached known_hosts.
-
-    Public wrapper around the internal ``_create_ssh_client`` helper. Used
-    by ``forward_cli.MindsApiUrlWriter`` to write ``minds_api_url`` on
-    remote agent hosts without depending on a private symbol.
-    """
-    return _create_ssh_client(ssh_info)
-
-
 def _create_ssh_client(ssh_info: RemoteSSHInfo) -> paramiko.SSHClient:
     """Create a paramiko SSH connection to the given host.
 
