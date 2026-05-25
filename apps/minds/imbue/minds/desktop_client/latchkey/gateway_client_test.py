@@ -79,6 +79,95 @@ def test_set_permission_rule_raises_on_non_2xx() -> None:
     assert "outside root" in str(exc_info.value)
 
 
+def test_delete_permission_rule_sends_expected_url_and_headers() -> None:
+    captured: dict[str, object] = {}
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        captured["method"] = request.method
+        captured["url"] = str(request.url)
+        captured["auth"] = request.headers.get("X-Latchkey-Gateway-Password")
+        return httpx.Response(204)
+
+    client = _build_client(_handler)
+    client.delete_permission_rule(
+        permissions_file_path=Path("/perms/host-1/latchkey_permissions.json"),
+        rule_key="minds-api-self-agent-xyz",
+    )
+    assert captured["method"] == "DELETE"
+    url = str(captured["url"])
+    assert url.startswith("http://gateway.invalid:1989/permissions/rules")
+    assert "rule_key=minds-api-self-agent-xyz" in url
+    assert captured["auth"] == "hunter2"
+
+
+def test_delete_permission_rule_tolerates_404() -> None:
+    """Cleanup races between agent destruction and gateway state are not errors."""
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        del request
+        return httpx.Response(404, json={"error": "no such rule"})
+
+    client = _build_client(_handler)
+    # Must not raise.
+    client.delete_permission_rule(
+        permissions_file_path=Path("/perms/host-1/latchkey_permissions.json"),
+        rule_key="gone-already",
+    )
+
+
+def test_set_permission_schema_posts_json_object_body() -> None:
+    captured: dict[str, object] = {}
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        captured["method"] = request.method
+        captured["url"] = str(request.url)
+        captured["body"] = json.loads(request.content)
+        return httpx.Response(201, json={"minds-api-proxy-call-x": {"properties": {"method": {"const": "POST"}}}})
+
+    client = _build_client(_handler)
+    client.set_permission_schema(
+        permissions_file_path=Path("/perms/host-1/latchkey_permissions.json"),
+        schema_name="minds-api-proxy-call-x",
+        schema_body={"properties": {"method": {"const": "POST"}}, "required": ["method"]},
+    )
+    assert captured["method"] == "POST"
+    url = str(captured["url"])
+    assert url.startswith("http://gateway.invalid:1989/permissions/schemas")
+    assert "schema_name=minds-api-proxy-call-x" in url
+    assert captured["body"] == {
+        "properties": {"method": {"const": "POST"}},
+        "required": ["method"],
+    }
+
+
+def test_set_permission_schema_raises_on_non_2xx() -> None:
+    def _handler(request: httpx.Request) -> httpx.Response:
+        del request
+        return httpx.Response(400, json={"error": "invalid schema name"})
+
+    client = _build_client(_handler)
+    with pytest.raises(LatchkeyGatewayClientError) as exc_info:
+        client.set_permission_schema(
+            permissions_file_path=Path("/perms/host-1/latchkey_permissions.json"),
+            schema_name="bad name",
+            schema_body={"properties": {}},
+        )
+    assert "400" in str(exc_info.value)
+
+
+def test_delete_permission_schema_tolerates_404() -> None:
+    def _handler(request: httpx.Request) -> httpx.Response:
+        del request
+        return httpx.Response(404, json={"error": "no such schema"})
+
+    client = _build_client(_handler)
+    # Must not raise.
+    client.delete_permission_schema(
+        permissions_file_path=Path("/perms/host-1/latchkey_permissions.json"),
+        schema_name="already-gone",
+    )
+
+
 def test_delete_permission_request_tolerates_404() -> None:
     """Deletes that race a concurrent grant/deny succeed silently."""
 

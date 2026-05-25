@@ -1,13 +1,29 @@
-"""Per-agent API key authentication for ``/api/v1/...`` endpoints.
+"""Bearer-token authentication for ``/api/v1/...`` endpoints.
 
-Exposes a FastAPI dependency that maps a ``Bearer <api_key>``
-``Authorization`` header onto the calling agent's :class:`AgentId`,
-backed by the SHA-256 hash files in ``<data_dir>/agents/<id>/api_key_hash``
-(see :mod:`imbue.minds.desktop_client.api_key_store`).
+Every minds installation has exactly one central ``MINDS_API_KEY``
+(persisted under ``<data_dir>/minds_api_key`` -- see
+:mod:`imbue.minds.desktop_client.api_key_store`). The latchkey gateway's
+bundled ``minds-api-proxy`` extension injects it as
+``Authorization: Bearer <key>`` on every request it proxies into the
+desktop client, so the request-handling code only has to confirm the
+header carries the same key.
 
-Kept as its own module so multiple ``/api/v1`` route modules
-(``api_v1.py``, ``file_server.py``, ...) can share the same
-``CallerAgentIdDep`` without forming an import cycle.
+Agent identity, when a route needs it, comes from the URL path segment
+(``/api/v1/agents/<agent_id>/...``) -- not from the bearer token. The
+latchkey gateway's per-host permissions file constrains which agent ids
+an incoming caller can address, so a request that reaches us with a
+valid token and a given ``<agent_id>`` in the path has already been
+authorized by the gateway as "this agent_id lives on the caller's host".
+
+Two consumer shapes are exposed:
+
+* :data:`MindsApiAuthDep` -- FastAPI dependency. Doesn't return anything
+  meaningful (the agent id, if relevant, is in the path); raises 401 on
+  failure.
+* :func:`is_request_authenticated` -- raw header check usable by the
+  ASGI auth gate wrapping the WebDAV mount (see
+  :mod:`imbue.minds.desktop_client.webdav`), which can't take a FastAPI
+  dependency.
 """
 
 from typing import Annotated
@@ -16,31 +32,45 @@ from fastapi import Depends
 from fastapi import HTTPException
 from fastapi import Request
 
-from imbue.minds.config.data_types import WorkspacePaths
-from imbue.minds.desktop_client.api_key_store import find_agent_by_api_key
-from imbue.mngr.primitives import AgentId
+from imbue.minds.desktop_client.api_key_store import is_valid_minds_api_key
+
+_BEARER_PREFIX = "Bearer "
 
 
-def _authenticate_api_key(request: Request) -> AgentId:
-    """Map the request's ``Authorization: Bearer ...`` header to an AgentId.
+def _extract_bearer_token(authorization: str | None) -> str | None:
+    """Return the token after ``Bearer `` or ``None`` if absent / malformed."""
+    if authorization is None:
+        return None
+    if not authorization.startswith(_BEARER_PREFIX):
+        return None
+    token = authorization[len(_BEARER_PREFIX) :]
+    return token or None
 
-    Raises ``HTTPException(401)`` if the header is missing, malformed,
-    empty, or does not correspond to any stored API key hash.
+
+def is_request_authenticated(authorization_header_value: str | None, expected_key: str) -> bool:
+    """Return ``True`` iff ``authorization_header_value`` carries the central key.
+
+    Pure function so the WebDAV ASGI gate and the FastAPI dependency
+    below can share the same check. ``expected_key`` is normally
+    ``app.state.minds_api_key``; we accept it as an argument so this
+    module has no module-level state.
     """
-    auth_header = request.headers.get("authorization", "")
-    if not auth_header.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="Missing or malformed Authorization header")
-
-    token = auth_header[len("Bearer ") :]
-    if not token:
-        raise HTTPException(status_code=401, detail="Empty Bearer token")
-
-    paths: WorkspacePaths = request.app.state.api_v1_paths
-    agent_id = find_agent_by_api_key(paths.data_dir, token)
-    if agent_id is None:
-        raise HTTPException(status_code=401, detail="Invalid API key")
-
-    return agent_id
+    token = _extract_bearer_token(authorization_header_value)
+    if token is None:
+        return False
+    return is_valid_minds_api_key(token, expected_key)
 
 
-CallerAgentIdDep = Annotated[AgentId, Depends(_authenticate_api_key)]
+def _authenticate_minds_api(request: Request) -> None:
+    """FastAPI dependency: 401 unless the request carries the central key.
+
+    Returns ``None`` because the central-key model carries no per-call
+    identity. Routes that need an agent id pick it up from the URL path
+    via the usual ``{agent_id}`` path parameter.
+    """
+    expected_key: str = request.app.state.minds_api_key
+    if not is_request_authenticated(request.headers.get("authorization"), expected_key):
+        raise HTTPException(status_code=401, detail="Missing or invalid Authorization header")
+
+
+MindsApiAuthDep = Annotated[None, Depends(_authenticate_minds_api)]

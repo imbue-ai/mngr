@@ -97,9 +97,3 @@ class GitCommitHash(NonEmptyStr):
     """A full git commit hash (40 hex characters)."""
 
     ...
-
-
-class ApiKeyHash(NonEmptyStr):
-    """SHA-256 hex digest of an agent's API key."""
-
-    ...

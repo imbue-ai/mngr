@@ -18,15 +18,27 @@
  * unset / empty / unparseable, the proxy responds 503 so callers see a
  * deterministic "not configured" failure rather than a hung connection.
  *
- * The proxy is intentionally transparent: it forwards the request
- * method, the path-and-query suffix, the inbound body, and the request
- * headers (minus hop-by-hop headers and the gateway-internal password /
- * permissions-override headers), and streams the upstream response
- * status, headers, and body straight back. There is no authentication
- * layered on top of the proxy itself -- the gateway's normal permission
- * check (against the synthetic ``latchkey-self.invalid`` URL) is the
- * only gate. Restricting which paths an agent may reach is therefore a
- * job for the agent's ``latchkey_permissions.json``.
+ * The proxy authenticates *to* the Minds API on behalf of the agent:
+ * if ``LATCHKEY_EXTENSION_MINDS_API_KEY`` is set, the proxy overwrites
+ * the inbound ``Authorization`` header with
+ * ``Bearer <LATCHKEY_EXTENSION_MINDS_API_KEY>`` before forwarding. The
+ * minds desktop client persists the same value to disk and matches it
+ * on every ``/api/v1/...`` request; agents themselves never see the
+ * key. Any inbound ``Authorization`` value is dropped on the floor --
+ * agents have no business injecting one for the Minds API and the
+ * overwrite prevents them from trying. When the env var is not set,
+ * the inbound ``Authorization`` header is passed through unchanged
+ * (the Minds API will then 401 the request); this keeps the proxy
+ * useful for tests that don't bother stubbing the key.
+ *
+ * The proxy is intentionally transparent in every other respect: it
+ * forwards the request method, the path-and-query suffix, the inbound
+ * body, and the request headers (minus hop-by-hop headers, the
+ * gateway-internal password / permissions-override headers, and the
+ * ``Authorization`` header which is always replaced when the key env
+ * var is set), and streams the upstream response status, headers, and
+ * body straight back. Restricting which paths an agent may reach is
+ * the job of the agent's ``latchkey_permissions.json``.
  *
  * NOTE: extension requests still go through the gateway's permission
  * check, so callers must have a rule that allows them to talk to
@@ -38,6 +50,7 @@ import { request as httpsRequest } from 'node:https';
 
 const PROXY_PATH_PREFIX = '/minds-api-proxy';
 const MINDS_API_URL_ENV_VAR = 'LATCHKEY_EXTENSION_MINDS_API_URL';
+const MINDS_API_KEY_ENV_VAR = 'LATCHKEY_EXTENSION_MINDS_API_KEY';
 
 // Hop-by-hop headers per RFC 7230 section 6.1. Stripped from both the
 // inbound request before we forward upstream and the upstream response
@@ -151,6 +164,14 @@ function buildUpstreamPath(requestUrl, upstreamBase) {
  * upstreams that vhost on it (or just log it) see the right value.
  */
 function buildUpstreamHeaders(request, upstreamBase) {
+  // When the proxy is configured with an API key we drop any inbound
+  // ``Authorization`` header outright so agents cannot spoof one; the
+  // replacement value is appended at the end of this function. When
+  // the env var is not set we pass any inbound value through verbatim
+  // (the Minds API will then 401 -- this is fine for tests).
+  const apiKey = process.env[MINDS_API_KEY_ENV_VAR];
+  const overwriteAuthorization = typeof apiKey === 'string' && apiKey.length > 0;
+
   const headers = {};
   const rawHeaders = request.rawHeaders ?? [];
   for (let index = 0; index < rawHeaders.length; index += 2) {
@@ -160,6 +181,7 @@ function buildUpstreamHeaders(request, upstreamBase) {
     if (HOP_BY_HOP_HEADERS.has(lowerName)) continue;
     if (GATEWAY_INTERNAL_HEADERS.has(lowerName)) continue;
     if (lowerName === 'host') continue;
+    if (overwriteAuthorization && lowerName === 'authorization') continue;
     const existing = headers[name];
     if (existing === undefined) {
       headers[name] = value;
@@ -170,6 +192,9 @@ function buildUpstreamHeaders(request, upstreamBase) {
     }
   }
   headers['host'] = upstreamBase.host;
+  if (overwriteAuthorization) {
+    headers['authorization'] = `Bearer ${apiKey}`;
+  }
   return headers;
 }
 

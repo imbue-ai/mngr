@@ -31,11 +31,13 @@ agent-side gateway URL but skip the password / JWT / opaque-handle
 steps that need a working ``Latchkey``.
 """
 
+import re
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Final
 
 from pydantic import Field
+from pydantic import JsonValue
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.frozen_model import FrozenModel
@@ -77,6 +79,18 @@ _PERM_READ_AVAILABLE_PERMISSIONS: Final[str] = "latchkey-self-read-available-per
 # up the per-service catalog endpoint.
 _AVAILABLE_PERMISSIONS_PATH_PATTERN: Final[str] = r"^/permissions/available/[a-z0-9][a-z0-9-]*$"
 
+# Path pattern for the ``minds-api-proxy`` gateway extension. This is
+# the *only* path under ``latchkey-self.invalid`` an agent may reach
+# via the proxy by default; per-agent rules added at finalize-host-
+# permissions time narrow this further to the specific
+# ``/api/v1/agents/<agent_id>/`` subtree the agent is allowed to talk
+# about. The notifications endpoint lives under that subtree and is
+# therefore reachable by every agent the desktop client provisions
+# without any extra grant -- it carries no per-user-grant decision and
+# should always be available.
+_MINDS_API_PROXY_PATH_PREFIX: Final[str] = "/minds-api-proxy/api/v1/agents/"
+_PERM_MINDS_API_PROXY_NOTIFICATIONS: Final[str] = "minds-api-proxy-notifications"
+
 _AGENT_BASELINE_PERMISSIONS: Final[LatchkeyPermissionsConfig] = LatchkeyPermissionsConfig(
     rules=(
         {
@@ -84,6 +98,7 @@ _AGENT_BASELINE_PERMISSIONS: Final[LatchkeyPermissionsConfig] = LatchkeyPermissi
                 _PERM_CREATE_PERMISSION_REQUEST,
                 _PERM_READ_SELF_PERMISSIONS,
                 _PERM_READ_AVAILABLE_PERMISSIONS,
+                _PERM_MINDS_API_PROXY_NOTIFICATIONS,
             ],
         },
     ),
@@ -116,8 +131,87 @@ _AGENT_BASELINE_PERMISSIONS: Final[LatchkeyPermissionsConfig] = LatchkeyPermissi
             },
             "required": ["method", "path"],
         },
+        # Notifications endpoint is reachable by every agent the
+        # desktop client provisions; the ``{agent_id}`` segment is not
+        # constrained here so the schema is shared across all agents.
+        # Per-agent isolation (this caller may only POST to
+        # ``/api/v1/agents/<its own id>/notifications``) is enforced by
+        # the per-agent permission schema + rule that
+        # :func:`agent_minds_api_proxy_schema_name` describes; this
+        # baseline grant is intentionally narrower than that (it does
+        # not cover Telegram or future routes) so the only blanket
+        # baseline grant we hand out is for the notification path.
+        _PERM_MINDS_API_PROXY_NOTIFICATIONS: {
+            "properties": {
+                "method": {"const": "POST"},
+                "path": {
+                    "type": "string",
+                    "pattern": rf"^{_MINDS_API_PROXY_PATH_PREFIX}[^/]+/notifications/?$",
+                },
+            },
+            "required": ["method", "path"],
+        },
     },
 )
+
+
+def agent_minds_api_proxy_scope_name(agent_id: str) -> str:
+    """Return the scope-schema (rule_key) name reserved for ``agent_id``.
+
+    Each minds agent gets its own per-agent rule in the host's
+    permissions file, keyed by a scope schema name unique to that agent.
+    The scope schema itself is just ``latchkey-self.invalid`` (the
+    gateway-self host); naming it per-agent is what lets us POST a
+    fresh rule without disturbing other agents' rules or the baseline.
+    """
+    return f"minds-api-self-{agent_id}"
+
+
+def agent_minds_api_proxy_permission_name(agent_id: str) -> str:
+    """Return the permission-schema name reserved for ``agent_id``.
+
+    The permission schema encodes the path pattern that constrains the
+    agent to its own ``/api/v1/agents/<agent_id>/`` subtree on the
+    Minds API proxy.
+    """
+    return f"minds-api-proxy-call-{agent_id}"
+
+
+def build_agent_minds_api_proxy_schemas(agent_id: str) -> dict[str, JsonValue]:
+    """Return the two inline schemas a per-agent rule references.
+
+    * ``scope`` -- mirrors ``latchkey-self`` (domain ==
+      ``latchkey-self.invalid``); named uniquely per agent so the rule
+      keyed on it doesn't collide with the baseline ``latchkey-self``
+      rule.
+    * ``permission`` -- matches every method on every path under
+      ``/minds-api-proxy/api/v1/agents/<agent_id>/`` (with or without
+      a trailing path). The path is anchored on the agent id literal
+      so an agent on host A cannot reach ``/api/v1/agents/<B's id>/...``
+      even though A and B share the gateway: B's id only appears in
+      *B's host*'s permissions file.
+    """
+    # ``re.escape`` keeps us safe against any character classes the
+    # detent path pattern would otherwise interpret; agent ids are
+    # UUID-shaped (hex + dashes) today, but encoding it through the
+    # escape removes any future surprise.
+    safe_agent_id = re.escape(agent_id)
+    return {
+        agent_minds_api_proxy_scope_name(agent_id): {
+            "properties": {"domain": {"const": _GATEWAY_SELF_HOST}},
+            "required": ["domain"],
+        },
+        agent_minds_api_proxy_permission_name(agent_id): {
+            "properties": {
+                "method": {"type": "string", "pattern": r"^[A-Z]+$"},
+                "path": {
+                    "type": "string",
+                    "pattern": rf"^{_MINDS_API_PROXY_PATH_PREFIX}{safe_agent_id}(/.*)?$",
+                },
+            },
+            "required": ["method", "path"],
+        },
+    }
 
 
 class AgentLatchkeySetup(FrozenModel):

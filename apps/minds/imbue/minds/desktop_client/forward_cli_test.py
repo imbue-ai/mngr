@@ -26,9 +26,6 @@ from imbue.imbue_common.event_envelope import EventSource
 from imbue.imbue_common.event_envelope import IsoTimestamp
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.forward_cli import EnvelopeStreamConsumer
-from imbue.minds.desktop_client.forward_cli import LocalAgentDiscoveryHandler
-from imbue.minds.desktop_client.forward_cli import MindsApiUrlWriter
-from imbue.minds.desktop_client.forward_cli import ReverseTunnelEstablishedInfo
 from imbue.minds.desktop_client.forward_cli import _redact_secrets
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.notification import NotificationRequest
@@ -402,11 +399,18 @@ def test_event_refresh_envelope_dispatches_to_refresh_callback(consumer: Envelop
 # --- forward stream: reverse_tunnel_established ---------------------------
 
 
-def test_reverse_tunnel_established_fires_callback_with_parsed_info(
+def test_reverse_tunnel_established_is_silently_ignored(
     consumer: EnvelopeStreamConsumer,
 ) -> None:
-    fired: list[ReverseTunnelEstablishedInfo] = []
-    consumer.add_on_reverse_tunnel_established_callback(lambda info: fired.append(info))
+    """Minds no longer asks the plugin for per-agent reverse tunnels.
+
+    The plugin may still emit ``reverse_tunnel_established`` envelopes
+    on behalf of other callers (e.g. the latchkey supervisor); the
+    consumer must drop them on the floor without crashing or routing
+    them to any callback. This test pins that behaviour so a future
+    consumer that re-adds a callback channel does so explicitly
+    rather than by accident.
+    """
     payload = {
         "type": "reverse_tunnel_established",
         "agent_id": str(_AGENT_ID_1),
@@ -415,53 +419,8 @@ def test_reverse_tunnel_established_fires_callback_with_parsed_info(
         "ssh_host": "1.2.3.4",
         "ssh_port": 22,
     }
+    # Must not raise -- the consumer should just trace-log and move on.
     _dispatch(consumer, _forward_envelope(payload, agent_id=_AGENT_ID_1))
-
-    assert len(fired) == 1
-    assert fired[0].agent_id == _AGENT_ID_1
-    assert fired[0].remote_port == 40000
-    assert fired[0].local_port == 8420
-
-
-def test_reverse_tunnel_established_re_emit_fires_callback_unconditionally(
-    consumer: EnvelopeStreamConsumer,
-) -> None:
-    """Re-emit with a different remote port must call the callback again. The
-    plugin is the source of truth and we must overwrite on every event.
-    """
-    fired: list[ReverseTunnelEstablishedInfo] = []
-    consumer.add_on_reverse_tunnel_established_callback(lambda info: fired.append(info))
-    base_payload = {
-        "type": "reverse_tunnel_established",
-        "agent_id": str(_AGENT_ID_1),
-        "remote_port": 40000,
-        "local_port": 8420,
-        "ssh_host": "1.2.3.4",
-        "ssh_port": 22,
-    }
-    _dispatch(consumer, _forward_envelope(base_payload, agent_id=_AGENT_ID_1))
-    second_payload = dict(base_payload)
-    second_payload["remote_port"] = 40001
-    _dispatch(consumer, _forward_envelope(second_payload, agent_id=_AGENT_ID_1))
-
-    assert [info.remote_port for info in fired] == [40000, 40001]
-
-
-def test_reverse_tunnel_established_with_invalid_payload_is_skipped(
-    consumer: EnvelopeStreamConsumer,
-) -> None:
-    fired: list[ReverseTunnelEstablishedInfo] = []
-    consumer.add_on_reverse_tunnel_established_callback(lambda info: fired.append(info))
-    # Missing remote_port -> KeyError is caught and the callback is not fired.
-    bad_payload = {
-        "type": "reverse_tunnel_established",
-        "agent_id": str(_AGENT_ID_1),
-        "local_port": 8420,
-        "ssh_host": "1.2.3.4",
-        "ssh_port": 22,
-    }
-    _dispatch(consumer, _forward_envelope(bad_payload, agent_id=_AGENT_ID_1))
-    assert fired == []
 
 
 # --- forward stream: listening --------------------------------------------
@@ -649,56 +608,6 @@ def test_start_before_attach_raises(consumer: EnvelopeStreamConsumer) -> None:
     cg = ConcurrencyGroup(name="forward-cli-test")
     with cg, pytest.raises(RuntimeError, match="start called before attach"):
         consumer.start(cg)
-
-
-# --- LocalAgentDiscoveryHandler ------------------------------------------
-
-
-def test_local_agent_discovery_handler_writes_minds_api_url_for_local_agent(
-    tmp_path: Path,
-) -> None:
-    handler = LocalAgentDiscoveryHandler(
-        minds_api_port=8420,
-        mngr_host_dir=tmp_path / ".mngr",
-    )
-    handler(_AGENT_ID_1, ssh_info=None, provider_name="local")
-    written = (tmp_path / ".mngr" / "agents" / str(_AGENT_ID_1) / "minds_api_url").read_text()
-    assert written == "http://127.0.0.1:8420"
-
-
-def test_local_agent_discovery_handler_skips_minds_api_url_for_remote_agent(
-    tmp_path: Path,
-) -> None:
-    handler = LocalAgentDiscoveryHandler(
-        minds_api_port=8420,
-        mngr_host_dir=tmp_path / ".mngr",
-    )
-    ssh_info = RemoteSSHInfo(user="root", host="1.2.3.4", port=22, key_path=Path("/tmp/k"))
-    handler(_AGENT_ID_1, ssh_info=ssh_info, provider_name="modal")
-    # No minds_api_url was written under the local mngr_host_dir
-    # (remote-agent writes happen via MindsApiUrlWriter via SSH).
-    assert not (tmp_path / ".mngr" / "agents" / str(_AGENT_ID_1) / "minds_api_url").exists()
-
-
-# --- MindsApiUrlWriter ----------------------------------------------------
-
-
-def test_minds_api_url_writer_skips_when_no_ssh_info_for_agent() -> None:
-    """When the resolver has no SSH info for an agent (e.g. local-only),
-    MindsApiUrlWriter must short-circuit before attempting any SSH connection.
-    """
-    resolver = MngrCliBackendResolver()
-    writer = MindsApiUrlWriter(resolver=resolver)
-    # The resolver knows nothing about this agent so get_ssh_info returns None.
-    info = ReverseTunnelEstablishedInfo(
-        agent_id=_AGENT_ID_1,
-        remote_port=40000,
-        local_port=8420,
-        ssh_host="1.2.3.4",
-        ssh_port=22,
-    )
-    # Must not raise (no SSH connect attempted).
-    writer(info)
 
 
 # --- _redact_secrets ------------------------------------------------------

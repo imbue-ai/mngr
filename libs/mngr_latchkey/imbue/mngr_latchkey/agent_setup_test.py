@@ -75,15 +75,19 @@ def test_prepare_full_wiring_tunneled(tmp_path: Path) -> None:
     assert setup.opaque_permissions_path is not None
     assert setup.opaque_permissions_path.parent == opaque_permissions_dir(fake.plugin_data_dir)
     on_disk = json.loads(setup.opaque_permissions_path.read_text())
-    # Every new agent gets three baseline permissions under the
+    # Every new agent gets four baseline permissions under the
     # ``latchkey-self`` scope: create a permission request, read its own
-    # current permissions, and read the per-service permissions catalog.
+    # current permissions, read the per-service permissions catalog, and
+    # POST to the shared ``minds-api-proxy`` notifications endpoint (the
+    # one Minds API route every agent the desktop client provisions can
+    # always reach without an extra grant).
     assert on_disk["rules"] == [
         {
             "latchkey-self": [
                 "latchkey-self-create-permission-request",
                 "latchkey-self-read-self-permissions",
                 "latchkey-self-read-available-permissions",
+                "minds-api-proxy-notifications",
             ],
         },
     ]
@@ -105,6 +109,15 @@ def test_prepare_full_wiring_tunneled(tmp_path: Path) -> None:
         "type": "string",
         "pattern": r"^/permissions/available/[a-z0-9][a-z0-9-]*$",
     }
+    notifications_schema = schemas["minds-api-proxy-notifications"]["properties"]
+    assert notifications_schema["method"] == {"const": "POST"}
+    assert notifications_schema["path"]["type"] == "string"
+    # The pattern must constrain the URL to the Minds API proxy's
+    # ``/api/v1/agents/<...>/notifications`` route specifically -- not
+    # everything under ``/minds-api-proxy/`` and not a single literal
+    # agent id.
+    assert notifications_schema["path"]["pattern"].startswith("^/minds-api-proxy/api/v1/agents/")
+    assert notifications_schema["path"]["pattern"].endswith("/notifications/?$")
 
 
 def test_prepare_full_wiring_on_host_uses_live_port(tmp_path: Path) -> None:

@@ -33,6 +33,13 @@
  *       permission-schema names.
  *   DELETE /permissions/rules?path=<path>&rule_key=<key>
  *       Remove the rule for <key>.
+ *   POST   /permissions/schemas?path=<path>&schema_name=<name>
+ *       Add or replace the inline detent schema named <name>. Body:
+ *       a JSON object (the schema definition). Schema names must
+ *       match the same conservative pattern as service names so the
+ *       on-disk file stays parseable by detent.
+ *   DELETE /permissions/schemas?path=<path>&schema_name=<name>
+ *       Remove the inline schema named <name>.
  *
  * Security model: for the endpoints that accept ``path``, ``path``
  * must resolve (after symlink-aware
@@ -71,6 +78,7 @@ const SELF_PATH = '/permissions/self';
 const AVAILABLE_COLLECTION_PATH = '/permissions/available';
 const AVAILABLE_ITEM_PATH_PREFIX = '/permissions/available/';
 const RULES_COLLECTION_PATH = '/permissions/rules';
+const SCHEMAS_COLLECTION_PATH = '/permissions/schemas';
 const PERMISSIONS_ROOT_ENV_VAR = 'LATCHKEY_EXTENSION_PERMISSIONS_ROOT';
 const AVAILABLE_SERVICES_FILE = 'services.json';
 const AVAILABLE_SERVICES_PATH = resolve(
@@ -155,6 +163,46 @@ class MissingRuleKeyError extends PermissionsExtensionError {
     this.name = 'MissingRuleKeyError';
   }
 }
+
+class MissingSchemaNameError extends PermissionsExtensionError {
+  constructor() {
+    super(400, "Missing required 'schema_name' query parameter.");
+    this.name = 'MissingSchemaNameError';
+  }
+}
+
+class InvalidSchemaNameError extends PermissionsExtensionError {
+  constructor(rawValue) {
+    super(
+      400,
+      `Invalid schema name '${rawValue}': must match /^[A-Za-z0-9][A-Za-z0-9._-]*$/.`,
+    );
+    this.name = 'InvalidSchemaNameError';
+  }
+}
+
+class SchemaNotFoundError extends PermissionsExtensionError {
+  constructor(schemaName) {
+    super(404, `No inline schema named '${schemaName}' in permissions.json`);
+    this.name = 'SchemaNotFoundError';
+  }
+}
+
+class InvalidSchemaBodyError extends PermissionsExtensionError {
+  constructor(detail) {
+    super(400, `Invalid schema body: ${detail}`);
+    this.name = 'InvalidSchemaBodyError';
+  }
+}
+
+// Schema names must be a conservative subset of characters so they can
+// be referenced verbatim from a detent rule, written into a JSON
+// object key, and produced as URL path segments without further
+// escaping. Per-agent schema names embed UUID-shaped agent ids (hex +
+// dashes), so the pattern is intentionally a touch more permissive
+// than the service-name pattern (which is lowercased): we allow upper
+// case, underscores, and dots in addition to letters / digits / dashes.
+const VALID_SCHEMA_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 
 class InvalidServiceNameError extends PermissionsExtensionError {
   constructor(rawValue) {
@@ -351,6 +399,9 @@ function parseRoute(requestUrl) {
   if (pathOnly === RULES_COLLECTION_PATH || pathOnly === `${RULES_COLLECTION_PATH}/`) {
     return { kind: 'rule' };
   }
+  if (pathOnly === SCHEMAS_COLLECTION_PATH || pathOnly === `${SCHEMAS_COLLECTION_PATH}/`) {
+    return { kind: 'schema' };
+  }
   return { kind: 'unhandled' };
 }
 
@@ -391,6 +442,33 @@ async function parseRulePermissionsBody(request) {
     }
   }
   return parsed;
+}
+
+async function parseSchemaBody(request) {
+  const raw = await readRequestBody(request);
+  if (raw.trim().length === 0) {
+    throw new InvalidSchemaBodyError('expected a JSON object, got empty body');
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new InvalidSchemaBodyError(`not valid JSON: ${message}`);
+  }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    throw new InvalidSchemaBodyError('expected a JSON object');
+  }
+  return parsed;
+}
+
+function validateSchemaName(rawName) {
+  if (typeof rawName !== 'string' || rawName.length === 0) {
+    throw new InvalidSchemaNameError(rawName);
+  }
+  if (!VALID_SCHEMA_NAME_PATTERN.test(rawName)) {
+    throw new InvalidSchemaNameError(rawName);
+  }
 }
 
 function sendJson(response, statusCode, payload) {
@@ -547,6 +625,40 @@ function handleDeleteRule(response, filePath, ruleKey) {
   response.end();
 }
 
+async function handlePostSchema(request, response, filePath, schemaName) {
+  validateSchemaName(schemaName);
+  const schemaBody = await parseSchemaBody(request);
+  const file = existsSync(filePath) ? readPermissionsFile(filePath) : { rules: [] };
+  const existingSchemas =
+    typeof file.schemas === 'object' && file.schemas !== null && !Array.isArray(file.schemas)
+      ? { ...file.schemas }
+      : {};
+  const isReplacement = Object.prototype.hasOwnProperty.call(existingSchemas, schemaName);
+  existingSchemas[schemaName] = schemaBody;
+  const updated = { ...file, schemas: existingSchemas };
+  writePermissionsFileAtomic(filePath, updated);
+  sendJson(response, isReplacement ? 200 : 201, { [schemaName]: schemaBody });
+}
+
+function handleDeleteSchema(response, filePath, schemaName) {
+  validateSchemaName(schemaName);
+  const file = readPermissionsFile(filePath);
+  if (
+    typeof file.schemas !== 'object' ||
+    file.schemas === null ||
+    Array.isArray(file.schemas) ||
+    !Object.prototype.hasOwnProperty.call(file.schemas, schemaName)
+  ) {
+    throw new SchemaNotFoundError(schemaName);
+  }
+  const remaining = { ...file.schemas };
+  delete remaining[schemaName];
+  const updated = { ...file, schemas: remaining };
+  writePermissionsFileAtomic(filePath, updated);
+  response.writeHead(204);
+  response.end();
+}
+
 export default async function permissionsExtension(request, response, context) {
   const route = parseRoute(request.url);
   const method = (request.method ?? 'GET').toUpperCase();
@@ -583,6 +695,18 @@ export default async function permissionsExtension(request, response, context) {
       }
       if (method === 'DELETE') {
         handleDeleteRule(response, filePath, ruleKey);
+        return true;
+      }
+    }
+    if (route.kind === 'schema') {
+      const filePath = resolvePathParamUnderRoot(searchParams.get('path'));
+      const schemaName = requireQueryParam(searchParams, 'schema_name', MissingSchemaNameError);
+      if (method === 'POST') {
+        await handlePostSchema(request, response, filePath, schemaName);
+        return true;
+      }
+      if (method === 'DELETE') {
+        handleDeleteSchema(response, filePath, schemaName);
         return true;
       }
     }
