@@ -1,7 +1,7 @@
 [project]
 name = "minds-desktop"
 version = "0.1.0"
-requires-python = ">=3.12"
+requires-python = "==3.12.13"
 dependencies = [
     "minds>=0.1.0",
     "imbue-mngr-claude>=0.2.0",
