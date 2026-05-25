@@ -668,8 +668,15 @@ def cleanup_tmux_session(session_name: str) -> None:
         except (ProcessLookupError, ValueError):
             pass
 
-    # Kill any orphaned activity monitors for this session (started with nohup, detached)
-    _run_with_timeout("pkill", "-9", "-f", f"list-panes -t {session_name}")
+    # Kill any orphaned activity monitors for this session (started with nohup, detached).
+    # The monitor runs `tmux list-panes -t =<session>:0 ...` (see
+    # _build_start_agent_shell_command, which routes the target through
+    # TmuxWindowTarget). Anchoring the pkill substring on the full `=<session>:0`
+    # form both keeps the match working (the bare `<session>` form is no longer
+    # in the command line) and avoids prefix-collision: a sibling session would
+    # appear as `=<session>-sibling:0`, which contains `<session>` but not
+    # `<session>:0`, so its monitor will not be killed by accident.
+    _run_with_timeout("pkill", "-9", "-f", f"list-panes -t ={session_name}:0")
 
 
 @contextmanager

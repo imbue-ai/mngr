@@ -23,3 +23,9 @@ Changes:
 - Add live prefix-collision unit tests in `hosts/tmux_test.py` that spin up two real
   sessions with overlapping names, kill the shorter one, and assert that each
   helper-built target refuses to misroute to the sibling.
+- Update `cleanup_tmux_session` (in `utils/testing.py`) to match the new
+  `=<session>:0` exact-match form when pkill-cleaning orphaned activity
+  monitors. The old substring `list-panes -t <session>` no longer appeared in
+  the monitor's command line (which now contains `list-panes -t =<session>:0`),
+  so orphans were not being killed; the new pattern restores cleanup and also
+  side-steps the prefix-collision the rest of this PR is about.
