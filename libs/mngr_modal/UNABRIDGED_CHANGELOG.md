@@ -4,6 +4,59 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-05-21
+
+Fix the intro in `UNABRIDGED_CHANGELOG.md` so it references the correct entries directory. The path was `changelog/<project>/` (which never existed); the actual layout is `<project_dir>/changelog/`.
+
+The acceptance test for `mngr_claude_usage`'s statusline-shim provisioning on a real Modal host (`test_provision_statusline_shim_on_modal_host`) is updated to assert against the new host-stable shim path layout (`<host_dir>/commands/claude_statusline.sh`) and the per-agent sidecar (`<state_dir>/commands/user_statusline_cmd`).
+
+## 2026-05-20
+
+## Modal provider no longer auto-creates an environment from non-create commands
+
+`mngr list`, `mngr gc`, and other read flows no longer silently bootstrap a
+Modal environment (the `Created Modal environment: ...` log line) just because
+the modal provider is enabled. The Modal provider now disables itself (raises
+`ProviderUnavailableError`, which higher-level loaders skip) when its per-user
+Modal environment doesn't exist yet. Only `mngr create` is allowed to bootstrap
+the environment on first use.
+
+Project now participates in the per-project changelog layout: a `changelog/` subdirectory holds per-PR entry files, and `CHANGELOG.md` / `UNABRIDGED_CHANGELOG.md` at the project root hold the consolidated history. See the full rationale in `dev/changelog/mngr-changelog-per-project.md`.
+
+- `mngr_modal`: Modal backend now raises a new `ProviderEmptyError`
+  (distinct from `ProviderUnavailableError`) when its per-user
+  environment doesn't exist yet, so `mngr list` can silently skip the
+  empty provider instead of aborting. (Counterpart to the new
+  `ProviderEmptyError` handling in the listing pipeline.)
+
+Collapse Modal environments across an offload-acceptance / offload-release
+run to a single shared env (opt-in via `MNGR_TEST_SHARED_MODAL_ENV_NAME`).
+Each fanned-out sandbox used to mint its own Modal environment and delete
+it on teardown -- dozens to hundreds per run, driving the
+1500-env-per-workspace cap into transient failures. Inside each sandbox,
+the modal test fixtures (`real_modal_provider`, `persistent_modal_provider`,
+`initial_snapshot_provider`, plus the session-scoped subprocess-env
+fixtures) honor the env var: they thread its name through
+`MngrConfig.prefix` + `ModalProviderConfig.user_id` so every test lands
+in the shared env, and they skip env creation / deletion / leak-tracking
+at the fixture layer (apps and volumes are still created and deleted
+per-test as before). Local pytest behavior (no env var set) is unchanged.
+
+Fix Modal resource leaks in `test_snapshot_and_shutdown.py`. The teardown's `modal app stop` and `modal volume delete` calls were both silently failing (`check=False`, captured output discarded); the fixture also wasn't passing an `environment_name` to `deploy_function`, so the test app + volume landed in the default `main` env outside any cleanup safety net. Pass the session-scoped Modal env to deploy, sandbox lookup, volume operations, and cleanup; run app-stop and volume-delete in parallel with `check=True` so any future failure surfaces immediately.
+
+## Retry on async Modal permission propagation
+
+Modal recently migrated their permission system so the per-user permission entry for a just-created environment is propagated asynchronously (typically ~3-7 seconds after `modal environment create` returns success). During that window, operations on the new environment raise `modal.exception.PermissionDeniedError` instead of `NotFoundError`. This was breaking every Modal acceptance test at fixture construction time.
+
+- `imbue.mngr_modal.backend`: both `_enter_ephemeral_app_context_with_retry` and `_lookup_persistent_app_with_retry` now retry on `ModalProxyPermissionDeniedError` in addition to `ModalProxyNotFoundError`, matching the existing 5-attempt exponential backoff (1s→10s) used for env-not-found.
+- `libs/mngr_modal/imbue/mngr_modal/conftest.py`: the test cleanup helper `_classify_modal_sdk_delete` now retries Modal SDK deletes through the same propagation window so that fast-running test teardowns don't spuriously leak environments/volumes.
+
+No user-visible behavior change beyond fewer transient Modal failures and a small added startup latency (~3-7s on the very first `mngr create` against a brand-new environment, only on first use per profile).
+
+Applied `@fixture_uses_resources` to `deployed_snapshot_function` in `test_snapshot_and_shutdown.py` to fix `test_snapshot_and_shutdown_missing_host_id` and `test_snapshot_and_shutdown_missing_sandbox_id` failing on the modal resource guard.
+
+Bumped pinned `modal` dependency from 1.3.1 to 1.4.3 to stay in sync with the rest of the monorepo.
+
 ## 2026-05-14
 
 CI acceptance test speedup — fix the `mngr_modal` session-end leak detector in `libs/mngr_modal/imbue/mngr_modal/conftest.py` (previously the `modal_session_cleanup` autouse fixture; now a `pytest_sessionfinish` hook so it runs after all session-scoped fixture teardowns -- pytest's autouse session-scoped fixtures tear down before non-autouse session-scoped fixtures regardless of declared dependencies, which made the previous fixture poll a still-registered env and fail before the deregister could run). The detector compared the global `modal environment list --json` against tests' tracked env names, but Modal's listing endpoints are eventually consistent w.r.t. deletion -- after a `modal environment delete X` returns "Environment 'X' not found", the env can still appear in the global list for tens of seconds. With one-test-per-batch the assertion almost never landed in the inconsistency window; with several tests per session it became consistent enough to repeatedly fail teardown on whichever test happened to be last. The fix is twofold: (a) the per-test and session-scope cleanup fixtures deregister tracked resources from `worker_modal_*_names` *only* when the cleanup chain confirmed the resource was deleted or already gone (the synchronous response is authoritative); cleanup failures keep the resource tracked and log a `logger.error` so the session-end leak detector still has a chance to surface a real leak. Cleanup return values are typed via a new `ModalCleanupOutcome` enum (`DELETED | NOT_FOUND | FAILED`). (b) the `pytest_sessionfinish` hook runs after all session-scoped fixture teardowns, so any name still in `worker_modal_*_names` at that point corresponds to a resource whose cleanup either FAILED or was never attempted (test crashed mid-fixture) -- i.e. a real leak rather than a listing-staleness false positive.
