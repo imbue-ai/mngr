@@ -84,140 +84,146 @@ _PERM_READ_AVAILABLE_PERMISSIONS: Final[str] = "latchkey-self-read-available-per
 _AVAILABLE_PERMISSIONS_PATH_PATTERN: Final[str] = r"^/permissions/available/[a-z0-9][a-z0-9-]*$"
 
 # Detent schema names + URL prefix the Minds API proxy lives under.
-# The first rule in :data:`_AGENT_BASELINE_PERMISSIONS` uses these two
-# schemas to gate every ``/minds-api-proxy/api/v1/agents/<id>/...``
-# request: the scope schema matches *any* such request, and the single
-# permission schema's path pattern constrains the ``<id>`` segment to a
-# regex-alternation enum of allowed agent ids (initially empty -- no
-# agent allowed). New agents are added via :func:`allow_agent_for_host`
-# (or its CLI wrapper, ``mngr latchkey allow-agent``).
+# Two rules in :data:`_AGENT_BASELINE_PERMISSIONS` cooperate to gate
+# every ``/minds-api-proxy/api/v1/agents/<id>/...`` request:
 #
-# Because detent evaluates rules top-to-bottom and stops at the first
-# rule whose scope matches, this guarantees that an unauthorized
-# agent_id is rejected by the first rule and never accidentally inherits
-# any subsequent rule's grant. (The remaining baseline rules are scoped
-# to ``/permission-requests``, ``/permissions/self``, etc., so they
-# don't match minds-api-proxy paths and don't interfere.)
+# 1. The FIRST rule's scope matches any such request whose ``<id>`` is
+#    NOT in the allowed list (encoded as ``not + anyOf`` on the path).
+#    Its permission list is empty, so detent rejects the request
+#    immediately when the scope fires -- and detent stops at the first
+#    matching scope, so the rule below never gets a chance to allow it.
+# 2. The SECOND rule (the existing gateway-self baseline) carries a
+#    generic ``minds-api-proxy`` permission that matches every path
+#    under the proxy prefix without enumerating ids. Authorized agents
+#    fall through to this rule (their id is in the allow list, so the
+#    first rule's ``not + anyOf`` doesn't fire) and the generic
+#    permission lets them through.
+#
+# The source-of-truth list of allowed agent ids is the ``anyOf`` array
+# inside the first rule's scope schema -- a plain JSON list of
+# per-agent path-pattern objects, populated by :func:`allow_agent_for_host`
+# (or its CLI wrapper, ``mngr latchkey allow-agent``).
 _MINDS_API_PROXY_PATH_PREFIX: Final[str] = "/minds-api-proxy/api/v1/agents/"
-_SCOPE_MINDS_API_PROXY: Final[str] = "minds-api-proxy"
-_PERM_MINDS_API_PROXY_ALLOWED_AGENT: Final[str] = "minds-api-proxy-allowed-agent"
+_SCOPE_MINDS_API_PROXY_UNAUTHORIZED: Final[str] = "minds-api-proxy-unauthorized"
+_PERM_MINDS_API_PROXY: Final[str] = "minds-api-proxy"
 
-# Scope schema's path pattern. Matches any request under the proxy's
-# ``/api/v1/agents/<id>/...`` subtree (with or without a trailing
-# segment), so the rule that uses this scope fires for every such
-# request regardless of method or endpoint.
-_MINDS_API_PROXY_SCOPE_PATH_PATTERN: Final[str] = rf"^{_MINDS_API_PROXY_PATH_PREFIX}[^/]+(/.*)?$"
+# Path-prefix pattern shared by the unauthorized scope ("any request
+# under the proxy's agents subtree") and the authorized-side
+# permission ("any path under the proxy's agents subtree").
+_MINDS_API_PROXY_PATH_PATTERN: Final[str] = rf"^{_MINDS_API_PROXY_PATH_PREFIX}[^/]+(/.*)?$"
 
-# Sentinel that ``_build_allowed_agent_path_pattern`` writes when the
-# enum is empty. ``(?!)`` is a negative-empty-lookahead -- it matches no
-# string of any length, so the resulting path pattern rejects every
-# request that gets past the scope schema. Encoded as a stand-alone
-# constant so the round-trip ``build -> parse -> build`` is provably
-# stable even with no ids in the list.
-_ALLOWED_AGENT_EMPTY_SENTINEL: Final[str] = "(?!)"
+# Characters allowed verbatim in an ``agent_id`` when we embed it into
+# a regex pattern body. mngr's ``RandomId`` format -- ``<prefix>-<32
+# hex>`` -- only uses ``[a-z0-9-]``, all of which are regex-safe
+# outside a character class. We validate explicitly (rather than
+# trusting the caller's typing) so a future id-shape change cannot
+# silently inject regex metacharacters into the on-disk pattern.
+_SAFE_AGENT_ID_RE: Final[re.Pattern[str]] = re.compile(r"^[A-Za-z0-9_-]+$")
 
-# Anchored regex that parses a populated allowed-agent path pattern
-# back into the list of agent ids encoded into its alternation group.
-# Agent ids are validated to ``[A-Za-z0-9_-]+`` (mngr's ``RandomId``
-# format: ``<prefix>-<32 hex>``) so the alternation body is restricted
-# to those characters plus the ``|`` separator. The non-capturing
-# ``(?:...)`` wrapper around the alternation is part of the format
-# this module writes; tolerating a wider grammar invites the file's
-# regex to drift from what the writer produces. The empty sentinel is
-# handled separately as a whole-string equality check below.
-_ALLOWED_AGENT_PATTERN_RE: Final[re.Pattern[str]] = re.compile(
-    r"^\^/minds-api-proxy/api/v1/agents/\(\?:(?P<body>[A-Za-z0-9_\-|]+)\)\(/\.\*\)\?\$$"
+# Anchored regex that extracts an agent id from one ``anyOf`` entry's
+# path pattern. Each entry that :func:`_build_allowed_agent_anyof_entry`
+# writes has the form
+# ``{"pattern": "^/minds-api-proxy/api/v1/agents/<id>(/.*)?$"}``;
+# this regex recovers ``<id>``.
+_ALLOWED_AGENT_ENTRY_RE: Final[re.Pattern[str]] = re.compile(
+    r"^\^/minds-api-proxy/api/v1/agents/(?P<id>[A-Za-z0-9_\-]+)\(/\.\*\)\?\$$"
 )
 
 
-def _empty_allowed_agent_path_pattern() -> str:
-    """Whole-string form of the path pattern when the allowed-agent enum is empty."""
-    return rf"^/minds-api-proxy/api/v1/agents/(?:{_ALLOWED_AGENT_EMPTY_SENTINEL})(/.*)?$"
+def _build_allowed_agent_anyof_entry(agent_id: str) -> dict[str, JsonValue]:
+    r"""Build the ``anyOf`` entry that allows ``agent_id`` past the unauthorized scope.
 
-
-def _build_allowed_agent_path_pattern(agent_ids: tuple[str, ...]) -> str:
-    """Build the path-pattern regex that gates the ``minds-api-proxy`` permission.
-
-    Format: ``^/minds-api-proxy/api/v1/agents/(?:<id1>|<id2>|...|<idN>)(/.*)?$``
-    when ``agent_ids`` is non-empty, or
-    ``^/minds-api-proxy/api/v1/agents/(?:(?!))(/.*)?$`` when it is empty.
-    The empty form uses a negative-empty-lookahead inside the
-    non-capturing group so the surrounding regex shape stays uniform
-    (which keeps the round-trip parser simple) while still matching no
-    real agent id.
+    The entry's pattern matches any path of the form
+    ``/minds-api-proxy/api/v1/agents/<agent_id>(/.*)?``. We validate
+    that ``agent_id`` only contains regex-safe characters and embed it
+    verbatim instead of going through :func:`re.escape` -- the escape
+    would turn ``-`` (regex-safe in the body of a pattern) into ``\-``,
+    breaking the symmetric :func:`_extract_agent_id_from_anyof_entry`
+    that recovers the id back out.
     """
-    if agent_ids:
-        body = "|".join(agent_ids)
-    else:
-        body = _ALLOWED_AGENT_EMPTY_SENTINEL
-    return rf"^/minds-api-proxy/api/v1/agents/(?:{body})(/.*)?$"
+    if not _SAFE_AGENT_ID_RE.match(agent_id):
+        raise LatchkeyStoreError(f"agent_id contains characters that are not safe to embed in a regex: {agent_id!r}")
+    return {"pattern": rf"^{_MINDS_API_PROXY_PATH_PREFIX}{agent_id}(/.*)?$"}
 
 
-def _parse_allowed_agent_path_pattern(pattern: str) -> tuple[str, ...]:
-    """Inverse of :func:`_build_allowed_agent_path_pattern`.
+def _extract_agent_id_from_anyof_entry(entry: JsonValue) -> str:
+    """Recover the agent id encoded into one ``anyOf`` entry.
 
-    Raises :class:`LatchkeyStoreError` if ``pattern`` does not match the
-    format this module writes. Callers should treat that as "the
-    permissions file was hand-edited into a shape we cannot safely
-    extend" and surface the error rather than silently rebuilding the
-    list from scratch (which would discard the hand-edit).
+    Raises :class:`LatchkeyStoreError` if ``entry`` is not the
+    ``{"pattern": ...}`` shape this module writes, or if its pattern
+    does not match the format :func:`_build_allowed_agent_anyof_entry`
+    produces. Callers should treat that as "the permissions file was
+    hand-edited into a shape we cannot safely extend" and surface the
+    error rather than silently rebuilding the list from scratch (which
+    would discard the hand-edit).
     """
-    # The empty form contains a ``(?!)`` whose embedded ``)`` upsets the
-    # ``[A-Za-z0-9_\-|]+`` body regex; check for it as a whole-string
-    # equality first.
-    if pattern == _empty_allowed_agent_path_pattern():
-        return ()
-    match = _ALLOWED_AGENT_PATTERN_RE.match(pattern)
+    if not isinstance(entry, dict):
+        raise LatchkeyStoreError(f"Allowed-agent ``anyOf`` entry must be a JSON object; got: {entry!r}")
+    pattern = entry.get("pattern")
+    if not isinstance(pattern, str):
+        raise LatchkeyStoreError(f"Allowed-agent ``anyOf`` entry is missing or has non-string ``pattern``: {entry!r}")
+    match = _ALLOWED_AGENT_ENTRY_RE.match(pattern)
     if match is None:
         raise LatchkeyStoreError(
-            f"Unrecognized {_PERM_MINDS_API_PROXY_ALLOWED_AGENT!r} path pattern; "
-            "refusing to overwrite a hand-edited permissions file. "
-            f"Got: {pattern!r}"
+            "Unrecognized allowed-agent ``anyOf`` entry pattern; refusing to overwrite a "
+            f"hand-edited permissions file. Got: {pattern!r}"
         )
-    body = match.group("body")
-    return tuple(body.split("|"))
+    return match.group("id")
 
 
 _AGENT_BASELINE_PERMISSIONS: Final[LatchkeyPermissionsConfig] = LatchkeyPermissionsConfig(
     rules=(
-        # First rule: gate the Minds API proxy. The scope schema
-        # matches every ``/minds-api-proxy/api/v1/agents/<id>/...``
-        # request, and the single permission schema constrains <id>
-        # to the allowed-agent enum (initially empty -- no agent
-        # allowed). Because detent stops at the first matching
-        # scope, an unauthorized agent_id is rejected here and does
-        # NOT fall through to the gateway-self rule below.
-        {_SCOPE_MINDS_API_PROXY: [_PERM_MINDS_API_PROXY_ALLOWED_AGENT]},
-        # Remaining rules: gateway-self endpoints (permission requests,
-        # self-permissions read, services catalog). These scopes do NOT
-        # match minds-api-proxy paths, so they are reached only by
-        # requests that targeted ``/permission-requests`` /
-        # ``/permissions/self`` / ``/permissions/available/<service>``
-        # in the first place.
+        # First rule: reject minds-api-proxy requests for unauthorized
+        # agent ids. The scope's path schema combines the proxy-prefix
+        # ``pattern`` with a ``not + anyOf`` whose entries are the
+        # per-agent path patterns of *allowed* ids (initially none --
+        # no agent allowed). When the agent id is in the allow list,
+        # one of the anyOf entries matches, the ``not`` is false, the
+        # combined path schema fails, and the rule's scope doesn't
+        # fire -- so detent moves on to the next rule. When the agent
+        # id is NOT in the allow list, none of the anyOf entries
+        # matches, the ``not`` is true, the path schema passes, the
+        # scope fires, and the empty permission list causes an
+        # immediate reject (with no fall-through to subsequent rules).
+        {_SCOPE_MINDS_API_PROXY_UNAUTHORIZED: []},
+        # Second rule: gateway-self endpoints + a generic
+        # ``minds-api-proxy`` permission that lets *any* path under the
+        # proxy's ``/agents/<id>/`` subtree through. Authorized agents
+        # only ever reach this rule after the first one's
+        # ``not + anyOf`` filtered them past; unauthorized agents are
+        # already rejected by Rule 1 and never get here.
         {
             _SCOPE_LATCHKEY_SELF: [
                 _PERM_CREATE_PERMISSION_REQUEST,
                 _PERM_READ_SELF_PERMISSIONS,
                 _PERM_READ_AVAILABLE_PERMISSIONS,
+                _PERM_MINDS_API_PROXY,
             ],
         },
     ),
     schemas={
-        _SCOPE_MINDS_API_PROXY: {
+        _SCOPE_MINDS_API_PROXY_UNAUTHORIZED: {
             "properties": {
                 "domain": {"const": _GATEWAY_SELF_HOST},
+                # ``pattern`` (must-match-prefix) and ``not + anyOf``
+                # (must-not-match-any-allowed-agent) at the same level
+                # combine with implicit AND, per JSON Schema. The
+                # ``anyOf`` list is the per-host source of truth for
+                # which agent ids are allowed -- empty at first, grown
+                # by :func:`allow_agent_for_host`.
                 "path": {
                     "type": "string",
-                    "pattern": _MINDS_API_PROXY_SCOPE_PATH_PATTERN,
+                    "pattern": _MINDS_API_PROXY_PATH_PATTERN,
+                    "not": {"anyOf": []},
                 },
             },
             "required": ["domain", "path"],
         },
-        _PERM_MINDS_API_PROXY_ALLOWED_AGENT: {
+        _PERM_MINDS_API_PROXY: {
             "properties": {
                 "path": {
                     "type": "string",
-                    "pattern": _build_allowed_agent_path_pattern(()),
+                    "pattern": _MINDS_API_PROXY_PATH_PATTERN,
                 },
             },
             "required": ["path"],
@@ -259,28 +265,25 @@ def allow_agent_for_host(
     host_id: HostId,
     agent_id: AgentId,
 ) -> None:
-    """Add ``agent_id`` to the host's allowed-agent enum on the Minds API proxy.
+    """Add ``agent_id`` to the host's allowed-agent list on the Minds API proxy.
 
-    Reads the host's ``latchkey_permissions.json`` (writing a fresh baseline
-    if it does not yet exist), parses the current allowed-agent list out of
-    the ``minds-api-proxy-allowed-agent`` schema's path pattern, appends
-    ``agent_id`` if it is not already there, deduplicates + sorts, and
-    writes the updated config back atomically. Idempotent: re-allowing an
-    agent already in the list is a no-op write.
+    Reads the host's ``latchkey_permissions.json`` (writing a fresh
+    baseline if it does not yet exist), extracts the current allowed-agent
+    list out of the ``minds-api-proxy-unauthorized`` scope's ``not.anyOf``
+    block, appends a per-agent entry if ``agent_id`` is not already there,
+    and writes the updated config back atomically. Idempotent: re-allowing
+    an agent already in the list is a no-op write.
 
     This is the *only* public way to grant a minds agent access to the
     Minds API proxy. The matching CLI wrapper is ``mngr latchkey
     allow-agent --host-id ID --agent-id ID``; the desktop client and any
-    other Python caller goes through this function directly. The previous
-    per-agent rule/schema dance and the corresponding low-level
-    ``POST /permissions/schemas`` gateway-extension endpoint are gone --
-    the only knob to turn is the allowed-agent enum.
+    other Python caller goes through this function directly.
 
     Raises :class:`LatchkeyStoreError` if the on-disk permissions file
-    has been hand-edited into a shape we cannot safely extend (the
-    parse of the existing pattern fails); callers should surface the
-    error and let the operator fix the file manually rather than
-    overwrite an arbitrary edit.
+    has been hand-edited into a shape we cannot safely extend (an
+    ``anyOf`` entry doesn't match the format this module writes); callers
+    should surface the error and let the operator fix the file manually
+    rather than overwrite an arbitrary edit.
     """
     path = permissions_path_for_host(plugin_data_dir, host_id)
     if path.is_file():
@@ -291,54 +294,62 @@ def allow_agent_for_host(
         config = _AGENT_BASELINE_PERMISSIONS
 
     schemas: dict[str, JsonValue] = dict(config.schemas)
-    permission_schema = schemas.get(_PERM_MINDS_API_PROXY_ALLOWED_AGENT)
+    scope_schema = schemas.get(_SCOPE_MINDS_API_PROXY_UNAUTHORIZED)
     # Use ``dict`` (concrete type) rather than ``Mapping`` because
     # ``JsonValue``'s mapping arm is ``dict[str, JsonValue]``
     # specifically; ``isinstance(x, Mapping)`` lets the type checker
     # narrow to ``Mapping[Unknown, Unknown]`` which then can't be
     # subscripted with a ``str`` key.
-    if not isinstance(permission_schema, dict):
+    if not isinstance(scope_schema, dict):
         raise LatchkeyStoreError(
             f"Permissions file {path} is missing the "
-            f"{_PERM_MINDS_API_PROXY_ALLOWED_AGENT!r} schema; cannot extend the allowed-agent enum."
+            f"{_SCOPE_MINDS_API_PROXY_UNAUTHORIZED!r} scope schema; cannot extend the allowed-agent list."
         )
-    properties = permission_schema.get("properties")
+    properties = scope_schema.get("properties")
     if not isinstance(properties, dict):
         raise LatchkeyStoreError(
-            f"Permissions file {path}'s {_PERM_MINDS_API_PROXY_ALLOWED_AGENT!r} schema is malformed: "
+            f"Permissions file {path}'s {_SCOPE_MINDS_API_PROXY_UNAUTHORIZED!r} schema is malformed: "
             f"missing or non-object ``properties``."
         )
     path_schema = properties.get("path")
     if not isinstance(path_schema, dict):
         raise LatchkeyStoreError(
-            f"Permissions file {path}'s {_PERM_MINDS_API_PROXY_ALLOWED_AGENT!r} schema is malformed: "
+            f"Permissions file {path}'s {_SCOPE_MINDS_API_PROXY_UNAUTHORIZED!r} schema is malformed: "
             f"missing or non-object ``properties.path``."
         )
-    pattern = path_schema.get("pattern")
-    if not isinstance(pattern, str):
+    not_block = path_schema.get("not")
+    if not isinstance(not_block, dict):
         raise LatchkeyStoreError(
-            f"Permissions file {path}'s {_PERM_MINDS_API_PROXY_ALLOWED_AGENT!r} schema is malformed: "
-            f"missing or non-string ``properties.path.pattern``."
+            f"Permissions file {path}'s {_SCOPE_MINDS_API_PROXY_UNAUTHORIZED!r} schema is malformed: "
+            f"missing or non-object ``properties.path.not``."
+        )
+    any_of = not_block.get("anyOf")
+    if not isinstance(any_of, list):
+        raise LatchkeyStoreError(
+            f"Permissions file {path}'s {_SCOPE_MINDS_API_PROXY_UNAUTHORIZED!r} schema is malformed: "
+            f"missing or non-list ``properties.path.not.anyOf``."
         )
 
-    existing_ids = _parse_allowed_agent_path_pattern(pattern)
+    existing_ids = [_extract_agent_id_from_anyof_entry(entry) for entry in any_of]
     if str(agent_id) in existing_ids:
         # No-op: agent already allowed.
         return
-    updated_ids = tuple(sorted(set(existing_ids) | {str(agent_id)}))
-    new_pattern = _build_allowed_agent_path_pattern(updated_ids)
+    new_any_of: list[JsonValue] = list(any_of) + [_build_allowed_agent_anyof_entry(str(agent_id))]
 
     # Build the updated schema body by copy-on-write so we do not
     # mutate the input config in place (it might be the shared baseline
-    # constant). The explicit ``dict[str, JsonValue]`` annotations
-    # keep the type checker happy as we rebuild the nested structure.
+    # constant). The explicit ``dict[str, JsonValue]`` / ``list[JsonValue]``
+    # annotations keep the type checker happy as we rebuild the nested
+    # structure.
+    new_not_block: dict[str, JsonValue] = dict(not_block)
+    new_not_block["anyOf"] = new_any_of
     new_path_schema: dict[str, JsonValue] = dict(path_schema)
-    new_path_schema["pattern"] = new_pattern
+    new_path_schema["not"] = new_not_block
     new_properties: dict[str, JsonValue] = dict(properties)
     new_properties["path"] = new_path_schema
-    new_permission_schema: dict[str, JsonValue] = dict(permission_schema)
-    new_permission_schema["properties"] = new_properties
-    schemas[_PERM_MINDS_API_PROXY_ALLOWED_AGENT] = new_permission_schema
+    new_scope_schema: dict[str, JsonValue] = dict(scope_schema)
+    new_scope_schema["properties"] = new_properties
+    schemas[_SCOPE_MINDS_API_PROXY_UNAUTHORIZED] = new_scope_schema
     new_config = LatchkeyPermissionsConfig(rules=config.rules, schemas=schemas)
     save_permissions(path, new_config)
 

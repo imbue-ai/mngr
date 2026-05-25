@@ -50,53 +50,60 @@ the monorepo outside their own tests.
 
 The per-agent `minds-api-proxy` permissioning model has been simplified.
 Instead of installing a per-agent scope schema + per-agent permission
-schema + per-agent rule at agent creation time (via the
-low-level `POST /permissions/schemas` extension endpoint), the baseline
-permissions file now ships with **one** fixed scope schema plus **one**
-fixed permission schema whose path pattern carries the list of allowed
-agent ids as a regex alternation. To allow a new agent, the desktop
-client (or an operator running the CLI) just appends the agent's id to
-that list.
+schema + per-agent rule at agent creation time (via the low-level
+`POST /permissions/schemas` extension endpoint), the baseline
+permissions file carries two cooperating rules + a plain JSON list of
+allowed agent ids. To allow a new agent, the desktop client (or an
+operator running the CLI) just appends an entry to that list.
 
 Concretely:
 
-- New baseline rule order: `{minds-api-proxy: [minds-api-proxy-allowed-agent]}`
-  comes **first** in `_AGENT_BASELINE_PERMISSIONS.rules`, ahead of the
-  existing gateway-self baseline. The scope schema matches every
-  `/minds-api-proxy/api/v1/agents/<id>/...` request; the single
-  permission schema's path pattern constrains `<id>` to the
-  allowed-agent enum (initially empty -- no agent allowed).
-- Detent evaluates rules top to bottom and stops at the first matching
-  scope, so an unauthorized `agent_id` is rejected by the first rule
-  and does NOT inherit any subsequent rule's grant. The shared
-  `minds-api-proxy-notifications` baseline grant that the previous
-  design hand-listed is gone entirely; notifications are reached via
-  the same allowed-agent enum as every other `/api/v1/agents/<id>/`
-  endpoint.
+- The baseline now has **two** rules, in this exact order:
+  1. `{minds-api-proxy-unauthorized: []}` -- scope matches any
+     `/minds-api-proxy/api/v1/agents/<id>/...` request whose `<id>`
+     is NOT in the allowed list (encoded as `not + anyOf` on the
+     path schema). The empty permission list rejects the request
+     immediately; detent stops at the first matching scope, so the
+     rule below never gets a chance to allow it.
+  2. `{latchkey-self: [...gateway-self baseline..., minds-api-proxy]}`
+     -- the existing gateway-self rule, extended with a *generic*
+     `minds-api-proxy` permission that matches any path under the
+     proxy's `/agents/<id>/` subtree without enumerating ids.
+     Authorized agents (those past Rule 1's `not + anyOf`) hit this
+     rule and are let through by the generic permission.
+- The source-of-truth list of allowed agent ids is a plain JSON
+  `anyOf` array inside Rule 1's scope schema -- one entry per allowed
+  agent of the form `{"pattern": "^/minds-api-proxy/api/v1/agents/<id>(/.*)?$"}`.
+  No regex alternation parsing/building; reading the list is iteration,
+  appending is `list.append`.
 - New library helper: `imbue.mngr_latchkey.agent_setup.allow_agent_for_host(plugin_data_dir, host_id, agent_id)`.
   Reads the host's permissions file (or starts from the baseline if it
-  doesn't yet exist), parses the existing allowed-agent list out of the
-  permission schema's path pattern, appends the new id, dedupes + sorts,
-  and writes back atomically. Idempotent.
+  doesn't yet exist), extracts the existing allowed-agent list out of
+  the `anyOf` block, appends a new entry if not already there, and
+  writes back atomically. Idempotent.
 - New CLI: `mngr latchkey allow-agent --host-id ID --agent-id ID` wraps
-  the helper for operators. Now documented in the README's "Wiring a
-  new agent using the CLI interface" section.
+  the helper for operators. Documented in the README's "Wiring a new
+  agent using the CLI interface" section.
 - `imbue.mngr_latchkey.store.load_permissions` is the new public
   reader that `allow_agent_for_host` uses; symmetric with `save_permissions`.
+- The shared `minds-api-proxy-notifications` baseline grant from the
+  earliest design in this branch is gone entirely; notifications are
+  reached via the same allowed-agent list as every other
+  `/api/v1/agents/<id>/` endpoint.
 - The per-agent helpers `agent_minds_api_proxy_scope_name`,
-  `agent_minds_api_proxy_permission_name`, and `build_agent_minds_api_proxy_schemas`
-  are gone -- nobody needs to mint a per-agent schema name anymore.
+  `agent_minds_api_proxy_permission_name`, and
+  `build_agent_minds_api_proxy_schemas` are gone -- nobody needs to
+  mint a per-agent schema name anymore.
 - The `POST /permissions/schemas` and `DELETE /permissions/schemas`
-  endpoints I added to `permissions.mjs` in the previous round of this
+  endpoints I added to `permissions.mjs` in an earlier round of this
   branch are gone. The user-facing interface for granting Minds API
-  access is now "add the agent id to the host's allowed-agent enum"
+  access is now "add the agent id to the host's allowed-agent list"
   (via the helper or the CLI), not "install arbitrary inline schemas".
 
-A permissions file whose `minds-api-proxy-allowed-agent` path pattern
-has been hand-edited into a shape the parser doesn't recognize is
-left alone (the helper raises `LatchkeyStoreError` rather than
-rebuild from scratch), so operators who customize the file by hand
-won't lose their edits silently.
+A permissions file whose `anyOf` block has been hand-edited into a
+shape the parser doesn't recognize is left alone (the helper raises
+`LatchkeyStoreError` rather than rebuild from scratch), so operators
+who customize the file by hand won't lose their edits silently.
 
 ## Consolidation: shared `SSHTunnelManager`
 
