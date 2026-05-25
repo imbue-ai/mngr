@@ -237,6 +237,10 @@ class HostState(UpperCaseStrEnum):
     FAILED = auto()
     DESTROYED = auto()
     UNAUTHENTICATED = auto()
+    # The provider that owns this host could not be accessed during the most recent discovery attempt,
+    # so the host's actual state is unknown. Distinct from None on HostDetails.state (which means
+    # "not observed / not applicable"). Emitted by AgentObserver when its provider errored.
+    UNKNOWN = auto()
 
 
 class AgentLifecycleState(UpperCaseStrEnum):
@@ -250,6 +254,11 @@ class AgentLifecycleState(UpperCaseStrEnum):
     # without the config, it can be hard to tell whether the agent is still running or not, because we don't know the process name to expect
     RUNNING_UNKNOWN_AGENT_TYPE = auto()
     DONE = auto()
+    # The provider that owns this agent could not be accessed during the most recent discovery attempt,
+    # so the agent's actual state is unknown. Emitted by AgentObserver for previously-tracked agents
+    # whose provider just failed discovery. Sticky: an agent leaves UNKNOWN only by reappearing in a
+    # snapshot or being explicitly destroyed.
+    UNKNOWN = auto()
 
 
 class AgentId(RandomId):

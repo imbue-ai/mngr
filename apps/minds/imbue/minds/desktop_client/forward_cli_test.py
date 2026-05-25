@@ -35,7 +35,6 @@ from imbue.minds.desktop_client.notification import NotificationRequest
 from imbue.minds.desktop_client.ssh_tunnel import RemoteSSHInfo
 from imbue.minds.primitives import ServiceName
 from imbue.mngr.api.discovery_events import AgentDestroyedEvent
-from imbue.mngr.api.discovery_events import DiscoveryErrorEvent
 from imbue.mngr.api.discovery_events import FullDiscoverySnapshotEvent
 from imbue.mngr.api.discovery_events import HostDestroyedEvent
 from imbue.mngr.api.discovery_events import HostSSHInfoEvent
@@ -334,83 +333,6 @@ def test_host_destroyed_destroys_all_agents_on_host(consumer: EnvelopeStreamCons
     assert consumer.resolver.list_known_agent_ids() == ()
 
 
-# --- observe stream: discovery error --------------------------------------
-
-
-def test_discovery_error_with_provider_name_fires_provider_error_callback(
-    consumer: EnvelopeStreamConsumer,
-) -> None:
-    counter = [0]
-    fired: list[tuple[str, str, str]] = []
-    consumer.add_on_provider_error_callback(lambda name, etype, emsg: fired.append((name, etype, emsg)))
-
-    error_event = DiscoveryErrorEvent(
-        timestamp=_TIMESTAMP,
-        event_id=_next_event_id(counter),
-        source=_EVENT_SOURCE,
-        error_type="ImbueCloudAuthError",
-        error_message="Refresh rejected by connector: token theft detected",
-        source_name="discovery_poll",
-        provider_name="imbue_cloud_thejash-gmail-com",
-    )
-    _dispatch(consumer, _observe_envelope(error_event))
-
-    assert fired == [
-        (
-            "imbue_cloud_thejash-gmail-com",
-            "ImbueCloudAuthError",
-            "Refresh rejected by connector: token theft detected",
-        )
-    ]
-
-
-def test_discovery_error_without_provider_name_does_not_fire_callback(
-    consumer: EnvelopeStreamConsumer,
-) -> None:
-    counter = [0]
-    fired: list[tuple[str, str, str]] = []
-    consumer.add_on_provider_error_callback(lambda name, etype, emsg: fired.append((name, etype, emsg)))
-
-    error_event = DiscoveryErrorEvent(
-        timestamp=_TIMESTAMP,
-        event_id=_next_event_id(counter),
-        source=_EVENT_SOURCE,
-        error_type="VpsApiError",
-        error_message="VPS API error 502",
-        source_name="discovery_poll",
-        provider_name=None,
-    )
-    _dispatch(consumer, _observe_envelope(error_event))
-
-    assert fired == []
-
-
-def test_provider_error_callback_failure_does_not_block_other_callbacks(
-    consumer: EnvelopeStreamConsumer,
-) -> None:
-    counter = [0]
-    fired: list[str] = []
-
-    def _bad_callback(_name: str, _etype: str, _emsg: str) -> None:
-        raise RuntimeError("boom")
-
-    consumer.add_on_provider_error_callback(_bad_callback)
-    consumer.add_on_provider_error_callback(lambda name, _etype, _emsg: fired.append(name))
-
-    error_event = DiscoveryErrorEvent(
-        timestamp=_TIMESTAMP,
-        event_id=_next_event_id(counter),
-        source=_EVENT_SOURCE,
-        error_type="ImbueCloudAuthError",
-        error_message="msg",
-        source_name="discovery_poll",
-        provider_name="imbue_cloud_alice",
-    )
-    _dispatch(consumer, _observe_envelope(error_event))
-
-    assert fired == ["imbue_cloud_alice"]
-
-
 # --- event stream: services / requests / refresh --------------------------
 
 
@@ -540,6 +462,34 @@ def test_reverse_tunnel_established_with_invalid_payload_is_skipped(
     }
     _dispatch(consumer, _forward_envelope(bad_payload, agent_id=_AGENT_ID_1))
     assert fired == []
+
+
+# --- forward stream: listening --------------------------------------------
+
+
+def test_listening_envelope_unblocks_wait_for_listening_with_port(
+    consumer: EnvelopeStreamConsumer,
+) -> None:
+    """A `listening` forward envelope hands wait_for_listening the bound port."""
+    _dispatch(consumer, _forward_envelope({"type": "listening", "host": "127.0.0.1", "port": 9137}))
+    assert consumer.wait_for_listening(timeout=1.0) == 9137
+
+
+def test_wait_for_listening_times_out_when_no_envelope_arrives(
+    consumer: EnvelopeStreamConsumer,
+) -> None:
+    """Without a `listening` envelope (e.g. the plugin died), wait returns None."""
+    assert consumer.wait_for_listening(timeout=0.05) is None
+
+
+def test_malformed_listening_port_is_dropped_and_waiter_keeps_waiting(
+    consumer: EnvelopeStreamConsumer,
+) -> None:
+    """A `listening` envelope with an unparseable port must not unblock the waiter
+    with a bogus value -- it is dropped and the waiter times out instead.
+    """
+    _dispatch(consumer, _forward_envelope({"type": "listening", "host": "127.0.0.1", "port": "nope"}))
+    assert consumer.wait_for_listening(timeout=0.05) is None
 
 
 # --- bounce_observe / terminate -------------------------------------------
