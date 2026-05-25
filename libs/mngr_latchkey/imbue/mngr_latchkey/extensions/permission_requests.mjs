@@ -71,9 +71,11 @@
 import { randomBytes, randomUUID } from 'node:crypto';
 import {
   existsSync,
+  lstatSync,
   mkdirSync,
   readFileSync,
   readdirSync,
+  realpathSync,
   renameSync,
   unlinkSync,
   writeFileSync,
@@ -567,9 +569,19 @@ function ensureDirectory(directory) {
  * under our own ``permission_requests/v2`` directory (mode 0600) and
  * writing the target permissions.json on approval (preserves existing
  * mode if any). ``mode`` is the unix mode for the *temp* file.
+ *
+ * If ``filePath`` is an existing symlink, the atomic rename targets
+ * the symlink's realpath rather than the link itself. ``rename(2)``
+ * operates on the link, not its target, so writing to the link path
+ * directly would replace the symlink with a regular file -- breaking
+ * the per-agent opaque symlinks that ``mngr latchkey link-permissions``
+ * swings into the canonical host permissions file. Resolving the link
+ * up front means the swap lands on the underlying file and the
+ * symlink stays in place.
  */
 function writeJsonFileAtomic(filePath, value, mode) {
-  const directory = dirname(filePath);
+  const destinationPath = resolveSymlinkTargetForWrite(filePath);
+  const directory = dirname(destinationPath);
   ensureDirectory(directory);
   const tempPath = join(
     directory,
@@ -578,7 +590,7 @@ function writeJsonFileAtomic(filePath, value, mode) {
   const serialized = `${JSON.stringify(value, null, 2)}\n`;
   try {
     writeFileSync(tempPath, serialized, { encoding: 'utf-8', mode });
-    renameSync(tempPath, filePath);
+    renameSync(tempPath, destinationPath);
   } catch (error) {
     try {
       unlinkSync(tempPath);
@@ -589,6 +601,40 @@ function writeJsonFileAtomic(filePath, value, mode) {
     throw new PermissionRequestsExtensionError(
       500,
       `Failed to write ${filePath}: ${message}`,
+    );
+  }
+}
+
+/**
+ * If ``filePath`` exists and is a symlink, return its realpath; if it
+ * does not exist or is a regular file, return ``filePath`` unchanged.
+ * Any other error (e.g. EACCES on ``lstat``) surfaces as a 500 so we
+ * don't silently fall back to clobbering the link.
+ */
+function resolveSymlinkTargetForWrite(filePath) {
+  let stat;
+  try {
+    stat = lstatSync(filePath);
+  } catch (error) {
+    if (error && error.code === 'ENOENT') {
+      return filePath;
+    }
+    const message = error instanceof Error ? error.message : String(error);
+    throw new PermissionRequestsExtensionError(
+      500,
+      `Failed to stat ${filePath}: ${message}`,
+    );
+  }
+  if (!stat.isSymbolicLink()) {
+    return filePath;
+  }
+  try {
+    return realpathSync(filePath);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new PermissionRequestsExtensionError(
+      500,
+      `Failed to resolve symlink ${filePath}: ${message}`,
     );
   }
 }

@@ -592,6 +592,53 @@ def test_approve_creates_target_when_missing(node_extension: tuple[str, Path, Pa
     assert applied["rules"] == [{"slack-api": ["slack-read-all"]}]
 
 
+def test_approve_preserves_symlink_at_target_path(
+    node_extension: tuple[str, Path, Path],
+    tmp_path: Path,
+) -> None:
+    """Approving a request must not replace a symlinked target with a regular file.
+
+    ``mngr latchkey link-permissions`` swings a per-agent opaque path
+    into the canonical host permissions file via a symlink. If the
+    extension wrote through ``rename(2)`` on the link itself, the
+    symlink would be replaced by a literal file and subsequent agents
+    sharing the canonical host file would silently desync from the
+    granted permissions. This test asserts that the symlink survives.
+    """
+    base_url, _latchkey_directory, permissions_config_path = node_extension
+    # Replace the (non-existent) target with a symlink pointing at a
+    # canonical file elsewhere on disk. The canonical file starts
+    # empty (no rules / no schemas) so we can verify both that the
+    # rules landed underneath the symlink and that the link itself
+    # survived the write.
+    canonical_path = tmp_path / "canonical_permissions.json"
+    canonical_path.write_text(json.dumps({"rules": []}))
+    assert not permissions_config_path.exists()
+    permissions_config_path.symlink_to(canonical_path)
+    assert permissions_config_path.is_symlink()
+
+    create_status, create_body = _post_json(
+        f"{base_url}/permission-requests",
+        {
+            "agent_id": "agent-1",
+            "rationale": "x",
+            "type": "predefined",
+            "payload": {"scope": "slack-api", "permissions": ["slack-read-all"]},
+        },
+    )
+    assert create_status == 201
+    request_id = json.loads(create_body)["request_id"]
+    approve_status, _ = _post_json(f"{base_url}/permission-requests/approve/{request_id}", None)
+    assert approve_status == 200
+
+    # Target path is still a symlink pointing at the canonical file.
+    assert permissions_config_path.is_symlink()
+    assert permissions_config_path.resolve() == canonical_path.resolve()
+    # The merge landed on the canonical file underneath.
+    applied = json.loads(canonical_path.read_text())
+    assert applied["rules"] == [{"slack-api": ["slack-read-all"]}]
+
+
 def test_approve_404s_on_unknown_request_id(node_extension: tuple[str, Path, Path]) -> None:
     base_url, *_ = node_extension
     status, body = _post_json(f"{base_url}/permission-requests/approve/nope", None)
