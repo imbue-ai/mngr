@@ -183,6 +183,15 @@ Run `pnpm --version` -- it must print `10.33.4`. To swap back to a newer pnpm af
 
 **A note on Homebrew**: `brew install node@24` and `brew install pnpm@10` work *if* the kegs currently happen to point at `24.15.0` / `10.33.4`, but Homebrew's `@<major>` formulae move forward through patch releases and there's no clean way to ask for an exact historical patch. Once a keg drifts past the pin, `engine-strict` will reject `pnpm install` and you'll need to switch to the version-manager / npm paths above anyway. If you already have these installed via brew and they still match, great -- just verify with `node --version` / `pnpm --version` before running `pnpm install`.
 
+### Dependency cooldown (minimum release age)
+
+Both package managers are configured to refuse any distribution published less than **7 days** ago, so a freshly-compromised release cannot be pulled into a build (or an end-user install) before it has had time to be noticed and yanked. This applies to transitive dependencies too.
+
+- **JS (pnpm)**: `minimumReleaseAge: 10080` (minutes) in `apps/minds/pnpm-workspace.yaml`. Requires pnpm >= 10.16.0 (we pin 10.33.4).
+- **Python (uv)**: `exclude-newer = "7 days"` under `[tool.uv]` in `apps/minds/electron/pyproject/pyproject.toml` (the packaged end-user app).
+
+The cooldown only bites during **resolution** -- `pnpm install` without `--frozen-lockfile`, `pnpm add`/`update`, and `uv lock`/`uv add` or a re-resolve. Frozen installs (CI's `pnpm install --frozen-lockfile`, and `uv sync` replaying an up-to-date lockfile) replay the committed lockfile and are unaffected. If you add or update a dependency and pnpm/uv refuses a version that is too new, either wait out the window or, for pnpm, add a targeted exception via `minimumReleaseAgeExclude`.
+
 ### Running locally
 
 ```bash

@@ -409,7 +409,7 @@ This coupling means Python and Electron updates are atomic from the user's persp
 
 ## Standalone pyproject.toml
 
-The file at `electron/pyproject.toml` is separate from the monorepo's `apps/minds/pyproject.toml`. It exists solely to tell `uv sync` what to install inside the Electron app:
+The file at `electron/pyproject/pyproject.toml` is separate from the monorepo's `apps/minds/pyproject.toml`. It exists solely to tell `uv sync` what to install inside the Electron app:
 
 ```toml
 [project]
