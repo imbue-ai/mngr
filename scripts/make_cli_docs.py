@@ -728,9 +728,9 @@ def main() -> None:
 
     repo_root = Path(__file__).parent.parent
     generated = collect_generated_files(repo_root)
+    stale = _find_stale_files(generated)
 
     if args.check:
-        stale = _find_stale_files(generated)
         if stale:
             print("The following generated docs are out of date:")
             for path in stale:
@@ -739,12 +739,10 @@ def main() -> None:
             sys.exit(1)
         return
 
-    for path, content in generated.items():
-        existing_content = path.read_text() if path.exists() else None
-        if content != existing_content:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(content)
-            print(f"Updated: {path}")
+    for path in stale:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(generated[path])
+        print(f"Updated: {path}")
 
 
 if __name__ == "__main__":
