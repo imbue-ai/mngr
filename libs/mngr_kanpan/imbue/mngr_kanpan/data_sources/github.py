@@ -40,20 +40,39 @@ class PrState(UpperCaseStrEnum):
 
 
 class CiStatus(UpperCaseStrEnum):
-    """Aggregate CI check status for a PR."""
+    """Aggregate CI check status for a PR.
 
-    PASSING = auto()
-    FAILING = auto()
+    Values mirror GitHub's ``StatusCheckRollup.state`` enum so that
+    ``from_rollup_state`` reduces to a straight ``CiStatus(state)`` lookup.
+    ``UNKNOWN`` is our addition for the "no rollup at all" case.
+    """
+
+    SUCCESS = auto()
+    FAILURE = auto()
     PENDING = auto()
     UNKNOWN = auto()
 
     @property
     def color(self) -> str | None:
         return {
-            CiStatus.PASSING: "light green",
-            CiStatus.FAILING: "light red",
+            CiStatus.SUCCESS: "light green",
+            CiStatus.FAILURE: "light red",
             CiStatus.PENDING: "yellow",
         }.get(self)
+
+    @classmethod
+    def from_rollup_state(cls, state: str | None) -> "CiStatus":
+        """Map a ``StatusCheckRollup.state`` value (or ``None``) to a ``CiStatus``.
+
+        Unknown / unmapped enum values fall back to ``UNKNOWN`` rather than
+        raising, so a future GitHub-side enum addition doesn't crash the board.
+        """
+        if state is None:
+            return cls.UNKNOWN
+        try:
+            return cls(state)
+        except ValueError:
+            return cls.UNKNOWN
 
 
 class PrField(FieldValue):
@@ -326,7 +345,7 @@ def _parse_pr_node(node: dict[str, Any], unresolved_ignore_user: str | None) -> 
         url=node["url"],
         head_branch=node["headRefName"],
         is_draft=bool(node.get("isDraft", False)),
-        check_status=_parse_rollup_state((node.get("statusCheckRollup") or {}).get("state")),
+        check_status=CiStatus.from_rollup_state((node.get("statusCheckRollup") or {}).get("state")),
         has_conflicts=node.get("mergeable") == "CONFLICTING",
         has_unresolved=_check_unresolved_threads(node, unresolved_ignore_user),
     )
@@ -341,18 +360,6 @@ def _parse_pr_state(state_str: str) -> PrState:
     if upper == "CLOSED":
         return PrState.CLOSED
     return PrState.OPEN
-
-
-@pure
-def _parse_rollup_state(state: str | None) -> CiStatus:
-    """Map ``StatusCheckRollup.state`` (SUCCESS|PENDING|FAILURE) to ``CiStatus``."""
-    if state == "SUCCESS":
-        return CiStatus.PASSING
-    if state == "FAILURE":
-        return CiStatus.FAILING
-    if state == "PENDING":
-        return CiStatus.PENDING
-    return CiStatus.UNKNOWN
 
 
 def _check_unresolved_threads(node: dict[str, Any], ignore_user: str | None) -> bool:

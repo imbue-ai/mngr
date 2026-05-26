@@ -126,7 +126,7 @@ def test_compute_section_open_pr_no_ci() -> None:
 
 @pytest.mark.parametrize(
     "ci_status",
-    [CiStatus.PASSING, CiStatus.FAILING, CiStatus.PENDING, CiStatus.UNKNOWN],
+    [CiStatus.SUCCESS, CiStatus.FAILURE, CiStatus.PENDING, CiStatus.UNKNOWN],
 )
 def test_compute_section_open_pr_ignores_ci(ci_status: CiStatus) -> None:
     # Regression: compute_section no longer dispatches on FIELD_CI for open PRs.
@@ -283,7 +283,7 @@ def test_run_data_sources_parallel_source_raises_exception() -> None:
 def test_run_data_sources_parallel_multiple_sources() -> None:
     a1 = AgentName("a1")
     pr = make_pr_field(created=datetime(2026, 1, 1, 0, 0, 13, tzinfo=timezone.utc))
-    ci = CiField(status=CiStatus.PASSING, created=datetime(2026, 1, 1, 0, 0, 14, tzinfo=timezone.utc))
+    ci = CiField(status=CiStatus.SUCCESS, created=datetime(2026, 1, 1, 0, 0, 14, tzinfo=timezone.utc))
     s1 = _MockDataSource("github", {a1: {"pr": pr}})
     s2 = _MockDataSource("git_info", {a1: {"ci": ci}})
     results, errors = _run_data_sources_parallel([s1, s2], (), {}, make_mngr_ctx())

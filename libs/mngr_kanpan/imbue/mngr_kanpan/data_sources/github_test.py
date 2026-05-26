@@ -30,7 +30,6 @@ from imbue.mngr_kanpan.data_sources.github import _get_cached_repo_field
 from imbue.mngr_kanpan.data_sources.github import _parse_board_response
 from imbue.mngr_kanpan.data_sources.github import _parse_pr_node
 from imbue.mngr_kanpan.data_sources.github import _parse_pr_state
-from imbue.mngr_kanpan.data_sources.github import _parse_rollup_state
 from imbue.mngr_kanpan.data_sources.github import fetch_board
 from imbue.mngr_kanpan.data_sources.repo_paths import RepoPathField
 from imbue.mngr_kanpan.testing import make_agent_details
@@ -190,29 +189,29 @@ def test_parse_pr_state_unknown_defaults_to_open() -> None:
     assert _parse_pr_state("DRAFT") == PrState.OPEN
 
 
-# === _parse_rollup_state ===
+# === CiStatus.from_rollup_state ===
 
 
-def test_parse_rollup_state_none() -> None:
-    assert _parse_rollup_state(None) == CiStatus.UNKNOWN
+def test_from_rollup_state_none() -> None:
+    assert CiStatus.from_rollup_state(None) == CiStatus.UNKNOWN
 
 
-def test_parse_rollup_state_success() -> None:
-    assert _parse_rollup_state("SUCCESS") == CiStatus.PASSING
+def test_from_rollup_state_success() -> None:
+    assert CiStatus.from_rollup_state("SUCCESS") == CiStatus.SUCCESS
 
 
-def test_parse_rollup_state_failure() -> None:
-    assert _parse_rollup_state("FAILURE") == CiStatus.FAILING
+def test_from_rollup_state_failure() -> None:
+    assert CiStatus.from_rollup_state("FAILURE") == CiStatus.FAILURE
 
 
-def test_parse_rollup_state_pending() -> None:
-    assert _parse_rollup_state("PENDING") == CiStatus.PENDING
+def test_from_rollup_state_pending() -> None:
+    assert CiStatus.from_rollup_state("PENDING") == CiStatus.PENDING
 
 
-def test_parse_rollup_state_unrecognized_is_unknown() -> None:
+def test_from_rollup_state_unrecognized_is_unknown() -> None:
     # Future-proofing: any new enum value we don't know about should
     # render as UNKNOWN rather than crash.
-    assert _parse_rollup_state("EXPECTED") == CiStatus.UNKNOWN
+    assert CiStatus.from_rollup_state("EXPECTED") == CiStatus.UNKNOWN
 
 
 # === _parse_pr_node ===
@@ -224,7 +223,7 @@ def test_parse_pr_node_minimal() -> None:
     assert pr.number == 42
     assert pr.head_branch == "mngr/foo"
     assert pr.state == PrState.OPEN
-    assert pr.check_status == CiStatus.PASSING
+    assert pr.check_status == CiStatus.SUCCESS
     assert pr.is_draft is False
     assert pr.has_conflicts is False
     assert pr.has_unresolved is False
@@ -547,7 +546,7 @@ def test_compute_pr_fetch_failed_with_cached_pr_uses_cache() -> None:
     cached_pr = make_pr_field(
         number=42, head_branch="branch-1", created=datetime(2028, 1, 1, 0, 0, 13, tzinfo=timezone.utc)
     )
-    cached_ci = CiField(status=CiStatus.PASSING, created=datetime(2028, 1, 1, 0, 0, 14, tzinfo=timezone.utc))
+    cached_ci = CiField(status=CiStatus.SUCCESS, created=datetime(2028, 1, 1, 0, 0, 14, tzinfo=timezone.utc))
     cached: dict[AgentName, dict[str, FieldValue]] = {
         agent.name: {FIELD_PR: cached_pr, FIELD_CI: cached_ci},
     }
@@ -570,7 +569,7 @@ def test_compute_pr_fetch_failed_with_cached_pr_for_different_branch_emits_fetch
     stale_cached_pr = make_pr_field(
         number=42, head_branch="branch-1", created=datetime(2028, 1, 1, 0, 0, 15, tzinfo=timezone.utc)
     )
-    cached_ci = CiField(status=CiStatus.PASSING, created=datetime(2028, 1, 1, 0, 0, 16, tzinfo=timezone.utc))
+    cached_ci = CiField(status=CiStatus.SUCCESS, created=datetime(2028, 1, 1, 0, 0, 16, tzinfo=timezone.utc))
     cached: dict[AgentName, dict[str, FieldValue]] = {
         agent.name: {FIELD_PR: stale_cached_pr, FIELD_CI: cached_ci},
     }
@@ -708,7 +707,7 @@ def test_pr_info_construct() -> None:
         url="https://example.com/pr/1",
         head_branch="b",
         is_draft=False,
-        check_status=CiStatus.PASSING,
+        check_status=CiStatus.SUCCESS,
         has_conflicts=False,
         has_unresolved=False,
     )
