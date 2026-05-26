@@ -14,6 +14,7 @@ The following categories of fixes should always be accepted without manual revie
 - Removing module-level docstrings
 - Removing Args/Returns sections from docstrings
 - Removing code from `__init__.py` (moving it to the appropriate module)
+- Pure DRY cleanup which is a clear improvement and doesn't change any behavior
 - Pydantic model improvements:
     - Converting dataclasses or namedtuples to `FrozenModel`
     - Converting raw dicts with static keys to `FrozenModel`

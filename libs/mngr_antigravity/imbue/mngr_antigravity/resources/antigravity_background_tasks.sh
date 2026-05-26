@@ -80,7 +80,9 @@ trap _cleanup EXIT
 
 log_info "Background tasks started for session $SESSION_NAME"
 
-while tmux has-session -t "$SESSION_NAME" 2>/dev/null; do
+# `=` is tmux's exact-match prefix; without it the loop would never exit when
+# our session is gone but a prefix-collision sibling is alive.
+while tmux has-session -t "=$SESSION_NAME" 2>/dev/null; do
     if [ -n "$_STREAM_PID" ] && ! kill -0 "$_STREAM_PID" 2>/dev/null; then
         log_warn "Raw transcript streamer died, restarting"
         if [ -x "$STREAM_SCRIPT" ]; then
