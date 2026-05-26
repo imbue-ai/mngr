@@ -793,20 +793,34 @@ def test_no_dependencies_younger_than_two_weeks() -> None:
     exclude.
     """
     lock = tomllib.loads((_REPO_ROOT / "uv.lock").read_text())
+    packages = lock.get("package", [])
     now = datetime.now(timezone.utc)
 
     too_new: list[str] = []
-    for package in lock.get("package", []):
-        if package["name"] in _FRESHNESS_EXEMPT_PACKAGES:
-            continue
+    examined = 0
+    for package in packages:
         uploaded = _lock_package_upload_time(package)
         if uploaded is None:
+            continue
+        examined += 1
+        if package["name"] in _FRESHNESS_EXEMPT_PACKAGES:
             continue
         age = now - uploaded
         if age < _DEPENDENCY_COOLDOWN:
             too_new.append(
                 f"  - {package['name']} {package['version']} (published {uploaded.date()}, {age.days}d ago)"
             )
+
+    # Guard against silently disabling the cooldown: if a future uv release stops
+    # emitting `upload-time` (or renames the key), every package would parse as
+    # None and this test would pass vacuously. Registry packages dominate the lock
+    # (only workspace/path/git entries lack an upload time), so require a healthy
+    # fraction to have yielded a parseable one.
+    assert examined >= len(packages) // 2, (
+        f"Only {examined} of {len(packages)} locked packages had a parseable `upload-time`. "
+        "The uv.lock format may have changed, which would silently disable this "
+        "dependency-freshness cooldown -- update `_lock_package_upload_time`."
+    )
 
     assert not too_new, (
         "These locked dependencies are younger than two weeks (supply-chain cooldown):\n"
