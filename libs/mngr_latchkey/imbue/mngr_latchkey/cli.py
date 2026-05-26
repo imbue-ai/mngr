@@ -44,10 +44,13 @@ from imbue.mngr.cli.output_helpers import emit_final_json
 from imbue.mngr.cli.output_helpers import write_human_line
 from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import PluginName
+from imbue.mngr_forward.ssh_tunnel import SSHTunnelManager
 from imbue.mngr_latchkey.agent_setup import finalize_host_permissions
 from imbue.mngr_latchkey.agent_setup import prepare_agent_latchkey
+from imbue.mngr_latchkey.agent_setup import register_agent_for_host
 from imbue.mngr_latchkey.config import LatchkeyPluginConfig
 from imbue.mngr_latchkey.core import LATCHKEY_BINARY
 from imbue.mngr_latchkey.core import Latchkey
@@ -56,7 +59,6 @@ from imbue.mngr_latchkey.discovery import LatchkeyDestructionHandler
 from imbue.mngr_latchkey.discovery import LatchkeyDiscoveryHandler
 from imbue.mngr_latchkey.discovery_stream import DiscoveryStreamConsumer
 from imbue.mngr_latchkey.forward_supervisor import is_forward_info_alive
-from imbue.mngr_latchkey.ssh_tunnel import SSHTunnelManager
 from imbue.mngr_latchkey.store import LatchkeyForwardInfo
 from imbue.mngr_latchkey.store import LatchkeyStoreError
 from imbue.mngr_latchkey.store import delete_forward_info
@@ -102,6 +104,13 @@ class _LinkPermissionsCliOptions(_LatchkeyCommonCliOptions):
 
     host_id: str
     opaque_path: str
+
+
+class _RegisterAgentCliOptions(_LatchkeyCommonCliOptions):
+    """Backing options object for ``mngr latchkey register-agent``."""
+
+    host_id: str
+    agent_id: str
 
 
 class _ForwardCliOptions(_LatchkeyCommonCliOptions):
@@ -365,6 +374,88 @@ discards the freshly-created baseline.""",
 ).register()
 
 add_pager_help_option(_link_permissions_command)
+
+
+# =============================================================================
+# Subcommand: register-agent
+# =============================================================================
+
+
+@click.command(name="register-agent")
+@click.option(
+    "--host-id",
+    "host_id",
+    required=True,
+    help="Canonical host ID the agent runs on. Identifies which per-host permissions file to edit.",
+)
+@click.option(
+    "--agent-id",
+    "agent_id",
+    required=True,
+    help="Canonical agent ID to add to the host's allowed-agent enum.",
+)
+@add_common_options
+@click.pass_context
+def _register_agent_command(ctx: click.Context, **kwargs: Any) -> None:
+    """Register ``agent_id`` for the host, granting access to ``/minds-api-proxy/api/v1/agents/<agent_id>/...``.
+
+    Wraps :func:`imbue.mngr_latchkey.agent_setup.register_agent_for_host`.
+    The default per-host permissions baseline rejects every Minds API
+    proxy request with an empty allowed-agent enum; this command
+    appends the supplied ``agent_id`` to the enum so the gateway will
+    let that agent through to its own ``/api/v1/agents/<id>/...``
+    subtree. Idempotent: re-running for an already-registered agent is a
+    no-op.
+    """
+    del kwargs
+    mngr_ctx, _output_opts, opts = setup_command_context(
+        ctx=ctx,
+        command_name="latchkey.register-agent",
+        command_class=_RegisterAgentCliOptions,
+        is_format_template_supported=False,
+    )
+
+    latchkey = _build_initialized_latchkey(mngr_ctx, opts.latchkey_directory, opts.latchkey_binary)
+
+    try:
+        host_id = HostId(opts.host_id)
+    except ValueError as e:
+        raise click.UsageError(f"--host-id is not a valid host ID: {e}") from e
+    try:
+        agent_id = AgentId(opts.agent_id)
+    except ValueError as e:
+        raise click.UsageError(f"--agent-id is not a valid agent ID: {e}") from e
+
+    try:
+        register_agent_for_host(latchkey.plugin_data_dir, host_id, agent_id)
+    except LatchkeyStoreError as e:
+        raise click.ClickException(f"register_agent_for_host failed: {e}") from e
+
+    logger.info("Registered agent {} on host {}; access to the Minds API proxy granted", agent_id, host_id)
+
+
+_add_common_latchkey_options(_register_agent_command)
+
+CommandHelpMetadata(
+    key="latchkey.register-agent",
+    one_line_description="Register an agent on a host, granting it access to the Minds API proxy",
+    synopsis="mngr latchkey register-agent --host-id ID --agent-id ID [OPTIONS]",
+    description="""Wraps :func:`imbue.mngr_latchkey.agent_setup.register_agent_for_host`.
+The per-host ``latchkey_permissions.json`` ships with an empty
+allowed-agent enum on the first rule (the one that gates
+``/minds-api-proxy/api/v1/agents/<id>/...``); this command appends
+the supplied agent ID to that enum so the gateway will let that
+agent through to its own ``/api/v1/agents/<id>/...`` subtree.
+Idempotent: re-running for an already-registered agent is a no-op.""",
+    examples=(
+        (
+            "Register an agent for the Minds API proxy",
+            "mngr latchkey register-agent --host-id $HOST_ID --agent-id $AGENT_ID",
+        ),
+    ),
+).register()
+
+add_pager_help_option(_register_agent_command)
 
 
 # =============================================================================
@@ -712,6 +803,7 @@ add_pager_help_option(_gateway_info_command)
 
 latchkey.add_command(_create_agent_env_command)
 latchkey.add_command(_link_permissions_command)
+latchkey.add_command(_register_agent_command)
 latchkey.add_command(_forward_command)
 latchkey.add_command(_admin_jwt_command)
 latchkey.add_command(_gateway_info_command)

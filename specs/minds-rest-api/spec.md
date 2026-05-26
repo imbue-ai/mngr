@@ -1,5 +1,28 @@
 # Minds REST API
 
+> **Status**: parts of this spec are now superseded. The original
+> design used a per-agent UUID4 `MINDS_API_KEY` and a per-agent reverse
+> SSH tunnel exposing the Minds API into each workspace. Both are gone
+> as of the `hynek/get-rid-of-additional-ssh-reverse-tunnels` change:
+>
+> * There is now exactly one central `MINDS_API_KEY` per minds
+>   installation, persisted at `<data_dir>/minds_api_key`.
+> * Agents reach the Minds API exclusively through the latchkey
+>   gateway's bundled `minds-api-proxy` extension at
+>   `$LATCHKEY_GATEWAY/minds-api-proxy/api/v1/...`. The extension
+>   injects the central key as `Authorization: Bearer <key>` on every
+>   forwarded request; agents themselves never see the key.
+> * The per-agent `minds_api_url` file convention is gone, as is the
+>   reverse-SSH-tunnel setup that wrote it.
+> * Per-agent identity for routes that need it now lives in the URL
+>   path (`/api/v1/agents/<agent_id>/...`). The latchkey gateway's
+>   per-host permissions file constrains which `agent_id` values a
+>   given caller can address: agent creation installs an inline
+>   schema + rule that pins the path pattern to the new agent's id.
+>
+> See [latchkey-permissions.md](../../apps/minds/docs/latchkey-permissions.md)
+> ("Minds API access through the gateway") for the current model.
+
 ## Overview
 
 * The minds desktop client currently exposes features through a mix of HTML page routes and ad-hoc JSON endpoints in `desktop_client/app.py`. There is no structured, versioned API that agents or external tools can program against.

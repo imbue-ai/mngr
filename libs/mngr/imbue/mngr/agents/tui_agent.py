@@ -39,10 +39,10 @@ class InteractiveTuiAgent(BaseAgent[AgentConfigT]):
       reappears after submission), or ``send_enter_best_effort`` (for agents
       with no reliable confirmation surface).
 
-    Interactive coding TUIs (Claude Code, Gemini CLI, pi) have complex input
-    handlers that can misinterpret Enter as a literal newline when it arrives
-    too quickly after the message text, so ``send_message`` waits for the
-    paste to render in the pane before invoking ``_send_enter_and_validate``.
+    Interactive coding TUIs (Claude Code, Antigravity CLI, pi) have complex
+    input handlers that can misinterpret Enter as a literal newline when it
+    arrives too quickly after the message text, so ``send_message`` waits for
+    the paste to render in the pane before invoking ``_send_enter_and_validate``.
     """
 
     TUI_READY_INDICATOR: ClassVar[str]
