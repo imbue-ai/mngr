@@ -345,7 +345,7 @@ PORT=$(/opt/homebrew/bin/limactl list --format '{{.SSHLocalPort}}' "$VM_NAME")
 limactl shell "$VM_NAME" -- ss -ltnp 2>/dev/null | grep -E ':8000|:8080|:7681'
 
 # What's tmux running?
-limactl shell "$VM_NAME" -- tmux list-windows -t "$VM_NAME#${VM_NAME#minds-}" \
+limactl shell "$VM_NAME" -- tmux list-windows -t "=$VM_NAME#${VM_NAME#minds-}" \
   -F '#{window_index} #{window_name} #{pane_current_command}'
 # Look for: svc-web, svc-cloudflared, svc-app-watcher (services should be running, not bash)
 

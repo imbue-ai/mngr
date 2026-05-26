@@ -41,7 +41,7 @@ for vm in $(limactl list -q); do
     'python3 scripts/forward_port.py --url http://localhost:8000 --name system_interface 2>/dev/null || true' \
     'exec minds-workspace-server' \
     > /tmp/restart_si.sh && chmod +x /tmp/restart_si.sh"
-  limactl shell --workdir /code "$vm" -- tmux new-window -t "$SESS" -n svc-system_interface "bash /tmp/restart_si.sh"
+  limactl shell --workdir /code "$vm" -- tmux new-window -t "=$SESS" -n svc-system_interface "bash /tmp/restart_si.sh"
 done
 echo
 echo "Done. Reload the chat tab in minds.app -- workspace_server should bind within ~5s."
