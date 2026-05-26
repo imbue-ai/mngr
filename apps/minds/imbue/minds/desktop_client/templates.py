@@ -172,7 +172,7 @@ def render_create_form(
     Both default to ``IMBUE_CLOUD`` when an account is selected; without
     an account the AI provider drops to ``SUBSCRIPTION`` and the compute
     provider defaults to ``LIMA`` (a real VM, the recommended local
-    sandbox) rather than ``LOCAL`` (bare Docker, which requires a running
+    sandbox) rather than ``DOCKER`` (bare Docker, which requires a running
     Docker daemon and is the more error-prone path).
 
     ``host_name`` is the value of the form's "Name" field; it drives the
@@ -238,7 +238,7 @@ _STATUS_TEXT_IMBUE_CLOUD: Final[dict[str, str]] = {
 def status_text_for(
     status: str,
     error: str | None = None,
-    launch_mode: LaunchMode = LaunchMode.LOCAL,
+    launch_mode: LaunchMode = LaunchMode.DOCKER,
 ) -> str:
     """Resolve the UI caption for an ``AgentCreationStatus`` value.
 

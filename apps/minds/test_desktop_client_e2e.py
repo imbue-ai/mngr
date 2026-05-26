@@ -501,9 +501,9 @@ def test_create_local_docker_workspace_via_electron(
                     _ensure_field_value(page, "#git_url", str(fct_path))
                     # The create form defaults to the LIMA compute provider;
                     # this job's runner has Docker but not limactl, so select
-                    # LOCAL (Docker) explicitly. The ai_provider select is
-                    # left at its SUBSCRIPTION default.
-                    page.select_option("#launch_mode", "LOCAL")
+                    # DOCKER explicitly. The ai_provider select is left at
+                    # its SUBSCRIPTION default.
+                    page.select_option("#launch_mode", "DOCKER")
 
                     logger.info("Submitting create form")
                     page.click("#create-submit")

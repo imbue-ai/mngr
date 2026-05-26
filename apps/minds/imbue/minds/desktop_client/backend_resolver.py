@@ -14,13 +14,13 @@ from pydantic import PrivateAttr
 
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
-from imbue.minds.desktop_client.ssh_tunnel import RemoteSSHInfo
 from imbue.minds.primitives import ServiceName
 from imbue.mngr.api.discovery_events import DiscoveredProvider
 from imbue.mngr.api.discovery_events import DiscoveryError
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr_forward.ssh_tunnel import RemoteSSHInfo
 
 SERVICES_EVENT_SOURCE_NAME: Final[str] = "services"
 REQUESTS_EVENT_SOURCE_NAME: Final[str] = "requests"
@@ -402,6 +402,18 @@ class MngrCliBackendResolver(BackendResolverInterface):
     def list_known_agent_ids(self) -> tuple[AgentId, ...]:
         with self._lock:
             return self._agents_result.agent_ids
+
+    def list_discovered_agents(self) -> tuple[DiscoveredAgent, ...]:
+        """Return the full ``DiscoveredAgent`` records from the latest discovery snapshot.
+
+        Unlike :meth:`list_known_agent_ids`, this exposes the typed
+        ``host_id`` / ``agent_name`` / ``labels`` alongside each id so
+        callers that need to act on agent-host pairs (e.g. the latchkey
+        auto-register callback) do not have to do N+1 lookups via
+        :meth:`get_agent_display_info` and re-parse stringified ids.
+        """
+        with self._lock:
+            return self._agents_result.discovered_agents
 
     def list_known_workspace_ids(self) -> tuple[AgentId, ...]:
         """Return agent IDs that are primary workspace agents.

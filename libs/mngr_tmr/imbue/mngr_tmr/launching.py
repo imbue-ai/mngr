@@ -375,7 +375,13 @@ def launch_all_test_agents(
 
     launch_config = config
     if use_snapshot:
-        provider = get_provider_instance(config.provider_name, mngr_ctx)
+        # Pass is_for_host_creation=True so a backend with one-time bootstrap
+        # (Modal's per-user environment) creates that resource here. The
+        # snapshotter and every test agent that follows is a host creation,
+        # so this is the moment to allow bootstrap; without it, --use-snapshot
+        # against a fresh Modal account aborts with ProviderEmptyError before
+        # any host is created.
+        provider = get_provider_instance(config.provider_name, mngr_ctx, is_for_host_creation=True)
         if provider.supports_snapshots:
             try:
                 snapshot_name = _create_snapshot_host(config, mngr_ctx, run_name)
