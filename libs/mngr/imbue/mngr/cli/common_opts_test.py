@@ -10,6 +10,7 @@ from click.core import ParameterSource
 from click.testing import CliRunner
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.mngr.cli.common_opts import _apply_template_extend
 from imbue.mngr.cli.common_opts import _process_template_escapes
 from imbue.mngr.cli.common_opts import _run_pre_command_scripts
 from imbue.mngr.cli.common_opts import _run_single_script
@@ -838,25 +839,22 @@ def test_apply_create_template_scalar_overrides_default_param(mngr_test_prefix: 
     assert result["type"] == "codex"
 
 
-def test_apply_create_template_dict_extend_appends_keys(mngr_test_prefix: str) -> None:
-    """``key__extend = {...}`` on a dict-typed option shallow-merges keys, with the
-    extend value's keys winning on collision (matches the resolver's dict semantics)."""
-    ctx = _make_click_context(
-        params={
-            "template": ("dev",),
-            # Click presents repeated --label k=v as a tuple of "k=v" strings, but
-            # some options are genuine dicts; emulate the dict case directly.
-            "host_label": {"a": "1"},
-        },
+def test_apply_template_extend_dict_shallow_merges_keys() -> None:
+    """``key__extend = {...}`` on a dict-typed value shallow-merges keys, with the
+    extend value's keys winning on collision (matches the resolver's dict semantics).
+
+    No CreateCliOptions field is dict-typed today, so this exercises
+    ``_apply_template_extend`` directly: the helper is shared with the rest of
+    the merge story and must stay shape-correct for the dict branch in case a
+    future option uses one.
+    """
+    result = _apply_template_extend(
+        {"a": "1"},
+        {"b": "2"},
+        template_name="dev",
+        param_name="example_dict_field",
     )
-    config = MngrConfig(
-        prefix=mngr_test_prefix,
-        create_templates={
-            CreateTemplateName("dev"): CreateTemplate(options={"host_label__extend": {"b": "2"}}),
-        },
-    )
-    result = apply_create_template(ctx, ctx.params.copy(), config)
-    assert result["host_label"] == {"a": "1", "b": "2"}
+    assert result == {"a": "1", "b": "2"}
 
 
 # =============================================================================
