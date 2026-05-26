@@ -415,9 +415,11 @@ The file at `electron/pyproject.toml` is separate from the monorepo's `apps/mind
 [project]
 name = "minds-desktop"
 version = "0.1.0"
-requires-python = ">=3.12"
+requires-python = "==3.12.13"
 dependencies = [
-    "imbue-minds>=0.1.0",
+    "minds>=0.1.0",
+    "imbue-mngr-claude>=0.2.0",
+    "imbue-mngr-modal>=0.2.0",
 ]
 ```
 
