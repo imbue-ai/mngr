@@ -1,0 +1,1 @@
+- Tighten the `test_invalid_provider_fails` e2e test so the create call actually reaches provider resolution (the test previously passed because of a missing `--type`, masking what it claimed to verify), and assert that the failure cites the unknown provider backend.

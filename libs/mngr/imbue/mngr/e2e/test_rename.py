@@ -15,7 +15,7 @@ from imbue.skitwright.expect import expect
 @pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.modal
+@pytest.mark.timeout(120)
 def test_create_and_rename_agent(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
     # "rename" is an experimental command. See "mngr rename --help" for current usage.

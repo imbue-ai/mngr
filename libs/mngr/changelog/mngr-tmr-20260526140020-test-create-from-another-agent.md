@@ -1,0 +1,3 @@
+- e2e: extend `test_create_from_another_agent` timeout to 120s so it can complete its two `mngr create` calls under the default 10s per-test timeout.
+- e2e: drop `@pytest.mark.modal` from `test_create_from_another_agent`; the test creates two local agents and never invokes the modal CLI or Python SDK in the test process, so the mark was triggering a NEVER_INVOKED resource-guard violation locally.
+- e2e: also write a marker file in the source agent's work dir and assert the cloned agent contains it, so the test now verifies that `--from <agent>` actually copies the source agent's working-directory contents.

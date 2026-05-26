@@ -1,0 +1,1 @@
+Remove incorrect `@pytest.mark.modal` from `test_create_with_transfer_none`: the test runs the agent in-place locally and never invokes Modal, so the resource guard correctly flagged the marker as a violation.

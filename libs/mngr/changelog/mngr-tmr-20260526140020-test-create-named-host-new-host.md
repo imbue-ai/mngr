@@ -1,0 +1,2 @@
+- Fix `test_create_named_host_new_host` e2e test by passing `--type claude` explicitly. After the source-coded default agent type was removed, `mngr create` requires an explicit `--type` or a configured default; the e2e fixture provides neither.
+- Improve `test_create_named_host_new_host` to verify the agent's host actually has the name and provider derived from the `name@host.provider` address syntax via `mngr list --format json`.

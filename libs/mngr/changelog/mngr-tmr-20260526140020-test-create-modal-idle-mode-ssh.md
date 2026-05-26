@@ -1,0 +1,1 @@
+- Fix `test_create_modal_idle_mode_ssh` (release): pass `--type command -- sleep ...` so the test no longer relies on an implicit default agent type (which was removed in PR #1581) and runs cleanly against a fresh e2e environment.

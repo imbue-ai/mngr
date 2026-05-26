@@ -1,0 +1,1 @@
+Fix `test_create_with_dirty_tree_fails` e2e test: add explicit timeout marker (mngr startup exceeds the default 10s pytest timeout) and make the test actually verify the dirty-tree error by passing `--type command --no-connect` and asserting on the error message.

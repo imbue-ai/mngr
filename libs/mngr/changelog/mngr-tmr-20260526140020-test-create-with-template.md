@@ -1,0 +1,1 @@
+Fix `test_create_with_template` e2e test: add `@pytest.mark.timeout(60)` so the test does not exceed the default 10s timeout, and remove the incorrect `@pytest.mark.modal` mark (the template-driven local-provider flow does not invoke Modal during the call phase).

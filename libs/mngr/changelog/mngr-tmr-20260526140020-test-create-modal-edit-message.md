@@ -1,0 +1,1 @@
+Fix the `test_create_modal_edit_message` e2e test: specify `--type command` so the test no longer relies on a default agent type being configured, and set `EDITOR=true` so `--edit-message` doesn't try to launch `vim` (which isn't available in the test environment).

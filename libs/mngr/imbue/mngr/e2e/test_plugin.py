@@ -9,11 +9,17 @@ from imbue.skitwright.expect import expect
 
 
 @pytest.mark.release
+@pytest.mark.timeout(60)
 def test_plugin_list_shows_installed(e2e: E2eSession) -> None:
     result = e2e.run("mngr plugin list", comment="List all installed plugins")
     expect(result).to_succeed()
-    # The dev environment always has the claude plugin registered
-    expect(result.stdout).to_contain("claude")
+    # Verify the table has the expected column headers (confirms structured output).
+    expect(result.stdout).to_contain("NAME")
+    expect(result.stdout).to_contain("ENABLED")
+    # The dev environment always has the claude plugin registered and enabled.
+    # Match "claude" as the leftmost column of a row that ends with "true",
+    # confirming it appears as a plugin entry and not just inside a description.
+    expect(result.stdout).to_match(r"(?m)^\s*claude\s+\S+.*\btrue\s*$")
 
 
 @pytest.mark.release
@@ -56,6 +62,7 @@ def test_plugin_disable_enable_roundtrip(e2e: E2eSession) -> None:
 
 
 @pytest.mark.release
+@pytest.mark.timeout(60)
 def test_plugin_disable_affects_create(e2e: E2eSession) -> None:
     # Disable the claude plugin so its agent type should be unavailable
     expect(e2e.run("mngr plugin disable claude", comment="Disable claude plugin")).to_succeed()
@@ -66,6 +73,15 @@ def test_plugin_disable_affects_create(e2e: E2eSession) -> None:
         comment="Attempt to create claude agent with plugin disabled",
     )
     expect(create_result).to_fail()
+    # Verify the failure is *because* the plugin is disabled, not for some other
+    # reason (e.g. unknown agent type or unrelated startup error). The error
+    # message should name the plugin and how to re-enable it.
+    combined_output = create_result.stdout + create_result.stderr
+    assert "claude" in combined_output and "disabled" in combined_output, (
+        f"Expected error mentioning disabled claude plugin, got:\n"
+        f"  stdout: {create_result.stdout!r}\n"
+        f"  stderr: {create_result.stderr!r}"
+    )
 
     # Re-enable so teardown can clean up normally
     e2e.run("mngr plugin enable claude", comment="Re-enable claude for cleanup")
