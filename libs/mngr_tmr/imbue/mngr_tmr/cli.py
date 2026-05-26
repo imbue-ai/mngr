@@ -247,9 +247,7 @@ def _run_reintegrate(
     # Discover agents from the previous run by label
     list_result = try_list_agents(mngr_ctx)
     if list_result is None:
-        if is_human:
-            write_human_line("Failed to list agents. Nothing to reintegrate.")
-        return
+        raise MngrError("Failed to list agents. Cannot reintegrate.")
     matching_agents = [
         detail
         for detail in list_result.agents
@@ -260,9 +258,7 @@ def _run_reintegrate(
         write_human_line("Found {} agent(s) from run {}", len(matching_agents), run_name)
 
     if not matching_agents:
-        if is_human:
-            write_human_line("No agents found for run name '{}'. Nothing to reintegrate.", run_name)
-        return
+        raise click.UsageError(f"No agents found for run name {run_name!r}. Nothing to reintegrate.")
 
     # Get local host (needed by the integrator config built later).
     source_host = get_local_host(mngr_ctx)
@@ -574,6 +570,25 @@ def _run_integrator_phase(
 @add_common_options
 @click.pass_context
 def tmr(ctx: click.Context, **kwargs: object) -> None:
+    try:
+        _tmr_body(ctx)
+    except click.UsageError as exc:
+        # click.UsageError exits 2 by default; convert to a plain ClickException
+        # with exit_code=1 so the tmr convention (1=usage, 2=everything else)
+        # is preserved.
+        wrapped = click.ClickException(exc.format_message())
+        wrapped.exit_code = 1
+        raise wrapped from exc
+    except click.ClickException as exc:
+        # MngrError (and other ClickException subclasses) default to exit 1.
+        # Promote to exit 2 per the tmr convention.
+        exc.exit_code = 2
+        raise
+
+
+def _tmr_body(ctx: click.Context) -> None:
+    """Run the tmr command body. Wrapped by ``tmr`` so exit codes follow the
+    1=usage / 2=other convention regardless of which layer raised."""
     mngr_ctx, output_opts, opts = setup_command_context(
         ctx=ctx,
         command_name="tmr",
@@ -775,6 +790,16 @@ def _run_tmr_pipeline(
     _emit_integrator_branch(integrated_branch, output_opts)
 
     _print_run_commands(run, output_opts, integrated_branch)
+
+    # If no test agent ever launched successfully, surface a non-zero exit so
+    # callers (especially CI) don't read the run as successful. The HTML
+    # report (already written above) still contains the per-agent error
+    # summaries needed to diagnose the launch failures.
+    if test_node_ids and not agent_infos:
+        raise MngrError(
+            f"All {len(launch_failures)} test agent launches failed; "
+            "see the HTML report for per-agent error summaries."
+        )
 
 
 def _build_run_commands(run_name: str, integrated_branch: str | None = None) -> list[tuple[str, str]]:
