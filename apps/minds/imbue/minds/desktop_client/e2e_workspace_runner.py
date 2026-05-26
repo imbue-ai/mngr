@@ -188,20 +188,18 @@ def resolve_fct_path(scratch_dir: Path) -> Path:
     return _shallow_clone_fct(_FCT_FALLBACK_BRANCH, destination)
 
 
-def _set_os_environ(name: str, value: str) -> None:
-    """Default setter for :func:`ensure_minds_env_defaults` -- writes to ``os.environ``."""
-    os.environ[name] = value
-
-
-def ensure_minds_env_defaults(setenv: Callable[[str, str], None] = _set_os_environ) -> None:
+def ensure_minds_env_defaults(setenv: Callable[[str, str], None]) -> None:
     """Set ``MINDS_ROOT_NAME`` / ``MINDS_CLIENT_CONFIG_PATH`` if unset.
 
-    With the default ``setenv``, this is a process-global ``os.environ``
-    mutation -- meant for the snapshot script, which runs in a throwaway
-    sandbox and doesn't care about env-var hygiene. The pytest wrapper
-    in ``apps/minds/test_desktop_client_e2e.py`` passes
-    ``monkeypatch.setenv`` so the env vars get reverted between tests
-    without duplicating the validation / logging logic.
+    Callers must supply the mutation strategy via ``setenv`` -- the
+    repo style guide forbids mutating ``os.environ`` of the current
+    process, so this library never picks the strategy on the caller's
+    behalf. The pytest wrapper in
+    ``apps/minds/test_desktop_client_e2e.py`` passes
+    ``monkeypatch.setenv`` so the env vars get reverted between tests;
+    the snapshot script (which runs in a throwaway sandbox) passes a
+    setter that writes to ``os.environ`` directly. Both options share
+    the validation / logging logic below.
     """
     if os.environ.get("MINDS_ROOT_NAME"):
         logger.info("Using inherited MINDS_ROOT_NAME={}", os.environ["MINDS_ROOT_NAME"])

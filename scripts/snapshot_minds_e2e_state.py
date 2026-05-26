@@ -78,6 +78,7 @@ _CLAUDE_CODE_VERSION: Final[str] = "2.1.141"
 #   we need.
 _IN_SANDBOX_RUNNER_PROGRAM: Final[str] = textwrap.dedent(
     """
+    import os
     import tempfile
     from pathlib import Path
 
@@ -91,7 +92,13 @@ _IN_SANDBOX_RUNNER_PROGRAM: Final[str] = textwrap.dedent(
     from imbue.mngr.utils.testing import get_short_random_string
 
     configure_logging()
-    ensure_minds_env_defaults()
+    # Explicit os.environ-mutating setter -- this is a throwaway sandbox so
+    # process-global env mutation is fine here. The runner intentionally
+    # refuses to default to this so the test path (which uses monkeypatch)
+    # can't accidentally leak env vars across tests.
+    def _write_to_os_environ(name, value):
+        os.environ[name] = value
+    ensure_minds_env_defaults(setenv=_write_to_os_environ)
     with tempfile.TemporaryDirectory(prefix="snapshot-fct-") as scratch:
         fct_path = resolve_fct_path(Path(scratch))
         workspace_name = f"forever-{get_short_random_string()}"
