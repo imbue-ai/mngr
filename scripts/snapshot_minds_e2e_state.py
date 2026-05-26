@@ -179,9 +179,11 @@ def _build_snapshot_image() -> modal.Image:
         )
         # Mount the local mngr checkout, then bake `uv sync` + pnpm install
         # into the image so the sandbox boots ready to run the e2e test.
-        # `.git` is included so the test's `_current_mngr_branch()` helper
-        # works; `.venv` / `node_modules` / `test-results` are excluded
-        # because we'll regenerate them inside the image.
+        # `.git` is included so the runner's `current_mngr_branch()` helper
+        # (used by `resolve_fct_path` to pick an FCT branch matching the
+        # current mngr branch) works; `.venv` / `node_modules` /
+        # `test-results` are excluded because we'll regenerate them inside
+        # the image.
         .add_local_dir(
             str(_REPO_ROOT),
             "/code/mngr",
