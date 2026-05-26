@@ -96,7 +96,7 @@ _IN_SANDBOX_RUNNER_PROGRAM: Final[str] = textwrap.dedent(
     # process-global env mutation is fine here. The runner intentionally
     # refuses to default to this so the test path (which uses monkeypatch)
     # can't accidentally leak env vars across tests.
-    def _write_to_os_environ(name, value):
+    def _write_to_os_environ(name: str, value: str) -> None:
         os.environ[name] = value
     ensure_minds_env_defaults(setenv=_write_to_os_environ)
     with tempfile.TemporaryDirectory(prefix="snapshot-fct-") as scratch:
