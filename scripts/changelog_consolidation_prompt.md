@@ -61,10 +61,29 @@ the right project's consolidated files.
 
    The allowed categories are exactly: `Added`, `Changed`, `Deprecated`,
    `Removed`, `Fixed`, `Security`. Use `Changed` as the catch-all for
-   internal refactors, doc edits, or test-only tweaks that don't fit
-   the other categories. One change → one bullet; merge near-duplicate
-   bullets across dates (within the same project) if they describe the
-   same user-visible effect.
+   internal refactors or doc edits that don't fit the other categories.
+   Merge near-duplicate bullets (within the same project) if they
+   describe the same user-visible effect.
+
+   `CHANGELOG.md` is a notable-only summary: if a change isn't notable,
+   omit it from `CHANGELOG.md` entirely rather than forcing a bullet for
+   it. The canonical example is a change that only affects tests rather
+   than user-facing behavior — skip it. For a library project, public
+   API changes count as user-facing: they affect consumers even when
+   end-user behavior is unchanged. Major internal refactors are
+   in scope too, even when in theory they leave the public surface and
+   end-user behavior unchanged: in practice a large restructuring can
+   introduce regressions, and a reader scanning the changelog to work out
+   what might have caused a problem should be able to see it. Only minor
+   or obviously no-op refactors may be omitted. If none of a project's
+   entries are notable, it is fine to produce no `CHANGELOG.md` bullets
+   for it at all.
+
+   Exception for the `dev` project: its audience is the repo's own
+   developers, so judge `dev` entries by developer/maintainer impact — a
+   CI, build, release, or tooling change that affects how the repo is
+   built, tested, or released is notable even though it isn't
+   end-user-facing.
 
 4. For each project that had at least one `SECTION` line: open that
    project's `CHANGELOG.md` (resolve `<project_dir>` as in step 2).

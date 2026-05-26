@@ -24,13 +24,10 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Changed: `LatchkeyGatewayClient.get_available_services` now returns a typed `dict[str, AvailableServiceEntry]` (pydantic-validated) instead of an untyped `dict[str, object]`.
 - Changed: Stop caching the latchkey per-directory encryption key on the long-lived `Latchkey` pydantic model; `Latchkey._load_encryption_key()` reads (and on first call mints) the key on every subprocess-spawn call so the secret only lives in parent memory for the duration of one env-builder call frame.
 - Changed: `load_or_create_encryption_key` now validates the on-disk key file's permission bits every load; any group/other access raises `LatchkeyEncryptionKeyPermissionError` with a `chmod 600 <path>` hint.
-- Changed: Regenerated CLI docs for `mngr latchkey`.
-- Changed: Adopted the new per-project changelog layout.
 
 ### Fixed
 
 - Fixed: Race condition in per-directory encryption-key resolution where a concurrent caller could read the on-disk key file mid-write; the file is now published atomically via temp file + `fsync` + `os.link` so the final path only ever exists with complete contents.
-- Fixed: `UNABRIDGED_CHANGELOG.md` intro now references the correct entries directory.
 - Fixed: `POST /permission-requests/approve/<id>` no longer replaces a symlinked `permissions.json` target with a regular file. The atomic-write helper now `lstat`s the target and resolves symlinks via `realpath` before the temp-file rename, so per-agent symlinks (e.g. those swung in by `mngr latchkey link-permissions`) stay intact and shared canonical permissions remain in sync.
 
 ## [v0.2.8] - 2026-05-13

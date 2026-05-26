@@ -18,7 +18,6 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 ### Fixed
 
 - Fixed: Cloned claude agent now actually resumes the source agent's conversation — `_adopt_cloned_session` renames the project subdir to the destination's realpath-resolved encoding, drops the stale `sessions-index.json`, writes the real `claude_session_id`, and carries forward `claude_session_id_history`.
-- Fixed: `UNABRIDGED_CHANGELOG.md` intro now references the correct entries directory (`<project_dir>/changelog/`).
 
 ## [v0.2.7] - 2026-05-11
 
