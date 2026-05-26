@@ -371,7 +371,7 @@ def _create_new_host(
     return new_host
 
 
-def _bootstrap_backend_for_host_creation(
+def bootstrap_backend_for_host_creation(
     provider_name: ProviderInstanceName,
     mngr_ctx: MngrContext,
 ) -> None:
@@ -397,7 +397,7 @@ def resolve_target_host(
         # like ``mngr list`` build the provider directly via
         # ``get_provider_instance`` and skip the provider on ProviderEmptyError
         # instead of bootstrapping silently behind the user's back.
-        _bootstrap_backend_for_host_creation(target_host.provider, mngr_ctx)
+        bootstrap_backend_for_host_creation(target_host.provider, mngr_ctx)
         provider = get_provider_instance(target_host.provider, mngr_ctx)
         is_auto_named = target_host.name is None
         host_name = target_host.name
