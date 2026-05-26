@@ -18,7 +18,7 @@
     "latchkey": "^2.11.3"
   },
   "devDependencies": {
-    "electron": "35.7.5",
+    "electron": "42.2.0",
     "@todesktop/cli": "^1.8.0"
   },
   "engines": {
