@@ -328,7 +328,7 @@ _IS_TRANSPORT_LOG_PATCHED: dict[str, bool] = {"patched": False}
 
 def _apply_paramiko_transport_log_patch() -> None:
     if not _IS_TRANSPORT_LOG_PATCHED["patched"]:
-        paramiko.transport.Transport._log = cast(Any, _patched_transport_log)
+        paramiko.transport.Transport._log = cast(Any, _patched_transport_log)  # ty: ignore[unresolved-attribute]
         _IS_TRANSPORT_LOG_PATCHED["patched"] = True
 
 

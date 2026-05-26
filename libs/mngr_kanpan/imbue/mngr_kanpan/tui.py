@@ -465,7 +465,10 @@ def _update_row_mark(state: _KanpanState, walker_idx: int, mark_key: str | None)
         name_markup = _flatten_markup_to_attr(name_markup, "muted")
     attr_map_widget = state.list_walker[walker_idx]
     row: _SelectableRow = attr_map_widget.original_widget
-    name_text: Text = row.contents[0][0]
+    # The first column of a row built by `_build_agent_row` is always the name
+    # cell, which is a `Text` (or `_HyperlinkText` subclass); urwid types
+    # `.contents` only as `Widget`, so this downcast is safe by construction.
+    name_text: Text = row.contents[0][0]  # ty: ignore[invalid-assignment]
     name_text.set_text(name_markup)
 
 
@@ -651,7 +654,7 @@ def _submit_batch_item(
     if isinstance(item.cmd, ActionBuiltinCommand):
         # Non-markable builtins never reach batch dispatch.
         return None
-    if item.cmd.command:
+    if isinstance(item.cmd, CustomCommand) and item.cmd.command:
         return executor.submit(_run_shell_command_sync, item.cmd.command, str(item.name))
     return None
 
