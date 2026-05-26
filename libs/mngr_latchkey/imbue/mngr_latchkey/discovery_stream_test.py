@@ -34,8 +34,8 @@ from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import SSHInfo
+from imbue.mngr_forward.ssh_tunnel import RemoteSSHInfo
 from imbue.mngr_latchkey.discovery_stream import DiscoveryStreamConsumer
-from imbue.mngr_latchkey.ssh_tunnel import RemoteSSHInfo
 
 _PROVIDER_NAME: ProviderInstanceName = ProviderInstanceName("local")
 

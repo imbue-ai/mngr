@@ -236,6 +236,9 @@ def fake_minds_api() -> Generator[tuple[ThreadingHTTPServer, _FakeMindsApiState,
         thread.join(timeout=5.0)
 
 
+_INJECTED_API_KEY: Final[str] = "central-api-key-fixture-value"
+
+
 @pytest.fixture
 def node_proxy(
     fake_minds_api: tuple[ThreadingHTTPServer, _FakeMindsApiState, str],
@@ -250,6 +253,45 @@ def node_proxy(
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         env={"LATCHKEY_EXTENSION_MINDS_API_URL": upstream_base_url, "PATH": "/usr/bin:/bin"},
+        text=True,
+    )
+    try:
+        port = _wait_for_node_port(process)
+        proxy_url = f"http://127.0.0.1:{port}"
+        yield proxy_url, state
+    finally:
+        process.terminate()
+        try:
+            process.wait(timeout=5.0)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=5.0)
+
+
+@pytest.fixture
+def node_proxy_with_api_key(
+    fake_minds_api: tuple[ThreadingHTTPServer, _FakeMindsApiState, str],
+) -> Generator[tuple[str, _FakeMindsApiState], None, None]:
+    """Like ``node_proxy`` but with ``LATCHKEY_EXTENSION_MINDS_API_KEY`` set.
+
+    Used by the tests that pin the proxy's ``Authorization`` header
+    overwrite behaviour. The fixture spins up its own child so the
+    base ``node_proxy`` test set keeps running with the env var unset
+    (which is its own pinned behaviour: pass-through Authorization).
+    """
+    _server, state, upstream_base_url = fake_minds_api
+    assert _NODE_BINARY is not None
+    script = _build_node_driver_script()
+    process = subprocess.Popen(
+        [_NODE_BINARY, "--input-type=module", "-e", script],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env={
+            "LATCHKEY_EXTENSION_MINDS_API_URL": upstream_base_url,
+            "LATCHKEY_EXTENSION_MINDS_API_KEY": _INJECTED_API_KEY,
+            "PATH": "/usr/bin:/bin",
+        },
         text=True,
     )
     try:
@@ -334,6 +376,59 @@ def test_proxy_forwards_post_body_and_method(
     assert recorded.body == payload
     assert recorded.headers.get("Content-Type") == "application/json"
     assert recorded.headers.get("X-Custom") == "value"
+
+
+def test_proxy_injects_authorization_bearer_when_api_key_env_set(
+    node_proxy_with_api_key: tuple[str, _FakeMindsApiState],
+) -> None:
+    """With the env var set, the proxy injects the central key as a Bearer token."""
+    proxy_url, state = node_proxy_with_api_key
+    state.next_response = _StagedResponse(status=200, headers={}, body=b"ok")
+    _http_request(f"{proxy_url}/minds-api-proxy/api/v1/agents/abc/notifications", method="POST")
+    assert len(state.received) == 1
+    received = state.received[0]
+    normalized = {k.lower(): v for k, v in received.headers.items()}
+    assert normalized.get("authorization") == f"Bearer {_INJECTED_API_KEY}"
+
+
+def test_proxy_overwrites_inbound_authorization_when_api_key_env_set(
+    node_proxy_with_api_key: tuple[str, _FakeMindsApiState],
+) -> None:
+    """An agent-supplied ``Authorization`` value must never reach the upstream."""
+    proxy_url, state = node_proxy_with_api_key
+    state.next_response = _StagedResponse(status=200, headers={}, body=b"ok")
+    _http_request(
+        f"{proxy_url}/minds-api-proxy/api/v1/agents/abc/notifications",
+        method="POST",
+        headers={"Authorization": "Bearer attacker-supplied-token"},
+    )
+    assert len(state.received) == 1
+    received = state.received[0]
+    normalized = {k.lower(): v for k, v in received.headers.items()}
+    assert normalized.get("authorization") == f"Bearer {_INJECTED_API_KEY}"
+    assert "attacker-supplied-token" not in normalized.get("authorization", "")
+
+
+def test_proxy_passes_authorization_through_when_api_key_env_unset(
+    node_proxy: tuple[str, _FakeMindsApiState],
+) -> None:
+    """Without the env var, the proxy must not synthesize an Authorization header.
+
+    Tests / fixtures that don't bother stubbing the central key still
+    need pass-through semantics so the upstream sees whatever the
+    caller actually sent (it will likely 401, but the proxy must not
+    paper over that).
+    """
+    proxy_url, state = node_proxy
+    state.next_response = _StagedResponse(status=401, headers={}, body=b"unauth")
+    _http_request(
+        f"{proxy_url}/minds-api-proxy/api/v1/agents/abc/notifications",
+        method="POST",
+        headers={"Authorization": "Bearer original-value"},
+    )
+    assert len(state.received) == 1
+    normalized = {k.lower(): v for k, v in state.received[0].headers.items()}
+    assert normalized.get("authorization") == "Bearer original-value"
 
 
 def test_proxy_strips_gateway_internal_headers_before_forwarding(

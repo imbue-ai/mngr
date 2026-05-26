@@ -36,12 +36,12 @@ from imbue.concurrency_group.concurrency_group import InvalidConcurrencyGroupSta
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr.primitives import AgentId
+from imbue.mngr_forward.ssh_tunnel import RemoteSSHInfo
+from imbue.mngr_forward.ssh_tunnel import SSHTunnelError
+from imbue.mngr_forward.ssh_tunnel import SSHTunnelManager
 from imbue.mngr_latchkey.core import AGENT_SIDE_LATCHKEY_PORT
 from imbue.mngr_latchkey.core import Latchkey
 from imbue.mngr_latchkey.core import LatchkeyError
-from imbue.mngr_latchkey.ssh_tunnel import RemoteSSHInfo
-from imbue.mngr_latchkey.ssh_tunnel import SSHTunnelError
-from imbue.mngr_latchkey.ssh_tunnel import SSHTunnelManager
 
 
 class LatchkeyDiscoveryHandler(MutableModel):
