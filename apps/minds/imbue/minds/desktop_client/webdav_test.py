@@ -7,26 +7,23 @@ from starlette.testclient import TestClient
 
 from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client.api_key_store import generate_api_key
-from imbue.minds.desktop_client.api_key_store import hash_api_key
-from imbue.minds.desktop_client.api_key_store import save_api_key_hash
 from imbue.minds.desktop_client.app import create_desktop_client
 from imbue.minds.desktop_client.auth import FileAuthStore
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
-from imbue.mngr.primitives import AgentId
 
 
 def _build_authenticated_client(tmp_path: Path) -> tuple[TestClient, str]:
-    """Build a TestClient + a valid Bearer API key for the WebDAV mount."""
+    """Build a TestClient + the central minds API key it expects."""
     paths = WorkspacePaths(data_dir=tmp_path / "minds")
     auth_store = FileAuthStore(data_directory=paths.auth_dir)
     api_key = generate_api_key()
-    save_api_key_hash(paths.data_dir, AgentId(), hash_api_key(api_key))
     backend_resolver = StaticBackendResolver(url_by_agent_and_service={})
     app = create_desktop_client(
         auth_store=auth_store,
         backend_resolver=backend_resolver,
         http_client=None,
         paths=paths,
+        minds_api_key=api_key,
     )
     return TestClient(app, base_url="http://localhost"), api_key
 
