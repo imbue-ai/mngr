@@ -40,6 +40,7 @@ would re-derive on every run.
 """
 
 import argparse
+import os
 import shlex
 import sys
 import textwrap
@@ -47,9 +48,18 @@ import time
 from pathlib import Path
 from typing import Final
 
-import modal
-import modal.exception
-from modal.stream_type import StreamType
+# Modal's vm_runtime experimental option requires the function runtime
+# config to be 'gvisor' (otherwise SandboxCreate fails with
+# ``MODAL_FUNCTION_RUNTIME must be set to 'gvisor'``). The Modal SDK
+# reads this from MODAL_FUNCTION_RUNTIME at import time, so the setdefault
+# has to land BEFORE we ``import modal``. Set only if the operator hasn't
+# already set it; this stays scoped to this script's process and does not
+# affect the general mngr_modal provider.
+os.environ.setdefault("MODAL_FUNCTION_RUNTIME", "gvisor")
+
+import modal  # noqa: E402
+import modal.exception  # noqa: E402
+from modal.stream_type import StreamType  # noqa: E402
 
 _REPO_ROOT: Final[Path] = Path(__file__).resolve().parent.parent
 
