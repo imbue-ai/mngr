@@ -177,13 +177,7 @@ class PrInfo(FrozenModel):
 
 
 class FetchBoardResult(FrozenModel):
-    """Result of one ``fetch_board`` call.
-
-    ``prs`` is keyed by ``(repo_path, head_branch)``. Pairs we asked about
-    that had no matching PR are simply absent -- the caller emits a
-    'Create PR' link in that case. ``errors`` carries any GraphQL or
-    transport errors observed; an empty tuple means a clean fetch.
-    """
+    """Result of one ``fetch_board`` call."""
 
     prs: dict[tuple[str, str], PrInfo] = Field(description="Mapping from (repo_path, head_branch) to the matching PR.")
     errors: tuple[str, ...] = Field(default=(), description="Per-repo or top-level errors surfaced from gh / GraphQL.")
@@ -194,15 +188,7 @@ def fetch_board(
     repo_branches: Sequence[tuple[str, str]],
     unresolved_ignore_user: str | None = None,
 ) -> FetchBoardResult:
-    """Fetch every PR the kanpan board needs in one ``gh api graphql`` call.
-
-    Sends a single embedded ``search()`` query whose query string ORs over
-    every requested ``repo:`` and ``head:`` qualifier. That gives an atomic
-    snapshot of every (repo, branch) pair we care about with one HTTP
-    request -- no per-repo fan-out, no second-pass metadata fetch, no
-    shared HTTP cache to race on. See `_build_board_graphql` for the
-    query shape and rationale.
-    """
+    """Fetch every PR the kanpan board needs in one ``gh api graphql`` call."""
     if not repo_branches:
         return FetchBoardResult(prs={})
 
@@ -359,14 +345,7 @@ def _parse_pr_state(state_str: str) -> PrState:
 
 @pure
 def _parse_rollup_state(state: str | None) -> CiStatus:
-    """Map ``StatusCheckRollup.state`` (SUCCESS|PENDING|FAILURE) to ``CiStatus``.
-
-    GitHub aggregates per-check conclusions server-side into this enum. On
-    the open PRs I had handy this agreed with the previous per-context
-    aggregator in every case I tested; if a future divergence surprises us
-    we can resurrect the per-context iteration by re-adding
-    ``contexts(first: 100) {{ nodes {{ ... }} }}`` to the rollup field.
-    """
+    """Map ``StatusCheckRollup.state`` (SUCCESS|PENDING|FAILURE) to ``CiStatus``."""
     if state == "SUCCESS":
         return CiStatus.PASSING
     if state == "FAILURE":
