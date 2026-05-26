@@ -13,7 +13,6 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Added: File-sharing permission requests carry a required `access` field (`READ` / `WRITE`); the minds approval dialog renders a green "read-only" / amber "read & write" badge per file path.
 - Added: New providers panel on the landing page lists every configured provider with its status, last error, and an Enable/Disable button; the panel also shows time since the last discovery event.
 - Added: New `ci` env tier alongside `dev` / `staging` / `production`, mirroring dev's lifecycle and reading Vault secrets from `secrets/minds/ci/*`.
-- Added: Acceptance test `test_create_local_docker_workspace_via_electron` drives the real Electron minds app via Playwright over CDP.
 - Added: "Creating your project" page now updates its spinner caption as setup progresses; `AgentCreationStatus` gains `INITIALIZING` / `CLONING_REPO` / `CHECKING_OUT_BRANCH` / `PROVISIONING_AI` / `CREATING_WORKSPACE` / `WAITING_FOR_READY` / `DONE` / `FAILED`.
 - Added: Workspace-server restart and health-recovery UI on the `mngr_forward` plugin — when a workspace server stops responding, the chrome auto-navigates to a recovery page with SSE-streamed status updates and a Restart button; landing page rows show status badges.
 - Added: `minds env recover` command + per-env recover-target file; every deploy captures pre-deploy Modal app versions, takes a Neon snapshot, and writes the recover file atomically before touching external state.
@@ -29,9 +28,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Changed: `minds run` no longer dictates the `mngr forward` plugin's port — the `--mngr-forward-port` flag and `MINDS_MNGR_FORWARD_PORT` env var are removed; the plugin picks its own port and reports it back via its `listening` envelope.
 - Changed: Bumped bundled Latchkey version to 2.11.3.
 - Changed: Latchkey gateway's `permission-requests` extension grows a typed request schema (`{agent_id, rationale, type, payload}`) and a new `POST /permission-requests/approve/<id>` endpoint; pending requests live under `permission_requests/v2/`.
-- Changed: minds desktop client's latchkey-permission handlers now live in `imbue.minds.desktop_client.latchkey.handlers` as `.predefined` and `.file_sharing` siblings sharing a Jinja template + Tailwind base.
 - Changed: `MINDS_API_KEY` is now written to the workspace host's env file via `--host-env` (not the per-agent `--env`) so every agent on the host can authenticate against `/api/v1/...`.
-- Changed: `LatchkeyPermissionRequestEvent` renamed to `LatchkeyPredefinedPermissionRequestEvent` to mirror the wire `type=predefined`.
 - Changed: minds latchkey permission management now uses latchkey 2.9.0's `permission_requests` / `permissions` gateway extensions; permission requests stream via `GET /permission-requests?follow=true` and grants apply through `POST /permissions/rules`.
 - Changed: minds split the services agent from the initial chat agent — the primary agent runs only bootstrap/services and is hidden; a real chat agent named after the host is created on first boot and every subsequent agent shares its `CLAUDE_CONFIG_DIR`. Existing workspaces must be re-created.
 - Changed: minds "Create a Project" Name field now sets the host name (validated via `HostName` regex); the agent is always `system-services`, and `imbue_cloud` `/hosts/lease` and `/hosts` gain a required `host_name`.
@@ -42,7 +39,6 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Changed: Swapped `minds env destroy`'s instance walker from Vultr to OVH; the dev-tier Vault path is now `<tier>/ovh` with AK/AS/CK.
 - Changed: Shorter Modal app + function names so deployed hostnames fit under DNS's 63-char limit (`remote-service-connector` → `rsc`, `fastapi_app` → `api`, `litellm-proxy` → `llm`, `litellm_app` → `proxy`).
 - Changed: One `minds env deploy` code path for every tier, driven by a `[lifecycle]` block in each tier's `deploy.toml`.
-- Changed: Pool-hosts schema migrations now backed by a `schema_migrations(version, applied_at)` table instead of replaying every `.sql` with `IF NOT EXISTS`.
 - Changed: Every `minds env deploy` mints a fresh `MINDS_DEPLOY_ID` and pushes every Modal Secret under a timestamped name (`<svc>-<tier>-<deploy_id>`).
 - Changed: `minds env deploy`'s post-deploy health check now polls the connector's `/health/liveness` (10 s per-attempt timeout, 60 s total budget) instead of `/docs`.
 - Changed: Speed up local minds workspace creation by restructuring the `forever-claude-template` Dockerfile and deferring Playwright into a post-boot install (warm rebuild 1m33s → 30s → ~25.6s).
@@ -52,7 +48,6 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 ### Removed
 
 - Removed: Silent auto-disable on `imbue_cloud` auth errors — `_ImbueCloudAuthErrorDisabler` and the provider-error callback plumbing on `EnvelopeStreamConsumer` are gone; the user now drives the Disable action explicitly via the providers panel.
-- Removed: `apps/minds/imbue/minds/cli/pool.py` and `apps/minds/imbue/minds/envs/providers/vultr_tags.py` orphans deleted in the OVH walker swap.
 
 ### Fixed
 
@@ -76,7 +71,6 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Added: New `minds run` command that spawns `mngr forward` as a subprocess and consumes its JSONL envelope stream instead of running forwarding in-process.
 - Added: minds injects `LATCHKEY_DISABLE_COUNTING=1` into every workspace whenever latchkey is wired so the shared host-side gateway represents one user.
 - Added: minds installs a grandparent-death watcher so the Python backend self-terminates ~3 s after Electron crashes, cascading into `mngr observe` / `mngr events` / latchkey children.
-- Added: New `MalformedMngrOutputError` (`imbue.minds.errors`).
 
 ### Changed
 

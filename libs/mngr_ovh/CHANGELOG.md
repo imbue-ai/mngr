@@ -21,7 +21,6 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Changed: `OvhVpsClient.set_renew_at_expiration` now retries on the OVH transient 400 `"Unable to synchronize l1::Service, subscription is not active yet"` (5-minute default budget, 15 s poll interval, both injectable).
 - Changed: `parse_extra_tags_env(MNGR_VPS_EXTRA_TAGS)` now runs at the top of `_provision_vps`, before any OVH API call, so a typo fails before we pay for a VPS.
 - Changed: `OuterHost.get_name` / `OuterHostInterface.get_name` now return `str` instead of `HostName` (the outer host's name is an SSH hostname / IP address that routinely contains dots).
-- Changed: Adopted the new per-project changelog layout.
 
 ### Fixed
 
@@ -31,4 +30,3 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Fixed: OVH `Debian 12 - Docker` image installs the rebuild SSH key into `/home/debian/.ssh/authorized_keys` rather than `/root/.ssh/authorized_keys`; the provider now sudo-copies the key into root's home during provisioning (configurable via new `bootstrap_ssh_user`, default `debian`).
 - Fixed: OVH IAM tags are now attached immediately after the VPS appears in `GET /vps` so a failure during rebuild / TOFU / bootstrap leaves a discoverable orphan instead of an invisible VPS.
 - Fixed: SSH-as-bootstrap-user / SSH-as-root paramiko sessions now load the private key with a type-agnostic helper that tries Ed25519, RSA, and ECDSA in turn (was hardcoded to `Ed25519Key`).
-- Fixed: `UNABRIDGED_CHANGELOG.md` intro now references the correct entries directory.
