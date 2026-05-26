@@ -403,6 +403,18 @@ class MngrCliBackendResolver(BackendResolverInterface):
         with self._lock:
             return self._agents_result.agent_ids
 
+    def list_discovered_agents(self) -> tuple[DiscoveredAgent, ...]:
+        """Return the full ``DiscoveredAgent`` records from the latest discovery snapshot.
+
+        Unlike :meth:`list_known_agent_ids`, this exposes the typed
+        ``host_id`` / ``agent_name`` / ``labels`` alongside each id so
+        callers that need to act on agent-host pairs (e.g. the latchkey
+        auto-register callback) do not have to do N+1 lookups via
+        :meth:`get_agent_display_info` and re-parse stringified ids.
+        """
+        with self._lock:
+            return self._agents_result.discovered_agents
+
     def list_known_workspace_ids(self) -> tuple[AgentId, ...]:
         """Return agent IDs that are primary workspace agents.
 

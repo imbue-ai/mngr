@@ -58,7 +58,6 @@ from imbue.mngr.primitives import HostName
 from imbue.mngr_latchkey.agent_setup import AgentLatchkeySetup
 from imbue.mngr_latchkey.agent_setup import finalize_host_permissions
 from imbue.mngr_latchkey.agent_setup import prepare_agent_latchkey
-from imbue.mngr_latchkey.agent_setup import register_agent_for_host
 from imbue.mngr_latchkey.core import Latchkey
 from imbue.mngr_latchkey.core import LatchkeyError
 from imbue.mngr_latchkey.store import LatchkeyStoreError
@@ -1314,20 +1313,18 @@ class AgentCreator(MutableModel):
                             f"canonical path for host {canonical_host_id}; permission grants will not "
                             f"take effect until the agent is re-created. Reason: {link_error}"
                         )
-                    # Register this agent's id with the host's
-                    # ``minds-api-proxy`` permission gate. Without this
-                    # the host's permissions file would still have the
-                    # baseline empty allowed-agent enum and reject every
-                    # ``/api/v1/agents/<id>/...`` request from this
-                    # agent. Best-effort: a failure logs a warning and
-                    # leaves the agent functional but unable to call
-                    # the Minds API; the operator can recover with
-                    # ``mngr latchkey register-agent``.
-                    self._register_agent_in_minds_api_proxy(
-                        agent_id=canonical_id,
-                        host_id=canonical_host_id,
-                        log_queue=log_queue,
-                    )
+                # Registration of ``canonical_id`` in the host's
+                # ``latchkey_permissions.json`` allowed-agent list is
+                # *not* done here. Instead, the
+                # :class:`LatchkeyAutoRegister` callback wired onto the
+                # backend resolver picks the new agent up on the next
+                # discovery tick and registers it then. This keeps the
+                # registration logic centralized so every path that
+                # produces an agent on a minds-managed host -- including
+                # the system_interface's "new chat" / "new worktree"
+                # buttons, which shell out to ``mngr create`` on the
+                # workspace host without ever calling back into minds --
+                # gets registered uniformly.
 
                 log_queue.put("[minds] Agent created successfully.")
 
@@ -1374,40 +1371,6 @@ class AgentCreator(MutableModel):
                 self._errors[cid_str] = str(e)
         finally:
             log_queue.put(LOG_SENTINEL)
-
-    def _register_agent_in_minds_api_proxy(
-        self,
-        agent_id: AgentId,
-        host_id: HostId,
-        log_queue: queue.Queue[str],
-    ) -> None:
-        """Register ``agent_id`` on the host so it can reach the Minds API proxy.
-
-        Thin wrapper around :func:`register_agent_for_host` that downgrades
-        :class:`LatchkeyStoreError` to a warning so an unparseable /
-        hand-edited permissions file does not fail agent creation
-        outright. A skipped registration leaves the agent unable to reach
-        any ``/api/v1/agents/<agent_id>/...`` endpoint; the operator can
-        run ``mngr latchkey register-agent`` manually once the underlying
-        file issue is resolved.
-        """
-        if self.latchkey is None:
-            return
-        try:
-            register_agent_for_host(self.latchkey.plugin_data_dir, host_id, agent_id)
-        except LatchkeyStoreError as e:
-            logger.warning(
-                "Failed to register agent {} on host {} in latchkey permissions: {}",
-                agent_id,
-                host_id,
-                e,
-            )
-            log_queue.put(
-                f"[minds] Warning: could not register agent {agent_id} on host {host_id} in the "
-                f"latchkey permissions file; the agent will not be able to call the Minds API "
-                f"until you run ``mngr latchkey register-agent --host-id {host_id} "
-                f"--agent-id {agent_id}`` manually. Reason: {e}"
-            )
 
     def _prepare_latchkey_or_warn(
         self,

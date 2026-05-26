@@ -60,6 +60,7 @@ from imbue.minds.desktop_client.latchkey.handlers.messaging import MngrMessageSe
 from imbue.minds.desktop_client.latchkey.handlers.predefined import LatchkeyPermissionGrantHandler
 from imbue.minds.desktop_client.latchkey.permission_requests_consumer import PermissionRequestsConsumer
 from imbue.minds.desktop_client.latchkey.services_catalog import ServicesCatalog
+from imbue.minds.desktop_client.latchkey_auto_register import LatchkeyAutoRegister
 from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.request_events import LatchkeyFileSharingPermissionRequestEvent
@@ -313,6 +314,17 @@ def run(
         mngr_forward_preauth_cookie=preauth_cookie,
         system_interface_health_tracker=system_interface_health_tracker,
     )
+
+    # Subscribe the latchkey auto-register callback to the discovery
+    # stream. Every newly-discovered agent on a minds-managed host gets
+    # its id appended to the host's ``latchkey_permissions.json``
+    # allowed-agent list -- this is what lets agents created via the
+    # system_interface's "new chat" / "new worktree" buttons (or any
+    # other path that bypasses ``AgentCreator``) actually reach the
+    # Minds API proxy. ``AgentCreator``'s own create flow no longer
+    # registers explicitly; it relies on this callback firing on the
+    # next discovery tick after ``mngr create`` returns.
+    LatchkeyAutoRegister(backend_resolver=backend_resolver, latchkey=latchkey).start()
 
     # Emit the started event so Electron can pre-set the cookie before the
     # first navigation. ``minds run`` itself does not open the browser at
