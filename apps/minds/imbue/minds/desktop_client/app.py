@@ -1643,8 +1643,10 @@ def _build_restart_shell_command() -> str:
     ``mngr exec`` runs commands in the agent's work_dir by default, so
     ``services.toml`` is referenced as a relative path.
     """
+    # `=` is tmux's exact-match prefix; without it, kill-window could prefix-match
+    # a sibling session and tear down the wrong agent's services.
     return (
-        f'tmux kill-window -t "${{MNGR_PREFIX}}{_SERVICES_AGENT_NAME}:{_RESTART_TMUX_WINDOW}" '
+        f'tmux kill-window -t "=${{MNGR_PREFIX}}{_SERVICES_AGENT_NAME}:{_RESTART_TMUX_WINDOW}" '
         f"2>/dev/null; touch services.toml"
     )
 
