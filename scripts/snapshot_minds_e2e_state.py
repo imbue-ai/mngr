@@ -46,6 +46,7 @@ from pathlib import Path
 from typing import Final
 
 import modal
+import modal.exception
 
 _REPO_ROOT: Final[Path] = Path(__file__).resolve().parent.parent
 
