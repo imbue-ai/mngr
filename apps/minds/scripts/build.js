@@ -1,8 +1,9 @@
 /**
  * Build script for Minds desktop app.
  *
- * Downloads platform-specific uv and git binaries, copies the standalone
- * pyproject.toml + lockfile into the resources directory for packaging.
+ * Downloads platform-specific uv, git, and Lima binaries, copies the
+ * standalone pyproject.toml + lockfile into the resources directory for
+ * packaging.
  */
 
 const fs = require('fs');
@@ -16,6 +17,7 @@ const ROOT = path.resolve(__dirname, '..');
 const RESOURCES_DIR = path.join(ROOT, 'resources');
 
 const UV_VERSION = '0.7.12';
+const LIMA_VERSION = '2.1.1';
 
 function getPlatformArch() {
   const platform = process.platform;
@@ -56,28 +58,43 @@ function download(url) {
   });
 }
 
-async function downloadUv({ platform, arch }) {
-  const uvDir = path.join(RESOURCES_DIR, 'uv');
-  fs.mkdirSync(uvDir, { recursive: true });
-
-  const url = getUvDownloadUrl({ platform, arch });
-  console.log(`Downloading uv from ${url}...`);
+/**
+ * Download a gzipped tarball to ``destDir`` and extract it in place with
+ * ``--strip-components=1``, then verify and chmod the named binary.
+ *
+ * Used for binaries that ship as a single self-contained tarball rooted one
+ * level deep (e.g. uv, Lima). ``label`` is used only for log lines and error
+ * messages; ``archiveName`` is the on-disk filename for the downloaded
+ * tarball (deleted after extraction); ``binaryPath`` is the absolute path
+ * the caller expects the extracted binary to live at.
+ */
+async function downloadAndExtractTarball({ destDir, url, archiveName, binaryPath, label }) {
+  fs.mkdirSync(destDir, { recursive: true });
+  console.log(`Downloading ${label} from ${url}...`);
 
   const tarball = await download(url);
-  const tarPath = path.join(uvDir, 'uv.tar.gz');
+  const tarPath = path.join(destDir, archiveName);
   fs.writeFileSync(tarPath, tarball);
 
-  // Extract the tarball
-  execSync(`tar xzf "${tarPath}" -C "${uvDir}" --strip-components=1`, { stdio: 'inherit' });
+  execSync(`tar xzf "${tarPath}" -C "${destDir}" --strip-components=1`, { stdio: 'inherit' });
   fs.unlinkSync(tarPath);
 
-  // Verify the binary exists
-  const uvBinary = path.join(uvDir, 'uv');
-  if (!fs.existsSync(uvBinary)) {
-    throw new Error(`uv binary not found at ${uvBinary} after extraction`);
+  if (!fs.existsSync(binaryPath)) {
+    throw new Error(`${label} binary not found at ${binaryPath} after extraction`);
   }
-  fs.chmodSync(uvBinary, 0o755);
-  console.log(`uv binary installed at ${uvBinary}`);
+  fs.chmodSync(binaryPath, 0o755);
+  console.log(`${label} binary installed at ${binaryPath}`);
+}
+
+async function downloadUv({ platform, arch }) {
+  const uvDir = path.join(RESOURCES_DIR, 'uv');
+  await downloadAndExtractTarball({
+    destDir: uvDir,
+    url: getUvDownloadUrl({ platform, arch }),
+    archiveName: 'uv.tar.gz',
+    binaryPath: path.join(uvDir, 'uv'),
+    label: 'uv',
+  });
 }
 
 /**
@@ -317,6 +334,52 @@ function bundleLatchkey() {
   );
 }
 
+function getLimaDownloadUrl({ platform, arch }) {
+  // Lima release tarballs are named lima-<version>-<OsLabel>-<archLabel>.tar.gz.
+  // The OS label is title-cased (Darwin/Linux). The arch label differs by OS:
+  // Darwin uses arm64, Linux uses aarch64; both use x86_64 for Intel.
+  const osLabel = platform === 'darwin' ? 'Darwin' : 'Linux';
+  let archLabel;
+  if (arch === 'x86_64') {
+    archLabel = 'x86_64';
+  } else if (arch === 'aarch64') {
+    archLabel = platform === 'darwin' ? 'arm64' : 'aarch64';
+  } else {
+    throw new Error(`Unsupported Lima arch: ${arch}`);
+  }
+  return `https://github.com/lima-vm/lima/releases/download/v${LIMA_VERSION}/lima-${LIMA_VERSION}-${osLabel}-${archLabel}.tar.gz`;
+}
+
+async function downloadLima({ platform, arch }) {
+  // We keep the full extracted layout (bin/ + share/ + libexec/) because
+  // limactl resolves its templates and guest-agent payloads via paths
+  // relative to its own executable.
+  const limaDir = path.join(RESOURCES_DIR, 'lima');
+  await downloadAndExtractTarball({
+    destDir: limaDir,
+    url: getLimaDownloadUrl({ platform, arch }),
+    archiveName: 'lima.tar.gz',
+    binaryPath: path.join(limaDir, 'bin', 'limactl'),
+    label: 'Lima',
+  });
+
+  // Strip Darwin guest-agents. Each one is a gzipped arm64/x86_64 Mach-O,
+  // and Apple's notarytool unzips it and rejects the inner binary because
+  // we never code-signed it (no Developer ID, no hardened runtime, no
+  // secure timestamp). We run Linux VMs only via Lima, so Darwin guest-
+  // agents are unreachable code and safe to delete.
+  const limaShareDir = path.join(limaDir, 'share', 'lima');
+  if (fs.existsSync(limaShareDir)) {
+    for (const entry of fs.readdirSync(limaShareDir)) {
+      if (entry.startsWith('lima-guestagent.Darwin-') && entry.endsWith('.gz')) {
+        const full = path.join(limaShareDir, entry);
+        fs.rmSync(full);
+        console.log(`Stripped Darwin guest-agent (unsignable inside .gz): ${full}`);
+      }
+    }
+  }
+}
+
 async function downloadGit() {
   const gitDir = path.join(RESOURCES_DIR, 'git');
   const binDir = path.join(gitDir, 'bin');
@@ -479,6 +542,7 @@ async function main() {
   // Download binaries and copy pyproject in parallel
   await Promise.all([
     downloadUv({ platform, arch }),
+    downloadLima({ platform, arch }),
     downloadGit(),
   ]);
 
