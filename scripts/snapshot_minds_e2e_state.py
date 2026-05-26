@@ -314,16 +314,35 @@ def _exec_in_sandbox(
 
 
 def _start_dockerd(sandbox: modal.Sandbox) -> None:
-    """Bring up dockerd inside the sandbox and wait for the socket."""
+    """Bring up dockerd inside the sandbox and verify the socket responds.
+
+    ``start-dockerd.sh`` backgrounds ``dockerd`` and exits once
+    ``docker info`` succeeds inside the script. On a Modal sandbox the
+    bash shell exit code occasionally comes back as -1 to the SDK even
+    though the script's own logic ran to completion (the backgrounded
+    dockerd child confuses exit-code propagation). So we don't gate on
+    the start-script's exit code -- instead we run a follow-up
+    ``docker info`` in a fresh exec and only fail if THAT comes back
+    non-zero, which is the actual signal we care about.
+    """
     start_script = "/code/mngr/libs/mngr/imbue/mngr/resources/start-dockerd.sh"
-    returncode = _exec_in_sandbox(
+    _exec_in_sandbox(
         sandbox,
         f"chmod +x {shlex.quote(start_script)} && {shlex.quote(start_script)}",
         description="start dockerd",
         timeout_seconds=180,
     )
-    if returncode != 0:
-        raise RuntimeError(f"start-dockerd.sh failed with returncode {returncode}")
+    verify_rc = _exec_in_sandbox(
+        sandbox,
+        "/usr/local/bin/docker info >/dev/null && echo 'dockerd verified up'",
+        description="verify dockerd is responsive",
+        timeout_seconds=30,
+    )
+    if verify_rc != 0:
+        raise RuntimeError(
+            f"`docker info` failed inside the sandbox with returncode {verify_rc} -- "
+            "start-dockerd.sh did not actually bring up dockerd."
+        )
 
 
 def _create_workspace_in_sandbox(sandbox: modal.Sandbox) -> None:
