@@ -14,12 +14,13 @@ The flow is:
    Docker-in-sandbox state (everything in ``/var/lib/docker``, including
    the agent's container and image layers) only persists across a
    ``snapshot_filesystem()`` call inside a VM-runtime sandbox.
-3. Inside the sandbox, start ``dockerd``, ``pnpm install`` the Electron
-   deps, and run the existing end-to-end Electron test
-   (``apps/minds/test_desktop_client_e2e.py``). That test drives the
-   Electron UI to create a forever-claude-template workspace -- the side
-   effect we care about is the Docker container the spawned ``mngr create``
-   stands up for the agent.
+3. Inside the sandbox, start ``dockerd`` and invoke
+   ``imbue.minds.desktop_client.e2e_workspace_runner.create_workspace_via_electron``
+   directly (no pytest). The runner is the shared driver behind the
+   minds Electron e2e test -- driving the Electron UI to create a
+   forever-claude-template workspace -- but we call it WITHOUT the
+   ``mngr destroy`` cleanup the pytest test wraps it with, so the agent
+   and its Docker container survive into the snapshot.
 4. Call ``sandbox.snapshot_filesystem()`` to capture the resulting state
    and print the Modal image ID so it can be plumbed into offload as
    ``offload run --override-image-id <ID>``.
@@ -30,7 +31,7 @@ has capacity issues with it, so it's opt-in for this snapshot workflow only.
 Usage:
     uv run python scripts/snapshot_minds_e2e_state.py
     uv run python scripts/snapshot_minds_e2e_state.py --app-name custom-app
-    uv run python scripts/snapshot_minds_e2e_state.py --skip-test    # just snapshot a bare image, no agent
+    uv run python scripts/snapshot_minds_e2e_state.py --skip-workspace-creation  # bare image, no agent
 
 The script intentionally lives outside the regular test suite -- it's
 expensive (multi-minute), it requires Modal credentials, and it produces a
@@ -41,6 +42,7 @@ would re-derive on every run.
 import argparse
 import shlex
 import sys
+import textwrap
 import time
 from pathlib import Path
 from typing import Final
@@ -60,10 +62,49 @@ _NODE_MAJOR: Final[str] = "20"
 _PNPM_VERSION: Final[str] = "10"
 _CLAUDE_CODE_VERSION: Final[str] = "2.1.141"
 
-# The single end-to-end test that drives Electron to spin up a workspace
-# Docker container. We just need to run this once successfully inside the
-# sandbox; the resulting /var/lib/docker state is what we want to snapshot.
-_E2E_TEST_NODEID: Final[str] = "apps/minds/test_desktop_client_e2e.py::test_create_local_docker_workspace_via_electron"
+# In-sandbox entrypoint that invokes the shared e2e workspace runner the
+# pytest test also uses, but without the test's mngr-destroy cleanup. The
+# resulting workspace agent + Docker container is exactly what we want
+# baked into the filesystem snapshot.
+#
+# Two notes on why this is a python -c string instead of a checked-in
+# helper script:
+# - Keeping the entrypoint adjacent to the snapshot script makes it
+#   obvious that this is a one-off operator tool and that any cleanup
+#   skip here is *intentional*.
+# - The mngr clone inside the sandbox already has the runner under
+#   ``imbue.minds.desktop_client.e2e_workspace_runner`` (installed via
+#   the image's ``uv sync --all-packages``), so a single import is all
+#   we need.
+_IN_SANDBOX_RUNNER_PROGRAM: Final[str] = textwrap.dedent(
+    """
+    import tempfile
+    from pathlib import Path
+
+    from imbue.minds.desktop_client.e2e_workspace_runner import (
+        configure_logging,
+        create_workspace_via_electron,
+        ensure_minds_env_defaults,
+        find_free_port,
+        resolve_fct_path,
+    )
+    from imbue.mngr.utils.testing import get_short_random_string
+
+    configure_logging()
+    ensure_minds_env_defaults()
+    with tempfile.TemporaryDirectory(prefix="snapshot-fct-") as scratch:
+        fct_path = resolve_fct_path(Path(scratch))
+        workspace_name = f"forever-{get_short_random_string()}"
+        debug_port = find_free_port()
+        print(f"[snapshot] workspace={workspace_name} debug_port={debug_port}", flush=True)
+        create_workspace_via_electron(fct_path, workspace_name, debug_port)
+        # IMPORTANT: do NOT call destroy_agent_best_effort here. The whole
+        # point of this script is to leave the workspace agent + Docker
+        # container alive so the upcoming snapshot_filesystem() captures
+        # them.
+        print(f"[snapshot] workspace agent {workspace_name!r} left running for snapshot", flush=True)
+    """
+).strip()
 
 
 def _build_snapshot_image() -> modal.Image:
@@ -212,28 +253,24 @@ def _start_dockerd(sandbox: modal.Sandbox) -> None:
         raise RuntimeError(f"start-dockerd.sh failed with returncode {returncode}")
 
 
-def _run_e2e_test(sandbox: modal.Sandbox) -> None:
-    """Run the existing minds Electron e2e test inside the sandbox.
+def _create_workspace_in_sandbox(sandbox: modal.Sandbox) -> None:
+    """Drive the Electron flow inside the sandbox via the shared runner.
 
-    Mirrors the ``test-docker-electron`` CI job's pytest invocation, which
-    wraps the pytest run in ``xvfb-run -a`` and pins the per-test timeout
-    to the test's own ``@pytest.mark.timeout(900)``.
+    Calls ``imbue.minds.desktop_client.e2e_workspace_runner`` directly
+    (no pytest) so we can deliberately *omit* the agent-destroy cleanup
+    the pytest test wraps that function with. Wrapped in ``xvfb-run -a``
+    because Electron needs an X display.
     """
-    command = (
-        "cd /code/mngr && "
-        "xvfb-run -a env PYTEST_MAX_DURATION_SECONDS=900 "
-        "uv run pytest -n 0 --timeout 900 --no-cov --cov-fail-under=0 -v --tb=short "
-        f"{shlex.quote(_E2E_TEST_NODEID)}"
-    )
+    command = "cd /code/mngr && xvfb-run -a uv run python -c {}".format(shlex.quote(_IN_SANDBOX_RUNNER_PROGRAM))
     returncode = _exec_in_sandbox(
         sandbox,
         command,
-        description="run minds Electron e2e test",
+        description="create workspace via Electron",
         timeout_seconds=1500,
     )
     if returncode != 0:
         raise RuntimeError(
-            f"Minds Electron e2e test failed with returncode {returncode}; refusing to snapshot a broken state."
+            f"Workspace creation failed with returncode {returncode}; refusing to snapshot a broken state."
         )
 
 
@@ -262,12 +299,13 @@ def _parse_args() -> argparse.Namespace:
         help=f"Modal app name to use (default: {_DEFAULT_APP_NAME!r}).",
     )
     parser.add_argument(
-        "--skip-test",
+        "--skip-workspace-creation",
         action="store_true",
         help=(
-            "Skip running the Electron e2e test; just snapshot the bare image "
-            "with deps installed but no agent container running. Useful for "
-            "iterating on the image build before paying the full e2e cost."
+            "Skip the Electron workspace-creation step; just snapshot the bare "
+            "image with deps installed and dockerd up but no workspace agent. "
+            "Useful for iterating on the image build before paying the full "
+            "workspace-creation cost."
         ),
     )
     return parser.parse_args()
@@ -298,10 +336,13 @@ def main() -> None:
     try:
         print(f"Sandbox {sandbox.object_id} created.", flush=True)
         _start_dockerd(sandbox)
-        if args.skip_test:
-            print("--skip-test set; snapshotting without running the e2e test.", flush=True)
+        if args.skip_workspace_creation:
+            print(
+                "--skip-workspace-creation set; snapshotting without a workspace agent.",
+                flush=True,
+            )
         else:
-            _run_e2e_test(sandbox)
+            _create_workspace_in_sandbox(sandbox)
         snapshot_image_id = _snapshot_sandbox(sandbox)
     finally:
         try:
