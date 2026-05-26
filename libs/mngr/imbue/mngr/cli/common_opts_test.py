@@ -10,6 +10,7 @@ from click.core import ParameterSource
 from click.testing import CliRunner
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.mngr.cli.common_opts import _apply_template_extend
 from imbue.mngr.cli.common_opts import _process_template_escapes
 from imbue.mngr.cli.common_opts import _run_pre_command_scripts
 from imbue.mngr.cli.common_opts import _run_single_script
@@ -19,6 +20,8 @@ from imbue.mngr.cli.common_opts import apply_config_defaults
 from imbue.mngr.cli.common_opts import apply_create_template
 from imbue.mngr.cli.common_opts import apply_settings_to_config
 from imbue.mngr.cli.common_opts import parse_output_options
+from imbue.mngr.cli.common_opts import restore_cli_list_values
+from imbue.mngr.cli.common_opts import save_cli_list_values_for_restoration
 from imbue.mngr.cli.common_opts import setup_command_context
 from imbue.mngr.config.data_types import CommandDefaults
 from imbue.mngr.config.data_types import CommonCliOptions
@@ -185,7 +188,12 @@ def test_apply_config_defaults_empty_string_clears_tuple_param(mngr_test_prefix:
 
 
 def test_apply_config_defaults_non_empty_string_replaces_tuple_param(mngr_test_prefix: str) -> None:
-    """apply_config_defaults should replace tuple param with config list value."""
+    """apply_config_defaults substitutes the config list as the tuple param's base.
+
+    Click's multi-option params are tuples on the receiving side, so the config
+    value is coerced to a tuple here for shape consistency with the rest of the
+    pipeline (templates, restore_cli_list_values both produce tuples).
+    """
     ctx = _make_click_context(
         params={"extra_window": (), "other_param": "value"},
     )
@@ -198,19 +206,18 @@ def test_apply_config_defaults_non_empty_string_replaces_tuple_param(mngr_test_p
 
     result = apply_config_defaults(ctx, config, "create")
 
-    # List value should be used directly
-    assert result["extra_window"] == ["cmd1", "cmd2"]
+    assert result["extra_window"] == ("cmd1", "cmd2")
 
 
-def test_apply_config_defaults_cli_flag_extends_non_empty_config(mngr_test_prefix: str) -> None:
-    """A CLI tuple flag extends (config-then-CLI) the merged settings value.
+def test_apply_config_defaults_substitutes_config_base_for_cli_tuple_params(mngr_test_prefix: str) -> None:
+    """apply_config_defaults now substitutes the config value as the BASE for every
+    tuple/list param, regardless of CLI source.
 
-    With the new assign-by-default merge for settings files, a single non-empty
-    ``commands.create.env`` ends up in the merged config (e.g. ``["X=5"]`` from
-    the local layer wiping the project layer's ``["X=4"]``). The CLI flag must
-    still extend that result; otherwise the user's ``--env X=6`` would silently
-    replace ``["X=5"]`` instead of appending. Order is ``config + CLI`` so the
-    CLI value reads as the user's final word at the tail of the list.
+    Under the new pipeline order (config_defaults -> templates -> CLI extension),
+    templates need to see a clean config base, not config+CLI mixed together.
+    The CLI tuple value is saved separately by
+    ``save_cli_list_values_for_restoration`` and appended at the end of the
+    pipeline by ``restore_cli_list_values``.
     """
     ctx = _make_click_context(
         params={"env": ("X=6",), "other_param": "value"},
@@ -221,10 +228,50 @@ def test_apply_config_defaults_cli_flag_extends_non_empty_config(mngr_test_prefi
         commands={"create": CommandDefaults(defaults={"env": ["X=5"]})},
     )
     result = apply_config_defaults(ctx, config, "create")
+    # Config value is the base; the CLI value will be re-added at the end of the pipeline.
+    assert result["env"] == ("X=5",)
+
+
+def test_apply_config_defaults_leaves_cli_source_scalars_untouched(mngr_test_prefix: str) -> None:
+    """CLI-source scalar params keep their CLI value through apply_config_defaults
+    (no config-base substitution for scalars; templates also skip them)."""
+    ctx = _make_click_context(
+        params={"new_host": "cli-host"},
+        source_by_param_name={"new_host": ParameterSource.COMMANDLINE},
+    )
+    config = MngrConfig(
+        prefix=mngr_test_prefix,
+        commands={"create": CommandDefaults(defaults={"new_host": "config-host"})},
+    )
+    result = apply_config_defaults(ctx, config, "create")
+    assert result["new_host"] == "cli-host"
+
+
+def test_pipeline_cli_flag_extends_non_empty_config(mngr_test_prefix: str) -> None:
+    """End-to-end pipeline test: a CLI tuple flag extends the merged settings value.
+
+    Order is ``config + CLI`` so the CLI value reads as the user's final word
+    at the tail of the list. With the new assign-by-default merge for settings
+    files, a single non-empty ``commands.create.env`` ends up in the merged
+    config (e.g. ``["X=5"]`` from the local layer wiping the project layer's
+    ``["X=4"]``). The CLI flag still extends that result.
+    """
+    ctx = _make_click_context(
+        params={"env": ("X=6",), "other_param": "value"},
+        source_by_param_name={"env": ParameterSource.COMMANDLINE},
+    )
+    config = MngrConfig(
+        prefix=mngr_test_prefix,
+        commands={"create": CommandDefaults(defaults={"env": ["X=5"]})},
+    )
+    after_defaults = apply_config_defaults(ctx, config, "create")
+    cli_values = save_cli_list_values_for_restoration(ctx)
+    # No templates here, so apply_create_template would be a no-op.
+    result = restore_cli_list_values(after_defaults, cli_values)
     assert result["env"] == ("X=5", "X=6")
 
 
-def test_apply_config_defaults_cli_flag_extends_multiple_values(mngr_test_prefix: str) -> None:
+def test_pipeline_cli_flag_extends_multiple_values(mngr_test_prefix: str) -> None:
     """Multiple CLI flag invocations all append after the config-supplied entries."""
     ctx = _make_click_context(
         params={"env": ("X=6", "X=7"), "other_param": "value"},
@@ -234,7 +281,9 @@ def test_apply_config_defaults_cli_flag_extends_multiple_values(mngr_test_prefix
         prefix=mngr_test_prefix,
         commands={"create": CommandDefaults(defaults={"env": ["X=5"]})},
     )
-    result = apply_config_defaults(ctx, config, "create")
+    after_defaults = apply_config_defaults(ctx, config, "create")
+    cli_values = save_cli_list_values_for_restoration(ctx)
+    result = restore_cli_list_values(after_defaults, cli_values)
     assert result["env"] == ("X=5", "X=6", "X=7")
 
 
@@ -604,141 +653,208 @@ def test_apply_create_template_skips_unknown_params(mngr_test_prefix: str) -> No
 # =============================================================================
 
 
-def test_apply_create_template_concatenates_list_params_with_config_defaults(mngr_test_prefix: str) -> None:
-    """Template list values should concatenate with existing config defaults, not overwrite."""
-    # Simulate the state after apply_config_defaults has set env from [commands.create]
+def test_apply_create_template_narrowing_raises_against_config_defaults(mngr_test_prefix: str) -> None:
+    """A template that bare-assigns a list option over a non-empty config-default
+    value drops the prior entries and trips the narrowing guard."""
     ctx = _make_click_context(
         params={
             "template": ("main",),
             "env": ("IS_SANDBOX=1", "IS_AUTONOMOUS=1"),
         },
     )
-
     config = MngrConfig(
         prefix=mngr_test_prefix,
         create_templates={
             CreateTemplateName("main"): CreateTemplate(options={"env": ["REVIEWER_AUTOFIX_ENABLE=0"]}),
         },
     )
+    with pytest.raises(ConfigParseError, match="narrowing"):
+        apply_create_template(ctx, ctx.params.copy(), config)
 
+
+def test_apply_create_template_extend_appends_to_config_defaults(mngr_test_prefix: str) -> None:
+    """``env__extend = [...]`` in a template is the documented opt-in for additive
+    behavior; it appends to the existing value without tripping the narrowing guard.
+    """
+    ctx = _make_click_context(
+        params={
+            "template": ("main",),
+            "env": ("IS_SANDBOX=1", "IS_AUTONOMOUS=1"),
+        },
+    )
+    config = MngrConfig(
+        prefix=mngr_test_prefix,
+        create_templates={
+            CreateTemplateName("main"): CreateTemplate(options={"env__extend": ["REVIEWER_AUTOFIX_ENABLE=0"]}),
+        },
+    )
     result = apply_create_template(ctx, ctx.params.copy(), config)
-
     assert result["env"] == ("IS_SANDBOX=1", "IS_AUTONOMOUS=1", "REVIEWER_AUTOFIX_ENABLE=0")
 
 
-def test_apply_create_template_concatenates_list_params_across_multiple_templates(mngr_test_prefix: str) -> None:
-    """Multiple templates should concatenate their list values."""
+def test_apply_create_template_assign_with_opt_in_replaces(mngr_test_prefix: str) -> None:
+    """With ``allow_settings_key_assignment_narrowing = true``, a template's bare
+    list assign is allowed and replaces the existing value (assign-by-default)."""
+    ctx = _make_click_context(
+        params={
+            "template": ("main",),
+            "env": ("FROM_CONFIG=1",),
+        },
+    )
+    config = MngrConfig(
+        prefix=mngr_test_prefix,
+        allow_settings_key_assignment_narrowing=True,
+        create_templates={
+            CreateTemplateName("main"): CreateTemplate(options={"env": ["TEMPLATE=1"]}),
+        },
+    )
+    result = apply_create_template(ctx, ctx.params.copy(), config)
+    assert result["env"] == ("TEMPLATE=1",)
+
+
+def test_apply_create_template_multiple_templates_extend_stack(mngr_test_prefix: str) -> None:
+    """Multiple templates each using ``env__extend`` stack additively, in template-order.
+
+    Combined with the pipeline ordering (config defaults -> templates -> CLI extend),
+    the final list reads chronologically: earlier layers first, later layers last.
+    """
     ctx = _make_click_context(
         params={
             "template": ("first", "second"),
             "env": (),
         },
     )
-
     config = MngrConfig(
         prefix=mngr_test_prefix,
         create_templates={
-            CreateTemplateName("first"): CreateTemplate(options={"env": ["FOO=1"]}),
-            CreateTemplateName("second"): CreateTemplate(options={"env": ["BAR=2"]}),
+            CreateTemplateName("first"): CreateTemplate(options={"env__extend": ["FOO=1"]}),
+            CreateTemplateName("second"): CreateTemplate(options={"env__extend": ["BAR=2"]}),
         },
     )
-
     result = apply_create_template(ctx, ctx.params.copy(), config)
-
     assert result["env"] == ("FOO=1", "BAR=2")
 
 
-def test_apply_create_template_empty_list_resets(mngr_test_prefix: str) -> None:
-    """An explicit empty list in a template should reset earlier values."""
-    # Simulate config defaults already applied
+def test_apply_create_template_second_template_narrowing_raises(mngr_test_prefix: str) -> None:
+    """When the first template extends and the second bare-assigns over the result,
+    the second template trips the narrowing guard against the in-flight value."""
+    ctx = _make_click_context(
+        params={
+            "template": ("first", "second"),
+            "env": (),
+        },
+    )
+    config = MngrConfig(
+        prefix=mngr_test_prefix,
+        create_templates={
+            CreateTemplateName("first"): CreateTemplate(options={"env__extend": ["FOO=1"]}),
+            CreateTemplateName("second"): CreateTemplate(options={"env": ["BAR=2"]}),
+        },
+    )
+    with pytest.raises(ConfigParseError, match="narrowing"):
+        apply_create_template(ctx, ctx.params.copy(), config)
+
+
+def test_apply_create_template_empty_list_assign_raises_without_opt_in(mngr_test_prefix: str) -> None:
+    """An explicit empty-list assign in a template (over a non-empty existing value)
+    is the most extreme narrowing case and raises by default. Symmetrical with
+    the settings-layer guard, which also flags ``env = []`` over a non-empty base.
+    """
     ctx = _make_click_context(
         params={
             "template": ("reset-template",),
             "env": ("FROM_CONFIG=1",),
         },
     )
-
     config = MngrConfig(
         prefix=mngr_test_prefix,
         create_templates={
             CreateTemplateName("reset-template"): CreateTemplate(options={"env": []}),
         },
     )
+    with pytest.raises(ConfigParseError, match="narrowing"):
+        apply_create_template(ctx, ctx.params.copy(), config)
 
+
+def test_apply_create_template_empty_list_assign_with_opt_in_clears(mngr_test_prefix: str) -> None:
+    """With the opt-in flag, an empty-list template assign clears the existing value."""
+    ctx = _make_click_context(
+        params={
+            "template": ("reset-template",),
+            "env": ("FROM_CONFIG=1",),
+        },
+    )
+    config = MngrConfig(
+        prefix=mngr_test_prefix,
+        allow_settings_key_assignment_narrowing=True,
+        create_templates={
+            CreateTemplateName("reset-template"): CreateTemplate(options={"env": []}),
+        },
+    )
     result = apply_create_template(ctx, ctx.params.copy(), config)
-
     assert result["env"] == ()
 
 
-def test_apply_create_template_empty_list_reset_then_later_template_adds(mngr_test_prefix: str) -> None:
-    """After a reset, later templates can still add values."""
+def test_apply_create_template_template_then_cli_via_pipeline(mngr_test_prefix: str) -> None:
+    """End-to-end pipeline: templates run first (with CLI list values temporarily
+    set aside), then the CLI value extends the template result at the end.
+
+    So if a template extends config defaults to ``("X=1", "X=3")`` and the CLI
+    supplies ``--env X=6``, the final value is ``("X=1", "X=3", "X=6")``.
+    """
     ctx = _make_click_context(
         params={
-            "template": ("reset", "add-back"),
-            "env": ("FROM_CONFIG=1",),
+            "template": ("dev",),
+            "env": ("X=6",),
+        },
+        source_by_param_name={"env": ParameterSource.COMMANDLINE},
+    )
+    config = MngrConfig(
+        prefix=mngr_test_prefix,
+        commands={"create": CommandDefaults(defaults={"env": ["X=1"]})},
+        create_templates={
+            CreateTemplateName("dev"): CreateTemplate(options={"env__extend": ["X=3"]}),
         },
     )
+    after_defaults = apply_config_defaults(ctx, config, "create")
+    cli_values = save_cli_list_values_for_restoration(ctx)
+    after_templates = apply_create_template(ctx, after_defaults, config)
+    result = restore_cli_list_values(after_templates, cli_values)
+    assert result["env"] == ("X=1", "X=3", "X=6")
 
+
+def test_apply_create_template_scalar_overrides_default_param(mngr_test_prefix: str) -> None:
+    """Scalar template options assign-by-default for DEFAULT-source params (existing
+    behaviour, regression-test pinned: scalars don't go through the narrowing guard)."""
+    ctx = _make_click_context(
+        params={"template": ("mytemplate",), "type": None, "name": "default"},
+    )
     config = MngrConfig(
         prefix=mngr_test_prefix,
         create_templates={
-            CreateTemplateName("reset"): CreateTemplate(options={"env": []}),
-            CreateTemplateName("add-back"): CreateTemplate(options={"env": ["FRESH=1"]}),
+            CreateTemplateName("mytemplate"): CreateTemplate(options={"type": "codex"}),
         },
     )
-
     result = apply_create_template(ctx, ctx.params.copy(), config)
+    assert result["type"] == "codex"
 
-    assert result["env"] == ("FRESH=1",)
 
+def test_apply_template_extend_dict_shallow_merges_keys() -> None:
+    """``key__extend = {...}`` on a dict-typed value shallow-merges keys, with the
+    extend value's keys winning on collision (matches the resolver's dict semantics).
 
-def test_apply_create_template_list_concat_with_cli_values(mngr_test_prefix: str) -> None:
-    """Template list values should concatenate with CLI-specified list values."""
-    ctx = _make_click_context(
-        params={
-            "template": ("mytemplate",),
-            "env": ("CLI_VAR=1",),
-        },
-        source_by_param_name={
-            "env": ParameterSource.COMMANDLINE,
-        },
+    No CreateCliOptions field is dict-typed today, so this exercises
+    ``_apply_template_extend`` directly: the helper is shared with the rest of
+    the merge story and must stay shape-correct for the dict branch in case a
+    future option uses one.
+    """
+    result = _apply_template_extend(
+        {"a": "1"},
+        {"b": "2"},
+        template_name="dev",
+        param_name="example_dict_field",
     )
-
-    config = MngrConfig(
-        prefix=mngr_test_prefix,
-        create_templates={
-            CreateTemplateName("mytemplate"): CreateTemplate(options={"env": ["TEMPLATE_VAR=2"]}),
-        },
-    )
-
-    result = apply_create_template(ctx, ctx.params.copy(), config)
-
-    assert result["env"] == ("CLI_VAR=1", "TEMPLATE_VAR=2")
-
-
-def test_apply_create_template_empty_list_does_not_reset_cli_values(mngr_test_prefix: str) -> None:
-    """An explicit empty list should not clear CLI-specified list values."""
-    ctx = _make_click_context(
-        params={
-            "template": ("reset-template",),
-            "env": ("CLI_VAR=1",),
-        },
-        source_by_param_name={
-            "env": ParameterSource.COMMANDLINE,
-        },
-    )
-
-    config = MngrConfig(
-        prefix=mngr_test_prefix,
-        create_templates={
-            CreateTemplateName("reset-template"): CreateTemplate(options={"env": []}),
-        },
-    )
-
-    result = apply_create_template(ctx, ctx.params.copy(), config)
-
-    # CLI-specified values should be preserved even when template resets
-    assert result["env"] == ("CLI_VAR=1",)
+    assert result == {"a": "1", "b": "2"}
 
 
 # =============================================================================
@@ -991,13 +1107,20 @@ def test_apply_settings_to_config_clear_then_cli_flag_replaces_with_opt_in(mngr_
         params={"env": ("X=6",)},
         source_by_param_name={"env": ParameterSource.COMMANDLINE},
     )
-    result = apply_config_defaults(ctx, cleared, "create")
+    # Full pipeline: apply_config_defaults sets the config base (empty here);
+    # save_cli_list_values_for_restoration stashes the CLI value;
+    # restore_cli_list_values appends the CLI value at the end.
+    after_defaults = apply_config_defaults(ctx, cleared, "create")
+    cli_values = save_cli_list_values_for_restoration(ctx)
+    result = restore_cli_list_values(after_defaults, cli_values)
     assert result["env"] == ("X=6",)
 
 
 def test_apply_settings_to_config_extend_then_cli_flag_appends(mngr_test_prefix: str) -> None:
     """``--setting commands.create.env__extend=["X=7"] --env X=6`` produces
-    ``["X=5", "X=7", "X=6"]``: setting extends first, then CLI appends."""
+    ``["X=5", "X=7", "X=6"]``: setting extends first, then CLI appends at the
+    end of the pipeline via ``restore_cli_list_values``.
+    """
     config = MngrConfig(
         prefix=mngr_test_prefix,
         commands={"create": CommandDefaults(defaults={"env": ["X=5"]})},
@@ -1012,7 +1135,10 @@ def test_apply_settings_to_config_extend_then_cli_flag_appends(mngr_test_prefix:
         params={"env": ("X=6",)},
         source_by_param_name={"env": ParameterSource.COMMANDLINE},
     )
-    result = apply_config_defaults(ctx, extended, "create")
+    after_defaults = apply_config_defaults(ctx, extended, "create")
+    cli_values = save_cli_list_values_for_restoration(ctx)
+    # No templates here, so apply_create_template would be a no-op anyway.
+    result = restore_cli_list_values(after_defaults, cli_values)
     assert result["env"] == ("X=5", "X=7", "X=6")
 
 

@@ -27,6 +27,9 @@ from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import OutputOptions
 from imbue.mngr.config.data_types import detect_settings_narrowing
+from imbue.mngr.config.data_types import would_assignment_narrow
+from imbue.mngr.config.key_resolver import bare_key
+from imbue.mngr.config.key_resolver import is_extend_key
 from imbue.mngr.config.key_resolver import parse_scalar_value
 from imbue.mngr.config.key_resolver import resolve_extends
 from imbue.mngr.config.key_resolver import set_at_path
@@ -213,12 +216,26 @@ def setup_command_context(
             to_update(mngr_ctx.field_ref().config, updated_config),
         )
 
-    # Apply config defaults to parameters that came from defaults (not user-specified)
+    # Pipeline order is: config_defaults -> templates -> CLI extension.
+    #
+    # 1. apply_config_defaults substitutes the config value as the BASE for each
+    #    tuple/list param (regardless of CLI source) so templates can apply
+    #    assign-by-default + ``__extend`` against a clean config base. Scalar
+    #    CLI-source params keep their CLI value through this step.
     updated_params = apply_config_defaults(ctx, mngr_ctx.config, command_name, strict=strict)
 
-    # Apply create template if this is the create command and a template was specified
+    # 2. Stash CLI tuple/list values from the raw click context for restoration
+    #    after templates resolve. (Reads ctx.params, not updated_params, because
+    #    updated_params already has the config base for those fields.)
+    cli_list_values = save_cli_list_values_for_restoration(ctx)
+
+    # 3. Apply create templates (create-only) against the config base.
     if command_name == "create":
         updated_params = apply_create_template(ctx, updated_params, mngr_ctx.config)
+
+    # 4. Append CLI tuple/list values to the template result so CLI ends up at
+    #    the tail of the merged list (config_base + template_result + CLI).
+    updated_params = restore_cli_list_values(updated_params, cli_list_values)
 
     # Block plugins that were disabled via command defaults or create templates
     # (e.g. disable_plugin from [commands.create] in settings.toml). load_config
@@ -458,35 +475,36 @@ def apply_config_defaults(
     *,
     strict: bool = True,
 ) -> dict[str, Any]:
-    """Apply config defaults to parameters that were not explicitly set by the user.
+    """Apply config defaults and prepare the "config base" for the template phase.
 
-    Uses ctx.get_parameter_source() to detect which parameters came from defaults.
-    Only overrides parameters that came from DEFAULT source, not COMMANDLINE or ENVIRONMENT.
+    For tuple/list params: the config value (if any) is substituted in
+    regardless of parameter source, becoming the BASE that templates apply
+    against and that the CLI value is appended to at the end of the pipeline.
+    Any CLI-source tuple/list param WITHOUT a config entry is reset to ``()``
+    here for the same reason: if we left the CLI value in, the final
+    ``restore_cli_list_values`` step would double-append it. The original
+    CLI tuple/list value is captured separately by
+    ``save_cli_list_values_for_restoration`` so it can be restored later.
 
-    Special handling for tuple/list parameters:
-    - An empty string value ("") clears the list (sets it to an empty tuple)
-    - This allows env vars like MNGR__COMMANDS__CREATE__ADD_COMMAND= to clear config defaults
-    - When the user passes a CLI flag for a tuple/list parameter AND the config also supplies
-      a non-empty list value, the config values come first and the CLI values are appended.
-      This preserves the "config-then-CLI" order that users expect when a CLI flag should
-      extend (not replace) the merged settings value.
+    For scalar params: only DEFAULT-source params are substituted with the
+    config value. CLI-source scalars keep their CLI value (and templates skip
+    them via their own source check), preserving the "CLI scalar wins" contract.
+
+    Special handling: an empty string config value (``""``) for a tuple/list
+    param clears the list to ``()`` -- this is how env vars like
+    ``MNGR__COMMANDS__CREATE__ADD_COMMAND=`` can clear config defaults.
 
     When strict=True, raises ConfigParseError for unknown parameter names; when
     strict=False, logs a warning and skips them. Callers should resolve the
     policy from MNGR_ALLOW_UNKNOWN_CONFIG once and pass the result through.
     """
-    # Get command defaults from config
     command_defaults = config.commands.get(command_name)
-    if not command_defaults:
-        # No config defaults for this command, return params as-is
-        return ctx.params.copy()
+    config_defaults: dict[str, Any] = command_defaults.defaults if command_defaults else {}
 
-    # Start with the existing params
     updated_params = ctx.params.copy()
 
-    # For each parameter, check if it came from a default and if config has an override
-    for param_name, config_value in command_defaults.defaults.items():
-        # Check if this parameter exists in the context
+    # First pass: every param with a config entry gets its value processed.
+    for param_name, config_value in config_defaults.items():
         if param_name not in ctx.params:
             msg = (
                 f"Unknown parameter '{param_name}' in commands.{command_name} config. "
@@ -497,31 +515,102 @@ def apply_config_defaults(
                 continue
             raise ConfigParseError(msg)
 
-        # Check the source of the parameter value
-        source = ctx.get_parameter_source(param_name)
+        current_value = ctx.params[param_name]
 
-        # Override if the value came from the default
-        if source == ParameterSource.DEFAULT:
-            # Handle empty string for tuple/list parameters (clears the list)
-            current_value = ctx.params[param_name]
-            if isinstance(current_value, tuple) and config_value == "":
+        # Tuple/list params: config is the base regardless of CLI source.
+        if isinstance(current_value, tuple):
+            if config_value == "":
                 updated_params[param_name] = ()
+            elif isinstance(config_value, (list, tuple)):
+                updated_params[param_name] = tuple(config_value)
             else:
+                # Shape mismatch (config gave a non-aggregate for a tuple param);
+                # pass it through so downstream validation can catch it.
                 updated_params[param_name] = config_value
-        # CLI-supplied tuple/list values extend the (non-empty) config defaults: the
-        # config values come first, then the CLI values are appended. Order matches the
-        # "settings file -> CLI" precedence (lower-precedence layers ship first; the
-        # user's flag is the final word and reads naturally at the end of the list).
-        elif (
-            isinstance(config_value, (list, tuple))
-            and config_value
-            and isinstance(ctx.params[param_name], (list, tuple))
-        ):
-            updated_params[param_name] = tuple(config_value) + tuple(ctx.params[param_name])
-        else:
-            # Parameter was explicitly set on the command line; CLI value wins
-            pass
+            continue
 
+        # Scalar params: only DEFAULT-source values are overridden by config.
+        if ctx.get_parameter_source(param_name) == ParameterSource.DEFAULT:
+            updated_params[param_name] = config_value
+
+    # Second pass: any CLI-source tuple/list param WITHOUT a config entry needs
+    # the CLI value cleared so restore_cli_list_values doesn't double-append.
+    # Click's "multiple=True" options default to (), which is the value we'd
+    # have had if the user hadn't supplied --flag at all; reset to that.
+    # Control tuples (see ``_NON_BOOKENDED_CLI_TUPLE_PARAMS``) are exempt --
+    # those need their CLI value to remain visible to downstream consumers.
+    for param_name, value in ctx.params.items():
+        if not isinstance(value, tuple):
+            continue
+        if param_name in config_defaults:
+            continue
+        if param_name in _NON_BOOKENDED_CLI_TUPLE_PARAMS:
+            continue
+        if ctx.get_parameter_source(param_name) != ParameterSource.COMMANDLINE:
+            continue
+        updated_params[param_name] = ()
+
+    return updated_params
+
+
+# Tuple-typed CLI params that drive control flow (which templates to apply, etc.)
+# rather than carrying data that gets merged with config defaults. The bookend
+# pattern (apply_config_defaults's reset + save_cli_list_values_for_restoration +
+# restore_cli_list_values) must skip them so the original CLI value stays visible
+# to whatever consumer needs it.
+_NON_BOOKENDED_CLI_TUPLE_PARAMS: frozenset[str] = frozenset({"template"})
+
+
+def save_cli_list_values_for_restoration(ctx: click.Context) -> dict[str, tuple[Any, ...]]:
+    """Capture the original CLI-supplied tuple/list values from ``ctx.params`` so
+    ``restore_cli_list_values`` can re-apply them at the end of the pipeline.
+
+    Reads from ``ctx.params`` (not the post-config-defaults params dict) because
+    ``apply_config_defaults`` substitutes config values into CLI-source tuple/list
+    params -- the config value becomes the "base" the template phase operates on.
+    The CLI value needs to come from the unmodified click context to survive.
+
+    Pipeline order is therefore:
+
+        apply_config_defaults       -> params hold config_base for tuple/list fields
+        save_cli_list_values_...    -> stash CLI value separately
+        apply_create_template       -> templates assign / __extend against config_base
+        restore_cli_list_values     -> append stashed CLI values to template result
+
+    Final value for a CLI-supplied tuple/list param is therefore
+    ``config_base + template_resolution + CLI_value`` -- the CLI value reads as
+    the user's final word at the tail of the list. Control params listed in
+    ``_NON_BOOKENDED_CLI_TUPLE_PARAMS`` are excluded -- they need to flow
+    through to consumers (e.g. ``apply_create_template``) without being
+    rewritten.
+    """
+    return {
+        param_name: tuple(value)
+        for param_name, value in ctx.params.items()
+        if isinstance(value, (list, tuple))
+        and ctx.get_parameter_source(param_name) == ParameterSource.COMMANDLINE
+        and param_name not in _NON_BOOKENDED_CLI_TUPLE_PARAMS
+    }
+
+
+def restore_cli_list_values(params: dict[str, Any], cli_list_values: dict[str, tuple[Any, ...]]) -> dict[str, Any]:
+    """Append the CLI list values previously captured by
+    ``save_cli_list_values_for_restoration`` to whatever the template phase
+    produced for the corresponding params.
+
+    Final ordering for a tuple/list parameter is::
+
+        config_defaults  +  template_resolution_result  +  CLI_supplied_values
+
+    so the CLI flag always reads as "what the user explicitly added on top."
+    """
+    updated_params = params.copy()
+    for param_name, cli_value in cli_list_values.items():
+        current = updated_params.get(param_name, ())
+        if isinstance(current, (list, tuple)):
+            updated_params[param_name] = tuple(current) + cli_value
+        else:
+            updated_params[param_name] = cli_value
     return updated_params
 
 
@@ -534,14 +623,24 @@ def apply_create_template(
 
     Templates are named presets of create command arguments that can be applied
     using --template <name>. Multiple templates can be specified and are applied
-    in order, stacking their values.
+    in order, stacking their values. Templates run AFTER ``apply_config_defaults``
+    (so the "base" for any option is the post-config-defaults value -- i.e. the
+    config-supplied value for tuple/list params, or ``()`` when no config entry
+    exists) and BEFORE ``restore_cli_list_values`` (the original CLI tuple/list
+    value was captured separately by ``save_cli_list_values_for_restoration``
+    and is appended to the template result at the end of the pipeline).
 
-    Merge semantics (matching config file merge behavior):
-    - Scalar params: latest template wins; CLI arguments always take precedence.
-    - List/tuple params (env, pass_env, etc.): concatenated with existing values
-      (from config defaults, earlier templates, or CLI). An explicit empty list
-      [] resets the parameter, clearing all values from earlier in the chain
-      (but not CLI-specified values).
+    Merge semantics (now aligned with the rest of the settings/merge_with rules):
+    - Scalar params from a template: assign-by-default; the latest template that
+      writes the param wins, and CLI-supplied scalars always take precedence
+      (templates skip them via the parameter-source check).
+    - Aggregate params from a template (list / tuple / dict / set): assign-by-default.
+      A template assigning over a non-empty base that would drop entries is a
+      narrowing assignment and raises ``ConfigParseError`` unless
+      ``config.allow_settings_key_assignment_narrowing`` is ``True``. To opt into
+      additive behavior for a specific key, write ``key__extend = [...]`` in the
+      template definition -- the same operator suffix recognised in TOML,
+      ``--setting``, and env vars.
 
     This function should only be called for the 'create' command.
     """
@@ -573,34 +672,117 @@ def apply_create_template(
 
         template = config.create_templates[template_key]
 
-        for param_name, template_value in template.options.items():
+        for raw_key, template_value in template.options.items():
             if template_value is None:
                 continue
+
+            # Detect the ``__extend`` operator suffix; bare keys are assign-by-default,
+            # ``<key>__extend`` opts into additive behavior for the targeted key.
+            is_extend = is_extend_key(raw_key)
+            param_name = bare_key(raw_key) if is_extend else raw_key
             if param_name not in params:
                 continue
-            source = ctx.get_parameter_source(param_name)
+
             existing_value = updated_params[param_name]
 
-            # List/tuple params: concatenate (or reset on explicit empty list)
-            if isinstance(template_value, (list, tuple)) and isinstance(existing_value, (list, tuple)):
-                if not template_value:
-                    # Explicit empty list resets values from config defaults and
-                    # earlier templates, but CLI-specified values are preserved
-                    if source == ParameterSource.DEFAULT:
-                        updated_params[param_name] = ()
-                    else:
-                        pass
-                else:
-                    # Concatenate existing values with template values
-                    updated_params[param_name] = tuple(existing_value) + tuple(template_value)
-            elif source == ParameterSource.DEFAULT:
-                # Scalar params from defaults: template value wins
-                updated_params[param_name] = template_value
+            if is_extend:
+                updated_params[param_name] = _apply_template_extend(
+                    existing_value,
+                    template_value,
+                    template_name=template_name,
+                    param_name=param_name,
+                )
+                continue
+
+            # Bare assign on a scalar field: CLI wins; otherwise template overrides.
+            if not isinstance(template_value, (list, tuple, dict, set, frozenset)):
+                if ctx.get_parameter_source(param_name) == ParameterSource.DEFAULT:
+                    updated_params[param_name] = template_value
+                # CLI-supplied scalar: CLI wins (no change)
+                continue
+
+            # Bare assign on an aggregate field: check the narrowing guard.
+            if would_assignment_narrow(existing_value, template_value):
+                if not config.allow_settings_key_assignment_narrowing:
+                    raise ConfigParseError(_build_template_narrowing_message(template_name, param_name))
+
+            # Coerce list -> tuple when the existing value is a tuple so downstream
+            # CLI code keeps seeing the canonical tuple shape it expects.
+            if isinstance(existing_value, tuple) and isinstance(template_value, list):
+                updated_params[param_name] = tuple(template_value)
             else:
-                # CLI-specified scalar params: CLI wins (no change)
-                pass
+                updated_params[param_name] = template_value
 
     return updated_params
+
+
+def _apply_template_extend(
+    existing_value: Any,
+    extend_value: Any,
+    *,
+    template_name: str,
+    param_name: str,
+) -> Any:
+    """Apply a single template's ``<key>__extend = ...`` against the existing
+    parameter value.
+
+    Mirrors the leaf semantics of ``_apply_extend`` in the key resolver -- list/
+    tuple/set/dict shape rules are the same -- but operates against in-flight
+    click param values rather than against parsed pydantic models, so the
+    coercion bias is toward the click-native tuple shape.
+    """
+    field_path = f"create_templates.{template_name}.{param_name}__extend"
+    if not isinstance(extend_value, (list, tuple, dict, set, frozenset)):
+        raise ConfigParseError(
+            f"{field_path} requires a list, tuple, dict, set, or frozenset value; got: {type(extend_value).__name__}"
+        )
+    if existing_value is None:
+        # Field unset in base. Extend acts like assign, matching ``_apply_extend``.
+        return extend_value
+    if isinstance(existing_value, (list, tuple)):
+        if not isinstance(extend_value, (list, tuple)):
+            raise ConfigParseError(
+                f"{field_path} (list/tuple) requires a JSON array value; got: {type(extend_value).__name__}"
+            )
+        merged = list(existing_value) + list(extend_value)
+        return tuple(merged) if isinstance(existing_value, tuple) else merged
+    if isinstance(existing_value, (set, frozenset)):
+        if not isinstance(extend_value, (set, frozenset, list, tuple)):
+            raise ConfigParseError(
+                f"{field_path} (set) requires a JSON array value; got: {type(extend_value).__name__}"
+            )
+        merged_set = set(existing_value) | set(extend_value)
+        return frozenset(merged_set) if isinstance(existing_value, frozenset) else merged_set
+    if isinstance(existing_value, dict):
+        if not isinstance(extend_value, dict):
+            raise ConfigParseError(
+                f"{field_path} (dict) requires a JSON object value; got: {type(extend_value).__name__}"
+            )
+        return {**existing_value, **extend_value}
+    raise ConfigParseError(
+        f"{field_path} is not valid: target field is a scalar "
+        f"({type(existing_value).__name__}); use bare assignment instead."
+    )
+
+
+def _build_template_narrowing_message(template_name: str, param_name: str) -> str:
+    """Construct the user-facing error for a template assign-by-default that
+    would silently drop entries from the existing parameter value.
+
+    Same shape as the settings-layer narrowing error so users see consistent
+    advice across config files, env vars, ``--setting``, and templates.
+    """
+    return (
+        f"Settings narrowing detected: create_templates.{template_name}.{param_name} would "
+        f"assign over a non-empty list/tuple/dict/set value from the merged config (or an "
+        f"earlier template in the stack), silently dropping the earlier entries.\n"
+        f"To opt into this assign-by-default behavior (and silence this error), set "
+        f"`allow_settings_key_assignment_narrowing = true` in your settings.toml.\n"
+        f"To keep the additive behavior for this specific key, switch the template entry to "
+        f"`{param_name}__extend = [...]`.\n"
+        f"NOTE: the default for `allow_settings_key_assignment_narrowing` will change to True "
+        f"in a future version, and support for False may be removed entirely."
+    )
 
 
 def is_param_explicit(ctx: click.Context, param_name: str) -> bool:
