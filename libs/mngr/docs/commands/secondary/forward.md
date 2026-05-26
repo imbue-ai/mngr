@@ -49,7 +49,7 @@ mngr forward [OPTIONS]
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
 | `--host` | text | Bind host | `127.0.0.1` |
-| `--port` | integer | Bind port | `8421` |
+| `--port` | integer | Bind port. When omitted, the server tries 8421 and falls back to an OS-assigned port if it is already in use. When supplied explicitly, the server binds exactly that port and fails if it is unavailable. | None |
 | `--service` | text | Service name to forward (e.g. 'system_interface') | None |
 | `--forward-port` | integer | Forward to a fixed remote port on the agent's host (manual mode). Mutually exclusive with --service. | None |
 | `--reverse` | text | Reverse tunnel pair REMOTE:LOCAL. Repeatable. REMOTE may be 0 (sshd-assigned). | None |

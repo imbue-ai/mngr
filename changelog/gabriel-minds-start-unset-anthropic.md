@@ -1,1 +1,0 @@
-- `just minds-start` now unsets `ANTHROPIC_API_KEY` and `ANTHROPIC_BASE_URL` before launching the desktop client, so credentials exported in the developer's shell no longer leak into agents created by the dev app.

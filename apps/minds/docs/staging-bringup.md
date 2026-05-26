@@ -59,9 +59,14 @@ become Vault entries in step 4.
   modal token set --profile minds-staging
   ```
   Verify a `[minds-staging]` block landed in `~/.modal.toml`. The
-  `MODAL_PROFILE` export in `minds env activate staging` (see step 6)
-  pins every subsequent `modal` shellout to this profile -- the
-  account you're logged into via `active = true` is irrelevant.
+  `MODAL_PROFILE` export in `minds env activate --deploy staging` (see
+  step 6) pins every subsequent `modal` shellout to this profile -- the
+  account you're logged into via `active = true` is irrelevant. The
+  presence of the `[minds-staging]` block is only checked when you pass
+  `--deploy` (which pre-validates `~/.modal.toml` and fails fast with a
+  `modal token set --profile minds-staging` hint if the block is
+  missing). Plain `minds env activate staging` -- use-only activation --
+  does not need the block and never reads `~/.modal.toml`.
 
 - [ ] **Neon project for staging.** Create a single project under your
   Neon org (any name; the staging tier uses `creates_resources=false`
@@ -252,21 +257,24 @@ After every push:
 ## 5. Verify Modal CLI talks to `minds-staging`
 
 ```bash
-eval "$(uv run minds env activate staging)"
+eval "$(uv run minds env activate --deploy staging)"
 echo "$MODAL_PROFILE"   # expect: minds-staging
 modal environment list  # should NOT error; no envs needed yet for SHARED tier
 ```
 
 If `modal` complains about missing auth, re-run `modal token set
---profile minds-staging`. The `MODAL_PROFILE` export the activation
-emits is what pins every `modal` shellout below to this workspace.
+--profile minds-staging`. The `MODAL_PROFILE` export the `--deploy`
+activation emits is what pins every `modal` shellout below to this
+workspace. Without `--deploy`, `MODAL_PROFILE` is not exported (and
+plain `activate` actively unsets it) -- that mode is for *using* the
+deployed tier, not deploying it.
 
 ---
 
 ## 6. First-time tier deploy
 
 ```bash
-eval "$(uv run minds env activate staging)"
+eval "$(uv run minds env activate --deploy staging)"
 uv run minds env deploy --yes-i-mean-staging
 ```
 
@@ -398,8 +406,9 @@ uv run minds env destroy --yes-i-mean-staging
   with the real Cloudflare domain + OAuth client ids.
 - [ ] (If the deployed URLs disagreed with the committed values:)
   the updated `apps/minds/imbue/minds/config/envs/staging/client.toml`.
-- [ ] A `changelog/<branch-name>.md` entry describing the staging
-  tier bring-up (required by CI).
+- [ ] An `apps/minds/changelog/<branch-name>.md` entry describing the
+  staging tier bring-up (required by CI); plus a `dev/changelog/<branch-name>.md`
+  entry if the PR also touches root-level files (scripts, CI, etc.).
 
 The `.minds/staging/pool_management_key/` directory should NOT land
 in the commit (it's covered by the existing `.minds/` gitignore, but

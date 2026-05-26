@@ -290,7 +290,7 @@ def test_start_gateway_drops_bundled_extensions(tmp_path: Path) -> None:
         port = manager.start_gateway(cg)
         assert _wait_for_listening("127.0.0.1", port)
         mjs_files = sorted(p.name for p in extensions_dir.iterdir() if p.suffix == ".mjs")
-        assert mjs_files == ["permission_requests.mjs", "permissions.mjs"]
+        assert mjs_files == ["minds_api_proxy.mjs", "permission_requests.mjs", "permissions.mjs"]
         # The destination files must be non-empty -- ``importlib.resources``
         # silently produces empty reads if the wheel does not actually
         # ship the .mjs payloads.

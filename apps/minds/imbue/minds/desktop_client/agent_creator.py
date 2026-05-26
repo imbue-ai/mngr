@@ -435,12 +435,22 @@ def _build_mngr_create_command(
     """Build the mngr create command and generate an API key for the agent.
 
     Returns (command_list, api_key) where api_key is a UUID4 string injected
-    as MINDS_API_KEY into the agent's environment via --env. ``--format jsonl``
-    is appended so the caller can parse the canonical ``AgentId`` out of
-    the trailing ``"event": "created"`` line; minds no longer pre-generates
-    an id because for imbue_cloud the lease forces it back to the pool
-    host's pre-baked id anyway, and pre-generating one led to bugs (e.g.
-    keying gateway state under a fictional id).
+    as MINDS_API_KEY into the host's env file via ``--host-env`` so every
+    agent that ever runs on this host (the system-services agent created
+    here plus the chat agents that the FCT bootstrap and the system
+    interface's "New Chat" button later spawn on the same host) inherits
+    the same key. Without this, only the system-services agent would see
+    ``MINDS_API_KEY`` and the chat agents' calls to the desktop client's
+    ``/api/v1/...`` routes would 401. The API-key hash is still stored
+    once under the system-services agent's canonical id; ``find_agent_by_api_key``
+    will resolve every workspace-side caller to that id, which is fine
+    for authentication but means notifications etc. surface under the
+    system-services agent's display name. ``--format jsonl`` is appended
+    so the caller can parse the canonical ``AgentId`` out of the trailing
+    ``"event": "created"`` line; minds no longer pre-generates an id
+    because for imbue_cloud the lease forces it back to the pool host's
+    pre-baked id anyway, and pre-generating one led to bugs (e.g. keying
+    gateway state under a fictional id).
 
     LOCAL mode: --template main --template docker (runs in Docker container)
     LIMA mode: --template main --template lima (runs in Lima VM)
@@ -524,7 +534,14 @@ def _build_mngr_create_command(
         # ``current`` so we just rename the *new* branch.
         "--branch",
         f":mngr/{host_name}",
-        "--env",
+        # ``--host-env`` (not ``--env``) so MINDS_API_KEY is written to
+        # the host's env file once and every agent on the host -- the
+        # system-services agent created here plus the chat agents the
+        # FCT bootstrap and system_interface's "New Chat" button later
+        # spawn on the same host -- inherits the same key for
+        # authenticating against the desktop client's ``/api/v1/...``
+        # routes.
+        "--host-env",
         f"MINDS_API_KEY={api_key}",
         "--label",
         "user_created=true",
@@ -855,15 +872,14 @@ class AgentCreator(MutableModel):
         frozen=True,
         description=(
             "Latchkey wrapper that owns the shared ``latchkey gateway`` subprocess. When "
-            "provided, agent creation derives the gateway's shared password and injects it as "
-            "``LATCHKEY_GATEWAY_PASSWORD`` into the ``mngr create`` env (so the agent's "
-            "``latchkey`` CLI authenticates), and after creation succeeds, mints a per-agent "
-            "permissions-override JWT and injects it via ``mngr provision --env --no-restart`` "
-            "so the gateway evaluates the agent's calls against its own deny-all-by-default "
-            "``latchkey_permissions.json`` instead of the gateway's shared default. ``None`` "
-            "degrades gracefully: the agent still gets ``LATCHKEY_GATEWAY=...`` (the URL is "
-            "useful by itself for tests / non-password-protected gateways), but no password "
-            "or JWT injection happens."
+            "provided, agent creation derives the gateway's shared password and a per-host "
+            "permissions-override JWT, injecting both into the ``mngr create`` env "
+            "(``LATCHKEY_GATEWAY_PASSWORD`` so the agent's ``latchkey`` CLI authenticates, "
+            "and ``LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE`` so the gateway evaluates the "
+            "agent's calls against its own deny-all-by-default ``latchkey_permissions.json`` "
+            "instead of the gateway's shared default). ``None`` degrades gracefully: the "
+            "agent still gets ``LATCHKEY_GATEWAY=...`` (the URL is useful by itself for "
+            "tests / non-password-protected gateways), but no password or JWT injection happens."
         ),
     )
     root_concurrency_group: ConcurrencyGroup = Field(
@@ -1240,14 +1256,13 @@ class AgentCreator(MutableModel):
                 # here with a deny-all baseline; after ``mngr create``
                 # returns the canonical host id, ``finalize_host_permissions``
                 # replaces that handle with a symlink to the canonical
-                # ``permissions_path_for_host`` location. This avoids
-                # the post-create ``mngr provision --env`` step (which
-                # was fragile and could silently leave
-                # ``LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE`` missing in
-                # the agent env). Every launch mode is ``is_tunneled=True``
-                # since the only on-host launch mode (DEV) was removed --
-                # all remaining modes reach the gateway via the reverse
-                # tunnel ``LatchkeyDiscoveryHandler`` sets up post-discovery.
+                # ``permissions_path_for_host`` location. The env vars are
+                # injected into the ``mngr create`` env so they are present
+                # from the start, avoiding any post-create re-provisioning
+                # step. Every launch mode is ``is_tunneled=True`` since the
+                # only on-host launch mode (DEV) was removed -- all remaining
+                # modes reach the gateway via the reverse tunnel
+                # ``LatchkeyDiscoveryHandler`` sets up post-discovery.
                 #
                 # ``prepare_agent_latchkey`` raises on infrastructure
                 # failures (latchkey CLI broken, on-disk write failed,

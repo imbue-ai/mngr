@@ -116,6 +116,43 @@ def test_build_mngr_create_command_lifts_latchkey_env_to_host_env_flags() -> Non
             )
 
 
+def test_build_mngr_create_command_lifts_minds_api_key_to_host_env() -> None:
+    """``MINDS_API_KEY`` must be set via ``--host-env`` (not ``--env``).
+
+    Each minds workspace now creates multiple agents on the same host: the
+    initial ``system-services`` agent (built here) plus one or more chat
+    agents that the FCT bootstrap and the system_interface's "New Chat"
+    button later spawn via their own ``mngr create`` invocations. Those
+    later creates do not pass ``--env MINDS_API_KEY=...``; they rely on the
+    host's env file to propagate the key. Passing it via ``--host-env``
+    here writes it to the host env file once so every agent that ever
+    runs on the host picks it up.
+    """
+    for mode, account in (
+        (LaunchMode.LOCAL, None),
+        (LaunchMode.LIMA, None),
+        (LaunchMode.CLOUD, None),
+        (LaunchMode.IMBUE_CLOUD, "alice@imbue.com"),
+    ):
+        command, api_key = _build_mngr_create_command(
+            launch_mode=mode,
+            host_name=HostName("hello"),
+            imbue_cloud_account=account,
+        )
+        kv = f"MINDS_API_KEY={api_key}"
+        assert kv in command, f"{mode}: expected MINDS_API_KEY in command"
+        index = command.index(kv)
+        assert command[index - 1] == "--host-env", (
+            f"{mode}: MINDS_API_KEY should be passed via --host-env, got {command[index - 1]!r}"
+        )
+        # Belt-and-suspenders: ensure no ``--env MINDS_API_KEY=...`` slipped
+        # back in alongside the host-env version.
+        env_pairs = [(command[i], command[i + 1]) for i, arg in enumerate(command[:-1]) if arg == "--env"]
+        assert not any(value.startswith("MINDS_API_KEY=") for _, value in env_pairs), (
+            f"{mode}: MINDS_API_KEY must not also be set via --env"
+        )
+
+
 def test_build_mngr_create_command_omits_latchkey_when_env_is_empty() -> None:
     """Empty / ``None`` ``latchkey_env`` opts the host out of latchkey wiring entirely."""
     for latchkey_env in (None, {}):

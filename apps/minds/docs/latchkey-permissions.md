@@ -20,7 +20,7 @@ and how the agent receives the answer.
    * 403 with `Error: Request not permitted by the user.`: the user has
      authenticated but has not allowed this kind of request.
 3. **Agent writes a request event.** On any of the blocked outcomes, the
-   agent appends a `LatchkeyPermissionRequestEvent` to
+   agent appends a `LatchkeyPredefinedPermissionRequestEvent` to
    `$MNGR_AGENT_STATE_DIR/events/requests/events.jsonl` with the latchkey
    service name and a one-paragraph rationale, then ends its turn and goes
    idle.
