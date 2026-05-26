@@ -85,8 +85,8 @@ def test_build_mngr_create_command_lifts_latchkey_env_to_host_env_flags() -> Non
     new host's env file once and every agent that ever runs on the host
     inherits the same gateway URL / password / JWT.
     """
-    command, _ = _build_mngr_create_command(
-        launch_mode=LaunchMode.LOCAL,
+    command = _build_mngr_create_command(
+        launch_mode=LaunchMode.DOCKER,
         host_name=HostName("hello"),
         latchkey_env={
             "LATCHKEY_GATEWAY": "http://127.0.0.1:1989",
@@ -116,48 +116,36 @@ def test_build_mngr_create_command_lifts_latchkey_env_to_host_env_flags() -> Non
             )
 
 
-def test_build_mngr_create_command_lifts_minds_api_key_to_host_env() -> None:
-    """``MINDS_API_KEY`` must be set via ``--host-env`` (not ``--env``).
+def test_build_mngr_create_command_does_not_inject_minds_api_key() -> None:
+    """The per-agent ``MINDS_API_KEY`` is gone.
 
-    Each minds workspace now creates multiple agents on the same host: the
-    initial ``system-services`` agent (built here) plus one or more chat
-    agents that the FCT bootstrap and the system_interface's "New Chat"
-    button later spawn via their own ``mngr create`` invocations. Those
-    later creates do not pass ``--env MINDS_API_KEY=...``; they rely on the
-    host's env file to propagate the key. Passing it via ``--host-env``
-    here writes it to the host env file once so every agent that ever
-    runs on the host picks it up.
+    There is now exactly one ``MINDS_API_KEY`` per minds installation;
+    the latchkey gateway's ``minds-api-proxy`` extension adds it as
+    ``Authorization: Bearer <key>`` on every forwarded request, and the
+    agent itself never sees the value. ``_build_mngr_create_command``
+    must therefore neither generate nor reference it -- whether via
+    ``--env`` or ``--host-env``.
     """
     for mode, account in (
-        (LaunchMode.LOCAL, None),
+        (LaunchMode.DOCKER, None),
         (LaunchMode.LIMA, None),
         (LaunchMode.CLOUD, None),
         (LaunchMode.IMBUE_CLOUD, "alice@imbue.com"),
     ):
-        command, api_key = _build_mngr_create_command(
+        command = _build_mngr_create_command(
             launch_mode=mode,
             host_name=HostName("hello"),
             imbue_cloud_account=account,
         )
-        kv = f"MINDS_API_KEY={api_key}"
-        assert kv in command, f"{mode}: expected MINDS_API_KEY in command"
-        index = command.index(kv)
-        assert command[index - 1] == "--host-env", (
-            f"{mode}: MINDS_API_KEY should be passed via --host-env, got {command[index - 1]!r}"
-        )
-        # Belt-and-suspenders: ensure no ``--env MINDS_API_KEY=...`` slipped
-        # back in alongside the host-env version.
-        env_pairs = [(command[i], command[i + 1]) for i, arg in enumerate(command[:-1]) if arg == "--env"]
-        assert not any(value.startswith("MINDS_API_KEY=") for _, value in env_pairs), (
-            f"{mode}: MINDS_API_KEY must not also be set via --env"
-        )
+        joined = " ".join(command)
+        assert "MINDS_API_KEY" not in joined, f"{mode}: command must not mention MINDS_API_KEY"
 
 
 def test_build_mngr_create_command_omits_latchkey_when_env_is_empty() -> None:
     """Empty / ``None`` ``latchkey_env`` opts the host out of latchkey wiring entirely."""
     for latchkey_env in (None, {}):
-        command, _ = _build_mngr_create_command(
-            launch_mode=LaunchMode.LOCAL,
+        command = _build_mngr_create_command(
+            launch_mode=LaunchMode.DOCKER,
             host_name=HostName("hello"),
             latchkey_env=latchkey_env,
         )
@@ -167,8 +155,8 @@ def test_build_mngr_create_command_omits_latchkey_when_env_is_empty() -> None:
 
 
 def test_build_mngr_create_command_uses_main_template_and_omits_message_arg() -> None:
-    command, api_key = _build_mngr_create_command(
-        launch_mode=LaunchMode.LOCAL,
+    command = _build_mngr_create_command(
+        launch_mode=LaunchMode.DOCKER,
         host_name=HostName("hello"),
     )
     assert "--template" in command
@@ -176,7 +164,6 @@ def test_build_mngr_create_command_uses_main_template_and_omits_message_arg() ->
     # The /welcome message now lives in forever-claude-template's
     # [create_templates.main] section, so the explicit --message arg is gone.
     assert "--message" not in command
-    assert api_key
     # minds no longer pre-generates an agent id; mngr generates one and we
     # parse it out of the JSONL ``created`` event in run_mngr_create.
     assert "--id" not in command
@@ -191,7 +178,7 @@ def test_build_mngr_create_command_uses_main_template_and_omits_message_arg() ->
 
 
 def test_build_mngr_create_command_imbue_cloud_targets_account_provider() -> None:
-    command, api_key = _build_mngr_create_command(
+    command = _build_mngr_create_command(
         launch_mode=LaunchMode.IMBUE_CLOUD,
         host_name=HostName("hello"),
         imbue_cloud_account="alice@imbue.com",
@@ -214,7 +201,6 @@ def test_build_mngr_create_command_imbue_cloud_targets_account_provider() -> Non
     assert "--id" not in command
     assert "--reuse" in command
     assert "--update" not in command
-    assert api_key
     # Lease attributes flow through --build-arg.
     assert "-b" in command
     assert "repo_url=https://github.com/imbue-ai/forever-claude-template" in command
@@ -227,7 +213,7 @@ def test_build_mngr_create_command_imbue_cloud_targets_account_provider() -> Non
     assert "GH_TOKEN" not in joined
     assert "--pass-host-env" not in command
     # IMBUE_CLOUD now uses the symmetric ``--template main --template imbue_cloud``
-    # shape (mirroring how LOCAL/LIMA/CLOUD use ``--template main --template <provider>``).
+    # shape (mirroring how DOCKER/LIMA/CLOUD use ``--template main --template <provider>``).
     # The provider-specific knobs (idle_mode, pass_host_env) live in the
     # ``imbue_cloud`` template instead of being inlined here.
     assert "--template" in command
@@ -236,19 +222,18 @@ def test_build_mngr_create_command_imbue_cloud_targets_account_provider() -> Non
     assert "imbue_cloud" in template_args
     # ``--idle-mode disabled`` also moved into the template.
     assert "--idle-mode" not in command
-    assert api_key
 
 
 def test_build_mngr_create_command_never_inlines_secret_env_flags() -> None:
     """Secret forwarding lives in FCT, not minds. The command line never carries
     ``--pass-(host-)env`` flags or secret values for any compute mode."""
     for mode, account in (
-        (LaunchMode.LOCAL, None),
+        (LaunchMode.DOCKER, None),
         (LaunchMode.LIMA, None),
         (LaunchMode.CLOUD, None),
         (LaunchMode.IMBUE_CLOUD, "alice@imbue.com"),
     ):
-        command, _ = _build_mngr_create_command(
+        command = _build_mngr_create_command(
             launch_mode=mode,
             host_name=HostName("hello"),
             imbue_cloud_account=account,
@@ -538,7 +523,7 @@ def test_start_creation_imbue_cloud_ai_with_local_compute_mints_litellm_key(tmp_
     creation_id = creator.start_creation(
         repo_source=str(_make_fake_repo(tmp_path)),
         host_name="my-workspace",
-        launch_mode=LaunchMode.LOCAL,
+        launch_mode=LaunchMode.DOCKER,
         ai_provider=AIProvider.IMBUE_CLOUD,
         account_email="alice@imbue.com",
     )
@@ -566,7 +551,7 @@ def test_start_creation_api_key_ai_does_not_mint_litellm_key(tmp_path: Path) -> 
     creation_id = creator.start_creation(
         repo_source=str(_make_fake_repo(tmp_path)),
         host_name="my-workspace",
-        launch_mode=LaunchMode.LOCAL,
+        launch_mode=LaunchMode.DOCKER,
         ai_provider=AIProvider.API_KEY,
         anthropic_api_key="sk-ant-user-supplied",
     )
@@ -587,7 +572,7 @@ def test_start_creation_subscription_ai_does_not_mint_litellm_key(tmp_path: Path
     creation_id = creator.start_creation(
         repo_source=str(_make_fake_repo(tmp_path)),
         host_name="my-workspace",
-        launch_mode=LaunchMode.LOCAL,
+        launch_mode=LaunchMode.DOCKER,
         ai_provider=AIProvider.SUBSCRIPTION,
     )
     _wait_until_finished(creator, creation_id)
@@ -607,7 +592,7 @@ def test_start_creation_api_key_ai_without_key_fails_with_clear_message(tmp_path
     creation_id = creator.start_creation(
         repo_source=str(_make_fake_repo(tmp_path)),
         host_name="my-workspace",
-        launch_mode=LaunchMode.LOCAL,
+        launch_mode=LaunchMode.DOCKER,
         ai_provider=AIProvider.API_KEY,
         anthropic_api_key="",
     )

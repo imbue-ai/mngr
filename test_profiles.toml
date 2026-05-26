@@ -25,7 +25,7 @@ testpaths = [
     "libs/mngr_claude",
     "libs/mngr_pair",
     "libs/mngr_opencode",
-    "libs/mngr_gemini",
+    "libs/mngr_antigravity",
     "libs/mngr_kanpan",
     "libs/mngr_schedule",
     "libs/mngr_recursive",

@@ -45,8 +45,18 @@ HOST_ENV_ARGS=$(jq -r '.env | to_entries[] | "--host-env \(.key)=\(.value)"' /tm
 # the same gateway wiring.
 CREATED=$(mngr create my-template $HOST_ENV_ARGS --format json)
 HOST_ID=$(echo "$CREATED" | jq -r .host_id)
+AGENT_ID=$(echo "$CREATED" | jq -r .agent_id)
 
+# Finalize the opaque permissions handle: swing its symlink to the
+# canonical host-keyed permissions path.
 mngr latchkey link-permissions --host-id "$HOST_ID" --opaque-path "$OPAQUE_PATH"
+
+# Register this agent for the host so it can reach the Minds API proxy.
+# The baseline rule rejects every ``/minds-api-proxy/api/v1/agents/<id>/...``
+# request whose ``<id>`` is not in the host's allowed-agent enum, so
+# every minds agent that wants to call the Minds API must be registered
+# here. Idempotent: re-running for an already-registered agent is a no-op.
+mngr latchkey register-agent --host-id "$HOST_ID" --agent-id "$AGENT_ID"
 ```
 
 ### Settings
@@ -100,7 +110,7 @@ from imbue.mngr_latchkey.discovery import (
     LatchkeyDiscoveryHandler,
     LatchkeyDestructionHandler,
 )
-from imbue.mngr_latchkey.ssh_tunnel import SSHTunnelManager
+from imbue.mngr_forward.ssh_tunnel import SSHTunnelManager
 
 latchkey = Latchkey(
     latchkey_binary="/path/to/latchkey",  # default: "latchkey" on PATH
@@ -203,6 +213,14 @@ consume the stream and approve/delete on resolution.
   fresh `?follow=true` consumer never sees the resolved request
   again. Available to the admin.
 
+The `permissions` extension also exposes
+`POST /permissions/schemas?path=<file>&schema_name=<name>` and
+`DELETE /permissions/schemas?path=<file>&schema_name=<name>` for adding
+or removing inline detent schemas alongside the rule editor. Used by
+minds at agent-creation time to install a per-agent path-pattern schema
+("only `/minds-api-proxy/api/v1/agents/<agent_id>/...`") that the rule
+for that agent references.
+
 Pending requests are stored as one JSON file per request under
 `<latchkey-directory>/permission_requests/v2/`. The `v2` segment is
 the on-disk schema version; future shape changes get a new directory
@@ -228,11 +246,21 @@ that needs to repoint the proxy at a new upstream simply respawns
 the gateway (or the `mngr latchkey forward` supervisor that owns it)
 with a fresh value for the env var.
 
-The extension performs no authentication of its own beyond the
-gateway's normal permission check (against the synthetic
-`latchkey-self.invalid` URL). Restricting which paths an agent can
-reach through the proxy is therefore a job for the agent's
-`latchkey_permissions.json`.
+The proxy authenticates *to* the upstream Minds API on behalf of the
+agent. When `LATCHKEY_EXTENSION_MINDS_API_KEY` is set, the proxy
+overwrites the inbound `Authorization` header with
+`Bearer <LATCHKEY_EXTENSION_MINDS_API_KEY>` before forwarding. Agents
+therefore never see the key, and an agent that tries to spoof an
+`Authorization` header has its value dropped on the floor. When the
+env var is unset, the inbound `Authorization` value is forwarded
+unchanged (useful for tests / local fixtures that do not bother
+stubbing the key; the upstream will simply 401 the request).
+
+Other than the `Authorization` overwrite, the extension performs no
+authentication of its own beyond the gateway's normal permission
+check (against the synthetic `latchkey-self.invalid` URL). Restricting
+which paths an agent can reach through the proxy is therefore a job
+for the agent's `latchkey_permissions.json`.
 
 ### `permissions` extension
 

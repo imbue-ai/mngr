@@ -48,10 +48,10 @@ class OpenCodeSignalCheck(SignalCheck):
     command: tuple[str, ...] = ("opencode", "--version")
 
 
-class GeminiSignalCheck(SignalCheck):
-    """Detects whether the Gemini CLI is installed."""
+class AntigravitySignalCheck(SignalCheck):
+    """Detects whether the Antigravity CLI is installed."""
 
-    command: tuple[str, ...] = ("gemini", "--version")
+    command: tuple[str, ...] = ("agy", "--version")
 
 
 class PiSignalCheck(SignalCheck):
@@ -75,7 +75,7 @@ class LimaSignalCheck(SignalCheck):
 # Shared instances for use across catalog entries.
 _CLAUDE_SIGNAL: Final[ClaudeSignalCheck] = ClaudeSignalCheck()
 _OPENCODE_SIGNAL: Final[OpenCodeSignalCheck] = OpenCodeSignalCheck()
-_GEMINI_SIGNAL: Final[GeminiSignalCheck] = GeminiSignalCheck()
+_ANTIGRAVITY_SIGNAL: Final[AntigravitySignalCheck] = AntigravitySignalCheck()
 _PI_SIGNAL: Final[PiSignalCheck] = PiSignalCheck()
 _MODAL_SIGNAL: Final[ModalSignalCheck] = ModalSignalCheck()
 _LIMA_SIGNAL: Final[LimaSignalCheck] = LimaSignalCheck()
@@ -116,11 +116,11 @@ PLUGIN_CATALOG: Final[tuple[CatalogEntry, ...]] = (
         is_recommended=True,
     ),
     CatalogEntry(
-        entry_point_name="gemini",
-        package_name="imbue-mngr-gemini",
-        description="Gemini agent type plugin for mngr",
+        entry_point_name="antigravity",
+        package_name="imbue-mngr-antigravity",
+        description="Antigravity agent type plugin for mngr",
         tier=PluginTier.INDEPENDENT,
-        signal=_GEMINI_SIGNAL,
+        signal=_ANTIGRAVITY_SIGNAL,
         is_recommended=True,
     ),
     CatalogEntry(

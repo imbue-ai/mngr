@@ -138,6 +138,10 @@ jobs:
             ${{ inputs.test_paths }} \
             -- ${{ inputs.pytest_args }} \
             | tee tmr-report/events.jsonl
+          # Don't rely on pipefail to propagate mngr's exit code through tee:
+          # in this step's GHA shell, the pipeline's non-zero left-side status
+          # has been observed to read as success. Re-assert it explicitly.
+          exit "${PIPESTATUS[0]}"
 
       - name: Upload HTML report
         if: always()
