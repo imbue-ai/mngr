@@ -265,9 +265,8 @@ def test_pipeline_cli_flag_extends_non_empty_config(mngr_test_prefix: str) -> No
     )
     after_defaults = apply_config_defaults(ctx, config, "create")
     cli_values = save_cli_list_values_for_restoration(ctx)
-    after_extract = after_defaults
-    # No templates here, so apply_create_template is a no-op.
-    result = restore_cli_list_values(after_extract, cli_values)
+    # No templates here, so apply_create_template would be a no-op.
+    result = restore_cli_list_values(after_defaults, cli_values)
     assert result["env"] == ("X=5", "X=6")
 
 
@@ -283,8 +282,7 @@ def test_pipeline_cli_flag_extends_multiple_values(mngr_test_prefix: str) -> Non
     )
     after_defaults = apply_config_defaults(ctx, config, "create")
     cli_values = save_cli_list_values_for_restoration(ctx)
-    after_extract = after_defaults
-    result = restore_cli_list_values(after_extract, cli_values)
+    result = restore_cli_list_values(after_defaults, cli_values)
     assert result["env"] == ("X=5", "X=6", "X=7")
 
 
@@ -819,8 +817,7 @@ def test_apply_create_template_template_then_cli_via_pipeline(mngr_test_prefix: 
     )
     after_defaults = apply_config_defaults(ctx, config, "create")
     cli_values = save_cli_list_values_for_restoration(ctx)
-    after_extract = after_defaults
-    after_templates = apply_create_template(ctx, after_extract, config)
+    after_templates = apply_create_template(ctx, after_defaults, config)
     result = restore_cli_list_values(after_templates, cli_values)
     assert result["env"] == ("X=1", "X=3", "X=6")
 
@@ -1142,9 +1139,8 @@ def test_apply_settings_to_config_extend_then_cli_flag_appends(mngr_test_prefix:
     )
     after_defaults = apply_config_defaults(ctx, extended, "create")
     cli_values = save_cli_list_values_for_restoration(ctx)
-    after_extract = after_defaults
     # No templates here, so apply_create_template would be a no-op anyway.
-    result = restore_cli_list_values(after_extract, cli_values)
+    result = restore_cli_list_values(after_defaults, cli_values)
     assert result["env"] == ("X=5", "X=7", "X=6")
 
 
