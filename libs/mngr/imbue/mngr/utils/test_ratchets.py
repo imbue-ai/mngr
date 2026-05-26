@@ -245,6 +245,21 @@ def test_prevent_bare_urwid_tty_signal_keys() -> None:
     rc.check_bare_urwid_tty_signal_keys(_DIR, snapshot(0))
 
 
+# Primary enforcement lives in the type system: TmuxSessionTarget and
+# TmuxWindowTarget (in hosts/tmux.py) emit exact-match `=` targets via
+# .as_shell_arg(). This ratchet is the regex-level backstop for shell-template
+# strings (e.g. bash heredocs in providers/listing_utils.py and connect.py,
+# the agent background-task scripts, ttyd's attach script) where Python types
+# don't reach.
+#
+# Baseline 1 accounts for agents/tui_utils.py:269: `tmux send-keys -t "$1"`
+# where $1 is bound from `tmux_target.as_shell_arg()` at the f-string
+# boundary -- variable indirection that the regex can't see through; safe in
+# practice because the value of $1 includes the `=` prefix.
+def test_prevent_bare_tmux_targets() -> None:
+    rc.check_bare_tmux_targets(_DIR, snapshot(1))
+
+
 def test_prevent_direct_subprocess() -> None:
     # testing.py files are test infrastructure and excluded alongside test files
     excluded = TEST_FILE_PATTERNS + ("testing.py",)

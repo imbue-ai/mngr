@@ -47,6 +47,7 @@ from imbue.mngr.errors import PluginMngrError
 from imbue.mngr.errors import SendMessageError
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.common import is_macos
+from imbue.mngr.hosts.tmux import TmuxWindowTarget
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.agent import HasCommonTranscriptMixin
 from imbue.mngr.interfaces.data_types import FileTransferSpec
@@ -1392,7 +1393,7 @@ class ClaudeAgent(InteractiveTuiAgent[ClaudeAgentConfig], HasCommonTranscriptMix
             _CLAUDE_COMMON_TRANSCRIPT_SCRIPT_NAME: _load_claude_resource_script(_CLAUDE_COMMON_TRANSCRIPT_SCRIPT_NAME)
         }
 
-    def _send_enter_and_validate(self, tmux_target: str) -> None:
+    def _send_enter_and_validate(self, tmux_target: TmuxWindowTarget) -> None:
         # Claude wires a UserPromptSubmit hook that fires `tmux wait-for -S`
         # on the per-session channel; wait for it. If the hook misfires
         # (occasionally happens while another message is being processed),
@@ -1486,7 +1487,7 @@ class ClaudeAgent(InteractiveTuiAgent[ClaudeAgentConfig], HasCommonTranscriptMix
         CostThresholdDialogIndicator(),
     )
 
-    def _preflight_send_message(self, tmux_target: str) -> None:
+    def _preflight_send_message(self, tmux_target: TmuxWindowTarget) -> None:
         """Check for blocking dialogs before sending a message.
 
         Checks the permissions_waiting file (set by the PermissionRequest hook)
