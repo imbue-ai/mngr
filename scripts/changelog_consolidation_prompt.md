@@ -69,10 +69,8 @@ the right project's consolidated files.
    `CHANGELOG.md` is a notable-only summary: if a change isn't notable,
    omit it from `CHANGELOG.md` entirely rather than forcing a bullet for
    it. The canonical example is a change that only affects tests rather
-   than user-facing behavior — skip it. Nothing is lost by skipping:
-   every per-PR entry is already preserved verbatim in the project's
-   `UNABRIDGED_CHANGELOG.md` (step 2). If none of a project's entries are
-   notable, it is fine to produce no `CHANGELOG.md` bullets for it at
+   than user-facing behavior — skip it. If none of a project's entries
+   are notable, it is fine to produce no `CHANGELOG.md` bullets for it at
    all.
 
 4. For each project that had at least one `SECTION` line: open that
