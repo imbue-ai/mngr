@@ -162,8 +162,6 @@ The pins are exact patches (`24.15.0`, `10.33.4`) and `engine-strict=true` will 
 **Node.js 24.15.0** -- via a version manager:
 
 ```bash
-cd apps/minds       # so the .nvmrc lookup below resolves to apps/minds/.nvmrc
-
 # nvm (https://github.com/nvm-sh/nvm)
 nvm install         # reads apps/minds/.nvmrc
 nvm use             # also reads .nvmrc
