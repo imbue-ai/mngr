@@ -367,7 +367,6 @@ def main() -> None:
         experimental_options={"vm_runtime": True},
     )
 
-    snapshot_image_id: str | None = None
     try:
         print(f"Sandbox {sandbox.object_id} created.", flush=True)
         _start_dockerd(sandbox)
@@ -379,19 +378,20 @@ def main() -> None:
         else:
             _create_workspace_in_sandbox(sandbox)
         snapshot_image_id = _snapshot_sandbox(sandbox)
+        # Printed inside the try so it only fires when the snapshot
+        # actually succeeded. Any failure in the try block propagates
+        # through the finally below as the real exception, which is
+        # more useful to the operator than a generic "snapshot not
+        # produced" string.
+        print(
+            "\nNext step: feed this image id to offload to skip the full image build:\n"
+            f"    offload run --override-image-id {snapshot_image_id} ..."
+        )
     finally:
         try:
             sandbox.terminate()
         except modal.exception.Error as exc:
             print(f"Sandbox terminate raised {exc!r}; continuing.", flush=True)
-
-    if snapshot_image_id is None:
-        raise SystemExit("Snapshot was not produced; see errors above.")
-
-    print(
-        "\nNext step: feed this image id to offload to skip the full image build:\n"
-        f"    offload run --override-image-id {snapshot_image_id} ..."
-    )
 
 
 if __name__ == "__main__":
