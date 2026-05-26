@@ -41,7 +41,6 @@ the ``mngr_latchkey/`` subdir under the user's latchkey directory; it
 is what :attr:`Latchkey.plugin_data_dir` returns.
 """
 
-import json
 import os
 import uuid
 from datetime import datetime
@@ -49,8 +48,10 @@ from pathlib import Path
 from typing import Final
 
 from loguru import logger
+from pydantic import ConfigDict
 from pydantic import Field
 from pydantic import JsonValue
+from pydantic import ValidationError
 
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.model_update import to_update
@@ -205,10 +206,21 @@ class LatchkeyStoreError(Exception):
 class LatchkeyPermissionsConfig(FrozenModel):
     """In-memory representation of a Latchkey/Detent permissions config file.
 
-    Models the ``schemas`` and ``rules`` sections. Detent's ``include``
-    directive is not modeled; any hand-edited ``include`` entries are
-    silently dropped on the next minds-driven save.
+    Models only the subset of detent's config schema that minds itself
+    produces: the top-level ``rules`` and ``schemas`` sections, with
+    every rule in the plain ``{scope: [permission, ...]}`` shape (the
+    ``{"schemas": [...], "hooks": [...]}`` rule-value form is not used
+    by minds and is not modeled). Detent's ``include`` directive is
+    not modeled either; ``extra="ignore"`` makes Pydantic silently drop
+    any such hand-edited keys on load, so they disappear on the next
+    minds-driven save.
     """
+
+    # Override FrozenModel's ``extra="forbid"`` so hand-edited fields
+    # detent accepts but minds does not produce (notably ``include``)
+    # don't make ``load_permissions`` fail; they're dropped on the next
+    # save instead, matching the previous hand-rolled loader's behavior.
+    model_config = ConfigDict(extra="ignore")
 
     rules: tuple[dict[str, list[str]], ...] = Field(
         default_factory=tuple,
@@ -362,15 +374,18 @@ def save_permissions(path: Path, config: LatchkeyPermissionsConfig) -> None:
     editor (:func:`imbue.mngr_latchkey.agent_setup.register_agent_for_host`).
     User-driven per-service grants still go through the gateway's
     ``permissions`` extension instead.
+
+    An empty ``schemas`` dict is omitted from the output (detent
+    accepts both shapes); ``rules`` is always emitted, even when empty.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
-
-    serialized: dict[str, JsonValue] = {"rules": [dict(rule) for rule in config.rules]}
-    if config.schemas:
-        serialized["schemas"] = dict(config.schemas)
-
+    # Pydantic's ``exclude=`` drops the field entirely; we drop
+    # ``schemas`` when empty so existing on-disk files (and the
+    # gateway's own writers) keep emitting the same ``{"rules": ...}``
+    # shape they always have.
+    exclude: set[str] = set() if config.schemas else {"schemas"}
     tmp_path = path.with_suffix(path.suffix + ".tmp")
-    tmp_path.write_text(json.dumps(serialized, indent=2))
+    tmp_path.write_text(config.model_dump_json(indent=2, exclude=exclude))
     tmp_path.chmod(0o600)
     os.replace(tmp_path, path)
     logger.debug("Wrote permissions config to {} ({} rule(s))", path, len(config.rules))
@@ -381,13 +396,15 @@ def load_permissions(path: Path) -> LatchkeyPermissionsConfig:
 
     Used by the host-allowed-agent editor (and tests) to read + extend
     an existing permissions file. The reverse of :func:`save_permissions`:
-    parses the JSON object shape and returns a typed config. Any field
-    that isn't part of the documented schema is dropped silently, matching
-    what ``save_permissions`` would write back out.
+    parses the JSON file via Pydantic, which enforces the documented
+    shape (``rules`` is a list of ``{scope: [perm, ...]}`` objects,
+    ``schemas`` is an object of JSON values) and silently drops any
+    other top-level keys (e.g. detent's ``include``) per the model's
+    ``extra="ignore"`` config.
 
     Raises:
         LatchkeyStoreError: if the file is missing, unreadable, not
-            valid JSON, or doesn't have the expected top-level shape.
+            valid JSON, or doesn't match the documented schema.
     """
     if not path.is_file():
         raise LatchkeyStoreError(f"Permissions file does not exist: {path}")
@@ -396,39 +413,6 @@ def load_permissions(path: Path) -> LatchkeyPermissionsConfig:
     except OSError as e:
         raise LatchkeyStoreError(f"Failed to read permissions file {path}: {e}") from e
     try:
-        parsed = json.loads(raw)
-    except json.JSONDecodeError as e:
-        raise LatchkeyStoreError(f"Permissions file {path} is not valid JSON: {e}") from e
-    if not isinstance(parsed, dict):
-        raise LatchkeyStoreError(
-            f"Permissions file {path} top-level value is not a JSON object: {type(parsed).__name__}"
-        )
-    raw_rules = parsed.get("rules", [])
-    if not isinstance(raw_rules, list):
-        raise LatchkeyStoreError(f"Permissions file {path} has non-list ``rules``: {type(raw_rules).__name__}")
-    rules: list[dict[str, list[str]]] = []
-    for index, raw_rule in enumerate(raw_rules):
-        if not isinstance(raw_rule, dict):
-            raise LatchkeyStoreError(f"Permissions file {path} rules[{index}] is not a JSON object")
-        # The pydantic model expects ``dict[str, list[str]]``; tolerate
-        # the inner list being a tuple-like JSON array and rebuild as
-        # ``list[str]``, raising if the values aren't strings.
-        cleaned_rule: dict[str, list[str]] = {}
-        for scope, permissions in raw_rule.items():
-            if not isinstance(scope, str):
-                raise LatchkeyStoreError(f"Permissions file {path} rules[{index}] has non-string scope: {scope!r}")
-            if not isinstance(permissions, list):
-                raise LatchkeyStoreError(f"Permissions file {path} rules[{index}][{scope!r}] is not a list")
-            cleaned_permissions: list[str] = []
-            for raw_perm in permissions:
-                if not isinstance(raw_perm, str):
-                    raise LatchkeyStoreError(
-                        f"Permissions file {path} rules[{index}][{scope!r}] contains non-string entry: {raw_perm!r}"
-                    )
-                cleaned_permissions.append(raw_perm)
-            cleaned_rule[scope] = cleaned_permissions
-        rules.append(cleaned_rule)
-    raw_schemas = parsed.get("schemas", {})
-    if not isinstance(raw_schemas, dict):
-        raise LatchkeyStoreError(f"Permissions file {path} has non-object ``schemas``: {type(raw_schemas).__name__}")
-    return LatchkeyPermissionsConfig(rules=tuple(rules), schemas=raw_schemas)
+        return LatchkeyPermissionsConfig.model_validate_json(raw)
+    except ValidationError as e:
+        raise LatchkeyStoreError(f"Permissions file {path} is malformed: {e}") from e
