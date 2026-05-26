@@ -123,7 +123,11 @@ def _build_snapshot_image() -> modal.Image:
         )
         .env(
             {
-                "PATH": "/root/.local/bin:/usr/local/bin:/usr/bin:/bin",
+                # Include the sbin dirs so start-dockerd.sh can find `ip`
+                # (/usr/sbin/ip) and `iptables-legacy` (/usr/sbin/iptables-legacy)
+                # when invoked via `bash -lc` -- Debian's /etc/profile won't
+                # restore the sbin paths if PATH is already set.
+                "PATH": "/root/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
                 # Avoid `uv sync` symlink-mode bugs that have historically
                 # broken Modal snapshotting (see mngr Dockerfile).
                 "UV_LINK_MODE": "copy",
