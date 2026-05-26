@@ -84,9 +84,13 @@ def test_create_local_docker_workspace_via_electron(
     ``finally`` regardless of outcome.
     """
     configure_logging()
-    # Route env-var defaults through monkeypatch so any values we inject get
-    # reverted between tests; the runner's default `os.environ` setter would
-    # leak `MINDS_ROOT_NAME` / `MINDS_CLIENT_CONFIG_PATH` into sibling tests.
+    # Route env-var defaults through `monkeypatch.setenv` so any
+    # `MINDS_ROOT_NAME` / `MINDS_CLIENT_CONFIG_PATH` values the runner
+    # injects get reverted between tests instead of leaking into siblings.
+    # The runner intentionally has no default setter -- the snapshot
+    # script (which runs in a throwaway sandbox) passes an
+    # `os.environ`-mutating setter, which is exactly what we want to
+    # avoid here.
     ensure_minds_env_defaults(setenv=monkeypatch.setenv)
 
     fct_path = resolve_fct_path(tmp_path)
