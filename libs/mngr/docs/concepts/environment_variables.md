@@ -72,11 +72,13 @@ The same rules apply uniformly to fields inside per-key container entries:
 - `plugins.<name>.<field>` (including plugin-defined subclass fields)
 - `commands.<name>.<field>` (resolved through the wrapper's `defaults` map)
 
+Create templates (applied at command time via `--template <name>`) also follow these rules. A template option like `[create_templates.dev] env = ["X=3"]` assign-by-defaults against the existing param value (from config defaults plus any earlier templates in the same `--template a --template b` chain); writing `env__extend = ["X=3"]` instead opts that template into additive behavior, appending to whatever the prior layers produced. The narrowing guard fires when a template would silently drop entries, using the same `allow_settings_key_assignment_narrowing` flag.
+
 Adding a brand-new entry under any of these (e.g. defining `[agent_types.my_other_claude]` in `settings.local.toml` when only `[agent_types.my_claude]` was in `settings.toml`) is a pure addition and never narrows; the container-level merge is per-key additive by design.
 
 The default value of `allow_settings_key_assignment_narrowing` is expected to change to `true` in a future version, and support for `false` may be removed entirely. Migrate your configs ahead of the flip so the eventual default change is a no-op.
 
-CLI flags that supply tuple/list values (e.g. `--env X=6`) always extend the merged settings value rather than replace it — the result is `<config values> + <CLI values>`. The safety net only applies to the settings-file / env-var / `--setting` merge, not to CLI flag merging.
+CLI flags that supply tuple/list values (e.g. `--env X=6`) always extend the merged settings value rather than replace it — the result is `<config values> + <template result> + <CLI values>` for the `create` command (CLI extends after templates apply), and `<config values> + <CLI values>` for everything else. The safety net only applies to the settings-file / env-var / `--setting` / template merge, not to CLI flag merging — the CLI is always the user's final, additive word.
 
 ### Precedence
 

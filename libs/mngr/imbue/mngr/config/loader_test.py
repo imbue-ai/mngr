@@ -665,6 +665,28 @@ def test_parse_create_templates_multiple_templates() -> None:
     assert CreateTemplateName("local") in result
 
 
+def test_parse_create_templates_accepts_extend_suffix() -> None:
+    """``<field>__extend = [...]`` is a valid template option -- the same ``__extend``
+    operator that works in TOML / ``--setting`` / env vars opts a single template
+    entry into additive behavior at template-application time."""
+    raw = {"dev": {"env__extend": ["DEBUG=1"]}}
+    result = _parse_create_templates(raw)
+    assert CreateTemplateName("dev") in result
+    # The extend key is stored verbatim in options; apply_create_template
+    # interprets it at template-application time.
+    assert result[CreateTemplateName("dev")].options == {"env__extend": ["DEBUG=1"]}
+
+
+def test_parse_create_templates_rejects_unknown_field_even_with_extend_suffix() -> None:
+    """``<unknown>__extend`` is still rejected -- the ``__extend`` suffix opts the
+    base key into additive merge, but the base key still has to be a real
+    CreateCliOptions field. (Same shape as the bare-key validation that flagged
+    typos in template options before.)"""
+    raw = {"dev": {"bogus_typo__extend": ["X=1"]}}
+    with pytest.raises(ConfigParseError, match="Unknown field 'bogus_typo__extend'"):
+        _parse_create_templates(raw)
+
+
 # =============================================================================
 # Tests for parse_config
 # =============================================================================

@@ -113,6 +113,36 @@ _CONTAINER_DICT_FIELDS: Final[frozenset[str]] = frozenset(
 )
 
 
+def would_assignment_narrow(base_value: Any, override_value: Any) -> bool:
+    """Return True if assigning ``override_value`` over ``base_value`` would
+    drop at least one base entry (a missing list/set element, a missing dict
+    key, or an explicit empty aggregate over a non-empty base).
+
+    Mirrors the leaf-level rule used by ``detect_settings_narrowing`` so the
+    settings-layer merge guard and the template-application guard agree on what
+    counts as narrowing. Same exemptions: no-ops (override equals base) and
+    supersets (every base entry survives, e.g. the materialised result of an
+    ``__extend`` operation) return ``False``. Scalars and empty/non-aggregate
+    bases never narrow.
+    """
+    if not isinstance(base_value, (list, tuple, dict, set, frozenset)) or not base_value:
+        return False
+    if isinstance(base_value, (list, tuple)):
+        if isinstance(override_value, (list, tuple)) and all(entry in override_value for entry in base_value):
+            return False
+        return True
+    if isinstance(base_value, (set, frozenset)):
+        if isinstance(override_value, (set, frozenset, list, tuple)) and set(base_value) <= set(override_value):
+            return False
+        return True
+    # base_value is a non-empty dict
+    if not isinstance(override_value, dict):
+        return True
+    if any(key not in override_value for key in base_value):
+        return True
+    return any(would_assignment_narrow(sub_base, override_value[key]) for key, sub_base in base_value.items())
+
+
 def detect_settings_narrowing(base: Any, override: Any) -> list[str]:
     """Return dotted paths where ``override`` would silently drop entries from
     a non-empty aggregate value in ``base`` (``list``, ``tuple``, ``dict``,

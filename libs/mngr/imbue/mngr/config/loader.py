@@ -795,15 +795,23 @@ def _parse_create_templates(raw_templates: dict[str, dict[str, Any]]) -> dict[Cr
              new_host = "modal"
              target_path = "/root/workspace"
 
+    ``param_name__extend = [...]`` is also accepted: the same ``__extend``
+    operator that works in TOML / ``--setting`` / env vars opts a single
+    template option into additive behavior at template-application time.
+    See ``apply_create_template`` for the application semantics.
+
     Uses model_construct to bypass validation and explicitly set None for unset fields.
     """
     templates: dict[CreateTemplateName, CreateTemplate] = {}
 
     for template_name, raw_options in raw_templates.items():
         raw_options = _normalize_field_keys(raw_options, f"create_templates.{template_name}")
-        # make sure the options don't define anything that cannot be handled:
+        # make sure the options don't define anything that cannot be handled
+        # (an ``__extend`` suffix is a valid operator on any CLI option key, so
+        # strip it before checking against the CreateCliOptions schema).
         for field in raw_options.keys():
-            if field not in CreateCliOptions.model_fields:
+            base_field = field[: -len(EXTEND_SUFFIX)] if field.endswith(EXTEND_SUFFIX) else field
+            if base_field not in CreateCliOptions.model_fields:
                 raise ConfigParseError(
                     f"Unknown field '{field}' in create_templates.{template_name}. Valid fields: {sorted(CreateCliOptions.model_fields.keys())}"
                 )
