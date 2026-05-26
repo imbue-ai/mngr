@@ -624,10 +624,11 @@ def apply_create_template(
     Templates are named presets of create command arguments that can be applied
     using --template <name>. Multiple templates can be specified and are applied
     in order, stacking their values. Templates run AFTER ``apply_config_defaults``
-    (so the "base" for any option is the post-config-defaults value) and BEFORE
-    ``restore_cli_list_values`` (CLI list params are temporarily set to empty so
-    templates apply against the config base; CLI extends the result at the end
-    of the pipeline).
+    (so the "base" for any option is the post-config-defaults value -- i.e. the
+    config-supplied value for tuple/list params, or ``()`` when no config entry
+    exists) and BEFORE ``restore_cli_list_values`` (the original CLI tuple/list
+    value was captured separately by ``save_cli_list_values_for_restoration``
+    and is appended to the template result at the end of the pipeline).
 
     Merge semantics (now aligned with the rest of the settings/merge_with rules):
     - Scalar params from a template: assign-by-default; the latest template that
