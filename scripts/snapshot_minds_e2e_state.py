@@ -4,18 +4,11 @@ container provisioned, so future test runs can boot from that state nearly
 instantly via offload's ``--override-image-id`` flag (offload v0.9.6+).
 
 PREREQUISITE: ``experimental_options={"vm_runtime": True}`` requires the
-caller's Modal workspace to have the VM-runtime preview enabled. As of
-2026-05-26 the workspace this repo's default Modal config points at does
-NOT have that preview enabled: SandboxCreate rejects the request with
-either ``MODAL_FUNCTION_RUNTIME must be set to 'gvisor'`` (when the
-runtime field is unset) or ``experimental_options['vm_runtime']=True
-conflicts with runtime='gvisor'`` (when we set it to gvisor). These two
-errors are mutually exclusive on the client side, so the only path
-forward is workspace-level preview enablement -- ask your Modal contact.
-Once enabled, this script should run end-to-end as written. Until then,
-treat the script as the validated *pattern* (refactored to share the
-``e2e_workspace_runner`` flow with the pytest test, deliberately
-skipping the agent-destroy cleanup) rather than an executable artifact.
+caller's Modal workspace to have the VM-runtime preview enabled. If
+SandboxCreate fails with "MODAL_FUNCTION_RUNTIME must be set to 'gvisor'"
+or "experimental_options['vm_runtime']=True conflicts with runtime=...",
+your active Modal profile does not have the preview enabled -- switch to
+one that does (``modal profile activate <name>`` / ``MODAL_PROFILE=<name>``).
 
 This is a one-off demonstration script for the test-efficiency groundwork.
 The flow is:
@@ -54,7 +47,6 @@ would re-derive on every run.
 """
 
 import argparse
-import os
 import shlex
 import sys
 import textwrap
@@ -62,18 +54,9 @@ import time
 from pathlib import Path
 from typing import Final
 
-# Modal's vm_runtime experimental option requires the function runtime
-# config to be 'gvisor' (otherwise SandboxCreate fails with
-# ``MODAL_FUNCTION_RUNTIME must be set to 'gvisor'``). The Modal SDK
-# reads this from MODAL_FUNCTION_RUNTIME at import time, so the setdefault
-# has to land BEFORE we ``import modal``. Set only if the operator hasn't
-# already set it; this stays scoped to this script's process and does not
-# affect the general mngr_modal provider.
-os.environ.setdefault("MODAL_FUNCTION_RUNTIME", "gvisor")
-
-import modal  # noqa: E402
-import modal.exception  # noqa: E402
-from modal.stream_type import StreamType  # noqa: E402
+import modal
+import modal.exception
+from modal.stream_type import StreamType
 
 _REPO_ROOT: Final[Path] = Path(__file__).resolve().parent.parent
 
