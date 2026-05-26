@@ -28,7 +28,9 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Changed: `minds run` no longer dictates the `mngr forward` plugin's port — the `--mngr-forward-port` flag and `MINDS_MNGR_FORWARD_PORT` env var are removed; the plugin picks its own port and reports it back via its `listening` envelope.
 - Changed: Bumped bundled Latchkey version to 2.11.3.
 - Changed: Latchkey gateway's `permission-requests` extension grows a typed request schema (`{agent_id, rationale, type, payload}`) and a new `POST /permission-requests/approve/<id>` endpoint; pending requests live under `permission_requests/v2/`.
+- Changed: minds desktop client's latchkey-permission handlers now live in `imbue.minds.desktop_client.latchkey.handlers` as `.predefined` and `.file_sharing` siblings sharing a Jinja template + Tailwind base.
 - Changed: `MINDS_API_KEY` is now written to the workspace host's env file via `--host-env` (not the per-agent `--env`) so every agent on the host can authenticate against `/api/v1/...`.
+- Changed: `LatchkeyPermissionRequestEvent` renamed to `LatchkeyPredefinedPermissionRequestEvent` to mirror the wire `type=predefined`.
 - Changed: minds latchkey permission management now uses latchkey 2.9.0's `permission_requests` / `permissions` gateway extensions; permission requests stream via `GET /permission-requests?follow=true` and grants apply through `POST /permissions/rules`.
 - Changed: minds split the services agent from the initial chat agent — the primary agent runs only bootstrap/services and is hidden; a real chat agent named after the host is created on first boot and every subsequent agent shares its `CLAUDE_CONFIG_DIR`. Existing workspaces must be re-created.
 - Changed: minds "Create a Project" Name field now sets the host name (validated via `HostName` regex); the agent is always `system-services`, and `imbue_cloud` `/hosts/lease` and `/hosts` gain a required `host_name`.
@@ -39,6 +41,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Changed: Swapped `minds env destroy`'s instance walker from Vultr to OVH; the dev-tier Vault path is now `<tier>/ovh` with AK/AS/CK.
 - Changed: Shorter Modal app + function names so deployed hostnames fit under DNS's 63-char limit (`remote-service-connector` → `rsc`, `fastapi_app` → `api`, `litellm-proxy` → `llm`, `litellm_app` → `proxy`).
 - Changed: One `minds env deploy` code path for every tier, driven by a `[lifecycle]` block in each tier's `deploy.toml`.
+- Changed: Pool-hosts schema migrations now backed by a `schema_migrations(version, applied_at)` table instead of replaying every `.sql` with `IF NOT EXISTS`.
 - Changed: Every `minds env deploy` mints a fresh `MINDS_DEPLOY_ID` and pushes every Modal Secret under a timestamped name (`<svc>-<tier>-<deploy_id>`).
 - Changed: `minds env deploy`'s post-deploy health check now polls the connector's `/health/liveness` (10 s per-attempt timeout, 60 s total budget) instead of `/docs`.
 - Changed: Speed up local minds workspace creation by restructuring the `forever-claude-template` Dockerfile and deferring Playwright into a post-boot install (warm rebuild 1m33s → 30s → ~25.6s).

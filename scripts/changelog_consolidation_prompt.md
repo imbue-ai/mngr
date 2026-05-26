@@ -62,9 +62,8 @@ the right project's consolidated files.
    The allowed categories are exactly: `Added`, `Changed`, `Deprecated`,
    `Removed`, `Fixed`, `Security`. Use `Changed` as the catch-all for
    internal refactors or doc edits that don't fit the other categories.
-   One change → one bullet; merge near-duplicate bullets across dates
-   (within the same project) if they describe the same user-visible
-   effect.
+   Merge near-duplicate bullets (within the same project) if they
+   describe the same user-visible effect.
 
    `CHANGELOG.md` is a notable-only summary: if a change isn't notable,
    omit it from `CHANGELOG.md` entirely rather than forcing a bullet for
@@ -90,8 +89,6 @@ the right project's consolidated files.
    a CI, build, release, or tooling change that meaningfully affects how
    the repo is built, tested, or released is notable for `dev` and should
    be kept, even though it isn't "user-facing" in the product sense.
-   (Routine, low-impact churn such as dependency-pin bumps or internal
-   reshuffles is still non-notable.)
 
 4. For each project that had at least one `SECTION` line: open that
    project's `CHANGELOG.md` (resolve `<project_dir>` as in step 2).
