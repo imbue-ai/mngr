@@ -14,23 +14,18 @@ from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import SnapshotName
 from imbue.mngr.primitives import TransferMode
 from imbue.mngr_tmr.data_types import AgentKind
-from imbue.mngr_tmr.data_types import Change
-from imbue.mngr_tmr.data_types import ChangeKind
-from imbue.mngr_tmr.data_types import ChangeStatus
-from imbue.mngr_tmr.data_types import TestResult
 from imbue.mngr_tmr.data_types import TmrLaunchConfig
 from imbue.mngr_tmr.launching import _build_agent_options
+from imbue.mngr_tmr.prompts import INTEGRATOR_INPUTS_DIRNAME
 from imbue.mngr_tmr.prompts import TESTING_AGENT_OUTCOME_FILENAME
+from imbue.mngr_tmr.prompts import build_local_integrator_prompt
+from imbue.mngr_tmr.prompts import build_remote_integrator_prompt
 from imbue.mngr_tmr.prompts import build_test_agent_prompt
-from imbue.mngr_tmr.testing import BLOCKED_FIX
-from imbue.mngr_tmr.testing import FAILED_FIX
-from imbue.mngr_tmr.testing import SUCCEEDED_FIX
 from imbue.mngr_tmr.utils import CollectTestsError
 from imbue.mngr_tmr.utils import collect_tests
 from imbue.mngr_tmr.utils import dedup_name
 from imbue.mngr_tmr.utils import make_run_name
 from imbue.mngr_tmr.utils import sanitize_test_name_for_agent
-from imbue.mngr_tmr.utils import should_pull_changes_from_outcome
 from imbue.mngr_tmr.utils import transfer_mode_for_provider
 
 
@@ -252,56 +247,26 @@ def test_collect_tests_bad_file_raises(tmp_path: Path, cg: ConcurrencyGroup) -> 
         collect_tests(pytest_args=("non_existent_test_file.py",), source_dir=tmp_path, cg=cg)
 
 
-# --- should_pull_changes_from_outcome tests ---
+# --- integrator prompt tests ---
 
 
-def _outcome(
-    changes: dict[ChangeKind, Change] | None = None,
-    errored: bool = False,
-    before: bool | None = None,
-    after: bool | None = None,
-) -> TestResult:
-    return TestResult(
-        changes=changes if changes is not None else {},
-        errored=errored,
-        tests_passing_before=before,
-        tests_passing_after=after,
-    )
+def test_local_integrator_prompt_lists_branches() -> None:
+    branches = ["mngr-tmr/r/a", "mngr-tmr/r/b"]
+    prompt = build_local_integrator_prompt(branches)
+    for branch in branches:
+        assert branch in prompt
+    assert "already exist" in prompt
+    assert "cherry-pick" in prompt.lower()
+    assert "outputs.tar.gz" in prompt
 
 
-def test_should_pull_succeeded_fix_with_tests_passing() -> None:
-    assert should_pull_changes_from_outcome(_outcome(changes=SUCCEEDED_FIX, before=False, after=True)) is True
-
-
-def test_should_pull_succeeded_fix_tests_were_failing_still_failing() -> None:
-    assert should_pull_changes_from_outcome(_outcome(changes=SUCCEEDED_FIX, before=False, after=False)) is True
-
-
-def test_should_not_pull_when_errored() -> None:
-    assert (
-        should_pull_changes_from_outcome(_outcome(changes=SUCCEEDED_FIX, errored=True, before=False, after=True))
-        is False
-    )
-
-
-def test_should_not_pull_when_no_succeeded_changes() -> None:
-    assert should_pull_changes_from_outcome(_outcome(changes=FAILED_FIX, before=False, after=False)) is False
-    assert should_pull_changes_from_outcome(_outcome(changes=BLOCKED_FIX, before=False, after=False)) is False
-
-
-def test_should_not_pull_when_no_changes() -> None:
-    assert should_pull_changes_from_outcome(_outcome(before=True, after=True)) is False
-
-
-def test_should_not_pull_when_regression() -> None:
-    assert should_pull_changes_from_outcome(_outcome(changes=SUCCEEDED_FIX, before=True, after=False)) is False
-
-
-def test_should_pull_improvement_tests_still_passing() -> None:
-    improved = {ChangeKind.IMPROVE_TEST: Change(status=ChangeStatus.SUCCEEDED, summary_markdown="improved")}
-    assert should_pull_changes_from_outcome(_outcome(changes=improved, before=True, after=True)) is True
-
-
-def test_should_not_pull_improvement_that_breaks_tests() -> None:
-    improved = {ChangeKind.IMPROVE_TEST: Change(status=ChangeStatus.SUCCEEDED, summary_markdown="improved")}
-    assert should_pull_changes_from_outcome(_outcome(changes=improved, before=True, after=False)) is False
+def test_remote_integrator_prompt_references_inputs_dir_and_predicate() -> None:
+    prompt = build_remote_integrator_prompt()
+    assert INTEGRATOR_INPUTS_DIRNAME in prompt
+    assert TESTING_AGENT_OUTCOME_FILENAME in prompt
+    # The remote prompt must encode the should-pull predicate itself.
+    assert "SUCCEEDED" in prompt
+    assert "tests_passing_before" in prompt
+    assert "tests_passing_after" in prompt
+    assert "git bundle list-heads" in prompt
+    assert "outputs.tar.gz" in prompt

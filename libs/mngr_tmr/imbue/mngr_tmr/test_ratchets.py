@@ -32,9 +32,9 @@ def test_prevent_while_true() -> None:
 
 
 def test_prevent_time_sleep() -> None:
-    # Ratchet at 5: launch_all_test_agents (1 launch-delay)
-    # + launch_and_poll_agents (2 poll sleeps) + wait_for_integrator (2 poll sleeps)
-    rc.check_time_sleep(_DIR, snapshot(5))
+    # Ratchet at 4: launch_all_test_agents (1 launch-delay)
+    # + launch_and_poll_agents (2 poll sleeps) + wait_for_integrator (1 poll sleep)
+    rc.check_time_sleep(_DIR, snapshot(4))
 
 
 def test_prevent_global_keyword() -> None:

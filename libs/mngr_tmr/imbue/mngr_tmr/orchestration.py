@@ -16,6 +16,7 @@ from loguru import logger
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import AgentId
+from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_tmr.data_types import AgentKind
 from imbue.mngr_tmr.data_types import AgentMetadata
 from imbue.mngr_tmr.data_types import TestAgentInfo
@@ -23,8 +24,8 @@ from imbue.mngr_tmr.data_types import TmrLaunchConfig
 from imbue.mngr_tmr.launching import launch_agents_up_to_limit
 from imbue.mngr_tmr.launching import stop_agent_on_host
 from imbue.mngr_tmr.pulling import finalize_agent
+from imbue.mngr_tmr.pulling import has_local_branch
 from imbue.mngr_tmr.pulling import is_agent_outputs_ready
-from imbue.mngr_tmr.pulling import is_integrator_outputs_ready
 from imbue.mngr_tmr.report import generate_html_report
 from imbue.mngr_tmr.report_upload import maybe_upload_report
 
@@ -206,15 +207,45 @@ def wait_for_integrator(
     poll_interval_seconds: float,
     host: OnlineHostInterface,
     deadline: float,
+    mngr_ctx: MngrContext,
+    provider_name: ProviderInstanceName,
+    output_dir: Path,
+    source_dir: Path,
 ) -> str | None:
-    """Poll for the integrator agent's outcome file and stop it once visible."""
-    while time.monotonic() < deadline:
-        if is_integrator_outputs_ready(integrator.work_dir, host):
-            logger.info("Integrator outcome file detected, stopping agent")
-            stop_agent_on_host(host, integrator.agent_id, integrator.agent_name)
-            return integrator.branch_name
-        time.sleep(poll_interval_seconds)
+    """Poll for the integrator's outputs archive; pull, stop, and return its branch.
 
-    logger.warning("Integrator agent timed out, stopping it")
-    stop_agent_on_host(host, integrator.agent_id, integrator.agent_name)
-    return None
+    The integrator publishes ``outputs.tar.gz`` the same way testing agents do.
+    On success this downloads + extracts the archive under
+    ``output_dir/<integrator_name>/`` and applies its ``branch.bundle`` (if any)
+    onto the local repo, then returns the integrated branch name. Returns None
+    when the integrator timed out or did not produce a usable branch.
+    """
+    pulled = False
+    while time.monotonic() < deadline:
+        if is_agent_outputs_ready(mngr_ctx, provider_name, host.id, integrator.agent_id):
+            logger.info("Integrator outputs archive detected, finalizing")
+            pulled = finalize_agent(
+                mngr_ctx=mngr_ctx,
+                provider_name=provider_name,
+                host=host,
+                agent_id=integrator.agent_id,
+                agent_name=integrator.agent_name,
+                branch_name=integrator.branch_name,
+                artifact_output_dir=output_dir,
+                source_dir=source_dir,
+                cg=mngr_ctx.concurrency_group,
+                should_stop=True,
+            )
+            break
+        time.sleep(poll_interval_seconds)
+    else:
+        logger.warning("Integrator agent timed out, stopping it")
+        stop_agent_on_host(host, integrator.agent_id, integrator.agent_name)
+        return None
+
+    if not pulled or integrator.branch_name is None:
+        return None
+    if not has_local_branch(source_dir, integrator.branch_name, mngr_ctx.concurrency_group):
+        logger.warning("Integrator finished but produced no local branch '{}'", integrator.branch_name)
+        return None
+    return integrator.branch_name

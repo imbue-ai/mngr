@@ -10,7 +10,6 @@ immutable once an agent has published them, so caching is safe).
 
 import html
 import json
-from collections.abc import Iterable
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -34,7 +33,6 @@ from imbue.mngr_tmr.data_types import TestResult
 from imbue.mngr_tmr.data_types import TestRunInfo
 from imbue.mngr_tmr.prompts import INTEGRATOR_OUTCOME_FILENAME
 from imbue.mngr_tmr.prompts import TESTING_AGENT_OUTCOME_FILENAME
-from imbue.mngr_tmr.utils import should_pull_changes_from_outcome as _should_pull_outcome
 
 _EXTRACTED_TEST_OUTPUT_DIR = "test_output"
 
@@ -113,9 +111,7 @@ def _outcome_path_for_testing_agent(output_dir: Path, agent_name: AgentName) -> 
 
 
 def _outcome_path_for_integrator(output_dir: Path, agent_name: AgentName) -> Path:
-    # The integrator agent still uses rsync, which drops .test_output's contents
-    # directly under <agent_name>/ (no test_output/ subdir).
-    return output_dir / str(agent_name) / INTEGRATOR_OUTCOME_FILENAME
+    return output_dir / str(agent_name) / _EXTRACTED_TEST_OUTPUT_DIR / INTEGRATOR_OUTCOME_FILENAME
 
 
 def _load_testing_agent_outcome(agent_name: AgentName, output_dir: Path) -> TestResult | None:
@@ -204,27 +200,6 @@ def _build_rows(agents: Sequence[AgentMetadata], output_dir: Path) -> list[TestM
         outcome = _load_testing_agent_outcome(meta.agent_name, output_dir) if meta.error_summary is None else None
         rows.append(_row_from_metadata(meta, outcome))
     return rows
-
-
-def list_pullable_branches(agents: Iterable[AgentMetadata], output_dir: Path) -> list[str]:
-    """Return branch names for testing agents whose outcomes qualify for integration.
-
-    Reads the outcome JSON for each agent from disk (cached) and applies the
-    ``should_pull_changes`` predicate. Used by the integrator phase to decide
-    which agent branches to cherry-pick.
-    """
-    branches: list[str] = []
-    for meta in agents:
-        if meta.kind is not AgentKind.TESTING_AGENT:
-            continue
-        if meta.error_summary is not None or meta.branch_name is None:
-            continue
-        outcome = _load_testing_agent_outcome(meta.agent_name, output_dir)
-        if outcome is None:
-            continue
-        if _should_pull_outcome(outcome):
-            branches.append(meta.branch_name)
-    return branches
 
 
 def _report_section_of(result: TestMapReduceResult) -> ReportSection:

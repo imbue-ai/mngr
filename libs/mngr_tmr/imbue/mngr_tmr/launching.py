@@ -13,6 +13,7 @@ from imbue.mngr.api.create import create as api_create
 from imbue.mngr.api.create import resolve_target_host
 from imbue.mngr.api.data_types import CreateAgentResult
 from imbue.mngr.api.providers import get_provider_instance
+from imbue.mngr.api.push import push_files
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import AgentError
 from imbue.mngr.errors import HostError
@@ -32,11 +33,14 @@ from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import LOCAL_PROVIDER_NAME
 from imbue.mngr.primitives import SnapshotName
 from imbue.mngr.primitives import TransferMode
+from imbue.mngr.primitives import UncommittedChangesMode
 from imbue.mngr_tmr.data_types import AgentKind
 from imbue.mngr_tmr.data_types import AgentMetadata
 from imbue.mngr_tmr.data_types import TestAgentInfo
 from imbue.mngr_tmr.data_types import TmrLaunchConfig
-from imbue.mngr_tmr.prompts import build_integrator_prompt
+from imbue.mngr_tmr.prompts import INTEGRATOR_INPUTS_DIRNAME
+from imbue.mngr_tmr.prompts import build_local_integrator_prompt
+from imbue.mngr_tmr.prompts import build_remote_integrator_prompt
 from imbue.mngr_tmr.prompts import build_test_agent_prompt
 from imbue.mngr_tmr.utils import dedup_name
 from imbue.mngr_tmr.utils import resolve_templates
@@ -512,12 +516,31 @@ def launch_integrator_agent(
     config: TmrLaunchConfig,
     mngr_ctx: MngrContext,
     run_name: str,
+    output_dir: Path,
 ) -> tuple[TestAgentInfo, OnlineHostInterface]:
-    """Launch an integrator agent that cherry-picks fix branches into a linear stack."""
+    """Launch an integrator agent that cherry-picks fix branches into a linear stack.
+
+    On the local provider the fix branches already exist in the shared local
+    repo (each test agent's branch bundle was applied during finalization), so
+    the integrator gets the cherry-pick prompt directly as its initial message.
+
+    On any other provider the integrator's host has no knowledge of those
+    branches, so we rsync the local ``output_dir`` (which holds every test
+    agent's extracted ``test_output/`` and ``branch.bundle``) into
+    ``<work_dir>/INTEGRATOR_INPUTS_DIRNAME/`` on the integrator host, then
+    deliver the remote variant of the integrator prompt via ``send_message``.
+    The remote prompt walks that input directory, filters bundles by the
+    should-pull predicate, fetches them into local branches, and cherry-picks.
+    """
     agent_name = AgentName(f"tmr-{run_name}-integrator")
     branch_name = f"mngr-tmr/{run_name}/integrated"
     host_name = HostName(f"tmr-{run_name}-integrator")
-    prompt = build_integrator_prompt(fix_branches)
+    is_local = config.provider_name.lower() == LOCAL_PROVIDER_NAME
+
+    if is_local:
+        initial_message: str | None = build_local_integrator_prompt(fix_branches)
+    else:
+        initial_message = None
 
     logger.info("Launching integrator agent '{}' to integrate {} branches", agent_name, len(fix_branches))
     create_result = _create_tmr_agent(
@@ -526,9 +549,25 @@ def launch_integrator_agent(
         config=config,
         mngr_ctx=mngr_ctx,
         kind=AgentKind.INTEGRATOR,
-        initial_message=prompt,
+        initial_message=initial_message,
         host_name=host_name,
     )
+
+    if not is_local:
+        destination = create_result.agent.work_dir / INTEGRATOR_INPUTS_DIRNAME
+        logger.info("Rsyncing integrator inputs to '{}:{}'", create_result.host.id, destination)
+        push_files(
+            agent=create_result.agent,
+            host=create_result.host,
+            source=output_dir,
+            destination_path=destination,
+            is_dry_run=False,
+            is_delete=False,
+            uncommitted_changes=UncommittedChangesMode.CLOBBER,
+            cg=mngr_ctx.concurrency_group,
+        )
+        logger.info("Sending integrator prompt to '{}'", agent_name)
+        create_result.agent.send_message(build_remote_integrator_prompt())
 
     return (
         TestAgentInfo(
