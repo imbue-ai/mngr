@@ -205,6 +205,14 @@ def _build_snapshot_image(staged_repo: Path) -> modal.Image:
         # System deps -- superset of the base mngr Dockerfile, plus the extras
         # the test-docker-electron CI job installs: xvfb (display server for
         # Electron) and the iptables/iproute2 needed by Docker-in-Docker.
+        #
+        # The lib* entries are Electron's runtime GUI dependency set on
+        # Debian. GitHub-hosted ubuntu-latest runners have these
+        # preinstalled, but debian:slim does not, so Electron exits
+        # immediately with ``error while loading shared libraries:
+        # libgtk-3.so.0`` without them. List sourced from Electron's own
+        # Linux-deps doc and the Playwright "Debian deps for chromium"
+        # set, then trimmed to what Electron actually needs at runtime.
         .apt_install(
             "bash",
             "build-essential",
@@ -224,6 +232,21 @@ def _build_snapshot_image(staged_repo: Path) -> modal.Image:
             "unison",
             "wget",
             "xvfb",
+            # Electron GUI runtime deps:
+            "libgtk-3-0",
+            "libnotify4",
+            "libnss3",
+            "libxss1",
+            "libxtst6",
+            "libatspi2.0-0",
+            "libdrm2",
+            "libgbm1",
+            "libxkbcommon0",
+            "libasound2",
+            "libsecret-1-0",
+            "libcups2",
+            "libpango-1.0-0",
+            "libcairo2",
         )
         # Docker-in-Docker static binaries (mirrors Dockerfile.release.extras).
         .run_commands(
