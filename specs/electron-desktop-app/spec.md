@@ -73,7 +73,7 @@ Everything else -- agent creation, discovery, proxying, authentication, the web 
 **Build flow:**
 
 1. `pnpm build` assembles the Electron app:
-   - Copies `electron/pyproject.toml` and its lockfile into the resources directory
+   - Copies `electron/pyproject/pyproject.toml` and its lockfile into the resources directory
    - Downloads platform-specific `uv` and `git` binaries into the resources directory
    - Packages the Electron code (main.js, preload.js, HTML pages, assets)
 2. `pnpm exec todesktop build` uploads the assembled app to ToDesktop, which:
@@ -127,8 +127,9 @@ apps/minds/
     assets/
       icon.svg              # Placeholder brain icon
       icon.png              # Generated from SVG for Electron (multiple sizes)
-    pyproject.toml          # Standalone: declares imbue-minds dependency
-    uv.lock                 # Pinned lockfile for reproducible installs
+    pyproject/
+      pyproject.toml        # Standalone: declares imbue-minds dependency
+      uv.lock               # Pinned lockfile for reproducible installs
   # ... existing Python code unchanged ...
   imbue/minds/
   pyproject.toml            # Existing monorepo pyproject.toml (unchanged)
@@ -397,7 +398,7 @@ This uses an OS-level lock (file lock on Linux, named mutex on macOS). No custom
 
 The update flow is:
 
-1. Developer bumps the `imbue-minds` version in `electron/pyproject.toml` and regenerates the lockfile
+1. Developer bumps the `imbue-minds` version in `electron/pyproject/pyproject.toml` and regenerates the lockfile
 2. Developer commits and runs `pnpm exec todesktop build`
 3. ToDesktop builds new installers, signs them, publishes to update server
 4. Running Minds apps check for updates in the background (ToDesktop handles this)
