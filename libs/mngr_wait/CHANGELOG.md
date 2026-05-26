@@ -5,7 +5,3 @@ A concise, human-friendly summary of changes to the `mngr_wait` project. Entries
 For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDGED_CHANGELOG.md).
 
 ## [Unreleased]
-
-### Changed
-
-- Changed: Adopted the new per-project changelog layout.
