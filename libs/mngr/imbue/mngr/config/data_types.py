@@ -535,7 +535,8 @@ class MngrConfig(FrozenModel):
     )
     is_error_reporting_enabled: bool = Field(
         default=True,
-        description="Whether to prompt users to report unexpected errors as GitHub issues when running interactively",
+        description="Whether to suggest launching a diagnostic agent (via a copy-paste-ready `mngr create` command) "
+        "when an unexpected error occurs while running interactively",
     )
     is_allowed_in_pytest: bool = Field(
         default=True,
