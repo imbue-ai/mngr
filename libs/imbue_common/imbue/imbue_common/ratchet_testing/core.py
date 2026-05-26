@@ -6,6 +6,7 @@ from datetime import timezone
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
+from typing import Final
 from typing import Self
 from typing import TypeVar
 
@@ -17,6 +18,21 @@ from pydantic_core import core_schema
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.primitives import NonEmptyStr
 from imbue.imbue_common.primitives import PositiveInt
+
+# Common binary file extensions that should be excluded from ratchet scans that
+# read file contents as text. .read_text() raises UnicodeDecodeError on these.
+# Used by both the project-local ratchets and the repo-wide test_meta_ratchets.py.
+BINARY_FILE_EXCLUSION: Final[tuple[str, ...]] = (
+    "*.png",
+    "*.ico",
+    "*.jpg",
+    "*.jpeg",
+    "*.gif",
+    "*.webp",
+    "*.pdf",
+    "*.zip",
+    "*.gz",
+)
 
 
 class FileExtension(NonEmptyStr):

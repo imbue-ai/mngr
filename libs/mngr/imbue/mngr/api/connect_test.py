@@ -59,7 +59,10 @@ def test_build_ssh_activity_wrapper_script_attaches_to_tmux_session() -> None:
     """Test that the wrapper script attaches to the correct tmux session."""
     script = _build_ssh_activity_wrapper_script("mngr-my-agent", Path("/home/user/.mngr"))
 
-    assert "tmux attach -t '=mngr-my-agent'" in script
+    # Target is rendered via TmuxSessionTarget.as_shell_arg(), which shell-quotes
+    # only if the name contains shell-special characters; '=mngr-my-agent' has
+    # none, so it appears unquoted.
+    assert "tmux attach -t =mngr-my-agent" in script
 
 
 def test_build_ssh_activity_wrapper_script_kills_activity_tracker_on_exit() -> None:
