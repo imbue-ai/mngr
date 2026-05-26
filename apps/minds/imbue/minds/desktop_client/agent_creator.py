@@ -543,7 +543,12 @@ def _build_mngr_create_command(
             # transfer + provisioning round the bake already paid for.
             mngr_command.append("--reuse")
         case _:
-            mngr_command.extend(["--reuse", "--update"])
+            # Non-IMBUE_CLOUD modes pass neither ``--reuse`` nor ``--update``:
+            # the create form is "give me a new agent on a new host", and
+            # ``--reuse`` matches only on agent name (``system-services``)
+            # without scoping to host, so it collides across hosts. The
+            # ``--new-host`` flag below already covers fresh-host intent.
+            pass
 
     # Per-mode template + per-mode runtime flags. All modes use
     # ``--template main --template <mode>``; the per-mode template provides
