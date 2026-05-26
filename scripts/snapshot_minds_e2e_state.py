@@ -3,6 +3,20 @@
 container provisioned, so future test runs can boot from that state nearly
 instantly via offload's ``--override-image-id`` flag (offload v0.9.6+).
 
+PREREQUISITE: ``experimental_options={"vm_runtime": True}`` requires the
+caller's Modal workspace to have the VM-runtime preview enabled. As of
+2026-05-26 the workspace this repo's default Modal config points at does
+NOT have that preview enabled: SandboxCreate rejects the request with
+either ``MODAL_FUNCTION_RUNTIME must be set to 'gvisor'`` (when the
+runtime field is unset) or ``experimental_options['vm_runtime']=True
+conflicts with runtime='gvisor'`` (when we set it to gvisor). These two
+errors are mutually exclusive on the client side, so the only path
+forward is workspace-level preview enablement -- ask your Modal contact.
+Once enabled, this script should run end-to-end as written. Until then,
+treat the script as the validated *pattern* (refactored to share the
+``e2e_workspace_runner`` flow with the pytest test, deliberately
+skipping the agent-destroy cleanup) rather than an executable artifact.
+
 This is a one-off demonstration script for the test-efficiency groundwork.
 The flow is:
 
