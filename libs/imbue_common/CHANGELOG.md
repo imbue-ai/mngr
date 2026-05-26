@@ -6,15 +6,6 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
-### Changed
-
-- Changed: Shared conftest hooks now set `LATCHKEY_DISABLE_COUNTING=1` in `os.environ` once per pytest session, so subprocesses spawned by tests no longer count toward Latchkey's public daily usage counter.
-- Changed: Adopted the new per-project changelog layout — per-PR entries now live under `libs/imbue_common/changelog/`.
-
-### Fixed
-
-- Fixed: `UNABRIDGED_CHANGELOG.md` intro now references the correct entries directory (`<project_dir>/changelog/`).
-
 ## [v0.2.7] - 2026-05-11
 
 ### Changed
