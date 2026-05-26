@@ -1,0 +1,1 @@
+- Tightened the e2e test for `--plugin` / `--disable-plugin` so the failure assertion verifies one of the supplied plugin names appears in the error message, and added a happy-path test that exercises both flags with registered plugin names.

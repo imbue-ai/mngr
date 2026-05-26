@@ -12,7 +12,7 @@ from imbue.skitwright.expect import expect
 @pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.modal
+@pytest.mark.timeout(60)
 def test_create_default(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
     # running mngr create is strictly better than running claude!
@@ -30,6 +30,10 @@ def test_create_default(e2e: E2eSession) -> None:
     )
     expect(result).to_succeed()
 
+    pwd_result = e2e.run("pwd", comment="Get the session cwd for comparison")
+    expect(pwd_result).to_succeed()
+    session_cwd = pwd_result.stdout.strip()
+
     list_result = e2e.run(
         "mngr list --format json",
         comment="the defaults are the following: agent=your configured default, provider=local, project=current dir",
@@ -40,13 +44,26 @@ def test_create_default(e2e: E2eSession) -> None:
     matching = [a for a in agents if a["name"] == "my-task"]
     assert len(matching) == 1
     agent = matching[0]
-    # Default creation should use a worktree (not in-place)
+    # Default creation should use a worktree (not in-place): work_dir differs from session cwd
     assert "worktrees" in agent["work_dir"], f"Expected worktree-based work_dir, got: {agent['work_dir']}"
+    assert os.path.realpath(agent["work_dir"]) != os.path.realpath(session_cwd), (
+        f"Expected worktree work_dir distinct from session cwd, but got the same path: {agent['work_dir']}"
+    )
+    # Default provider should be local, per the tutorial block
+    assert agent["host"]["provider_name"] == "local", (
+        f"Expected default provider=local, got: {agent['host']['provider_name']}"
+    )
+    assert agent["state"] in ("RUNNING", "WAITING")
+
+    # Verify the agent is actually running in the worktree by exec'ing pwd
+    exec_result = e2e.run("mngr exec my-task pwd", comment="Verify agent is actually running in the worktree")
+    expect(exec_result).to_succeed()
+    expect(exec_result.stdout).to_contain(agent["work_dir"])
 
 
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.modal
+@pytest.mark.timeout(60)
 def test_create_in_place(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
     # if you want the default behavior of claude (starting in-place), you can specify that:
@@ -85,7 +102,7 @@ def test_create_in_place(e2e: E2eSession) -> None:
 @pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.modal
+@pytest.mark.timeout(300)
 def test_create_short_forms(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
     # you can name the agent type explicitly as a positional argument, or use the short form for the
@@ -110,19 +127,29 @@ def test_create_short_forms(e2e: E2eSession) -> None:
     )
     expect(result_short).to_succeed()
 
-    # Verify both agents were created and are running
+    # Asserting both agents share the same type/state confirms `mngr c` is a true
+    # alias for `mngr create` rather than a separate command with overlapping syntax.
     list_result = e2e.run("mngr list --format json", comment="Verify both agents are running")
     expect(list_result).to_succeed()
     parsed = json.loads(list_result.stdout)
     agents_by_name = {a["name"]: a for a in parsed["agents"]}
     assert "my-task" in agents_by_name, f"my-task not found in agents: {list(agents_by_name)}"
     assert "my-other-task" in agents_by_name, f"my-other-task not found in agents: {list(agents_by_name)}"
+    full_agent = agents_by_name["my-task"]
+    short_agent = agents_by_name["my-other-task"]
+    assert full_agent["type"] == short_agent["type"] == "command", (
+        f"both agents should have type 'command'; got full={full_agent['type']!r}, short={short_agent['type']!r}"
+    )
+    assert full_agent["state"] in ("RUNNING", "WAITING"), f"my-task in unexpected state: {full_agent['state']}"
+    assert short_agent["state"] in ("RUNNING", "WAITING"), (
+        f"my-other-task in unexpected state: {short_agent['state']}"
+    )
 
 
 @pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.modal
+@pytest.mark.timeout(60)
 def test_create_codex_agent(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
     # you can also specify a different agent (ex: codex)
@@ -150,12 +177,14 @@ def test_create_codex_agent(e2e: E2eSession) -> None:
     assert len(matching) == 1
     assert matching[0]["type"] == "codex"
     assert matching[0]["state"] in ("RUNNING", "WAITING")
+    # Confirm the codex agent type resolved through the configured command override
+    assert "sleep 99999" in matching[0]["command"]
 
 
 @pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.modal
+@pytest.mark.timeout(60)
 def test_create_with_agent_args(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
     # you can specify the arguments to the *agent* (ie, send args to the agent rather than mngr)
@@ -190,7 +219,7 @@ def test_create_with_agent_args(e2e: E2eSession) -> None:
 @pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.modal
+@pytest.mark.timeout(120)
 def test_create_named_agent(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
     # when creating agents to accomplish tasks, it's recommended that you give them a name to make it easier to manage them:
@@ -221,7 +250,7 @@ def test_create_named_agent(e2e: E2eSession) -> None:
 @pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.modal
+@pytest.mark.timeout(120)
 def test_create_with_json_output(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
     # you can control output format for scripting:
@@ -244,13 +273,19 @@ def test_create_with_json_output(e2e: E2eSession) -> None:
     parsed = json.loads(list_result.stdout)
     agents = parsed["agents"]
     assert len(agents) == 1
-    assert agents[0]["name"] == "my-task"
+    agent = agents[0]
+    assert agent["name"] == "my-task"
+    # The IDs returned by `mngr create --format json` must refer to the same
+    # agent/host that subsequently shows up in `mngr list --format json`.
+    assert agent["id"] == create_json["agent_id"]
+    assert agent["host"]["id"] == create_json["host_id"]
+    assert agent["type"] == "command"
+    assert agent["state"] in ("RUNNING", "WAITING")
 
 
 @pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.modal
 def test_create_headless(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
     # mngr is very much meant to be used for scripting and automation, so nothing requires interactivity.

@@ -1,0 +1,1 @@
+- Fixed: `test_full_lifecycle` e2e test now passes locally. Added `@pytest.mark.timeout(300)` so the test isn't killed by the default 10-second pytest-timeout, and removed an incorrect `@pytest.mark.modal` mark (the test uses the local provider via `mngr create`/`mngr list`/`mngr destroy`, which never invokes the `modal` CLI binary that the resource guard tracks).

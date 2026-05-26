@@ -413,9 +413,16 @@ def e2e(
     # Remote providers (Modal, Docker) are left enabled so that e2e tests
     # exercise the full discovery path. Tests that trigger Modal (via
     # mngr list, mngr destroy --gc, etc.) need @pytest.mark.modal.
+    # Also set a default agent type so create commands that mirror tutorial
+    # blocks (which never spell out --type) succeed without user-scope config.
     settings_path = project_config_dir / "settings.local.toml"
+    # `type = "claude"` mirrors what `mngr extras config` writes to user-scope
+    # settings during install.sh, so tests can mirror the tutorial blocks
+    # (which assume the user has picked a default type) without each command
+    # having to repeat `--type ...`.
     settings_path.write_text(
         "[commands.create]\n"
+        'type = "claude"\n'
         'connect_command = "mngr-e2e-connect"\n'
         "\n"
         "[commands.start]\n"

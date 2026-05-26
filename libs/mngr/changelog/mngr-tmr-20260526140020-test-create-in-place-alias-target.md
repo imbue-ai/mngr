@@ -1,0 +1,1 @@
+Fix `test_create_in_place_alias_target` e2e test: remove unused `@pytest.mark.modal` marker (the test only uses the local provider via `--transfer=none`) and add `@pytest.mark.timeout(60)` so that the combined `mngr create` plus `mngr list` calls do not exceed the default 10s pytest timeout.

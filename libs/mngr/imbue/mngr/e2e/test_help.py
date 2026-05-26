@@ -21,7 +21,10 @@ def test_help_succeeds(e2e: E2eSession) -> None:
         comment="or see the other commands--list, destroy, message, connect, push, pull, clone, and more!",
     )
     expect(result).to_succeed()
-    expect(result.stdout).to_contain("Usage")
+    # Verify the help text has the expected click structural sections
+    expect(result.stdout).to_contain("Usage:")
+    expect(result.stdout).to_contain("Options:")
+    expect(result.stdout).to_contain("Commands:")
     # Verify the commands mentioned in the tutorial comment are present
     expect(result.stdout).to_contain("create")
     expect(result.stdout).to_contain("list")

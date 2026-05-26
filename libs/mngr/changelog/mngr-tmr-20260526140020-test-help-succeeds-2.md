@@ -1,0 +1,1 @@
+Tightened `test_help_succeeds` to assert on the click structural section headers (`Usage:`, `Options:`, `Commands:`) so the test verifies the actual help output structure, not just that the command name substrings appear somewhere in stdout.

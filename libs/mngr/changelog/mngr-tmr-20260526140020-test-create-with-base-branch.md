@@ -1,0 +1,1 @@
+Add an assertion to `test_create_with_base_branch` that verifies the new agent's worktree is checked out on the newly created branch (`mngr/my-task`), not on the diverged source-of-truth branch. Matches the worktree-branch verification already present in the sibling `test_create_with_custom_branch_pattern` and `test_create_with_explicit_branch_name` tests.

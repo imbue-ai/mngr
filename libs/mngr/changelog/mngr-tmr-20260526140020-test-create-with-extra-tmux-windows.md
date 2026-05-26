@@ -1,0 +1,3 @@
+Remove incorrect @pytest.mark.modal from e2e test_create_with_extra_tmux_windows in test_create_commands.py and add a 60s pytest timeout. The modal resource guard tracks CLI binary invocations (via PATH wrapper) and SDK gRPC calls (via in-process monkeypatch), neither of which fires for `mngr list` in an empty subprocess environment: mngr uses the Modal Python SDK, not the CLI, and the SDK monkeypatch does not propagate to subprocesses. The function-body runtime hovers at ~10s, so the default pytest timeout was racing the test.
+
+Also tighten the test: use two `-w` flags (mirroring the tutorial's `server` + `logs` pattern) and verify each window's command actually runs via `mngr exec my-task 'ps aux'`, not just that the window names exist.

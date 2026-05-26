@@ -1,0 +1,1 @@
+Strengthened the `test_create_with_idle_mode_and_timeout` e2e test to verify that `--idle-mode run` and `--idle-timeout 60` are actually applied to the created agent (via `mngr list --format json`) rather than only checking that the `create` command exits 0.

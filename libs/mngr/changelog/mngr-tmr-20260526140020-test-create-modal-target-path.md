@@ -1,0 +1,1 @@
+Fix and tighten `test_create_modal_target_path`: pass an explicit `--type command` so the e2e test no longer depends on a user-configured default agent type, and assert that the agent's `work_dir` is rooted at `/workspace` so a regression in target-path mounting would be caught.

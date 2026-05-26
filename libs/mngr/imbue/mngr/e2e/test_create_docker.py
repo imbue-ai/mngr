@@ -34,8 +34,15 @@ def test_create_docker_start_args(e2e: E2eSession) -> None:
     mngr create my-task --provider docker -s "--gpus all"
     # these args are passed to "docker run", whereas the build args are passed to "docker build".
     """)
+    # `--type command -- sleep <N>` stands in for the real agent (matching the
+    # pattern used by tests in test_create_basic.py) so the test does not
+    # depend on a default agent type being set in the test profile -- the e2e
+    # fixture starts from a fresh profile and only configures
+    # `commands.create.connect_command`, leaving `commands.create.type` unset.
+    # The sleep keeps the container alive long enough for the post-create
+    # `mngr exec my-task hostname` call below to read back the hostname.
     result = e2e.run(
-        'mngr create my-task --provider docker -s "--hostname=mngr-start-arg-test" --no-connect --no-ensure-clean',
+        'mngr create my-task --provider docker --type command -s "--hostname=mngr-start-arg-test" --no-connect --no-ensure-clean -- sleep 100078',
         comment="some providers (like docker), take start args as well as build args",
         timeout=_REMOTE_TIMEOUT,
     )

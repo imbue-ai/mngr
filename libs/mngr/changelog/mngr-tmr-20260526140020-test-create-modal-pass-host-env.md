@@ -1,0 +1,1 @@
+- e2e tests: set a default `commands.create.type` in the shared test settings so tutorial-style `mngr create` invocations (which never spell out `--type`) succeed without relying on user-scope config.
