@@ -61,10 +61,19 @@ the right project's consolidated files.
 
    The allowed categories are exactly: `Added`, `Changed`, `Deprecated`,
    `Removed`, `Fixed`, `Security`. Use `Changed` as the catch-all for
-   internal refactors, doc edits, or test-only tweaks that don't fit
-   the other categories. One change → one bullet; merge near-duplicate
-   bullets across dates (within the same project) if they describe the
-   same user-visible effect.
+   internal refactors or doc edits that don't fit the other categories.
+   One change → one bullet; merge near-duplicate bullets across dates
+   (within the same project) if they describe the same user-visible
+   effect.
+
+   `CHANGELOG.md` is a notable-only summary: if a change isn't notable,
+   omit it from `CHANGELOG.md` entirely rather than forcing a bullet for
+   it. The canonical example is a change that only affects tests rather
+   than user-facing behavior — skip it. Nothing is lost by skipping:
+   every per-PR entry is already preserved verbatim in the project's
+   `UNABRIDGED_CHANGELOG.md` (step 2). If none of a project's entries are
+   notable, it is fine to produce no `CHANGELOG.md` bullets for it at
+   all.
 
 4. For each project that had at least one `SECTION` line: open that
    project's `CHANGELOG.md` (resolve `<project_dir>` as in step 2).
