@@ -1,1 +1,0 @@
-Adds a `just minds-test-electron` recipe that wraps the new `test_create_local_docker_workspace_via_electron` Electron acceptance test in `xvfb-run -a`, and wires the existing `test-docker` CI job to install Node, pnpm, xvfb, and the apps/minds pnpm dependencies so the Electron binary is available for the run.

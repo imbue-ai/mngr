@@ -12,6 +12,8 @@ from pydantic import PrivateAttr
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mngr.primitives import AgentId
+from imbue.mngr_forward.ssh_tunnel import RemoteSSHInfo
+from imbue.mngr_forward.ssh_tunnel import SSHTunnelManager
 from imbue.mngr_latchkey.core import AGENT_SIDE_LATCHKEY_PORT
 from imbue.mngr_latchkey.core import CredentialStatus
 from imbue.mngr_latchkey.core import LATCHKEY_MIN_VERSION
@@ -23,8 +25,6 @@ from imbue.mngr_latchkey.core import LatchkeyNotInitializedError
 from imbue.mngr_latchkey.core import LatchkeyVersionError
 from imbue.mngr_latchkey.discovery import LatchkeyDestructionHandler
 from imbue.mngr_latchkey.discovery import LatchkeyDiscoveryHandler
-from imbue.mngr_latchkey.ssh_tunnel import RemoteSSHInfo
-from imbue.mngr_latchkey.ssh_tunnel import SSHTunnelManager
 from imbue.mngr_latchkey.store import admin_permissions_path
 from imbue.mngr_latchkey.store import default_permissions_path
 from imbue.mngr_latchkey.store import ensure_browser_log_path

@@ -310,7 +310,7 @@ class BaseAgent(AgentInterface[AgentConfigT]):
         by resending (e.g., a blocking dialog).
 
         BaseAgent uses a simple send (literal text + Enter). Interactive TUI
-        agents (Claude Code, Gemini CLI, etc.) should subclass InteractiveTuiAgent
+        agents (Claude Code, Antigravity CLI, etc.) should subclass InteractiveTuiAgent
         which overrides this with the paste-detection / submission-signal pipeline.
         """
         with self._message_lock(), log_span("Sending message to agent {} (length={})", self.name, len(message)):

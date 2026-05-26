@@ -597,11 +597,12 @@ def test_forward_refuses_to_start_when_another_supervisor_is_alive(
 # -- Group wiring -----------------------------------------------------------
 
 
-def test_group_exposes_three_subcommands() -> None:
+def test_group_exposes_documented_subcommands() -> None:
     """The ``mngr latchkey`` group exposes the documented subcommands."""
     assert set(latchkey.commands.keys()) == {
         "create-agent-env",
         "link-permissions",
+        "register-agent",
         "forward",
         "admin-jwt",
         "gateway-info",
@@ -611,5 +612,12 @@ def test_group_exposes_three_subcommands() -> None:
 def test_help_text_lists_subcommands(cli_runner: CliRunner) -> None:
     result = cli_runner.invoke(latchkey, ["--help"], catch_exceptions=False)
     assert result.exit_code == 0
-    for subcommand in ("create-agent-env", "link-permissions", "forward", "admin-jwt", "gateway-info"):
+    for subcommand in (
+        "create-agent-env",
+        "link-permissions",
+        "register-agent",
+        "forward",
+        "admin-jwt",
+        "gateway-info",
+    ):
         assert subcommand in result.output

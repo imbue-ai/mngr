@@ -152,10 +152,11 @@ def send_enter_and_poll_for_cleared_indicator(
     """Strategy 2: send Enter, poll for the cleared indicator, retry on miss.
 
     ``cleared_indicator`` must be a substring that is hidden while the user's
-    text occupies the input row and reappears once Enter is consumed (e.g.
-    gemini's ``Type your message`` placeholder). When the poll times out we
-    re-send Enter -- interactive TUIs occasionally swallow Enter on fresh
-    sessions when it arrives before the pasted text has been absorbed.
+    text occupies the input row and reappears once Enter is consumed -- the
+    typical example is an input-prompt placeholder that the TUI hides while
+    the user is typing. When the poll times out we re-send Enter --
+    interactive TUIs occasionally swallow Enter on fresh sessions when it
+    arrives before the pasted text has been absorbed.
 
     Raises ``SendMessageError`` if all ``max_attempts`` rounds time out.
     """
