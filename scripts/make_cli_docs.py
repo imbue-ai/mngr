@@ -678,9 +678,11 @@ REGEN_COMMAND = "uv run python scripts/make_cli_docs.py"
 def collect_generated_files(repo_root: Path) -> dict[Path, str]:
     """Return every generated doc file mapped to its expected content.
 
-    This is the single source of truth shared by ``main`` (which writes the
-    files) and the unit test (which checks they are up to date), so the writer
-    and the checker cannot drift apart.
+    This is the single source of truth shared by ``main``'s writer (the default,
+    no-args path, which writes the files) and its checker (the ``--check`` path,
+    which only verifies they are up to date), so the writer and checker cannot
+    drift apart. ``test_cli_docs_are_up_to_date`` drives the checker by invoking
+    the script with ``--check``.
     """
     generated: dict[Path, str] = {}
 
