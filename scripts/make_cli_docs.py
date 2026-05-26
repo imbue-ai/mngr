@@ -720,7 +720,10 @@ def _find_stale_files(generated: dict[Path, str]) -> list[Path]:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     parser.add_argument(
         "--check",
         action="store_true",
