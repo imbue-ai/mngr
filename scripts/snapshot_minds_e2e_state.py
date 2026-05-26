@@ -3,12 +3,16 @@
 container provisioned, so future test runs can boot from that state nearly
 instantly via offload's ``--override-image-id`` flag (offload v0.9.6+).
 
+Verified end-to-end against Modal on 2026-05-26 -- produced snapshot
+image ID ``im-01KSJWM8D9DTMAFWTGRZHYAF10`` from a sandbox with the FCT
+workspace's Docker container alive and ``system_interface`` rendered.
+
 PREREQUISITE: ``experimental_options={"vm_runtime": True}`` requires the
-caller's Modal workspace to have the VM-runtime preview enabled. If
-SandboxCreate fails with "MODAL_FUNCTION_RUNTIME must be set to 'gvisor'"
-or "experimental_options['vm_runtime']=True conflicts with runtime=...",
-your active Modal profile does not have the preview enabled -- switch to
-one that does (``modal profile activate <name>`` / ``MODAL_PROFILE=<name>``).
+caller's active Modal profile to have the VM-runtime preview enabled. If
+``Sandbox.create`` fails with ``MODAL_FUNCTION_RUNTIME must be set to
+'gvisor'`` or ``experimental_options['vm_runtime']=True conflicts with
+runtime=...``, your profile lacks the preview -- switch to one that
+has it (``modal profile activate <name>`` / ``MODAL_PROFILE=<name>``).
 
 This is a one-off demonstration script for the test-efficiency groundwork.
 The flow is:
