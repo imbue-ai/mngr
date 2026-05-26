@@ -149,6 +149,59 @@ mngr latchkey link-permissions [OPTIONS]
 $ mngr latchkey link-permissions --host-id $HOST_ID --opaque-path /path/from/create-agent-env.json
 ```
 
+## mngr latchkey register-agent
+
+Register an agent on a host, granting it access to the Minds API proxy.
+
+Wraps :func:`imbue.mngr_latchkey.agent_setup.register_agent_for_host`.
+The per-host ``latchkey_permissions.json`` ships with an empty
+allowed-agent enum on the first rule (the one that gates
+``/minds-api-proxy/api/v1/agents/<id>/...``); this command appends
+the supplied agent ID to that enum so the gateway will let that
+agent through to its own ``/api/v1/agents/<id>/...`` subtree.
+Idempotent: re-running for an already-registered agent is a no-op.
+
+**Usage:**
+
+```text
+mngr latchkey register-agent [OPTIONS]
+```
+**Options:**
+
+## Common
+
+| Name | Type | Description | Default |
+| ---- | ---- | ----------- | ------- |
+| `--format` | text | Output format (human, json, jsonl, FORMAT): Output format for results. When a template is provided, fields use standard python templating like 'name: {agent.name}' See below for available fields. | `human` |
+| `-q`, `--quiet` | boolean | Suppress all console output | `False` |
+| `-v`, `--verbose` | integer range | Increase verbosity (default: BUILD); -v for DEBUG, -vv for TRACE | `0` |
+| `--log-file` | path | Path to log file (overrides default ~/.mngr/events/logs/<timestamp>-<pid>.json) | None |
+| `--log-commands`, `--no-log-commands` | boolean | Log commands that were executed | None |
+| `--headless` | boolean | Disable all interactive behavior (prompts, TUI, editor). Also settable via MNGR_HEADLESS env var or 'headless' config key. | `False` |
+| `--safe` | boolean | Always query all providers during discovery (disable event-stream optimization). Use this when interfacing with mngr from multiple machines. | `False` |
+| `--plugin`, `--enable-plugin` | text | Enable a plugin [repeatable] | None |
+| `--disable-plugin` | text | Disable a plugin [repeatable] | None |
+| `-S`, `--setting` | text | Override a config setting for this invocation (KEY=VALUE, dot-separated paths) [repeatable] | None |
+| `-h`, `--help` | boolean | Show this message and exit. | `False` |
+
+## Other Options
+
+| Name | Type | Description | Default |
+| ---- | ---- | ----------- | ------- |
+| `--host-id` | text | Canonical host ID the agent runs on. Identifies which per-host permissions file to edit. | None |
+| `--agent-id` | text | Canonical agent ID to add to the host's allowed-agent enum. | None |
+| `--latchkey-binary` | text | Path to the upstream ``latchkey`` CLI. Falls back to $MNGR_LATCHKEY_BINARY, then ``[plugins.latchkey].latchkey_binary`` in settings.toml, then 'latchkey' on PATH. | None |
+| `--latchkey-directory` | path | Root directory for ``LATCHKEY_DIRECTORY`` and the plugin's ``mngr_latchkey/`` metadata subtree. Falls back to $MNGR_LATCHKEY_DIRECTORY, then ``[plugins.latchkey].directory`` in settings.toml, then '~/.mngr/latchkey'. | None |
+
+
+## Examples
+
+**Register an agent for the Minds API proxy**
+
+```bash
+$ mngr latchkey register-agent --host-id $HOST_ID --agent-id $AGENT_ID
+```
+
 ## mngr latchkey forward
 
 Run the shared Latchkey gateway and reverse-tunnel it into every discovered agent.
