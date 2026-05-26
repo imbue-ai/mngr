@@ -45,45 +45,45 @@ from imbue.minds.config.loader import repo_tier_client_config_path
 # so parents[5] hops up over desktop_client, minds, imbue, minds, apps to the repo
 # root. (The original copy of this code lived two levels closer to the root in
 # apps/minds/test_desktop_client_e2e.py, where parents[2] was correct.)
-REPO_ROOT: Final[Path] = Path(__file__).resolve().parents[5]
-FCT_EXTERNAL_WORKTREE: Final[Path] = REPO_ROOT / ".external_worktrees" / "forever-claude-template"
-FCT_REMOTE: Final[str] = "https://github.com/imbue-ai/forever-claude-template.git"
-FCT_FALLBACK_BRANCH: Final[str] = "main"
+_REPO_ROOT: Final[Path] = Path(__file__).resolve().parents[5]
+_FCT_EXTERNAL_WORKTREE: Final[Path] = _REPO_ROOT / ".external_worktrees" / "forever-claude-template"
+_FCT_REMOTE: Final[str] = "https://github.com/imbue-ai/forever-claude-template.git"
+_FCT_FALLBACK_BRANCH: Final[str] = "main"
 
 # The contentView page URL contains ``/_chrome`` only for the chrome
 # (sidebar/title-bar) view; the main content view never does. We match the
 # pure-localhost backend pages, not the ``agent-<id>.localhost`` proxy.
 # The capturing group exposes the bare origin (``http://localhost:<port>``)
-# so :func:`backend_origin_from_page` can reuse the same pattern instead of
+# so :func:`_backend_origin_from_page` can reuse the same pattern instead of
 # re-encoding the localhost-origin contract a second time.
-BACKEND_ORIGIN_PATTERN: Final[re.Pattern[str]] = re.compile(r"^(http://localhost:\d+)(?:/|$)")
-CHROME_PATH_PATTERN: Final[re.Pattern[str]] = re.compile(r"^http://localhost:\d+/_chrome(?:/|$|\?)")
+_BACKEND_ORIGIN_PATTERN: Final[re.Pattern[str]] = re.compile(r"^(http://localhost:\d+)(?:/|$)")
+_CHROME_PATH_PATTERN: Final[re.Pattern[str]] = re.compile(r"^http://localhost:\d+/_chrome(?:/|$|\?)")
 # The agent subdomain URL the create flow redirects to once the workspace's
 # ``system_interface`` is reachable. The desktop client wraps that origin in
 # the mngr_forward plugin, so the port may differ from the bare backend.
-AGENT_SUBDOMAIN_PATTERN: Final[re.Pattern[str]] = re.compile(r"^http://agent-[a-f0-9]+\.localhost:\d+(?:/|$)")
+_AGENT_SUBDOMAIN_PATTERN: Final[re.Pattern[str]] = re.compile(r"^http://agent-[a-f0-9]+\.localhost:\d+(?:/|$)")
 
 # Default env tier when nothing is activated. Staging's ``client.toml`` is
 # committed under apps/minds/imbue/minds/config/envs/staging/ so callers
 # can boot the backend without an explicit ``minds env activate`` step.
-DEFAULT_MINDS_ROOT_NAME: Final[str] = "minds-staging"
-DEFAULT_MINDS_TIER: Final[str] = "staging"
+_DEFAULT_MINDS_ROOT_NAME: Final[str] = "minds-staging"
+_DEFAULT_MINDS_TIER: Final[str] = "staging"
 
-ELECTRON_BINARY: Final[Path] = REPO_ROOT / "apps" / "minds" / "node_modules" / ".bin" / "electron"
-ELECTRON_MAIN_JS: Final[Path] = REPO_ROOT / "apps" / "minds" / "electron" / "main.js"
+_ELECTRON_BINARY: Final[Path] = _REPO_ROOT / "apps" / "minds" / "node_modules" / ".bin" / "electron"
+_ELECTRON_MAIN_JS: Final[Path] = _REPO_ROOT / "apps" / "minds" / "electron" / "main.js"
 
 # Per-phase wall-clock budgets. Tight enough to fail with a useful
 # "stuck in <phase>" error before a wrapping suite-level timeout fires.
-CDP_READY_TIMEOUT_SECONDS: Final[int] = 120
-BACKEND_READY_TIMEOUT_SECONDS: Final[int] = 120
-CREATE_FORM_TIMEOUT_SECONDS: Final[int] = 600
-SYSTEM_INTERFACE_TIMEOUT_SECONDS: Final[int] = 180
+_CDP_READY_TIMEOUT_SECONDS: Final[int] = 120
+_BACKEND_READY_TIMEOUT_SECONDS: Final[int] = 120
+_CREATE_FORM_TIMEOUT_SECONDS: Final[int] = 600
+_SYSTEM_INTERFACE_TIMEOUT_SECONDS: Final[int] = 180
 
 # Pre-tested CSS selector against the system_interface frontend at
 # .external_worktrees/forever-claude-template/apps/system_interface/.
 # `.dockview-workspace` is the wrapper div the DockviewWorkspace mithril
 # component mounts on first render.
-DOCKVIEW_WORKSPACE_SELECTOR: Final[str] = "div.dockview-workspace"
+_DOCKVIEW_WORKSPACE_SELECTOR: Final[str] = "div.dockview-workspace"
 
 
 def configure_logging() -> None:
@@ -102,7 +102,7 @@ def find_free_port() -> int:
     Used to allocate the ``--remote-debugging-port`` Electron exposes. There
     is a small race between us closing the socket and Electron binding the
     port; on a quiet host the window is negligible. If a flaky bind ever
-    shows up, the retry should live in :func:`wait_for_cdp` rather than
+    shows up, the retry should live in :func:`_wait_for_cdp` rather than
     here (this helper exists to surface a single number).
     """
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -110,14 +110,14 @@ def find_free_port() -> int:
         return s.getsockname()[1]
 
 
-def current_mngr_branch() -> str | None:
+def _current_mngr_branch() -> str | None:
     """Return the current branch name of the mngr repo, or None if detached.
 
     Returning ``None`` for a detached HEAD lets the FCT resolver skip the
     "branch matching" step rather than asking FCT for a ref named ``HEAD``.
     """
     result = subprocess.run(
-        ["git", "-C", str(REPO_ROOT), "rev-parse", "--abbrev-ref", "HEAD"],
+        ["git", "-C", str(_REPO_ROOT), "rev-parse", "--abbrev-ref", "HEAD"],
         check=True,
         capture_output=True,
         text=True,
@@ -129,14 +129,14 @@ def current_mngr_branch() -> str | None:
     return branch
 
 
-def fct_remote_has_branch(branch: str) -> bool:
+def _fct_remote_has_branch(branch: str) -> bool:
     """Return True iff the FCT public remote currently has ``branch``.
 
     ``git ls-remote`` exits 0 either way; presence is signalled by stdout
     being non-empty.
     """
     result = subprocess.run(
-        ["git", "ls-remote", "--heads", FCT_REMOTE, branch],
+        ["git", "ls-remote", "--heads", _FCT_REMOTE, branch],
         check=True,
         capture_output=True,
         text=True,
@@ -145,11 +145,11 @@ def fct_remote_has_branch(branch: str) -> bool:
     return bool(result.stdout.strip())
 
 
-def shallow_clone_fct(branch: str, destination: Path) -> Path:
+def _shallow_clone_fct(branch: str, destination: Path) -> Path:
     """Shallow-clone ``branch`` of the FCT public remote into ``destination``."""
     destination.parent.mkdir(parents=True, exist_ok=True)
     subprocess.run(
-        ["git", "clone", "--depth", "1", "--branch", branch, FCT_REMOTE, str(destination)],
+        ["git", "clone", "--depth", "1", "--branch", branch, _FCT_REMOTE, str(destination)],
         check=True,
         capture_output=True,
         text=True,
@@ -170,22 +170,22 @@ def resolve_fct_path(scratch_dir: Path) -> Path:
     when steps 2 or 3 fire (e.g. ``pytest tmp_path`` for the test,
     ``$TMPDIR`` for the snapshot script).
     """
-    if FCT_EXTERNAL_WORKTREE.is_dir() and (FCT_EXTERNAL_WORKTREE / ".git").exists():
-        logger.info("Using FCT external worktree at {}", FCT_EXTERNAL_WORKTREE)
-        return FCT_EXTERNAL_WORKTREE
+    if _FCT_EXTERNAL_WORKTREE.is_dir() and (_FCT_EXTERNAL_WORKTREE / ".git").exists():
+        logger.info("Using FCT external worktree at {}", _FCT_EXTERNAL_WORKTREE)
+        return _FCT_EXTERNAL_WORKTREE
 
     destination = scratch_dir / "fct"
-    branch = current_mngr_branch()
-    if branch is not None and fct_remote_has_branch(branch):
+    branch = _current_mngr_branch()
+    if branch is not None and _fct_remote_has_branch(branch):
         logger.info("Shallow-cloning FCT branch {!r} into {}", branch, destination)
-        return shallow_clone_fct(branch, destination)
+        return _shallow_clone_fct(branch, destination)
 
     logger.info(
         "FCT remote does not have a branch named {!r}; falling back to {!r}",
         branch,
-        FCT_FALLBACK_BRANCH,
+        _FCT_FALLBACK_BRANCH,
     )
-    return shallow_clone_fct(FCT_FALLBACK_BRANCH, destination)
+    return _shallow_clone_fct(_FCT_FALLBACK_BRANCH, destination)
 
 
 def _set_os_environ(name: str, value: str) -> None:
@@ -207,22 +207,22 @@ def ensure_minds_env_defaults(setenv: Callable[[str, str], None] = _set_os_envir
         logger.info("Using inherited MINDS_ROOT_NAME={}", os.environ["MINDS_ROOT_NAME"])
         return
 
-    config_path = repo_tier_client_config_path(DEFAULT_MINDS_TIER)
+    config_path = repo_tier_client_config_path(_DEFAULT_MINDS_TIER)
     if not config_path.is_file():
         raise FileNotFoundError(
-            f"Default tier {DEFAULT_MINDS_TIER!r} has no client.toml at {config_path}; "
+            f"Default tier {_DEFAULT_MINDS_TIER!r} has no client.toml at {config_path}; "
             "either activate a minds env explicitly or restore the staging config."
         )
-    setenv("MINDS_ROOT_NAME", DEFAULT_MINDS_ROOT_NAME)
+    setenv("MINDS_ROOT_NAME", _DEFAULT_MINDS_ROOT_NAME)
     setenv("MINDS_CLIENT_CONFIG_PATH", str(config_path))
     logger.info(
         "No MINDS_ROOT_NAME activated; defaulting to {} (config={})",
-        DEFAULT_MINDS_ROOT_NAME,
+        _DEFAULT_MINDS_ROOT_NAME,
         config_path,
     )
 
 
-def build_electron_env(workspace_git_url: Path, workspace_name: str) -> dict[str, str]:
+def _build_electron_env(workspace_git_url: Path, workspace_name: str) -> dict[str, str]:
     """Return the env vars the Electron child process should inherit.
 
     Mirrors ``just minds-start``: passes the FCT path + agent name through
@@ -262,13 +262,13 @@ def _drain_byte_stream_to_loguru(stream: IO[bytes], prefix: str) -> None:
             logger.debug("[{}] {}", prefix, line)
 
 
-def stream_electron_output(process: subprocess.Popen[bytes]) -> None:
+def _stream_electron_output(process: subprocess.Popen[bytes]) -> None:
     """Drain Electron's stdout+stderr into the loguru sink in a background thread.
 
     Electron is verbose; without draining the pipes the OS buffer fills and
     Electron blocks. We don't parse anything; the caller reads state from CDP.
     """
-    # ``launched_electron`` always opens both pipes with ``subprocess.PIPE``;
+    # ``_launched_electron`` always opens both pipes with ``subprocess.PIPE``;
     # the explicit None check narrows ``Popen.stdout``/``stderr`` from
     # ``IO[bytes] | None`` to ``IO[bytes]`` and turns a future regression
     # (someone drops ``stdout=PIPE``) into an obvious assertion failure rather
@@ -281,7 +281,7 @@ def stream_electron_output(process: subprocess.Popen[bytes]) -> None:
 
 
 @contextmanager
-def launched_electron(
+def _launched_electron(
     workspace_git_url: Path,
     workspace_name: str,
     debug_port: int,
@@ -295,14 +295,14 @@ def launched_electron(
     agent / Docker container. Those persist as separate host-level
     processes; cleanup of them is the caller's responsibility.
     """
-    if not ELECTRON_BINARY.is_file():
+    if not _ELECTRON_BINARY.is_file():
         raise FileNotFoundError(
-            f"Electron binary missing at {ELECTRON_BINARY}. Run `cd apps/minds && pnpm install` first."
+            f"Electron binary missing at {_ELECTRON_BINARY}. Run `cd apps/minds && pnpm install` first."
         )
 
     cmd = [
-        str(ELECTRON_BINARY),
-        str(ELECTRON_MAIN_JS),
+        str(_ELECTRON_BINARY),
+        str(_ELECTRON_MAIN_JS),
         f"--remote-debugging-port={debug_port}",
         # GitHub Actions runners ship Electron's chrome-sandbox binary
         # without the setuid bit, so the renderer aborts on launch with
@@ -318,12 +318,12 @@ def launched_electron(
     logger.info("Launching Electron: {}", " ".join(cmd))
     process = subprocess.Popen(
         cmd,
-        cwd=str(REPO_ROOT),
-        env=build_electron_env(workspace_git_url, workspace_name),
+        cwd=str(_REPO_ROOT),
+        env=_build_electron_env(workspace_git_url, workspace_name),
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
-    stream_electron_output(process)
+    _stream_electron_output(process)
     try:
         yield process
     finally:
@@ -337,7 +337,7 @@ def launched_electron(
                 process.wait(timeout=5)
 
 
-def wait_for_cdp(debug_port: int, timeout_seconds: int) -> None:
+def _wait_for_cdp(debug_port: int, timeout_seconds: int) -> None:
     """Poll the Chrome DevTools Protocol HTTP endpoint until it responds.
 
     A 200 from ``/json/version`` means the Electron renderer's debugger is
@@ -358,7 +358,7 @@ def wait_for_cdp(debug_port: int, timeout_seconds: int) -> None:
     raise TimeoutError(f"CDP at port {debug_port} did not respond within {timeout_seconds}s (last: {last_error})")
 
 
-def pick_content_page(browser: Browser, timeout_seconds: int) -> Page:
+def _pick_content_page(browser: Browser, timeout_seconds: int) -> Page:
     """Return the Electron WebContentsView that serves the main content.
 
     Electron's BaseWindow has multiple WebContentsView's (chrome view,
@@ -375,9 +375,9 @@ def pick_content_page(browser: Browser, timeout_seconds: int) -> Page:
             for page in context.pages:
                 url = page.url
                 last_observed.append(url)
-                if not BACKEND_ORIGIN_PATTERN.match(url):
+                if not _BACKEND_ORIGIN_PATTERN.match(url):
                     continue
-                if CHROME_PATH_PATTERN.match(url):
+                if _CHROME_PATH_PATTERN.match(url):
                     continue
                 logger.info("Picked Electron content page at {}", url)
                 return page
@@ -387,20 +387,20 @@ def pick_content_page(browser: Browser, timeout_seconds: int) -> Page:
     )
 
 
-def backend_origin_from_page(page: Page) -> str:
+def _backend_origin_from_page(page: Page) -> str:
     """Extract ``http://localhost:<backend_port>`` from a content-view page URL.
 
-    Reuses :data:`BACKEND_ORIGIN_PATTERN` so the localhost-origin contract
+    Reuses :data:`_BACKEND_ORIGIN_PATTERN` so the localhost-origin contract
     is encoded in exactly one place; the pattern's capturing group exposes
     the bare origin without re-parsing the URL.
     """
-    match = BACKEND_ORIGIN_PATTERN.match(page.url)
+    match = _BACKEND_ORIGIN_PATTERN.match(page.url)
     if match is None:
         raise AssertionError(f"Content page URL is not on the backend origin: {page.url!r}")
     return match.group(1)
 
 
-def ensure_field_value(page: Page, selector: str, expected_value: str) -> None:
+def _ensure_field_value(page: Page, selector: str, expected_value: str) -> None:
     """Type ``expected_value`` into the form field if it isn't already there.
 
     Handles both the prefilled-via-env-var case (dev tiers) and the
@@ -432,7 +432,7 @@ def destroy_agent_best_effort(workspace_name: str) -> None:
     try:
         completed = subprocess.run(
             cmd,
-            cwd=str(REPO_ROOT),
+            cwd=str(_REPO_ROOT),
             capture_output=True,
             text=True,
             timeout=120,
@@ -469,13 +469,13 @@ def create_workspace_via_electron(
     - ``MINDS_ROOT_NAME`` must already be set in ``os.environ`` (call
       :func:`ensure_minds_env_defaults` first or activate a minds env).
     """
-    with launched_electron(fct_path, workspace_name, debug_port):
-        wait_for_cdp(debug_port, CDP_READY_TIMEOUT_SECONDS)
+    with _launched_electron(fct_path, workspace_name, debug_port):
+        _wait_for_cdp(debug_port, _CDP_READY_TIMEOUT_SECONDS)
         with sync_playwright() as playwright:
             browser = playwright.chromium.connect_over_cdp(f"http://127.0.0.1:{debug_port}")
             try:
-                page = pick_content_page(browser, BACKEND_READY_TIMEOUT_SECONDS)
-                backend_origin = backend_origin_from_page(page)
+                page = _pick_content_page(browser, _BACKEND_READY_TIMEOUT_SECONDS)
+                backend_origin = _backend_origin_from_page(page)
                 logger.info("Backend origin: {}", backend_origin)
 
                 logger.info("Navigating to /create")
@@ -488,8 +488,8 @@ def create_workspace_via_electron(
                 page.click("#toggle-advanced")
                 page.wait_for_selector("#git_url:visible", timeout=5_000)
 
-                ensure_field_value(page, "#host_name", workspace_name)
-                ensure_field_value(page, "#git_url", str(fct_path))
+                _ensure_field_value(page, "#host_name", workspace_name)
+                _ensure_field_value(page, "#git_url", str(fct_path))
                 # DOCKER + SUBSCRIPTION are the defaults when no account
                 # is selected; don't touch the launch_mode / ai_provider
                 # selects so this stays robust to future option
@@ -498,15 +498,15 @@ def create_workspace_via_electron(
                 logger.info("Submitting create form")
                 page.click("#create-submit")
                 page.wait_for_url(
-                    AGENT_SUBDOMAIN_PATTERN,
-                    timeout=CREATE_FORM_TIMEOUT_SECONDS * 1000,
+                    _AGENT_SUBDOMAIN_PATTERN,
+                    timeout=_CREATE_FORM_TIMEOUT_SECONDS * 1000,
                 )
                 logger.info("Workspace ready at {}", page.url)
 
                 page.wait_for_selector(
-                    DOCKVIEW_WORKSPACE_SELECTOR,
+                    _DOCKVIEW_WORKSPACE_SELECTOR,
                     state="visible",
-                    timeout=SYSTEM_INTERFACE_TIMEOUT_SECONDS * 1000,
+                    timeout=_SYSTEM_INTERFACE_TIMEOUT_SECONDS * 1000,
                 )
                 logger.info("system_interface dockview rendered; workspace creation complete")
             finally:
