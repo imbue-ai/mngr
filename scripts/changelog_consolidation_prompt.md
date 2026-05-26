@@ -73,8 +73,12 @@ the right project's consolidated files.
    "user-facing" includes the public API surface: added/removed/renamed
    exported symbols, changed signatures, and changed subclass or
    extension contracts are notable (they affect the library's consumers)
-   even when no end-user behavior changes; a pure internal refactor that
-   leaves the public surface unchanged is not. If none of a project's
+   even when no end-user behavior changes. Major internal refactors are
+   in scope too, even when in theory they leave the public surface and
+   end-user behavior unchanged: in practice a large restructuring can
+   introduce regressions, and a reader scanning the changelog to work out
+   what might have caused a problem should be able to see it. Only minor
+   or obviously no-op refactors may be omitted. If none of a project's
    entries are notable, it is fine to produce no `CHANGELOG.md` bullets
    for it at all.
 
