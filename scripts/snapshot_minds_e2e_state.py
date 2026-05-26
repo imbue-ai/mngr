@@ -47,6 +47,7 @@ from typing import Final
 
 import modal
 import modal.exception
+from modal.stream_type import StreamType
 
 _REPO_ROOT: Final[Path] = Path(__file__).resolve().parent.parent
 
@@ -167,15 +168,27 @@ def _exec_in_sandbox(
     description: str,
     timeout_seconds: int,
 ) -> int:
-    """Run a shell command inside ``sandbox`` and stream its output."""
+    """Run a shell command inside ``sandbox`` and stream its merged output.
+
+    stderr is merged into stdout at the sandbox level via
+    ``stderr=StreamType.STDOUT`` so we only have to drain a single pipe.
+    Reading two pipes serially (stdout to completion, then stderr) risks
+    a deadlock when the process produces enough stderr to fill that
+    pipe's buffer while we are still draining stdout. Merging avoids
+    that and also gives us a single, naturally-ordered log stream --
+    which is what a human operator actually wants here.
+    """
     print(f"\n=== [{description}] {command} ===", flush=True)
-    proc = sandbox.exec("bash", "-lc", command, timeout=timeout_seconds)
+    proc = sandbox.exec(
+        "bash",
+        "-lc",
+        command,
+        timeout=timeout_seconds,
+        stderr=StreamType.STDOUT,
+    )
     for line in proc.stdout:
         sys.stdout.write(line)
         sys.stdout.flush()
-    for line in proc.stderr:
-        sys.stderr.write(line)
-        sys.stderr.flush()
     returncode = proc.wait()
     if returncode != 0:
         print(f"=== [{description}] exited {returncode} ===", flush=True)
