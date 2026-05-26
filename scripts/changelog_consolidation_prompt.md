@@ -79,14 +79,11 @@ the right project's consolidated files.
    entries are notable, it is fine to produce no `CHANGELOG.md` bullets
    for it at all.
 
-   Exception for the `dev` project: `dev` tracks repo-level developer
-   tooling (CI workflows, scripts, build config, ratchets, and the
-   changelog system itself), whose audience is the repo's own developers
-   rather than product end-users. Judge `dev` entries by their impact on
-   that developer/maintainer workflow, not by end-user-facing behavior —
-   a CI, build, release, or tooling change that meaningfully affects how
-   the repo is built, tested, or released is notable for `dev` and should
-   be kept, even though it isn't "user-facing" in the product sense.
+   Exception for the `dev` project: its audience is the repo's own
+   developers, so judge `dev` entries by developer/maintainer impact — a
+   CI, build, release, or tooling change that affects how the repo is
+   built, tested, or released is notable even though it isn't
+   end-user-facing.
 
 4. For each project that had at least one `SECTION` line: open that
    project's `CHANGELOG.md` (resolve `<project_dir>` as in step 2).
