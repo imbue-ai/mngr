@@ -127,7 +127,7 @@ def test_build_mngr_create_command_does_not_inject_minds_api_key() -> None:
     ``--env`` or ``--host-env``.
     """
     for mode, account in (
-        (LaunchMode.LOCAL, None),
+        (LaunchMode.DOCKER, None),
         (LaunchMode.LIMA, None),
         (LaunchMode.CLOUD, None),
         (LaunchMode.IMBUE_CLOUD, "alice@imbue.com"),
