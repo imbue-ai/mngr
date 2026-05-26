@@ -59,12 +59,12 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             ~/.cargo/bin/offload
-          key: cargo-offload-0.9.5-${{ runner.os }}
+          key: cargo-offload-0.9.6-${{ runner.os }}
 
       - name: Install offload
         run: |
-          if ! command -v offload &> /dev/null || ! offload --version | grep -q '0.9.5'; then
-            cargo install offload@0.9.5 --force
+          if ! command -v offload &> /dev/null || ! offload --version | grep -q '0.9.6'; then
+            cargo install offload@0.9.6 --force
           fi
 
       - name: Restore offload test durations from previous run
@@ -256,12 +256,12 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             ~/.cargo/bin/offload
-          key: cargo-offload-0.9.5-${{ runner.os }}
+          key: cargo-offload-0.9.6-${{ runner.os }}
 
       - name: Install offload
         run: |
-          if ! command -v offload &> /dev/null || ! offload --version | grep -q '0.9.5'; then
-            cargo install offload@0.9.5 --force
+          if ! command -v offload &> /dev/null || ! offload --version | grep -q '0.9.6'; then
+            cargo install offload@0.9.6 --force
           fi
 
       - name: Restore offload test durations from previous run
