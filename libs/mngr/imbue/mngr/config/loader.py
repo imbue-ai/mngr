@@ -32,6 +32,8 @@ from imbue.mngr.config.data_types import detect_settings_narrowing
 from imbue.mngr.config.data_types import split_cli_args_string
 from imbue.mngr.config.host_dir import read_default_host_dir
 from imbue.mngr.config.key_resolver import EXTEND_SUFFIX
+from imbue.mngr.config.key_resolver import bare_key
+from imbue.mngr.config.key_resolver import is_extend_key
 from imbue.mngr.config.key_resolver import parse_scalar_value
 from imbue.mngr.config.key_resolver import resolve_extends
 from imbue.mngr.config.key_resolver import set_at_path
@@ -810,7 +812,7 @@ def _parse_create_templates(raw_templates: dict[str, dict[str, Any]]) -> dict[Cr
         # (an ``__extend`` suffix is a valid operator on any CLI option key, so
         # strip it before checking against the CreateCliOptions schema).
         for field in raw_options.keys():
-            base_field = field[: -len(EXTEND_SUFFIX)] if field.endswith(EXTEND_SUFFIX) else field
+            base_field = bare_key(field) if is_extend_key(field) else field
             if base_field not in CreateCliOptions.model_fields:
                 raise ConfigParseError(
                     f"Unknown field '{field}' in create_templates.{template_name}. Valid fields: {sorted(CreateCliOptions.model_fields.keys())}"
