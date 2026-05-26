@@ -208,7 +208,6 @@ def test_cli_docs_are_up_to_date() -> None:
     The generator is run via its --check mode in a fresh interpreter so that
     MNGR_LOAD_ALL_PLUGINS is set before any mngr import and every provider's commands are
     documented; running it in-process would not reliably reload already-imported modules.
-    The check runs in ~1s, so the default pytest timeout applies (like the sibling ruff check).
     """
     result = subprocess.run(
         [sys.executable, str(_REPO_ROOT / "scripts" / "make_cli_docs.py"), "--check"],
