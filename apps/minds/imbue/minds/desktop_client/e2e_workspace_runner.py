@@ -139,15 +139,27 @@ def _fct_remote_has_branch(branch: str) -> bool:
     """Return True iff the FCT public remote currently has ``branch``.
 
     ``git ls-remote`` exits 0 either way; presence is signalled by stdout
-    being non-empty.
+    being non-empty. Network-level failures (DNS hiccup, GitHub 5xx,
+    proxy block, timeout) are logged as a warning and treated the same as
+    "no such branch" so the caller still falls back to ``main`` per the
+    documented 3-step chain rather than crashing the whole run on a
+    transient probe failure.
     """
-    result = subprocess.run(
-        ["git", "ls-remote", "--heads", _FCT_REMOTE, branch],
-        check=True,
-        capture_output=True,
-        text=True,
-        timeout=30,
-    )
+    try:
+        result = subprocess.run(
+            ["git", "ls-remote", "--heads", _FCT_REMOTE, branch],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+        logger.warning(
+            "Failed to query FCT remote for branch {!r}; treating as absent so main fallback runs: {!r}",
+            branch,
+            exc,
+        )
+        return False
     return bool(result.stdout.strip())
 
 
