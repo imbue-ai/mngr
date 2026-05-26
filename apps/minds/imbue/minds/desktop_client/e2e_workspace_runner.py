@@ -121,14 +121,26 @@ def _current_mngr_branch() -> str | None:
 
     Returning ``None`` for a detached HEAD lets the FCT resolver skip the
     "branch matching" step rather than asking FCT for a ref named ``HEAD``.
+
+    Any failure to invoke git (missing ``.git`` -- e.g. when the runner
+    executes inside a Modal sandbox whose source tree was uploaded via
+    ``add_local_dir`` and the worktree's ``.git`` file points at a
+    gitdir that does not exist on the sandbox; ``CalledProcessError``;
+    ``TimeoutExpired``) is logged at warning level and treated as
+    "branch unknown", which routes the caller through the documented
+    fall-back to FCT ``main`` rather than crashing the whole run.
     """
-    result = subprocess.run(
-        ["git", "-C", str(_REPO_ROOT), "rev-parse", "--abbrev-ref", "HEAD"],
-        check=True,
-        capture_output=True,
-        text=True,
-        timeout=10,
-    )
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(_REPO_ROOT), "rev-parse", "--abbrev-ref", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError) as exc:
+        logger.warning("Could not determine current mngr branch ({!r}); treating as unknown", exc)
+        return None
     branch = result.stdout.strip()
     if not branch or branch == "HEAD":
         return None

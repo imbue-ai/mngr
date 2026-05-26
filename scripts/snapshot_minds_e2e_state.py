@@ -186,11 +186,23 @@ def _build_snapshot_image() -> modal.Image:
         )
         # Mount the local mngr checkout, then bake `uv sync` + pnpm install
         # into the image so the sandbox boots ready to run the e2e test.
-        # `.git` is included so the runner's `_current_mngr_branch()` helper
-        # (used by `resolve_fct_path` to pick an FCT branch matching the
-        # current mngr branch) works; `.venv` / `node_modules` /
-        # `test-results` are excluded because we'll regenerate them inside
-        # the image.
+        #
+        # Exclusion buckets:
+        # - regenerated inside the image (.venv / node_modules / build caches)
+        # - actively written during this upload by other processes
+        #   (.reviewer/ by autofix, .claude/ by Claude Code,
+        #   test-results / .test_output by parallel pytest runs);
+        #   Modal raises ExecutionError if any file in the upload set
+        #   changes during the upload.
+        # - .git: worktree ``.git`` is a tiny ``gitdir: <path>`` file
+        #   pointing at the main repo's .git/worktrees/<id>/ -- that
+        #   path does not exist inside the sandbox, so no in-sandbox
+        #   git command would work even if we did upload it. The
+        #   runner's ``_current_mngr_branch`` tolerates a missing /
+        #   unusable .git and returns None, routing ``resolve_fct_path``
+        #   through the documented "fall back to FCT main" path.
+        # - .external_worktrees can hold large FCT working trees; we
+        #   prefer the sandbox to clone FCT fresh from the public remote.
         .add_local_dir(
             str(_REPO_ROOT),
             "/code/mngr",
@@ -204,6 +216,10 @@ def _build_snapshot_image() -> modal.Image:
                 "**/.pytest_cache",
                 "**/.ruff_cache",
                 "**/.mypy_cache",
+                "**/.reviewer",
+                "**/.claude",
+                "**/.external_worktrees",
+                "**/.git",
             ],
         )
         .workdir("/code/mngr")
