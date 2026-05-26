@@ -452,7 +452,7 @@ def _build_mngr_create_command(
     pre-baked id anyway, and pre-generating one led to bugs (e.g. keying
     gateway state under a fictional id).
 
-    LOCAL mode: --template main --template docker (runs in Docker container)
+    DOCKER mode: --template main --template docker (runs in Docker container)
     LIMA mode: --template main --template lima (runs in Lima VM)
     CLOUD mode: --template main --template vultr (runs in Docker on a Vultr VPS)
     IMBUE_CLOUD mode: --new-host on the imbue_cloud_<slug> provider (the
@@ -487,7 +487,7 @@ def _build_mngr_create_command(
     of latchkey wiring.
     """
     match launch_mode:
-        case LaunchMode.LOCAL:
+        case LaunchMode.DOCKER:
             address = f"{_DEFAULT_AGENT_NAME}@{host_name}.docker"
         case LaunchMode.LIMA:
             address = f"{_DEFAULT_AGENT_NAME}@{host_name}.lima"
@@ -576,7 +576,7 @@ def _build_mngr_create_command(
     # while runtime-only knobs that vary per-invocation (``--new-host``,
     # ``-b lease_attributes``) stay inline.
     match launch_mode:
-        case LaunchMode.LOCAL:
+        case LaunchMode.DOCKER:
             mngr_command.extend(["--new-host", "--template", "main", "--template", "docker"])
             mngr_command.extend(_remote_host_env_flags())
         case LaunchMode.LIMA:
@@ -964,7 +964,7 @@ class AgentCreator(MutableModel):
         repo_source: str,
         host_name: str = "",
         branch: str = "",
-        launch_mode: LaunchMode = LaunchMode.LOCAL,
+        launch_mode: LaunchMode = LaunchMode.DOCKER,
         ai_provider: AIProvider = AIProvider.SUBSCRIPTION,
         account_email: str = "",
         branch_or_tag: str = "",
@@ -1076,7 +1076,7 @@ class AgentCreator(MutableModel):
                 creation_id=creation_id,
                 agent_id=self._canonical_agent_ids.get(cid_str),
                 status=status,
-                launch_mode=self._launch_modes.get(cid_str, LaunchMode.LOCAL),
+                launch_mode=self._launch_modes.get(cid_str, LaunchMode.DOCKER),
                 redirect_url=self._redirect_urls.get(cid_str),
                 error=self._errors.get(cid_str),
             )

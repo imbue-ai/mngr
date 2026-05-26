@@ -86,7 +86,7 @@ def test_build_mngr_create_command_lifts_latchkey_env_to_host_env_flags() -> Non
     inherits the same gateway URL / password / JWT.
     """
     command, _ = _build_mngr_create_command(
-        launch_mode=LaunchMode.LOCAL,
+        launch_mode=LaunchMode.DOCKER,
         host_name=HostName("hello"),
         latchkey_env={
             "LATCHKEY_GATEWAY": "http://127.0.0.1:1989",
@@ -157,7 +157,7 @@ def test_build_mngr_create_command_omits_latchkey_when_env_is_empty() -> None:
     """Empty / ``None`` ``latchkey_env`` opts the host out of latchkey wiring entirely."""
     for latchkey_env in (None, {}):
         command, _ = _build_mngr_create_command(
-            launch_mode=LaunchMode.LOCAL,
+            launch_mode=LaunchMode.DOCKER,
             host_name=HostName("hello"),
             latchkey_env=latchkey_env,
         )
@@ -168,7 +168,7 @@ def test_build_mngr_create_command_omits_latchkey_when_env_is_empty() -> None:
 
 def test_build_mngr_create_command_uses_main_template_and_omits_message_arg() -> None:
     command, api_key = _build_mngr_create_command(
-        launch_mode=LaunchMode.LOCAL,
+        launch_mode=LaunchMode.DOCKER,
         host_name=HostName("hello"),
     )
     assert "--template" in command
@@ -227,7 +227,7 @@ def test_build_mngr_create_command_imbue_cloud_targets_account_provider() -> Non
     assert "GH_TOKEN" not in joined
     assert "--pass-host-env" not in command
     # IMBUE_CLOUD now uses the symmetric ``--template main --template imbue_cloud``
-    # shape (mirroring how LOCAL/LIMA/CLOUD use ``--template main --template <provider>``).
+    # shape (mirroring how DOCKER/LIMA/CLOUD use ``--template main --template <provider>``).
     # The provider-specific knobs (idle_mode, pass_host_env) live in the
     # ``imbue_cloud`` template instead of being inlined here.
     assert "--template" in command
@@ -243,7 +243,7 @@ def test_build_mngr_create_command_never_inlines_secret_env_flags() -> None:
     """Secret forwarding lives in FCT, not minds. The command line never carries
     ``--pass-(host-)env`` flags or secret values for any compute mode."""
     for mode, account in (
-        (LaunchMode.LOCAL, None),
+        (LaunchMode.DOCKER, None),
         (LaunchMode.LIMA, None),
         (LaunchMode.CLOUD, None),
         (LaunchMode.IMBUE_CLOUD, "alice@imbue.com"),
@@ -538,7 +538,7 @@ def test_start_creation_imbue_cloud_ai_with_local_compute_mints_litellm_key(tmp_
     creation_id = creator.start_creation(
         repo_source=str(_make_fake_repo(tmp_path)),
         host_name="my-workspace",
-        launch_mode=LaunchMode.LOCAL,
+        launch_mode=LaunchMode.DOCKER,
         ai_provider=AIProvider.IMBUE_CLOUD,
         account_email="alice@imbue.com",
     )
@@ -566,7 +566,7 @@ def test_start_creation_api_key_ai_does_not_mint_litellm_key(tmp_path: Path) -> 
     creation_id = creator.start_creation(
         repo_source=str(_make_fake_repo(tmp_path)),
         host_name="my-workspace",
-        launch_mode=LaunchMode.LOCAL,
+        launch_mode=LaunchMode.DOCKER,
         ai_provider=AIProvider.API_KEY,
         anthropic_api_key="sk-ant-user-supplied",
     )
@@ -587,7 +587,7 @@ def test_start_creation_subscription_ai_does_not_mint_litellm_key(tmp_path: Path
     creation_id = creator.start_creation(
         repo_source=str(_make_fake_repo(tmp_path)),
         host_name="my-workspace",
-        launch_mode=LaunchMode.LOCAL,
+        launch_mode=LaunchMode.DOCKER,
         ai_provider=AIProvider.SUBSCRIPTION,
     )
     _wait_until_finished(creator, creation_id)
@@ -607,7 +607,7 @@ def test_start_creation_api_key_ai_without_key_fails_with_clear_message(tmp_path
     creation_id = creator.start_creation(
         repo_source=str(_make_fake_repo(tmp_path)),
         host_name="my-workspace",
-        launch_mode=LaunchMode.LOCAL,
+        launch_mode=LaunchMode.DOCKER,
         ai_provider=AIProvider.API_KEY,
         anthropic_api_key="",
     )

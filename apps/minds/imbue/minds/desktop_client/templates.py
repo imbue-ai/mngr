@@ -170,7 +170,7 @@ def render_create_form(
 
     The compute provider (``launch_mode``) and AI provider are independent.
     Both default to ``IMBUE_CLOUD`` when an account is selected; without
-    an account we drop them to ``LOCAL`` / ``SUBSCRIPTION`` so the form
+    an account we drop them to ``DOCKER`` / ``SUBSCRIPTION`` so the form
     starts in a valid state for the no-account flow.
 
     ``host_name`` is the value of the form's "Name" field; it drives the
@@ -184,7 +184,7 @@ def render_create_form(
     effective_branch = branch if branch else _dev_only_workspace_default("MINDS_WORKSPACE_BRANCH", _FALLBACK_BRANCH)
     has_account = bool(default_account_id and accounts)
     effective_launch_mode = (
-        launch_mode if launch_mode is not None else (LaunchMode.IMBUE_CLOUD if has_account else LaunchMode.LOCAL)
+        launch_mode if launch_mode is not None else (LaunchMode.IMBUE_CLOUD if has_account else LaunchMode.DOCKER)
     )
     effective_ai_provider = (
         ai_provider
@@ -236,7 +236,7 @@ _STATUS_TEXT_IMBUE_CLOUD: Final[dict[str, str]] = {
 def status_text_for(
     status: str,
     error: str | None = None,
-    launch_mode: LaunchMode = LaunchMode.LOCAL,
+    launch_mode: LaunchMode = LaunchMode.DOCKER,
 ) -> str:
     """Resolve the UI caption for an ``AgentCreationStatus`` value.
 
