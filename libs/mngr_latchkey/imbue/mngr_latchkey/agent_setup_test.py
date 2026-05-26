@@ -14,14 +14,18 @@ from pathlib import Path
 import pytest
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
 from imbue.mngr_latchkey.agent_setup import AgentLatchkeySetup
 from imbue.mngr_latchkey.agent_setup import ENV_LATCHKEY_DISABLE_COUNTING
 from imbue.mngr_latchkey.agent_setup import ENV_LATCHKEY_GATEWAY
 from imbue.mngr_latchkey.agent_setup import ENV_LATCHKEY_GATEWAY_PASSWORD
 from imbue.mngr_latchkey.agent_setup import ENV_LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE
+from imbue.mngr_latchkey.agent_setup import _build_allowed_agent_anyof_entry
+from imbue.mngr_latchkey.agent_setup import _extract_agent_id_from_anyof_entry
 from imbue.mngr_latchkey.agent_setup import finalize_host_permissions
 from imbue.mngr_latchkey.agent_setup import prepare_agent_latchkey
+from imbue.mngr_latchkey.agent_setup import register_agent_for_host
 from imbue.mngr_latchkey.core import AGENT_SIDE_LATCHKEY_PORT
 from imbue.mngr_latchkey.core import LatchkeyError
 from imbue.mngr_latchkey.core import LatchkeyJwtMintError
@@ -75,19 +79,46 @@ def test_prepare_full_wiring_tunneled(tmp_path: Path) -> None:
     assert setup.opaque_permissions_path is not None
     assert setup.opaque_permissions_path.parent == opaque_permissions_dir(fake.plugin_data_dir)
     on_disk = json.loads(setup.opaque_permissions_path.read_text())
-    # Every new agent gets three baseline permissions under the
-    # ``latchkey-self`` scope: create a permission request, read its own
-    # current permissions, and read the per-service permissions catalog.
+    # Two rules now ship in the baseline:
+    #
+    # 1. ``minds-api-proxy-unauthorized`` (first): scope matches any
+    #    ``/minds-api-proxy/api/v1/agents/<id>/...`` request whose <id>
+    #    is NOT in the allowed list (encoded as ``not + anyOf`` on the
+    #    path schema; initially empty -- no agent allowed). Detent
+    #    stops at the first matching scope, and the empty permission
+    #    list rejects the request immediately.
+    # 2. ``latchkey-self`` (after): the gateway-self endpoints every
+    #    agent needs, plus a generic ``minds-api-proxy`` permission
+    #    for any path under the proxy's ``/agents/<id>/`` subtree.
+    #    Authorized agents (those past Rule 1's ``not + anyOf``) hit
+    #    this rule and are let through by the generic permission.
     assert on_disk["rules"] == [
+        {"minds-api-proxy-per-agent-unauthorized": []},
         {
             "latchkey-self": [
                 "latchkey-self-create-permission-request",
                 "latchkey-self-read-self-permissions",
                 "latchkey-self-read-available-permissions",
+                "minds-api-proxy-per-agent",
             ],
         },
     ]
     schemas = on_disk["schemas"]
+    # The minds-api-proxy-unauthorized scope:
+    #   * ``domain`` constrained to the gateway-self host,
+    #   * ``path`` must match the proxy-prefix pattern AND not match
+    #     any agent-id pattern in the (initially empty) ``anyOf`` list.
+    unauthorized_scope = schemas["minds-api-proxy-per-agent-unauthorized"]["properties"]
+    assert unauthorized_scope["domain"] == {"const": "latchkey-self.invalid"}
+    assert unauthorized_scope["path"]["type"] == "string"
+    assert unauthorized_scope["path"]["pattern"] == r"^/minds-api-proxy/api/v1/agents/[^/]+(/.*)?$"
+    assert unauthorized_scope["path"]["not"] == {"anyOf": []}
+    # And the second rule references a generic ``minds-api-proxy``
+    # permission whose path matches any ``/agents/<any>/`` request.
+    minds_proxy_perm = schemas["minds-api-proxy-per-agent"]["properties"]
+    assert minds_proxy_perm["path"]["type"] == "string"
+    assert minds_proxy_perm["path"]["pattern"] == r"^/minds-api-proxy/api/v1/agents/[^/]+(/.*)?$"
+    # And the gateway-self baseline rule's schemas are unchanged.
     assert schemas["latchkey-self"]["properties"]["domain"] == {"const": "latchkey-self.invalid"}
     assert schemas["latchkey-self-create-permission-request"]["properties"] == {
         "method": {"const": "POST"},
@@ -215,3 +246,120 @@ def test_agent_latchkey_setup_default_opaque_path_is_none() -> None:
     setup = AgentLatchkeySetup(env={})
     assert setup.opaque_permissions_path is None
     assert isinstance(setup.env, Mapping)
+
+
+# -- Allowed-agent anyOf helpers ---------------------------------------------
+
+
+def test_allowed_agent_anyof_round_trip() -> None:
+    """Each agent id can be built into an ``anyOf`` entry and recovered back."""
+    for agent_id in (
+        "agent-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "agent-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "agent-cccccccccccccccccccccccccccccccc",
+    ):
+        entry = _build_allowed_agent_anyof_entry(agent_id)
+        assert _extract_agent_id_from_anyof_entry(entry) == agent_id
+
+
+def test_build_allowed_agent_anyof_entry_rejects_unsafe_agent_id() -> None:
+    """Agent ids that contain regex metacharacters are rejected at build time.
+
+    We embed the id verbatim into a regex pattern, so any character
+    outside ``[A-Za-z0-9_-]`` would either change the regex's meaning
+    or break the symmetric extractor. ``LatchkeyStoreError`` raised
+    here is preferable to a silently-malformed pattern on disk.
+    """
+    with pytest.raises(LatchkeyStoreError):
+        _build_allowed_agent_anyof_entry("agent-with.dot")
+
+
+def test_extract_agent_id_from_anyof_entry_raises_on_unrecognized_entry() -> None:
+    """An ``anyOf`` entry whose shape doesn't match what we write must raise.
+
+    Otherwise a hand-edited permissions file would get silently rebuilt
+    on the next ``register_agent_for_host`` call, discarding the operator's
+    edit.
+    """
+    with pytest.raises(LatchkeyStoreError):
+        _extract_agent_id_from_anyof_entry({"pattern": "^/totally/different/shape$"})
+    with pytest.raises(LatchkeyStoreError):
+        _extract_agent_id_from_anyof_entry({"const": "not-a-pattern-entry"})
+    with pytest.raises(LatchkeyStoreError):
+        _extract_agent_id_from_anyof_entry("not-even-a-dict")
+
+
+# -- register_agent_for_host -------------------------------------------------
+
+
+def _allowed_anyof_for_host(tmp_path: Path, host_id: HostId) -> list[dict[str, str]]:
+    """Return the parsed ``anyOf`` list from the host's permissions file."""
+    path = permissions_path_for_host(tmp_path, host_id)
+    config = json.loads(path.read_text())
+    return config["schemas"]["minds-api-proxy-per-agent-unauthorized"]["properties"]["path"]["not"]["anyOf"]
+
+
+def test_register_agent_for_host_creates_baseline_when_file_absent(tmp_path: Path) -> None:
+    """First call for a host writes the baseline + adds the agent."""
+    host_id = HostId.generate()
+    agent_id = AgentId.generate()
+    register_agent_for_host(tmp_path, host_id, agent_id)
+    any_of = _allowed_anyof_for_host(tmp_path, host_id)
+    assert len(any_of) == 1
+    assert _extract_agent_id_from_anyof_entry(any_of[0]) == str(agent_id)
+
+
+def test_register_agent_for_host_is_idempotent(tmp_path: Path) -> None:
+    """Re-registering an already-registered agent is a no-op."""
+    host_id = HostId.generate()
+    agent_id = AgentId.generate()
+    register_agent_for_host(tmp_path, host_id, agent_id)
+    register_agent_for_host(tmp_path, host_id, agent_id)
+    any_of = _allowed_anyof_for_host(tmp_path, host_id)
+    assert len(any_of) == 1
+
+
+def test_register_agent_for_host_accumulates_across_agents(tmp_path: Path) -> None:
+    """Multiple agents on the same host all end up in the allowed ``anyOf`` list."""
+    host_id = HostId.generate()
+    agent_a = AgentId.generate()
+    agent_b = AgentId.generate()
+    agent_c = AgentId.generate()
+    register_agent_for_host(tmp_path, host_id, agent_a)
+    register_agent_for_host(tmp_path, host_id, agent_b)
+    register_agent_for_host(tmp_path, host_id, agent_c)
+    any_of = _allowed_anyof_for_host(tmp_path, host_id)
+    parsed = {_extract_agent_id_from_anyof_entry(e) for e in any_of}
+    assert parsed == {str(agent_a), str(agent_b), str(agent_c)}
+
+
+def test_register_agent_for_host_preserves_other_grants(tmp_path: Path) -> None:
+    """Registering a new agent does not disturb the baseline rules or other schemas."""
+    host_id = HostId.generate()
+    agent_id = AgentId.generate()
+    register_agent_for_host(tmp_path, host_id, agent_id)
+    path = permissions_path_for_host(tmp_path, host_id)
+    config = json.loads(path.read_text())
+    rule_keys = [next(iter(rule.keys())) for rule in config["rules"]]
+    # The minds-api-proxy-unauthorized rule must come first so detent
+    # stops at it for an unauthorized agent_id (rejecting with the
+    # empty permission list) rather than falling through to the
+    # latchkey-self baseline rule.
+    assert rule_keys == ["minds-api-proxy-per-agent-unauthorized", "latchkey-self"]
+
+
+def test_register_agent_for_host_raises_when_anyof_was_hand_edited(tmp_path: Path) -> None:
+    """A corrupted / hand-edited permissions file is not silently overwritten."""
+    host_id = HostId.generate()
+    agent_id = AgentId.generate()
+    # Bootstrap with the baseline + one agent, then replace one of the
+    # ``anyOf`` entries with a pattern the parser will reject.
+    register_agent_for_host(tmp_path, host_id, AgentId.generate())
+    path = permissions_path_for_host(tmp_path, host_id)
+    config = json.loads(path.read_text())
+    config["schemas"]["minds-api-proxy-per-agent-unauthorized"]["properties"]["path"]["not"]["anyOf"] = [
+        {"pattern": "^/no-longer-recognized$"}
+    ]
+    path.write_text(json.dumps(config))
+    with pytest.raises(LatchkeyStoreError):
+        register_agent_for_host(tmp_path, host_id, agent_id)

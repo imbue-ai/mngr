@@ -322,7 +322,7 @@ state.
 ## 7. (Optional) bake one staging pool host
 
 Only needed if you want the staging desktop client to use IMBUE_CLOUD
-launch mode. LOCAL mode (`--template main --template docker`) works
+launch mode. DOCKER mode (`--template main --template docker`) works
 without any pool hosts.
 
 ```bash

@@ -499,7 +499,7 @@ def test_create_local_docker_workspace_via_electron(
 
                     _ensure_field_value(page, "#host_name", workspace_name)
                     _ensure_field_value(page, "#git_url", str(fct_path))
-                    # LOCAL + SUBSCRIPTION are the defaults when no account
+                    # DOCKER + SUBSCRIPTION are the defaults when no account
                     # is selected; don't touch the launch_mode / ai_provider
                     # selects so the test stays robust to future option
                     # reorderings in the form.

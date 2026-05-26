@@ -31,21 +31,27 @@ agent-side gateway URL but skip the password / JWT / opaque-handle
 steps that need a working ``Latchkey``.
 """
 
+import re
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Final
 
 from pydantic import Field
+from pydantic import JsonValue
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
 from imbue.mngr_latchkey.core import AGENT_SIDE_LATCHKEY_PORT
 from imbue.mngr_latchkey.core import Latchkey
 from imbue.mngr_latchkey.core import LatchkeyError
 from imbue.mngr_latchkey.store import LatchkeyPermissionsConfig
+from imbue.mngr_latchkey.store import LatchkeyStoreError
 from imbue.mngr_latchkey.store import link_opaque_permissions_to_host
+from imbue.mngr_latchkey.store import load_permissions
 from imbue.mngr_latchkey.store import new_opaque_permissions_path
+from imbue.mngr_latchkey.store import permissions_path_for_host
 from imbue.mngr_latchkey.store import save_permissions
 
 # Env-var names baked into the upstream latchkey CLI's wire contract.
@@ -77,17 +83,88 @@ _PERM_READ_AVAILABLE_PERMISSIONS: Final[str] = "latchkey-self-read-available-per
 # up the per-service catalog endpoint.
 _AVAILABLE_PERMISSIONS_PATH_PATTERN: Final[str] = r"^/permissions/available/[a-z0-9][a-z0-9-]*$"
 
+# Paths under this prefix are only allowed if the agent ID in the path is in the allow list (expressed via anyOf below).
+_MINDS_API_PROXY_PER_AGENT_PATH_PREFIX: Final[str] = "/minds-api-proxy/api/v1/agents/"
+_MINDS_API_PROXY_PER_AGENT_PATH_PATTERN: Final[str] = rf"^{_MINDS_API_PROXY_PER_AGENT_PATH_PREFIX}[^/]+(/.*)?$"
+
+_SCOPE_MINDS_API_PROXY_PER_AGENT_UNAUTHORIZED: Final[str] = "minds-api-proxy-per-agent-unauthorized"
+_PERM_MINDS_API_PROXY_PER_AGENT: Final[str] = "minds-api-proxy-per-agent"
+
+# Exact prefix/suffix wrapping each agent id inside an ``anyOf`` entry's
+# path pattern. Shared by the build + extract helpers so the two cannot
+# drift apart.
+_ALLOWED_AGENT_PATTERN_PREFIX: Final[str] = rf"^{_MINDS_API_PROXY_PER_AGENT_PATH_PREFIX}"
+_ALLOWED_AGENT_PATTERN_SUFFIX: Final[str] = "/(.*)$"
+
+# Characters allowed verbatim in an ``agent_id`` when we embed it into
+# a regex pattern body. mngr's ``RandomId`` format -- ``<prefix>-<32
+# hex>`` -- only uses ``[a-z0-9-]``, all of which are regex-safe
+# outside a character class. We validate explicitly (rather than
+# trusting the caller's typing) so a future id-shape change cannot
+# silently inject regex metacharacters into the on-disk pattern.
+_SAFE_AGENT_ID_RE: Final[re.Pattern[str]] = re.compile(r"^[A-Za-z0-9_-]+$")
+
+
+def _build_allowed_agent_anyof_entry(agent_id: str) -> dict[str, JsonValue]:
+    """Build the ``anyOf`` entry that allows ``agent_id`` past the unauthorized scope."""
+    if not _SAFE_AGENT_ID_RE.match(agent_id):
+        raise LatchkeyStoreError(f"agent_id contains characters that are not safe to embed in a regex: {agent_id!r}")
+    return {"pattern": f"{_ALLOWED_AGENT_PATTERN_PREFIX}{agent_id}{_ALLOWED_AGENT_PATTERN_SUFFIX}"}
+
+
+def _extract_agent_id_from_anyof_entry(entry: JsonValue) -> str:
+    """Recover the agent id encoded into one ``anyOf`` entry."""
+    if not isinstance(entry, dict):
+        raise LatchkeyStoreError(f"Allowed-agent ``anyOf`` entry must be a JSON object; got: {entry!r}")
+    pattern = entry.get("pattern")
+    if not isinstance(pattern, str):
+        raise LatchkeyStoreError(f"Allowed-agent ``anyOf`` entry is missing or has non-string ``pattern``: {entry!r}")
+    if not (pattern.startswith(_ALLOWED_AGENT_PATTERN_PREFIX) and pattern.endswith(_ALLOWED_AGENT_PATTERN_SUFFIX)):
+        raise LatchkeyStoreError(
+            f"Unrecognized allowed-agent ``anyOf`` entry pattern; refusing to overwrite a "
+            f"hand-edited permissions file. Got: {pattern!r}"
+        )
+    return pattern.removeprefix(_ALLOWED_AGENT_PATTERN_PREFIX).removesuffix(_ALLOWED_AGENT_PATTERN_SUFFIX)
+
+
 _AGENT_BASELINE_PERMISSIONS: Final[LatchkeyPermissionsConfig] = LatchkeyPermissionsConfig(
     rules=(
+        # Unauthorized agents trying to access agent-scoped Minds API endpoint get an empty list of permissions, leading to immediate rejection.
+        {_SCOPE_MINDS_API_PROXY_PER_AGENT_UNAUTHORIZED: []},
         {
             _SCOPE_LATCHKEY_SELF: [
                 _PERM_CREATE_PERMISSION_REQUEST,
                 _PERM_READ_SELF_PERMISSIONS,
                 _PERM_READ_AVAILABLE_PERMISSIONS,
+                # Requests that made it through the first rule (= not unauthorized agents) can now access the agent-scoped Minds API endpoint.
+                _PERM_MINDS_API_PROXY_PER_AGENT,
             ],
         },
     ),
     schemas={
+        _SCOPE_MINDS_API_PROXY_PER_AGENT_UNAUTHORIZED: {
+            "properties": {
+                "domain": {"const": _GATEWAY_SELF_HOST},
+                "path": {
+                    "type": "string",
+                    "pattern": _MINDS_API_PROXY_PER_AGENT_PATH_PATTERN,
+                    # As we create agents running on the host whose permissions
+                    # file this is, we'll add their IDs to the list below, thus
+                    # excluding them from the unauthorized rejection shortcut.
+                    "not": {"anyOf": []},
+                },
+            },
+            "required": ["domain", "path"],
+        },
+        _PERM_MINDS_API_PROXY_PER_AGENT: {
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "pattern": _MINDS_API_PROXY_PER_AGENT_PATH_PATTERN,
+                },
+            },
+            "required": ["path"],
+        },
         _SCOPE_LATCHKEY_SELF: {
             "properties": {"domain": {"const": _GATEWAY_SELF_HOST}},
             "required": ["domain"],
@@ -118,6 +195,94 @@ _AGENT_BASELINE_PERMISSIONS: Final[LatchkeyPermissionsConfig] = LatchkeyPermissi
         },
     },
 )
+
+
+def register_agent_for_host(
+    plugin_data_dir: Path,
+    host_id: HostId,
+    agent_id: AgentId,
+) -> None:
+    """Register ``agent_id`` for the given host, granting it access to the Minds API proxy.
+
+    Reads the host's ``latchkey_permissions.json`` (writing a fresh
+    baseline if it does not yet exist), extracts the current allowed-agent
+    list out of the ``minds-api-proxy-unauthorized`` scope's ``not.anyOf``
+    block, appends a per-agent entry if ``agent_id`` is not already there,
+    and writes the updated config back atomically. Idempotent:
+    re-registering an agent already in the list is a no-op write.
+
+    This is the *only* public way to grant a minds agent access to the
+    Minds API proxy. The matching CLI wrapper is ``mngr latchkey
+    register-agent --host-id ID --agent-id ID``; the desktop client and
+    any other Python caller goes through this function directly.
+
+    """
+    path = permissions_path_for_host(plugin_data_dir, host_id)
+    if path.is_file():
+        config = load_permissions(path)
+    else:
+        # First agent on this host: start from the baseline so the
+        # gateway-self rules and the minds-api-proxy gate are present.
+        config = _AGENT_BASELINE_PERMISSIONS
+
+    schemas: dict[str, JsonValue] = dict(config.schemas)
+    scope_schema = schemas.get(_SCOPE_MINDS_API_PROXY_PER_AGENT_UNAUTHORIZED)
+    # Use ``dict`` (concrete type) rather than ``Mapping`` because
+    # ``JsonValue``'s mapping arm is ``dict[str, JsonValue]``
+    # specifically; ``isinstance(x, Mapping)`` lets the type checker
+    # narrow to ``Mapping[Unknown, Unknown]`` which then can't be
+    # subscripted with a ``str`` key.
+    if not isinstance(scope_schema, dict):
+        raise LatchkeyStoreError(
+            f"Permissions file {path} is missing the "
+            f"{_SCOPE_MINDS_API_PROXY_PER_AGENT_UNAUTHORIZED!r} scope schema; cannot extend the allowed-agent list."
+        )
+    properties = scope_schema.get("properties")
+    if not isinstance(properties, dict):
+        raise LatchkeyStoreError(
+            f"Permissions file {path}'s {_SCOPE_MINDS_API_PROXY_PER_AGENT_UNAUTHORIZED!r} schema is malformed: "
+            f"missing or non-object ``properties``."
+        )
+    path_schema = properties.get("path")
+    if not isinstance(path_schema, dict):
+        raise LatchkeyStoreError(
+            f"Permissions file {path}'s {_SCOPE_MINDS_API_PROXY_PER_AGENT_UNAUTHORIZED!r} schema is malformed: "
+            f"missing or non-object ``properties.path``."
+        )
+    not_block = path_schema.get("not")
+    if not isinstance(not_block, dict):
+        raise LatchkeyStoreError(
+            f"Permissions file {path}'s {_SCOPE_MINDS_API_PROXY_PER_AGENT_UNAUTHORIZED!r} schema is malformed: "
+            f"missing or non-object ``properties.path.not``."
+        )
+    any_of = not_block.get("anyOf")
+    if not isinstance(any_of, list):
+        raise LatchkeyStoreError(
+            f"Permissions file {path}'s {_SCOPE_MINDS_API_PROXY_PER_AGENT_UNAUTHORIZED!r} schema is malformed: "
+            f"missing or non-list ``properties.path.not.anyOf``."
+        )
+
+    existing_ids = [_extract_agent_id_from_anyof_entry(entry) for entry in any_of]
+    if str(agent_id) in existing_ids:
+        # No-op: agent already allowed.
+        return
+    new_any_of: list[JsonValue] = list(any_of) + [_build_allowed_agent_anyof_entry(str(agent_id))]
+
+    schemas[_SCOPE_MINDS_API_PROXY_PER_AGENT_UNAUTHORIZED] = {
+        **scope_schema,
+        "properties": {
+            **properties,
+            "path": {
+                **path_schema,
+                "not": {
+                    **not_block,
+                    "anyOf": new_any_of,
+                },
+            },
+        },
+    }
+    new_config = LatchkeyPermissionsConfig(rules=config.rules, schemas=schemas)
+    save_permissions(path, new_config)
 
 
 class AgentLatchkeySetup(FrozenModel):

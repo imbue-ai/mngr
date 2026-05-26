@@ -19,12 +19,12 @@ from collections.abc import Sequence
 
 from fastapi import Request
 
-from imbue.minds.desktop_client.api_v1 import inject_tunnel_token_into_agent
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import TunnelInfo
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
+from imbue.minds.desktop_client.tunnel_token_injection import inject_tunnel_token_into_agent
 from imbue.minds.primitives import ServiceName
 from imbue.mngr.primitives import AgentId
 
