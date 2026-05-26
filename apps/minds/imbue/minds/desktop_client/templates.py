@@ -170,10 +170,8 @@ def render_create_form(
 
     The compute provider (``launch_mode``) and AI provider are independent.
     Both default to ``IMBUE_CLOUD`` when an account is selected; without
-    an account the AI provider drops to ``SUBSCRIPTION`` and the compute
-    provider defaults to ``LIMA`` (a real VM, the recommended local
-    sandbox) rather than ``DOCKER`` (bare Docker, which requires a running
-    Docker daemon and is the more error-prone path).
+    an account we drop them to ``DOCKER`` / ``SUBSCRIPTION`` so the form
+    starts in a valid state for the no-account flow.
 
     ``host_name`` is the value of the form's "Name" field; it drives the
     host name on the resulting workspace. (The agent itself is always
@@ -186,7 +184,7 @@ def render_create_form(
     effective_branch = branch if branch else _dev_only_workspace_default("MINDS_WORKSPACE_BRANCH", _FALLBACK_BRANCH)
     has_account = bool(default_account_id and accounts)
     effective_launch_mode = (
-        launch_mode if launch_mode is not None else (LaunchMode.IMBUE_CLOUD if has_account else LaunchMode.LIMA)
+        launch_mode if launch_mode is not None else (LaunchMode.IMBUE_CLOUD if has_account else LaunchMode.DOCKER)
     )
     effective_ai_provider = (
         ai_provider
