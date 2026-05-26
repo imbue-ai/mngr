@@ -425,7 +425,7 @@ dependencies = [
 
 This is intentionally minimal. `minds` transitively pulls in `mngr` and the rest of the core Python dependencies; `imbue-mngr-claude` and `imbue-mngr-modal` are listed explicitly so the plugins are installed. The lockfile (`uv.lock`) pins everything.
 
-When cutting a new release, the developer updates the version pin (e.g., `imbue-minds>=0.2.0`) and regenerates the lockfile with `uv lock`. This lockfile is committed and shipped in the Electron app bundle.
+When cutting a new release, the developer updates the version pin (e.g., `minds>=0.2.0`) and regenerates the lockfile with `uv lock`. This lockfile is committed and shipped in the Electron app bundle.
 
 ## App Identity
 
