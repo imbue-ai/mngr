@@ -22,10 +22,11 @@ The FCT source is resolved by the runner in three steps (first match wins):
    that matches the current mngr branch, into ``tmp_path``.
 3. Otherwise, a shallow clone of FCT ``main`` into ``tmp_path``.
 
-The test inherits whatever minds env the runner already activated. When
-``MINDS_ROOT_NAME`` is unset, it defaults to the shared ``minds-staging``
-tier (matches the repo-committed ``client.toml`` under
-``apps/minds/imbue/minds/config/envs/staging/``).
+The test inherits whatever minds env the operator has activated. When
+``MINDS_ROOT_NAME`` is unset, the wrapper calls
+``ensure_minds_env_defaults(setenv=monkeypatch.setenv)`` which sets the
+shared ``minds-staging`` tier as the default (matches the repo-committed
+``client.toml`` under ``apps/minds/imbue/minds/config/envs/staging/``).
 
 Run locally:
 
