@@ -4,6 +4,10 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-05-26
+
+Collapse the GitHub data source's four separate `gh` calls (`gh pr list --state open`, `gh pr list --state all`, `gh pr view --json mergeable`, `gh api graphql` for unresolved threads) into a single `gh api graphql` request per board refresh. The new query uses GitHub search's OR semantics over `repo:` and `head:` qualifiers to filter directly to the (repo, branch) pairs the agents need, and embeds `mergeable`, `statusCheckRollup { state }`, `reviewThreads`, and `comments` inline on every returned PullRequest. This eliminates the gh HTTP cache race that the lock-based fix was working around (no `gh pr list`, no SearchType introspection, no cache file to corrupt), provides an atomic point-in-time snapshot of the entire board, and cuts the refresh from 2M+2K HTTP calls (where M = unique repos, K = open PRs) to exactly one. Removes ~250 lines of fetch/parse/orchestration code along with the `_GH_PR_LIST_LOCK`, the `ThreadPoolExecutor`, and the conflicts/unresolved second-pass fetcher.
+
 ## 2026-05-21
 
 Fix the intro in `UNABRIDGED_CHANGELOG.md` so it references the correct entries directory. The path was `changelog/<project>/` (which never existed); the actual layout is `<project_dir>/changelog/`.
