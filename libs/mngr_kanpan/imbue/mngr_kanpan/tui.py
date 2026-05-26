@@ -640,23 +640,27 @@ def _submit_batch_item(
     executor: ThreadPoolExecutor, item: _BatchWorkItem
 ) -> Future[subprocess.CompletedProcess[str]] | None:
     """Submit a single batch work item to the executor."""
-    if isinstance(item.cmd, MarkableBuiltinCommand):
-        match item.cmd.role:
-            case MarkableBuiltinRole.DELETE:
-                names = [str(n) for n in item.batch_names] if item.batch_names else [str(item.name)]
-                return executor.submit(_run_destroy, names)
-            case MarkableBuiltinRole.PUSH:
-                if item.entry is None or item.entry.work_dir is None:
-                    return None
-                return executor.submit(_run_git_push, str(item.entry.work_dir))
-            case _:
-                assert_never(item.cmd.role)
-    if isinstance(item.cmd, ActionBuiltinCommand):
-        # Non-markable builtins never reach batch dispatch.
-        return None
-    if isinstance(item.cmd, CustomCommand) and item.cmd.command:
-        return executor.submit(_run_shell_command_sync, item.cmd.command, str(item.name))
-    return None
+    match item.cmd:
+        case MarkableBuiltinCommand():
+            match item.cmd.role:
+                case MarkableBuiltinRole.DELETE:
+                    names = [str(n) for n in item.batch_names] if item.batch_names else [str(item.name)]
+                    return executor.submit(_run_destroy, names)
+                case MarkableBuiltinRole.PUSH:
+                    if item.entry is None or item.entry.work_dir is None:
+                        return None
+                    return executor.submit(_run_git_push, str(item.entry.work_dir))
+                case _:
+                    assert_never(item.cmd.role)
+        case ActionBuiltinCommand():
+            # Non-markable builtins never reach batch dispatch.
+            return None
+        case CustomCommand():
+            if item.cmd.command:
+                return executor.submit(_run_shell_command_sync, item.cmd.command, str(item.name))
+            return None
+        case _:
+            assert_never(item.cmd)
 
 
 def _execute_next_in_batch(
