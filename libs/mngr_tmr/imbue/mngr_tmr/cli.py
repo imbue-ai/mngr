@@ -570,25 +570,6 @@ def _run_integrator_phase(
 @add_common_options
 @click.pass_context
 def tmr(ctx: click.Context, **kwargs: object) -> None:
-    try:
-        _tmr_body(ctx)
-    except click.UsageError as exc:
-        # click.UsageError exits 2 by default; convert to a plain ClickException
-        # with exit_code=1 so the tmr convention (1=usage, 2=everything else)
-        # is preserved.
-        wrapped = click.ClickException(exc.format_message())
-        wrapped.exit_code = 1
-        raise wrapped from exc
-    except click.ClickException as exc:
-        # MngrError (and other ClickException subclasses) default to exit 1.
-        # Promote to exit 2 per the tmr convention.
-        exc.exit_code = 2
-        raise
-
-
-def _tmr_body(ctx: click.Context) -> None:
-    """Run the tmr command body. Wrapped by ``tmr`` so exit codes follow the
-    1=usage / 2=other convention regardless of which layer raised."""
     mngr_ctx, output_opts, opts = setup_command_context(
         ctx=ctx,
         command_name="tmr",
