@@ -196,7 +196,6 @@ def test_no_ruff_lint_errors_repo_wide() -> None:
         raise AssertionError("\n".join(errors) + "\n" + fix_hint)
 
 
-@pytest.mark.timeout(60)
 def test_cli_docs_are_up_to_date() -> None:
     """Committed CLI docs and the PyPI README must match scripts/make_cli_docs.py output.
 
@@ -209,14 +208,13 @@ def test_cli_docs_are_up_to_date() -> None:
     The generator is run via its --check mode in a fresh interpreter so that
     MNGR_LOAD_ALL_PLUGINS is set before any mngr import and every provider's commands are
     documented; running it in-process would not reliably reload already-imported modules.
-    The 60s timeout (vs. the 10s default) leaves headroom for plugin loading under CI load.
+    The check runs in ~1s, so the default pytest timeout applies (like the sibling ruff check).
     """
     result = subprocess.run(
         [sys.executable, str(_REPO_ROOT / "scripts" / "make_cli_docs.py"), "--check"],
         cwd=_REPO_ROOT,
         capture_output=True,
         text=True,
-        timeout=60,
     )
     assert result.returncode == 0, (
         "Generated CLI docs are out of date. Run `uv run python scripts/make_cli_docs.py` "
