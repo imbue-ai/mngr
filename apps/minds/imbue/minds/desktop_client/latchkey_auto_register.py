@@ -7,24 +7,6 @@ already exists), appends the agent to the ``minds-api-proxy-per-agent-unauthoriz
 ``not.anyOf`` allowlist so the gateway's ``minds-api-proxy`` extension
 stops rejecting the agent's ``/api/v1/agents/<agent_id>/...`` calls.
 
-This is the only place that drives latchkey registration for *every* way
-an agent can come into existence:
-
-- The top-level ``mngr create`` invoked by :class:`AgentCreator` (the
-  ``/api/create-agent`` flow and the create-project form).
-- Sibling creations spawned inside a workspace by the system_interface
-  app's "new chat" / "new worktree" buttons -- these shell out to
-  ``mngr create`` on the workspace host with no callback into minds,
-  so the only signal minds gets is the local ``mngr observe`` discovery
-  stream picking the new agent up.
-- Any other path that lands an agent on a minds-managed host (manual
-  CLI use, scripts, ``mngr_uncapped_claude`` orchestration, etc.).
-
-Hosts without an existing permissions file are intentionally skipped:
-the file is materialized at host-creation time by
-:func:`imbue.mngr_latchkey.agent_setup.finalize_host_permissions`, so
-its absence means the host was not provisioned by minds and we should
-not conjure a permissions file from a discovery event alone.
 """
 
 import threading
@@ -46,17 +28,10 @@ from imbue.mngr_latchkey.store import permissions_path_for_host
 class LatchkeyAutoRegister(MutableModel):
     """Subscribes to ``MngrCliBackendResolver`` and registers newly-seen agents.
 
-    Holds an in-memory set of ``(host_id, agent_id)`` pairs already
-    processed so the on-change callback can short-circuit on the common
-    "discovery tick with no new agents" case without re-reading the
-    permissions file. The underlying :func:`register_agent_for_host`
+    The underlying :func:`register_agent_for_host`
     is itself idempotent + atomic, so the dedup set is purely an
     optimization -- correctness does not depend on it.
 
-    Process-scoped lifetime. Not unsubscribed at shutdown because the
-    resolver itself dies with the process; if a finer-grained teardown
-    is ever needed, ``MngrCliBackendResolver.remove_on_change_callback``
-    can be invoked with :meth:`_on_change`.
     """
 
     backend_resolver: MngrCliBackendResolver = Field(
@@ -91,14 +66,7 @@ class LatchkeyAutoRegister(MutableModel):
         self._on_change()
 
     def _on_change(self) -> None:
-        """Resolver change callback: register any newly-discovered agents.
-
-        Runs synchronously on the resolver's notifying thread (typically
-        the envelope-consumer reader thread). The per-pair work is a
-        cheap ``Path.is_file()`` + small atomic JSON read/write; in the
-        steady state every pair hits the dedup set and we return without
-        touching disk.
-        """
+        """Resolver change callback: register any newly-discovered agents."""
         for host_id, agent_id in self._collect_unprocessed_pairs():
             self._handle_pair(host_id, agent_id)
 
@@ -120,13 +88,11 @@ class LatchkeyAutoRegister(MutableModel):
     def _handle_pair(self, host_id: HostId, agent_id: AgentId) -> None:
         """Register ``agent_id`` on ``host_id`` if the host is minds-managed.
 
-        Hosts without an existing ``latchkey_permissions.json`` are
-        skipped (see module docstring). On infrastructure failure
-        (malformed file, IO error) we log a warning and still mark the
-        pair as processed so we do not retry on every subsequent
-        discovery tick -- the operator can recover with
-        ``mngr latchkey register-agent`` once the underlying file
-        issue is resolved.
+        Hosts without an existing ``latchkey_permissions.json`` are skipped. On
+        infrastructure failure (malformed file, IO error) we log a warning and
+        still mark the pair as processed so we do not retry on every subsequent
+        discovery tick -- the operator can recover with ``mngr latchkey
+        register-agent`` once the underlying file issue is resolved.
         """
         permissions_path = permissions_path_for_host(self.latchkey.plugin_data_dir, host_id)
         if not permissions_path.is_file():

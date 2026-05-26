@@ -1313,18 +1313,6 @@ class AgentCreator(MutableModel):
                             f"canonical path for host {canonical_host_id}; permission grants will not "
                             f"take effect until the agent is re-created. Reason: {link_error}"
                         )
-                # Registration of ``canonical_id`` in the host's
-                # ``latchkey_permissions.json`` allowed-agent list is
-                # *not* done here. Instead, the
-                # :class:`LatchkeyAutoRegister` callback wired onto the
-                # backend resolver picks the new agent up on the next
-                # discovery tick and registers it then. This keeps the
-                # registration logic centralized so every path that
-                # produces an agent on a minds-managed host -- including
-                # the system_interface's "new chat" / "new worktree"
-                # buttons, which shell out to ``mngr create`` on the
-                # workspace host without ever calling back into minds --
-                # gets registered uniformly.
 
                 log_queue.put("[minds] Agent created successfully.")
 

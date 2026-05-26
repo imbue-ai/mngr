@@ -315,15 +315,9 @@ def run(
         system_interface_health_tracker=system_interface_health_tracker,
     )
 
-    # Subscribe the latchkey auto-register callback to the discovery
-    # stream. Every newly-discovered agent on a minds-managed host gets
+    # Every newly-discovered agent on a minds-managed host gets
     # its id appended to the host's ``latchkey_permissions.json``
-    # allowed-agent list -- this is what lets agents created via the
-    # system_interface's "new chat" / "new worktree" buttons (or any
-    # other path that bypasses ``AgentCreator``) actually reach the
-    # Minds API proxy. ``AgentCreator``'s own create flow no longer
-    # registers explicitly; it relies on this callback firing on the
-    # next discovery tick after ``mngr create`` returns.
+    # allowed-agent list.
     LatchkeyAutoRegister(backend_resolver=backend_resolver, latchkey=latchkey).start()
 
     # Emit the started event so Electron can pre-set the cookie before the
