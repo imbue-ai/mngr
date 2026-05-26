@@ -92,6 +92,7 @@ _CLAUDE_CODE_VERSION: Final[str] = "2.1.141"
 _IN_SANDBOX_RUNNER_PROGRAM: Final[str] = textwrap.dedent(
     """
     import os
+    import subprocess
     import tempfile
     from pathlib import Path
 
@@ -120,9 +121,38 @@ _IN_SANDBOX_RUNNER_PROGRAM: Final[str] = textwrap.dedent(
         create_workspace_via_electron(fct_path, workspace_name, debug_port)
         # IMPORTANT: do NOT call destroy_agent_best_effort here. The whole
         # point of this script is to leave the workspace agent + Docker
-        # container alive so the upcoming snapshot_filesystem() captures
-        # them.
-        print(f"[snapshot] workspace agent {workspace_name!r} left running for snapshot", flush=True)
+        # container's on-disk state (volumes, /code, /worktree, the
+        # bootstrap-written runtime/, etc.) captured by snapshot_filesystem.
+        # But we DO want the container itself stopped cleanly before the
+        # snapshot fires, so its filesystem state is consistent (no
+        # half-written sqlite WALs, no inflight tmux pty writes, etc.)
+        # and so a sandbox booted from the snapshot can `docker start`
+        # the container deterministically rather than inheriting a
+        # mid-flight running state.
+        #
+        # `docker stop` sends SIGTERM, waits up to `--time`, then SIGKILL.
+        # The FCT container runs tini as PID 1, which propagates SIGTERM
+        # to the bootstrap/services/agent processes inside. 60s grace is
+        # generous enough for the bootstrap to flush its event log and
+        # close the chat agent's claude session cleanly.
+        running = subprocess.run(
+            ["docker", "ps", "--format", "{{.Names}}"],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        ).stdout.split()
+        for name in running:
+            print(f"[snapshot] stopping container {name!r}", flush=True)
+            subprocess.run(
+                ["docker", "stop", "--time", "60", name],
+                check=True,
+                timeout=120,
+            )
+        print(
+            f"[snapshot] workspace agent {workspace_name!r} container stopped; ready for snapshot",
+            flush=True,
+        )
     """
 ).strip()
 

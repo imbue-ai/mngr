@@ -308,6 +308,9 @@ def _stream_electron_output(process: subprocess.Popen[bytes]) -> None:
         thread.start()
 
 
+_ELECTRON_SIGTERM_GRACE_SECONDS: Final[int] = 30
+
+
 @contextmanager
 def _launched_electron(
     workspace_git_url: Path,
@@ -316,8 +319,14 @@ def _launched_electron(
 ) -> Iterator[subprocess.Popen[bytes]]:
     """Start the Electron app, yield the process, and always tear it down.
 
-    SIGTERM with a 5s grace, then SIGKILL. The Electron main process owns
-    the backend subprocess and the renderer; clean termination cascades.
+    SIGTERM with a ``_ELECTRON_SIGTERM_GRACE_SECONDS`` grace, then
+    SIGKILL. The Electron main process owns the backend subprocess and
+    the renderer; clean termination cascades. The grace window is
+    intentionally generous (30s) because the minds backend that Electron
+    spawns has its own asyncio teardown path that needs ~5-10 seconds to
+    drain mngr_forward streams cleanly -- shorter grace periods
+    routinely escalate to SIGKILL and leave the workspace in a
+    half-shutdown state.
 
     Note: tearing down Electron does NOT destroy the workspace's mngr
     agent / Docker container. Those persist as separate host-level
@@ -358,9 +367,12 @@ def _launched_electron(
         if process.poll() is None:
             process.terminate()
             try:
-                process.wait(timeout=5)
+                process.wait(timeout=_ELECTRON_SIGTERM_GRACE_SECONDS)
             except subprocess.TimeoutExpired:
-                logger.warning("Electron did not exit on SIGTERM; sending SIGKILL")
+                logger.warning(
+                    "Electron did not exit on SIGTERM within {}s; sending SIGKILL",
+                    _ELECTRON_SIGTERM_GRACE_SECONDS,
+                )
                 process.kill()
                 process.wait(timeout=5)
 
