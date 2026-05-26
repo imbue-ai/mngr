@@ -1,6 +1,6 @@
-"""Project-level conftest for mngr-gemini.
+"""Project-level conftest for mngr-antigravity.
 
-When running tests from libs/mngr_gemini/, this conftest provides the common pytest hooks
+When running tests from libs/mngr_antigravity/, this conftest provides the common pytest hooks
 that would otherwise come from the monorepo root conftest.py (which is not discovered
 when pytest runs from a subdirectory).
 
