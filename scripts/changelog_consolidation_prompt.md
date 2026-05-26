@@ -68,11 +68,9 @@ the right project's consolidated files.
    `CHANGELOG.md` is a notable-only summary: if a change isn't notable,
    omit it from `CHANGELOG.md` entirely rather than forcing a bullet for
    it. The canonical example is a change that only affects tests rather
-   than user-facing behavior — skip it. For a library project,
-   "user-facing" includes the public API surface: added/removed/renamed
-   exported symbols, changed signatures, and changed subclass or
-   extension contracts are notable (they affect the library's consumers)
-   even when no end-user behavior changes. Major internal refactors are
+   than user-facing behavior — skip it. For a library project, public
+   API changes count as user-facing: they affect consumers even when
+   end-user behavior is unchanged. Major internal refactors are
    in scope too, even when in theory they leave the public surface and
    end-user behavior unchanged: in practice a large restructuring can
    introduce regressions, and a reader scanning the changelog to work out
