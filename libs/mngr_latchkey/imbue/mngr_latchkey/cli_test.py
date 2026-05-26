@@ -602,7 +602,7 @@ def test_group_exposes_documented_subcommands() -> None:
     assert set(latchkey.commands.keys()) == {
         "create-agent-env",
         "link-permissions",
-        "allow-agent",
+        "register-agent",
         "forward",
         "admin-jwt",
         "gateway-info",
@@ -615,7 +615,7 @@ def test_help_text_lists_subcommands(cli_runner: CliRunner) -> None:
     for subcommand in (
         "create-agent-env",
         "link-permissions",
-        "allow-agent",
+        "register-agent",
         "forward",
         "admin-jwt",
         "gateway-info",

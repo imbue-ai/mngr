@@ -359,7 +359,7 @@ def save_permissions(path: Path, config: LatchkeyPermissionsConfig) -> None:
 
     Used by the pre-gateway-startup write paths (deny-all default,
     admin file, per-agent opaque baseline) and by the host-allowed-agent
-    editor (:func:`imbue.mngr_latchkey.agent_setup.allow_agent_for_host`).
+    editor (:func:`imbue.mngr_latchkey.agent_setup.register_agent_for_host`).
     User-driven per-service grants still go through the gateway's
     ``permissions`` extension instead.
     """

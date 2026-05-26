@@ -41,7 +41,7 @@ machinery is gone:
   behalf of an agent on host B (B's id only appears in B's host's
   permissions file).
 - The desktop client now calls
-  `imbue.mngr_latchkey.agent_setup.allow_agent_for_host(...)` directly
+  `imbue.mngr_latchkey.agent_setup.register_agent_for_host(...)` directly
   -- a single library call that does an atomic file edit -- instead of
   the previous gateway-extension dance that POSTed two schemas + one
   rule per agent. The `gateway_client` field on `AgentCreator` is
@@ -50,7 +50,7 @@ machinery is gone:
   schema-altering methods (`set_permission_schema`,
   `delete_permission_schema`, `delete_permission_rule`).
 - The operator-facing equivalent is the new
-  `mngr latchkey allow-agent --host-id ID --agent-id ID` CLI command.
+  `mngr latchkey register-agent --host-id ID --agent-id ID` CLI command.
 - The `inject_tunnel_token_into_agent` helper moved out of
   `api_v1.py` into its own module so it can be imported without
   pulling the FastAPI router in.
