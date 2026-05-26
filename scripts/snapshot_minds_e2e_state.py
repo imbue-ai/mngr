@@ -48,7 +48,9 @@ would re-derive on every run.
 
 import argparse
 import shlex
+import subprocess
 import sys
+import tempfile
 import textwrap
 import time
 from pathlib import Path
@@ -121,7 +123,70 @@ _IN_SANDBOX_RUNNER_PROGRAM: Final[str] = textwrap.dedent(
 ).strip()
 
 
-def _build_snapshot_image() -> modal.Image:
+# rsync exclusion list applied when staging the local mngr checkout into a
+# stable temp dir BEFORE the Modal upload. The staging step exists because
+# Modal's add_local_dir errors with ``ExecutionError`` if any source file
+# changes mid-upload, and the upload takes long enough (multiple minutes)
+# that concurrent writers in the working checkout (stop-hook auto-merges
+# of main, autofix writes under .reviewer/, parallel pytest runs writing
+# under test-results/, etc.) reliably race the upload and abort it.
+# Copying once at the start gives Modal a frozen tree to read from.
+#
+# Exclusion buckets:
+# - regenerated inside the image (.venv / node_modules / build caches)
+# - written during the upload by other tools (.reviewer, .claude,
+#   test-results, .test_output)
+# - .git: worktree ``.git`` is a tiny ``gitdir: <path>`` file pointing at
+#   the main repo's .git/worktrees/<id>/ -- that path does not exist
+#   inside the sandbox, so no in-sandbox git command would work even if
+#   we did upload it. The runner's ``_current_mngr_branch`` tolerates a
+#   missing / unusable .git and returns None, routing
+#   ``resolve_fct_path`` through the documented "fall back to FCT main"
+#   path.
+# - .external_worktrees can hold large FCT working trees; we prefer the
+#   sandbox to clone FCT fresh from the public remote.
+_STAGING_RSYNC_EXCLUDES: Final[tuple[str, ...]] = (
+    ".venv",
+    "node_modules",
+    "test-results",
+    ".test_output",
+    "__pycache__",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".mypy_cache",
+    ".reviewer",
+    ".claude",
+    ".external_worktrees",
+    ".git",
+)
+
+
+def _stage_repo_to_temp_dir(staging_dir: Path) -> Path:
+    """Rsync the local mngr checkout into ``staging_dir`` and return the path.
+
+    Insulates Modal's add_local_dir upload from concurrent writers in the
+    live working tree (autofix, stop-hook auto-merges, parallel test runs).
+    Without this, ``Modal.Image.add_local_dir`` aborts the run with
+    ``ExecutionError: <path> was modified during build process`` as soon
+    as any tracked file gets rewritten mid-upload.
+    """
+    target = staging_dir / "mngr"
+    target.mkdir(parents=True, exist_ok=True)
+    rsync_command = ["rsync", "-a", "--delete"]
+    for pattern in _STAGING_RSYNC_EXCLUDES:
+        rsync_command += ["--exclude", pattern]
+    # Trailing slash on source so rsync copies *contents* of _REPO_ROOT
+    # into target rather than nesting it under target/<repo-name>.
+    rsync_command += [f"{_REPO_ROOT}/", f"{target}/"]
+    print(
+        f"Staging mngr checkout into {target} (excluding {len(_STAGING_RSYNC_EXCLUDES)} pattern(s))",
+        flush=True,
+    )
+    subprocess.run(rsync_command, check=True, timeout=600)
+    return target
+
+
+def _build_snapshot_image(staged_repo: Path) -> modal.Image:
     """Return a Modal image with every dep the minds Electron e2e test needs.
 
     Built inline (not via ``modal.Image.from_dockerfile``) so this script
@@ -129,6 +194,11 @@ def _build_snapshot_image() -> modal.Image:
     that lives outside the repo until ``just _generate-release-dockerfile``
     runs, and we don't want to require that side effect just to take a
     snapshot.
+
+    ``staged_repo`` is the frozen copy produced by
+    :func:`_stage_repo_to_temp_dir`. Uploading from there (instead of the
+    live working tree) is what keeps Modal's "modified during build"
+    check from aborting the run.
     """
     return (
         modal.Image.debian_slim(python_version="3.12")
@@ -191,43 +261,14 @@ def _build_snapshot_image() -> modal.Image:
                 "PLAYWRIGHT_BROWSERS_PATH": "/opt/ms-playwright",
             }
         )
-        # Mount the local mngr checkout, then bake `uv sync` + pnpm install
-        # into the image so the sandbox boots ready to run the e2e test.
-        #
-        # Exclusion buckets:
-        # - regenerated inside the image (.venv / node_modules / build caches)
-        # - actively written during this upload by other processes
-        #   (.reviewer/ by autofix, .claude/ by Claude Code,
-        #   test-results / .test_output by parallel pytest runs);
-        #   Modal raises ExecutionError if any file in the upload set
-        #   changes during the upload.
-        # - .git: worktree ``.git`` is a tiny ``gitdir: <path>`` file
-        #   pointing at the main repo's .git/worktrees/<id>/ -- that
-        #   path does not exist inside the sandbox, so no in-sandbox
-        #   git command would work even if we did upload it. The
-        #   runner's ``_current_mngr_branch`` tolerates a missing /
-        #   unusable .git and returns None, routing ``resolve_fct_path``
-        #   through the documented "fall back to FCT main" path.
-        # - .external_worktrees can hold large FCT working trees; we
-        #   prefer the sandbox to clone FCT fresh from the public remote.
+        # Mount the staged (frozen) mngr checkout, then bake `uv sync` +
+        # pnpm install into the image so the sandbox boots ready to run
+        # the e2e workflow. The exclusion buckets above already filtered
+        # the rsync, so add_local_dir doesn't need a redundant `ignore`.
         .add_local_dir(
-            str(_REPO_ROOT),
+            str(staged_repo),
             "/code/mngr",
             copy=True,
-            ignore=[
-                "**/.venv",
-                "**/node_modules",
-                "**/test-results",
-                "**/.test_output",
-                "**/__pycache__",
-                "**/.pytest_cache",
-                "**/.ruff_cache",
-                "**/.mypy_cache",
-                "**/.reviewer",
-                "**/.claude",
-                "**/.external_worktrees",
-                "**/.git",
-            ],
         )
         .workdir("/code/mngr")
         .run_commands(
@@ -346,23 +387,32 @@ def _parse_args() -> argparse.Namespace:
 def main() -> None:
     args = _parse_args()
 
-    image = _build_snapshot_image()
-    app = modal.App.lookup(args.app_name, create_if_missing=True)
+    # Stage the repo into a temp dir BEFORE building the image so the
+    # Modal upload reads from a frozen tree. The staging dir lives for
+    # the whole image-build phase; we clean it up after Sandbox.create
+    # returns (Modal has already materialized the image at that point,
+    # so the staged copy is no longer referenced).
+    with tempfile.TemporaryDirectory(prefix="mngr-snapshot-stage-") as staging_dir_str:
+        staging_dir = Path(staging_dir_str)
+        staged_repo = _stage_repo_to_temp_dir(staging_dir)
 
-    print(f"Creating sandbox in app {args.app_name!r} with vm_runtime=True", flush=True)
-    sandbox = modal.Sandbox.create(
-        image=image,
-        app=app,
-        timeout=_SANDBOX_TIMEOUT_SECONDS,
-        cpu=4.0,
-        memory=8 * 1024,
-        # The whole point of this script: opt in to Modal's VM runtime so
-        # Docker-in-sandbox state survives snapshot_filesystem(). We are
-        # NOT enabling this in the general mngr_modal provider -- Modal
-        # has capacity issues with vm_runtime, so this is scoped to the
-        # snapshot workflow only.
-        experimental_options={"vm_runtime": True},
-    )
+        image = _build_snapshot_image(staged_repo)
+        app = modal.App.lookup(args.app_name, create_if_missing=True)
+
+        print(f"Creating sandbox in app {args.app_name!r} with vm_runtime=True", flush=True)
+        sandbox = modal.Sandbox.create(
+            image=image,
+            app=app,
+            timeout=_SANDBOX_TIMEOUT_SECONDS,
+            cpu=4.0,
+            memory=8 * 1024,
+            # The whole point of this script: opt in to Modal's VM runtime so
+            # Docker-in-sandbox state survives snapshot_filesystem(). We are
+            # NOT enabling this in the general mngr_modal provider -- Modal
+            # has capacity issues with vm_runtime, so this is scoped to the
+            # snapshot workflow only.
+            experimental_options={"vm_runtime": True},
+        )
 
     try:
         print(f"Sandbox {sandbox.object_id} created.", flush=True)
