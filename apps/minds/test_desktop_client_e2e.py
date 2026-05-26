@@ -35,48 +35,18 @@ Linux CI requires ``xvfb`` (the recipe wraps the invocation with
 ``xvfb-run -a``).
 """
 
-import os
 from pathlib import Path
 
 import pytest
 from loguru import logger
 
-from imbue.minds.config.loader import repo_tier_client_config_path
-from imbue.minds.desktop_client.e2e_workspace_runner import DEFAULT_MINDS_ROOT_NAME
-from imbue.minds.desktop_client.e2e_workspace_runner import DEFAULT_MINDS_TIER
 from imbue.minds.desktop_client.e2e_workspace_runner import configure_logging
 from imbue.minds.desktop_client.e2e_workspace_runner import create_workspace_via_electron
 from imbue.minds.desktop_client.e2e_workspace_runner import destroy_agent_best_effort
+from imbue.minds.desktop_client.e2e_workspace_runner import ensure_minds_env_defaults
 from imbue.minds.desktop_client.e2e_workspace_runner import find_free_port
 from imbue.minds.desktop_client.e2e_workspace_runner import resolve_fct_path
 from imbue.mngr.utils.testing import get_short_random_string
-
-
-def _resolve_minds_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Ensure ``MINDS_ROOT_NAME`` / ``MINDS_CLIENT_CONFIG_PATH`` are set.
-
-    Pytest-monkeypatched version of
-    :func:`e2e_workspace_runner.ensure_minds_env_defaults` -- using
-    monkeypatch instead of mutating ``os.environ`` directly so other
-    tests in the same pytest process see the original values.
-    """
-    if os.environ.get("MINDS_ROOT_NAME"):
-        logger.info("Using inherited MINDS_ROOT_NAME={}", os.environ["MINDS_ROOT_NAME"])
-        return
-
-    config_path = repo_tier_client_config_path(DEFAULT_MINDS_TIER)
-    if not config_path.is_file():
-        raise FileNotFoundError(
-            f"Default tier {DEFAULT_MINDS_TIER!r} has no client.toml at {config_path}; "
-            "either activate a minds env explicitly or restore the staging config."
-        )
-    monkeypatch.setenv("MINDS_ROOT_NAME", DEFAULT_MINDS_ROOT_NAME)
-    monkeypatch.setenv("MINDS_CLIENT_CONFIG_PATH", str(config_path))
-    logger.info(
-        "No MINDS_ROOT_NAME activated; defaulting to {} (config={})",
-        DEFAULT_MINDS_ROOT_NAME,
-        config_path,
-    )
 
 
 # Carrying only the resource marks the *test process* sees a host-side
@@ -114,7 +84,10 @@ def test_create_local_docker_workspace_via_electron(
     ``finally`` regardless of outcome.
     """
     configure_logging()
-    _resolve_minds_env(monkeypatch)
+    # Route env-var defaults through monkeypatch so any values we inject get
+    # reverted between tests; the runner's default `os.environ` setter would
+    # leak `MINDS_ROOT_NAME` / `MINDS_CLIENT_CONFIG_PATH` into sibling tests.
+    ensure_minds_env_defaults(setenv=monkeypatch.setenv)
 
     fct_path = resolve_fct_path(tmp_path)
     workspace_name = f"forever-{get_short_random_string()}"

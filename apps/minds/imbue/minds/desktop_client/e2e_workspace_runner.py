@@ -26,6 +26,7 @@ import subprocess
 import sys
 import threading
 import time
+from collections.abc import Callable
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -187,14 +188,20 @@ def resolve_fct_path(scratch_dir: Path) -> Path:
     return shallow_clone_fct(FCT_FALLBACK_BRANCH, destination)
 
 
-def ensure_minds_env_defaults() -> None:
+def _set_os_environ(name: str, value: str) -> None:
+    """Default setter for :func:`ensure_minds_env_defaults` -- writes to ``os.environ``."""
+    os.environ[name] = value
+
+
+def ensure_minds_env_defaults(setenv: Callable[[str, str], None] = _set_os_environ) -> None:
     """Set ``MINDS_ROOT_NAME`` / ``MINDS_CLIENT_CONFIG_PATH`` if unset.
 
-    Process-global ``os.environ`` mutation -- meant for the snapshot
-    script, which runs in a throwaway sandbox and doesn't care about
-    env-var hygiene. The pytest test has its own pytest-monkeypatch
-    wrapper around the same defaults so the env vars get reverted
-    between tests.
+    With the default ``setenv``, this is a process-global ``os.environ``
+    mutation -- meant for the snapshot script, which runs in a throwaway
+    sandbox and doesn't care about env-var hygiene. The pytest wrapper
+    in ``apps/minds/test_desktop_client_e2e.py`` passes
+    ``monkeypatch.setenv`` so the env vars get reverted between tests
+    without duplicating the validation / logging logic.
     """
     if os.environ.get("MINDS_ROOT_NAME"):
         logger.info("Using inherited MINDS_ROOT_NAME={}", os.environ["MINDS_ROOT_NAME"])
@@ -206,8 +213,8 @@ def ensure_minds_env_defaults() -> None:
             f"Default tier {DEFAULT_MINDS_TIER!r} has no client.toml at {config_path}; "
             "either activate a minds env explicitly or restore the staging config."
         )
-    os.environ["MINDS_ROOT_NAME"] = DEFAULT_MINDS_ROOT_NAME
-    os.environ["MINDS_CLIENT_CONFIG_PATH"] = str(config_path)
+    setenv("MINDS_ROOT_NAME", DEFAULT_MINDS_ROOT_NAME)
+    setenv("MINDS_CLIENT_CONFIG_PATH", str(config_path))
     logger.info(
         "No MINDS_ROOT_NAME activated; defaulting to {} (config={})",
         DEFAULT_MINDS_ROOT_NAME,
