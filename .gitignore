@@ -336,3 +336,4 @@
 # ``minds env recover`` so two concurrent invocations against the same
 # env serialize. The file itself is empty and cheap to leave around.
 **/.minds-deploy-lock-*.lock
+**/.antigravitycli/

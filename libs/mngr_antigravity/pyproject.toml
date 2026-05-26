@@ -1,7 +1,7 @@
 [project]
-name = "imbue-mngr-gemini"
+name = "imbue-mngr-antigravity"
 version = "0.1.0"
-description = "Gemini agent type plugin for mngr"
+description = "Antigravity agent type plugin for mngr"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
@@ -9,7 +9,7 @@ dependencies = [
 ]
 
 [project.entry-points.mngr]
-gemini = "imbue.mngr_gemini.plugin"
+antigravity = "imbue.mngr_antigravity.plugin"
 
 [build-system]
 requires = ["hatchling"]
@@ -32,7 +32,7 @@ timeout_func_only = true
 junit_family = "xunit1"
 testpaths = ["."]
 addopts = [
-  "--cov=imbue.mngr_gemini",
+  "--cov=imbue.mngr_antigravity",
   "--cov-report=term-missing",
   "--cov-report=xml",
   "--durations=20",

@@ -99,9 +99,8 @@ _try_resolve_file() {
 # -- Reconciliation (restart recovery) --
 #
 # Field extraction, id-set construction, and reverse-scan reconciliation
-# come from mngr_transcript_lib.sh and are shared with mngr_gemini's
-# stream_transcript.sh. The shared helpers operate on the global
-# _MNGR_TRANSCRIPT_ID_SET, populated by mngr_transcript_build_id_set.
+# come from mngr_transcript_lib.sh. The shared helpers operate on the
+# global _MNGR_TRANSCRIPT_ID_SET, populated by mngr_transcript_build_id_set.
 
 # -- Session processing --
 
