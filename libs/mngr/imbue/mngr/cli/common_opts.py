@@ -731,23 +731,38 @@ def _apply_template_extend(
     click param values rather than against parsed pydantic models, so the
     coercion bias is toward the click-native tuple shape.
     """
+    field_path = f"create_templates.{template_name}.{param_name}__extend"
     if not isinstance(extend_value, (list, tuple, dict, set, frozenset)):
         raise ConfigParseError(
-            f"create_templates.{template_name}.{param_name}__extend requires a list, tuple, dict, or set value; "
-            f"got: {type(extend_value).__name__}"
+            f"{field_path} requires a list, tuple, dict, set, or frozenset value; got: {type(extend_value).__name__}"
         )
-    if isinstance(existing_value, (list, tuple)) and isinstance(extend_value, (list, tuple)):
+    if existing_value is None:
+        # Field unset in base. Extend acts like assign, matching ``_apply_extend``.
+        return extend_value
+    if isinstance(existing_value, (list, tuple)):
+        if not isinstance(extend_value, (list, tuple)):
+            raise ConfigParseError(
+                f"{field_path} (list/tuple) requires a JSON array value; got: {type(extend_value).__name__}"
+            )
         merged = list(existing_value) + list(extend_value)
         return tuple(merged) if isinstance(existing_value, tuple) else merged
-    if isinstance(existing_value, (set, frozenset)) and isinstance(extend_value, (set, frozenset, list, tuple)):
+    if isinstance(existing_value, (set, frozenset)):
+        if not isinstance(extend_value, (set, frozenset, list, tuple)):
+            raise ConfigParseError(
+                f"{field_path} (set) requires a JSON array value; got: {type(extend_value).__name__}"
+            )
         merged_set = set(existing_value) | set(extend_value)
         return frozenset(merged_set) if isinstance(existing_value, frozenset) else merged_set
-    if isinstance(existing_value, dict) and isinstance(extend_value, dict):
+    if isinstance(existing_value, dict):
+        if not isinstance(extend_value, dict):
+            raise ConfigParseError(
+                f"{field_path} (dict) requires a JSON object value; got: {type(extend_value).__name__}"
+            )
         return {**existing_value, **extend_value}
-    # The existing value is empty / not yet an aggregate of the right shape.
-    # Match the resolver behaviour: extend acts like assign for an unset base,
-    # but the extend value's shape must still be an aggregate (checked above).
-    return extend_value
+    raise ConfigParseError(
+        f"{field_path} is not valid: target field is a scalar "
+        f"({type(existing_value).__name__}); use bare assignment instead."
+    )
 
 
 def _build_template_narrowing_message(template_name: str, param_name: str) -> str:
