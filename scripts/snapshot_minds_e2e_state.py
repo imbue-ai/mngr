@@ -252,7 +252,10 @@ def _snapshot_sandbox(sandbox: modal.Sandbox) -> str:
 
 
 def _parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     parser.add_argument(
         "--app-name",
         default=_DEFAULT_APP_NAME,
