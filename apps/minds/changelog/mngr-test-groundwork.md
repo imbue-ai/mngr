@@ -1,11 +1,29 @@
-# Fix stale `LaunchMode.LOCAL` reference in agent_creator_test.py
+# Extract Electron e2e workspace creation flow into a reusable runner
 
-`apps/minds/imbue/minds/desktop_client/agent_creator_test.py:130` was
-still referencing `LaunchMode.LOCAL`, which was renamed to
-`LaunchMode.DOCKER` in an earlier PR (commit 609e7d46b). The rename
-caught every `.LOCAL` usage that existed at the time, but a sibling
-branch added a new `.LOCAL` reference in this test that wasn't caught
-when it landed via merge. That broke `test_no_type_errors` across every
-project in the monorepo (each runs the type checker on its dependency
-graph, which includes `apps/minds`). Renamed the stray usage to
-`LaunchMode.DOCKER` to match the rest of the file.
+Split the Playwright-over-CDP driver out of
+`apps/minds/test_desktop_client_e2e.py` into a new module at
+`apps/minds/imbue/minds/desktop_client/e2e_workspace_runner.py` so the
+same flow can be invoked outside pytest. The new module exposes the
+public entry points `create_workspace_via_electron`, `resolve_fct_path`,
+`ensure_minds_env_defaults`, `configure_logging`, `find_free_port`, and
+`destroy_agent_best_effort`; everything else stays underscore-prefixed.
+
+The existing pytest test was reduced to a thin wrapper that:
+
+- calls `ensure_minds_env_defaults(setenv=monkeypatch.setenv)` so any
+  injected env vars get reverted between tests,
+- delegates the actual Electron / Playwright flow to
+  `create_workspace_via_electron`, and
+- always calls `destroy_agent_best_effort` in `finally` so a successful
+  test never leaks an agent into the host.
+
+`scripts/snapshot_minds_e2e_state.py` is the second caller: it invokes
+`create_workspace_via_electron` directly and deliberately omits the
+`mngr destroy` cleanup, because the whole point of the snapshot is to
+capture a sandbox in which the workspace's Docker container is alive.
+
+Also added a `*/desktop_client/e2e_workspace_runner.py` exclusion to the
+`test_prevent_direct_subprocess` ratchet, since the new module
+necessarily shells out to `electron`, `git`, and `uv run mngr destroy`
+(operator-tool subprocesses with no `ConcurrencyGroup`-managed
+equivalent). No user-visible behavior change.
