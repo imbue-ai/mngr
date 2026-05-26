@@ -1,6 +1,6 @@
-# Unabridged Changelog - mngr_gemini
+# Unabridged Changelog - mngr_antigravity
 
-Full, unedited changelog entries consolidated nightly from individual files in `libs/mngr_gemini/changelog/`.
+Full, unedited changelog entries consolidated nightly from individual files in `libs/mngr_antigravity/changelog/`.
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
