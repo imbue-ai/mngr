@@ -93,13 +93,13 @@ def test_prepare_full_wiring_tunneled(tmp_path: Path) -> None:
     #    Authorized agents (those past Rule 1's ``not + anyOf``) hit
     #    this rule and are let through by the generic permission.
     assert on_disk["rules"] == [
-        {"minds-api-proxy-unauthorized": []},
+        {"minds-api-proxy-per-agent-unauthorized": []},
         {
             "latchkey-self": [
                 "latchkey-self-create-permission-request",
                 "latchkey-self-read-self-permissions",
                 "latchkey-self-read-available-permissions",
-                "minds-api-proxy",
+                "minds-api-proxy-per-agent",
             ],
         },
     ]
@@ -108,14 +108,14 @@ def test_prepare_full_wiring_tunneled(tmp_path: Path) -> None:
     #   * ``domain`` constrained to the gateway-self host,
     #   * ``path`` must match the proxy-prefix pattern AND not match
     #     any agent-id pattern in the (initially empty) ``anyOf`` list.
-    unauthorized_scope = schemas["minds-api-proxy-unauthorized"]["properties"]
+    unauthorized_scope = schemas["minds-api-proxy-per-agent-unauthorized"]["properties"]
     assert unauthorized_scope["domain"] == {"const": "latchkey-self.invalid"}
     assert unauthorized_scope["path"]["type"] == "string"
     assert unauthorized_scope["path"]["pattern"] == r"^/minds-api-proxy/api/v1/agents/[^/]+(/.*)?$"
     assert unauthorized_scope["path"]["not"] == {"anyOf": []}
     # And the second rule references a generic ``minds-api-proxy``
     # permission whose path matches any ``/agents/<any>/`` request.
-    minds_proxy_perm = schemas["minds-api-proxy"]["properties"]
+    minds_proxy_perm = schemas["minds-api-proxy-per-agent"]["properties"]
     assert minds_proxy_perm["path"]["type"] == "string"
     assert minds_proxy_perm["path"]["pattern"] == r"^/minds-api-proxy/api/v1/agents/[^/]+(/.*)?$"
     # And the gateway-self baseline rule's schemas are unchanged.
@@ -296,7 +296,7 @@ def _allowed_anyof_for_host(tmp_path: Path, host_id: HostId) -> list[dict[str, s
     """Return the parsed ``anyOf`` list from the host's permissions file."""
     path = permissions_path_for_host(tmp_path, host_id)
     config = json.loads(path.read_text())
-    return config["schemas"]["minds-api-proxy-unauthorized"]["properties"]["path"]["not"]["anyOf"]
+    return config["schemas"]["minds-api-proxy-per-agent-unauthorized"]["properties"]["path"]["not"]["anyOf"]
 
 
 def test_allow_agent_for_host_creates_baseline_when_file_absent(tmp_path: Path) -> None:
@@ -345,7 +345,7 @@ def test_allow_agent_for_host_preserves_other_grants(tmp_path: Path) -> None:
     # stops at it for an unauthorized agent_id (rejecting with the
     # empty permission list) rather than falling through to the
     # latchkey-self baseline rule.
-    assert rule_keys == ["minds-api-proxy-unauthorized", "latchkey-self"]
+    assert rule_keys == ["minds-api-proxy-per-agent-unauthorized", "latchkey-self"]
 
 
 def test_allow_agent_for_host_raises_when_anyof_was_hand_edited(tmp_path: Path) -> None:
@@ -357,7 +357,7 @@ def test_allow_agent_for_host_raises_when_anyof_was_hand_edited(tmp_path: Path) 
     allow_agent_for_host(tmp_path, host_id, AgentId.generate())
     path = permissions_path_for_host(tmp_path, host_id)
     config = json.loads(path.read_text())
-    config["schemas"]["minds-api-proxy-unauthorized"]["properties"]["path"]["not"]["anyOf"] = [
+    config["schemas"]["minds-api-proxy-per-agent-unauthorized"]["properties"]["path"]["not"]["anyOf"] = [
         {"pattern": "^/no-longer-recognized$"}
     ]
     path.write_text(json.dumps(config))

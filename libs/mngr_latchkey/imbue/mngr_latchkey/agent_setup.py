@@ -90,6 +90,11 @@ _MINDS_API_PROXY_PER_AGENT_PATH_PATTERN: Final[str] = rf"^{_MINDS_API_PROXY_PER_
 _SCOPE_MINDS_API_PROXY_PER_AGENT_UNAUTHORIZED: Final[str] = "minds-api-proxy-per-agent-unauthorized"
 _PERM_MINDS_API_PROXY_PER_AGENT: Final[str] = "minds-api-proxy-per-agent"
 
+# Exact prefix/suffix wrapping each agent id inside an ``anyOf`` entry's
+# path pattern. Shared by the build + extract helpers so the two cannot
+# drift apart.
+_ALLOWED_AGENT_PATTERN_PREFIX: Final[str] = rf"^{_MINDS_API_PROXY_PER_AGENT_PATH_PREFIX}"
+_ALLOWED_AGENT_PATTERN_SUFFIX: Final[str] = "/(.*)?$"
 
 # Characters allowed verbatim in an ``agent_id`` when we embed it into
 # a regex pattern body. mngr's ``RandomId`` format -- ``<prefix>-<32
@@ -104,7 +109,7 @@ def _build_allowed_agent_anyof_entry(agent_id: str) -> dict[str, JsonValue]:
     """Build the ``anyOf`` entry that allows ``agent_id`` past the unauthorized scope."""
     if not _SAFE_AGENT_ID_RE.match(agent_id):
         raise LatchkeyStoreError(f"agent_id contains characters that are not safe to embed in a regex: {agent_id!r}")
-    return {"pattern": rf"^{_MINDS_API_PROXY_PER_AGENT_PATH_PREFIX}{agent_id}/(.*)?$"}
+    return {"pattern": f"{_ALLOWED_AGENT_PATTERN_PREFIX}{agent_id}{_ALLOWED_AGENT_PATTERN_SUFFIX}"}
 
 
 def _extract_agent_id_from_anyof_entry(entry: JsonValue) -> str:
@@ -114,7 +119,12 @@ def _extract_agent_id_from_anyof_entry(entry: JsonValue) -> str:
     pattern = entry.get("pattern")
     if not isinstance(pattern, str):
         raise LatchkeyStoreError(f"Allowed-agent ``anyOf`` entry is missing or has non-string ``pattern``: {entry!r}")
-    return pattern.lstrip(f"^{_MINDS_API_PROXY_PER_AGENT_PATH_PREFIX}").split("/")[0]
+    if not (pattern.startswith(_ALLOWED_AGENT_PATTERN_PREFIX) and pattern.endswith(_ALLOWED_AGENT_PATTERN_SUFFIX)):
+        raise LatchkeyStoreError(
+            f"Unrecognized allowed-agent ``anyOf`` entry pattern; refusing to overwrite a "
+            f"hand-edited permissions file. Got: {pattern!r}"
+        )
+    return pattern.removeprefix(_ALLOWED_AGENT_PATTERN_PREFIX).removesuffix(_ALLOWED_AGENT_PATTERN_SUFFIX)
 
 
 _AGENT_BASELINE_PERMISSIONS: Final[LatchkeyPermissionsConfig] = LatchkeyPermissionsConfig(
