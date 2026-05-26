@@ -28,6 +28,8 @@ dependencies = [
     "telethon>=1.40.0",
     "uvicorn>=0.32.0",
     "websockets>=13.0",
+    "wsgidav>=4.3",
+    "a2wsgi>=1.10",
 ]
 license = {text = "FCL-1.0-MIT"}
 license-files = [

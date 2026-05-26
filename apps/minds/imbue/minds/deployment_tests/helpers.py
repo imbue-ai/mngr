@@ -24,6 +24,7 @@ from imbue.minds.bootstrap import MINDS_ROOT_NAME_ENV_VAR
 from imbue.minds.bootstrap import mngr_host_dir_for
 from imbue.minds.bootstrap import mngr_prefix_for
 from imbue.minds.bootstrap import root_name_for_env_name
+from imbue.minds.cli._activated_env import MODAL_PROFILE_ENV_VAR
 from imbue.minds.cli._activated_env import modal_profile_for_tier_or_none
 from imbue.minds.cli._activated_env import tier_for_env_name
 from imbue.minds.deployment_tests.data_types import SharedEnvHandle
@@ -45,14 +46,17 @@ _SUPERTOKENS_PROBE_TIMEOUT_SECONDS: Final[float] = 30.0
 def build_minds_env_subprocess_env(name: DevEnvName) -> dict[str, str]:
     """Build the env dict for a ``minds env deploy/destroy`` subprocess targeting ``name``.
 
-    Mirrors what ``minds env activate <name>`` exports (without going
-    through the print-shell-vars indirection): MINDS_ROOT_NAME, MNGR_HOST_DIR,
-    MNGR_PREFIX, MINDS_CLIENT_CONFIG_PATH, and (for tiers with a
-    committed ``modal_workspace``) MODAL_PROFILE. The MODAL_PROFILE
-    lookup goes through the same ``modal_profile_for_tier_or_none``
-    helper ``minds env activate`` itself uses, so a separated CI Modal
-    workspace (planned) automatically lands here without having to
-    update a test-only hardcoded constant.
+    Mirrors what ``minds env activate --deploy <name>`` exports (without
+    going through the print-shell-vars indirection): MINDS_ROOT_NAME,
+    MNGR_HOST_DIR, MNGR_PREFIX, MINDS_CLIENT_CONFIG_PATH, and (for tiers
+    with a committed ``modal_workspace``) MODAL_PROFILE. The
+    MODAL_PROFILE lookup goes through the same
+    ``modal_profile_for_tier_or_none`` helper ``minds env activate``
+    itself uses, so a separated CI Modal workspace (planned)
+    automatically lands here without having to update a test-only
+    hardcoded constant. Including MODAL_PROFILE is required for the
+    subprocess deploy/destroy to satisfy the deploy-mode activation
+    gate enforced by ``require_deploy_mode_activation``.
 
     Inherits VAULT_TOKEN / VAULT_ADDR / VAULT_NAMESPACE / ANTHROPIC_API_KEY
     from the parent process unchanged so the subprocess can read Vault +
@@ -66,7 +70,7 @@ def build_minds_env_subprocess_env(name: DevEnvName) -> dict[str, str]:
     env["MINDS_CLIENT_CONFIG_PATH"] = str(client_config_file(name))
     modal_profile = modal_profile_for_tier_or_none(tier_for_env_name(str(name)))
     if modal_profile is not None:
-        env["MODAL_PROFILE"] = modal_profile
+        env[MODAL_PROFILE_ENV_VAR] = modal_profile
     return env
 
 
@@ -215,7 +219,7 @@ def modal_env_exists(name: DevEnvName) -> bool:
     sub_env = dict(os.environ)
     modal_profile = modal_profile_for_tier_or_none(tier_for_env_name(str(name)))
     if modal_profile is not None:
-        sub_env["MODAL_PROFILE"] = modal_profile
+        sub_env[MODAL_PROFILE_ENV_VAR] = modal_profile
     result = subprocess.run(
         ["uv", "run", "modal", "environment", "list", "--json"],
         env=sub_env,
@@ -282,28 +286,28 @@ def supertokens_app_exists(*, name: DevEnvName, core_base_url: str, api_key: Sec
     )
 
 
-def load_dev_credentials_from_vault() -> dict[str, str]:
-    """Read the dev-tier vault entries the round-trip test needs.
+def load_ci_credentials_from_vault() -> dict[str, str]:
+    """Read the ci-tier vault entries the round-trip test needs.
 
     Returns a dict with NEON_ORG_ID, NEON_API_TOKEN, SUPERTOKENS_CONNECTION_URI,
-    SUPERTOKENS_API_KEY. Reads from ``secrets/minds/dev/neon-admin`` +
-    ``secrets/minds/dev/supertokens`` via the same ``read_vault_kv``
+    SUPERTOKENS_API_KEY. Reads from ``secrets/minds/ci/neon-admin`` +
+    ``secrets/minds/ci/supertokens`` via the same ``read_vault_kv``
     helper the CLI uses, so the test honors the operator's existing
-    Vault token / address.
+    Vault token / address. The ci tier's vault namespace mirrors the
+    dev tier's today; the two are kept separate so we can diverge
+    later without churning the test scaffolding.
     """
-    neon_kv = read_vault_kv(VaultPath("secrets/minds/dev/neon-admin"))
-    st_kv = read_vault_kv(VaultPath("secrets/minds/dev/supertokens"))
+    neon_kv = read_vault_kv(VaultPath("secrets/minds/ci/neon-admin"))
+    st_kv = read_vault_kv(VaultPath("secrets/minds/ci/supertokens"))
     missing: list[str] = []
     for key in ("NEON_ORG_ID", "NEON_API_TOKEN"):
         if not neon_kv.get(key):
-            missing.append(f"secrets/minds/dev/neon-admin.{key}")
+            missing.append(f"secrets/minds/ci/neon-admin.{key}")
     for key in ("SUPERTOKENS_CONNECTION_URI", "SUPERTOKENS_API_KEY"):
         if not st_kv.get(key):
-            missing.append(f"secrets/minds/dev/supertokens.{key}")
+            missing.append(f"secrets/minds/ci/supertokens.{key}")
     if missing:
-        raise MindError(
-            "Vault is missing required dev-tier credentials for the round-trip test: " + ", ".join(missing)
-        )
+        raise MindError("Vault is missing required ci-tier credentials for the round-trip test: " + ", ".join(missing))
     return {
         "NEON_ORG_ID": neon_kv["NEON_ORG_ID"],
         "NEON_API_TOKEN": neon_kv["NEON_API_TOKEN"],

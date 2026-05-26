@@ -1,395 +1,524 @@
-"""End-to-end test for the minds desktop client.
+"""End-to-end test that drives the real Electron minds app to create a
+local Docker workspace from the forever-claude-template (FCT) repo.
 
-Creates an agent from the forever-claude-template repo via the desktop
-client API, verifies it starts and its web server is accessible through
-the desktop client proxy.
+The test launches ``apps/minds/electron/main.js`` via the project-local
+``electron`` binary with ``--remote-debugging-port``, lets Electron
+spawn the Python backend exactly the way ``just minds-start`` does,
+connects to the Electron renderer via Playwright over CDP, types into
+the create form, submits it, and waits for the workspace's
+``system_interface`` dockview UI to render through the desktop client's
+subdomain proxy.
 
-Set MINDS_TEMPLATE_REPO to a local checkout of the forever-claude-template
-repo for faster iteration (avoids cloning). If unset, the tests clone
-from the GitHub repo into a temporary directory.
+The FCT source is resolved in three steps (first match wins):
 
-Run from the repo root:
-    just test apps/minds/test_desktop_client_e2e.py::test_create_agent_e2e
+1. ``<repo-root>/.external_worktrees/forever-claude-template/`` if that
+   directory is a populated git working tree (operator-managed local
+   worktree; matches the convention enforced by
+   ``apps/minds/scripts/test_deployments.py``).
+2. Otherwise, a shallow clone of the branch on the FCT public remote
+   that matches the current mngr branch, into ``tmp_path``.
+3. Otherwise, a shallow clone of FCT ``main`` into ``tmp_path``.
 
-The Docker E2E test waits for /tmp/minds-e2e-done before tearing down:
-    touch /tmp/minds-e2e-done
+The test inherits whatever minds env the runner already activated. When
+``MINDS_ROOT_NAME`` is unset, it defaults to the shared ``minds-staging``
+tier (matches the repo-committed ``client.toml`` under
+``apps/minds/imbue/minds/config/envs/staging/``).
+
+Run locally:
+
+    just minds-test-electron
+
+Linux CI requires ``xvfb`` (the recipe wraps the invocation with
+``xvfb-run -a``).
 """
 
 import os
+import re
 import socket
 import subprocess
 import sys
-import textwrap
 import threading
-from collections.abc import Generator
+import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
+from typing import Final
+from typing import IO
 
-import dotenv
 import httpx
 import pytest
-import uvicorn
 from loguru import logger
+from playwright.sync_api import Browser
+from playwright.sync_api import Page
+from playwright.sync_api import sync_playwright
 
-from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
-from imbue.minds.config.data_types import WorkspacePaths
-from imbue.minds.desktop_client.agent_creator import AgentCreator
-from imbue.minds.desktop_client.app import create_desktop_client
-from imbue.minds.desktop_client.auth import FileAuthStore
-from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
-from imbue.minds.desktop_client.notification import NotificationDispatcher
-from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
-from imbue.minds.primitives import OneTimeCode
-from imbue.minds.testing import clean_env
+from imbue.minds.config.loader import repo_tier_client_config_path
+from imbue.mngr.utils.testing import get_short_random_string
 
-_REPO_ROOT = Path(__file__).resolve().parents[2]
-_TEMPLATE_GIT_URL = "https://github.com/imbue-ai/forever-claude-template.git"
-_SIGNAL_FILE = Path("/tmp/minds-e2e-done")
+_REPO_ROOT: Final[Path] = Path(__file__).resolve().parents[2]
+_FCT_EXTERNAL_WORKTREE: Final[Path] = _REPO_ROOT / ".external_worktrees" / "forever-claude-template"
+_FCT_REMOTE: Final[str] = "https://github.com/imbue-ai/forever-claude-template.git"
+_FCT_FALLBACK_BRANCH: Final[str] = "main"
 
-# Minimal template repo config for the test fixture. Mirrors the shape of
-# forever-claude-template's `.mngr/settings.toml` (the templates and agent
-# types that `AgentCreator` references via `--template main --template <mode>`)
-# but omits the production-only `extra_provision_command` that expects a
-# populated `vendor/mngr/` submodule -- the test wants to exercise the minds
-# agent-creation plumbing, not the full template's provisioning script.
-_MINIMAL_TEMPLATE_SETTINGS = textwrap.dedent(
-    """\
-    [commands.create]
-    connect = false
-    ensure_clean = false
-    yes = true
+# The contentView page URL contains ``/_chrome`` only for the chrome
+# (sidebar/title-bar) view; the main content view never does. We match the
+# pure-localhost backend pages, not the ``agent-<id>.localhost`` proxy.
+# The capturing group exposes the bare origin (``http://localhost:<port>``)
+# so :func:`_backend_origin_from_page` can reuse the same pattern instead
+# of re-encoding the localhost-origin contract a second time.
+_BACKEND_ORIGIN_PATTERN: Final[re.Pattern[str]] = re.compile(r"^(http://localhost:\d+)(?:/|$)")
+_CHROME_PATH_PATTERN: Final[re.Pattern[str]] = re.compile(r"^http://localhost:\d+/_chrome(?:/|$|\?)")
+# The agent subdomain URL the create flow redirects to once the workspace's
+# ``system_interface`` is reachable. The desktop client wraps that origin in
+# the mngr_forward plugin, so the port may differ from the bare backend.
+_AGENT_SUBDOMAIN_PATTERN: Final[re.Pattern[str]] = re.compile(r"^http://agent-[a-f0-9]+\.localhost:\d+(?:/|$)")
 
-    [agent_types.claude]
-    auto_dismiss_dialogs = true
-    auto_allow_permissions = true
-    cli_args = "--dangerously-skip-permissions"
+# Default env tier when nothing is activated. Staging's ``client.toml`` is
+# committed under apps/minds/imbue/minds/config/envs/staging/ so the test
+# can boot the backend without an explicit ``minds env activate`` step.
+_DEFAULT_MINDS_ROOT_NAME: Final[str] = "minds-staging"
+_DEFAULT_MINDS_TIER: Final[str] = "staging"
 
-    [agent_types.main]
-    parent_type = "claude"
+_ELECTRON_BINARY: Final[Path] = _REPO_ROOT / "apps" / "minds" / "node_modules" / ".bin" / "electron"
+_ELECTRON_MAIN_JS: Final[Path] = _REPO_ROOT / "apps" / "minds" / "electron" / "main.js"
 
-    # Disable providers the test doesn't exercise so their plugin init (e.g.
-    # modal auth token lookup) doesn't fail the agent-creation subprocess.
-    [providers.modal]
-    is_enabled = false
+# Per-phase wall-clock budgets. ``@pytest.mark.timeout(900)`` is the
+# absolute cap; the per-phase budgets below are tight enough to fail with
+# a useful "stuck in <phase>" error before the overall timeout fires.
+_CDP_READY_TIMEOUT_SECONDS: Final[int] = 120
+_BACKEND_READY_TIMEOUT_SECONDS: Final[int] = 120
+_CREATE_FORM_TIMEOUT_SECONDS: Final[int] = 600
+_SYSTEM_INTERFACE_TIMEOUT_SECONDS: Final[int] = 180
 
-    [providers.docker]
-    is_enabled = false
-
-    [create_templates.main]
-    type = "main"
-
-    [create_templates.docker]
-    provider = "docker"
-    target_path = "/code/"
-    build_arg = ["--file=Dockerfile", "."]
-    idle_mode = "disabled"
-    """
-)
+# Pre-tested CSS selectors against the system_interface frontend at
+# `.external_worktrees/forever-claude-template/apps/system_interface/`.
+# `.dockview-workspace` is the wrapper div the DockviewWorkspace mithril
+# component mounts on first render.
+_DOCKVIEW_WORKSPACE_SELECTOR: Final[str] = "div.dockview-workspace"
 
 
-@pytest.fixture
-def minds_template_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[Path, None, None]:
-    """Create a controllable minds template repo for the e2e tests.
-
-    Writes a minimal `.{MNGR_ROOT_NAME}/settings.toml` defining the `main`
-    and `docker` templates that `AgentCreator._build_mngr_create_command`
-    passes to `mngr create`. Sets `MINDS_TEMPLATE_REPO` so the desktop client
-    uses the local path instead of cloning forever-claude-template from
-    GitHub; this sidesteps both the network clone and the fact that the
-    shared test fixtures pin `MNGR_ROOT_NAME` to a per-test `mngr-test-<id>`
-    (which would otherwise make mngr look for `.mngr-test-<id>/settings.toml`
-    inside a clone that only carries `.mngr/settings.toml`).
-    """
-    template_dir = tmp_path / "minds-template-repo"
-    template_dir.mkdir()
-    subprocess.run(["git", "init", "-q", str(template_dir)], check=True, capture_output=True)
-    # Claude-plugin provisioning refuses to start the agent if
-    # `.claude/settings.local.json` isn't gitignored, so pre-populate that.
-    (template_dir / ".gitignore").write_text(".claude/settings.local.json\n")
-    root_name = os.environ.get("MNGR_ROOT_NAME", "mngr")
-    config_dir = template_dir / f".{root_name}"
-    config_dir.mkdir()
-    (config_dir / "settings.toml").write_text(_MINIMAL_TEMPLATE_SETTINGS)
-    git_env = {
-        **os.environ,
-        "GIT_AUTHOR_NAME": "minds-test",
-        "GIT_AUTHOR_EMAIL": "minds-test@test.invalid",
-        "GIT_COMMITTER_NAME": "minds-test",
-        "GIT_COMMITTER_EMAIL": "minds-test@test.invalid",
-    }
-    subprocess.run(
-        ["git", "-C", str(template_dir), "add", "-A"],
-        check=True,
-        capture_output=True,
-    )
-    subprocess.run(
-        ["git", "-C", str(template_dir), "commit", "-q", "-m", "init"],
-        check=True,
-        capture_output=True,
-        env=git_env,
-    )
-    monkeypatch.setenv("MINDS_TEMPLATE_REPO", str(template_dir))
-    yield template_dir
-
-
-_AGENT_NAME = "forever"
-
-
-def _get_template_repo() -> str:
-    """Return the template repo source: a local path (from MINDS_TEMPLATE_REPO) or the git URL.
-
-    When MINDS_TEMPLATE_REPO is set, returns the expanded local path.
-    Otherwise returns the plain GitHub HTTPS URL -- forever-claude-template
-    is a public repo, so no credentials are needed.
-    """
-    env_value = os.environ.get("MINDS_TEMPLATE_REPO")
-    if env_value is not None:
-        return str(Path(env_value).expanduser())
-    return _TEMPLATE_GIT_URL
-
-
-def _configure_logging() -> None:
+def _configure_test_logging() -> None:
+    """Route loguru to stderr at DEBUG so the test's tracing shows up in pytest -s."""
     logger.remove()
     logger.add(
         sys.stderr,
         level="DEBUG",
-        format="{time:HH:mm:ss.SSS} | {level:<7} | {name}:{function}:{line} - {message}",
+        format="{time:HH:mm:ss.SSS} | {level:<7} | {function}:{line} - {message}",
     )
 
 
-def _load_env() -> None:
-    env_file = _REPO_ROOT / ".env"
-    if env_file.exists():
-        dotenv.load_dotenv(env_file)
-    test_env_file = _REPO_ROOT / ".test_env"
-    if test_env_file.exists():
-        dotenv.load_dotenv(test_env_file)
-
-
 def _find_free_port() -> int:
+    """Return a port the OS is currently willing to hand out for TCP.
+
+    Used to allocate the ``--remote-debugging-port`` Electron exposes. There
+    is a small race between us closing the socket and Electron binding the
+    port; on a quiet CI host the window is negligible. If a flaky bind ever
+    shows up, the retry should live in :func:`_wait_for_cdp` rather than
+    here (this helper exists to surface a single number).
+    """
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.bind(("127.0.0.1", 0))
         return s.getsockname()[1]
 
 
-def _destroy_agent(agent_name: str) -> None:
-    try:
-        subprocess.run(
-            ["uv", "run", "mngr", "destroy", agent_name, "--force"],
-            capture_output=True,
-            timeout=30,
-            text=True,
-            cwd=_REPO_ROOT,
-            env=clean_env(),
-        )
-    except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
-        logger.debug("mngr destroy {} failed (best-effort cleanup): {}", agent_name, exc)
+def _current_mngr_branch() -> str | None:
+    """Return the current branch name of the mngr repo, or None if detached.
 
-
-class DesktopClientFixture:
-    def __init__(self, tmp_dir: Path) -> None:
-        self.host = "127.0.0.1"
-        self.port = _find_free_port()
-        self.code = OneTimeCode("test-code-for-e2e-12345")
-        self.tmp_dir = tmp_dir
-        self._server: uvicorn.Server | None = None
-        self._thread: threading.Thread | None = None
-
-    @property
-    def base_url(self) -> str:
-        return f"http://{self.host}:{self.port}"
-
-    def start(self) -> None:
-        paths = WorkspacePaths(data_dir=self.tmp_dir)
-        auth_store = FileAuthStore(data_directory=paths.auth_dir)
-        auth_store.add_one_time_code(code=self.code)
-
-        backend_resolver = MngrCliBackendResolver()
-        # ``AgentCreator.root_concurrency_group`` is required; this e2e harness
-        # runs a slimmed minds-side server (no plugin subprocess) so the
-        # surviving resolver gets fed via direct test-harness writes rather
-        # than a real envelope stream.
-        root_cg = ConcurrencyGroup(name="test-root")
-        root_cg.__enter__()
-        agent_creator = AgentCreator(
-            paths=paths,
-            root_concurrency_group=root_cg,
-            notification_dispatcher=NotificationDispatcher.create(
-                is_electron=False, tkinter_module=None, is_macos=False
-            ),
-            system_interface_health_tracker=SystemInterfaceHealthTracker(),
-        )
-
-        app = create_desktop_client(
-            auth_store=auth_store,
-            backend_resolver=backend_resolver,
-            http_client=None,
-            agent_creator=agent_creator,
-        )
-
-        config = uvicorn.Config(app, host=self.host, port=self.port, log_level="warning")
-        self._server = uvicorn.Server(config)
-
-        self._thread = threading.Thread(target=self._server.run, daemon=True)
-        self._thread.start()
-
-        for _ in range(50):
-            try:
-                with socket.create_connection((self.host, self.port), timeout=0.1):
-                    logger.info("Desktop client started on {}:{}", self.host, self.port)
-                    return
-            except (ConnectionRefusedError, OSError):
-                threading.Event().wait(0.1)
-
-        pytest.fail("Desktop client did not start within 5 seconds")
-
-    def stop(self) -> None:
-        if self._server is not None:
-            self._server.should_exit = True
-        if self._thread is not None:
-            self._thread.join(timeout=5)
-
-
-def _create_agent_with_retry(
-    client: httpx.Client,
-    max_attempts: int = 2,
-    agent_name: str = _AGENT_NAME,
-    launch_mode: str = "LOCAL",
-) -> str:
-    """Create an agent via API, retrying on failure (e.g. provisioning timeout)."""
-    for attempt in range(max_attempts):
-        logger.info("Creating agent (attempt {}/{})", attempt + 1, max_attempts)
-        resp = client.post(
-            "/api/create-agent",
-            json={
-                "git_url": _get_template_repo(),
-                "agent_name": agent_name,
-                "launch_mode": launch_mode,
-            },
-        )
-        assert resp.status_code == 200, f"Create API failed: {resp.status_code} {resp.text}"
-        agent_id = resp.json()["agent_id"]
-
-        for i in range(300):
-            resp = client.get(f"/api/create-agent/{agent_id}/status")
-            if resp.status_code == 200:
-                data = resp.json()
-                status = data.get("status")
-                if status == "DONE":
-                    logger.info("Agent created in {} seconds", i)
-                    return agent_id
-                if status == "FAILED":
-                    error = data.get("error", "unknown")
-                    logger.warning("Creation failed: {}", error)
-                    if attempt < max_attempts - 1:
-                        logger.info("Retrying...")
-                        _destroy_agent(agent_name)
-                        break
-                    pytest.fail(f"Agent creation failed after {max_attempts} attempts: {error}")
-            threading.Event().wait(1)
-        else:
-            if attempt < max_attempts - 1:
-                logger.warning("Creation timed out, retrying...")
-                _destroy_agent(agent_name)
-                continue
-            pytest.fail(f"Agent creation timed out after {max_attempts} attempts")
-
-    pytest.fail("Unreachable")
-
-
-def _wait_for_web_server(client: httpx.Client, agent_id: str, timeout_seconds: int) -> None:
-    """Poll the desktop client until the agent's web server is discovered, then verify the proxy."""
-    logger.info("Waiting for server discovery (up to {}s)...", timeout_seconds)
-    for i in range(timeout_seconds):
-        resp = client.get(f"/agents/{agent_id}/servers/")
-        if resp.status_code == 200 and "system_interface" in resp.text:
-            logger.info("Web server discovered after {} seconds", i)
-            break
-        if i % 10 == 0 and i > 0:
-            logger.debug("Still waiting for discovery ({} seconds)...", i)
-        threading.Event().wait(1)
-    else:
-        resp = client.get(f"/agents/{agent_id}/servers/")
-        logger.error("Servers page ({}): {}", resp.status_code, resp.text[:500])
-        pytest.fail(f"Web server not discovered within {timeout_seconds} seconds")
-
-    resp = client.get(f"/agents/{agent_id}/system_interface/", follow_redirects=True)
-    assert resp.status_code == 200, f"Web proxy failed: {resp.status_code}"
-    logger.info("Web server accessible via proxy (status {})", resp.status_code)
-
-
-# docker / docker_sdk / tmux marks are required because `mngr create` shells
-# out to the docker binary, uses the Python docker SDK during provisioning,
-# and spawns the agent inside a tmux pane.
-#
-# Skipped pending a separate root-cause for "TUI send enter and wait timeout"
-# seen in test-docker-release CI (ubuntu-latest with real dockerd). The tmux
-# pane reaches the `env claude --session-id ...` prompt fine, but the initial
-# Enter keypress doesn't appear to register with claude's TUI -- pane
-# content sits unchanged for the full 90s wait.
-#
-# Notes for the follow-up:
-#   - This is NOT the same silent-hang the b2036ed20 env-wrap fixed; the
-#     silent-hang was 0 bytes of both stdout and stderr. Here claude paints
-#     its prompt and stays alive; only the subsequent Enter appears stuck.
-#   - The send flow here is already the shared `mngr message` internals --
-#     `mngr create --message /welcome` folds the initial send into the
-#     create step but reuses the same `_send_enter_and_wait` helper
-#     (libs/mngr/.../base_agent.py) that `mngr message` itself calls.
-#     Switching to an explicit two-step `mngr create` + `mngr message`
-#     wouldn't change the send path at all.
-#   - Most plausible cause is Modal-side weirdness around pty buffering
-#     and a notoriously slow sandbox filesystem: the send CAN go through,
-#     but sometimes not for well over 90s (the test's wait). Not a bug in
-#     the send flow so much as a bad fit between the test's timeout and
-#     Modal's worst-case latency here.
-#   - Ran green locally under offload-modal-release after b2036ed20
-#     (120/120), so the docker-release flavour is the only thing blocking.
-@pytest.mark.release
-@pytest.mark.docker
-@pytest.mark.docker_sdk
-@pytest.mark.tmux
-@pytest.mark.timeout(600)
-@pytest.mark.skip(reason="TUI send-enter timeout in test-docker-release; needs follow-up, see inline comment")
-def test_create_agent_e2e(tmp_path: Path, minds_template_repo: Path) -> None:
-    """Create an agent and verify its web server is accessible through the desktop client."""
-    _configure_logging()
-    _load_env()
-    os.environ["MINDS_WORKSPACE_NAME"] = _AGENT_NAME
-
-    _SIGNAL_FILE.unlink(missing_ok=True)
-    _destroy_agent(_AGENT_NAME)
-
-    server = DesktopClientFixture(tmp_path)
-    server.start()
-
-    client = httpx.Client(
-        base_url=server.base_url,
-        cookies={"minds_session": "skip"},
-        timeout=15.0,
+    Returning ``None`` for a detached HEAD lets the FCT resolver skip the
+    "branch matching" step rather than asking FCT for a ref named ``HEAD``.
+    """
+    result = subprocess.run(
+        ["git", "-C", str(_REPO_ROOT), "rev-parse", "--abbrev-ref", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=10,
     )
-    os.environ["SKIP_AUTH"] = "1"
+    branch = result.stdout.strip()
+    if not branch or branch == "HEAD":
+        return None
+    return branch
+
+
+def _fct_remote_has_branch(branch: str) -> bool:
+    """Return True iff the FCT public remote currently has ``branch``.
+
+    ``git ls-remote`` exits 0 either way; presence is signalled by stdout
+    being non-empty.
+    """
+    result = subprocess.run(
+        ["git", "ls-remote", "--heads", _FCT_REMOTE, branch],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    return bool(result.stdout.strip())
+
+
+def _shallow_clone_fct(branch: str, destination: Path) -> Path:
+    """Shallow-clone ``branch`` of the FCT public remote into ``destination``."""
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run(
+        ["git", "clone", "--depth", "1", "--branch", branch, _FCT_REMOTE, str(destination)],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    return destination
+
+
+def _resolve_fct_path(tmp_path: Path) -> Path:
+    """Return a local FCT working tree via the 3-step fallback chain.
+
+    Step 1 (preferred): operator-managed ``.external_worktrees/forever-claude-template/``.
+    Step 2: a shallow clone of the current mngr branch from the FCT remote
+    if FCT has a branch by that name.
+    Step 3: a shallow clone of FCT ``main``.
+    """
+    if _FCT_EXTERNAL_WORKTREE.is_dir() and (_FCT_EXTERNAL_WORKTREE / ".git").exists():
+        logger.info("Using FCT external worktree at {}", _FCT_EXTERNAL_WORKTREE)
+        return _FCT_EXTERNAL_WORKTREE
+
+    destination = tmp_path / "fct"
+    branch = _current_mngr_branch()
+    if branch is not None and _fct_remote_has_branch(branch):
+        logger.info("Shallow-cloning FCT branch {!r} into {}", branch, destination)
+        return _shallow_clone_fct(branch, destination)
+
+    logger.info(
+        "FCT remote does not have a branch named {!r}; falling back to {!r}",
+        branch,
+        _FCT_FALLBACK_BRANCH,
+    )
+    return _shallow_clone_fct(_FCT_FALLBACK_BRANCH, destination)
+
+
+def _resolve_minds_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Ensure ``MINDS_ROOT_NAME`` and ``MINDS_CLIENT_CONFIG_PATH`` are set.
+
+    Uses whatever the test runner has already activated. When
+    ``MINDS_ROOT_NAME`` is unset, falls back to the shared
+    ``minds-staging`` tier whose ``client.toml`` is committed in this
+    repo (so no external setup is required to run the test).
+    """
+    if os.environ.get("MINDS_ROOT_NAME"):
+        logger.info("Using inherited MINDS_ROOT_NAME={}", os.environ["MINDS_ROOT_NAME"])
+        return
+
+    config_path = repo_tier_client_config_path(_DEFAULT_MINDS_TIER)
+    if not config_path.is_file():
+        raise FileNotFoundError(
+            f"Default tier {_DEFAULT_MINDS_TIER!r} has no client.toml at {config_path}; "
+            "either activate a minds env explicitly or restore the staging config."
+        )
+    monkeypatch.setenv("MINDS_ROOT_NAME", _DEFAULT_MINDS_ROOT_NAME)
+    monkeypatch.setenv("MINDS_CLIENT_CONFIG_PATH", str(config_path))
+    logger.info(
+        "No MINDS_ROOT_NAME activated; defaulting to {} (config={})",
+        _DEFAULT_MINDS_ROOT_NAME,
+        config_path,
+    )
+
+
+def _build_electron_env(workspace_git_url: Path, workspace_name: str) -> dict[str, str]:
+    """Return the env vars the Electron child process should inherit.
+
+    Mirrors ``just minds-start``: passes the FCT path + agent name through
+    the ``MINDS_WORKSPACE_*`` prefill vars (honored only in dev tiers --
+    see ``_dev_only_workspace_default`` in templates.py), and scrubs any
+    ANTHROPIC creds the operator's shell might have exported so they
+    don't silently leak into every workspace the test creates.
+    """
+    env = dict(os.environ)
+    env["MINDS_WORKSPACE_GIT_URL"] = str(workspace_git_url)
+    env["MINDS_WORKSPACE_NAME"] = workspace_name
+    # Pin MNGR_ROOT_NAME back to "mngr" for the Electron child so the
+    # spawned `mngr create` subprocess finds FCT's .mngr/settings.toml
+    # (which defines the `main` + `docker` create templates). The minds
+    # project conftest sets MNGR_ROOT_NAME=mngr-test-<timestamp> for test
+    # isolation, but that would make mngr look for
+    # .mngr-test-<timestamp>/settings.toml inside the FCT clone -- a file
+    # that does not exist, causing mngr to abort with
+    # `Template 'main' not found. No templates are configured`. MNGR_PREFIX
+    # (the tmux session prefix) stays test-isolated so the spawned tmux
+    # session does not collide with other tests' sessions.
+    env["MNGR_ROOT_NAME"] = "mngr"
+    env.pop("ANTHROPIC_API_KEY", None)
+    env.pop("ANTHROPIC_BASE_URL", None)
+    return env
+
+
+def _stream_electron_output(process: subprocess.Popen[bytes]) -> None:
+    """Drain Electron's stdout+stderr into the loguru sink in a background thread.
+
+    Electron is verbose; without draining the pipes the OS buffer fills and
+    Electron blocks. We don't parse anything; the test reads state from CDP.
+    """
+
+    def _drain(stream: IO[bytes], prefix: str) -> None:
+        for raw_line in iter(stream.readline, b""):
+            line = raw_line.decode("utf-8", errors="replace").rstrip()
+            if line:
+                logger.debug("[{}] {}", prefix, line)
+
+    # ``_launched_electron`` always opens both pipes with ``subprocess.PIPE``;
+    # the explicit None check narrows ``Popen.stdout``/``stderr`` from
+    # ``IO[bytes] | None`` to ``IO[bytes]`` and turns a future regression
+    # (someone drops ``stdout=PIPE``) into an obvious assertion failure rather
+    # than a silent thread crash on ``None.readline``.
+    if process.stdout is None or process.stderr is None:
+        raise AssertionError("Electron subprocess was launched without piped stdout/stderr")
+    for stream, prefix in ((process.stdout, "electron-out"), (process.stderr, "electron-err")):
+        thread = threading.Thread(target=_drain, args=(stream, prefix), daemon=True)
+        thread.start()
+
+
+@contextmanager
+def _launched_electron(
+    workspace_git_url: Path,
+    workspace_name: str,
+    debug_port: int,
+) -> Iterator[subprocess.Popen[bytes]]:
+    """Start the Electron app, yield the process, and always tear it down.
+
+    SIGTERM with a 5s grace, then SIGKILL. The Electron main process owns
+    the backend subprocess and the renderer; clean termination cascades.
+    """
+    if not _ELECTRON_BINARY.is_file():
+        raise FileNotFoundError(
+            f"Electron binary missing at {_ELECTRON_BINARY}. Run `cd apps/minds && pnpm install` first."
+        )
+
+    cmd = [
+        str(_ELECTRON_BINARY),
+        str(_ELECTRON_MAIN_JS),
+        f"--remote-debugging-port={debug_port}",
+        # GitHub Actions runners ship Electron's chrome-sandbox binary
+        # without the setuid bit, so the renderer aborts on launch with
+        # `FATAL:setuid_sandbox_host.cc -- The SUID sandbox helper
+        # binary was found, but is not configured correctly`. Disabling
+        # the sandbox sidesteps the chown/chmod dance and matches the
+        # well-trodden CI pattern (Playwright's own electron docs ship
+        # `--no-sandbox` for the same reason). Acceptable here because
+        # the binary we drive is a dev-mode Electron launched against
+        # our own backend, not a downloaded one.
+        "--no-sandbox",
+    ]
+    logger.info("Launching Electron: {}", " ".join(cmd))
+    process = subprocess.Popen(
+        cmd,
+        cwd=str(_REPO_ROOT),
+        env=_build_electron_env(workspace_git_url, workspace_name),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    _stream_electron_output(process)
+    try:
+        yield process
+    finally:
+        if process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                logger.warning("Electron did not exit on SIGTERM; sending SIGKILL")
+                process.kill()
+                process.wait(timeout=5)
+
+
+def _wait_for_cdp(debug_port: int, timeout_seconds: int) -> None:
+    """Poll the Chrome DevTools Protocol HTTP endpoint until it responds.
+
+    A 200 from ``/json/version`` means the Electron renderer's debugger is
+    accepting connections; Playwright's ``connect_over_cdp`` will succeed
+    immediately after.
+    """
+    deadline = time.monotonic() + timeout_seconds
+    last_error: str | None = None
+    while time.monotonic() < deadline:
+        try:
+            response = httpx.get(f"http://127.0.0.1:{debug_port}/json/version", timeout=2.0)
+            if response.status_code == 200:
+                return
+            last_error = f"status={response.status_code}"
+        except (httpx.HTTPError, OSError) as exc:
+            last_error = repr(exc)
+        threading.Event().wait(timeout=0.5)
+    raise TimeoutError(f"CDP at port {debug_port} did not respond within {timeout_seconds}s (last: {last_error})")
+
+
+def _pick_content_page(browser: Browser, timeout_seconds: int) -> Page:
+    """Return the Electron WebContentsView that serves the main content.
+
+    Electron's BaseWindow has multiple WebContentsView's (chrome view,
+    content view, requests panel, sidebar). Each is its own CDP page. The
+    content view is the one whose URL is on the backend origin but is NOT
+    rooted at ``/_chrome``. We poll until that page exists because Electron
+    spawns the backend asynchronously after launch.
+    """
+    deadline = time.monotonic() + timeout_seconds
+    last_observed: list[str] = []
+    while time.monotonic() < deadline:
+        last_observed = []
+        for context in browser.contexts:
+            for page in context.pages:
+                url = page.url
+                last_observed.append(url)
+                if not _BACKEND_ORIGIN_PATTERN.match(url):
+                    continue
+                if _CHROME_PATH_PATTERN.match(url):
+                    continue
+                logger.info("Picked Electron content page at {}", url)
+                return page
+        threading.Event().wait(timeout=0.5)
+    raise TimeoutError(
+        f"No Electron content page settled on a backend URL within {timeout_seconds}s; observed pages: {last_observed}"
+    )
+
+
+def _backend_origin_from_page(page: Page) -> str:
+    """Extract ``http://localhost:<backend_port>`` from a content-view page URL.
+
+    Reuses :data:`_BACKEND_ORIGIN_PATTERN` so the localhost-origin contract
+    is encoded in exactly one place; the pattern's capturing group exposes
+    the bare origin without re-parsing the URL.
+    """
+    match = _BACKEND_ORIGIN_PATTERN.match(page.url)
+    if match is None:
+        raise AssertionError(f"Content page URL is not on the backend origin: {page.url!r}")
+    return match.group(1)
+
+
+def _ensure_field_value(page: Page, selector: str, expected_value: str) -> None:
+    """Type ``expected_value`` into the form field if it isn't already there.
+
+    Handles both the prefilled-via-env-var case (dev tiers) and the
+    blank-form case (shared tiers like ``minds-staging`` where
+    ``_dev_only_workspace_default`` deliberately ignores the
+    ``MINDS_WORKSPACE_*`` env vars).
+    """
+    current_value = page.input_value(selector)
+    if current_value == expected_value:
+        logger.debug("Field {} already has expected value {!r}", selector, expected_value)
+        return
+    logger.info("Typing {!r} into {}", expected_value, selector)
+    page.fill(selector, expected_value)
+
+
+def _destroy_agent_best_effort(workspace_name: str) -> None:
+    """Tear down the mngr agent created during the test. Always survives.
+
+    ``mngr destroy`` may legitimately fail (e.g. the test crashed before
+    create succeeded, the docker daemon stopped). We log and swallow.
+    """
+    cmd = ["uv", "run", "mngr", "destroy", workspace_name, "--force"]
+    logger.info("Cleanup: {}", " ".join(cmd))
+    try:
+        completed = subprocess.run(
+            cmd,
+            cwd=str(_REPO_ROOT),
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        logger.warning("mngr destroy {} raised {!r}", workspace_name, exc)
+        return
+    if completed.returncode != 0:
+        logger.warning(
+            "mngr destroy {} exited {} (stderr: {})",
+            workspace_name,
+            completed.returncode,
+            completed.stderr.strip(),
+        )
+
+
+# Carrying only the resource marks the *test process* sees a host-side
+# invocation of, after the test passes end-to-end:
+#
+# - `docker` (CLI) is invoked by the spawned `mngr create` subprocess to
+#   start the container; the PATH-injected resource-guard wrapper catches it.
+# - `rsync` is invoked by `mngr create` to overlay the FCT worktree onto
+#   the internal clone; same PATH wrapper.
+#
+# Marks we deliberately do *not* carry, and why:
+#
+# - `tmux` -- the workspace agent's tmux session lives *inside* the docker
+#   container, never on the host, so the host's tmux wrapper never ticks
+#   the counter and the guard fires post-hoc with "marked tmux but never
+#   invoked tmux".
+# - `docker_sdk` -- the Python `docker` SDK guard is a wrapper around the
+#   in-process SDK import, not a PATH wrapper, so it only sees uses from
+#   *this* pytest process. mngr's docker SDK calls happen in the spawned
+#   subprocess and never reach our SDK wrapper, so the mark fires the
+#   same "marked but never invoked" check.
+@pytest.mark.acceptance
+@pytest.mark.docker
+@pytest.mark.rsync
+@pytest.mark.minds_electron
+@pytest.mark.timeout(900)
+def test_create_local_docker_workspace_via_electron(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Drive the Electron app to create a local Docker workspace from FCT.
+
+    Asserts the workspace's ``system_interface`` dockview UI renders
+    through the desktop client proxy. Cleans up the mngr agent in
+    ``finally`` regardless of outcome.
+    """
+    _configure_test_logging()
+    _resolve_minds_env(monkeypatch)
+
+    fct_path = _resolve_fct_path(tmp_path)
+    workspace_name = f"forever-{get_short_random_string()}"
+    debug_port = _find_free_port()
+    logger.info("Workspace name: {}; CDP debug port: {}", workspace_name, debug_port)
 
     try:
-        # Create agent via API (with retry for transient provisioning failures)
-        agent_id = _create_agent_with_retry(client, max_attempts=2)
-        logger.info("Agent ready: {}", agent_id)
+        with _launched_electron(fct_path, workspace_name, debug_port):
+            _wait_for_cdp(debug_port, _CDP_READY_TIMEOUT_SECONDS)
+            with sync_playwright() as playwright:
+                browser = playwright.chromium.connect_over_cdp(f"http://127.0.0.1:{debug_port}")
+                try:
+                    page = _pick_content_page(browser, _BACKEND_READY_TIMEOUT_SECONDS)
+                    backend_origin = _backend_origin_from_page(page)
+                    logger.info("Backend origin: {}", backend_origin)
 
-        # Wait for the desktop client to discover the agent's web server
-        # and verify it is accessible through the proxy.
-        _wait_for_web_server(client, agent_id, timeout_seconds=120)
+                    logger.info("Navigating to /create")
+                    page.goto(f"{backend_origin}/create", wait_until="domcontentloaded")
+                    page.wait_for_selector("#create-form", state="attached", timeout=10_000)
 
-        logger.info("Server: {}", server.base_url)
-        logger.info("Agent servers: {}/agents/{}/servers/", server.base_url, agent_id)
-        logger.info("Waiting for signal file: {}", _SIGNAL_FILE)
-        logger.info("Create it to finish: touch {}", _SIGNAL_FILE)
+                    # The fields are inside the collapsed "Advanced options"
+                    # section; opening the section first lets us see typed
+                    # values during debugging and matches what a user would do.
+                    page.click("#toggle-advanced")
+                    page.wait_for_selector("#git_url:visible", timeout=5_000)
 
-        while not _SIGNAL_FILE.exists():
-            threading.Event().wait(1)
+                    _ensure_field_value(page, "#host_name", workspace_name)
+                    _ensure_field_value(page, "#git_url", str(fct_path))
+                    # DOCKER + SUBSCRIPTION are the defaults when no account
+                    # is selected; don't touch the launch_mode / ai_provider
+                    # selects so the test stays robust to future option
+                    # reorderings in the form.
 
-        logger.info("Signal received, tearing down...")
+                    logger.info("Submitting create form")
+                    page.click("#create-submit")
+                    page.wait_for_url(
+                        _AGENT_SUBDOMAIN_PATTERN,
+                        timeout=_CREATE_FORM_TIMEOUT_SECONDS * 1000,
+                    )
+                    logger.info("Workspace ready at {}", page.url)
 
+                    page.wait_for_selector(
+                        _DOCKVIEW_WORKSPACE_SELECTOR,
+                        state="visible",
+                        timeout=_SYSTEM_INTERFACE_TIMEOUT_SECONDS * 1000,
+                    )
+                    logger.info("system_interface dockview rendered; test passed")
+                finally:
+                    browser.close()
     finally:
-        client.close()
-        _destroy_agent(_AGENT_NAME)
-        server.stop()
-        _SIGNAL_FILE.unlink(missing_ok=True)
+        _destroy_agent_best_effort(workspace_name)

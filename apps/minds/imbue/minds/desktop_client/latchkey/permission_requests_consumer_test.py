@@ -8,34 +8,80 @@ from typing import Final
 import httpx
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.minds.desktop_client.latchkey.gateway_client import FileSharingRequestPayload
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClient
+from imbue.minds.desktop_client.latchkey.gateway_client import PermissionEffect
+from imbue.minds.desktop_client.latchkey.gateway_client import PredefinedRequestPayload
 from imbue.minds.desktop_client.latchkey.gateway_client import StreamedPermissionRequest
 from imbue.minds.desktop_client.latchkey.permission_requests_consumer import PermissionRequestsConsumer
 from imbue.minds.desktop_client.latchkey.permission_requests_consumer import streamed_request_to_event
-from imbue.minds.desktop_client.request_events import LatchkeyPermissionRequestEvent
+from imbue.minds.desktop_client.request_events import LatchkeyFileSharingPermissionRequestEvent
+from imbue.minds.desktop_client.request_events import LatchkeyPredefinedPermissionRequestEvent
+from imbue.minds.desktop_client.request_events import RequestEvent
 from imbue.minds.desktop_client.request_events import RequestType
 
 _POLL_TIMEOUT_SECONDS: Final[float] = 2.0
 _POLL_INTERVAL_SECONDS: Final[float] = 0.02
 
 
-def test_streamed_request_to_event_maps_fields_and_uses_request_id_as_event_id() -> None:
-    """The translator reuses ``request_id`` as ``event_id`` so the inbox keys join cleanly."""
-    streamed = StreamedPermissionRequest(
-        request_id="abc123",
-        agent_id="agent-9",
-        scope="slack-api",
-        permissions=("slack-read-all",),
-        rationale="needs to read messages",
+def _make_streamed_predefined(
+    request_id: str = "abc123",
+    agent_id: str = "agent-9",
+    scope: str = "slack-api",
+    permissions: tuple[str, ...] = ("slack-read-all",),
+    rationale: str = "needs to read messages",
+) -> StreamedPermissionRequest:
+    return StreamedPermissionRequest(
+        request_id=request_id,
+        agent_id=agent_id,
+        rationale=rationale,
+        request_type="predefined",
+        payload=PredefinedRequestPayload(scope=scope, permissions=permissions),
+        target="/tmp/permissions.json",
+        effect=PermissionEffect(rules=({scope: permissions},)),
     )
-    event = streamed_request_to_event(streamed)
-    assert isinstance(event, LatchkeyPermissionRequestEvent)
+
+
+def _make_streamed_file_sharing(
+    request_id: str = "def456",
+    agent_id: str = "agent-7",
+    path: str = "/home/user/data.txt",
+    access: str = "READ",
+    rationale: str = "needs data",
+) -> StreamedPermissionRequest:
+    return StreamedPermissionRequest(
+        request_id=request_id,
+        agent_id=agent_id,
+        rationale=rationale,
+        request_type="file-sharing",
+        payload=FileSharingRequestPayload.model_validate({"path": path, "access": access}),
+        target="/tmp/permissions.json",
+        effect=PermissionEffect(rules=({"latchkey-self": ("minds-file-server-deadbeef",)},)),
+    )
+
+
+def test_streamed_request_to_event_maps_predefined_fields() -> None:
+    """Predefined-type streamed records translate to LatchkeyPredefinedPermissionRequestEvent."""
+    event = streamed_request_to_event(_make_streamed_predefined())
+    assert isinstance(event, LatchkeyPredefinedPermissionRequestEvent)
     assert str(event.event_id) == "abc123"
     assert event.agent_id == "agent-9"
     assert event.scope == "slack-api"
     assert event.permissions == ("slack-read-all",)
     assert event.rationale == "needs to read messages"
     assert event.request_type == str(RequestType.LATCHKEY_PERMISSION)
+
+
+def test_streamed_request_to_event_maps_file_sharing_fields() -> None:
+    """File-sharing-type streamed records translate to LatchkeyFileSharingPermissionRequestEvent."""
+    event = streamed_request_to_event(_make_streamed_file_sharing(access="WRITE"))
+    assert isinstance(event, LatchkeyFileSharingPermissionRequestEvent)
+    assert str(event.event_id) == "def456"
+    assert event.agent_id == "agent-7"
+    assert event.path == "/home/user/data.txt"
+    assert event.access == "WRITE"
+    assert event.rationale == "needs data"
+    assert event.request_type == str(RequestType.FILE_SHARING_PERMISSION)
 
 
 def _wait_until(predicate, timeout: float = _POLL_TIMEOUT_SECONDS) -> bool:
@@ -57,16 +103,20 @@ def test_consumer_dispatches_each_streamed_request_to_on_request() -> None:
             {
                 "request_id": "r1",
                 "agent_id": "a1",
-                "scope": "slack-api",
-                "permissions": ["slack-read-all"],
                 "rationale": "x",
+                "request_type": "predefined",
+                "payload": {"scope": "slack-api", "permissions": ["slack-read-all"]},
+                "target": "/tmp/permissions.json",
+                "effect": {"rules": [{"slack-api": ["slack-read-all"]}]},
             },
             {
                 "request_id": "r2",
                 "agent_id": "a2",
-                "scope": "github-rest-api",
-                "permissions": [],
                 "rationale": "y",
+                "request_type": "file-sharing",
+                "payload": {"path": "/home/user/log.txt", "access": "READ"},
+                "target": "/tmp/permissions.json",
+                "effect": {"rules": [{"latchkey-self": ["minds-file-server-cafef00d"]}]},
             },
         )
     )
@@ -77,10 +127,10 @@ def test_consumer_dispatches_each_streamed_request_to_on_request() -> None:
     # two-line payload is enough: when the transport closes, the
     # consumer goes through one reconnect-backoff iteration and we
     # signal stop().
-    delivered: list[LatchkeyPermissionRequestEvent] = []
+    delivered: list[RequestEvent] = []
     lock = threading.Lock()
 
-    def _on_request(event: LatchkeyPermissionRequestEvent) -> None:
+    def _on_request(event: RequestEvent) -> None:
         with lock:
             delivered.append(event)
 
@@ -103,4 +153,7 @@ def test_consumer_dispatches_each_streamed_request_to_on_request() -> None:
         finally:
             consumer.stop()
     assert {str(e.event_id) for e in delivered} == {"r1", "r2"}
-    assert {e.scope for e in delivered} == {"slack-api", "github-rest-api"}
+    predefined = next(e for e in delivered if isinstance(e, LatchkeyPredefinedPermissionRequestEvent))
+    file_sharing = next(e for e in delivered if isinstance(e, LatchkeyFileSharingPermissionRequestEvent))
+    assert predefined.scope == "slack-api"
+    assert file_sharing.path == "/home/user/log.txt"

@@ -4,8 +4,6 @@
 
 See the [`mngr create` command](../commands/primary/create.md)  for details about adding environment variables into the env file for new hosts and agents.
 
-See the [`mngr provision` command](../commands/secondary/provision.md) for details about modifying environment variables for existing hosts and agents.
-
 ## Scope and lifecycle
 
 Environment variables are configured for agents during provisioning and for hosts during creation.

@@ -52,6 +52,59 @@ class FakeEofChannel:
         self._sock.close()
 
 
+class _SocketBackedChannel:
+    """Stub paramiko-channel-like that wraps a real socket.
+
+    Used by the round-trip relay test below to drive ``relay_data`` against a
+    pair of real sockets without spinning up a paramiko transport.
+    """
+
+    _sock: socket.socket
+
+    @classmethod
+    def create(cls, sock: socket.socket) -> "_SocketBackedChannel":
+        instance = cls.__new__(cls)
+        object.__setattr__(instance, "_sock", sock)
+        return instance
+
+    def sendall(self, data: bytes) -> None:
+        self._sock.sendall(data)
+
+    def recv(self, size: int) -> bytes:
+        return self._sock.recv(size)
+
+    def recv_ready(self) -> bool:
+        return True
+
+    def fileno(self) -> int:
+        return self._sock.fileno()
+
+    def close(self) -> None:
+        self._sock.close()
+
+
+def test_relay_data_forwards_between_socket_pair() -> None:
+    """Data sent on one end of a socketpair reaches the other via the relay."""
+    app_sock, relay_sock_a = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+    channel_sock, relay_sock_b = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+
+    fake_channel = _SocketBackedChannel.create(relay_sock_b)
+    relay_thread = threading.Thread(target=relay_data, args=(relay_sock_a, fake_channel), daemon=True)
+    relay_thread.start()
+
+    app_sock.settimeout(3.0)
+    channel_sock.settimeout(3.0)
+
+    app_sock.sendall(b"hello from client")
+    channel_sock.sendall(b"hello from backend")
+    data = app_sock.recv(4096)
+    assert data == b"hello from backend"
+
+    app_sock.close()
+    channel_sock.close()
+    relay_thread.join(timeout=5.0)
+
+
 def test_relay_data_terminates_when_channel_has_received_eof() -> None:
     """Regression: half-closed channel (EOF received) must not spin the relay loop.
 

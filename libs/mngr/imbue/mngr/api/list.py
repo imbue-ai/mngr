@@ -19,13 +19,17 @@ from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.pure import pure
 from imbue.mngr.api.discover import warn_on_duplicate_host_names
+from imbue.mngr.api.discovery_events import DiscoveredProvider
+from imbue.mngr.api.discovery_events import DiscoveryError
 from imbue.mngr.api.discovery_events import emit_discovery_error_event
 from imbue.mngr.api.discovery_events import emit_host_ssh_info
 from imbue.mngr.api.discovery_events import extract_agents_and_hosts_from_full_listing
+from imbue.mngr.api.discovery_events import make_discovered_provider
 from imbue.mngr.api.discovery_events import write_full_discovery_snapshot
 from imbue.mngr.api.providers import get_provider_instance
 from imbue.mngr.api.providers import list_provider_names_to_load
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.config.data_types import ProviderInstanceConfig
 from imbue.mngr.errors import BaseMngrError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import ProviderDiscoveryError
@@ -40,6 +44,7 @@ from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import DiscoveredHost
 from imbue.mngr.primitives import ErrorBehavior
 from imbue.mngr.primitives import HostId
+from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.utils.cel_utils import apply_compiled_cel_filters
 from imbue.mngr.utils.cel_utils import build_cel_context
@@ -270,24 +275,97 @@ def _maybe_write_full_discovery_snapshot(
 ) -> None:
     """Write a full discovery snapshot when this listing represents all known agents.
 
-    A snapshot is written only when the listing is complete and error-free:
+    A snapshot is written whenever the listing represents the full state:
     - All providers were queried (no provider_names filter)
     - No CEL filters were applied (the result contains every agent)
-    - No errors occurred during listing (otherwise we may be missing agents)
+
+    Per-provider discovery errors are NOT a reason to skip emission: the
+    snapshot is authoritative state, and consumers need to see which
+    providers succeeded vs. failed in order to render reality. The `providers`
+    and `error_by_provider_name` fields carry that information.
     """
     is_full_listing = provider_names is None and not include_filters and not exclude_filters
     if not is_full_listing:
         return
-    if result.errors:
-        logger.trace("Skipping full discovery snapshot: {} error(s) during listing", len(result.errors))
+    # Skip if any error is something other than a per-provider error. This
+    # filter currently lumps three classes together: plain `ErrorInfo` from the
+    # top-level `except MngrError` (truly non-attributable), plus `HostErrorInfo`
+    # and `AgentErrorInfo` (attributable to a host/agent but not modeled in the
+    # snapshot today). In all three cases the result may be structurally
+    # incomplete in ways the snapshot's `error_by_provider_name` field cannot
+    # represent, so we skip emission rather than mislead consumers. Only
+    # per-provider failures are handled in-band via `error_by_provider_name`;
+    # surfacing per-host / per-agent errors in the snapshot is out of scope for
+    # this change.
+    non_provider_errors = [e for e in result.errors if not isinstance(e, ProviderErrorInfo)]
+    if non_provider_errors:
+        logger.trace(
+            "Skipping full discovery snapshot: {} non-provider-attributable error(s) during listing",
+            len(non_provider_errors),
+        )
         return
     try:
         discovered_agents, discovered_hosts, host_ssh_infos = extract_agents_and_hosts_from_full_listing(result.agents)
-        write_full_discovery_snapshot(mngr_ctx.config, discovered_agents, discovered_hosts)
+        snapshot_providers, error_by_provider_name = _build_provider_snapshot_state(mngr_ctx, result)
+        write_full_discovery_snapshot(
+            mngr_ctx.config,
+            discovered_agents,
+            discovered_hosts,
+            providers=snapshot_providers,
+            error_by_provider_name=error_by_provider_name,
+        )
         for host_id, ssh_info in host_ssh_infos:
             emit_host_ssh_info(mngr_ctx.config, host_id, ssh_info)
     except (MngrError, OSError) as e:
         logger.warning("Failed to write full discovery snapshot: {}", e)
+
+
+def _build_provider_snapshot_state(
+    mngr_ctx: MngrContext,
+    result: ListResult,
+) -> tuple[tuple[DiscoveredProvider, ...], dict[ProviderInstanceName, DiscoveryError]]:
+    """Derive the snapshot's providers and error_by_provider_name fields from listing data.
+
+    A provider lands in `error_by_provider_name` if it has any ``ProviderErrorInfo`` on
+    ``result.errors`` (whether the failure was in construction or in discovery; both
+    paths use the same error type). Every other provider that we attempted to load
+    in this listing lands in `providers` -- including ones that successfully reported
+    zero hosts/agents (e.g. ProviderEmptyError, which is silently skipped).
+    """
+    error_by_provider_name: dict[ProviderInstanceName, DiscoveryError] = {}
+    for error_info in result.errors:
+        if isinstance(error_info, ProviderErrorInfo):
+            error_by_provider_name[error_info.provider_name] = DiscoveryError(
+                type_name=error_info.exception_type,
+                message=error_info.message,
+                provider_name=error_info.provider_name,
+            )
+
+    candidate_names = list_provider_names_to_load(mngr_ctx)
+    snapshot_providers: list[DiscoveredProvider] = []
+    for name in candidate_names:
+        if name in error_by_provider_name:
+            continue
+        config = _get_provider_config_for_snapshot(name, mngr_ctx)
+        snapshot_providers.append(make_discovered_provider(name, config))
+    return tuple(snapshot_providers), error_by_provider_name
+
+
+def _get_provider_config_for_snapshot(
+    name: ProviderInstanceName,
+    mngr_ctx: MngrContext,
+) -> ProviderInstanceConfig:
+    """Return the config block for `name`, or a base default for backend-default instances.
+
+    Providers named explicitly in `mngr_ctx.config.providers` use their configured
+    block; backends that are loaded via the implicit-default path (no explicit
+    `[providers.<backend>]` block) get a minimal placeholder so the snapshot can
+    still surface them.
+    """
+    explicit = mngr_ctx.config.providers.get(name)
+    if explicit is not None:
+        return explicit
+    return ProviderInstanceConfig(backend=ProviderBackendName(str(name)))
 
 
 def _construct_and_discover_for_provider(
@@ -326,8 +404,8 @@ def _construct_and_discover_for_provider(
             # extract provider_name from ProviderDiscoveryError) can attribute
             # the failure to this provider. The CONTINUE branch below already
             # carries provider_name through emit_discovery_error_event; ABORT
-            # needs the same attribution so minds' auto-disable-on-auth-error
-            # path sees a usable provider_name on the emitted event.
+            # needs the same attribution so downstream consumers (e.g. minds'
+            # providers panel) see a usable provider_name on the emitted event.
             raise ProviderDiscoveryError(provider_name, e) from e
         logger.opt(exception=e).error("Error discovering agents for provider {}", provider_name)
         emit_discovery_error_event(
