@@ -69,9 +69,14 @@ the right project's consolidated files.
    `CHANGELOG.md` is a notable-only summary: if a change isn't notable,
    omit it from `CHANGELOG.md` entirely rather than forcing a bullet for
    it. The canonical example is a change that only affects tests rather
-   than user-facing behavior — skip it. If none of a project's entries
-   are notable, it is fine to produce no `CHANGELOG.md` bullets for it at
-   all.
+   than user-facing behavior — skip it. For a library project,
+   "user-facing" includes the public API surface: added/removed/renamed
+   exported symbols, changed signatures, and changed subclass or
+   extension contracts are notable (they affect the library's consumers)
+   even when no end-user behavior changes; a pure internal refactor that
+   leaves the public surface unchanged is not. If none of a project's
+   entries are notable, it is fine to produce no `CHANGELOG.md` bullets
+   for it at all.
 
    Exception for the `dev` project: `dev` tracks repo-level developer
    tooling (CI workflows, scripts, build config, ratchets, and the
