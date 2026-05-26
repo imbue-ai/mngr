@@ -96,6 +96,12 @@ def configure_logging() -> None:
     )
 
 
+# Deliberate duplicate of ``imbue.mngr.utils.testing.find_free_port``: this
+# module ships in the ``imbue-minds`` wheel, but ``imbue.mngr.utils.testing``
+# is excluded from the ``imbue-mngr`` wheel and imports ``pytest`` at module
+# scope (a non-runtime dep). Importing from there would either break the
+# wheel install (missing module) or force pytest into a runtime dep. Keep
+# the two copies in sync if either ever changes.
 def find_free_port() -> int:
     """Return a port the OS is currently willing to hand out for TCP.
 
