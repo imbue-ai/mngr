@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # mngr_transcript_lib.sh -- Shared primitives for raw-transcript streamers.
 #
-# Sourced by per-agent stream_transcript.sh scripts (claude, gemini, ...) to
+# Sourced by per-agent stream_transcript.sh scripts (claude, ...) to
 # share the parts of raw-transcript capture that are structurally identical
 # regardless of the agent's native session schema:
 #
@@ -32,8 +32,8 @@
 #
 #   - mngr_transcript_percent_encode_path PATH
 #       Echo PATH with characters not safe in a single filename ('/', '%')
-#       percent-encoded. Used by streamers whose offset keys are file paths
-#       (gemini); streamers whose keys are uuid-shaped (claude) can skip it.
+#       percent-encoded. Used by streamers whose offset keys are file paths;
+#       streamers whose keys are uuid-shaped (claude) can skip it.
 #
 # All functions are pure / read-only except for population of
 # _MNGR_TRANSCRIPT_ID_SET. Callers are responsible for declaring that array

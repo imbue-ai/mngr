@@ -1,1 +1,0 @@
-- `GeminiAgentConfig.merge_with` follows mngr's new assign-by-default semantics: an override's `cli_args` replaces the base's (rather than concatenating). Use the new `cli_args__extend` TOML key to opt into additive behavior. See the `mngr` changelog entry for the full breaking-change writeup.
