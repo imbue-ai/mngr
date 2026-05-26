@@ -1,28 +1,27 @@
 #!/usr/bin/env bash
-# Background tasks supervisor for gemini agents.
+# Background tasks supervisor for antigravity agents.
 #
-# This script runs continuously while the agent's tmux session is alive,
-# supervising the watchers that capture gemini transcripts:
-#   1. Raw transcript streaming: launches stream_transcript.sh which tails
-#      gemini's session JSONL files (filtered by .project_root) into
-#      $MNGR_AGENT_STATE_DIR/logs/gemini_transcript/events.jsonl. Always
-#      launched -- the raw transcript is required by HasTranscriptMixin.
-#   2. Common transcript conversion (optional): launches common_transcript.sh,
-#      which converts the raw stream into the agent-agnostic common format at
-#      $MNGR_AGENT_STATE_DIR/events/gemini/common_transcript/events.jsonl,
-#      only if that script is present in commands/. GeminiAgent.provision()
-#      skips writing the converter when emit_common_transcript=False, so
-#      disabled-emit takes effect simply via the on-disk -x check.
+# Runs continuously while the agent's tmux session is alive, supervising:
+#   1. Raw transcript streaming: stream_transcript.sh tails agy's per-
+#      conversation JSONL transcripts (filtered to conversation IDs that
+#      this agent created, discovered by grep'ing agy's own --log-file)
+#      into $MNGR_AGENT_STATE_DIR/logs/antigravity_transcript/events.jsonl.
+#   2. Common transcript conversion (optional): common_transcript.sh
+#      converts the raw stream into the agent-agnostic common format at
+#      $MNGR_AGENT_STATE_DIR/events/antigravity/common_transcript/events.jsonl.
+#      Only launched if the script is present in commands/ (provision()
+#      writes it when emit_common_transcript=True).
 #
 # Restart dead children, clean them up on exit, and dedup via pidfile so
-# concurrent re-runs (eg. agent restart) don't pile up watchers racing on
-# the same offset files and output file. Mirrors the structure of
-# claude_background_tasks.sh; gemini has no activity-tracker equivalent so
-# the loop body only restarts watchers.
+# concurrent re-runs (e.g. agent restart) don't pile up watchers racing
+# on the same offset files and output file. Mirrors the structure of
+# mngr_claude's claude_background_tasks.sh; agy exposes no
+# UserPromptSubmit-style activity hook so the loop body only restarts
+# watchers.
 #
-# Usage: gemini_background_tasks.sh <tmux_session_name>
+# Usage: antigravity_background_tasks.sh <tmux_session_name>
 #
-# Requires environment variables:
+# Environment:
 #   MNGR_AGENT_STATE_DIR  - the agent's state directory (contains commands/)
 
 set -euo pipefail
@@ -30,25 +29,23 @@ set -euo pipefail
 SESSION_NAME="${1:-}"
 
 if [ -z "$SESSION_NAME" ]; then
-    echo "Usage: gemini_background_tasks.sh <tmux_session_name>" >&2
+    echo "Usage: antigravity_background_tasks.sh <tmux_session_name>" >&2
     exit 1
 fi
 
-# Prevent duplicate instances using a pidfile keyed on the tmux session name.
-_MNGR_GEMINI_LOCK="/tmp/mngr_gemini_${SESSION_NAME}.pid"
+_MNGR_ANTIGRAVITY_LOCK="/tmp/mngr_antigravity_${SESSION_NAME}.pid"
 
-if [ -f "$_MNGR_GEMINI_LOCK" ] && kill -0 "$(cat "$_MNGR_GEMINI_LOCK" 2>/dev/null)" 2>/dev/null; then
+if [ -f "$_MNGR_ANTIGRAVITY_LOCK" ] && kill -0 "$(cat "$_MNGR_ANTIGRAVITY_LOCK" 2>/dev/null)" 2>/dev/null; then
     exit 0
 fi
 
-echo $$ > "$_MNGR_GEMINI_LOCK"
+echo $$ > "$_MNGR_ANTIGRAVITY_LOCK"
 
 mkdir -p "$MNGR_AGENT_STATE_DIR/events"
 
-# Configure and source the shared logging library
-_MNGR_LOG_TYPE="gemini_background_tasks"
-_MNGR_LOG_SOURCE="logs/gemini_background_tasks"
-_MNGR_LOG_FILE="$MNGR_AGENT_STATE_DIR/events/logs/gemini_background_tasks/events.jsonl"
+_MNGR_LOG_TYPE="antigravity_background_tasks"
+_MNGR_LOG_SOURCE="logs/antigravity_background_tasks"
+_MNGR_LOG_FILE="$MNGR_AGENT_STATE_DIR/events/logs/antigravity_background_tasks/events.jsonl"
 # shellcheck source=mngr_log.sh
 source "$MNGR_AGENT_STATE_DIR/commands/mngr_log.sh"
 
@@ -60,9 +57,6 @@ if [ -x "$STREAM_SCRIPT" ]; then
     log_info "Started raw transcript streaming (PID: $_STREAM_PID)"
 fi
 
-# Optionally start the common transcript converter. Provisioned to disk
-# only when GeminiAgent.provision() decides to emit the common transcript,
-# so this -x check is the single gate.
 COMMON_TRANSCRIPT_SCRIPT="$MNGR_AGENT_STATE_DIR/commands/common_transcript.sh"
 _COMMON_TRANSCRIPT_PID=""
 if [ -x "$COMMON_TRANSCRIPT_SCRIPT" ]; then
@@ -80,14 +74,13 @@ _cleanup() {
         kill "$_COMMON_TRANSCRIPT_PID" 2>/dev/null
         wait "$_COMMON_TRANSCRIPT_PID" 2>/dev/null || true
     fi
-    rm -f "$_MNGR_GEMINI_LOCK"
+    rm -f "$_MNGR_ANTIGRAVITY_LOCK"
 }
 trap _cleanup EXIT
 
 log_info "Background tasks started for session $SESSION_NAME"
 
 while tmux has-session -t "$SESSION_NAME" 2>/dev/null; do
-    # Restart raw transcript streamer if it died unexpectedly
     if [ -n "$_STREAM_PID" ] && ! kill -0 "$_STREAM_PID" 2>/dev/null; then
         log_warn "Raw transcript streamer died, restarting"
         if [ -x "$STREAM_SCRIPT" ]; then
@@ -97,7 +90,6 @@ while tmux has-session -t "$SESSION_NAME" 2>/dev/null; do
         fi
     fi
 
-    # Restart common transcript converter if it died unexpectedly
     if [ -n "$_COMMON_TRANSCRIPT_PID" ] && ! kill -0 "$_COMMON_TRANSCRIPT_PID" 2>/dev/null; then
         log_warn "Common transcript converter died, restarting"
         if [ -x "$COMMON_TRANSCRIPT_SCRIPT" ]; then
