@@ -94,7 +94,7 @@ _PERM_MINDS_API_PROXY_PER_AGENT: Final[str] = "minds-api-proxy-per-agent"
 # path pattern. Shared by the build + extract helpers so the two cannot
 # drift apart.
 _ALLOWED_AGENT_PATTERN_PREFIX: Final[str] = rf"^{_MINDS_API_PROXY_PER_AGENT_PATH_PREFIX}"
-_ALLOWED_AGENT_PATTERN_SUFFIX: Final[str] = "/(.*)?$"
+_ALLOWED_AGENT_PATTERN_SUFFIX: Final[str] = "/(.*)$"
 
 # Characters allowed verbatim in an ``agent_id`` when we embed it into
 # a regex pattern body. mngr's ``RandomId`` format -- ``<prefix>-<32
