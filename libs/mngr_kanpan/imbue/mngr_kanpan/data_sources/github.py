@@ -42,9 +42,9 @@ class PrState(UpperCaseStrEnum):
 class CiStatus(UpperCaseStrEnum):
     """Aggregate CI check status for a PR.
 
-    Values mirror GitHub's ``StatusCheckRollup.state`` enum so that
-    ``from_rollup_state`` reduces to a straight ``CiStatus(state)`` lookup.
-    ``UNKNOWN`` is our addition for the "no rollup at all" case.
+    Values mirror GitHub's `StatusCheckRollup.state` enum so that
+    `from_rollup_state` reduces to a straight `CiStatus(state)` lookup.
+    `UNKNOWN` is our addition for the "no rollup at all" case.
     """
 
     SUCCESS = auto()
@@ -62,9 +62,9 @@ class CiStatus(UpperCaseStrEnum):
 
     @classmethod
     def from_rollup_state(cls, state: str | None) -> "CiStatus":
-        """Map a ``StatusCheckRollup.state`` value (or ``None``) to a ``CiStatus``.
+        """Map a `StatusCheckRollup.state` value (or `None`) to a `CiStatus`.
 
-        Unknown / unmapped enum values fall back to ``UNKNOWN`` rather than
+        Unknown / unmapped enum values fall back to `UNKNOWN` rather than
         raising, so a future GitHub-side enum addition doesn't crash the board.
         """
         if state is None:
@@ -130,7 +130,7 @@ class PrFetchFailedField(FieldValue):
     usable historical PR data is available to fall back to.
 
     Routes the agent into BoardSection.PRS_FAILED. If a previous cycle
-    cached a PrField whose ``head_branch`` matches the agent's current
+    cached a PrField whose `head_branch` matches the agent's current
     branch, that cached PrField is used instead of emitting this sentinel
     (silent fallback). A cached PrField for a different branch is treated
     as unusable -- the agent has moved on and the old PR would be
@@ -177,10 +177,10 @@ _UNRESOLVED_ADAPTER: TypeAdapter[FieldValue] = TypeAdapter(UnresolvedField)
 class PrInfo(FrozenModel):
     """PR data assembled from one combined GraphQL query.
 
-    Carries every field the board renders so that ``compute()`` can construct
+    Carries every field the board renders so that `compute()` can construct
     PrField / CiField / ConflictsField / UnresolvedField without any further
-    network calls. ``has_conflicts`` and ``has_unresolved`` are only consulted
-    when ``state == OPEN`` -- for closed or merged PRs the conflicts and
+    network calls. `has_conflicts` and `has_unresolved` are only consulted
+    when `state == OPEN` -- for closed or merged PRs the conflicts and
     unresolved columns are not rendered.
     """
 
@@ -196,7 +196,7 @@ class PrInfo(FrozenModel):
 
 
 class FetchBoardResult(FrozenModel):
-    """Result of one ``fetch_board`` call."""
+    """Result of one `fetch_board` call."""
 
     prs: dict[tuple[str, str], PrInfo] = Field(description="Mapping from (repo_path, head_branch) to the matching PR.")
     errors: tuple[str, ...] = Field(default=(), description="Per-repo or top-level errors surfaced from gh / GraphQL.")
@@ -207,7 +207,7 @@ def fetch_board(
     repo_branches: Sequence[tuple[str, str]],
     unresolved_ignore_user: str | None = None,
 ) -> FetchBoardResult:
-    """Fetch every PR the kanpan board needs in one ``gh api graphql`` call."""
+    """Fetch every PR the kanpan board needs in one `gh api graphql` call."""
     if not repo_branches:
         return FetchBoardResult(prs={})
 
@@ -233,16 +233,16 @@ def fetch_board(
 def _build_board_graphql(repo_branches: Sequence[tuple[str, str]]) -> str:
     """Build the GraphQL document that fetches every requested (repo, branch).
 
-    GitHub's search query syntax treats multiple ``repo:`` and ``head:``
-    qualifiers within a single ``search()`` call as OR, which is the
-    SQL ``WHERE repo IN (...) AND head IN (...)`` equivalent. That lets a
-    single ``search()`` cover every (repo, branch) pair without aliasing
+    GitHub's search query syntax treats multiple `repo:` and `head:`
+    qualifiers within a single `search()` call as OR, which is the
+    SQL `WHERE repo IN (...) AND head IN (...)` equivalent. That lets a
+    single `search()` cover every (repo, branch) pair without aliasing
     one subquery per pair.
 
-    ``first: 100`` is GitHub's hard per-page cap. The board only renders
+    `first: 100` is GitHub's hard per-page cap. The board only renders
     PRs whose branch matches an active agent, so even on busy monorepos
     the matched set is bounded by the agent count -- which is typically
-    well under 100. ``hasNextPage`` is surfaced as an error if it ever
+    well under 100. `hasNextPage` is surfaced as an error if it ever
     trips, so we'd notice before silently dropping data.
     """
     repos = sorted({rb[0] for rb in repo_branches})
@@ -353,7 +353,7 @@ def _parse_pr_node(node: dict[str, Any], unresolved_ignore_user: str | None) -> 
 
 @pure
 def _parse_pr_state(state_str: str) -> PrState:
-    """Convert the GraphQL ``PullRequestState`` enum to ``PrState``."""
+    """Convert the GraphQL `PullRequestState` enum to `PrState`."""
     upper = state_str.upper()
     if upper == "MERGED":
         return PrState.MERGED
@@ -365,20 +365,25 @@ def _parse_pr_state(state_str: str) -> PrState:
 def _check_unresolved_threads(node: dict[str, Any], ignore_user: str | None) -> bool:
     """Determine whether a PR has unresolved review threads or unanswered PR comments.
 
-    Inline review threads: return True if any thread has ``isResolved=False``
-    (and, if ``ignore_user`` is set, the last comment is not by that user --
+    Inline review threads: return True if any thread has `isResolved=False`
+    (and, if `ignore_user` is set, the last comment is not by that user --
     if the last reply was yours, the ball is in their court so we skip it).
 
-    PR conversation: when ``ignore_user`` is set, also return True if the
-    last conversation comment is by someone other than ``ignore_user``.
-    Without ``ignore_user``, PR conversation comments don't gate the column.
+    PR conversation: when `ignore_user` is set, also return True if the
+    last conversation comment is by someone other than `ignore_user`.
+    Without `ignore_user`, PR conversation comments don't gate the column.
 
     Reads directly off the PullRequest node returned by the combined search
     query (no separate JSON to parse, no separate GraphQL request).
     """
     threads = (node.get("reviewThreads") or {}).get("nodes") or []
     for thread in threads:
-        if not isinstance(thread, dict) or thread.get("isResolved", True):
+        # `reviewThreads.nodes` is `[PullRequestReviewThread]` -- the inner type
+        # is nullable per the GraphQL schema, so an individual entry can come
+        # back as `null` if e.g. one specific thread was deleted between
+        # connection-counting and field resolution. Skip the position rather
+        # than blowing up the whole refresh.
+        if thread is None or thread.get("isResolved", True):
             continue
         if ignore_user is not None:
             comments = (thread.get("comments") or {}).get("nodes") or []
@@ -435,12 +440,12 @@ class GitHubDataSourceConfig(DataSourceConfig):
 class GitHubDataSource(FrozenModel):
     """Fetches GitHub PR, CI, conflict, and unresolved comment data.
 
-    Uses the GitHub GraphQL API via ``gh api graphql``. Reads ``repo_path``
-    from cached fields (produced by ``RepoPathsDataSource`` in the previous
+    Uses the GitHub GraphQL API via `gh api graphql`. Reads `repo_path`
+    from cached fields (produced by `RepoPathsDataSource` in the previous
     cycle) and from agent labels.
 
     All data for the entire board is fetched in a single GraphQL request
-    via ``fetch_board`` -- there is no per-repo or per-PR fan-out.
+    via `fetch_board` -- there is no per-repo or per-PR fan-out.
     """
 
     config: GitHubDataSourceConfig = Field(default_factory=GitHubDataSourceConfig)
@@ -541,46 +546,17 @@ class GitHubDataSource(FrozenModel):
             # attribution to this agent rides on a possibly-stale mapping.
             this_created = agent_created[agent.name]
             pr_info = board.prs.get((agent_repo, branch))
-            agent_fields: dict[str, FieldValue] = {}
 
             if pr_info is not None:
-                if self.config.pr:
-                    agent_fields[FIELD_PR] = PrField(
-                        number=pr_info.number,
-                        url=pr_info.url,
-                        is_draft=pr_info.is_draft,
-                        title=pr_info.title,
-                        state=pr_info.state,
-                        head_branch=pr_info.head_branch,
-                        created=this_created,
-                    )
-                if self.config.ci:
-                    agent_fields[FIELD_CI] = CiField(status=pr_info.check_status, created=this_created)
-                # Conflicts / unresolved only render for OPEN PRs; closed and merged PRs
-                # don't expose a meaningful conflict-or-unresolved status to act on.
-                if pr_info.state == PrState.OPEN:
-                    if self.config.conflicts:
-                        agent_fields[FIELD_CONFLICTS] = ConflictsField(
-                            has_conflicts=pr_info.has_conflicts, created=this_created
-                        )
-                    if self.config.unresolved:
-                        agent_fields[FIELD_UNRESOLVED] = UnresolvedField(
-                            has_unresolved=pr_info.has_unresolved, created=this_created
-                        )
+                agent_fields = _compute_pr_fields(pr_info, this_created, self.config)
             elif not fetch_failed:
                 # Fetch succeeded; branch genuinely has no PR yet.
-                if self.config.pr:
-                    agent_fields[FIELD_PR] = CreatePrUrlField(
-                        url=_build_create_pr_url(agent_repo, branch),
-                        created=this_created,
-                    )
+                agent_fields = _compute_no_pr_fields(agent_repo, branch, this_created, self.config)
             else:
                 # Fetch errored. Use a cached PrField if one matches this branch,
                 # otherwise show a PrFetchFailedField sentinel.
-                agent_fields.update(
-                    _compute_failed_fetch_fields(
-                        cached_fields, agent.name, branch, agent_repo, this_created, self.config
-                    )
+                agent_fields = _compute_failed_fetch_fields(
+                    cached_fields, agent.name, branch, agent_repo, this_created, self.config
                 )
 
             if agent_fields:
@@ -592,7 +568,7 @@ class GitHubDataSource(FrozenModel):
 def _get_cached_repo_field(
     cached_fields: dict[AgentName, dict[str, FieldValue]], agent_name: AgentName
 ) -> RepoPathField | None:
-    """Get the cached RepoPathField (with its ``created`` timestamp) if available."""
+    """Get the cached RepoPathField (with its `created` timestamp) if available."""
     agent_cached = cached_fields.get(agent_name)
     if agent_cached is None:
         return None
@@ -606,6 +582,57 @@ def _get_cached_repo_field(
 def _build_create_pr_url(repo_path: str, branch: str) -> str:
     """Build a GitHub URL for creating a new PR from the given branch."""
     return f"https://github.com/{repo_path}/compare/{branch}?expand=1"
+
+
+@pure
+def _compute_no_pr_fields(
+    agent_repo: str,
+    branch: str,
+    this_created: datetime,
+    config: GitHubDataSourceConfig,
+) -> dict[str, FieldValue]:
+    """Build the per-agent fields when the fetch succeeded but the agent's
+    branch has no PR yet -- emit a CreatePrUrlField so the agent renders a
+    'Create PR' link in the FIELD_PR slot.
+    """
+    if not config.pr:
+        return {}
+    return {FIELD_PR: CreatePrUrlField(url=_build_create_pr_url(agent_repo, branch), created=this_created)}
+
+
+@pure
+def _compute_pr_fields(
+    pr_info: PrInfo,
+    this_created: datetime,
+    config: GitHubDataSourceConfig,
+) -> dict[str, FieldValue]:
+    """Build the per-agent FIELD_PR / FIELD_CI / FIELD_CONFLICTS / FIELD_UNRESOLVED
+    fields when the agent's (repo, branch) lookup resolved to a real PR.
+
+    Conflicts and unresolved are only emitted for OPEN PRs -- closed and merged
+    PRs don't expose a meaningful conflict-or-unresolved status to act on.
+    """
+    agent_fields: dict[str, FieldValue] = {}
+    if config.pr:
+        agent_fields[FIELD_PR] = PrField(
+            number=pr_info.number,
+            url=pr_info.url,
+            is_draft=pr_info.is_draft,
+            title=pr_info.title,
+            state=pr_info.state,
+            head_branch=pr_info.head_branch,
+            created=this_created,
+        )
+    if config.ci:
+        agent_fields[FIELD_CI] = CiField(status=pr_info.check_status, created=this_created)
+    if pr_info.state == PrState.OPEN:
+        if config.conflicts:
+            agent_fields[FIELD_CONFLICTS] = ConflictsField(has_conflicts=pr_info.has_conflicts, created=this_created)
+        if config.unresolved:
+            agent_fields[FIELD_UNRESOLVED] = UnresolvedField(
+                has_unresolved=pr_info.has_unresolved, created=this_created
+            )
+    return agent_fields
 
 
 @pure
@@ -630,9 +657,9 @@ def _compute_failed_fetch_fields(
 
     Staleness: there is no TTL on the cached PR. If the fetch keeps failing
     for hours, we keep showing the last-known PR row (number, state, CI).
-    The cached fields carry their own ``created`` so the TUI renders them
+    The cached fields carry their own `created` so the TUI renders them
     as stale once they age past the staleness threshold. The
-    PrFetchFailedField is stamped with ``this_created`` (the lookup
+    PrFetchFailedField is stamped with `this_created` (the lookup
     freshness for this agent) for the same taint-propagation reason as
     the success path.
     """
