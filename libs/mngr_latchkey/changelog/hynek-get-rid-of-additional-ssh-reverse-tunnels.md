@@ -76,16 +76,16 @@ Concretely:
   agent of the form `{"pattern": "^/minds-api-proxy/api/v1/agents/<id>(/.*)?$"}`.
   No regex alternation parsing/building; reading the list is iteration,
   appending is `list.append`.
-- New library helper: `imbue.mngr_latchkey.agent_setup.allow_agent_for_host(plugin_data_dir, host_id, agent_id)`.
+- New library helper: `imbue.mngr_latchkey.agent_setup.register_agent_for_host(plugin_data_dir, host_id, agent_id)`.
   Reads the host's permissions file (or starts from the baseline if it
   doesn't yet exist), extracts the existing allowed-agent list out of
   the `anyOf` block, appends a new entry if not already there, and
   writes back atomically. Idempotent.
-- New CLI: `mngr latchkey allow-agent --host-id ID --agent-id ID` wraps
-  the helper for operators. Documented in the README's "Wiring a new
-  agent using the CLI interface" section.
+- New CLI: `mngr latchkey register-agent --host-id ID --agent-id ID`
+  wraps the helper for operators. Documented in the README's "Wiring a
+  new agent using the CLI interface" section.
 - `imbue.mngr_latchkey.store.load_permissions` is the new public
-  reader that `allow_agent_for_host` uses; symmetric with `save_permissions`.
+  reader that `register_agent_for_host` uses; symmetric with `save_permissions`.
 - The shared `minds-api-proxy-notifications` baseline grant from the
   earliest design in this branch is gone entirely; notifications are
   reached via the same allowed-agent list as every other

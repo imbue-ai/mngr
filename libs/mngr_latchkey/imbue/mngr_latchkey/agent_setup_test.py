@@ -23,9 +23,9 @@ from imbue.mngr_latchkey.agent_setup import ENV_LATCHKEY_GATEWAY_PASSWORD
 from imbue.mngr_latchkey.agent_setup import ENV_LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE
 from imbue.mngr_latchkey.agent_setup import _build_allowed_agent_anyof_entry
 from imbue.mngr_latchkey.agent_setup import _extract_agent_id_from_anyof_entry
-from imbue.mngr_latchkey.agent_setup import allow_agent_for_host
 from imbue.mngr_latchkey.agent_setup import finalize_host_permissions
 from imbue.mngr_latchkey.agent_setup import prepare_agent_latchkey
+from imbue.mngr_latchkey.agent_setup import register_agent_for_host
 from imbue.mngr_latchkey.core import AGENT_SIDE_LATCHKEY_PORT
 from imbue.mngr_latchkey.core import LatchkeyError
 from imbue.mngr_latchkey.core import LatchkeyJwtMintError
@@ -278,7 +278,7 @@ def test_extract_agent_id_from_anyof_entry_raises_on_unrecognized_entry() -> Non
     """An ``anyOf`` entry whose shape doesn't match what we write must raise.
 
     Otherwise a hand-edited permissions file would get silently rebuilt
-    on the next ``allow_agent_for_host`` call, discarding the operator's
+    on the next ``register_agent_for_host`` call, discarding the operator's
     edit.
     """
     with pytest.raises(LatchkeyStoreError):
@@ -289,7 +289,7 @@ def test_extract_agent_id_from_anyof_entry_raises_on_unrecognized_entry() -> Non
         _extract_agent_id_from_anyof_entry("not-even-a-dict")
 
 
-# -- allow_agent_for_host ----------------------------------------------------
+# -- register_agent_for_host -------------------------------------------------
 
 
 def _allowed_anyof_for_host(tmp_path: Path, host_id: HostId) -> list[dict[str, str]]:
@@ -299,45 +299,45 @@ def _allowed_anyof_for_host(tmp_path: Path, host_id: HostId) -> list[dict[str, s
     return config["schemas"]["minds-api-proxy-per-agent-unauthorized"]["properties"]["path"]["not"]["anyOf"]
 
 
-def test_allow_agent_for_host_creates_baseline_when_file_absent(tmp_path: Path) -> None:
+def test_register_agent_for_host_creates_baseline_when_file_absent(tmp_path: Path) -> None:
     """First call for a host writes the baseline + adds the agent."""
     host_id = HostId.generate()
     agent_id = AgentId.generate()
-    allow_agent_for_host(tmp_path, host_id, agent_id)
+    register_agent_for_host(tmp_path, host_id, agent_id)
     any_of = _allowed_anyof_for_host(tmp_path, host_id)
     assert len(any_of) == 1
     assert _extract_agent_id_from_anyof_entry(any_of[0]) == str(agent_id)
 
 
-def test_allow_agent_for_host_is_idempotent(tmp_path: Path) -> None:
-    """Re-allowing an already-allowed agent is a no-op."""
+def test_register_agent_for_host_is_idempotent(tmp_path: Path) -> None:
+    """Re-registering an already-registered agent is a no-op."""
     host_id = HostId.generate()
     agent_id = AgentId.generate()
-    allow_agent_for_host(tmp_path, host_id, agent_id)
-    allow_agent_for_host(tmp_path, host_id, agent_id)
+    register_agent_for_host(tmp_path, host_id, agent_id)
+    register_agent_for_host(tmp_path, host_id, agent_id)
     any_of = _allowed_anyof_for_host(tmp_path, host_id)
     assert len(any_of) == 1
 
 
-def test_allow_agent_for_host_accumulates_across_agents(tmp_path: Path) -> None:
+def test_register_agent_for_host_accumulates_across_agents(tmp_path: Path) -> None:
     """Multiple agents on the same host all end up in the allowed ``anyOf`` list."""
     host_id = HostId.generate()
     agent_a = AgentId.generate()
     agent_b = AgentId.generate()
     agent_c = AgentId.generate()
-    allow_agent_for_host(tmp_path, host_id, agent_a)
-    allow_agent_for_host(tmp_path, host_id, agent_b)
-    allow_agent_for_host(tmp_path, host_id, agent_c)
+    register_agent_for_host(tmp_path, host_id, agent_a)
+    register_agent_for_host(tmp_path, host_id, agent_b)
+    register_agent_for_host(tmp_path, host_id, agent_c)
     any_of = _allowed_anyof_for_host(tmp_path, host_id)
     parsed = {_extract_agent_id_from_anyof_entry(e) for e in any_of}
     assert parsed == {str(agent_a), str(agent_b), str(agent_c)}
 
 
-def test_allow_agent_for_host_preserves_other_grants(tmp_path: Path) -> None:
-    """Allowing a new agent does not disturb the baseline rules or other schemas."""
+def test_register_agent_for_host_preserves_other_grants(tmp_path: Path) -> None:
+    """Registering a new agent does not disturb the baseline rules or other schemas."""
     host_id = HostId.generate()
     agent_id = AgentId.generate()
-    allow_agent_for_host(tmp_path, host_id, agent_id)
+    register_agent_for_host(tmp_path, host_id, agent_id)
     path = permissions_path_for_host(tmp_path, host_id)
     config = json.loads(path.read_text())
     rule_keys = [next(iter(rule.keys())) for rule in config["rules"]]
@@ -348,13 +348,13 @@ def test_allow_agent_for_host_preserves_other_grants(tmp_path: Path) -> None:
     assert rule_keys == ["minds-api-proxy-per-agent-unauthorized", "latchkey-self"]
 
 
-def test_allow_agent_for_host_raises_when_anyof_was_hand_edited(tmp_path: Path) -> None:
+def test_register_agent_for_host_raises_when_anyof_was_hand_edited(tmp_path: Path) -> None:
     """A corrupted / hand-edited permissions file is not silently overwritten."""
     host_id = HostId.generate()
     agent_id = AgentId.generate()
     # Bootstrap with the baseline + one agent, then replace one of the
     # ``anyOf`` entries with a pattern the parser will reject.
-    allow_agent_for_host(tmp_path, host_id, AgentId.generate())
+    register_agent_for_host(tmp_path, host_id, AgentId.generate())
     path = permissions_path_for_host(tmp_path, host_id)
     config = json.loads(path.read_text())
     config["schemas"]["minds-api-proxy-per-agent-unauthorized"]["properties"]["path"]["not"]["anyOf"] = [
@@ -362,4 +362,4 @@ def test_allow_agent_for_host_raises_when_anyof_was_hand_edited(tmp_path: Path) 
     ]
     path.write_text(json.dumps(config))
     with pytest.raises(LatchkeyStoreError):
-        allow_agent_for_host(tmp_path, host_id, agent_id)
+        register_agent_for_host(tmp_path, host_id, agent_id)

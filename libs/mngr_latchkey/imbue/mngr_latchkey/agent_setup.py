@@ -197,24 +197,24 @@ _AGENT_BASELINE_PERMISSIONS: Final[LatchkeyPermissionsConfig] = LatchkeyPermissi
 )
 
 
-def allow_agent_for_host(
+def register_agent_for_host(
     plugin_data_dir: Path,
     host_id: HostId,
     agent_id: AgentId,
 ) -> None:
-    """Add ``agent_id`` to the host's allowed-agent list on the Minds API proxy.
+    """Register ``agent_id`` for the given host, granting it access to the Minds API proxy.
 
     Reads the host's ``latchkey_permissions.json`` (writing a fresh
     baseline if it does not yet exist), extracts the current allowed-agent
     list out of the ``minds-api-proxy-unauthorized`` scope's ``not.anyOf``
     block, appends a per-agent entry if ``agent_id`` is not already there,
-    and writes the updated config back atomically. Idempotent: re-allowing
-    an agent already in the list is a no-op write.
+    and writes the updated config back atomically. Idempotent:
+    re-registering an agent already in the list is a no-op write.
 
     This is the *only* public way to grant a minds agent access to the
     Minds API proxy. The matching CLI wrapper is ``mngr latchkey
-    allow-agent --host-id ID --agent-id ID``; the desktop client and any
-    other Python caller goes through this function directly.
+    register-agent --host-id ID --agent-id ID``; the desktop client and
+    any other Python caller goes through this function directly.
 
     """
     path = permissions_path_for_host(plugin_data_dir, host_id)
