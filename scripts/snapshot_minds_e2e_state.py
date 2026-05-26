@@ -4,8 +4,12 @@ container provisioned, so future test runs can boot from that state nearly
 instantly via offload's ``--override-image-id`` flag (offload v0.9.6+).
 
 Verified end-to-end against Modal on 2026-05-26 -- produced snapshot
-image ID ``im-01KSJWM8D9DTMAFWTGRZHYAF10`` from a sandbox with the FCT
-workspace's Docker container alive and ``system_interface`` rendered.
+image ID ``im-01KSK4Q55X28H41V6NCH7D6NN8`` from a sandbox with the FCT
+workspace's ``system_interface`` UI rendered, Electron quit cleanly,
+and both workspace Docker containers (``minds-staging-forever-<...>``
++ ``minds-staging-docker-state-<...>``) stopped cleanly before the
+snapshot fired -- so a sandbox booted from the image starts with
+consistent on-disk state and a deterministic ``docker start`` path.
 
 PREREQUISITE: ``experimental_options={"vm_runtime": True}`` requires the
 caller's active Modal profile to have the VM-runtime preview enabled. If
