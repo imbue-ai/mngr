@@ -13,7 +13,6 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Added: File-sharing permission requests carry a required `access` field (`READ` / `WRITE`); the minds approval dialog renders a green "read-only" / amber "read & write" badge per file path.
 - Added: New providers panel on the landing page lists every configured provider with its status, last error, and an Enable/Disable button; the panel also shows time since the last discovery event.
 - Added: New `ci` env tier alongside `dev` / `staging` / `production`, mirroring dev's lifecycle and reading Vault secrets from `secrets/minds/ci/*`.
-- Added: Acceptance test `test_create_local_docker_workspace_via_electron` drives the real Electron minds app via Playwright over CDP.
 - Added: "Creating your project" page now updates its spinner caption as setup progresses; `AgentCreationStatus` gains `INITIALIZING` / `CLONING_REPO` / `CHECKING_OUT_BRANCH` / `PROVISIONING_AI` / `CREATING_WORKSPACE` / `WAITING_FOR_READY` / `DONE` / `FAILED`.
 - Added: Workspace-server restart and health-recovery UI on the `mngr_forward` plugin — when a workspace server stops responding, the chrome auto-navigates to a recovery page with SSE-streamed status updates and a Restart button; landing page rows show status badges.
 - Added: `minds env recover` command + per-env recover-target file; every deploy captures pre-deploy Modal app versions, takes a Neon snapshot, and writes the recover file atomically before touching external state.
@@ -52,7 +51,6 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 ### Removed
 
 - Removed: Silent auto-disable on `imbue_cloud` auth errors — `_ImbueCloudAuthErrorDisabler` and the provider-error callback plumbing on `EnvelopeStreamConsumer` are gone; the user now drives the Disable action explicitly via the providers panel.
-- Removed: `apps/minds/imbue/minds/cli/pool.py` and `apps/minds/imbue/minds/envs/providers/vultr_tags.py` orphans deleted in the OVH walker swap.
 
 ### Fixed
 
@@ -76,7 +74,6 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Added: New `minds run` command that spawns `mngr forward` as a subprocess and consumes its JSONL envelope stream instead of running forwarding in-process.
 - Added: minds injects `LATCHKEY_DISABLE_COUNTING=1` into every workspace whenever latchkey is wired so the shared host-side gateway represents one user.
 - Added: minds installs a grandparent-death watcher so the Python backend self-terminates ~3 s after Electron crashes, cascading into `mngr observe` / `mngr events` / latchkey children.
-- Added: New `MalformedMngrOutputError` (`imbue.minds.errors`).
 
 ### Changed
 

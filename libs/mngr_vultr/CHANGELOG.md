@@ -9,8 +9,3 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 ### Changed
 
 - Changed: `mngr_vultr` now only contributes the tag-listing; shared parallel-SSH discovery has been lifted into `VpsDockerProvider`.
-- Changed: Adopted the new per-project changelog layout.
-
-### Fixed
-
-- Fixed: `UNABRIDGED_CHANGELOG.md` intro now references the correct entries directory.
