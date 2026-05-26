@@ -12,12 +12,15 @@ end-to-end tests:
 - Added `scripts/snapshot_minds_e2e_state.py`, a demonstration script that
   creates a Modal sandbox with `experimental_options={"vm_runtime": True}`,
   installs the Docker + Node + pnpm + xvfb stack the
-  `test-docker-electron` CI job needs, runs the existing minds Electron
-  e2e test (which creates a workspace's Docker container as a side
-  effect), and then calls `sandbox.snapshot_filesystem()` to capture the
-  state. The resulting Modal image ID can be fed back to offload via
-  `--override-image-id` so future test runs boot from an already-warm
-  workspace + Docker container in seconds instead of rebuilding from
-  scratch every time. The script intentionally opts in to `vm_runtime`
-  only for itself -- Modal has capacity issues with that runtime, so we
-  do not flip it on for the general mngr_modal provider.
+  `test-docker-electron` CI job needs, calls the shared
+  `imbue.minds.desktop_client.e2e_workspace_runner.create_workspace_via_electron`
+  driver directly (no pytest) while deliberately skipping the
+  `mngr destroy` cleanup so the workspace agent + Docker container
+  survive into the snapshot, and then calls
+  `sandbox.snapshot_filesystem()` to capture the state. The resulting
+  Modal image ID can be fed back to offload via `--override-image-id` so
+  future test runs boot from an already-warm workspace + Docker
+  container in seconds instead of rebuilding from scratch every time.
+  The script intentionally opts in to `vm_runtime` only for itself --
+  Modal has capacity issues with that runtime, so we do not flip it on
+  for the general mngr_modal provider.
