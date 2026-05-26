@@ -594,8 +594,9 @@ def save_cli_list_values_for_restoration(ctx: click.Context) -> dict[str, tuple[
 
 
 def restore_cli_list_values(params: dict[str, Any], cli_list_values: dict[str, tuple[Any, ...]]) -> dict[str, Any]:
-    """Append the CLI list values previously extracted by ``extract_cli_list_values``
-    to whatever the template phase produced for the corresponding params.
+    """Append the CLI list values previously captured by
+    ``save_cli_list_values_for_restoration`` to whatever the template phase
+    produced for the corresponding params.
 
     Final ordering for a tuple/list parameter is::
 
