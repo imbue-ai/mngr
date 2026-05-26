@@ -13,3 +13,12 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Added: Opt-in `auto_allow_permissions` flag on `GeminiAgentConfig` that installs a `BeforeTool` wildcard hook auto-approving every tool call.
 - Added: Gemini agents now emit a common transcript readable by `mngr transcript`; raw gemini session JSONL is captured into `logs/gemini_transcript/events.jsonl`. Opt out with `emit_common_transcript = false`.
 - Added: `specs/mngr-gemini-feature-parity/concise.md` mapping a seven-PR plan toward feature parity with `mngr_claude`.
+
+### Changed
+
+- Changed: `GeminiAgent` now implements the new `HasTranscriptMixin` / `HasCommonTranscriptMixin` mixins.
+- Changed: Adopted the new per-project changelog layout.
+
+### Fixed
+
+- Fixed: `UNABRIDGED_CHANGELOG.md` intro now references the correct entries directory.
