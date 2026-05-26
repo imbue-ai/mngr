@@ -3,13 +3,26 @@
 container provisioned, so future test runs can boot from that state nearly
 instantly via offload's ``--override-image-id`` flag (offload v0.9.6+).
 
-Verified end-to-end against Modal on 2026-05-26 -- produced snapshot
-image ID ``im-01KSK4Q55X28H41V6NCH7D6NN8`` from a sandbox with the FCT
-workspace's ``system_interface`` UI rendered, Electron quit cleanly,
-and both workspace Docker containers (``minds-staging-forever-<...>``
-+ ``minds-staging-docker-state-<...>``) stopped cleanly before the
-snapshot fired -- so a sandbox booted from the image starts with
-consistent on-disk state and a deterministic ``docker start`` path.
+Verified end-to-end against Modal on 2026-05-26 -- the most recent
+snapshot id is ``im-01KSK6YY0V97VGXJZMCB4S9D12``, captured from a
+sandbox with the FCT workspace's ``system_interface`` UI rendered,
+Electron quit cleanly, and both workspace Docker containers
+(``minds-staging-forever-<...>`` + ``minds-staging-docker-state-<...>``)
+stopped cleanly before the snapshot fired -- so a sandbox booted from
+the image starts with consistent on-disk state and a deterministic
+``docker start`` path.
+
+The ``apps/minds/test_snapshot_resume.py::test_workspace_docker_container_is_present_and_stopped``
+test was also verified against this snapshot id via direct
+``modal.Sandbox.create(image=...)`` (1.68s test, 8.8s sandbox-to-
+result). Note: ``just test-offload-minds-snapshot`` against this
+image currently fails on offload's side -- offload v0.9.6's per-
+sandbox junit download still uses Modal's deprecated
+``Sandbox.open()`` API, which Modal's vm_runtime sandboxes
+specifically reject as ``request cancelled due to internal error``.
+The fix is a one-line change in offload (migrate to
+``Sandbox.filesystem``) -- file an upstream issue against
+imbue-ai/offload before re-trying the offload path.
 
 PREREQUISITE: ``experimental_options={"vm_runtime": True}`` requires the
 caller's active Modal profile to have the VM-runtime preview enabled. If
