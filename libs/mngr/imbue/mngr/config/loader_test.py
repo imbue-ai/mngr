@@ -2161,3 +2161,25 @@ def test_load_config_narrowing_error_names_both_sides_with_paths_and_scopes(
     assert "mngr config set --scope project" in message
     assert "assigned by" in message
     assert "would drop a value from" in message
+
+
+def test_load_config_narrowing_error_names_env_var_layer(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, cg: ConcurrencyGroup
+) -> None:
+    """When an ``MNGR__*`` env var narrows a file layer, the assigning side is named
+    as the scopeless env layer (no path, no ``config set --scope`` flag) while the
+    dropped-from side still names the file and its scope.
+    """
+    pm, project_dir = _setup_layered_test_env(monkeypatch, tmp_path)
+    (project_dir / "settings.toml").write_text('[commands.create]\nenv = ["X=4"]\n')
+    monkeypatch.setenv("MNGR__COMMANDS__CREATE__ENV", '["X=5"]')
+
+    with pytest.raises(ConfigParseError) as exc_info:
+        load_config(pm=pm, context_dir=tmp_path, concurrency_group=cg)
+
+    message = str(exc_info.value)
+    # Assigning side: the env layer, named as such with no path / scope flag.
+    assert "assigned by MNGR__* environment variables" in message
+    # Dropped-from side: the project file, with its scope flag.
+    assert str(project_dir / "settings.toml") in message
+    assert "mngr config set --scope project" in message
