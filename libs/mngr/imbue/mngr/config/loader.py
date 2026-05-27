@@ -129,6 +129,7 @@ def load_config(
     profile_dir = get_or_create_profile_dir(base_dir)
 
     # Pre-compute disabled plugins so _parse_providers can skip them.
+    # This uses the same lightweight pre-reader that create_plugin_manager() uses.
     config_disabled_plugins = read_disabled_plugins()
 
     # Start with base config that has defaults based on root_name
