@@ -19,7 +19,11 @@ from imbue.mngr.primitives import AgentId
 from imbue.mngr_vps_docker.primitives import VpsInstanceId
 
 # Sentinel marking the start of each agent JSON file in batched-read output.
-# Chosen to be a string that cannot appear inside a serialized JSON record.
+# Chosen to be extremely unlikely to appear inside any real agent record:
+# long, all-uppercase, dash-delimited, and namespaced with the project tag.
+# (It is *not* impossible -- the sentinel is plain ASCII and would be valid
+# unescaped inside a JSON string value -- but no realistic agent record
+# contains this exact substring.)
 _AGENT_FILE_SEP: Final[str] = "---MNGR_AGENT_FILE_SEP---"
 
 
