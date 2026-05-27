@@ -1,3 +1,5 @@
+import io
+import json
 from pathlib import Path
 
 import pytest
@@ -5,6 +7,7 @@ import pytest
 from imbue.imbue_common.primitives import PositiveInt
 from imbue.mngr_forward.data_types import ForwardPortStrategy
 from imbue.mngr_forward.data_types import ForwardServiceStrategy
+from imbue.mngr_forward.envelope import EnvelopeWriter
 from imbue.mngr_forward.resolver import ForwardResolver
 from imbue.mngr_forward.ssh_tunnel import RemoteSSHInfo
 from imbue.mngr_forward.testing import TEST_AGENT_ID_1
@@ -77,6 +80,33 @@ def test_remove_known_agent_drops_services() -> None:
     resolver.update_services(TEST_AGENT_ID_1, {"system_interface": "http://127.0.0.1:1"})
     resolver.remove_known_agent(TEST_AGENT_ID_1)
     assert resolver.resolve(TEST_AGENT_ID_1) is None
+
+
+def test_update_services_emits_resolver_snapshot_envelope() -> None:
+    buf = io.StringIO()
+    writer = EnvelopeWriter(output=buf)
+    resolver = ForwardResolver(
+        strategy=ForwardServiceStrategy(service_name="system_interface"),
+        envelope_writer=writer,
+    )
+    resolver.add_known_agent(TEST_AGENT_ID_1)
+    resolver.update_services(TEST_AGENT_ID_1, {"system_interface": "http://127.0.0.1:9100"})
+    lines = [json.loads(line) for line in buf.getvalue().splitlines() if line]
+    assert any(
+        line["stream"] == "forward"
+        and line["payload"].get("type") == "resolver_snapshot"
+        and line["payload"]["services_by_agent"]
+        == {str(TEST_AGENT_ID_1): {"system_interface": "http://127.0.0.1:9100"}}
+        for line in lines
+    )
+
+
+def test_update_services_without_envelope_writer_is_silent() -> None:
+    # No envelope writer => no emission, no failure. Tested for the path used by
+    # existing resolver-only tests and any code path that doesn't need the snapshot.
+    resolver = ForwardResolver(strategy=ForwardServiceStrategy(service_name="system_interface"))
+    resolver.add_known_agent(TEST_AGENT_ID_1)
+    resolver.update_services(TEST_AGENT_ID_1, {"system_interface": "http://127.0.0.1:9100"})
 
 
 def test_initial_discovery_flag() -> None:

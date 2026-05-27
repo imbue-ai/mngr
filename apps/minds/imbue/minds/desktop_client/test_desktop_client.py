@@ -11,13 +11,13 @@ from starlette.testclient import TestClient
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.minds.config.data_types import WorkspacePaths
+from imbue.minds.desktop_client import recovery_probe as _recovery_probe
 from imbue.minds.desktop_client.agent_creator import AgentCreationStatus
 from imbue.minds.desktop_client.agent_creator import AgentCreator
 from imbue.minds.desktop_client.agent_creator import LOG_SENTINEL
 from imbue.minds.desktop_client.app import _build_mngr_start_argv
 from imbue.minds.desktop_client.app import _build_mngr_stop_argv
 from imbue.minds.desktop_client.app import _build_workspace_list
-from imbue.minds.desktop_client.app import _classify_host_health
 from imbue.minds.desktop_client.app import _run_restart_sequence
 from imbue.minds.desktop_client.app import create_desktop_client
 from imbue.minds.desktop_client.auth import FileAuthStore
@@ -1509,11 +1509,24 @@ def test_build_mngr_start_argv_targets_the_agent() -> None:
     assert argv[:3] == ["/usr/local/bin/mngr", "start", str(aid)]
 
 
+def _classify_host_health_compat(list_json: str | None, agent_id: AgentId) -> dict[str, bool]:
+    """Legacy-shape wrapper around the new host-state extraction / classification.
+
+    Preserves the prior ``{"reachable": ..., "host_offline": ...}`` contract
+    so the existing classification cases stay covered after the refactor
+    that moved the logic into ``recovery_probe``.
+    """
+    agent_row = _recovery_probe.extract_agent_row(list_json, agent_id)
+    host_state = _recovery_probe.extract_host_state(agent_row)
+    reachable, host_offline = _recovery_probe.classify_host_state(host_state)
+    return {"reachable": reachable, "host_offline": host_offline}
+
+
 def test_classify_host_health_running_host_is_reachable() -> None:
     """A RUNNING host classifies as reachable -- the surgical restart applies."""
     aid = AgentId.generate()
     list_json = json.dumps({"agents": [{"id": str(aid), "host": {"state": "RUNNING"}}]})
-    assert _classify_host_health(list_json, aid) == {"reachable": True, "host_offline": False}
+    assert _classify_host_health_compat(list_json, aid) == {"reachable": True, "host_offline": False}
 
 
 def test_classify_host_health_stopped_host_is_offline() -> None:
@@ -1521,7 +1534,7 @@ def test_classify_host_health_stopped_host_is_offline() -> None:
     aid = AgentId.generate()
     for state in ("STOPPED", "CRASHED", "FAILED", "STOPPING"):
         list_json = json.dumps({"agents": [{"id": str(aid), "host": {"state": state}}]})
-        assert _classify_host_health(list_json, aid) == {"reachable": False, "host_offline": True}, state
+        assert _classify_host_health_compat(list_json, aid) == {"reachable": False, "host_offline": True}, state
 
 
 def test_classify_host_health_ambiguous_state_is_neither() -> None:
@@ -1533,13 +1546,13 @@ def test_classify_host_health_ambiguous_state_is_neither() -> None:
     aid = AgentId.generate()
     # An ambiguous lifecycle state (host may still be running agents).
     starting = json.dumps({"agents": [{"id": str(aid), "host": {"state": "STARTING"}}]})
-    assert _classify_host_health(starting, aid) == {"reachable": False, "host_offline": False}
+    assert _classify_host_health_compat(starting, aid) == {"reachable": False, "host_offline": False}
     # The probed agent is absent from the listing.
     other = json.dumps({"agents": [{"id": "agent-other", "host": {"state": "STOPPED"}}]})
-    assert _classify_host_health(other, aid) == {"reachable": False, "host_offline": False}
+    assert _classify_host_health_compat(other, aid) == {"reachable": False, "host_offline": False}
     # mngr produced no usable output at all.
-    assert _classify_host_health(None, aid) == {"reachable": False, "host_offline": False}
-    assert _classify_host_health("not json", aid) == {"reachable": False, "host_offline": False}
+    assert _classify_host_health_compat(None, aid) == {"reachable": False, "host_offline": False}
+    assert _classify_host_health_compat("not json", aid) == {"reachable": False, "host_offline": False}
 
 
 def test_recovery_page_requires_authentication(tmp_path: Path) -> None:

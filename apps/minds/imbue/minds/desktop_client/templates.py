@@ -330,6 +330,68 @@ _RECOVERY_STYLE: Final[str] = """\
         line-height: 1.5;
         font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
       }
+      details .debug-section {
+        padding: 0 12px 8px;
+        font-size: 0.75rem;
+        line-height: 1.4;
+      }
+      details .debug-section h4 {
+        margin: 8px 0 4px;
+        font-size: 0.75rem;
+        font-weight: 600;
+      }
+      .checklist {
+        list-style: none;
+        padding: 0;
+        margin: 12px 0 0;
+        text-align: left;
+        font-size: 0.8125rem;
+        line-height: 1.5;
+      }
+      .checklist li {
+        display: flex;
+        align-items: baseline;
+        gap: 8px;
+        padding: 2px 0;
+      }
+      .checklist li .icon {
+        display: inline-block;
+        width: 14px;
+        text-align: center;
+        font-weight: 600;
+      }
+      .checklist li.pass .icon { color: #16a34a; }
+      .checklist li.fail .icon { color: #dc2626; }
+      .checklist li.warn .icon { color: #d97706; }
+      .checklist li.unknown .icon { color: #9ca3af; }
+      .ssh-list {
+        list-style: none;
+        padding: 0;
+        margin: 4px 0 0;
+      }
+      .ssh-list li {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: 0.75rem;
+        padding: 2px 0;
+      }
+      .ssh-list code {
+        flex: 1;
+        white-space: nowrap;
+        overflow-x: auto;
+        background: #fef3c7;
+        padding: 1px 4px;
+        border-radius: 3px;
+      }
+      .copy-row-btn {
+        margin: 0;
+        padding: 2px 6px;
+        font-size: 0.7rem;
+        background: #d97706;
+      }
+      .copy-row-btn:hover { background: #b45309; }
       button {
         margin-top: 16px;
         background: #18181b;
@@ -342,6 +404,16 @@ _RECOVERY_STYLE: Final[str] = """\
         cursor: pointer;
       }
       button:hover { background: #3f3f46; }
+      button.secondary {
+        background: #6b7280;
+      }
+      button.secondary:hover { background: #4b5563; }
+      #copy-diagnostics-btn {
+        background: #6b7280;
+        font-size: 0.75rem;
+        padding: 6px 12px;
+      }
+      #copy-diagnostics-btn:hover { background: #4b5563; }
 """
 
 # The recovery page's behavior. It drives the shared loading card (toggling
@@ -362,6 +434,12 @@ _RECOVERY_SCRIPT: Final[str] = """\
         var spinnerEl = document.getElementById('loading-spinner');
         var errorEl = document.getElementById('recovery-error');  // null unless restart_failed
         var hostBtn = document.getElementById('recovery-host-btn');
+        var checklistEl = document.getElementById('recovery-checklist');
+        var debugDetailsEl = document.getElementById('recovery-debug-details');
+        var debugContentEl = document.getElementById('recovery-debug-content');
+        var copyBtn = document.getElementById('copy-diagnostics-btn');
+
+        var latestHealth = null;
 
         // A timed reload restarts the spinner's CSS animation from 0deg, so the
         // interval must be a whole multiple of the spinner's 1s rotation period
@@ -373,6 +451,145 @@ _RECOVERY_SCRIPT: Final[str] = """\
 
         function show(el, visible) {
           if (el) el.classList.toggle('hidden', !visible);
+        }
+
+        function escapeHtml(s) {
+          if (s === null || s === undefined) return '';
+          return String(s)
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#39;');
+        }
+
+        function checklistRow(state, label) {
+          // state: 'pass' | 'fail' | 'warn' | 'unknown'
+          var icons = { pass: 'OK', fail: 'X', warn: '!', unknown: '?' };
+          return '<li class="' + state + '"><span class="icon">' + icons[state] + '</span>'
+            + '<span>' + escapeHtml(label) + '</span></li>';
+        }
+
+        function renderChecklist(data) {
+          if (!checklistEl) return;
+          if (!data) {
+            checklistEl.innerHTML = '';
+            return;
+          }
+          var probe = data.probe || {};
+          var rows = [];
+          // Q1: host RUNNING
+          rows.push(checklistRow(
+            data.reachable ? 'pass' : (data.host_offline ? 'fail' : 'warn'),
+            'Host: ' + (data.host_state || 'unknown')
+          ));
+          // Q2: SSH reachable (sentinel arrived)
+          rows.push(checklistRow(
+            data.ssh_dead ? 'fail' : 'pass',
+            'SSH reachable to workspace container'
+          ));
+          // Q1b: system-services agent state
+          rows.push(checklistRow(
+            data.services_agent_state === 'RUNNING' ? 'pass'
+              : (data.services_agent_state ? 'warn' : 'unknown'),
+            'system-services agent: ' + (data.services_agent_state || 'unknown')
+          ));
+          // Q4: services.toml declares [services.system_interface]
+          var declares = probe.services_toml_declares_system_interface;
+          rows.push(checklistRow(
+            declares === true ? 'pass' : (declares === false ? 'fail' : 'unknown'),
+            'services.toml declares [services.system_interface]'
+          ));
+          // Q6: in-container probe responded with HTTP 200
+          var curlState;
+          if (probe.curl_status === '200') {
+            curlState = 'pass';
+          } else if (probe.curl_status) {
+            curlState = 'warn';
+          } else {
+            curlState = 'unknown';
+          }
+          rows.push(checklistRow(
+            curlState,
+            'In-container probe (curl): ' + (probe.curl_status || 'no response')
+          ));
+          // Q7: plugin resolver has system_interface entry
+          var hasResolverEntry = data.plugin_resolver_services
+            && Object.prototype.hasOwnProperty.call(data.plugin_resolver_services, 'system_interface');
+          rows.push(checklistRow(
+            hasResolverEntry ? 'pass' : 'warn',
+            'Plugin resolver has system_interface entry'
+          ));
+          checklistEl.innerHTML = rows.join('');
+        }
+
+        function renderDebugMenu(data) {
+          if (!debugContentEl || !debugDetailsEl) return;
+          if (!data) {
+            debugContentEl.innerHTML = '';
+            show(debugDetailsEl, false);
+            return;
+          }
+          var probe = data.probe || {};
+          var parts = [];
+          parts.push('<div class="debug-section"><h4>Host state</h4><pre>'
+            + escapeHtml(data.host_state || 'unknown')
+            + ' (reachable=' + data.reachable + ', host_offline=' + data.host_offline + ')</pre></div>');
+          parts.push('<div class="debug-section"><h4>tmux ls</h4><pre>'
+            + escapeHtml(probe.tmux_ls || probe.tmux_error || '(no output)') + '</pre></div>');
+          var tomlBlock = (probe.services_toml_declares_system_interface === true)
+            ? '[services.system_interface] declared'
+            : (probe.services_toml_declares_system_interface === false
+                ? '[services.system_interface] MISSING'
+                : 'unknown');
+          if (probe.services_toml_error) {
+            tomlBlock += '\\n(error: ' + probe.services_toml_error + ')';
+          }
+          parts.push('<div class="debug-section"><h4>services.toml @ '
+            + escapeHtml(probe.services_toml_path || '/code/services.toml')
+            + '</h4><pre>' + escapeHtml(tomlBlock) + '</pre></div>');
+          parts.push('<div class="debug-section"><h4>Inner port ss -ltnp (port='
+            + escapeHtml(probe.inner_port === null || probe.inner_port === undefined ? 'unknown' : probe.inner_port)
+            + ')</h4><pre>' + escapeHtml(probe.port_listener || probe.port_listener_error || '(no output)') + '</pre></div>');
+          parts.push('<div class="debug-section"><h4>curl http://localhost:'
+            + escapeHtml(probe.inner_port === null || probe.inner_port === undefined ? '?' : probe.inner_port)
+            + '/</h4><pre>HTTP ' + escapeHtml(probe.curl_status || (probe.curl_error || 'no response')) + '</pre></div>');
+          var resolverEntries = data.plugin_resolver_services || {};
+          var resolverLines = Object.keys(resolverEntries).map(function (k) {
+            return k + ' = ' + resolverEntries[k];
+          });
+          parts.push('<div class="debug-section"><h4>Plugin resolver entry</h4><pre>'
+            + escapeHtml(resolverLines.length ? resolverLines.join('\\n') : '(no entry yet)') + '</pre></div>');
+          var sshConns = data.ssh_connections || [];
+          if (sshConns.length > 0) {
+            var sshRows = sshConns.map(function (entry) {
+              var cmd = entry.command || ('ssh -i ' + entry.key_path + ' -p ' + entry.port + ' ' + entry.user + '@' + entry.host);
+              return '<li><code>' + escapeHtml(cmd) + '</code>'
+                + '<button type="button" class="copy-row-btn" data-copy="' + escapeHtml(cmd) + '">Copy</button></li>';
+            });
+            parts.push('<div class="debug-section"><h4>SSH</h4><ul class="ssh-list">'
+              + sshRows.join('') + '</ul></div>');
+          }
+          debugContentEl.innerHTML = parts.join('');
+          show(debugDetailsEl, true);
+          // Wire per-row Copy buttons.
+          var copyRowBtns = debugContentEl.querySelectorAll('.copy-row-btn');
+          for (var i = 0; i < copyRowBtns.length; i += 1) {
+            copyRowBtns[i].addEventListener('click', function (e) {
+              var text = e.currentTarget.getAttribute('data-copy') || '';
+              if (navigator.clipboard) navigator.clipboard.writeText(text);
+            });
+          }
+        }
+
+        function copyDiagnostics() {
+          if (!latestHealth) return;
+          try {
+            var text = JSON.stringify(latestHealth, null, 2);
+            if (navigator.clipboard) navigator.clipboard.writeText(text);
+          } catch (e) {
+            /* ignore */
+          }
         }
 
         // The poll URL omits intent=restart so that, once the restart is
@@ -392,13 +609,13 @@ _RECOVERY_SCRIPT: Final[str] = """\
           show(spinnerEl, true);
           show(errorEl, false);
           show(hostBtn, false);
+          if (checklistEl) checklistEl.innerHTML = '';
+          show(checklistEl, false);
         }
-        // The single "Workspace unresponsive" state -- shown both before any
-        // restart (ambiguous host state) and after a restart failed to
-        // recover the workspace. These were two near-identical screens; they
-        // are one page now. The error <details> is only in the DOM when a
-        // failure reason exists, so showing it is a no-op when there is none:
-        // the same page renders correctly with or without the detail.
+        // The shared "Workspace unresponsive" state -- shown for ambiguous-host
+        // states, after a restart failure, and for the SSH-dead path (where
+        // bouncing a live container would interrupt user agents and we want
+        // explicit consent before doing so).
         function renderUnresponsive() {
           titleEl.textContent = 'Workspace unresponsive';
           messageEl.textContent =
@@ -407,7 +624,25 @@ _RECOVERY_SCRIPT: Final[str] = """\
           show(spinnerEl, false);
           show(errorEl, true);
           hostBtn.textContent = 'Restart workspace';
+          hostBtn.classList.remove('secondary');
           show(hostBtn, true);
+          if (checklistEl) show(checklistEl, latestHealth !== null);
+        }
+        // New tier: services.toml is missing [services.system_interface]. A
+        // restart cannot recover this; the user has to fix the file. Provide
+        // a secondary "Try restart anyway" affordance for completeness.
+        function renderMisconfigured() {
+          titleEl.textContent = 'Workspace misconfigured';
+          messageEl.textContent =
+            "This workspace's services.toml is missing the [services.system_interface] entry, "
+            + 'so the system interface cannot be started. A restart is unlikely to help -- '
+            + 'fix services.toml first. See the checklist below for diagnostics.';
+          show(spinnerEl, false);
+          show(errorEl, false);
+          hostBtn.textContent = 'Try restart anyway';
+          hostBtn.classList.add('secondary');
+          show(hostBtn, true);
+          if (checklistEl) show(checklistEl, true);
         }
         function renderDispatchError() {
           titleEl.textContent = 'Workspace unresponsive';
@@ -415,6 +650,7 @@ _RECOVERY_SCRIPT: Final[str] = """\
           show(spinnerEl, false);
           show(errorEl, false);
           hostBtn.textContent = 'Restart workspace';
+          hostBtn.classList.remove('secondary');
           show(hostBtn, true);
         }
 
@@ -438,6 +674,25 @@ _RECOVERY_SCRIPT: Final[str] = """\
           }).then(function (resp) {
             return resp.json();
           }).then(function (data) {
+            latestHealth = data || null;
+            renderChecklist(latestHealth);
+            renderDebugMenu(latestHealth);
+            if (data && data.is_misconfigured) {
+              // services.toml lacks the system_interface declaration. No
+              // restart will recover this; surface the misconfigured tier and
+              // do NOT auto-dispatch.
+              renderMisconfigured();
+              return;
+            }
+            if (data && data.ssh_dead) {
+              // The sentinel never arrived: the container's SSH transport is
+              // down (or hung). A surgical restart's `mngr stop` would just
+              // fail at the same SSH layer; a host restart bypasses that
+              // path but would bounce a live container, so we require
+              // explicit consent rather than auto-dispatching.
+              renderUnresponsive();
+              return;
+            }
             if (data && data.reachable) {
               // Container running: the surgical system-interface restart can
               // recover the workspace without interrupting agents.
@@ -459,6 +714,9 @@ _RECOVERY_SCRIPT: Final[str] = """\
         hostBtn.addEventListener('click', function () {
           postRestart('/restart-host');
         });
+        if (copyBtn) {
+          copyBtn.addEventListener('click', copyDiagnostics);
+        }
 
         if (initialStatus === 'restarting') {
           renderLoading();
@@ -501,7 +759,26 @@ def render_recovery_page(
             f"        <pre>{html.escape(initial_error)}</pre>\n"
             "      </details>\n"
         )
-    card_extra = error_block + '      <button id="recovery-host-btn" class="hidden">Restart workspace</button>\n'
+    # Structured checklist + debug details are populated dynamically by
+    # the recovery JS once it gets a host-health response. They are in
+    # the DOM from the start (hidden) so the JS can fill them in place
+    # without re-templating.
+    checklist_block = '      <ul id="recovery-checklist" class="checklist hidden"></ul>\n'
+    debug_block = (
+        '      <details id="recovery-debug-details" class="hidden">\n'
+        "        <summary>Diagnostics</summary>\n"
+        '        <div id="recovery-debug-content"></div>\n'
+        '        <div class="debug-section">'
+        '<button type="button" id="copy-diagnostics-btn">Copy diagnostics</button>'
+        "</div>\n"
+        "      </details>\n"
+    )
+    card_extra = (
+        error_block
+        + checklist_block
+        + '      <button id="recovery-host-btn" class="hidden">Restart workspace</button>\n'
+        + debug_block
+    )
     card_attrs = (
         f' data-agent-id="{html.escape(str(agent_id))}"'
         f' data-return-to="{html.escape(return_to)}"'

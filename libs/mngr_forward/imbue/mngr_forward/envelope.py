@@ -23,6 +23,7 @@ from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr.primitives import AgentId
 from imbue.mngr_forward.data_types import ListeningPayload
 from imbue.mngr_forward.data_types import LoginUrlPayload
+from imbue.mngr_forward.data_types import ResolverSnapshotPayload
 from imbue.mngr_forward.data_types import ReverseTunnelEstablishedPayload
 from imbue.mngr_forward.data_types import SystemInterfaceBackendFailurePayload
 from imbue.mngr_forward.primitives import ForwardPort
@@ -93,6 +94,15 @@ class EnvelopeWriter(MutableModel):
                 "payload": payload.model_dump(mode="json"),
             }
         )
+
+    def emit_resolver_snapshot(self, services_by_agent: dict[str, dict[str, str]]) -> None:
+        """Emit a ``resolver_snapshot`` plugin event with the current per-agent service map.
+
+        Sent on every resolver mutation. Carries the full map so a
+        late-attaching consumer only needs the latest envelope to be in sync.
+        """
+        payload = ResolverSnapshotPayload(services_by_agent=services_by_agent)
+        self._write_envelope({"stream": "forward", "payload": payload.model_dump(mode="json")})
 
     def emit_system_interface_backend_failure(self, payload: SystemInterfaceBackendFailurePayload) -> None:
         """Emit a ``system_interface_backend_failure`` plugin event.

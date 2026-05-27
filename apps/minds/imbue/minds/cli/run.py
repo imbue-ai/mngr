@@ -275,6 +275,9 @@ def run(
     consumer.add_on_system_interface_backend_failure_callback(
         lambda agent_id, _reason, _status: system_interface_health_tracker.record_failure(agent_id)
     )
+    # ``create_desktop_client`` registers an ``on_recovery`` callback that
+    # logs the cached final probe payload at INFO on each non-HEALTHY ->
+    # HEALTHY transition. Nothing additional is wired here.
 
     # All callbacks registered -- now safe to start the envelope reader
     # threads. Doing this earlier (e.g. inside ``start_mngr_forward``)

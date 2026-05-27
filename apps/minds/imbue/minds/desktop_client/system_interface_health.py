@@ -64,6 +64,7 @@ class AgentHealth(str, Enum):
 
 
 OnChangeCallback = Callable[[AgentId, AgentHealth], None]
+OnRecoveryCallback = Callable[[AgentId], None]
 
 
 class _AgentRecord(MutableModel):
@@ -112,6 +113,7 @@ class SystemInterfaceHealthTracker(MutableModel):
     _lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
     _records: dict[str, _AgentRecord] = PrivateAttr(default_factory=dict)
     _on_change_callbacks: list[OnChangeCallback] = PrivateAttr(default_factory=list)
+    _on_recovery_callbacks: list[OnRecoveryCallback] = PrivateAttr(default_factory=list)
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
@@ -127,6 +129,17 @@ class SystemInterfaceHealthTracker(MutableModel):
         """
         with self._lock:
             self._on_change_callbacks.append(callback)
+
+    def add_on_recovery_callback(self, callback: OnRecoveryCallback) -> None:
+        """Register a callback fired on every non-HEALTHY -> HEALTHY transition.
+
+        Distinct from ``add_on_change_callback`` so consumers that only care
+        about successful recoveries don't have to filter the firehose of
+        every state change. The recovery-diagnostics path uses this to
+        write the final probe results at INFO via loguru.
+        """
+        with self._lock:
+            self._on_recovery_callbacks.append(callback)
 
     def remove_on_change_callback(self, callback: OnChangeCallback) -> None:
         """Unregister a previously registered change callback.
@@ -207,6 +220,7 @@ class SystemInterfaceHealthTracker(MutableModel):
                 fire_health = AgentHealth.HEALTHY
         if fire_health is not None:
             self._fire_on_change(agent_id, fire_health)
+            self._fire_on_recovery(agent_id)
 
     def mark_stuck(self, agent_id: AgentId) -> None:
         """Force-transition ``agent_id`` to STUCK, firing on-change.
@@ -327,3 +341,12 @@ class SystemInterfaceHealthTracker(MutableModel):
                 callback(agent_id, new_health)
             except (OSError, RuntimeError, ValueError) as e:
                 logger.warning("SystemInterfaceHealthTracker on-change callback failed for {}: {}", agent_id, e)
+
+    def _fire_on_recovery(self, agent_id: AgentId) -> None:
+        with self._lock:
+            callbacks = list(self._on_recovery_callbacks)
+        for callback in callbacks:
+            try:
+                callback(agent_id)
+            except (OSError, RuntimeError, ValueError) as e:
+                logger.warning("SystemInterfaceHealthTracker on-recovery callback failed for {}: {}", agent_id, e)

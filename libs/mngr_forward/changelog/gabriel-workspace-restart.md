@@ -11,3 +11,14 @@ backend failure instead of flashing a raw error.
 - The "Loading workspace" loader no longer shows the explanatory "This
   page will reload automatically..." line -- it just shows the heading,
   vertically centered against the spinner.
+- New `resolver_snapshot` envelope: the plugin emits the full per-agent
+  service map on every `update_services` mutation. Minds mirrors the
+  latest snapshot in its envelope-stream consumer and uses it on the
+  recovery-diagnostics page to render whether the plugin has seen the
+  agent's `system_interface` service (Q7 on the recovery checklist).
+  Old minds against a new plugin transparently drops the new payload;
+  new minds against an old plugin sees no `resolver_snapshot` and just
+  renders Q7 as "no entry yet" -- same transient as a fresh plugin
+  startup. No periodic flushes, no debouncing, no initial empty
+  emission; the first envelope is sent on the first real services
+  event.

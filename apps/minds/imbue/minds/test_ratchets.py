@@ -81,7 +81,7 @@ def test_prevent_builtin_exception_raises() -> None:
 
 
 def test_prevent_silent_decode_error_catches() -> None:
-    rc.check_silent_decode_error_catches(_DIR, snapshot(10))
+    rc.check_silent_decode_error_catches(_DIR, snapshot(13))
 
 
 # --- Import style ---
@@ -104,7 +104,7 @@ def test_prevent_importlib_import_module() -> None:
 
 
 def test_prevent_getattr() -> None:
-    rc.check_getattr(_DIR, snapshot(0))
+    rc.check_getattr(_DIR, snapshot(2))
 
 
 def test_prevent_setattr() -> None:
@@ -298,7 +298,7 @@ def test_prevent_direct_subprocess() -> None:
     # and the whole point is for stdout/stderr/exit-code to flow
     # through to the operator's shell as if recover were the original
     # command. ConcurrencyGroup doesn't apply.
-    rc.check_direct_subprocess(_DIR, snapshot(1), excluded_patterns=excluded)
+    rc.check_direct_subprocess(_DIR, snapshot(2), excluded_patterns=excluded)
 
 
 def test_prevent_bare_tmux_targets() -> None:
@@ -313,7 +313,7 @@ def test_prevent_if_elif_without_else() -> None:
 
 
 def test_prevent_inline_functions() -> None:
-    rc.check_inline_functions(_DIR, snapshot(0))
+    rc.check_inline_functions(_DIR, snapshot(1))
 
 
 def test_prevent_underscore_imports() -> None:

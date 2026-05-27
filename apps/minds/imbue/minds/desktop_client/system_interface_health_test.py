@@ -361,6 +361,48 @@ def test_concurrent_failure_envelopes_then_one_stuck_event() -> None:
         assert seen == [AgentHealth.STUCK]
 
 
+def test_on_recovery_callback_fires_only_on_non_healthy_to_healthy() -> None:
+    """The recovery callback fires on the STUCK -> HEALTHY transition, not on
+    every HEALTHY observation.
+    """
+    tracker = SystemInterfaceHealthTracker(stuck_threshold_seconds=_FAST_THRESHOLD)
+    aid = AgentId.generate()
+    recovered: list[AgentId] = []
+    tracker.add_on_recovery_callback(lambda a: recovered.append(a))
+
+    # A probe-success for an agent the tracker never tracked is a no-op.
+    tracker.record_probe_success(aid)
+    assert recovered == []
+
+    _drive_to_stuck(tracker, aid)
+    assert tracker.get_health(aid) == AgentHealth.STUCK
+    tracker.record_probe_success(aid)
+    assert recovered == [aid]
+
+    # A second probe-success against the now-HEALTHY agent must not refire.
+    tracker.record_probe_success(aid)
+    assert recovered == [aid]
+
+
+def test_on_recovery_callback_exception_does_not_break_subsequent_callbacks() -> None:
+    tracker = SystemInterfaceHealthTracker(stuck_threshold_seconds=_FAST_THRESHOLD)
+    aid = AgentId.generate()
+    seen: list[AgentId] = []
+
+    def bad_cb(_a: AgentId) -> None:
+        raise ValueError("boom")
+
+    def good_cb(a: AgentId) -> None:
+        seen.append(a)
+
+    tracker.add_on_recovery_callback(bad_cb)
+    tracker.add_on_recovery_callback(good_cb)
+
+    _drive_to_stuck(tracker, aid)
+    tracker.record_probe_success(aid)
+    assert seen == [aid]
+
+
 def test_callback_exception_does_not_break_subsequent_callbacks() -> None:
     tracker = SystemInterfaceHealthTracker(stuck_threshold_seconds=_FAST_THRESHOLD)
     aid = AgentId.generate()

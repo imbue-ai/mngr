@@ -99,8 +99,32 @@ class SystemInterfaceBackendFailurePayload(FrozenModel):
     )
 
 
+class ResolverSnapshotPayload(FrozenModel):
+    """Emitted on every resolver mutation: full per-agent service map.
+
+    Carries the full ``{agent_id: {service_name: url}}`` map held by the
+    plugin's ``ForwardResolver`` at the moment of mutation. Consumers
+    (notably minds' recovery-diagnostics path) keep the latest copy in
+    process state so the recovery page can render whether the plugin has
+    seen the system_interface service for a given agent.
+
+    The full map is sent on every change (no per-agent diff) so a consumer
+    that connects late only needs the most recent envelope to be in sync.
+    """
+
+    type: Literal["resolver_snapshot"] = "resolver_snapshot"
+    services_by_agent: dict[str, dict[str, str]] = Field(
+        default_factory=dict,
+        description="Full per-agent service map: {agent_id_str: {service_name: url}}",
+    )
+
+
 ForwardPayload = (
-    LoginUrlPayload | ListeningPayload | ReverseTunnelEstablishedPayload | SystemInterfaceBackendFailurePayload
+    LoginUrlPayload
+    | ListeningPayload
+    | ReverseTunnelEstablishedPayload
+    | SystemInterfaceBackendFailurePayload
+    | ResolverSnapshotPayload
 )
 
 

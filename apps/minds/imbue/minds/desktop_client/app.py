@@ -66,6 +66,11 @@ from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.notification import NotificationRequest
 from imbue.minds.desktop_client.notification import NotificationUrgency
+from imbue.minds.desktop_client.recovery_probe import HostHealthResponse
+from imbue.minds.desktop_client.recovery_probe import ProbeRecord
+from imbue.minds.desktop_client.recovery_probe import build_host_health_response
+from imbue.minds.desktop_client.recovery_probe import build_probe_argv
+from imbue.minds.desktop_client.recovery_probe import parse_probe_output
 from imbue.minds.desktop_client.request_events import RequestInbox
 from imbue.minds.desktop_client.request_events import RequestType
 from imbue.minds.desktop_client.request_events import parse_request_event
@@ -1645,13 +1650,6 @@ _RESTART_COMMAND_TIMEOUT_SECONDS: Final[float] = 120.0
 _SYSTEM_INTERFACE_STARTUP_WAIT_SECONDS: Final[float] = 15.0
 # Poll cadence while waiting for the system interface to come back post-restart.
 _RESTART_PROBE_INTERVAL_SECONDS: Final[float] = 1.0
-# ``HostState`` values (as ``mngr list`` reports them) that mean the workspace
-# container is down with nothing running. A host restart of such a host just
-# starts it back up and interrupts no agent, so the recovery page can dispatch
-# it without a confirmation. RUNNING is handled separately; every other state
-# (STARTING, PAUSED, DESTROYED, UNAUTHENTICATED, ...) is ambiguous and falls
-# back to a confirmed manual restart.
-_OFFLINE_HOST_STATES: Final[frozenset[str]] = frozenset({"STOPPED", "STOPPING", "CRASHED", "FAILED"})
 
 
 def _build_mngr_stop_argv(mngr_binary: str, agent_id: AgentId, is_host_restart: bool) -> list[str]:
@@ -1676,37 +1674,6 @@ def _build_mngr_host_state_argv(mngr_binary: str) -> list[str]:
     is a pure read -- it never starts a stopped container.
     """
     return [mngr_binary, "list", "--format", "json", "--quiet"]
-
-
-def _classify_host_health(list_json: str | None, agent_id: AgentId) -> dict[str, bool]:
-    """Classify a workspace's host from ``mngr list --format json`` output.
-
-    Returns ``{"reachable": ..., "host_offline": ...}``:
-      - ``reachable`` -- the host is RUNNING, so the surgical system-interface
-        restart can recover the workspace.
-      - ``host_offline`` -- the host is stopped/crashed, so nothing is running
-        and a host restart is non-destructive (can be auto-dispatched).
-    A host whose state cannot be determined classifies as neither, so the
-    recovery page falls back to a confirmed manual restart.
-    """
-    if list_json is None:
-        return {"reachable": False, "host_offline": False}
-    try:
-        agents = json.loads(list_json).get("agents", [])
-    except (json.JSONDecodeError, AttributeError) as e:
-        logger.warning("Could not parse `mngr list` output for host-health classification of {}: {}", agent_id, e)
-        return {"reachable": False, "host_offline": False}
-    for agent in agents:
-        if not isinstance(agent, dict) or agent.get("id") != str(agent_id):
-            continue
-        host = agent.get("host")
-        state = str(host.get("state", "")).upper() if isinstance(host, dict) else ""
-        if state == "RUNNING":
-            return {"reachable": True, "host_offline": False}
-        if state in _OFFLINE_HOST_STATES:
-            return {"reachable": False, "host_offline": True}
-        return {"reachable": False, "host_offline": False}
-    return {"reachable": False, "host_offline": False}
 
 
 def _sanitize_recovery_return_to(raw: str) -> str:
@@ -2018,13 +1985,16 @@ def _handle_host_health_probe_api(
     request: Request,
     auth_store: AuthStoreDep,
 ) -> Response:
-    """Layer-2 probe: classify the workspace host so the recovery page picks a tier.
+    """Layer-2 probe: classify the workspace host + run the recovery-diagnostics probe.
 
-    Reads the host's lifecycle state from ``mngr list``. A RUNNING host can be
-    recovered with the surgical system-interface restart; a stopped host needs
-    a full host restart -- which the recovery page can auto-dispatch, since a
-    stopped container has nothing running to interrupt. Returns
-    ``{"reachable": ..., "host_offline": ...}``.
+    Reads the host's lifecycle state from ``mngr list`` AND runs a batched
+    in-container probe via ``mngr exec`` (recovery-diagnostics: tmux ls,
+    services.toml parse, ss/curl on the inner port). Returns the full
+    :class:`HostHealthResponse` -- the recovery page uses ``reachable`` /
+    ``host_offline`` for auto-dispatch tiering, ``is_misconfigured`` /
+    ``ssh_dead`` to choose between the misconfigured / unresponsive
+    variants, and the rest of the payload for the structured checklist
+    and debug menu.
     """
     if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
         return _json_error("Not authenticated", status_code=403)
@@ -2032,17 +2002,102 @@ def _handle_host_health_probe_api(
     concurrency_group: ConcurrencyGroup | None = request.app.state.root_concurrency_group
     if concurrency_group is None:
         return _json_error("Host health probe is unavailable in this configuration", status_code=503)
-    env = dict(os.environ)
-    env["MNGR_HOST_DIR"] = str(request.app.state.mngr_host_dir)
-    list_json = _capture_mngr_command(
-        concurrency_group, _build_mngr_host_state_argv(request.app.state.mngr_binary), env
+    response = _run_host_health_probe(aid, request, concurrency_group)
+    logger.info(
+        "Layer-2 host-state probe for {}: reachable={} host_offline={} ssh_dead={} is_misconfigured={}",
+        aid,
+        response.reachable,
+        response.host_offline,
+        response.ssh_dead,
+        response.is_misconfigured,
     )
-    health = _classify_host_health(list_json, aid)
-    logger.info("Layer-2 host-state probe for {}: {}", aid, health)
     return Response(
-        content=json.dumps(health),
+        content=response.model_dump_json(),
         media_type="application/json",
     )
+
+
+def _run_host_health_probe(
+    agent_id: AgentId,
+    request: Request,
+    concurrency_group: ConcurrencyGroup,
+) -> HostHealthResponse:
+    """Run the batched ``mngr exec`` probe + ``mngr list`` lookup, return the response.
+
+    Extracted so it can be reused by the post-recovery loguru log path
+    (which needs the same record) without re-implementing the assembly.
+    """
+    env = dict(os.environ)
+    env["MNGR_HOST_DIR"] = str(request.app.state.mngr_host_dir)
+    mngr_binary: str = request.app.state.mngr_binary
+    list_json = _capture_mngr_command(concurrency_group, _build_mngr_host_state_argv(mngr_binary), env)
+    backend_resolver: BackendResolverInterface = request.app.state.backend_resolver
+    services_agent_id = backend_resolver.get_system_services_agent_id(agent_id)
+    probe = _run_batched_probe(concurrency_group, mngr_binary, services_agent_id, env)
+    consumer: EnvelopeStreamConsumer | None = request.app.state.envelope_stream_consumer
+    plugin_resolver_services: dict[str, str] = (
+        consumer.get_resolver_snapshot_for_agent(agent_id) if consumer is not None else {}
+    )
+    response = build_host_health_response(
+        list_json=list_json,
+        agent_id=agent_id,
+        services_agent_id=services_agent_id,
+        probe=probe,
+        plugin_resolver_services=plugin_resolver_services,
+    )
+    cache: dict[str, HostHealthResponse] = request.app.state.latest_host_health_by_agent_id
+    cache[str(agent_id)] = response
+    return response
+
+
+class _LogProbeOnRecoveryCallback(MutableModel):
+    """Callable that logs the cached probe at INFO on STUCK->HEALTHY recovery.
+
+    Registered with the health tracker so that when a workspace recovers,
+    the most recent host-health probe response (cached by the host-health
+    endpoint) lands in a single INFO log line. The line includes either
+    the probe payload or a "(no probe observation cached)" marker so the
+    operator can correlate the recovery with the most recent observation.
+
+    Holds a reference to the shared cache dict on ``app.state`` -- both
+    sides see the same instance, so the endpoint's writes are visible
+    here without any explicit threading primitive (the GIL serializes
+    pop/insert on the dict and we never iterate in either direction).
+    """
+
+    cache: dict[str, HostHealthResponse] = Field(
+        frozen=True,
+        description="Shared per-agent cache populated by the host-health endpoint.",
+    )
+
+    def __call__(self, agent_id: AgentId) -> None:
+        response = self.cache.pop(str(agent_id), None)
+        if response is None:
+            logger.info("Workspace {} recovered (no probe observation cached)", agent_id)
+            return
+        logger.info("Workspace {} recovered; final probe: {}", agent_id, response.model_dump_json())
+
+
+def _run_batched_probe(
+    concurrency_group: ConcurrencyGroup,
+    mngr_binary: str,
+    services_agent_id: AgentId | None,
+    env: dict[str, str],
+) -> ProbeRecord:
+    """Run the batched in-container probe via ``mngr exec``.
+
+    Returns a probe record with ``ssh_dead=True`` when the
+    system-services agent has not yet been discovered (so we can't even
+    address the in-container script), when ``mngr exec`` could not be
+    run, or when the sentinel never lands on stdout (SSH transport down
+    or container hang). Recovery-page client steers SSH-dead to the
+    host-restart tier.
+    """
+    if services_agent_id is None:
+        return ProbeRecord(ssh_dead=True)
+    argv = build_probe_argv(mngr_binary, services_agent_id)
+    stdout = _capture_mngr_command(concurrency_group, argv, env)
+    return parse_probe_output(stdout)
 
 
 # -- Account management routes --
@@ -2885,6 +2940,15 @@ def create_desktop_client(
     app.state.system_interface_health_tracker = system_interface_health_tracker
     app.state.mngr_binary = mngr_binary
     app.state.mngr_host_dir = mngr_host_dir if mngr_host_dir is not None else Path.home() / ".mngr"
+    # Per-agent cache of the most recent host-health probe response. The
+    # host-health endpoint writes here on every probe; the recovery-log
+    # callback below reads on STUCK->HEALTHY transition so the final
+    # observed state of a recovered workspace gets a single INFO log line.
+    app.state.latest_host_health_by_agent_id = {}
+    if system_interface_health_tracker is not None:
+        system_interface_health_tracker.add_on_recovery_callback(
+            _LogProbeOnRecoveryCallback(cache=app.state.latest_host_health_by_agent_id)
+        )
     # Populated with the running loop by _managed_lifespan on startup. Defined
     # up-front as None so background callbacks fired before startup (e.g. mngr
     # events produced between consumer.start() and uvicorn.run()) see a

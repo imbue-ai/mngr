@@ -29,6 +29,7 @@ from imbue.mngr_forward.data_types import ForwardPortStrategy
 from imbue.mngr_forward.data_types import ForwardServiceStrategy
 from imbue.mngr_forward.data_types import ForwardStrategy
 from imbue.mngr_forward.data_types import ProxyTarget
+from imbue.mngr_forward.envelope import EnvelopeWriter
 from imbue.mngr_forward.ssh_tunnel import RemoteSSHInfo
 
 
@@ -38,6 +39,15 @@ class ForwardResolver(MutableModel):
     strategy: ForwardStrategy = Field(
         frozen=True,
         description="Either ForwardServiceStrategy or ForwardPortStrategy; chosen at CLI parse time",
+    )
+    envelope_writer: EnvelopeWriter | None = Field(
+        default=None,
+        description=(
+            "Optional writer used to emit a ``resolver_snapshot`` envelope on every "
+            "``update_services`` mutation. Plugin wires this so minds-side consumers "
+            "can mirror the per-agent service map for diagnostics. None in tests / "
+            "code paths that don't care about emission."
+        ),
     )
 
     _lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
@@ -72,9 +82,18 @@ class ForwardResolver(MutableModel):
             self._ssh_by_agent.pop(aid_str, None)
 
     def update_services(self, agent_id: AgentId, services: dict[str, str]) -> None:
-        """Replace the known services for a single agent."""
+        """Replace the known services for a single agent.
+
+        Emits a ``resolver_snapshot`` envelope after the mutation so consumers
+        can mirror the per-agent service map. The snapshot carries the full
+        per-agent map (not just this agent) so a late-attaching consumer can
+        catch up from a single envelope.
+        """
         with self._lock:
             self._services_by_agent[str(agent_id)] = dict(services)
+            snapshot = {aid: dict(svc) for aid, svc in self._services_by_agent.items()}
+        if self.envelope_writer is not None:
+            self.envelope_writer.emit_resolver_snapshot(snapshot)
 
     def update_ssh_info(self, agent_id: AgentId, ssh_info: RemoteSSHInfo) -> None:
         """Set or replace the SSH info for a single agent."""

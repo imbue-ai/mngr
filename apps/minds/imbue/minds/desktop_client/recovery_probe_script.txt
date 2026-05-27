@@ -1,0 +1,69 @@
+import json
+import re
+import subprocess
+
+result = {
+    "tmux_ls": None,
+    "tmux_error": None,
+    "services_toml_declares_system_interface": None,
+    "services_toml_path": "/code/services.toml",
+    "services_toml_error": None,
+    "inner_port": None,
+    "port_listener": None,
+    "port_listener_error": None,
+    "curl_status": None,
+    "curl_error": None,
+}
+
+try:
+    proc = subprocess.run(
+        ["tmux", "ls"], capture_output=True, text=True, timeout=2,
+    )
+    result["tmux_ls"] = proc.stdout + (proc.stderr if proc.returncode != 0 else "")
+except Exception as e:
+    result["tmux_error"] = repr(e)
+
+try:
+    import tomllib
+    with open("/code/services.toml", "rb") as fh:
+        data = tomllib.load(fh)
+    services = data.get("services", {})
+    si = services.get("system_interface")
+    result["services_toml_declares_system_interface"] = isinstance(si, dict)
+    if isinstance(si, dict):
+        cmd = si.get("command", "") or ""
+        m = re.search(r"--url\s+\S+://[^:]+:(\d+)", cmd)
+        if m:
+            try:
+                result["inner_port"] = int(m.group(1))
+            except ValueError:
+                pass
+except Exception as e:
+    result["services_toml_error"] = repr(e)
+
+if result["inner_port"] is not None:
+    try:
+        proc = subprocess.run(
+            ["ss", "-ltnp"], capture_output=True, text=True, timeout=2,
+        )
+        port_marker = ":{}".format(result["inner_port"])
+        lines = [line for line in proc.stdout.splitlines() if port_marker in line]
+        result["port_listener"] = "\n".join(lines)
+    except Exception as e:
+        result["port_listener_error"] = repr(e)
+
+if result["inner_port"] is not None:
+    try:
+        proc = subprocess.run(
+            [
+                "curl", "-m1", "-s", "-o", "/dev/null",
+                "-w", "%{http_code}",
+                "http://localhost:{}/".format(result["inner_port"]),
+            ],
+            capture_output=True, text=True, timeout=3,
+        )
+        result["curl_status"] = proc.stdout.strip()
+    except Exception as e:
+        result["curl_error"] = repr(e)
+
+print(json.dumps(result))

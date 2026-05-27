@@ -49,3 +49,33 @@ Tiered system-interface restart for the minds recovery flow.
   putting the subdomain in the request URL. The plugin already routes on
   the ``Host`` header, so this makes those calls independent of
   ``*.localhost`` name resolution, which is not available on every host.
+- Recovery diagnostics: the recovery page now runs a batched in-container
+  probe (``tmux ls``, ``services.toml`` declaration parse, ``ss``/``curl``
+  on the system-interface inner port) plus a plugin resolver-snapshot
+  read, and surfaces the results inline. A structured checklist (host /
+  SSH / services-agent / services.toml / in-container probe / plugin
+  resolver) makes it obvious which part of the stack is failing; a
+  collapsed Diagnostics ``<details>`` block carries the raw observations
+  and copyable SSH connection strings for the workspace host, with a
+  page-level "Copy diagnostics" button. Probes only run on recovery-page
+  load (RESTARTING refreshes skip probing); normal healthy operation
+  generates no new probe traffic.
+- New "Workspace misconfigured" recovery tier: when ``services.toml`` is
+  missing ``[services.system_interface]`` (the only condition where no
+  restart can possibly help), the recovery page renders dedicated copy
+  explaining that a restart will not help and offers a secondary "Try
+  restart anyway" affordance rather than auto-dispatching.
+- Auto-escalate to host-restart when the SSH transport to a RUNNING host
+  is down (the probe sentinel never returns). The page renders the
+  shared "Workspace unresponsive" state with the checklist visible so
+  SSH appears as the failing item, and the primary button is rebound to
+  the host restart; bouncing a live container still requires explicit
+  consent, so no auto-dispatch.
+- The recovery probe runs over ``mngr exec`` with a 5s hard ceiling
+  bounded by ``--no-start`` and ``--quiet``, so a wedged container
+  cannot gate the recovery UI and a probe will never accidentally start
+  a stopped host.
+- On every non-HEALTHY -> HEALTHY tracker transition, the system
+  interface health tracker now fires an on-recovery callback. Minds
+  wires it to a loguru INFO line so the final recovery is visible in
+  the log alongside the per-probe diagnostics line.
