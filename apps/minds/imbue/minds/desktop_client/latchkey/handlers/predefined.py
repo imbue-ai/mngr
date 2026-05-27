@@ -400,10 +400,6 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
         it goes into the response event so the inbox can dedupe the
         response against the original request. ``display_name`` is the
         human-readable service name shown in the agent-facing message.
-        For requests whose scope is in the catalog these are the catalog
-        entry's scope and display name respectively; for requests with
-        an unknown scope, both fall back to the raw scope string so the
-        deny path still works.
         """
         message = _format_denied_message(display_name)
         response_event = self._write_response_and_notify(
@@ -565,21 +561,12 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
         request: Request,
         req_event: RequestEvent,
     ) -> Response:
-        """Drive the deny flow from the dialog form submission.
-
-        Deny must work even when the requested scope is not in the
-        gateway's catalog: an agent can file a request under an unknown
-        scope (typo, stale catalog, etc.) and the user's only sensible
-        recourse from the rendered dialog (see
-        :func:`_render_unknown_scope_page`) is to deny it. In that case
-        we fall back to using the raw scope string as the display name
-        too, so the agent-facing ``mngr message`` and the persisted
-        response event still get written.
-        """
+        """Drive the deny flow from the dialog form submission."""
         if not isinstance(req_event, LatchkeyPredefinedPermissionRequestEvent):
             return _json_error("Unsupported request type", status_code=500)
         service_info = self.services_catalog.get_by_scope(req_event.scope)
         if service_info is None:
+            # Even invalid permission requests can be denied.
             display_name = req_event.scope
         else:
             display_name = service_info.display_name
