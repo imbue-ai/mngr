@@ -26,6 +26,7 @@ surgical.
 import base64
 import json
 import re
+from functools import cache
 from pathlib import Path
 from typing import Final
 
@@ -53,22 +54,26 @@ PROBE_TIMEOUT_SECONDS: Final[float] = 5.0
 # in ``build_probe_shell_command`` so the outer ``mngr exec`` argv stays a
 # single shell-safe token without quoting headaches.
 #
-# Loaded lazily on first use rather than at module import: if the .txt file
-# is missing (e.g. an incomplete install), an eager read would raise during
-# import and break every importer of this module (app.py and the rest of
-# the desktop-client chain). Lazy load keeps the rest of the app working;
-# only the recovery-probe endpoint hits the missing file, where the
-# FileNotFoundError surfaces as a 500 from the host-health endpoint.
+# Loaded lazily on first use (via ``functools.cache`` on the helper below)
+# rather than at module import: if the .txt file is missing (e.g. an
+# incomplete install), an eager read would raise during import and break
+# every importer of this module (app.py and the rest of the desktop-client
+# chain). Lazy load keeps the rest of the app working; only the
+# recovery-probe endpoint hits the missing file, where the FileNotFoundError
+# surfaces as a 500 from the host-health endpoint.
 _PROBE_SCRIPT_PATH: Final[Path] = Path(__file__).parent / "recovery_probe_script.txt"
-_probe_python_script_cache: str | None = None
 
 
+@cache
 def _get_probe_python_script() -> str:
-    """Return the inner-probe Python source, loading it from disk on first call."""
-    global _probe_python_script_cache
-    if _probe_python_script_cache is None:
-        _probe_python_script_cache = _PROBE_SCRIPT_PATH.read_text(encoding="utf-8")
-    return _probe_python_script_cache
+    """Return the inner-probe Python source, loading it from disk on first call.
+
+    Cached via ``functools.cache`` so the file is read at most once per
+    process even though every recovery-probe invocation calls through here.
+    Using ``functools.cache`` rather than a module-level mutable variable
+    avoids the ``global`` keyword, which the repo style guide forbids.
+    """
+    return _PROBE_SCRIPT_PATH.read_text(encoding="utf-8")
 
 
 def build_probe_shell_command() -> str:
