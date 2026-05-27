@@ -105,7 +105,7 @@ mngr create my-agent --provider vultr -b --vps-plan=vc2-2c-4gb -b --file=Dockerf
 
 | Operation | What happens |
 |-----------|-------------|
-| `create` | Provision VPS, install Docker via cloud-init, create the unified `mngr-host-vol-<hex>` volume (seeded with empty `host_dir/` and `agents/`), run container, set up SSH, write `host_state.json` |
+| `create` | Provision VPS, install Docker via cloud-init, prepare the btrfs loop filesystem on the outer (install `btrfs-progs`, `fallocate` + `mkfs.btrfs` the loop file, loop-mount it, persist via `/etc/fstab`, `btrfs subvolume create` the per-host subvolume), create the bind-options unified `mngr-host-vol-<hex>` volume pointing at that subvolume (seeded with empty `host_dir/` and `agents/`), run container, set up SSH, write `host_state.json` |
 | `stop` | `docker stop` the container. VPS keeps running. |
 | `start` | `docker start` the container. Wait for SSH. |
 | `destroy` | Remove container, best-effort `btrfs subvolume delete` of the per-host subvolume (drops `host_state.json`, `agents/`, and `host_dir/` together), remove the docker named volume entry, destroy VPS (which also takes the loop file with it), clean up SSH keys |
