@@ -331,8 +331,9 @@ def test_create_volume_with_layout_seeds_host_dir_and_agents(tmp_path: Path) -> 
 
 
 def test_open_host_store_resolves_mountpoint(tmp_path: Path) -> None:
+    # open_host_store only consults the stubbed `docker volume inspect`; no
+    # real directory is required for resolving the mountpoint.
     mountpoint = tmp_path / "_data"
-    mountpoint.mkdir()
     outer = _outer_with_mountpoint(mountpoint, volume_name="mngr-host-vol-aaaa")
     store = open_host_store(cast(OuterHostInterface, outer), "mngr-host-vol-aaaa")
     assert store.mountpoint == mountpoint
