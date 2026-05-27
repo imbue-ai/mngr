@@ -381,9 +381,15 @@ def test_engine_version_supports_volume_subpath_rejects_unparseable(version: str
         verify_engine_version_supports_volume_subpath(version)
 
 
-def test_engine_version_supports_volume_subpath_accepts_rc_suffix() -> None:
-    """Version strings with a `-rc` / pre-release suffix on the minor are accepted."""
-    verify_engine_version_supports_volume_subpath("25.0-rc.1")
+@pytest.mark.parametrize("version", ["25.0.0-rc.1", "25.0-rc.1", "25.0-beta.2"])
+def test_engine_version_supports_volume_subpath_accepts_prerelease_suffix(version: str) -> None:
+    """Pre-release suffixes on either the minor or patch component are tolerated.
+
+    `25.0.0-rc.1` matches the realistic Docker pre-release format; the
+    other entries cover the parser's robustness to suffixes appearing on
+    the minor segment.
+    """
+    verify_engine_version_supports_volume_subpath(version)
 
 
 # =========================================================================
