@@ -36,7 +36,7 @@ def _config_opts_into_pytest(raw: dict[str, Any]) -> bool:
     return raw.get("is_allowed_in_pytest") is True
 
 
-def enforce_pytest_config_opt_in(loaded_configs: list[tuple[Path, dict[str, Any]]]) -> None:
+def enforce_pytest_config_opt_in(loaded_configs: list[tuple[str, dict[str, Any]]]) -> None:
     """Refuse to read a non-test config during a pytest run.
 
     During a pytest run (``PYTEST_CURRENT_TEST`` set), every config file that was
@@ -47,15 +47,16 @@ def enforce_pytest_config_opt_in(loaded_configs: list[tuple[Path, dict[str, Any]
     is checked on its own, not just the merged value. If no config file was
     loaded there is nothing to protect against, so mngr runs normally.
 
-    ``loaded_configs`` is the list of (path, raw) for the config files that were
-    actually present (callers filter out missing files).
+    ``loaded_configs`` is the list of (source, raw) for the config files that
+    were actually present (callers filter out missing files); ``source`` is a
+    path or human-readable label used only in the error message.
     """
     if "PYTEST_CURRENT_TEST" not in os.environ:
         return
-    for path, raw in loaded_configs:
+    for source, raw in loaded_configs:
         if not _config_opts_into_pytest(raw):
             raise ConfigParseError(
-                f"Running mngr within pytest is not allowed: the config file at {path} does not "
+                f"Running mngr within pytest is not allowed: the config file ({source}) does not "
                 "set is_allowed_in_pytest = true. Every config file loaded during a pytest run "
                 "must opt in. If this is a test config, set that field; otherwise a test is "
                 "loading a config that was not written for testing."
@@ -168,7 +169,7 @@ def _resolve_config_files(
     root_name = os.environ.get("MNGR_ROOT_NAME", "mngr")
     base_dir = read_default_host_dir()
 
-    loaded: list[tuple[Path, dict[str, Any]]] = []
+    loaded: list[tuple[str, dict[str, Any]]] = []
 
     # User config
     profile_dir = find_profile_dir_lightweight(base_dir)
@@ -176,7 +177,7 @@ def _resolve_config_files(
         user_path = get_user_config_path(profile_dir)
         raw = try_load_toml(user_path)
         if raw is not None:
-            loaded.append((user_path, raw))
+            loaded.append((str(user_path), raw))
 
     # Project + local config need the project root.
     # Resolve the directory inside the ConcurrencyGroup (it needs git lookups),
@@ -191,10 +192,10 @@ def _resolve_config_files(
             path = project_dir / filename
             raw = try_load_toml(path)
             if raw is not None:
-                loaded.append((path, raw))
+                loaded.append((str(path), raw))
 
     enforce_pytest_config_opt_in(loaded)
-    return [raw for _path, raw in loaded]
+    return [raw for _source, raw in loaded]
 
 
 # --- Default subcommand pre-reader ---

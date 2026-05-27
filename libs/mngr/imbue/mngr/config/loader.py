@@ -39,6 +39,7 @@ from imbue.mngr.config.key_resolver import parse_scalar_value
 from imbue.mngr.config.key_resolver import resolve_extends
 from imbue.mngr.config.key_resolver import set_at_path
 from imbue.mngr.config.plugin_registry import get_plugin_config_class
+from imbue.mngr.config.pre_readers import enforce_pytest_config_opt_in
 from imbue.mngr.config.pre_readers import get_user_config_path
 from imbue.mngr.config.pre_readers import load_local_config
 from imbue.mngr.config.pre_readers import load_project_config
@@ -135,11 +136,10 @@ def load_config(
     # Pass context_dir so the disabled-plugin set is read from the same config
     # tree as the rest of this load (not cwd), keeping the two consistent.
     #
-    # This call also enforces the pytest config guard for the whole load: it goes
-    # through _resolve_config_files (the single chokepoint), which reads the same
-    # user/project/local files the merge below reads and requires every one of
-    # them to set is_allowed_in_pytest = true during a pytest run. So if a real,
-    # non-test config is picked up, this raises here before any config is used.
+    # This call goes through _resolve_config_files, which enforces the pytest
+    # config guard on the files it reads. The merge below re-enforces it on the
+    # layers it reads itself (see enforce_pytest_config_opt_in there), so the
+    # guard does not depend on this call alone.
     config_disabled_plugins = read_disabled_plugins(context_dir)
 
     # Start with base config that has defaults based on root_name
@@ -157,32 +157,39 @@ def load_config(
     if strict is None:
         strict = resolve_strict_from_env()
 
-    # Load and merge config files in precedence order (user, project, local).
-    # The pytest config guard was already enforced above via read_disabled_plugins
-    # (which reads these same files through _resolve_config_files), so by this
-    # point every loaded file has opted in (or load failed).
-    #
-    # Narrowing violations -- a higher-precedence layer assigning over a non-
-    # empty aggregate value from a lower-precedence layer -- are collected as
-    # we go, then turned into a single error after all layers are merged (when
-    # the final ``allow_settings_key_assignment_narrowing`` resolves to False).
+    # Load the config files in precedence order (user, project, local). The
+    # read_disabled_plugins(context_dir) call above already enforced the pytest
+    # guard on these same files, but enforce it again here on the layers this
+    # function reads itself, so load_config's protection is self-contained and
+    # does not depend on that earlier call's side effect.
+    loaded_layers: list[tuple[str, dict[str, Any]]] = [
+        (source_label, raw)
+        for raw, source_label in (
+            (try_load_toml(get_user_config_path(profile_dir)), "user settings"),
+            (load_project_config(context_dir, root_name, concurrency_group), "project settings"),
+            (load_local_config(context_dir, root_name, concurrency_group), "project local settings"),
+        )
+        if raw is not None
+    ]
+    enforce_pytest_config_opt_in(loaded_layers)
+
+    # Merge the layers. Narrowing violations -- a higher-precedence layer
+    # assigning over a non-empty aggregate value from a lower-precedence layer --
+    # are collected as we go, then turned into a single error after all layers
+    # are merged (when the final ``allow_settings_key_assignment_narrowing``
+    # resolves to False).
     narrowing_violations: list[tuple[str, str]] = []
-    for raw, source_label in (
-        (try_load_toml(get_user_config_path(profile_dir)), "user settings"),
-        (load_project_config(context_dir, root_name, concurrency_group), "project settings"),
-        (load_local_config(context_dir, root_name, concurrency_group), "project local settings"),
-    ):
-        if raw is not None:
-            parsed_layer = _parse_config_with_extends(
-                raw,
-                base_config=config,
-                disabled_plugins=config_disabled_plugins,
-                strict=strict,
-                silent=silent_unknown_fields,
-            )
-            for violation in detect_settings_narrowing(config, parsed_layer):
-                narrowing_violations.append((source_label, violation))
-            config = config.merge_with(parsed_layer)
+    for source_label, raw in loaded_layers:
+        parsed_layer = _parse_config_with_extends(
+            raw,
+            base_config=config,
+            disabled_plugins=config_disabled_plugins,
+            strict=strict,
+            silent=silent_unknown_fields,
+        )
+        for violation in detect_settings_narrowing(config, parsed_layer):
+            narrowing_violations.append((source_label, violation))
+        config = config.merge_with(parsed_layer)
 
     # Apply ``MNGR__*`` env-var overrides plus the preserved-alias env vars
     # (MNGR_PREFIX, MNGR_HOST_DIR, MNGR_HEADLESS). These all flow through the
