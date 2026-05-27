@@ -16,7 +16,7 @@ pytestmark = pytest.mark.xdist_group(name="ratchets")
 
 
 def test_prevent_todos() -> None:
-    rc.check_todos(_DIR, snapshot(2))
+    rc.check_todos(_DIR, snapshot(0))
 
 
 def test_prevent_exec() -> None:
@@ -242,7 +242,7 @@ def test_prevent_bare_urwid_tty_signal_keys() -> None:
 
 
 def test_prevent_direct_subprocess() -> None:
-    rc.check_direct_subprocess(_DIR, snapshot(6))
+    rc.check_direct_subprocess(_DIR, snapshot(0))
 
 
 def test_prevent_bare_tmux_targets() -> None:
@@ -269,7 +269,7 @@ def test_prevent_init_methods_in_non_exception_classes() -> None:
 
 
 def test_prevent_cast_usage() -> None:
-    rc.check_cast_usage(_DIR, snapshot(1))
+    rc.check_cast_usage(_DIR, snapshot(0))
 
 
 def test_prevent_assert_isinstance() -> None:

@@ -84,6 +84,8 @@ Only after doing all of the above should you begin writing code.
 
 Each project has a `test_ratchets.py` file containing automated code quality checks ("ratchets"). Each ratchet tracks a count of violations for a specific anti-pattern (e.g. raising built-in exceptions, using monkeypatch.setattr). The count can only stay the same or decrease -- increasing it fails the test. To add or modify ratchets, use `/writing-ratchet-tests`.
 
+When your change *reduces* a ratchet's violations, lock in the improvement by tightening its recorded count: run `uv run pytest --inline-snapshot=trim <path/to/test_ratchets.py>` (scoped to the affected file(s), and without xdist so inline-snapshot stays enabled).
+
 Ratchets are guidance and reminders about good code, not rules to be blindly obeyed. When a ratchet fires on your code:
 
 1. Understand *why* the ratchet exists by reading its `rule_description`. It explains the principle behind the check.
