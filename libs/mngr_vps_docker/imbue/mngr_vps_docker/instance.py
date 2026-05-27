@@ -25,6 +25,7 @@ from pyinfra.api import Host as PyinfraHost
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.executor import ConcurrencyGroupExecutor
 from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.imbue_common.ids import InvalidRandomIdError
 from imbue.imbue_common.logging import log_span
 from imbue.mngr.errors import HostConnectionError
 from imbue.mngr.errors import HostNotFoundError
@@ -85,11 +86,10 @@ from imbue.mngr.providers.ssh_utils import load_or_create_ssh_keypair
 from imbue.mngr.providers.ssh_utils import wait_for_sshd
 from imbue.mngr_vps_docker.cloud_init import generate_cloud_init_user_data
 from imbue.mngr_vps_docker.config import VpsDockerProviderConfig
-from imbue.mngr_vps_docker.host_store import CONTAINER_ENTRYPOINT_CMD
 from imbue.mngr_vps_docker.host_store import VpsDockerHostRecord
-from imbue.mngr_vps_docker.host_store import VpsDockerHostStore
 from imbue.mngr_vps_docker.host_store import VpsHostConfig
-from imbue.mngr_vps_docker.host_store import ensure_state_container
+from imbue.mngr_vps_docker.host_store import create_volume_with_layout
+from imbue.mngr_vps_docker.host_store import open_host_store
 from imbue.mngr_vps_docker.primitives import VpsInstanceId
 from imbue.mngr_vps_docker.vps_client import VpsClientInterface
 
@@ -221,8 +221,58 @@ LABEL_TAGS: Final[str] = f"{LABEL_PREFIX}tags"
 # Default image when no user customization
 DEFAULT_IMAGE: Final[str] = "debian:bookworm-slim"
 
-# Host volume mount path inside the container
+# Path inside the agent container where the unified host volume is mounted.
+# The container sees three top-level entries under this mount: host_state.json,
+# agents/, and host_dir/. The container's mngr host_dir symlink resolves into
+# the host_dir/ subdirectory so all of the agent's writes end up on the volume.
 HOST_VOLUME_MOUNT_PATH: Final[str] = "/mngr-vol"
+
+# Subdirectory inside the unified volume that backs the agent's mngr host_dir.
+HOST_DIR_SUBPATH: Final[str] = "host_dir"
+
+# Shell command for the agent container's PID 1: trap SIGTERM and stay alive
+# until SIGTERM arrives so `docker stop` (idle timeout, manual stop) exits cleanly.
+CONTAINER_ENTRYPOINT_CMD: Final[str] = "trap 'exit 0' TERM; tail -f /dev/null & wait"
+
+
+def _host_volume_name_for(host_id: HostId) -> str:
+    """Return the unified Docker volume name for a host."""
+    return f"mngr-host-vol-{host_id.get_uuid().hex}"
+
+
+def _read_host_id_label_from_vps(outer: OuterHostInterface) -> HostId | None:
+    """Return the host_id label of the (single) mngr container on this VPS, if any.
+
+    Each VPS hosts at most one mngr container (1:1 invariant), so the value
+    of the ``com.imbue.mngr.host-id`` label on any container with that label
+    set uniquely identifies the VPS's host. Returns ``None`` when no such
+    container exists yet (e.g., the VPS is still being provisioned).
+
+    Includes stopped containers so a paused host is still discoverable.
+    """
+    fmt = "{{index .Config.Labels " + json.dumps(LABEL_HOST_ID) + "}}"
+    result = outer.execute_idempotent_command(
+        "docker ps -a -q "
+        f"--filter {shlex.quote('label=' + LABEL_HOST_ID)} | "
+        f"xargs -r docker inspect --format {shlex.quote(fmt)}",
+    )
+    if not result.success:
+        raise MngrError(
+            f"Failed to list mngr containers on VPS: stdout={result.stdout.strip()!r} stderr={result.stderr.strip()!r}"
+        )
+    for raw_line in result.stdout.splitlines():
+        value = raw_line.strip()
+        if not value:
+            continue
+        try:
+            return HostId(value)
+        except InvalidRandomIdError as e:
+            # A corrupted/manually-edited label must not crash discovery for
+            # the whole VPS; surface as MngrError so the existing fallback
+            # path in _read_records_from_vps logs and continues.
+            raise MngrError(f"Container on VPS has malformed {LABEL_HOST_ID} label {value!r}: {e}") from e
+    return None
+
 
 # Idempotent install: skip if depot already on PATH, otherwise download to
 # /usr/local/bin via depot.dev's official installer. Run once per build (cheap
@@ -366,11 +416,6 @@ def _remove_container(outer: OuterHostInterface, container_name: str, force: boo
         args.append("-f")
     args.append(container_name)
     _run_docker(outer, args)
-
-
-def _create_volume(outer: OuterHostInterface, volume_name: str) -> None:
-    """Create a Docker named volume."""
-    _run_docker(outer, ["volume", "create", volume_name])
 
 
 def _remove_volume(outer: OuterHostInterface, volume_name: str) -> None:
@@ -672,43 +717,9 @@ class VpsDockerProvider(BaseProviderInstance):
     # =========================================================================
     # Host Store
     # =========================================================================
-
-    def _state_container_name(self) -> str:
-        """Return the expected state container name for this provider/user."""
-        return f"{self.mngr_ctx.config.prefix}docker-state-{self.mngr_ctx.get_profile_user_id()}"
-
-    def _get_host_store(self, outer: OuterHostInterface) -> VpsDockerHostStore:
-        """Get or create the host store on the VPS.
-
-        Creates the state container if it does not exist. Use
-        _get_existing_host_store for read-only access that does not create
-        the container (e.g., during discovery).
-        """
-        state_container_name = ensure_state_container(
-            outer=outer,
-            prefix=self.mngr_ctx.config.prefix,
-            user_id=str(self.mngr_ctx.get_profile_user_id()),
-            provider_name=str(self.name),
-        )
-        return VpsDockerHostStore(
-            outer=outer,
-            state_container_name=state_container_name,
-        )
-
-    def _get_existing_host_store(self, outer: OuterHostInterface) -> VpsDockerHostStore | None:
-        """Get a handle to an existing host store on the VPS.
-
-        Returns None if the state container does not exist or is not running.
-        Unlike _get_host_store, this never creates the state container --
-        only _setup_container_on_vps should do that.
-        """
-        container_name = self._state_container_name()
-        if not _docker_inspect_running(outer, container_name):
-            return None
-        return VpsDockerHostStore(
-            outer=outer,
-            state_container_name=container_name,
-        )
+    # The store is opened via ``open_host_store(outer, volume_name)`` (free
+    # function in ``host_store``) which resolves the volume's mountpoint via
+    # ``docker volume inspect``. This used to be the per-user state container.
 
     # =========================================================================
     # Host Object Construction
@@ -766,21 +777,16 @@ class VpsDockerProvider(BaseProviderInstance):
         return offline
 
     def _on_certified_host_data_updated(self, host_id: HostId, certified_data: CertifiedHostData, vps_ip: str) -> None:
-        """Callback when host data.json is updated -- sync to state volume."""
+        """Callback when host data.json is updated -- sync to the unified host volume."""
         try:
             with self._make_outer_for_vps_ip(vps_ip) as outer:
-                host_store = self._get_existing_host_store(outer)
-                if host_store is None:
-                    logger.warning(
-                        "State container not found on VPS {} -- cannot sync certified data for {}", vps_ip, host_id
-                    )
-                    return
-                existing = host_store.read_host_record(host_id)
+                host_store = open_host_store(outer, _host_volume_name_for(host_id))
+                existing = host_store.read_host_record()
                 if existing is not None:
                     updated = existing.model_copy(update={"certified_host_data": certified_data})
                     host_store.write_host_record(updated)
         except (HostConnectionError, MngrError) as e:
-            logger.warning("Failed to sync certified data to VPS state volume: {}", e)
+            logger.warning("Failed to sync certified data to VPS host volume: {}", e)
 
     # =========================================================================
     # VPS Provisioning
@@ -909,6 +915,13 @@ class VpsDockerProvider(BaseProviderInstance):
             )
 
             with self._make_outer_for_vps_ip(vps_ip) as outer:
+                # Create the unified host volume eagerly, before the (potentially
+                # slow and failure-prone) image pull/build, so the volume always
+                # exists by the time we need to write a host_state.json -- whether
+                # the host succeeds or fails partway through setup.
+                with log_span("Creating unified host volume"):
+                    create_volume_with_layout(outer, _host_volume_name_for(host_id), HOST_DIR_SUBPATH)
+
                 container_name, container_id, volume_name = self._setup_container_on_vps(
                     outer=outer,
                     host_id=host_id,
@@ -1049,13 +1062,12 @@ class VpsDockerProvider(BaseProviderInstance):
         and runs docker build there. Otherwise pulls the base image directly.
 
         Returns (container_name, container_id, volume_name).
-        """
-        with log_span("Setting up state container on VPS"):
-            self._get_host_store(outer)
 
-        volume_name = f"mngr-host-vol-{host_id.get_uuid().hex}"
-        with log_span("Creating host volume"):
-            _create_volume(outer, volume_name)
+        The unified host volume must already exist before this method runs --
+        ``create_host`` creates it eagerly right after allocating the host_id
+        so that failed-host metadata can still be written to it.
+        """
+        volume_name = _host_volume_name_for(host_id)
 
         if docker_build_args:
             base_image = self._build_image_on_vps(outer, host_id, base_image, docker_build_args, git_depth)
@@ -1089,7 +1101,7 @@ class VpsDockerProvider(BaseProviderInstance):
             self._setup_container_ssh(
                 outer=outer,
                 container_name=container_name,
-                host_volume_mount_path=HOST_VOLUME_MOUNT_PATH,
+                host_volume_mount_path=f"{HOST_VOLUME_MOUNT_PATH}/{HOST_DIR_SUBPATH}",
                 known_hosts_entries=tuple(known_hosts or ()),
                 authorized_keys_entries=tuple(authorized_keys or ()),
             )
@@ -1175,12 +1187,7 @@ class VpsDockerProvider(BaseProviderInstance):
             ),
             container_id=container_id,
         )
-        host_store = self._get_existing_host_store(outer)
-        if host_store is None:
-            raise MngrError(
-                f"State container not found on VPS {vps_ip} during host finalization -- "
-                "it should have been created by _setup_container_on_vps"
-            )
+        host_store = open_host_store(outer, volume_name)
         host_store.write_host_record(host_record)
 
         # Cache so that persist_agent_data (called moments later) can find
@@ -1195,8 +1202,8 @@ class VpsDockerProvider(BaseProviderInstance):
     def _on_host_finalized(self, *, host_id: HostId, vps_ip: str) -> None:
         """Hook called at the very end of ``_finalize_host_creation``.
 
-        Fires after the host record has been written to the state volume
-        and is therefore the "point of no return" for ``create_host``.
+        Fires after the host record has been written to the unified host
+        volume and is therefore the "point of no return" for ``create_host``.
         Subclasses can override to commit any deferred provisioning side
         effects that must only become durable once the host is fully
         usable -- e.g. OVH classic VPS un-cancellation, which must wait
@@ -1392,12 +1399,11 @@ class VpsDockerProvider(BaseProviderInstance):
                 _stop_container(outer, host_record.config.container_name, timeout_seconds=int(timeout_seconds))
 
             # Update host record
-            host_store = self._get_existing_host_store(outer)
-            if host_store is not None:
-                now = datetime.now(timezone.utc)
-                updated_data = host_record.certified_host_data.model_copy(update={"updated_at": now})
-                updated_record = host_record.model_copy(update={"certified_host_data": updated_data})
-                host_store.write_host_record(updated_record)
+            host_store = open_host_store(outer, host_record.config.volume_name)
+            now = datetime.now(timezone.utc)
+            updated_data = host_record.certified_host_data.model_copy(update={"updated_at": now})
+            updated_record = host_record.model_copy(update={"certified_host_data": updated_data})
+            host_store.write_host_record(updated_record)
 
         logger.info("Host {} stopped", host_id)
 
@@ -1451,25 +1457,20 @@ class VpsDockerProvider(BaseProviderInstance):
 
         if vps_ip is not None:
             with self._make_outer_for_vps_ip(vps_ip) as outer:
-                # Stop and remove container
+                # Stop and remove the agent container; removing the volume below
+                # will fail otherwise because the container still holds it open.
                 try:
                     _remove_container(outer, vps_config.container_name, force=True)
                 except (HostConnectionError, MngrError) as e:
                     logger.warning("Failed to remove container: {}", e)
 
-                # Remove host volume
+                # Remove the unified host volume. This deletes host_state.json,
+                # agents/*.json, and host_dir/ in one go -- no separate state
+                # volume to clean up.
                 try:
                     _remove_volume(outer, vps_config.volume_name)
                 except (HostConnectionError, MngrError) as e:
                     logger.warning("Failed to remove host volume: {}", e)
-
-                # Delete host record from state volume
-                try:
-                    host_store = self._get_existing_host_store(outer)
-                    if host_store is not None:
-                        host_store.delete_host_record(host_id)
-                except (HostConnectionError, MngrError) as e:
-                    logger.warning("Failed to delete host record from state volume: {}", e)
 
         # Destroy the VPS instance
         with log_span("Destroying VPS instance"):
@@ -1571,7 +1572,7 @@ class VpsDockerProvider(BaseProviderInstance):
         discovered: list[DiscoveredHost] = []
 
         # Query all VPS instances from the provider API that have our tags
-        # then SSH to each VPS to read host records from the state volume.
+        # then SSH to each VPS to read host records from its unified host volume.
 
         # First, try to find any VPS instances for this provider
         # We'll need the host records from each VPS
@@ -1604,10 +1605,11 @@ class VpsDockerProvider(BaseProviderInstance):
         cg: ConcurrencyGroup,
         include_destroyed: bool = False,
     ) -> dict[DiscoveredHost, list[DiscoveredAgent]]:
-        """Load hosts and agent references from state volumes in batched SSH calls.
+        """Load hosts and agent references from each VPS's unified host volume.
 
-        Reads all host records and agent data from each VPS in a single SSH command,
-        then determines container running status. Avoids the default implementation's
+        For each VPS, reads the host record and any persisted agent data
+        directly from the unified host volume's mountpoint, then determines
+        container running status. Avoids the default implementation's
         per-host SSH calls into containers for agent discovery.
         """
         with log_span("VPS Docker discover_hosts_and_agents for provider={}", self.name):
@@ -1692,8 +1694,9 @@ class VpsDockerProvider(BaseProviderInstance):
         Concrete subclasses implement this by querying their provider's
         listing API (e.g. by tag) and resolving the matching instances'
         SSH targets. The remaining discovery machinery -- parallel SSH
-        into each VPS, reading host records and agent data from the
-        state volume, caching -- is shared and lives in this base class.
+        into each VPS, reading host records and agent data from each
+        VPS's unified host volume, caching -- is shared and lives in
+        this base class.
 
         Default returns ``[]`` so test doubles and providers without a
         listing API can opt out without overriding.
@@ -1704,23 +1707,31 @@ class VpsDockerProvider(BaseProviderInstance):
         self,
         vps_ip: str,
     ) -> tuple[list[VpsDockerHostRecord], dict[HostId, list[dict[str, Any]]]]:
-        """Read all host records and agent data from a single VPS in one SSH command.
+        """Read the (single) host record + agent data from one VPS.
 
-        Uses the read-only host store so that discovery never creates the
-        state container. If the container does not exist yet (e.g., the VPS
-        is still being set up by a concurrent ``mngr create``), returns
-        empty results. If outer SSH to the VPS fails, fall back to any
+        Each VPS hosts exactly one mngr container (1:1 invariant). We find
+        that container by its host-id label, derive its unified volume name,
+        and read host_state.json + agents/*.json from the volume's
+        mountpoint. If the container does not exist yet (e.g., the VPS is
+        still being set up by a concurrent ``mngr create``), returns empty
+        results. If outer SSH to the VPS fails, fall back to any
         in-process cached records for that VPS so the hosts still appear
         in the listing (with an offline state) instead of disappearing
         entirely; one bad VPS must not silently drop its hosts.
         """
         try:
             with self._make_outer_for_vps_ip(vps_ip) as outer:
-                host_store = self._get_existing_host_store(outer)
-                if host_store is None:
-                    logger.debug("State container not ready on VPS {}, skipping", vps_ip)
+                host_id = _read_host_id_label_from_vps(outer)
+                if host_id is None:
+                    logger.debug("No mngr container on VPS {} yet, skipping", vps_ip)
                     return [], {}
-                return host_store.list_all_host_records_with_agents()
+                host_store = open_host_store(outer, _host_volume_name_for(host_id))
+                record = host_store.read_host_record()
+                if record is None:
+                    logger.debug("No host record on VPS {} volume yet, skipping", vps_ip)
+                    return [], {}
+                agent_data = host_store.list_persisted_agent_data()
+                return [record], {host_id: agent_data}
         except (HostConnectionError, MngrError) as e:
             cached_records = [r for r in self._host_record_cache.values() if r.vps_ip == vps_ip]
             if cached_records:
@@ -2067,11 +2078,8 @@ class VpsDockerProvider(BaseProviderInstance):
             )
             updated_record = host_record.model_copy(update={"certified_host_data": updated_data})
 
-            host_store = self._get_existing_host_store(outer)
-            if host_store is None:
-                raise MngrError(
-                    f"State container not found on VPS {host_record.vps_ip} -- cannot save snapshot record"
-                )
+            # ``host_record.config`` is guaranteed non-None by the guard at the top of this method.
+            host_store = open_host_store(outer, host_record.config.volume_name)
             host_store.write_host_record(updated_record)
 
         logger.info("Created snapshot {} for host {}", snapshot_name, host_id)
@@ -2137,10 +2145,13 @@ class VpsDockerProvider(BaseProviderInstance):
         updated_record = host_record.model_copy(update={"certified_host_data": updated_data})
 
         if host_record.vps_ip is not None:
+            if host_record.config is None:
+                raise MngrError(
+                    f"Host record for {host_id} on VPS {host_record.vps_ip} is missing config -- "
+                    "cannot determine unified volume name to rename"
+                )
             with self._make_outer_for_vps_ip(host_record.vps_ip) as outer:
-                host_store = self._get_existing_host_store(outer)
-                if host_store is None:
-                    raise MngrError(f"State container not found on VPS {host_record.vps_ip} -- cannot rename host")
+                host_store = open_host_store(outer, host_record.config.volume_name)
                 host_store.write_host_record(updated_record)
 
         return self.get_host(host_id)
@@ -2183,33 +2194,27 @@ class VpsDockerProvider(BaseProviderInstance):
 
     def list_persisted_agent_data_for_host(self, host_id: HostId) -> list[dict]:
         host_record = self._find_host_record(host_id)
-        if host_record is None or host_record.vps_ip is None:
+        if host_record is None or host_record.vps_ip is None or host_record.config is None:
             raise HostNotFoundError(self.name, host_id)
 
         with self._make_outer_for_vps_ip(host_record.vps_ip) as outer:
-            host_store = self._get_existing_host_store(outer)
-            if host_store is None:
-                raise MngrError(f"State container not found on VPS {host_record.vps_ip}")
-            return host_store.list_persisted_agent_data_for_host(host_id)
+            host_store = open_host_store(outer, host_record.config.volume_name)
+            return host_store.list_persisted_agent_data()
 
     def persist_agent_data(self, host_id: HostId, agent_data: Mapping[str, object]) -> None:
         host_record = self._find_host_record(host_id)
-        if host_record is None or host_record.vps_ip is None:
+        if host_record is None or host_record.vps_ip is None or host_record.config is None:
             raise HostNotFoundError(self.name, host_id)
 
         with self._make_outer_for_vps_ip(host_record.vps_ip) as outer:
-            host_store = self._get_existing_host_store(outer)
-            if host_store is None:
-                raise MngrError(f"State container not found on VPS {host_record.vps_ip}")
-            host_store.persist_agent_data(host_id, agent_data)
+            host_store = open_host_store(outer, host_record.config.volume_name)
+            host_store.persist_agent_data(agent_data)
 
     def remove_persisted_agent_data(self, host_id: HostId, agent_id: AgentId) -> None:
         host_record = self._find_host_record(host_id)
-        if host_record is None or host_record.vps_ip is None:
+        if host_record is None or host_record.vps_ip is None or host_record.config is None:
             raise HostNotFoundError(self.name, host_id)
 
         with self._make_outer_for_vps_ip(host_record.vps_ip) as outer:
-            host_store = self._get_existing_host_store(outer)
-            if host_store is None:
-                raise MngrError(f"State container not found on VPS {host_record.vps_ip}")
-            host_store.remove_persisted_agent_data(host_id, agent_id)
+            host_store = open_host_store(outer, host_record.config.volume_name)
+            host_store.remove_persisted_agent_data(agent_id)
