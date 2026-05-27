@@ -175,7 +175,9 @@ class VpsDockerHostStore(MutableModel):
 
     def delete_host_record(self) -> None:
         """Delete the host record and all per-agent metadata on the volume."""
-        # Remove both files in a single SSH round-trip; -f makes both targets idempotent.
+        # Remove the agents/ directory and the host_state.json file in a single
+        # SSH round-trip. ``-r`` is required because agents/ is a directory;
+        # ``-f`` makes both targets idempotent (no error if either is missing).
         _run_outer_command(
             self.outer,
             f"rm -rf {shlex.quote(str(self._agents_dir))} {shlex.quote(str(self._host_state_path))}",
