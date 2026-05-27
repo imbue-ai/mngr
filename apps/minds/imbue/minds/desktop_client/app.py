@@ -2077,7 +2077,7 @@ def _run_host_health_probe(
     return response
 
 
-class _LogProbeOnRecoveryCallback(MutableModel):
+class _LogProbeOnRecoveryCallback:
     """Callable that logs the cached probe at INFO on every non-HEALTHY -> HEALTHY recovery.
 
     Registered with the health tracker so that when a workspace recovers
@@ -2087,16 +2087,17 @@ class _LogProbeOnRecoveryCallback(MutableModel):
     payload or a "(no probe observation cached)" marker so the operator
     can correlate the recovery with the most recent observation.
 
-    Holds a reference to the shared cache dict on ``app.state`` -- both
-    sides see the same instance, so the endpoint's writes are visible
-    here without any explicit threading primitive (the GIL serializes
-    pop/insert on the dict and we never iterate in either direction).
+    Implemented as a plain class (not a Pydantic model) so the OrderedDict
+    is held by reference: ``self.cache is app.state.latest_host_health_by_agent_id``,
+    so the endpoint's writes are visible here without any explicit threading
+    primitive (the GIL serializes pop/insert on the dict and we never
+    iterate in either direction). A Pydantic model with a ``dict`` /
+    ``OrderedDict`` field would validate-copy the input on construction,
+    breaking the shared-reference contract.
     """
 
-    cache: OrderedDict[str, HostHealthResponse] = Field(
-        frozen=True,
-        description="Shared per-agent cache populated by the host-health endpoint.",
-    )
+    def __init__(self, cache: "OrderedDict[str, HostHealthResponse]") -> None:
+        self.cache = cache
 
     def __call__(self, agent_id: AgentId) -> None:
         response = self.cache.pop(str(agent_id), None)

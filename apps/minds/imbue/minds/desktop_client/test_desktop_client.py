@@ -1926,3 +1926,30 @@ def test_host_health_api_requires_authentication(tmp_path: Path) -> None:
     client, _, agent_id = _setup_test_server(tmp_path)
     response = client.get(f"/api/agents/{agent_id}/host-health")
     assert response.status_code == 403
+
+
+def test_log_probe_on_recovery_callback_sees_external_cache_writes() -> None:
+    """The callback must hold the cache OrderedDict by reference, not by Pydantic-copy.
+
+    The host-health endpoint writes to the shared OrderedDict on every probe;
+    the recovery callback reads from the same instance on a non-HEALTHY ->
+    HEALTHY transition. If the callback were a Pydantic model with a
+    dict / OrderedDict field, validation would copy the input on
+    construction and the callback would never observe the endpoint's writes.
+    """
+    from collections import OrderedDict
+
+    from imbue.minds.desktop_client.app import _LogProbeOnRecoveryCallback
+    from imbue.minds.desktop_client.recovery_probe import HostHealthResponse
+
+    cache: "OrderedDict[str, HostHealthResponse]" = OrderedDict()
+    callback = _LogProbeOnRecoveryCallback(cache=cache)
+    # The shared-reference invariant the docstring promises:
+    assert callback.cache is cache
+
+    # An external write after construction must be visible to the callback.
+    aid = AgentId.generate()
+    cache[str(aid)] = HostHealthResponse(reachable=True, host_offline=False)
+    callback(aid)
+    # After the callback fires, the entry is popped from the shared cache.
+    assert str(aid) not in cache
