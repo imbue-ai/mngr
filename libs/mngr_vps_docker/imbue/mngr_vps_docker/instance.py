@@ -1207,8 +1207,8 @@ class VpsDockerProvider(BaseProviderInstance):
     def _on_host_finalized(self, *, host_id: HostId, vps_ip: str) -> None:
         """Hook called at the very end of ``_finalize_host_creation``.
 
-        Fires after the host record has been written to the state volume
-        and is therefore the "point of no return" for ``create_host``.
+        Fires after the host record has been written to the unified host
+        volume and is therefore the "point of no return" for ``create_host``.
         Subclasses can override to commit any deferred provisioning side
         effects that must only become durable once the host is fully
         usable -- e.g. OVH classic VPS un-cancellation, which must wait
@@ -1577,7 +1577,7 @@ class VpsDockerProvider(BaseProviderInstance):
         discovered: list[DiscoveredHost] = []
 
         # Query all VPS instances from the provider API that have our tags
-        # then SSH to each VPS to read host records from the state volume.
+        # then SSH to each VPS to read host records from its unified host volume.
 
         # First, try to find any VPS instances for this provider
         # We'll need the host records from each VPS
@@ -1610,10 +1610,11 @@ class VpsDockerProvider(BaseProviderInstance):
         cg: ConcurrencyGroup,
         include_destroyed: bool = False,
     ) -> dict[DiscoveredHost, list[DiscoveredAgent]]:
-        """Load hosts and agent references from state volumes in batched SSH calls.
+        """Load hosts and agent references from each VPS's unified host volume.
 
-        Reads all host records and agent data from each VPS in a single SSH command,
-        then determines container running status. Avoids the default implementation's
+        For each VPS, reads the host record and any persisted agent data
+        directly from the unified host volume's mountpoint, then determines
+        container running status. Avoids the default implementation's
         per-host SSH calls into containers for agent discovery.
         """
         with log_span("VPS Docker discover_hosts_and_agents for provider={}", self.name):
@@ -1698,8 +1699,9 @@ class VpsDockerProvider(BaseProviderInstance):
         Concrete subclasses implement this by querying their provider's
         listing API (e.g. by tag) and resolving the matching instances'
         SSH targets. The remaining discovery machinery -- parallel SSH
-        into each VPS, reading host records and agent data from the
-        state volume, caching -- is shared and lives in this base class.
+        into each VPS, reading host records and agent data from each
+        VPS's unified host volume, caching -- is shared and lives in
+        this base class.
 
         Default returns ``[]`` so test doubles and providers without a
         listing API can opt out without overriding.
