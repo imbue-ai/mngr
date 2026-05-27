@@ -1899,9 +1899,11 @@ class VpsDockerProvider(BaseProviderInstance):
         """Load hosts and agent references from each VPS's unified host volume.
 
         For each VPS, reads the host record and any persisted agent data
-        directly from the unified host volume's mountpoint, then determines
-        container running status. Avoids the default implementation's
-        per-host SSH calls into containers for agent discovery.
+        directly from the docker volume's bind-source path (the per-host
+        btrfs subvolume the volume's ``Options.device`` points at), then
+        determines container running status. Avoids the default
+        implementation's per-host SSH calls into containers for agent
+        discovery.
         """
         with log_span("VPS Docker discover_hosts_and_agents for provider={}", self.name):
             all_records, agent_data_by_host_id = self._discover_host_records_with_agents()
