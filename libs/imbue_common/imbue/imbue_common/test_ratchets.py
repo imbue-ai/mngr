@@ -28,7 +28,7 @@ def test_prevent_eval() -> None:
 
 
 def test_prevent_while_true() -> None:
-    rc.check_while_true(_DIR, snapshot(1))
+    rc.check_while_true(_DIR, snapshot(0))
 
 
 def test_prevent_time_sleep() -> None:
@@ -70,7 +70,7 @@ def test_prevent_silent_decode_error_catches() -> None:
 
 
 def test_prevent_inline_imports() -> None:
-    rc.check_inline_imports(_DIR, snapshot(13))
+    rc.check_inline_imports(_DIR, snapshot(1))
 
 
 def test_prevent_relative_imports() -> None:
@@ -86,11 +86,11 @@ def test_prevent_importlib_import_module() -> None:
 
 
 def test_prevent_getattr() -> None:
-    rc.check_getattr(_DIR, snapshot(22))
+    rc.check_getattr(_DIR, snapshot(20))
 
 
 def test_prevent_setattr() -> None:
-    rc.check_setattr(_DIR, snapshot(11))
+    rc.check_setattr(_DIR, snapshot(9))
 
 
 # --- Banned libraries and patterns ---
@@ -146,7 +146,7 @@ def test_prevent_num_prefix() -> None:
 
 
 def test_prevent_trailing_comments() -> None:
-    rc.check_trailing_comments(_DIR, snapshot(12))
+    rc.check_trailing_comments(_DIR, snapshot(8))
 
 
 def test_prevent_init_docstrings() -> None:
@@ -193,7 +193,7 @@ def test_prevent_model_copy() -> None:
 
 
 def test_prevent_fstring_logging() -> None:
-    rc.check_fstring_logging(_DIR, snapshot(3))
+    rc.check_fstring_logging(_DIR, snapshot(1))
 
 
 def test_prevent_click_echo() -> None:
@@ -208,11 +208,11 @@ def test_prevent_logger_exception() -> None:
 
 
 def test_prevent_unittest_mock_imports() -> None:
-    rc.check_unittest_mock_imports(_DIR, snapshot(2))
+    rc.check_unittest_mock_imports(_DIR, snapshot(1))
 
 
 def test_prevent_monkeypatch_setattr() -> None:
-    rc.check_monkeypatch_setattr(_DIR, snapshot(7))
+    rc.check_monkeypatch_setattr(_DIR, snapshot(2))
 
 
 def test_prevent_test_container_classes() -> None:
@@ -235,7 +235,7 @@ def test_prevent_bare_urwid_tty_signal_keys() -> None:
 
 
 def test_prevent_direct_subprocess() -> None:
-    rc.check_direct_subprocess(_DIR, snapshot(17))
+    rc.check_direct_subprocess(_DIR, snapshot(14))
 
 
 def test_prevent_bare_tmux_targets() -> None:
@@ -254,7 +254,7 @@ def test_prevent_inline_functions() -> None:
 
 
 def test_prevent_underscore_imports() -> None:
-    rc.check_underscore_imports(_DIR, snapshot(7))
+    rc.check_underscore_imports(_DIR, snapshot(3))
 
 
 def test_prevent_init_methods_in_non_exception_classes() -> None:
