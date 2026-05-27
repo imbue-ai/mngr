@@ -171,4 +171,4 @@ def test_log_event_is_frozen() -> None:
         pid=PositiveInt(1),
     )
     with pytest.raises(ValidationError):
-        event.level = "INFO"  # type: ignore[misc]
+        event.level = "INFO"  # ty: ignore[invalid-assignment]

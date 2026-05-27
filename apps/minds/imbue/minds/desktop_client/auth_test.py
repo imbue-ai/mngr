@@ -1,3 +1,5 @@
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -33,6 +35,37 @@ def test_get_signing_key_persists_across_instances(tmp_path: Path) -> None:
     key_b = store_b.get_signing_key()
 
     assert key_a.get_secret_value() == key_b.get_secret_value()
+
+
+def test_get_signing_key_is_consistent_under_concurrent_first_access(tmp_path: Path) -> None:
+    """Concurrent first-time callers must all converge on a single signing key.
+
+    Regression test for a race that surfaced in the minds Electron e2e CI job:
+    FastAPI runs sync route handlers on a threadpool, so on a fresh data
+    directory the startup burst of requests all reached signing-key generation
+    at once. The old lazy implementation let each thread generate a *different*
+    key and race to write (last writer wins) -- invalidating the cookie just
+    signed with an earlier key -- or read the file mid-write and raise
+    SigningKeyError. Either way the next request looked unauthenticated.
+    """
+    store = FileAuthStore(data_directory=tmp_path / "auth")
+    thread_count = 32
+    # Release every worker simultaneously so they genuinely contend on the
+    # first-time generation path; the timeout turns a hang into a clear failure.
+    barrier = threading.Barrier(thread_count, timeout=30)
+
+    def _read_key() -> str:
+        barrier.wait()
+        return store.get_signing_key().get_secret_value()
+
+    with ThreadPoolExecutor(max_workers=thread_count) as pool:
+        futures = [pool.submit(_read_key) for _ in range(thread_count)]
+        # ``future.result()`` re-raises any SigningKeyError from a worker.
+        keys = {future.result() for future in futures}
+
+    assert len(keys) == 1, "concurrent callers generated divergent signing keys"
+    on_disk_key = (tmp_path / "auth" / "signing_key").read_text().strip()
+    assert keys == {on_disk_key}, "in-memory signing key diverged from the persisted one"
 
 
 def test_get_signing_key_raises_for_empty_key_file(tmp_path: Path) -> None:
