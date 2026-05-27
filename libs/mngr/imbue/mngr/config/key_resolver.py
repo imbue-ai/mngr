@@ -229,11 +229,17 @@ def resolve_extends(
 
 
 def _is_create_template_option_path(path: tuple[str, ...]) -> bool:
-    """Return True when ``path`` is inside the options of a create template.
+    """Return True when ``path`` is the options of a create template.
 
     Used by ``resolve_extends`` to recognise leaf keys that should keep their
     ``__extend`` suffix for deferred runtime resolution by
     ``apply_create_template`` rather than being eagerly resolved against the
     config-load-time base.
+
+    Template options live exactly one level inside the ``create_templates``
+    container -- ``('create_templates', '<name>')`` -- so the check is on the
+    exact depth rather than a prefix match. Deeper paths would mean a
+    structurally invalid template body (rejected by ``_parse_create_templates``)
+    and should not silently get the preserve-extend treatment.
     """
-    return len(path) >= 2 and path[0] == "create_templates"
+    return len(path) == 2 and path[0] == "create_templates"
