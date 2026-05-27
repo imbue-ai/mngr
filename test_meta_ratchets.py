@@ -171,6 +171,8 @@ def test_no_import_layer_violations() -> None:
     check_no_import_lint_errors(_REPO_ROOT)
 
 
+@pytest.mark.flaky
+@pytest.mark.timeout(60)
 def test_no_type_errors_repo_wide() -> None:
     """Ensure the workspace has zero type errors (ty), once for the whole repo.
 
@@ -179,6 +181,12 @@ def test_no_type_errors_repo_wide() -> None:
     on each invocation regardless of the directory it runs from, so a single
     repo-wide check is exactly equivalent to -- and replaces -- the per-project
     test_no_type_errors copies that used to re-run the identical scan ~36 times.
+
+    The ``uv run ty check`` subprocess occasionally exceeds the default 10s
+    pytest-timeout on offload under cold-cache / loaded-runner conditions (the
+    per-project copies were marked flaky for this reason); the check itself is
+    deterministic, so the bump to 60s plus ``@pytest.mark.flaky`` retry handles
+    the transient slowness.
 
     If this fails for a reason that looks spurious, run `uv sync --all-packages`
     and re-run before treating the error as real (see CLAUDE.md).
