@@ -16,12 +16,14 @@ repos:
         types: [python]
     -   id: ty
 #        ty scans the whole uv workspace regardless of which files changed, so it does
-#        not take staged filenames (pass_filenames: false).
+#        not take staged filenames (pass_filenames: false) and runs only at pre-push
+#        (a per-commit hook would add a fixed full-workspace scan to every commit).
         name: "Python type checker (ty)"
         entry: bash -c 'uv run ty check'
         language: system
         types: [python]
         pass_filenames: false
+        stages: [pre-push]
     -   id: regenerate-cli-docs
         name: "Regenerate CLI markdown docs"
         entry: bash -c 'uv run python scripts/make_cli_docs.py && git diff --quiet libs/mngr/docs/commands/ libs/mngr/README.md'

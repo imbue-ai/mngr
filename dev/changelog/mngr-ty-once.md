@@ -10,13 +10,14 @@ no cross-process cache benefit.
 
 Removed the per-project copies and kept a single repo-wide `test_no_type_errors`
 and `test_no_ruff_errors` in `test_meta_ratchets.py`, updating the meta-ratchet
-expected-test-name set and `CLAUDE.md` accordingly.
+expected-test-name set accordingly.
 
 Because `ty` (unlike `ruff`) was not in pre-commit, scoped local runs such as
 `just test-quick libs/<project>` no longer type-checked at all after the
-consolidation. Added a `ty` pre-commit hook (mirroring the existing `ruff` hook,
-running `uv run ty check` over the whole workspace whenever a Python file is
-staged) so local commits still get a type-check gate; the single
+consolidation. Added a `ty` hook to `.pre-commit-config.yaml` that runs
+`uv run ty check` over the whole workspace at the `pre-push` stage (ty can't
+scope to staged files, so running it per-commit would add a fixed full-workspace
+scan to every commit). Pushes now get a type-check gate; the single
 `test_no_type_errors` in `test_meta_ratchets.py` remains the CI backstop.
 
 No user-facing behavior change.
