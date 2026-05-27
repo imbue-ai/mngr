@@ -43,17 +43,26 @@ vm_runtime = true
 
 [framework]
 type = "pytest"
-# Conditional ``cd /code/mngr`` because offload's ``--override-image-id``
-# path skips the image-setup pipeline that would normally apply the
-# ``sandbox_project_root`` setting, so the sandbox's per-exec cwd is
-# ``/`` -- and ``uv run pytest`` from there can't find the local
-# ``.venv/bin/pytest`` and errors with "Failed to spawn: `pytest`". The
-# same command is used by offload for *local* test discovery, where
-# ``/code/mngr`` does not exist, so an unconditional cd would break
-# discovery. Guarding the cd on directory existence makes the command
-# work in both contexts: local discovery uses the worktree cwd, in-
-# sandbox execution lands in /code/mngr.
-command = "uv run pytest"
+# Bash-wrapped command with a conditional cd so the same string works in
+# both offload contexts:
+# - Local discovery: offload's pytest framework `shell_words::split`s the
+#   command, takes the first token as the program (`bash`), and spawns
+#   it directly with the remaining tokens as argv. bash runs the -c
+#   script: /code/mngr does not exist locally, so the cd is skipped,
+#   and `uv run pytest --collect-only "$@"` runs from the worktree cwd.
+# - In-sandbox execution: offload calls
+#   `modal_sandbox.py exec <id> "<cmd.to_shell_string()>"`, which wraps
+#   the whole thing in another `bash -c` inside the sandbox. The
+#   sandbox's cwd is `/` (offload's create_from_image hardcodes
+#   workdir=/app on Sandbox.create but Modal does NOT propagate that
+#   workdir to subsequent .exec() calls). The inner bash -c sees
+#   /code/mngr exists, cd's into it, then `uv run pytest "$@"` runs
+#   from the project root and finds .venv/bin/pytest.
+#
+# The `--` after the inline script terminates bash's option parsing so
+# the subsequent test args become "$@" rather than additional flags
+# being parsed by bash.
+command = "bash -c '[ -d /code/mngr ] && cd /code/mngr; exec uv run pytest \"$@\"' --"
 run_args = "--no-cov -p no:xdist"
 
 [groups.all]
