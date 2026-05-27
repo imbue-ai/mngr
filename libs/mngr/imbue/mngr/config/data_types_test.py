@@ -17,10 +17,12 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import PluginConfig
 from imbue.mngr.config.data_types import ProviderInstanceConfig
 from imbue.mngr.config.data_types import RetryConfig
+from imbue.mngr.config.data_types import StringDerivedTuple
 from imbue.mngr.config.data_types import WorkDirExtraPathMode
 from imbue.mngr.config.data_types import detect_settings_narrowing
 from imbue.mngr.config.data_types import get_or_create_user_id
 from imbue.mngr.config.data_types import split_cli_args_string
+from imbue.mngr.config.data_types import would_assignment_narrow
 from imbue.mngr.config.loader import parse_config
 from imbue.mngr.errors import ConfigParseError
 from imbue.mngr.errors import ParseSpecError
@@ -1162,6 +1164,56 @@ def test_detect_settings_narrowing_allows_agent_type_cli_args_superset(mngr_test
         agent_types={AgentTypeName("my_claude"): AgentTypeConfig(cli_args=("--debug", "--verbose"))},
     )
     assert detect_settings_narrowing(base, override) == []
+
+
+def test_detect_settings_narrowing_exempts_string_derived_tuple_override(mngr_test_prefix: str) -> None:
+    """A ``StringDerivedTuple`` override over a non-empty list/tuple base is
+    exempt from narrowing detection even when the tokens differ.
+
+    Locks in the leaf-level rule (``_check_narrowing``) directly so a future
+    refactor that breaks the marker discrimination is caught here, not just by
+    the loader-level integration test.
+    """
+    base = MngrConfig(
+        prefix=mngr_test_prefix,
+        agent_types={AgentTypeName("my_claude"): AgentTypeConfig(cli_args=("--debug",))},
+    )
+    override = MngrConfig.model_construct(
+        prefix=mngr_test_prefix,
+        agent_types={
+            AgentTypeName("my_claude"): AgentTypeConfig.model_construct(cli_args=StringDerivedTuple(("--verbose",)))
+        },
+    )
+    assert detect_settings_narrowing(base, override) == []
+
+
+def test_detect_settings_narrowing_still_flags_plain_tuple_override(mngr_test_prefix: str) -> None:
+    """Sanity check that ``StringDerivedTuple`` is the actual discriminator: the
+    same shape with a plain ``tuple`` override is still flagged as narrowing.
+    Together with the exemption test above, this proves the marker is what gates
+    the exemption rather than some incidental shape property.
+    """
+    base = MngrConfig(
+        prefix=mngr_test_prefix,
+        agent_types={AgentTypeName("my_claude"): AgentTypeConfig(cli_args=("--debug",))},
+    )
+    override = MngrConfig.model_construct(
+        prefix=mngr_test_prefix,
+        agent_types={AgentTypeName("my_claude"): AgentTypeConfig.model_construct(cli_args=("--verbose",))},
+    )
+    assert detect_settings_narrowing(base, override) == ["agent_types.my_claude.cli_args"]
+
+
+def test_would_assignment_narrow_exempts_string_derived_tuple() -> None:
+    """``would_assignment_narrow`` mirrors the leaf-level exemption used by
+    ``_check_narrowing``: a ``StringDerivedTuple`` override over a non-empty
+    list/tuple base reports no narrowing, while a plain-tuple override with
+    the same tokens still does. This is the rule the template-application
+    guard in ``apply_create_template`` relies on.
+    """
+    base: tuple[str, ...] = ("--debug",)
+    assert would_assignment_narrow(base, StringDerivedTuple(("--verbose",))) is False
+    assert would_assignment_narrow(base, ("--verbose",)) is True
 
 
 def test_detect_settings_narrowing_flags_provider_subclass_list_replacement(mngr_test_prefix: str) -> None:

@@ -128,13 +128,15 @@ class _RecordingHandler(LatchkeyPermissionGrantHandler):
         self,
         request_event_id: str,
         agent_id: AgentId,
-        service_info: ServicePermissionInfo,
+        scope: str,
+        display_name: str,
     ) -> tuple[str, RequestResponseEvent]:
         self.deny_calls.append(
             {
                 "request_event_id": request_event_id,
                 "agent_id": str(agent_id),
-                "scope": service_info.scope,
+                "scope": scope,
+                "display_name": display_name,
             }
         )
         response_event = create_request_response_event(
@@ -142,7 +144,7 @@ class _RecordingHandler(LatchkeyPermissionGrantHandler):
             status=RequestStatus.DENIED,
             agent_id=str(agent_id),
             request_type=str(RequestType.LATCHKEY_PERMISSION),
-            scope=service_info.scope,
+            scope=scope,
         )
         return self.deny_message, response_event
 

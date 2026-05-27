@@ -4,8 +4,15 @@ from pathlib import Path
 
 import pytest
 from starlette.responses import HTMLResponse
+from starlette.testclient import TestClient
 
+from imbue.minds.config.data_types import WorkspacePaths
+from imbue.minds.desktop_client.app import create_desktop_client
+from imbue.minds.desktop_client.auth import FileAuthStore
+from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
+from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
+from imbue.minds.desktop_client.cookie_manager import create_session_cookie
 from imbue.minds.desktop_client.latchkey.handlers.messaging import MngrMessageSender
 from imbue.minds.desktop_client.latchkey.handlers.predefined import GrantOutcome
 from imbue.minds.desktop_client.latchkey.handlers.predefined import LatchkeyPermissionFlowError
@@ -14,6 +21,7 @@ from imbue.minds.desktop_client.latchkey.services_catalog import ServicePermissi
 from imbue.minds.desktop_client.latchkey.services_catalog import ServicesCatalog
 from imbue.minds.desktop_client.latchkey.testing import FakeLatchkeyGatewayClient
 from imbue.minds.desktop_client.latchkey.testing import build_fake_gateway_client
+from imbue.minds.desktop_client.request_events import RequestInbox
 from imbue.minds.desktop_client.request_events import RequestStatus
 from imbue.minds.desktop_client.request_events import create_latchkey_predefined_permission_request_event
 from imbue.minds.desktop_client.request_events import load_response_events
@@ -675,7 +683,8 @@ def test_deny_writes_response_event_without_touching_permissions_file(tmp_path: 
     handler.deny(
         request_event_id="evt-abc",
         agent_id=agent_id,
-        service_info=_SLACK_SERVICE_INFO,
+        scope=_SLACK_SERVICE_INFO.scope,
+        display_name=_SLACK_SERVICE_INFO.display_name,
     )
 
     responses = load_response_events(tmp_path)
@@ -693,7 +702,8 @@ def test_deny_sends_mngr_message(tmp_path: Path) -> None:
     handler.deny(
         request_event_id="evt-abc",
         agent_id=AgentId(),
-        service_info=_SLACK_SERVICE_INFO,
+        scope=_SLACK_SERVICE_INFO.scope,
+        display_name=_SLACK_SERVICE_INFO.display_name,
     )
 
     mngr_recording = _read_recording(tmp_path / "mngr_report.jsonl")
@@ -753,11 +763,93 @@ def test_deny_calls_gateway_delete_permission_request_only(tmp_path: Path) -> No
     handler.deny(
         request_event_id="evt-deny",
         agent_id=AgentId(),
-        service_info=_SLACK_SERVICE_INFO,
+        scope=_SLACK_SERVICE_INFO.scope,
+        display_name=_SLACK_SERVICE_INFO.display_name,
     )
 
     assert fake_client.set_calls == ()
     assert fake_client.deleted_request_ids == ("evt-deny",)
+
+
+def _build_authenticated_client(
+    tmp_path: Path,
+    handler: LatchkeyPermissionGrantHandler,
+    inbox: RequestInbox,
+) -> TestClient:
+    """Wire ``handler`` into a desktop-client app with a valid session cookie.
+
+    Mirrors the helper used by ``file_sharing_test.py`` so the
+    HTTP-level deny test below exercises the same dispatcher path the
+    real desktop client uses.
+    """
+    auth_dir = tmp_path / "auth"
+    auth_store = FileAuthStore(data_directory=auth_dir)
+    backend_resolver: BackendResolverInterface = StaticBackendResolver(url_by_agent_and_service={})
+    paths = WorkspacePaths(data_dir=tmp_path)
+    app = create_desktop_client(
+        auth_store=auth_store,
+        backend_resolver=backend_resolver,
+        http_client=None,
+        paths=paths,
+        request_inbox=inbox,
+        request_event_handlers=(handler,),
+    )
+    client = TestClient(app, base_url="http://localhost")
+    cookie_value = create_session_cookie(signing_key=auth_store.get_signing_key())
+    client.cookies.set(SESSION_COOKIE_NAME, cookie_value, path="/")
+    return client
+
+
+def test_apply_deny_request_succeeds_for_unknown_scope(tmp_path: Path) -> None:
+    """Deny must work even when the request's scope is not in the gateway catalog.
+
+    An agent can file a permission request under an unknown scope
+    (typo, stale catalog, etc.); the rendered dialog
+    (:func:`_render_unknown_scope_page`) offers Deny as the only
+    action. The deny HTTP path must therefore still tear down the
+    pending request, append a DENIED response event, and notify the
+    agent -- using the raw scope string in place of a catalog
+    display name.
+    """
+    fake_client = FakeLatchkeyGatewayClient()
+    handler = _build_handler(tmp_path, credential_status="valid")
+    # Swap in a gateway client that records delete calls so we can
+    # assert the pending request was torn down.
+    handler = LatchkeyPermissionGrantHandler(
+        data_dir=tmp_path,
+        latchkey=handler.latchkey,
+        services_catalog=_build_slack_services_catalog(fake_client),
+        mngr_message_sender=handler.mngr_message_sender,
+        gateway_client=fake_client,
+    )
+    agent_id = AgentId()
+    event = create_latchkey_predefined_permission_request_event(
+        agent_id=str(agent_id),
+        scope="not-in-catalog-scope",
+        rationale="please",
+    )
+    inbox = RequestInbox().add_request(event)
+    client = _build_authenticated_client(tmp_path, handler, inbox)
+
+    response = client.post(f"/requests/{event.event_id}/deny")
+
+    assert response.status_code == 200
+    assert response.json() == {"outcome": "DENIED"}
+    # Gateway DELETE for the pending request must have been issued.
+    assert fake_client.deleted_request_ids == (str(event.event_id),)
+    # Response event was appended on disk, carrying the raw scope.
+    response_events = load_response_events(tmp_path)
+    assert len(response_events) == 1
+    assert response_events[0].status == str(RequestStatus.DENIED)
+    assert response_events[0].scope == "not-in-catalog-scope"
+    # Agent was notified; the message falls back to the raw scope as
+    # the display name since no catalog entry exists.
+    mngr_recording = _read_recording(tmp_path / "mngr_report.jsonl")
+    assert len(mngr_recording) == 1
+    argv = mngr_recording[0]["argv"]
+    assert isinstance(argv, list)
+    assert "denied" in argv[2].lower()
+    assert "not-in-catalog-scope" in argv[2]
 
 
 def test_grant_preserves_existing_schemas_block_in_permissions_file(tmp_path: Path) -> None:
