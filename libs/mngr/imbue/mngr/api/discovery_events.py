@@ -32,7 +32,8 @@ from imbue.imbue_common.logging import generate_rotation_timestamp
 from imbue.imbue_common.logging import rotation_lock
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.pure import pure
-from imbue.mngr.api.providers import get_all_provider_instances
+from imbue.mngr.api.providers import get_provider_instance
+from imbue.mngr.api.providers import list_provider_names_to_load
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import ProviderInstanceConfig
@@ -40,6 +41,8 @@ from imbue.mngr.errors import AgentNotFoundError
 from imbue.mngr.errors import BaseMngrError
 from imbue.mngr.errors import DiscoverySchemaChangedError
 from imbue.mngr.errors import ProviderDiscoveryError
+from imbue.mngr.errors import ProviderEmptyError
+from imbue.mngr.errors import ProviderUnavailableError
 from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import AgentId
@@ -783,9 +786,26 @@ def _discover_all_hosts_ssh_free(mngr_ctx: MngrContext) -> dict[str, DiscoveredH
     host). It deliberately does *not* enumerate agents, which is the operation
     that requires SSH into the host. Returns a map of ``host_id`` (str) ->
     :class:`DiscoveredHost`.
+
+    Tolerates per-provider failures at both instantiation and ``discover_hosts``
+    time: an unauthorized or unreachable provider (e.g. Modal without a token)
+    is skipped with a warning rather than aborting the whole scan, since the
+    caller only needs to confirm that the *specific* host targeted by
+    ``mngr stop --stop-host`` is still reachable.
     """
     hosts_by_id: dict[str, DiscoveredHost] = {}
-    for provider in get_all_provider_instances(mngr_ctx):
+    for name in list_provider_names_to_load(mngr_ctx):
+        try:
+            provider = get_provider_instance(name, mngr_ctx)
+        except ProviderEmptyError as e:
+            logger.debug("Skipping provider {} for SSH-free host discovery (empty): {}", name, e)
+            continue
+        except ProviderUnavailableError as e:
+            logger.debug("Skipping provider {} for SSH-free host discovery (unavailable): {}", name, e)
+            continue
+        except BaseMngrError as e:
+            logger.warning("SSH-free host discovery skipped provider {} (instantiation failed): {}", name, e)
+            continue
         try:
             discovered = provider.discover_hosts(cg=mngr_ctx.concurrency_group, include_destroyed=False)
         except BaseMngrError as e:
