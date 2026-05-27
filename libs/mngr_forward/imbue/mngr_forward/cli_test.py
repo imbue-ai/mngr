@@ -37,7 +37,7 @@ def _opts(**overrides: object) -> ForwardCliOptions:
         log_commands=None,
         plugin=(),
         disable_plugin=(),
-        **overrides,  # type: ignore[arg-type]
+        **overrides,  # ty: ignore[invalid-argument-type]
     )
 
 
