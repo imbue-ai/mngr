@@ -117,8 +117,13 @@ LABEL_HOST_ID: Final[str] = f"{LABEL_PREFIX}host-id"
 LABEL_HOST_NAME: Final[str] = f"{LABEL_PREFIX}host-name"
 LABEL_TAGS: Final[str] = f"{LABEL_PREFIX}tags"
 
-# Path where the state volume is mounted inside host containers (when host volume is enabled).
-# The host_dir (e.g. /mngr) is symlinked to <this>/<host_id> so all data persists on the volume.
+# Path where the full state volume is mounted inside host containers in legacy
+# (shared) mode -- i.e. when `isolate_host_volumes` is False or None. In that
+# mode host_dir (e.g. /mngr) is symlinked to <this>/volumes/<host_id> so all
+# data persists on the volume. In isolated mode (`isolate_host_volumes=True`)
+# the per-host sub-folder is bound directly at host_dir via
+# `--mount ... volume-subpath=...` and this path is not used inside the host
+# container. The state container always mounts the full volume here.
 HOST_VOLUME_MOUNT_PATH: Final[str] = STATE_VOLUME_MOUNT_PATH
 
 # SSH constants
