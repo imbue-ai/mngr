@@ -512,7 +512,6 @@ def launch_agents_up_to_limit(
 
 
 def launch_integrator_agent(
-    fix_branches: list[str],
     config: TmrLaunchConfig,
     mngr_ctx: MngrContext,
     run_name: str,
@@ -529,15 +528,13 @@ def launch_integrator_agent(
     ``output_dir`` into ``<work_dir>/INTEGRATOR_INPUTS_DIRNAME/`` and deliver
     the integrator prompt via ``send_message``. The prompt walks that input
     directory, applies the should-pull predicate to filter, fetches the
-    qualifying bundles into local branches, and cherry-picks. ``fix_branches``
-    is currently informational -- the integrator filters from the inputs dir
-    rather than consuming this list -- but is retained for the log line.
+    qualifying bundles into local branches, and cherry-picks.
     """
     agent_name = AgentName(f"tmr-{run_name}-integrator")
     branch_name = f"mngr-tmr/{run_name}/integrated"
     host_name = HostName(f"tmr-{run_name}-integrator")
 
-    logger.info("Launching integrator agent '{}' to integrate {} branches", agent_name, len(fix_branches))
+    logger.info("Launching integrator agent '{}'", agent_name)
     create_result = _create_tmr_agent(
         agent_name=agent_name,
         branch_name=branch_name,

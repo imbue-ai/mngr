@@ -351,17 +351,14 @@ def _run_integrator_phase(
     when a branch was produced; the report reads the integrator outcome JSON
     from disk.
     """
-    fix_branches = [
-        meta.branch_name
-        for meta in test_agent_metadata
-        if meta.kind is AgentKind.TESTING_AGENT and meta.error_summary is None and meta.branch_name is not None
-    ]
-    if not fix_branches:
+    has_any_successful_test_agent = any(
+        meta.kind is AgentKind.TESTING_AGENT and meta.error_summary is None for meta in test_agent_metadata
+    )
+    if not has_any_successful_test_agent:
         return None
 
     try:
         integrator, integrator_host = launch_integrator_agent(
-            fix_branches=fix_branches,
             config=config,
             mngr_ctx=mngr_ctx,
             run_name=run_name,
