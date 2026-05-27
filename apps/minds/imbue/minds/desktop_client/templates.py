@@ -684,23 +684,29 @@ _RECOVERY_SCRIPT: Final[str] = """\
               renderMisconfigured();
               return;
             }
+            if (data && data.host_offline) {
+              // Container fully stopped: nothing is running, so a host restart
+              // just starts it back up -- dispatch it, no confirmation needed.
+              // Checked BEFORE ssh_dead because a stopped container also has
+              // ssh_dead set (the in-container probe couldn't run), and we
+              // want the auto-dispatch path, not the manual-consent one.
+              postRestart('/restart-host');
+              return;
+            }
             if (data && data.ssh_dead) {
-              // The sentinel never arrived: the container's SSH transport is
-              // down (or hung). A surgical restart's `mngr stop` would just
-              // fail at the same SSH layer; a host restart bypasses that
-              // path but would bounce a live container, so we require
-              // explicit consent rather than auto-dispatching.
+              // The sentinel never arrived but the host is not offline:
+              // the container's SSH transport is down (or hung) while the
+              // host claims to be running. A surgical restart's `mngr stop`
+              // would just fail at the same SSH layer; a host restart
+              // bypasses that path but would bounce a live container, so
+              // we require explicit consent rather than auto-dispatching.
               renderUnresponsive();
               return;
             }
             if (data && data.reachable) {
-              // Container running: the surgical system-interface restart can
-              // recover the workspace without interrupting agents.
+              // Container running and SSH alive: the surgical system-interface
+              // restart can recover the workspace without interrupting agents.
               postRestart('/restart-system-interface');
-            } else if (data && data.host_offline) {
-              // Container fully stopped: nothing is running, so a host restart
-              // just starts it back up -- dispatch it, no confirmation needed.
-              postRestart('/restart-host');
             } else {
               // Ambiguous host state: a host restart could interrupt running
               // agents, so make the user confirm by clicking.

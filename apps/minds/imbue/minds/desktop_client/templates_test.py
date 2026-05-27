@@ -320,3 +320,25 @@ def test_render_recovery_page_script_handles_ssh_dead_path() -> None:
     # unresponsive" copy with no auto-dispatch.
     assert "data.ssh_dead" in html
     assert "renderUnresponsive" in html
+
+
+def test_render_recovery_page_script_prefers_host_offline_over_ssh_dead() -> None:
+    """A STOPPED/CRASHED host also has ssh_dead=True (the in-container probe
+    couldn't run). The runProbe() branches must auto-dispatch the host
+    restart (host_offline branch) instead of falling into the manual-consent
+    ssh_dead branch -- pinning the relative order so a regression flags here.
+    """
+    html = render_recovery_page(
+        agent_id=_AGENT_A,
+        return_to="",
+        initial_status="stuck",
+        initial_error="",
+    )
+    host_offline_index = html.find("data.host_offline")
+    ssh_dead_index = html.find("data.ssh_dead")
+    assert host_offline_index >= 0, "host_offline branch must be present"
+    assert ssh_dead_index >= 0, "ssh_dead branch must be present"
+    assert host_offline_index < ssh_dead_index, (
+        "host_offline must be checked before ssh_dead in runProbe(), so a stopped "
+        "container's ssh_dead does not block the host-restart auto-dispatch."
+    )
