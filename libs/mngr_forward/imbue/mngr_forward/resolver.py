@@ -59,6 +59,16 @@ class ForwardResolver(MutableModel):
     _known_agent_ids: set[str] = PrivateAttr(default_factory=set)
     _initial_discovery_done: bool = PrivateAttr(default=False)
 
+    def _snapshot_services_locked(self) -> dict[str, dict[str, str]]:
+        """Return a deep copy of ``_services_by_agent`` for emission.
+
+        Caller MUST hold ``self._lock``. The copy is taken under the lock
+        so the resulting payload is a consistent point-in-time view; the
+        actual ``emit_resolver_snapshot`` call must happen outside the
+        lock to avoid holding it across a write.
+        """
+        return {aid: dict(svc) for aid, svc in self._services_by_agent.items()}
+
     def update_known_agents(self, agent_ids: tuple[AgentId, ...]) -> None:
         """Replace the set of known agents. Drops services / SSH info for removed agents.
 
@@ -78,7 +88,7 @@ class ForwardResolver(MutableModel):
             self._known_agent_ids = new_set
             self._initial_discovery_done = True
             if services_changed:
-                snapshot = {aid: dict(svc) for aid, svc in self._services_by_agent.items()}
+                snapshot = self._snapshot_services_locked()
         if snapshot is not None and self.envelope_writer is not None:
             self.envelope_writer.emit_resolver_snapshot(snapshot)
 
@@ -105,7 +115,7 @@ class ForwardResolver(MutableModel):
             services_changed = self._services_by_agent.pop(aid_str, None) is not None
             self._ssh_by_agent.pop(aid_str, None)
             if services_changed:
-                snapshot = {aid: dict(svc) for aid, svc in self._services_by_agent.items()}
+                snapshot = self._snapshot_services_locked()
         if snapshot is not None and self.envelope_writer is not None:
             self.envelope_writer.emit_resolver_snapshot(snapshot)
 
@@ -119,7 +129,7 @@ class ForwardResolver(MutableModel):
         """
         with self._lock:
             self._services_by_agent[str(agent_id)] = dict(services)
-            snapshot = {aid: dict(svc) for aid, svc in self._services_by_agent.items()}
+            snapshot = self._snapshot_services_locked()
         if self.envelope_writer is not None:
             self.envelope_writer.emit_resolver_snapshot(snapshot)
 
