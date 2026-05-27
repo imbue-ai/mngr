@@ -10,6 +10,19 @@ dependencies = [
     "click>=8.0.0",
 ]
 
+[tool.uv]
+# Supply-chain cooldown: uv won't consider any package version uploaded after
+# this timestamp when resolving/locking, so we only adopt registry releases
+# that have been public long enough for the community to flag malware before we
+# pull them. scripts/release.py advances this cutoff toward (release date - two
+# weeks) at each release, but only ever forward -- never pushing it back to
+# re-restrict a cutoff that is still younger than the cooldown window (doing so
+# would re-exclude a deliberately-pinned fresh dep like `ty` and break
+# resolution). See `update_exclude_newer` in scripts/release.py. The cooldown
+# does not protect against a compromise that stays undetected past the window;
+# its only value is the detection delay before we adopt a release.
+exclude-newer = "2026-05-23T00:00:00Z"
+
 [tool.uv.sources]
 imbue-common = { workspace = true }
 

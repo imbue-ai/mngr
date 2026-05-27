@@ -1,4 +1,6 @@
 import sys
+import tomllib
+from datetime import date
 from pathlib import Path
 
 import pytest
@@ -13,6 +15,7 @@ if str(_SCRIPTS_DIR) not in sys.path:
 
 from scripts.release import _gate_release_on_pending_changelog_entries  # noqa: E402
 from scripts.release import _pluralize_entry  # noqa: E402
+from scripts.release import update_exclude_newer  # noqa: E402
 
 
 def _write_changelog_entry(tmp_path: Path, name: str, content: str = "- entry", project: str = "mngr") -> None:
@@ -77,3 +80,46 @@ def test_gate_blocks_and_returns_false_with_pending_entries(
     assert "libs/mngr_lima/changelog/fake-b.md" in err
     # The error path prints the on-demand command for the user to copy.
     assert "mngr schedule run" in err
+
+
+def _write_root_pyproject(tmp_path: Path, exclude_newer: str) -> Path:
+    """Write a minimal root pyproject.toml carrying a `[tool.uv] exclude-newer`.
+
+    Includes an unrelated key under [tool.uv] so the tests can assert that
+    update_exclude_newer rewrites only the cutoff and preserves the rest.
+    """
+    path = tmp_path / "pyproject.toml"
+    path.write_text(
+        f'[tool.uv]\nexclude-newer = "{exclude_newer}"\n\n[tool.uv.sources]\nimbue-common = {{ workspace = true }}\n'
+    )
+    return path
+
+
+def test_update_exclude_newer_advances_stale_cutoff(tmp_path: Path) -> None:
+    # A cutoff well older than two weeks before the release date is advanced to
+    # exactly (release_date - 2 weeks), and unrelated config is preserved.
+    path = _write_root_pyproject(tmp_path, "2026-01-01T00:00:00Z")
+    result = update_exclude_newer(path, date(2026, 5, 27))
+    assert result == "2026-05-13T00:00:00Z"
+    doc = tomllib.loads(path.read_text())
+    assert doc["tool"]["uv"]["exclude-newer"] == "2026-05-13T00:00:00Z"
+    assert doc["tool"]["uv"]["sources"]["imbue-common"] == {"workspace": True}
+
+
+def test_update_exclude_newer_keeps_recent_cutoff(tmp_path: Path) -> None:
+    # A cutoff younger than the cooldown window (only 4 days before the release
+    # date) must be left untouched: advancing it would push it back and re-exclude
+    # whatever freshly-pinned dep it was set to admit.
+    path = _write_root_pyproject(tmp_path, "2026-05-23T00:00:00Z")
+    original = path.read_text()
+    result = update_exclude_newer(path, date(2026, 5, 27))
+    assert result is None
+    assert path.read_text() == original
+
+
+def test_update_exclude_newer_noop_at_window_boundary(tmp_path: Path) -> None:
+    # A cutoff exactly at (release_date - 2 weeks) is a no-op: max() ties to the
+    # current value, so no rewrite happens.
+    path = _write_root_pyproject(tmp_path, "2026-05-13T00:00:00Z")
+    result = update_exclude_newer(path, date(2026, 5, 27))
+    assert result is None
