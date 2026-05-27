@@ -222,7 +222,7 @@ def _resolve_minds_env(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
-def _build_electron_env(workspace_git_url: Path, workspace_name: str, mngr_forward_port: int) -> dict[str, str]:
+def _build_electron_env(workspace_git_url: Path, workspace_name: str) -> dict[str, str]:
     """Return the env vars the Electron child process should inherit.
 
     Mirrors ``just minds-start``: passes the FCT path + agent name through
@@ -230,19 +230,10 @@ def _build_electron_env(workspace_git_url: Path, workspace_name: str, mngr_forwa
     see ``_dev_only_workspace_default`` in templates.py), and scrubs any
     ANTHROPIC creds the operator's shell might have exported so they
     don't silently leak into every workspace the test creates.
-
-    Passes ``MINDS_MNGR_FORWARD_PORT`` so the spawned ``mngr forward``
-    subprocess binds to a per-test free port -- ``backend.js`` never
-    passes ``--mngr-forward-port`` so ``minds run`` falls back to the
-    click default (``_DEFAULT_MNGR_FORWARD_PORT = 8421`` in
-    ``apps/minds/imbue/minds/cli/run.py``), which collides with any
-    concurrent ``just minds-start`` (or with a prior crashed test that
-    didn't fully tear down its forward supervisor).
     """
     env = dict(os.environ)
     env["MINDS_WORKSPACE_GIT_URL"] = str(workspace_git_url)
     env["MINDS_WORKSPACE_NAME"] = workspace_name
-    env["MINDS_MNGR_FORWARD_PORT"] = str(mngr_forward_port)
     # Pin MNGR_ROOT_NAME back to "mngr" for the Electron child so the
     # spawned `mngr create` subprocess finds FCT's .mngr/settings.toml
     # (which defines the `main` + `docker` create templates). The minds
@@ -289,7 +280,6 @@ def _launched_electron(
     workspace_git_url: Path,
     workspace_name: str,
     debug_port: int,
-    mngr_forward_port: int,
 ) -> Iterator[subprocess.Popen[bytes]]:
     """Start the Electron app, yield the process, and always tear it down.
 
@@ -320,7 +310,7 @@ def _launched_electron(
     process = subprocess.Popen(
         cmd,
         cwd=str(_REPO_ROOT),
-        env=_build_electron_env(workspace_git_url, workspace_name, mngr_forward_port),
+        env=_build_electron_env(workspace_git_url, workspace_name),
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
@@ -485,16 +475,10 @@ def test_create_local_docker_workspace_via_electron(
     fct_path = _resolve_fct_path(tmp_path)
     workspace_name = f"forever-{get_short_random_string()}"
     debug_port = _find_free_port()
-    mngr_forward_port = _find_free_port()
-    logger.info(
-        "Workspace name: {}; CDP debug port: {}; mngr_forward port: {}",
-        workspace_name,
-        debug_port,
-        mngr_forward_port,
-    )
+    logger.info("Workspace name: {}; CDP debug port: {}", workspace_name, debug_port)
 
     try:
-        with _launched_electron(fct_path, workspace_name, debug_port, mngr_forward_port):
+        with _launched_electron(fct_path, workspace_name, debug_port):
             _wait_for_cdp(debug_port, _CDP_READY_TIMEOUT_SECONDS)
             with sync_playwright() as playwright:
                 browser = playwright.chromium.connect_over_cdp(f"http://127.0.0.1:{debug_port}")
@@ -515,7 +499,7 @@ def test_create_local_docker_workspace_via_electron(
 
                     _ensure_field_value(page, "#host_name", workspace_name)
                     _ensure_field_value(page, "#git_url", str(fct_path))
-                    # LOCAL + SUBSCRIPTION are the defaults when no account
+                    # DOCKER + SUBSCRIPTION are the defaults when no account
                     # is selected; don't touch the launch_mode / ai_provider
                     # selects so the test stays robust to future option
                     # reorderings in the form.

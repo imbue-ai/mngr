@@ -115,10 +115,12 @@ def test_prevent_setattr() -> None:
 
 
 def test_prevent_asyncio_import() -> None:
-    # Two: app.py uses ``asyncio.get_running_loop()`` and ``asyncio.run_coroutine_threadsafe``
-    # for HTTP route handlers; latchkey/permissions.py uses ``run_in_executor`` to run the
-    # blocking grant/deny path off the event loop. Both are intrinsic to FastAPI integration.
-    rc.check_asyncio_import(_DIR, snapshot(2))
+    # Three: app.py uses ``asyncio.get_running_loop()`` and ``asyncio.run_coroutine_threadsafe``
+    # for HTTP route handlers; the two sibling permission handlers under
+    # ``latchkey/handlers/`` (``predefined.py`` and ``file_sharing.py``) both use
+    # ``run_in_executor`` to run the blocking grant/deny path off the event loop. All three
+    # are intrinsic to FastAPI integration.
+    rc.check_asyncio_import(_DIR, snapshot(3))
 
 
 def test_prevent_pandas_import() -> None:
@@ -297,6 +299,10 @@ def test_prevent_direct_subprocess() -> None:
     # through to the operator's shell as if recover were the original
     # command. ConcurrencyGroup doesn't apply.
     rc.check_direct_subprocess(_DIR, snapshot(1), excluded_patterns=excluded)
+
+
+def test_prevent_bare_tmux_targets() -> None:
+    rc.check_bare_tmux_targets(_DIR, snapshot(0))
 
 
 # --- AST-based ratchets ---

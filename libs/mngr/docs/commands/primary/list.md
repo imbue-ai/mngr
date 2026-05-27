@@ -71,7 +71,7 @@ mngr list [OPTIONS]
 | `--safe` | boolean | Always query all providers during discovery (disable event-stream optimization). Use this when interfacing with mngr from multiple machines. | `False` |
 | `--plugin`, `--enable-plugin` | text | Enable a plugin [repeatable] | None |
 | `--disable-plugin` | text | Disable a plugin [repeatable] | None |
-| `-S`, `--setting` | text | Override a config setting for this invocation (KEY=VALUE, dot-separated paths) [repeatable] | None |
+| `-S`, `--setting` | text | Override a config setting for this invocation (KEY=VALUE, dot-separated paths; append __extend to the leaf key to extend list/dict/set fields) [repeatable] | None |
 | `-h`, `--help` | boolean | Show this message and exit. | `False` |
 
 ## CEL Filter Examples
@@ -136,7 +136,7 @@ Each subsection notes where its fields are available; agent and host fields work
 - `idle_timeout_seconds` - Idle timeout before host stops
 - `activity_sources` - Activity sources used for idle detection
 - `start_on_boot` - Whether the agent is set to start on host boot
-- `state` - Agent lifecycle state (RUNNING, STOPPED, WAITING, REPLACED, RUNNING_UNKNOWN_AGENT_TYPE, DONE)
+- `state` - Agent lifecycle state (RUNNING, STOPPED, WAITING, REPLACED, RUNNING_UNKNOWN_AGENT_TYPE, DONE, UNKNOWN)
 - `labels` - Agent labels (key-value pairs, e.g., project=mngr)
 - `labels.$KEY` - Specific label value (e.g., `labels.project`)
 - `plugin.$PLUGIN_NAME.*` - Plugin-defined fields (e.g., `plugin.chat_history.messages`)

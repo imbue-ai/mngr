@@ -12,8 +12,8 @@ importers:
         specifier: ^1.6.0
         version: 1.6.4
       latchkey:
-        specifier: ^2.11.1
-        version: 2.11.1
+        specifier: ^2.12.1
+        version: 2.12.1
     devDependencies:
       '@todesktop/cli':
         specifier: ^1.8.0
@@ -1661,8 +1661,8 @@ packages:
   keyv@4.5.4:
     resolution: {integrity: sha512-oxVHkHR/EJf2CNXnWxRLW6mg7JyCCUcG0DtEGmL2ctUo1PNTin1PUil+r/+4r5MpVgC/fn1kjsx7mjSujKqIpw==}
 
-  latchkey@2.11.1:
-    resolution: {integrity: sha512-FIqtGXLH4fU6XA2h8Zy38EK7AGiStcWoyz4rrBRUkJ919JSuU1H/nlK+6H1Df7cU4ux24W/YyHregoH/2DglPA==}
+  latchkey@2.12.1:
+    resolution: {integrity: sha512-asS+4PmMif/KsSfUwdKp3bb2iY2F7pV5wZaE3jwhH0IudkULt3WMzJ5eeQBhCB7Nr/uvfDioXZrviW5b6WTj7g==}
     engines: {node: '>=20'}
     hasBin: true
 
@@ -4448,7 +4448,7 @@ snapshots:
     dependencies:
       json-buffer: 3.0.1
 
-  latchkey@2.11.1:
+  latchkey@2.12.1:
     dependencies:
       '@imbue-ai/detent': 1.2.0
       '@napi-rs/keyring': 1.2.0

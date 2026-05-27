@@ -37,7 +37,7 @@ from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.request_events import RequestInbox
-from imbue.minds.desktop_client.request_events import create_latchkey_permission_request_event
+from imbue.minds.desktop_client.request_events import create_latchkey_predefined_permission_request_event
 from imbue.minds.desktop_client.system_interface_health import AgentHealth
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
 from imbue.minds.primitives import CreationId
@@ -806,7 +806,7 @@ def test_creation_logs_sse_emits_status_events(tmp_path: Path) -> None:
     log_queue: queue.Queue[str] = queue.Queue()
     with agent_creator._lock:
         agent_creator._statuses[str(creation_id)] = AgentCreationStatus.CREATING_WORKSPACE
-        agent_creator._launch_modes[str(creation_id)] = LaunchMode.LOCAL
+        agent_creator._launch_modes[str(creation_id)] = LaunchMode.DOCKER
         agent_creator._log_queues[str(creation_id)] = log_queue
 
     log_queue.put("regular log line")
@@ -881,7 +881,7 @@ def test_create_form_submit_passes_launch_mode(tmp_path: Path) -> None:
         data={
             "git_url": "file:///nonexistent-repo",
             "host_name": "my-agent",
-            "launch_mode": "LOCAL",
+            "launch_mode": "DOCKER",
         },
         follow_redirects=False,
     )
@@ -898,7 +898,7 @@ def test_create_agent_api_passes_launch_mode(tmp_path: Path) -> None:
         json={
             "git_url": "file:///nonexistent-repo",
             "host_name": "my-agent",
-            "launch_mode": "LOCAL",
+            "launch_mode": "DOCKER",
         },
     )
     assert response.status_code == 200
@@ -930,7 +930,7 @@ def test_create_form_shows_launch_mode_dropdown(tmp_path: Path) -> None:
     response = client.get("/create")
     assert response.status_code == 200
     assert "launch_mode" in response.text
-    assert "local" in response.text
+    assert "docker" in response.text
     assert "cloud" in response.text
     assert "lima" in response.text
     assert "imbue_cloud" in response.text
@@ -994,7 +994,7 @@ def test_create_form_submit_rejects_imbue_cloud_ai_without_account(tmp_path: Pat
         data={
             "git_url": "file:///nonexistent-repo",
             "host_name": "my-agent",
-            "launch_mode": "LOCAL",
+            "launch_mode": "DOCKER",
             "ai_provider": "IMBUE_CLOUD",
             "account_id": "",
         },
@@ -1013,7 +1013,7 @@ def test_create_form_submit_rejects_api_key_provider_without_key(tmp_path: Path)
         data={
             "git_url": "file:///nonexistent-repo",
             "host_name": "my-agent",
-            "launch_mode": "LOCAL",
+            "launch_mode": "DOCKER",
             "ai_provider": "API_KEY",
             "anthropic_api_key": "",
         },
@@ -1032,7 +1032,7 @@ def test_create_form_submit_accepts_subscription_with_no_account(tmp_path: Path)
         data={
             "git_url": "file:///nonexistent-repo",
             "host_name": "my-agent",
-            "launch_mode": "LOCAL",
+            "launch_mode": "DOCKER",
             "ai_provider": "SUBSCRIPTION",
             "account_id": "",
         },
@@ -1097,7 +1097,7 @@ def test_create_agent_api_rejects_imbue_cloud_ai_without_account(tmp_path: Path)
         "/api/create-agent",
         json={
             "git_url": "file:///nonexistent-repo",
-            "launch_mode": "LOCAL",
+            "launch_mode": "DOCKER",
             "ai_provider": "IMBUE_CLOUD",
         },
     )
@@ -1118,7 +1118,7 @@ def test_create_form_submit_preserves_account_id_on_validation_error(tmp_path: P
         data={
             "git_url": "file:///nonexistent-repo",
             "host_name": "my-agent",
-            "launch_mode": "LOCAL",
+            "launch_mode": "DOCKER",
             "ai_provider": "IMBUE_CLOUD",
             "account_id": "",
         },
@@ -1312,7 +1312,7 @@ def test_requests_panel_card_routes_via_minds_bridge(tmp_path: Path) -> None:
     # Build the app inline so we can seed the inbox before creating the
     # TestClient and still have a concretely-typed handle to app.state.
     agent_id = str(AgentId())
-    event = create_latchkey_permission_request_event(
+    event = create_latchkey_predefined_permission_request_event(
         agent_id=agent_id, scope="slack-api", rationale="Need to post status updates"
     )
     auth_store = FileAuthStore(data_directory=tmp_path / "auth")

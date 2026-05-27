@@ -91,17 +91,17 @@ def test_render_create_form_contains_all_launch_modes() -> None:
         assert mode.value.lower() in html
 
 
-def test_render_create_form_selects_local_by_default() -> None:
+def test_render_create_form_selects_docker_by_default() -> None:
     html = render_create_form()
-    assert 'value="LOCAL" selected' in html
+    assert 'value="DOCKER" selected' in html
 
 
 def test_render_create_form_selects_specified_launch_mode() -> None:
-    # CLOUD instead of the default LOCAL so the "selection honored over the
+    # CLOUD instead of the default DOCKER so the "selection honored over the
     # default" assertion is meaningful.
     html = render_create_form(launch_mode=LaunchMode.CLOUD)
     assert 'value="CLOUD" selected' in html
-    assert 'value="LOCAL" selected' not in html
+    assert 'value="DOCKER" selected' not in html
 
 
 def test_render_create_form_contains_ai_provider_options() -> None:

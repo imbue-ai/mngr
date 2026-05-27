@@ -225,8 +225,8 @@ class ProviderDiscoveryError(ProviderError):
 
     The wrapped exception is preserved in ``__cause__``; ``provider_name``
     carries the ``ProviderInstanceName`` of the failing instance so error
-    handlers (e.g. minds' auto-disable on auth failure) don't have to
-    pattern-match the message string.
+    handlers (e.g. minds' providers panel surfacing per-provider error
+    badges) don't have to pattern-match the message string.
     """
 
     def __init__(self, provider_name: ProviderInstanceName, cause: BaseException) -> None:

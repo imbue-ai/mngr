@@ -41,7 +41,7 @@ mngr forward [OPTIONS]
 | `--safe` | boolean | Always query all providers during discovery (disable event-stream optimization). Use this when interfacing with mngr from multiple machines. | `False` |
 | `--plugin`, `--enable-plugin` | text | Enable a plugin [repeatable] | None |
 | `--disable-plugin` | text | Disable a plugin [repeatable] | None |
-| `-S`, `--setting` | text | Override a config setting for this invocation (KEY=VALUE, dot-separated paths) [repeatable] | None |
+| `-S`, `--setting` | text | Override a config setting for this invocation (KEY=VALUE, dot-separated paths; append __extend to the leaf key to extend list/dict/set fields) [repeatable] | None |
 | `-h`, `--help` | boolean | Show this message and exit. | `False` |
 
 ## Other Options
@@ -49,7 +49,7 @@ mngr forward [OPTIONS]
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
 | `--host` | text | Bind host | `127.0.0.1` |
-| `--port` | integer | Bind port | `8421` |
+| `--port` | integer | Bind port. When omitted, the server tries 8421 and falls back to an OS-assigned port if it is already in use. When supplied explicitly, the server binds exactly that port and fails if it is unavailable. | None |
 | `--service` | text | Service name to forward (e.g. 'system_interface') | None |
 | `--forward-port` | integer | Forward to a fixed remote port on the agent's host (manual mode). Mutually exclusive with --service. | None |
 | `--reverse` | text | Reverse tunnel pair REMOTE:LOCAL. Repeatable. REMOTE may be 0 (sshd-assigned). | None |
