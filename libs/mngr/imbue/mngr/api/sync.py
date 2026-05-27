@@ -646,24 +646,23 @@ def _build_git_url_and_env(
 
 
 def _split_options_and_positionals(args: Sequence[str]) -> tuple[list[str], list[str]]:
-    """Split git args into options (before the first positional) and positionals.
+    """Split git args into options (those starting with ``-``) and positionals.
 
     git's command line is ``git <cmd> [<options>] [<repo> [<refspec>...]]``: options
     must come before the repository, and anything after the repository is treated
-    as a refspec. Since mngr supplies the URL, we have to slot it in at the
-    options/positionals boundary. Args starting with ``-`` up to the first
-    non-option are treated as options; everything from the first non-option on is
-    treated as positionals. Mixed orderings (an option after a positional) end up
-    in the positional bucket, which is what plain git would do too.
+    as a refspec (for push) or forwarded to the underlying ``git fetch`` (for pull).
+    Since mngr supplies the URL itself, every flag the caller passes needs to land
+    before that URL, regardless of where they typed it. We treat any arg starting
+    with ``-`` as an option and anything else as a positional. Options that take a
+    separate-token value (e.g. ``-o foo``) must use the ``--opt=foo`` form so the
+    value doesn't get reclassified as a positional.
     """
     options: list[str] = []
     positionals: list[str] = []
-    seen_positional = False
     for arg in args:
-        if not seen_positional and arg.startswith("-"):
+        if arg.startswith("-"):
             options.append(arg)
         else:
-            seen_positional = True
             positionals.append(arg)
     return options, positionals
 
@@ -702,12 +701,33 @@ def git_push(
     _configure_push_destination(remote_host, remote_path)
     url, env = _build_git_url_and_env(remote_host, remote_path, is_push=True)
     options, positionals = _split_options_and_positionals(extra_args)
+    # When the caller doesn't supply a refspec, default to pushing the local
+    # current branch onto the remote's current branch. This matches mngr's
+    # worktree-style agents (where the agent has its own branch) and lets
+    # ``mngr git push my-agent`` Just Work without the caller having to
+    # discover the agent's branch name.
+    if not positionals:
+        positionals = [_default_push_refspec(local_path, remote_host, remote_path, cg)]
     cmd = ["git", "-C", str(local_path), "push", *options, url, *positionals]
     logger.debug("Running git push: {}", shlex.join(cmd))
     try:
         cg.run_process_to_completion(cmd, env=env)
     except ProcessError as e:
         raise GitSyncError(e.stderr) from e
+
+
+def _default_push_refspec(
+    local_path: Path,
+    remote_host: OnlineHostInterface,
+    remote_path: Path,
+    cg: ConcurrencyGroup,
+) -> str:
+    """Return ``<local_current_branch>:<remote_current_branch>`` for the no-args default."""
+    local_branch = get_current_branch(local_path, cg)
+    result = remote_host.execute_idempotent_command("git symbolic-ref --short HEAD", cwd=remote_path)
+    if not result.success:
+        raise GitSyncError(f"Failed to detect remote current branch: {result.stderr}")
+    return f"{local_branch}:{result.stdout.strip()}"
 
 
 def git_pull(

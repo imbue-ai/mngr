@@ -294,6 +294,8 @@ def test_git_pull_merges_agent_commits(
     run_git_command(agent_dir, "add", "agent_change.txt")
     run_git_command(agent_dir, "commit", "-m", "Agent commit")
 
+    # No refspec: ``git pull <url>`` fetches the agent's HEAD branch
+    # (``mngr/<agent>``) and merges into the local current branch (main).
     result = run_mngr_subprocess(
         "git",
         "pull",
@@ -301,7 +303,6 @@ def test_git_pull_merges_agent_commits(
         "modal",
         created_agent,
         "--",
-        "main",
         "--no-edit",
         env=sync_test_env,
         cwd=repo_path,

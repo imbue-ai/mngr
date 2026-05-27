@@ -88,7 +88,7 @@ def _resolve_remote_endpoint(
 
 @git_command.command(
     name="push",
-    context_settings={"ignore_unknown_options": True, "allow_interspersed_args": False},
+    context_settings={"ignore_unknown_options": True},
 )
 @click.argument("target", type=HOST_LOCATION_ADDRESS, metavar="TARGET")
 @click.argument("git_args", nargs=-1, type=click.UNPROCESSED, metavar="[-- GIT_ARGS...]")
@@ -125,7 +125,7 @@ def git_push_command(ctx: click.Context, **kwargs: Any) -> None:
 
 @git_command.command(
     name="pull",
-    context_settings={"ignore_unknown_options": True, "allow_interspersed_args": False},
+    context_settings={"ignore_unknown_options": True},
 )
 @click.argument("source", type=HOST_LOCATION_ADDRESS, metavar="SOURCE")
 @click.argument("git_args", nargs=-1, type=click.UNPROCESSED, metavar="[-- GIT_ARGS...]")
