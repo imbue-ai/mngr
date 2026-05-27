@@ -89,15 +89,15 @@ _PRESERVED_ALIASES: Final[dict[str, tuple[str, Callable[[str], Any]]]] = {
 class _SettingsSource(FrozenModel):
     """Identifies one settings layer for narrowing diagnostics.
 
-    ``path`` is the resolved TOML file path; ``scope`` is the matching ``mngr
-    config set --scope`` value (``user`` / ``project`` / ``local``). Both are
-    ``None`` for the ``MNGR__*`` env-var layer, which is not a file and has no
-    ``config set`` scope.
+    ``scope`` is the matching ``mngr config set --scope`` value (``user`` /
+    ``project`` / ``local``) and ``path`` is the resolved TOML file path. Both
+    are ``None`` for the ``MNGR__*`` env-var layer, which is not a file and has
+    no ``config set`` scope. The human-readable label is derived from ``scope``
+    in ``_describe_source`` rather than stored, so the two can't drift.
     """
 
-    label: str
-    path: Path | None = None
     scope: str | None = None
+    path: Path | None = None
 
 
 class _NarrowingViolation(FrozenModel):
@@ -208,14 +208,14 @@ def load_config(
     narrowing_violations: list[_NarrowingViolation] = []
     processed_sources: list[tuple[_SettingsSource, MngrConfig]] = []
     for raw, source in (
-        (try_load_toml(user_config_path), _SettingsSource(label="user settings", path=user_config_path, scope="user")),
+        (try_load_toml(user_config_path), _SettingsSource(scope="user", path=user_config_path)),
         (
             try_load_toml(project_config_path) if project_config_path is not None else None,
-            _SettingsSource(label="project settings", path=project_config_path, scope="project"),
+            _SettingsSource(scope="project", path=project_config_path),
         ),
         (
             try_load_toml(local_config_path) if local_config_path is not None else None,
-            _SettingsSource(label="project local settings", path=local_config_path, scope="local"),
+            _SettingsSource(scope="local", path=local_config_path),
         ),
     ):
         if raw is not None:
@@ -237,8 +237,8 @@ def load_config(
     # form raise ConfigParseError.
     env_override_raw = _collect_env_overrides(os.environ)
     if env_override_raw:
-        # The env layer has no ``config set`` scope, so it carries no path/scope.
-        env_source = _SettingsSource(label="MNGR__* environment variables")
+        # The env layer is not a file and has no ``config set`` scope.
+        env_source = _SettingsSource()
         parsed_env_layer = _parse_config_with_extends(
             env_override_raw,
             base_config=config,
@@ -427,13 +427,15 @@ def _collect_layer_narrowing(
 
 
 def _describe_source(source: "_SettingsSource") -> str:
-    """Render a settings layer for the narrowing error: its label, the resolved
-    file path, and the ``config set --scope`` flag that edits it (when it is a
-    TOML file layer).
+    """Render a settings layer for the narrowing error.
+
+    A TOML file layer is described as ``<scope> settings (<path>) [edit with:
+    mngr config set --scope <scope> ...]``; the scopeless ``MNGR__*`` env-var
+    layer is named as such.
     """
-    if source.path is not None and source.scope is not None:
-        return f"{source.label} ({source.path}) [edit with: mngr config set --scope {source.scope} ...]"
-    return source.label
+    if source.scope is None:
+        return "MNGR__* environment variables"
+    return f"{source.scope} settings ({source.path}) [edit with: mngr config set --scope {source.scope} ...]"
 
 
 def _build_narrowing_error(violations: Sequence["_NarrowingViolation"]) -> ConfigParseError:

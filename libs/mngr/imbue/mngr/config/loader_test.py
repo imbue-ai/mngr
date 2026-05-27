@@ -2114,9 +2114,9 @@ def test_collect_layer_narrowing_attributes_highest_precedence_lower_layer() -> 
     value the new layer narrows. Because the merge is assign-by-default, that
     layer holds the merged base value being dropped.
     """
-    user_source = _SettingsSource(label="user settings", path=Path("/u/settings.toml"), scope="user")
-    project_source = _SettingsSource(label="project settings", path=Path("/p/settings.toml"), scope="project")
-    local_source = _SettingsSource(label="project local settings", path=Path("/p/settings.local.toml"), scope="local")
+    user_source = _SettingsSource(scope="user", path=Path("/u/settings.toml"))
+    project_source = _SettingsSource(scope="project", path=Path("/p/settings.toml"))
+    local_source = _SettingsSource(scope="local", path=Path("/p/settings.local.toml"))
     user_layer = MngrConfig(prefix="a-", commands={"create": CommandDefaults(defaults={"env": ["A"]})})
     project_layer = MngrConfig(prefix="a-", commands={"create": CommandDefaults(defaults={"env": ["A", "B"]})})
     # ``base`` is the accumulated merge the local layer is detected against; under
