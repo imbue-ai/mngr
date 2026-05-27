@@ -355,9 +355,9 @@ def _docker_inspect_running(outer: OuterHostInterface, container_name: str) -> b
     return result.stdout.strip().lower() == "true"
 
 
-def _check_file_exists_on_outer(outer: OuterHostInterface, path: str) -> bool:
+def _check_file_exists_on_outer(outer: OuterHostInterface, path: Path) -> bool:
     """Return True iff a file exists on outer."""
-    result = outer.execute_idempotent_command(f"test -f {shlex.quote(path)}", timeout_seconds=10.0)
+    result = outer.execute_idempotent_command(f"test -f {shlex.quote(str(path))}", timeout_seconds=10.0)
     return result.success
 
 
@@ -558,7 +558,7 @@ def prepare_btrfs_on_outer(
     # The free-space check is skipped when the loop file already exists, so
     # re-running on an already-provisioned VPS doesn't fail when the
     # reserve has since been consumed by docker image layers.
-    if not _check_file_exists_on_outer(outer, str(loop_file_path)):
+    if not _check_file_exists_on_outer(outer, loop_file_path):
         with log_span("Computing btrfs loop file size from free space on /"):
             free_gb = _get_outer_free_disk_gb(outer, Path("/"))
             loop_file_size_gb = free_gb - outer_disk_reserved_gb
@@ -1054,7 +1054,7 @@ class VpsDockerProvider(BaseProviderInstance):
         """Wait for cloud-init to finish (Docker installed, marker file present)."""
         start = time.monotonic()
         while time.monotonic() - start < timeout_seconds:
-            if _check_file_exists_on_outer(outer, "/var/run/mngr-ready"):
+            if _check_file_exists_on_outer(outer, Path("/var/run/mngr-ready")):
                 elapsed = time.monotonic() - start
                 if elapsed > 30.0:
                     logger.warning("Cloud-init took {:.1f}s (threshold: 30s)", elapsed)

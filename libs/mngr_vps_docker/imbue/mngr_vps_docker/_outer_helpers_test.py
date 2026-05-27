@@ -174,13 +174,13 @@ def test_docker_inspect_running_returns_false_when_command_fails() -> None:
 
 def test_check_file_exists_returns_true_when_test_succeeds() -> None:
     outer = _outer(CommandResult(stdout="", stderr="", success=True))
-    assert _check_file_exists_on_outer(outer, "/tmp/some-file") is True
+    assert _check_file_exists_on_outer(outer, Path("/tmp/some-file")) is True
     assert _stub(outer).recorded[0].command.startswith("test -f")
 
 
 def test_check_file_exists_returns_false_when_test_fails() -> None:
     outer = _outer(CommandResult(stdout="", stderr="", success=False))
-    assert _check_file_exists_on_outer(outer, "/tmp/missing") is False
+    assert _check_file_exists_on_outer(outer, Path("/tmp/missing")) is False
 
 
 # =============================================================================
