@@ -213,3 +213,53 @@ def test_resolve_extends_walks_through_agent_type_direct_attribute() -> None:
         {"agent_types": {"my_claude": {"cli_args__extend": ["--verbose"]}}},
     )
     assert resolved == {"agent_types": {"my_claude": {"cli_args": ("--debug", "--verbose")}}}
+
+
+def test_resolve_extends_preserves_extend_suffix_inside_new_create_template() -> None:
+    """Inside a ``create_templates.<name>`` block, an ``<opt>__extend`` whose base
+    lookup yields ``None`` (the template is brand-new) is preserved verbatim instead
+    of collapsing into a bare assign. ``apply_create_template`` interprets the
+    preserved key against the runtime create-command params at template-application
+    time.
+
+    Locks in the resolver-level invariant independently of the loader integration
+    tests so a future refactor cannot silently drop the preserve-extend branch.
+    """
+    base = MngrConfig()
+    resolved = resolve_extends(
+        base,
+        {"create_templates": {"coder_local": {"type": "claude", "env__extend": ["X=1"]}}},
+    )
+    assert resolved == {"create_templates": {"coder_local": {"type": "claude", "env__extend": ["X=1"]}}}
+
+
+def test_resolve_extends_collapses_extend_inside_existing_create_template() -> None:
+    """When the base does already have a value for the create-template option,
+    ``<opt>__extend`` is materialised into the bare key via ``_apply_extend``
+    (concat-list semantics). Demonstrates that the discriminator for the
+    preserve-extend branch is the base lookup yielding ``None`` rather than the
+    path itself.
+    """
+    base = MngrConfig(
+        create_templates={CreateTemplateName("dev"): CreateTemplate(options={"env": ["X=1"]})},
+    )
+    resolved = resolve_extends(
+        base,
+        {"create_templates": {"dev": {"env__extend": ["X=2"]}}},
+    )
+    assert resolved == {"create_templates": {"dev": {"env": ["X=1", "X=2"]}}}
+
+
+def test_resolve_extends_does_not_preserve_extend_outside_create_templates() -> None:
+    """The preserve-extend branch is scoped to ``create_templates.<name>`` paths
+    only. An ``<opt>__extend`` against a ``None`` base elsewhere
+    (``commands.<name>.<opt>__extend`` here) still flows through ``_apply_extend``,
+    which treats ``current_value=None`` as assign-via-extend and collapses to a
+    bare key. Locks in the depth/scope guard in ``_is_create_template_option_path``.
+    """
+    base = MngrConfig()
+    resolved = resolve_extends(
+        base,
+        {"commands": {"create": {"env__extend": ["X=1"]}}},
+    )
+    assert resolved == {"commands": {"create": {"env": ["X=1"]}}}
