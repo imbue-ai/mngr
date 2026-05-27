@@ -314,4 +314,9 @@ def test_render_recovery_page_script_handles_ssh_dead_path() -> None:
         initial_status="stuck",
         initial_error="",
     )
-    assert "ssh_dead" in html
+    # The script must actually branch on `data.ssh_dead` (not merely
+    # mention the string elsewhere), and the branch must call
+    # renderUnresponsive() so the user sees the shared "Workspace
+    # unresponsive" copy with no auto-dispatch.
+    assert "data.ssh_dead" in html
+    assert "renderUnresponsive" in html
