@@ -180,10 +180,14 @@ def detect_settings_narrowing(base: Any, override: Any) -> list[str]:
 
     "Narrowing" is defined as the override losing at least one base entry --
     a missing list/set element, a missing dict key, or an explicit empty
-    aggregate over a non-empty base. Only no-ops (override equals base) and
+    aggregate over a non-empty base. No-ops (override equals base) and
     supersets (every base entry survives, e.g. an ``__extend`` result) pass
-    without flagging. Value mutations at a shared dict key recurse instead
-    of flagging at the parent.
+    without flagging. Against a list/tuple base, a ``StringDerivedTuple``
+    override is also exempt: a string-shaped TOML value (e.g.
+    ``cli_args = "..."``) is a coherent single value, so a higher-precedence
+    layer that replaces one string with another expresses scalar replacement
+    rather than aggregate narrowing. Value mutations at a shared dict key
+    recurse instead of flagging at the parent.
 
     Layers that didn't write the field (override value is ``None``, since
     ``parse_config`` defaults missing fields to ``None``) are skipped by
