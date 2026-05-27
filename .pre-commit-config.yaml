@@ -14,6 +14,16 @@ repos:
         entry: bash -c 'uv run ruff check --fix --force-exclude --config pyproject.toml "$@" && uv run ruff format --force-exclude --config pyproject.toml "$@"' --
         language: system
         types: [python]
+    -   id: ty
+#        ty resolves the uv workspace root and scans every member regardless of which files
+#        changed, so it runs over the whole workspace (pass_filenames: false) whenever any
+#        Python file is staged. This is the local type-check gate; the single
+#        test_no_type_errors in test_meta_ratchets.py is the CI backstop.
+        name: "Python type checker (ty)"
+        entry: bash -c 'uv run ty check'
+        language: system
+        types: [python]
+        pass_filenames: false
     -   id: regenerate-cli-docs
         name: "Regenerate CLI markdown docs"
         entry: bash -c 'uv run python scripts/make_cli_docs.py && git diff --quiet libs/mngr/docs/commands/ libs/mngr/README.md'

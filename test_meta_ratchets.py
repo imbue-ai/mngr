@@ -101,9 +101,9 @@ def _get_expected_ratchet_test_names() -> frozenset[str]:
 
     Each check_foo() function maps to test_prevent_foo(). The type-check and
     ruff-lint ratchets are NOT per-project: ty and ruff each scan the whole
-    workspace identically regardless of the directory they run from, so a single
-    repo-wide check (test_no_type_errors_repo_wide / test_no_ruff_lint_errors_repo_wide
-    in this file) replaces what used to be ~36 redundant per-project copies.
+    workspace identically regardless of the directory they run from, so single
+    repo-wide checks (test_no_type_errors / test_no_ruff_errors in this file)
+    replace what used to be ~36 redundant per-project copies.
     """
     checks_path = (
         _REPO_ROOT
@@ -127,9 +127,9 @@ def test_all_test_ratchets_files_have_same_tests() -> None:
     """Ensure all test_ratchets.py files define precisely the expected set of test functions.
 
     The expected tests are derived from standard_ratchet_checks.py (one test_prevent_*
-    per check_* function). The type-check and ruff-lint ratchets are repo-wide
-    (see test_no_type_errors_repo_wide / test_no_ruff_lint_errors_repo_wide), not
-    per-project, so they are intentionally absent from this set.
+    per check_* function). The type-check and ruff-lint ratchets run once repo-wide
+    (test_no_type_errors / test_no_ruff_errors in this file), not per-project, so
+    they are intentionally absent from this set.
     """
     reference_tests = _get_expected_ratchet_test_names()
 
@@ -172,14 +172,15 @@ def test_no_import_layer_violations() -> None:
 
 
 @pytest.mark.timeout(60)
-def test_no_type_errors_repo_wide() -> None:
+def test_no_type_errors() -> None:
     """Ensure the workspace has zero type errors (ty), once for the whole repo.
 
     ty resolves the uv workspace root (root pyproject.toml declares
     [tool.uv.workspace] members = ["libs/*", "apps/*"]) and scans every member
-    on each invocation regardless of the directory it runs from, so a single
-    repo-wide check is exactly equivalent to -- and replaces -- the per-project
-    test_no_type_errors copies that used to re-run the identical scan ~36 times.
+    on each invocation regardless of the directory it runs from, so this single
+    repo-wide check is exactly equivalent to -- and replaces -- the ~36
+    per-project copies that used to re-run the identical scan once per project.
+    Local iteration is covered by the ``ty`` pre-commit hook; this is the CI backstop.
 
     The ``uv run ty check`` subprocess occasionally exceeds the default 10s
     pytest-timeout on offload under cold-cache / loaded-runner conditions, so the
@@ -192,8 +193,8 @@ def test_no_type_errors_repo_wide() -> None:
     check_no_type_errors(_REPO_ROOT)
 
 
-def test_no_ruff_lint_errors_repo_wide() -> None:
-    """Ensure all Python files pass ruff lint and format checks repo-wide.
+def test_no_ruff_errors() -> None:
+    """Ensure all Python files pass ruff lint and format checks, once for the whole repo.
 
     Runs both ruff check and ruff format --check over the entire repo root. This
     is the sole ruff ratchet (the per-project copies were redundant -- this root
