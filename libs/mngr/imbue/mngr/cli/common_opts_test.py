@@ -12,7 +12,6 @@ from click.testing import CliRunner
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mngr.cli.common_opts import _apply_template_extend
 from imbue.mngr.cli.common_opts import _process_template_escapes
-from imbue.mngr.cli.common_opts import _resolve_narrowing_override
 from imbue.mngr.cli.common_opts import _run_pre_command_scripts
 from imbue.mngr.cli.common_opts import _run_single_script
 from imbue.mngr.cli.common_opts import _split_known_and_plugin_params
@@ -1457,62 +1456,27 @@ def test_setup_command_context_warns_on_unknown_command_param_when_lax(
 
 
 # =============================================================================
-# Tests for the --setting narrowing opt-in (_resolve_narrowing_override and
-# the same-invocation self-authorize path in apply_settings_to_config).
+# Tests for the narrowing guard on --setting overrides.
 # =============================================================================
 
 
-def test_resolve_narrowing_override_reads_boolean_flag() -> None:
-    """A ``--setting allow_settings_key_assignment_narrowing=<bool>`` is parsed
-    into the corresponding boolean; an absent flag resolves to None.
-    """
-    assert _resolve_narrowing_override(("allow_settings_key_assignment_narrowing=true",)) is True
-    assert _resolve_narrowing_override(("allow_settings_key_assignment_narrowing=false",)) is False
-    assert _resolve_narrowing_override(("commands.create.connect=false",)) is None
-    assert _resolve_narrowing_override(()) is None
-
-
-def test_resolve_narrowing_override_normalizes_hyphens_and_takes_last() -> None:
-    """Hyphenated keys normalize to underscores (matching ``_normalize_field_keys``),
-    and the last assignment wins when the flag is repeated.
-    """
-    assert _resolve_narrowing_override(("allow-settings-key-assignment-narrowing=true",)) is True
-    assert (
-        _resolve_narrowing_override(
-            (
-                "allow_settings_key_assignment_narrowing=true",
-                "allow_settings_key_assignment_narrowing=false",
-            )
-        )
-        is False
-    )
-
-
-def test_resolve_narrowing_override_ignores_non_boolean_value() -> None:
-    """A non-boolean value is not treated as an override here; the full --setting
-    parse in apply_settings_to_config is responsible for reporting bad values.
-    """
-    assert _resolve_narrowing_override(("allow_settings_key_assignment_narrowing=maybe",)) is None
-    assert _resolve_narrowing_override(("allow_settings_key_assignment_narrowing=1",)) is None
-
-
-def test_apply_settings_to_config_same_invocation_opt_in_authorizes_narrowing(mngr_test_prefix: str) -> None:
-    """A ``--setting`` that would narrow is authorized when the same call also sets
-    ``--setting allow_settings_key_assignment_narrowing=true``, because the guard
-    checks the merged opt-in flag rather than the pre-merge one.
+def test_apply_settings_to_config_setting_cannot_self_authorize_narrowing(mngr_test_prefix: str) -> None:
+    """``--setting`` cannot toggle the narrowing guard: a same-invocation
+    ``--setting allow_settings_key_assignment_narrowing=true`` does NOT authorize
+    a narrowing ``--setting``. The guard reads the opt-in flag as it stood on the
+    loaded config (a settings file or the MNGR__* env var is the only place it can
+    be enabled), so the narrowing ``--setting`` still raises.
     """
     config = MngrConfig(
         prefix=mngr_test_prefix,
         commands={"create": CommandDefaults(defaults={"env": ["X=5"]})},
     )
-    result = apply_settings_to_config(
-        config,
-        (
-            "commands.create.env=[]",
-            "allow_settings_key_assignment_narrowing=true",
-        ),
-        frozenset(),
-    )
-    # The narrowing assign went through (env cleared) and the flag is now set.
-    assert result.commands["create"].defaults["env"] == []
-    assert result.allow_settings_key_assignment_narrowing is True
+    with pytest.raises(ConfigParseError, match="narrowing"):
+        apply_settings_to_config(
+            config,
+            (
+                "commands.create.env=[]",
+                "allow_settings_key_assignment_narrowing=true",
+            ),
+            frozenset(),
+        )

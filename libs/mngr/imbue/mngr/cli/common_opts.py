@@ -6,7 +6,6 @@ from collections.abc import Sequence
 from concurrent.futures import Future
 from pathlib import Path
 from typing import Any
-from typing import Final
 from typing import TypeVar
 
 import click
@@ -177,14 +176,6 @@ def setup_command_context(
     if strict is None:
         strict = resolve_strict_from_env()
 
-    # ``--setting`` is the highest-precedence layer but is merged after
-    # load_config runs (see apply_settings_to_config below), so load_config's
-    # file/env-layer narrowing guard cannot see a ``--setting`` opt-in. Resolve
-    # just the narrowing flag from the raw --setting strings here and pass it
-    # down so ``--setting allow_settings_key_assignment_narrowing=true`` actually
-    # suppresses that guard, matching what the error message advertises.
-    narrowing_override = _resolve_narrowing_override(initial_opts.setting)
-
     # Load config (is_interactive will be resolved below)
     pm = ctx.obj
     mngr_ctx = load_config(
@@ -195,7 +186,6 @@ def setup_command_context(
         is_interactive=False,
         strict=strict,
         silent_unknown_fields=silent_unknown_fields,
-        narrowing_override=narrowing_override,
     )
 
     # Resolve is_interactive from all sources.
@@ -412,38 +402,6 @@ def _process_template_escapes(template: str) -> str:
     return "".join(result)
 
 
-# Top-level boolean settings key that opts into (or out of) the narrowing guard.
-_NARROWING_FLAG_KEY: Final[str] = "allow_settings_key_assignment_narrowing"
-
-
-@pure
-def _resolve_narrowing_override(settings: Sequence[str]) -> bool | None:
-    """Resolve a ``--setting`` override for the narrowing guard flag.
-
-    Scans the raw ``--setting KEY=VALUE`` strings for a top-level
-    ``allow_settings_key_assignment_narrowing`` assignment and returns its
-    boolean value (last assignment wins), or ``None`` if no setting assigns it.
-    This is fed to ``load_config`` so a ``--setting`` opt-in can suppress the
-    file/env-layer narrowing guard, which would otherwise run before the
-    ``--setting`` layer is merged.
-
-    Hyphens are normalized to underscores to match ``_normalize_field_keys``.
-    Non-boolean values are ignored here (treated as "no override"); the full
-    ``--setting`` parse in ``apply_settings_to_config`` reports any bad value.
-    """
-    override: bool | None = None
-    for setting_str in settings:
-        if "=" not in setting_str:
-            continue
-        key_path, value_str = setting_str.split("=", 1)
-        if key_path.strip().replace("-", "_") != _NARROWING_FLAG_KEY:
-            continue
-        parsed = parse_scalar_value(value_str)
-        if isinstance(parsed, bool):
-            override = parsed
-    return override
-
-
 @pure
 def apply_settings_to_config(
     config: MngrConfig,
@@ -478,17 +436,16 @@ def apply_settings_to_config(
 
     resolved = resolve_extends(config, raw)
     settings_config = parse_config(resolved, disabled_plugins=disabled_plugins, strict=True)
-    merged = config.merge_with(settings_config)
     # Apply the same narrowing guard used by the config-file merge path so
     # ``--setting`` cannot silently drop entries from the merged config either.
-    # Check the *merged* opt-in flag, not the pre-merge one, so a same-invocation
-    # ``--setting allow_settings_key_assignment_narrowing=true`` authorizes a
-    # narrowing introduced by another ``--setting`` in the same call.
-    if not merged.allow_settings_key_assignment_narrowing:
+    # The opt-in flag must already be set on ``config`` (via a settings file or
+    # the MNGR__* env var); ``--setting`` itself cannot toggle the guard, matching
+    # the loader's behavior.
+    if not config.allow_settings_key_assignment_narrowing:
         violations = detect_settings_narrowing(config, settings_config)
         if violations:
             raise _build_setting_narrowing_error(violations)
-    return merged
+    return config.merge_with(settings_config)
 
 
 def _build_setting_narrowing_error(violations: Sequence[str]) -> ConfigParseError:
@@ -496,10 +453,8 @@ def _build_setting_narrowing_error(violations: Sequence[str]) -> ConfigParseErro
 
     Mirrors the loader's message but attributes the violations to ``--setting``
     and reminds users that they can opt in either by setting the safety field
-    to True or by switching the specific key to ``__extend``. The opt-in works
-    in the same invocation (e.g. add ``--setting
-    allow_settings_key_assignment_narrowing=true``), since the guard checks the
-    merged flag.
+    to True (in a settings file or the MNGR__* env var) or by switching the
+    specific key to ``__extend``. ``--setting`` itself cannot toggle the guard.
     """
     detail_lines = [f"  --setting: {key}" for key in violations]
     return ConfigParseError(
@@ -508,8 +463,7 @@ def _build_setting_narrowing_error(violations: Sequence[str]) -> ConfigParseErro
         "entries.\n" + "\n".join(detail_lines) + "\n"
         "To opt into this assign-by-default behavior (and silence this error), set "
         "`allow_settings_key_assignment_narrowing = true` in your settings.toml (or "
-        "MNGR__ALLOW_SETTINGS_KEY_ASSIGNMENT_NARROWING=true, or add `--setting "
-        "allow_settings_key_assignment_narrowing=true` to this command).\n"
+        "MNGR__ALLOW_SETTINGS_KEY_ASSIGNMENT_NARROWING=true).\n"
         "To keep the additive behavior for a specific key, switch to the `__extend` suffix on "
         "the --setting key (e.g. `--setting commands.create.env__extend='[\"X=5\"]'`).\n"
         "NOTE: the default for `allow_settings_key_assignment_narrowing` will change to True "

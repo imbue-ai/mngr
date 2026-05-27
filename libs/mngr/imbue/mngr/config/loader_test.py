@@ -19,10 +19,11 @@ from imbue.mngr.config.data_types import CreateTemplateName
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import PluginConfig
 from imbue.mngr.config.data_types import get_or_create_user_id
+from imbue.mngr.config.loader import _NarrowingViolation
 from imbue.mngr.config.loader import _SettingsSource
 from imbue.mngr.config.loader import _apply_plugin_overrides
-from imbue.mngr.config.loader import _attribute_narrowing_source
 from imbue.mngr.config.loader import _collect_env_overrides
+from imbue.mngr.config.loader import _collect_layer_narrowing
 from imbue.mngr.config.loader import _normalize_tuple_fields_for_construct
 from imbue.mngr.config.loader import _parse_agent_types
 from imbue.mngr.config.loader import _parse_commands
@@ -31,7 +32,6 @@ from imbue.mngr.config.loader import _parse_logging_config
 from imbue.mngr.config.loader import _parse_mngr_env_overrides
 from imbue.mngr.config.loader import _parse_plugins
 from imbue.mngr.config.loader import _parse_providers
-from imbue.mngr.config.loader import _walk_settings_path
 from imbue.mngr.config.loader import block_disabled_plugins
 from imbue.mngr.config.loader import get_or_create_profile_dir
 from imbue.mngr.config.loader import load_config
@@ -2104,70 +2104,39 @@ def test_load_config_string_cli_args_replacement_does_not_narrow(
 
 
 # =============================================================================
-# Tests for narrowing diagnostics (both-sides attribution) and the
-# narrowing_override that lets a --setting opt-in suppress the loader guard.
+# Tests for narrowing diagnostics: both-sides attribution (which layer assigns
+# over which layer's dropped value).
 # =============================================================================
 
 
-def test_walk_settings_path_resolves_nested_model_and_mapping_segments() -> None:
-    """``_walk_settings_path`` traverses model fields and mapping keys, returning
-    the leaf value, or ``None`` when a segment is missing.
-    """
-    config = MngrConfig(
-        prefix="walk-test-",
-        commands={"create": CommandDefaults(defaults={"env": ["X=1"]})},
-    )
-    assert _walk_settings_path(config, ["commands", "create", "defaults", "env"]) == ["X=1"]
-    # Missing mapping key and missing model field both short-circuit to None.
-    assert _walk_settings_path(config, ["commands", "destroy", "defaults"]) is None
-    assert _walk_settings_path(config, ["commands", "create", "defaults", "missing"]) is None
-
-
-def test_attribute_narrowing_source_picks_highest_precedence_lower_layer() -> None:
-    """When several lower-precedence layers set the narrowed key, the assign-by-
-    default merge means the highest-precedence one holds the merged base value,
-    so that layer is the one whose value is dropped.
+def test_collect_layer_narrowing_attributes_highest_precedence_lower_layer() -> None:
+    """The dropped-from side is the highest-precedence already-merged layer whose
+    value the new layer narrows. Because the merge is assign-by-default, that
+    layer holds the merged base value being dropped.
     """
     user_source = _SettingsSource(label="user settings", path=Path("/u/settings.toml"), scope="user")
     project_source = _SettingsSource(label="project settings", path=Path("/p/settings.toml"), scope="project")
+    local_source = _SettingsSource(label="project local settings", path=Path("/p/settings.local.toml"), scope="local")
     user_layer = MngrConfig(prefix="a-", commands={"create": CommandDefaults(defaults={"env": ["A"]})})
     project_layer = MngrConfig(prefix="a-", commands={"create": CommandDefaults(defaults={"env": ["A", "B"]})})
-    override_layer = MngrConfig(prefix="a-", commands={"create": CommandDefaults(defaults={"env": ["C"]})})
+    # ``base`` is the accumulated merge the local layer is detected against; under
+    # assign-by-default it equals the project layer's value (the highest prior).
+    base = user_layer.merge_with(project_layer)
+    local_layer = MngrConfig(prefix="a-", commands={"create": CommandDefaults(defaults={"env": ["C"]})})
 
-    attributed = _attribute_narrowing_source(
-        "commands.create.defaults.env",
-        override_layer,
+    violations = _collect_layer_narrowing(
+        base,
+        local_layer,
+        local_source,
         [(user_source, user_layer), (project_source, project_layer)],
     )
-    assert attributed == project_source
-
-
-def test_load_config_narrowing_override_true_suppresses(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, cg: ConcurrencyGroup
-) -> None:
-    """``narrowing_override=True`` (resolved from ``--setting``) suppresses the
-    loader guard even though no config file opts in -- this is what makes
-    ``--setting allow_settings_key_assignment_narrowing=true`` work.
-    """
-    pm, project_dir = _setup_layered_test_env(monkeypatch, tmp_path)
-    _write_two_layer_narrowing_config(project_dir, allow_narrowing=None)
-
-    mngr_ctx = load_config(pm=pm, context_dir=tmp_path, concurrency_group=cg, narrowing_override=True)
-    assert mngr_ctx.config.commands["create"].defaults["env"] == ["X=5"]
-
-
-def test_load_config_narrowing_override_false_enforces_despite_file_opt_in(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, cg: ConcurrencyGroup
-) -> None:
-    """``narrowing_override=False`` (from ``--setting ...=false``) wins over a
-    config-file opt-in, re-enabling the guard. ``--setting`` is the highest-
-    precedence layer, so opting out there overrides a file ``true``.
-    """
-    pm, project_dir = _setup_layered_test_env(monkeypatch, tmp_path)
-    _write_two_layer_narrowing_config(project_dir, allow_narrowing=True)
-
-    with pytest.raises(ConfigParseError, match="narrowing"):
-        load_config(pm=pm, context_dir=tmp_path, concurrency_group=cg, narrowing_override=False)
+    assert violations == [
+        _NarrowingViolation(
+            key_path="commands.create.defaults.env",
+            assigned_by=local_source,
+            dropped_from=project_source,
+        )
+    ]
 
 
 def test_load_config_narrowing_error_names_both_sides_with_paths_and_scopes(

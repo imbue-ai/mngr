@@ -32,7 +32,6 @@ from imbue.mngr.config.data_types import RetryConfig
 from imbue.mngr.config.data_types import StringDerivedTuple
 from imbue.mngr.config.data_types import detect_settings_narrowing
 from imbue.mngr.config.data_types import split_cli_args_string
-from imbue.mngr.config.data_types import would_assignment_narrow
 from imbue.mngr.config.host_dir import read_default_host_dir
 from imbue.mngr.config.key_resolver import EXTEND_SUFFIX
 from imbue.mngr.config.key_resolver import bare_key
@@ -122,7 +121,6 @@ def load_config(
     is_interactive: bool = False,
     strict: bool | None = None,
     silent_unknown_fields: bool = False,
-    narrowing_override: bool | None = None,
 ) -> MngrContext:
     """Load and merge configuration from all sources.
 
@@ -138,16 +136,14 @@ def load_config(
     6. ``--setting KEY=VALUE`` CLI overrides (applied later in setup_command_context)
     7. CLI arguments (handled by caller)
 
-    ``narrowing_override`` lets the caller pre-resolve an
-    ``allow_settings_key_assignment_narrowing`` value from the layer-6
-    ``--setting`` overrides (which are applied after this function runs, so the
-    config-file/env narrowing guard below would otherwise never see them). When
-    not ``None`` it takes precedence over the file/env-resolved flag for the
-    narrowing-guard decision only -- the stored config flag still reflects the
-    file/env layers, and the ``--setting`` flag value is merged in later by
-    ``apply_settings_to_config``. This is what makes
-    ``--setting allow_settings_key_assignment_narrowing=true`` actually suppress
-    file/env-layer narrowing, matching what the error message advertises.
+    Note: the narrowing guard below runs over layers 2-5 (the config files and
+    env vars) only. It does NOT see the layer-6 ``--setting`` overrides, which
+    are merged afterwards in ``setup_command_context`` -- ``--setting`` cannot
+    fully resolve until this function has produced the config it extends against
+    (``__extend`` keys resolve against the loaded config), so it deliberately
+    runs after. Consequently ``allow_settings_key_assignment_narrowing`` can only
+    be opted into via a settings file or the ``MNGR__*`` env var, not via
+    ``--setting`` -- see the error message and changelog.
 
     MNGR_ROOT_NAME is read before config-file resolution to derive:
     1. Config file paths (where to look for settings files)
@@ -253,15 +249,11 @@ def load_config(
         config = config.merge_with(parsed_env_layer)
         processed_sources.append((env_source, parsed_env_layer))
 
-    # Raise on collected narrowing assignments unless the user has opted in.
-    # ``narrowing_override`` (resolved from layer-6 ``--setting``) wins over the
-    # file/env-resolved flag for this decision; see the docstring. Done before
-    # further config_dict mutation so the error surfaces with the actual
-    # settings-file paths in the message.
-    effective_allow_narrowing = (
-        narrowing_override if narrowing_override is not None else config.allow_settings_key_assignment_narrowing
-    )
-    if narrowing_violations and not effective_allow_narrowing:
+    # Raise on collected narrowing assignments unless the user has opted in via a
+    # settings file or the MNGR__* env var. Done before further config_dict
+    # mutation so the error surfaces with the actual settings-file paths in the
+    # message.
+    if narrowing_violations and not config.allow_settings_key_assignment_narrowing:
         raise _build_narrowing_error(narrowing_violations)
 
     # Build a dict with non-None values for final validation.
@@ -395,50 +387,6 @@ def get_or_create_profile_dir(base_dir: Path) -> Path:
 # =============================================================================
 
 
-def _walk_settings_path(root: Any, segments: Sequence[str]) -> Any:
-    """Resolve a narrowing dotted path against a parsed config layer.
-
-    Each segment is either a model field (attribute access) or a mapping key,
-    mirroring the traversal in ``_walk_for_narrowing``. Returns ``None`` if any
-    segment is missing or the path runs into a non-model/non-mapping value
-    before it is fully consumed.
-    """
-    current = root
-    for segment in segments:
-        if isinstance(current, BaseModel):
-            current = getattr(current, segment, None)
-        elif isinstance(current, Mapping):
-            current = current.get(segment)
-        else:
-            return None
-        if current is None:
-            return None
-    return current
-
-
-def _attribute_narrowing_source(
-    key_path: str,
-    override_layer: MngrConfig,
-    processed_sources: Sequence[tuple["_SettingsSource", MngrConfig]],
-) -> "_SettingsSource | None":
-    """Identify which already-merged layer contributed the value being narrowed.
-
-    Because the merge is assign-by-default, the merged base value at any path
-    equals the value written by the highest-precedence layer that set it. So
-    scan the processed layers from highest precedence to lowest and return the
-    first whose value at ``key_path`` would be narrowed by ``override_layer``'s
-    value at the same path. Returns ``None`` if no contributing layer is found
-    (should not happen for a real violation, but keeps the diagnostic robust).
-    """
-    segments = key_path.split(".")
-    override_value = _walk_settings_path(override_layer, segments)
-    for source, layer in reversed(processed_sources):
-        prior_value = _walk_settings_path(layer, segments)
-        if prior_value is not None and would_assignment_narrow(prior_value, override_value):
-            return source
-    return None
-
-
 def _collect_layer_narrowing(
     base: MngrConfig,
     parsed_layer: MngrConfig,
@@ -447,17 +395,35 @@ def _collect_layer_narrowing(
 ) -> list["_NarrowingViolation"]:
     """Detect narrowing of ``base`` by ``parsed_layer`` and attribute each side.
 
-    ``source`` is the layer doing the assignment; the lower-precedence layer
-    whose value is dropped is resolved via ``_attribute_narrowing_source``.
+    ``source`` is the layer doing the assignment. The lower-precedence layer
+    whose value is dropped is attributed by re-running ``detect_settings_narrowing``
+    of ``parsed_layer`` against each already-merged layer: because the merge is
+    assign-by-default, the merged base value at any path equals the value written
+    by the highest-precedence layer that set it, so the highest-precedence prior
+    layer that ``parsed_layer`` narrows at a given path is the one whose value is
+    being dropped. Reusing ``detect_settings_narrowing`` here (rather than walking
+    field values directly) keeps the field traversal in one place -- the place the
+    ``PREVENT_GETATTR`` ratchet already accounts for. ``dropped_from`` is ``None``
+    only if no contributing layer is found (should not happen for a real
+    violation, but keeps the diagnostic robust).
     """
-    return [
-        _NarrowingViolation(
-            key_path=key_path,
-            assigned_by=source,
-            dropped_from=_attribute_narrowing_source(key_path, parsed_layer, processed_sources),
-        )
-        for key_path in detect_settings_narrowing(base, parsed_layer)
+    violation_paths = detect_settings_narrowing(base, parsed_layer)
+    if not violation_paths:
+        return []
+    # For each already-merged layer (highest precedence first), the set of paths
+    # where ``parsed_layer`` narrows that specific layer.
+    narrowed_paths_by_prior_source = [
+        (prior_source, set(detect_settings_narrowing(prior_layer, parsed_layer)))
+        for prior_source, prior_layer in reversed(processed_sources)
     ]
+    violations: list[_NarrowingViolation] = []
+    for key_path in violation_paths:
+        dropped_from = next(
+            (prior_source for prior_source, paths in narrowed_paths_by_prior_source if key_path in paths),
+            None,
+        )
+        violations.append(_NarrowingViolation(key_path=key_path, assigned_by=source, dropped_from=dropped_from))
+    return violations
 
 
 def _describe_source(source: "_SettingsSource") -> str:
@@ -491,9 +457,10 @@ def _build_narrowing_error(violations: Sequence["_NarrowingViolation"]) -> Confi
         "a non-empty list/tuple/dict/set value from a lower-precedence layer, silently "
         "dropping the earlier entries.\n" + "\n".join(detail_lines) + "\n"
         "To opt into this assign-by-default behavior (and silence this error), set "
-        "`allow_settings_key_assignment_narrowing = true` in your settings.toml (or "
-        "MNGR__ALLOW_SETTINGS_KEY_ASSIGNMENT_NARROWING=true, or --setting "
-        "allow_settings_key_assignment_narrowing=true).\n"
+        "`allow_settings_key_assignment_narrowing = true` in one of the settings files above "
+        "(or MNGR__ALLOW_SETTINGS_KEY_ASSIGNMENT_NARROWING=true). Note: a `--setting` override "
+        "cannot opt in here -- this guard runs while loading the settings files and env vars, "
+        "before `--setting` is applied.\n"
         "To keep the additive behavior for a specific key, use the `__extend` suffix on the "
         'key in the higher-precedence layer (e.g. `env__extend = ["X=5"]`).\n'
         "NOTE: the default for `allow_settings_key_assignment_narrowing` will change to True "
