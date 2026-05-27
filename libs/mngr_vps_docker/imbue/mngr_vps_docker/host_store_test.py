@@ -472,6 +472,35 @@ def test_remove_persisted_agent_data_is_idempotent(tmp_path: Path) -> None:
     store.remove_persisted_agent_data(_AGENT_ID_3)
 
 
+def test_list_persisted_agent_data_raises_on_shell_failure(tmp_path: Path) -> None:
+    """A non-zero exit from the batched agent read must raise instead of returning []."""
+
+    class _FailingShellOuter(_LocalFakeOuter):
+        def execute_idempotent_command(
+            self,
+            command: str,
+            user: str | None = None,
+            cwd: Path | None = None,
+            env: Mapping[str, str] | None = None,
+            timeout_seconds: float | None = None,
+        ) -> CommandResult:
+            # Let path_exists / docker volume inspect work normally; fail
+            # only the batched agent-list shell loop.
+            if "for f in" in command:
+                return CommandResult(stdout="", stderr="permission denied", success=False)
+            return super().execute_idempotent_command(command, user, cwd, env, timeout_seconds)
+
+    (tmp_path / "agents").mkdir()
+    outer = _FailingShellOuter(
+        id=HostId.generate(),
+        connector=_make_local_connector(),
+        mountpoint_by_volume={"unused": tmp_path},
+    )
+    store = VpsDockerHostStore(outer=outer, mountpoint=tmp_path)
+    with pytest.raises(MngrError, match="list-agent-records"):
+        store.list_persisted_agent_data()
+
+
 def test_list_persisted_agent_data_uses_one_round_trip(tmp_path: Path) -> None:
     """All agent files must come back in a single execute_idempotent_command call."""
     outer = _LocalFakeOuter(

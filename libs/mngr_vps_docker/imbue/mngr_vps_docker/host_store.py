@@ -188,20 +188,29 @@ class VpsDockerHostStore(MutableModel):
         logger.trace("Persisted agent data at {}", path)
 
     def list_persisted_agent_data(self) -> list[dict[str, Any]]:
-        """Read all persisted agent records on this volume in a single SSH round-trip."""
+        """Read all persisted agent records on this volume in a single SSH round-trip.
+
+        The shell script short-circuits with exit 0 + empty stdout when
+        the agents/ directory does not exist yet (brand-new volume that
+        hasn't persisted any agent data). All *other* failures -- permission
+        denied, OOM, malformed shell -- propagate as ``MngrError`` rather
+        than being silently turned into an empty list.
+        """
         agents_dir_q = shlex.quote(str(self._agents_dir))
-        # Single shell loop: for each *.json under agents/, print the sentinel,
-        # the absolute path, then the file contents. The trailing `|| true`
-        # turns a missing directory or empty glob into an empty stdout.
+        # Single shell call: a directory-missing guard up front, then a
+        # loop over agents/*.json. The `[ -f "$f" ] || continue` guard
+        # turns the literal-glob fallback (when no files match) into a
+        # clean exit-0 with empty stdout, without swallowing real errors.
         script = (
+            f"[ -d {agents_dir_q} ] || exit 0; "
             f"for f in {agents_dir_q}/*.json; do "
             f'[ -f "$f" ] || continue; '
             f"echo '{_AGENT_FILE_SEP}'\"$f\"; "
             f'cat "$f"; '
-            f"done 2>/dev/null || true"
+            f"done"
         )
-        result = self.outer.execute_idempotent_command(script)
-        return self._parse_batched_agent_records(result.stdout)
+        output = _run_outer_command(self.outer, script, label="list-agent-records")
+        return self._parse_batched_agent_records(output)
 
     @staticmethod
     def _parse_batched_agent_records(output: str) -> list[dict[str, Any]]:
