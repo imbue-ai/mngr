@@ -2084,6 +2084,7 @@ dependencies = [
     { name = "boto3" },
     { name = "imbue-mngr" },
     { name = "imbue-mngr-mapreduce" },
+    { name = "jinja2" },
     { name = "markdown-it-py" },
 ]
 
@@ -2092,6 +2093,7 @@ requires-dist = [
     { name = "boto3", specifier = ">=1.40,<2" },
     { name = "imbue-mngr", editable = "libs/mngr" },
     { name = "imbue-mngr-mapreduce", editable = "libs/mngr_mapreduce" },
+    { name = "jinja2", specifier = ">=3.1" },
     { name = "markdown-it-py", specifier = ">=3.0.0" },
 ]
 
