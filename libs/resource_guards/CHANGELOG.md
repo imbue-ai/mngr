@@ -13,8 +13,3 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 ### Changed
 
 - Changed: `@pytest.mark.<resource>` on a test is now satisfied by either direct invocation OR a `@fixture_uses_resources(<resource>)` fixture in the test's closure; the mark is now **required** on every consumer of a tagged fixture so `pytest -m <resource>` is the canonical selector.
-- Changed: Adopted the new per-project changelog layout.
-
-### Fixed
-
-- Fixed: `UNABRIDGED_CHANGELOG.md` intro now references the correct entries directory.

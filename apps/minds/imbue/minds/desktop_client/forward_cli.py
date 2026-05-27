@@ -11,7 +11,8 @@ spawning code; this file replaces them with a thin consumer that:
   ``MngrCliBackendResolver`` plus a set of ``on_agent_discovered`` /
   ``on_agent_destroyed`` callbacks; ``event`` lines drive the resolver's
   service map and fan out to request / refresh callbacks; ``forward`` lines
-  fire ``on_reverse_tunnel_established`` for the ``MindsApiUrlWriter``;
+  feed the ``system_interface_backend_failure`` health tracker and the
+  ``listening`` port handshake;
 - exposes ``bounce_observe()`` (sends ``SIGHUP`` to the plugin's PID), used
   by ``supertokens_routes`` after a freshly-written
   ``[providers.imbue_cloud_<slug>]`` block in ``settings.toml``;
@@ -22,7 +23,6 @@ spawning code; this file replaces them with a thin consumer that:
 import json
 import os
 import secrets
-import shlex
 import shutil
 import signal
 import subprocess
@@ -34,7 +34,6 @@ from pathlib import Path
 from typing import Any
 from typing import Final
 
-import paramiko
 from loguru import logger
 from pydantic import Field
 from pydantic import PrivateAttr
@@ -53,8 +52,6 @@ from imbue.minds.desktop_client.backend_resolver import parse_service_log_record
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.notification import NotificationRequest
 from imbue.minds.desktop_client.notification import NotificationUrgency
-from imbue.minds.desktop_client.ssh_tunnel import RemoteSSHInfo
-from imbue.minds.desktop_client.ssh_tunnel import open_ssh_client
 from imbue.mngr.api.discovery_events import AgentDestroyedEvent
 from imbue.mngr.api.discovery_events import AgentDiscoveryEvent
 from imbue.mngr.api.discovery_events import DiscoveryErrorEvent
@@ -65,25 +62,14 @@ from imbue.mngr.api.discovery_events import parse_discovery_event_line
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr_forward.data_types import SystemInterfaceBackendFailureReason
+from imbue.mngr_forward.ssh_tunnel import RemoteSSHInfo
 
 _DEFAULT_MNGR_HOST_DIR: Final[Path] = Path.home() / ".mngr"
-_REMOTE_HOST_DIR: Final[str] = "/mngr"
 _PREAUTH_TOKEN_LENGTH: Final[int] = 64
 
 OnAgentDiscoveredCallback = Callable[[AgentId, RemoteSSHInfo | None, str], None]
 OnAgentDestroyedCallback = Callable[[AgentId], None]
-OnReverseTunnelEstablishedCallback = Callable[["ReverseTunnelEstablishedInfo"], None]
 OnSystemInterfaceBackendFailureCallback = Callable[[AgentId, SystemInterfaceBackendFailureReason, int | None], None]
-
-
-class ReverseTunnelEstablishedInfo(FrozenModel):
-    """Decoded ``forward.reverse_tunnel_established`` payload from the plugin."""
-
-    agent_id: AgentId = Field(description="Agent the tunnel was set up for")
-    remote_port: int = Field(description="Port on the remote sshd that was bound")
-    local_port: int = Field(description="Local port the tunnel forwards to")
-    ssh_host: str = Field(description="SSH host the reverse tunnel runs over")
-    ssh_port: int = Field(description="SSH port on ssh_host")
 
 
 class ForwardSubprocessConfig(FrozenModel):
@@ -129,9 +115,6 @@ class EnvelopeStreamConsumer(MutableModel):
     _services_by_agent: dict[str, dict[str, str]] = PrivateAttr(default_factory=dict)
     _on_agent_discovered_callbacks: list[OnAgentDiscoveredCallback] = PrivateAttr(default_factory=list)
     _on_agent_destroyed_callbacks: list[OnAgentDestroyedCallback] = PrivateAttr(default_factory=list)
-    _on_reverse_tunnel_established_callbacks: list[OnReverseTunnelEstablishedCallback] = PrivateAttr(
-        default_factory=list
-    )
     _on_system_interface_backend_failure_callbacks: list[OnSystemInterfaceBackendFailureCallback] = PrivateAttr(
         default_factory=list
     )
@@ -155,11 +138,6 @@ class EnvelopeStreamConsumer(MutableModel):
         """Register a callback fired for every observe-stream agent destruction."""
         with self._lock:
             self._on_agent_destroyed_callbacks.append(callback)
-
-    def add_on_reverse_tunnel_established_callback(self, callback: OnReverseTunnelEstablishedCallback) -> None:
-        """Register a callback fired for each ``reverse_tunnel_established`` envelope."""
-        with self._lock:
-            self._on_reverse_tunnel_established_callbacks.append(callback)
 
     def add_on_system_interface_backend_failure_callback(
         self, callback: OnSystemInterfaceBackendFailureCallback
@@ -562,24 +540,7 @@ class EnvelopeStreamConsumer(MutableModel):
     def _handle_forward_payload(self, payload: dict[str, Any]) -> None:
         payload_type = payload.get("type")
         if payload_type == "reverse_tunnel_established":
-            try:
-                info = ReverseTunnelEstablishedInfo(
-                    agent_id=AgentId(str(payload["agent_id"])),
-                    remote_port=int(payload["remote_port"]),
-                    local_port=int(payload["local_port"]),
-                    ssh_host=str(payload["ssh_host"]),
-                    ssh_port=int(payload["ssh_port"]),
-                )
-            except (KeyError, ValueError, TypeError) as e:
-                logger.warning("Could not parse reverse_tunnel_established payload: {}", e)
-                return
-            with self._lock:
-                callbacks = list(self._on_reverse_tunnel_established_callbacks)
-            for callback in callbacks:
-                try:
-                    callback(info)
-                except (OSError, RuntimeError, paramiko.SSHException) as e:
-                    logger.warning("reverse_tunnel_established callback failed for {}: {}", info.agent_id, e)
+            logger.trace("Ignoring reverse_tunnel_established envelope: {}", payload)
         elif payload_type == "system_interface_backend_failure":
             try:
                 agent_id = AgentId(str(payload["agent_id"]))
@@ -628,97 +589,6 @@ class EnvelopeStreamConsumer(MutableModel):
         logger.info("`mngr forward` is listening on port {}", port)
 
 
-# -- Helpers run from the consumer's callbacks ------------------------------
-
-
-class MindsApiUrlWriter(MutableModel):
-    """``on_reverse_tunnel_established`` callback that writes ``minds_api_url`` on remote agents.
-
-    Opens a fresh paramiko connection per event (using SSH info from the
-    surviving resolver) and overwrites ``<state_dir>/minds_api_url`` with
-    ``http://127.0.0.1:<remote_port>``. The write is unconditional — if the
-    plugin re-emits the event with a different remote port (sshd reassigned
-    the dynamic-bind), we just overwrite.
-    """
-
-    resolver: MngrCliBackendResolver = Field(frozen=True, description="Source of cached SSH info")
-
-    def __call__(self, info: ReverseTunnelEstablishedInfo) -> None:
-        ssh_info = self.resolver.get_ssh_info(info.agent_id)
-        if ssh_info is None:
-            logger.debug(
-                "MindsApiUrlWriter: no ssh_info for {}; skipping minds_api_url write",
-                info.agent_id,
-            )
-            return
-        url = f"http://127.0.0.1:{info.remote_port}"
-        agent_state_dir = f"{_REMOTE_HOST_DIR}/agents/{info.agent_id}"
-        try:
-            client = open_ssh_client(ssh_info)
-        except (paramiko.SSHException, OSError) as e:
-            logger.warning("MindsApiUrlWriter: SSH connect failed for {}: {}", info.agent_id, e)
-            return
-        try:
-            quoted_dir = shlex.quote(agent_state_dir)
-            quoted_url = shlex.quote(url)
-            command = f"mkdir -p {quoted_dir} && printf '%s' {quoted_url} > {quoted_dir}/minds_api_url"
-            try:
-                _stdin, stdout, _stderr = client.exec_command(command, timeout=10.0)
-                _stdin.close()
-                exit_status = stdout.channel.recv_exit_status()
-                if exit_status != 0:
-                    logger.warning(
-                        "MindsApiUrlWriter: remote write failed for {}: exit={}",
-                        info.agent_id,
-                        exit_status,
-                    )
-            except (paramiko.SSHException, OSError) as e:
-                logger.warning("MindsApiUrlWriter: write failed for {}: {}", info.agent_id, e)
-        finally:
-            try:
-                client.close()
-            except (paramiko.SSHException, OSError) as e:
-                logger.trace("Error closing SSH client after url write: {}", e)
-
-
-class LocalAgentDiscoveryHandler(MutableModel):
-    """``on_agent_discovered`` callback covering minds-specific local-agent setup.
-
-    For local agents (``ssh_info is None``), writes ``minds_api_url`` to
-    ``<MNGR_HOST_DIR>/agents/<agent-id>/minds_api_url`` so the workspace
-    server can talk back to minds without a tunnel.
-
-    Note: the previous Cloudflare-tunnel-token re-injection step is gone —
-    the agent's container persists the token itself, and any rebuild path
-    re-triggers ``_run_tunnel_setup`` from agent-create instead.
-    """
-
-    minds_api_port: int = Field(frozen=True, description="Port the minds-side bare-origin server binds")
-    mngr_host_dir: Path = Field(
-        default_factory=lambda: _DEFAULT_MNGR_HOST_DIR,
-        description="MNGR_HOST_DIR for local-agent state-dir discovery",
-    )
-
-    def __call__(
-        self,
-        agent_id: AgentId,
-        ssh_info: RemoteSSHInfo | None,
-        provider_name: str,
-    ) -> None:
-        del provider_name
-        if ssh_info is None:
-            self._write_local_minds_api_url(agent_id)
-
-    def _write_local_minds_api_url(self, agent_id: AgentId) -> None:
-        state_dir = self.mngr_host_dir / "agents" / str(agent_id)
-        try:
-            state_dir.mkdir(parents=True, exist_ok=True)
-            url_file = state_dir / "minds_api_url"
-            url_file.write_text(f"http://127.0.0.1:{self.minds_api_port}")
-        except OSError as e:
-            logger.warning("Could not write minds_api_url for local agent {}: {}", agent_id, e)
-
-
 # -- start_mngr_forward ----------------------------------------------------
 
 
@@ -732,8 +602,8 @@ def start_mngr_forward(
     Returns ``(consumer, preauth_cookie_value)``. The reader threads are
     *not* started yet -- the caller MUST:
 
-    1. register its on_agent_discovered / on_agent_destroyed /
-       on_reverse_tunnel_established handlers on the consumer;
+    1. register its on_agent_discovered / on_agent_destroyed handlers
+       on the consumer;
     2. call ``consumer.start(concurrency_group)`` to begin consuming
        envelopes;
     3. hand the preauth cookie to the Electron shell so it can pre-set

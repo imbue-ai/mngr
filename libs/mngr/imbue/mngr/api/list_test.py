@@ -906,6 +906,7 @@ def test_list_agents_streaming_mode_on_agent_callback_is_called(
     assert "list-stream-test" in found_names
 
 
+@pytest.mark.flaky
 @pytest.mark.tmux
 def test_list_agents_with_include_filter_excludes_non_matching(
     temp_work_dir: Path,

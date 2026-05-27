@@ -35,7 +35,7 @@ class OutputFormat(UpperCaseStrEnum):
 class LaunchMode(UpperCaseStrEnum):
     """How a workspace agent should be launched."""
 
-    LOCAL = auto()
+    DOCKER = auto()
     CLOUD = auto()
     LIMA = auto()
     IMBUE_CLOUD = auto()
@@ -95,11 +95,5 @@ class GitBranch(NonEmptyStr):
 
 class GitCommitHash(NonEmptyStr):
     """A full git commit hash (40 hex characters)."""
-
-    ...
-
-
-class ApiKeyHash(NonEmptyStr):
-    """SHA-256 hex digest of an agent's API key."""
 
     ...
