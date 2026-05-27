@@ -1,28 +1,31 @@
 #!/usr/bin/env python3
 """Snapshot a Modal sandbox that already has a minds workspace + Docker
 container provisioned, so future test runs can boot from that state nearly
-instantly via offload's ``--override-image-id`` flag (offload v0.9.6+).
+instantly via offload's ``--override-image-id`` flag (offload v0.9.7+).
 
-Verified end-to-end against Modal on 2026-05-26 -- the most recent
-snapshot id is ``im-01KSK6YY0V97VGXJZMCB4S9D12``, captured from a
-sandbox with the FCT workspace's ``system_interface`` UI rendered,
-Electron quit cleanly, and both workspace Docker containers
-(``minds-staging-forever-<...>`` + ``minds-staging-docker-state-<...>``)
-stopped cleanly before the snapshot fired -- so a sandbox booted from
-the image starts with consistent on-disk state and a deterministic
-``docker start`` path.
+Verified end-to-end against Modal on 2026-05-27. The most recently
+verified snapshot id is ``im-01KSMZYQ5X1MKME78EQYRNW6CT`` (the earlier
+``im-01KSK6YY0V97VGXJZMCB4S9D12`` works equivalently but lacks the
+``/app -> /code/mngr`` symlink the snapshot script now layers in --
+offload's ``--override-image-id`` path hardcodes ``workdir="/app"``
+on the resumed sandbox, so the symlink is what lets ``uv run pytest``
+find the project from offload's chosen workdir).
 
-The ``apps/minds/test_snapshot_resume.py::test_workspace_docker_container_is_present_and_stopped``
-test was also verified against this snapshot id via direct
-``modal.Sandbox.create(image=...)`` (1.68s test, 8.8s sandbox-to-
-result). Note: ``just test-offload-minds-snapshot`` against this
-image currently fails on offload's side -- offload v0.9.6's per-
-sandbox junit download still uses Modal's deprecated
-``Sandbox.open()`` API, which Modal's vm_runtime sandboxes
-specifically reject as ``request cancelled due to internal error``.
-The fix is a one-line change in offload (migrate to
-``Sandbox.filesystem``) -- file an upstream issue against
-imbue-ai/offload before re-trying the offload path.
+End-to-end:
+``just test-offload-minds-snapshot im-01KSMZYQ5X1MKME78EQYRNW6CT`` runs
+the ``minds_snapshot_resume`` test suite (today: one sanity test in
+``apps/minds/test_snapshot_resume.py``) against the snapshot in ~17-20s
+wall clock per run, 4/4 successive runs green.
+
+A couple of vm_runtime sandboxes did fail intermittently with
+exit_code=137 + missing junit.xml during early testing on
+2026-05-27. We could not reproduce that on a retry under the same
+conditions, so the working hypothesis is a transient Modal-side
+vm_runtime flake (the runtime is preview-stage and the operator
+warned about capacity issues). If you hit it, just retry; if it
+turns into a pattern, capture the failing batch's verbose offload
+log and check the modal_sandbox.py exec path before assuming
+offload's at fault.
 
 PREREQUISITE: ``experimental_options={"vm_runtime": True}`` requires the
 caller's active Modal profile to have the VM-runtime preview enabled. If
