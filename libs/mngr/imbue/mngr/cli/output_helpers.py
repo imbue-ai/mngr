@@ -9,7 +9,6 @@ from typing import assert_never
 from loguru import logger
 
 from imbue.imbue_common.pure import pure
-from imbue.mngr.api.sync import GitSyncResult
 from imbue.mngr.api.sync import RsyncResult
 from imbue.mngr.primitives import ErrorBehavior
 from imbue.mngr.primitives import OutputFormat
@@ -250,72 +249,31 @@ def output_rsync_result(
             assert_never(unreachable)
 
 
-def _output_git_sync_result(
-    result: GitSyncResult,
+def _output_git_sync_success(
     output_format: OutputFormat,
     event_name: str,
-    verb: str,
-    verb_past: str,
-    preposition: str,
+    human_message: str,
 ) -> None:
-    """Shared implementation for git push and git pull result output."""
-    result_data = {
-        "source_branch": result.source_branch,
-        "target_branch": result.target_branch,
-        "source_path": str(result.source_path),
-        "destination_path": str(result.destination_path),
-        "is_dry_run": result.is_dry_run,
-        "commits_transferred": result.commits_transferred,
-    }
+    """Shared success output for ``mngr git push`` / ``mngr git pull``.
 
+    There's no structured result -- git's own stdout/stderr have already gone to the
+    user during the run. This just emits a terminating event/line so callers can
+    detect the operation finished.
+    """
     match output_format:
         case OutputFormat.JSON:
-            emit_final_json(result_data)
+            emit_final_json({"success": True})
         case OutputFormat.JSONL:
-            emit_event(event_name, result_data, OutputFormat.JSONL)
+            emit_event(event_name, {"success": True}, OutputFormat.JSONL)
         case OutputFormat.HUMAN:
-            if result.is_dry_run:
-                write_human_line(
-                    "Dry run complete: would {} {} commits from {} {} {}",
-                    verb,
-                    result.commits_transferred,
-                    result.source_branch,
-                    preposition,
-                    result.target_branch,
-                )
-            else:
-                write_human_line(
-                    "Git {} complete: {} {} commits from {} {} {}",
-                    verb,
-                    verb_past,
-                    result.commits_transferred,
-                    result.source_branch,
-                    preposition,
-                    result.target_branch,
-                )
+            write_human_line(human_message)
         case _ as unreachable:
             assert_never(unreachable)
 
 
-def output_git_push_result(result: GitSyncResult, output_format: OutputFormat) -> None:
-    """Output a git push result in the appropriate format."""
-    _output_git_sync_result(
-        result=result,
-        output_format=output_format,
-        event_name="git_push_complete",
-        verb="push",
-        verb_past="pushed",
-        preposition="to",
-    )
+def output_git_push_success(output_format: OutputFormat) -> None:
+    _output_git_sync_success(output_format, "git_push_complete", "Git push complete")
 
 
-def output_git_pull_result(result: GitSyncResult, output_format: OutputFormat) -> None:
-    """Output a git pull result in the appropriate format."""
-    _output_git_sync_result(
-        result=result,
-        output_format=output_format,
-        event_name="git_pull_complete",
-        verb="merge",
-        verb_past="merged",
-        preposition="into",
-    )
+def output_git_pull_success(output_format: OutputFormat) -> None:
+    _output_git_sync_success(output_format, "git_pull_complete", "Git pull complete")

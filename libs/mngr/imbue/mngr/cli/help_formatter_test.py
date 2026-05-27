@@ -612,28 +612,8 @@ _SYNOPSIS_OPTOUT_FLAGS: dict[str, frozenset[str]] = {
             "--uncommitted-changes",
         }
     ),
-    "git.push": frozenset(
-        {
-            "--all-branches",
-            "--branch",
-            "--start",
-            "--tags",
-            "--uncommitted-changes",
-        }
-    ),
-    "git.pull": frozenset(
-        {
-            "--all-branches",
-            "--branch",
-            "--force-git",
-            "--merge",
-            "--rebase",
-            "--start",
-            "--tags",
-            "--uncommitted-changes",
-            "--uncommitted-source",
-        }
-    ),
+    "git.push": frozenset(),
+    "git.pull": frozenset(),
     "pair": frozenset(
         {
             "--require-git",

@@ -6,7 +6,7 @@
 **Synopsis:**
 
 ```text
-mngr git push|pull TARGET [OPTIONS]
+mngr git push|pull TARGET [-- GIT_ARGS...]
 ```
 
 Push or pull git commits between local and a remote host or agent.
@@ -17,6 +17,13 @@ Each subcommand takes a single host-location address identifying the remote
 endpoint (the local side is the current working directory). The address must
 include an agent or a host -- bare local paths are rejected (use plain
 ``git push``/``git pull`` for local-only operations).
+
+These are thin wrappers around ``git push`` / ``git pull``. mngr builds the
+SSH URL and credentials for you, then runs the underlying git command;
+anything you put after ``--`` is passed through verbatim. There's no
+``--source-branch``, ``--target-branch``, ``--mirror``, or ``--dry-run`` --
+use the corresponding git flags (``--force``, ``--tags``, refspec syntax,
+``--dry-run``, ``--rebase`` etc.) directly.
 
 **Usage:**
 
@@ -51,12 +58,16 @@ agent or host's repository.
 TARGET is a host-location address: ``AGENT[@HOST[.PROVIDER]][:PATH]`` or
 ``@HOST[.PROVIDER]:PATH``. A bare path is rejected (use plain ``git push``).
 
-The local side is always the current working directory.
+The local side is always the current working directory. mngr sets the
+destination's ``receive.denyCurrentBranch=updateInstead`` and configures the
+SSH transport, then runs ``git push <URL> <GIT_ARGS...>``. Any flags or
+refspecs you supply after ``--`` are passed verbatim to the underlying
+``git push``.
 
 **Usage:**
 
 ```text
-mngr git push [OPTIONS] TARGET
+mngr git push [OPTIONS] TARGET [-- GIT_ARGS...]
 ```
 **Options:**
 
@@ -64,20 +75,7 @@ mngr git push [OPTIONS] TARGET
 
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
-| `--dry-run` | boolean | Show what would be transferred without actually transferring | `False` |
 | `--start`, `--no-start` | boolean | Automatically start the host if offline (the agent does not need to be running) | `True` |
-
-## Git Options
-
-| Name | Type | Description | Default |
-| ---- | ---- | ----------- | ------- |
-| `--source-branch` | text | Branch to push from [default: current branch on the local machine] | None |
-| `--target-branch` | text | Branch to push to [default: current branch on the remote] | None |
-| `--mirror` | boolean | Force the remote's git state to match the source, overwriting all refs (branches, tags) and resetting the working tree (dangerous). Any commits or branches that exist only on the remote will be lost. Required when the remote and the source have diverged (non-fast-forward). For non-local hosts, pushes all local branches and tags. | `False` |
-| `--uncommitted-changes` | choice (`stash` &#x7C; `clobber` &#x7C; `merge` &#x7C; `fail`) | How to handle uncommitted changes on the remote (the side being modified): stash, clobber, merge, or fail | `fail` |
-| `--branch` | text | Push specific branches [repeatable] [future] | None |
-| `--all-branches`, `--all` | boolean | Push all branches [future] | `False` |
-| `--tags` | boolean | Include git tags in push [future] | `False` |
 
 ## Common
 
@@ -104,16 +102,16 @@ mngr git push [OPTIONS] TARGET
 $ mngr git push my-agent
 ```
 
-**Push a specific branch**
+**Push a specific branch with a refspec**
 
 ```bash
-$ mngr git push my-agent --source-branch feature
+$ mngr git push my-agent -- feature:main
 ```
 
-**Force-overwrite the agent's refs**
+**Force-push all branches**
 
 ```bash
-$ mngr git push my-agent --mirror
+$ mngr git push my-agent -- --force --all
 ```
 
 **Push to a path on a specific host**
@@ -125,7 +123,7 @@ $ mngr git push @host.modal:/work
 **Preview what would be transferred**
 
 ```bash
-$ mngr git push my-agent --dry-run
+$ mngr git push my-agent -- --dry-run
 ```
 
 ## mngr git pull
@@ -133,17 +131,20 @@ $ mngr git push my-agent --dry-run
 Pull git commits from a remote agent or host into the local repository.
 
 Pull git commits from a remote agent or host's repository into the current
-working directory's repository (by fetching and merging).
+working directory's repository.
 
 SOURCE is a host-location address: ``AGENT[@HOST[.PROVIDER]][:PATH]`` or
 ``@HOST[.PROVIDER]:PATH``. A bare path is rejected (use plain ``git pull``).
 
-The local side is always the current working directory.
+The local side is always the current working directory. mngr configures the
+SSH transport, then runs ``git pull <URL> <GIT_ARGS...>``. Any flags or
+branch names you supply after ``--`` are passed verbatim to the underlying
+``git pull``.
 
 **Usage:**
 
 ```text
-mngr git pull [OPTIONS] SOURCE
+mngr git pull [OPTIONS] SOURCE [-- GIT_ARGS...]
 ```
 **Options:**
 
@@ -151,23 +152,7 @@ mngr git pull [OPTIONS] SOURCE
 
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
-| `--dry-run` | boolean | Show what would be transferred without actually transferring | `False` |
 | `--start`, `--no-start` | boolean | Automatically start the host if offline (the agent does not need to be running) | `True` |
-
-## Git Options
-
-| Name | Type | Description | Default |
-| ---- | ---- | ----------- | ------- |
-| `--source-branch` | text | Branch to pull from [default: current branch on the remote] | None |
-| `--target-branch` | text | Branch to merge into on the local side [default: current branch locally] | None |
-| `--uncommitted-changes` | choice (`stash` &#x7C; `clobber` &#x7C; `merge` &#x7C; `fail`) | How to handle uncommitted changes locally (the side being modified): stash, clobber, merge, or fail | `fail` |
-| `--branch` | text | Pull specific branches [repeatable] [future] | None |
-| `--all-branches`, `--all` | boolean | Pull all remote branches [future] | `False` |
-| `--tags` | boolean | Include git tags in sync [future] | `False` |
-| `--force-git` | boolean | Force overwrite local git state (use with caution) [future] | `False` |
-| `--merge` | boolean | Merge remote changes with local changes [future] | `False` |
-| `--rebase` | boolean | Rebase local changes onto remote changes [future] | `False` |
-| `--uncommitted-source` | choice (`warn` &#x7C; `error`) | Warn or error if the remote has uncommitted changes [future] | None |
 
 ## Common
 
@@ -197,7 +182,13 @@ $ mngr git pull my-agent
 **Pull a specific branch**
 
 ```bash
-$ mngr git pull my-agent --source-branch feature
+$ mngr git pull my-agent -- feature
+```
+
+**Rebase local changes onto agent's branch**
+
+```bash
+$ mngr git pull my-agent -- feature --rebase
 ```
 
 **Pull from a path on a specific host**
@@ -209,7 +200,7 @@ $ mngr git pull @host.modal:/work
 **Preview what would be merged**
 
 ```bash
-$ mngr git pull my-agent --dry-run
+$ mngr git pull my-agent -- --dry-run
 ```
 
 ## See Also
@@ -225,8 +216,20 @@ $ mngr git pull my-agent --dry-run
 $ mngr git push my-agent
 ```
 
+**Push with a refspec**
+
+```bash
+$ mngr git push my-agent -- feature:main
+```
+
 **Pull the agent's branch into the current working directory**
 
 ```bash
 $ mngr git pull my-agent
+```
+
+**Pull a specific branch with rebase**
+
+```bash
+$ mngr git pull my-agent -- feature --rebase
 ```

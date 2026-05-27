@@ -1,7 +1,6 @@
-### Migrate to the new `imbue.mngr.api.sync` interface
+### Migrate to the new thin `git_pull`/`git_push` wrappers
 
-`mngr_pair` now calls `git_pull`/`git_push` (from `imbue.mngr.api.sync`) instead
-of the removed `pull_git`/`push_git` wrappers from `imbue.mngr.api.pull` /
-`imbue.mngr.api.push`. Argument shape changes from `(agent, host, source, ...)`
-to `(local_path, remote_host, remote_path, ...)`; the agent's `work_dir` is
-passed explicitly as `remote_path`. Behavior is unchanged.
+`mngr_pair` now composes the thin `git_pull`/`git_push` wrappers (from
+`imbue.mngr.api.sync`) with its own stash guard and target-branch checkout
+dance. Externally observable behavior of `sync_git_state` (stash mode handling,
+target-branch handling) is unchanged.

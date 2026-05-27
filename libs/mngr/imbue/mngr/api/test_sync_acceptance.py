@@ -179,7 +179,6 @@ def test_git_push_transfers_commits_to_agent(
         "--disable-plugin",
         "modal",
         created_agent,
-        "--uncommitted-changes=clobber",
         env=sync_test_env,
         cwd=repo_path,
     )
@@ -207,18 +206,21 @@ def test_git_push_transfers_commits_to_agent(
 @pytest.mark.acceptance
 @pytest.mark.tmux
 @pytest.mark.timeout(120)
-def test_git_push_uncommitted_changes_fail_mode_rejects(
+def test_git_push_force_overwrites_diverged_remote(
     sync_test_env: dict[str, str],
     repo_path: Path,
     created_agent: str,
 ) -> None:
+    """``mngr git push -- --force`` passes through and overwrites a diverged agent branch."""
     agent_dir = _get_agent_work_dir(repo_path, created_agent)
 
-    (agent_dir / "dirty.txt").write_text("uncommitted")
+    (agent_dir / "agent_change.txt").write_text("agent work")
+    run_git_command(agent_dir, "add", "agent_change.txt")
+    run_git_command(agent_dir, "commit", "-m", "Agent commit")
 
-    (repo_path / "new.txt").write_text("new")
-    run_git_command(repo_path, "add", "new.txt")
-    run_git_command(repo_path, "commit", "-m", "New file")
+    (repo_path / "local_change.txt").write_text("local work")
+    run_git_command(repo_path, "add", "local_change.txt")
+    run_git_command(repo_path, "commit", "-m", "Local commit")
 
     result = run_mngr_subprocess(
         "git",
@@ -226,121 +228,15 @@ def test_git_push_uncommitted_changes_fail_mode_rejects(
         "--disable-plugin",
         "modal",
         created_agent,
-        "--uncommitted-changes=fail",
+        "--",
+        "--force",
         env=sync_test_env,
         cwd=repo_path,
     )
-    assert result.returncode != 0
-    assert "Uncommitted changes" in result.stderr
+    assert result.returncode == 0, f"Push --force failed: {result.stderr}"
 
-
-@pytest.mark.acceptance
-@pytest.mark.tmux
-@pytest.mark.timeout(120)
-def test_git_push_uncommitted_changes_stash_mode_preserves_changes(
-    sync_test_env: dict[str, str],
-    repo_path: Path,
-    created_agent: str,
-) -> None:
-    agent_dir = _get_agent_work_dir(repo_path, created_agent)
-
-    (agent_dir / "stashed.txt").write_text("will be stashed")
-
-    (repo_path / "new.txt").write_text("new")
-    run_git_command(repo_path, "add", "new.txt")
-    run_git_command(repo_path, "commit", "-m", "New file")
-
-    result = run_mngr_subprocess(
-        "git",
-        "push",
-        "--disable-plugin",
-        "modal",
-        created_agent,
-        "--uncommitted-changes=stash",
-        env=sync_test_env,
-        cwd=repo_path,
-    )
-    assert result.returncode == 0, f"Push failed: {result.stderr}"
-
-    assert (agent_dir / "new.txt").exists()
-    assert not (agent_dir / "stashed.txt").exists()
-
-    stash_result = subprocess.run(
-        ["git", "stash", "list"],
-        cwd=str(agent_dir),
-        capture_output=True,
-        text=True,
-    )
-    assert "mngr-sync-stash" in stash_result.stdout
-
-
-@pytest.mark.acceptance
-@pytest.mark.tmux
-@pytest.mark.timeout(120)
-def test_git_push_uncommitted_changes_clobber_mode_discards_changes(
-    sync_test_env: dict[str, str],
-    repo_path: Path,
-    created_agent: str,
-) -> None:
-    agent_dir = _get_agent_work_dir(repo_path, created_agent)
-
-    (agent_dir / "clobbered.txt").write_text("will be discarded")
-
-    (repo_path / "new.txt").write_text("new")
-    run_git_command(repo_path, "add", "new.txt")
-    run_git_command(repo_path, "commit", "-m", "New file")
-
-    result = run_mngr_subprocess(
-        "git",
-        "push",
-        "--disable-plugin",
-        "modal",
-        created_agent,
-        "--uncommitted-changes=clobber",
-        env=sync_test_env,
-        cwd=repo_path,
-    )
-    assert result.returncode == 0, f"Push failed: {result.stderr}"
-
-    assert (agent_dir / "new.txt").exists()
-    assert not (agent_dir / "clobbered.txt").exists()
-
-
-@pytest.mark.acceptance
-@pytest.mark.tmux
-@pytest.mark.timeout(120)
-def test_git_push_mirror_overwrites_all_refs(
-    sync_test_env: dict[str, str],
-    repo_path: Path,
-    created_agent: str,
-) -> None:
-    run_git_command(repo_path, "checkout", "-b", "feature-branch")
-    (repo_path / "feature.txt").write_text("feature")
-    run_git_command(repo_path, "add", "feature.txt")
-    run_git_command(repo_path, "commit", "-m", "Feature commit")
-    run_git_command(repo_path, "checkout", "main")
-
-    result = run_mngr_subprocess(
-        "git",
-        "push",
-        "--disable-plugin",
-        "modal",
-        created_agent,
-        "--mirror",
-        "--uncommitted-changes=clobber",
-        env=sync_test_env,
-        cwd=repo_path,
-    )
-    assert result.returncode == 0, f"Mirror push failed: {result.stderr}"
-
-    agent_dir = _get_agent_work_dir(repo_path, created_agent)
-    branch_result = subprocess.run(
-        ["git", "branch", "-a"],
-        cwd=str(agent_dir),
-        capture_output=True,
-        text=True,
-    )
-    assert "feature-branch" in branch_result.stdout
+    assert (agent_dir / "local_change.txt").exists()
+    assert not (agent_dir / "agent_change.txt").exists()
 
 
 # =============================================================================
@@ -404,7 +300,9 @@ def test_git_pull_merges_agent_commits(
         "--disable-plugin",
         "modal",
         created_agent,
-        "--uncommitted-changes=clobber",
+        "--",
+        "main",
+        "--no-edit",
         env=sync_test_env,
         cwd=repo_path,
     )

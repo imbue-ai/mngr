@@ -11,15 +11,8 @@ from imbue.mngr.primitives import HostLocationAddress
 def test_git_push_cli_options_can_be_instantiated() -> None:
     opts = GitPushCliOptions(
         target=HostLocationAddress(),
-        dry_run=False,
         start=True,
-        source_branch=None,
-        target_branch=None,
-        uncommitted_changes="fail",
-        mirror=False,
-        branch=(),
-        all_branches=False,
-        tags=False,
+        git_args=(),
         output_format="human",
         quiet=False,
         verbose=0,
@@ -28,24 +21,14 @@ def test_git_push_cli_options_can_be_instantiated() -> None:
         plugin=(),
         disable_plugin=(),
     )
-    assert opts.mirror is False
+    assert opts.start is True
 
 
 def test_git_pull_cli_options_can_be_instantiated() -> None:
     opts = GitPullCliOptions(
         source=HostLocationAddress(),
-        dry_run=False,
         start=True,
-        source_branch=None,
-        target_branch=None,
-        uncommitted_changes="fail",
-        branch=(),
-        all_branches=False,
-        tags=False,
-        force_git=False,
-        merge=False,
-        rebase=False,
-        uncommitted_source=None,
+        git_args=(),
         output_format="human",
         quiet=False,
         verbose=0,
@@ -54,23 +37,18 @@ def test_git_pull_cli_options_can_be_instantiated() -> None:
         plugin=(),
         disable_plugin=(),
     )
-    assert opts.dry_run is False
+    assert opts.start is True
 
 
-def test_git_push_help_shows_options() -> None:
+def test_git_push_help_describes_passthrough() -> None:
     runner = CliRunner()
     result = runner.invoke(cli, ["git", "push", "--help"])
     assert result.exit_code == 0
-    assert "--source-branch" in result.output
-    assert "--target-branch" in result.output
-    assert "--mirror" in result.output
-    assert "--dry-run" in result.output
+    assert "GIT_ARGS" in result.output or "git push" in result.output.lower()
 
 
-def test_git_pull_help_shows_options() -> None:
+def test_git_pull_help_describes_passthrough() -> None:
     runner = CliRunner()
     result = runner.invoke(cli, ["git", "pull", "--help"])
     assert result.exit_code == 0
-    assert "--source-branch" in result.output
-    assert "--target-branch" in result.output
-    assert "--dry-run" in result.output
+    assert "GIT_ARGS" in result.output or "git pull" in result.output.lower()

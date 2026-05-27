@@ -5,7 +5,6 @@ from pathlib import Path
 
 import pytest
 
-from imbue.mngr.api.sync import GitSyncResult
 from imbue.mngr.api.sync import RsyncResult
 from imbue.mngr.cli.output_helpers import AbortError
 from imbue.mngr.cli.output_helpers import _write_json_line
@@ -15,8 +14,8 @@ from imbue.mngr.cli.output_helpers import emit_format_template_lines
 from imbue.mngr.cli.output_helpers import emit_info
 from imbue.mngr.cli.output_helpers import format_size
 from imbue.mngr.cli.output_helpers import on_error
-from imbue.mngr.cli.output_helpers import output_git_pull_result
-from imbue.mngr.cli.output_helpers import output_git_push_result
+from imbue.mngr.cli.output_helpers import output_git_pull_success
+from imbue.mngr.cli.output_helpers import output_git_push_success
 from imbue.mngr.cli.output_helpers import output_rsync_result
 from imbue.mngr.cli.output_helpers import render_format_template
 from imbue.mngr.cli.output_helpers import write_human_line
@@ -401,84 +400,34 @@ def test_output_rsync_result_human_dry_run(capsys: pytest.CaptureFixture[str]) -
 
 
 # =============================================================================
-# Tests for output_git_push_result and output_git_pull_result
+# Tests for output_git_push_success and output_git_pull_success
 # =============================================================================
 
 
-def test_output_git_push_result_json(capsys: pytest.CaptureFixture[str]) -> None:
-    result = GitSyncResult(
-        source_branch="main",
-        target_branch="main",
-        source_path=Path("/src"),
-        destination_path=Path("/dst"),
-        is_dry_run=False,
-        commits_transferred=3,
-    )
-    output_git_push_result(result, OutputFormat.JSON)
+def test_output_git_push_success_json(capsys: pytest.CaptureFixture[str]) -> None:
+    output_git_push_success(OutputFormat.JSON)
     captured = capsys.readouterr()
     output = json.loads(captured.out.strip())
-    assert output["commits_transferred"] == 3
-    assert output["source_branch"] == "main"
+    assert output["success"] is True
 
 
-def test_output_git_pull_result_jsonl(capsys: pytest.CaptureFixture[str]) -> None:
-    result = GitSyncResult(
-        source_branch="main",
-        target_branch="main",
-        source_path=Path("/src"),
-        destination_path=Path("/dst"),
-        is_dry_run=False,
-        commits_transferred=3,
-    )
-    output_git_pull_result(result, OutputFormat.JSONL)
+def test_output_git_pull_success_jsonl(capsys: pytest.CaptureFixture[str]) -> None:
+    output_git_pull_success(OutputFormat.JSONL)
     captured = capsys.readouterr()
     output = json.loads(captured.out.strip())
     assert output["event"] == "git_pull_complete"
 
 
-def test_output_git_push_result_human(capsys: pytest.CaptureFixture[str]) -> None:
-    result = GitSyncResult(
-        source_branch="main",
-        target_branch="main",
-        source_path=Path("/src"),
-        destination_path=Path("/dst"),
-        is_dry_run=False,
-        commits_transferred=3,
-    )
-    output_git_push_result(result, OutputFormat.HUMAN)
+def test_output_git_push_success_human(capsys: pytest.CaptureFixture[str]) -> None:
+    output_git_push_success(OutputFormat.HUMAN)
     captured = capsys.readouterr()
     assert "Git push complete" in captured.out
-    assert "pushed" in captured.out
 
 
-def test_output_git_pull_result_human(capsys: pytest.CaptureFixture[str]) -> None:
-    result = GitSyncResult(
-        source_branch="feature",
-        target_branch="main",
-        source_path=Path("/src"),
-        destination_path=Path("/dst"),
-        is_dry_run=False,
-        commits_transferred=5,
-    )
-    output_git_pull_result(result, OutputFormat.HUMAN)
+def test_output_git_pull_success_human(capsys: pytest.CaptureFixture[str]) -> None:
+    output_git_pull_success(OutputFormat.HUMAN)
     captured = capsys.readouterr()
-    assert "Git merge complete" in captured.out
-    assert "merged" in captured.out
-
-
-def test_output_git_push_result_human_dry_run(capsys: pytest.CaptureFixture[str]) -> None:
-    result = GitSyncResult(
-        source_branch="main",
-        target_branch="main",
-        source_path=Path("/src"),
-        destination_path=Path("/dst"),
-        is_dry_run=True,
-        commits_transferred=3,
-    )
-    output_git_push_result(result, OutputFormat.HUMAN)
-    captured = capsys.readouterr()
-    assert "Dry run complete" in captured.out
-    assert "would push" in captured.out
+    assert "Git pull complete" in captured.out
 
 
 # =============================================================================
@@ -522,37 +471,15 @@ def test_write_json_line_terminates_with_newline(capsys: pytest.CaptureFixture[s
 
 
 # =============================================================================
-# Tests for output_git_push_result (JSONL event name)
+# Tests for output_git_push_success (JSONL event name)
 # =============================================================================
 
 
-def test_output_git_push_result_jsonl(capsys: pytest.CaptureFixture[str]) -> None:
-    result = GitSyncResult(
-        source_branch="main",
-        target_branch="main",
-        source_path=Path("/src"),
-        destination_path=Path("/dst"),
-        is_dry_run=False,
-        commits_transferred=3,
-    )
-    output_git_push_result(result, OutputFormat.JSONL)
+def test_output_git_push_success_jsonl_event_name(capsys: pytest.CaptureFixture[str]) -> None:
+    output_git_push_success(OutputFormat.JSONL)
     captured = capsys.readouterr()
     output = json.loads(captured.out.strip())
     assert output["event"] == "git_push_complete"
-
-
-def test_output_git_pull_result_human_dry_run(capsys: pytest.CaptureFixture[str]) -> None:
-    result = GitSyncResult(
-        source_branch="feature",
-        target_branch="main",
-        source_path=Path("/src"),
-        destination_path=Path("/dst"),
-        is_dry_run=True,
-        commits_transferred=2,
-    )
-    output_git_pull_result(result, OutputFormat.HUMAN)
-    captured = capsys.readouterr()
-    assert "would merge" in captured.out
 
 
 # =============================================================================

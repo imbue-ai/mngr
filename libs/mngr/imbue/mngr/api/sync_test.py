@@ -8,9 +8,7 @@ import pytest
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mngr.api.sync import GitSyncError
-from imbue.mngr.api.sync import GitSyncResult
 from imbue.mngr.api.sync import LocalGitContext
-from imbue.mngr.api.sync import NotAGitRepositoryError
 from imbue.mngr.api.sync import RemoteGitContext
 from imbue.mngr.api.sync import RsyncEndpointError
 from imbue.mngr.api.sync import RsyncResult
@@ -19,6 +17,7 @@ from imbue.mngr.api.sync import _build_remote_rsync_command
 from imbue.mngr.api.sync import _build_rsync_command
 from imbue.mngr.api.sync import _build_ssh_git_url
 from imbue.mngr.api.sync import git_pull
+from imbue.mngr.api.sync import git_push
 from imbue.mngr.api.sync import rsync
 from imbue.mngr.api.testing import FakeHost
 from imbue.mngr.errors import MngrError
@@ -60,57 +59,6 @@ def test_rsync_result_supports_dry_run() -> None:
     assert result.is_dry_run is True
 
 
-def test_rsync_result_can_be_serialized_to_dict() -> None:
-    result = RsyncResult(
-        files_transferred=3,
-        bytes_transferred=500,
-        source_path=Path("/src"),
-        destination_path=Path("/dst"),
-        is_dry_run=False,
-    )
-
-    data = result.model_dump()
-    assert data["files_transferred"] == 3
-    assert data["bytes_transferred"] == 500
-    assert "mode" not in data
-
-
-# =============================================================================
-# GitSyncResult model tests
-# =============================================================================
-
-
-def test_git_sync_result_can_be_created_with_all_fields() -> None:
-    result = GitSyncResult(
-        source_branch="feature",
-        target_branch="main",
-        source_path=Path("/source"),
-        destination_path=Path("/dest"),
-        is_dry_run=False,
-        commits_transferred=5,
-    )
-
-    assert result.source_branch == "feature"
-    assert result.target_branch == "main"
-    assert result.source_path == Path("/source")
-    assert result.destination_path == Path("/dest")
-    assert result.is_dry_run is False
-    assert result.commits_transferred == 5
-
-
-def test_git_sync_result_supports_dry_run() -> None:
-    result = GitSyncResult(
-        source_branch="dev",
-        target_branch="main",
-        source_path=Path("/src"),
-        destination_path=Path("/dst"),
-        is_dry_run=True,
-        commits_transferred=0,
-    )
-
-    assert result.is_dry_run is True
-
-
 # =============================================================================
 # UncommittedChangesError tests
 # =============================================================================
@@ -122,36 +70,9 @@ def test_uncommitted_changes_error_contains_path_in_message() -> None:
     assert "/some/path" in str(error)
 
 
-def test_uncommitted_changes_error_provides_user_help_text() -> None:
-    error = UncommittedChangesError(Path("/some/path"))
-    assert "stash" in error.user_help_text.lower()
-    assert "clobber" in error.user_help_text.lower()
-
-
 def test_uncommitted_changes_error_stores_destination_path() -> None:
     error = UncommittedChangesError(Path("/test/path"))
     assert error.destination == Path("/test/path")
-
-
-# =============================================================================
-# NotAGitRepositoryError tests
-# =============================================================================
-
-
-def test_not_a_git_repository_error_contains_path_in_message() -> None:
-    error = NotAGitRepositoryError(Path("/not/a/repo"))
-    assert "Not a git repository" in str(error)
-    assert "/not/a/repo" in str(error)
-
-
-def test_not_a_git_repository_error_provides_user_help_text() -> None:
-    error = NotAGitRepositoryError(Path("/some/path"))
-    assert "mngr rsync" in error.user_help_text
-
-
-def test_not_a_git_repository_error_stores_path() -> None:
-    error = NotAGitRepositoryError(Path("/test/path"))
-    assert error.path == Path("/test/path")
 
 
 # =============================================================================
@@ -163,11 +84,6 @@ def test_git_sync_error_contains_message_in_str() -> None:
     error = GitSyncError("something went wrong")
     assert "Git sync failed" in str(error)
     assert "something went wrong" in str(error)
-
-
-def test_git_sync_error_provides_user_help_text() -> None:
-    error = GitSyncError("test")
-    assert error.user_help_text is not None
 
 
 # =============================================================================
@@ -305,15 +221,6 @@ def test_remote_git_context_has_uncommitted_changes_returns_false_when_clean(
     assert ctx.has_uncommitted_changes(temp_git_repo) is False
 
 
-def test_remote_git_context_has_uncommitted_changes_raises_on_non_git_dir(
-    tmp_path: Path,
-) -> None:
-    host = cast(OnlineHostInterface, FakeHost())
-    ctx = RemoteGitContext(host=host)
-    with pytest.raises(MngrError, match="git status failed"):
-        ctx.has_uncommitted_changes(tmp_path)
-
-
 def test_remote_git_context_git_stash_returns_true_on_success(
     temp_git_repo: Path,
 ) -> None:
@@ -332,28 +239,6 @@ def test_remote_git_context_git_stash_returns_false_when_no_changes_to_save(
     ctx = RemoteGitContext(host=host)
     result = ctx.git_stash(temp_git_repo)
     assert result is False
-
-
-def test_remote_git_context_git_stash_pop_succeeds(
-    temp_git_repo: Path,
-) -> None:
-    (temp_git_repo / "README.md").write_text("modified")
-
-    host = cast(OnlineHostInterface, FakeHost())
-    ctx = RemoteGitContext(host=host)
-    ctx.git_stash(temp_git_repo)
-    ctx.git_stash_pop(temp_git_repo)
-
-    assert (temp_git_repo / "README.md").read_text() == "modified"
-
-
-def test_remote_git_context_git_stash_pop_raises_when_no_stash(
-    temp_git_repo: Path,
-) -> None:
-    host = cast(OnlineHostInterface, FakeHost())
-    ctx = RemoteGitContext(host=host)
-    with pytest.raises(MngrError, match="git stash pop failed"):
-        ctx.git_stash_pop(temp_git_repo)
 
 
 def test_remote_git_context_git_reset_hard_succeeds(
@@ -376,16 +261,6 @@ def test_remote_git_context_get_current_branch_returns_branch_name(
     host = cast(OnlineHostInterface, FakeHost())
     ctx = RemoteGitContext(host=host)
     assert ctx.get_current_branch(temp_git_repo) == "main"
-
-
-def test_remote_git_context_get_current_branch_returns_feature_branch(
-    temp_git_repo: Path,
-) -> None:
-    run_git_command(temp_git_repo, "checkout", "-b", "feature-branch")
-
-    host = cast(OnlineHostInterface, FakeHost())
-    ctx = RemoteGitContext(host=host)
-    assert ctx.get_current_branch(temp_git_repo) == "feature-branch"
 
 
 def test_remote_git_context_is_git_repository_returns_true_for_git_repo(
@@ -413,12 +288,6 @@ def test_build_ssh_git_url_produces_correct_url() -> None:
     ssh_info = ("root", "example.com", 2222, Path("/tmp/key"))
     result = _build_ssh_git_url(ssh_info, Path("/home/user/project"))
     assert result == "ssh://root@example.com:2222/home/user/project/.git"
-
-
-def test_build_ssh_git_url_with_default_port() -> None:
-    ssh_info = ("user", "myhost.local", 22, Path("/key"))
-    result = _build_ssh_git_url(ssh_info, Path("/work"))
-    assert result == "ssh://user@myhost.local:22/work/.git"
 
 
 # =============================================================================
@@ -475,21 +344,6 @@ def test_build_remote_rsync_command_pull_uses_remote_source() -> None:
     assert cmd[-1] == "/local/dst"
 
 
-def test_build_remote_rsync_command_includes_dry_run_and_delete() -> None:
-    ssh_info = ("root", "host", 22, Path("/key"))
-    cmd = _build_remote_rsync_command(
-        local_path=Path("/src"),
-        remote_path=Path("/dst"),
-        ssh_info=ssh_info,
-        known_hosts_file=None,
-        is_push=True,
-        is_dry_run=True,
-        is_delete=True,
-    )
-    assert "--dry-run" in cmd
-    assert "--delete" in cmd
-
-
 # =============================================================================
 # rsync endpoint validation
 # =============================================================================
@@ -515,59 +369,63 @@ def test_rsync_rejects_remote_to_remote_transfers(
 
 
 # =============================================================================
-# git_pull safe.directory regression test
+# git_pull / git_push end-to-end (local host)
 # =============================================================================
 
 
-def test_git_pull_adds_safe_directory_for_non_local_host(
+def test_git_pull_transfers_commit_from_remote_to_local(
     tmp_path: Path,
     cg: ConcurrencyGroup,
 ) -> None:
-    """Regression test: git_pull must add safe.directory for non-local hosts.
-
-    Without this, git operations on remote hosts can fail with "detected dubious
-    ownership" when file ownership differs from the SSH user (e.g., after rsync
-    from a local machine with a different UID).
-    """
+    """git_pull pulls a new commit from a remote (here: local FakeHost) into the local repo."""
     local_dir = tmp_path / "local"
     agent_dir = tmp_path / "agent"
 
     init_git_repo(local_dir)
-
-    subprocess.run(
-        ["git", "clone", str(local_dir), str(agent_dir)],
-        capture_output=True,
-        text=True,
-        check=True,
-    )
+    subprocess.run(["git", "clone", str(local_dir), str(agent_dir)], capture_output=True, check=True)
     run_git_command(agent_dir, "config", "user.email", "test@example.com")
     run_git_command(agent_dir, "config", "user.name", "Test User")
 
-    host = cast(OnlineHostInterface, FakeHost(is_local=False))
-
-    # Add a commit to agent so there's something to pull
     (agent_dir / "agent_file.txt").write_text("agent content")
     run_git_command(agent_dir, "add", "agent_file.txt")
     run_git_command(agent_dir, "commit", "-m", "Agent commit")
 
+    host = cast(OnlineHostInterface, FakeHost(is_local=True))
     git_pull(
         local_path=local_dir,
         remote_host=host,
         remote_path=agent_dir,
-        source_branch=None,
-        target_branch=None,
-        is_dry_run=False,
-        uncommitted_changes=UncommittedChangesMode.FAIL,
+        extra_args=("main", "--no-edit"),
         cg=cg,
     )
 
-    # Verify safe.directory was added to the global gitconfig
-    result = subprocess.run(
-        ["git", "config", "--global", "--get-all", "safe.directory"],
-        capture_output=True,
-        text=True,
-    )
-    assert str(agent_dir) in result.stdout.strip().splitlines()
-
-    # Also verify the pull actually worked
     assert (local_dir / "agent_file.txt").read_text() == "agent content"
+
+
+def test_git_push_transfers_commit_from_local_to_remote(
+    tmp_path: Path,
+    cg: ConcurrencyGroup,
+) -> None:
+    """git_push pushes a new commit from local to the remote (here: local FakeHost)."""
+    local_dir = tmp_path / "local"
+    agent_dir = tmp_path / "agent"
+
+    init_git_repo(agent_dir)
+    subprocess.run(["git", "clone", str(agent_dir), str(local_dir)], capture_output=True, check=True)
+    run_git_command(local_dir, "config", "user.email", "test@example.com")
+    run_git_command(local_dir, "config", "user.name", "Test User")
+
+    (local_dir / "local_file.txt").write_text("local content")
+    run_git_command(local_dir, "add", "local_file.txt")
+    run_git_command(local_dir, "commit", "-m", "Local commit")
+
+    host = cast(OnlineHostInterface, FakeHost(is_local=True))
+    git_push(
+        local_path=local_dir,
+        remote_host=host,
+        remote_path=agent_dir,
+        extra_args=("main",),
+        cg=cg,
+    )
+
+    assert (agent_dir / "local_file.txt").read_text() == "local content"

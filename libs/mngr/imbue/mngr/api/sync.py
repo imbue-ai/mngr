@@ -3,6 +3,7 @@ import shlex
 from abc import ABC
 from abc import abstractmethod
 from collections.abc import Iterator
+from collections.abc import Sequence
 from contextlib import contextmanager
 from contextlib import nullcontext
 from pathlib import Path
@@ -26,11 +27,7 @@ from imbue.mngr.interfaces.data_types import CommandResult
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import UncommittedChangesMode
 from imbue.mngr.utils.deps import RSYNC
-from imbue.mngr.utils.git_utils import GIT_MIRROR_PUSH_REFSPECS
-from imbue.mngr.utils.git_utils import count_commits_between
 from imbue.mngr.utils.git_utils import get_current_branch
-from imbue.mngr.utils.git_utils import get_head_commit
-from imbue.mngr.utils.git_utils import is_ancestor
 from imbue.mngr.utils.git_utils import is_git_repository
 from imbue.mngr.utils.rsync_utils import parse_rsync_output
 
@@ -54,25 +51,10 @@ class UncommittedChangesError(MngrError):
         super().__init__(f"Uncommitted changes in destination: {destination}")
 
 
-class NotAGitRepositoryError(MngrError):
-    """Raised when a git operation is attempted on a non-git directory."""
-
-    user_help_text = (
-        "Use ``mngr rsync`` to copy files without git, or ensure both source and destination are git repositories."
-    )
-
-    def __init__(self, path: Path) -> None:
-        self.path = path
-        super().__init__(f"Not a git repository: {path}")
-
-
 class GitSyncError(MngrError):
-    """Raised when a git sync operation fails."""
+    """Raised when a git push or pull subprocess fails."""
 
-    user_help_text = (
-        "Check that the repository is accessible and you have the necessary permissions. "
-        "You may need to resolve conflicts manually or use --uncommitted-changes=clobber."
-    )
+    user_help_text = "Check that the repository is accessible and you have the necessary permissions."
 
     def __init__(self, message: str) -> None:
         super().__init__(f"Git sync failed: {message}")
@@ -110,31 +92,6 @@ class RsyncResult(FrozenModel):
     is_dry_run: bool = Field(
         default=False,
         description="Whether this was a dry run",
-    )
-
-
-class GitSyncResult(FrozenModel):
-    """Result of a git push or git pull operation."""
-
-    source_branch: str = Field(
-        description="Branch that was synced from",
-    )
-    target_branch: str = Field(
-        description="Branch that was synced to",
-    )
-    source_path: Path = Field(
-        description="Source repository path",
-    )
-    destination_path: Path = Field(
-        description="Destination repository path",
-    )
-    is_dry_run: bool = Field(
-        default=False,
-        description="Whether this was a dry run",
-    )
-    commits_transferred: int = Field(
-        default=0,
-        description="Number of commits transferred",
     )
 
 
@@ -313,7 +270,7 @@ def handle_uncommitted_changes(
 
 
 @contextmanager
-def _stash_guard(
+def stash_guard(
     git_ctx: GitContextInterface,
     path: Path,
     uncommitted_changes: UncommittedChangesMode,
@@ -494,9 +451,7 @@ def _do_rsync(
     should_stash = uncommitted_changes != UncommittedChangesMode.CLOBBER and is_destination_git_repo
 
     stash_cm = (
-        _stash_guard(destination_git_ctx, destination_path, uncommitted_changes)
-        if should_stash
-        else nullcontext(False)
+        stash_guard(destination_git_ctx, destination_path, uncommitted_changes) if should_stash else nullcontext(False)
     )
 
     with stash_cm:
@@ -653,558 +608,98 @@ def rsync(
     )
 
 
-# === Git Sync Helpers ===
+# === Git Push/Pull ===
+#
+# These are thin wrappers around ``git push`` / ``git pull``. They handle three
+# things the user would otherwise do by hand: build the right git URL for the
+# remote (ssh:// with mngr-managed key/port/known_hosts, or a bare local path),
+# inject GIT_SSH_COMMAND so git uses mngr's SSH credentials, and configure the
+# destination side once so a push to a checked-out branch updates the working
+# tree instead of refusing. Everything else (refspecs, --force, --tags, branch
+# names) is left to the caller via ``extra_args``.
 
 
-def _get_head_commit_or_raise(path: Path, cg: ConcurrencyGroup) -> str:
-    """Get the current HEAD commit hash, raising on failure."""
-    commit = get_head_commit(path, cg)
-    if commit is None:
-        raise MngrError(f"Failed to get HEAD commit in {path}")
-    return commit
+def _build_git_url_and_env(
+    remote_host: OnlineHostInterface,
+    remote_path: Path,
+) -> tuple[str, dict[str, str] | None]:
+    """Build the git URL and environment to talk to ``remote_path`` on ``remote_host``.
 
-
-def _merge_fetch_head(local_path: Path, cg: ConcurrencyGroup) -> None:
-    """Merge FETCH_HEAD into the current branch, aborting on conflict."""
-    try:
-        cg.run_process_to_completion(
-            ["git", "merge", "FETCH_HEAD", "--no-edit"],
-            cwd=local_path,
-        )
-    except ProcessError as merge_error:
-        try:
-            cg.run_process_to_completion(
-                ["git", "rev-parse", "--verify", "MERGE_HEAD"],
-                cwd=local_path,
-            )
-            try:
-                cg.run_process_to_completion(
-                    ["git", "merge", "--abort"],
-                    cwd=local_path,
-                )
-            except ProcessError as abort_error:
-                logger.warning(
-                    "Failed to abort merge in {}: {}. Repository may be in a conflicted state.",
-                    local_path,
-                    abort_error.stderr.strip(),
-                )
-        except ProcessError:
-            pass
-        raise GitSyncError(merge_error.stderr) from merge_error
-
-
-# === Git Push Functions ===
-
-
-def _local_git_push_mirror(
-    local_path: Path,
-    destination_path: Path,
-    host: OnlineHostInterface,
-    source_branch: str,
-    is_dry_run: bool,
-    cg: ConcurrencyGroup,
-) -> int:
-    """Push via mirror fetch, overwriting all refs in the target.
-
-    Returns the number of commits transferred.
+    For local hosts the URL is the bare path (no SSH, no env). For remote hosts the
+    URL is ``ssh://user@host:port/<remote_path>/.git`` and the environment carries
+    ``GIT_SSH_COMMAND`` with the resolved key/port/known_hosts.
     """
-    target_git_dir = str(destination_path)
-    logger.debug("Performing mirror fetch to {}", target_git_dir)
-
-    pre_fetch_head = get_head_commit(destination_path, cg)
-
-    if is_dry_run:
-        if pre_fetch_head is not None:
-            return count_commits_between(local_path, pre_fetch_head, source_branch, cg)
-        return 0
-
-    try:
-        cg.run_process_to_completion(
-            [
-                "git",
-                "-C",
-                target_git_dir,
-                "fetch",
-                "--update-head-ok",
-                str(local_path),
-                "--force",
-                "refs/*:refs/*",
-            ],
-        )
-    except ProcessError as e:
-        raise GitSyncError(e.stderr) from e
-
-    reset_result = host.execute_idempotent_command(
-        f"git reset --hard refs/heads/{source_branch}",
-        cwd=destination_path,
-    )
-    if not reset_result.success:
-        raise GitSyncError(f"Failed to update working tree: {reset_result.stderr}")
-
-    post_fetch_head = get_head_commit(destination_path, cg)
-    if pre_fetch_head is not None and post_fetch_head is not None and pre_fetch_head != post_fetch_head:
-        return count_commits_between(destination_path, pre_fetch_head, post_fetch_head, cg)
-    return 0
+    if remote_host.is_local:
+        return str(remote_path), None
+    ssh_info = remote_host.get_ssh_connection_info()
+    assert ssh_info is not None, "Remote host must provide SSH connection info"
+    known_hosts_file = get_ssh_known_hosts_file(remote_host)
+    url = _build_ssh_git_url(ssh_info, remote_path)
+    env = {**os.environ, "GIT_SSH_COMMAND": _build_ssh_transport_args(ssh_info, known_hosts_file)}
+    return url, env
 
 
-def _local_git_push_branch(
-    local_path: Path,
-    destination_path: Path,
-    host: OnlineHostInterface,
-    source_branch: str,
-    target_branch: str,
-    is_dry_run: bool,
-    cg: ConcurrencyGroup,
-) -> int:
-    """Push a single branch via fetch+reset.
+def _configure_push_destination(remote_host: OnlineHostInterface, remote_path: Path) -> None:
+    """Configure the destination repo to accept a push to its checked-out branch.
 
-    Returns the number of commits transferred.
+    With ``receive.denyCurrentBranch=updateInstead`` git applies the push to the
+    working tree on a fast-forward and refuses otherwise (instead of the default
+    of always refusing). Idempotent; safe to call before every push.
     """
-    target_git_dir = str(destination_path)
-    logger.debug("Fetching branch {} into {}", source_branch, target_git_dir)
-
-    pre_fetch_head = get_head_commit(destination_path, cg)
-
-    if is_dry_run:
-        if pre_fetch_head is not None:
-            return count_commits_between(local_path, pre_fetch_head, source_branch, cg)
-        return 0
-
-    try:
-        cg.run_process_to_completion(
-            ["git", "-C", target_git_dir, "fetch", str(local_path), source_branch],
-        )
-    except ProcessError as e:
-        raise GitSyncError(e.stderr) from e
-
-    try:
-        hash_result = cg.run_process_to_completion(
-            ["git", "-C", target_git_dir, "rev-parse", "FETCH_HEAD"],
-        )
-    except ProcessError as e:
-        raise GitSyncError(f"Failed to resolve FETCH_HEAD: {e.stderr}") from e
-    fetched_commit = hash_result.stdout.strip()
-
-    if pre_fetch_head is not None and pre_fetch_head != fetched_commit:
-        is_fast_forward = is_ancestor(destination_path, pre_fetch_head, fetched_commit, cg)
-        if not is_fast_forward:
-            raise GitSyncError(
-                f"Cannot push: agent branch '{target_branch}' has diverged from "
-                f"local branch '{source_branch}'. Use --mirror to force-overwrite "
-                f"all refs, or pull agent changes first to reconcile."
-            )
-
-    reset_result = host.execute_idempotent_command(
-        f"git reset --hard {fetched_commit}",
-        cwd=destination_path,
-    )
-    if not reset_result.success:
-        raise GitSyncError(f"Failed to update working tree: {reset_result.stderr}")
-
-    commits_transferred = 0
-    if pre_fetch_head is not None and pre_fetch_head != fetched_commit:
-        commits_transferred = count_commits_between(destination_path, pre_fetch_head, fetched_commit, cg)
-
-    logger.debug(
-        "Git push complete: pushed {} commits from {} to {}",
-        commits_transferred,
-        source_branch,
-        target_branch,
-    )
-    return commits_transferred
-
-
-def _remote_git_push_mirror(
-    local_path: Path,
-    destination_path: Path,
-    host: OnlineHostInterface,
-    ssh_info: SshConnectionInfo,
-    source_branch: str,
-    is_dry_run: bool,
-    cg: ConcurrencyGroup,
-) -> int:
-    """Push all branches and tags over SSH, overwriting all refs in the target.
-
-    Uses explicit refspecs instead of --mirror to avoid pushing remote-tracking
-    refs (refs/remotes/*), which cause "inconsistent aliased update" errors on
-    git 2.45+ due to symbolic refs like refs/remotes/origin/HEAD.
-
-    Returns the number of commits transferred.
-    """
-    git_url = _build_ssh_git_url(ssh_info, destination_path)
-    known_hosts_file = get_ssh_known_hosts_file(host)
-    git_ssh_cmd = _build_ssh_transport_args(ssh_info, known_hosts_file)
-    env = {**os.environ, "GIT_SSH_COMMAND": git_ssh_cmd, "GIT_LFS_SKIP_PUSH": "1"}
-
-    logger.debug("Performing mirror push to {}", git_url)
-
-    pre_push_head_result = host.execute_idempotent_command("git rev-parse HEAD", cwd=destination_path)
-    pre_push_head = pre_push_head_result.stdout.strip() if pre_push_head_result.success else None
-
-    if is_dry_run:
-        if pre_push_head is not None:
-            return count_commits_between(local_path, pre_push_head, source_branch, cg)
-        return 0
-
-    for config_cmd in [
+    result = remote_host.execute_idempotent_command(
         "git config receive.denyCurrentBranch updateInstead",
-        "git config receive.denyDeleteCurrent ignore",
-        "git checkout --detach HEAD",
-    ]:
-        config_result = host.execute_idempotent_command(config_cmd, cwd=destination_path)
-        if not config_result.success:
-            raise GitSyncError(f"Failed to configure remote for mirror push: {config_result.stderr}")
-
-    try:
-        cg.run_process_to_completion(
-            [
-                "git",
-                "-C",
-                str(local_path),
-                "push",
-                "--no-verify",
-                "--force",
-                "--prune",
-                git_url,
-                *GIT_MIRROR_PUSH_REFSPECS,
-            ],
-            env=env,
-        )
-    except ProcessError as e:
-        raise GitSyncError(e.stderr) from e
-
-    reset_result = host.execute_idempotent_command(
-        f"git reset --hard refs/heads/{source_branch}",
-        cwd=destination_path,
+        cwd=remote_path,
     )
-    if not reset_result.success:
-        raise GitSyncError(f"Failed to update working tree: {reset_result.stderr}")
-
-    post_push_head_result = host.execute_idempotent_command("git rev-parse HEAD", cwd=destination_path)
-    post_push_head = post_push_head_result.stdout.strip() if post_push_head_result.success else None
-
-    if pre_push_head is not None and post_push_head is not None and pre_push_head != post_push_head:
-        return count_commits_between(local_path, pre_push_head, post_push_head, cg)
-    return 0
-
-
-def _remote_git_push_branch(
-    local_path: Path,
-    destination_path: Path,
-    host: OnlineHostInterface,
-    ssh_info: SshConnectionInfo,
-    source_branch: str,
-    target_branch: str,
-    is_dry_run: bool,
-    cg: ConcurrencyGroup,
-) -> int:
-    """Push a single branch to a remote host via git push over SSH.
-
-    Returns the number of commits transferred.
-    """
-    git_url = _build_ssh_git_url(ssh_info, destination_path)
-    known_hosts_file = get_ssh_known_hosts_file(host)
-    git_ssh_cmd = _build_ssh_transport_args(ssh_info, known_hosts_file)
-    env = {**os.environ, "GIT_SSH_COMMAND": git_ssh_cmd, "GIT_LFS_SKIP_PUSH": "1"}
-
-    logger.debug("Pushing branch {} to {} via SSH", source_branch, git_url)
-
-    pre_push_head_result = host.execute_idempotent_command("git rev-parse HEAD", cwd=destination_path)
-    pre_push_head = pre_push_head_result.stdout.strip() if pre_push_head_result.success else None
-
-    if is_dry_run:
-        if pre_push_head is not None:
-            return count_commits_between(local_path, pre_push_head, source_branch, cg)
-        return 0
-
-    config_result = host.execute_idempotent_command(
-        "git config receive.denyCurrentBranch updateInstead",
-        cwd=destination_path,
-    )
-    if not config_result.success:
-        raise GitSyncError(f"Failed to configure remote: {config_result.stderr}")
-
-    if pre_push_head is not None:
-        is_fast_forward = is_ancestor(local_path, pre_push_head, source_branch, cg)
-        if not is_fast_forward:
-            raise GitSyncError(
-                f"Cannot push: agent branch '{target_branch}' has diverged from "
-                f"local branch '{source_branch}'. Use --mirror to force-overwrite "
-                f"all refs, or pull agent changes first to reconcile."
-            )
-
-    try:
-        cg.run_process_to_completion(
-            ["git", "-C", str(local_path), "push", git_url, f"{source_branch}:{target_branch}"],
-            env=env,
-        )
-    except ProcessError as e:
-        raise GitSyncError(e.stderr) from e
-
-    post_push_head_result = host.execute_idempotent_command("git rev-parse HEAD", cwd=destination_path)
-    post_push_head = post_push_head_result.stdout.strip() if post_push_head_result.success else None
-
-    commits_transferred = 0
-    if pre_push_head is not None and post_push_head is not None and pre_push_head != post_push_head:
-        commits_transferred = count_commits_between(local_path, pre_push_head, post_push_head, cg)
-
-    logger.debug(
-        "Git push complete: pushed {} commits from {} to {}",
-        commits_transferred,
-        source_branch,
-        target_branch,
-    )
-    return commits_transferred
-
-
-# === Git Pull Functions ===
-
-
-def _fetch_and_merge(
-    local_path: Path,
-    source_path: Path,
-    source_branch: str,
-    target_branch: str,
-    original_branch: str,
-    is_dry_run: bool,
-    cg: ConcurrencyGroup,
-    ssh_info: SshConnectionInfo | None,
-    known_hosts_file: Path | None,
-) -> int:
-    """Fetch from source repo and merge into target branch.
-
-    Handles checkout to target_branch if different from original_branch, and
-    restores original_branch on both success and failure. Returns the number
-    of commits transferred.
-    """
-    if ssh_info is not None:
-        git_url = _build_ssh_git_url(ssh_info, source_path)
-        git_ssh_cmd = _build_ssh_transport_args(ssh_info, known_hosts_file)
-        fetch_env = {**os.environ, "GIT_SSH_COMMAND": git_ssh_cmd}
-        logger.debug("Fetching from remote repository via SSH: {}", git_url)
-        try:
-            cg.run_process_to_completion(
-                ["git", "fetch", git_url, source_branch],
-                cwd=local_path,
-                env=fetch_env,
-            )
-        except ProcessError as e:
-            raise MngrError(f"Failed to fetch from remote: {e.stderr}") from e
-    else:
-        logger.debug("Fetching from repository: {}", source_path)
-        try:
-            cg.run_process_to_completion(
-                ["git", "fetch", str(source_path), source_branch],
-                cwd=local_path,
-            )
-        except ProcessError as e:
-            raise MngrError(f"Failed to fetch from remote: {e.stderr}") from e
-
-    did_checkout = original_branch != target_branch
-    if did_checkout:
-        logger.debug("Checking out target branch: {}", target_branch)
-        try:
-            cg.run_process_to_completion(
-                ["git", "checkout", target_branch],
-                cwd=local_path,
-            )
-        except ProcessError as e:
-            raise MngrError(f"Failed to checkout target branch: {e.stderr}") from e
-
-    pre_merge_head = _get_head_commit_or_raise(local_path, cg)
-    commits_to_merge = count_commits_between(local_path, "HEAD", "FETCH_HEAD", cg)
-
-    try:
-        if is_dry_run:
-            logger.debug(
-                "Dry run: would merge {} commits from {} into {}",
-                commits_to_merge,
-                source_branch,
-                target_branch,
-            )
-            commits_transferred = commits_to_merge
-        else:
-            _merge_fetch_head(local_path, cg)
-            post_merge_head = _get_head_commit_or_raise(local_path, cg)
-            commits_transferred = (
-                count_commits_between(local_path, pre_merge_head, post_merge_head, cg)
-                if pre_merge_head != post_merge_head
-                else 0
-            )
-            logger.debug(
-                "Git pull complete: merged {} commits from {} into {}",
-                commits_transferred,
-                source_branch,
-                target_branch,
-            )
-    except MngrError:
-        if did_checkout:
-            try:
-                cg.run_process_to_completion(
-                    ["git", "checkout", original_branch],
-                    cwd=local_path,
-                )
-            except ProcessError as checkout_error:
-                logger.warning(
-                    "Failed to restore branch {} after git pull failure: {}",
-                    original_branch,
-                    checkout_error.stderr.strip(),
-                )
-        raise
-
-    if did_checkout:
-        try:
-            cg.run_process_to_completion(
-                ["git", "checkout", original_branch],
-                cwd=local_path,
-            )
-        except ProcessError as e:
-            raise MngrError(f"Failed to checkout original branch {original_branch}: {e.stderr}") from e
-
-    return commits_transferred
-
-
-# === Top-Level Git Push/Pull ===
+    if not result.success:
+        raise GitSyncError(f"Failed to configure destination: {result.stderr}")
 
 
 def git_push(
     local_path: Path,
     remote_host: OnlineHostInterface,
     remote_path: Path,
-    source_branch: str | None,
-    target_branch: str | None,
-    is_dry_run: bool,
-    uncommitted_changes: UncommittedChangesMode,
-    is_mirror: bool,
+    extra_args: Sequence[str],
     cg: ConcurrencyGroup,
-) -> GitSyncResult:
-    """Push git commits from a local repository to a remote repository."""
-    local_git_ctx = LocalGitContext(cg=cg)
-    remote_git_ctx = RemoteGitContext(host=remote_host)
+) -> None:
+    """Run ``git push`` from ``local_path`` to ``remote_path`` on ``remote_host``.
 
-    logger.debug("Pushing git from {} to {} on host", local_path, remote_path)
+    ``extra_args`` is appended verbatim to the underlying ``git push`` command
+    after the constructed URL, so the caller can pass refspecs, ``--force``,
+    ``--tags``, ``--dry-run``, etc.
 
+    Raises :class:`GitSyncError` on any failure of the underlying git command.
+    """
     add_safe_directory_on_remote(remote_host, remote_path)
-
-    if not local_git_ctx.is_git_repository(local_path):
-        raise NotAGitRepositoryError(local_path)
-
-    if not remote_git_ctx.is_git_repository(remote_path):
-        raise NotAGitRepositoryError(remote_path)
-
-    actual_source_branch = source_branch if source_branch is not None else local_git_ctx.get_current_branch(local_path)
-    actual_target_branch = (
-        target_branch if target_branch is not None else remote_git_ctx.get_current_branch(remote_path)
-    )
-
-    with _stash_guard(remote_git_ctx, remote_path, uncommitted_changes):
-        if remote_host.is_local:
-            if is_mirror:
-                commits_transferred = _local_git_push_mirror(
-                    local_path,
-                    remote_path,
-                    remote_host,
-                    actual_source_branch,
-                    is_dry_run,
-                    cg,
-                )
-            else:
-                commits_transferred = _local_git_push_branch(
-                    local_path,
-                    remote_path,
-                    remote_host,
-                    actual_source_branch,
-                    actual_target_branch,
-                    is_dry_run,
-                    cg,
-                )
-        else:
-            ssh_info = remote_host.get_ssh_connection_info()
-            assert ssh_info is not None, "Remote host must provide SSH connection info"
-            if is_mirror:
-                commits_transferred = _remote_git_push_mirror(
-                    local_path,
-                    remote_path,
-                    remote_host,
-                    ssh_info,
-                    actual_source_branch,
-                    is_dry_run,
-                    cg,
-                )
-            else:
-                commits_transferred = _remote_git_push_branch(
-                    local_path,
-                    remote_path,
-                    remote_host,
-                    ssh_info,
-                    actual_source_branch,
-                    actual_target_branch,
-                    is_dry_run,
-                    cg,
-                )
-
-    return GitSyncResult(
-        source_branch=actual_source_branch,
-        target_branch=actual_target_branch,
-        source_path=local_path,
-        destination_path=remote_path,
-        is_dry_run=is_dry_run,
-        commits_transferred=commits_transferred,
-    )
+    _configure_push_destination(remote_host, remote_path)
+    url, env = _build_git_url_and_env(remote_host, remote_path)
+    cmd = ["git", "-C", str(local_path), "push", url, *extra_args]
+    logger.debug("Running git push: {}", shlex.join(cmd))
+    try:
+        cg.run_process_to_completion(cmd, env=env)
+    except ProcessError as e:
+        raise GitSyncError(e.stderr) from e
 
 
 def git_pull(
     local_path: Path,
     remote_host: OnlineHostInterface,
     remote_path: Path,
-    source_branch: str | None,
-    target_branch: str | None,
-    is_dry_run: bool,
-    uncommitted_changes: UncommittedChangesMode,
+    extra_args: Sequence[str],
     cg: ConcurrencyGroup,
-) -> GitSyncResult:
-    """Pull git commits from a remote repository into a local repository."""
-    local_git_ctx = LocalGitContext(cg=cg)
-    remote_git_ctx = RemoteGitContext(host=remote_host)
+) -> None:
+    """Run ``git pull`` into ``local_path`` from ``remote_path`` on ``remote_host``.
 
-    logger.debug("Pulling git from {} on host to {}", remote_path, local_path)
+    ``extra_args`` is appended verbatim to the underlying ``git pull`` command
+    after the constructed URL, so the caller can pass a branch name,
+    ``--rebase``, ``--ff-only``, ``--no-edit``, etc.
 
+    Raises :class:`GitSyncError` on any failure of the underlying git command.
+    """
     add_safe_directory_on_remote(remote_host, remote_path)
-
-    if not local_git_ctx.is_git_repository(local_path):
-        raise NotAGitRepositoryError(local_path)
-
-    if not remote_git_ctx.is_git_repository(remote_path):
-        raise NotAGitRepositoryError(remote_path)
-
-    actual_source_branch = (
-        source_branch if source_branch is not None else remote_git_ctx.get_current_branch(remote_path)
-    )
-    actual_target_branch = target_branch if target_branch is not None else local_git_ctx.get_current_branch(local_path)
-
-    original_branch = get_current_branch(local_path, cg)
-
-    ssh_info = remote_host.get_ssh_connection_info() if not remote_host.is_local else None
-    known_hosts_file = get_ssh_known_hosts_file(remote_host) if not remote_host.is_local else None
-
-    with _stash_guard(local_git_ctx, local_path, uncommitted_changes):
-        commits_transferred = _fetch_and_merge(
-            local_path=local_path,
-            source_path=remote_path,
-            source_branch=actual_source_branch,
-            target_branch=actual_target_branch,
-            original_branch=original_branch,
-            is_dry_run=is_dry_run,
-            cg=cg,
-            ssh_info=ssh_info,
-            known_hosts_file=known_hosts_file,
-        )
-
-    return GitSyncResult(
-        source_branch=actual_source_branch,
-        target_branch=actual_target_branch,
-        source_path=remote_path,
-        destination_path=local_path,
-        is_dry_run=is_dry_run,
-        commits_transferred=commits_transferred,
-    )
+    url, env = _build_git_url_and_env(remote_host, remote_path)
+    cmd = ["git", "-C", str(local_path), "pull", url, *extra_args]
+    logger.debug("Running git pull: {}", shlex.join(cmd))
+    try:
+        cg.run_process_to_completion(cmd, env=env)
+    except ProcessError as e:
+        raise GitSyncError(e.stderr) from e
