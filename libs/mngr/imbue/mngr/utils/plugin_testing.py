@@ -188,9 +188,15 @@ def tmp_home_dir(tmp_path: Path) -> Generator[Path, None, None]:
 
 @pytest.fixture
 def temp_profile_dir(temp_host_dir: Path) -> Path:
-    """Create a temporary profile directory."""
+    """Create a temporary profile directory.
+
+    Seeds the pytest opt-in (is_allowed_in_pytest defaults to False) so tests
+    that point config.toml at this profile and run mngr through load_config pass
+    the guard; most users build a MngrContext directly and never load this file.
+    """
     profile_dir = temp_host_dir / PROFILES_DIRNAME / uuid4().hex
     profile_dir.mkdir(parents=True, exist_ok=True)
+    (profile_dir / "settings.toml").write_text("is_allowed_in_pytest = true\n")
     return profile_dir
 
 

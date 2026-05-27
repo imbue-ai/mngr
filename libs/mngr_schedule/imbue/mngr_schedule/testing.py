@@ -89,10 +89,11 @@ def build_subprocess_env() -> dict[str, str]:
     MODAL_TOKEN_ID/MODAL_TOKEN_SECRET so HOME can remain isolated.
 
     Keeps the autouse-set MNGR_HOST_DIR / MNGR_ROOT_NAME so the subprocess
-    mngr operates on an isolated tmp profile and does not load the repo's
-    .mngr/settings.toml (which would trip the is_allowed_in_pytest=false
-    guard). The Modal SSH key will be auto-generated on first use inside
-    the tmp profile.
+    mngr operates on the isolated tmp profile that the autouse fixture seeded
+    with is_allowed_in_pytest = true. That opt-in lets the subprocess load its
+    config during a pytest run (the field defaults to False); the isolated
+    profile also means it never picks up the repo's real .mngr/settings.toml.
+    The Modal SSH key will be auto-generated on first use inside the tmp profile.
 
     Deliberately does NOT strip PYTEST_CURRENT_TEST: the Modal backend's
     TEST_ENV_PATTERN guard and the config is_allowed_in_pytest check rely

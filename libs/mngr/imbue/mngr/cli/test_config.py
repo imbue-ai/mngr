@@ -60,9 +60,12 @@ def test_config_list_with_scope_shows_file_path(
     root_config_path = temp_host_dir / "config.toml"
     root_config_path.write_text(f'profile = "{profile_id}"\n')
 
-    # Create the settings.toml in the profile directory
+    # Create the settings.toml in the profile directory. is_allowed_in_pytest
+    # opts this config into the pytest run (it defaults to False); this test
+    # repoints config.toml at a fresh profile, so it doesn't inherit the opt-in
+    # that the autouse fixture seeded into the default profile.
     user_config_path = profile_dir / "settings.toml"
-    user_config_path.write_text('prefix = "custom-"\n')
+    user_config_path.write_text('prefix = "custom-"\nis_allowed_in_pytest = true\n')
 
     result = cli_runner.invoke(
         config,

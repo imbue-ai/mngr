@@ -279,6 +279,10 @@ def temp_profile_dir(temp_host_dir: Path) -> Path:
     """
     profile_dir = temp_host_dir / PROFILES_DIRNAME / uuid4().hex
     profile_dir.mkdir(parents=True, exist_ok=True)
+    # Seed the pytest opt-in (is_allowed_in_pytest defaults to False). Most users
+    # build a MngrContext directly so this file is never loaded, but tests that
+    # point config.toml at this profile and run mngr through load_config need it.
+    (profile_dir / "settings.toml").write_text("is_allowed_in_pytest = true\n")
     return profile_dir
 
 

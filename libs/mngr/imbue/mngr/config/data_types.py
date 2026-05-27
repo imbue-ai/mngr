@@ -539,12 +539,12 @@ class MngrConfig(FrozenModel):
         "when an unexpected error occurs while running interactively",
     )
     is_allowed_in_pytest: bool = Field(
-        default=True,
+        default=False,
         description=(
-            "Set this to False to prevent loading this config in pytest runs. "
-            "Tests that intentionally need to load a config with this set to False "
-            "(e.g. end-to-end tests of real mngr subprocesses) must set "
-            "MNGR_ALLOW_PYTEST=1 in the subprocess env as an explicit opt-in."
+            "Whether this config may be loaded during a pytest run. Defaults to False so that "
+            "real configs (the developer's ~/.mngr or the repo's .mngr/settings.toml) cannot be "
+            "picked up by a poorly-scoped test and used to perform real operations. Configs that "
+            "are written specifically for tests must set this to True to opt in."
         ),
     )
     default_destroyed_host_persisted_seconds: float = Field(

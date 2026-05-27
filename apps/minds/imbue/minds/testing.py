@@ -95,10 +95,11 @@ def clean_env() -> dict[str, str]:
     Returns a copy of os.environ. Relies on the shared plugin test fixtures
     (registered in apps/minds/conftest.py via register_plugin_test_fixtures)
     having set MNGR_HOST_DIR / MNGR_PREFIX / MNGR_ROOT_NAME to per-test
-    tmp values, so the subprocess inherits proper isolation. With
-    MNGR_ROOT_NAME set to `mngr-test-<id>`, the subprocess does not load
-    the repo's .mngr/settings.toml, so the is_allowed_in_pytest=false
-    guard there does not fire and no explicit opt-in is needed.
+    tmp values, so the subprocess inherits proper isolation. The inherited
+    MNGR_HOST_DIR points at the autouse-seeded tmp profile whose user config
+    sets is_allowed_in_pytest = true, which lets the subprocess load its config
+    during a pytest run (the field defaults to False). MNGR_ROOT_NAME being
+    `mngr-test-<id>` also keeps it from picking up the repo's .mngr/settings.toml.
 
     Asserts that the expected isolation is in place so a future test that
     forgets to register the shared fixtures gets a loud failure instead of
