@@ -13,9 +13,7 @@ from imbue.mngr.utils.testing import get_short_random_string
 pytestmark = [pytest.mark.docker, pytest.mark.acceptance, pytest.mark.rsync]
 
 
-def _find_host_container(
-    client: docker.DockerClient, prefix: str
-) -> docker.models.containers.Container:
+def _find_host_container(client: docker.DockerClient, prefix: str) -> docker.models.containers.Container:
     """Find the single mngr host container created by a subprocess test.
 
     Host containers carry a ``LABEL_HOST_ID`` label and a name starting with
@@ -327,6 +325,7 @@ def test_mngr_create_stop_start_destroy_lifecycle(
     )
 
 
+@pytest.mark.docker_sdk
 @pytest.mark.timeout(900)
 def test_stop_host_recovers_container_with_dead_sshd(
     temp_source_dir: Path,

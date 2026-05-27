@@ -82,9 +82,7 @@ def _stop_hosts_for_addresses(
     Returns the list of agent identifiers whose host was stopped (or was
     already stopped).
     """
-    resolved_by_identifier = resolve_hosts_for_identifiers(
-        mngr_ctx, [str(addr.agent) for addr in agent_addresses]
-    )
+    resolved_by_identifier = resolve_hosts_for_identifiers(mngr_ctx, [str(addr.agent) for addr in agent_addresses])
 
     # Apply any explicit @HOST[.PROVIDER] qualifier from the address as a
     # constraint on the resolved host, mirroring the non-stop-host path.

@@ -830,8 +830,7 @@ def resolve_hosts_for_identifiers(
     events_path = get_discovery_events_path(mngr_ctx.config)
     if not events_path.exists():
         raise AgentNotFoundError(
-            f"Could not resolve a host for: {', '.join(identifiers)} "
-            "(no discovery event stream available)"
+            f"Could not resolve a host for: {', '.join(identifiers)} (no discovery event stream available)"
         )
 
     try:
@@ -891,9 +890,7 @@ def resolve_hosts_for_identifiers(
                 "(the discovery event stream is stale or the host no longer exists)"
             )
         if len(candidate_hosts) > 1:
-            host_descriptions = ", ".join(
-                f"{h.host_name}.{h.provider_name}" for h in candidate_hosts.values()
-            )
+            host_descriptions = ", ".join(f"{h.host_name}.{h.provider_name}" for h in candidate_hosts.values())
             raise AgentNotFoundError(
                 f"Agent identifier '{identifier}' matches agents on multiple hosts ({host_descriptions}); "
                 "disambiguate using NAME@HOST.PROVIDER"
