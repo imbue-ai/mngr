@@ -439,19 +439,19 @@ def apply_settings_to_config(
     # The settings-narrowing guard runs while the settings files and env vars are
     # loaded, before --setting is applied, so its opt-in flag would be silently
     # ineffective there. A non-None value here means the user tried to set it via
-    # --setting -- reject it with a pointer to where it actually works, rather
+    # --setting, so reject it with a pointer to where it actually works rather
     # than accepting it as a no-op.
     if settings_config.allow_settings_key_assignment_narrowing is not None:
         raise UserInputError(
             "`allow_settings_key_assignment_narrowing` cannot be set with --setting. It "
             "controls the settings-narrowing guard, which runs while the settings files and "
-            "env vars are loaded -- before --setting is applied. Set "
+            "env vars are loaded (before --setting is applied). Set "
             "`allow_settings_key_assignment_narrowing = true` in a settings.toml, or set "
             "MNGR__ALLOW_SETTINGS_KEY_ASSIGNMENT_NARROWING=true."
         )
     # Apply the same narrowing guard used by the config-file merge path so
     # ``--setting`` cannot silently drop entries from the merged config either.
-    # Honor the existing setting on ``config`` -- ``--setting`` runs after
+    # Honor the existing setting on ``config``, since ``--setting`` runs after
     # config-file loading, so the resolved value is already known here.
     if not config.allow_settings_key_assignment_narrowing:
         violations = detect_settings_narrowing(config, settings_config)

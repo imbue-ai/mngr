@@ -151,12 +151,12 @@ def load_config(
 
     Note: the narrowing guard below runs over layers 2-5 (the config files and
     env vars) only. It does NOT see the layer-6 ``--setting`` overrides, which
-    are merged afterwards in ``setup_command_context`` -- ``--setting`` cannot
+    are merged afterwards in ``setup_command_context``. ``--setting`` cannot
     fully resolve until this function has produced the config it extends against
     (``__extend`` keys resolve against the loaded config), so it deliberately
     runs after. Consequently ``allow_settings_key_assignment_narrowing`` can only
     be opted into via a settings file or the ``MNGR__*`` env var, not via
-    ``--setting`` -- see the error message and changelog.
+    ``--setting`` (see the error message and changelog).
 
     MNGR_ROOT_NAME is read before config-file resolution to derive:
     1. Config file paths (where to look for settings files)
