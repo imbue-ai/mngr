@@ -39,11 +39,9 @@ from imbue.mngr.config.key_resolver import parse_scalar_value
 from imbue.mngr.config.key_resolver import resolve_extends
 from imbue.mngr.config.key_resolver import set_at_path
 from imbue.mngr.config.plugin_registry import get_plugin_config_class
-from imbue.mngr.config.pre_readers import enforce_pytest_config_opt_in
-from imbue.mngr.config.pre_readers import get_user_config_path
-from imbue.mngr.config.pre_readers import load_local_config
-from imbue.mngr.config.pre_readers import load_project_config
+from imbue.mngr.config.pre_readers import read_config_layers
 from imbue.mngr.config.pre_readers import read_disabled_plugins
+from imbue.mngr.config.pre_readers import resolve_project_config_dir
 from imbue.mngr.config.pre_readers import try_load_toml
 from imbue.mngr.config.provider_config_registry import get_provider_config_class
 from imbue.mngr.config.provider_config_registry import list_registered_provider_backend_names
@@ -88,7 +86,6 @@ _PRESERVED_ALIASES: Final[dict[str, tuple[str, Callable[[str], Any]]]] = {
 def load_config(
     pm: pluggy.PluginManager,
     concurrency_group: ConcurrencyGroup,
-    context_dir: Path | None = None,
     enabled_plugins: Sequence[str] | None = None,
     disabled_plugins: Sequence[str] | None = None,
     is_interactive: bool = False,
@@ -100,8 +97,8 @@ def load_config(
     Precedence (lowest to highest):
     1. Built-in MngrConfig defaults
     2. User config (~/.{root_name}/profiles/<profile_id>/settings.toml)
-    3. Project config (.{root_name}/settings.toml at context_dir, git root, or MNGR_PROJECT_CONFIG_DIR)
-    4. Local config (.{root_name}/settings.local.toml at context_dir, git root, or MNGR_PROJECT_CONFIG_DIR)
+    3. Project config (.{root_name}/settings.toml at the git root or MNGR_PROJECT_CONFIG_DIR)
+    4. Local config (.{root_name}/settings.local.toml at the git root or MNGR_PROJECT_CONFIG_DIR)
     5. MNGR__* env vars (each ``__``-separated segment after ``MNGR__`` maps to a dotted config
        key; values are JSON-parsed with raw-string fallback) plus the preserved aliases
        ``MNGR_PREFIX``, ``MNGR_HOST_DIR``, and ``MNGR_HEADLESS`` (synthesised into the same form
@@ -132,15 +129,7 @@ def load_config(
     profile_dir = get_or_create_profile_dir(base_dir)
 
     # Pre-compute disabled plugins so _parse_providers can skip them.
-    # This uses the same lightweight pre-reader that create_plugin_manager() uses.
-    # Pass context_dir so the disabled-plugin set is read from the same config
-    # tree as the rest of this load (not cwd), keeping the two consistent.
-    #
-    # This call goes through _resolve_config_files, which enforces the pytest
-    # config guard on the files it reads. The merge below re-enforces it on the
-    # layers it reads itself (see enforce_pytest_config_opt_in there), so the
-    # guard does not depend on this call alone.
-    config_disabled_plugins = read_disabled_plugins(context_dir)
+    config_disabled_plugins = read_disabled_plugins()
 
     # Start with base config that has defaults based on root_name
     # Use model_construct with None to allow merging to work properly
@@ -157,21 +146,13 @@ def load_config(
     if strict is None:
         strict = resolve_strict_from_env()
 
-    # Load the config files in precedence order (user, project, local). The
-    # read_disabled_plugins(context_dir) call above already enforced the pytest
-    # guard on these same files, but enforce it again here on the layers this
-    # function reads itself, so load_config's protection is self-contained and
-    # does not depend on that earlier call's side effect.
-    loaded_layers: list[tuple[str, dict[str, Any]]] = [
-        (source_label, raw)
-        for raw, source_label in (
-            (try_load_toml(get_user_config_path(profile_dir)), "user settings"),
-            (load_project_config(context_dir, root_name, concurrency_group), "project settings"),
-            (load_local_config(context_dir, root_name, concurrency_group), "project local settings"),
-        )
-        if raw is not None
-    ]
-    enforce_pytest_config_opt_in(loaded_layers)
+    # Read the user/project/local config layers (in precedence order). This goes
+    # through read_config_layers -- the single chokepoint that applies the pytest
+    # config guard -- so a real (non-test) config can never be loaded here during
+    # a test run. The project root is resolved from the cwd's git worktree root
+    # (or MNGR_PROJECT_CONFIG_DIR).
+    project_config_dir = resolve_project_config_dir(None, root_name, concurrency_group)
+    loaded_layers = read_config_layers(profile_dir, project_config_dir)
 
     # Merge the layers. Narrowing violations -- a higher-precedence layer
     # assigning over a non-empty aggregate value from a lower-precedence layer --
@@ -273,7 +254,7 @@ def load_config(
     # Resolve project root for use as cwd in pre-command scripts.
     # Note: MNGR_PROJECT_CONFIG_DIR is NOT used here because it points to the config
     # directory (containing settings.toml), not the project root.
-    project_root = context_dir or find_git_worktree_root(start=None, cg=concurrency_group)
+    project_root = find_git_worktree_root(start=None, cg=concurrency_group)
 
     # Return MngrContext containing both config and plugin manager
     return MngrContext(

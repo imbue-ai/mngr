@@ -279,9 +279,7 @@ def create_plugin_manager() -> pluggy.PluginManager:
     # MNGR_LOAD_ALL_PLUGINS overrides this so that tooling (e.g. doc generation)
     # can produce output that reflects all providers regardless of local config.
     if not parse_bool_env(os.environ.get("MNGR_LOAD_ALL_PLUGINS", "")):
-        # None: resolve the project config from cwd. This runs at plugin-manager
-        # creation, before any command has resolved a context dir.
-        block_disabled_plugins(pm, read_disabled_plugins(None))
+        block_disabled_plugins(pm, read_disabled_plugins())
 
     # Automatically discover and load plugins registered via setuptools entry points.
     # External packages can register hooks by adding an entry point for the "mngr" group.

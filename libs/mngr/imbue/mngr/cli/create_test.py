@@ -77,8 +77,8 @@ def _write_agent_type_command_to_settings(settings_path: Path, type_name: str, c
     """
     settings_doc = load_config_file_tomlkit(settings_path)
     assert len(settings_doc) == 0, (
-        f"{settings_path} unexpectedly already has content {dict(settings_doc)!r}. This helper is "
-        "only meant for a freshly-created test profile; it asserts rather than silently overwriting."
+        f"{settings_path} unexpectedly already has content {dict(settings_doc)!r}. This helper "
+        "writes a fresh profile's settings.toml from scratch; pass a freshly-created profile."
     )
     settings_doc["is_allowed_in_pytest"] = True
     type_table = tomlkit.table()

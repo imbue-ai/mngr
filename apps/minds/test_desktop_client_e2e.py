@@ -454,6 +454,32 @@ def _destroy_agent_best_effort(workspace_name: str) -> None:
 #   *this* pytest process. mngr's docker SDK calls happen in the spawned
 #   subprocess and never reach our SDK wrapper, so the mark fires the
 #   same "marked but never invoked" check.
+@contextmanager
+def _fct_settings_opted_into_pytest(fct_path: Path) -> Iterator[None]:
+    """Temporarily opt FCT's ``.mngr/settings.toml`` into the pytest config guard.
+
+    The Electron-spawned ``mngr create`` loads FCT's ``.mngr/settings.toml`` (the
+    test pins ``MNGR_ROOT_NAME=mngr`` to get the main/docker create templates).
+    mngr's pytest guard requires every config it loads during a test run to set
+    ``is_allowed_in_pytest = true``. We add it to this checkout only -- not to
+    FCT's shipped config, which would disable the guard for every FCT-based
+    project -- and restore the original on exit so an operator-managed
+    ``.external_worktrees/forever-claude-template/`` checkout is not left dirty.
+    """
+    settings_path = fct_path / ".mngr" / "settings.toml"
+    original = settings_path.read_text() if settings_path.exists() else None
+    if original is None or "is_allowed_in_pytest" not in original:
+        settings_path.parent.mkdir(parents=True, exist_ok=True)
+        settings_path.write_text("is_allowed_in_pytest = true\n" + (original or ""))
+    try:
+        yield
+    finally:
+        if original is None:
+            settings_path.unlink(missing_ok=True)
+        else:
+            settings_path.write_text(original)
+
+
 @pytest.mark.acceptance
 @pytest.mark.docker
 @pytest.mark.rsync
@@ -473,76 +499,53 @@ def test_create_local_docker_workspace_via_electron(
     _resolve_minds_env(monkeypatch)
 
     fct_path = _resolve_fct_path(tmp_path)
-
-    # The Electron-spawned `mngr create` loads FCT's .mngr/settings.toml (we pin
-    # MNGR_ROOT_NAME=mngr above for exactly that, to get the main/docker create
-    # templates). mngr's pytest config guard requires every config it loads during
-    # a test run to set is_allowed_in_pytest = true. We deliberately do NOT ship
-    # that opt-in in FCT's real config -- doing so would disable the guard for
-    # every FCT-based project -- so we add it to *this* checkout only, for the
-    # duration of the test, and restore it in the finally below (an
-    # operator-managed .external_worktrees/forever-claude-template/ checkout must
-    # not be left dirty). Done inline here, not in a shared helper, so the opt-in
-    # stays scoped to this single test.
-    fct_settings_path = fct_path / ".mngr" / "settings.toml"
-    original_fct_settings = fct_settings_path.read_text() if fct_settings_path.exists() else None
-    if original_fct_settings is None or "is_allowed_in_pytest" not in original_fct_settings:
-        fct_settings_path.parent.mkdir(parents=True, exist_ok=True)
-        fct_settings_path.write_text("is_allowed_in_pytest = true\n" + (original_fct_settings or ""))
-
     workspace_name = f"forever-{get_short_random_string()}"
     debug_port = _find_free_port()
     logger.info("Workspace name: {}; CDP debug port: {}", workspace_name, debug_port)
 
-    try:
-        with _launched_electron(fct_path, workspace_name, debug_port):
-            _wait_for_cdp(debug_port, _CDP_READY_TIMEOUT_SECONDS)
-            with sync_playwright() as playwright:
-                browser = playwright.chromium.connect_over_cdp(f"http://127.0.0.1:{debug_port}")
-                try:
-                    page = _pick_content_page(browser, _BACKEND_READY_TIMEOUT_SECONDS)
-                    backend_origin = _backend_origin_from_page(page)
-                    logger.info("Backend origin: {}", backend_origin)
+    with _fct_settings_opted_into_pytest(fct_path):
+        try:
+            with _launched_electron(fct_path, workspace_name, debug_port):
+                _wait_for_cdp(debug_port, _CDP_READY_TIMEOUT_SECONDS)
+                with sync_playwright() as playwright:
+                    browser = playwright.chromium.connect_over_cdp(f"http://127.0.0.1:{debug_port}")
+                    try:
+                        page = _pick_content_page(browser, _BACKEND_READY_TIMEOUT_SECONDS)
+                        backend_origin = _backend_origin_from_page(page)
+                        logger.info("Backend origin: {}", backend_origin)
 
-                    logger.info("Navigating to /create")
-                    page.goto(f"{backend_origin}/create", wait_until="domcontentloaded")
-                    page.wait_for_selector("#create-form", state="attached", timeout=10_000)
+                        logger.info("Navigating to /create")
+                        page.goto(f"{backend_origin}/create", wait_until="domcontentloaded")
+                        page.wait_for_selector("#create-form", state="attached", timeout=10_000)
 
-                    # The fields are inside the collapsed "Advanced options"
-                    # section; opening the section first lets us see typed
-                    # values during debugging and matches what a user would do.
-                    page.click("#toggle-advanced")
-                    page.wait_for_selector("#git_url:visible", timeout=5_000)
+                        # The fields are inside the collapsed "Advanced options"
+                        # section; opening the section first lets us see typed
+                        # values during debugging and matches what a user would do.
+                        page.click("#toggle-advanced")
+                        page.wait_for_selector("#git_url:visible", timeout=5_000)
 
-                    _ensure_field_value(page, "#host_name", workspace_name)
-                    _ensure_field_value(page, "#git_url", str(fct_path))
-                    # DOCKER + SUBSCRIPTION are the defaults when no account
-                    # is selected; don't touch the launch_mode / ai_provider
-                    # selects so the test stays robust to future option
-                    # reorderings in the form.
+                        _ensure_field_value(page, "#host_name", workspace_name)
+                        _ensure_field_value(page, "#git_url", str(fct_path))
+                        # DOCKER + SUBSCRIPTION are the defaults when no account
+                        # is selected; don't touch the launch_mode / ai_provider
+                        # selects so the test stays robust to future option
+                        # reorderings in the form.
 
-                    logger.info("Submitting create form")
-                    page.click("#create-submit")
-                    page.wait_for_url(
-                        _AGENT_SUBDOMAIN_PATTERN,
-                        timeout=_CREATE_FORM_TIMEOUT_SECONDS * 1000,
-                    )
-                    logger.info("Workspace ready at {}", page.url)
+                        logger.info("Submitting create form")
+                        page.click("#create-submit")
+                        page.wait_for_url(
+                            _AGENT_SUBDOMAIN_PATTERN,
+                            timeout=_CREATE_FORM_TIMEOUT_SECONDS * 1000,
+                        )
+                        logger.info("Workspace ready at {}", page.url)
 
-                    page.wait_for_selector(
-                        _DOCKVIEW_WORKSPACE_SELECTOR,
-                        state="visible",
-                        timeout=_SYSTEM_INTERFACE_TIMEOUT_SECONDS * 1000,
-                    )
-                    logger.info("system_interface dockview rendered; test passed")
-                finally:
-                    browser.close()
-    finally:
-        # Restore FCT's settings.toml so an operator's checkout isn't left dirty
-        # (clones live under tmp_path and are discarded, but the external-worktree
-        # case reuses a persistent checkout).
-        if original_fct_settings is None:
-            fct_settings_path.unlink(missing_ok=True)
-        else:
-            fct_settings_path.write_text(original_fct_settings)
-        _destroy_agent_best_effort(workspace_name)
+                        page.wait_for_selector(
+                            _DOCKVIEW_WORKSPACE_SELECTOR,
+                            state="visible",
+                            timeout=_SYSTEM_INTERFACE_TIMEOUT_SECONDS * 1000,
+                        )
+                        logger.info("system_interface dockview rendered; test passed")
+                    finally:
+                        browser.close()
+        finally:
+            _destroy_agent_best_effort(workspace_name)

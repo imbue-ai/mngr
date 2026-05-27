@@ -1359,8 +1359,6 @@ def _build_fully_populated_mngr_config(mngr_test_prefix: str) -> MngrConfig:
         is_nested_tmux_allowed=True,
         headless=True,
         is_error_reporting_enabled=False,
-        # Non-default: is_allowed_in_pytest now defaults to False, so the
-        # populated config must set it True to differ from the default.
         is_allowed_in_pytest=True,
         default_destroyed_host_persisted_seconds=98765.0,
         default_min_online_host_age_seconds=4321.0,

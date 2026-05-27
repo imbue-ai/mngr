@@ -78,12 +78,14 @@ def test_get_local_config_name_returns_correct_path() -> None:
 # =============================================================================
 
 
-def test_read_default_command_returns_none_when_no_config(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_read_default_command_returns_none_when_no_config(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, temp_git_repo_cwd: Path
+) -> None:
     """read_default_command should return None when no config files exist."""
 
     monkeypatch.setenv("MNGR_HOST_DIR", str(tmp_path / "nonexistent"))
     monkeypatch.setenv("MNGR_ROOT_NAME", "mngr-test-nocfg")
-    assert read_default_command("mngr", None) is None
+    assert read_default_command("mngr") is None
 
 
 def test_read_default_command_reads_from_project_config(
@@ -95,7 +97,7 @@ def test_read_default_command_reads_from_project_config(
         'is_allowed_in_pytest = true\n\n[commands.mngr]\ndefault_subcommand = "list"\n'
     )
 
-    assert read_default_command("mngr", None) == "list"
+    assert read_default_command("mngr") == "list"
 
 
 def test_read_default_command_local_overrides_project(
@@ -110,7 +112,7 @@ def test_read_default_command_local_overrides_project(
         'is_allowed_in_pytest = true\n\n[commands.mngr]\ndefault_subcommand = "stop"\n'
     )
 
-    assert read_default_command("mngr", None) == "stop"
+    assert read_default_command("mngr") == "stop"
 
 
 def test_read_default_command_empty_string_disables(
@@ -122,7 +124,7 @@ def test_read_default_command_empty_string_disables(
         'is_allowed_in_pytest = true\n\n[commands.mngr]\ndefault_subcommand = ""\n'
     )
 
-    assert read_default_command("mngr", None) == ""
+    assert read_default_command("mngr") == ""
 
 
 def test_read_default_command_independent_command_names(
@@ -135,10 +137,10 @@ def test_read_default_command_independent_command_names(
         '[commands.mngr]\ndefault_subcommand = "list"\n\n[commands.snapshot]\ndefault_subcommand = "destroy"\n'
     )
 
-    assert read_default_command("mngr", None) == "list"
-    assert read_default_command("snapshot", None) == "destroy"
+    assert read_default_command("mngr") == "list"
+    assert read_default_command("snapshot") == "destroy"
     # Unconfigured groups get None (use compile-time default)
-    assert read_default_command("other", None) is None
+    assert read_default_command("other") is None
 
 
 # =============================================================================
@@ -148,7 +150,7 @@ def test_read_default_command_independent_command_names(
 
 def test_read_disabled_plugins_returns_empty_when_no_config(temp_git_repo_cwd: Path) -> None:
     """read_disabled_plugins should return empty set when no config files exist."""
-    assert read_disabled_plugins(None) == frozenset()
+    assert read_disabled_plugins() == frozenset()
 
 
 def test_read_disabled_plugins_reads_from_project_config(
@@ -160,7 +162,7 @@ def test_read_disabled_plugins_reads_from_project_config(
         "is_allowed_in_pytest = true\n\n[plugins.modal]\nenabled = false\n"
     )
 
-    assert "modal" in read_disabled_plugins(None)
+    assert "modal" in read_disabled_plugins()
 
 
 def test_read_disabled_plugins_local_overrides_project(
@@ -175,7 +177,7 @@ def test_read_disabled_plugins_local_overrides_project(
         "is_allowed_in_pytest = true\n\n[plugins.modal]\nenabled = true\n"
     )
 
-    assert "modal" not in read_disabled_plugins(None)
+    assert "modal" not in read_disabled_plugins()
 
 
 def test_read_disabled_plugins_multiple_plugins(
@@ -188,7 +190,7 @@ def test_read_disabled_plugins_multiple_plugins(
         "[plugins.modal]\nenabled = false\n\n[plugins.docker]\nenabled = false\n\n[plugins.local]\nenabled = true\n"
     )
 
-    result = read_disabled_plugins(None)
+    result = read_disabled_plugins()
     assert "modal" in result
     assert "docker" in result
     assert "local" not in result
@@ -275,7 +277,7 @@ def test_load_project_config_uses_mngr_project_config_dir(
     (custom_dir / "settings.toml").write_text('prefix = "custom-"\n')
     monkeypatch.setenv("MNGR_PROJECT_CONFIG_DIR", str(custom_dir))
 
-    result = load_project_config(None, "mngr", cg)
+    result = load_project_config("mngr", cg)
     assert result is not None
     assert result["prefix"] == "custom-"
 
@@ -291,7 +293,7 @@ def test_load_local_config_uses_mngr_project_config_dir(
     (custom_dir / "settings.local.toml").write_text('prefix = "local-custom-"\n')
     monkeypatch.setenv("MNGR_PROJECT_CONFIG_DIR", str(custom_dir))
 
-    result = load_local_config(None, "mngr", cg)
+    result = load_local_config("mngr", cg)
     assert result is not None
     assert result["prefix"] == "local-custom-"
 
@@ -309,7 +311,7 @@ def test_read_default_command_uses_mngr_project_config_dir(
     monkeypatch.setenv("MNGR_PROJECT_CONFIG_DIR", str(custom_dir))
     monkeypatch.setenv("MNGR_HOST_DIR", str(tmp_path / "nonexistent"))
 
-    assert read_default_command("mngr", None) == "create"
+    assert read_default_command("mngr") == "create"
 
 
 def test_read_disabled_plugins_uses_mngr_project_config_dir(
@@ -323,4 +325,4 @@ def test_read_disabled_plugins_uses_mngr_project_config_dir(
     monkeypatch.setenv("MNGR_PROJECT_CONFIG_DIR", str(custom_dir))
     monkeypatch.setenv("MNGR_HOST_DIR", str(tmp_path / "nonexistent"))
 
-    assert "modal" in read_disabled_plugins(None)
+    assert "modal" in read_disabled_plugins()

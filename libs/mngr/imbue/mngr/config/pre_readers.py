@@ -128,17 +128,25 @@ def resolve_project_config_dir(
     return root / f".{root_name}"
 
 
-def load_project_config(context_dir: Path | None, root_name: str, cg: ConcurrencyGroup) -> dict[str, Any] | None:
-    """Find and load the project config file, returning None if not found."""
-    project_dir = resolve_project_config_dir(context_dir, root_name, cg)
+def load_project_config(root_name: str, cg: ConcurrencyGroup) -> dict[str, Any] | None:
+    """Find and load the project config file, returning None if not found.
+
+    The project root is resolved from MNGR_PROJECT_CONFIG_DIR or the cwd's git
+    worktree root (see resolve_project_config_dir).
+    """
+    project_dir = resolve_project_config_dir(None, root_name, cg)
     if project_dir is None:
         return None
     return try_load_toml(project_dir / "settings.toml")
 
 
-def load_local_config(context_dir: Path | None, root_name: str, cg: ConcurrencyGroup) -> dict[str, Any] | None:
-    """Find and load the local config file, returning None if not found."""
-    project_dir = resolve_project_config_dir(context_dir, root_name, cg)
+def load_local_config(root_name: str, cg: ConcurrencyGroup) -> dict[str, Any] | None:
+    """Find and load the local config file, returning None if not found.
+
+    The project root is resolved from MNGR_PROJECT_CONFIG_DIR or the cwd's git
+    worktree root (see resolve_project_config_dir).
+    """
+    project_dir = resolve_project_config_dir(None, root_name, cg)
     if project_dir is None:
         return None
     return try_load_toml(project_dir / "settings.local.toml")
@@ -163,52 +171,64 @@ def load_local_config(context_dir: Path | None, root_name: str, cg: ConcurrencyG
 # results, so later layers naturally override earlier ones.
 
 
-def _resolve_config_files(
-    context_dir: Path | None,
-) -> list[dict[str, Any]]:
-    """Return parsed config dicts in precedence order (lowest to highest).
+def read_config_layers(
+    profile_dir: Path | None,
+    project_config_dir: Path | None,
+) -> list[tuple[str, dict[str, Any]]]:
+    """Read the user/project/local config layers and enforce the pytest guard.
 
-    ``context_dir`` selects the project root for the project/local layers; pass
-    None to resolve it from cwd (the convention load_config uses). Every config
-    file that is read is run through the pytest opt-in guard, so this is the
-    single chokepoint that keeps a real config from being read during a test.
+    This is the single chokepoint for reading config files: it loads each layer
+    that exists and runs ``enforce_pytest_config_opt_in`` over them, so no code
+    path can read config during a pytest run without the guard being applied.
+    Returns ``(path, raw)`` per present layer, in precedence order (user <
+    project < local).
+
+    ``profile_dir`` and ``project_config_dir`` are resolved by the caller (so
+    this does no directory resolution and needs no ConcurrencyGroup): profile_dir
+    via the lightweight read-only lookup for the pre-readers, or create-on-demand
+    for ``load_config``; project_config_dir via ``resolve_project_config_dir``.
     """
-    root_name = os.environ.get("MNGR_ROOT_NAME", "mngr")
-    base_dir = read_default_host_dir()
-
     loaded: list[tuple[str, dict[str, Any]]] = []
-
-    # User config
-    profile_dir = find_profile_dir_lightweight(base_dir)
     if profile_dir is not None:
         user_path = get_user_config_path(profile_dir)
         raw = try_load_toml(user_path)
         if raw is not None:
             loaded.append((str(user_path), raw))
-
-    # Project + local config need the project root.
-    # Resolve the directory inside the ConcurrencyGroup (it needs git lookups),
-    # but load the TOML files outside it so ConfigParseError propagates directly
-    # instead of being wrapped in ConcurrencyExceptionGroup.
-    cg = ConcurrencyGroup(name="config-pre-reader")
-    with cg:
-        project_dir = resolve_project_config_dir(context_dir, root_name, cg)
-
-    if project_dir is not None:
+    if project_config_dir is not None:
         for filename in ("settings.toml", "settings.local.toml"):
-            path = project_dir / filename
+            path = project_config_dir / filename
             raw = try_load_toml(path)
             if raw is not None:
                 loaded.append((str(path), raw))
-
     enforce_pytest_config_opt_in(loaded)
-    return [raw for _source, raw in loaded]
+    return loaded
+
+
+def _resolve_config_files() -> list[dict[str, Any]]:
+    """Return parsed config dicts in precedence order (lowest to highest).
+
+    Used by the lightweight pre-readers; the project root is resolved from
+    MNGR_PROJECT_CONFIG_DIR or the cwd's git worktree root.
+    """
+    root_name = os.environ.get("MNGR_ROOT_NAME", "mngr")
+    base_dir = read_default_host_dir()
+    profile_dir = find_profile_dir_lightweight(base_dir)
+
+    # Resolve the project dir inside the ConcurrencyGroup (it needs git lookups),
+    # but read the TOML files outside it (in read_config_layers) so a
+    # ConfigParseError propagates directly instead of being wrapped in a
+    # ConcurrencyExceptionGroup.
+    cg = ConcurrencyGroup(name="config-pre-reader")
+    with cg:
+        project_config_dir = resolve_project_config_dir(None, root_name, cg)
+
+    return [raw for _source, raw in read_config_layers(profile_dir, project_config_dir)]
 
 
 # --- Default subcommand pre-reader ---
 
 
-def read_default_command(command_name: str, context_dir: Path | None) -> str | None:
+def read_default_command(command_name: str) -> str | None:
     """Return the configured default subcommand for command_name.
 
     Returns None if no config files set default_subcommand for the given
@@ -216,11 +236,11 @@ def read_default_command(command_name: str, context_dir: Path | None) -> str | N
     An empty string means "explicitly disabled" (the caller should show
     help instead of defaulting).
 
-    ``context_dir`` selects the project root for the project/local layers; pass
-    None to resolve it from cwd.
+    The project root is resolved from MNGR_PROJECT_CONFIG_DIR or the cwd's git
+    worktree root.
     """
     merged: dict[str, str] = {}
-    for raw in _resolve_config_files(context_dir):
+    for raw in _resolve_config_files():
         raw_commands = raw.get("commands")
         if not isinstance(raw_commands, dict):
             continue
@@ -236,18 +256,17 @@ def read_default_command(command_name: str, context_dir: Path | None) -> str | N
 # --- Disabled plugins pre-reader ---
 
 
-def read_disabled_plugins(context_dir: Path | None) -> frozenset[str]:
+def read_disabled_plugins() -> frozenset[str]:
     """Return the set of plugin names disabled across all config layers.
 
     Reads user, project, and local config files for [plugins.<name>]
     sections with enabled = false.  Later layers override earlier ones.
 
-    ``context_dir`` selects the project root for the project/local layers; pass
-    the same value used for the surrounding ``load_config`` so the disabled-plugin
-    set is computed from the same config tree, or None to resolve it from cwd.
+    The project root is resolved from MNGR_PROJECT_CONFIG_DIR or the cwd's git
+    worktree root.
     """
     merged: dict[str, bool] = {}
-    for raw in _resolve_config_files(context_dir):
+    for raw in _resolve_config_files():
         raw_plugins = raw.get("plugins")
         if not isinstance(raw_plugins, dict):
             continue
