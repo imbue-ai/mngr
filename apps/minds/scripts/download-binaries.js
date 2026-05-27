@@ -10,11 +10,6 @@
  * - Linux:   Copy the system git from `which git`.
  * - Windows: Download git-for-windows' MinGit zip from GitHub releases and
  *            verify a pinned SHA256 before extraction.
- *
- * On `wz/minds_onboard` this file also handled uv re-download and pnpm
- * install for the ToDesktop `beforeInstall` hook. Those paths are deferred
- * to a follow-up PR that activates the hook in package.json -- this PR
- * keeps the file scope to git-only.
  */
 
 const fs = require('fs');
