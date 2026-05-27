@@ -176,8 +176,8 @@ async function downloadGit(resourcesDir, { platform }) {
   } else if (platform === 'darwin') {
     // git invokes `git-remote-https` and friends from <prefix>/libexec/git-core/
     // via relative-to-binary lookup, and reads default templates from
-    // <prefix>/share/git-core/templates/. Copy all three so the bundled git
-    // clones with no external dependencies on the user's machine.
+    // <prefix>/share/git-core/templates/. Copy the binary, the libexec
+    // helpers, and the templates so the bundled git is self-contained.
     let resolvedGit;
     try {
       resolvedGit = execSync('xcrun --find git', { encoding: 'utf-8' }).trim();
