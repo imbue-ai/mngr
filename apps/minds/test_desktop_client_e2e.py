@@ -50,6 +50,7 @@ import pytest
 from loguru import logger
 from playwright.sync_api import Browser
 from playwright.sync_api import Page
+from playwright.sync_api import Playwright
 from playwright.sync_api import sync_playwright
 
 from imbue.minds.config.loader import repo_tier_client_config_path
@@ -349,6 +350,20 @@ def _wait_for_cdp(debug_port: int, timeout_seconds: int) -> None:
     raise TimeoutError(f"CDP at port {debug_port} did not respond within {timeout_seconds}s (last: {last_error})")
 
 
+@contextmanager
+def _connected_cdp_browser(playwright: Playwright, debug_port: int) -> Iterator[Browser]:
+    """Wait for Electron's CDP endpoint to come up, connect Playwright over it, close on exit.
+
+    Playwright's ``Browser`` is itself a context manager (it closes on
+    ``__exit__``); this wrapper exists only to fold the CDP-readiness wait into
+    the same ``with`` entry, so the test body needs no separate wait statement
+    between launching Electron and connecting.
+    """
+    _wait_for_cdp(debug_port, _CDP_READY_TIMEOUT_SECONDS)
+    with playwright.chromium.connect_over_cdp(f"http://127.0.0.1:{debug_port}") as browser:
+        yield browser
+
+
 def _pick_content_page(browser: Browser, timeout_seconds: int) -> Page:
     """Return the Electron WebContentsView that serves the main content.
 
@@ -407,32 +422,41 @@ def _ensure_field_value(page: Page, selector: str, expected_value: str) -> None:
     page.fill(selector, expected_value)
 
 
-def _destroy_agent_best_effort(workspace_name: str) -> None:
-    """Tear down the mngr agent created during the test. Always survives.
+@contextmanager
+def _destroyed_workspace_on_exit(workspace_name: str) -> Iterator[None]:
+    """Yield, then tear down the mngr workspace the test created. Always survives.
 
-    ``mngr destroy`` may legitimately fail (e.g. the test crashed before
-    create succeeded, the docker daemon stopped). We log and swallow.
+    Teardown-only: the workspace/agent is created mid-test by driving the
+    Electron create form, not by a setup step here, so there is no matching
+    "create" to pair with -- this just guarantees cleanup runs when the block
+    exits, regardless of outcome (and after Electron is down, since it wraps
+    ``_launched_electron``). ``mngr destroy`` may legitimately fail (the test
+    crashed before create succeeded, the docker daemon stopped); we log and
+    swallow so cleanup never masks the real test result.
     """
-    cmd = ["uv", "run", "mngr", "destroy", workspace_name, "--force"]
-    logger.info("Cleanup: {}", " ".join(cmd))
     try:
-        completed = subprocess.run(
-            cmd,
-            cwd=str(_REPO_ROOT),
-            capture_output=True,
-            text=True,
-            timeout=120,
-        )
-    except (subprocess.TimeoutExpired, OSError) as exc:
-        logger.warning("mngr destroy {} raised {!r}", workspace_name, exc)
-        return
-    if completed.returncode != 0:
-        logger.warning(
-            "mngr destroy {} exited {} (stderr: {})",
-            workspace_name,
-            completed.returncode,
-            completed.stderr.strip(),
-        )
+        yield
+    finally:
+        cmd = ["uv", "run", "mngr", "destroy", workspace_name, "--force"]
+        logger.info("Cleanup: {}", " ".join(cmd))
+        try:
+            completed = subprocess.run(
+                cmd,
+                cwd=str(_REPO_ROOT),
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+        except (subprocess.TimeoutExpired, OSError) as exc:
+            logger.warning("mngr destroy {} raised {!r}", workspace_name, exc)
+        else:
+            if completed.returncode != 0:
+                logger.warning(
+                    "mngr destroy {} exited {} (stderr: {})",
+                    workspace_name,
+                    completed.returncode,
+                    completed.stderr.strip(),
+                )
 
 
 @contextmanager
@@ -491,9 +515,9 @@ def test_create_local_docker_workspace_via_electron(
 ) -> None:
     """Drive the Electron app to create a local Docker workspace from FCT.
 
-    Asserts the workspace's ``system_interface`` dockview UI renders
-    through the desktop client proxy. Cleans up the mngr agent in
-    ``finally`` regardless of outcome.
+    Asserts the workspace's ``system_interface`` dockview UI renders through
+    the desktop client proxy. The stacked context managers tear down the
+    workspace, Electron, and the FCT settings opt-in regardless of outcome.
     """
     _configure_test_logging()
     _resolve_minds_env(monkeypatch)
@@ -503,49 +527,50 @@ def test_create_local_docker_workspace_via_electron(
     debug_port = _find_free_port()
     logger.info("Workspace name: {}; CDP debug port: {}", workspace_name, debug_port)
 
-    with _fct_settings_opted_into_pytest(fct_path):
-        try:
-            with _launched_electron(fct_path, workspace_name, debug_port):
-                _wait_for_cdp(debug_port, _CDP_READY_TIMEOUT_SECONDS)
-                with sync_playwright() as playwright:
-                    browser = playwright.chromium.connect_over_cdp(f"http://127.0.0.1:{debug_port}")
-                    try:
-                        page = _pick_content_page(browser, _BACKEND_READY_TIMEOUT_SECONDS)
-                        backend_origin = _backend_origin_from_page(page)
-                        logger.info("Backend origin: {}", backend_origin)
+    # The teardown order is the reverse of this entry order: browser closes,
+    # Playwright stops, Electron terminates, the workspace is destroyed, then
+    # FCT's settings.toml is restored -- matching what the previous nested
+    # with/try blocks did. `_connected_cdp_browser` must come after
+    # `sync_playwright` (it consumes the yielded `playwright`) and after
+    # `_launched_electron` (it waits for that process's CDP endpoint).
+    with (
+        _fct_settings_opted_into_pytest(fct_path),
+        _destroyed_workspace_on_exit(workspace_name),
+        _launched_electron(fct_path, workspace_name, debug_port),
+        sync_playwright() as playwright,
+        _connected_cdp_browser(playwright, debug_port) as browser,
+    ):
+        page = _pick_content_page(browser, _BACKEND_READY_TIMEOUT_SECONDS)
+        backend_origin = _backend_origin_from_page(page)
+        logger.info("Backend origin: {}", backend_origin)
 
-                        logger.info("Navigating to /create")
-                        page.goto(f"{backend_origin}/create", wait_until="domcontentloaded")
-                        page.wait_for_selector("#create-form", state="attached", timeout=10_000)
+        logger.info("Navigating to /create")
+        page.goto(f"{backend_origin}/create", wait_until="domcontentloaded")
+        page.wait_for_selector("#create-form", state="attached", timeout=10_000)
 
-                        # The fields are inside the collapsed "Advanced options"
-                        # section; opening the section first lets us see typed
-                        # values during debugging and matches what a user would do.
-                        page.click("#toggle-advanced")
-                        page.wait_for_selector("#git_url:visible", timeout=5_000)
+        # The fields are inside the collapsed "Advanced options" section;
+        # opening the section first lets us see typed values during debugging
+        # and matches what a user would do.
+        page.click("#toggle-advanced")
+        page.wait_for_selector("#git_url:visible", timeout=5_000)
 
-                        _ensure_field_value(page, "#host_name", workspace_name)
-                        _ensure_field_value(page, "#git_url", str(fct_path))
-                        # DOCKER + SUBSCRIPTION are the defaults when no account
-                        # is selected; don't touch the launch_mode / ai_provider
-                        # selects so the test stays robust to future option
-                        # reorderings in the form.
+        _ensure_field_value(page, "#host_name", workspace_name)
+        _ensure_field_value(page, "#git_url", str(fct_path))
+        # DOCKER + SUBSCRIPTION are the defaults when no account is selected;
+        # don't touch the launch_mode / ai_provider selects so the test stays
+        # robust to future option reorderings in the form.
 
-                        logger.info("Submitting create form")
-                        page.click("#create-submit")
-                        page.wait_for_url(
-                            _AGENT_SUBDOMAIN_PATTERN,
-                            timeout=_CREATE_FORM_TIMEOUT_SECONDS * 1000,
-                        )
-                        logger.info("Workspace ready at {}", page.url)
+        logger.info("Submitting create form")
+        page.click("#create-submit")
+        page.wait_for_url(
+            _AGENT_SUBDOMAIN_PATTERN,
+            timeout=_CREATE_FORM_TIMEOUT_SECONDS * 1000,
+        )
+        logger.info("Workspace ready at {}", page.url)
 
-                        page.wait_for_selector(
-                            _DOCKVIEW_WORKSPACE_SELECTOR,
-                            state="visible",
-                            timeout=_SYSTEM_INTERFACE_TIMEOUT_SECONDS * 1000,
-                        )
-                        logger.info("system_interface dockview rendered; test passed")
-                    finally:
-                        browser.close()
-        finally:
-            _destroy_agent_best_effort(workspace_name)
+        page.wait_for_selector(
+            _DOCKVIEW_WORKSPACE_SELECTOR,
+            state="visible",
+            timeout=_SYSTEM_INTERFACE_TIMEOUT_SECONDS * 1000,
+        )
+        logger.info("system_interface dockview rendered; test passed")
