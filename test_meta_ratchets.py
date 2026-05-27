@@ -99,11 +99,7 @@ def test_every_project_has_test_ratchets_file() -> None:
 def _get_expected_ratchet_test_names() -> frozenset[str]:
     """Derive the expected set of test function names from standard_ratchet_checks.py.
 
-    Each check_foo() function maps to test_prevent_foo(). The type-check and
-    ruff-lint ratchets are NOT per-project: ty and ruff each scan the whole
-    workspace identically regardless of the directory they run from, so single
-    repo-wide checks (test_no_type_errors / test_no_ruff_errors in this file)
-    replace what used to be ~36 redundant per-project copies.
+    Each check_foo() function maps to test_prevent_foo().
     """
     checks_path = (
         _REPO_ROOT
@@ -127,9 +123,7 @@ def test_all_test_ratchets_files_have_same_tests() -> None:
     """Ensure all test_ratchets.py files define precisely the expected set of test functions.
 
     The expected tests are derived from standard_ratchet_checks.py (one test_prevent_*
-    per check_* function). The type-check and ruff-lint ratchets run once repo-wide
-    (test_no_type_errors / test_no_ruff_errors in this file), not per-project, so
-    they are intentionally absent from this set.
+    per check_* function).
     """
     reference_tests = _get_expected_ratchet_test_names()
 
@@ -173,33 +167,26 @@ def test_no_import_layer_violations() -> None:
 
 @pytest.mark.timeout(60)
 def test_no_type_errors() -> None:
-    """Ensure the workspace has zero type errors (ty), once for the whole repo.
+    """Ensure the whole workspace has zero type errors (ty).
 
     ty resolves the uv workspace root (root pyproject.toml declares
-    [tool.uv.workspace] members = ["libs/*", "apps/*"]) and scans every member
-    on each invocation regardless of the directory it runs from, so this single
-    repo-wide check is exactly equivalent to -- and replaces -- the ~36
-    per-project copies that used to re-run the identical scan once per project.
-    Local iteration is covered by the ``ty`` pre-commit hook; this is the CI backstop.
+    [tool.uv.workspace] members = ["libs/*", "apps/*"]) and scans every member, so
+    this single check covers the entire repo. CI backstop for the ty pre-commit hook.
 
-    The ``uv run ty check`` subprocess occasionally exceeds the default 10s
-    pytest-timeout on offload under cold-cache / loaded-runner conditions, so the
-    timeout is bumped to 60s. The check itself is deterministic (no retry needed):
-    60s is ample headroom for a scan that runs in ~1s locally.
-
-    If this fails for a reason that looks spurious, run `uv sync --all-packages`
-    and re-run before treating the error as real (see CLAUDE.md).
+    Timeout is 60s rather than the default 10s because the ``uv run ty check``
+    subprocess can be slow on offload under load; the check is deterministic, so it
+    is not marked flaky. If a failure looks spurious, run ``uv sync --all-packages``
+    and re-run before treating it as real (see CLAUDE.md).
     """
     check_no_type_errors(_REPO_ROOT)
 
 
 def test_no_ruff_errors() -> None:
-    """Ensure all Python files pass ruff lint and format checks, once for the whole repo.
+    """Ensure all Python files pass ruff lint and format checks repo-wide.
 
-    Runs both ruff check and ruff format --check over the entire repo root. This
-    is the sole ruff ratchet (the per-project copies were redundant -- this root
-    invocation is a strict superset, additionally covering repo-root and scripts/
-    files) and acts as the CI backstop for the ruff pre-commit hook.
+    Runs both ruff check and ruff format --check from the repo root, covering all
+    workspace members plus repo-root and scripts/ files. CI backstop for the ruff
+    pre-commit hook.
     """
     fix_hint = "To fix: `uv run ruff check --fix . && uv run ruff format .`"
     errors: list[str] = []

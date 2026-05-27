@@ -15,10 +15,8 @@ repos:
         language: system
         types: [python]
     -   id: ty
-#        ty resolves the uv workspace root and scans every member regardless of which files
-#        changed, so it runs over the whole workspace (pass_filenames: false) whenever any
-#        Python file is staged. This is the local type-check gate; the single
-#        test_no_type_errors in test_meta_ratchets.py is the CI backstop.
+#        ty scans the whole uv workspace regardless of which files changed, so it does
+#        not take staged filenames (pass_filenames: false).
         name: "Python type checker (ty)"
         entry: bash -c 'uv run ty check'
         language: system

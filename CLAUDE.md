@@ -146,7 +146,7 @@ Every PR must include one changelog entry file **per project it touches**. CI wi
 
 # Silly error workarounds
 
-If you get a failure in `test_no_type_errors` (in `test_meta_ratchets.py`) that seems spurious, try running `uv sync --all-packages` and then re-running the tests. If that doesn't work, the error is probably real, and should be fixed.
+If you get a failure in `test_no_type_errors` that seems spurious, try running `uv sync --all-packages` and then re-running the tests. If that doesn't work, the error is probably real, and should be fixed.
 
 If you get a "ModuleNotFoundError" error for a 3rd-party dependency when running a command that is defined in this repo (like `mngr`), then run "uv tool uninstall imbue-mngr && uv tool install -e libs/mngr" (for the relevant tool) to refresh the dependencies for that tool, and then try running the command again.
 
