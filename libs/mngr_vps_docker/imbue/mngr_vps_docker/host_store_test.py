@@ -351,9 +351,9 @@ def test_write_then_read_host_record_roundtrips(tmp_path: Path) -> None:
     on_disk = (tmp_path / "host_state.json").read_text()
     assert json.loads(on_disk)["certified_host_data"]["host_id"] == "host-abc"
 
-    # Reading the record back, bypassing the in-memory cache.
+    # Reading the record back from a fresh store reflects what's on disk.
     fresh_store = _make_store(tmp_path)
-    loaded = fresh_store.read_host_record(is_cache_enabled=False)
+    loaded = fresh_store.read_host_record()
     assert loaded is not None
     assert loaded.certified_host_data.host_name == "alpha"
     assert loaded.vps_ip == "10.0.0.1"
@@ -361,24 +361,13 @@ def test_write_then_read_host_record_roundtrips(tmp_path: Path) -> None:
 
 def test_read_host_record_returns_none_when_missing(tmp_path: Path) -> None:
     store = _make_store(tmp_path)
-    assert store.read_host_record(is_cache_enabled=False) is None
+    assert store.read_host_record() is None
 
 
 def test_read_host_record_returns_none_on_corrupt_json(tmp_path: Path) -> None:
     (tmp_path / "host_state.json").write_text("{not valid json")
     store = _make_store(tmp_path)
-    assert store.read_host_record(is_cache_enabled=False) is None
-
-
-def test_read_host_record_uses_cache_after_write(tmp_path: Path) -> None:
-    store = _make_store(tmp_path)
-    record = VpsDockerHostRecord(certified_host_data=_make_certified_data())
-    store.write_host_record(record)
-    # Removing the on-disk file should not affect the cached read.
-    (tmp_path / "host_state.json").unlink()
-    cached = store.read_host_record(is_cache_enabled=True)
-    assert cached is not None
-    assert cached.certified_host_data.host_id == "test-host-123"
+    assert store.read_host_record() is None
 
 
 def test_delete_host_record_removes_state_and_agents(tmp_path: Path) -> None:
@@ -392,8 +381,8 @@ def test_delete_host_record_removes_state_and_agents(tmp_path: Path) -> None:
 
     assert not (tmp_path / "host_state.json").exists()
     assert not (tmp_path / "agents").exists()
-    # Cache cleared.
-    assert store.read_host_record(is_cache_enabled=True) is None
+    # Subsequent read sees no record.
+    assert store.read_host_record() is None
 
 
 def test_delete_host_record_is_idempotent_when_nothing_exists(tmp_path: Path) -> None:

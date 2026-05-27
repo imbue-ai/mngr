@@ -8,7 +8,6 @@ from typing import Final
 from loguru import logger
 from pydantic import ConfigDict
 from pydantic import Field
-from pydantic import PrivateAttr
 
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
@@ -123,8 +122,6 @@ class VpsDockerHostStore(MutableModel):
     outer: OuterHostInterface = Field(frozen=True, description="Outer host used to reach the VPS")
     mountpoint: Path = Field(frozen=True, description="Absolute path on the outer where the host volume is mounted")
 
-    _record_cache: VpsDockerHostRecord | None = PrivateAttr(default=None)
-
     @property
     def _host_state_path(self) -> Path:
         return self.mountpoint / "host_state.json"
@@ -141,13 +138,9 @@ class VpsDockerHostStore(MutableModel):
         data = host_record.model_dump_json(indent=2)
         self.outer.write_text_file(self._host_state_path, data)
         logger.trace("Wrote host record at {}", self._host_state_path)
-        self._record_cache = host_record
 
-    def read_host_record(self, is_cache_enabled: bool = True) -> VpsDockerHostRecord | None:
+    def read_host_record(self) -> VpsDockerHostRecord | None:
         """Read the host record from the unified volume. Returns None if not present."""
-        if is_cache_enabled and self._record_cache is not None:
-            return self._record_cache
-
         path = self._host_state_path
         if not self.outer.path_exists(path):
             return None
@@ -157,12 +150,10 @@ class VpsDockerHostStore(MutableModel):
             logger.debug("Host record at {} not readable: {}", path, e)
             return None
         try:
-            host_record = VpsDockerHostRecord.model_validate_json(data)
+            return VpsDockerHostRecord.model_validate_json(data)
         except (json.JSONDecodeError, ValueError) as e:
             logger.warning("Failed to parse host record at {}: {}", path, e)
             return None
-        self._record_cache = host_record
-        return host_record
 
     def delete_host_record(self) -> None:
         """Delete the host record and all per-agent metadata on the volume."""
@@ -172,7 +163,6 @@ class VpsDockerHostStore(MutableModel):
             f"rm -rf {shlex.quote(str(self._agents_dir))} {shlex.quote(str(self._host_state_path))}",
             label="delete-host-record",
         )
-        self._record_cache = None
 
     def persist_agent_data(self, agent_data: Mapping[str, object]) -> None:
         """Write agent data for offline listing."""
