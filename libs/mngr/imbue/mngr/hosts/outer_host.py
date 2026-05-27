@@ -428,7 +428,7 @@ class OuterHost(OuterHostInterface):
                 lines.append(OutputLine(buffer_name=buffer_name, line=line))
         return success, CommandOutput(lines)
 
-    def _get_paramiko_transport(self) -> object:
+    def _get_paramiko_transport(self) -> Transport:
         """Get the paramiko Transport from the SSH connector."""
         try:
             client = self.connector.host.connector.client  # ty: ignore[unresolved-attribute]
@@ -439,7 +439,7 @@ class OuterHost(OuterHostInterface):
             raise HostConnectionError("No active SSH transport")
         return transport
 
-    def _create_sftp_client(self, transport: object) -> SFTPClient | None:
+    def _create_sftp_client(self, transport: Transport) -> SFTPClient | None:
         """Create an SFTPClient from a paramiko Transport."""
         return SFTPClient.from_transport(transport)
 
@@ -551,7 +551,7 @@ class OuterHost(OuterHostInterface):
 
     def _put_file(
         self,
-        filename_or_io: str | IO[str] | IO[bytes],
+        filename_or_io: str | IO[bytes],
         remote_filename: str,
         remote_temp_filename: str | None = None,
     ) -> bool:
@@ -576,7 +576,7 @@ class OuterHost(OuterHostInterface):
     @_retry_on_transient_ssh_error
     def _put_file_with_transient_retry(
         self,
-        filename_or_io: str | IO[str] | IO[bytes],
+        filename_or_io: str | IO[bytes],
         remote_filename: str,
         remote_temp_filename: str | None = None,
     ) -> bool:
@@ -624,7 +624,7 @@ class OuterHost(OuterHostInterface):
 
     def _put_file_via_paramiko(
         self,
-        filename_or_io: str | IO[str] | IO[bytes],
+        filename_or_io: str | IO[bytes],
         remote_filename: str,
     ) -> bool:
         """Upload a file using a dedicated paramiko SFTP channel.

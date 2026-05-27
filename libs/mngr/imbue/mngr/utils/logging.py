@@ -71,6 +71,10 @@ class LoggingConfig(FrozenModel):
         default=NonEmptyStr(_DEFAULT_EVENT_SOURCE),
         description="Event source for JSONL log events, matching events/<source>/",
     )
+    enable_paramiko_logging: bool = Field(
+        default=False,
+        description="When true, paramiko TRACE-level messages are forwarded to loguru.",
+    )
 
     def merge_with(self, override: "LoggingConfig") -> "LoggingConfig":
         """Merge this config with an override config.
@@ -96,6 +100,9 @@ class LoggingConfig(FrozenModel):
             else self.is_logging_env_vars,
             event_type=override.event_type if override.event_type is not None else self.event_type,
             event_source=override.event_source if override.event_source is not None else self.event_source,
+            enable_paramiko_logging=override.enable_paramiko_logging
+            if override.enable_paramiko_logging is not None
+            else self.enable_paramiko_logging,
         )
 
 
@@ -146,6 +153,12 @@ CLEAR_SCREEN: Final[str] = "\x1b[2J\x1b[H"
 
 # Module-level storage for the console handler ID (used by LoggingSuppressor)
 _console_handler_id: int | None = None
+
+# Module-level toggle for paramiko TRACE-level forwarding. Resolved from
+# LoggingConfig.enable_paramiko_logging at setup_logging time so handlers
+# installed during suppress_warnings() (which runs before the full config is
+# parsed in pre-readers) still see the right value.
+_paramiko_logging_enabled: bool = False
 
 
 # Map from our LogLevel enum to loguru level strings
@@ -278,7 +291,7 @@ the user even though the traceback body goes to debug.
 
 
 def _is_paramiko_logging_enabled() -> bool:
-    return os.environ.get("MNGR_ENABLE_PARAMIKO_LOGGING", "0") == "1"
+    return _paramiko_logging_enabled
 
 
 class _ParamikoToLoguruHandler(logging.Handler):
@@ -328,7 +341,7 @@ _IS_TRANSPORT_LOG_PATCHED: dict[str, bool] = {"patched": False}
 
 def _apply_paramiko_transport_log_patch() -> None:
     if not _IS_TRANSPORT_LOG_PATCHED["patched"]:
-        paramiko.transport.Transport._log = cast(Any, _patched_transport_log)
+        paramiko.transport.Transport._log = cast(Any, _patched_transport_log)  # ty: ignore[unresolved-attribute]
         _IS_TRANSPORT_LOG_PATCHED["patched"] = True
 
 
@@ -419,7 +432,11 @@ def setup_logging(
     - stderr logging for user-facing messages (clean format, colored)
     - File logging in JSONL event envelope format to a single rotating events.jsonl
     """
-    global _console_handler_id
+    global _console_handler_id, _paramiko_logging_enabled
+
+    # Wire paramiko trace forwarding from config so handlers installed below
+    # pick up the configured value.
+    _paramiko_logging_enabled = config.enable_paramiko_logging
 
     # Remove default handler
     logger.remove()

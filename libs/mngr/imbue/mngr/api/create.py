@@ -259,7 +259,11 @@ def create(
                 # Start agent with signal-based readiness detection
                 # Raises AgentStartError if the agent doesn't signal readiness in time
                 logger.info("Starting agent {} ...", agent.name)
-                timeout = agent_options.ready_timeout_seconds
+                timeout = (
+                    agent_options.ready_timeout_seconds
+                    if agent_options.ready_timeout_seconds is not None
+                    else mngr_ctx.config.agent_ready_timeout
+                )
                 agent.wait_for_ready_signal(
                     is_creating=True,
                     start_action=lambda: host.start_agents([agent.id]),

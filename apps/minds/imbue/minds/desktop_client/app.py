@@ -69,6 +69,7 @@ from imbue.minds.desktop_client.request_events import RequestType
 from imbue.minds.desktop_client.request_events import parse_request_event
 from imbue.minds.desktop_client.request_handler import RequestEventHandler
 from imbue.minds.desktop_client.request_handler import find_handler_for_event
+from imbue.minds.desktop_client.session_store import AccountSession
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.sharing_handler import SharingError
 from imbue.minds.desktop_client.sharing_handler import enable_sharing_via_cloudflare
@@ -1643,8 +1644,10 @@ def _build_restart_shell_command() -> str:
     ``mngr exec`` runs commands in the agent's work_dir by default, so
     ``services.toml`` is referenced as a relative path.
     """
+    # `=` is tmux's exact-match prefix; without it, kill-window could prefix-match
+    # a sibling session and tear down the wrong agent's services.
     return (
-        f'tmux kill-window -t "${{MNGR_PREFIX}}{_SERVICES_AGENT_NAME}:{_RESTART_TMUX_WINDOW}" '
+        f'tmux kill-window -t "=${{MNGR_PREFIX}}{_SERVICES_AGENT_NAME}:{_RESTART_TMUX_WINDOW}" '
         f"2>/dev/null; touch services.toml"
     )
 
@@ -2097,7 +2100,7 @@ def _resolve_ws_name_and_account(
     agent_id: str,
     request: Request,
     backend_resolver: BackendResolverInterface,
-) -> tuple[str, str, bool, list[object]]:
+) -> tuple[str, str, bool, list[AccountSession]]:
     """Resolve workspace name, account email, has_account flag, and accounts list."""
     parsed_id = AgentId(agent_id)
     ws_name = backend_resolver.get_workspace_name(parsed_id) or ""

@@ -6,7 +6,7 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "pytest-xdist>=3.8.0",
-    "ty>=0.0.24",
+    "ty>=0.0.39",
     "click>=8.0.0",
 ]
 

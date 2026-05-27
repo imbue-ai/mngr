@@ -1,3 +1,4 @@
+from collections.abc import Generator
 from pathlib import Path
 
 import pytest
@@ -16,6 +17,7 @@ from imbue.mngr.primitives import SnapshotId
 from imbue.mngr.primitives import SnapshotName
 from imbue.mngr.providers.docker.instance import DockerProviderInstance
 from imbue.mngr.providers.docker.testing import make_docker_provider
+from imbue.mngr.providers.docker.testing import make_docker_provider_with_cleanup
 
 pytestmark = [pytest.mark.acceptance, pytest.mark.timeout(600)]
 
@@ -544,3 +546,64 @@ def test_disconnect_closes_paramiko_ssh_client(docker_provider: DockerProviderIn
     assert not old_transport.is_active(), (
         "paramiko transport is still active after disconnect -- the SSH connection was leaked"
     )
+
+
+# =============================================================================
+# Host-volume isolation (volume-subpath)
+# =============================================================================
+
+
+@pytest.fixture
+def isolated_docker_provider(temp_mngr_ctx: MngrContext) -> Generator[DockerProviderInstance, None, None]:
+    """Like the standard docker_provider fixture but creates hosts with isolate_host_volumes=True."""
+    yield from make_docker_provider_with_cleanup(temp_mngr_ctx, isolate_host_volumes=True)
+
+
+@pytest.mark.docker
+@pytest.mark.docker_sdk
+@pytest.mark.release
+def test_isolated_host_cannot_see_sibling_host_volumes(
+    isolated_docker_provider: DockerProviderInstance,
+) -> None:
+    """When isolate_host_volumes=True, host A must not be able to read host B's vol-* directory."""
+    host_a = isolated_docker_provider.create_host(HostName("test-iso-a"))
+    host_b = isolated_docker_provider.create_host(HostName("test-iso-b"))
+
+    # Write a marker file under host B's host_dir.
+    write_result = host_b.execute_idempotent_command("echo b-only > /mngr/marker.txt")
+    assert write_result.success
+
+    # The legacy shared-volume mount put /mngr-state into every host; in the
+    # isolated mode that mount does not exist, so /mngr-state must not be a
+    # directory in either host.
+    for host, label in ((host_a, "a"), (host_b, "b")):
+        result = host.execute_idempotent_command("test -d /mngr-state && echo present || echo absent")
+        assert result.success
+        assert "absent" in result.stdout, f"/mngr-state is unexpectedly visible in isolated host {label}"
+
+    # Host A must not see host B's marker file via any path. Sanity-check the
+    # marker is readable from B (so the test is meaningful).
+    read_b = host_b.execute_idempotent_command("cat /mngr/marker.txt")
+    assert read_b.success
+    assert "b-only" in read_b.stdout
+    read_a = host_a.execute_idempotent_command("cat /mngr/marker.txt")
+    assert not read_a.success or "b-only" not in read_a.stdout
+
+
+@pytest.mark.docker
+@pytest.mark.docker_sdk
+@pytest.mark.release
+def test_isolated_host_persists_data_across_restart(
+    isolated_docker_provider: DockerProviderInstance,
+) -> None:
+    """The isolated subpath mount persists host_dir contents across stop/start, same as the shared mount."""
+    host = isolated_docker_provider.create_host(HostName("test-iso-persist"))
+    write = host.execute_idempotent_command("echo persisted > /mngr/restart-marker.txt")
+    assert write.success
+
+    isolated_docker_provider.stop_host(host, create_snapshot=False)
+    restarted = isolated_docker_provider.start_host(host.id)
+    assert isinstance(restarted, Host)
+    read = restarted.execute_idempotent_command("cat /mngr/restart-marker.txt")
+    assert read.success
+    assert "persisted" in read.stdout

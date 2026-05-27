@@ -38,14 +38,15 @@ def test_antigravity_agent_config_has_correct_defaults() -> None:
     assert config.auto_dismiss_dialogs is False
 
 
-def test_antigravity_agent_config_merge_with_concatenates_user_args() -> None:
-    """User-supplied cli_args concatenate onto the (empty) default."""
+def test_antigravity_agent_config_merge_with_replaces_cli_args() -> None:
+    """User-supplied cli_args replace the default under assign-by-default merge semantics."""
     base = AntigravityAgentConfig()
     override = AntigravityAgentConfig(cli_args=("--verbose",))
 
     merged = base.merge_with(override)
 
     assert isinstance(merged, AntigravityAgentConfig)
+    # Override's cli_args replaces (rather than concatenates onto) the base.
     assert merged.cli_args == ("--verbose",)
     assert str(merged.command) == "agy"
 

@@ -70,7 +70,7 @@ def test_prevent_silent_decode_error_catches() -> None:
 
 
 def test_prevent_inline_imports() -> None:
-    rc.check_inline_imports(_DIR, snapshot(4))
+    rc.check_inline_imports(_DIR, snapshot(0))
 
 
 def test_prevent_relative_imports() -> None:
@@ -236,6 +236,10 @@ def test_prevent_bare_urwid_tty_signal_keys() -> None:
 
 def test_prevent_direct_subprocess() -> None:
     rc.check_direct_subprocess(_DIR, snapshot(0))
+
+
+def test_prevent_bare_tmux_targets() -> None:
+    rc.check_bare_tmux_targets(_DIR, snapshot(0))
 
 
 # --- AST-based ratchets ---
