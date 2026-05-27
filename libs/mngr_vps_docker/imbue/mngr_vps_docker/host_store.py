@@ -140,13 +140,24 @@ class VpsDockerHostStore(MutableModel):
         logger.trace("Wrote host record at {}", self._host_state_path)
 
     def read_host_record(self) -> VpsDockerHostRecord | None:
-        """Read the host record from the unified volume. Returns None if not present."""
+        """Read the host record from the unified volume. Returns None if not present.
+
+        A *missing* host_state.json (e.g. on a freshly-created volume that
+        hasn't been finalized yet) returns None. Any other failure --
+        transient SSH error, permission problem -- propagates as
+        ``MngrError`` so that the outer ``except (HostConnectionError,
+        MngrError)`` guards in callers like ``_read_records_from_vps`` can
+        log a warning and fall back to cached records instead of letting
+        the host silently disappear from the listing.
+        """
         path = self._host_state_path
         if not self.outer.path_exists(path):
             return None
         try:
             data = self.outer.read_text_file(path)
-        except (FileNotFoundError, OSError, MngrError) as e:
+        except (FileNotFoundError, OSError) as e:
+            # File raced from under us between path_exists and read, or a
+            # local-outer raised a real OSError. Treat as "missing".
             logger.debug("Host record at {} not readable: {}", path, e)
             return None
         try:

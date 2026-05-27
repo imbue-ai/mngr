@@ -370,6 +370,32 @@ def test_read_host_record_returns_none_on_corrupt_json(tmp_path: Path) -> None:
     assert store.read_host_record() is None
 
 
+def test_read_host_record_propagates_mngr_error(tmp_path: Path) -> None:
+    """Transient SSH-class read failures must NOT be swallowed.
+
+    If read_text_file raises MngrError, callers like ``_read_records_from_vps``
+    rely on the exception bubbling out so they can warn and fall back to
+    cached records. Silently returning None would make the host disappear
+    from the listing on any flaky-network blip.
+    """
+
+    class _FailingReadOuter(_LocalFakeOuter):
+        def path_exists(self, path: Path) -> bool:
+            return True
+
+        def read_text_file(self, path: Path, encoding: str = "utf-8") -> str:
+            raise MngrError("simulated transient SSH failure")
+
+    outer = _FailingReadOuter(
+        id=HostId.generate(),
+        connector=_make_local_connector(),
+        mountpoint_by_volume={"unused": tmp_path},
+    )
+    store = VpsDockerHostStore(outer=outer, mountpoint=tmp_path)
+    with pytest.raises(MngrError, match="simulated transient SSH failure"):
+        store.read_host_record()
+
+
 def test_delete_host_record_removes_state_and_agents(tmp_path: Path) -> None:
     store = _make_store(tmp_path)
     record = VpsDockerHostRecord(certified_host_data=_make_certified_data())
