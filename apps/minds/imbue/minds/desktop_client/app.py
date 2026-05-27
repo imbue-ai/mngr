@@ -2144,8 +2144,9 @@ class _LogProbeOnRecoveryCallback(MutableModel):
     Holds an :class:`_HostHealthCache` reference (a Pydantic model is passed
     through by identity, unlike a raw OrderedDict field which Pydantic
     would copy on construction), so the endpoint's writes are visible
-    here without any explicit threading primitive (the GIL serializes
-    pop/insert on the dict and we never iterate in either direction).
+    here. ``_HostHealthCache`` serializes its own ``put`` and ``pop``
+    operations under an internal lock, so concurrent calls from the
+    FastAPI threadpool and this callback thread interleave safely.
     """
 
     cache: _HostHealthCache = Field(
