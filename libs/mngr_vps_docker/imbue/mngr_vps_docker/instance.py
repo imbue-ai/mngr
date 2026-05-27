@@ -418,11 +418,6 @@ def _remove_container(outer: OuterHostInterface, container_name: str, force: boo
     _run_docker(outer, args)
 
 
-def _create_volume(outer: OuterHostInterface, volume_name: str) -> None:
-    """Create a Docker named volume."""
-    _run_docker(outer, ["volume", "create", volume_name])
-
-
 def _remove_volume(outer: OuterHostInterface, volume_name: str) -> None:
     """Remove a Docker named volume (force)."""
     _run_docker(outer, ["volume", "rm", "-f", volume_name])

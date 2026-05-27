@@ -24,7 +24,6 @@ from imbue.mngr_vps_docker.instance import LABEL_HOST_ID
 from imbue.mngr_vps_docker.instance import _build_image_on_outer
 from imbue.mngr_vps_docker.instance import _check_file_exists_on_outer
 from imbue.mngr_vps_docker.instance import _commit_container
-from imbue.mngr_vps_docker.instance import _create_volume
 from imbue.mngr_vps_docker.instance import _docker_inspect_running
 from imbue.mngr_vps_docker.instance import _exec_in_container
 from imbue.mngr_vps_docker.instance import _is_retryable_rsync_error
@@ -240,12 +239,6 @@ def test_remove_container_with_force() -> None:
     outer = _outer()
     _remove_container(outer, "my-container", force=True)
     assert _stub(outer).recorded[0].command == "docker rm -f my-container"
-
-
-def test_create_volume_uses_docker_volume_create() -> None:
-    outer = _outer()
-    _create_volume(outer, "my-vol")
-    assert _stub(outer).recorded[0].command == "docker volume create my-vol"
 
 
 def test_remove_volume_uses_docker_volume_rm_force() -> None:
