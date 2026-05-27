@@ -57,15 +57,27 @@ class ForwardResolver(MutableModel):
     _initial_discovery_done: bool = PrivateAttr(default=False)
 
     def update_known_agents(self, agent_ids: tuple[AgentId, ...]) -> None:
-        """Replace the set of known agents. Drops services / SSH info for removed agents."""
+        """Replace the set of known agents. Drops services / SSH info for removed agents.
+
+        Emits a ``resolver_snapshot`` envelope when any agent's services
+        entry was dropped, so consumers stay in sync with the resolver
+        after bulk destruction.
+        """
+        snapshot: dict[str, dict[str, str]] | None = None
         with self._lock:
             new_set = {str(aid) for aid in agent_ids}
             removed = self._known_agent_ids - new_set
+            services_changed = False
             for aid_str in removed:
-                self._services_by_agent.pop(aid_str, None)
+                if self._services_by_agent.pop(aid_str, None) is not None:
+                    services_changed = True
                 self._ssh_by_agent.pop(aid_str, None)
             self._known_agent_ids = new_set
             self._initial_discovery_done = True
+            if services_changed:
+                snapshot = {aid: dict(svc) for aid, svc in self._services_by_agent.items()}
+        if snapshot is not None and self.envelope_writer is not None:
+            self.envelope_writer.emit_resolver_snapshot(snapshot)
 
     def add_known_agent(self, agent_id: AgentId) -> None:
         """Mark a single agent as known (incremental discovery)."""
@@ -74,12 +86,25 @@ class ForwardResolver(MutableModel):
             self._initial_discovery_done = True
 
     def remove_known_agent(self, agent_id: AgentId) -> None:
-        """Mark a single agent as no longer known (incremental destruction)."""
+        """Mark a single agent as no longer known (incremental destruction).
+
+        Emits a ``resolver_snapshot`` envelope when the agent had a services
+        entry (i.e. there was something for the consumer's mirror to drop).
+        Mirrors the ``update_services`` emission contract: every mutation
+        of ``_services_by_agent`` produces a snapshot envelope so the
+        consumer-side mirror does not retain stale entries for destroyed
+        agents.
+        """
+        snapshot: dict[str, dict[str, str]] | None = None
         with self._lock:
             aid_str = str(agent_id)
             self._known_agent_ids.discard(aid_str)
-            self._services_by_agent.pop(aid_str, None)
+            services_changed = self._services_by_agent.pop(aid_str, None) is not None
             self._ssh_by_agent.pop(aid_str, None)
+            if services_changed:
+                snapshot = {aid: dict(svc) for aid, svc in self._services_by_agent.items()}
+        if snapshot is not None and self.envelope_writer is not None:
+            self.envelope_writer.emit_resolver_snapshot(snapshot)
 
     def update_services(self, agent_id: AgentId, services: dict[str, str]) -> None:
         """Replace the known services for a single agent.
