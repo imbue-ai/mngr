@@ -39,7 +39,6 @@ automatically builds and provisions one host, snapshots it, then launches
 all remaining agents from that snapshot. Pass --snapshot <ID> to reuse an
 existing snapshot instead of building one.
 Use --env to pass environment variables and --label to tag all agents.
-Use --prompt-suffix to append custom instructions to the agent prompt.
 Use --max-parallel-agents to limit how many agents run simultaneously (0 = no limit).
 
 Each agent writes its result to .test_output/testing_agent_outcome.json (in its work directory)
@@ -77,7 +76,6 @@ mngr tmr [OPTIONS] [PYTEST_ARGS]...
 
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
-| `--prompt-suffix` | text | Additional text to append to the agent prompt | None |
 | `--agent-type` | text | Type of agent to launch for each task | `claude` |
 | `-t`, `--agent-template` | text | Create template to apply for mapper agents [repeatable, stacks in order] | None |
 | `--provider` | text | Provider for agent hosts (e.g. local, docker, modal). Used for both mappers and the reducer. | `local` |
