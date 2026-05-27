@@ -1,15 +1,11 @@
 /**
- * Resolve and bundle the platform-specific git binary into the resources
- * directory.
+ * Bundle the platform-specific git binary into `<resourcesDir>/git/`.
  *
- * - macOS:   `/usr/bin/git` is an xcode-select shim, not a runnable git --
- *            copying the shim into a sandboxed app makes runtime `git` calls
- *            SIGKILL after ToDesktop re-signs it. Resolve the real binary via
- *            `xcrun --find git`, then copy it plus its libexec/git-core
- *            helpers and templates so clone works standalone.
- * - Linux:   Copy the system git from `which git`.
- * - Windows: Download git-for-windows' MinGit zip from GitHub releases and
- *            verify a pinned SHA256 before extraction.
+ * macOS:   real binary via `xcrun --find git`, plus libexec/git-core helpers
+ *          and templates. `/usr/bin/git` is an xcode-select shim that
+ *          SIGKILLs at runtime once re-signed by ToDesktop.
+ * Linux:   copy from `which git`.
+ * Windows: SHA256-verified MinGit download from git-for-windows releases.
  */
 
 const fs = require('fs');
@@ -108,21 +104,16 @@ function verifyChecksum(buffer, filename) {
 }
 
 /**
- * Recursively copy Apple's git libexec tree into destDir, with two
- * transforms:
- *   1. Skip symlinks whose target is the main git binary. Apple ships ~100
- *      shims (git-add, git-commit, git-diff, ...) that are all symlinks to
- *      `git` itself; git uses argv[0] to dispatch when invoked as git-add
- *      directly. We don't need any of these because our code invokes git
- *      via `git <subcommand>`, not `git-subcommand`. Including them would
- *      bloat the bundle by ~1GB (each dereferenced shim = a full copy of
- *      the 7.6MB git binary).
- *   2. Dereference the remaining symlinks (git-remote-https -> git-remote-http
- *      etc.) into real file copies. Keeping them as symlinks is risky for
- *      cross-platform packaging: ToDesktop's Windows build server chokes
- *      when 7zip encounters an absolute macOS symlink, and the original
- *      Apple symlinks point at absolute Xcode paths which break on any
- *      machine without Xcode at that exact path.
+ * Recursively copy Apple's git libexec tree into destDir, dereferencing
+ * symlinks into real file copies.
+ *
+ * Symlinks pointing back at the main `git` binary (Apple's ~100 argv[0]
+ * shims like git-add, git-commit) are skipped -- the invoked-as-subcommand
+ * dispatch they enable is unused here, and dereferencing each would add
+ * ~7.6 MB per shim. Other symlinks must be dereferenced because Apple's
+ * targets are absolute paths into Xcode that break on any machine without
+ * Xcode at that exact path, and ToDesktop's Windows packager rejects
+ * absolute macOS symlinks.
  */
 function copyGitCoreDereferencingSymlinks(srcDir, destDir) {
   for (const entry of fs.readdirSync(srcDir, { withFileTypes: true })) {
@@ -177,17 +168,10 @@ async function downloadGit(resourcesDir, { platform }) {
     fs.copyFileSync(gitExe, path.join(binDir, 'git'));
     console.log(`[download-binaries] git installed at ${path.join(binDir, 'git.exe')}`);
   } else if (platform === 'darwin') {
-    // macOS: /usr/bin/git is the Xcode CommandLineTools *shim*, not a real
-    // binary. Copying it into the app bundle produces something macOS kills
-    // with SIGKILL on invocation (the shim can't find its expected Xcode
-    // paths). Resolve the shim via `xcrun --find git` and copy the real
-    // binary instead.
-    //
-    // Git also needs its runtime helpers -- it invokes `git-remote-https`
-    // and friends from <prefix>/libexec/git-core/ via relative-to-binary
-    // lookup, and reads default templates from <prefix>/share/git-core/
-    // templates/. Copy all three into the bundle so clone works with no
-    // external dependencies on the user's machine.
+    // git invokes `git-remote-https` and friends from <prefix>/libexec/git-core/
+    // via relative-to-binary lookup, and reads default templates from
+    // <prefix>/share/git-core/templates/. Copy all three so the bundled git
+    // clones with no external dependencies on the user's machine.
     let resolvedGit;
     try {
       resolvedGit = execSync('xcrun --find git', { encoding: 'utf-8' }).trim();
