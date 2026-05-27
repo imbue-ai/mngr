@@ -2110,11 +2110,10 @@ def test_load_config_string_cli_args_replacement_does_not_narrow(
 # =============================================================================
 
 
-def test_display_path_contracts_home_dir(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_display_path_contracts_home_dir(tmp_path: Path) -> None:
     """A path under the user's home is shown with ``~``; a path outside home is
-    shown absolute.
+    shown absolute. The autouse env fixture already points HOME at ``tmp_path``.
     """
-    monkeypatch.setenv("HOME", str(tmp_path))
     assert _display_path(tmp_path / ".mngr" / "settings.toml") == "~/.mngr/settings.toml"
     outside = tmp_path.parent / "outside" / "settings.toml"
     assert _display_path(outside) == str(outside)
