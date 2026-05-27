@@ -4,8 +4,10 @@ from pathlib import Path
 from typing import Any
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.mngr.config.consts import LOCAL_SETTINGS_FILENAME
 from imbue.mngr.config.consts import PROFILES_DIRNAME
 from imbue.mngr.config.consts import ROOT_CONFIG_FILENAME
+from imbue.mngr.config.consts import SETTINGS_FILENAME
 from imbue.mngr.config.host_dir import read_default_host_dir
 from imbue.mngr.errors import ConfigParseError
 from imbue.mngr.utils.git_utils import find_git_worktree_root
@@ -51,17 +53,27 @@ def find_profile_dir_lightweight(base_dir: Path) -> Path | None:
 
 def get_user_config_path(profile_dir: Path) -> Path:
     """Get the user config path based on profile directory."""
-    return profile_dir / "settings.toml"
+    return profile_dir / SETTINGS_FILENAME
+
+
+def get_project_config_path(project_config_dir: Path) -> Path:
+    """Get the project settings file inside a resolved project config directory."""
+    return project_config_dir / SETTINGS_FILENAME
+
+
+def get_local_config_path(project_config_dir: Path) -> Path:
+    """Get the local settings file inside a resolved project config directory."""
+    return project_config_dir / LOCAL_SETTINGS_FILENAME
 
 
 def get_project_config_name(root_name: str) -> Path:
     """Get the project config relative path based on root name."""
-    return Path(f".{root_name}") / "settings.toml"
+    return Path(f".{root_name}") / SETTINGS_FILENAME
 
 
 def get_local_config_name(root_name: str) -> Path:
     """Get the local config relative path based on root name."""
-    return Path(f".{root_name}") / "settings.local.toml"
+    return Path(f".{root_name}") / LOCAL_SETTINGS_FILENAME
 
 
 def _find_project_root(cg: ConcurrencyGroup, start: Path | None = None) -> Path | None:
@@ -133,10 +145,10 @@ def _resolve_config_files(
         project_dir = resolve_project_config_dir(context_dir, root_name, cg)
 
     if project_dir is not None:
-        raw_project = try_load_toml(project_dir / "settings.toml")
+        raw_project = try_load_toml(get_project_config_path(project_dir))
         if raw_project is not None:
             configs.append(raw_project)
-        raw_local = try_load_toml(project_dir / "settings.local.toml")
+        raw_local = try_load_toml(get_local_config_path(project_dir))
         if raw_local is not None:
             configs.append(raw_local)
 

@@ -431,24 +431,25 @@ def apply_settings_to_config(
         key_path = key_path.strip()
         if not key_path:
             raise UserInputError("Invalid --setting: key cannot be empty")
-        # The settings-narrowing guard runs while the settings files and env vars
-        # are loaded, before --setting is applied, so its opt-in flag would be
-        # silently ineffective there. Reject setting it via --setting with a
-        # pointer to where it actually works, rather than accepting it as a no-op.
-        bare = bare_key(key_path) if is_extend_key(key_path) else key_path
-        if bare.replace("-", "_") == "allow_settings_key_assignment_narrowing":
-            raise UserInputError(
-                "`allow_settings_key_assignment_narrowing` cannot be set with --setting. It "
-                "controls the settings-narrowing guard, which runs while the settings files and "
-                "env vars are loaded -- before --setting is applied. Set "
-                "`allow_settings_key_assignment_narrowing = true` in a settings.toml, or set "
-                "MNGR__ALLOW_SETTINGS_KEY_ASSIGNMENT_NARROWING=true."
-            )
         parsed_value = parse_scalar_value(value_str)
         set_at_path(raw, key_path.split("."), parsed_value)
 
     resolved = resolve_extends(config, raw)
     settings_config = parse_config(resolved, disabled_plugins=disabled_plugins, strict=True)
+    # The settings-narrowing guard runs while the settings files and env vars are
+    # loaded, before --setting is applied, so its opt-in flag would be silently
+    # ineffective there. parse_config has already normalized the key (hyphens,
+    # casing) through the shared ``_normalize_field_keys``, so a non-None value
+    # here means the user tried to set it via --setting -- reject it with a
+    # pointer to where it actually works, rather than accepting it as a no-op.
+    if settings_config.allow_settings_key_assignment_narrowing is not None:
+        raise UserInputError(
+            "`allow_settings_key_assignment_narrowing` cannot be set with --setting. It "
+            "controls the settings-narrowing guard, which runs while the settings files and "
+            "env vars are loaded -- before --setting is applied. Set "
+            "`allow_settings_key_assignment_narrowing = true` in a settings.toml, or set "
+            "MNGR__ALLOW_SETTINGS_KEY_ASSIGNMENT_NARROWING=true."
+        )
     # Apply the same narrowing guard used by the config-file merge path so
     # ``--setting`` cannot silently drop entries from the merged config either.
     # Honor the existing setting on ``config`` -- ``--setting`` runs after

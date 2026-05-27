@@ -40,6 +40,8 @@ from imbue.mngr.config.key_resolver import parse_scalar_value
 from imbue.mngr.config.key_resolver import resolve_extends
 from imbue.mngr.config.key_resolver import set_at_path
 from imbue.mngr.config.plugin_registry import get_plugin_config_class
+from imbue.mngr.config.pre_readers import get_local_config_path
+from imbue.mngr.config.pre_readers import get_project_config_path
 from imbue.mngr.config.pre_readers import get_user_config_path
 from imbue.mngr.config.pre_readers import read_disabled_plugins
 from imbue.mngr.config.pre_readers import resolve_project_config_dir
@@ -193,8 +195,8 @@ def load_config(
     # lookup.
     project_config_dir = resolve_project_config_dir(context_dir, root_name, concurrency_group)
     user_config_path = get_user_config_path(profile_dir)
-    project_config_path = project_config_dir / "settings.toml" if project_config_dir is not None else None
-    local_config_path = project_config_dir / "settings.local.toml" if project_config_dir is not None else None
+    project_config_path = get_project_config_path(project_config_dir) if project_config_dir is not None else None
+    local_config_path = get_local_config_path(project_config_dir) if project_config_dir is not None else None
 
     # Load and merge config files in precedence order (user, project, local).
     # Narrowing violations -- a higher-precedence layer assigning over a non-
@@ -248,10 +250,9 @@ def load_config(
         config = config.merge_with(parsed_env_layer)
         processed_sources.append((env_source, parsed_env_layer))
 
-    # Raise on collected narrowing assignments unless the user has opted in via a
-    # settings file or the MNGR__* env var. Done before further config_dict
-    # mutation so the error surfaces with the actual settings-file paths in the
-    # message.
+    # Raise on collected narrowing assignments unless the user has opted in.
+    # Done before further config_dict mutation so the error surfaces with the
+    # actual settings-file paths in the message.
     if narrowing_violations and not config.allow_settings_key_assignment_narrowing:
         raise _build_narrowing_error(narrowing_violations)
 
