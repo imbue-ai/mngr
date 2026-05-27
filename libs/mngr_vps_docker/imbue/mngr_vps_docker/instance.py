@@ -388,13 +388,17 @@ def _install_btrfs_progs_on_outer(outer: OuterHostInterface) -> None:
 
 
 def _get_outer_free_disk_gb(outer: OuterHostInterface, path: Path) -> int:
-    """Return free space at ``path`` on the outer, rounded down to whole GiB.
+    """Return free space at ``path`` on the outer, floor-divided to whole GiB.
 
-    Uses ``df --output=avail -B 1G`` which prints the available bytes converted
-    to (rounded-up) GiB units; the value is parsed back as an int.
+    Reads the available-bytes count with ``df --output=avail -B 1`` and does
+    the GiB conversion (`// (1024 ** 3)`) in Python so the result is always
+    less-than-or-equal-to the true free space. ``df``'s own ``-B 1G`` form
+    rounds up, which would let the caller compute a loop-file size up to
+    ~1 GiB larger than actually available; floor-dividing here keeps the
+    caller's allocation math conservative.
     """
     result = outer.execute_idempotent_command(
-        f"df --output=avail -B 1G {shlex.quote(str(path))} | tail -n 1",
+        f"df --output=avail -B 1 {shlex.quote(str(path))} | tail -n 1",
         timeout_seconds=10.0,
     )
     if not result.success:
@@ -403,9 +407,10 @@ def _get_outer_free_disk_gb(outer: OuterHostInterface, path: Path) -> int:
         )
     raw = result.stdout.strip()
     try:
-        return int(raw)
+        free_bytes = int(raw)
     except ValueError as e:
         raise VpsProvisioningError(f"Could not parse free-space output {raw!r} from df at {path} on outer") from e
+    return free_bytes // (1024**3)
 
 
 def _is_path_mounted_on_outer(outer: OuterHostInterface, path: Path) -> bool:

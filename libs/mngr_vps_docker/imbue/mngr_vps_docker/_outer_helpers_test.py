@@ -457,13 +457,23 @@ def test_install_btrfs_progs_raises_on_apt_failure() -> None:
 
 
 def test_get_outer_free_disk_gb_parses_df_output() -> None:
-    # ``df --output=avail -B 1G`` prints "Avail\n  37\n"; tail -n 1 leaves "  37".
-    outer = _outer(CommandResult(stdout="     37\n", stderr="", success=True))
+    # ``df --output=avail -B 1`` prints "Avail\n<bytes>\n"; tail -n 1 leaves the bytes.
+    # 37 GiB + 500 MiB of free bytes must floor-divide to 37 (NOT round up to 38).
+    free_bytes = 37 * (1024**3) + 500 * (1024**2)
+    outer = _outer(CommandResult(stdout=f"     {free_bytes}\n", stderr="", success=True))
     free = _get_outer_free_disk_gb(outer, Path("/"))
     assert free == 37
     cmd = _stub(outer).recorded[0].command
-    assert "df --output=avail -B 1G" in cmd
+    assert "df --output=avail -B 1 " in cmd
     assert "tail -n 1" in cmd
+
+
+def test_get_outer_free_disk_gb_floors_to_whole_gib() -> None:
+    # 1 GiB - 1 byte free must report 0, not 1, so the caller's
+    # ``free_gb - reserved_gb`` math never over-allocates.
+    free_bytes = (1024**3) - 1
+    outer = _outer(CommandResult(stdout=f"{free_bytes}\n", stderr="", success=True))
+    assert _get_outer_free_disk_gb(outer, Path("/")) == 0
 
 
 def test_get_outer_free_disk_gb_raises_on_shell_failure() -> None:
@@ -641,10 +651,12 @@ _TEST_RESERVED_GB = 20
 def _fresh_vps_script() -> list[tuple[str, CommandResult]]:
     # Every probe reports "missing/not-yet" so each gated mutating step runs.
     # Used by both fresh-vps tests below to share the canonical layout.
+    # df --output=avail -B 1 returns bytes; 100 GiB worth keeps the arithmetic
+    # in the assertions (free 100 - reserved 20 = 80 GiB loop file) easy to read.
     return [
         ("command -v mkfs.btrfs", _fail()),
         ("test -f /var/lib/mngr-btrfs.img", _fail()),
-        ("df --output=avail", _ok("100\n")),
+        ("df --output=avail", _ok(f"{100 * (1024**3)}\n")),
         ("mountpoint -q", _fail()),
         ("grep -qE", _fail()),
         (f"test -d /mngr-btrfs/{_TEST_HOST_HEX}", _fail()),
@@ -720,12 +732,12 @@ def test_prepare_btrfs_on_outer_is_idempotent_when_everything_in_place() -> None
 
 
 def test_prepare_btrfs_on_outer_raises_when_free_space_below_reserve() -> None:
-    # Loop file missing forces the free-space check, which sees only 15GB < 20GB reserved.
+    # Loop file missing forces the free-space check, which sees only 15 GiB < 20 GiB reserved.
     outer = _scripted(
         [
             ("command -v mkfs.btrfs", _ok()),
             ("test -f /var/lib/mngr-btrfs.img", _fail()),
-            ("df --output=avail", _ok("15\n")),
+            ("df --output=avail", _ok(f"{15 * (1024**3)}\n")),
         ]
     )
     with pytest.raises(VpsProvisioningError, match="Insufficient free space"):
@@ -744,7 +756,7 @@ def test_prepare_btrfs_on_outer_raises_when_free_space_equal_to_reserve() -> Non
         [
             ("command -v mkfs.btrfs", _ok()),
             ("test -f /var/lib/mngr-btrfs.img", _fail()),
-            ("df --output=avail", _ok("20\n")),
+            ("df --output=avail", _ok(f"{20 * (1024**3)}\n")),
         ]
     )
     with pytest.raises(VpsProvisioningError, match="Insufficient free space"):
