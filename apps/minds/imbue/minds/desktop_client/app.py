@@ -2971,7 +2971,8 @@ def create_desktop_client(
     app.state.mngr_host_dir = mngr_host_dir if mngr_host_dir is not None else Path.home() / ".mngr"
     # Per-agent cache of the most recent host-health probe response. The
     # host-health endpoint writes here on every probe; the recovery-log
-    # callback below reads on STUCK->HEALTHY transition so the final
+    # callback below reads on every non-HEALTHY -> HEALTHY transition
+    # (STUCK, RESTARTING, or RESTART_FAILED -> HEALTHY) so the final
     # observed state of a recovered workspace gets a single INFO log line.
     # Backed by an OrderedDict and capped at _HOST_HEALTH_CACHE_MAX_ENTRIES
     # so a workspace that the user gives up on (stays in RESTART_FAILED and
