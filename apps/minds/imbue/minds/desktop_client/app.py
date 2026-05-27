@@ -27,7 +27,9 @@ from fastapi.responses import Response
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from loguru import logger
+from pydantic import ConfigDict
 from pydantic import Field
+from pydantic import PrivateAttr
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyExceptionGroup
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
@@ -2059,25 +2061,55 @@ def _run_host_health_probe(
         probe=probe,
         plugin_resolver_services=plugin_resolver_services,
     )
-    cache: OrderedDict[str, HostHealthResponse] = request.app.state.latest_host_health_by_agent_id
-    aid_str = str(agent_id)
-    # move_to_end + assignment gives LRU semantics: a re-probe for the same
-    # agent reorders that entry to the most-recently-used position rather than
-    # inserting a duplicate at the end of the OrderedDict.
-    cache[aid_str] = response
-    cache.move_to_end(aid_str)
-    # Evict oldest entries once the cap is reached. KeyError can only fire if
-    # the recovery callback popped the just-evicted entry concurrently, which
-    # is benign here -- the cache is already shrinking.
-    while len(cache) > _HOST_HEALTH_CACHE_MAX_ENTRIES:
-        try:
-            cache.popitem(last=False)
-        except KeyError:
-            break
+    cache: _HostHealthCache = request.app.state.host_health_cache
+    cache.put(agent_id, response)
     return response
 
 
-class _LogProbeOnRecoveryCallback:
+class _HostHealthCache(MutableModel):
+    """Reference holder around the LRU-capped host-health response cache.
+
+    Exists to give the host-health endpoint and the on-recovery callback a
+    by-reference handle on the same OrderedDict. A Pydantic model with a
+    ``dict`` / ``OrderedDict`` field validates and *copies* the input on
+    construction, breaking the shared-reference contract; holding the
+    OrderedDict inside a ``PrivateAttr`` makes Pydantic leave it alone,
+    and passing this holder as a field to another Pydantic model passes
+    the holder through by identity (Pydantic does not copy nested models).
+
+    The cap and LRU semantics live here rather than at every call site so
+    the endpoint code is just ``cache.put(agent_id, response)`` and the
+    callback code is just ``cache.pop(agent_id)``.
+    """
+
+    max_entries: int = Field(
+        default=_HOST_HEALTH_CACHE_MAX_ENTRIES,
+        description="Cap on the number of cached entries; oldest evicted on overflow.",
+    )
+
+    _entries: "OrderedDict[str, HostHealthResponse]" = PrivateAttr(default_factory=OrderedDict)
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    def put(self, agent_id: AgentId, response: HostHealthResponse) -> None:
+        """Insert or refresh the cached response for ``agent_id`` (LRU on the back)."""
+        aid_str = str(agent_id)
+        self._entries[aid_str] = response
+        self._entries.move_to_end(aid_str)
+        while len(self._entries) > self.max_entries:
+            # KeyError can only fire if a concurrent pop just evicted the entry,
+            # which is benign here -- the cache is already shrinking.
+            try:
+                self._entries.popitem(last=False)
+            except KeyError:
+                break
+
+    def pop(self, agent_id: AgentId) -> HostHealthResponse | None:
+        """Remove and return the cached response for ``agent_id``, or None if not cached."""
+        return self._entries.pop(str(agent_id), None)
+
+
+class _LogProbeOnRecoveryCallback(MutableModel):
     """Callable that logs the cached probe at INFO on every non-HEALTHY -> HEALTHY recovery.
 
     Registered with the health tracker so that when a workspace recovers
@@ -2087,20 +2119,22 @@ class _LogProbeOnRecoveryCallback:
     payload or a "(no probe observation cached)" marker so the operator
     can correlate the recovery with the most recent observation.
 
-    Implemented as a plain class (not a Pydantic model) so the OrderedDict
-    is held by reference: ``self.cache is app.state.latest_host_health_by_agent_id``,
-    so the endpoint's writes are visible here without any explicit threading
-    primitive (the GIL serializes pop/insert on the dict and we never
-    iterate in either direction). A Pydantic model with a ``dict`` /
-    ``OrderedDict`` field would validate-copy the input on construction,
-    breaking the shared-reference contract.
+    Holds an :class:`_HostHealthCache` reference (a Pydantic model is passed
+    through by identity, unlike a raw OrderedDict field which Pydantic
+    would copy on construction), so the endpoint's writes are visible
+    here without any explicit threading primitive (the GIL serializes
+    pop/insert on the dict and we never iterate in either direction).
     """
 
-    def __init__(self, cache: "OrderedDict[str, HostHealthResponse]") -> None:
-        self.cache = cache
+    cache: _HostHealthCache = Field(
+        frozen=True,
+        description="Shared cache populated by the host-health endpoint.",
+    )
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
 
     def __call__(self, agent_id: AgentId) -> None:
-        response = self.cache.pop(str(agent_id), None)
+        response = self.cache.pop(agent_id)
         if response is None:
             logger.info("Workspace {} recovered (no probe observation cached)", agent_id)
             return
@@ -2974,13 +3008,16 @@ def create_desktop_client(
     # callback below reads on every non-HEALTHY -> HEALTHY transition
     # (STUCK, RESTARTING, or RESTART_FAILED -> HEALTHY) so the final
     # observed state of a recovered workspace gets a single INFO log line.
-    # Backed by an OrderedDict and capped at _HOST_HEALTH_CACHE_MAX_ENTRIES
-    # so a workspace that the user gives up on (stays in RESTART_FAILED and
-    # never fires the recovery callback) cannot grow the cache without bound.
-    app.state.latest_host_health_by_agent_id = OrderedDict()
+    # Wrapped in an _HostHealthCache holder so the same instance is shared
+    # by the endpoint and the callback (a raw OrderedDict field on a
+    # Pydantic model is validate-copied on construction). The holder
+    # enforces the LRU cap so a workspace that the user gives up on
+    # (stays in RESTART_FAILED and never fires the recovery callback)
+    # cannot grow the cache without bound.
+    app.state.host_health_cache = _HostHealthCache()
     if system_interface_health_tracker is not None:
         system_interface_health_tracker.add_on_recovery_callback(
-            _LogProbeOnRecoveryCallback(cache=app.state.latest_host_health_by_agent_id)
+            _LogProbeOnRecoveryCallback(cache=app.state.host_health_cache)
         )
     # Populated with the running loop by _managed_lifespan on startup. Defined
     # up-front as None so background callbacks fired before startup (e.g. mngr

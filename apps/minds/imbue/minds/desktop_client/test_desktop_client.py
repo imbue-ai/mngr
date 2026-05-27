@@ -15,6 +15,8 @@ from imbue.minds.desktop_client import recovery_probe as _recovery_probe
 from imbue.minds.desktop_client.agent_creator import AgentCreationStatus
 from imbue.minds.desktop_client.agent_creator import AgentCreator
 from imbue.minds.desktop_client.agent_creator import LOG_SENTINEL
+from imbue.minds.desktop_client.app import _HostHealthCache
+from imbue.minds.desktop_client.app import _LogProbeOnRecoveryCallback
 from imbue.minds.desktop_client.app import _build_mngr_start_argv
 from imbue.minds.desktop_client.app import _build_mngr_stop_argv
 from imbue.minds.desktop_client.app import _build_workspace_list
@@ -36,6 +38,7 @@ from imbue.minds.desktop_client.cookie_manager import create_session_cookie
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.notification import NotificationDispatcher
+from imbue.minds.desktop_client.recovery_probe import HostHealthResponse
 from imbue.minds.desktop_client.request_events import RequestInbox
 from imbue.minds.desktop_client.request_events import create_latchkey_predefined_permission_request_event
 from imbue.minds.desktop_client.system_interface_health import AgentHealth
@@ -1929,27 +1932,40 @@ def test_host_health_api_requires_authentication(tmp_path: Path) -> None:
 
 
 def test_log_probe_on_recovery_callback_sees_external_cache_writes() -> None:
-    """The callback must hold the cache OrderedDict by reference, not by Pydantic-copy.
+    """The callback must hold the cache holder by reference, not by Pydantic-copy.
 
-    The host-health endpoint writes to the shared OrderedDict on every probe;
-    the recovery callback reads from the same instance on a non-HEALTHY ->
-    HEALTHY transition. If the callback were a Pydantic model with a
-    dict / OrderedDict field, validation would copy the input on
+    The host-health endpoint writes to the shared _HostHealthCache on every
+    probe; the recovery callback reads from the same instance on a
+    non-HEALTHY -> HEALTHY transition. If the callback held a raw dict /
+    OrderedDict field, Pydantic validation would copy the input on
     construction and the callback would never observe the endpoint's writes.
+    The _HostHealthCache wrapper sidesteps this -- Pydantic passes nested
+    models through by identity.
     """
-    from collections import OrderedDict
-
-    from imbue.minds.desktop_client.app import _LogProbeOnRecoveryCallback
-    from imbue.minds.desktop_client.recovery_probe import HostHealthResponse
-
-    cache: "OrderedDict[str, HostHealthResponse]" = OrderedDict()
+    cache = _HostHealthCache()
     callback = _LogProbeOnRecoveryCallback(cache=cache)
     # The shared-reference invariant the docstring promises:
     assert callback.cache is cache
 
     # An external write after construction must be visible to the callback.
     aid = AgentId.generate()
-    cache[str(aid)] = HostHealthResponse(reachable=True, host_offline=False)
+    cache.put(aid, HostHealthResponse(reachable=True, host_offline=False))
     callback(aid)
     # After the callback fires, the entry is popped from the shared cache.
-    assert str(aid) not in cache
+    assert cache.pop(aid) is None
+
+
+def test_host_health_cache_evicts_oldest_on_overflow() -> None:
+    """LRU cap: the oldest entry is evicted once the cap is exceeded; touched entries survive."""
+    cache = _HostHealthCache(max_entries=2)
+    a, b, c = AgentId.generate(), AgentId.generate(), AgentId.generate()
+    cache.put(a, HostHealthResponse(reachable=True, host_offline=False))
+    cache.put(b, HostHealthResponse(reachable=True, host_offline=False))
+    # Refreshing `a` should move it to the most-recently-used slot; the next
+    # insert (`c`) must evict `b`, not `a`.
+    cache.put(a, HostHealthResponse(reachable=False, host_offline=True))
+    cache.put(c, HostHealthResponse(reachable=True, host_offline=False))
+
+    assert cache.pop(b) is None
+    assert cache.pop(a) is not None
+    assert cache.pop(c) is not None
