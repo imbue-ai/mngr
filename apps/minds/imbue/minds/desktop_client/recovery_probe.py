@@ -56,8 +56,9 @@ PROBE_TIMEOUT_SECONDS: Final[float] = 5.0
 # Loaded lazily on first use rather than at module import: if the .txt file
 # is missing (e.g. an incomplete install), an eager read would raise during
 # import and break every importer of this module (app.py and the rest of
-# the desktop-client chain). Lazy load keeps the rest of the app working
-# and narrows the failure to "the recovery probe returns ssh_dead".
+# the desktop-client chain). Lazy load keeps the rest of the app working;
+# only the recovery-probe endpoint hits the missing file, where the
+# FileNotFoundError surfaces as a 500 from the host-health endpoint.
 _PROBE_SCRIPT_PATH: Final[Path] = Path(__file__).parent / "recovery_probe_script.txt"
 _probe_python_script_cache: str | None = None
 
