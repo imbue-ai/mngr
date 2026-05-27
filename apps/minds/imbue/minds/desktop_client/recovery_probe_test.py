@@ -46,7 +46,7 @@ def test_parse_probe_output_extracts_full_payload() -> None:
         "services_toml_declares_system_interface": True,
         "services_toml_path": "/code/services.toml",
         "inner_port": 8000,
-        "port_listener": "LISTEN 0 128 *:8000 *:* users:((\"python3\",pid=10,fd=3))",
+        "port_listener": 'LISTEN 0 128 *:8000 *:* users:(("python3",pid=10,fd=3))',
         "curl_status": "200",
     }
     record = parse_probe_output(_probe_stdout(payload))
@@ -210,9 +210,7 @@ def test_build_probe_argv_targets_services_agent_with_timeout_and_no_start() -> 
 
 def test_build_host_health_response_misconfigured_when_services_toml_lacks_entry() -> None:
     list_json = json.dumps({"agents": [{"id": str(_AGENT_ID), "host": {"state": "RUNNING"}}]})
-    probe = parse_probe_output(
-        _probe_stdout({"services_toml_declares_system_interface": False, "inner_port": None})
-    )
+    probe = parse_probe_output(_probe_stdout({"services_toml_declares_system_interface": False, "inner_port": None}))
     response = build_host_health_response(
         list_json=list_json,
         agent_id=_AGENT_ID,
