@@ -21,7 +21,7 @@ from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import ProviderInstanceName
-from imbue.mngr_mapreduce.snippets import ARCHIVE_SUBPATH
+from imbue.mngr_mapreduce.archive import ARCHIVE_SUBPATH
 
 
 def _get_agent_volume(

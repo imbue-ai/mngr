@@ -10,8 +10,9 @@ publish-outputs bash, etc.) flow through here.
 from jinja2 import Environment
 from jinja2 import PackageLoader
 
+from imbue.mngr_mapreduce.archive import ARCHIVE_FILENAME
+from imbue.mngr_mapreduce.archive import ARCHIVE_SUBDIR
 from imbue.mngr_mapreduce.launching import REDUCER_INPUTS_DIRNAME
-from imbue.mngr_mapreduce.snippets import publish_outputs_snippet
 
 TESTING_AGENT_OUTCOME_FILENAME = "testing_agent_outcome.json"
 INTEGRATOR_OUTCOME_FILENAME = "integrator_outcome.json"
@@ -32,6 +33,43 @@ _jinja_env = Environment(
 )
 
 
+def _publish_outputs_snippet() -> str:
+    """Bash that packages ``.test_output`` into the outputs archive.
+
+    The agent runs this from the git repo root. If the agent made commits
+    on its branch beyond the base, a ``branch.bundle`` is included in the
+    archive. Writes via a ``.tmp`` sibling and renames on completion so
+    the orchestrator never reads a half-written archive. Both the mapper
+    and reducer prompts embed this verbatim as their final step.
+
+    The archive path uses ``ARCHIVE_SUBDIR`` / ``ARCHIVE_FILENAME`` from
+    the framework so the bash and the orchestrator's polling agree on
+    where to look.
+    """
+    return f"""```bash
+ARCHIVE_DIR="$MNGR_AGENT_STATE_DIR/{ARCHIVE_SUBDIR}"
+mkdir -p "$ARCHIVE_DIR"
+
+STAGING=$(mktemp -d)
+trap 'rm -rf "$STAGING"' EXIT
+
+# Rename .test_output -> test_output inside the archive
+cp -a .test_output "$STAGING/test_output"
+
+# Include an incremental git bundle if any commits exist beyond the base.
+# The bundle is created with the explicit branch name so the orchestrator
+# can fetch ``$BRANCH:$BRANCH`` cleanly.
+BRANCH=$(git rev-parse --abbrev-ref HEAD)
+if [ -n "$(git rev-list --max-count=1 "$MNGR_GIT_BASE_BRANCH..$BRANCH" 2>/dev/null)" ]; then
+    git bundle create "$STAGING/branch.bundle" "$MNGR_GIT_BASE_BRANCH..$BRANCH"
+fi
+
+TARBALL="$ARCHIVE_DIR/{ARCHIVE_FILENAME}"
+tar -czf "$TARBALL.tmp" -C "$STAGING" .
+mv "$TARBALL.tmp" "$TARBALL"
+```"""
+
+
 def build_test_agent_prompt(
     test_node_id: str,
     pytest_flags: tuple[str, ...],
@@ -50,7 +88,7 @@ def build_test_agent_prompt(
     return template.render(
         run_cmd=run_cmd,
         outcome_filename=TESTING_AGENT_OUTCOME_FILENAME,
-        publish_snippet=publish_outputs_snippet(),
+        publish_snippet=_publish_outputs_snippet(),
     )
 
 
@@ -69,5 +107,5 @@ def build_integrator_prompt() -> str:
         inputs_dirname=INTEGRATOR_INPUTS_DIRNAME,
         mapper_outcome_filename=TESTING_AGENT_OUTCOME_FILENAME,
         reducer_outcome_filename=INTEGRATOR_OUTCOME_FILENAME,
-        publish_snippet=publish_outputs_snippet(),
+        publish_snippet=_publish_outputs_snippet(),
     )
