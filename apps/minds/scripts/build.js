@@ -9,10 +9,8 @@
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const https = require('https');
-const http = require('http');
 const { execSync, execFileSync } = require('child_process');
-const { downloadGit } = require('./download-binaries.js');
+const { downloadGit, download } = require('./download-binaries.js');
 
 const ROOT = path.resolve(__dirname, '..');
 const RESOURCES_DIR = path.join(ROOT, 'resources');
@@ -35,28 +33,6 @@ function getUvDownloadUrl({ platform, arch }) {
     ? `uv-${arch}-apple-darwin`
     : `uv-${arch}-unknown-linux-gnu`;
   return `https://github.com/astral-sh/uv/releases/download/${UV_VERSION}/${target}.tar.gz`;
-}
-
-function download(url) {
-  return new Promise((resolve, reject) => {
-    const client = url.startsWith('https') ? https : http;
-    client.get(url, { headers: { 'User-Agent': 'minds-build' } }, (res) => {
-      if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-        res.resume(); // Drain the redirect response to free the connection
-        download(res.headers.location).then(resolve).catch(reject);
-        return;
-      }
-      if (res.statusCode !== 200) {
-        res.resume(); // Drain the error response to free the connection
-        reject(new Error(`HTTP ${res.statusCode} for ${url}`));
-        return;
-      }
-      const chunks = [];
-      res.on('data', (chunk) => chunks.push(chunk));
-      res.on('end', () => resolve(Buffer.concat(chunks)));
-      res.on('error', reject);
-    }).on('error', reject);
-  });
 }
 
 /**

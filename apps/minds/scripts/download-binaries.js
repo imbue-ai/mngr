@@ -220,4 +220,4 @@ async function downloadGit(resourcesDir, { platform }) {
   }
 }
 
-module.exports = { downloadGit };
+module.exports = { downloadGit, download };
