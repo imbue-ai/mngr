@@ -139,8 +139,10 @@ def would_assignment_narrow(base_value: Any, override_value: Any) -> bool:
     settings-layer merge guard and the template-application guard agree on what
     counts as narrowing. Same exemptions: no-ops (override equals base) and
     supersets (every base entry survives, e.g. the materialised result of an
-    ``__extend`` operation) return ``False``. Scalars and empty/non-aggregate
-    bases never narrow.
+    ``__extend`` operation) return ``False``. Against a list/tuple base, a
+    ``StringDerivedTuple`` override is also exempt -- it represents a scalar
+    string replacement of the whole value, not aggregate narrowing. Scalars
+    and empty/non-aggregate bases never narrow.
     """
     if not isinstance(base_value, (list, tuple, dict, set, frozenset)) or not base_value:
         return False
