@@ -438,10 +438,9 @@ def apply_settings_to_config(
     settings_config = parse_config(resolved, disabled_plugins=disabled_plugins, strict=True)
     # The settings-narrowing guard runs while the settings files and env vars are
     # loaded, before --setting is applied, so its opt-in flag would be silently
-    # ineffective there. parse_config has already normalized the key (hyphens,
-    # casing) through the shared ``_normalize_field_keys``, so a non-None value
-    # here means the user tried to set it via --setting -- reject it with a
-    # pointer to where it actually works, rather than accepting it as a no-op.
+    # ineffective there. A non-None value here means the user tried to set it via
+    # --setting -- reject it with a pointer to where it actually works, rather
+    # than accepting it as a no-op.
     if settings_config.allow_settings_key_assignment_narrowing is not None:
         raise UserInputError(
             "`allow_settings_key_assignment_narrowing` cannot be set with --setting. It "
