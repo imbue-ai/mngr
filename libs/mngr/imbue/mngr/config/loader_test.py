@@ -2149,15 +2149,8 @@ def test_load_config_narrowing_override_true_suppresses(
     loader guard even though no config file opts in -- this is what makes
     ``--setting allow_settings_key_assignment_narrowing=true`` work.
     """
-    pm = pluggy.PluginManager("mngr")
-    pm.add_hookspecs(hookspecs)
-    load_all_registries(pm)
-    monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.delenv("MNGR_PREFIX", raising=False)
-    monkeypatch.delenv("MNGR_HOST_DIR", raising=False)
-    monkeypatch.delenv("MNGR_ROOT_NAME", raising=False)
-    _write_two_layer_narrowing_config(tmp_path, allow_narrowing=None)
-    monkeypatch.setenv("MNGR_PROJECT_CONFIG_DIR", str(tmp_path))
+    pm, project_dir = _setup_layered_test_env(monkeypatch, tmp_path)
+    _write_two_layer_narrowing_config(project_dir, allow_narrowing=None)
 
     mngr_ctx = load_config(pm=pm, context_dir=tmp_path, concurrency_group=cg, narrowing_override=True)
     assert mngr_ctx.config.commands["create"].defaults["env"] == ["X=5"]
@@ -2170,15 +2163,8 @@ def test_load_config_narrowing_override_false_enforces_despite_file_opt_in(
     config-file opt-in, re-enabling the guard. ``--setting`` is the highest-
     precedence layer, so opting out there overrides a file ``true``.
     """
-    pm = pluggy.PluginManager("mngr")
-    pm.add_hookspecs(hookspecs)
-    load_all_registries(pm)
-    monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.delenv("MNGR_PREFIX", raising=False)
-    monkeypatch.delenv("MNGR_HOST_DIR", raising=False)
-    monkeypatch.delenv("MNGR_ROOT_NAME", raising=False)
-    _write_two_layer_narrowing_config(tmp_path, allow_narrowing=True)
-    monkeypatch.setenv("MNGR_PROJECT_CONFIG_DIR", str(tmp_path))
+    pm, project_dir = _setup_layered_test_env(monkeypatch, tmp_path)
+    _write_two_layer_narrowing_config(project_dir, allow_narrowing=True)
 
     with pytest.raises(ConfigParseError, match="narrowing"):
         load_config(pm=pm, context_dir=tmp_path, concurrency_group=cg, narrowing_override=False)
@@ -2191,15 +2177,8 @@ def test_load_config_narrowing_error_names_both_sides_with_paths_and_scopes(
     dropped, each with the resolved file path and matching ``config set --scope``
     flag, so the user knows exactly which files are implicated.
     """
-    pm = pluggy.PluginManager("mngr")
-    pm.add_hookspecs(hookspecs)
-    load_all_registries(pm)
-    monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.delenv("MNGR_PREFIX", raising=False)
-    monkeypatch.delenv("MNGR_HOST_DIR", raising=False)
-    monkeypatch.delenv("MNGR_ROOT_NAME", raising=False)
-    _write_two_layer_narrowing_config(tmp_path, allow_narrowing=None)
-    monkeypatch.setenv("MNGR_PROJECT_CONFIG_DIR", str(tmp_path))
+    pm, project_dir = _setup_layered_test_env(monkeypatch, tmp_path)
+    _write_two_layer_narrowing_config(project_dir, allow_narrowing=None)
 
     with pytest.raises(ConfigParseError) as exc_info:
         load_config(pm=pm, context_dir=tmp_path, concurrency_group=cg)
