@@ -13,6 +13,7 @@ from loguru import logger
 from pydantic import BaseModel
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.model_update import to_update
 from imbue.mngr.config.agent_config_registry import get_agent_config_class
 from imbue.mngr.config.agent_config_registry import is_agent_config_registered
@@ -31,6 +32,7 @@ from imbue.mngr.config.data_types import RetryConfig
 from imbue.mngr.config.data_types import StringDerivedTuple
 from imbue.mngr.config.data_types import detect_settings_narrowing
 from imbue.mngr.config.data_types import split_cli_args_string
+from imbue.mngr.config.data_types import would_assignment_narrow
 from imbue.mngr.config.host_dir import read_default_host_dir
 from imbue.mngr.config.key_resolver import EXTEND_SUFFIX
 from imbue.mngr.config.key_resolver import bare_key
@@ -40,9 +42,8 @@ from imbue.mngr.config.key_resolver import resolve_extends
 from imbue.mngr.config.key_resolver import set_at_path
 from imbue.mngr.config.plugin_registry import get_plugin_config_class
 from imbue.mngr.config.pre_readers import get_user_config_path
-from imbue.mngr.config.pre_readers import load_local_config
-from imbue.mngr.config.pre_readers import load_project_config
 from imbue.mngr.config.pre_readers import read_disabled_plugins
+from imbue.mngr.config.pre_readers import resolve_project_config_dir
 from imbue.mngr.config.pre_readers import try_load_toml
 from imbue.mngr.config.provider_config_registry import get_provider_config_class
 from imbue.mngr.config.provider_config_registry import list_registered_provider_backend_names
@@ -84,6 +85,34 @@ _PRESERVED_ALIASES: Final[dict[str, tuple[str, Callable[[str], Any]]]] = {
 }
 
 
+class _SettingsSource(FrozenModel):
+    """Identifies one settings layer for narrowing diagnostics.
+
+    ``path`` is the resolved TOML file path; ``scope`` is the matching ``mngr
+    config set --scope`` value (``user`` / ``project`` / ``local``). Both are
+    ``None`` for the ``MNGR__*`` env-var layer, which is not a file and has no
+    ``config set`` scope.
+    """
+
+    label: str
+    path: Path | None = None
+    scope: str | None = None
+
+
+class _NarrowingViolation(FrozenModel):
+    """A single narrowing assignment, with both sides attributed.
+
+    ``assigned_by`` is the higher-precedence layer doing the (narrowing)
+    assignment; ``dropped_from`` is the lower-precedence layer whose value would
+    be silently dropped (``None`` only if no contributing layer could be
+    identified, which should not happen for a real violation).
+    """
+
+    key_path: str
+    assigned_by: _SettingsSource
+    dropped_from: _SettingsSource | None = None
+
+
 def load_config(
     pm: pluggy.PluginManager,
     concurrency_group: ConcurrencyGroup,
@@ -93,6 +122,7 @@ def load_config(
     is_interactive: bool = False,
     strict: bool | None = None,
     silent_unknown_fields: bool = False,
+    narrowing_override: bool | None = None,
 ) -> MngrContext:
     """Load and merge configuration from all sources.
 
@@ -107,6 +137,17 @@ def load_config(
        via _collect_env_overrides). See docs/concepts/environment_variables.md for the full surface.
     6. ``--setting KEY=VALUE`` CLI overrides (applied later in setup_command_context)
     7. CLI arguments (handled by caller)
+
+    ``narrowing_override`` lets the caller pre-resolve an
+    ``allow_settings_key_assignment_narrowing`` value from the layer-6
+    ``--setting`` overrides (which are applied after this function runs, so the
+    config-file/env narrowing guard below would otherwise never see them). When
+    not ``None`` it takes precedence over the file/env-resolved flag for the
+    narrowing-guard decision only -- the stored config flag still reflects the
+    file/env layers, and the ``--setting`` flag value is merged in later by
+    ``apply_settings_to_config``. This is what makes
+    ``--setting allow_settings_key_assignment_narrowing=true`` actually suppress
+    file/env-layer narrowing, matching what the error message advertises.
 
     MNGR_ROOT_NAME is read before config-file resolution to derive:
     1. Config file paths (where to look for settings files)
@@ -149,16 +190,36 @@ def load_config(
     if strict is None:
         strict = resolve_strict_from_env()
 
+    # Resolve the concrete file path of each TOML layer up front so narrowing
+    # diagnostics can name the actual files (and the matching ``config set
+    # --scope`` flag) rather than an opaque layer label. ``project_config_dir``
+    # is resolved once here instead of via ``load_project_config`` /
+    # ``load_local_config`` (which would each re-run the git lookup) so the
+    # project and local files share one resolution.
+    project_config_dir = resolve_project_config_dir(context_dir, root_name, concurrency_group)
+    user_config_path = get_user_config_path(profile_dir)
+    project_config_path = project_config_dir / "settings.toml" if project_config_dir is not None else None
+    local_config_path = project_config_dir / "settings.local.toml" if project_config_dir is not None else None
+
     # Load and merge config files in precedence order (user, project, local).
     # Narrowing violations -- a higher-precedence layer assigning over a non-
     # empty aggregate value from a lower-precedence layer -- are collected as
     # we go, then turned into a single error after all layers are merged (when
     # the final ``allow_settings_key_assignment_narrowing`` resolves to False).
-    narrowing_violations: list[tuple[str, str]] = []
-    for raw, source_label in (
-        (try_load_toml(get_user_config_path(profile_dir)), "user settings"),
-        (load_project_config(context_dir, root_name, concurrency_group), "project settings"),
-        (load_local_config(context_dir, root_name, concurrency_group), "project local settings"),
+    # ``processed_sources`` lets each violation be attributed to the specific
+    # lower-precedence layer whose value is being dropped.
+    narrowing_violations: list[_NarrowingViolation] = []
+    processed_sources: list[tuple[_SettingsSource, MngrConfig]] = []
+    for raw, source in (
+        (try_load_toml(user_config_path), _SettingsSource(label="user settings", path=user_config_path, scope="user")),
+        (
+            try_load_toml(project_config_path) if project_config_path is not None else None,
+            _SettingsSource(label="project settings", path=project_config_path, scope="project"),
+        ),
+        (
+            try_load_toml(local_config_path) if local_config_path is not None else None,
+            _SettingsSource(label="project local settings", path=local_config_path, scope="local"),
+        ),
     ):
         if raw is not None:
             parsed_layer = _parse_config_with_extends(
@@ -168,9 +229,9 @@ def load_config(
                 strict=strict,
                 silent=silent_unknown_fields,
             )
-            for violation in detect_settings_narrowing(config, parsed_layer):
-                narrowing_violations.append((source_label, violation))
+            narrowing_violations.extend(_collect_layer_narrowing(config, parsed_layer, source, processed_sources))
             config = config.merge_with(parsed_layer)
+            processed_sources.append((source, parsed_layer))
 
     # Apply ``MNGR__*`` env-var overrides plus the preserved-alias env vars
     # (MNGR_PREFIX, MNGR_HOST_DIR, MNGR_HEADLESS). These all flow through the
@@ -179,6 +240,8 @@ def load_config(
     # form raise ConfigParseError.
     env_override_raw = _collect_env_overrides(os.environ)
     if env_override_raw:
+        # The env layer has no ``config set`` scope, so it carries no path/scope.
+        env_source = _SettingsSource(label="MNGR__* environment variables")
         parsed_env_layer = _parse_config_with_extends(
             env_override_raw,
             base_config=config,
@@ -186,14 +249,19 @@ def load_config(
             strict=strict,
             silent=silent_unknown_fields,
         )
-        for violation in detect_settings_narrowing(config, parsed_env_layer):
-            narrowing_violations.append(("MNGR__* env vars", violation))
+        narrowing_violations.extend(_collect_layer_narrowing(config, parsed_env_layer, env_source, processed_sources))
         config = config.merge_with(parsed_env_layer)
+        processed_sources.append((env_source, parsed_env_layer))
 
     # Raise on collected narrowing assignments unless the user has opted in.
-    # Done before further config_dict mutation so the error surfaces with the
-    # actual settings-file paths in the message.
-    if narrowing_violations and not config.allow_settings_key_assignment_narrowing:
+    # ``narrowing_override`` (resolved from layer-6 ``--setting``) wins over the
+    # file/env-resolved flag for this decision; see the docstring. Done before
+    # further config_dict mutation so the error surfaces with the actual
+    # settings-file paths in the message.
+    effective_allow_narrowing = (
+        narrowing_override if narrowing_override is not None else config.allow_settings_key_assignment_narrowing
+    )
+    if narrowing_violations and not effective_allow_narrowing:
         raise _build_narrowing_error(narrowing_violations)
 
     # Build a dict with non-None values for final validation.
@@ -327,15 +395,97 @@ def get_or_create_profile_dir(base_dir: Path) -> Path:
 # =============================================================================
 
 
-def _build_narrowing_error(violations: Sequence[tuple[str, str]]) -> ConfigParseError:
+def _walk_settings_path(root: Any, segments: Sequence[str]) -> Any:
+    """Resolve a narrowing dotted path against a parsed config layer.
+
+    Each segment is either a model field (attribute access) or a mapping key,
+    mirroring the traversal in ``_walk_for_narrowing``. Returns ``None`` if any
+    segment is missing or the path runs into a non-model/non-mapping value
+    before it is fully consumed.
+    """
+    current = root
+    for segment in segments:
+        if isinstance(current, BaseModel):
+            current = getattr(current, segment, None)
+        elif isinstance(current, Mapping):
+            current = current.get(segment)
+        else:
+            return None
+        if current is None:
+            return None
+    return current
+
+
+def _attribute_narrowing_source(
+    key_path: str,
+    override_layer: MngrConfig,
+    processed_sources: Sequence[tuple["_SettingsSource", MngrConfig]],
+) -> "_SettingsSource | None":
+    """Identify which already-merged layer contributed the value being narrowed.
+
+    Because the merge is assign-by-default, the merged base value at any path
+    equals the value written by the highest-precedence layer that set it. So
+    scan the processed layers from highest precedence to lowest and return the
+    first whose value at ``key_path`` would be narrowed by ``override_layer``'s
+    value at the same path. Returns ``None`` if no contributing layer is found
+    (should not happen for a real violation, but keeps the diagnostic robust).
+    """
+    segments = key_path.split(".")
+    override_value = _walk_settings_path(override_layer, segments)
+    for source, layer in reversed(processed_sources):
+        prior_value = _walk_settings_path(layer, segments)
+        if prior_value is not None and would_assignment_narrow(prior_value, override_value):
+            return source
+    return None
+
+
+def _collect_layer_narrowing(
+    base: MngrConfig,
+    parsed_layer: MngrConfig,
+    source: "_SettingsSource",
+    processed_sources: Sequence[tuple["_SettingsSource", MngrConfig]],
+) -> list["_NarrowingViolation"]:
+    """Detect narrowing of ``base`` by ``parsed_layer`` and attribute each side.
+
+    ``source`` is the layer doing the assignment; the lower-precedence layer
+    whose value is dropped is resolved via ``_attribute_narrowing_source``.
+    """
+    return [
+        _NarrowingViolation(
+            key_path=key_path,
+            assigned_by=source,
+            dropped_from=_attribute_narrowing_source(key_path, parsed_layer, processed_sources),
+        )
+        for key_path in detect_settings_narrowing(base, parsed_layer)
+    ]
+
+
+def _describe_source(source: "_SettingsSource") -> str:
+    """Render a settings layer for the narrowing error: its label, the resolved
+    file path, and the ``config set --scope`` flag that edits it (when it is a
+    TOML file layer).
+    """
+    if source.path is not None and source.scope is not None:
+        return f"{source.label} ({source.path}) [edit with: mngr config set --scope {source.scope} ...]"
+    return source.label
+
+
+def _build_narrowing_error(violations: Sequence["_NarrowingViolation"]) -> ConfigParseError:
     """Construct the user-facing error raised when a higher-precedence layer
     silently narrows a non-empty aggregate value.
 
-    Lists every offending source-and-key pair, explains how to opt in to the
-    new assign-by-default semantics, points at the ``__extend`` operator for
-    additive opt-out, and warns that the safety net itself is temporary.
+    For each offending key it names both sides -- the file/scope doing the
+    assignment and the file/scope whose value would be dropped -- then explains
+    how to opt in to the new assign-by-default semantics, points at the
+    ``__extend`` operator for additive opt-out, and warns that the safety net
+    itself is temporary.
     """
-    detail_lines = [f"  {source}: {key}" for source, key in violations]
+    detail_lines: list[str] = []
+    for violation in violations:
+        detail_lines.append(f"  {violation.key_path}")
+        detail_lines.append(f"      assigned by {_describe_source(violation.assigned_by)}")
+        if violation.dropped_from is not None:
+            detail_lines.append(f"      would drop a value from {_describe_source(violation.dropped_from)}")
     return ConfigParseError(
         "Settings narrowing detected: a higher-precedence settings layer would assign over "
         "a non-empty list/tuple/dict/set value from a lower-precedence layer, silently "

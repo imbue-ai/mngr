@@ -14,11 +14,14 @@ from imbue.mngr.cli.common_opts import apply_create_template
 from imbue.mngr.config.agent_config_registry import register_agent_config
 from imbue.mngr.config.agent_config_registry import reset_agent_config_registry
 from imbue.mngr.config.data_types import AgentTypeConfig
+from imbue.mngr.config.data_types import CommandDefaults
 from imbue.mngr.config.data_types import CreateTemplateName
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import PluginConfig
 from imbue.mngr.config.data_types import get_or_create_user_id
+from imbue.mngr.config.loader import _SettingsSource
 from imbue.mngr.config.loader import _apply_plugin_overrides
+from imbue.mngr.config.loader import _attribute_narrowing_source
 from imbue.mngr.config.loader import _collect_env_overrides
 from imbue.mngr.config.loader import _normalize_tuple_fields_for_construct
 from imbue.mngr.config.loader import _parse_agent_types
@@ -28,6 +31,7 @@ from imbue.mngr.config.loader import _parse_logging_config
 from imbue.mngr.config.loader import _parse_mngr_env_overrides
 from imbue.mngr.config.loader import _parse_plugins
 from imbue.mngr.config.loader import _parse_providers
+from imbue.mngr.config.loader import _walk_settings_path
 from imbue.mngr.config.loader import block_disabled_plugins
 from imbue.mngr.config.loader import get_or_create_profile_dir
 from imbue.mngr.config.loader import load_config
@@ -2097,3 +2101,115 @@ def test_load_config_string_cli_args_replacement_does_not_narrow(
     (project_dir / "settings.local.toml").write_text('[agent_types.my_claude]\ncli_args = "--baz"\n')
     mngr_ctx = load_config(pm=pm, context_dir=tmp_path, concurrency_group=cg)
     assert mngr_ctx.config.agent_types[AgentTypeName("my_claude")].cli_args == ("--baz",)
+
+
+# =============================================================================
+# Tests for narrowing diagnostics (both-sides attribution) and the
+# narrowing_override that lets a --setting opt-in suppress the loader guard.
+# =============================================================================
+
+
+def test_walk_settings_path_resolves_nested_model_and_mapping_segments() -> None:
+    """``_walk_settings_path`` traverses model fields and mapping keys, returning
+    the leaf value, or ``None`` when a segment is missing.
+    """
+    config = MngrConfig(
+        prefix="walk-test-",
+        commands={"create": CommandDefaults(defaults={"env": ["X=1"]})},
+    )
+    assert _walk_settings_path(config, ["commands", "create", "defaults", "env"]) == ["X=1"]
+    # Missing mapping key and missing model field both short-circuit to None.
+    assert _walk_settings_path(config, ["commands", "destroy", "defaults"]) is None
+    assert _walk_settings_path(config, ["commands", "create", "defaults", "missing"]) is None
+
+
+def test_attribute_narrowing_source_picks_highest_precedence_lower_layer() -> None:
+    """When several lower-precedence layers set the narrowed key, the assign-by-
+    default merge means the highest-precedence one holds the merged base value,
+    so that layer is the one whose value is dropped.
+    """
+    user_source = _SettingsSource(label="user settings", path=Path("/u/settings.toml"), scope="user")
+    project_source = _SettingsSource(label="project settings", path=Path("/p/settings.toml"), scope="project")
+    user_layer = MngrConfig(prefix="a-", commands={"create": CommandDefaults(defaults={"env": ["A"]})})
+    project_layer = MngrConfig(prefix="a-", commands={"create": CommandDefaults(defaults={"env": ["A", "B"]})})
+    override_layer = MngrConfig(prefix="a-", commands={"create": CommandDefaults(defaults={"env": ["C"]})})
+
+    attributed = _attribute_narrowing_source(
+        "commands.create.defaults.env",
+        override_layer,
+        [(user_source, user_layer), (project_source, project_layer)],
+    )
+    assert attributed == project_source
+
+
+def test_load_config_narrowing_override_true_suppresses(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, cg: ConcurrencyGroup
+) -> None:
+    """``narrowing_override=True`` (resolved from ``--setting``) suppresses the
+    loader guard even though no config file opts in -- this is what makes
+    ``--setting allow_settings_key_assignment_narrowing=true`` work.
+    """
+    pm = pluggy.PluginManager("mngr")
+    pm.add_hookspecs(hookspecs)
+    load_all_registries(pm)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("MNGR_PREFIX", raising=False)
+    monkeypatch.delenv("MNGR_HOST_DIR", raising=False)
+    monkeypatch.delenv("MNGR_ROOT_NAME", raising=False)
+    _write_two_layer_narrowing_config(tmp_path, allow_narrowing=None)
+    monkeypatch.setenv("MNGR_PROJECT_CONFIG_DIR", str(tmp_path))
+
+    mngr_ctx = load_config(pm=pm, context_dir=tmp_path, concurrency_group=cg, narrowing_override=True)
+    assert mngr_ctx.config.commands["create"].defaults["env"] == ["X=5"]
+
+
+def test_load_config_narrowing_override_false_enforces_despite_file_opt_in(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, cg: ConcurrencyGroup
+) -> None:
+    """``narrowing_override=False`` (from ``--setting ...=false``) wins over a
+    config-file opt-in, re-enabling the guard. ``--setting`` is the highest-
+    precedence layer, so opting out there overrides a file ``true``.
+    """
+    pm = pluggy.PluginManager("mngr")
+    pm.add_hookspecs(hookspecs)
+    load_all_registries(pm)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("MNGR_PREFIX", raising=False)
+    monkeypatch.delenv("MNGR_HOST_DIR", raising=False)
+    monkeypatch.delenv("MNGR_ROOT_NAME", raising=False)
+    _write_two_layer_narrowing_config(tmp_path, allow_narrowing=True)
+    monkeypatch.setenv("MNGR_PROJECT_CONFIG_DIR", str(tmp_path))
+
+    with pytest.raises(ConfigParseError, match="narrowing"):
+        load_config(pm=pm, context_dir=tmp_path, concurrency_group=cg, narrowing_override=False)
+
+
+def test_load_config_narrowing_error_names_both_sides_with_paths_and_scopes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, cg: ConcurrencyGroup
+) -> None:
+    """The narrowing error names the assigning layer and the layer whose value is
+    dropped, each with the resolved file path and matching ``config set --scope``
+    flag, so the user knows exactly which files are implicated.
+    """
+    pm = pluggy.PluginManager("mngr")
+    pm.add_hookspecs(hookspecs)
+    load_all_registries(pm)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("MNGR_PREFIX", raising=False)
+    monkeypatch.delenv("MNGR_HOST_DIR", raising=False)
+    monkeypatch.delenv("MNGR_ROOT_NAME", raising=False)
+    _write_two_layer_narrowing_config(tmp_path, allow_narrowing=None)
+    monkeypatch.setenv("MNGR_PROJECT_CONFIG_DIR", str(tmp_path))
+
+    with pytest.raises(ConfigParseError) as exc_info:
+        load_config(pm=pm, context_dir=tmp_path, concurrency_group=cg)
+
+    message = str(exc_info.value)
+    # Assigning side: the local file, with its scope flag.
+    assert str(tmp_path / "settings.local.toml") in message
+    assert "mngr config set --scope local" in message
+    # Dropped-from side: the project file, with its scope flag.
+    assert str(tmp_path / "settings.toml") in message
+    assert "mngr config set --scope project" in message
+    assert "assigned by" in message
+    assert "would drop a value from" in message

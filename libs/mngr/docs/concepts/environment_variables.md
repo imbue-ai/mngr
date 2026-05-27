@@ -54,10 +54,10 @@ The same `__extend` suffix is recognised in TOML, in `--setting`, and in `mngr c
 
 Assign-by-default makes it easy to accidentally drop earlier entries when a higher-precedence layer writes the same key. For example, with `commands.create.env = ["X=4"]` in `.mngr/settings.toml` and `commands.create.env = ["X=5"]` in `.mngr/settings.local.toml`, the merged value silently becomes `["X=5"]` — the `X=4` from the project layer is lost.
 
-To prevent silent data loss during the migration, mngr raises `ConfigParseError` when a higher-precedence settings layer would assign over a non-empty list/tuple/dict/set value with anything that doesn't preserve every prior entry. The error tells you how to fix it:
+To prevent silent data loss during the migration, mngr raises `ConfigParseError` when a higher-precedence settings layer would assign over a non-empty list/tuple/dict/set value with anything that doesn't preserve every prior entry. The error names both implicated layers — the file (and matching `mngr config set --scope` flag) doing the assignment and the file whose value would be dropped — so you can see exactly which configs conflict. It also tells you how to fix it:
 
 1. Switch the specific key to `__extend` to keep the additive behavior (e.g. `env__extend = ["X=5"]` in the local layer).
-2. Set `allow_settings_key_assignment_narrowing = true` (a top-level field on `MngrConfig`) to opt into the assign-by-default behavior globally.
+2. Set `allow_settings_key_assignment_narrowing = true` (a top-level field on `MngrConfig`) to opt into the assign-by-default behavior. This can be set in any layer — `settings.toml`, the `MNGR__ALLOW_SETTINGS_KEY_ASSIGNMENT_NARROWING=true` env var, or `--setting allow_settings_key_assignment_narrowing=true` for a single invocation (a `--setting` opt-in also suppresses narrowing that originates in the config files or env vars, since the flag is resolved across all layers before the guard fires).
 
 The only assignments that pass without flagging are no-ops (the override value equals the base value) and supersets (every base entry survives, e.g. an `__extend` result or an explicit assign that happens to include every prior value). Clearing (`env = []` over a non-empty base) and any other partial drop are flagged — clearing is the most extreme form of data loss, so the user must explicitly opt in.
 
