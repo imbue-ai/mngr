@@ -91,7 +91,7 @@ def _cached_entry_points(
     return _entry_points_cache[key]
 
 
-importlib.metadata.entry_points = _cached_entry_points  # type: ignore[assignment]
+importlib.metadata.entry_points = _cached_entry_points  # ty: ignore[invalid-assignment]
 
 
 # Directory for test output files (slow tests, coverage summaries).

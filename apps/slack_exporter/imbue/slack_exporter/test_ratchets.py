@@ -32,7 +32,7 @@ def test_prevent_while_true() -> None:
 
 
 def test_prevent_time_sleep() -> None:
-    rc.check_time_sleep(_DIR, snapshot(1))
+    rc.check_time_sleep(_DIR, snapshot(0))
 
 
 def test_prevent_global_keyword() -> None:
@@ -238,6 +238,10 @@ def test_prevent_direct_subprocess() -> None:
     rc.check_direct_subprocess(_DIR, snapshot(1))
 
 
+def test_prevent_bare_tmux_targets() -> None:
+    rc.check_bare_tmux_targets(_DIR, snapshot(0))
+
+
 # --- AST-based ratchets ---
 
 
@@ -246,7 +250,7 @@ def test_prevent_if_elif_without_else() -> None:
 
 
 def test_prevent_inline_functions() -> None:
-    rc.check_inline_functions(_DIR, snapshot(1))
+    rc.check_inline_functions(_DIR, snapshot(0))
 
 
 def test_prevent_underscore_imports() -> None:

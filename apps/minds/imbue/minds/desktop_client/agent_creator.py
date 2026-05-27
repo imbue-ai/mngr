@@ -906,9 +906,16 @@ class AgentCreator(MutableModel):
         ),
     )
     workspace_ready_timeout_seconds: float = Field(
-        default=60.0,
+        default=300.0,
         frozen=True,
-        description="Maximum time to wait for the new agent's system_interface to return HTTP 200.",
+        description=(
+            "Maximum time to wait for the new agent's system_interface to return HTTP 200. "
+            "First-boot provisioning (uv sync, npm ci + run build for the system_interface "
+            "frontend) regularly takes 90-180s on a fresh VM or Docker host, so the previous "
+            "60s default left users on the recovery page while the agent was still finishing "
+            "provisioning. The probe is cheap so a generous cap is harmless; we still publish "
+            "the redirect anyway if it expires."
+        ),
     )
     workspace_ready_poll_interval_seconds: float = Field(
         default=0.5,

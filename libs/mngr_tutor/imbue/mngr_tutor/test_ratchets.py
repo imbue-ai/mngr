@@ -208,11 +208,11 @@ def test_prevent_logger_exception() -> None:
 
 
 def test_prevent_unittest_mock_imports() -> None:
-    rc.check_unittest_mock_imports(_DIR, snapshot(1))
+    rc.check_unittest_mock_imports(_DIR, snapshot(0))
 
 
 def test_prevent_monkeypatch_setattr() -> None:
-    rc.check_monkeypatch_setattr(_DIR, snapshot(10))
+    rc.check_monkeypatch_setattr(_DIR, snapshot(1))
 
 
 def test_prevent_test_container_classes() -> None:
@@ -236,6 +236,10 @@ def test_prevent_bare_urwid_tty_signal_keys() -> None:
 
 def test_prevent_direct_subprocess() -> None:
     rc.check_direct_subprocess(_DIR, snapshot(1))
+
+
+def test_prevent_bare_tmux_targets() -> None:
+    rc.check_bare_tmux_targets(_DIR, snapshot(0))
 
 
 # --- AST-based ratchets ---

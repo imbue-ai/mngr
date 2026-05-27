@@ -4,6 +4,10 @@ import os
 import re
 import subprocess
 import sys
+import tomllib
+from datetime import datetime
+from datetime import timedelta
+from datetime import timezone
 from pathlib import Path
 
 import pytest
@@ -12,6 +16,7 @@ from inline_snapshot import snapshot
 
 from imbue.imbue_common.ratchet_testing.common_ratchets import RegexRatchetRule
 from imbue.imbue_common.ratchet_testing.common_ratchets import check_ratchet_rule_all_files
+from imbue.imbue_common.ratchet_testing.core import BINARY_FILE_EXCLUSION
 from imbue.imbue_common.ratchet_testing.core import _get_all_files_with_extension
 from imbue.imbue_common.ratchet_testing.ratchets import check_no_import_lint_errors
 from imbue.imbue_common.ratchet_testing.ratchets import find_bash_scripts_without_strict_mode
@@ -31,7 +36,6 @@ _REPO_ROOT = Path(__file__).parent
 _EXCLUDED_PROJECTS: frozenset[str] = frozenset()
 
 _SELF_EXCLUSION: tuple[str, ...] = ("test_meta_ratchets.py",)
-_BINARY_FILE_EXCLUSION: tuple[str, ...] = ("*.png", "*.ico", "*.jpg", "*.jpeg", "*.gif", "*.webp")
 _DATA_FILE_EXCLUSION: tuple[str, ...] = ("*.jsonl",)
 _MIGRATION_SCRIPT_EXCLUSION: tuple[str, ...] = (
     "migrate_code_mng_to_mngr.sh",
@@ -246,7 +250,7 @@ _PREVENT_OLD_MNG_NAME = RegexRatchetRule(
 
 def test_prevent_old_mng_name_in_file_contents() -> None:
     """Ensure the old 'mng' name (not followed by 'r') is not reintroduced in file contents."""
-    exclusions = _SELF_EXCLUSION + _BINARY_FILE_EXCLUSION + _DATA_FILE_EXCLUSION + _MIGRATION_SCRIPT_EXCLUSION
+    exclusions = _SELF_EXCLUSION + BINARY_FILE_EXCLUSION + _DATA_FILE_EXCLUSION + _MIGRATION_SCRIPT_EXCLUSION
     chunks = check_ratchet_rule_all_files(_PREVENT_OLD_MNG_NAME, _REPO_ROOT, exclusions)
     assert len(chunks) <= snapshot(0), _PREVENT_OLD_MNG_NAME.format_failure(chunks)
 
@@ -729,4 +733,100 @@ def test_top_level_coverage_omit_covers_subproject_omits() -> None:
     ]
     assert len(errors) == 0, (
         "Top-level [tool.coverage.run].omit is missing entries for files that subprojects omit:\n" + "\n".join(errors)
+    )
+
+
+# --- Dependency freshness (supply-chain cooldown) ---
+
+# How long a release must have been public before we will lock it.
+_DEPENDENCY_COOLDOWN = timedelta(weeks=2)
+
+# Packages exempt from the cooldown above. Each must be a deliberately-chosen,
+# trusted pin -- never an auto-floated dependency. Justify every entry.
+_FRESHNESS_EXEMPT_PACKAGES: frozenset[str] = frozenset(
+    {
+        # Our type checker: a dev-only tool (never shipped in a published wheel),
+        # pinned to the latest release for the best type coverage.
+        "ty",
+        # Explicitly pinned to ==1.4.3 for API stability (see libs/mngr_modal).
+        "modal",
+    }
+)
+
+
+def _lock_package_upload_time(package: dict) -> datetime | None:
+    """Return the earliest registry upload time recorded for a locked package.
+
+    Workspace / path / git sources carry no `upload-time`, so they return None
+    (and are not subject to the cooldown).
+    """
+    raw_times: list[str] = []
+    sdist = package.get("sdist")
+    if isinstance(sdist, dict) and sdist.get("upload-time"):
+        raw_times.append(sdist["upload-time"])
+    for wheel in package.get("wheels", []):
+        if wheel.get("upload-time"):
+            raw_times.append(wheel["upload-time"])
+    if not raw_times:
+        return None
+    return min(datetime.fromisoformat(t.replace("Z", "+00:00")) for t in raw_times)
+
+
+def test_no_dependencies_younger_than_two_weeks() -> None:
+    """Ensure no locked dependency was published within the last two weeks.
+
+    This is a supply-chain cooldown: we only adopt registry releases that have
+    been public long enough for the community to flag malware before we pull
+    them. It does NOT protect us from a compromise that stays undetected for
+    longer than the window, nor does it shield the first project to lock a fresh
+    release; its only value is the detection delay before we adopt (and, for
+    runtime deps in published wheels, re-propagate) a release.
+
+    Enforced as a (time-relative) test rather than a `[tool.uv] exclude-newer`
+    pin so the cutoff tracks "two weeks before now" automatically -- uv only
+    accepts a fixed date in static config. Regenerate a compliant lock with:
+
+        uv lock --upgrade --exclude-newer "2 weeks"
+
+    adding `--exclude-newer-package <name>=<date>` for each exempted package
+    (see _FRESHNESS_EXEMPT_PACKAGES), which the global cutoff would otherwise
+    exclude.
+    """
+    lock = tomllib.loads((_REPO_ROOT / "uv.lock").read_text())
+    packages = lock.get("package", [])
+    now = datetime.now(timezone.utc)
+
+    too_new: list[str] = []
+    examined = 0
+    for package in packages:
+        uploaded = _lock_package_upload_time(package)
+        if uploaded is None:
+            continue
+        examined += 1
+        if package["name"] in _FRESHNESS_EXEMPT_PACKAGES:
+            continue
+        age = now - uploaded
+        if age < _DEPENDENCY_COOLDOWN:
+            too_new.append(
+                f"  - {package['name']} {package['version']} (published {uploaded.date()}, {age.days}d ago)"
+            )
+
+    # Guard against silently disabling the cooldown: if a future uv release stops
+    # emitting `upload-time` (or renames the key), every package would parse as
+    # None and this test would pass vacuously. Registry packages dominate the lock
+    # (only workspace/path/git entries lack an upload time), so require a healthy
+    # fraction to have yielded a parseable one.
+    assert examined >= len(packages) // 2, (
+        f"Only {examined} of {len(packages)} locked packages had a parseable `upload-time`. "
+        "The uv.lock format may have changed, which would silently disable this "
+        "dependency-freshness cooldown -- update `_lock_package_upload_time`."
+    )
+
+    assert not too_new, (
+        "These locked dependencies are younger than two weeks (supply-chain cooldown):\n"
+        + "\n".join(sorted(too_new))
+        + '\n\nRe-lock with `uv lock --upgrade --exclude-newer "2 weeks"` (adding '
+        "`--exclude-newer-package <name>=<date>` for any exempted package), wait until they "
+        "age out, or -- only for a deliberately-trusted pin -- add the package to "
+        "_FRESHNESS_EXEMPT_PACKAGES with justification."
     )

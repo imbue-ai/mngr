@@ -503,8 +503,8 @@ def test_compute_pr_found_populates_all_fields() -> None:
     fields, _errors = ds.compute(agents=(agent,), cached_fields={}, mngr_ctx=ctx)
     af = fields[agent.name]
     assert FIELD_PR in af and FIELD_CI in af and FIELD_CONFLICTS in af and FIELD_UNRESOLVED in af
-    assert isinstance(af[FIELD_CONFLICTS], ConflictsField) and af[FIELD_CONFLICTS].has_conflicts is True  # type: ignore[union-attr]
-    assert isinstance(af[FIELD_UNRESOLVED], UnresolvedField) and af[FIELD_UNRESOLVED].has_unresolved is True  # type: ignore[union-attr]
+    assert isinstance(af[FIELD_CONFLICTS], ConflictsField) and af[FIELD_CONFLICTS].has_conflicts is True  # ty: ignore[unresolved-attribute]
+    assert isinstance(af[FIELD_UNRESOLVED], UnresolvedField) and af[FIELD_UNRESOLVED].has_unresolved is True  # ty: ignore[unresolved-attribute]
 
 
 def test_compute_no_pr_for_branch_generates_create_url() -> None:

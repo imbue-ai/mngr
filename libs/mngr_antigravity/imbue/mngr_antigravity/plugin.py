@@ -52,6 +52,7 @@ from imbue.mngr.agents.tui_utils import send_enter_best_effort
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import UserInputError
+from imbue.mngr.hosts.tmux import TmuxWindowTarget
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.agent import HasCommonTranscriptMixin
 from imbue.mngr.interfaces.host import CreateAgentOptions
@@ -181,7 +182,7 @@ class AntigravityAgent(InteractiveTuiAgent[AntigravityAgentConfig], HasCommonTra
         # `agy` is a single-file Go binary; ps/tmux show the literal command name.
         return "agy"
 
-    def _send_enter_and_validate(self, tmux_target: str) -> None:
+    def _send_enter_and_validate(self, tmux_target: TmuxWindowTarget) -> None:
         # Antigravity has no ``UserPromptSubmit`` analog (so the tmux wait-for
         # hook trick Claude uses doesn't apply) and its input row has no
         # placeholder that hides while text is typed and reappears after

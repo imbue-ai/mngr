@@ -11,6 +11,7 @@ from datetime import timezone
 from pathlib import Path
 from uuid import uuid4
 
+import pluggy
 import pytest
 import tomlkit
 from loguru import logger
@@ -52,7 +53,7 @@ class E2eSession(Session):
             (f"mngr exec {agent_name} 'tmux list-sessions 2>&1'", "tmux sessions"),
             (
                 f'mngr exec {agent_name} \'SESSION=$(tmux list-sessions -F "#{{session_name}}" 2>/dev/null | head -1);'
-                f' tmux capture-pane -p -t "$SESSION" 2>&1 || echo no-pane\'',
+                f' tmux capture-pane -p -t "=$SESSION" 2>&1 || echo no-pane\'',
                 "claude pane",
             ),
             (
@@ -161,7 +162,9 @@ _e2e_test_failed: dict[str, bool] = {}
 
 
 @pytest.hookimpl(tryfirst=True, hookwrapper=True)
-def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo[None]) -> Generator[None, None, None]:
+def pytest_runtest_makereport(
+    item: pytest.Item, call: pytest.CallInfo[None]
+) -> Generator[None, pluggy.Result[pytest.TestReport], None]:
     """Track whether the test call phase failed, for use in e2e fixture teardown."""
     outcome = yield
     rep = outcome.get_result()

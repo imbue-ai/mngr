@@ -293,8 +293,8 @@ def test_gather_output_stops_when_shutdown_event_is_set() -> None:
     shutdown_event.set()
 
     gatherer = OutputGatherer(
-        stdout=stdout_reader,  # type: ignore[arg-type]
-        stderr=stderr_reader,  # type: ignore[arg-type]
+        stdout=stdout_reader,  # ty: ignore[invalid-argument-type]
+        stderr=stderr_reader,  # ty: ignore[invalid-argument-type]
         stdout_container=stdout_container,
         stderr_container=stderr_container,
         shutdown_event=shutdown_event,
@@ -343,8 +343,8 @@ def test_gather_output_handles_none_reads() -> None:
     shutdown_event = Event()
 
     gatherer = OutputGatherer(
-        stdout=stdout_reader,  # type: ignore[arg-type]
-        stderr=stderr_reader,  # type: ignore[arg-type]
+        stdout=stdout_reader,  # ty: ignore[invalid-argument-type]
+        stderr=stderr_reader,  # ty: ignore[invalid-argument-type]
         stdout_container=stdout_container,
         stderr_container=stderr_container,
         shutdown_event=shutdown_event,

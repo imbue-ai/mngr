@@ -47,7 +47,7 @@ def test_prevent_bare_print() -> None:
     # print() / sys.stdout.write(). Exempt the whole file rather than
     # bumping the count for each new diagnostic.
     excluded = TEST_FILE_PATTERNS + ("cron_runner.py",)
-    rc.check_bare_print(_DIR, snapshot(4), excluded_patterns=excluded)
+    rc.check_bare_print(_DIR, snapshot(2), excluded_patterns=excluded)
 
 
 # --- Exception handling ---
@@ -244,7 +244,11 @@ def test_prevent_bare_urwid_tty_signal_keys() -> None:
 def test_prevent_direct_subprocess() -> None:
     # testing.py files are test infrastructure and excluded alongside test files
     excluded = TEST_FILE_PATTERNS + ("testing.py",)
-    rc.check_direct_subprocess(_DIR, snapshot(11), excluded_patterns=excluded)
+    rc.check_direct_subprocess(_DIR, snapshot(7), excluded_patterns=excluded)
+
+
+def test_prevent_bare_tmux_targets() -> None:
+    rc.check_bare_tmux_targets(_DIR, snapshot(0))
 
 
 # --- AST-based ratchets ---

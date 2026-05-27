@@ -19,6 +19,7 @@ from imbue.mngr.agents.base_agent import BaseAgent
 from imbue.mngr.agents.tui_utils import DEFAULT_ENTER_SUBMISSION_WAIT_FOR_TIMEOUT_SECONDS
 from imbue.mngr.agents.tui_utils import wait_for_paste_visible
 from imbue.mngr.agents.tui_utils import wait_for_tui_ready
+from imbue.mngr.hosts.tmux import TmuxWindowTarget
 from imbue.mngr.interfaces.agent import AgentConfigT
 
 
@@ -56,7 +57,7 @@ class InteractiveTuiAgent(BaseAgent[AgentConfigT]):
         return self.TUI_READY_INDICATOR
 
     @abstractmethod
-    def _send_enter_and_validate(self, tmux_target: str) -> None:
+    def _send_enter_and_validate(self, tmux_target: TmuxWindowTarget) -> None:
         """Send Enter to submit the pasted message, then confirm submission.
 
         Implementations should call one of the strategy helpers in
