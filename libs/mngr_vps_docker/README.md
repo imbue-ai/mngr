@@ -10,21 +10,25 @@ Each VPS runs exactly one Docker container (1:1 mapping). Docker is used purely 
 
 ```
 User Machine                              VPS
-+------------------+                      +---------------------------------------+
-|                  |   SSH (port 22)      |  VPS OS (Debian/Ubuntu)               |
-|  mngr CLI        | ------------------>  |  (Docker commands over SSH)           |
-|                  |                      |  Docker Engine                        |
-|  ~/.mngr/        |   SSH (port 2222)    |  +---------------------------------+  |
-|    profile/      | ------------------>  |  | Container (sshd)                |  |
-|      providers/  |   direct to          |  |   /mngr -> /mngr-vol/host_dir   |  |
-|        <backend>/|   VPS:2222           |  +---------------------------------+  |
-|          keys/   |                      |  Unified Docker volume                |
-+------------------+                      |  (mngr-host-vol-<host_id_hex>)        |
-                                          |  mounted at /mngr-vol:                |
-                                          |    host_state.json                    |
-                                          |    agents/<agent_id>.json             |
-                                          |    host_dir/...                       |
-                                          +---------------------------------------+
++------------------+                      +-----------------------------------------+
+|                  |   SSH (port 22)      |  VPS OS (Debian/Ubuntu)                 |
+|  mngr CLI        | ------------------>  |  (Docker commands over SSH)             |
+|                  |                      |  Docker Engine (overlay2 on ext4 root)  |
+|  ~/.mngr/        |   SSH (port 2222)    |  +-----------------------------------+  |
+|    profile/      | ------------------>  |  | Container (sshd)                  |  |
+|      providers/  |   direct to          |  |   /mngr -> /mngr-vol/host_dir     |  |
+|        <backend>/|   VPS:2222           |  +-----------------------------------+  |
+|          keys/   |                      |  Docker named volume                    |
++------------------+                      |  (mngr-host-vol-<host_id_hex>) is a     |
+                                          |  bind-options local volume whose        |
+                                          |  device= points at:                     |
+                                          |    /mngr-btrfs/<host_id_hex>            |
+                                          |  (per-host btrfs subvolume on a         |
+                                          |   loop-mounted /var/lib/mngr-btrfs.img) |
+                                          |    host_state.json                      |
+                                          |    agents/<agent_id>.json               |
+                                          |    host_dir/...                         |
+                                          +-----------------------------------------+
 ```
 
 ### Key design decisions
@@ -32,7 +36,7 @@ User Machine                              VPS
 - **Docker commands over SSH**: All Docker operations are executed via `ssh user@vps docker ...`, not via the Docker SDK's remote host feature.
 - **Direct SSH to container**: The container's sshd port (default 2222) is exposed on the VPS's public IP. mngr connects directly to `<vps_ip>:2222` with key-based authentication.
 - **SSH host keys via cloud-init**: Host keys are generated locally and injected into the VPS via cloud-init `user_data`, eliminating TOFU (trust-on-first-use).
-- **Unified per-host volume on the VPS**: Each VPS has exactly one mngr-managed Docker volume (`mngr-host-vol-<host_id_hex>`) holding both metadata (`host_state.json`, `agents/<agent_id>.json`) and the `host_dir/` contents. mngr reads and writes the metadata directly on the VPS filesystem via the volume's docker mountpoint (typically `/var/lib/docker/volumes/<name>/_data`), discovered with `docker volume inspect`. No separate state container is involved. This means a single `docker run --rm -v <volume>:/data ... tar ...` captures everything for that host.
+- **Per-host docker volume on a btrfs subvolume**: Each VPS has exactly one mngr-managed Docker named volume (`mngr-host-vol-<host_id_hex>`), created with `--driver=local --opt type=none --opt device=/mngr-btrfs/<host_id_hex> --opt o=bind`. The `device=` path is a real btrfs subvolume on a loop-mounted btrfs filesystem (image file `/var/lib/mngr-btrfs.img`, mounted at `/mngr-btrfs` via `/etc/fstab`), which makes the per-host data eligible for `btrfs subvolume snapshot -r` for consistent snapshots. mngr reads and writes metadata (`host_state.json`, `agents/<agent_id>.json`, `host_dir/`) directly on the subvolume by extracting `Options.device` from `docker volume inspect`. Docker itself keeps default `data-root=/var/lib/docker` and `storage-driver=overlay2` (on the ext4 root); only this single volume's storage lives on btrfs.
 - **Separate SSH keypairs**: The VPS and container each have their own SSH keypair for defense in depth.
 
 ## Modules
@@ -63,6 +67,9 @@ The base config (`VpsDockerProviderConfig`) provides these settings:
 | `default_plan` | `vc2-1c-1gb` | Default VPS plan |
 | `default_os_id` | 2136 | Default OS image (Debian 12 x64) |
 | `default_start_args` | `()` | Default `docker run` arguments |
+| `btrfs_mount_path` | `/mngr-btrfs` | Outer-host path where the loop-mounted btrfs filesystem holding the per-host unified volume is mounted |
+| `btrfs_loop_file_path` | `/var/lib/mngr-btrfs.img` | Outer-host path of the loop-backed btrfs image file (allocated with `fallocate`, persisted across reboots via `/etc/fstab`) |
+| `outer_disk_reserved_gb` | `20` | GB of free space on the outer's root filesystem to reserve at provisioning time; loop file size is `free_gb - outer_disk_reserved_gb` |
 
 ## Build and start args
 
@@ -112,3 +119,9 @@ To add support for a new VPS provider (e.g., DigitalOcean, Hetzner):
 2. Implement `VpsClientInterface` with the provider's API
 3. Subclass `VpsDockerProvider` and override `_discover_host_records()` and `_find_host_record()` to use the provider's instance listing API
 4. Create a `ProviderBackendInterface` implementation and register via pluggy entry points
+
+The btrfs loop-file setup is provided by the base class (`_prepare_btrfs_on_outer`, called at the top of `_setup_container_on_vps`); new providers do not need to install `btrfs-progs` or wire up the loop mount themselves as long as the outer host is a Debian-family Linux with `apt-get` available.
+
+## Compatibility
+
+This release moves the per-host unified docker volume onto a loop-mounted btrfs filesystem (the volume itself becomes a bind-options local volume backed by `<btrfs_mount_path>/<host_id_hex>`). Existing vultr / ovh hosts created on the prior plain-`docker-volume-create` layout cannot be discovered or managed after upgrade. Destroy and recreate them. This is the same breaking-change shape as the earlier "two-volume consolidation" change.
