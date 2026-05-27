@@ -89,22 +89,6 @@ def resolve_project_config_dir(
     return root / f".{root_name}"
 
 
-def load_project_config(context_dir: Path | None, root_name: str, cg: ConcurrencyGroup) -> dict[str, Any] | None:
-    """Find and load the project config file, returning None if not found."""
-    project_dir = resolve_project_config_dir(context_dir, root_name, cg)
-    if project_dir is None:
-        return None
-    return try_load_toml(project_dir / "settings.toml")
-
-
-def load_local_config(context_dir: Path | None, root_name: str, cg: ConcurrencyGroup) -> dict[str, Any] | None:
-    """Find and load the local config file, returning None if not found."""
-    project_dir = resolve_project_config_dir(context_dir, root_name, cg)
-    if project_dir is None:
-        return None
-    return try_load_toml(project_dir / "settings.local.toml")
-
-
 # =============================================================================
 # Lightweight config pre-readers
 # =============================================================================

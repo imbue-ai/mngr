@@ -189,9 +189,8 @@ def load_config(
     # Resolve the concrete file path of each TOML layer up front so narrowing
     # diagnostics can name the actual files (and the matching ``config set
     # --scope`` flag) rather than an opaque layer label. ``project_config_dir``
-    # is resolved once here instead of via ``load_project_config`` /
-    # ``load_local_config`` (which would each re-run the git lookup) so the
-    # project and local files share one resolution.
+    # is resolved once here so the project and local files share one git-root
+    # lookup.
     project_config_dir = resolve_project_config_dir(context_dir, root_name, concurrency_group)
     user_config_path = get_user_config_path(profile_dir)
     project_config_path = project_config_dir / "settings.toml" if project_config_dir is not None else None
