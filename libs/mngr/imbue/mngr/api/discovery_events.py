@@ -33,6 +33,7 @@ from imbue.imbue_common.logging import format_nanosecond_iso_timestamp
 from imbue.imbue_common.logging import generate_log_event_id
 from imbue.imbue_common.logging import generate_rotation_timestamp
 from imbue.imbue_common.logging import rotation_lock
+from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.pure import pure
 from imbue.mngr.api.providers import get_all_provider_instances
 from imbue.mngr.config.data_types import MngrConfig
@@ -536,10 +537,8 @@ class ResolvedAgentHost(FrozenModel):
     provider_name: ProviderInstanceName = Field(description="Provider instance that owns the host")
 
 
-class _ResolutionMaps(FrozenModel):
+class _ResolutionMaps(MutableModel):
     """Bundle of the maps built (and mutated in place) while replaying discovery events."""
-
-    model_config = {"frozen": False}
 
     # agent_id -> provider_name
     provider_by_agent_id: dict[str, str] = Field(default_factory=dict)
