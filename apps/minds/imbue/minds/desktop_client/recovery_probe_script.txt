@@ -46,8 +46,11 @@ if result["inner_port"] is not None:
         proc = subprocess.run(
             ["ss", "-ltnp"], capture_output=True, text=True, timeout=2,
         )
-        port_marker = ":{}".format(result["inner_port"])
-        lines = [line for line in proc.stdout.splitlines() if port_marker in line]
+        # Match ":PORT" only when not followed by another digit, so the filter
+        # for port 8000 does not also match :18000, :80000, etc. in unrelated
+        # lines.
+        port_pattern = re.compile(r":{}(?!\d)".format(result["inner_port"]))
+        lines = [line for line in proc.stdout.splitlines() if port_pattern.search(line)]
         result["port_listener"] = "\n".join(lines)
     except Exception as e:
         result["port_listener_error"] = repr(e)
