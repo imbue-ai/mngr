@@ -19,7 +19,7 @@ pytestmark = pytest.mark.xdist_group(name="ratchets")
 
 
 def test_prevent_todos() -> None:
-    rc.check_todos(_DIR, snapshot(2))
+    rc.check_todos(_DIR, snapshot(0))
 
 
 def test_prevent_exec() -> None:
@@ -43,7 +43,7 @@ def test_prevent_global_keyword() -> None:
 
 
 def test_prevent_bare_print() -> None:
-    rc.check_bare_print(_DIR, snapshot(34), excluded_patterns=("_kqueue_tty_test_script.py",))
+    rc.check_bare_print(_DIR, snapshot(33), excluded_patterns=("_kqueue_tty_test_script.py",))
 
 
 # --- Exception handling ---
@@ -54,7 +54,7 @@ def test_prevent_bare_except() -> None:
 
 
 def test_prevent_broad_exception_catch() -> None:
-    rc.check_broad_exception_catch(_DIR, snapshot(9))
+    rc.check_broad_exception_catch(_DIR, snapshot(8))
 
 
 def test_prevent_base_exception_catch() -> None:
@@ -66,7 +66,7 @@ def test_prevent_builtin_exception_raises() -> None:
 
 
 def test_prevent_silent_decode_error_catches() -> None:
-    rc.check_silent_decode_error_catches(_DIR, snapshot(12))
+    rc.check_silent_decode_error_catches(_DIR, snapshot(8))
 
 
 # --- Import style ---
@@ -94,7 +94,7 @@ def test_prevent_getattr() -> None:
     # pattern documented inline on _walk_to_field. Switching to model_dump
     # round-tripping to dodge the ratchet would re-introduce the serialisation
     # cost _walk_to_field was rewritten to avoid (see its docstring).
-    rc.check_getattr(_DIR, snapshot(15))
+    rc.check_getattr(_DIR, snapshot(11))
 
 
 def test_prevent_setattr() -> None:
@@ -143,7 +143,7 @@ def test_prevent_hardcoded_claude_dir() -> None:
 # which is autouse and fires for tests without @pytest.mark.docker, so it must bypass
 # the PATH wrapper (which would otherwise block the docker invocation).
 def test_prevent_hardcoded_guarded_binary() -> None:
-    rc.check_hardcoded_guarded_binary(_DIR, snapshot(2))
+    rc.check_hardcoded_guarded_binary(_DIR, snapshot(0))
 
 
 # --- Naming conventions ---
@@ -219,11 +219,11 @@ def test_prevent_logger_exception() -> None:
 
 
 def test_prevent_unittest_mock_imports() -> None:
-    rc.check_unittest_mock_imports(_DIR, snapshot(3))
+    rc.check_unittest_mock_imports(_DIR, snapshot(1))
 
 
 def test_prevent_monkeypatch_setattr() -> None:
-    rc.check_monkeypatch_setattr(_DIR, snapshot(36))
+    rc.check_monkeypatch_setattr(_DIR, snapshot(33))
 
 
 def test_prevent_test_container_classes() -> None:
@@ -263,7 +263,7 @@ def test_prevent_bare_tmux_targets() -> None:
 def test_prevent_direct_subprocess() -> None:
     # testing.py files are test infrastructure and excluded alongside test files
     excluded = TEST_FILE_PATTERNS + ("testing.py",)
-    rc.check_direct_subprocess(_DIR, snapshot(20), excluded_patterns=excluded)
+    rc.check_direct_subprocess(_DIR, snapshot(15), excluded_patterns=excluded)
 
 
 # --- AST-based ratchets ---
@@ -286,7 +286,7 @@ def test_prevent_init_methods_in_non_exception_classes() -> None:
 
 
 def test_prevent_cast_usage() -> None:
-    rc.check_cast_usage(_DIR, snapshot(9))
+    rc.check_cast_usage(_DIR, snapshot(8))
 
 
 def test_prevent_assert_isinstance() -> None:
