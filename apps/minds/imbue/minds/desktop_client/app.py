@@ -2038,10 +2038,10 @@ def _run_host_health_probe(
     Composes the response from three independent inputs: ``mngr list`` for
     host state / services-agent state / SSH connection info, the batched
     in-container ``mngr exec`` probe, and the plugin's resolver-snapshot
-    mirror. Caches the response on
-    ``app.state.latest_host_health_by_agent_id`` so the on-recovery
-    callback can log the most recent observation on the next non-HEALTHY
-    -> HEALTHY transition.
+    mirror. Caches the response on the ``_HostHealthCache`` held at
+    ``app.state.host_health_cache`` so the on-recovery callback can log
+    the most recent observation on the next non-HEALTHY -> HEALTHY
+    transition.
     """
     env = dict(os.environ)
     env["MNGR_HOST_DIR"] = str(request.app.state.mngr_host_dir)
