@@ -12,10 +12,14 @@ backend failure instead of flashing a raw error.
   page will reload automatically..." line -- it just shows the heading,
   vertically centered against the spinner.
 - New `resolver_snapshot` envelope: the plugin emits the full per-agent
-  service map on every `update_services` mutation. Minds mirrors the
-  latest snapshot in its envelope-stream consumer and uses it on the
-  recovery-diagnostics page to render whether the plugin has seen the
-  agent's `system_interface` service (Q7 on the recovery checklist).
+  service map on every mutation of that map -- both
+  `update_services` (set/replace for one agent) and the destruction
+  paths (`remove_known_agent` and `update_known_agents` when they drop
+  an agent that had services), so consumer mirrors do not retain stale
+  entries for destroyed agents. Minds mirrors the latest snapshot in
+  its envelope-stream consumer and uses it on the recovery-diagnostics
+  page to render whether the plugin has seen the agent's
+  `system_interface` service (Q7 on the recovery checklist).
   Old minds against a new plugin transparently drops the new payload;
   new minds against an old plugin sees no `resolver_snapshot` and just
   renders Q7 as "no entry yet" -- same transient as a fresh plugin
