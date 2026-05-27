@@ -108,7 +108,7 @@ mngr create my-agent --provider vultr -b --vps-plan=vc2-2c-4gb -b --file=Dockerf
 | `create` | Provision VPS, install Docker via cloud-init, create the unified `mngr-host-vol-<hex>` volume (seeded with empty `host_dir/` and `agents/`), run container, set up SSH, write `host_state.json` |
 | `stop` | `docker stop` the container. VPS keeps running. |
 | `start` | `docker start` the container. Wait for SSH. |
-| `destroy` | Remove container, remove the unified host volume (drops `host_state.json`, `agents/`, and `host_dir/` together), destroy VPS, clean up SSH keys |
+| `destroy` | Remove container, best-effort `btrfs subvolume delete` of the per-host subvolume (drops `host_state.json`, `agents/`, and `host_dir/` together), remove the docker named volume entry, destroy VPS (which also takes the loop file with it), clean up SSH keys |
 | idle timeout | `docker stop` the container. VPS keeps running. |
 
 ## Implementing a new VPS provider
