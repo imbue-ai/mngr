@@ -89,7 +89,12 @@ def test_prevent_importlib_import_module() -> None:
 
 
 def test_prevent_getattr() -> None:
-    rc.check_getattr(_DIR, snapshot(9))
+    # detect_settings_narrowing in config/data_types.py walks MngrConfig (and
+    # sub-model) fields by name via the model_fields iterable, which is the same
+    # pattern documented inline on _walk_to_field. Switching to model_dump
+    # round-tripping to dodge the ratchet would re-introduce the serialisation
+    # cost _walk_to_field was rewritten to avoid (see its docstring).
+    rc.check_getattr(_DIR, snapshot(15))
 
 
 def test_prevent_setattr() -> None:
@@ -218,7 +223,7 @@ def test_prevent_unittest_mock_imports() -> None:
 
 
 def test_prevent_monkeypatch_setattr() -> None:
-    rc.check_monkeypatch_setattr(_DIR, snapshot(35))
+    rc.check_monkeypatch_setattr(_DIR, snapshot(36))
 
 
 def test_prevent_test_container_classes() -> None:
