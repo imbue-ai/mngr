@@ -66,7 +66,7 @@ def test_prevent_builtin_exception_raises() -> None:
 
 
 def test_prevent_silent_decode_error_catches() -> None:
-    rc.check_silent_decode_error_catches(_DIR, snapshot(9))
+    rc.check_silent_decode_error_catches(_DIR, snapshot(8))
 
 
 # --- Import style ---
@@ -94,7 +94,7 @@ def test_prevent_getattr() -> None:
     # pattern documented inline on _walk_to_field. Switching to model_dump
     # round-tripping to dodge the ratchet would re-introduce the serialisation
     # cost _walk_to_field was rewritten to avoid (see its docstring).
-    rc.check_getattr(_DIR, snapshot(15))
+    rc.check_getattr(_DIR, snapshot(11))
 
 
 def test_prevent_setattr() -> None:
@@ -263,7 +263,7 @@ def test_prevent_bare_tmux_targets() -> None:
 def test_prevent_direct_subprocess() -> None:
     # testing.py files are test infrastructure and excluded alongside test files
     excluded = TEST_FILE_PATTERNS + ("testing.py",)
-    rc.check_direct_subprocess(_DIR, snapshot(14), excluded_patterns=excluded)
+    rc.check_direct_subprocess(_DIR, snapshot(15), excluded_patterns=excluded)
 
 
 # --- AST-based ratchets ---
