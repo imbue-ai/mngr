@@ -29,14 +29,17 @@ def _find_host_container(client: docker.DockerClient, prefix: str) -> docker.mod
 def _kill_sshd_master(container: docker.models.containers.Container) -> None:
     """Kill the master sshd process inside a container by its specific PID.
 
-    Finds the sshd process whose parent is PID 1 (the listener / master) and
-    sends it a plain ``kill`` (SIGTERM). Deliberately avoids broad ``pkill``
-    patterns: only the one verified master PID is signalled.
+    Finds the sshd process whose parent is NOT itself an sshd (per-connection
+    sshds fork from the master, so the master is the one whose ppid sits
+    outside the sshd PID set) and sends it a plain ``kill`` (SIGTERM).
+    Deliberately avoids broad ``pkill`` patterns: only the one verified
+    master PID is signalled.
     """
     exit_code, output = container.exec_run(["pgrep", "-x", "sshd"])
     assert exit_code == 0, f"no sshd process found in container: {output!r}"
     sshd_pids = [line for line in output.decode().split() if line]
     assert sshd_pids, "pgrep returned no sshd PIDs"
+    sshd_pid_set = set(sshd_pids)
 
     master_pid: str | None = None
     for pid in sshd_pids:
@@ -47,7 +50,7 @@ def _kill_sshd_master(container: docker.models.containers.Container) -> None:
         # so split on the closing ')' of comm before reading positional fields.
         fields = stat_out.decode().rsplit(")", 1)[-1].split()
         ppid = fields[1] if len(fields) > 1 else ""
-        if ppid == "1":
+        if ppid and ppid not in sshd_pid_set:
             master_pid = pid
             break
     assert master_pid is not None, f"could not identify master sshd among PIDs {sshd_pids}"
