@@ -1510,6 +1510,59 @@ def test_load_config_allows_pytest_when_config_opts_in(
     load_config(pm=pm, concurrency_group=cg, context_dir=tmp_path)
 
 
+def test_load_config_raises_when_in_pytest_and_config_omits_opt_in(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, cg: ConcurrencyGroup
+) -> None:
+    """A loaded config that omits is_allowed_in_pytest raises during pytest.
+
+    This pins the default: is_allowed_in_pytest defaults to False, so a config
+    file that does not set it cannot be picked up during a pytest run.
+    """
+    pm = pluggy.PluginManager("mngr")
+    pm.add_hookspecs(hookspecs)
+    load_all_registries(pm)
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("MNGR_PREFIX", raising=False)
+    monkeypatch.delenv("MNGR_HOST_DIR", raising=False)
+    monkeypatch.delenv("MNGR_ROOT_NAME", raising=False)
+    monkeypatch.setenv("PYTEST_CURRENT_TEST", "test_something")
+
+    # A real config file that sets an unrelated key but does not opt in.
+    mngr_dir = tmp_path / ".mngr"
+    mngr_dir.mkdir(parents=True, exist_ok=True)
+    profile_dir = get_or_create_profile_dir(mngr_dir)
+    (profile_dir / "settings.toml").write_text('prefix = "custom-"\n')
+
+    with pytest.raises(ConfigParseError, match="Running mngr within pytest is not allowed"):
+        load_config(pm=pm, concurrency_group=cg, context_dir=tmp_path)
+
+
+def test_load_config_allows_pytest_when_no_config_file_loaded(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, cg: ConcurrencyGroup
+) -> None:
+    """load_config runs during pytest when no config file is picked up at all.
+
+    The guard only fires when a config file was actually loaded; with nothing to
+    protect against, a test that loads no config file needs no opt-in.
+    """
+    pm = pluggy.PluginManager("mngr")
+    pm.add_hookspecs(hookspecs)
+    load_all_registries(pm)
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("MNGR_PREFIX", raising=False)
+    monkeypatch.delenv("MNGR_HOST_DIR", raising=False)
+    monkeypatch.delenv("MNGR_ROOT_NAME", raising=False)
+    monkeypatch.setenv("PYTEST_CURRENT_TEST", "test_something")
+
+    # No settings.toml is written anywhere under HOME or context_dir, so no
+    # config file is loaded.
+
+    # Should NOT raise.
+    load_config(pm=pm, concurrency_group=cg, context_dir=tmp_path)
+
+
 # =============================================================================
 # Tests for load_config with env command overrides
 # =============================================================================
