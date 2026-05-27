@@ -15,9 +15,7 @@ from imbue.mngr_tmr.report import IntegratorResult
 from imbue.mngr_tmr.report import ReportSection
 from imbue.mngr_tmr.report import TestMapReduceResult
 from imbue.mngr_tmr.report import TestResult
-from imbue.mngr_tmr.report import _build_grouped_tables
-from imbue.mngr_tmr.report import _build_toc_sidebar
-from imbue.mngr_tmr.report import _merged_status
+from imbue.mngr_tmr.report import _merged_status_html
 from imbue.mngr_tmr.report import _render_markdown
 from imbue.mngr_tmr.report import _report_section_of
 from imbue.mngr_tmr.report import generate_html_report
@@ -234,43 +232,18 @@ def test_render_markdown_plain_text() -> None:
     assert "plain text" in result
 
 
-# --- _build_toc_sidebar tests ---
-
-
-def test_build_toc_sidebar_empty() -> None:
-    assert _build_toc_sidebar({}) == ""
-
-
-def test_build_toc_sidebar_single_section() -> None:
-    toc = _build_toc_sidebar({ReportSection.CLEAN_PASS: 5})
-    assert "Clean pass (5)" in toc
-    assert 'href="#sec-CLEAN_PASS"' in toc
-
-
-def test_build_toc_sidebar_multiple_sections() -> None:
-    toc = _build_toc_sidebar({ReportSection.CLEAN_PASS: 3, ReportSection.BLOCKED: 2})
-    assert "Clean pass (3)" in toc
-    assert "Blocked (2)" in toc
-
-
-def test_build_toc_sidebar_running_section() -> None:
-    toc = _build_toc_sidebar({ReportSection.RUNNING: 3})
-    assert "Running (3)" in toc
-    assert "rgb(3, 169, 244)" in toc
-
-
 # --- _merged_status tests ---
 
 
 def test_merged_status_no_integrator() -> None:
     r = make_test_result(before=True, after=True)
-    assert _merged_status(r, None) == ""
+    assert _merged_status_html(r, None) == ""
 
 
 def test_merged_status_no_branch() -> None:
     r = make_test_result(before=True, after=True)
     integrator = IntegratorResult(squashed_branches=("mngr-tmr/a",))
-    assert _merged_status(r, integrator) == ""
+    assert _merged_status_html(r, integrator) == ""
 
 
 def test_merged_status_squashed() -> None:
@@ -283,7 +256,7 @@ def test_merged_status_squashed() -> None:
         changes=SUCCEEDED_FIX,
     )
     integrator = IntegratorResult(squashed_branches=("mngr-tmr/a",))
-    assert "10003" in _merged_status(r, integrator)
+    assert "10003" in _merged_status_html(r, integrator)
 
 
 def test_merged_status_impl_priority() -> None:
@@ -296,7 +269,7 @@ def test_merged_status_impl_priority() -> None:
         changes={ChangeKind.FIX_IMPL: Change(status=ChangeStatus.SUCCEEDED, summary_markdown="fixed")},
     )
     integrator = IntegratorResult(impl_priority=("mngr-tmr/b",), impl_commit_hashes={"mngr-tmr/b": "abc123def"})
-    status = _merged_status(r, integrator)
+    status = _merged_status_html(r, integrator)
     assert "abc123def" in status
     assert "<code>" in status
 
@@ -311,7 +284,7 @@ def test_merged_status_failed() -> None:
         changes=SUCCEEDED_FIX,
     )
     integrator = IntegratorResult(failed=("mngr-tmr/c",))
-    assert "10007" in _merged_status(r, integrator)
+    assert "10007" in _merged_status_html(r, integrator)
 
 
 def test_merged_status_not_in_integrator() -> None:
@@ -324,101 +297,10 @@ def test_merged_status_not_in_integrator() -> None:
         changes=SUCCEEDED_FIX,
     )
     integrator = IntegratorResult(squashed_branches=("mngr-tmr/other",))
-    assert _merged_status(r, integrator) == ""
+    assert _merged_status_html(r, integrator) == ""
 
 
 # --- HTML report tests ---
-
-
-def test_build_grouped_tables_groups_by_section() -> None:
-    results = [
-        make_test_result(before=True, after=True),
-        make_test_result(changes=SUCCEEDED_FIX, before=False, after=True),
-    ]
-    tables_html = _build_grouped_tables(results)
-    assert tables_html.index("Non-implementation fixes") < tables_html.index("Clean pass")
-
-
-def test_build_grouped_tables_shows_branch() -> None:
-    r = TestMapReduceResult(
-        test_node_id="t::c",
-        agent_name=AgentName("c"),
-        changes=SUCCEEDED_FIX,
-        tests_passing_before=False,
-        tests_passing_after=True,
-        summary_markdown="fixed",
-        branch_name="mngr-tmr/c-abc123",
-    )
-    assert "mngr-tmr/c-abc123" in _build_grouped_tables([r])
-
-
-def test_build_grouped_tables_shows_changes_column() -> None:
-    changes = {
-        ChangeKind.FIX_TEST: Change(status=ChangeStatus.SUCCEEDED, summary_markdown="fixed"),
-        ChangeKind.IMPROVE_TEST: Change(status=ChangeStatus.BLOCKED, summary_markdown="blocked"),
-    }
-    r = TestMapReduceResult(
-        test_node_id="t::d",
-        agent_name=AgentName("d"),
-        changes=changes,
-        tests_passing_before=False,
-        tests_passing_after=True,
-        summary_markdown="Fixed test",
-    )
-    tables_html = _build_grouped_tables([r])
-    assert "FIX_TEST" in tables_html
-    assert "IMPROVE_TEST" in tables_html
-    assert "10003" in tables_html
-    assert "9644" in tables_html
-
-
-def test_build_grouped_tables_renders_markdown_summary() -> None:
-    r = TestMapReduceResult(
-        test_node_id="t::d",
-        agent_name=AgentName("d"),
-        tests_passing_before=True,
-        tests_passing_after=True,
-        summary_markdown="Test **passed** with `no issues`.",
-    )
-    tables_html = _build_grouped_tables([r])
-    assert "<strong>passed</strong>" in tables_html
-    assert "<code>no issues</code>" in tables_html
-
-
-def test_build_grouped_tables_running_first() -> None:
-    results = [make_test_result(), make_test_result(before=True, after=True)]
-    tables_html = _build_grouped_tables(results)
-    assert tables_html.index("Clean pass") < tables_html.index("Running")
-
-
-def test_build_grouped_tables_has_merged_column() -> None:
-    r = make_test_result(changes=SUCCEEDED_FIX, before=False, after=True)
-    tables_html = _build_grouped_tables([r])
-    assert "Merged?" in tables_html
-
-
-def test_build_grouped_tables_impl_priority_sorting() -> None:
-    impl_fix_a = {ChangeKind.FIX_IMPL: Change(status=ChangeStatus.SUCCEEDED, summary_markdown="fix a")}
-    impl_fix_b = {ChangeKind.FIX_IMPL: Change(status=ChangeStatus.SUCCEEDED, summary_markdown="fix b")}
-    r_a = TestMapReduceResult(
-        test_node_id="t::a",
-        agent_name=AgentName("a"),
-        changes=impl_fix_a,
-        tests_passing_before=False,
-        tests_passing_after=True,
-        branch_name="mngr-tmr/a",
-    )
-    r_b = TestMapReduceResult(
-        test_node_id="t::b",
-        agent_name=AgentName("b"),
-        changes=impl_fix_b,
-        tests_passing_before=False,
-        tests_passing_after=True,
-        branch_name="mngr-tmr/b",
-    )
-    integrator = IntegratorResult(impl_priority=("mngr-tmr/b", "mngr-tmr/a"))
-    tables_html = _build_grouped_tables([r_a, r_b], integrator=integrator)
-    assert tables_html.index("t::<wbr>b") < tables_html.index("t::<wbr>a")
 
 
 def test_generate_html_report(tmp_path: Path) -> None:
@@ -451,16 +333,6 @@ def test_generate_html_report(tmp_path: Path) -> None:
     assert "Clean pass" in content
     assert "Non-implementation fixes" in content
     assert 'class="toc-sidebar"' in content
-
-
-def test_generate_html_report_groups_clean_pass_before_running(tmp_path: Path) -> None:
-    results = [
-        make_test_result(before=True, after=True),
-        make_test_result(changes=FAILED_FIX, before=False, after=False),
-    ]
-    tables_html = _build_grouped_tables(results)
-    assert "Non-implementation fixes" in tables_html
-    assert "Clean pass" in tables_html
 
 
 def test_generate_html_report_creates_output_dir(tmp_path: Path) -> None:

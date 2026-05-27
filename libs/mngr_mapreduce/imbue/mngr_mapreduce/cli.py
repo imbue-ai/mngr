@@ -609,7 +609,6 @@ def reintegrate_mapreduce(
                 task_id=task_id,
                 agent_id=detail.id,
                 agent_name=detail.name,
-                work_dir=detail.work_dir,
                 branch_name=detail.initial_branch or "",
                 created_at=0.0,
             )

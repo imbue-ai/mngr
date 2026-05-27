@@ -97,19 +97,21 @@ class MapperInfo(FrozenModel):
     task_id: str = Field(description="Opaque id of the task this agent was launched for")
     agent_id: AgentId = Field(description="The ID of the launched agent")
     agent_name: AgentName = Field(description="The name of the launched agent")
-    work_dir: Path = Field(description="The agent's working directory on its host")
     branch_name: str = Field(description="Git branch created for this agent")
     created_at: float = Field(description="Monotonic timestamp (time.monotonic()) when the agent was created")
 
 
 class ReducerInfo(FrozenModel):
-    """Tracks the launched reducer agent."""
+    """Tracks the launched reducer agent.
+
+    There's no ``created_at`` field because the reduce phase has a single
+    overall deadline (built from ``reducer_timeout`` at launch time)
+    rather than a per-agent timeout.
+    """
 
     agent_id: AgentId = Field(description="The ID of the launched agent")
     agent_name: AgentName = Field(description="The name of the launched agent")
-    work_dir: Path = Field(description="The agent's working directory on its host")
     branch_name: str = Field(description="Git branch created for this agent")
-    created_at: float = Field(description="Monotonic timestamp (time.monotonic()) when the agent was created")
 
 
 class LaunchConfig(FrozenModel):

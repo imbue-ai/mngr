@@ -253,10 +253,9 @@ def wait_for_reducer(
 
     The reducer publishes its outputs the same way mappers do. On success
     this downloads + extracts the archive under ``ctx.output_dir/<name>/``
-    and fires ``recipe.on_reducer_finalized``. Returns the reducer's
+    and fires ``recipe.on_reducer_finalized`` -- the only place the
+    extracted contents are interpreted. Returns the reducer's
     ``AgentMetadata`` either way; on timeout, ``error_summary`` is set.
-    The framework no longer interprets the reducer's outputs beyond
-    handing the extracted directory to the recipe.
     """
     while time.monotonic() < deadline:
         if is_agent_outputs_ready(mngr_ctx, provider_name, host.id, info.agent_id):

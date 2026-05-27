@@ -11,9 +11,9 @@ The HTML template, the CSS, and the panel JS live under ``report_assets/``
 and are rendered with Jinja2. This module's job is to assemble the
 context dict the template renders against.
 
-Also home to the test-mapreduce-specific data types -- they're only used
-by this module (and its tests), so they live here rather than in a separate
-``data_types.py``. Framework-side types live in ``imbue.mngr_mapreduce.data_types``.
+The test-mapreduce-specific data types (``TestResult``, ``Change``, etc.)
+also live here -- they're only used by this module. Framework-side types
+live in ``imbue.mngr_mapreduce.data_types``.
 """
 
 import html
@@ -588,92 +588,3 @@ def generate_html_report(
     output_path.write_text(report_html)
     logger.info("HTML report written to {}", output_path)
     return output_path
-
-
-# Backwards-compatible exports for legacy callers / tests. ``_build_grouped_tables``
-# / ``_build_toc_sidebar`` etc. used to return HTML strings; tests now reach into
-# the view-building helpers, which are the new internal seams.
-def _build_grouped_tables(
-    results: list[TestMapReduceResult],
-    agent_artifact_runs: dict[str, list[tuple[str, str, Path]]] | None = None,
-    integrator: IntegratorResult | None = None,
-    run_commands: list[tuple[str, str]] | None = None,
-) -> str:
-    """Test helper: render just the sections fragment of the report.
-
-    Used by ``report_test`` to assert HTML structure without needing a full
-    file write. Builds the section views then renders them in isolation via
-    a small inline template.
-    """
-    artifact_map = agent_artifact_runs or {}
-    has_artifacts = bool(artifact_map)
-    sections = _build_section_views(results, integrator, artifact_map, has_artifacts)
-    reintegrate_cmd = ""
-    if run_commands:
-        for cmd_label, cmd_text in run_commands:
-            if "reintegrate" in cmd_label.lower():
-                reintegrate_cmd = html.escape(cmd_text)
-                break
-    fragment = _jinja_env.from_string(
-        """{% for section in sections %}
-<h2 id="{{ section.anchor }}" style="color: {{ section.color }};">{{ section.label }} ({{ section.rows|length }})</h2>
-{% if section.kind == "BLOCKED" %}
-<div class="blocked-hint">
-  <p>To resolve issues with a blocked agent:</p>
-  <ol>
-    <li><code>mngr connect $agent_name</code></li>
-    <li>When done, tell it to "regenerate the outcome file"</li>
-    {% if reintegrate_cmd %}<li>Run: <code>{{ reintegrate_cmd|safe }}</code></li>{% endif %}
-  </ol>
-</div>
-{% endif %}
-{% if section.kind == "NON_IMPL_FIXES" and integrator and integrator.squashed_commit_hash %}
-<p class="squashed-hash">Squashed commit: <code>{{ integrator.squashed_commit_hash[:10] }}</code></p>
-{% endif %}
-<table>
-  <thead><tr>{% if section.kind == "RUNNING" %}<th>Test</th><th>Agent</th>{% elif section.kind == "CLEAN_PASS" %}<th>Test</th><th>Agent</th><th>Branch</th>{% if has_artifacts %}<th>Artifacts</th>{% endif %}{% else %}<th>Test</th><th>Changes</th><th>Agent</th><th>Branch</th><th>Merged?</th>{% if has_artifacts %}<th>Artifacts</th>{% endif %}{% endif %}</tr></thead>
-  <tbody>
-  {% for row in section.rows %}
-  <tr>
-    {% if section.kind == "RUNNING" %}<td>{{ row.test_id_html|safe }}</td><td><code>{{ row.agent_name }}</code></td>
-    {% elif section.kind == "CLEAN_PASS" %}<td>{{ row.test_id_html|safe }}</td><td><code>{{ row.agent_name }}</code></td><td><code>{{ row.branch_name or "-" }}</code></td>{% if has_artifacts %}{% if row.has_artifacts %}<td><button class="artifacts-btn" data-agent="{{ row.agent_name }}">View</button></td>{% else %}<td>-</td>{% endif %}{% endif %}
-    {% else %}<td>{{ row.test_id_html|safe }}</td><td>{{ row.changes_html|safe }}</td><td><code>{{ row.agent_name }}</code></td><td><code>{{ row.branch_name or "-" }}</code></td><td>{{ row.merged_html|safe }}</td>{% if has_artifacts %}{% if row.has_artifacts %}<td><button class="artifacts-btn" data-agent="{{ row.agent_name }}">View</button></td>{% else %}<td>-</td>{% endif %}{% endif %}
-    {% endif %}
-  </tr>
-  {% if row.summary_html and section.kind != "RUNNING" %}<tr class="summary-row"><td colspan="{{ section.col_count }}" class="md summary-cell">{{ row.summary_html|safe }}</td></tr>{% endif %}
-  {% endfor %}
-  </tbody>
-</table>
-{% endfor %}"""
-    )
-    return fragment.render(
-        sections=sections, integrator=integrator, has_artifacts=has_artifacts, reintegrate_cmd=reintegrate_cmd
-    )
-
-
-def _build_toc_sidebar(counts: dict[ReportSection, int]) -> str:
-    """Test helper: render the TOC sidebar HTML given a counts map."""
-    if not counts:
-        return ""
-    links: list[dict[str, object]] = []
-    for sec in _SECTION_ORDER:
-        count = counts.get(sec, 0)
-        if count == 0:
-            continue
-        links.append(
-            {
-                "anchor": f"sec-{sec.value}",
-                "color": _SECTION_COLORS[sec],
-                "label": _SECTION_LABELS[sec],
-                "count": count,
-            }
-        )
-    fragment = _jinja_env.from_string(
-        """<div class="toc-sidebar">{% for link in links %}<a href="#{{ link.anchor }}" class="toc-link" style="color: {{ link.color }};">{{ link.label }} ({{ link.count }})</a>{% endfor %}</div>"""
-    )
-    return fragment.render(links=links)
-
-
-def _merged_status(result: TestMapReduceResult, integrator: IntegratorResult | None) -> str:
-    """Backwards-compatible wrapper preserved for the report tests."""
-    return _merged_status_html(result, integrator)

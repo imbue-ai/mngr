@@ -27,9 +27,9 @@
   <script src="{{ asciinema_js_url }}"></script>
 {%- endif %}
   <style>
-{{ css }}
+{{ css|safe }}
 {%- if has_artifacts %}
-{{ detail_css }}
+{{ detail_css|safe }}
 {%- endif %}
   </style>
 </head>
@@ -144,7 +144,7 @@
   </div>
 {%- endfor %}
   <script>
-{{ js }}
+{{ js|safe }}
   </script>
 {%- endif %}
 </body>

@@ -268,7 +268,6 @@ def _launch_mapper(
             task_id=task.id,
             agent_id=create_result.agent.id,
             agent_name=create_result.agent.name,
-            work_dir=create_result.agent.work_dir,
             branch_name=branch_name,
             created_at=time.monotonic(),
         ),
@@ -572,9 +571,7 @@ def launch_reducer_agent(
         ReducerInfo(
             agent_id=create_result.agent.id,
             agent_name=create_result.agent.name,
-            work_dir=create_result.agent.work_dir,
             branch_name=branch_name,
-            created_at=time.monotonic(),
         ),
         create_result.host,
     )
