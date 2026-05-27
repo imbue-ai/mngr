@@ -1726,7 +1726,7 @@ class VpsDockerProvider(BaseProviderInstance):
                     logger.debug("No host record on VPS {} volume yet, skipping", vps_ip)
                     return [], {}
                 agent_data = host_store.list_persisted_agent_data()
-                return [record], {host_id: agent_data} if agent_data else {host_id: []}
+                return [record], {host_id: agent_data}
         except (HostConnectionError, MngrError) as e:
             cached_records = [r for r in self._host_record_cache.values() if r.vps_ip == vps_ip]
             if cached_records:
