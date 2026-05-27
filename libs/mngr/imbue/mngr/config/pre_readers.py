@@ -128,30 +128,6 @@ def resolve_project_config_dir(
     return root / f".{root_name}"
 
 
-def load_project_config(root_name: str, cg: ConcurrencyGroup) -> dict[str, Any] | None:
-    """Find and load the project config file, returning None if not found.
-
-    The project root is resolved from MNGR_PROJECT_CONFIG_DIR or the cwd's git
-    worktree root (see resolve_project_config_dir).
-    """
-    project_dir = resolve_project_config_dir(None, root_name, cg)
-    if project_dir is None:
-        return None
-    return try_load_toml(project_dir / "settings.toml")
-
-
-def load_local_config(root_name: str, cg: ConcurrencyGroup) -> dict[str, Any] | None:
-    """Find and load the local config file, returning None if not found.
-
-    The project root is resolved from MNGR_PROJECT_CONFIG_DIR or the cwd's git
-    worktree root (see resolve_project_config_dir).
-    """
-    project_dir = resolve_project_config_dir(None, root_name, cg)
-    if project_dir is None:
-        return None
-    return try_load_toml(project_dir / "settings.local.toml")
-
-
 # =============================================================================
 # Lightweight config pre-readers
 # =============================================================================
