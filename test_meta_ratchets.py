@@ -19,6 +19,7 @@ from imbue.imbue_common.ratchet_testing.common_ratchets import check_ratchet_rul
 from imbue.imbue_common.ratchet_testing.core import BINARY_FILE_EXCLUSION
 from imbue.imbue_common.ratchet_testing.core import _get_all_files_with_extension
 from imbue.imbue_common.ratchet_testing.ratchets import check_no_import_lint_errors
+from imbue.imbue_common.ratchet_testing.ratchets import check_no_type_errors
 from imbue.imbue_common.ratchet_testing.ratchets import find_bash_scripts_without_strict_mode
 from imbue.imbue_common.test_profiles import detect_branch
 from scripts.changelog_projects import DEV_PROJECT
@@ -98,8 +99,11 @@ def test_every_project_has_test_ratchets_file() -> None:
 def _get_expected_ratchet_test_names() -> frozenset[str]:
     """Derive the expected set of test function names from standard_ratchet_checks.py.
 
-    Each check_foo() function maps to test_prevent_foo(). Two additional hand-written
-    tests (test_no_type_errors, test_no_ruff_errors) are always expected.
+    Each check_foo() function maps to test_prevent_foo(). The type-check and
+    ruff-lint ratchets are NOT per-project: ty and ruff each scan the whole
+    workspace identically regardless of the directory they run from, so a single
+    repo-wide check (test_no_type_errors_repo_wide / test_no_ruff_lint_errors_repo_wide
+    in this file) replaces what used to be ~36 redundant per-project copies.
     """
     checks_path = (
         _REPO_ROOT
@@ -116,8 +120,6 @@ def _get_expected_ratchet_test_names() -> frozenset[str]:
         for node in ast.walk(tree)
         if isinstance(node, ast.FunctionDef) and node.name.startswith("check_")
     }
-    test_names.add("test_no_type_errors")
-    test_names.add("test_no_ruff_errors")
     return frozenset(test_names)
 
 
@@ -125,7 +127,9 @@ def test_all_test_ratchets_files_have_same_tests() -> None:
     """Ensure all test_ratchets.py files define precisely the expected set of test functions.
 
     The expected tests are derived from standard_ratchet_checks.py (one test_prevent_*
-    per check_* function) plus test_no_type_errors and test_no_ruff_errors.
+    per check_* function). The type-check and ruff-lint ratchets are repo-wide
+    (see test_no_type_errors_repo_wide / test_no_ruff_lint_errors_repo_wide), not
+    per-project, so they are intentionally absent from this set.
     """
     reference_tests = _get_expected_ratchet_test_names()
 
@@ -167,13 +171,28 @@ def test_no_import_layer_violations() -> None:
     check_no_import_lint_errors(_REPO_ROOT)
 
 
+def test_no_type_errors_repo_wide() -> None:
+    """Ensure the workspace has zero type errors (ty), once for the whole repo.
+
+    ty resolves the uv workspace root (root pyproject.toml declares
+    [tool.uv.workspace] members = ["libs/*", "apps/*"]) and scans every member
+    on each invocation regardless of the directory it runs from, so a single
+    repo-wide check is exactly equivalent to -- and replaces -- the per-project
+    test_no_type_errors copies that used to re-run the identical scan ~36 times.
+
+    If this fails for a reason that looks spurious, run `uv sync --all-packages`
+    and re-run before treating the error as real (see CLAUDE.md).
+    """
+    check_no_type_errors(_REPO_ROOT)
+
+
 def test_no_ruff_lint_errors_repo_wide() -> None:
     """Ensure all Python files pass ruff lint and format checks repo-wide.
 
-    Runs both ruff check and ruff format --check over the entire repo root.
-    Per-project test_ratchets.py files also run ruff check within each project;
-    this test acts as a CI backstop for the pre-commit hook and additionally
-    covers repo-root and scripts/ files.
+    Runs both ruff check and ruff format --check over the entire repo root. This
+    is the sole ruff ratchet (the per-project copies were redundant -- this root
+    invocation is a strict superset, additionally covering repo-root and scripts/
+    files) and acts as the CI backstop for the ruff pre-commit hook.
     """
     fix_hint = "To fix: `uv run ruff check --fix . && uv run ruff format .`"
     errors: list[str] = []
