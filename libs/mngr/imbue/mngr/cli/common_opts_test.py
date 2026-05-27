@@ -1460,23 +1460,21 @@ def test_setup_command_context_warns_on_unknown_command_param_when_lax(
 # =============================================================================
 
 
-def test_apply_settings_to_config_setting_cannot_self_authorize_narrowing(mngr_test_prefix: str) -> None:
-    """``--setting`` cannot toggle the narrowing guard: a same-invocation
-    ``--setting allow_settings_key_assignment_narrowing=true`` does NOT authorize
-    a narrowing ``--setting``. The guard reads the opt-in flag as it stood on the
-    loaded config (a settings file or the MNGR__* env var is the only place it can
-    be enabled), so the narrowing ``--setting`` still raises.
+@pytest.mark.parametrize(
+    "flag_setting",
+    [
+        "allow_settings_key_assignment_narrowing=true",
+        "allow_settings_key_assignment_narrowing=false",
+        # Hyphenated spelling normalizes to the same field.
+        "allow-settings-key-assignment-narrowing=true",
+    ],
+)
+def test_apply_settings_to_config_rejects_setting_the_narrowing_flag(flag_setting: str, mngr_test_prefix: str) -> None:
+    """``--setting`` cannot set ``allow_settings_key_assignment_narrowing``: the
+    narrowing guard runs while loading the settings files and env vars, before
+    ``--setting`` is applied, so a ``--setting`` value would be misleading. It
+    raises a clear error pointing to the settings file / env var instead.
     """
-    config = MngrConfig(
-        prefix=mngr_test_prefix,
-        commands={"create": CommandDefaults(defaults={"env": ["X=5"]})},
-    )
-    with pytest.raises(ConfigParseError, match="narrowing"):
-        apply_settings_to_config(
-            config,
-            (
-                "commands.create.env=[]",
-                "allow_settings_key_assignment_narrowing=true",
-            ),
-            frozenset(),
-        )
+    config = MngrConfig(prefix=mngr_test_prefix)
+    with pytest.raises(UserInputError, match="allow_settings_key_assignment_narrowing"):
+        apply_settings_to_config(config, (flag_setting,), frozenset())

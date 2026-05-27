@@ -458,9 +458,7 @@ def _build_narrowing_error(violations: Sequence["_NarrowingViolation"]) -> Confi
         "dropping the earlier entries.\n" + "\n".join(detail_lines) + "\n"
         "To opt into this assign-by-default behavior (and silence this error), set "
         "`allow_settings_key_assignment_narrowing = true` in one of the settings files above "
-        "(or MNGR__ALLOW_SETTINGS_KEY_ASSIGNMENT_NARROWING=true). Note: a `--setting` override "
-        "cannot opt in here -- this guard runs while loading the settings files and env vars, "
-        "before `--setting` is applied.\n"
+        "(or MNGR__ALLOW_SETTINGS_KEY_ASSIGNMENT_NARROWING=true).\n"
         "To keep the additive behavior for a specific key, use the `__extend` suffix on the "
         'key in the higher-precedence layer (e.g. `env__extend = ["X=5"]`).\n'
         "NOTE: the default for `allow_settings_key_assignment_narrowing` will change to True "

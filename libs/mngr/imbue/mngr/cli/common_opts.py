@@ -431,6 +431,19 @@ def apply_settings_to_config(
         key_path = key_path.strip()
         if not key_path:
             raise UserInputError("Invalid --setting: key cannot be empty")
+        # The settings-narrowing guard runs while the settings files and env vars
+        # are loaded, before --setting is applied, so its opt-in flag would be
+        # silently ineffective there. Reject setting it via --setting with a
+        # pointer to where it actually works, rather than accepting it as a no-op.
+        bare = bare_key(key_path) if is_extend_key(key_path) else key_path
+        if bare.replace("-", "_") == "allow_settings_key_assignment_narrowing":
+            raise UserInputError(
+                "`allow_settings_key_assignment_narrowing` cannot be set with --setting. It "
+                "controls the settings-narrowing guard, which runs while the settings files and "
+                "env vars are loaded -- before --setting is applied. Set "
+                "`allow_settings_key_assignment_narrowing = true` in a settings.toml, or set "
+                "MNGR__ALLOW_SETTINGS_KEY_ASSIGNMENT_NARROWING=true."
+            )
         parsed_value = parse_scalar_value(value_str)
         set_at_path(raw, key_path.split("."), parsed_value)
 
@@ -438,9 +451,8 @@ def apply_settings_to_config(
     settings_config = parse_config(resolved, disabled_plugins=disabled_plugins, strict=True)
     # Apply the same narrowing guard used by the config-file merge path so
     # ``--setting`` cannot silently drop entries from the merged config either.
-    # The opt-in flag must already be set on ``config`` (via a settings file or
-    # the MNGR__* env var); ``--setting`` itself cannot toggle the guard, matching
-    # the loader's behavior.
+    # Honor the existing setting on ``config`` -- ``--setting`` runs after
+    # config-file loading, so the resolved value is already known here.
     if not config.allow_settings_key_assignment_narrowing:
         violations = detect_settings_narrowing(config, settings_config)
         if violations:
@@ -453,8 +465,7 @@ def _build_setting_narrowing_error(violations: Sequence[str]) -> ConfigParseErro
 
     Mirrors the loader's message but attributes the violations to ``--setting``
     and reminds users that they can opt in either by setting the safety field
-    to True (in a settings file or the MNGR__* env var) or by switching the
-    specific key to ``__extend``. ``--setting`` itself cannot toggle the guard.
+    to True or by switching the specific key to ``__extend``.
     """
     detail_lines = [f"  --setting: {key}" for key in violations]
     return ConfigParseError(
@@ -462,8 +473,7 @@ def _build_setting_narrowing_error(violations: Sequence[str]) -> ConfigParseErro
         "list/tuple/dict/set value from the merged config, silently dropping the earlier "
         "entries.\n" + "\n".join(detail_lines) + "\n"
         "To opt into this assign-by-default behavior (and silence this error), set "
-        "`allow_settings_key_assignment_narrowing = true` in your settings.toml (or "
-        "MNGR__ALLOW_SETTINGS_KEY_ASSIGNMENT_NARROWING=true).\n"
+        "`allow_settings_key_assignment_narrowing = true` in your settings.toml.\n"
         "To keep the additive behavior for a specific key, switch to the `__extend` suffix on "
         "the --setting key (e.g. `--setting commands.create.env__extend='[\"X=5\"]'`).\n"
         "NOTE: the default for `allow_settings_key_assignment_narrowing` will change to True "
