@@ -258,9 +258,13 @@ def _check_narrowing(
     treated as narrowing too: it drops every prior entry, which is the most
     extreme form of data loss the safety net is meant to catch. To clear,
     the user must set ``allow_settings_key_assignment_narrowing = true``.
-    The only assignments that pass without warning are no-ops (override
-    equals base) and supersets (every base entry survives, e.g. ``__extend``
-    results or additive assigns that happen to include every prior value).
+    Against a non-empty list/tuple base, three forms of override pass without
+    warning: no-ops (override equals base), supersets (every base entry
+    survives, e.g. ``__extend`` results or additive assigns that happen to
+    include every prior value), and ``StringDerivedTuple`` overrides (a
+    string-shaped TOML value such as ``cli_args = "..."`` is a coherent
+    single value, so replacing it is scalar replacement rather than
+    aggregate narrowing).
     """
     if isinstance(base_value, BaseModel) and isinstance(override_value, BaseModel):
         _walk_for_narrowing(base_value, override_value, path, violations)
