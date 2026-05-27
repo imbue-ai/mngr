@@ -886,6 +886,8 @@ def test_template_unknown_template_raises_error(
     mngr_dir.mkdir()
     settings_file = mngr_dir / "settings.toml"
     settings_file.write_text("""
+is_allowed_in_pytest = true
+
 [create_templates.existing]
 ensure_clean = false
 """)
