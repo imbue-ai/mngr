@@ -40,7 +40,7 @@ def test_backend_get_config_class() -> None:
 
 
 def test_build_provider_instance_returns_docker_provider_instance(temp_mngr_ctx: MngrContext) -> None:
-    config = DockerProviderConfig()
+    config = DockerProviderConfig(isolate_host_volumes=False)
     instance = DockerProviderBackend.build_provider_instance(
         name=ProviderInstanceName("test-docker"),
         config=config,
@@ -50,7 +50,7 @@ def test_build_provider_instance_returns_docker_provider_instance(temp_mngr_ctx:
 
 
 def test_build_provider_instance_with_custom_host_dir(temp_mngr_ctx: MngrContext) -> None:
-    config = DockerProviderConfig(host_dir=Path("/custom/dir"))
+    config = DockerProviderConfig(host_dir=Path("/custom/dir"), isolate_host_volumes=False)
     instance = DockerProviderBackend.build_provider_instance(
         name=ProviderInstanceName("test-docker"),
         config=config,
@@ -60,7 +60,7 @@ def test_build_provider_instance_with_custom_host_dir(temp_mngr_ctx: MngrContext
 
 
 def test_build_provider_instance_uses_default_host_dir(temp_mngr_ctx: MngrContext) -> None:
-    config = DockerProviderConfig()
+    config = DockerProviderConfig(isolate_host_volumes=False)
     instance = DockerProviderBackend.build_provider_instance(
         name=ProviderInstanceName("test-docker"),
         config=config,
@@ -70,7 +70,7 @@ def test_build_provider_instance_uses_default_host_dir(temp_mngr_ctx: MngrContex
 
 
 def test_build_provider_instance_uses_name(temp_mngr_ctx: MngrContext) -> None:
-    config = DockerProviderConfig()
+    config = DockerProviderConfig(isolate_host_volumes=False)
     instance = DockerProviderBackend.build_provider_instance(
         name=ProviderInstanceName("my-docker"),
         config=config,
