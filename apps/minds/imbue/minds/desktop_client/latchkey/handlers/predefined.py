@@ -352,7 +352,7 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
                 response_event = self._write_response_and_notify(
                     request_event_id=request_event_id,
                     agent_id=agent_id,
-                    service_info=service_info,
+                    scope=service_info.scope,
                     status=RequestStatus.DENIED,
                     message=message,
                 )
@@ -376,7 +376,7 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
         response_event = self._write_response_and_notify(
             request_event_id=request_event_id,
             agent_id=agent_id,
-            service_info=service_info,
+            scope=service_info.scope,
             status=RequestStatus.GRANTED,
             message=granted_message,
         )
@@ -391,14 +391,25 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
         self,
         request_event_id: str,
         agent_id: AgentId,
-        service_info: ServicePermissionInfo,
+        scope: str,
+        display_name: str,
     ) -> tuple[str, RequestResponseEvent]:
-        """Append a DENIED response and notify the agent. Returns ``(message, response_event)``."""
-        message = _format_denied_message(service_info.display_name)
+        """Append a DENIED response and notify the agent. Returns ``(message, response_event)``.
+
+        ``scope`` is the Detent scope schema the request was filed under;
+        it goes into the response event so the inbox can dedupe the
+        response against the original request. ``display_name`` is the
+        human-readable service name shown in the agent-facing message.
+        For requests whose scope is in the catalog these are the catalog
+        entry's scope and display name respectively; for requests with
+        an unknown scope, both fall back to the raw scope string so the
+        deny path still works.
+        """
+        message = _format_denied_message(display_name)
         response_event = self._write_response_and_notify(
             request_event_id=request_event_id,
             agent_id=agent_id,
-            service_info=service_info,
+            scope=scope,
             status=RequestStatus.DENIED,
             message=message,
         )
@@ -554,15 +565,24 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
         request: Request,
         req_event: RequestEvent,
     ) -> Response:
-        """Drive the deny flow from the dialog form submission."""
+        """Drive the deny flow from the dialog form submission.
+
+        Deny must work even when the requested scope is not in the
+        gateway's catalog: an agent can file a request under an unknown
+        scope (typo, stale catalog, etc.) and the user's only sensible
+        recourse from the rendered dialog (see
+        :func:`_render_unknown_scope_page`) is to deny it. In that case
+        we fall back to using the raw scope string as the display name
+        too, so the agent-facing ``mngr message`` and the persisted
+        response event still get written.
+        """
         if not isinstance(req_event, LatchkeyPredefinedPermissionRequestEvent):
             return _json_error("Unsupported request type", status_code=500)
         service_info = self.services_catalog.get_by_scope(req_event.scope)
         if service_info is None:
-            return _json_error(
-                f"Scope '{req_event.scope}' is not in the gateway catalog",
-                status_code=400,
-            )
+            display_name = req_event.scope
+        else:
+            display_name = service_info.display_name
 
         request_event_id = str(req_event.event_id)
         parsed_agent_id = AgentId(req_event.agent_id)
@@ -571,7 +591,8 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
             lambda: self.deny(
                 request_event_id=request_event_id,
                 agent_id=parsed_agent_id,
-                service_info=service_info,
+                scope=req_event.scope,
+                display_name=display_name,
             ),
         )
         self._mirror_response_into_inbox(request, response_event)
@@ -655,7 +676,7 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
         self,
         request_event_id: str,
         agent_id: AgentId,
-        service_info: ServicePermissionInfo,
+        scope: str,
         status: RequestStatus,
         message: str,
     ) -> RequestResponseEvent:
@@ -689,7 +710,7 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
             status=status,
             agent_id=str(agent_id),
             request_type=str(RequestType.LATCHKEY_PERMISSION),
-            scope=service_info.scope,
+            scope=scope,
         )
         append_response_event(self.data_dir, response_event)
         self.mngr_message_sender.send(agent_id, message)
