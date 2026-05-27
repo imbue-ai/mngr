@@ -17,12 +17,6 @@ from imbue.mngr_mapreduce.launching import REDUCER_INPUTS_DIRNAME
 TESTING_AGENT_OUTCOME_FILENAME = "testing_agent_outcome.json"
 INTEGRATOR_OUTCOME_FILENAME = "integrator_outcome.json"
 
-# Subdirectory of the integrator agent's work_dir into which the orchestrator
-# rsyncs the local output directory before kicking the integrator off. Just an
-# alias for the framework's neutral name so the existing prompt code reads
-# the same.
-INTEGRATOR_INPUTS_DIRNAME = REDUCER_INPUTS_DIRNAME
-
 # Prompts are plain text, not HTML, so autoescaping is off. The templates
 # never mix variable substitution with literal `{{`/`}}` -- empty-dict bash
 # and JSON examples use single `{` `}` only -- so no `{% raw %}` blocks are
@@ -33,20 +27,13 @@ _jinja_env = Environment(
 )
 
 
-def _publish_outputs_snippet() -> str:
-    """Bash that packages ``.test_output`` into the outputs archive.
-
-    The agent runs this from the git repo root. If the agent made commits
-    on its branch beyond the base, a ``branch.bundle`` is included in the
-    archive. Writes via a ``.tmp`` sibling and renames on completion so
-    the orchestrator never reads a half-written archive. Both the mapper
-    and reducer prompts embed this verbatim as their final step.
-
-    The archive path uses ``ARCHIVE_SUBDIR`` / ``ARCHIVE_FILENAME`` from
-    the framework so the bash and the orchestrator's polling agree on
-    where to look.
-    """
-    return f"""```bash
+# Bash that packages ``.test_output`` into the outputs archive. The agent
+# runs this from the git repo root as the final step of both the mapper and
+# reducer prompts. Writes via a ``.tmp`` sibling and renames on completion
+# so the orchestrator never reads a half-written archive. ``ARCHIVE_SUBDIR``
+# / ``ARCHIVE_FILENAME`` come from the framework so the bash and the
+# orchestrator's polling agree on where to look.
+_PUBLISH_OUTPUTS_SNIPPET = f"""```bash
 ARCHIVE_DIR="$MNGR_AGENT_STATE_DIR/{ARCHIVE_SUBDIR}"
 mkdir -p "$ARCHIVE_DIR"
 
@@ -88,7 +75,7 @@ def build_test_agent_prompt(
     return template.render(
         run_cmd=run_cmd,
         outcome_filename=TESTING_AGENT_OUTCOME_FILENAME,
-        publish_snippet=_publish_outputs_snippet(),
+        publish_snippet=_PUBLISH_OUTPUTS_SNIPPET,
     )
 
 
@@ -96,7 +83,7 @@ def build_integrator_prompt() -> str:
     """Build the integrator's initial message.
 
     The orchestrator has rsynced the per-test-agent output directories under
-    ``INTEGRATOR_INPUTS_DIRNAME`` in the integrator's work_dir, each subdir
+    ``REDUCER_INPUTS_DIRNAME`` in the integrator's work_dir, each subdir
     holding the test agent's ``test_output/<outcome.json>`` and (when commits
     were made) a ``branch.bundle``. The integrator must walk those
     subdirectories, apply the "should pull" predicate to filter qualifying
@@ -104,8 +91,8 @@ def build_integrator_prompt() -> str:
     """
     template = _jinja_env.get_template("reducer.j2")
     return template.render(
-        inputs_dirname=INTEGRATOR_INPUTS_DIRNAME,
+        inputs_dirname=REDUCER_INPUTS_DIRNAME,
         mapper_outcome_filename=TESTING_AGENT_OUTCOME_FILENAME,
         reducer_outcome_filename=INTEGRATOR_OUTCOME_FILENAME,
-        publish_snippet=_publish_outputs_snippet(),
+        publish_snippet=_PUBLISH_OUTPUTS_SNIPPET,
     )

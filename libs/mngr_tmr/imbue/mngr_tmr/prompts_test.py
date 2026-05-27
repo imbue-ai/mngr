@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
-from imbue.mngr_tmr.prompts import INTEGRATOR_INPUTS_DIRNAME
+from imbue.mngr_mapreduce.launching import REDUCER_INPUTS_DIRNAME
 from imbue.mngr_tmr.prompts import TESTING_AGENT_OUTCOME_FILENAME
 from imbue.mngr_tmr.prompts import build_integrator_prompt
 from imbue.mngr_tmr.prompts import build_test_agent_prompt
@@ -63,7 +63,7 @@ def test_collect_tests_bad_file_raises(tmp_path: Path, cg: ConcurrencyGroup) -> 
 
 def test_integrator_prompt_references_inputs_dir_and_predicate() -> None:
     prompt = build_integrator_prompt()
-    assert INTEGRATOR_INPUTS_DIRNAME in prompt
+    assert REDUCER_INPUTS_DIRNAME in prompt
     assert TESTING_AGENT_OUTCOME_FILENAME in prompt
     # The integrator must encode the should-pull predicate itself.
     assert "SUCCEEDED" in prompt
