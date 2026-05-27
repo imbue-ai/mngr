@@ -25,6 +25,7 @@ from pyinfra.api import Host as PyinfraHost
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.executor import ConcurrencyGroupExecutor
 from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.imbue_common.ids import InvalidRandomIdError
 from imbue.imbue_common.logging import log_span
 from imbue.mngr.errors import HostConnectionError
 from imbue.mngr.errors import HostNotFoundError
@@ -261,8 +262,15 @@ def _read_host_id_label_from_vps(outer: OuterHostInterface) -> HostId | None:
         )
     for raw_line in result.stdout.splitlines():
         value = raw_line.strip()
-        if value:
+        if not value:
+            continue
+        try:
             return HostId(value)
+        except InvalidRandomIdError as e:
+            # A corrupted/manually-edited label must not crash discovery for
+            # the whole VPS; surface as MngrError so the existing fallback
+            # path in _read_records_from_vps logs and continues.
+            raise MngrError(f"Container on VPS has malformed {LABEL_HOST_ID} label {value!r}: {e}") from e
     return None
 
 
