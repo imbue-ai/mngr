@@ -164,19 +164,21 @@ def rsync_command(ctx: click.Context, **kwargs) -> None:
     if opts.destination.path is None and opts.destination.agent is None:
         raise UserInputError("DESTINATION must include an agent, a host, or a path")
 
+    # Reject when both sides are bare local paths (the user should use plain rsync
+    # for that). An endpoint that names an agent or host is allowed even when it
+    # resolves to a host with ``is_local=True`` -- the user clearly meant to address
+    # something through mngr.
+    source_is_bare_local = opts.source.agent is None and opts.source.host is None
+    destination_is_bare_local = opts.destination.agent is None and opts.destination.host is None
+    if source_is_bare_local and destination_is_bare_local:
+        raise RsyncEndpointError(
+            "mngr rsync requires one of SOURCE or DESTINATION to reference an agent or remote host"
+        )
+
     source_resolved = _resolve_endpoint(opts.source, mngr_ctx, is_start_desired=opts.start)
     destination_resolved = _resolve_endpoint(opts.destination, mngr_ctx, is_start_desired=opts.start)
 
     uncommitted_changes_mode = UncommittedChangesMode(opts.uncommitted_changes.upper())
-
-    # The api also enforces this; check at the CLI layer so users see a clean error
-    # before discovery side effects continue.
-    if source_resolved.location.host.is_local == destination_resolved.location.host.is_local:
-        if source_resolved.location.host.is_local:
-            raise RsyncEndpointError(
-                "mngr rsync requires one of SOURCE or DESTINATION to reference a remote host or agent"
-            )
-        raise RsyncEndpointError("mngr rsync does not support remote-to-remote transfers")
 
     result = rsync(
         source_host=source_resolved.location.host,

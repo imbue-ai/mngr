@@ -622,21 +622,50 @@ def rsync(
 def _build_git_url_and_env(
     remote_host: OnlineHostInterface,
     remote_path: Path,
+    *,
+    is_push: bool,
 ) -> tuple[str, dict[str, str] | None]:
     """Build the git URL and environment to talk to ``remote_path`` on ``remote_host``.
 
     For local hosts the URL is the bare path (no SSH, no env). For remote hosts the
     URL is ``ssh://user@host:port/<remote_path>/.git`` and the environment carries
-    ``GIT_SSH_COMMAND`` with the resolved key/port/known_hosts.
+    ``GIT_SSH_COMMAND`` with the resolved key/port/known_hosts. For push only, also
+    sets ``GIT_LFS_SKIP_PUSH=1`` so an LFS-tracked file doesn't try to upload to a
+    remote LFS server that the agent's repo isn't configured for.
     """
     if remote_host.is_local:
-        return str(remote_path), None
+        return str(remote_path), {**os.environ, "GIT_LFS_SKIP_PUSH": "1"} if is_push else None
     ssh_info = remote_host.get_ssh_connection_info()
     assert ssh_info is not None, "Remote host must provide SSH connection info"
     known_hosts_file = get_ssh_known_hosts_file(remote_host)
     url = _build_ssh_git_url(ssh_info, remote_path)
-    env = {**os.environ, "GIT_SSH_COMMAND": _build_ssh_transport_args(ssh_info, known_hosts_file)}
+    env: dict[str, str] = {**os.environ, "GIT_SSH_COMMAND": _build_ssh_transport_args(ssh_info, known_hosts_file)}
+    if is_push:
+        env["GIT_LFS_SKIP_PUSH"] = "1"
     return url, env
+
+
+def _split_options_and_positionals(args: Sequence[str]) -> tuple[list[str], list[str]]:
+    """Split git args into options (before the first positional) and positionals.
+
+    git's command line is ``git <cmd> [<options>] [<repo> [<refspec>...]]``: options
+    must come before the repository, and anything after the repository is treated
+    as a refspec. Since mngr supplies the URL, we have to slot it in at the
+    options/positionals boundary. Args starting with ``-`` up to the first
+    non-option are treated as options; everything from the first non-option on is
+    treated as positionals. Mixed orderings (an option after a positional) end up
+    in the positional bucket, which is what plain git would do too.
+    """
+    options: list[str] = []
+    positionals: list[str] = []
+    seen_positional = False
+    for arg in args:
+        if not seen_positional and arg.startswith("-"):
+            options.append(arg)
+        else:
+            seen_positional = True
+            positionals.append(arg)
+    return options, positionals
 
 
 def _configure_push_destination(remote_host: OnlineHostInterface, remote_path: Path) -> None:
@@ -663,16 +692,17 @@ def git_push(
 ) -> None:
     """Run ``git push`` from ``local_path`` to ``remote_path`` on ``remote_host``.
 
-    ``extra_args`` is appended verbatim to the underlying ``git push`` command
-    after the constructed URL, so the caller can pass refspecs, ``--force``,
-    ``--tags``, ``--dry-run``, etc.
+    ``extra_args`` is passed through to the underlying ``git push`` command. Args
+    starting with ``-`` (up to the first non-option) go before the constructed URL
+    so they're parsed as options; the rest go after the URL as refspecs.
 
     Raises :class:`GitSyncError` on any failure of the underlying git command.
     """
     add_safe_directory_on_remote(remote_host, remote_path)
     _configure_push_destination(remote_host, remote_path)
-    url, env = _build_git_url_and_env(remote_host, remote_path)
-    cmd = ["git", "-C", str(local_path), "push", url, *extra_args]
+    url, env = _build_git_url_and_env(remote_host, remote_path, is_push=True)
+    options, positionals = _split_options_and_positionals(extra_args)
+    cmd = ["git", "-C", str(local_path), "push", *options, url, *positionals]
     logger.debug("Running git push: {}", shlex.join(cmd))
     try:
         cg.run_process_to_completion(cmd, env=env)
@@ -689,15 +719,16 @@ def git_pull(
 ) -> None:
     """Run ``git pull`` into ``local_path`` from ``remote_path`` on ``remote_host``.
 
-    ``extra_args`` is appended verbatim to the underlying ``git pull`` command
-    after the constructed URL, so the caller can pass a branch name,
-    ``--rebase``, ``--ff-only``, ``--no-edit``, etc.
+    ``extra_args`` is passed through to the underlying ``git pull`` command. Args
+    starting with ``-`` (up to the first non-option) go before the constructed URL
+    so they're parsed as options; the rest go after the URL as refspecs.
 
     Raises :class:`GitSyncError` on any failure of the underlying git command.
     """
     add_safe_directory_on_remote(remote_host, remote_path)
-    url, env = _build_git_url_and_env(remote_host, remote_path)
-    cmd = ["git", "-C", str(local_path), "pull", url, *extra_args]
+    url, env = _build_git_url_and_env(remote_host, remote_path, is_push=False)
+    options, positionals = _split_options_and_positionals(extra_args)
+    cmd = ["git", "-C", str(local_path), "pull", *options, url, *positionals]
     logger.debug("Running git pull: {}", shlex.join(cmd))
     try:
         cg.run_process_to_completion(cmd, env=env)
