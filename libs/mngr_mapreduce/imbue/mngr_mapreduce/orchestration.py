@@ -8,6 +8,7 @@ place where content-aware interpretation happens.
 """
 
 import time
+from pathlib import Path
 
 from loguru import logger
 
@@ -27,7 +28,6 @@ from imbue.mngr_mapreduce.launching import launch_mappers_up_to_limit
 from imbue.mngr_mapreduce.launching import stop_agent_on_host
 from imbue.mngr_mapreduce.pulling import is_agent_outputs_ready
 from imbue.mngr_mapreduce.pulling import pull_agent_outputs
-from imbue.mngr_mapreduce.report_upload import maybe_upload_report
 
 
 def _mapper_metadata_for(info: MapperInfo, error_summary: str | None = None) -> AgentMetadata:
@@ -45,19 +45,18 @@ def _run_render_report(
     ctx: MapReduceContext,
     agents: list[AgentMetadata],
     reducer: AgentMetadata | None,
-) -> None:
-    """Call ``recipe.render_report`` and best-effort-upload the result.
+) -> Path | None:
+    """Call ``recipe.render_report`` and return the path (or ``None`` on error).
 
     Recipe errors are logged but do not abort the run -- a broken renderer
-    shouldn't sink an otherwise-successful run.
+    shouldn't sink an otherwise-successful run. Side effects beyond writing
+    the report (e.g. mirroring it elsewhere) are the recipe's responsibility.
     """
     try:
-        report_path = recipe.render_report(ctx, agents, reducer)
+        return recipe.render_report(ctx, agents, reducer)
     except (OSError, ValueError, RuntimeError) as exc:
         logger.warning("Recipe render_report raised: {}", exc)
-        return
-    if report_path is not None:
-        maybe_upload_report(report_path, ctx.run_name)
+        return None
 
 
 def _render_polling_tick(

@@ -9,7 +9,6 @@ from imbue.mngr.primitives import OutputFormat
 from imbue.mngr_mapreduce.cli import disable_modal_initial_snapshot
 from imbue.mngr_mapreduce.cli import emit_agents_launched
 from imbue.mngr_mapreduce.cli import emit_report_path
-from imbue.mngr_mapreduce.cli import emit_report_url
 from imbue.mngr_mapreduce.cli import emit_task_count
 
 
@@ -51,22 +50,6 @@ def test_emit_task_count_jsonl(capsys: Any) -> None:
     emit_task_count(3, OutputOptions(output_format=OutputFormat.JSONL))
     captured = capsys.readouterr()
     assert '"event": "tasks_discovered"' in captured.out
-
-
-def test_emit_report_url_none_emits_nothing(capsys: Any) -> None:
-    emit_report_url(None, OutputOptions(output_format=OutputFormat.JSONL))
-    captured = capsys.readouterr()
-    assert captured.out == ""
-
-
-def test_emit_report_url_human(capsys: Any) -> None:
-    emit_report_url("http://go/shared/x", _human_output_opts())
-
-
-def test_emit_report_url_jsonl(capsys: Any) -> None:
-    emit_report_url("http://go/shared/x", OutputOptions(output_format=OutputFormat.JSONL))
-    captured = capsys.readouterr()
-    assert '"event": "report_url"' in captured.out
 
 
 def test_disable_modal_initial_snapshot_skips_non_modal_providers(temp_mngr_ctx: MngrContext) -> None:

@@ -35,7 +35,6 @@ def test_cli_help_contains_provider_env_label_options(cli_runner: CliRunner) -> 
     assert "--provider" in result.output
     assert "--env" in result.output
     assert "--label" in result.output
-    assert "--prompt-suffix" in result.output
 
 
 def test_cli_help_drops_removed_options(cli_runner: CliRunner) -> None:

@@ -54,7 +54,6 @@ from imbue.mngr_mapreduce.mngr_cli import try_list_agents
 from imbue.mngr_mapreduce.orchestration import launch_and_poll_mappers
 from imbue.mngr_mapreduce.orchestration import wait_for_reducer
 from imbue.mngr_mapreduce.pulling import pull_agent_outputs
-from imbue.mngr_mapreduce.report_upload import maybe_upload_report
 from imbue.mngr_mapreduce.utils import get_base_commit
 from imbue.mngr_mapreduce.utils import make_run_name
 
@@ -302,19 +301,6 @@ def emit_report_path(path: Path, output_opts: OutputOptions) -> None:
             assert_never(unreachable)
 
 
-def emit_report_url(url: str | None, output_opts: OutputOptions) -> None:
-    """Emit the public URL of the report mirror, if upload occurred."""
-    if url is None:
-        return
-    match output_opts.output_format:
-        case OutputFormat.JSON | OutputFormat.JSONL:
-            emit_event("report_url", {"url": url}, output_opts.output_format)
-        case OutputFormat.HUMAN:
-            write_human_line("Report URL: {}", url)
-        case _ as unreachable:
-            assert_never(unreachable)
-
-
 def build_launch_config(
     opts: MapReduceCliOptions,
     source_dir: Path,
@@ -521,7 +507,6 @@ def _run_pipeline(
     final_path = _render_final_report(recipe, ctx, mapper_metadata, reducer_meta)
     if final_path is not None:
         emit_report_path(final_path, output_opts)
-        emit_report_url(maybe_upload_report(final_path, ctx.run_name), output_opts)
 
     # If no mapper ever launched successfully, surface a non-zero exit so
     # CI callers don't read the run as successful.
@@ -644,10 +629,8 @@ def reintegrate_mapreduce(
 
     base_commit = get_base_commit(source_dir, mngr_ctx.concurrency_group)
 
-    # Pre-reduce report
-    pre_path = _render_final_report(recipe, ctx, mapper_metadata, None)
-    if pre_path is not None:
-        emit_report_url(maybe_upload_report(pre_path, run_name), output_opts)
+    # Pre-reduce render so the recipe can mirror/emit; framework discards path.
+    _render_final_report(recipe, ctx, mapper_metadata, None)
 
     config = build_launch_config(
         opts=opts,
@@ -661,4 +644,3 @@ def reintegrate_mapreduce(
     final_path = _render_final_report(recipe, ctx, mapper_metadata, reducer_meta)
     if final_path is not None:
         emit_report_path(final_path, output_opts)
-        emit_report_url(maybe_upload_report(final_path, run_name), output_opts)

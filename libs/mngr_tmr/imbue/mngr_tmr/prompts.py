@@ -20,7 +20,6 @@ INTEGRATOR_INPUTS_DIRNAME = REDUCER_INPUTS_DIRNAME
 def build_test_agent_prompt(
     test_node_id: str,
     pytest_flags: tuple[str, ...],
-    prompt_suffix: str = "",
 ) -> str:
     """Build the prompt/initial message for a test-running agent.
 
@@ -198,8 +197,6 @@ with the appropriate change status set to "BLOCKED" and explain in the
 summary_markdown. If the user sends follow-up messages later, you may ask them
 questions at that point.
 """
-    if prompt_suffix:
-        prompt += f"\n{prompt_suffix}\n"
     return prompt
 
 

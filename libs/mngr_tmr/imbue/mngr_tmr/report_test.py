@@ -1,27 +1,178 @@
-"""Unit tests for test-mapreduce HTML report generation."""
+"""Unit tests for the test-mapreduce report module (data types + HTML generation)."""
 
+import json
 from pathlib import Path
 
 from imbue.mngr.primitives import AgentName
 from imbue.mngr_mapreduce.data_types import AgentKind
 from imbue.mngr_mapreduce.data_types import AgentMetadata
-from imbue.mngr_tmr.data_types import Change
-from imbue.mngr_tmr.data_types import ChangeKind
-from imbue.mngr_tmr.data_types import ChangeStatus
-from imbue.mngr_tmr.data_types import IntegratorResult
-from imbue.mngr_tmr.data_types import ReportSection
-from imbue.mngr_tmr.data_types import TestMapReduceResult
+from imbue.mngr_tmr.prompts import INTEGRATOR_OUTCOME_FILENAME
+from imbue.mngr_tmr.prompts import TESTING_AGENT_OUTCOME_FILENAME
+from imbue.mngr_tmr.report import Change
+from imbue.mngr_tmr.report import ChangeKind
+from imbue.mngr_tmr.report import ChangeStatus
+from imbue.mngr_tmr.report import IntegratorResult
+from imbue.mngr_tmr.report import ReportSection
+from imbue.mngr_tmr.report import TestMapReduceResult
+from imbue.mngr_tmr.report import TestResult
 from imbue.mngr_tmr.report import _build_grouped_tables
 from imbue.mngr_tmr.report import _build_toc_sidebar
 from imbue.mngr_tmr.report import _merged_status
 from imbue.mngr_tmr.report import _render_markdown
 from imbue.mngr_tmr.report import _report_section_of
 from imbue.mngr_tmr.report import generate_html_report
-from imbue.mngr_tmr.testing import FAILED_FIX
-from imbue.mngr_tmr.testing import SUCCEEDED_FIX
-from imbue.mngr_tmr.testing import make_metadata_and_outcome
-from imbue.mngr_tmr.testing import make_test_result
-from imbue.mngr_tmr.testing import write_integrator_outcome
+
+SUCCEEDED_FIX = {ChangeKind.FIX_TEST: Change(status=ChangeStatus.SUCCEEDED, summary_markdown="fixed")}
+FAILED_FIX = {ChangeKind.FIX_TEST: Change(status=ChangeStatus.FAILED, summary_markdown="failed")}
+
+
+def make_test_result(
+    changes: dict[ChangeKind, Change] | None = None,
+    errored: bool = False,
+    before: bool | None = None,
+    after: bool | None = None,
+) -> TestMapReduceResult:
+    """Build a minimal TestMapReduceResult for testing render-internal helpers."""
+    return TestMapReduceResult(
+        test_node_id="t::t",
+        agent_name=AgentName("a"),
+        changes=changes if changes is not None else {},
+        errored=errored,
+        tests_passing_before=before,
+        tests_passing_after=after,
+    )
+
+
+def _serialize_outcome(outcome: TestResult) -> dict[str, object]:
+    return {
+        "changes": {
+            k.value: {"status": v.status.value, "summary_markdown": v.summary_markdown}
+            for k, v in outcome.changes.items()
+        },
+        "errored": outcome.errored,
+        "tests_passing_before": outcome.tests_passing_before,
+        "tests_passing_after": outcome.tests_passing_after,
+        "summary_markdown": outcome.summary_markdown,
+        "test_runs": [
+            {"run_name": r.run_name, "description_markdown": r.description_markdown} for r in outcome.test_runs
+        ],
+    }
+
+
+def _write_test_outcome(output_dir: Path, agent_name: AgentName, outcome: TestResult) -> None:
+    target = output_dir / str(agent_name) / "test_output" / TESTING_AGENT_OUTCOME_FILENAME
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(json.dumps(_serialize_outcome(outcome)))
+
+
+def write_integrator_outcome(output_dir: Path, agent_name: AgentName, payload: dict[str, object]) -> None:
+    """Write an integrator outcome JSON where the reporter expects it."""
+    target = output_dir / str(agent_name) / "test_output" / INTEGRATOR_OUTCOME_FILENAME
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(json.dumps(payload))
+
+
+def make_metadata_and_outcome(
+    output_dir: Path,
+    agent_name: str,
+    *,
+    test_node_id: str = "t::t",
+    branch_name: str | None = None,
+    error_summary: str | None = None,
+    changes: dict[ChangeKind, Change] | None = None,
+    errored: bool = False,
+    tests_passing_before: bool | None = None,
+    tests_passing_after: bool | None = None,
+    summary_markdown: str = "",
+    write_outcome: bool = True,
+) -> AgentMetadata:
+    """Build an ``AgentMetadata`` and (unless ``write_outcome`` is False) write
+    its outcome JSON under ``output_dir/<agent_name>/test_output/``.
+
+    Mirrors what orchestration would emit at runtime: errored agents have
+    ``error_summary`` set and no outcome on disk; "running" agents have neither.
+    """
+    name = AgentName(agent_name)
+    metadata = AgentMetadata(
+        kind=AgentKind.MAPPER,
+        agent_name=name,
+        task_id=test_node_id,
+        branch_name=branch_name,
+        error_summary=error_summary,
+    )
+    if error_summary is None and write_outcome:
+        outcome = TestResult(
+            changes=changes if changes is not None else {},
+            errored=errored,
+            tests_passing_before=tests_passing_before,
+            tests_passing_after=tests_passing_after,
+            summary_markdown=summary_markdown,
+        )
+        _write_test_outcome(output_dir, name, outcome)
+    return metadata
+
+
+# --- enum + dataclass smoke tests ---
+
+
+def test_change_kind_values() -> None:
+    assert ChangeKind.IMPROVE_TEST == "IMPROVE_TEST"
+    assert ChangeKind.FIX_TEST == "FIX_TEST"
+    assert ChangeKind.FIX_IMPL == "FIX_IMPL"
+    assert ChangeKind.FIX_TUTORIAL == "FIX_TUTORIAL"
+
+
+def test_change_status_values() -> None:
+    assert ChangeStatus.SUCCEEDED == "SUCCEEDED"
+    assert ChangeStatus.FAILED == "FAILED"
+    assert ChangeStatus.BLOCKED == "BLOCKED"
+
+
+def test_report_section_values() -> None:
+    assert ReportSection.NON_IMPL_FIXES == "NON_IMPL_FIXES"
+    assert ReportSection.IMPL_FIXES == "IMPL_FIXES"
+    assert ReportSection.BLOCKED == "BLOCKED"
+    assert ReportSection.CLEAN_PASS == "CLEAN_PASS"
+    assert ReportSection.RUNNING == "RUNNING"
+
+
+def test_test_result_empty() -> None:
+    result = TestResult(tests_passing_before=True, tests_passing_after=True, summary_markdown="All good")
+    assert result.changes == {}
+    assert result.errored is False
+
+
+def test_test_result_with_changes() -> None:
+    changes = {
+        ChangeKind.FIX_TEST: Change(status=ChangeStatus.SUCCEEDED, summary_markdown="Fixed"),
+        ChangeKind.IMPROVE_TEST: Change(status=ChangeStatus.BLOCKED, summary_markdown="Needs work"),
+    }
+    result = TestResult(changes=changes, tests_passing_before=False, tests_passing_after=True)
+    assert len(result.changes) == 2
+
+
+def test_test_map_reduce_result_with_branch() -> None:
+    result = TestMapReduceResult(
+        test_node_id="tests/test_foo.py::test_baz",
+        agent_name=AgentName("tmr-test-baz"),
+        changes={ChangeKind.FIX_IMPL: Change(status=ChangeStatus.SUCCEEDED, summary_markdown="Fixed null check")},
+        tests_passing_before=False,
+        tests_passing_after=True,
+        summary_markdown="Fixed missing null check",
+        branch_name="tmr/20260101000000/test-baz",
+    )
+    assert result.branch_name == "tmr/20260101000000/test-baz"
+
+
+def test_test_map_reduce_result_without_branch() -> None:
+    result = TestMapReduceResult(
+        test_node_id="tests/test_foo.py::test_ok",
+        agent_name=AgentName("tmr-test-ok"),
+        tests_passing_before=True,
+        tests_passing_after=True,
+    )
+    assert result.branch_name is None
+
 
 # --- report_section_of tests ---
 

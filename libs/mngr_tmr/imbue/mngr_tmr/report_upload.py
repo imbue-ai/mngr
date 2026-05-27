@@ -1,10 +1,10 @@
-"""Optional S3 upload of the report HTML.
+"""Optional S3 upload of the TMR HTML report.
 
 When ``AWS_ACCESS_KEY_ID`` and ``AWS_SECRET_ACCESS_KEY`` are present in
-the environment, the framework mirrors each freshly-written
-``index.html`` to ``s3://int8-shared-internal/mapreduce-reports/<run>.html``
+the environment, the recipe mirrors each freshly-written
+``index.html`` to ``s3://int8-shared-internal/tmr-reports/<run>.html``
 in ``us-west-2`` and exposes it via the internal short link
-``http://go/shared/mapreduce-reports/<run>.html``. Without those credentials,
+``http://go/shared/tmr-reports/<run>.html``. Without those credentials,
 the upload is a no-op and the helper returns ``None``.
 """
 
@@ -18,8 +18,8 @@ from loguru import logger
 
 _BUCKET = "int8-shared-internal"
 _REGION = "us-west-2"
-_KEY_PREFIX = "mapreduce-reports"
-_URL_BASE = "http://go/shared/mapreduce-reports"
+_KEY_PREFIX = "tmr-reports"
+_URL_BASE = "http://go/shared/tmr-reports"
 
 
 def maybe_upload_report(html_path: Path, run_name: str) -> str | None:

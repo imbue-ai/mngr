@@ -21,6 +21,7 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.mngr.cli.output_helpers import emit_event
 from imbue.mngr.cli.output_helpers import write_human_line
 from imbue.mngr.config.data_types import OutputOptions
+from imbue.mngr.errors import MngrError
 from imbue.mngr.primitives import OutputFormat
 from imbue.mngr_mapreduce.data_types import AgentMetadata
 from imbue.mngr_mapreduce.data_types import MapReduceContext
@@ -31,9 +32,40 @@ from imbue.mngr_mapreduce.data_types import ReducerInfo
 from imbue.mngr_tmr.prompts import build_integrator_prompt
 from imbue.mngr_tmr.prompts import build_test_agent_prompt
 from imbue.mngr_tmr.report import generate_html_report
-from imbue.mngr_tmr.utils import collect_tests
+from imbue.mngr_tmr.report_upload import maybe_upload_report
 
 _BRANCH_BUNDLE_NAME = "branch.bundle"
+
+
+class CollectTestsError(MngrError, RuntimeError):
+    """Raised when pytest test collection fails."""
+
+    ...
+
+
+def collect_tests(
+    pytest_args: tuple[str, ...],
+    source_dir: Path,
+    cg: ConcurrencyGroup,
+) -> list[str]:
+    """Run pytest --collect-only -q and return the list of test node IDs."""
+    cmd = ["python", "-m", "pytest", "--collect-only", "-q", *pytest_args]
+    logger.info("Collecting tests: {}", " ".join(cmd))
+    result = cg.run_process_to_completion(cmd, cwd=source_dir, timeout=60.0, is_checked_after=False)
+    if result.returncode != 0:
+        raise CollectTestsError(f"pytest --collect-only failed (exit code {result.returncode}):\n{result.stderr}")
+
+    test_ids: list[str] = []
+    for line in result.stdout.splitlines():
+        stripped = line.strip()
+        if stripped and "::" in stripped and not stripped.startswith("="):
+            test_ids.append(stripped)
+
+    if not test_ids:
+        raise CollectTestsError("pytest --collect-only returned no tests")
+
+    logger.info("Collected {} test(s)", len(test_ids))
+    return test_ids
 
 
 def _apply_branch_bundle(
@@ -112,7 +144,6 @@ class TestMapReduceRecipe(MapReduceRecipe, FrozenModel):
     testing_flags: tuple[str, ...] = Field(
         default=(), description="Flags shared between pytest discovery and individual mapper runs"
     )
-    prompt_suffix: str = Field(default="", description="Additional text appended to the mapper prompt")
 
     def discover(self, ctx: MapReduceContext) -> list[MapReduceTask]:
         raw_ids = collect_tests(
@@ -135,7 +166,7 @@ class TestMapReduceRecipe(MapReduceRecipe, FrozenModel):
         # under .test_output/e2e/tmr_<run>_try_N/ rather than colliding with
         # ad-hoc local pytest runs.
         flags = self.testing_flags + ("--mngr-e2e-run-name", f"{self.name}_{ctx.run_name}")
-        return build_test_agent_prompt(task.id, flags, self.prompt_suffix)
+        return build_test_agent_prompt(task.id, flags)
 
     def build_reducer_prompt(self, ctx: MapReduceContext) -> str:
         return build_integrator_prompt()
@@ -169,12 +200,16 @@ class TestMapReduceRecipe(MapReduceRecipe, FrozenModel):
             ctx.run_name,
             integrated_branch=reducer.branch_name if applied and reducer is not None else None,
         )
-        return generate_html_report(
+        report_path = generate_html_report(
             agents=agents,
             output_dir=ctx.output_dir,
             integrator_metadata=reducer,
             run_commands=run_commands,
         )
+        # Mirror to S3 (no-op without AWS creds) on every regeneration;
+        # symmetric with the local file write.
+        _emit_report_url(maybe_upload_report(report_path, ctx.run_name), ctx.output_opts)
+        return report_path
 
 
 def _build_run_commands(run_name: str, integrated_branch: str | None = None) -> list[tuple[str, str]]:
@@ -188,21 +223,6 @@ def _build_run_commands(run_name: str, integrated_branch: str | None = None) -> 
     return commands
 
 
-def print_run_commands(run_name: str, output_opts: OutputOptions, integrated_branch: str | None = None) -> None:
-    """Print useful commands for managing a TMR run's agents.
-
-    Only emits in HUMAN output mode; in JSON/JSONL the run name and integrator
-    branch are already exposed via structured events, and unguarded
-    ``write_human_line`` calls would pollute the structured stream.
-    """
-    if output_opts.output_format != OutputFormat.HUMAN:
-        return
-    write_human_line("")
-    for label, cmd in _build_run_commands(run_name, integrated_branch):
-        write_human_line("{}:", label)
-        write_human_line("  {}", cmd)
-
-
 def _emit_reducer_branch(branch_name: str, output_opts: OutputOptions) -> None:
     """Emit the integrator branch name as a structured event when applicable."""
     match output_opts.output_format:
@@ -210,5 +230,18 @@ def _emit_reducer_branch(branch_name: str, output_opts: OutputOptions) -> None:
             emit_event("integrator_branch", {"branch_name": branch_name}, output_opts.output_format)
         case OutputFormat.HUMAN:
             pass
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+def _emit_report_url(url: str | None, output_opts: OutputOptions) -> None:
+    """Emit the public URL of the report mirror, if upload occurred."""
+    if url is None:
+        return
+    match output_opts.output_format:
+        case OutputFormat.JSON | OutputFormat.JSONL:
+            emit_event("report_url", {"url": url}, output_opts.output_format)
+        case OutputFormat.HUMAN:
+            write_human_line("Report URL: {}", url)
         case _ as unreachable:
             assert_never(unreachable)

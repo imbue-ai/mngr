@@ -22,7 +22,6 @@ class TmrCliOptions(MapReduceCliOptions):
 
     pytest_args: tuple[str, ...]
     testing_flags: tuple[str, ...]
-    prompt_suffix: str | None
 
 
 class _TmrCommand(click.Command):
@@ -49,11 +48,6 @@ class _TmrCommand(click.Command):
 
 @click.command("tmr", cls=_TmrCommand, context_settings={"ignore_unknown_options": True})
 @click.argument("pytest_args", nargs=-1, type=click.UNPROCESSED)
-@click.option(
-    "--prompt-suffix",
-    default=None,
-    help="Additional text to append to the agent prompt",
-)
 @add_mapreduce_options
 @add_common_options
 @click.pass_context
@@ -66,7 +60,6 @@ def tmr(ctx: click.Context, **kwargs: object) -> None:
     recipe = TestMapReduceRecipe(
         pytest_args=opts.pytest_args,
         testing_flags=opts.testing_flags,
-        prompt_suffix=opts.prompt_suffix or "",
     )
     run_mapreduce(recipe, opts, mngr_ctx, output_opts)
 
@@ -103,7 +96,6 @@ automatically builds and provisions one host, snapshots it, then launches
 all remaining agents from that snapshot. Pass --snapshot <ID> to reuse an
 existing snapshot instead of building one.
 Use --env to pass environment variables and --label to tag all agents.
-Use --prompt-suffix to append custom instructions to the agent prompt.
 Use --max-parallel-agents to limit how many agents run simultaneously (0 = no limit).
 
 Each agent writes its result to .test_output/testing_agent_outcome.json (in its work directory)

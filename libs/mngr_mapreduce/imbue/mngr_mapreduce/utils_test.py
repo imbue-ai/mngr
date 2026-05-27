@@ -1,7 +1,18 @@
 """Unit tests for framework utility functions."""
 
+from pathlib import Path
+
+import pytest
+
+from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.mngr.config.data_types import CreateTemplate
+from imbue.mngr.config.data_types import CreateTemplateName
+from imbue.mngr.config.data_types import MngrConfig
+from imbue.mngr.errors import MngrError
 from imbue.mngr_mapreduce.utils import dedup_name
+from imbue.mngr_mapreduce.utils import get_base_commit
 from imbue.mngr_mapreduce.utils import make_run_name
+from imbue.mngr_mapreduce.utils import resolve_templates
 from imbue.mngr_mapreduce.utils import sanitize_for_agent_name
 
 
@@ -46,3 +57,54 @@ def test_sanitize_special_characters() -> None:
 
 def test_sanitize_strips_leading_and_trailing_hyphens() -> None:
     assert sanitize_for_agent_name("__foo__") == "foo"
+
+
+def test_sanitize_empty_input() -> None:
+    """Empty input yields an empty slug (callers must dedup if they need uniqueness)."""
+    assert sanitize_for_agent_name("") == ""
+
+
+def test_resolve_templates_empty_returns_empty() -> None:
+    config = MngrConfig()
+    assert resolve_templates((), config) == {}
+
+
+def test_resolve_templates_picks_up_options() -> None:
+    config = MngrConfig(
+        create_templates={
+            CreateTemplateName("foo"): CreateTemplate(options={"build_args": ("--x",), "agent_type": "claude"}),
+        },
+    )
+    merged = resolve_templates(("foo",), config)
+    assert merged == {"build_args": ("--x",), "agent_type": "claude"}
+
+
+def test_resolve_templates_later_overrides_earlier() -> None:
+    config = MngrConfig(
+        create_templates={
+            CreateTemplateName("a"): CreateTemplate(options={"agent_type": "x"}),
+            CreateTemplateName("b"): CreateTemplate(options={"agent_type": "y"}),
+        },
+    )
+    merged = resolve_templates(("a", "b"), config)
+    assert merged["agent_type"] == "y"
+
+
+def test_resolve_templates_missing_template_raises() -> None:
+    config = MngrConfig()
+    with pytest.raises(MngrError):
+        resolve_templates(("nope",), config)
+
+
+def test_get_base_commit_returns_head_sha(tmp_path: Path, cg: ConcurrencyGroup) -> None:
+    """Exercises get_base_commit on a one-commit scratch repo."""
+    cg.run_process_to_completion(["git", "init", "-q"], cwd=tmp_path)
+    cg.run_process_to_completion(["git", "config", "user.email", "t@example.com"], cwd=tmp_path)
+    cg.run_process_to_completion(["git", "config", "user.name", "t"], cwd=tmp_path)
+    (tmp_path / "f.txt").write_text("hi")
+    cg.run_process_to_completion(["git", "add", "f.txt"], cwd=tmp_path)
+    cg.run_process_to_completion(["git", "commit", "-q", "-m", "init"], cwd=tmp_path)
+
+    sha = get_base_commit(tmp_path, cg)
+    assert len(sha) == 40
+    assert all(c in "0123456789abcdef" for c in sha)

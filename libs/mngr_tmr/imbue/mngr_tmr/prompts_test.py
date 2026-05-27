@@ -9,8 +9,8 @@ from imbue.mngr_tmr.prompts import INTEGRATOR_INPUTS_DIRNAME
 from imbue.mngr_tmr.prompts import TESTING_AGENT_OUTCOME_FILENAME
 from imbue.mngr_tmr.prompts import build_integrator_prompt
 from imbue.mngr_tmr.prompts import build_test_agent_prompt
-from imbue.mngr_tmr.utils import CollectTestsError
-from imbue.mngr_tmr.utils import collect_tests
+from imbue.mngr_tmr.recipe import CollectTestsError
+from imbue.mngr_tmr.recipe import collect_tests
 
 
 def test_build_agent_prompt_contains_test_id() -> None:
@@ -38,17 +38,6 @@ def test_build_agent_prompt_requests_markdown() -> None:
 def test_build_agent_prompt_instructs_one_entry_per_kind() -> None:
     prompt = build_test_agent_prompt("t::t", ())
     assert "do not duplicate kinds" in prompt.lower()
-
-
-def test_build_agent_prompt_with_suffix() -> None:
-    prompt = build_test_agent_prompt("t::t", (), prompt_suffix="Always run with --verbose flag.")
-    assert "Always run with --verbose flag." in prompt
-
-
-def test_build_agent_prompt_empty_suffix_ignored() -> None:
-    prompt_no_suffix = build_test_agent_prompt("t::t", ())
-    prompt_empty_suffix = build_test_agent_prompt("t::t", (), prompt_suffix="")
-    assert prompt_no_suffix == prompt_empty_suffix
 
 
 def test_collect_tests_with_real_pytest(tmp_path: Path, cg: ConcurrencyGroup) -> None:

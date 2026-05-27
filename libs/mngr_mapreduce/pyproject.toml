@@ -5,7 +5,6 @@ description = "Map-reduce framework for mngr - run independent map agents in par
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "boto3>=1.40,<2",
     "imbue-mngr==0.1.6",
 ]
 
