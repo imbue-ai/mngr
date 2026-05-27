@@ -230,9 +230,7 @@ def load_config(
     # Configs written specifically for tests set is_allowed_in_pytest = true; the
     # shared test fixtures (setup_mngr_test_environment / get_subprocess_test_env)
     # seed each isolated tmp host_dir with such a user config, so a properly
-    # scoped test always opts in while a leaked real config never does. There is
-    # deliberately no env-var escape hatch: a blanket override would also disable
-    # the guard for a leaked real config, defeating the point.
+    # scoped test always opts in while a leaked real config never does.
     if not final_config.is_allowed_in_pytest and "PYTEST_CURRENT_TEST" in os.environ:
         raise ConfigParseError(
             "Running mngr within pytest is not allowed by the current configuration. "

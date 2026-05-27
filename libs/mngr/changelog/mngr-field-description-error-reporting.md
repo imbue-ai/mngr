@@ -17,8 +17,9 @@ by a poorly-scoped test now trips the guard instead of being used to perform
 real operations. Configs written specifically for tests opt in explicitly.
 
 The `MNGR_ALLOW_PYTEST=1` environment variable, which used to bypass the guard
-entirely, has been removed: a blanket override would also disable the guard for
-a leaked real config, defeating its purpose. The field description was updated
-accordingly. The shared test fixtures now seed each isolated tmp host dir with
-the opt-in, so properly scoped tests continue to run mngr without any extra
-configuration.
+entirely, has been removed. It had a single user, and the existence of such a
+variable was not worth the risk of it being reached for as a quick bypass
+instead of properly fixing a test with a leaky environment. The field
+description was updated accordingly. The shared test fixtures now seed each
+isolated tmp host dir with the opt-in, so properly scoped tests continue to run
+mngr without any extra configuration.

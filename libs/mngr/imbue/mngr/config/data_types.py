@@ -535,16 +535,15 @@ class MngrConfig(FrozenModel):
     )
     is_error_reporting_enabled: bool = Field(
         default=True,
-        description="Whether to suggest launching a diagnostic agent (via a copy-paste-ready `mngr create` command) "
+        description="Whether to suggest launching a diagnostic agent "
         "when an unexpected error occurs while running interactively",
     )
     is_allowed_in_pytest: bool = Field(
         default=False,
         description=(
-            "Whether this config may be loaded during a pytest run. Defaults to False so that "
-            "real configs (the developer's ~/.mngr or the repo's .mngr/settings.toml) cannot be "
-            "picked up by a poorly-scoped test and used to perform real operations. Configs that "
-            "are written specifically for tests must set this to True to opt in."
+            "Whether this config may be loaded during a pytest run. Defaults to False so a "
+            "poorly-scoped test cannot pick up a real config (e.g. ~/.mngr) and perform real "
+            "operations; configs written for tests set this to True to opt in."
         ),
     )
     default_destroyed_host_persisted_seconds: float = Field(
