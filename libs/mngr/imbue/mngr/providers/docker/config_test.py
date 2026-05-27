@@ -3,7 +3,7 @@ from pydantic import ValidationError
 
 from imbue.mngr.primitives import DockerBuilder
 from imbue.mngr.providers.docker.config import DockerProviderConfig
-from imbue.mngr.providers.docker.config import _reset_isolate_default_warning_for_test
+from imbue.mngr.providers.docker.config import _emit_isolate_default_warning_once
 from imbue.mngr.utils.testing import capture_loguru
 
 
@@ -29,7 +29,7 @@ def test_explicit_build_timeout_seconds_is_honored() -> None:
 
 def test_isolate_host_volumes_defaults_to_none() -> None:
     """Default is unset (tri-state); behaves like False but warns once at load time."""
-    _reset_isolate_default_warning_for_test()
+    _emit_isolate_default_warning_once.cache_clear()
     with capture_loguru(level="WARNING"):
         config = DockerProviderConfig()
     assert config.isolate_host_volumes is None
@@ -37,7 +37,7 @@ def test_isolate_host_volumes_defaults_to_none() -> None:
 
 def test_isolate_host_volumes_default_emits_warning_once_per_process() -> None:
     """Leaving isolate_host_volumes unset must produce exactly one warning per process."""
-    _reset_isolate_default_warning_for_test()
+    _emit_isolate_default_warning_once.cache_clear()
     with capture_loguru(level="WARNING") as log_output:
         DockerProviderConfig()
         DockerProviderConfig()
@@ -51,7 +51,7 @@ def test_isolate_host_volumes_default_emits_warning_once_per_process() -> None:
 
 def test_isolate_host_volumes_explicit_false_does_not_warn() -> None:
     """An explicit False is the user opting into the legacy behavior; stay silent."""
-    _reset_isolate_default_warning_for_test()
+    _emit_isolate_default_warning_once.cache_clear()
     with capture_loguru(level="WARNING") as log_output:
         config = DockerProviderConfig(isolate_host_volumes=False)
     assert config.isolate_host_volumes is False
@@ -60,7 +60,7 @@ def test_isolate_host_volumes_explicit_false_does_not_warn() -> None:
 
 def test_isolate_host_volumes_explicit_true_does_not_warn() -> None:
     """An explicit True is the user opting into the new behavior; stay silent."""
-    _reset_isolate_default_warning_for_test()
+    _emit_isolate_default_warning_once.cache_clear()
     with capture_loguru(level="WARNING") as log_output:
         config = DockerProviderConfig(isolate_host_volumes=True)
     assert config.isolate_host_volumes is True
@@ -69,18 +69,18 @@ def test_isolate_host_volumes_explicit_true_does_not_warn() -> None:
 
 def test_isolation_without_host_volume_is_rejected() -> None:
     """isolate_host_volumes=True without is_host_volume_created is meaningless and rejected."""
-    _reset_isolate_default_warning_for_test()
+    _emit_isolate_default_warning_once.cache_clear()
     with pytest.raises(ValidationError, match="isolate_host_volumes=True requires is_host_volume_created=True"):
         DockerProviderConfig(is_host_volume_created=False, isolate_host_volumes=True)
 
 
 def test_no_host_volume_with_isolation_false_is_fine() -> None:
     """The conflicting-combo check only fires when isolate=True. False / None are unrestricted."""
-    _reset_isolate_default_warning_for_test()
+    _emit_isolate_default_warning_once.cache_clear()
     with capture_loguru(level="WARNING"):
         config_false = DockerProviderConfig(is_host_volume_created=False, isolate_host_volumes=False)
     assert config_false.isolate_host_volumes is False
-    _reset_isolate_default_warning_for_test()
+    _emit_isolate_default_warning_once.cache_clear()
     with capture_loguru(level="WARNING"):
         config_none = DockerProviderConfig(is_host_volume_created=False)
     assert config_none.isolate_host_volumes is None

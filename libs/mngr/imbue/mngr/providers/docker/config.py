@@ -1,3 +1,4 @@
+from functools import cache
 from pathlib import Path
 
 from loguru import logger
@@ -10,16 +11,22 @@ from imbue.mngr.primitives import DockerBuilder
 from imbue.mngr.primitives import IdleMode
 from imbue.mngr.primitives import ProviderBackendName
 
-# Module-level guard so the "default will change" deprecation warning fires at
-# most once per process (treated as once per `mngr` invocation). Exposed for
-# tests to reset between cases.
-_HAS_WARNED_ABOUT_ISOLATE_DEFAULT: bool = False
 
+@cache
+def _emit_isolate_default_warning_once() -> None:
+    """Emit the `isolate_host_volumes` default-flip deprecation warning at most once per process.
 
-def _reset_isolate_default_warning_for_test() -> None:
-    """Reset the module-level dedup guard so tests can re-trigger the warning."""
-    global _HAS_WARNED_ABOUT_ISOLATE_DEFAULT
-    _HAS_WARNED_ABOUT_ISOLATE_DEFAULT = False
+    Dedup is provided by ``functools.cache``: the body runs on the first call
+    and is a no-op on every subsequent call until ``cache_clear()`` is invoked
+    (which tests do between cases to re-exercise the emission path).
+    """
+    logger.warning(
+        "Docker provider config `isolate_host_volumes` is unset. The default will change "
+        "to True in a future release, which will cause each host container to see only its "
+        "own host_dir sub-folder instead of the entire shared state volume. To keep the "
+        "current (shared) behavior, set isolate_host_volumes=false explicitly. To opt in "
+        "to the new behavior now, set isolate_host_volumes=true (requires Docker Engine >= 25.0)."
+    )
 
 
 class DockerProviderConfig(ProviderInstanceConfig):
@@ -110,14 +117,6 @@ class DockerProviderConfig(ProviderInstanceConfig):
 
     @model_validator(mode="after")
     def _maybe_warn_about_isolate_default(self) -> "DockerProviderConfig":
-        global _HAS_WARNED_ABOUT_ISOLATE_DEFAULT
-        if self.isolate_host_volumes is None and not _HAS_WARNED_ABOUT_ISOLATE_DEFAULT:
-            logger.warning(
-                "Docker provider config `isolate_host_volumes` is unset. The default will change "
-                "to True in a future release, which will cause each host container to see only its "
-                "own host_dir sub-folder instead of the entire shared state volume. To keep the "
-                "current (shared) behavior, set isolate_host_volumes=false explicitly. To opt in "
-                "to the new behavior now, set isolate_host_volumes=true (requires Docker Engine >= 25.0)."
-            )
-            _HAS_WARNED_ABOUT_ISOLATE_DEFAULT = True
+        if self.isolate_host_volumes is None:
+            _emit_isolate_default_warning_once()
         return self
