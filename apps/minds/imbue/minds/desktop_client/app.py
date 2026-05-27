@@ -2052,13 +2052,14 @@ def _run_host_health_probe(
 
 
 class _LogProbeOnRecoveryCallback(MutableModel):
-    """Callable that logs the cached probe at INFO on STUCK->HEALTHY recovery.
+    """Callable that logs the cached probe at INFO on every non-HEALTHY -> HEALTHY recovery.
 
-    Registered with the health tracker so that when a workspace recovers,
-    the most recent host-health probe response (cached by the host-health
-    endpoint) lands in a single INFO log line. The line includes either
-    the probe payload or a "(no probe observation cached)" marker so the
-    operator can correlate the recovery with the most recent observation.
+    Registered with the health tracker so that when a workspace recovers
+    (from STUCK, RESTARTING, or RESTART_FAILED back to HEALTHY), the most
+    recent host-health probe response (cached by the host-health endpoint)
+    lands in a single INFO log line. The line includes either the probe
+    payload or a "(no probe observation cached)" marker so the operator
+    can correlate the recovery with the most recent observation.
 
     Holds a reference to the shared cache dict on ``app.state`` -- both
     sides see the same instance, so the endpoint's writes are visible
