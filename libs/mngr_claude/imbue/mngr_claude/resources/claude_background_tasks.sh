@@ -89,7 +89,9 @@ trap _cleanup EXIT
 
 log_info "Background tasks started for session $SESSION_NAME"
 
-while tmux has-session -t "$SESSION_NAME" 2>/dev/null; do
+# `=` is tmux's exact-match prefix; without it the loop would never exit when
+# our session is gone but a prefix-collision sibling is alive.
+while tmux has-session -t "=$SESSION_NAME" 2>/dev/null; do
     # Update activity timestamp if agent is actively processing
     if [ -f "$MNGR_AGENT_STATE_DIR/active" ]; then
         printf '{"time": %d, "source": "activity_updater"}' \

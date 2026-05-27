@@ -42,6 +42,7 @@ from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import ConfigStructureError
 from imbue.mngr.errors import MngrError
+from imbue.mngr.hosts.tmux import TmuxWindowTarget
 from imbue.mngr.hosts.tmux import build_tmux_capture_pane_command
 from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.interfaces.data_types import HostDetails
@@ -630,8 +631,9 @@ def cleanup_tmux_session(session_name: str) -> None:
     a hung ``tmux`` step can't block the rest of the cleanup.
     """
     # Collect all pane PIDs and their descendants before killing the session.
-    # Guard with has-session first: list-panes -s does not support the = prefix for
-    # exact matching, so it would prefix-match a different session if this one is gone.
+    # Guard with has-session first: list-panes -s does not honor the = exact-match
+    # prefix (cmd-find.c quirk), so without the guard a bare-name list-panes -s
+    # would silently misroute when this session is gone.
     has_result = _run_with_timeout("tmux", "has-session", "-t", f"={session_name}")
     all_pids: list[str] = []
     if has_result.returncode == 0:
@@ -667,8 +669,15 @@ def cleanup_tmux_session(session_name: str) -> None:
         except (ProcessLookupError, ValueError):
             pass
 
-    # Kill any orphaned activity monitors for this session (started with nohup, detached)
-    _run_with_timeout("pkill", "-9", "-f", f"list-panes -t {session_name}")
+    # Kill any orphaned activity monitors for this session (started with nohup, detached).
+    # The monitor runs `tmux list-panes -t =<session>:0 ...` (see
+    # _build_start_agent_shell_command, which routes the target through
+    # TmuxWindowTarget). Anchoring the pkill substring on the full `=<session>:0`
+    # form both keeps the match working (the bare `<session>` form is no longer
+    # in the command line) and avoids prefix-collision: a sibling session would
+    # appear as `=<session>-sibling:0`, which contains `<session>` but not
+    # `<session>:0`, so its monitor will not be killed by accident.
+    _run_with_timeout("pkill", "-9", "-f", f"list-panes -t ={session_name}:0")
 
 
 @contextmanager
@@ -697,15 +706,19 @@ def mngr_agent_cleanup(
         run_mngr_subprocess(*args, env=env)
 
 
-def capture_tmux_pane_contents(session_name: str) -> str:
-    """Capture the contents of a tmux session's pane via local subprocess.
+def capture_tmux_pane_contents(target: TmuxWindowTarget) -> str:
+    """Capture the contents of a tmux pane via local subprocess.
 
     This is the local-only variant for test code that doesn't have a host object.
     For the host-based version (works over SSH), use
     imbue.mngr.hosts.tmux.capture_tmux_pane_content.
+
+    The :class:`TmuxWindowTarget` argument mirrors the host-version signature so
+    callers that already hold a structured target can pass it through without
+    deconstructing.
     """
     result = subprocess.run(
-        shlex.split(build_tmux_capture_pane_command(session_name)),
+        shlex.split(build_tmux_capture_pane_command(target)),
         capture_output=True,
         text=True,
     )

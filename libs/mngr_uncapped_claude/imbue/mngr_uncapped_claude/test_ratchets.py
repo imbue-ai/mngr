@@ -244,3 +244,10 @@ def test_no_type_errors() -> None:
 def test_no_ruff_errors() -> None:
     """Ensure the codebase has zero ruff linting errors."""
     check_no_ruff_errors(_DIR)
+
+
+# --- Process management ---
+
+
+def test_prevent_bare_tmux_targets() -> None:
+    rc.check_bare_tmux_targets(_DIR, snapshot(0))

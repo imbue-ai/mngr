@@ -16,6 +16,7 @@ from inline_snapshot import snapshot
 
 from imbue.imbue_common.ratchet_testing.common_ratchets import RegexRatchetRule
 from imbue.imbue_common.ratchet_testing.common_ratchets import check_ratchet_rule_all_files
+from imbue.imbue_common.ratchet_testing.core import BINARY_FILE_EXCLUSION
 from imbue.imbue_common.ratchet_testing.core import _get_all_files_with_extension
 from imbue.imbue_common.ratchet_testing.ratchets import check_no_import_lint_errors
 from imbue.imbue_common.ratchet_testing.ratchets import find_bash_scripts_without_strict_mode
@@ -35,7 +36,6 @@ _REPO_ROOT = Path(__file__).parent
 _EXCLUDED_PROJECTS: frozenset[str] = frozenset()
 
 _SELF_EXCLUSION: tuple[str, ...] = ("test_meta_ratchets.py",)
-_BINARY_FILE_EXCLUSION: tuple[str, ...] = ("*.png", "*.ico", "*.jpg", "*.jpeg", "*.gif", "*.webp")
 _DATA_FILE_EXCLUSION: tuple[str, ...] = ("*.jsonl",)
 _MIGRATION_SCRIPT_EXCLUSION: tuple[str, ...] = (
     "migrate_code_mng_to_mngr.sh",
@@ -250,7 +250,7 @@ _PREVENT_OLD_MNG_NAME = RegexRatchetRule(
 
 def test_prevent_old_mng_name_in_file_contents() -> None:
     """Ensure the old 'mng' name (not followed by 'r') is not reintroduced in file contents."""
-    exclusions = _SELF_EXCLUSION + _BINARY_FILE_EXCLUSION + _DATA_FILE_EXCLUSION + _MIGRATION_SCRIPT_EXCLUSION
+    exclusions = _SELF_EXCLUSION + BINARY_FILE_EXCLUSION + _DATA_FILE_EXCLUSION + _MIGRATION_SCRIPT_EXCLUSION
     chunks = check_ratchet_rule_all_files(_PREVENT_OLD_MNG_NAME, _REPO_ROOT, exclusions)
     assert len(chunks) <= snapshot(0), _PREVENT_OLD_MNG_NAME.format_failure(chunks)
 

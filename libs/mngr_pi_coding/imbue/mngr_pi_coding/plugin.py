@@ -13,6 +13,7 @@ from imbue.mngr.agents.tui_utils import send_enter_best_effort
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import PluginMngrError
+from imbue.mngr.hosts.tmux import TmuxWindowTarget
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.data_types import FileTransferSpec
 from imbue.mngr.interfaces.host import CreateAgentOptions
@@ -112,7 +113,7 @@ class PiCodingAgent(InteractiveTuiAgent[PiCodingAgentConfig]):
     # so it serves as the startup ready indicator.
     TUI_READY_INDICATOR = "pi v"
 
-    def _send_enter_and_validate(self, tmux_target: str) -> None:
+    def _send_enter_and_validate(self, tmux_target: TmuxWindowTarget) -> None:
         # Pi has no UserPromptSubmit hook and no input-row placeholder that
         # disappears during typing, so submission can't be confirmed
         # post-Enter. The earlier paste-visibility check is what gives us

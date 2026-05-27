@@ -89,7 +89,12 @@ def test_prevent_importlib_import_module() -> None:
 
 
 def test_prevent_getattr() -> None:
-    rc.check_getattr(_DIR, snapshot(9))
+    # detect_settings_narrowing in config/data_types.py walks MngrConfig (and
+    # sub-model) fields by name via the model_fields iterable, which is the same
+    # pattern documented inline on _walk_to_field. Switching to model_dump
+    # round-tripping to dodge the ratchet would re-introduce the serialisation
+    # cost _walk_to_field was rewritten to avoid (see its docstring).
+    rc.check_getattr(_DIR, snapshot(15))
 
 
 def test_prevent_setattr() -> None:
@@ -218,7 +223,7 @@ def test_prevent_unittest_mock_imports() -> None:
 
 
 def test_prevent_monkeypatch_setattr() -> None:
-    rc.check_monkeypatch_setattr(_DIR, snapshot(32))
+    rc.check_monkeypatch_setattr(_DIR, snapshot(33))
 
 
 def test_prevent_test_container_classes() -> None:
@@ -238,6 +243,21 @@ def test_prevent_os_fork() -> None:
 
 def test_prevent_bare_urwid_tty_signal_keys() -> None:
     rc.check_bare_urwid_tty_signal_keys(_DIR, snapshot(0))
+
+
+# Primary enforcement lives in the type system: TmuxSessionTarget and
+# TmuxWindowTarget (in hosts/tmux.py) emit exact-match `=` targets via
+# .as_shell_arg(). This ratchet is the regex-level backstop for shell-template
+# strings (e.g. bash heredocs in providers/listing_utils.py and connect.py,
+# the agent background-task scripts, ttyd's attach script) where Python types
+# don't reach.
+#
+# Baseline 1 accounts for agents/tui_utils.py:269: `tmux send-keys -t "$1"`
+# where $1 is bound from `tmux_target.as_shell_arg()` at the f-string
+# boundary -- variable indirection that the regex can't see through; safe in
+# practice because the value of $1 includes the `=` prefix.
+def test_prevent_bare_tmux_targets() -> None:
+    rc.check_bare_tmux_targets(_DIR, snapshot(1))
 
 
 def test_prevent_direct_subprocess() -> None:

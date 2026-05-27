@@ -4,12 +4,13 @@ from imbue.mngr.agents.base_agent import BaseAgent
 from imbue.mngr.agents.tui_agent import InteractiveTuiAgent
 from imbue.mngr.agents.tui_utils import send_enter_best_effort
 from imbue.mngr.config.data_types import AgentTypeConfig
+from imbue.mngr.hosts.tmux import TmuxWindowTarget
 
 
 class _ProbeTuiAgent(InteractiveTuiAgent[AgentTypeConfig]):
     TUI_READY_INDICATOR = "probe-banner"
 
-    def _send_enter_and_validate(self, tmux_target: str) -> None:
+    def _send_enter_and_validate(self, tmux_target: TmuxWindowTarget) -> None:
         send_enter_best_effort(self, tmux_target)
 
 

@@ -19,4 +19,6 @@ else
     _SESSION=$(tmux display-message -p '#{session_name}')
 fi
 unset TMUX
-exec tmux attach -t "$_SESSION":0
+# `=` is tmux's exact-match prefix; without it, attaching to a gone agent
+# could silently land on a prefix-collision sibling.
+exec tmux attach -t "=$_SESSION:0"
