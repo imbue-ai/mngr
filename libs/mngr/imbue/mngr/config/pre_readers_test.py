@@ -210,7 +210,7 @@ def test_resolve_project_config_dir_uses_env_var_when_set(
     custom_dir.mkdir()
     monkeypatch.setenv("MNGR_PROJECT_CONFIG_DIR", str(custom_dir))
 
-    result = resolve_project_config_dir(None, "mngr", cg)
+    result = resolve_project_config_dir("mngr", cg)
     assert result == custom_dir
 
 
@@ -223,40 +223,8 @@ def test_resolve_project_config_dir_falls_back_to_git_root_when_env_var_not_set(
     """resolve_project_config_dir should use <git_root>/.<root_name> when MNGR_PROJECT_CONFIG_DIR is not set."""
     monkeypatch.delenv("MNGR_PROJECT_CONFIG_DIR", raising=False)
 
-    result = resolve_project_config_dir(None, mngr_test_root_name, cg)
+    result = resolve_project_config_dir(mngr_test_root_name, cg)
     assert result == temp_git_repo_cwd / f".{mngr_test_root_name}"
-
-
-def test_resolve_project_config_dir_context_dir_overrides_git_root(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-    mngr_test_root_name: str,
-    cg: ConcurrencyGroup,
-) -> None:
-    """resolve_project_config_dir should use context_dir when provided and MNGR_PROJECT_CONFIG_DIR is not set."""
-    monkeypatch.delenv("MNGR_PROJECT_CONFIG_DIR", raising=False)
-    context_dir = tmp_path / "context"
-    context_dir.mkdir()
-
-    result = resolve_project_config_dir(context_dir, mngr_test_root_name, cg)
-    assert result == context_dir / f".{mngr_test_root_name}"
-
-
-def test_resolve_project_config_dir_env_var_takes_precedence_over_context_dir(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-    mngr_test_root_name: str,
-    cg: ConcurrencyGroup,
-) -> None:
-    """resolve_project_config_dir should prefer MNGR_PROJECT_CONFIG_DIR over context_dir."""
-    custom_dir = tmp_path / "custom"
-    custom_dir.mkdir()
-    context_dir = tmp_path / "context"
-    context_dir.mkdir()
-    monkeypatch.setenv("MNGR_PROJECT_CONFIG_DIR", str(custom_dir))
-
-    result = resolve_project_config_dir(context_dir, mngr_test_root_name, cg)
-    assert result == custom_dir
 
 
 # =============================================================================

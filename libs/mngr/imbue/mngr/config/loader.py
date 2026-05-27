@@ -151,7 +151,7 @@ def load_config(
     # config guard -- so a real (non-test) config can never be loaded here during
     # a test run. The project root is resolved from the cwd's git worktree root
     # (or MNGR_PROJECT_CONFIG_DIR).
-    project_config_dir = resolve_project_config_dir(None, root_name, concurrency_group)
+    project_config_dir = resolve_project_config_dir(root_name, concurrency_group)
     loaded_layers = read_config_layers(profile_dir, project_config_dir)
 
     # Merge the layers. Narrowing violations -- a higher-precedence layer

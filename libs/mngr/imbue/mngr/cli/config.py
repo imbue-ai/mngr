@@ -89,12 +89,12 @@ def get_config_path(scope: ConfigScope, root_name: str, profile_dir: Path, cg: C
                 raise ConfigNotFoundError("profile_dir is required for USER scope")
             return get_user_config_path(profile_dir)
         case ConfigScope.PROJECT:
-            project_dir = resolve_project_config_dir(None, root_name, cg)
+            project_dir = resolve_project_config_dir(root_name, cg)
             if project_dir is None:
                 raise ConfigNotFoundError("No git repository found for project config")
             return project_dir / "settings.toml"
         case ConfigScope.LOCAL:
-            project_dir = resolve_project_config_dir(None, root_name, cg)
+            project_dir = resolve_project_config_dir(root_name, cg)
             if project_dir is None:
                 raise ConfigNotFoundError("No git repository found for local config")
             return project_dir / "settings.local.toml"

@@ -109,7 +109,6 @@ def _find_project_root(cg: ConcurrencyGroup, start: Path | None = None) -> Path 
 
 
 def resolve_project_config_dir(
-    context_dir: Path | None,
     root_name: str,
     cg: ConcurrencyGroup,
 ) -> Path | None:
@@ -122,7 +121,7 @@ def resolve_project_config_dir(
     env_project_dir = os.environ.get("MNGR_PROJECT_CONFIG_DIR")
     if env_project_dir:
         return Path(env_project_dir)
-    root = context_dir or _find_project_root(cg=cg)
+    root = _find_project_root(cg=cg)
     if root is None:
         return None
     return root / f".{root_name}"
@@ -196,7 +195,7 @@ def _resolve_config_files() -> list[dict[str, Any]]:
     # ConcurrencyExceptionGroup.
     cg = ConcurrencyGroup(name="config-pre-reader")
     with cg:
-        project_config_dir = resolve_project_config_dir(None, root_name, cg)
+        project_config_dir = resolve_project_config_dir(root_name, cg)
 
     return [raw for _source, raw in read_config_layers(profile_dir, project_config_dir)]
 
