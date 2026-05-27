@@ -272,8 +272,3 @@ def test_prevent_assert_isinstance() -> None:
 
 def test_prevent_code_in_init_files() -> None:
     rc.check_code_in_init_files(_DIR, snapshot(0))
-
-
-# Pyright subprocess occasionally exceeds the 10s pytest-timeout on offload
-# under cold-cache / loaded-runner conditions. The check itself is
-# deterministic; retry handles the transient slowness.
