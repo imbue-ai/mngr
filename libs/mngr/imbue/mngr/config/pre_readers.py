@@ -50,6 +50,13 @@ def enforce_pytest_config_opt_in(loaded_configs: list[tuple[str, dict[str, Any]]
     ``loaded_configs`` is the list of (source, raw) for the config files that
     were actually present (callers filter out missing files); ``source`` is a
     path or human-readable label used only in the error message.
+
+    DO NOT strip ``PYTEST_CURRENT_TEST`` from a test's (or a subprocess's)
+    environment to get past this guard. That marker is load-bearing for several
+    safety features -- the Modal backend's ``TEST_ENV_PATTERN`` guard and this
+    config guard among them -- and removing it has leaked un-sweepable real
+    resources in the past. The only correct way to permit a config during a
+    pytest run is to set ``is_allowed_in_pytest = true`` on that config.
     """
     if "PYTEST_CURRENT_TEST" not in os.environ:
         return

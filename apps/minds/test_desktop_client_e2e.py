@@ -473,6 +473,23 @@ def test_create_local_docker_workspace_via_electron(
     _resolve_minds_env(monkeypatch)
 
     fct_path = _resolve_fct_path(tmp_path)
+
+    # The Electron-spawned `mngr create` loads FCT's .mngr/settings.toml (we pin
+    # MNGR_ROOT_NAME=mngr above for exactly that, to get the main/docker create
+    # templates). mngr's pytest config guard requires every config it loads during
+    # a test run to set is_allowed_in_pytest = true. We deliberately do NOT ship
+    # that opt-in in FCT's real config -- doing so would disable the guard for
+    # every FCT-based project -- so we add it to *this* checkout only, for the
+    # duration of the test, and restore it in the finally below (an
+    # operator-managed .external_worktrees/forever-claude-template/ checkout must
+    # not be left dirty). Done inline here, not in a shared helper, so the opt-in
+    # stays scoped to this single test.
+    fct_settings_path = fct_path / ".mngr" / "settings.toml"
+    original_fct_settings = fct_settings_path.read_text() if fct_settings_path.exists() else None
+    if original_fct_settings is None or "is_allowed_in_pytest" not in original_fct_settings:
+        fct_settings_path.parent.mkdir(parents=True, exist_ok=True)
+        fct_settings_path.write_text("is_allowed_in_pytest = true\n" + (original_fct_settings or ""))
+
     workspace_name = f"forever-{get_short_random_string()}"
     debug_port = _find_free_port()
     logger.info("Workspace name: {}; CDP debug port: {}", workspace_name, debug_port)
@@ -521,4 +538,11 @@ def test_create_local_docker_workspace_via_electron(
                 finally:
                     browser.close()
     finally:
+        # Restore FCT's settings.toml so an operator's checkout isn't left dirty
+        # (clones live under tmp_path and are discarded, but the external-worktree
+        # case reuses a persistent checkout).
+        if original_fct_settings is None:
+            fct_settings_path.unlink(missing_ok=True)
+        else:
+            fct_settings_path.write_text(original_fct_settings)
         _destroy_agent_best_effort(workspace_name)
