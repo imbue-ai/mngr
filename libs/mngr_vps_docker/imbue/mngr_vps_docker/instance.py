@@ -2073,11 +2073,7 @@ class VpsDockerProvider(BaseProviderInstance):
             )
             updated_record = host_record.model_copy(update={"certified_host_data": updated_data})
 
-            if host_record.config is None:
-                raise MngrError(
-                    f"Host record for {host_id} on VPS {host_record.vps_ip} is missing config -- "
-                    "cannot determine unified volume name to save snapshot record"
-                )
+            # ``host_record.config`` is guaranteed non-None by the guard at the top of this method.
             host_store = open_host_store(outer, host_record.config.volume_name)
             host_store.write_host_record(updated_record)
 
