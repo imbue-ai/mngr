@@ -6,7 +6,7 @@
   package version uploaded after the cutoff. This is proactive (you cannot lock a
   too-new package) rather than after-the-fact detection.
 - `scripts/release.py` now advances the cutoff at each release: it sets
-  `exclude-newer` to (Pacific release date - 2 weeks) just before regenerating
+  `exclude-newer` to (today's UTC date - 2 weeks) just before regenerating
   `uv.lock`, and commits the root `pyproject.toml` alongside the version bumps. The
   update is **forward-only** -- it takes `max(current_cutoff, release_date - 2 weeks)`,
   so a release cut while the current cutoff is still younger than two weeks leaves it

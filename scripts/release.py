@@ -329,9 +329,10 @@ def update_exclude_newer(pyproject_path: Path, release_date: date) -> str | None
     would re-exclude that dep and break resolution. So the new cutoff is the later
     of the current value and ``release_date - DEPENDENCY_COOLDOWN``.
 
-    The window is anchored to the Pacific release date but written as a UTC
-    timestamp so the committed value is identical regardless of who cuts the
-    release; the few-hours fuzz is immaterial for a two-week boundary.
+    ``release_date`` is combined with midnight UTC to form the cutoff, matching
+    the UTC upload-times uv compares it against. The committed value is therefore
+    identical regardless of who cuts the release, and the time-of-day is
+    immaterial for a two-week boundary.
 
     Returns the new cutoff string if it changed, or ``None`` if the current cutoff
     already wins (in which case no write is performed).
@@ -825,13 +826,13 @@ def main() -> None:
     if pin_modified:
         print(f"Updated dependency pins in: {', '.join(pin_modified)}")
 
-    release_date = today_pacific()
-
     # Advance the supply-chain cooldown cutoff before re-locking so the
     # regenerated uv.lock records the new `[options] exclude-newer`. Forward-only:
     # a release run while the cutoff is still younger than the window leaves it
-    # untouched (see update_exclude_newer).
-    new_cutoff = update_exclude_newer(REPO_ROOT / "pyproject.toml", date.fromisoformat(release_date))
+    # untouched (see update_exclude_newer). Anchored to UTC (today's date) to match
+    # the UTC upload-times uv compares it against -- deliberately independent of the
+    # Pacific changelog date used below.
+    new_cutoff = update_exclude_newer(REPO_ROOT / "pyproject.toml", datetime.now(timezone.utc).date())
     if new_cutoff is not None:
         print(f"Advanced exclude-newer cooldown cutoff to {new_cutoff}")
 
@@ -846,6 +847,7 @@ def main() -> None:
     # and dev/ changelogs are not versioned and stay untouched -- their
     # entries accumulate in [Unreleased] indefinitely (the consolidator
     # keeps appending there).
+    release_date = today_pacific()
     finalized_paths: list[Path] = []
     versions_to_finalize: dict[str, str] = {
         **{name: current_versions[name] for name in confirmed_new},
