@@ -41,7 +41,9 @@ function downloadOnce(url, redirectsRemaining = MAX_REDIRECTS) {
       if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
         res.resume();
         if (redirectsRemaining <= 0) {
-          reject(new Error(`Too many redirects while fetching ${url}`));
+          const err = new Error(`Too many redirects while fetching ${url}`);
+          err.permanent = true;
+          reject(err);
           return;
         }
         downloadOnce(res.headers.location, redirectsRemaining - 1).then(resolve).catch(reject);
@@ -49,7 +51,9 @@ function downloadOnce(url, redirectsRemaining = MAX_REDIRECTS) {
       }
       if (res.statusCode !== 200) {
         res.resume();
-        reject(new Error(`HTTP ${res.statusCode} for ${url}`));
+        const err = new Error(`HTTP ${res.statusCode} for ${url}`);
+        err.permanent = true;
+        reject(err);
         return;
       }
       const chunks = [];
@@ -62,7 +66,8 @@ function downloadOnce(url, redirectsRemaining = MAX_REDIRECTS) {
 
 /**
  * Download with exponential-backoff retry. Network blips during ToDesktop
- * build time shouldn't fail the entire build.
+ * build time shouldn't fail the entire build. Errors tagged `permanent`
+ * (bad HTTP status, redirect-loop) are raised immediately without retrying.
  */
 async function download(url) {
   let lastErr;
@@ -71,6 +76,7 @@ async function download(url) {
       return await downloadOnce(url);
     } catch (err) {
       lastErr = err;
+      if (err.permanent) break;
       if (attempt === DOWNLOAD_RETRIES) break;
       const delayMs = 1000 * 2 ** (attempt - 1);
       console.log(`[download-binaries] ${url} failed (attempt ${attempt}/${DOWNLOAD_RETRIES}): ${err.message}. Retrying in ${delayMs}ms...`);
