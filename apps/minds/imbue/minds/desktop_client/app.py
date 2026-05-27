@@ -1952,24 +1952,37 @@ def _dispatch_restart(
     # is_checked=False + on_failure: a crash of the one-shot worker is handled
     # by transitioning the tracker to RESTART_FAILED (so the recovery page does
     # not hang), rather than being surfaced later when the root group is checked.
-    concurrency_group.start_new_thread(
-        target=_run_restart_sequence,
-        kwargs={
-            "workspace_agent_id": aid,
-            "is_host_restart": is_host_restart,
-            "tracker": tracker,
-            "backend_resolver": backend_resolver,
-            "mngr_binary": request.app.state.mngr_binary,
-            "mngr_host_dir": request.app.state.mngr_host_dir,
-            "concurrency_group": concurrency_group,
-            "mngr_forward_port": request.app.state.mngr_forward_port or 0,
-            "mngr_forward_preauth_cookie": request.app.state.mngr_forward_preauth_cookie,
-        },
-        name=f"system-interface-restart-{aid}",
-        daemon=True,
-        is_checked=False,
-        on_failure=_RestartWorkerFailureHandler(tracker=tracker, workspace_agent_id=aid),
-    )
+    #
+    # ``start_new_thread`` itself can raise (its concurrency-group decorators
+    # fire ``ConcurrencyGroupError`` when the group is shutting down or has
+    # already failed). If the spawn raises after we've already claimed
+    # RESTARTING, the tracker would otherwise be stuck in that state forever
+    # with no worker to advance it. Catch the spawn-time failures explicitly
+    # and roll the tracker into RESTART_FAILED so the recovery page surfaces
+    # the failure instead of polling indefinitely.
+    try:
+        concurrency_group.start_new_thread(
+            target=_run_restart_sequence,
+            kwargs={
+                "workspace_agent_id": aid,
+                "is_host_restart": is_host_restart,
+                "tracker": tracker,
+                "backend_resolver": backend_resolver,
+                "mngr_binary": request.app.state.mngr_binary,
+                "mngr_host_dir": request.app.state.mngr_host_dir,
+                "concurrency_group": concurrency_group,
+                "mngr_forward_port": request.app.state.mngr_forward_port or 0,
+                "mngr_forward_preauth_cookie": request.app.state.mngr_forward_preauth_cookie,
+            },
+            name=f"system-interface-restart-{aid}",
+            daemon=True,
+            is_checked=False,
+            on_failure=_RestartWorkerFailureHandler(tracker=tracker, workspace_agent_id=aid),
+        )
+    except (OSError, RuntimeError, ConcurrencyGroupError) as exc:
+        logger.warning("Failed to spawn restart worker for {}: {}", aid, exc)
+        tracker.mark_restart_failed(aid, f"Could not start the restart worker: {exc}")
+        return _json_error(f"Could not start the restart worker: {exc}", status_code=503)
     return Response(status_code=202, content="{}", media_type="application/json")
 
 
