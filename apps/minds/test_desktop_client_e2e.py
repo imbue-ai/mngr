@@ -435,25 +435,6 @@ def _destroy_agent_best_effort(workspace_name: str) -> None:
         )
 
 
-# Carrying only the resource marks the *test process* sees a host-side
-# invocation of, after the test passes end-to-end:
-#
-# - `docker` (CLI) is invoked by the spawned `mngr create` subprocess to
-#   start the container; the PATH-injected resource-guard wrapper catches it.
-# - `rsync` is invoked by `mngr create` to overlay the FCT worktree onto
-#   the internal clone; same PATH wrapper.
-#
-# Marks we deliberately do *not* carry, and why:
-#
-# - `tmux` -- the workspace agent's tmux session lives *inside* the docker
-#   container, never on the host, so the host's tmux wrapper never ticks
-#   the counter and the guard fires post-hoc with "marked tmux but never
-#   invoked tmux".
-# - `docker_sdk` -- the Python `docker` SDK guard is a wrapper around the
-#   in-process SDK import, not a PATH wrapper, so it only sees uses from
-#   *this* pytest process. mngr's docker SDK calls happen in the spawned
-#   subprocess and never reach our SDK wrapper, so the mark fires the
-#   same "marked but never invoked" check.
 @contextmanager
 def _fct_settings_opted_into_pytest(fct_path: Path) -> Iterator[None]:
     """Temporarily opt FCT's ``.mngr/settings.toml`` into the pytest config guard.
@@ -480,6 +461,25 @@ def _fct_settings_opted_into_pytest(fct_path: Path) -> Iterator[None]:
             settings_path.write_text(original)
 
 
+# Carrying only the resource marks the *test process* sees a host-side
+# invocation of, after the test passes end-to-end:
+#
+# - `docker` (CLI) is invoked by the spawned `mngr create` subprocess to
+#   start the container; the PATH-injected resource-guard wrapper catches it.
+# - `rsync` is invoked by `mngr create` to overlay the FCT worktree onto
+#   the internal clone; same PATH wrapper.
+#
+# Marks we deliberately do *not* carry, and why:
+#
+# - `tmux` -- the workspace agent's tmux session lives *inside* the docker
+#   container, never on the host, so the host's tmux wrapper never ticks
+#   the counter and the guard fires post-hoc with "marked tmux but never
+#   invoked tmux".
+# - `docker_sdk` -- the Python `docker` SDK guard is a wrapper around the
+#   in-process SDK import, not a PATH wrapper, so it only sees uses from
+#   *this* pytest process. mngr's docker SDK calls happen in the spawned
+#   subprocess and never reach our SDK wrapper, so the mark fires the
+#   same "marked but never invoked" check.
 @pytest.mark.acceptance
 @pytest.mark.docker
 @pytest.mark.rsync
