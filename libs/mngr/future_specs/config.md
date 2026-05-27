@@ -70,9 +70,7 @@ connect = false
 format = "json"
 ```
 
-Command defaults can also be set via environment variables using the pattern `MNGR_COMMANDS_<COMMANDNAME>_<PARAMNAME>=<value>`. See [environment variables](../docs/concepts/environment_variables.md) for details.
-
-**Important**: Command names must be single words (no spaces, hyphens, or underscores). This is required for unambiguous parsing of the `MNGR_COMMANDS_*` environment variables. Any future plugins that register custom commands must follow this convention.
+Command defaults can also be set via environment variables using the pattern `MNGR__COMMANDS__<COMMANDNAME>__<PARAMNAME>=<value>` (note the double-underscore segment separator). See [environment variables](../docs/concepts/environment_variables.md) for details.
 
 ## Validation Rules
 
