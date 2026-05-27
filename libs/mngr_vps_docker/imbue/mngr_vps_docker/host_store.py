@@ -144,11 +144,13 @@ class VpsDockerHostStore(MutableModel):
 
         A *missing* host_state.json (e.g. on a freshly-created volume that
         hasn't been finalized yet) returns None. Any other failure --
-        transient SSH error, permission problem -- propagates as
-        ``MngrError`` so that the outer ``except (HostConnectionError,
-        MngrError)`` guards in callers like ``_read_records_from_vps`` can
-        log a warning and fall back to cached records instead of letting
-        the host silently disappear from the listing.
+        transient SSH error, permission problem -- propagates (typically
+        as ``HostConnectionError`` for SSH transport failures, or as
+        ``MngrError`` for shell-level errors) so that the outer
+        ``except (HostConnectionError, MngrError)`` guards in callers
+        like ``_read_records_from_vps`` can log a warning and fall back
+        to cached records instead of letting the host silently disappear
+        from the listing.
         """
         path = self._host_state_path
         if not self.outer.path_exists(path):
