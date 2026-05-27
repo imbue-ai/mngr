@@ -31,6 +31,37 @@ def try_load_toml(path: Path | None) -> dict[str, Any] | None:
         raise ConfigParseError(f"Failed to parse config file {path}: {e}") from e
 
 
+def _config_opts_into_pytest(raw: dict[str, Any]) -> bool:
+    """Whether a raw config dict explicitly opts into being loaded under pytest."""
+    return raw.get("is_allowed_in_pytest") is True
+
+
+def enforce_pytest_config_opt_in(loaded_configs: list[tuple[Path, dict[str, Any]]]) -> None:
+    """Refuse to read a non-test config during a pytest run.
+
+    During a pytest run (``PYTEST_CURRENT_TEST`` set), every config file that was
+    actually loaded must set ``is_allowed_in_pytest = true``. This keeps a real
+    config -- the developer's ~/.mngr or the repo's .mngr/settings.toml -- from
+    being picked up by a poorly-scoped test and used to drive real operations,
+    even when it is loaded alongside a test config that does opt in: every layer
+    is checked on its own, not just the merged value. If no config file was
+    loaded there is nothing to protect against, so mngr runs normally.
+
+    ``loaded_configs`` is the list of (path, raw) for the config files that were
+    actually present (callers filter out missing files).
+    """
+    if "PYTEST_CURRENT_TEST" not in os.environ:
+        return
+    for path, raw in loaded_configs:
+        if not _config_opts_into_pytest(raw):
+            raise ConfigParseError(
+                f"Running mngr within pytest is not allowed: the config file at {path} does not "
+                "set is_allowed_in_pytest = true. Every config file loaded during a pytest run "
+                "must opt in. If this is a test config, set that field; otherwise a test is "
+                "loading a config that was not written for testing."
+            )
+
+
 def find_profile_dir_lightweight(base_dir: Path) -> Path | None:
     """Read-only profile directory lookup (never creates dirs/files).
 
@@ -125,20 +156,27 @@ def load_local_config(context_dir: Path | None, root_name: str, cg: ConcurrencyG
 
 
 def _resolve_config_files(
-    context_dir: Path | None = None,
+    context_dir: Path | None,
 ) -> list[dict[str, Any]]:
-    """Return parsed config dicts in precedence order (lowest to highest)."""
+    """Return parsed config dicts in precedence order (lowest to highest).
+
+    ``context_dir`` selects the project root for the project/local layers; pass
+    None to resolve it from cwd (the convention load_config uses). Every config
+    file that is read is run through the pytest opt-in guard, so this is the
+    single chokepoint that keeps a real config from being read during a test.
+    """
     root_name = os.environ.get("MNGR_ROOT_NAME", "mngr")
     base_dir = read_default_host_dir()
 
-    configs: list[dict[str, Any]] = []
+    loaded: list[tuple[Path, dict[str, Any]]] = []
 
     # User config
     profile_dir = find_profile_dir_lightweight(base_dir)
     if profile_dir is not None:
-        raw = try_load_toml(get_user_config_path(profile_dir))
+        user_path = get_user_config_path(profile_dir)
+        raw = try_load_toml(user_path)
         if raw is not None:
-            configs.append(raw)
+            loaded.append((user_path, raw))
 
     # Project + local config need the project root.
     # Resolve the directory inside the ConcurrencyGroup (it needs git lookups),
@@ -149,29 +187,32 @@ def _resolve_config_files(
         project_dir = resolve_project_config_dir(context_dir, root_name, cg)
 
     if project_dir is not None:
-        raw_project = try_load_toml(project_dir / "settings.toml")
-        if raw_project is not None:
-            configs.append(raw_project)
-        raw_local = try_load_toml(project_dir / "settings.local.toml")
-        if raw_local is not None:
-            configs.append(raw_local)
+        for filename in ("settings.toml", "settings.local.toml"):
+            path = project_dir / filename
+            raw = try_load_toml(path)
+            if raw is not None:
+                loaded.append((path, raw))
 
-    return configs
+    enforce_pytest_config_opt_in(loaded)
+    return [raw for _path, raw in loaded]
 
 
 # --- Default subcommand pre-reader ---
 
 
-def read_default_command(command_name: str) -> str | None:
+def read_default_command(command_name: str, context_dir: Path | None) -> str | None:
     """Return the configured default subcommand for command_name.
 
     Returns None if no config files set default_subcommand for the given
     command group (the caller should use its compile-time default).
     An empty string means "explicitly disabled" (the caller should show
     help instead of defaulting).
+
+    ``context_dir`` selects the project root for the project/local layers; pass
+    None to resolve it from cwd.
     """
     merged: dict[str, str] = {}
-    for raw in _resolve_config_files():
+    for raw in _resolve_config_files(context_dir):
         raw_commands = raw.get("commands")
         if not isinstance(raw_commands, dict):
             continue
@@ -187,14 +228,18 @@ def read_default_command(command_name: str) -> str | None:
 # --- Disabled plugins pre-reader ---
 
 
-def read_disabled_plugins() -> frozenset[str]:
+def read_disabled_plugins(context_dir: Path | None) -> frozenset[str]:
     """Return the set of plugin names disabled across all config layers.
 
     Reads user, project, and local config files for [plugins.<name>]
     sections with enabled = false.  Later layers override earlier ones.
+
+    ``context_dir`` selects the project root for the project/local layers; pass
+    the same value used for the surrounding ``load_config`` so the disabled-plugin
+    set is computed from the same config tree, or None to resolve it from cwd.
     """
     merged: dict[str, bool] = {}
-    for raw in _resolve_config_files():
+    for raw in _resolve_config_files(context_dir):
         raw_plugins = raw.get("plugins")
         if not isinstance(raw_plugins, dict):
             continue

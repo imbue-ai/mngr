@@ -419,8 +419,13 @@ def e2e(
     # Remote providers (Modal, Docker) are left enabled so that e2e tests
     # exercise the full discovery path. Tests that trigger Modal (via
     # mngr list, mngr destroy --gc, etc.) need @pytest.mark.modal.
+    # is_allowed_in_pytest opts this local-layer config into the pytest run.
+    # Every config file loaded during a pytest run must opt in individually, and
+    # this one is loaded alongside the profile's settings.toml.
     settings_path = project_config_dir / "settings.local.toml"
     settings_path.write_text(
+        "is_allowed_in_pytest = true\n"
+        "\n"
         "[commands.create]\n"
         'connect_command = "mngr-e2e-connect"\n'
         "\n"

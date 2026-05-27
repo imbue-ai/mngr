@@ -1216,7 +1216,9 @@ def test_load_config_rejects_unknown_fields_by_default(
     mngr_dir.mkdir(parents=True, exist_ok=True)
     profile_dir = get_or_create_profile_dir(mngr_dir)
     settings_path = profile_dir / "settings.toml"
-    settings_path.write_text('future_field = "hello"\n')
+    # is_allowed_in_pytest lets the config past the pytest guard so the
+    # unknown-field rejection (the behavior under test) is what surfaces.
+    settings_path.write_text('future_field = "hello"\nis_allowed_in_pytest = true\n')
 
     with pytest.raises(ConfigParseError, match="Unknown configuration fields.*future_field"):
         load_config(pm=pm, context_dir=tmp_path, concurrency_group=cg)

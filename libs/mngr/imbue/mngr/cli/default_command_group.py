@@ -34,7 +34,9 @@ class DefaultCommandGroup(click.Group):
         **extra: Any,
     ) -> click.Context:
         if self._config_key is not None:
-            configured = read_default_command(self._config_key)
+            # None: resolve the project config from cwd (default subcommand is
+            # read at group dispatch, before a context dir is resolved).
+            configured = read_default_command(self._config_key, None)
             if configured is not None:
                 self._default_command = configured
         return super().make_context(info_name, args, parent=parent, **extra)

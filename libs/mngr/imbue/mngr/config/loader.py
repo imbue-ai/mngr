@@ -108,7 +108,15 @@ def load_config(
 
     # Pre-compute disabled plugins so _parse_providers can skip them.
     # This uses the same lightweight pre-reader that create_plugin_manager() uses.
-    config_disabled_plugins = read_disabled_plugins()
+    # Pass context_dir so the disabled-plugin set is read from the same config
+    # tree as the rest of this load (not cwd), keeping the two consistent.
+    #
+    # This call also enforces the pytest config guard for the whole load: it goes
+    # through _resolve_config_files (the single chokepoint), which reads the same
+    # user/project/local files the merge below reads and requires every one of
+    # them to set is_allowed_in_pytest = true during a pytest run. So if a real,
+    # non-test config is picked up, this raises here before any config is used.
+    config_disabled_plugins = read_disabled_plugins(context_dir)
 
     # Start with base config that has defaults based on root_name
     # Use model_construct with None to allow merging to work properly
@@ -126,16 +134,15 @@ def load_config(
         strict = resolve_strict_from_env()
 
     # Load and merge config files in precedence order (user, project, local).
-    # Track whether any config file was actually present so the pytest guard
-    # below only fires when a config was picked up (see that check).
-    is_any_config_file_loaded = False
+    # The pytest config guard was already enforced above via read_disabled_plugins
+    # (which reads these same files through _resolve_config_files), so by this
+    # point every loaded file has opted in (or load failed).
     for raw in (
         try_load_toml(get_user_config_path(profile_dir)),
         load_project_config(context_dir, root_name, concurrency_group),
         load_local_config(context_dir, root_name, concurrency_group),
     ):
         if raw is not None:
-            is_any_config_file_loaded = True
             config = config.merge_with(
                 parse_config(
                     raw, disabled_plugins=config_disabled_plugins, strict=strict, silent=silent_unknown_fields
@@ -226,22 +233,6 @@ def load_config(
 
     # Validate and apply defaults using normal constructor
     final_config = MngrConfig.model_validate(config_dict)
-
-    # Refuse to run during pytest when a config file was picked up that did not
-    # opt in. is_allowed_in_pytest defaults to False, so a real config (the
-    # developer's ~/.mngr or the repo's .mngr/settings.toml) loaded by a
-    # poorly-scoped test trips this guard instead of being used to perform real
-    # operations. The guard only fires when an actual config file was loaded:
-    # if nothing was picked up, there is no real config to protect against, so a
-    # test that loads no config file runs fine without any opt-in. Configs
-    # written specifically for tests set is_allowed_in_pytest = true.
-    if is_any_config_file_loaded and not final_config.is_allowed_in_pytest and "PYTEST_CURRENT_TEST" in os.environ:
-        raise ConfigParseError(
-            "Running mngr within pytest is not allowed by the current configuration. "
-            "A config file was loaded that does not set is_allowed_in_pytest = true. If this "
-            "is a test config, set that field; if you are seeing this unexpectedly, a test is "
-            "loading a config that was not written for testing."
-        )
 
     # Resolve project root for use as cwd in pre-command scripts.
     # Note: MNGR_PROJECT_CONFIG_DIR is NOT used here because it points to the config
