@@ -6,7 +6,7 @@
 **Synopsis:**
 
 ```text
-mngr tmr [TEST_PATHS...] [-- TESTING_FLAGS...] [--provider <PROVIDER>] [--use-snapshot] [--env KEY=VALUE] [--label KEY=VALUE] [--timeout <SECS>] [--agent-type <TYPE>]
+mngr tmr [TEST_PATHS...] [-- TESTING_FLAGS...] [--provider <PROVIDER>] [--env KEY=VALUE] [--label KEY=VALUE] [--timeout <SECS>] [--agent-type <TYPE>]
 ```
 
 Run and fix tests in parallel using agents (test map-reduce).
@@ -34,8 +34,10 @@ This discovers tests with `pytest --collect-only tests/e2e -m release` and runs
 each test with `pytest tests/e2e/test_foo.py::test_bar -m release`.
 
 Use --provider to run agents on a specific provider (e.g. docker, modal).
-Use --use-snapshot with remote providers to build and provision one host first,
-snapshot it, then launch all remaining agents from the snapshot (much faster).
+On providers that support snapshots (e.g. modal), the orchestrator
+automatically builds and provisions one host, snapshots it, then launches
+all remaining agents from that snapshot. Pass --snapshot <ID> to reuse an
+existing snapshot instead of building one.
 Use --env to pass environment variables and --label to tag all agents.
 Use --prompt-suffix to append custom instructions to the agent prompt.
 Use --max-parallel-agents to limit how many agents run simultaneously (0 = no limit).
@@ -76,16 +78,12 @@ mngr tmr [OPTIONS] [PYTEST_ARGS]...
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
 | `--agent-type` | text | Type of agent to launch for each test | `claude` |
-| `--integrator-type` | text | Type of agent for the integrator (defaults to --agent-type) | None |
 | `-t`, `--agent-template` | text | Create template to apply for testing agents [repeatable, stacks in order] | None |
-| `--integrator-template` | text | Create template to apply for the integrator agent (defaults to --agent-template) | None |
-| `--provider` | text | Provider for agent hosts (e.g. local, docker, modal) | `local` |
-| `--integrator-provider` | text | Provider for the integrator agent (defaults to local since there is only one) | `local` |
+| `--provider` | text | Provider for agent hosts (e.g. local, docker, modal). Used for both testing agents and the integrator. | `local` |
 | `--env` | text | Environment variable KEY=VALUE to pass to agents [repeatable] | None |
 | `--label` | text | Agent label KEY=VALUE to attach to all launched agents [repeatable] | None |
 | `--prompt-suffix` | text | Additional text to append to the agent prompt | None |
-| `--use-snapshot` | boolean | Build one agent first, snapshot its host, then launch remaining agents from the snapshot (faster for remote providers) | `False` |
-| `--snapshot` | text | Use an existing snapshot/image ID for all agents (skips building; implies --use-snapshot behavior) | None |
+| `--snapshot` | text | Use an existing snapshot/image ID for all agents (skips building a fresh snapshot) | None |
 | `--max-parallel-launch` | integer | Maximum number of agents to launch concurrently (launch-time parallelism) | `10` |
 | `--agents-per-host` | integer | Number of agents sharing each remote host (ignored for local provider) | `4` |
 | `--max-parallel-agents` | integer | Maximum number of agents running at any one time (0 = no limit). When set, agents are launched incrementally as earlier ones finish. | `0` |
@@ -131,10 +129,10 @@ $ mngr tmr tests/e2e -- -m release
 $ mngr tmr --provider docker tests/
 ```
 
-**Modal with snapshot**
+**Modal (snapshot is automatic)**
 
 ```bash
-$ mngr tmr --provider modal --use-snapshot tests/
+$ mngr tmr --provider modal tests/
 ```
 
 **Pass env vars and labels**
