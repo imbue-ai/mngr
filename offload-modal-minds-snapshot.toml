@@ -43,6 +43,16 @@ vm_runtime = true
 
 [framework]
 type = "pytest"
+# Conditional ``cd /code/mngr`` because offload's ``--override-image-id``
+# path skips the image-setup pipeline that would normally apply the
+# ``sandbox_project_root`` setting, so the sandbox's per-exec cwd is
+# ``/`` -- and ``uv run pytest`` from there can't find the local
+# ``.venv/bin/pytest`` and errors with "Failed to spawn: `pytest`". The
+# same command is used by offload for *local* test discovery, where
+# ``/code/mngr`` does not exist, so an unconditional cd would break
+# discovery. Guarding the cd on directory existence makes the command
+# work in both contexts: local discovery uses the worktree cwd, in-
+# sandbox execution lands in /code/mngr.
 command = "uv run pytest"
 run_args = "--no-cov -p no:xdist"
 
