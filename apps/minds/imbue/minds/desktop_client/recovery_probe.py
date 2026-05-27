@@ -52,8 +52,22 @@ PROBE_TIMEOUT_SECONDS: Final[float] = 5.0
 # ratchets that only inspect ``.py`` files. The script is then base64-encoded
 # in ``build_probe_shell_command`` so the outer ``mngr exec`` argv stays a
 # single shell-safe token without quoting headaches.
+#
+# Loaded lazily on first use rather than at module import: if the .txt file
+# is missing (e.g. an incomplete install), an eager read would raise during
+# import and break every importer of this module (app.py and the rest of
+# the desktop-client chain). Lazy load keeps the rest of the app working
+# and narrows the failure to "the recovery probe returns ssh_dead".
 _PROBE_SCRIPT_PATH: Final[Path] = Path(__file__).parent / "recovery_probe_script.txt"
-_PROBE_PYTHON_SCRIPT: Final[str] = _PROBE_SCRIPT_PATH.read_text(encoding="utf-8")
+_probe_python_script_cache: str | None = None
+
+
+def _get_probe_python_script() -> str:
+    """Return the inner-probe Python source, loading it from disk on first call."""
+    global _probe_python_script_cache
+    if _probe_python_script_cache is None:
+        _probe_python_script_cache = _PROBE_SCRIPT_PATH.read_text(encoding="utf-8")
+    return _probe_python_script_cache
 
 
 def build_probe_shell_command() -> str:
@@ -64,7 +78,7 @@ def build_probe_shell_command() -> str:
     token, so we don't have to escape Python source through the layers of
     ``mngr exec`` / sshd / the container shell.
     """
-    encoded = base64.b64encode(_PROBE_PYTHON_SCRIPT.encode("utf-8")).decode("ascii")
+    encoded = base64.b64encode(_get_probe_python_script().encode("utf-8")).decode("ascii")
     return f"echo '{PROBE_SENTINEL}' && echo {encoded} | base64 -d | python3"
 
 
