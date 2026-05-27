@@ -129,23 +129,24 @@ function copyGitCoreDereferencingSymlinks(srcDir, destDir) {
     const srcPath = path.join(srcDir, entry.name);
     const destPath = path.join(destDir, entry.name);
     if (entry.isSymbolicLink()) {
-      let realTarget;
-      try {
-        realTarget = fs.realpathSync(srcPath);
-      } catch {
-        continue; // broken symlink -- skip
-      }
+      const realTarget = fs.realpathSync(srcPath);
       if (path.basename(realTarget) === 'git') {
         continue; // skip argv[0] shims pointing at the main binary
       }
-      fs.copyFileSync(srcPath, destPath);
-      try { fs.chmodSync(destPath, 0o755); } catch {}
+      const realStats = fs.statSync(realTarget);
+      if (realStats.isDirectory()) {
+        fs.mkdirSync(destPath, { recursive: true });
+        copyGitCoreDereferencingSymlinks(realTarget, destPath);
+      } else {
+        fs.copyFileSync(realTarget, destPath);
+        fs.chmodSync(destPath, 0o755);
+      }
     } else if (entry.isDirectory()) {
       fs.mkdirSync(destPath, { recursive: true });
       copyGitCoreDereferencingSymlinks(srcPath, destPath);
     } else if (entry.isFile()) {
       fs.copyFileSync(srcPath, destPath);
-      try { fs.chmodSync(destPath, fs.statSync(srcPath).mode); } catch {}
+      fs.chmodSync(destPath, fs.statSync(srcPath).mode);
     }
   }
 }
