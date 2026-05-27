@@ -32,14 +32,11 @@ import sys
 from collections import deque
 from datetime import date
 from datetime import datetime
-from datetime import time
 from datetime import timedelta
 from datetime import timezone
 from pathlib import Path
-from typing import Any
 from typing import Final
 from typing import TextIO
-from typing import cast
 
 import httpx
 import semver
@@ -283,7 +280,7 @@ def _write_version(pkg_pypi_name: str, new_version: str) -> None:
     """Update the version field in a package's pyproject.toml."""
     pkg = PACKAGE_BY_PYPI_NAME[pkg_pypi_name]
     doc = tomlkit.loads(pkg.pyproject_path.read_text())
-    project = cast(dict[str, Any], doc["project"])
+    project = doc["project"]
     project["version"] = new_version
     pkg.pyproject_path.write_text(tomlkit.dumps(doc))
 
@@ -298,7 +295,7 @@ def update_internal_dep_pins(all_versions: dict[str, str]) -> list[str]:
         if not pkg.internal_deps:
             continue
         doc = tomlkit.loads(pkg.pyproject_path.read_text())
-        project = cast(dict[str, Any], doc["project"])
+        project = doc["project"]
         # Modify the tomlkit array in-place to preserve formatting and comments
         deps = project["dependencies"]
         is_changed = False
@@ -329,19 +326,18 @@ def update_exclude_newer(pyproject_path: Path, release_date: date) -> str | None
     would re-exclude that dep and break resolution. So the new cutoff is the later
     of the current value and ``release_date - DEPENDENCY_COOLDOWN``.
 
-    ``release_date`` is combined with midnight UTC to form the cutoff, matching
-    the UTC upload-times uv compares it against. The committed value is therefore
-    identical regardless of who cuts the release, and the time-of-day is
-    immaterial for a two-week boundary.
+    The cutoff is anchored at midnight UTC, matching the UTC upload-times uv
+    compares it against. The committed value is therefore identical regardless of
+    who cuts the release, and the time-of-day is immaterial for a two-week boundary.
 
     Returns the new cutoff string if it changed, or ``None`` if the current cutoff
     already wins (in which case no write is performed).
     """
     doc = tomlkit.loads(pyproject_path.read_text())
-    tool = cast(dict[str, Any], doc["tool"])
-    uv_config = cast(dict[str, Any], tool["uv"])
-    current = datetime.fromisoformat(str(uv_config["exclude-newer"]).replace("Z", "+00:00"))
-    candidate = datetime.combine(release_date - DEPENDENCY_COOLDOWN, time.min, tzinfo=timezone.utc)
+    uv_config = doc["tool"]["uv"]
+    current = datetime.fromisoformat(str(uv_config["exclude-newer"]))
+    candidate_date = release_date - DEPENDENCY_COOLDOWN
+    candidate = datetime(candidate_date.year, candidate_date.month, candidate_date.day, tzinfo=timezone.utc)
     new_cutoff = max(current, candidate)
     if new_cutoff == current:
         return None
