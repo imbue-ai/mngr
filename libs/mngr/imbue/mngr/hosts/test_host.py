@@ -510,8 +510,8 @@ def test_remote_lock_cooperatively_retains_lock_file_on_error_when_env_var_set(
     ssh_host_factory: Callable[[str], Host],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Remote host lock_cooperatively should retain the lock file on error when MNGR_RETAIN_LOCK_FOR_FAILED_HOSTS_DURING_CREATE=1."""
-    monkeypatch.setenv("MNGR_RETAIN_LOCK_FOR_FAILED_HOSTS_DURING_CREATE", "1")
+    """Remote host lock_cooperatively should retain the lock file on error when MNGR_DEBUG_RETAIN_LOCK_FOR_FAILED_HOSTS_DURING_CREATE=1."""
+    monkeypatch.setenv("MNGR_DEBUG_RETAIN_LOCK_FOR_FAILED_HOSTS_DURING_CREATE", "1")
     host = ssh_host_factory("lock-err-retain")
     assert not host.is_local
     lock_file_path = host.host_dir / "host_lock"
