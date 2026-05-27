@@ -1,8 +1,37 @@
 # Unabridged Changelog - mngr_forward
 
-Full, unedited changelog entries consolidated nightly from individual files in the `changelog/mngr_forward/` directory.
+Full, unedited changelog entries consolidated nightly from individual files in `libs/mngr_forward/changelog/`.
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
+
+## 2026-05-22
+
+`mngr forward` no longer crashes when its bind port is already in use. `--port` is now optional: when omitted, the server tries its default (8421) and falls back to an OS-assigned port if that is taken; when supplied explicitly, it still binds exactly that port and fails fast (with a clean error) if it is unavailable. The server binds its listen socket up front and hands it to uvicorn, so the `listening` envelope always reports the port actually bound.
+
+## Discovery schema bump
+
+- `mngr_forward` parses `FullDiscoverySnapshotEvent` lines from its inner `mngr observe --discovery-only` subprocess. The event grew two additional fields (`providers` and `error_by_provider_name`) in `libs/mngr`. This build picks them up transparently -- older `mngr_forward` builds running against new snapshots will raise `DiscoverySchemaChangedError` and must be rebuilt.
+
+## 2026-05-21
+
+Fix the intro in `UNABRIDGED_CHANGELOG.md` so it references the correct entries directory. The path was `changelog/<project>/` (which never existed); the actual layout is `<project_dir>/changelog/`.
+
+## 2026-05-20
+
+Renamed the workspace-server envelope contract to system-interface in lockstep with the mngr-side rename: `WorkspaceBackendFailure*` → `SystemInterfaceBackendFailure*`, the envelope type literal `workspace_backend_failure` → `system_interface_backend_failure`, and the plugin's 503 loader page now reads "System interface starting".
+
+Workspace-server restart and health-recovery support on the `mngr_forward` plugin (consumed by minds).
+
+- The plugin emits `workspace_backend_failure` envelopes when it sees connection errors, mid-SSE EOF, or 5xx responses from the workspace backend. Consumers (minds) can track these as a per-agent health state machine to trigger a recovery UI.
+- The plugin's 503 fallback page (shown while the workspace server is
+  unreachable) is now a styled card with a loading spinner instead of the
+  blank "Backend not yet available. Retrying..." page. It still auto-refreshes
+  every second.
+- The "Workspace server starting" loader spinner's animation duration now
+  matches the page's 1-second auto-refresh interval, so the spinner is at
+  the cycle boundary (rather than 90 degrees past it) when the reload fires.
+
+Project now participates in the per-project changelog layout: a `changelog/` subdirectory holds per-PR entry files, and `CHANGELOG.md` / `UNABRIDGED_CHANGELOG.md` at the project root hold the consolidated history. See the full rationale in `dev/changelog/mngr-changelog-per-project.md`.
 
 ## 2026-05-09
 

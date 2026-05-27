@@ -11,11 +11,12 @@ import pytest
 from imbue.mngr.agents.base_agent import BaseAgent
 from imbue.mngr.cli.testing import create_test_agent
 from imbue.mngr.config.data_types import AgentTypeConfig
+from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import SendMessageError
 from imbue.mngr.errors import UserInputError
+from imbue.mngr.hosts.tmux import TmuxWindowTarget
 from imbue.mngr.interfaces.data_types import CommandResult
-from imbue.mngr.interfaces.host import DEFAULT_AGENT_READY_TIMEOUT_SECONDS
 from imbue.mngr.primitives import ActivitySource
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentLifecycleState
@@ -301,13 +302,9 @@ def test_get_resume_message_returns_message_when_set(
 
 def test_get_ready_timeout_seconds_returns_default_when_not_set(
     test_agent: BaseAgent,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Test that get_ready_timeout_seconds returns default when not set in data.json."""
-    # get_ready_timeout_seconds falls back to get_agent_ready_timeout(), which
-    # honors MNGR_AGENT_READY_TIMEOUT. Remove it to guarantee the default path.
-    monkeypatch.delenv("MNGR_AGENT_READY_TIMEOUT", raising=False)
-    assert test_agent.get_ready_timeout_seconds() == DEFAULT_AGENT_READY_TIMEOUT_SECONDS
+    """get_ready_timeout_seconds falls back to MngrConfig.agent_ready_timeout when data.json omits it."""
+    assert test_agent.get_ready_timeout_seconds() == MngrConfig.model_fields["agent_ready_timeout"].default
 
 
 def test_get_ready_timeout_seconds_returns_value_when_set(
@@ -334,11 +331,22 @@ def test_get_expected_process_name_uses_command_basename(
     assert test_agent.get_expected_process_name() == "sleep"
 
 
-def test_tmux_target_appends_window_zero(
+def test_tmux_target_uses_exact_match_window_zero(
     test_agent: BaseAgent,
 ) -> None:
-    """tmux_target should return session_name:0 to always target window 0."""
-    assert test_agent.tmux_target == f"{test_agent.session_name}:0"
+    """tmux_target should return a TmuxWindowTarget pinned to window 0.
+
+    The window pin protects against additional windows (watchers, ttyd) routing
+    target resolution to the wrong pane. When rendered via as_shell_arg(), the
+    leading ``=`` forces exact session-name matching; without it, tmux silently
+    falls back to prefix matching and a query for ``mngr-foo`` would match a
+    live session called ``mngr-foo-bar`` once ``mngr-foo`` is gone.
+    """
+    target = test_agent.tmux_target
+    assert isinstance(target, TmuxWindowTarget)
+    assert target.session_name == test_agent.session_name
+    assert target.window == 0
+    assert target.as_shell_arg() == f"={test_agent.session_name}:0"
 
 
 @pytest.mark.tmux
@@ -352,7 +360,7 @@ def test_send_tmux_literal_keys_short_message_with_leading_dash(
     `invalid flag --`, so the message never reaches the pane.
     """
     session_name = f"{test_agent.mngr_ctx.config.prefix}{test_agent.name}"
-    tmux_target = f"{session_name}:0"
+    tmux_target = TmuxWindowTarget(session_name=session_name, window=0)
     message = "--model gemma --flag-leading-message"
 
     # `cat` echoes typed characters via the PTY's line discipline, so the
@@ -368,7 +376,7 @@ def test_send_tmux_literal_keys_short_message_with_leading_dash(
 
         def _message_visible() -> bool:
             result = test_agent.host.execute_idempotent_command(
-                f"tmux capture-pane -t '{tmux_target}' -p",
+                f"tmux capture-pane -t {tmux_target.as_shell_arg()} -p",
                 timeout_seconds=5.0,
             )
             return message in result.stdout
@@ -976,7 +984,7 @@ def test_send_tmux_literal_keys_short_message_uses_send_keys(
     stub = _StubHost()
     agent = _create_agent_with_stub_host(temp_mngr_ctx, stub)
 
-    agent._send_tmux_literal_keys("mngr-test:0", "hello")
+    agent._send_tmux_literal_keys(TmuxWindowTarget(session_name="mngr-test", window=0), "hello")
 
     assert len(stub.executed_commands) == 1
     assert "send-keys" in stub.executed_commands[0]
@@ -992,7 +1000,7 @@ def test_send_tmux_literal_keys_long_message_uses_load_buffer(
     agent = _create_agent_with_stub_host(temp_mngr_ctx, stub)
 
     long_message = "x" * 1024
-    agent._send_tmux_literal_keys("mngr-test:0", long_message)
+    agent._send_tmux_literal_keys(TmuxWindowTarget(session_name="mngr-test", window=0), long_message)
 
     # Should write the file
     assert len(stub.written_files) == 1
@@ -1020,7 +1028,7 @@ def test_send_tmux_literal_keys_long_message_raises_on_load_buffer_failure(
     agent = _create_agent_with_stub_host(temp_mngr_ctx, stub)
 
     with pytest.raises(SendMessageError, match="load-buffer failed"):
-        agent._send_tmux_literal_keys("mngr-test:0", "x" * 1024)
+        agent._send_tmux_literal_keys(TmuxWindowTarget(session_name="mngr-test", window=0), "x" * 1024)
 
 
 def test_send_tmux_literal_keys_long_message_raises_on_paste_buffer_failure(
@@ -1036,7 +1044,7 @@ def test_send_tmux_literal_keys_long_message_raises_on_paste_buffer_failure(
     agent = _create_agent_with_stub_host(temp_mngr_ctx, stub)
 
     with pytest.raises(SendMessageError, match="paste-buffer failed"):
-        agent._send_tmux_literal_keys("mngr-test:0", "x" * 1024)
+        agent._send_tmux_literal_keys(TmuxWindowTarget(session_name="mngr-test", window=0), "x" * 1024)
 
 
 def test_send_tmux_literal_keys_short_message_raises_on_send_keys_failure(
@@ -1051,7 +1059,7 @@ def test_send_tmux_literal_keys_short_message_raises_on_send_keys_failure(
     agent = _create_agent_with_stub_host(temp_mngr_ctx, stub)
 
     with pytest.raises(SendMessageError, match="send-keys failed"):
-        agent._send_tmux_literal_keys("mngr-test:0", "hello")
+        agent._send_tmux_literal_keys(TmuxWindowTarget(session_name="mngr-test", window=0), "hello")
 
 
 def test_agent_name_rejects_slash() -> None:
@@ -1072,7 +1080,7 @@ def test_send_message_simple_sends_keys_and_enter(
     stub = _StubHost()
     agent = _create_agent_with_stub_host(temp_mngr_ctx, stub)
 
-    agent._send_message_simple("mngr-test:0", "hello")
+    agent._send_message_simple(TmuxWindowTarget(session_name="mngr-test", window=0), "hello")
 
     assert len(stub.executed_commands) == 2
     assert "send-keys" in stub.executed_commands[0]
@@ -1093,7 +1101,7 @@ def test_send_message_simple_raises_on_enter_failure(
     agent = _create_agent_with_stub_host(temp_mngr_ctx, stub)
 
     with pytest.raises(SendMessageError, match="send-keys Enter failed"):
-        agent._send_message_simple("mngr-test:0", "hello")
+        agent._send_message_simple(TmuxWindowTarget(session_name="mngr-test", window=0), "hello")
 
 
 # =========================================================================

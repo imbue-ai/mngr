@@ -28,13 +28,13 @@ from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.common import check_agent_type_known
 from imbue.mngr.hosts.common import determine_lifecycle_state
 from imbue.mngr.hosts.tmux import LONG_MESSAGE_THRESHOLD
+from imbue.mngr.hosts.tmux import TmuxWindowTarget
 from imbue.mngr.hosts.tmux import capture_tmux_pane_content
 from imbue.mngr.interfaces.agent import AgentConfigT
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.data_types import FileTransferSpec
 from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.interfaces.host import OnlineHostInterface
-from imbue.mngr.interfaces.host import get_agent_ready_timeout
 from imbue.mngr.primitives import ActivitySource
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import CommandString
@@ -186,11 +186,9 @@ class BaseAgent(AgentInterface[AgentConfigT]):
         determine_lifecycle_state pure function for the actual state logic.
         """
         try:
-            session_name = f"{self.mngr_ctx.config.prefix}{self.name}"
-
-            # Get pane state and pid in one command
+            # Get pane state and pid in one command.
             result = self.host.execute_idempotent_command(
-                f"tmux list-panes -t '{session_name}:0' "
+                f"tmux list-panes -t {self.tmux_target.as_shell_arg()} "
                 f"-F '#{{pane_dead}}|#{{pane_current_command}}|#{{pane_pid}}' 2>/dev/null | head -n 1",
                 timeout_seconds=5.0,
             )
@@ -257,21 +255,24 @@ class BaseAgent(AgentInterface[AgentConfigT]):
 
     def get_ready_timeout_seconds(self) -> float:
         data = self._read_data()
-        return data.get("ready_timeout_seconds", get_agent_ready_timeout())
+        stored = data.get("ready_timeout_seconds")
+        if stored is None:
+            return self.mngr_ctx.config.agent_ready_timeout
+        return stored
 
     @property
     def session_name(self) -> str:
         return f"{self.mngr_ctx.config.prefix}{self.name}"
 
     @property
-    def tmux_target(self) -> str:
-        """Tmux target for the agent's primary window (window 0).
+    def tmux_target(self) -> TmuxWindowTarget:
+        """Structured tmux target for the agent's primary window (window 0).
 
-        Agents always run in window 0 of their tmux session. Using the bare
-        session name as a tmux target selects the *currently active* window,
-        which is wrong when additional windows exist (e.g., watchers, ttyd).
+        Always pins window 0 because agents run there; using the session
+        without a window component selects the *currently active* window, which
+        is wrong when additional windows exist (e.g., watchers, ttyd).
         """
-        return f"{self.session_name}:0"
+        return TmuxWindowTarget(session_name=self.session_name, window=0)
 
     @contextmanager
     def _message_lock(self) -> Generator[None, None, None]:
@@ -311,14 +312,14 @@ class BaseAgent(AgentInterface[AgentConfigT]):
         by resending (e.g., a blocking dialog).
 
         BaseAgent uses a simple send (literal text + Enter). Interactive TUI
-        agents (Claude Code, Gemini CLI, etc.) should subclass InteractiveTuiAgent
+        agents (Claude Code, Antigravity CLI, etc.) should subclass InteractiveTuiAgent
         which overrides this with the paste-detection / submission-signal pipeline.
         """
         with self._message_lock(), log_span("Sending message to agent {} (length={})", self.name, len(message)):
             self._preflight_send_message(self.tmux_target)
             self._send_message_simple(self.tmux_target, message)
 
-    def _preflight_send_message(self, tmux_target: str) -> None:
+    def _preflight_send_message(self, tmux_target: TmuxWindowTarget) -> None:
         """Run preflight checks before sending a message.
 
         Called at the start of send_message. Default is a no-op.
@@ -344,7 +345,7 @@ class BaseAgent(AgentInterface[AgentConfigT]):
         """Capture the current tmux pane content for this agent."""
         return self._capture_pane_content(self.tmux_target, include_scrollback=include_scrollback)
 
-    def _send_tmux_literal_keys(self, tmux_target: str, message: str) -> None:
+    def _send_tmux_literal_keys(self, tmux_target: TmuxWindowTarget, message: str) -> None:
         """Send literal text to a tmux pane, choosing the best method by length.
 
         For short messages (< 1024 chars), uses ``tmux send-keys -l``.
@@ -352,8 +353,9 @@ class BaseAgent(AgentInterface[AgentConfigT]):
         the host and uses ``tmux load-buffer`` + ``tmux paste-buffer`` to avoid
         the tmux "command too long" error.
         """
+        target_arg = tmux_target.as_shell_arg()
         if len(message) < LONG_MESSAGE_THRESHOLD:
-            send_msg_cmd = f"tmux send-keys -t '{tmux_target}' -l -- {shlex.quote(message)}"
+            send_msg_cmd = f"tmux send-keys -t {target_arg} -l -- {shlex.quote(message)}"
             result = self.host.execute_stateful_command(send_msg_cmd)
             if not result.success:
                 raise SendMessageError(str(self.name), f"tmux send-keys failed: {result.stderr or result.stdout}")
@@ -369,7 +371,7 @@ class BaseAgent(AgentInterface[AgentConfigT]):
                     raise SendMessageError(
                         str(self.name), f"tmux load-buffer failed: {result.stderr or result.stdout}"
                     )
-                paste_cmd = f"tmux paste-buffer -b {quoted_buffer} -t '{tmux_target}'"
+                paste_cmd = f"tmux paste-buffer -b {quoted_buffer} -t {target_arg}"
                 result = self.host.execute_stateful_command(paste_cmd)
                 if not result.success:
                     raise SendMessageError(
@@ -380,16 +382,16 @@ class BaseAgent(AgentInterface[AgentConfigT]):
                     f"tmux delete-buffer -b {quoted_buffer} 2>/dev/null; rm -f {quoted_path}"
                 )
 
-    def _send_message_simple(self, tmux_target: str, message: str) -> None:
+    def _send_message_simple(self, tmux_target: TmuxWindowTarget, message: str) -> None:
         """Send a message directly without waiting for paste confirmation."""
         self._send_tmux_literal_keys(tmux_target, message)
 
-        send_enter_cmd = f"tmux send-keys -t '{tmux_target}' Enter"
+        send_enter_cmd = f"tmux send-keys -t {tmux_target.as_shell_arg()} Enter"
         result = self.host.execute_stateful_command(send_enter_cmd)
         if not result.success:
             raise SendMessageError(str(self.name), f"tmux send-keys Enter failed: {result.stderr or result.stdout}")
 
-    def _capture_pane_content(self, tmux_target: str, include_scrollback: bool = False) -> str | None:
+    def _capture_pane_content(self, tmux_target: TmuxWindowTarget, include_scrollback: bool = False) -> str | None:
         """Capture the current pane content, returning None on failure."""
         return capture_tmux_pane_content(
             self.host,
@@ -398,7 +400,7 @@ class BaseAgent(AgentInterface[AgentConfigT]):
             include_scrollback=include_scrollback,
         )
 
-    def _check_pane_contains(self, tmux_target: str, text: str) -> bool:
+    def _check_pane_contains(self, tmux_target: TmuxWindowTarget, text: str) -> bool:
         """Check if the pane content contains the given text."""
         content = self._capture_pane_content(tmux_target)
         found = content is not None and text in content

@@ -1,9 +1,10 @@
 """Result and artifact pulling for the test-mapreduce plugin.
 
-Pulls the agent's outputs archive (test agents) or rsyncs ``.test_output``
-(integrator) onto local disk and applies any branch bundle. Outcome JSON
-parsing lives in ``report.py``; the orchestration code that calls this
-module treats the extracted contents as an opaque blob.
+Pulls the agent's outputs archive onto local disk and applies any branch
+bundle. The same path serves both testing agents and the integrator -- both
+publish a tarball at ``$MNGR_AGENT_STATE_DIR/plugin/<plugin>/outputs.tar.gz``.
+Outcome JSON parsing lives in ``report.py``; orchestration code treats the
+extracted contents as opaque.
 """
 
 import io
@@ -13,24 +14,16 @@ from pathlib import Path
 from loguru import logger
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
-from imbue.concurrency_group.errors import ProcessError
 from imbue.mngr.api.providers import get_provider_instance
-from imbue.mngr.api.sync import git_pull
-from imbue.mngr.api.sync import rsync_from_remote
 from imbue.mngr.config.data_types import MngrContext
-from imbue.mngr.errors import AgentNotFoundOnHostError
-from imbue.mngr.errors import HostError
 from imbue.mngr.errors import MngrError
-from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.interfaces.volume import Volume
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import ProviderInstanceName
-from imbue.mngr.primitives import UncommittedChangesMode
 from imbue.mngr_tmr.launching import stop_agent_on_host
-from imbue.mngr_tmr.prompts import INTEGRATOR_OUTCOME_FILENAME
 from imbue.mngr_tmr.prompts import PLUGIN_NAME
 
 _OUTPUTS_ARCHIVE_NAME = "outputs.tar.gz"
@@ -93,8 +86,7 @@ def _apply_branch_bundle(
     The bundle was created with ``git bundle create ... <base>..<branch>``,
     so it carries the ref under its branch name; the fetch refspec maps
     that ref onto the same local branch name. Idempotent for repeated
-    invocations and a no-op on the local provider (where the branch
-    already exists in the worktree-sharing repo).
+    invocations.
     """
     result = cg.run_process_to_completion(
         ["git", "fetch", "--no-tags", str(bundle_path), f"+{branch_name}:{branch_name}"],
@@ -123,7 +115,7 @@ def pull_agent_outputs(
     source_dir: Path | None,
     cg: ConcurrencyGroup,
 ) -> bool:
-    """Download and extract the outputs archive for a single testing agent.
+    """Download and extract the outputs archive for a single agent.
 
     Reads ``outputs.tar.gz`` from the agent's state volume, extracts it
     under ``destination_dir/<agent_name>/``, and (if a ``branch.bundle`` is
@@ -165,6 +157,16 @@ def pull_agent_outputs(
     return True
 
 
+def has_local_branch(source_dir: Path, branch_name: str, cg: ConcurrencyGroup) -> bool:
+    """Check whether a git branch exists in the local source_dir repo."""
+    result = cg.run_process_to_completion(
+        ["git", "rev-parse", "--verify", "--quiet", f"refs/heads/{branch_name}"],
+        cwd=source_dir,
+        is_checked_after=False,
+    )
+    return result.returncode == 0
+
+
 def finalize_agent(
     mngr_ctx: MngrContext,
     provider_name: ProviderInstanceName,
@@ -194,123 +196,3 @@ def finalize_agent(
     if should_stop:
         stop_agent_on_host(host, agent_id, agent_name)
     return pulled
-
-
-def _get_agent_from_host(
-    host: OnlineHostInterface,
-    agent_id: AgentId,
-) -> AgentInterface:
-    """Look up an agent on a host by ID.
-
-    Raises AgentNotFoundOnHostError if not found, or HostError if the host
-    is unreachable (callers should catch both).
-    """
-    for agent in host.get_agents():
-        if agent.id == agent_id:
-            return agent
-    raise AgentNotFoundOnHostError(agent_id, host.id)
-
-
-def pull_integrator_outputs(
-    agent_id: AgentId,
-    agent_name: AgentName,
-    host: OnlineHostInterface,
-    destination_dir: Path,
-    cg: ConcurrencyGroup,
-) -> bool:
-    """Pull the integrator agent's .test_output via rsync. Returns True on success.
-
-    Contents land directly under ``destination_dir/<agent_name>/`` (no
-    ``test_output/`` subdir, because rsync flattens the trailing-slashed
-    source). The reporter parses the outcome JSON from that location.
-    """
-    try:
-        agent = _get_agent_from_host(host, agent_id)
-    except (MngrError, HostError, AgentNotFoundOnHostError) as exc:
-        logger.warning("Could not find integrator agent on host: {}", exc)
-        return False
-
-    local_dest = destination_dir / str(agent_name)
-    local_dest.mkdir(parents=True, exist_ok=True)
-    try:
-        rsync_from_remote(
-            remote_host=host,
-            remote_path=agent.work_dir / ".test_output",
-            local_path=local_dest,
-            is_dry_run=False,
-            is_delete=False,
-            uncommitted_changes=UncommittedChangesMode.CLOBBER,
-            cg=cg,
-        )
-        return True
-    except (MngrError, HostError, OSError) as exc:
-        logger.warning("Failed to pull integrator outputs: {}", exc)
-        return False
-
-
-def pull_agent_branch(
-    agent_id: AgentId,
-    agent_name: AgentName,
-    branch_name: str | None,
-    host: OnlineHostInterface,
-    destination: Path,
-    cg: ConcurrencyGroup,
-    base_commit: str | None = None,
-) -> str | None:
-    """Pull the agent's git branch into the local repo.
-
-    Used by the integrator path; testing agents go through the bundle
-    contained in their outputs archive instead.
-
-    Returns the branch name if successful, None otherwise.
-    """
-    if branch_name is None:
-        logger.warning("Agent '{}' has no branch to pull", agent_name)
-        return None
-
-    try:
-        if base_commit is not None:
-            _create_local_branch(destination, branch_name, base_commit, cg)
-
-        agent_for_branch = _get_agent_from_host(host, agent_id)
-        git_pull(
-            local_path=destination,
-            remote_host=host,
-            remote_path=agent_for_branch.work_dir,
-            source_branch=branch_name,
-            target_branch=branch_name,
-            is_dry_run=False,
-            uncommitted_changes=UncommittedChangesMode.STASH,
-            cg=cg,
-        )
-        logger.info("Pulled branch '{}' from agent '{}'", branch_name, agent_name)
-        return branch_name
-    except HostError as exc:
-        logger.warning("Connection lost while pulling branch from agent '{}': {}", agent_name, exc)
-        return None
-    except (MngrError, ProcessError) as exc:
-        logger.warning("Failed to pull branch from agent '{}': {}", agent_name, exc)
-        return None
-
-
-def _create_local_branch(destination: Path, branch_name: str, base_commit: str, cg: ConcurrencyGroup) -> None:
-    """Create a local git branch from a base commit (without checking it out)."""
-    result = cg.run_process_to_completion(
-        ["git", "branch", branch_name, base_commit],
-        cwd=destination,
-        is_checked_after=False,
-    )
-    if result.returncode == 0:
-        logger.info("Created local branch '{}' from commit {}", branch_name, base_commit[:8])
-    else:
-        logger.info("Branch '{}' already exists, reusing it", branch_name)
-
-
-def is_integrator_outputs_ready(work_dir: Path, host: OnlineHostInterface) -> bool:
-    """Check if the integrator's outcome file exists on the remote host."""
-    result_path = work_dir / ".test_output" / INTEGRATOR_OUTCOME_FILENAME
-    try:
-        host.read_text_file(result_path)
-        return True
-    except (HostError, FileNotFoundError, OSError):
-        return False

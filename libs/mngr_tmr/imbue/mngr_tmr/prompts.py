@@ -9,6 +9,35 @@ PLUGIN_NAME = "test-map-reduce"
 TESTING_AGENT_OUTCOME_FILENAME = "testing_agent_outcome.json"
 INTEGRATOR_OUTCOME_FILENAME = "integrator_outcome.json"
 
+# Subdirectory of the integrator's work_dir into which the orchestrator
+# rsyncs the local output directory before kicking the integrator off.
+# Mirrored in launching.py so they stay in sync.
+INTEGRATOR_INPUTS_DIRNAME = ".tmr_inputs"
+
+
+_PUBLISH_OUTPUTS_SNIPPET = f"""```bash
+ARCHIVE_DIR="$MNGR_AGENT_STATE_DIR/plugin/{PLUGIN_NAME}"
+mkdir -p "$ARCHIVE_DIR"
+
+STAGING=$(mktemp -d)
+trap 'rm -rf "$STAGING"' EXIT
+
+# Rename .test_output -> test_output inside the archive
+cp -a .test_output "$STAGING/test_output"
+
+# Include an incremental git bundle if any commits exist beyond the base.
+# The bundle is created with the explicit branch name so the orchestrator
+# can fetch ``$BRANCH:$BRANCH`` cleanly.
+BRANCH=$(git rev-parse --abbrev-ref HEAD)
+if [ -n "$(git rev-list --max-count=1 "$MNGR_GIT_BASE_BRANCH..$BRANCH" 2>/dev/null)" ]; then
+    git bundle create "$STAGING/branch.bundle" "$MNGR_GIT_BASE_BRANCH..$BRANCH"
+fi
+
+TARBALL="$ARCHIVE_DIR/outputs.tar.gz"
+tar -czf "$TARBALL.tmp" -C "$STAGING" .
+mv "$TARBALL.tmp" "$TARBALL"
+```"""
+
 
 def build_test_agent_prompt(
     test_node_id: str,
@@ -174,28 +203,7 @@ Fields:
 After the outcome file is written, package the outputs and publish them
 where the orchestrator can find them. Run this from the git repo root:
 
-```bash
-ARCHIVE_DIR="$MNGR_AGENT_STATE_DIR/plugin/{PLUGIN_NAME}"
-mkdir -p "$ARCHIVE_DIR"
-
-STAGING=$(mktemp -d)
-trap 'rm -rf "$STAGING"' EXIT
-
-# Rename .test_output -> test_output inside the archive
-cp -a .test_output "$STAGING/test_output"
-
-# Include an incremental git bundle if any commits exist beyond the base.
-# The bundle is created with the explicit branch name so the orchestrator
-# can fetch ``$BRANCH:$BRANCH`` cleanly.
-BRANCH=$(git rev-parse --abbrev-ref HEAD)
-if [ -n "$(git rev-list --max-count=1 "$MNGR_GIT_BASE_BRANCH..$BRANCH" 2>/dev/null)" ]; then
-    git bundle create "$STAGING/branch.bundle" "$MNGR_GIT_BASE_BRANCH..$BRANCH"
-fi
-
-TARBALL="$ARCHIVE_DIR/outputs.tar.gz"
-tar -czf "$TARBALL.tmp" -C "$STAGING" .
-mv "$TARBALL.tmp" "$TARBALL"
-```
+{_PUBLISH_OUTPUTS_SNIPPET}
 
 This MUST be the very last step. The orchestrator polls for outputs.tar.gz
 and treats its appearance as the signal that you are done. The .tmp + rename
@@ -215,22 +223,45 @@ questions at that point.
     return prompt
 
 
-def build_integrator_prompt(
-    fix_branches: list[str],
-) -> str:
-    """Build the prompt/initial message for the integrator agent."""
-    branch_list = "\n".join(f"  - {b}" for b in fix_branches)
-    return f"""Integrate the following branches into a single linear commit stack:
-{branch_list}
+_INTEGRATOR_OUTCOME_SECTION = f"""# Writing the outcome and publishing outputs
 
-# Strategy
+After cherry-picking, write the result atomically to avoid races with the
+orchestrator reading it:
+
+1. First write to .test_output/{INTEGRATOR_OUTCOME_FILENAME}.draft (relative to the git repo root)
+2. Then rename (mv) the .draft file to .test_output/{INTEGRATOR_OUTCOME_FILENAME}
+
+The schema is:
+
+{{"squashed_branches": ["branch1", "branch2"],
+ "squashed_commit_hash": "abc1234",
+ "impl_priority": ["branch3"],
+ "impl_commit_hashes": {{"branch3": "def5678"}},
+ "failed": ["branch4"]}}
+
+Fields:
+- squashed_branches: branch names whose test/doc commits were squashed
+- squashed_commit_hash: commit hash of the squashed test/doc commit (short is fine)
+- impl_priority: impl branch names in priority order, highest first
+- impl_commit_hashes: mapping of impl branch name to its commit hash on the integrated branch
+- failed: branch names that could not be integrated
+
+Then, finally, publish the outputs archive. Run this from the git repo root:
+
+{_PUBLISH_OUTPUTS_SNIPPET}
+
+This MUST be the very last step. The orchestrator polls for outputs.tar.gz
+and treats its appearance as the signal that you are done. The .tmp + rename
+sequence prevents the orchestrator from reading a half-written archive.
+"""
+
+
+_INTEGRATOR_CHERRY_PICK_INSTRUCTIONS = """# Cherry-pick strategy
 
 Use cherry-pick (NOT merge) to build a clean linear history. The goal is a
 branch with a flat list of commits that is easy to review.
 
-# Steps
-
-1. For each branch listed above, inspect the commits. Each branch should have
+1. For each branch in the list, inspect the commits. Each branch should have
    commits prefixed with a change kind in brackets, like [FIX_TEST], [FIX_IMPL],
    [IMPROVE_TEST], or [FIX_TUTORIAL].
 
@@ -251,24 +282,94 @@ branch with a flat list of commits that is easy to review.
 
 5. After cherry-picking, record the commit hashes using `git rev-parse HEAD` after
    each step (the squashed commit and each impl commit).
+"""
 
-6. Write the result atomically to avoid races with the orchestrator reading it:
-   a. First write to .test_output/{INTEGRATOR_OUTCOME_FILENAME}.draft (relative to the git repo root)
-   b. Then rename (mv) the .draft file to .test_output/{INTEGRATOR_OUTCOME_FILENAME}
 
-   The schema is:
-{{"squashed_branches": ["branch1", "branch2"], "squashed_commit_hash": "abc1234", "impl_priority": ["branch3"], "impl_commit_hashes": {{"branch3": "def5678"}}, "failed": ["branch4"]}}
-
-- squashed_branches: list of branch names whose test/doc commits were squashed
-- squashed_commit_hash: the commit hash of the squashed test/doc commit (short hash is fine)
-- impl_priority: list of impl branch names in priority order (highest first)
-- impl_commit_hashes: mapping of each impl branch name to its commit hash on the integrated branch
-- failed: list of branch names that could not be integrated
-
-# Important: do not ask for user input
+_INTEGRATOR_DO_NOT_ASK = """# Important: do not ask for user input
 
 For this initial request, do NOT ask the user for any input or clarification.
 Work autonomously. If a cherry-pick has conflicts you cannot resolve, skip that
 branch and record it as failed. If the user sends follow-up messages later, you
 may ask them questions at that point.
 """
+
+
+def build_integrator_prompt() -> str:
+    """Build the integrator's initial message.
+
+    The orchestrator has rsynced the per-test-agent output directories under
+    ``INTEGRATOR_INPUTS_DIRNAME`` in the integrator's work_dir, each subdir
+    holding the test agent's ``test_output/<outcome.json>`` and (when commits
+    were made) a ``branch.bundle``. The integrator must walk those
+    subdirectories, apply the "should pull" predicate to filter qualifying
+    agents, fetch the qualifying bundles into local branches, then cherry-pick.
+    """
+    return f"""Integrate fix branches from the test agents whose outputs have been
+uploaded into ``{INTEGRATOR_INPUTS_DIRNAME}/`` (a sibling of the current
+directory's contents, in the integrator's work_dir). Each subdirectory
+``{INTEGRATOR_INPUTS_DIRNAME}/<agent_name>/`` contains the test agent's
+``test_output/{TESTING_AGENT_OUTCOME_FILENAME}`` and (when it made commits)
+a ``branch.bundle``.
+
+# Discover and fetch qualifying branches
+
+Run this from the git repo root to filter and fetch the branches whose
+agents reported a real fix (and didn't regress the test suite):
+
+```bash
+set -euo pipefail
+
+INPUTS_DIR="{INTEGRATOR_INPUTS_DIRNAME}"
+FETCHED_BRANCHES=()
+
+should_pull() {{
+    python3 - "$1" <<'PYEOF'
+import json, sys
+data = json.load(open(sys.argv[1]))
+if data.get("errored"):
+    sys.exit(1)
+changes = data.get("changes") or {{}}
+if not any((c or {{}}).get("status") == "SUCCEEDED" for c in changes.values()):
+    sys.exit(1)
+if data.get("tests_passing_before") is True and data.get("tests_passing_after") is not True:
+    sys.exit(1)
+sys.exit(0)
+PYEOF
+}}
+
+bundle_branch() {{
+    git bundle list-heads "$1" \\
+        | awk 'NR==1 {{ sub(/^refs\\/heads\\//, "", $2); print $2 }}'
+}}
+
+for agent_dir in "$INPUTS_DIR"/*/; do
+    outcome="$agent_dir/test_output/{TESTING_AGENT_OUTCOME_FILENAME}"
+    bundle="$agent_dir/branch.bundle"
+    [ -f "$outcome" ] || continue
+    [ -f "$bundle" ] || continue
+    if ! should_pull "$outcome"; then
+        echo "Skipping $agent_dir (did not meet the should-pull predicate)"
+        continue
+    fi
+    branch=$(bundle_branch "$bundle")
+    if [ -z "$branch" ]; then
+        echo "Skipping $agent_dir (could not read branch ref from bundle)"
+        continue
+    fi
+    echo "Fetching $branch from $bundle"
+    git fetch --no-tags "$bundle" "+$branch:$branch"
+    FETCHED_BRANCHES+=("$branch")
+done
+
+printf '%s\\n' "${{FETCHED_BRANCHES[@]}}"
+```
+
+The branches you must cherry-pick are exactly the printed ones. If no
+branches qualify, write an outcome describing that (no squashed/impl
+commits) and proceed straight to publishing the outputs archive.
+
+{_INTEGRATOR_CHERRY_PICK_INSTRUCTIONS}
+
+{_INTEGRATOR_OUTCOME_SECTION}
+
+{_INTEGRATOR_DO_NOT_ASK}"""

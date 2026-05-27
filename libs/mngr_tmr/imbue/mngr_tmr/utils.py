@@ -11,11 +11,6 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mngr.config.data_types import CreateTemplateName
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.errors import MngrError
-from imbue.mngr.primitives import LOCAL_PROVIDER_NAME
-from imbue.mngr.primitives import ProviderInstanceName
-from imbue.mngr.primitives import TransferMode
-from imbue.mngr_tmr.data_types import ChangeStatus
-from imbue.mngr_tmr.data_types import TestResult
 
 
 def make_run_name() -> str:
@@ -43,21 +38,6 @@ def dedup_name(base: str, used: set[str]) -> str:
             used.add(candidate)
             return candidate
     raise AssertionError("itertools.count is infinite; loop must return")
-
-
-def should_pull_changes_from_outcome(outcome: TestResult) -> bool:
-    """Decide whether an agent's changes should be kept based on its parsed outcome.
-
-    Pull when: not errored, at least one SUCCEEDED change, and tests are at
-    least as good as before (if they were passing, they must still be passing).
-    """
-    if outcome.errored:
-        return False
-    if not any(c.status == ChangeStatus.SUCCEEDED for c in outcome.changes.values()):
-        return False
-    if outcome.tests_passing_before is True and outcome.tests_passing_after is not True:
-        return False
-    return True
 
 
 def resolve_templates(
@@ -139,14 +119,3 @@ def sanitize_test_name_for_agent(test_node_id: str) -> str:
             continue
         sanitized += ch
     return sanitized.strip("-").lower()[:40]
-
-
-def transfer_mode_for_provider(provider_name: ProviderInstanceName) -> TransferMode:
-    """Determine the transfer mode based on the provider.
-
-    GIT_WORKTREE only works when source and target are on the same host, so it is
-    only usable with the local provider. Remote providers (docker, modal, etc.)
-    use GIT_MIRROR to transfer git history efficiently.
-    """
-    is_local = provider_name.lower() == LOCAL_PROVIDER_NAME
-    return TransferMode.GIT_WORKTREE if is_local else TransferMode.GIT_MIRROR

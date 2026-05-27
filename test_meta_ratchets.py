@@ -3,6 +3,7 @@ import fnmatch
 import os
 import re
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -11,6 +12,7 @@ from inline_snapshot import snapshot
 
 from imbue.imbue_common.ratchet_testing.common_ratchets import RegexRatchetRule
 from imbue.imbue_common.ratchet_testing.common_ratchets import check_ratchet_rule_all_files
+from imbue.imbue_common.ratchet_testing.core import BINARY_FILE_EXCLUSION
 from imbue.imbue_common.ratchet_testing.core import _get_all_files_with_extension
 from imbue.imbue_common.ratchet_testing.ratchets import check_no_import_lint_errors
 from imbue.imbue_common.ratchet_testing.ratchets import find_bash_scripts_without_strict_mode
@@ -30,7 +32,6 @@ _REPO_ROOT = Path(__file__).parent
 _EXCLUDED_PROJECTS: frozenset[str] = frozenset()
 
 _SELF_EXCLUSION: tuple[str, ...] = ("test_meta_ratchets.py",)
-_BINARY_FILE_EXCLUSION: tuple[str, ...] = ("*.png", "*.ico", "*.jpg", "*.jpeg", "*.gif", "*.webp")
 _DATA_FILE_EXCLUSION: tuple[str, ...] = ("*.jsonl",)
 _MIGRATION_SCRIPT_EXCLUSION: tuple[str, ...] = (
     "migrate_code_mng_to_mngr.sh",
@@ -195,6 +196,31 @@ def test_no_ruff_lint_errors_repo_wide() -> None:
         raise AssertionError("\n".join(errors) + "\n" + fix_hint)
 
 
+def test_cli_docs_are_up_to_date() -> None:
+    """Committed CLI docs and the PyPI README must match scripts/make_cli_docs.py output.
+
+    Guards against editing a command's help metadata (or the top-level README) without
+    regenerating the docs -- the same check the regenerate-cli-docs pre-commit hook performs.
+    This complements test_all_non_hidden_commands_have_generated_docs in help_formatter_test.py
+    (which only checks that a doc *file* exists per command) by verifying the file *contents*
+    are current.
+
+    The generator is run via its --check mode in a fresh interpreter so that
+    MNGR_LOAD_ALL_PLUGINS is set before any mngr import and every provider's commands are
+    documented; running it in-process would not reliably reload already-imported modules.
+    """
+    result = subprocess.run(
+        [sys.executable, str(_REPO_ROOT / "scripts" / "make_cli_docs.py"), "--check"],
+        cwd=_REPO_ROOT,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, (
+        "Generated CLI docs are out of date. Run `uv run python scripts/make_cli_docs.py` "
+        f"and commit the result.\n{result.stdout}{result.stderr}"
+    )
+
+
 def test_prevent_bash_without_strict_mode() -> None:
     """Ensure all bash scripts in the repo use 'set -euo pipefail' for strict error handling.
 
@@ -220,7 +246,7 @@ _PREVENT_OLD_MNG_NAME = RegexRatchetRule(
 
 def test_prevent_old_mng_name_in_file_contents() -> None:
     """Ensure the old 'mng' name (not followed by 'r') is not reintroduced in file contents."""
-    exclusions = _SELF_EXCLUSION + _BINARY_FILE_EXCLUSION + _DATA_FILE_EXCLUSION + _MIGRATION_SCRIPT_EXCLUSION
+    exclusions = _SELF_EXCLUSION + BINARY_FILE_EXCLUSION + _DATA_FILE_EXCLUSION + _MIGRATION_SCRIPT_EXCLUSION
     chunks = check_ratchet_rule_all_files(_PREVENT_OLD_MNG_NAME, _REPO_ROOT, exclusions)
     assert len(chunks) <= snapshot(0), _PREVENT_OLD_MNG_NAME.format_failure(chunks)
 

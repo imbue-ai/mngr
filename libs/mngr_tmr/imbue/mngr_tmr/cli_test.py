@@ -39,7 +39,19 @@ def test_cli_help_contains_provider_env_label_options(cli_runner: CliRunner) -> 
     assert "--env" in result.output
     assert "--label" in result.output
     assert "--prompt-suffix" in result.output
-    assert "--use-snapshot" in result.output
+
+
+def test_cli_help_drops_removed_options(cli_runner: CliRunner) -> None:
+    """The integrator-specific flags and --use-snapshot are gone.
+
+    The integrator follows --provider and the test-agent type/templates;
+    snapshot building is automatic when the provider supports it.
+    """
+    result = cli_runner.invoke(tmr, ["--help"])
+    assert "--integrator-provider" not in result.output
+    assert "--integrator-type" not in result.output
+    assert "--integrator-template" not in result.output
+    assert "--use-snapshot" not in result.output
 
 
 def test_cli_help_contains_timeout_options(cli_runner: CliRunner) -> None:
@@ -170,9 +182,10 @@ def test_tmr_command_options_before_separator() -> None:
 
 
 def test_disable_modal_initial_snapshot_skips_non_modal_providers(temp_mngr_ctx: MngrContext) -> None:
-    """Non-modal provider names leave config.providers untouched."""
+    """A non-modal provider name leaves config.providers untouched."""
     before = dict(temp_mngr_ctx.config.providers)
-    _disable_modal_initial_snapshot(temp_mngr_ctx, ("local", "docker"))
+    _disable_modal_initial_snapshot(temp_mngr_ctx, "local")
+    _disable_modal_initial_snapshot(temp_mngr_ctx, "docker")
     assert dict(temp_mngr_ctx.config.providers) == before
 
 
@@ -184,5 +197,5 @@ def test_disable_modal_initial_snapshot_silent_when_modal_backend_unregistered(
     caller will surface the UnknownBackendError later when it tries to
     actually use modal."""
     before = dict(temp_mngr_ctx.config.providers)
-    _disable_modal_initial_snapshot(temp_mngr_ctx, ("modal", "modal"))
+    _disable_modal_initial_snapshot(temp_mngr_ctx, "modal")
     assert dict(temp_mngr_ctx.config.providers) == before

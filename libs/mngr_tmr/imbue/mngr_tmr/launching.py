@@ -13,6 +13,7 @@ from imbue.mngr.api.create import create as api_create
 from imbue.mngr.api.create import resolve_target_host
 from imbue.mngr.api.data_types import CreateAgentResult
 from imbue.mngr.api.providers import get_provider_instance
+from imbue.mngr.api.sync import rsync_to_remote
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import AgentError
 from imbue.mngr.errors import HostError
@@ -32,16 +33,17 @@ from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import LOCAL_PROVIDER_NAME
 from imbue.mngr.primitives import SnapshotName
 from imbue.mngr.primitives import TransferMode
+from imbue.mngr.primitives import UncommittedChangesMode
 from imbue.mngr_tmr.data_types import AgentKind
 from imbue.mngr_tmr.data_types import AgentMetadata
 from imbue.mngr_tmr.data_types import TestAgentInfo
 from imbue.mngr_tmr.data_types import TmrLaunchConfig
+from imbue.mngr_tmr.prompts import INTEGRATOR_INPUTS_DIRNAME
 from imbue.mngr_tmr.prompts import build_integrator_prompt
 from imbue.mngr_tmr.prompts import build_test_agent_prompt
 from imbue.mngr_tmr.utils import dedup_name
 from imbue.mngr_tmr.utils import resolve_templates
 from imbue.mngr_tmr.utils import sanitize_test_name_for_agent
-from imbue.mngr_tmr.utils import transfer_mode_for_provider
 
 _AGENT_CREATION_TIMEOUT_SECONDS = 600.0
 
@@ -116,7 +118,7 @@ def _build_agent_options(
     kind: AgentKind,
     initial_message: str | None = None,
     target_path: Path | None = None,
-    transfer_mode: TransferMode | None = None,
+    transfer_mode: TransferMode = TransferMode.GIT_MIRROR,
 ) -> CreateAgentOptions:
     """Build CreateAgentOptions for a tmr agent.
 
@@ -125,11 +127,13 @@ def _build_agent_options(
 
     ``target_path`` overrides where the agent's work_dir is placed on the
     host (used to pin the snapshotter to ``/code``). ``transfer_mode``
-    overrides the provider default (used to switch test agents to
-    git-worktree when sourcing from the host's own ``/code``).
+    defaults to ``GIT_MIRROR`` for every provider (including local) so that
+    agent branches are kept in the agent's own clone and surface in the
+    source repo only via the published bundle -- the orchestrator code path
+    is then identical across providers. Callers override to ``GIT_WORKTREE``
+    when source and target live on the same host (e.g. when an agent built
+    from a snapshot sources from the host's own ``/code``).
     """
-    if transfer_mode is None:
-        transfer_mode = transfer_mode_for_provider(config.provider_name)
     is_remote = config.provider_name.lower() != LOCAL_PROVIDER_NAME
     label_options = AgentLabelOptions(labels={**config.label_options.labels, _ROLE_LABEL_KEY: kind.value})
     return CreateAgentOptions(
@@ -356,7 +360,6 @@ def launch_all_test_agents(
     launch_failures: list[AgentMetadata],
     run_name: str,
     prompt_suffix: str = "",
-    use_snapshot: bool = False,
     max_parallel: int = 4,
     launch_delay_seconds: float = 2.0,
     agents_per_host: int = 4,
@@ -367,6 +370,12 @@ def launch_all_test_agents(
     host. Hosts are pre-created in a pool and agents are assigned round-robin.
     For local providers, this setting is ignored (all agents share localhost).
 
+    When the provider supports snapshots (e.g. modal) and the caller has not
+    pre-supplied one via ``config.snapshot``, a snapshot host is built first
+    and the resulting snapshot ID is propagated into ``launch_config`` so all
+    other agents are launched from it. Providers without snapshot support
+    (local, docker, ...) skip this step silently.
+
     Per-test launch failures are appended (in place) to ``launch_failures`` so
     they can be surfaced in the report.
     """
@@ -374,19 +383,20 @@ def launch_all_test_agents(
     agent_hosts: dict[str, OnlineHostInterface] = {}
 
     launch_config = config
-    if use_snapshot:
-        provider = get_provider_instance(config.provider_name, mngr_ctx)
+    if config.snapshot is None:
+        # Pass is_for_host_creation=True so a backend with one-time bootstrap
+        # (Modal's per-user environment) creates that resource here. The
+        # snapshotter and every test agent that follows is a host creation,
+        # so this is the moment to allow bootstrap; without it, snapshotting
+        # against a fresh Modal account aborts with ProviderEmptyError before
+        # any host is created.
+        provider = get_provider_instance(config.provider_name, mngr_ctx, is_for_host_creation=True)
         if provider.supports_snapshots:
             try:
                 snapshot_name = _create_snapshot_host(config, mngr_ctx, run_name)
                 launch_config = config.model_copy_update(to_update(config.field_ref().snapshot, snapshot_name))
             except (MngrError, HostError, OSError, BaseExceptionGroup) as exc:
                 logger.warning("Failed to create snapshot, launching agents without snapshot: {}", exc)
-        else:
-            logger.warning(
-                "Provider '{}' does not support snapshots, launching all agents without snapshot",
-                config.provider_name,
-            )
 
     is_local = launch_config.provider_name.lower() == LOCAL_PROVIDER_NAME
     host_pool: list[OnlineHostInterface] = []
@@ -508,27 +518,52 @@ def launch_agents_up_to_limit(
 
 
 def launch_integrator_agent(
-    fix_branches: list[str],
     config: TmrLaunchConfig,
     mngr_ctx: MngrContext,
     run_name: str,
+    output_dir: Path,
 ) -> tuple[TestAgentInfo, OnlineHostInterface]:
-    """Launch an integrator agent that cherry-picks fix branches into a linear stack."""
+    """Launch an integrator agent that cherry-picks fix branches into a linear stack.
+
+    Test agents always run with ``GIT_MIRROR`` transfer mode (see
+    ``_build_agent_options``), so their branches never appear in the
+    orchestrator's source repo automatically -- the only way the integrator
+    gets at them is via the per-agent ``branch.bundle`` files that the
+    orchestrator has already pulled and extracted under ``output_dir``. The
+    integrator host has no knowledge of those branches either, so we rsync
+    ``output_dir`` into ``<work_dir>/INTEGRATOR_INPUTS_DIRNAME/`` and deliver
+    the integrator prompt via ``send_message``. The prompt walks that input
+    directory, applies the should-pull predicate to filter, fetches the
+    qualifying bundles into local branches, and cherry-picks.
+    """
     agent_name = AgentName(f"tmr-{run_name}-integrator")
     branch_name = f"mngr-tmr/{run_name}/integrated"
     host_name = HostName(f"tmr-{run_name}-integrator")
-    prompt = build_integrator_prompt(fix_branches)
 
-    logger.info("Launching integrator agent '{}' to integrate {} branches", agent_name, len(fix_branches))
+    logger.info("Launching integrator agent '{}'", agent_name)
     create_result = _create_tmr_agent(
         agent_name=agent_name,
         branch_name=branch_name,
         config=config,
         mngr_ctx=mngr_ctx,
         kind=AgentKind.INTEGRATOR,
-        initial_message=prompt,
+        initial_message=None,
         host_name=host_name,
     )
+
+    destination = create_result.agent.work_dir / INTEGRATOR_INPUTS_DIRNAME
+    logger.info("Rsyncing integrator inputs to '{}:{}'", create_result.host.id, destination)
+    rsync_to_remote(
+        local_path=output_dir,
+        remote_host=create_result.host,
+        remote_path=destination,
+        is_dry_run=False,
+        is_delete=False,
+        uncommitted_changes=UncommittedChangesMode.CLOBBER,
+        cg=mngr_ctx.concurrency_group,
+    )
+    logger.info("Sending integrator prompt to '{}'", agent_name)
+    create_result.agent.send_message(build_integrator_prompt())
 
     return (
         TestAgentInfo(

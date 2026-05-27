@@ -52,7 +52,7 @@ class E2eSession(Session):
             (f"mngr exec {agent_name} 'tmux list-sessions 2>&1'", "tmux sessions"),
             (
                 f'mngr exec {agent_name} \'SESSION=$(tmux list-sessions -F "#{{session_name}}" 2>/dev/null | head -1);'
-                f' tmux capture-pane -p -t "$SESSION" 2>&1 || echo no-pane\'',
+                f' tmux capture-pane -p -t "=$SESSION" 2>&1 || echo no-pane\'',
                 "claude pane",
             ),
             (

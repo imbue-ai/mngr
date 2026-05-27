@@ -1,8 +1,46 @@
 # Unabridged Changelog - mngr_imbue_cloud
 
-Full, unedited changelog entries consolidated nightly from individual files in the `changelog/mngr_imbue_cloud/` directory.
+Full, unedited changelog entries consolidated nightly from individual files in `libs/mngr_imbue_cloud/changelog/`.
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
+
+## 2026-05-22
+
+## No more silent auto-disable on auth errors
+
+- Previously, when `ImbueCloudAuthError` was raised during discovery, minds would silently rewrite the user's settings to set `is_enabled = false` for the offending `imbue_cloud_<slug>` block. That behavior is gone (see the `apps/minds` changelog for details). `mngr_imbue_cloud` itself is unchanged -- it still raises `ImbueCloudAuthError` on session-revoke errors; the difference is that those errors now propagate to the providers panel in minds (where the user can choose to disable the provider explicitly) instead of triggering a hidden config rewrite.
+
+## 2026-05-21
+
+Fix the intro in `UNABRIDGED_CHANGELOG.md` so it references the correct entries directory. The path was `changelog/<project>/` (which never existed); the actual layout is `<project_dir>/changelog/`.
+
+- Bumped pinned `imbue-mngr` / `imbue-common` / `concurrency-group` versions to match the current monorepo.
+
+## 2026-05-20
+
+Project now participates in the per-project changelog layout: a `changelog/` subdirectory holds per-PR entry files, and `CHANGELOG.md` / `UNABRIDGED_CHANGELOG.md` at the project root hold the consolidated history. See the full rationale in `dev/changelog/mngr-changelog-per-project.md`.
+
+End-to-end fixes for the OVH-backed pool flow (bake -> lease/adopt -> first-start). Discovered + fixed iteratively while smoke-testing the flow against a fresh dev env.
+
+### `pool_hosts` INSERT picks up the schema's `host_name` column
+
+A prior schema migration added `host_name NOT NULL` to `pool_hosts` but the bake's INSERT in `mngr_imbue_cloud.cli.admin._create_single_pool_host` was never updated. Every successful pool bake died at the very last step with `null value in column "host_name" of relation "pool_hosts" violates not-null constraint` -- worst of all, the cleanup path doesn't run on a psycopg2 error, so the OVH VPS + docker image + agent + ufw + injected management key were all already done by the time the INSERT fired, and every failed bake leaked a fully-provisioned VPS. Fix adds the column (the variable was already computed at the top of `_create_single_pool_host`) and extracts the SQL into a module-level `_INSERT_POOL_HOST_SQL` constant with a regression test asserting every required column appears, so any future drift of the same shape gets caught up front without needing a fake DB.
+
+### Bake produces a leasable state aligned with the adopt path
+
+- The bake's services agent now uses the constant name `system-services` (was a per-bake `pool-<hex>` UUID). The minds-side adopt code in `mngr_imbue_cloud.host.ImbueCloudHost.create_agent_state` explicitly keeps the bake's name verbatim, so the bake has to use the same name the user's `mngr create system-services@<host>.imbue_cloud_<slug>` does -- otherwise the leased workspace's tmux sessions are named after the per-bake UUID instead of the user's expected `system-services`. The per-bake unique `pool-<hex>-host` suffix stays on the *host name* for operator-local mngr disambiguation across sequential bakes.
+- After the existing key-injection step, the bake destroys the FCT-bootstrap-created chat agent and `rm -f`'s `/code/runtime/initial_chat_created`. During the bake the services agent boots and the FCT bootstrap creates an initial chat agent named after the bake's host (per `_build_create_chat_command` in the FCT bootstrap), then drops a sentinel file so it never recreates on later starts. Without the cleanup, the user's lease inherits the bake's chat agent name and the bake-time agent's claude session that has no API key (because the user's LiteLLM key didn't exist at bake time). Destroying both lets the bootstrap fire fresh on the user's first start with the correct host_name + access to the patched claude config dir.
+- The bake's subsequent `mngr stop` / `mngr exec` calls use the full address `system-services@<host_name>.ovh` instead of just `system-services`. Now that the agent name is a constant, the operator's local mngr state accumulates one `system-services` agent per bake (each on a different host). `_get_agent_info` previously took an agent name alone and the mngr-list `--include` filter returned the first match, which under sequential bakes is some prior bake's stale agent on a stale VPS -- the bake would then SSH the wrong VPS for ufw + key injection + DB INSERT while the actually-baked container received nothing. `_get_agent_info` now takes `host_name` as a keyword arg and filters by both `name` and `host.name`.
+- Multi-token `mngr exec` commands are packed into a single `shlex.join`'d positional string. `mngr exec`'s click parser is `AGENTS... COMMAND` -- the LAST positional goes to `COMMAND` and the rest to `AGENTS`. Passing the inner `mngr destroy <name> --force` as separate argv entries either ate `--force` as a `mngr exec` option (which doesn't exist) or treated `mngr`/`destroy`/`<name>` as additional agent names. Joining into one string sidesteps both.
+
+### Lease/adopt rewrites the container's `host_name`
+
+`ImbueCloudProvider.create_host` now SFTPs into the leased container after the host-key scan and rewrites `/mngr/data.json`'s `host_name` field to the user-supplied `HostName`. Without this, the FCT bootstrap's `_maybe_create_initial_chat` (which reads `host_name` from `/mngr/data.json` to decide what to name the freshly-recreated chat agent on the user's first start) inherits the bake's placeholder name (`pool-<hex>-host`) instead of the user's chosen workspace name. SFTP-based to dodge shell-quoting hazards in an `exec_command` round-trip; raises `MngrError` on any SSH / SFTP / JSON failure since the wrong `host_name` is exactly the bug this exists to prevent.
+
+Swap the imbue-cloud pool bake walker from Vultr to OVH:
+
+- `mngr imbue_cloud admin pool create` is now provider-generic. It drops the `MINDS_ROOT_NAME` env detection, adds a required `--region REGION` and repeatable `--tag KEY=VALUE`, lands on `--template main --template ovh` with `@host.ovh` + `--provider ovh`, appends `-b --vps-datacenter=<region>`, and installs + configures `ufw` on every leased VPS before the row hits `pool_hosts`. UFW failures abort the bake.
+- `forever-claude-template` gains a `[create_templates.ovh]` block (no plan / datacenter baked in -- region flows in per-invocation, plan defaults from `OvhProviderConfig`). The `[create_templates.vultr]` block stays in place; `mngr_vultr` is still a registered provider for non-pool uses.
 
 ## 2026-05-12
 

@@ -5,3 +5,7 @@ A concise, human-friendly summary of changes for the `mngr_vultr` library. Entri
 For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDGED_CHANGELOG.md).
 
 ## [Unreleased]
+
+### Changed
+
+- Changed: `mngr_vultr` now only contributes the tag-listing; shared parallel-SSH discovery has been lifted into `VpsDockerProvider`.

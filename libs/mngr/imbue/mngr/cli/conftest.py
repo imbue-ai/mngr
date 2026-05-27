@@ -24,7 +24,6 @@ from imbue.mngr.cli.label import label
 from imbue.mngr.cli.limit import limit
 from imbue.mngr.cli.message import message
 from imbue.mngr.cli.migrate import migrate
-from imbue.mngr.cli.provision import provision
 from imbue.mngr.cli.rename import rename
 from imbue.mngr.cli.rsync import rsync_command
 from imbue.mngr.cli.snapshot import snapshot
@@ -243,7 +242,6 @@ _HELP_TEST_CASES: list[tuple[click.Command, list[str], str]] = [
     (transcript, ["--help"], "transcript"),
     (message, ["--help"], "message"),
     (migrate, ["--help"], "migrate"),
-    (provision, ["--help"], "provision"),
     (rsync_command, ["--help"], "rsync"),
     (cli, ["git", "--help"], "git"),
     (cli, ["git", "push", "--help"], "git_push"),
@@ -285,7 +283,6 @@ _NONEXISTENT_AGENT_CASES: list[tuple[click.Command, list[str], str]] = [
     (limit, ["nonexistent-agent-77234", "--idle-timeout", "300"], "limit"),
     (events, ["nonexistent-agent-34892"], "event"),
     (transcript, ["nonexistent-agent-82341"], "transcript"),
-    (provision, ["nonexistent-agent-77412"], "provision"),
     (cli, ["git", "pull", "nonexistent-agent-66201"], "git_pull"),
     (cli, ["git", "push", "nonexistent-agent-77312"], "git_push"),
     (rename, ["nonexistent-agent-99812", "new-name"], "rename"),

@@ -1,1 +1,0 @@
-- `CLAUDE.local.md` is now copied into agent workdirs by default, so user-specific Claude instructions from the host repo are available inside agents.

@@ -80,8 +80,9 @@ The desktop app bundles platform-specific binaries so users need zero prerequisi
 
 - **uv**: Downloads Python, creates venvs, installs packages. Downloaded from GitHub releases during `pnpm build`.
 - **git**: Required for agent creation (cloning repos). Currently copied from the build machine; a statically-linked distribution should be used for production.
+- **lima**: Required for the Lima launch mode (running agents in Linux VMs). Downloaded from GitHub releases during `pnpm build`. Self-contained on macOS Apple Silicon via Lima's `vz` backend; macOS Intel and Linux still require QEMU on the host machine.
 
-Both are placed in the `resources/` directory (outside the asar archive) and added to `PATH` in the child process environment.
+All three are placed in the `resources/` directory (outside the asar archive) and added to `PATH` in the child process environment.
 
 ## Data directory
 
@@ -202,6 +203,6 @@ apps/minds/
       pyproject.toml        # Standalone: declares minds dependency
       uv.lock               # Pinned lockfile for reproducible installs
   scripts/
-    build.js                # Downloads uv/git, copies pyproject to resources/
+    build.js                # Downloads uv/git/lima, copies pyproject to resources/
   resources/                # (gitignored) Built artifacts for packaging
 ```

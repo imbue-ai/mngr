@@ -9,6 +9,7 @@ from typing import assert_never
 import click
 from loguru import logger
 
+from imbue.imbue_common.model_update import to_update
 from imbue.mngr.cli.common_opts import CommonCliOptions
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
@@ -29,7 +30,6 @@ from imbue.mngr.interfaces.host import AgentEnvironmentOptions
 from imbue.mngr.interfaces.host import AgentLabelOptions
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import AgentTypeName
-from imbue.mngr.primitives import LOCAL_PROVIDER_NAME
 from imbue.mngr.primitives import OutputFormat
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
@@ -44,11 +44,8 @@ from imbue.mngr_tmr.launching import launch_integrator_agent
 from imbue.mngr_tmr.mngr_cli import try_list_agents
 from imbue.mngr_tmr.orchestration import launch_and_poll_agents
 from imbue.mngr_tmr.orchestration import wait_for_integrator
-from imbue.mngr_tmr.pulling import pull_agent_branch
 from imbue.mngr_tmr.pulling import pull_agent_outputs
-from imbue.mngr_tmr.pulling import pull_integrator_outputs
 from imbue.mngr_tmr.report import generate_html_report
-from imbue.mngr_tmr.report import list_pullable_branches
 from imbue.mngr_tmr.report_upload import maybe_upload_report
 from imbue.mngr_tmr.utils import collect_tests
 from imbue.mngr_tmr.utils import get_base_commit
@@ -60,8 +57,8 @@ _DEFAULT_INTEGRATOR_TIMEOUT_SECONDS = 3600.0
 _MODAL_BACKEND_NAME = "modal"
 
 
-def _disable_modal_initial_snapshot(mngr_ctx: MngrContext, provider_names: tuple[str, ...]) -> None:
-    """Override modal-backed provider configs to skip the per-agent initial snapshot.
+def _disable_modal_initial_snapshot(mngr_ctx: MngrContext, provider_name: str) -> None:
+    """Override the given modal-backed provider config to skip the per-agent initial snapshot.
 
     Modal's on_agent_created hook normally creates a 60-90s filesystem
     snapshot after each agent is created so the host can be restarted
@@ -69,35 +66,30 @@ def _disable_modal_initial_snapshot(mngr_ctx: MngrContext, provider_names: tuple
     explicitly via ``provider.create_snapshot`` on the dedicated
     snapshotter, and every other host TMR creates is ephemeral, so the
     safety-net snapshot is dead weight that runs once *per agent*
-    (multiplying the cost on pooled hosts). Disable it for any modal
-    provider TMR is about to use, preserving the rest of the user's
-    config.
+    (multiplying the cost on pooled hosts). Disable it for the modal
+    provider TMR is about to use, preserving the rest of the user's config.
 
-    Must be called before any ``get_provider_instance`` call for these
-    names, since provider instances cache their config at construction.
+    No-op when ``provider_name`` is not a modal-backed provider. Must be
+    called before any ``get_provider_instance`` call for this name, since
+    provider instances cache their config at construction.
     """
-    seen: set[ProviderInstanceName] = set()
-    for raw_name in provider_names:
-        instance_name = ProviderInstanceName(raw_name)
-        if instance_name in seen:
-            continue
-        seen.add(instance_name)
-        existing = mngr_ctx.config.providers.get(instance_name)
-        if existing is None:
-            # Default-resolved provider: the instance name doubles as the
-            # backend name. Only patch when that backend is modal.
-            if raw_name != _MODAL_BACKEND_NAME:
-                continue
-            try:
-                config_class = get_config_class(ProviderBackendName(raw_name))
-            except UnknownBackendError:
-                continue
-            existing = config_class(backend=ProviderBackendName(raw_name))
-        if str(existing.backend) != _MODAL_BACKEND_NAME:
-            continue
-        mngr_ctx.config.providers[instance_name] = existing.model_copy_update(
-            ("is_snapshotted_after_create", False),
-        )
+    instance_name = ProviderInstanceName(provider_name)
+    existing = mngr_ctx.config.providers.get(instance_name)
+    if existing is None:
+        # Default-resolved provider: the instance name doubles as the
+        # backend name. Only patch when that backend is modal.
+        if provider_name != _MODAL_BACKEND_NAME:
+            return
+        try:
+            config_class = get_config_class(ProviderBackendName(provider_name))
+        except UnknownBackendError:
+            return
+        existing = config_class(backend=ProviderBackendName(provider_name))
+    if str(existing.backend) != _MODAL_BACKEND_NAME:
+        return
+    mngr_ctx.config.providers[instance_name] = existing.model_copy_update(
+        ("is_snapshotted_after_create", False),
+    )
 
 
 class TmrCliOptions(CommonCliOptions):
@@ -106,15 +98,11 @@ class TmrCliOptions(CommonCliOptions):
     pytest_args: tuple[str, ...]
     testing_flags: tuple[str, ...]
     agent_type: str
-    integrator_type: str | None
     agent_template: tuple[str, ...]
-    integrator_template: tuple[str, ...]
     provider: str
-    integrator_provider: str
     env: tuple[str, ...]
     label: tuple[str, ...]
     prompt_suffix: str | None
-    use_snapshot: bool
     snapshot: str | None
     max_parallel_launch: int
     agents_per_host: int
@@ -247,9 +235,7 @@ def _run_reintegrate(
     # Discover agents from the previous run by label
     list_result = try_list_agents(mngr_ctx)
     if list_result is None:
-        if is_human:
-            write_human_line("Failed to list agents. Nothing to reintegrate.")
-        return
+        raise MngrError("Failed to list agents. Cannot reintegrate.")
     matching_agents = [
         detail
         for detail in list_result.agents
@@ -260,9 +246,7 @@ def _run_reintegrate(
         write_human_line("Found {} agent(s) from run {}", len(matching_agents), run_name)
 
     if not matching_agents:
-        if is_human:
-            write_human_line("No agents found for run name '{}'. Nothing to reintegrate.", run_name)
-        return
+        raise click.UsageError(f"No agents found for run name {run_name!r}. Nothing to reintegrate.")
 
     # Get local host (needed by the integrator config built later).
     source_host = get_local_host(mngr_ctx)
@@ -317,21 +301,19 @@ def _run_reintegrate(
     run_labels = dict(resolve_labels(opts.label).labels)
     run_labels["tmr_run_name"] = run_name
     label_options = AgentLabelOptions(labels=run_labels)
-    integrator_agent_type = opts.integrator_type if opts.integrator_type is not None else opts.agent_type
-    integrator_templates = opts.integrator_template if opts.integrator_template else opts.agent_template
     integrator_config = TmrLaunchConfig(
         source_dir=source_dir,
         source_host=source_host,
         base_commit=base_commit,
-        agent_type=AgentTypeName(integrator_agent_type),
-        provider_name=ProviderInstanceName(opts.integrator_provider),
+        agent_type=AgentTypeName(opts.agent_type),
+        provider_name=ProviderInstanceName(opts.provider),
         env_options=env_options,
         label_options=label_options,
-        templates=integrator_templates,
+        templates=opts.agent_template,
         additional_authorized_keys=opts.additional_authorized_keys,
     )
     integrator_meta = _run_integrator_phase(
-        test_agent_metadata, integrator_config, mngr_ctx, opts, output_dir, run_name, base_commit=base_commit
+        test_agent_metadata, integrator_config, mngr_ctx, opts, output_dir, run_name
     )
     integrated_branch = integrator_meta.branch_name if integrator_meta is not None else None
     report_path = generate_html_report(
@@ -353,26 +335,30 @@ def _run_integrator_phase(
     opts: TmrCliOptions,
     output_dir: Path,
     run_name: str,
-    base_commit: str | None = None,
 ) -> AgentMetadata | None:
     """Launch an integrator agent to cherry-pick all fix branches into a linear stack.
 
-    All pullable branches are integrated. Test/doc/tutorial commits are squashed
+    Every test agent that committed something gets uploaded to the integrator
+    (or, for the local provider, is already present in the shared local repo).
+    The integrator itself filters them by the should-pull predicate and
+    cherry-picks the ones that qualify. Test/doc/tutorial commits are squashed
     into one commit; FIX_IMPL commits are kept separate and stacked by priority.
     Returns the integrator's metadata (kind=INTEGRATOR) with branch_name set
     when a branch was produced; the report reads the integrator outcome JSON
     from disk.
     """
-    fix_branches = list_pullable_branches(test_agent_metadata, output_dir)
-    if not fix_branches:
+    has_any_successful_test_agent = any(
+        meta.kind is AgentKind.TESTING_AGENT and meta.error_summary is None for meta in test_agent_metadata
+    )
+    if not has_any_successful_test_agent:
         return None
 
     try:
         integrator, integrator_host = launch_integrator_agent(
-            fix_branches=fix_branches,
             config=config,
             mngr_ctx=mngr_ctx,
             run_name=run_name,
+            output_dir=output_dir,
         )
     except (MngrError, HostError, AgentError, OSError, BaseExceptionGroup) as exc:
         logger.warning("Failed to launch integrator agent: {}", exc)
@@ -384,6 +370,10 @@ def _run_integrator_phase(
         poll_interval_seconds=opts.poll_interval,
         host=integrator_host,
         deadline=integrator_deadline,
+        mngr_ctx=mngr_ctx,
+        provider_name=config.provider_name,
+        output_dir=output_dir,
+        source_dir=config.source_dir,
     )
 
     if integrator_branch is None:
@@ -391,30 +381,7 @@ def _run_integrator_phase(
             kind=AgentKind.INTEGRATOR,
             agent_name=integrator.agent_name,
             branch_name=None,
-            error_summary="Integrator timed out before producing a branch.",
-        )
-
-    # Pull the integrator's outputs into output_dir so the reporter can parse
-    # the integrator outcome JSON from disk.
-    pull_integrator_outputs(
-        integrator.agent_id,
-        integrator.agent_name,
-        integrator_host,
-        output_dir,
-        mngr_ctx.concurrency_group,
-    )
-
-    # Only pull branches from remote providers; local worktree branches already exist
-    is_remote = config.provider_name.lower() != LOCAL_PROVIDER_NAME
-    if is_remote:
-        pull_agent_branch(
-            integrator.agent_id,
-            integrator.agent_name,
-            integrator_branch,
-            integrator_host,
-            config.source_dir,
-            mngr_ctx.concurrency_group,
-            base_commit=base_commit,
+            error_summary="Integrator timed out or did not produce an integrated branch.",
         )
 
     return AgentMetadata(
@@ -433,33 +400,16 @@ def _run_integrator_phase(
     help="Type of agent to launch for each test",
 )
 @click.option(
-    "--integrator-type",
-    default=None,
-    help="Type of agent for the integrator (defaults to --agent-type)",
-)
-@click.option(
     "-t",
     "--agent-template",
     multiple=True,
     help="Create template to apply for testing agents [repeatable, stacks in order]",
 )
 @click.option(
-    "--integrator-template",
-    multiple=True,
-    default=None,
-    help="Create template to apply for the integrator agent (defaults to --agent-template)",
-)
-@click.option(
     "--provider",
     default="local",
     show_default=True,
-    help="Provider for agent hosts (e.g. local, docker, modal)",
-)
-@click.option(
-    "--integrator-provider",
-    default="local",
-    show_default=True,
-    help="Provider for the integrator agent (defaults to local since there is only one)",
+    help="Provider for agent hosts (e.g. local, docker, modal). Used for both testing agents and the integrator.",
 )
 @click.option(
     "--env",
@@ -477,15 +427,9 @@ def _run_integrator_phase(
     help="Additional text to append to the agent prompt",
 )
 @click.option(
-    "--use-snapshot",
-    is_flag=True,
-    default=False,
-    help="Build one agent first, snapshot its host, then launch remaining agents from the snapshot (faster for remote providers)",
-)
-@click.option(
     "--snapshot",
     default=None,
-    help="Use an existing snapshot/image ID for all agents (skips building; implies --use-snapshot behavior)",
+    help="Use an existing snapshot/image ID for all agents (skips building a fresh snapshot)",
 )
 @click.option(
     "--max-parallel-launch",
@@ -585,7 +529,7 @@ def tmr(ctx: click.Context, **kwargs: object) -> None:
     # enumerates all hosts which can push the system near the FD limit.
     _raise_fd_limit()
 
-    _disable_modal_initial_snapshot(mngr_ctx, (opts.provider, opts.integrator_provider))
+    _disable_modal_initial_snapshot(mngr_ctx, opts.provider)
 
     source_dir = Path(opts.source) if opts.source is not None else Path.cwd()
 
@@ -693,15 +637,16 @@ def _run_tmr_pipeline(
 
     launch_failures: list[AgentMetadata] = []
 
+    snapshot_name: SnapshotName | None = provided_snapshot
     if use_batched:
-        if opts.use_snapshot and output_opts.output_format == OutputFormat.HUMAN:
-            write_human_line("WARNING: --use-snapshot is not supported with --max-parallel-agents and will be ignored")
+        # The batched path does not snapshot -- each agent is launched on
+        # demand as earlier ones finish, so there's no "build one first,
+        # snapshot, launch the rest" phase to hook into.
         agent_infos: list[TestAgentInfo] = []
         agent_hosts: dict[str, OnlineHostInterface] = {}
         remaining_node_ids = test_node_ids
     else:
-        # When --snapshot is provided, all agents use it directly (no need for --use-snapshot)
-        agent_infos, agent_hosts, _snapshot_name = launch_all_test_agents(
+        agent_infos, agent_hosts, snapshot_name = launch_all_test_agents(
             test_node_ids=test_node_ids,
             config=config,
             mngr_ctx=mngr_ctx,
@@ -709,7 +654,6 @@ def _run_tmr_pipeline(
             launch_failures=launch_failures,
             run_name=run,
             prompt_suffix=opts.prompt_suffix or "",
-            use_snapshot=opts.use_snapshot and provided_snapshot is None,
             max_parallel=opts.max_parallel_launch,
             launch_delay_seconds=opts.launch_delay,
             agents_per_host=opts.agents_per_host,
@@ -743,26 +687,13 @@ def _run_tmr_pipeline(
     report_path = generate_html_report(test_agent_metadata, output_dir)
     _emit_report_url(maybe_upload_report(report_path, run), output_opts)
 
-    # Step 9: Build integrator config (defaults to local provider) and integrate.
-    # The integrator's tmr_role label is set automatically by _create_tmr_agent
-    # (from AgentKind.INTEGRATOR), distinguishing it from testing agents in
+    # Step 9: Integrate. The integrator runs on the same provider as the test
+    # agents and reuses any snapshot built for them, so it starts as fast as
+    # the test agents did. The integrator's tmr_role label is set automatically
+    # by _create_tmr_agent (from AgentKind.INTEGRATOR), distinguishing it in
     # `mngr ls` and during reintegrate.
-    integrator_agent_type = opts.integrator_type if opts.integrator_type is not None else opts.agent_type
-    integrator_templates = opts.integrator_template if opts.integrator_template else opts.agent_template
-    integrator_config = TmrLaunchConfig(
-        source_dir=source_dir,
-        source_host=source_host,
-        base_commit=base_commit,
-        agent_type=AgentTypeName(integrator_agent_type),
-        provider_name=ProviderInstanceName(opts.integrator_provider),
-        env_options=env_options,
-        label_options=label_options,
-        templates=integrator_templates,
-        additional_authorized_keys=opts.additional_authorized_keys,
-    )
-    integrator_meta = _run_integrator_phase(
-        test_agent_metadata, integrator_config, mngr_ctx, opts, output_dir, run, base_commit=base_commit
-    )
+    integrator_config = config.model_copy_update(to_update(config.field_ref().snapshot, snapshot_name))
+    integrator_meta = _run_integrator_phase(test_agent_metadata, integrator_config, mngr_ctx, opts, output_dir, run)
     integrated_branch = integrator_meta.branch_name if integrator_meta is not None else None
     report_path = generate_html_report(
         test_agent_metadata,
@@ -775,6 +706,16 @@ def _run_tmr_pipeline(
     _emit_integrator_branch(integrated_branch, output_opts)
 
     _print_run_commands(run, output_opts, integrated_branch)
+
+    # If no test agent ever launched successfully, surface a non-zero exit so
+    # callers (especially CI) don't read the run as successful. The HTML
+    # report (already written above) still contains the per-agent error
+    # summaries needed to diagnose the launch failures.
+    if test_node_ids and not agent_infos:
+        raise MngrError(
+            f"All {len(launch_failures)} test agent launches failed; "
+            "see the HTML report for per-agent error summaries."
+        )
 
 
 def _build_run_commands(run_name: str, integrated_branch: str | None = None) -> list[tuple[str, str]]:
@@ -806,7 +747,7 @@ def _print_run_commands(run_name: str, output_opts: OutputOptions, integrated_br
 CommandHelpMetadata(
     key="tmr",
     one_line_description="Run and fix tests in parallel using agents (test map-reduce)",
-    synopsis="mngr tmr [TEST_PATHS...] [-- TESTING_FLAGS...] [--provider <PROVIDER>] [--use-snapshot] [--env KEY=VALUE] [--label KEY=VALUE] [--timeout <SECS>] [--agent-type <TYPE>]",
+    synopsis="mngr tmr [TEST_PATHS...] [-- TESTING_FLAGS...] [--provider <PROVIDER>] [--env KEY=VALUE] [--label KEY=VALUE] [--timeout <SECS>] [--agent-type <TYPE>]",
     description="""This command implements a map-reduce pattern for tests:
 
 1. Collects tests using pytest --collect-only, passing through all arguments.
@@ -830,8 +771,10 @@ This discovers tests with `pytest --collect-only tests/e2e -m release` and runs
 each test with `pytest tests/e2e/test_foo.py::test_bar -m release`.
 
 Use --provider to run agents on a specific provider (e.g. docker, modal).
-Use --use-snapshot with remote providers to build and provision one host first,
-snapshot it, then launch all remaining agents from the snapshot (much faster).
+On providers that support snapshots (e.g. modal), the orchestrator
+automatically builds and provisions one host, snapshots it, then launches
+all remaining agents from that snapshot. Pass --snapshot <ID> to reuse an
+existing snapshot instead of building one.
 Use --env to pass environment variables and --label to tag all agents.
 Use --prompt-suffix to append custom instructions to the agent prompt.
 Use --max-parallel-agents to limit how many agents run simultaneously (0 = no limit).
@@ -844,7 +787,7 @@ tests_passing_before/after booleans, and a markdown summary.""",
         ("Run tests in a specific file", "mngr tmr tests/test_foo.py"),
         ("Run tests with a marker", "mngr tmr tests/e2e -- -m release"),
         ("Use Docker provider", "mngr tmr --provider docker tests/"),
-        ("Modal with snapshot", "mngr tmr --provider modal --use-snapshot tests/"),
+        ("Modal (snapshot is automatic)", "mngr tmr --provider modal tests/"),
         ("Pass env vars and labels", "mngr tmr --env API_KEY=xxx --label batch=run1"),
         ("Limit to 4 concurrent agents", "mngr tmr --max-parallel-agents 4 tests/"),
         ("Custom poll interval", "mngr tmr --poll-interval 30"),

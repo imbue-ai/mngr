@@ -589,7 +589,6 @@ _SYNOPSIS_OPTOUT_FLAGS: dict[str, frozenset[str]] = {
     "destroy": frozenset(),
     "message": frozenset({"--provider"}),
     "exec": frozenset(),
-    "provision": frozenset({"--bootstrap", "--destroy-on-fail", "--host", "--pass-env"}),
     "cleanup": frozenset({"--action", "--snapshot-before"}),
     "limit": frozenset(
         {

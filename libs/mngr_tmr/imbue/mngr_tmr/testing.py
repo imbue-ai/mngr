@@ -16,7 +16,6 @@ from imbue.mngr_tmr.prompts import TESTING_AGENT_OUTCOME_FILENAME
 
 SUCCEEDED_FIX = {ChangeKind.FIX_TEST: Change(status=ChangeStatus.SUCCEEDED, summary_markdown="fixed")}
 FAILED_FIX = {ChangeKind.FIX_TEST: Change(status=ChangeStatus.FAILED, summary_markdown="failed")}
-BLOCKED_FIX = {ChangeKind.FIX_IMPL: Change(status=ChangeStatus.BLOCKED, summary_markdown="blocked")}
 
 
 def make_test_result(
@@ -61,7 +60,7 @@ def write_test_outcome(output_dir: Path, agent_name: AgentName, outcome: TestRes
 
 def write_integrator_outcome(output_dir: Path, agent_name: AgentName, payload: dict[str, object]) -> None:
     """Write an integrator outcome JSON where the reporter expects it."""
-    target = output_dir / str(agent_name) / INTEGRATOR_OUTCOME_FILENAME
+    target = output_dir / str(agent_name) / "test_output" / INTEGRATOR_OUTCOME_FILENAME
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(json.dumps(payload))
 

@@ -11,6 +11,7 @@ from collections.abc import Mapping
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated
+from typing import Any
 from typing import Final
 from urllib.parse import urlparse
 
@@ -31,6 +32,8 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.errors import ConcurrencyGroupError
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.minds.bootstrap import is_imbue_cloud_provider_enabled_for_account
+from imbue.minds.bootstrap import list_disabled_provider_names
+from imbue.minds.bootstrap import set_provider_is_enabled
 from imbue.minds.config.data_types import ClientEnvConfig
 from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client.agent_creator import AgentCreationStatus
@@ -40,7 +43,6 @@ from imbue.minds.desktop_client.agent_creator import make_workspace_probe_client
 from imbue.minds.desktop_client.agent_creator import probe_workspace_through_plugin
 from imbue.minds.desktop_client.agent_creator import resolve_template_version
 from imbue.minds.desktop_client.api_v1 import create_api_v1_router
-from imbue.minds.desktop_client.api_v1 import inject_tunnel_token_into_agent
 from imbue.minds.desktop_client.auth import AuthStoreInterface
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
@@ -92,6 +94,8 @@ from imbue.minds.desktop_client.templates import render_welcome_page
 from imbue.minds.desktop_client.templates import render_workspace_settings
 from imbue.minds.desktop_client.templates import status_text_for
 from imbue.minds.desktop_client.templates import workspace_accent
+from imbue.minds.desktop_client.tunnel_token_injection import inject_tunnel_token_into_agent
+from imbue.minds.desktop_client.webdav import create_webdav_app
 from imbue.minds.primitives import AIProvider
 from imbue.minds.primitives import CreationId
 from imbue.minds.primitives import LaunchMode
@@ -572,9 +576,9 @@ async def _handle_create_form_submit(request: Request, auth_store: AuthStoreDep)
     host_name = str(form.get("host_name", "")).strip()
     branch = str(form.get("branch", "")).strip()
     try:
-        launch_mode = LaunchMode(str(form.get("launch_mode", LaunchMode.LOCAL.value)))
+        launch_mode = LaunchMode(str(form.get("launch_mode", LaunchMode.DOCKER.value)))
     except ValueError:
-        launch_mode = LaunchMode.LOCAL
+        launch_mode = LaunchMode.DOCKER
     try:
         ai_provider = AIProvider(str(form.get("ai_provider", AIProvider.SUBSCRIPTION.value)))
     except ValueError:
@@ -712,7 +716,7 @@ async def _handle_create_agent_api(request: Request, auth_store: AuthStoreDep) -
     host_name = str(body.get("host_name", "")).strip()
     branch = str(body.get("branch", "")).strip()
     try:
-        launch_mode = LaunchMode(str(body.get("launch_mode", LaunchMode.LOCAL.value)))
+        launch_mode = LaunchMode(str(body.get("launch_mode", LaunchMode.DOCKER.value)))
     except ValueError:
         return Response(
             status_code=400,
@@ -1231,6 +1235,60 @@ def _handle_telegram_status(
     return Response(content=json.dumps(result), media_type="application/json")
 
 
+# -- Providers panel toggle route --
+
+
+async def _handle_provider_toggle(
+    provider_name: str,
+    request: Request,
+    auth_store: AuthStoreDep,
+) -> Response:
+    """Toggle ``is_enabled`` for a provider in minds' active settings and bounce observe.
+
+    POST ``/api/providers/{provider_name}/toggle`` with body ``{"is_enabled": bool}``.
+    Writes via :func:`set_provider_is_enabled`, then sends ``SIGHUP`` to
+    ``mngr forward`` so it restarts its ``mngr observe`` child to pick up the
+    new setting. The next ``FullDiscoverySnapshotEvent`` will reflect the
+    change; the chrome's optimistic "waiting for refresh" state clears at that
+    point.
+    """
+    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
+        return Response(status_code=403, content='{"error": "Not authenticated"}', media_type="application/json")
+    try:
+        body = await request.json()
+    except (json.JSONDecodeError, ValueError) as e:
+        logger.warning("Provider toggle request body was not valid JSON: {}", e)
+        return Response(status_code=400, content='{"error": "Body must be JSON"}', media_type="application/json")
+    # request.json() can return any JSON value (array, string, number, null, ...),
+    # not just objects. Reject non-dict bodies before calling .get() so we return
+    # a structured 400 rather than a 500 from an AttributeError.
+    if not isinstance(body, dict):
+        return Response(
+            status_code=400,
+            content='{"error": "Body must be a JSON object"}',
+            media_type="application/json",
+        )
+    is_enabled = body.get("is_enabled")
+    if not isinstance(is_enabled, bool):
+        return Response(
+            status_code=400,
+            content='{"error": "Body must include is_enabled: bool"}',
+            media_type="application/json",
+        )
+    changed = set_provider_is_enabled(provider_name, is_enabled)
+    # Only bounce observe when the settings file actually changed -- a no-op toggle
+    # (e.g. user clicking Disable twice) should not trigger a SIGHUP and a full
+    # mngr observe restart, since the next discovery snapshot would be identical.
+    if changed:
+        consumer: EnvelopeStreamConsumer | None = request.app.state.envelope_stream_consumer
+        if consumer is not None:
+            consumer.bounce_observe()
+    return Response(
+        content=json.dumps({"provider_name": provider_name, "is_enabled": is_enabled, "changed": changed}),
+        media_type="application/json",
+    )
+
+
 # -- Chrome (persistent shell) route handlers --
 
 
@@ -1318,6 +1376,10 @@ async def _handle_chrome_events(
             yield "data: {}\n\n".format(
                 json.dumps({"type": "workspaces", "workspaces": last_workspace_data, "has_accounts": has_accounts})
             )
+            # Send the initial providers panel state so the chrome can render
+            # the providers section before the first resolver change fires.
+            last_providers_data = _build_providers_state_payload(backend_resolver)
+            yield "data: {}\n\n".format(json.dumps({"type": "providers_state", **last_providers_data}))
             inbox: RequestInbox | None = request.app.state.request_inbox
             last_request_count = inbox.get_pending_count() if inbox else 0
             # ``auto_open`` is bundled with ``request_count`` (rather than its
@@ -1393,6 +1455,11 @@ async def _handle_chrome_events(
                     last_workspace_data = current_data
                     yield "data: {}\n\n".format(json.dumps({"type": "workspaces", "workspaces": current_data}))
 
+                current_providers_data = _build_providers_state_payload(backend_resolver)
+                if current_providers_data != last_providers_data:
+                    last_providers_data = current_providers_data
+                    yield "data: {}\n\n".format(json.dumps({"type": "providers_state", **current_providers_data}))
+
                 inbox = request.app.state.request_inbox
                 current_request_count = inbox.get_pending_count() if inbox else 0
                 if current_request_count != last_request_count:
@@ -1416,6 +1483,91 @@ async def _handle_chrome_events(
             "X-Accel-Buffering": "no",
         },
     )
+
+
+# Provider names that are always hidden from minds' providers panel:
+# - ``local``: always present, always healthy; nothing actionable.
+# - ``imbue_cloud``: the default singleton instance is non-functional. Minds
+#   uses the multi-account variant (``imbue_cloud_<slug>`` per signed-in
+#   account), so the default block is dead weight and surfacing it would
+#   confuse users into thinking they need to enable / disable it.
+# Other consumers (e.g. `mngr list` CLI) keep showing both normally -- the
+# hide applies only to minds' panel.
+_HIDDEN_PROVIDER_NAMES_IN_PANEL: Final[frozenset[str]] = frozenset({"local", "imbue_cloud"})
+
+
+def _build_providers_state_payload(backend_resolver: BackendResolverInterface) -> dict[str, Any]:
+    """Build the providers panel SSE payload from resolver state + minds' settings file.
+
+    Combines three sources:
+    - ``backend_resolver.list_providers()`` -- providers that loaded
+      successfully in the most recent discovery snapshot.
+    - ``backend_resolver.get_provider_errors()`` -- providers whose discovery
+      raised.
+    - ``list_disabled_provider_names()`` -- providers minds' settings file
+      explicitly disables. These are skipped by discovery and so don't appear
+      in the snapshot, but the panel needs them for the Enable button.
+
+    The ``local`` provider is always hidden. Each entry carries name + backend
+    + status; errored entries also carry ``error_type`` and ``error_message``.
+    """
+    if not isinstance(backend_resolver, MngrCliBackendResolver):
+        return {
+            "providers": [],
+            "last_event_at": None,
+            "last_full_snapshot_at": None,
+        }
+    providers = backend_resolver.list_providers()
+    errored = backend_resolver.get_provider_errors()
+    disabled_names = list_disabled_provider_names()
+    last_event_at, last_full_snapshot_at = backend_resolver.get_freshness_timestamps()
+
+    # De-duplicate by name with priority disabled > error > ok. A provider can
+    # appear in multiple source buckets during the window between a Disable click
+    # (writes to minds' settings) and mngr observe's restart (rewrites the snapshot
+    # to drop the now-disabled provider). In that window the same name shows up in
+    # both `disabled_names` and the resolver's errored or healthy set. The user's
+    # explicitly recorded intent (disabled-in-settings) wins; transient error state
+    # wins over stale healthy state.
+    entry_by_name: dict[str, dict[str, Any]] = {}
+    for provider in providers:
+        name = str(provider.provider_name)
+        if name in _HIDDEN_PROVIDER_NAMES_IN_PANEL:
+            continue
+        entry_by_name[name] = {
+            "name": name,
+            "backend": str(provider.config.backend),
+            "status": "ok",
+            "is_enabled": provider.config.is_enabled if provider.config.is_enabled is not None else True,
+        }
+    for provider_name, error in errored.items():
+        name = str(provider_name)
+        if name in _HIDDEN_PROVIDER_NAMES_IN_PANEL:
+            continue
+        entry_by_name[name] = {
+            "name": name,
+            "backend": None,
+            "status": "error",
+            "is_enabled": True,
+            "error_type": error.type_name,
+            "error_message": error.message,
+        }
+    for name in disabled_names:
+        if name in _HIDDEN_PROVIDER_NAMES_IN_PANEL:
+            continue
+        entry_by_name[name] = {
+            "name": name,
+            "backend": None,
+            "status": "disabled",
+            "is_enabled": False,
+        }
+    # Stable alphabetical order by name across all categories.
+    entries = sorted(entry_by_name.values(), key=lambda entry: entry["name"])
+    return {
+        "providers": entries,
+        "last_event_at": last_event_at.isoformat() if last_event_at is not None else None,
+        "last_full_snapshot_at": last_full_snapshot_at.isoformat() if last_full_snapshot_at is not None else None,
+    }
 
 
 def _build_workspace_list(
@@ -1491,8 +1643,10 @@ def _build_restart_shell_command() -> str:
     ``mngr exec`` runs commands in the agent's work_dir by default, so
     ``services.toml`` is referenced as a relative path.
     """
+    # `=` is tmux's exact-match prefix; without it, kill-window could prefix-match
+    # a sibling session and tear down the wrong agent's services.
     return (
-        f'tmux kill-window -t "${{MNGR_PREFIX}}{_SERVICES_AGENT_NAME}:{_RESTART_TMUX_WINDOW}" '
+        f'tmux kill-window -t "=${{MNGR_PREFIX}}{_SERVICES_AGENT_NAME}:{_RESTART_TMUX_WINDOW}" '
         f"2>/dev/null; touch services.toml"
     )
 
@@ -2443,6 +2597,7 @@ def create_desktop_client(
     system_interface_health_tracker: SystemInterfaceHealthTracker | None = None,
     mngr_binary: str = "mngr",
     mngr_host_dir: Path | None = None,
+    minds_api_key: str | None = None,
 ) -> FastAPI:
     """Create the bare-origin minds FastAPI application.
 
@@ -2524,6 +2679,10 @@ def create_desktop_client(
     # ``app.state.api_v1_paths`` instead of using a defaulting attribute
     # lookup -- the latter is flagged by the project ratchet.
     app.state.api_v1_paths = paths
+    # Central minds API key. Required for ``/api/v1/...`` and the WebDAV
+    # mount; tests that don't exercise those routes can leave it as
+    # ``None`` (the bearer-auth gates fail closed when the key is None).
+    app.state.minds_api_key = minds_api_key
     if http_client is not None:
         app.state.http_client = http_client
 
@@ -2548,6 +2707,13 @@ def create_desktop_client(
     if paths is not None:
         api_v1_router = create_api_v1_router()
         app.include_router(api_v1_router, prefix="/api/v1")
+        # Mount the WebDAV file server under /api/v1/files. Each share
+        # root maps URL-path == on-disk-path (``~`` and ``/tmp``); the
+        # mount itself is gated by the same central-key Bearer check
+        # that protects the rest of /api/v1, via a closure that reads
+        # ``app.state.minds_api_key`` on every request so the gate
+        # stays in sync if a future code path ever rotates the key.
+        app.mount("/api/v1/files", create_webdav_app(lambda: app.state.minds_api_key))
 
     # Static assets: Tailwind Play CDN JS + hand-written tokens.css +
     # per-page JS. The Tailwind JS is fetched once by `just minds-tailwind`
@@ -2610,6 +2776,9 @@ def create_desktop_client(
     # Telegram setup routes
     app.post("/api/agents/{agent_id}/telegram/setup")(_handle_telegram_setup)
     app.get("/api/agents/{agent_id}/telegram/status")(_handle_telegram_status)
+
+    # Providers panel toggle (Disable / Enable buttons in the landing page panel)
+    app.post("/api/providers/{provider_name}/toggle")(_handle_provider_toggle)
 
     # System-interface recovery routes
     app.get("/agents/{agent_id}/recovery")(_handle_recovery_page)

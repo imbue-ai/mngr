@@ -5,3 +5,7 @@ A concise, human-friendly summary of changes to the `mngr_notifications` project
 For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDGED_CHANGELOG.md).
 
 ## [Unreleased]
+
+### Changed
+
+- Changed: The watcher's "agent is waiting for input" notification now fires for the indirect `RUNNING → UNKNOWN → WAITING` transition (when the agent's provider was briefly unreachable) in addition to the direct `RUNNING → WAITING` transition; an internal per-agent bit bridges the indirect path.

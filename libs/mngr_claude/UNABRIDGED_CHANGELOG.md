@@ -1,8 +1,23 @@
 # Unabridged Changelog - mngr_claude
 
-Full, unedited changelog entries consolidated nightly from individual files in the `changelog/mngr_claude/` directory.
+Full, unedited changelog entries consolidated nightly from individual files in `libs/mngr_claude/changelog/`.
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
+
+## 2026-05-21
+
+Fix the intro in `UNABRIDGED_CHANGELOG.md` so it references the correct entries directory. The path was `changelog/<project>/` (which never existed); the actual layout is `<project_dir>/changelog/`.
+
+`resolve_shared_claude_config_dir()` (used when a claude agent opts into `use_env_config_dir=True`) now falls back to `~/.claude/` when `$CLAUDE_CONFIG_DIR` is unset, instead of raising. The fallback matches claude's own default, so callers can treat that flag as a pure "don't touch the config dir" knob even on machines where the user never sets `CLAUDE_CONFIG_DIR`. Also drops `ORIGINAL_CLAUDE_CONFIG_DIR` from the agent env in the `mngr uncapped-claude` flow so credential sync reads from the live `$CLAUDE_CONFIG_DIR` (matters when uncapped-claude is invoked from inside another mngr claude agent).
+
+## 2026-05-20
+
+Project now participates in the per-project changelog layout: a `changelog/` subdirectory holds per-PR entry files, and `CHANGELOG.md` / `UNABRIDGED_CHANGELOG.md` at the project root hold the consolidated history. See the full rationale in `dev/changelog/mngr-changelog-per-project.md`.
+
+`ClaudeAgent` now satisfies the new `HasTranscriptMixin` and
+`HasCommonTranscriptMixin` mixins on `AgentInterface` (introduced to give every
+agent type a shared transcript-capture contract). The user-visible behavior of
+`mngr transcript <claude-agent>` is unchanged.
 
 ## 2026-05-14
 
