@@ -157,9 +157,10 @@ class VpsDockerHostStore(MutableModel):
             return None
         try:
             data = self.outer.read_text_file(path)
-        except (FileNotFoundError, OSError) as e:
-            # File raced from under us between path_exists and read, or a
-            # local-outer raised a real OSError. Treat as "missing".
+        except OSError as e:
+            # File raced from under us between path_exists and read
+            # (FileNotFoundError) or a local-outer raised some other
+            # OSError. Treat as "missing".
             logger.debug("Host record at {} not readable: {}", path, e)
             return None
         try:
