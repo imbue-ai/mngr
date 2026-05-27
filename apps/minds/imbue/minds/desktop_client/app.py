@@ -2025,8 +2025,13 @@ def _run_host_health_probe(
 ) -> HostHealthResponse:
     """Run the batched ``mngr exec`` probe + ``mngr list`` lookup, return the response.
 
-    Extracted so it can be reused by the post-recovery loguru log path
-    (which needs the same record) without re-implementing the assembly.
+    Composes the response from three independent inputs: ``mngr list`` for
+    host state / services-agent state / SSH connection info, the batched
+    in-container ``mngr exec`` probe, and the plugin's resolver-snapshot
+    mirror. Caches the response on
+    ``app.state.latest_host_health_by_agent_id`` so the on-recovery
+    callback can log the most recent observation on the next non-HEALTHY
+    -> HEALTHY transition.
     """
     env = dict(os.environ)
     env["MNGR_HOST_DIR"] = str(request.app.state.mngr_host_dir)
