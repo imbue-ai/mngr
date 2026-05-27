@@ -117,7 +117,7 @@ class FakeSSHClient(paramiko.SSHClient):
         object.__setattr__(instance, "_fake_transport", FakeSSHTransport.create(active=active))
         return instance
 
-    def get_transport(self) -> FakeSSHTransport:
+    def get_transport(self) -> FakeSSHTransport:  # ty: ignore[invalid-method-override]
         return self._fake_transport
 
     def close(self) -> None:
@@ -211,7 +211,7 @@ def test_reverse_tunnel_spec_remote_zero_means_dynamic() -> None:
 
 def test_reverse_tunnel_spec_local_must_be_positive() -> None:
     with pytest.raises(ValueError):
-        ReverseTunnelSpec(remote_port=NonNegativeInt(8420), local_port=0)  # type: ignore[arg-type]
+        ReverseTunnelSpec(remote_port=NonNegativeInt(8420), local_port=0)  # ty: ignore[invalid-argument-type]
 
 
 # -- SSH connection helpers ------------------------------------------------

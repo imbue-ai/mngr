@@ -122,4 +122,4 @@ def test_expect_dispatches_to_string_expectation() -> None:
 
 def test_expect_raises_on_unsupported_type() -> None:
     with pytest.raises(TypeError, match="does not support"):
-        expect(42)  # type: ignore[call-overload]
+        expect(42)  # ty: ignore[no-matching-overload]
