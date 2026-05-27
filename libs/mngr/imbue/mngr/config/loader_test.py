@@ -19,8 +19,8 @@ from imbue.mngr.config.data_types import CreateTemplateName
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import PluginConfig
 from imbue.mngr.config.data_types import get_or_create_user_id
+from imbue.mngr.config.loader import _FileSettingsSource
 from imbue.mngr.config.loader import _NarrowingViolation
-from imbue.mngr.config.loader import _SettingsSource
 from imbue.mngr.config.loader import _apply_plugin_overrides
 from imbue.mngr.config.loader import _collect_env_overrides
 from imbue.mngr.config.loader import _collect_layer_narrowing
@@ -2124,9 +2124,9 @@ def test_collect_layer_narrowing_attributes_highest_precedence_lower_layer() -> 
     value the new layer narrows. Because the merge is assign-by-default, that
     layer holds the merged base value being dropped.
     """
-    user_source = _SettingsSource(scope="user", path=Path("/u/settings.toml"))
-    project_source = _SettingsSource(scope="project", path=Path("/p/settings.toml"))
-    local_source = _SettingsSource(scope="local", path=Path("/p/settings.local.toml"))
+    user_source = _FileSettingsSource(scope="user", path=Path("/u/settings.toml"))
+    project_source = _FileSettingsSource(scope="project", path=Path("/p/settings.toml"))
+    local_source = _FileSettingsSource(scope="local", path=Path("/p/settings.local.toml"))
     user_layer = MngrConfig(prefix="a-", commands={"create": CommandDefaults(defaults={"env": ["A"]})})
     project_layer = MngrConfig(prefix="a-", commands={"create": CommandDefaults(defaults={"env": ["A", "B"]})})
     # ``base`` is the accumulated merge the local layer is detected against; under
