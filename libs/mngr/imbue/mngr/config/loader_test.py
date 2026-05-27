@@ -49,8 +49,16 @@ hookimpl = pluggy.HookimplMarker("mngr")
 
 def _isolate_load_config_env(monkeypatch: pytest.MonkeyPatch) -> None:
     """Undo the autouse ``setup_test_mngr_env`` fixture's MNGR_* settings so
-    ``load_config(..., context_dir=tmp_path)`` resolves ``~/.mngr`` to
-    ``tmp_path/.mngr`` instead of the fixture-supplied host dir / prefix / root.
+    ``load_config`` resolves ``~/.mngr`` to ``tmp_path/.mngr`` (the user/profile
+    config base) instead of the fixture-supplied host dir / prefix / root, and so
+    ``root_name`` collapses to ``"mngr"`` (making the project config dir
+    ``<git-root>/.mngr/``).
+
+    Tests using this helper pair it with the ``temp_git_repo_cwd`` fixture, which
+    chdirs into an isolated empty git repo so the loader's git-worktree-root walk
+    resolves the project config dir to that repo (and not the developer's real
+    checkout). Project/local config is written under ``<git-root>/.mngr/`` (or via
+    ``MNGR_PROJECT_CONFIG_DIR``); the user/profile config stays HOME-based.
 
     HOME is already pointed at ``tmp_path`` by the autouse fixture (via
     ``isolate_home``), so no ``setenv("HOME", ...)`` is needed here. Tests with
@@ -1931,7 +1939,7 @@ def test_load_config_narrowing_allowed_when_opted_in(
 
 
 def test_load_config_extend_avoids_narrowing_without_opt_in(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, cg: ConcurrencyGroup
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, temp_git_repo_cwd: Path, cg: ConcurrencyGroup
 ) -> None:
     """Using ``env__extend`` in the higher-precedence layer preserves base entries
     and never trips the narrowing guard. The merged value contains both layers'
@@ -1948,7 +1956,7 @@ def test_load_config_extend_avoids_narrowing_without_opt_in(
     )
     monkeypatch.setenv("MNGR_PROJECT_CONFIG_DIR", str(tmp_path))
 
-    mngr_ctx = load_config(pm=pm, context_dir=tmp_path, concurrency_group=cg)
+    mngr_ctx = load_config(pm=pm, concurrency_group=cg)
     assert mngr_ctx.config.commands["create"].defaults["env"] == ["X=4", "X=5"]
 
 
@@ -1977,7 +1985,7 @@ def _setup_layered_test_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> 
 
 
 def test_load_config_narrowing_raises_on_agent_type_cli_args_replacement(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, cg: ConcurrencyGroup
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, temp_git_repo_cwd: Path, cg: ConcurrencyGroup
 ) -> None:
     """A local layer that re-assigns a non-empty ``agent_types.<name>.cli_args`` raises by default."""
     pm, project_dir = _setup_layered_test_env(monkeypatch, tmp_path)
@@ -1988,11 +1996,11 @@ def test_load_config_narrowing_raises_on_agent_type_cli_args_replacement(
         'is_allowed_in_pytest = true\n\n[agent_types.my_claude]\ncli_args = ["--verbose"]\n'
     )
     with pytest.raises(ConfigParseError, match="agent_types.my_claude.cli_args"):
-        load_config(pm=pm, context_dir=tmp_path, concurrency_group=cg)
+        load_config(pm=pm, concurrency_group=cg)
 
 
 def test_load_config_extend_avoids_narrowing_on_agent_type_cli_args(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, cg: ConcurrencyGroup
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, temp_git_repo_cwd: Path, cg: ConcurrencyGroup
 ) -> None:
     """``cli_args__extend`` in the local layer preserves the project layer's entries
     and merges them in precedence order, without tripping the guard."""
@@ -2003,13 +2011,13 @@ def test_load_config_extend_avoids_narrowing_on_agent_type_cli_args(
     (project_dir / "settings.local.toml").write_text(
         'is_allowed_in_pytest = true\n\n[agent_types.my_claude]\ncli_args__extend = ["--verbose"]\n'
     )
-    mngr_ctx = load_config(pm=pm, context_dir=tmp_path, concurrency_group=cg)
+    mngr_ctx = load_config(pm=pm, concurrency_group=cg)
     cli_args = mngr_ctx.config.agent_types[AgentTypeName("my_claude")].cli_args
     assert cli_args == ("--debug", "--verbose")
 
 
 def test_load_config_narrowing_raises_on_create_template_options_replacement(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, cg: ConcurrencyGroup
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, temp_git_repo_cwd: Path, cg: ConcurrencyGroup
 ) -> None:
     """A local layer that re-assigns a non-empty list inside
     ``create_templates.<name>.options`` raises by default."""
@@ -2021,11 +2029,11 @@ def test_load_config_narrowing_raises_on_create_template_options_replacement(
         'is_allowed_in_pytest = true\n\n[create_templates.dev]\nenv = ["X=2"]\n'
     )
     with pytest.raises(ConfigParseError, match="create_templates.dev"):
-        load_config(pm=pm, context_dir=tmp_path, concurrency_group=cg)
+        load_config(pm=pm, concurrency_group=cg)
 
 
 def test_load_config_extend_avoids_narrowing_on_create_template_options(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, cg: ConcurrencyGroup
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, temp_git_repo_cwd: Path, cg: ConcurrencyGroup
 ) -> None:
     """``env__extend`` inside ``[create_templates.dev]`` walks through the
     ``options`` mapping and merges with the project layer's entries."""
@@ -2036,13 +2044,13 @@ def test_load_config_extend_avoids_narrowing_on_create_template_options(
     (project_dir / "settings.local.toml").write_text(
         'is_allowed_in_pytest = true\n\n[create_templates.dev]\nenv__extend = ["X=2"]\n'
     )
-    mngr_ctx = load_config(pm=pm, context_dir=tmp_path, concurrency_group=cg)
+    mngr_ctx = load_config(pm=pm, concurrency_group=cg)
     template = mngr_ctx.config.create_templates[CreateTemplateName("dev")]
     assert template.options["env"] == ["X=1", "X=2"]
 
 
 def test_load_config_allows_adding_new_agent_type_in_local(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, cg: ConcurrencyGroup
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, temp_git_repo_cwd: Path, cg: ConcurrencyGroup
 ) -> None:
     """Adding a brand-new agent_type entry in the local layer never narrows --
     the per-key container merge preserves the project layer's entry alongside the
@@ -2054,13 +2062,13 @@ def test_load_config_allows_adding_new_agent_type_in_local(
     (project_dir / "settings.local.toml").write_text(
         'is_allowed_in_pytest = true\n\n[agent_types.my_codex]\nparent_type = "codex"\ncli_args = ["--other"]\n'
     )
-    mngr_ctx = load_config(pm=pm, context_dir=tmp_path, concurrency_group=cg)
+    mngr_ctx = load_config(pm=pm, concurrency_group=cg)
     assert mngr_ctx.config.agent_types[AgentTypeName("my_claude")].cli_args == ("--debug",)
     assert mngr_ctx.config.agent_types[AgentTypeName("my_codex")].cli_args == ("--other",)
 
 
 def test_load_config_extend_in_new_template_preserves_extend_suffix(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, cg: ConcurrencyGroup
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, temp_git_repo_cwd: Path, cg: ConcurrencyGroup
 ) -> None:
     """A template introduced in a single layer with ``env__extend = [...]`` keeps
     the ``__extend`` suffix in its options dict so ``apply_create_template`` can
@@ -2071,7 +2079,7 @@ def test_load_config_extend_in_new_template_preserves_extend_suffix(
     (project_dir / "settings.local.toml").write_text(
         'is_allowed_in_pytest = true\n\n[create_templates.coder_local]\ntype = "claude"\nenv__extend = ["X=1"]\n'
     )
-    mngr_ctx = load_config(pm=pm, context_dir=tmp_path, concurrency_group=cg)
+    mngr_ctx = load_config(pm=pm, concurrency_group=cg)
     template = mngr_ctx.config.create_templates[CreateTemplateName("coder_local")]
     # The __extend suffix is preserved verbatim so apply_create_template can
     # interpret it at template-application time.
@@ -2080,7 +2088,7 @@ def test_load_config_extend_in_new_template_preserves_extend_suffix(
 
 
 def test_load_config_extend_in_new_template_extends_runtime_env(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, cg: ConcurrencyGroup
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, temp_git_repo_cwd: Path, cg: ConcurrencyGroup
 ) -> None:
     """End-to-end check for the bug in
     test_load_config_extend_in_new_template_preserves_extend_suffix: loading a
@@ -2097,7 +2105,7 @@ def test_load_config_extend_in_new_template_extends_runtime_env(
         '[create_templates.coder_local]\ntype = "claude"\n'
         'env__extend = ["TEMPLATE=1"]\n'
     )
-    mngr_ctx = load_config(pm=pm, context_dir=tmp_path, concurrency_group=cg)
+    mngr_ctx = load_config(pm=pm, concurrency_group=cg)
     # Simulate the create command's params after apply_config_defaults: the
     # runtime env tuple has been populated from [commands.create].env.
     ctx = click.Context(click.Command("create"))
@@ -2113,7 +2121,7 @@ def test_load_config_extend_in_new_template_extends_runtime_env(
 
 
 def test_load_config_string_cli_args_replacement_does_not_narrow(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, cg: ConcurrencyGroup
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, temp_git_repo_cwd: Path, cg: ConcurrencyGroup
 ) -> None:
     """When ``cli_args`` is given as a string (rather than a list) in the higher-
     precedence layer, the user's intent is scalar replacement of the whole command
@@ -2128,5 +2136,5 @@ def test_load_config_string_cli_args_replacement_does_not_narrow(
     (project_dir / "settings.local.toml").write_text(
         'is_allowed_in_pytest = true\n\n[agent_types.my_claude]\ncli_args = "--baz"\n'
     )
-    mngr_ctx = load_config(pm=pm, context_dir=tmp_path, concurrency_group=cg)
+    mngr_ctx = load_config(pm=pm, concurrency_group=cg)
     assert mngr_ctx.config.agent_types[AgentTypeName("my_claude")].cli_args == ("--baz",)
