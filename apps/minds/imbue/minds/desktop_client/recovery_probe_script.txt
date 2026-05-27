@@ -17,7 +17,7 @@ result = {
 
 try:
     proc = subprocess.run(
-        ["tmux", "ls"], capture_output=True, text=True, timeout=2,
+        ["tmux", "ls"], capture_output=True, text=True, timeout=1,
     )
     result["tmux_ls"] = proc.stdout + (proc.stderr if proc.returncode != 0 else "")
 except Exception as e:
@@ -44,7 +44,7 @@ except Exception as e:
 if result["inner_port"] is not None:
     try:
         proc = subprocess.run(
-            ["ss", "-ltnp"], capture_output=True, text=True, timeout=2,
+            ["ss", "-ltnp"], capture_output=True, text=True, timeout=1,
         )
         # Match ":PORT" only when not followed by another digit, so the filter
         # for port 8000 does not also match :18000, :80000, etc. in unrelated
@@ -63,7 +63,7 @@ if result["inner_port"] is not None:
                 "-w", "%{http_code}",
                 "http://localhost:{}/".format(result["inner_port"]),
             ],
-            capture_output=True, text=True, timeout=3,
+            capture_output=True, text=True, timeout=2,
         )
         result["curl_status"] = proc.stdout.strip()
     except Exception as e:

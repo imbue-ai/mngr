@@ -37,12 +37,12 @@ from imbue.mngr.primitives import AgentId
 PROBE_SENTINEL: Final[str] = "===PROBE-READY==="
 
 # Hard ceiling for a single batched ``mngr exec``. Bounded so a wedged
-# container can't gate the recovery UI. 5s is generous given the probe is
-# four small subprocesses (``tmux ls`` / TOML parse / ``ss`` / ``curl``)
-# whose individual budgets are all 1-2s, so the only paths that need the
-# full 5s are SSH or container hangs that the page wants to escalate
-# anyway. The endpoint surfaces a timeout as ssh_dead, same as a missing
-# sentinel.
+# container can't gate the recovery UI. The inner probe is four small
+# subprocesses (``tmux ls`` / TOML parse / ``ss`` / ``curl``) whose
+# individual subprocess timeouts sum to a worst case of 1+1+2 = 4s, so the
+# 5s ceiling leaves a comfortable margin while still keeping a wedged
+# container from hanging the recovery UI. The endpoint surfaces a timeout
+# as ssh_dead, same as a missing sentinel.
 PROBE_TIMEOUT_SECONDS: Final[float] = 5.0
 
 
