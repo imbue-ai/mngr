@@ -24,6 +24,7 @@ from imbue.mngr.config.loader import _SettingsSource
 from imbue.mngr.config.loader import _apply_plugin_overrides
 from imbue.mngr.config.loader import _collect_env_overrides
 from imbue.mngr.config.loader import _collect_layer_narrowing
+from imbue.mngr.config.loader import _display_path
 from imbue.mngr.config.loader import _normalize_tuple_fields_for_construct
 from imbue.mngr.config.loader import _parse_agent_types
 from imbue.mngr.config.loader import _parse_commands
@@ -2109,6 +2110,16 @@ def test_load_config_string_cli_args_replacement_does_not_narrow(
 # =============================================================================
 
 
+def test_display_path_contracts_home_dir(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """A path under the user's home is shown with ``~``; a path outside home is
+    shown absolute.
+    """
+    monkeypatch.setenv("HOME", str(tmp_path))
+    assert _display_path(tmp_path / ".mngr" / "settings.toml") == "~/.mngr/settings.toml"
+    outside = tmp_path.parent / "outside" / "settings.toml"
+    assert _display_path(outside) == str(outside)
+
+
 def test_collect_layer_narrowing_attributes_highest_precedence_lower_layer() -> None:
     """The dropped-from side is the highest-precedence already-merged layer whose
     value the new layer narrows. Because the merge is assign-by-default, that
@@ -2153,11 +2164,13 @@ def test_load_config_narrowing_error_names_both_sides_with_paths_and_scopes(
         load_config(pm=pm, context_dir=tmp_path, concurrency_group=cg)
 
     message = str(exc_info.value)
+    # Paths are rendered with the home dir contracted to ``~`` (the test clamps
+    # HOME to tmp_path, so these settings files live directly under it).
     # Assigning side: the local file, with its scope flag.
-    assert str(tmp_path / "settings.local.toml") in message
+    assert "~/settings.local.toml" in message
     assert "mngr config set --scope local" in message
     # Dropped-from side: the project file, with its scope flag.
-    assert str(tmp_path / "settings.toml") in message
+    assert "~/settings.toml" in message
     assert "mngr config set --scope project" in message
     assert "assigned by" in message
     assert "would drop a value from" in message
@@ -2180,6 +2193,6 @@ def test_load_config_narrowing_error_names_env_var_layer(
     message = str(exc_info.value)
     # Assigning side: the env layer, named as such with no path / scope flag.
     assert "assigned by MNGR__* environment variables" in message
-    # Dropped-from side: the project file, with its scope flag.
-    assert str(project_dir / "settings.toml") in message
+    # Dropped-from side: the project file (home contracted to ``~``), with its scope flag.
+    assert "~/settings.toml" in message
     assert "mngr config set --scope project" in message

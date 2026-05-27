@@ -426,16 +426,32 @@ def _collect_layer_narrowing(
     return violations
 
 
+def _display_path(path: Path) -> str:
+    """Render ``path`` with the user's home directory contracted to ``~`` (e.g.
+    ``~/.mngr/profiles/<id>/settings.toml``), falling back to the absolute path
+    when it is not under home. Keeps the narrowing error readable and avoids
+    spelling out the full home path.
+    """
+    home = Path.home()
+    if path.is_relative_to(home):
+        return f"~/{path.relative_to(home)}"
+    return str(path)
+
+
 def _describe_source(source: "_SettingsSource") -> str:
     """Render a settings layer for the narrowing error.
 
     A TOML file layer is described as ``<scope> settings (<path>) [edit with:
     mngr config set --scope <scope> ...]``; the scopeless ``MNGR__*`` env-var
-    layer is named as such.
+    layer (which has no file) is named as such. A file layer always carries both
+    a ``path`` and a ``scope``, so narrowing on ``path`` covers the env case.
     """
-    if source.scope is None:
+    if source.path is None:
         return "MNGR__* environment variables"
-    return f"{source.scope} settings ({source.path}) [edit with: mngr config set --scope {source.scope} ...]"
+    return (
+        f"{source.scope} settings ({_display_path(source.path)}) "
+        f"[edit with: mngr config set --scope {source.scope} ...]"
+    )
 
 
 def _build_narrowing_error(violations: Sequence["_NarrowingViolation"]) -> ConfigParseError:
