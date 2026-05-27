@@ -12,6 +12,7 @@ const path = require('path');
 const https = require('https');
 const http = require('http');
 const { execSync, execFileSync } = require('child_process');
+const { downloadGit } = require('./download-binaries.js');
 
 const ROOT = path.resolve(__dirname, '..');
 const RESOURCES_DIR = path.join(ROOT, 'resources');
@@ -379,13 +380,6 @@ async function downloadLima({ platform, arch }) {
     }
   }
 }
-
-// Reuse download-binaries.js's real-git resolution: on macOS `which git`
-// is the xcode-select shim, not a runnable binary -- bundling it produces
-// an app that cannot clone on a machine without Xcode at the expected
-// path. downloadGit() there resolves the real binary via `xcrun --find
-// git` and copies its libexec/git-core helpers and templates too.
-const { downloadGit } = require('./download-binaries.js');
 
 function copyPyproject() {
   const srcDir = path.join(ROOT, 'electron', 'pyproject');
