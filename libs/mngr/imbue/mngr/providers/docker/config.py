@@ -1,12 +1,25 @@
 from pathlib import Path
 
+from loguru import logger
 from pydantic import Field
+from pydantic import model_validator
 
 from imbue.mngr.config.data_types import ProviderInstanceConfig
 from imbue.mngr.primitives import ActivitySource
 from imbue.mngr.primitives import DockerBuilder
 from imbue.mngr.primitives import IdleMode
 from imbue.mngr.primitives import ProviderBackendName
+
+# Module-level guard so the "default will change" deprecation warning fires at
+# most once per process (treated as once per `mngr` invocation). Exposed for
+# tests to reset between cases.
+_HAS_WARNED_ABOUT_ISOLATE_DEFAULT: bool = False
+
+
+def _reset_isolate_default_warning_for_test() -> None:
+    """Reset the module-level dedup guard so tests can re-trigger the warning."""
+    global _HAS_WARNED_ABOUT_ISOLATE_DEFAULT
+    _HAS_WARNED_ABOUT_ISOLATE_DEFAULT = False
 
 
 class DockerProviderConfig(ProviderInstanceConfig):
@@ -70,3 +83,41 @@ class DockerProviderConfig(ProviderInstanceConfig):
             "accessible even when the container is stopped."
         ),
     )
+    isolate_host_volumes: bool | None = Field(
+        default=None,
+        description=(
+            "Whether each host container should see only its own host_dir sub-folder, "
+            "rather than the entire shared state volume. When True, mngr mounts the "
+            "host's per-host sub-folder directly at host_dir using "
+            "`--mount type=volume,...,volume-subpath=...` (requires Docker Engine >= 25.0) "
+            "and no longer symlinks host_dir to a path under /mngr-state. "
+            "When False, mngr uses today's behavior: the entire shared state volume is "
+            "mounted at /mngr-state and host_dir is a symlink into it. "
+            "When None (default), today's behavior is used and a one-shot deprecation "
+            "warning is emitted noting that the default will change to True in a future "
+            "release. Set explicitly to False to keep the legacy behavior silently."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _validate_isolation_requires_volume(self) -> "DockerProviderConfig":
+        if self.isolate_host_volumes is True and not self.is_host_volume_created:
+            raise ValueError(
+                "isolate_host_volumes=True requires is_host_volume_created=True "
+                "(host-volume isolation is meaningless without a host volume)"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _maybe_warn_about_isolate_default(self) -> "DockerProviderConfig":
+        global _HAS_WARNED_ABOUT_ISOLATE_DEFAULT
+        if self.isolate_host_volumes is None and not _HAS_WARNED_ABOUT_ISOLATE_DEFAULT:
+            logger.warning(
+                "Docker provider config `isolate_host_volumes` is unset. The default will change "
+                "to True in a future release, which will cause each host container to see only its "
+                "own host_dir sub-folder instead of the entire shared state volume. To keep the "
+                "current (shared) behavior, set isolate_host_volumes=false explicitly. To opt in "
+                "to the new behavior now, set isolate_host_volumes=true (requires Docker Engine >= 25.0)."
+            )
+            _HAS_WARNED_ABOUT_ISOLATE_DEFAULT = True
+        return self

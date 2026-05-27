@@ -29,6 +29,7 @@ from imbue.mngr.providers.docker.instance import _get_docker_context_host
 from imbue.mngr.providers.docker.instance import _get_ssh_host_from_docker_config
 from imbue.mngr.providers.docker.instance import build_container_labels
 from imbue.mngr.providers.docker.instance import parse_container_labels
+from imbue.mngr.providers.docker.instance import verify_engine_version_supports_volume_subpath
 from imbue.mngr.providers.docker.testing import make_docker_provider
 from imbue.mngr.providers.docker.testing import make_docker_provider_with_local_volume
 from imbue.mngr.providers.docker.testing import make_offline_docker_provider
@@ -290,6 +291,101 @@ def test_build_docker_run_command_entrypoint_at_end(temp_mngr_ctx: MngrContext) 
     assert cmd[image_idx + 1] == "-c"
 
 
+def test_build_docker_run_command_passes_through_volume_mount_args(temp_mngr_ctx: MngrContext) -> None:
+    """`volume_mount_args` tokens are inserted verbatim into the docker run command."""
+    provider = make_docker_provider(temp_mngr_ctx)
+    cmd = provider._build_docker_run_command(
+        image="my-image",
+        container_name="test",
+        labels={},
+        start_args=(),
+        volume_mount_args=["--mount", "type=volume,source=foo,target=/bar,volume-subpath=baz"],
+    )
+    mount_idx = cmd.index("--mount")
+    assert cmd[mount_idx + 1] == "type=volume,source=foo,target=/bar,volume-subpath=baz"
+
+
+# =========================================================================
+# Volume Mount Argument Building
+# =========================================================================
+
+
+def test_build_volume_mount_args_legacy_shared_mode(temp_mngr_ctx: MngrContext) -> None:
+    """Legacy mode emits `-v <vol>:/mngr-state:rw` regardless of host id."""
+    provider = make_docker_provider(temp_mngr_ctx)
+    args = provider._build_volume_mount_args(HostId(HOST_ID_A), is_isolated=False)
+    assert args[0] == "-v"
+    assert args[1].endswith(":/mngr-state:rw")
+
+
+def test_build_volume_mount_args_isolated_mode(temp_mngr_ctx: MngrContext) -> None:
+    """Isolated mode emits `--mount type=volume,...,volume-subpath=volumes/vol-<hex>`."""
+    provider = make_docker_provider(temp_mngr_ctx)
+    host_id = HostId(HOST_ID_A)
+    args = provider._build_volume_mount_args(host_id, is_isolated=True)
+    assert args[0] == "--mount"
+    spec = args[1]
+    assert spec.startswith("type=volume,")
+    assert f"target={provider.host_dir}" in spec
+    expected_volume_id = provider._volume_id_for_host(host_id)
+    assert f"volume-subpath=volumes/{expected_volume_id}" in spec
+    # The state volume name appears as the source.
+    assert f"source={provider._state_volume_name}" in spec
+
+
+def test_build_volume_mount_args_disabled_returns_empty(temp_mngr_ctx: MngrContext) -> None:
+    """When is_host_volume_created is False, no mount args are emitted in either mode."""
+    config = DockerProviderConfig(is_host_volume_created=False, isolate_host_volumes=False)
+    provider = DockerProviderInstance(
+        name=ProviderInstanceName("test-no-vol"),
+        host_dir=Path("/mngr"),
+        mngr_ctx=temp_mngr_ctx,
+        config=config,
+    )
+    assert provider._build_volume_mount_args(HostId(HOST_ID_A), is_isolated=False) == []
+
+
+def test_host_volume_symlink_target_is_none_when_isolated(temp_mngr_ctx: MngrContext) -> None:
+    """Isolated mode has no symlink (host_dir IS the mount)."""
+    provider = make_docker_provider(temp_mngr_ctx)
+    assert provider._get_host_volume_symlink_target(HostId(HOST_ID_A), is_isolated=True) is None
+
+
+def test_host_volume_symlink_target_points_into_state_mount_when_shared(temp_mngr_ctx: MngrContext) -> None:
+    """Shared mode emits the per-host path under /mngr-state for the install-script to symlink to."""
+    provider = make_docker_provider(temp_mngr_ctx)
+    target = provider._get_host_volume_symlink_target(HostId(HOST_ID_A), is_isolated=False)
+    assert target is not None
+    assert target.startswith("/mngr-state/volumes/vol-")
+
+
+# =========================================================================
+# Engine Version Preflight
+# =========================================================================
+
+
+@pytest.mark.parametrize("version", ["25.0.0", "25.0.3", "25.1.0", "26.0.0", "100.0.0"])
+def test_engine_version_supports_volume_subpath_accepts_25_or_newer(version: str) -> None:
+    verify_engine_version_supports_volume_subpath(version)
+
+
+@pytest.mark.parametrize("version", ["24.0.7", "24.0.0", "23.0.5", "20.10.21", "1.0.0"])
+def test_engine_version_supports_volume_subpath_rejects_older(version: str) -> None:
+    with pytest.raises(MngrError, match="requires Docker Engine 25.0\\+"):
+        verify_engine_version_supports_volume_subpath(version)
+
+
+@pytest.mark.parametrize("version", ["not-a-version", "abc.def", ""])
+def test_engine_version_supports_volume_subpath_rejects_unparseable(version: str) -> None:
+    with pytest.raises(MngrError):
+        verify_engine_version_supports_volume_subpath(version)
+
+
+def test_engine_version_supports_volume_subpath_accepts_rc_suffix() -> None:
+    """Version strings with a `-rc` / pre-release suffix on the minor are accepted."""
+    verify_engine_version_supports_volume_subpath("25.0-rc.1")
+
+
 # =========================================================================
 # Tag Methods (no Docker required)
 # =========================================================================
@@ -476,7 +572,7 @@ def test_build_image_translates_process_timeout_to_docker_build_timeout_error(
     temp_mngr_ctx: MngrContext,
 ) -> None:
     """A timed-out `docker build` surfaces as a clear DockerBuildTimeoutError."""
-    config = DockerProviderConfig(build_timeout_seconds=42)
+    config = DockerProviderConfig(build_timeout_seconds=42, isolate_host_volumes=False)
     provider = _BuildTimingOutDockerProvider(
         name=ProviderInstanceName("test-docker-timeout"),
         host_dir=Path("/mngr"),
