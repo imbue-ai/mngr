@@ -7,6 +7,7 @@ import queue
 import subprocess
 import threading
 import time
+from collections import OrderedDict
 from collections.abc import AsyncGenerator
 from collections.abc import Mapping
 from contextlib import asynccontextmanager
@@ -1651,6 +1652,13 @@ _RESTART_COMMAND_TIMEOUT_SECONDS: Final[float] = 120.0
 _SYSTEM_INTERFACE_STARTUP_WAIT_SECONDS: Final[float] = 15.0
 # Poll cadence while waiting for the system interface to come back post-restart.
 _RESTART_PROBE_INTERVAL_SECONDS: Final[float] = 1.0
+# Cap on the per-agent host-health probe cache. Entries are popped on a
+# non-HEALTHY -> HEALTHY transition by _LogProbeOnRecoveryCallback, but a
+# workspace that the user gives up on while RESTART_FAILED never recovers --
+# so without a cap, the cache grows monotonically with every distinct
+# workspace whose recovery page is ever visited. 256 is generous for any
+# realistic user (dozens of workspaces) and bounds pathological cases.
+_HOST_HEALTH_CACHE_MAX_ENTRIES: Final[int] = 256
 
 
 def _build_mngr_stop_argv(mngr_binary: str, agent_id: AgentId, is_host_restart: bool) -> list[str]:
@@ -2051,8 +2059,21 @@ def _run_host_health_probe(
         probe=probe,
         plugin_resolver_services=plugin_resolver_services,
     )
-    cache: dict[str, HostHealthResponse] = request.app.state.latest_host_health_by_agent_id
-    cache[str(agent_id)] = response
+    cache: OrderedDict[str, HostHealthResponse] = request.app.state.latest_host_health_by_agent_id
+    aid_str = str(agent_id)
+    # move_to_end + assignment gives LRU semantics: a re-probe for the same
+    # agent reorders that entry to the most-recently-used position rather than
+    # inserting a duplicate at the end of the OrderedDict.
+    cache[aid_str] = response
+    cache.move_to_end(aid_str)
+    # Evict oldest entries once the cap is reached. KeyError can only fire if
+    # the recovery callback popped the just-evicted entry concurrently, which
+    # is benign here -- the cache is already shrinking.
+    while len(cache) > _HOST_HEALTH_CACHE_MAX_ENTRIES:
+        try:
+            cache.popitem(last=False)
+        except KeyError:
+            break
     return response
 
 
@@ -2072,7 +2093,7 @@ class _LogProbeOnRecoveryCallback(MutableModel):
     pop/insert on the dict and we never iterate in either direction).
     """
 
-    cache: dict[str, HostHealthResponse] = Field(
+    cache: OrderedDict[str, HostHealthResponse] = Field(
         frozen=True,
         description="Shared per-agent cache populated by the host-health endpoint.",
     )
@@ -2951,7 +2972,10 @@ def create_desktop_client(
     # host-health endpoint writes here on every probe; the recovery-log
     # callback below reads on STUCK->HEALTHY transition so the final
     # observed state of a recovered workspace gets a single INFO log line.
-    app.state.latest_host_health_by_agent_id = {}
+    # Backed by an OrderedDict and capped at _HOST_HEALTH_CACHE_MAX_ENTRIES
+    # so a workspace that the user gives up on (stays in RESTART_FAILED and
+    # never fires the recovery callback) cannot grow the cache without bound.
+    app.state.latest_host_health_by_agent_id = OrderedDict()
     if system_interface_health_tracker is not None:
         system_interface_health_tracker.add_on_recovery_callback(
             _LogProbeOnRecoveryCallback(cache=app.state.latest_host_health_by_agent_id)
