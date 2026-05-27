@@ -19,6 +19,8 @@ from imbue.mngr.errors import MngrError
 from imbue.mngr.interfaces.data_types import CommandResult
 from imbue.mngr.interfaces.host import OuterHostInterface
 from imbue.mngr.primitives import DockerBuilder
+from imbue.mngr.primitives import HostId
+from imbue.mngr_vps_docker.instance import LABEL_HOST_ID
 from imbue.mngr_vps_docker.instance import _build_image_on_outer
 from imbue.mngr_vps_docker.instance import _check_file_exists_on_outer
 from imbue.mngr_vps_docker.instance import _commit_container
@@ -27,6 +29,7 @@ from imbue.mngr_vps_docker.instance import _docker_inspect_running
 from imbue.mngr_vps_docker.instance import _exec_in_container
 from imbue.mngr_vps_docker.instance import _is_retryable_rsync_error
 from imbue.mngr_vps_docker.instance import _pull_image
+from imbue.mngr_vps_docker.instance import _read_host_id_label_from_vps
 from imbue.mngr_vps_docker.instance import _redact_secret_env
 from imbue.mngr_vps_docker.instance import _remove_container
 from imbue.mngr_vps_docker.instance import _remove_volume
@@ -371,3 +374,47 @@ def test_build_image_on_outer_with_depot_uses_depot_build(monkeypatch: pytest.Mo
     assert "depot build --load -t depot-image" in cmd
     # Secret must NOT be inlined into the command string -- it goes via env.
     assert "my-secret-token" not in cmd
+
+
+# =============================================================================
+# _read_host_id_label_from_vps
+# =============================================================================
+
+
+def test_read_host_id_label_returns_host_id_when_container_has_label() -> None:
+    """Success path: VPS hosts one mngr container, label parses to a HostId."""
+    expected = HostId.generate()
+    outer = _outer(CommandResult(stdout=f"{expected}\n", stderr="", success=True))
+    result = _read_host_id_label_from_vps(outer)
+    assert result == expected
+    cmd = _stub(outer).recorded[0].command
+    # Filters by the host-id label and inspects the resulting container ids.
+    assert "docker ps -a -q" in cmd
+    assert f"label={LABEL_HOST_ID}" in cmd
+    assert "docker inspect --format" in cmd
+
+
+def test_read_host_id_label_returns_none_when_no_mngr_container() -> None:
+    """No mngr container on the VPS yet (e.g. concurrent create) -- return None, not raise."""
+    outer = _outer(CommandResult(stdout="", stderr="", success=True))
+    assert _read_host_id_label_from_vps(outer) is None
+
+
+def test_read_host_id_label_skips_blank_lines() -> None:
+    """xargs with no input can produce a trailing newline; whitespace-only lines must be skipped."""
+    outer = _outer(CommandResult(stdout="\n   \n", stderr="", success=True))
+    assert _read_host_id_label_from_vps(outer) is None
+
+
+def test_read_host_id_label_raises_on_malformed_label() -> None:
+    """A label value that isn't a valid HostId must surface as MngrError, not crash discovery."""
+    outer = _outer(CommandResult(stdout="not-a-valid-host-id\n", stderr="", success=True))
+    with pytest.raises(MngrError, match="malformed"):
+        _read_host_id_label_from_vps(outer)
+
+
+def test_read_host_id_label_raises_when_docker_ps_fails() -> None:
+    """A non-zero exit from the docker ps pipeline must raise MngrError."""
+    outer = _outer(CommandResult(stdout="", stderr="docker daemon not running", success=False))
+    with pytest.raises(MngrError, match="Failed to list mngr containers"):
+        _read_host_id_label_from_vps(outer)
