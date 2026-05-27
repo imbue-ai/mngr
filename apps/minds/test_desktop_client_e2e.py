@@ -529,8 +529,7 @@ def test_create_local_docker_workspace_via_electron(
 
     # The teardown order is the reverse of this entry order: browser closes,
     # Playwright stops, Electron terminates, the workspace is destroyed, then
-    # FCT's settings.toml is restored -- matching what the previous nested
-    # with/try blocks did. `_connected_cdp_browser` must come after
+    # FCT's settings.toml is restored. `_connected_cdp_browser` must come after
     # `sync_playwright` (it consumes the yielded `playwright`) and after
     # `_launched_electron` (it waits for that process's CDP endpoint).
     with (
