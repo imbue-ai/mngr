@@ -11,7 +11,7 @@
   update is **forward-only** -- it takes `max(current_cutoff, release_date - 2 weeks)`,
   so a release cut while the current cutoff is still younger than two weeks leaves it
   untouched rather than pushing it back. This avoids re-excluding a deliberately-pinned
-  fresh dependency (e.g. `ty`, currently 4 days old) and breaking resolution. The
+  fresh dependency and breaking resolution. The
   initial value is set to just past the newest locked package for the same reason,
   which makes per-package exemptions unnecessary.
 - Removed `test_no_dependencies_younger_than_two_weeks` (and its

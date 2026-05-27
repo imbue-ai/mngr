@@ -322,8 +322,8 @@ def update_exclude_newer(pyproject_path: Path, release_date: date) -> str | None
     that have been public long enough for the community to flag malware. We move
     it to ``release_date`` minus the cooldown window, but never backward -- if the
     current cutoff is still younger than the window (e.g. it was set recently to
-    admit a freshly-pinned, deliberately-trusted dep like ``ty``), pushing it back
-    would re-exclude that dep and break resolution. So the new cutoff is the later
+    admit a freshly-pinned, deliberately-trusted dep), pushing it back would
+    re-exclude that dep and break resolution. So the new cutoff is the later
     of the current value and ``release_date - DEPENDENCY_COOLDOWN``.
 
     The cutoff is anchored at midnight UTC, matching the UTC upload-times uv
