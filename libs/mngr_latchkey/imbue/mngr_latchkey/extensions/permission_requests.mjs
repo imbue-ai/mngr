@@ -13,6 +13,11 @@
  *       For ``type=="predefined"`` the payload is
  *         ``{scope: <string>, permissions: [<string>, ...]}``,
  *       matching the legacy detent-flavored scope/permission grant.
+ *       The scope must be one of the Detent scopes named in the
+ *       bundled ``services.json`` catalog, and every entry in
+ *       ``permissions`` must be one of the permission-schema names
+ *       the catalog lists under that scope; otherwise the request is
+ *       rejected with HTTP 400.
  *       For ``type=="file-sharing"`` the payload is
  *         ``{path: <absolute_path>}``;
  *       the path must be absolute and must not contain any ``..``
@@ -81,7 +86,22 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { homedir } from 'node:os';
-import { dirname, join, posix } from 'node:path';
+import { dirname, join, posix, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+// Bundled services catalog. The file is shipped alongside this
+// extension and read fresh on every catalog-validating request so a
+// catalog update lands without a gateway restart. The shape is the
+// same one served by the ``permissions`` extension's
+// ``/permissions/available`` endpoint: a JSON object keyed by raw
+// service name, with each value carrying a Detent ``scope`` schema
+// name and the array of permission-schema names that may be granted
+// under that scope.
+const SERVICES_CATALOG_FILE = 'services.json';
+const SERVICES_CATALOG_PATH = resolve(
+  dirname(fileURLToPath(import.meta.url)),
+  SERVICES_CATALOG_FILE,
+);
 
 const COLLECTION_PATH = '/permission-requests';
 const APPROVE_PATH_PREFIX = '/permission-requests/approve/';
@@ -208,6 +228,13 @@ class RequestNotFoundError extends PermissionRequestsExtensionError {
   }
 }
 
+class ServicesCatalogUnavailableError extends PermissionRequestsExtensionError {
+  constructor(detail) {
+    super(500, `Could not load ${SERVICES_CATALOG_FILE}: ${detail}`);
+    this.name = 'ServicesCatalogUnavailableError';
+  }
+}
+
 class TargetNotConfiguredError extends PermissionRequestsExtensionError {
   constructor() {
     super(
@@ -322,8 +349,103 @@ function validateAbsoluteFileSharingPath(rawPath) {
 }
 
 /**
+ * Read and validate the bundled ``services.json`` catalog, returning a
+ * map from Detent scope schema name to the set of permission-schema
+ * names that may be granted under that scope.
+ *
+ * Mirrors ``permissions.mjs``'s ``readAvailableServices`` -- duplicated
+ * here rather than imported because the gateway loads extensions
+ * independently and we cannot rely on cross-extension imports. The
+ * file is trusted package data, so any structural problem is a
+ * deployment bug and surfaces as HTTP 500.
+ *
+ * Multiple service entries that nominally share a Detent scope (none
+ * today, but the catalog is hand-curated) have their permission lists
+ * unioned so a future shared-scope entry does not silently narrow the
+ * valid permissions for one of the contributing services.
+ */
+function loadValidPermissionsByScope() {
+  let raw;
+  try {
+    raw = readFileSync(SERVICES_CATALOG_PATH, 'utf-8');
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new ServicesCatalogUnavailableError(`cannot read file: ${message}`);
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new ServicesCatalogUnavailableError(`not valid JSON: ${message}`);
+  }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    throw new ServicesCatalogUnavailableError(
+      'top-level value is not a JSON object keyed by service name.',
+    );
+  }
+  const permissionsByScope = new Map();
+  for (const [serviceName, entry] of Object.entries(parsed)) {
+    if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) {
+      throw new ServicesCatalogUnavailableError(
+        `entry for '${serviceName}' must be a JSON object.`,
+      );
+    }
+    if (typeof entry.scope !== 'string' || entry.scope.length === 0) {
+      throw new ServicesCatalogUnavailableError(
+        `entry for '${serviceName}': 'scope' must be a non-empty string.`,
+      );
+    }
+    const permissions = entry.permissions;
+    if (!Array.isArray(permissions) || !permissions.every((item) => typeof item === 'string')) {
+      throw new ServicesCatalogUnavailableError(
+        `entry for '${serviceName}': 'permissions' must be an array of strings.`,
+      );
+    }
+    const existing = permissionsByScope.get(entry.scope) ?? new Set();
+    for (const permission of permissions) {
+      existing.add(permission);
+    }
+    permissionsByScope.set(entry.scope, existing);
+  }
+  return permissionsByScope;
+}
+
+/**
+ * Validate that ``scope`` is known to the bundled services catalog
+ * and that every entry in ``permissions`` is a valid permission under
+ * that scope. Throws ``InvalidRequestBodyError`` (HTTP 400) on any
+ * mismatch so a caller that asks for a scope/permission combination
+ * the catalog does not know about gets a clear rejection at request
+ * creation time rather than producing an effect that approval would
+ * happily splice into permissions.json.
+ */
+function validatePredefinedAgainstCatalog(scope, permissions) {
+  const permissionsByScope = loadValidPermissionsByScope();
+  const validPermissions = permissionsByScope.get(scope);
+  if (validPermissions === undefined) {
+    throw new InvalidRequestBodyError(
+      `payload.'scope' '${scope}' is not a known service scope in the catalog.`,
+    );
+  }
+  const unknown = permissions.filter((permission) => !validPermissions.has(permission));
+  if (unknown.length > 0) {
+    throw new InvalidRequestBodyError(
+      `payload.'permissions' contains entries not valid for scope '${scope}': ${unknown
+        .map((name) => `'${name}'`)
+        .join(', ')}.`,
+    );
+  }
+}
+
+/**
  * Validate the payload object for a ``predefined`` permission request.
  * Returns the canonical payload shape (``{scope, permissions}``).
+ *
+ * Beyond structural type-checking, the scope and permissions are
+ * cross-checked against the bundled services catalog so a request can
+ * only ever name a (scope, permission) combination the catalog
+ * actually exposes.
  */
 function validatePredefinedPayload(payload) {
   if (typeof payload !== 'object' || payload === null || Array.isArray(payload)) {
@@ -332,6 +454,7 @@ function validatePredefinedPayload(payload) {
   ensureNonEmptyString('payload.', 'scope', payload.scope);
   ensureStringArray('payload.', 'permissions', payload.permissions);
   ensureNoExtraneousFields('payload ', ['scope', 'permissions'], payload);
+  validatePredefinedAgainstCatalog(payload.scope, payload.permissions);
   return { scope: payload.scope, permissions: [...payload.permissions] };
 }
 
