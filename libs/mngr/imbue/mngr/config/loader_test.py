@@ -1566,6 +1566,47 @@ def test_load_config_raises_when_in_pytest_and_config_omits_opt_in(
         load_config(pm=pm, concurrency_group=cg)
 
 
+def test_load_config_raises_when_one_layer_opts_in_but_another_does_not(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, temp_git_repo_cwd: Path, cg: ConcurrencyGroup
+) -> None:
+    """A non-opted-in layer trips the guard even when a higher layer opts in.
+
+    This pins the per-layer design: the guard checks every loaded config file
+    individually, not just the merged value. Here the lower-precedence user layer
+    is a real config that does NOT opt in, while the higher-precedence project
+    layer does -- so the *merged* is_allowed_in_pytest resolves to True. A merged-
+    value check would therefore let the real user config be loaded; the per-layer
+    check must still raise on the user layer. Without this, a test config opting
+    in could silently mask a real config riding in beneath it.
+    """
+    pm = pluggy.PluginManager("mngr")
+    pm.add_hookspecs(hookspecs)
+    load_all_registries(pm)
+
+    _isolate_load_config_env(monkeypatch)
+    monkeypatch.setenv("PYTEST_CURRENT_TEST", "test_something")
+
+    # Lower-precedence user/profile layer: a real config that does NOT opt in.
+    mngr_dir = tmp_path / ".mngr"
+    mngr_dir.mkdir(parents=True, exist_ok=True)
+    profile_dir = get_or_create_profile_dir(mngr_dir)
+    user_settings_path = profile_dir / "settings.toml"
+    user_settings_path.write_text('prefix = "custom-"\n')
+
+    # Higher-precedence project layer opts in. root_name collapses to "mngr" under
+    # _isolate_load_config_env, so this resolves to <git-root>/.mngr/. The merged
+    # is_allowed_in_pytest is therefore True (project overrides user).
+    project_config_dir = temp_git_repo_cwd / ".mngr"
+    project_config_dir.mkdir(parents=True, exist_ok=True)
+    (project_config_dir / "settings.toml").write_text("is_allowed_in_pytest = true\n")
+
+    with pytest.raises(ConfigParseError, match="Running mngr within pytest is not allowed") as exc_info:
+        load_config(pm=pm, concurrency_group=cg)
+    # The error must name the non-opted-in user layer even though the merged value
+    # is True, proving the per-layer check fired rather than a merged-value check.
+    assert str(user_settings_path) in str(exc_info.value)
+
+
 def test_load_config_allows_pytest_when_no_config_file_loaded(
     monkeypatch: pytest.MonkeyPatch, temp_git_repo_cwd: Path, cg: ConcurrencyGroup
 ) -> None:
