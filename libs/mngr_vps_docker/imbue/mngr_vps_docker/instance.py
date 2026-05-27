@@ -664,8 +664,7 @@ def _delete_btrfs_subvolume_on_outer(outer: OuterHostInterface, subvolume_path: 
 def _seed_host_volume_layout_on_outer(outer: OuterHostInterface, subvolume_path: Path) -> None:
     """Pre-create the ``host_dir/`` and ``agents/`` subdirectories of the subvolume.
 
-    Mirrors what ``create_volume_with_layout`` used to do for the named-volume
-    layout: a single ``mkdir -p`` so downstream writers (the agent container,
+    A single ``mkdir -p`` so downstream writers (the agent container,
     ``persist_agent_data``) don't need to mkdir first. Idempotent.
     """
     host_dir_path = subvolume_path / HOST_DIR_SUBPATH
