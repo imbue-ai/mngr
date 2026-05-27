@@ -188,9 +188,10 @@ class SystemInterfaceHealthTracker(MutableModel):
             record = self._records.get(aid_str)
             if record is None or record.health != AgentHealth.HEALTHY:
                 return
+            now = time.monotonic()
             if record.failure_run_started_at is None:
-                record.failure_run_started_at = time.monotonic()
-            elapsed = time.monotonic() - record.failure_run_started_at
+                record.failure_run_started_at = now
+            elapsed = now - record.failure_run_started_at
             if elapsed + 1e-6 < self.stuck_threshold_seconds:
                 return
             record.health = AgentHealth.STUCK
