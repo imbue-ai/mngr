@@ -194,7 +194,8 @@ async function downloadGit(resourcesDir, { platform }) {
     } catch (err) {
       throw new Error(
         'git not resolvable via `xcrun --find git`. Install Xcode Command ' +
-        'Line Tools (`xcode-select --install`) and retry.',
+        `Line Tools (\`xcode-select --install\`) and retry. Underlying error: ${err.message}`,
+        { cause: err },
       );
     }
     if (!resolvedGit || !fs.existsSync(resolvedGit)) {
