@@ -3,11 +3,14 @@
 from pathlib import Path
 from typing import Any
 
+import click
 import pluggy
 import pytest
+from click.core import ParameterSource
 from pydantic import Field
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.mngr.cli.common_opts import apply_create_template
 from imbue.mngr.config.agent_config_registry import register_agent_config
 from imbue.mngr.config.agent_config_registry import reset_agent_config_registry
 from imbue.mngr.config.data_types import AgentTypeConfig
@@ -2025,3 +2028,72 @@ def test_load_config_allows_adding_new_agent_type_in_local(
     mngr_ctx = load_config(pm=pm, context_dir=tmp_path, concurrency_group=cg)
     assert mngr_ctx.config.agent_types[AgentTypeName("my_claude")].cli_args == ("--debug",)
     assert mngr_ctx.config.agent_types[AgentTypeName("my_codex")].cli_args == ("--other",)
+
+
+def test_load_config_extend_in_new_template_preserves_extend_suffix(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, cg: ConcurrencyGroup
+) -> None:
+    """A template introduced in a single layer with ``env__extend = [...]`` keeps
+    the ``__extend`` suffix in its options dict so ``apply_create_template`` can
+    extend the runtime params at template-application time (rather than collapsing
+    into a bare assign that would narrow over the create command's runtime env).
+    """
+    pm, project_dir = _setup_layered_test_env(monkeypatch, tmp_path)
+    (project_dir / "settings.local.toml").write_text(
+        '[create_templates.coder_local]\ntype = "claude"\nenv__extend = ["X=1"]\n'
+    )
+    mngr_ctx = load_config(pm=pm, context_dir=tmp_path, concurrency_group=cg)
+    template = mngr_ctx.config.create_templates[CreateTemplateName("coder_local")]
+    # The __extend suffix is preserved verbatim so apply_create_template can
+    # interpret it at template-application time.
+    assert template.options.get("env__extend") == ["X=1"]
+    assert "env" not in template.options
+
+
+def test_load_config_extend_in_new_template_extends_runtime_env(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, cg: ConcurrencyGroup
+) -> None:
+    """End-to-end check for the bug in
+    test_load_config_extend_in_new_template_preserves_extend_suffix: loading a
+    template whose only ``env__extend`` entry was introduced in a single layer
+    should compose with the create command's runtime env (which itself comes from
+    a separate config block) rather than narrowing over it.
+    """
+    pm, project_dir = _setup_layered_test_env(monkeypatch, tmp_path)
+    (project_dir / "settings.local.toml").write_text(
+        '[commands.create]\nenv = ["RUNTIME=1"]\n'
+        "\n"
+        '[create_templates.coder_local]\ntype = "claude"\n'
+        'env__extend = ["TEMPLATE=1"]\n'
+    )
+    mngr_ctx = load_config(pm=pm, context_dir=tmp_path, concurrency_group=cg)
+    # Simulate the create command's params after apply_config_defaults: the
+    # runtime env tuple has been populated from [commands.create].env.
+    ctx = click.Context(click.Command("create"))
+    params: dict[str, Any] = {
+        "template": ("coder_local",),
+        "env": ("RUNTIME=1",),
+    }
+    ctx.params = params
+    for param_name in params:
+        ctx.set_parameter_source(param_name, ParameterSource.DEFAULT)
+    result = apply_create_template(ctx, params.copy(), mngr_ctx.config)
+    assert result["env"] == ("RUNTIME=1", "TEMPLATE=1")
+
+
+def test_load_config_string_cli_args_replacement_does_not_narrow(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, cg: ConcurrencyGroup
+) -> None:
+    """When ``cli_args`` is given as a string (rather than a list) in the higher-
+    precedence layer, the user's intent is scalar replacement of the whole command
+    line, not list-narrowing. The string form represents a coherent single value
+    and should not trigger the narrowing guard against the lower layer's tokenized
+    tuple, even when the resulting tokens differ.
+    """
+    pm, project_dir = _setup_layered_test_env(monkeypatch, tmp_path)
+    (project_dir / "settings.toml").write_text(
+        '[agent_types.my_claude]\nparent_type = "claude"\ncli_args = "--foo --bar"\n'
+    )
+    (project_dir / "settings.local.toml").write_text('[agent_types.my_claude]\ncli_args = "--baz"\n')
+    mngr_ctx = load_config(pm=pm, context_dir=tmp_path, concurrency_group=cg)
+    assert mngr_ctx.config.agent_types[AgentTypeName("my_claude")].cli_args == ("--baz",)
