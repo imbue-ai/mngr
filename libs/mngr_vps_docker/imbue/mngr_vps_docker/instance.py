@@ -973,8 +973,12 @@ class VpsDockerProvider(BaseProviderInstance):
     # Host Store
     # =========================================================================
     # The store is opened via ``open_host_store(outer, volume_name)`` (free
-    # function in ``host_store``) which resolves the volume's mountpoint via
-    # ``docker volume inspect``. This used to be the per-user state container.
+    # function in ``host_store``) which resolves the volume's bind-source path
+    # via ``docker volume inspect --format '{{.Options.device}}'`` -- the docker
+    # named volume is a bind-options entry pointing at the per-host btrfs
+    # subvolume, so ``Options.device`` (not the unused ``Mountpoint``
+    # placeholder under ``/var/lib/docker/volumes``) is the real on-disk path.
+    # This used to be the per-user state container.
 
     # =========================================================================
     # Host Object Construction
