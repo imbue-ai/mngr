@@ -190,6 +190,13 @@ def resolve_extends(
     model attributes and Mapping keys interchangeably, so the same
     function works whether ``base`` is a parsed ``MngrConfig``, a nested
     config object, or a raw dict.
+
+    Inside a ``create_templates.<name>`` block, an ``<opt>__extend`` whose
+    base lookup yields ``None`` is preserved verbatim rather than collapsed
+    into a bare assign. Template options are applied lazily at
+    ``mngr create`` time, so a brand-new template's ``env__extend`` should
+    remain an extend (against the runtime command's params) instead of
+    silently becoming an assign that would narrow them.
     """
     result: dict[str, Any] = {}
     # First pass: copy bare keys and recurse into nested dicts.
@@ -211,5 +218,22 @@ def resolve_extends(
             current = result[bare]
         else:
             current = _walk_to_field(base, path + (bare,))
+        # Preserve the __extend suffix inside a create template when the base
+        # has no value to extend. apply_create_template will resolve it against
+        # the create command's runtime params instead of collapsing to assign.
+        if current is None and _is_create_template_option_path(path):
+            result[key] = value
+            continue
         result[bare] = _apply_extend(current, value, field_path)
     return result
+
+
+def _is_create_template_option_path(path: tuple[str, ...]) -> bool:
+    """Return True when ``path`` is inside the options of a create template.
+
+    Used by ``resolve_extends`` to recognise leaf keys that should keep their
+    ``__extend`` suffix for deferred runtime resolution by
+    ``apply_create_template`` rather than being eagerly resolved against the
+    config-load-time base.
+    """
+    return len(path) >= 2 and path[0] == "create_templates"

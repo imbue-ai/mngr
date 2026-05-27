@@ -54,6 +54,23 @@ _DEFAULT_MIN_ONLINE_HOST_AGE_SECONDS: Final[float] = 60.0 * 10.0
 PluginConfigT = TypeVar("PluginConfigT", bound="PluginConfig")
 
 
+class StringDerivedTuple(tuple):
+    """Marker tuple subclass for a tuple value that was originally provided as a
+    string in user settings.
+
+    Some tuple-typed fields (most notably ``cli_args``) accept either a list/tuple
+    or a single string in TOML. When the user writes a string, the natural unit is
+    the whole string -- so a higher-precedence layer that replaces one string with
+    another is scalar replacement, not aggregate narrowing. ``_check_narrowing``
+    uses this marker to short-circuit the per-entry narrowing check for those cases.
+
+    The marker survives ``model_construct`` (which bypasses validation) but is
+    intentionally not preserved through ``model_dump`` / merges. That is enough
+    because narrowing detection always compares a freshly-parsed layer (which
+    retains the marker on string-derived fields) against the already-merged base.
+    """
+
+
 @pure
 def split_cli_args_string(cli_args: str) -> tuple[str, ...]:
     """Split a CLI args string into individual argument tokens, preserving quoting.
@@ -128,6 +145,10 @@ def would_assignment_narrow(base_value: Any, override_value: Any) -> bool:
     if not isinstance(base_value, (list, tuple, dict, set, frozenset)) or not base_value:
         return False
     if isinstance(base_value, (list, tuple)):
+        # Mirror the StringDerivedTuple exemption in ``_check_narrowing`` so the
+        # template-application guard agrees with the settings-layer guard.
+        if isinstance(override_value, StringDerivedTuple):
+            return False
         if isinstance(override_value, (list, tuple)) and all(entry in override_value for entry in base_value):
             return False
         return True
@@ -241,6 +262,11 @@ def _check_narrowing(
     if not isinstance(base_value, (list, tuple, dict, set, frozenset)) or not base_value:
         return
     if isinstance(base_value, (list, tuple)):
+        # Scalar replacement intent: when the override was originally a string
+        # (e.g. ``cli_args = "..."`` in TOML), the user is replacing the whole
+        # value as a coherent unit, not narrowing a list.
+        if isinstance(override_value, StringDerivedTuple):
+            return
         if isinstance(override_value, (list, tuple)) and all(entry in override_value for entry in base_value):
             return
         violations.append(".".join(path))
