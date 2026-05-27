@@ -4,39 +4,17 @@ Isolated in a dedicated module so that prompt changes are easy to spot in diffs
 and easy to edit manually.
 """
 
-PLUGIN_NAME = "test-map-reduce"
+from imbue.mngr_mapreduce.launching import REDUCER_INPUTS_DIRNAME
+from imbue.mngr_mapreduce.snippets import publish_outputs_snippet
 
 TESTING_AGENT_OUTCOME_FILENAME = "testing_agent_outcome.json"
 INTEGRATOR_OUTCOME_FILENAME = "integrator_outcome.json"
 
-# Subdirectory of the integrator's work_dir into which the orchestrator
-# rsyncs the local output directory before kicking the integrator off.
-# Mirrored in launching.py so they stay in sync.
-INTEGRATOR_INPUTS_DIRNAME = ".tmr_inputs"
-
-
-_PUBLISH_OUTPUTS_SNIPPET = f"""```bash
-ARCHIVE_DIR="$MNGR_AGENT_STATE_DIR/plugin/{PLUGIN_NAME}"
-mkdir -p "$ARCHIVE_DIR"
-
-STAGING=$(mktemp -d)
-trap 'rm -rf "$STAGING"' EXIT
-
-# Rename .test_output -> test_output inside the archive
-cp -a .test_output "$STAGING/test_output"
-
-# Include an incremental git bundle if any commits exist beyond the base.
-# The bundle is created with the explicit branch name so the orchestrator
-# can fetch ``$BRANCH:$BRANCH`` cleanly.
-BRANCH=$(git rev-parse --abbrev-ref HEAD)
-if [ -n "$(git rev-list --max-count=1 "$MNGR_GIT_BASE_BRANCH..$BRANCH" 2>/dev/null)" ]; then
-    git bundle create "$STAGING/branch.bundle" "$MNGR_GIT_BASE_BRANCH..$BRANCH"
-fi
-
-TARBALL="$ARCHIVE_DIR/outputs.tar.gz"
-tar -czf "$TARBALL.tmp" -C "$STAGING" .
-mv "$TARBALL.tmp" "$TARBALL"
-```"""
+# Subdirectory of the integrator agent's work_dir into which the orchestrator
+# rsyncs the local output directory before kicking the integrator off. Just an
+# alias for the framework's neutral name so the existing prompt code reads
+# the same.
+INTEGRATOR_INPUTS_DIRNAME = REDUCER_INPUTS_DIRNAME
 
 
 def build_test_agent_prompt(
@@ -53,6 +31,8 @@ def build_test_agent_prompt(
     run_cmd = f"pytest {test_node_id}"
     if flags_str:
         run_cmd += f" {flags_str}"
+
+    publish_snippet = publish_outputs_snippet()
 
     prompt = f"""Run the test with: {run_cmd}
 
@@ -203,7 +183,7 @@ Fields:
 After the outcome file is written, package the outputs and publish them
 where the orchestrator can find them. Run this from the git repo root:
 
-{_PUBLISH_OUTPUTS_SNIPPET}
+{publish_snippet}
 
 This MUST be the very last step. The orchestrator polls for outputs.tar.gz
 and treats its appearance as the signal that you are done. The .tmp + rename
@@ -248,7 +228,7 @@ Fields:
 
 Then, finally, publish the outputs archive. Run this from the git repo root:
 
-{_PUBLISH_OUTPUTS_SNIPPET}
+{publish_outputs_snippet()}
 
 This MUST be the very last step. The orchestrator polls for outputs.tar.gz
 and treats its appearance as the signal that you are done. The .tmp + rename

@@ -1,14 +1,10 @@
 """Unit tests for test-mapreduce data types."""
 
-from pathlib import Path
-
-from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
 from imbue.mngr_tmr.data_types import Change
 from imbue.mngr_tmr.data_types import ChangeKind
 from imbue.mngr_tmr.data_types import ChangeStatus
 from imbue.mngr_tmr.data_types import ReportSection
-from imbue.mngr_tmr.data_types import TestAgentInfo
 from imbue.mngr_tmr.data_types import TestMapReduceResult
 from imbue.mngr_tmr.data_types import TestResult
 
@@ -83,18 +79,6 @@ def test_test_result_from_json_compatible_dict() -> None:
     assert result.tests_passing_after is True
 
 
-def test_test_agent_info_construction() -> None:
-    info = TestAgentInfo(
-        test_node_id="tests/test_foo.py::test_bar",
-        agent_id=AgentId.generate(),
-        agent_name=AgentName("tmr-test-bar"),
-        work_dir=Path("/tmp/work"),
-        created_at=0.0,
-    )
-    assert info.test_node_id == "tests/test_foo.py::test_bar"
-    assert str(info.agent_name) == "tmr-test-bar"
-
-
 def test_test_map_reduce_result_with_branch() -> None:
     result = TestMapReduceResult(
         test_node_id="tests/test_foo.py::test_baz",
@@ -103,9 +87,9 @@ def test_test_map_reduce_result_with_branch() -> None:
         tests_passing_before=False,
         tests_passing_after=True,
         summary_markdown="Fixed missing null check",
-        branch_name="mngr-tmr/test-baz",
+        branch_name="tmr/20260101000000/test-baz",
     )
-    assert result.branch_name == "mngr-tmr/test-baz"
+    assert result.branch_name == "tmr/20260101000000/test-baz"
     assert len(result.changes) == 1
 
 

@@ -21,8 +21,8 @@ from imbue.mngr.utils.detail_renderer import ASCIINEMA_PLAYER_CSS
 from imbue.mngr.utils.detail_renderer import ASCIINEMA_PLAYER_JS
 from imbue.mngr.utils.detail_renderer import DETAIL_CSS
 from imbue.mngr.utils.detail_renderer import render_test_detail
-from imbue.mngr_tmr.data_types import AgentKind
-from imbue.mngr_tmr.data_types import AgentMetadata
+from imbue.mngr_mapreduce.data_types import AgentKind
+from imbue.mngr_mapreduce.data_types import AgentMetadata
 from imbue.mngr_tmr.data_types import Change
 from imbue.mngr_tmr.data_types import ChangeKind
 from imbue.mngr_tmr.data_types import ChangeStatus
@@ -162,7 +162,7 @@ def _row_from_metadata(meta: AgentMetadata, outcome: TestResult | None) -> TestM
     """Build a renderable row from per-agent metadata + optional parsed outcome."""
     if meta.error_summary is not None:
         return TestMapReduceResult(
-            test_node_id=meta.test_node_id or str(meta.agent_name),
+            test_node_id=meta.task_id or str(meta.agent_name),
             agent_name=meta.agent_name,
             errored=True,
             summary_markdown=meta.error_summary,
@@ -170,13 +170,13 @@ def _row_from_metadata(meta: AgentMetadata, outcome: TestResult | None) -> TestM
         )
     if outcome is None:
         return TestMapReduceResult(
-            test_node_id=meta.test_node_id or str(meta.agent_name),
+            test_node_id=meta.task_id or str(meta.agent_name),
             agent_name=meta.agent_name,
             summary_markdown="Agent is still running...",
             branch_name=meta.branch_name,
         )
     return TestMapReduceResult(
-        test_node_id=meta.test_node_id or str(meta.agent_name),
+        test_node_id=meta.task_id or str(meta.agent_name),
         agent_name=meta.agent_name,
         changes=outcome.changes,
         errored=outcome.errored,
@@ -195,7 +195,7 @@ def _build_rows(agents: Sequence[AgentMetadata], output_dir: Path) -> list[TestM
     """
     rows: list[TestMapReduceResult] = []
     for meta in agents:
-        if meta.kind is not AgentKind.TESTING_AGENT:
+        if meta.kind is not AgentKind.MAPPER:
             continue
         outcome = _load_testing_agent_outcome(meta.agent_name, output_dir) if meta.error_summary is None else None
         rows.append(_row_from_metadata(meta, outcome))

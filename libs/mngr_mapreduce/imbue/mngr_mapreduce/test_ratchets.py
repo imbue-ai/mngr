@@ -32,8 +32,9 @@ def test_prevent_while_true() -> None:
 
 
 def test_prevent_time_sleep() -> None:
-    # The orchestration sleeps moved to the mngr_mapreduce framework.
-    rc.check_time_sleep(_DIR, snapshot(0))
+    # Ratchet at 4: launch_all_mappers (1 launch-delay) +
+    # launch_and_poll_mappers (2 poll sleeps) + wait_for_reducer (1 poll sleep)
+    rc.check_time_sleep(_DIR, snapshot(4))
 
 
 def test_prevent_global_keyword() -> None:
@@ -41,12 +42,7 @@ def test_prevent_global_keyword() -> None:
 
 
 def test_prevent_bare_print() -> None:
-    # setup_tmr_ci_debug.py is a user-facing CLI utility whose stdout *is* its
-    # output channel (the printed line is the modal SSH public key the user
-    # copies into .github/tmr-authorized-keys). Logger framing isn't right
-    # here, so exclude this script from the rule rather than route output
-    # through a logger just to dodge the regex.
-    rc.check_bare_print(_DIR, snapshot(0), excluded_patterns=("setup_tmr_ci_debug.py",))
+    rc.check_bare_print(_DIR, snapshot(0))
 
 
 # --- Exception handling ---

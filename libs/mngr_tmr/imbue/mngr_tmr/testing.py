@@ -4,8 +4,8 @@ import json
 from pathlib import Path
 
 from imbue.mngr.primitives import AgentName
-from imbue.mngr_tmr.data_types import AgentKind
-from imbue.mngr_tmr.data_types import AgentMetadata
+from imbue.mngr_mapreduce.data_types import AgentKind
+from imbue.mngr_mapreduce.data_types import AgentMetadata
 from imbue.mngr_tmr.data_types import Change
 from imbue.mngr_tmr.data_types import ChangeKind
 from imbue.mngr_tmr.data_types import ChangeStatus
@@ -88,9 +88,9 @@ def make_metadata_and_outcome(
     """
     name = AgentName(agent_name)
     metadata = AgentMetadata(
-        kind=AgentKind.TESTING_AGENT,
+        kind=AgentKind.MAPPER,
         agent_name=name,
-        test_node_id=test_node_id,
+        task_id=test_node_id,
         branch_name=branch_name,
         error_summary=error_summary,
     )

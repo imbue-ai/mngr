@@ -1,77 +1,17 @@
-"""Utility functions for the test-mapreduce plugin."""
+"""Pytest discovery helpers used by the TMR recipe."""
 
-import itertools
-from datetime import datetime
-from datetime import timezone
 from pathlib import Path
 
 from loguru import logger
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
-from imbue.mngr.config.data_types import CreateTemplateName
-from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.errors import MngrError
-
-
-def make_run_name() -> str:
-    """Compact timestamp identifying a TMR run, e.g. '20260514184215'.
-
-    14 chars, all digits, sortable by alphabetical comparison. UTC.
-    """
-    return datetime.now(tz=timezone.utc).strftime("%Y%m%d%H%M%S")
-
-
-def dedup_name(base: str, used: set[str]) -> str:
-    """Return ``base`` if unused, else ``base-2``, ``base-3``, ... .
-
-    Mutates ``used`` to include the returned value. Used to keep agent /
-    branch names unique within a single TMR run after sanitization
-    truncation may have collapsed two distinct test node ids onto the
-    same suffix.
-    """
-    if base not in used:
-        used.add(base)
-        return base
-    for counter in itertools.count(2):
-        candidate = f"{base}-{counter}"
-        if candidate not in used:
-            used.add(candidate)
-            return candidate
-    raise AssertionError("itertools.count is infinite; loop must return")
-
-
-def resolve_templates(
-    template_names: tuple[str, ...],
-    config: MngrConfig,
-) -> dict[str, object]:
-    """Resolve create templates by name and merge their options.
-
-    Later templates override earlier ones for the same key.
-    Returns a merged dict of template option values.
-    """
-    merged: dict[str, object] = {}
-    for template_name in template_names:
-        key = CreateTemplateName(template_name)
-        if key not in config.create_templates:
-            available = [str(t) for t in config.create_templates]
-            avail_str = f" Available: {', '.join(available)}" if available else ""
-            raise MngrError(f"Template '{template_name}' not found.{avail_str}")
-        for k, v in config.create_templates[key].options.items():
-            if v is not None:
-                merged[k] = v
-    return merged
 
 
 class CollectTestsError(MngrError, RuntimeError):
     """Raised when pytest test collection fails."""
 
     ...
-
-
-def get_base_commit(source_dir: Path, cg: ConcurrencyGroup) -> str:
-    """Get the current HEAD commit hash, used as the base for all agent branches."""
-    result = cg.run_process_to_completion(["git", "rev-parse", "HEAD"], cwd=source_dir)
-    return result.stdout.strip()
 
 
 def collect_tests(
@@ -97,25 +37,3 @@ def collect_tests(
 
     logger.info("Collected {} test(s)", len(test_ids))
     return test_ids
-
-
-def sanitize_test_name_for_agent(test_node_id: str) -> str:
-    """Convert a pytest node ID into a valid agent name suffix.
-
-    Strips the file path prefix and replaces characters that are not valid in
-    agent names.
-    """
-    parts = test_node_id.split("::")
-    short_name = parts[-1] if parts else test_node_id
-    cleaned = ""
-    for ch in short_name:
-        if ch.isalnum() or ch == "-":
-            cleaned += ch
-        else:
-            cleaned += "-"
-    sanitized = ""
-    for ch in cleaned:
-        if ch == "-" and sanitized.endswith("-"):
-            continue
-        sanitized += ch
-    return sanitized.strip("-").lower()[:40]

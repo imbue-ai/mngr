@@ -3,8 +3,8 @@
 from pathlib import Path
 
 from imbue.mngr.primitives import AgentName
-from imbue.mngr_tmr.data_types import AgentKind
-from imbue.mngr_tmr.data_types import AgentMetadata
+from imbue.mngr_mapreduce.data_types import AgentKind
+from imbue.mngr_mapreduce.data_types import AgentMetadata
 from imbue.mngr_tmr.data_types import Change
 from imbue.mngr_tmr.data_types import ChangeKind
 from imbue.mngr_tmr.data_types import ChangeStatus
@@ -371,7 +371,7 @@ def test_generate_html_report_with_integrator(tmp_path: Path) -> None:
         ),
     ]
     integrator_meta = AgentMetadata(
-        kind=AgentKind.INTEGRATOR,
+        kind=AgentKind.REDUCER,
         agent_name=AgentName("tmr-integrator-abc123"),
         branch_name="mngr-tmr/integrated-abc123",
     )
@@ -390,7 +390,7 @@ def test_generate_html_report_integrator_with_failures(tmp_path: Path) -> None:
     output_dir = tmp_path / "out"
     agents = [make_metadata_and_outcome(output_dir, "a", tests_passing_before=True, tests_passing_after=True)]
     integrator_meta = AgentMetadata(
-        kind=AgentKind.INTEGRATOR,
+        kind=AgentKind.REDUCER,
         agent_name=AgentName("tmr-integrator-abc123"),
         branch_name="mngr-tmr/integrated-abc123",
     )

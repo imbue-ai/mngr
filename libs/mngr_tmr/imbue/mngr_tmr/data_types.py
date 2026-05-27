@@ -1,20 +1,18 @@
-"""Data types for the test-mapreduce plugin."""
+"""Test-mapreduce-specific data types.
+
+These types describe what the testing agents and the reducer (integrator)
+agent put in their outputs archives, plus the reporter's grouping/coloring
+scheme. Framework-side types (``MapReduceContext``, ``AgentMetadata``,
+``AgentKind``, etc.) live in ``imbue.mngr_mapreduce.data_types``.
+"""
 
 from enum import auto
-from pathlib import Path
 
 from pydantic import Field
 
 from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
-from imbue.mngr.interfaces.host import AgentEnvironmentOptions
-from imbue.mngr.interfaces.host import AgentLabelOptions
-from imbue.mngr.interfaces.host import OnlineHostInterface
-from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
-from imbue.mngr.primitives import AgentTypeName
-from imbue.mngr.primitives import ProviderInstanceName
-from imbue.mngr.primitives import SnapshotName
 
 
 class ChangeKind(UpperCaseStrEnum):
@@ -67,7 +65,7 @@ class TestRunInfo(FrozenModel):
 
 
 class TestResult(FrozenModel):
-    """Result reported by a test agent, read from result.json."""
+    """Result reported by a test agent, read from its outcome JSON."""
 
     changes: dict[ChangeKind, Change] = Field(
         default_factory=dict, description="Changes the agent attempted, keyed by kind"
@@ -83,88 +81,6 @@ class TestResult(FrozenModel):
     )
     summary_markdown: str = Field(default="", description="Overall markdown summary of what happened")
     test_runs: tuple[TestRunInfo, ...] = Field(default=(), description="List of test runs performed, in order")
-
-
-class TestAgentInfo(FrozenModel):
-    """Tracks a launched test agent and its associated test."""
-
-    test_node_id: str = Field(description="The pytest node ID for the test (e.g. tests/test_foo.py::test_bar)")
-    agent_id: AgentId = Field(description="The ID of the launched agent")
-    agent_name: AgentName = Field(description="The name of the launched agent")
-    work_dir: Path = Field(description="The agent's working directory on its host")
-    branch_name: str | None = Field(default=None, description="Git branch created for this agent")
-    created_at: float = Field(description="Monotonic timestamp (time.monotonic()) when the agent was created")
-
-
-class AgentKind(UpperCaseStrEnum):
-    """What flavor of tmr agent a directory under the output dir holds.
-
-    The string value of each variant is also used verbatim as the
-    ``tmr_role`` label that ``_create_tmr_agent`` stamps on every
-    launched agent, so that ``mngr ls --include 'labels.tmr_role ==
-    "..."'`` matches the in-process classification.
-    """
-
-    TESTING_AGENT = auto()
-    INTEGRATOR = auto()
-    SNAPSHOTTER = auto()
-
-
-class AgentMetadata(FrozenModel):
-    """In-memory hand-off between orchestration and the reporter.
-
-    Orchestration carries one of these per agent. The reporter combines it
-    with whatever it finds under ``<output_dir>/<agent_name>/`` (extracted
-    outcome JSON, branch bundle, etc.) to render rows. Orchestration is the
-    only authority on ``test_node_id``, ``branch_name``, and whether the
-    agent failed to publish outputs (``error_summary``); the outcome JSON
-    schema is a contract between the agent and the reporter and never
-    crosses orchestration.
-    """
-
-    kind: AgentKind = Field(description="What flavor of tmr agent this is")
-    agent_name: AgentName = Field(description="Agent name (matches the subdir under output_dir)")
-    test_node_id: str | None = Field(
-        default=None,
-        description="Pytest node id for testing agents; None for the integrator",
-    )
-    branch_name: str | None = Field(default=None, description="Branch the agent committed to, if any")
-    error_summary: str | None = Field(
-        default=None,
-        description="Markdown to render when the agent did not complete normally (timeout, "
-        "launch failure, etc.). When None, the reporter looks for the agent's outcome JSON "
-        "under output_dir/<agent_name>/test_output/.",
-    )
-
-
-class TmrLaunchConfig(FrozenModel):
-    """Common configuration for launching tmr agents."""
-
-    source_dir: Path = Field(description="Source directory for agent work dirs")
-    source_host: OnlineHostInterface = Field(description="Local host where source code lives")
-    base_commit: str = Field(description="Commit at source_dir HEAD when the run started; used as the bundle base")
-    agent_type: AgentTypeName = Field(description="Type of agent to run (claude, codex, etc.)")
-    provider_name: ProviderInstanceName = Field(description="Provider for agent hosts (local, docker, modal)")
-    env_options: AgentEnvironmentOptions = Field(
-        default_factory=AgentEnvironmentOptions,
-        description="Environment variables to pass to agents",
-    )
-    label_options: AgentLabelOptions = Field(
-        default_factory=AgentLabelOptions,
-        description="Labels to attach to agents",
-    )
-    snapshot: SnapshotName | None = Field(
-        default=None,
-        description="Snapshot to use for host creation (None means build from scratch)",
-    )
-    templates: tuple[str, ...] = Field(
-        default=(),
-        description="Create template names to apply when creating agents",
-    )
-    additional_authorized_keys: tuple[str, ...] = Field(
-        default=(),
-        description="SSH public key lines to install in authorized_keys on each agent host (allows inbound SSH)",
-    )
 
 
 class IntegratorResult(FrozenModel):
