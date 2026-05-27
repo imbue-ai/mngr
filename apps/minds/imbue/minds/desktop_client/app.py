@@ -2101,25 +2101,34 @@ class _HostHealthCache(MutableModel):
     )
 
     _entries: "OrderedDict[str, HostHealthResponse]" = PrivateAttr(default_factory=OrderedDict)
+    # Guards the compound put / pop operations. CPython's GIL serializes each
+    # individual dict op, but ``put`` is three ops (setitem, move_to_end, an
+    # eviction loop) and can interleave with concurrent calls from the FastAPI
+    # threadpool (one per host-health probe) and the on-recovery callback
+    # thread. Without this lock two concurrent puts could each see ``len > max``
+    # and both evict, shrinking the cache below the cap.
+    _lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     def put(self, agent_id: AgentId, response: HostHealthResponse) -> None:
         """Insert or refresh the cached response for ``agent_id`` (LRU on the back)."""
         aid_str = str(agent_id)
-        self._entries[aid_str] = response
-        self._entries.move_to_end(aid_str)
-        while len(self._entries) > self.max_entries:
-            # KeyError can only fire if a concurrent pop just evicted the entry,
-            # which is benign here -- the cache is already shrinking.
-            try:
-                self._entries.popitem(last=False)
-            except KeyError:
-                break
+        with self._lock:
+            self._entries[aid_str] = response
+            self._entries.move_to_end(aid_str)
+            while len(self._entries) > self.max_entries:
+                # KeyError can only fire if the cache was emptied concurrently
+                # (impossible under the lock, but kept as a defense in depth).
+                try:
+                    self._entries.popitem(last=False)
+                except KeyError:
+                    break
 
     def pop(self, agent_id: AgentId) -> HostHealthResponse | None:
         """Remove and return the cached response for ``agent_id``, or None if not cached."""
-        return self._entries.pop(str(agent_id), None)
+        with self._lock:
+            return self._entries.pop(str(agent_id), None)
 
 
 class _LogProbeOnRecoveryCallback(MutableModel):
