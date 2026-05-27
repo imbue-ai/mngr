@@ -455,3 +455,23 @@ def test_remove_persisted_agent_data_is_idempotent(tmp_path: Path) -> None:
     store = _make_store(tmp_path)
     # No prior persist; removal must not raise.
     store.remove_persisted_agent_data(_AGENT_ID_3)
+
+
+def test_list_persisted_agent_data_uses_one_round_trip(tmp_path: Path) -> None:
+    """All agent files must come back in a single execute_idempotent_command call."""
+    outer = _LocalFakeOuter(
+        id=HostId.generate(),
+        connector=_make_local_connector(),
+        mountpoint_by_volume={"unused": tmp_path},
+    )
+    store = VpsDockerHostStore(outer=outer, mountpoint=tmp_path)
+    store.persist_agent_data({"id": str(_AGENT_ID_1), "name": "first"})
+    store.persist_agent_data({"id": str(_AGENT_ID_2), "name": "second"})
+
+    pre_call_count = len(outer.recorded_commands)
+    listed = store.list_persisted_agent_data()
+    post_call_count = len(outer.recorded_commands)
+
+    assert {entry["id"] for entry in listed} == {str(_AGENT_ID_1), str(_AGENT_ID_2)}
+    # One batched shell call regardless of agent count -- *not* one per agent.
+    assert post_call_count - pre_call_count == 1

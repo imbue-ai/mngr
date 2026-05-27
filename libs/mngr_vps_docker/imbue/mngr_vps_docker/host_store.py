@@ -3,6 +3,7 @@ import shlex
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
+from typing import Final
 
 from loguru import logger
 from pydantic import ConfigDict
@@ -17,6 +18,10 @@ from imbue.mngr.interfaces.data_types import HostConfig
 from imbue.mngr.interfaces.host import OuterHostInterface
 from imbue.mngr.primitives import AgentId
 from imbue.mngr_vps_docker.primitives import VpsInstanceId
+
+# Sentinel marking the start of each agent JSON file in batched-read output.
+# Chosen to be a string that cannot appear inside a serialized JSON record.
+_AGENT_FILE_SEP: Final[str] = "---MNGR_AGENT_FILE_SEP---"
 
 
 class VpsHostConfig(HostConfig):
@@ -182,20 +187,37 @@ class VpsDockerHostStore(MutableModel):
         logger.trace("Persisted agent data at {}", path)
 
     def list_persisted_agent_data(self) -> list[dict[str, Any]]:
-        """Read all persisted agent records on this volume."""
-        result = self.outer.execute_idempotent_command(
-            f"ls -1 {shlex.quote(str(self._agents_dir))}/*.json 2>/dev/null || true"
+        """Read all persisted agent records on this volume in a single SSH round-trip."""
+        agents_dir_q = shlex.quote(str(self._agents_dir))
+        # Single shell loop: for each *.json under agents/, print the sentinel,
+        # the absolute path, then the file contents. The trailing `|| true`
+        # turns a missing directory or empty glob into an empty stdout.
+        script = (
+            f"for f in {agents_dir_q}/*.json; do "
+            f'[ -f "$f" ] || continue; '
+            f"echo '{_AGENT_FILE_SEP}'\"$f\"; "
+            f'cat "$f"; '
+            f"done 2>/dev/null || true"
         )
-        # Empty / missing dir produces empty stdout via the `|| true` fallback.
+        result = self.outer.execute_idempotent_command(script)
+        return self._parse_batched_agent_records(result.stdout)
+
+    @staticmethod
+    def _parse_batched_agent_records(output: str) -> list[dict[str, Any]]:
+        """Parse the (sentinel, path, content) chunks produced by list_persisted_agent_data."""
+        if not output.strip():
+            return []
         agent_records: list[dict[str, Any]] = []
-        for line in result.stdout.splitlines():
-            file_path = line.strip()
-            if not file_path:
+        # Anything before the first sentinel is ignorable noise (e.g. a stray
+        # ls warning); the [1:] slice drops it.
+        for chunk in output.split(_AGENT_FILE_SEP)[1:]:
+            head, _, content = chunk.partition("\n")
+            file_path = head.strip()
+            if not file_path or not content.strip():
                 continue
             try:
-                content = self.outer.read_text_file(Path(file_path))
                 agent_records.append(json.loads(content))
-            except (FileNotFoundError, OSError, MngrError, json.JSONDecodeError) as e:
+            except json.JSONDecodeError as e:
                 logger.warning("Skipped invalid agent record {}: {}", file_path, e)
         return agent_records
 
