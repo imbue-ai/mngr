@@ -12,6 +12,9 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Added: New bundled `minds-api-proxy` latchkey gateway extension that reverse-proxies requests under `/minds-api-proxy` to the minds desktop client's bare-origin Minds API, with the upstream URL read at request time from `LATCHKEY_EXTENSION_MINDS_API_URL`; `LatchkeyForwardSupervisor.extra_env` publishes the env var to the detached supervisor on every `minds run` startup.
 - Added: `POST /permission-requests/approve/<request_id>` endpoint that merges the pending request's `effect.rules` + `effect.schemas` into the stored `target` permissions.json.
 - Added: New `GET /permissions/available` / `GET /permissions/available/<service_name>` catalog endpoints, backed by a `services.json` data file materialized alongside the `.mjs` extensions at gateway-spawn time.
+- Added: `permissions` extension grew `POST /permissions/schemas?path=<file>&schema_name=<name>` (add/replace inline schema) and `DELETE /permissions/schemas?path=<file>&schema_name=<name>` (remove). Schema names must match `^[A-Za-z0-9][A-Za-z0-9._-]*$` so they round-trip safely through URL path segments.
+- Added: `agent_minds_api_proxy_scope_name(agent_id)`, `agent_minds_api_proxy_permission_name(agent_id)`, and `build_agent_minds_api_proxy_schemas(agent_id)` helpers exposing the per-agent scope, permission, and inline schemas that the desktop client adds on top of the baseline.
+- Added: Agent baseline (`_AGENT_BASELINE_PERMISSIONS`) ships an extra schema out of the box so every minds-created agent can `POST /minds-api-proxy/api/v1/agents/<...>/notifications`.
 
 ### Changed
 
@@ -24,6 +27,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Changed: `LatchkeyGatewayClient.get_available_services` now returns a typed `dict[str, AvailableServiceEntry]` (pydantic-validated) instead of an untyped `dict[str, object]`.
 - Changed: Stop caching the latchkey per-directory encryption key on the long-lived `Latchkey` pydantic model; `Latchkey._load_encryption_key()` reads (and on first call mints) the key on every subprocess-spawn call so the secret only lives in parent memory for the duration of one env-builder call frame.
 - Changed: `load_or_create_encryption_key` now validates the on-disk key file's permission bits every load; any group/other access raises `LatchkeyEncryptionKeyPermissionError` with a `chmod 600 <path>` hint.
+- Changed: `minds-api-proxy` gateway extension now authenticates forwarded requests to the upstream Minds API on the agent's behalf — when `LATCHKEY_EXTENSION_MINDS_API_KEY` is set it overwrites the inbound `Authorization` header with `Bearer <key>`, so agents never see the key and cannot spoof one. With the env var unset, the header is forwarded unchanged (used by tests).
 
 ### Fixed
 

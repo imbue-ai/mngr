@@ -4,6 +4,17 @@ Full, unedited changelog entries for the `mngr_notifications` project, consolida
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-05-26
+
+- Pruned non-notable entries (test-only changes, internal refactors, and doc-only tweaks with no user-facing effect) from this project's CHANGELOG.md, per the new notable-only changelog policy.
+
+Adopted the `PREVENT_BARE_TMUX_TARGETS` ratchet rule (added in `imbue_common`) via
+`rc.check_bare_tmux_targets(_DIR, snapshot(0))` in this project's `test_ratchets.py`.
+This ratchet prevents new occurrences of `tmux <subcmd> -t '<bare-name>'` -- targets
+without a leading `=` exact-match prefix, which can silently route commands to a
+sibling session whose name shares a prefix with the intended one. No production code
+changes in this project; the adopting test starts at a baseline of zero violations.
+
 ## 2026-05-22
 
 ## Recognize the indirect "now waiting" transition

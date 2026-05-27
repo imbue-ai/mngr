@@ -37,6 +37,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Changed: `mngr create --provider lima` help text now shows `--memory=N` / `--disk=N` (plain integers).
 - Changed: mngr's generated `~/.mngr/tmux.conf` widens `status-left-length` to 20 so a full `mngr-…` session name shows in the status bar.
 - Changed: Discovery polling no longer retries failures at the top level — providers retry their own transient failures before raising.
+- Changed: Replaced the `gemini` entry in `PLUGIN_CATALOG` with `antigravity`; `AntigravitySignalCheck` detects the new CLI via `agy --version`.
 
 ### Removed
 
