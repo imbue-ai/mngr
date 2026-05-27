@@ -294,28 +294,8 @@ may ask them questions at that point.
 """
 
 
-def build_local_integrator_prompt(fix_branches: list[str]) -> str:
-    """Build the integrator prompt for the local provider case.
-
-    The fix branches already exist in the integrator's shared local repo
-    (created locally by the orchestrator from each test agent's bundle).
-    The integrator only has to cherry-pick them and publish its outputs.
-    """
-    branch_list = "\n".join(f"  - {b}" for b in fix_branches)
-    return f"""Integrate the following branches into a single linear commit stack:
-{branch_list}
-
-These branches already exist in this local git repository.
-
-{_INTEGRATOR_CHERRY_PICK_INSTRUCTIONS}
-
-{_INTEGRATOR_OUTCOME_SECTION}
-
-{_INTEGRATOR_DO_NOT_ASK}"""
-
-
-def build_remote_integrator_prompt() -> str:
-    """Build the integrator prompt for the remote-provider case.
+def build_integrator_prompt() -> str:
+    """Build the integrator's initial message.
 
     The orchestrator has rsynced the per-test-agent output directories under
     ``INTEGRATOR_INPUTS_DIRNAME`` in the integrator's work_dir, each subdir

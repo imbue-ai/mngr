@@ -86,8 +86,7 @@ def _apply_branch_bundle(
     The bundle was created with ``git bundle create ... <base>..<branch>``,
     so it carries the ref under its branch name; the fetch refspec maps
     that ref onto the same local branch name. Idempotent for repeated
-    invocations and a no-op on the local provider (where the branch
-    already exists in the worktree-sharing repo).
+    invocations.
     """
     result = cg.run_process_to_completion(
         ["git", "fetch", "--no-tags", str(bundle_path), f"+{branch_name}:{branch_name}"],

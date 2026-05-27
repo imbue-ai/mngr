@@ -39,13 +39,11 @@ from imbue.mngr_tmr.data_types import AgentMetadata
 from imbue.mngr_tmr.data_types import TestAgentInfo
 from imbue.mngr_tmr.data_types import TmrLaunchConfig
 from imbue.mngr_tmr.prompts import INTEGRATOR_INPUTS_DIRNAME
-from imbue.mngr_tmr.prompts import build_local_integrator_prompt
-from imbue.mngr_tmr.prompts import build_remote_integrator_prompt
+from imbue.mngr_tmr.prompts import build_integrator_prompt
 from imbue.mngr_tmr.prompts import build_test_agent_prompt
 from imbue.mngr_tmr.utils import dedup_name
 from imbue.mngr_tmr.utils import resolve_templates
 from imbue.mngr_tmr.utils import sanitize_test_name_for_agent
-from imbue.mngr_tmr.utils import transfer_mode_for_provider
 
 _AGENT_CREATION_TIMEOUT_SECONDS = 600.0
 
@@ -120,7 +118,7 @@ def _build_agent_options(
     kind: AgentKind,
     initial_message: str | None = None,
     target_path: Path | None = None,
-    transfer_mode: TransferMode | None = None,
+    transfer_mode: TransferMode = TransferMode.GIT_MIRROR,
 ) -> CreateAgentOptions:
     """Build CreateAgentOptions for a tmr agent.
 
@@ -129,11 +127,13 @@ def _build_agent_options(
 
     ``target_path`` overrides where the agent's work_dir is placed on the
     host (used to pin the snapshotter to ``/code``). ``transfer_mode``
-    overrides the provider default (used to switch test agents to
-    git-worktree when sourcing from the host's own ``/code``).
+    defaults to ``GIT_MIRROR`` for every provider (including local) so that
+    agent branches are kept in the agent's own clone and surface in the
+    source repo only via the published bundle -- the orchestrator code path
+    is then identical across providers. Callers override to ``GIT_WORKTREE``
+    when source and target live on the same host (e.g. when an agent built
+    from a snapshot sources from the host's own ``/code``).
     """
-    if transfer_mode is None:
-        transfer_mode = transfer_mode_for_provider(config.provider_name)
     is_remote = config.provider_name.lower() != LOCAL_PROVIDER_NAME
     label_options = AgentLabelOptions(labels={**config.label_options.labels, _ROLE_LABEL_KEY: kind.value})
     return CreateAgentOptions(
@@ -520,27 +520,22 @@ def launch_integrator_agent(
 ) -> tuple[TestAgentInfo, OnlineHostInterface]:
     """Launch an integrator agent that cherry-picks fix branches into a linear stack.
 
-    On the local provider the fix branches already exist in the shared local
-    repo (each test agent's branch bundle was applied during finalization), so
-    the integrator gets the cherry-pick prompt directly as its initial message.
-
-    On any other provider the integrator's host has no knowledge of those
-    branches, so we rsync the local ``output_dir`` (which holds every test
-    agent's extracted ``test_output/`` and ``branch.bundle``) into
-    ``<work_dir>/INTEGRATOR_INPUTS_DIRNAME/`` on the integrator host, then
-    deliver the remote variant of the integrator prompt via ``send_message``.
-    The remote prompt walks that input directory, filters bundles by the
-    should-pull predicate, fetches them into local branches, and cherry-picks.
+    Test agents always run with ``GIT_MIRROR`` transfer mode (see
+    ``_build_agent_options``), so their branches never appear in the
+    orchestrator's source repo automatically -- the only way the integrator
+    gets at them is via the per-agent ``branch.bundle`` files that the
+    orchestrator has already pulled and extracted under ``output_dir``. The
+    integrator host has no knowledge of those branches either, so we rsync
+    ``output_dir`` into ``<work_dir>/INTEGRATOR_INPUTS_DIRNAME/`` and deliver
+    the integrator prompt via ``send_message``. The prompt walks that input
+    directory, applies the should-pull predicate to filter, fetches the
+    qualifying bundles into local branches, and cherry-picks. ``fix_branches``
+    is currently informational -- the integrator filters from the inputs dir
+    rather than consuming this list -- but is retained for the log line.
     """
     agent_name = AgentName(f"tmr-{run_name}-integrator")
     branch_name = f"mngr-tmr/{run_name}/integrated"
     host_name = HostName(f"tmr-{run_name}-integrator")
-    is_local = config.provider_name.lower() == LOCAL_PROVIDER_NAME
-
-    if is_local:
-        initial_message: str | None = build_local_integrator_prompt(fix_branches)
-    else:
-        initial_message = None
 
     logger.info("Launching integrator agent '{}' to integrate {} branches", agent_name, len(fix_branches))
     create_result = _create_tmr_agent(
@@ -549,25 +544,24 @@ def launch_integrator_agent(
         config=config,
         mngr_ctx=mngr_ctx,
         kind=AgentKind.INTEGRATOR,
-        initial_message=initial_message,
+        initial_message=None,
         host_name=host_name,
     )
 
-    if not is_local:
-        destination = create_result.agent.work_dir / INTEGRATOR_INPUTS_DIRNAME
-        logger.info("Rsyncing integrator inputs to '{}:{}'", create_result.host.id, destination)
-        push_files(
-            agent=create_result.agent,
-            host=create_result.host,
-            source=output_dir,
-            destination_path=destination,
-            is_dry_run=False,
-            is_delete=False,
-            uncommitted_changes=UncommittedChangesMode.CLOBBER,
-            cg=mngr_ctx.concurrency_group,
-        )
-        logger.info("Sending integrator prompt to '{}'", agent_name)
-        create_result.agent.send_message(build_remote_integrator_prompt())
+    destination = create_result.agent.work_dir / INTEGRATOR_INPUTS_DIRNAME
+    logger.info("Rsyncing integrator inputs to '{}:{}'", create_result.host.id, destination)
+    push_files(
+        agent=create_result.agent,
+        host=create_result.host,
+        source=output_dir,
+        destination_path=destination,
+        is_dry_run=False,
+        is_delete=False,
+        uncommitted_changes=UncommittedChangesMode.CLOBBER,
+        cg=mngr_ctx.concurrency_group,
+    )
+    logger.info("Sending integrator prompt to '{}'", agent_name)
+    create_result.agent.send_message(build_integrator_prompt())
 
     return (
         TestAgentInfo(

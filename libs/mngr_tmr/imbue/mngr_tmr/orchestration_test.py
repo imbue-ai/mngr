@@ -18,15 +18,13 @@ from imbue.mngr_tmr.data_types import TmrLaunchConfig
 from imbue.mngr_tmr.launching import _build_agent_options
 from imbue.mngr_tmr.prompts import INTEGRATOR_INPUTS_DIRNAME
 from imbue.mngr_tmr.prompts import TESTING_AGENT_OUTCOME_FILENAME
-from imbue.mngr_tmr.prompts import build_local_integrator_prompt
-from imbue.mngr_tmr.prompts import build_remote_integrator_prompt
+from imbue.mngr_tmr.prompts import build_integrator_prompt
 from imbue.mngr_tmr.prompts import build_test_agent_prompt
 from imbue.mngr_tmr.utils import CollectTestsError
 from imbue.mngr_tmr.utils import collect_tests
 from imbue.mngr_tmr.utils import dedup_name
 from imbue.mngr_tmr.utils import make_run_name
 from imbue.mngr_tmr.utils import sanitize_test_name_for_agent
-from imbue.mngr_tmr.utils import transfer_mode_for_provider
 
 
 def test_make_run_name_format() -> None:
@@ -83,15 +81,6 @@ def test_sanitize_single_part() -> None:
     assert result == "simple-test"
 
 
-def test_transfer_mode_local_provider_uses_git_worktree() -> None:
-    assert transfer_mode_for_provider(ProviderInstanceName("local")) == TransferMode.GIT_WORKTREE
-
-
-def test_transfer_mode_remote_provider_uses_git_mirror() -> None:
-    assert transfer_mode_for_provider(ProviderInstanceName("docker")) == TransferMode.GIT_MIRROR
-    assert transfer_mode_for_provider(ProviderInstanceName("modal")) == TransferMode.GIT_MIRROR
-
-
 def _make_config(provider: str = "local", snapshot: SnapshotName | None = None) -> TmrLaunchConfig:
     """Build a TmrLaunchConfig for unit testing.
 
@@ -115,10 +104,12 @@ def test_build_agent_options_rsync_disabled() -> None:
     assert opts.data_options.is_rsync_enabled is False
 
 
-def test_build_agent_options_local_uses_worktree() -> None:
+def test_build_agent_options_local_uses_git_mirror() -> None:
+    """Local agents use GIT_MIRROR so their branches stay in their own clones,
+    keeping the orchestrator's bundle-pull path identical across providers."""
     opts = _build_agent_options(AgentName("test"), "branch", _make_config("local"), AgentKind.TESTING_AGENT)
     assert opts.git is not None
-    assert opts.transfer_mode == TransferMode.GIT_WORKTREE
+    assert opts.transfer_mode == TransferMode.GIT_MIRROR
 
 
 def test_build_agent_options_remote_uses_git_mirror() -> None:
@@ -250,21 +241,11 @@ def test_collect_tests_bad_file_raises(tmp_path: Path, cg: ConcurrencyGroup) -> 
 # --- integrator prompt tests ---
 
 
-def test_local_integrator_prompt_lists_branches() -> None:
-    branches = ["mngr-tmr/r/a", "mngr-tmr/r/b"]
-    prompt = build_local_integrator_prompt(branches)
-    for branch in branches:
-        assert branch in prompt
-    assert "already exist" in prompt
-    assert "cherry-pick" in prompt.lower()
-    assert "outputs.tar.gz" in prompt
-
-
-def test_remote_integrator_prompt_references_inputs_dir_and_predicate() -> None:
-    prompt = build_remote_integrator_prompt()
+def test_integrator_prompt_references_inputs_dir_and_predicate() -> None:
+    prompt = build_integrator_prompt()
     assert INTEGRATOR_INPUTS_DIRNAME in prompt
     assert TESTING_AGENT_OUTCOME_FILENAME in prompt
-    # The remote prompt must encode the should-pull predicate itself.
+    # The integrator must encode the should-pull predicate itself.
     assert "SUCCEEDED" in prompt
     assert "tests_passing_before" in prompt
     assert "tests_passing_after" in prompt
