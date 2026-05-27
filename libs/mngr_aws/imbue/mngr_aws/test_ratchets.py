@@ -277,3 +277,7 @@ def test_prevent_hardcoded_guarded_binary() -> None:
 
 def test_prevent_bare_urwid_tty_signal_keys() -> None:
     rc.check_bare_urwid_tty_signal_keys(_DIR, snapshot(0))
+
+
+def test_prevent_bare_tmux_targets() -> None:
+    rc.check_bare_tmux_targets(_DIR, snapshot(0))

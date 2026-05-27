@@ -31,6 +31,7 @@ from contextlib import contextmanager
 from datetime import datetime
 from datetime import timezone
 from typing import Any
+from typing import cast
 
 import pytest
 from pydantic import Field
@@ -156,7 +157,10 @@ class _DiscoveryTestProvider(VpsDockerProvider):
         if exc is not None:
             raise exc
         if vps_ip in self.state_container_ready:
-            yield _DummyOuter()
+            # _DummyOuter is a duck-typed stand-in (never actually accessed); cast
+            # to satisfy the OuterHostInterface yield type, matching the sibling
+            # vps_docker tests (e.g. _outer_helpers_test, instance_test).
+            yield cast(OuterHostInterface, _DummyOuter())
             return
         raise AssertionError(f"unexpected _make_outer_for_vps_ip call for {vps_ip!r}")
 
