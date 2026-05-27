@@ -39,15 +39,19 @@ def test_cli_help_contains_provider_env_label_options(cli_runner: CliRunner) -> 
     assert "--env" in result.output
     assert "--label" in result.output
     assert "--prompt-suffix" in result.output
-    assert "--use-snapshot" in result.output
 
 
-def test_cli_help_no_longer_has_integrator_specific_options(cli_runner: CliRunner) -> None:
-    """Integrator now follows --provider and inherits the test-agent type/templates."""
+def test_cli_help_drops_removed_options(cli_runner: CliRunner) -> None:
+    """The integrator-specific flags and --use-snapshot are gone.
+
+    The integrator follows --provider and the test-agent type/templates;
+    snapshot building is automatic when the provider supports it.
+    """
     result = cli_runner.invoke(tmr, ["--help"])
     assert "--integrator-provider" not in result.output
     assert "--integrator-type" not in result.output
     assert "--integrator-template" not in result.output
+    assert "--use-snapshot" not in result.output
 
 
 def test_cli_help_contains_timeout_options(cli_runner: CliRunner) -> None:

@@ -360,7 +360,6 @@ def launch_all_test_agents(
     launch_failures: list[AgentMetadata],
     run_name: str,
     prompt_suffix: str = "",
-    use_snapshot: bool = False,
     max_parallel: int = 4,
     launch_delay_seconds: float = 2.0,
     agents_per_host: int = 4,
@@ -371,6 +370,12 @@ def launch_all_test_agents(
     host. Hosts are pre-created in a pool and agents are assigned round-robin.
     For local providers, this setting is ignored (all agents share localhost).
 
+    When the provider supports snapshots (e.g. modal) and the caller has not
+    pre-supplied one via ``config.snapshot``, a snapshot host is built first
+    and the resulting snapshot ID is propagated into ``launch_config`` so all
+    other agents are launched from it. Providers without snapshot support
+    (local, docker, ...) skip this step silently.
+
     Per-test launch failures are appended (in place) to ``launch_failures`` so
     they can be surfaced in the report.
     """
@@ -378,7 +383,7 @@ def launch_all_test_agents(
     agent_hosts: dict[str, OnlineHostInterface] = {}
 
     launch_config = config
-    if use_snapshot:
+    if config.snapshot is None:
         provider = get_provider_instance(config.provider_name, mngr_ctx)
         if provider.supports_snapshots:
             try:
@@ -386,11 +391,6 @@ def launch_all_test_agents(
                 launch_config = config.model_copy_update(to_update(config.field_ref().snapshot, snapshot_name))
             except (MngrError, HostError, OSError, BaseExceptionGroup) as exc:
                 logger.warning("Failed to create snapshot, launching agents without snapshot: {}", exc)
-        else:
-            logger.warning(
-                "Provider '{}' does not support snapshots, launching all agents without snapshot",
-                config.provider_name,
-            )
 
     is_local = launch_config.provider_name.lower() == LOCAL_PROVIDER_NAME
     host_pool: list[OnlineHostInterface] = []
