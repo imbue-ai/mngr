@@ -130,7 +130,7 @@ function copyGitCoreDereferencingSymlinks(srcDir, destDir) {
         copyGitCoreDereferencingSymlinks(realTarget, destPath);
       } else {
         fs.copyFileSync(realTarget, destPath);
-        fs.chmodSync(destPath, 0o755);
+        fs.chmodSync(destPath, realStats.mode);
       }
     } else if (entry.isDirectory()) {
       fs.mkdirSync(destPath, { recursive: true });
