@@ -67,7 +67,7 @@ def tmr(ctx: click.Context, **kwargs: object) -> None:
         pytest_args=opts.pytest_args,
         testing_flags=opts.testing_flags,
         prompt_suffix=opts.prompt_suffix or "",
-    )  # type: ignore[call-arg]
+    )
     run_mapreduce(recipe, opts, mngr_ctx, output_opts)
 
 

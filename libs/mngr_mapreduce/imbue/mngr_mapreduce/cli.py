@@ -46,6 +46,7 @@ from imbue.mngr_mapreduce.data_types import AgentMetadata
 from imbue.mngr_mapreduce.data_types import LaunchConfig
 from imbue.mngr_mapreduce.data_types import MapReduceContext
 from imbue.mngr_mapreduce.data_types import MapReduceRecipe
+from imbue.mngr_mapreduce.data_types import MapReduceTask
 from imbue.mngr_mapreduce.data_types import MapperInfo
 from imbue.mngr_mapreduce.launching import launch_all_mappers
 from imbue.mngr_mapreduce.launching import launch_reducer_agent
@@ -458,7 +459,7 @@ def _run_pipeline(
     mngr_ctx: MngrContext,
     output_opts: OutputOptions,
     config: LaunchConfig,
-    tasks: list,  # list[MapReduceTask] -- avoid an extra import at the top
+    tasks: list[MapReduceTask],
 ) -> None:
     """Launch + poll + reduce + report.
 

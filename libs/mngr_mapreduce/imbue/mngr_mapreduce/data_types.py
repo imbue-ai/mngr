@@ -208,7 +208,7 @@ class MapReduceRecipe(ABC):
         agnostic subdir), and then sends this prompt as a follow-up message.
         """
 
-    def on_mapper_finalized(self, ctx: MapReduceContext, agent_dir: Path, info: MapperInfo) -> None:  # noqa: B027
+    def on_mapper_finalized(self, ctx: MapReduceContext, agent_dir: Path, info: MapperInfo) -> None:
         """Called after a mapper's outputs archive has been extracted.
 
         ``agent_dir`` is ``ctx.output_dir / info.agent_name``. The agent is
@@ -216,15 +216,16 @@ class MapReduceRecipe(ABC):
         after this returns. Exceptions are logged by the framework but do
         not abort the run.
 
-        Default impl is a no-op; B027 is suppressed because skipping this
-        hook is a valid choice for recipes that don't need post-mapper work.
+        Default impl is a no-op.
         """
+        return None
 
-    def on_reducer_finalized(self, ctx: MapReduceContext, agent_dir: Path, info: ReducerInfo) -> None:  # noqa: B027
+    def on_reducer_finalized(self, ctx: MapReduceContext, agent_dir: Path, info: ReducerInfo) -> None:
         """Called after the reducer's outputs archive has been extracted.
 
         Same contract as ``on_mapper_finalized``. Default impl is a no-op.
         """
+        return None
 
     @abstractmethod
     def render_report(

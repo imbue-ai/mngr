@@ -60,6 +60,26 @@ def _run_render_report(
         maybe_upload_report(report_path, ctx.run_name)
 
 
+def _render_polling_tick(
+    recipe: MapReduceRecipe,
+    ctx: MapReduceContext,
+    all_agents: list[MapperInfo],
+    timed_out_ids: set[str],
+    launch_failures: list[AgentMetadata],
+) -> None:
+    """Render the report for the current mid-poll state.
+
+    Builds a fresh metadata list (launch failures + per-agent rows) so the
+    recipe's renderer sees the current state, including timed-out agents
+    that don't have any extracted outputs on disk.
+    """
+    metadata: list[AgentMetadata] = list(launch_failures)
+    for info in all_agents:
+        error = "Agent was stopped because the timeout was reached." if str(info.agent_id) in timed_out_ids else None
+        metadata.append(_mapper_metadata_for(info, error_summary=error))
+    _run_render_report(recipe, ctx, metadata, reducer=None)
+
+
 def _finalize_mapper(
     recipe: MapReduceRecipe,
     ctx: MapReduceContext,
@@ -139,18 +159,6 @@ def launch_and_poll_mappers(
         agent_id_to_info[agent_id_str] = info
         pending_ids.add(agent_id_str)
 
-    def render() -> None:
-        # Build a fresh per-tick metadata list (launch failures + per-agent rows)
-        # so the recipe's renderer sees the current state, including timed-out
-        # agents that don't have any extracted outputs on disk.
-        metadata: list[AgentMetadata] = list(launch_failures)
-        for info in all_agents:
-            error = (
-                "Agent was stopped because the timeout was reached." if str(info.agent_id) in timed_out_ids else None
-            )
-            metadata.append(_mapper_metadata_for(info, error_summary=error))
-        _run_render_report(recipe, ctx, metadata, reducer=None)
-
     launch_kwargs: dict = {
         "recipe": recipe,
         "ctx": ctx,
@@ -168,7 +176,7 @@ def launch_and_poll_mappers(
     }
 
     launch_mappers_up_to_limit(**launch_kwargs)
-    render()
+    _render_polling_tick(recipe, ctx, all_agents, timed_out_ids, launch_failures)
 
     while pending_ids or remaining_tasks:
         now = time.monotonic()
@@ -201,7 +209,7 @@ def launch_and_poll_mappers(
         launch_mappers_up_to_limit(**launch_kwargs)
 
         if changed:
-            render()
+            _render_polling_tick(recipe, ctx, all_agents, timed_out_ids, launch_failures)
 
         if not pending_ids and not remaining_tasks:
             break
