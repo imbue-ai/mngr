@@ -40,7 +40,6 @@ from imbue.mngr.cli.create import create as create_command
 from imbue.mngr.config.consts import PROFILES_DIRNAME
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
-from imbue.mngr.config.loader import get_or_create_profile_dir
 from imbue.mngr.errors import ConfigStructureError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.hosts.tmux import TmuxWindowTarget
@@ -66,8 +65,6 @@ from imbue.mngr.providers.registry import load_local_backend_only
 from imbue.mngr.utils.env_utils import TEST_ENV_PATTERN
 from imbue.mngr.utils.env_utils import TEST_ENV_PREFIX
 from imbue.mngr.utils.polling import wait_for
-from imbue.mngr.utils.toml_config import load_config_file_tomlkit
-from imbue.mngr.utils.toml_config import save_config_file
 
 # =============================================================================
 # Resource tracking lists for cleanup verification
@@ -377,27 +374,6 @@ def assert_home_is_temp_directory() -> None:
         )
 
 
-def seed_pytest_allowed_config(host_dir: Path) -> None:
-    """Seed an isolated test host_dir so configs loaded from it pass the pytest guard.
-
-    ``MngrConfig.is_allowed_in_pytest`` defaults to False, so ``load_config``
-    refuses to run during a pytest run unless the resolved config opts in (this
-    keeps a leaked real config -- the developer's ~/.mngr or the repo's
-    .mngr/settings.toml -- from being picked up by a poorly-scoped test). Tests
-    run mngr (in process and as subprocesses) against isolated tmp host dirs, so
-    we write a minimal user config there that sets ``is_allowed_in_pytest = true``.
-
-    The write is idempotent and preserves any other content already in the
-    profile's settings.toml, so it is safe to call repeatedly and safe for tests
-    that subsequently add their own keys to the same file.
-    """
-    profile_dir = get_or_create_profile_dir(host_dir)
-    settings_path = profile_dir / "settings.toml"
-    settings_doc = load_config_file_tomlkit(settings_path)
-    settings_doc["is_allowed_in_pytest"] = True
-    save_config_file(settings_path, settings_doc)
-
-
 def setup_mngr_test_environment(
     home_dir: Path,
     host_dir: Path,
@@ -420,11 +396,6 @@ def setup_mngr_test_environment(
     monkeypatch.setenv("MNGR_PREFIX", prefix)
     monkeypatch.setenv("MNGR_ROOT_NAME", root_name)
     monkeypatch.delenv("MNGR_PROJECT_CONFIG_DIR", raising=False)
-
-    # Opt this host_dir's config into pytest runs (is_allowed_in_pytest defaults
-    # to False). Subprocesses launched by the test that inherit this MNGR_HOST_DIR
-    # pick up the same opt-in.
-    seed_pytest_allowed_config(host_dir)
 
     # Unison derives its config directory from $HOME. Since we override HOME
     # above, unison tries to create its config dir inside the temp home, which
@@ -474,11 +445,6 @@ def get_subprocess_test_env(
         env["MNGR_PREFIX"] = prefix
     if host_dir is not None:
         env["MNGR_HOST_DIR"] = str(host_dir)
-        # This is a fresh host_dir, so seed its config to opt into pytest runs
-        # (is_allowed_in_pytest defaults to False). When host_dir is None the
-        # subprocess inherits MNGR_HOST_DIR, which the autouse fixture already
-        # seeded via setup_mngr_test_environment.
-        seed_pytest_allowed_config(host_dir)
     return env
 
 

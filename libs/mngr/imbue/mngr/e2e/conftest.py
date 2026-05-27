@@ -254,11 +254,10 @@ def _setup_test_profile(host_dir: Path) -> str:
     config_path = host_dir / ROOT_CONFIG_FILENAME
     config_path.write_text(f'profile = "{profile_id}"\n')
 
-    # Opt this profile's config into pytest runs. is_allowed_in_pytest defaults
-    # to False, and the subprocess mngr inherits PYTEST_CURRENT_TEST, so without
-    # this the config loader would refuse to run. This profile overrides the one
-    # the autouse fixture seeded (it points config.toml at a fresh profile_id),
-    # so the opt-in has to be written here too.
+    # Opt this profile's config into pytest runs. The subprocess mngr inherits
+    # PYTEST_CURRENT_TEST and loads this profile's settings.toml, so without
+    # is_allowed_in_pytest = true (it defaults to False) the config loader would
+    # refuse to run.
     (profile_dir / "settings.toml").write_text("is_allowed_in_pytest = true\n")
 
     # Build a user_id that produces a Modal environment name matching the

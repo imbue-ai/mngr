@@ -125,13 +125,17 @@ def load_config(
     if strict is None:
         strict = resolve_strict_from_env()
 
-    # Load and merge config files in precedence order (user, project, local)
+    # Load and merge config files in precedence order (user, project, local).
+    # Track whether any config file was actually present so the pytest guard
+    # below only fires when a config was picked up (see that check).
+    is_any_config_file_loaded = False
     for raw in (
         try_load_toml(get_user_config_path(profile_dir)),
         load_project_config(context_dir, root_name, concurrency_group),
         load_local_config(context_dir, root_name, concurrency_group),
     ):
         if raw is not None:
+            is_any_config_file_loaded = True
             config = config.merge_with(
                 parse_config(
                     raw, disabled_plugins=config_disabled_plugins, strict=strict, silent=silent_unknown_fields
@@ -223,20 +227,20 @@ def load_config(
     # Validate and apply defaults using normal constructor
     final_config = MngrConfig.model_validate(config_dict)
 
-    # Refuse to run during pytest unless the loaded config explicitly opts in.
-    # is_allowed_in_pytest defaults to False, so a real config (the developer's
-    # ~/.mngr or the repo's .mngr/settings.toml) that a poorly-scoped test picks
-    # up trips this guard instead of being used to perform real operations.
-    # Configs written specifically for tests set is_allowed_in_pytest = true; the
-    # shared test fixtures (setup_mngr_test_environment / get_subprocess_test_env)
-    # seed each isolated tmp host_dir with such a user config, so a properly
-    # scoped test always opts in while a leaked real config never does.
-    if not final_config.is_allowed_in_pytest and "PYTEST_CURRENT_TEST" in os.environ:
+    # Refuse to run during pytest when a config file was picked up that did not
+    # opt in. is_allowed_in_pytest defaults to False, so a real config (the
+    # developer's ~/.mngr or the repo's .mngr/settings.toml) loaded by a
+    # poorly-scoped test trips this guard instead of being used to perform real
+    # operations. The guard only fires when an actual config file was loaded:
+    # if nothing was picked up, there is no real config to protect against, so a
+    # test that loads no config file runs fine without any opt-in. Configs
+    # written specifically for tests set is_allowed_in_pytest = true.
+    if is_any_config_file_loaded and not final_config.is_allowed_in_pytest and "PYTEST_CURRENT_TEST" in os.environ:
         raise ConfigParseError(
             "Running mngr within pytest is not allowed by the current configuration. "
-            "A config must set is_allowed_in_pytest = true to be loaded during a pytest "
-            "run; the shared test fixtures provide this for isolated tmp host dirs. If you "
-            "are seeing this, a test is loading a config that was not written for testing."
+            "A config file was loaded that does not set is_allowed_in_pytest = true. If this "
+            "is a test config, set that field; if you are seeing this unexpectedly, a test is "
+            "loading a config that was not written for testing."
         )
 
     # Resolve project root for use as cwd in pre-command scripts.

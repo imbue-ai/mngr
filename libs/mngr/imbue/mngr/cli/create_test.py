@@ -71,6 +71,8 @@ def _write_agent_type_command_to_settings(settings_path: Path, type_name: str, c
     declare a lightweight agent type do not need a top-level helper.
     """
     settings_doc = load_config_file_tomlkit(settings_path)
+    # Opt this loaded config into the pytest run (is_allowed_in_pytest defaults to False).
+    settings_doc["is_allowed_in_pytest"] = True
     agent_types = settings_doc.setdefault("agent_types", tomlkit.table())
     type_table = tomlkit.table()
     type_table["command"] = command
