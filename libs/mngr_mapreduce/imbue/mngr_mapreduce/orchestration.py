@@ -9,19 +9,14 @@ place where content-aware interpretation happens.
 
 import time
 from pathlib import Path
-from types import TracebackType
 
 from loguru import logger
-from pydantic import ConfigDict
-from pydantic import Field
 
-from imbue.concurrency_group.thread_utils import ObservableThread
-from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import AgentId
-from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr_mapreduce.background_stopper import BackgroundStopper
 from imbue.mngr_mapreduce.data_types import AgentKind
 from imbue.mngr_mapreduce.data_types import AgentMetadata
 from imbue.mngr_mapreduce.data_types import LaunchConfig
@@ -31,87 +26,8 @@ from imbue.mngr_mapreduce.data_types import MapReduceTask
 from imbue.mngr_mapreduce.data_types import MapperInfo
 from imbue.mngr_mapreduce.data_types import ReducerInfo
 from imbue.mngr_mapreduce.launching import launch_mappers_up_to_limit
-from imbue.mngr_mapreduce.launching import stop_agent_on_host
 from imbue.mngr_mapreduce.pulling import is_agent_outputs_ready
 from imbue.mngr_mapreduce.pulling import pull_agent_outputs
-
-_STOP_DRAIN_TIMEOUT_SECONDS = 60.0
-
-
-class _BackgroundStopper(MutableModel):
-    """Fire-and-forget ``stop_agent_on_host`` calls so a slow stop can't wedge the polling loop.
-
-    Production scenario: with a remote provider (e.g. Modal), an agent can
-    publish its outputs archive to its volume and then have the underlying
-    sandbox torn down before the polling loop notices. The post-finalize
-    ``stop_agents`` SSH call then blocks on the kernel's TCP retransmit
-    timeout -- observed at ~16 minutes per call -- which serializes the
-    loop and starves it of observed finalizations. With 80 mappers under a
-    4h GHA cap, the previous synchronous path left ~50 mappers unfinalized.
-
-    Each ``submit`` spawns a daemon ``ObservableThread`` running
-    ``stop_agent_on_host`` and returns immediately. The stopper context-exits
-    with a bounded drain so a clean run still waits briefly for in-flight
-    stops to finalize; any that haven't returned by then are abandoned (the
-    provider reaps stale sandboxes via its own lifecycle independent of our
-    cleanup).
-    """
-
-    model_config = ConfigDict(arbitrary_types_allowed=True)
-
-    drain_timeout_seconds: float = Field(
-        default=_STOP_DRAIN_TIMEOUT_SECONDS,
-        description="How long ``__exit__`` waits for in-flight stops before giving up.",
-    )
-    threads: list[ObservableThread] = Field(
-        default_factory=list,
-        description="Threads spawned by ``submit``, joined on ``__exit__``.",
-    )
-
-    def submit(self, host: OnlineHostInterface, agent_id: AgentId, agent_name: AgentName) -> None:
-        thread = ObservableThread(
-            target=stop_agent_on_host,
-            args=(host, agent_id, agent_name),
-            name=f"stop-{agent_name}",
-            # Anything that escapes ``stop_agent_on_host``'s own ``(MngrError, HostError)``
-            # catch (e.g. an unwrapped ``OSError`` from paramiko) is logged via
-            # ObservableThread's error logger, but we don't want it to crash the drain
-            # ``join()`` -- the stops are best-effort cleanup.
-            suppressed_exceptions=(BaseException,),
-        )
-        thread.start()
-        self.threads.append(thread)
-
-    def __enter__(self) -> "_BackgroundStopper":
-        return self
-
-    def __exit__(
-        self,
-        exc_type: type[BaseException] | None,
-        exc_val: BaseException | None,
-        exc_tb: TracebackType | None,
-    ) -> None:
-        in_flight = [t for t in self.threads if t.is_alive()]
-        if not in_flight:
-            return
-        logger.info(
-            "Waiting up to {}s for {} in-flight agent stop(s) to finish",
-            self.drain_timeout_seconds,
-            len(in_flight),
-        )
-        deadline = time.monotonic() + self.drain_timeout_seconds
-        for thread in in_flight:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                break
-            thread.join(timeout=remaining)
-        leaked = [t for t in self.threads if t.is_alive()]
-        if leaked:
-            logger.warning(
-                "Abandoned {} agent stop thread(s) after {}s drain timeout",
-                len(leaked),
-                self.drain_timeout_seconds,
-            )
 
 
 def _mapper_metadata_for(info: MapperInfo, error_summary: str | None = None) -> AgentMetadata:
@@ -170,7 +86,7 @@ def _finalize_mapper(
     provider_name: ProviderInstanceName,
     host: OnlineHostInterface,
     info: MapperInfo,
-    stopper: _BackgroundStopper,
+    stopper: BackgroundStopper,
 ) -> bool:
     """Pull a finished mapper's outputs, fire the recipe hook, and stop the agent.
 
@@ -263,7 +179,7 @@ def launch_and_poll_mappers(
     launch_mappers_up_to_limit(**launch_kwargs)
     _render_polling_tick(recipe, ctx, all_agents, timed_out_ids, launch_failures)
 
-    with _BackgroundStopper() as stopper:
+    with BackgroundStopper() as stopper:
         while pending_ids or remaining_tasks:
             now = time.monotonic()
             changed = False
@@ -344,7 +260,7 @@ def wait_for_reducer(
     extracted contents are interpreted. Returns the reducer's
     ``AgentMetadata`` either way; on timeout, ``error_summary`` is set.
     """
-    with _BackgroundStopper() as stopper:
+    with BackgroundStopper() as stopper:
         while time.monotonic() < deadline:
             if is_agent_outputs_ready(mngr_ctx, provider_name, host.id, info.agent_id):
                 logger.info("Reducer outputs archive detected, finalizing")
