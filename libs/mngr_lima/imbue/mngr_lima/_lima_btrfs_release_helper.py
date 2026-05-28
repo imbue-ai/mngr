@@ -53,6 +53,10 @@ def _build_provider(host_dir: Path, profile_dir: Path) -> tuple[LimaProviderInst
         # Small disk so the modal sandbox finishes mkfs quickly.
         host_data_disk_size="2GiB",
         default_idle_timeout=3600,
+        # Modal sandboxes have no /dev/kvm so qemu runs in TCG (software
+        # emulation). Cold boot of an Ubuntu cloud image under TCG is
+        # ~10-15 min; the default 600s is for KVM-accelerated boots.
+        vm_start_timeout_seconds=1500.0,
     )
     pm = create_plugin_manager()
     mngr_config = MngrConfig.model_construct(

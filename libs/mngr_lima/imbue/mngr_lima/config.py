@@ -79,3 +79,15 @@ class LimaProviderConfig(ProviderInstanceConfig):
         default=120.0,
         description="Timeout in seconds for waiting for SSH to be ready on the VM",
     )
+    vm_start_timeout_seconds: float = Field(
+        default=600.0,
+        description=(
+            "Maximum time (in seconds) to wait for `limactl start` to finish a "
+            "fresh VM bring-up before aborting. The default (10 min) is "
+            "generous for KVM-accelerated boots; environments without KVM "
+            "(e.g. modal sandboxes running qemu in TCG mode) often need 20+ "
+            "minutes and should bump this. Independent of the lima-side "
+            "`--timeout` start arg, which controls Lima's own internal "
+            "abort -- both have to be wide enough."
+        ),
+    )

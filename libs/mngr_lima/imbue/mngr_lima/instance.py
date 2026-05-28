@@ -469,6 +469,7 @@ sudo poweroff
                 instance_name,
                 yaml_path,
                 start_args=effective_start_args,
+                timeout=self.config.vm_start_timeout_seconds,
             )
 
             # Wait for cloud-init to complete
