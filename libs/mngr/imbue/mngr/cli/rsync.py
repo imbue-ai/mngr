@@ -6,8 +6,8 @@ from imbue.mngr.api.find import ResolvedHostLocationAddress
 from imbue.mngr.api.find import ensure_host_started
 from imbue.mngr.api.find import resolve_host_location_address
 from imbue.mngr.api.providers import get_provider_instance
-from imbue.mngr.api.sync import RsyncEndpointError
-from imbue.mngr.api.sync import rsync
+from imbue.mngr.api.rsync import RsyncEndpointError
+from imbue.mngr.api.rsync import rsync
 from imbue.mngr.cli.address_params import HOST_LOCATION_ADDRESS
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context

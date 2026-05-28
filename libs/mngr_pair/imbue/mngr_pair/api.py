@@ -15,11 +15,11 @@ from imbue.concurrency_group.errors import ProcessError
 from imbue.concurrency_group.local_process import RunningProcess
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
-from imbue.mngr.api.sync import LocalGitContext
-from imbue.mngr.api.sync import RemoteGitContext
-from imbue.mngr.api.sync import git_pull
-from imbue.mngr.api.sync import git_push
-from imbue.mngr.api.sync import stash_guard
+from imbue.mngr.api.git import LocalGitContext
+from imbue.mngr.api.git import RemoteGitContext
+from imbue.mngr.api.git import git_pull
+from imbue.mngr.api.git import git_push
+from imbue.mngr.api.git import stash_guard
 from imbue.mngr.errors import MngrError
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.host import OnlineHostInterface

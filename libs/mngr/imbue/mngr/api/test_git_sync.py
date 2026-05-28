@@ -12,9 +12,9 @@ from typing import cast
 import pytest
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
-from imbue.mngr.api.sync import GitSyncError
-from imbue.mngr.api.sync import git_pull
-from imbue.mngr.api.sync import git_push
+from imbue.mngr.api.git import GitSyncError
+from imbue.mngr.api.git import git_pull
+from imbue.mngr.api.git import git_push
 from imbue.mngr.api.testing import FakeAgent
 from imbue.mngr.api.testing import FakeHost
 from imbue.mngr.api.testing import SyncTestContext

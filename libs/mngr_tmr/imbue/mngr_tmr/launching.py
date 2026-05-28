@@ -13,7 +13,7 @@ from imbue.mngr.api.create import create as api_create
 from imbue.mngr.api.create import resolve_target_host
 from imbue.mngr.api.data_types import CreateAgentResult
 from imbue.mngr.api.providers import get_provider_instance
-from imbue.mngr.api.sync import rsync_to_remote
+from imbue.mngr.api.rsync import rsync_to_remote
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import AgentError
 from imbue.mngr.errors import HostError

@@ -9,7 +9,7 @@ from typing import assert_never
 from loguru import logger
 
 from imbue.imbue_common.pure import pure
-from imbue.mngr.api.sync import RsyncResult
+from imbue.mngr.api.rsync import RsyncResult
 from imbue.mngr.primitives import ErrorBehavior
 from imbue.mngr.primitives import OutputFormat
 

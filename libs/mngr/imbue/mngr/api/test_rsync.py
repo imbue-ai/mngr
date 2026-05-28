@@ -5,9 +5,9 @@ from typing import cast
 import pytest
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
-from imbue.mngr.api.sync import UncommittedChangesError
-from imbue.mngr.api.sync import rsync_from_remote
-from imbue.mngr.api.sync import rsync_to_remote
+from imbue.mngr.api.git import UncommittedChangesError
+from imbue.mngr.api.rsync import rsync_from_remote
+from imbue.mngr.api.rsync import rsync_to_remote
 from imbue.mngr.api.testing import FakeAgent
 from imbue.mngr.api.testing import FakeHost
 from imbue.mngr.api.testing import SyncTestContext

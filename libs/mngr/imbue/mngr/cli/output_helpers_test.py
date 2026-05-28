@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from imbue.mngr.api.sync import RsyncResult
+from imbue.mngr.api.rsync import RsyncResult
 from imbue.mngr.cli.output_helpers import AbortError
 from imbue.mngr.cli.output_helpers import _write_json_line
 from imbue.mngr.cli.output_helpers import emit_event

@@ -6,8 +6,8 @@ from click_option_group import optgroup
 
 from imbue.mngr.api.discover import discover_hosts_and_agents
 from imbue.mngr.api.find import resolve_host_location_address
-from imbue.mngr.api.sync import git_pull
-from imbue.mngr.api.sync import git_push
+from imbue.mngr.api.git import git_pull
+from imbue.mngr.api.git import git_push
 from imbue.mngr.cli.address_params import HOST_LOCATION_ADDRESS
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
