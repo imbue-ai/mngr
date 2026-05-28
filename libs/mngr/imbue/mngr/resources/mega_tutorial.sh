@@ -904,7 +904,7 @@ git fetch --all && git merge mngr/my-task
 
 # TODO: give an example of how to use a stop hook to automatically push for the agent
 
-# TODO: add some more example with mngr pull for how to merge work back in
+# TODO: add some more example with mngr git pull for how to merge work back in
 
 # when destroying, clean up the branch that was originally created when the agent was created
 mngr destroy my-task --force --remove-created-branch
@@ -1285,7 +1285,7 @@ mngr create my-task --provider modal \
   --sudo-command "apt-get update && apt-get install -y build-essential" \
   --extra-provision-command "pip install -r /workspace/requirements.txt"
 
-# TODO: also show how you can use "mngr push" or "mngr exec" after starting the agent, just as nice alternatives
+# TODO: also show how you can use "mngr rsync" or "mngr exec" after starting the agent, just as nice alternatives
 
 ##############################################################################
 # ADVANCED WORKFLOWS

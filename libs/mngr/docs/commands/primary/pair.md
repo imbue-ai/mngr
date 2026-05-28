@@ -86,8 +86,8 @@ mngr pair [OPTIONS] SOURCE
 
 ## See Also
 
-- [mngr help push](mngr help push) - Push files or git commits to an agent
-- [mngr help pull](mngr help pull) - Pull files or git commits from an agent
+- [mngr rsync](./rsync.md) - One-shot file sync between local and a remote host or agent
+- [mngr git](./git.md) - Push or pull git commits between local and a remote agent or host
 - [mngr create](./create.md) - Create a new agent
 - [mngr list](./list.md) - List agents to find one to pair with
 

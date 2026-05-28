@@ -293,8 +293,8 @@ mngr <command> [options]
 
 ### For moving data in and out:
 
-- [`pull`](libs/mngr/docs/commands/primary/pull.md): Pull data from agent
-- [`push`](libs/mngr/docs/commands/primary/push.md): Push data to agent
+- [`rsync`](libs/mngr/docs/commands/primary/rsync.md): Rsync files between local and a remote host or agent
+- [`git`](libs/mngr/docs/commands/primary/git.md): Push or pull git commits between local and a remote host or agent
 - [`pair`](libs/mngr/docs/commands/primary/pair.md): Continually sync data with an agent
 - [`message`](libs/mngr/docs/commands/secondary/message.md): Send a message to an agent
 - [`transcript`](libs/mngr/docs/commands/secondary/transcript.md): View the message transcript for an agent

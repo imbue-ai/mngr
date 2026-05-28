@@ -77,8 +77,7 @@ mngr rsync [OPTIONS] SOURCE DESTINATION
 
 ## See Also
 
-- [mngr help git push](mngr help git push) - Push git commits from local to a remote repository
-- [mngr help git pull](mngr help git pull) - Pull git commits from a remote repository to local
+- [mngr git](./git.md) - Push or pull git commits between local and a remote agent or host
 - [mngr pair](./pair.md) - Continuously sync files between agent and local
 
 ## Examples

@@ -220,8 +220,7 @@ are not supported -- use plain ``rsync`` for the former.""",
         ("Preview what would be transferred", "mngr rsync ./local-src my-agent --dry-run"),
     ),
     see_also=(
-        ("git push", "Push git commits from local to a remote repository"),
-        ("git pull", "Pull git commits from a remote repository to local"),
+        ("git", "Push or pull git commits between local and a remote agent or host"),
         ("pair", "Continuously sync files between agent and local"),
     ),
 ).register()
