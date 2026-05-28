@@ -351,7 +351,11 @@ def _make_callback_handler_class(box: _OAuthCaptureBox) -> type[http.server.Base
         def do_GET(self) -> None:
             parsed = urllib.parse.urlparse(self.path)
             params = dict(urllib.parse.parse_qsl(parsed.query, keep_blank_values=True))
-            box.set(params)
+            # Only the real /oauth/callback hit with query params is the callback. Browsers
+            # routinely fire secondary GETs (favicon.ico, prefetches, service-worker pings)
+            # at the same listener; those must not overwrite the captured params.
+            if parsed.path == "/oauth/callback" and params:
+                box.set(params)
             body = (
                 b"<html><head><title>Imbue Cloud sign-in</title></head>"
                 b"<body><h1>You are signed in</h1>"
