@@ -26,6 +26,12 @@ from imbue.mngr_vps_docker.primitives import VpsInstanceId
 # contains this exact substring.)
 _AGENT_FILE_SEP: Final[str] = "---MNGR_AGENT_FILE_SEP---"
 
+# Subdirectory inside the unified volume holding one JSON file per persisted
+# agent record (``<agent_id>.json``). Lives next to ``HOST_DIR_SUBPATH`` /
+# ``host_state.json`` -- shared with ``instance.py`` so the on-disk layout has
+# a single source of truth and renaming the directory requires a single edit.
+AGENTS_SUBPATH: Final[str] = "agents"
+
 
 class VpsHostConfig(HostConfig):
     """VPS-specific host configuration stored in the host record."""
@@ -130,7 +136,7 @@ class VpsDockerHostStore(MutableModel):
 
     @property
     def _agents_dir(self) -> Path:
-        return self.mountpoint / "agents"
+        return self.mountpoint / AGENTS_SUBPATH
 
     def _agent_data_path(self, agent_id: AgentId) -> Path:
         return self._agents_dir / f"{agent_id}.json"

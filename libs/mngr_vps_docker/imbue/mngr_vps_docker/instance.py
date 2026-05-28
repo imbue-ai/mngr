@@ -87,6 +87,7 @@ from imbue.mngr.providers.ssh_utils import wait_for_sshd
 from imbue.mngr_vps_docker.cloud_init import generate_cloud_init_user_data
 from imbue.mngr_vps_docker.config import VpsDockerProviderConfig
 from imbue.mngr_vps_docker.errors import VpsProvisioningError
+from imbue.mngr_vps_docker.host_store import AGENTS_SUBPATH
 from imbue.mngr_vps_docker.host_store import VpsDockerHostRecord
 from imbue.mngr_vps_docker.host_store import VpsHostConfig
 from imbue.mngr_vps_docker.host_store import open_host_store
@@ -675,7 +676,7 @@ def _seed_host_volume_layout_on_outer(outer: OuterHostInterface, subvolume_path:
     ``persist_agent_data``) don't need to mkdir first. Idempotent.
     """
     host_dir_path = subvolume_path / HOST_DIR_SUBPATH
-    agents_dir_path = subvolume_path / "agents"
+    agents_dir_path = subvolume_path / AGENTS_SUBPATH
     result = outer.execute_idempotent_command(
         f"mkdir -p {shlex.quote(str(host_dir_path))} {shlex.quote(str(agents_dir_path))}",
         timeout_seconds=10.0,
