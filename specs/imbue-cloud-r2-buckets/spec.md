@@ -13,8 +13,9 @@
 ### Key design decisions (from Q&A)
 
 - **No prefix scoping.** Separate bucket per host; each bucket gets its own scoped credential.
-- **Bucket naming / ownership.** The server derives the real R2 name as `<user_id_prefix>--<slug>` where `user_id_prefix` is the 16-hex-char SuperTokens prefix already used for tunnel ownership. The user only ever passes/sees their **short** name; the full R2 name/URL is shown back in responses.
+- **Bucket naming / ownership.** The server derives the real R2 name as `<user_id_prefix>--<slug>` where `user_id_prefix` is the **full SuperTokens user id with hyphens stripped (32 hex chars)** -- NOT the 16-hex truncation tunnels use. Using the full id eliminates any cross-user collision risk for bucket ownership; it leaves `63 - 32 - 2 = 29` chars for the slug. The user only ever passes/sees their **short** name; the full R2 name/URL is shown back in responses.
 - **Listing is double-checked.** Buckets are listed via the R2 `name_contains` filter, then **re-verified in our code** to start with `<user_id_prefix>--` (mirrors the tunnel `startswith` ownership check) so a crafted bucket name cannot grant cross-user access.
+- **Owner identity.** The `r2_keys` table stores the **full SuperTokens user id** (with hyphens) as the owner -- exact ownership checks + auditing, matching what the existing LiteLLM `/keys/*` endpoints already do. The 32-hex bucket-name prefix is just the same id hyphen-stripped, so the two stay consistent.
 - **Credential model.** Access Key ID = the Cloudflare token `id`; Secret Access Key = `sha256(token value)`. The token value is a secret: returned to the user once at creation and never persisted.
 - **State.** Buckets are not tracked in our DB (listed from the R2 API). Keys **are** tracked in a new `r2_keys` table in the connector's existing Neon DB.
 - **Single broadened Cloudflare token.** Reuse the existing `CLOUDFLARE_API_TOKEN`, widened to include R2 admin + "API Tokens Write" (rather than a separate secret). Existing deployed tiers must have this widened manually -- see Migration / rollout.
@@ -29,7 +30,7 @@
   - Emits JSON with the bucket info **and** the default key's credentials inline (S3 endpoint, full bucket name, access key id, secret) -- one round trip.
   - **Errors** if the derived bucket already exists for that user (not idempotent).
   - **Errors** if the user is at the per-account bucket cap.
-  - **Errors** if the slugified name violates R2 rules (3-63 chars, lowercase alphanumeric + hyphens, no leading/trailing hyphen) after the prefix is prepended.
+  - **Errors** if the slugified name violates R2 rules after the prefix is prepended (final name 3-63 chars, lowercase alphanumeric + hyphens, no leading/trailing hyphen; with the 32-hex prefix + `--`, the slug budget is 29 chars).
 - `mngr imbue_cloud bucket list` -- lists all of the caller's buckets (full R2 name + S3 endpoint), filtered via `name_contains` then re-verified by prefix.
 - `mngr imbue_cloud bucket info <name>` -- returns bucket metadata only (full R2 name, S3 endpoint). Keys come from `bucket keys list`.
 - `mngr imbue_cloud bucket destroy <name>`
@@ -67,9 +68,10 @@ This file is intentionally self-contained (stdlib + 3rd-party only, no monorepo 
   - `CreateKeyRequest { alias: str | None = None, access: str = "readwrite" }`
   - `KeyInfo { access_key_id: str, bucket_name: str, access: str, alias: str | None, created_at: str }`
   - Validate `access` against `{"read", "readwrite"}`; validate `name` with a field validator that rejects names which (after prefixing) break R2 rules.
+- **Owner / prefix derivation.** Bucket endpoints derive the owner from the full user id via `_get_user_id_from_access_token(...)` (NOT `admin.username`, which is the 16-hex truncation). The bucket-name prefix is that full id hyphen-stripped (`user_id.replace("-", "")`, 32 hex chars); the `r2_keys.owner_user_id` column stores the full id verbatim (with hyphens).
 - **Naming helpers** (mirror the existing tunnel helpers):
-  - `make_bucket_name(username, short_name) -> str` -> `f"{username}--{slug}"` with a `slugify` (lowercase, alphanumeric + single hyphens, collapse runs).
-  - `verify_bucket_ownership(bucket_name, username)` -> raise on missing `f"{username}--"` prefix.
+  - `make_bucket_name(user_id_prefix, short_name) -> str` -> `f"{user_id_prefix}--{slug}"` (prefix = 32-hex hyphen-stripped user id) with a `slugify` (lowercase, alphanumeric + single hyphens, collapse runs).
+  - `verify_bucket_ownership(bucket_name, user_id_prefix)` -> raise on missing `f"{user_id_prefix}--"` prefix.
   - `_validate_r2_bucket_name(name)` -> enforce 3-63, lowercase alnum + hyphen, no leading/trailing hyphen.
   - Constant `_MAX_BUCKETS_PER_ACCOUNT = 50`.
   - `s3_endpoint()` -> `https://{CLOUDFLARE_ACCOUNT_ID}.r2.cloudflarestorage.com`.
@@ -81,18 +83,18 @@ This file is intentionally self-contained (stdlib + 3rd-party only, no monorepo 
   - `delete_bucket(name)` -> `DELETE /accounts/{acct}/r2/buckets/{name}` (raises a typed `R2BucketNotEmptyError` when CF reports non-empty)
   - `create_bucket_token(bucket_name, access, token_name)` -> `POST /accounts/{acct}/tokens` with an R2 bucket-scoped policy (resource `com.cloudflare.edge.r2.bucket.<ACCOUNT_ID>_default_<BUCKET_NAME>`) and the read vs write **permission group** id; returns `{id, value}`.
   - `delete_token(token_id)` -> `DELETE /accounts/{acct}/tokens/{token_id}`
-  - Permission-group UUIDs ("Workers R2 Storage Bucket Item Read" / "...Write") are looked up once or hard-coded as constants (note in Open Questions).
+  - Permission-group UUIDs ("Workers R2 Storage Bucket Item Read" / "...Write") are **looked up at runtime and cached** (per `get_permission_groups`), NOT hard-coded -- the connector runs against multiple Cloudflare accounts across deploy environments, so a hard-coded UUID could be wrong for some accounts.
 - **Key store abstraction** (new `KeyStore` Protocol so DB-backed endpoints are unit-testable, parallel to `CloudflareOps`):
-  - `add_key(access_key_id, owner, bucket_name, access, alias, created_at)`
-  - `list_keys(owner, bucket_name: str | None) -> list[KeyRecord]`
+  - `add_key(access_key_id, owner_user_id, bucket_name, access, alias, created_at)` (`owner_user_id` = full SuperTokens user id)
+  - `list_keys(owner_user_id, bucket_name: str | None) -> list[KeyRecord]`
   - `get_key(access_key_id) -> KeyRecord | None`
   - `delete_key(access_key_id)`
-  - `delete_keys_for_bucket(owner, bucket_name) -> list[KeyRecord]` (returns revoked rows so the endpoint can revoke their CF tokens)
+  - `delete_keys_for_bucket(owner_user_id, bucket_name) -> list[KeyRecord]` (returns revoked rows so the endpoint can revoke their CF tokens)
   - `count_buckets_owned(...)` is NOT needed (bucket count comes from R2 list).
   - Implementations: `PostgresKeyStore` (psycopg2 against `DATABASE_URL`, same DB as `pool_hosts`) and `InMemoryKeyStore` (test mock in `app_test.py`).
 - **Errors**: `R2BucketNotEmptyError`, `R2BucketExistsError`, `R2BucketNotFoundError`, `R2BucketLimitError`; extend `raise_as_http` to map them to `409`/`404`/`409`/`409` respectively.
 - **Endpoints** (all: `authenticate_request` -> `require_admin` -> `require_paid_account`):
-  - `POST /buckets` -> create bucket (cap check via `list_buckets` + prefix re-verify; create bucket; mint default key; record; return `CreateBucketResponse`).
+  - `POST /buckets` -> create bucket (cap check via `list_buckets` + prefix re-verify; create bucket; mint default key; record; return `CreateBucketResponse`). If the default-key mint fails after the bucket is created, **best-effort delete the just-created bucket, then raise** (keep create atomic).
   - `GET /buckets` -> list buckets (filter + prefix re-verify).
   - `GET /buckets/{name}` -> bucket info (ownership check).
   - `DELETE /buckets/{name}` -> verify ownership; delete bucket (relay non-empty); cascade revoke tokens + delete key rows.
@@ -105,7 +107,7 @@ This file is intentionally self-contained (stdlib + 3rd-party only, no monorepo 
 
 - `apps/remote_service_connector/migrations/004_r2_keys.sql`: create table `r2_keys`:
   - `access_key_id TEXT PRIMARY KEY` (= Cloudflare token id)
-  - `owner_user_id TEXT NOT NULL` (the 16-hex username prefix)
+  - `owner_user_id TEXT NOT NULL` (the **full** SuperTokens user id, with hyphens)
   - `bucket_name TEXT NOT NULL` (full R2 name)
   - `access TEXT NOT NULL CHECK (access IN ('read','readwrite'))`
   - `alias TEXT`
@@ -133,7 +135,7 @@ This file is intentionally self-contained (stdlib + 3rd-party only, no monorepo 
 - `.minds/template/cloudflare.sh`: update the `CLOUDFLARE_API_TOKEN` comment to note it now also needs R2 admin + "API Tokens Write".
 - `apps/remote_service_connector/README.md`: document the new `/buckets/*` routes and the broadened token requirement (with the migration note).
 - `libs/mngr_imbue_cloud/README.md`: document the `bucket` command group.
-- Changelog entries for both touched projects (`libs/mngr_imbue_cloud`, `apps/remote_service_connector`); add `dev` only if root-level files like `.minds/template` count as `dev`.
+- Changelog entries for both touched projects (`libs/mngr_imbue_cloud`, `apps/remote_service_connector`). Editing `.minds/template/cloudflare.sh` does **not** require a separate `dev` changelog entry.
 
 ### Migration / rollout (manual, operator action)
 
@@ -163,13 +165,16 @@ Each phase ends in a working (if incomplete) system.
 - **Plugin unit tests**: client error mapping (`409`/`404` -> typed errors); data_type (de)serialization incl. `R2BucketAccess` <-> `read`/`readwrite`; CLI arg parsing / JSON output shape (using a fake/served connector or the existing test fixtures).
 - **Migration test**: extend the existing "insert has required columns" style check so the `r2_keys` schema and the `add_key` INSERT can't drift.
 - **Manual verification** (during development, not crystallized): real connector + real R2 -- create bucket, mint read-only + read-write keys, confirm S3 access honors the scope, destroy fails while non-empty, succeeds after emptying, tokens actually revoked in Cloudflare.
-- **Edge cases**: duplicate bucket name; slug collapsing two distinct names to the same slug; very long user short name overflowing 63 chars after prefix; CF token-create failure mid-`bucket create` (bucket created, key failed) -- decide whether to roll back the bucket (see Open Questions).
+- **Edge cases**: duplicate bucket name; slug collapsing two distinct names to the same slug; very long user short name overflowing the 29-char slug budget; CF token-create failure mid-`bucket create` -> assert the bucket is best-effort deleted and the call raises.
 - Run the full suite via `just test-offload`; iterate locally with `just test-quick`.
 
 ## Open Questions
 
-- **R2 permission-group UUIDs.** The read vs read-write token policy needs Cloudflare's "Workers R2 Storage Bucket Item Read/Write" permission-group IDs. Hard-code them as constants, or look them up at runtime via `GET /accounts/{acct}/tokens/permission_groups` and cache? (Lean: hard-code with a comment; they're stable account-wide.)
-- **Partial-failure rollback on `bucket create`.** If the bucket is created but the default-key token mint fails, do we delete the just-created bucket to keep create atomic, or leave the empty bucket and surface the error? (Lean: best-effort delete the bucket, then raise.)
-- **Jurisdiction in the token resource string.** The bucket-scoped policy resource is `com.cloudflare.edge.r2.bucket.<ACCOUNT_ID>_<JURISDICTION>_<BUCKET_NAME>`. Since v1 uses the default jurisdiction, confirm the literal segment is `default` (verify against a live token before shipping).
-- **`dev` changelog.** Confirm whether editing `.minds/template/cloudflare.sh` requires a `dev/changelog/<branch>.md` entry in addition to the two project entries.
-- **Owner identity stored in `r2_keys`.** Plan stores the 16-hex username prefix (consistent with bucket ownership). Confirm we don't also want the full SuperTokens user id for auditing.
+- **Jurisdiction in the token resource string (UNRESOLVED -- verify before shipping).** The bucket-scoped policy resource is `com.cloudflare.edge.r2.bucket.<ACCOUNT_ID>_<JURISDICTION>_<BUCKET_NAME>`. v1 uses the default jurisdiction; confirm the literal segment is `default` against a live token before shipping.
+
+### Resolved
+
+- **R2 permission-group UUIDs** -> look them up at runtime (`GET /accounts/{acct}/tokens/permission_groups`) and cache, NOT hard-coded -- the connector serves multiple Cloudflare accounts across deploy environments.
+- **Partial-failure rollback on `bucket create`** -> best-effort delete the just-created bucket, then raise (keep create atomic).
+- **`dev` changelog** -> not required for the `.minds/template/cloudflare.sh` edit; only the two project changelog entries are needed.
+- **Owner identity in `r2_keys`** -> store the **full** SuperTokens user id (with hyphens) as the owner column; the 32-hex bucket-name prefix is the same id hyphen-stripped.
