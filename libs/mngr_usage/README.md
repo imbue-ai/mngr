@@ -78,6 +78,20 @@ interval is 30s; use `--interval` for tighter cadence. To restrict matching
 to a specific writer, use the top-level `source` field in CEL (e.g.
 `--until 'source == "claude" && five_hour.used_percentage < 50'`).
 
+## Polling from cron (check mode)
+
+`mngr usage wait` blocks a single process until its predicate matches once --
+the right tool for a **one-off**: "when the 5h window frees up, kick off this
+batch." For a **recurring** policy -- "every so often, if usage looks like X,
+do Y" -- let `cron` own the cadence instead: poll the plain `mngr usage --format
+json` snapshot on a schedule and branch in the shell (the snapshot is the same
+per-source shape `wait` evaluates, so `jq` plays the role `--until`'s CEL did).
+
+See [cron automation recipes](docs/cron_recipes.md) for worked examples:
+soaking up an about-to-expire 5h window (with a weekly pace check), warming a
+fresh window the moment the last one elapses, and fanning a queue of task files
+out to label-capped agents.
+
 ## Implementing a writer plugin
 
 A writer plugin is responsible for producing `cost_snapshot` events at the
