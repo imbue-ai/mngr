@@ -199,23 +199,6 @@ def get_agent_state_dir_path(host_dir: Path, agent_id: AgentId) -> Path:
     return host_dir / "agents" / str(agent_id)
 
 
-def _remaining_budget(deadline: float) -> float:
-    """Seconds remaining until ``deadline`` (a ``time.monotonic()`` value), floored at a small positive value.
-
-    The 0.5s floor leaves enough headroom for SSH's per-call timeout to take
-    effect rather than treating an exhausted budget as 0s, which paramiko
-    interprets as "non-blocking" and surfaces unhelpful errors.
-    """
-    return max(0.5, deadline - time.monotonic())
-
-
-def _optional_remaining_budget(deadline: float | None) -> float | None:
-    """Same as ``_remaining_budget`` but tolerates ``None`` (meaning: no budget configured)."""
-    if deadline is None:
-        return None
-    return _remaining_budget(deadline)
-
-
 def install_packaged_script_on_host(
     host: OnlineHostInterface,
     *,
@@ -2518,9 +2501,7 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
                     if not result.success:
                         raise AgentStartError(str(agent.name), result.stderr)
 
-    def _get_all_descendant_pids(
-        self, parent_pid: str, visited: set[str] | None = None, *, deadline: float | None = None
-    ) -> list[str]:
+    def _get_all_descendant_pids(self, parent_pid: str, visited: set[str] | None = None) -> list[str]:
         """Recursively get all descendant PIDs of a given parent PID.
 
         Tracks already-visited PIDs in ``visited`` to break cycles that can
@@ -2529,9 +2510,6 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         naive walk loops forever). Without this, a sufficiently long-lived
         agent's destroy path could hit Python's recursion limit and crash
         the caller mid-cleanup.
-
-        ``deadline`` (a ``time.monotonic()`` value) bounds each SSH call so an
-        unreachable host fails fast instead of stalling on TCP retransmits.
         """
         if visited is None:
             visited = set()
@@ -2541,21 +2519,18 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         descendant_pids: list[str] = []
 
         # Get immediate children
-        result = self.execute_idempotent_command(
-            f"pgrep -P {parent_pid} 2>/dev/null || true",
-            timeout_seconds=_optional_remaining_budget(deadline),
-        )
+        result = self.execute_idempotent_command(f"pgrep -P {parent_pid} 2>/dev/null || true")
         if result.success and result.stdout.strip():
             child_pids = result.stdout.strip().split("\n")
             for child_pid in child_pids:
                 if child_pid and child_pid not in visited:
                     descendant_pids.append(child_pid)
                     # Recursively get descendants of this child
-                    descendant_pids.extend(self._get_all_descendant_pids(child_pid, visited, deadline=deadline))
+                    descendant_pids.extend(self._get_all_descendant_pids(child_pid, visited))
 
         return descendant_pids
 
-    def _collect_session_pids(self, session_name: str, *, deadline: float | None = None) -> list[str]:
+    def _collect_session_pids(self, session_name: str) -> list[str]:
         """Collect all pane PIDs and their descendants for a tmux session.
 
         Iterates the session's windows and calls ``list-panes`` per window so
@@ -2570,8 +2545,7 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         risk entirely.
         """
         windows_result = self.execute_idempotent_command(
-            f"tmux list-windows -t {TmuxSessionTarget(session_name=session_name).as_shell_arg()} -F '#I' 2>/dev/null",
-            timeout_seconds=_optional_remaining_budget(deadline),
+            f"tmux list-windows -t {TmuxSessionTarget(session_name=session_name).as_shell_arg()} -F '#I' 2>/dev/null"
         )
         if not windows_result.success or not windows_result.stdout.strip():
             return []
@@ -2581,17 +2555,16 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         for window_idx in window_indices:
             window_target = TmuxWindowTarget(session_name=session_name, window=window_idx)
             result = self.execute_idempotent_command(
-                f"tmux list-panes -t {window_target.as_shell_arg()} -F '#{{pane_pid}}' 2>/dev/null",
-                timeout_seconds=_optional_remaining_budget(deadline),
+                f"tmux list-panes -t {window_target.as_shell_arg()} -F '#{{pane_pid}}' 2>/dev/null"
             )
             if result.success and result.stdout.strip():
                 pane_pids = [p.strip() for p in result.stdout.strip().split("\n") if p.strip()]
                 for pane_pid in pane_pids:
                     all_pids.append(pane_pid)
-                    all_pids.extend(self._get_all_descendant_pids(pane_pid, deadline=deadline))
+                    all_pids.extend(self._get_all_descendant_pids(pane_pid))
         return all_pids
 
-    def _collect_pids_by_agent_id_env(self, agent_id: AgentId, *, deadline: float | None = None) -> list[str]:
+    def _collect_pids_by_agent_id_env(self, agent_id: AgentId) -> list[str]:
         """Find all PIDs whose MNGR_AGENT_ID environment matches agent_id.
 
         The agent's env file (sourced via `set -a`) exports MNGR_AGENT_ID into every
@@ -2646,7 +2619,7 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
             "  done; "
             "fi; true"
         )
-        result = self.execute_idempotent_command(cmd, timeout_seconds=_optional_remaining_budget(deadline))
+        result = self.execute_idempotent_command(cmd)
         if not result.stdout.strip():
             return []
         return [pid for pid in result.stdout.strip().split("\n") if pid.strip()]
@@ -2654,87 +2627,52 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
     def stop_agents(self, agent_ids: Sequence[AgentId], timeout_seconds: float = 5.0) -> None:
         """Stop agents by killing all processes in their tmux sessions.
 
-        ``timeout_seconds`` is the wall-clock budget for the entire operation,
-        applied as a per-SSH-call timeout. If the host has become unreachable
-        (typical when cleaning up after a remote sandbox has been torn down),
-        the call aborts with a warning instead of blocking on the kernel's
-        TCP retransmit timeout, which is ~15 minutes per stalled call.
-
         This ensures all processes in all panes are terminated by:
         1. Getting all PIDs (panes + descendants + orphans matched by MNGR_AGENT_ID env)
         2. Sending SIGTERM to each individual process
         3. Waiting briefly, then sending SIGKILL to any survivors
         4. Finally killing the tmux session itself
         """
-        deadline = time.monotonic() + timeout_seconds
         with log_span("Stopping {} agent(s) with timeout={}s", len(agent_ids), timeout_seconds):
-            try:
-                self._stop_agents_within_deadline(agent_ids, deadline)
-            except (OSError, HostConnectionError) as exc:
-                logger.warning("Aborted stop_agents -- host unreachable: {}", exc)
+            all_pids: list[str] = []
 
-    def _stop_agents_within_deadline(self, agent_ids: Sequence[AgentId], deadline: float) -> None:
-        """Body of ``stop_agents``; raises on connection error so the wrapper can log and bail."""
-        all_pids: list[str] = []
-        session_names: list[str] = []
+            current_agents: list[AgentInterface] = []
 
-        for agent_id in agent_ids:
-            agent_name = self._read_agent_name_via_shell(agent_id, deadline=deadline)
-            if agent_name is None:
-                continue
+            for agent_id in agent_ids:
+                agent = self._get_agent_by_id(agent_id)
+                if agent is None:
+                    continue
 
-            session_name = f"{self.mngr_ctx.config.prefix}{agent_name}"
-            session_names.append(session_name)
-            all_pids.extend(self._collect_session_pids(session_name, deadline=deadline))
-            # Also pick up orphans (e.g. children of an OOM-killed claude) that
-            # reparented to PID 1 and so are invisible to the pane-descendant walk.
-            all_pids.extend(self._collect_pids_by_agent_id_env(agent_id, deadline=deadline))
+                current_agents.append(agent)
+                session_name = f"{self.mngr_ctx.config.prefix}{agent.name}"
+                all_pids.extend(self._collect_session_pids(session_name))
+                # Also pick up orphans (e.g. children of an OOM-killed claude) that
+                # reparented to PID 1 and so are invisible to the pane-descendant walk.
+                all_pids.extend(self._collect_pids_by_agent_id_env(agent.id))
 
-        # Deduplicate while preserving order (a pid may appear in both lists).
-        all_pids = list(dict.fromkeys(all_pids))
+            # Deduplicate while preserving order (a pid may appear in both lists).
+            all_pids = list(dict.fromkeys(all_pids))
 
-        if all_pids:
-            pid_list = " ".join(all_pids)
-            remaining = _remaining_budget(deadline)
-            # Send SIGTERM to all processes at once, then wait briefly and SIGKILL survivors.
-            # This is done in a single shell command to avoid the issue where one non-responsive
-            # process (e.g., interactive bash which ignores SIGTERM) would consume the entire
-            # timeout budget in a serial loop, preventing SIGKILL from reaching other processes.
-            grace_seconds = min(1.0, remaining)
-            self.execute_idempotent_command(
-                f"for p in {pid_list}; do kill -TERM $p 2>/dev/null; done; "
-                f"sleep {grace_seconds}; "
-                f"for p in {pid_list}; do kill -KILL $p 2>/dev/null; done; true",
-                timeout_seconds=remaining,
-            )
+            if all_pids:
+                pid_list = " ".join(all_pids)
 
-        # Finally kill the tmux sessions themselves
-        for session_name in session_names:
-            self.execute_idempotent_command(
-                f"tmux kill-session -t {TmuxSessionTarget(session_name=session_name).as_shell_arg()} 2>/dev/null || true",
-                timeout_seconds=_remaining_budget(deadline),
-            )
+                # Send SIGTERM to all processes at once, then wait briefly and SIGKILL survivors.
+                # This is done in a single shell command to avoid the issue where one non-responsive
+                # process (e.g., interactive bash which ignores SIGTERM) would consume the entire
+                # timeout budget in a serial loop, preventing SIGKILL from reaching other processes.
+                grace_seconds = min(1.0, timeout_seconds)
+                self.execute_idempotent_command(
+                    f"for p in {pid_list}; do kill -TERM $p 2>/dev/null; done; "
+                    f"sleep {grace_seconds}; "
+                    f"for p in {pid_list}; do kill -KILL $p 2>/dev/null; done; true"
+                )
 
-    def _read_agent_name_via_shell(self, agent_id: AgentId, *, deadline: float) -> AgentName | None:
-        """Read an agent's ``name`` field directly from its on-disk ``data.json`` via ``cat``.
-
-        Used by ``stop_agents`` instead of ``_get_agent_by_id``/``get_agents``:
-        the latter ultimately uses SFTP, whose wrappers don't expose a timeout
-        and can stall ~15 minutes if the sandbox has silently gone away.
-        ``cat`` over ``execute_idempotent_command`` honours paramiko's channel
-        timeout, so an unreachable host fails fast.
-        """
-        data_path = get_agent_state_dir_path(self.host_dir, agent_id) / "data.json"
-        result = self.execute_idempotent_command(
-            f"cat {shlex.quote(str(data_path))} 2>/dev/null",
-            timeout_seconds=_remaining_budget(deadline),
-        )
-        if not result.success or not result.stdout:
-            return None
-        try:
-            return AgentName(json.loads(result.stdout)["name"])
-        except (json.JSONDecodeError, KeyError):
-            return None
+            # Finally kill the tmux sessions themselves
+            for agent in current_agents:
+                session_name = f"{self.mngr_ctx.config.prefix}{agent.name}"
+                self.execute_idempotent_command(
+                    f"tmux kill-session -t {TmuxSessionTarget(session_name=session_name).as_shell_arg()} 2>/dev/null || true"
+                )
 
     def _get_agent_by_id(self, agent_id: AgentId) -> AgentInterface | None:
         """Get an agent by ID."""
