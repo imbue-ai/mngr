@@ -21,6 +21,7 @@ from imbue.mngr.config.consts import PROFILES_DIRNAME
 from imbue.mngr.config.consts import ROOT_CONFIG_FILENAME
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import CommandDefaults
+from imbue.mngr.config.data_types import ConfigScope
 from imbue.mngr.config.data_types import CreateCliOptions
 from imbue.mngr.config.data_types import CreateTemplate
 from imbue.mngr.config.data_types import CreateTemplateName
@@ -87,13 +88,13 @@ _PRESERVED_ALIASES: Final[dict[str, tuple[str, Callable[[str], Any]]]] = {
 class _FileSettingsSource(FrozenModel):
     """A TOML settings-file layer for narrowing diagnostics.
 
-    ``scope`` is the matching ``mngr config set --scope`` value (``user`` /
-    ``project`` / ``local``) and ``path`` is the resolved file path. The
-    human-readable label is derived from ``scope`` in ``_describe_source``
-    rather than stored, so the two can't drift.
+    ``scope`` is the :class:`ConfigScope` the file belongs to (which is exactly
+    what ``mngr config set --scope`` accepts) and ``path`` is the resolved file
+    path. The human-readable label is derived from ``scope`` in
+    ``_describe_source`` rather than stored, so the two can't drift.
     """
 
-    scope: str
+    scope: ConfigScope
     path: Path
 
 
@@ -419,7 +420,10 @@ def _describe_source(source: _SettingsSource) -> str:
     """
     match source:
         case _FileSettingsSource(scope=scope, path=path):
-            return f"{scope} settings ({_display_path(path)}) [edit with: mngr config set --scope {scope} ...]"
+            scope_flag = scope.value.lower()
+            return (
+                f"{scope_flag} settings ({_display_path(path)}) [edit with: mngr config set --scope {scope_flag} ...]"
+            )
         case _EnvSettingsSource():
             return "MNGR__* environment variables"
 

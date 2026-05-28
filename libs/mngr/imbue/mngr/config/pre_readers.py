@@ -7,6 +7,7 @@ from typing import Final
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mngr.config.consts import PROFILES_DIRNAME
 from imbue.mngr.config.consts import ROOT_CONFIG_FILENAME
+from imbue.mngr.config.data_types import ConfigScope
 from imbue.mngr.config.host_dir import read_default_host_dir
 from imbue.mngr.errors import ConfigParseError
 from imbue.mngr.utils.git_utils import find_git_worktree_root
@@ -168,29 +169,29 @@ def resolve_project_config_dir(
 def read_config_layers(
     profile_dir: Path | None,
     project_config_dir: Path | None,
-) -> list[tuple[str, Path, dict[str, Any]]]:
+) -> list[tuple[ConfigScope, Path, dict[str, Any]]]:
     """Read the user/project/local config layers and enforce the pytest guard.
 
     This is the single chokepoint for reading config files: it loads each layer
     that exists and runs ``enforce_pytest_config_opt_in`` over them, so no code
     path can read config during a pytest run without the guard being applied.
-    Returns ``(scope, path, raw)`` per present layer, in precedence order (user <
-    project < local); ``scope`` is the matching ``mngr config set --scope`` value
-    (``user`` / ``project`` / ``local``), which lets ``load_config`` attribute
-    narrowing diagnostics to a specific file.
+    Returns ``(scope, path, raw)`` per present layer, in precedence order
+    (USER < PROJECT < LOCAL); ``scope`` is the :class:`ConfigScope` the file
+    belongs to, which lets ``load_config`` attribute narrowing diagnostics to a
+    specific file (and matches what ``mngr config set --scope`` accepts).
 
     ``profile_dir`` and ``project_config_dir`` are resolved by the caller (so
     this does no directory resolution and needs no ConcurrencyGroup): profile_dir
     via the lightweight read-only lookup for the pre-readers, or create-on-demand
     for ``load_config``; project_config_dir via ``resolve_project_config_dir``.
     """
-    candidate_paths: list[tuple[str, Path]] = []
+    candidate_paths: list[tuple[ConfigScope, Path]] = []
     if profile_dir is not None:
-        candidate_paths.append(("user", get_user_config_path(profile_dir)))
+        candidate_paths.append((ConfigScope.USER, get_user_config_path(profile_dir)))
     if project_config_dir is not None:
-        candidate_paths.append(("project", get_project_config_path(project_config_dir)))
-        candidate_paths.append(("local", get_local_config_path(project_config_dir)))
-    loaded: list[tuple[str, Path, dict[str, Any]]] = []
+        candidate_paths.append((ConfigScope.PROJECT, get_project_config_path(project_config_dir)))
+        candidate_paths.append((ConfigScope.LOCAL, get_local_config_path(project_config_dir)))
+    loaded: list[tuple[ConfigScope, Path, dict[str, Any]]] = []
     for scope, path in candidate_paths:
         raw = try_load_toml(path)
         if raw is not None:

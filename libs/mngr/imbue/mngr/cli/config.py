@@ -4,7 +4,6 @@ import subprocess
 import tomllib
 import typing
 from collections.abc import MutableMapping
-from enum import auto
 from pathlib import Path
 from typing import Any
 from typing import assert_never
@@ -16,7 +15,6 @@ from loguru import logger
 from pydantic import BaseModel
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
-from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
 from imbue.mngr.cli.help_formatter import CommandHelpMetadata
@@ -27,6 +25,7 @@ from imbue.mngr.cli.output_helpers import emit_final_json
 from imbue.mngr.cli.output_helpers import emit_format_template_lines
 from imbue.mngr.cli.output_helpers import write_human_line
 from imbue.mngr.config.data_types import CommonCliOptions
+from imbue.mngr.config.data_types import ConfigScope
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import OutputOptions
 from imbue.mngr.config.key_resolver import EXTEND_SUFFIX
@@ -47,14 +46,6 @@ from imbue.mngr.utils.interactive_subprocess import run_interactive_subprocess
 from imbue.mngr.utils.toml_config import load_config_file_tomlkit
 from imbue.mngr.utils.toml_config import save_config_file
 from imbue.mngr.utils.toml_config import set_nested_value
-
-
-class ConfigScope(UpperCaseStrEnum):
-    """Scope for configuration file operations."""
-
-    USER = auto()
-    PROJECT = auto()
-    LOCAL = auto()
 
 
 class ConfigCliOptions(CommonCliOptions):

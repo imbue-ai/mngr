@@ -307,6 +307,19 @@ class WorkDirExtraPathMode(UpperCaseStrEnum):
     COPY = auto()
 
 
+class ConfigScope(UpperCaseStrEnum):
+    """A settings-file layer: the user profile, the project, or the local override.
+
+    The lowercased member name is the value accepted by ``mngr config set
+    --scope`` and surfaced in diagnostics; ``get_config_path`` (cli/config.py)
+    and ``read_config_layers`` (pre_readers.py) both map these to the same files.
+    """
+
+    USER = auto()
+    PROJECT = auto()
+    LOCAL = auto()
+
+
 # === Value Types ===
 
 
