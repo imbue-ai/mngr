@@ -21,6 +21,7 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import AgentNotFoundOnHostError
 from imbue.mngr.errors import HostAuthenticationError
 from imbue.mngr.errors import HostConnectionError
+from imbue.mngr.errors import HostNotFoundError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.data_types import AgentDetails
@@ -467,13 +468,34 @@ class ProviderInstanceInterface(MutableModel, ABC):
                 # otherwise the next discovery cycle keeps re-hitting the same
                 # stale handle.
                 self.on_connection_error(host_ref.host_id)
-                logger.warning(
-                    "Skipping host {} ({}) during agent enumeration: {}",
-                    host_ref.host_id,
-                    host_ref.host_name,
-                    e,
-                )
-                results[host_ref] = []
+                # Before giving up on this host, try the provider's offline
+                # view: a docker container that is RUNNING but whose sshd
+                # has died still exposes its persisted agent records via
+                # the docker daemon (labels + on-host-volume data). Falling
+                # back here keeps the host's workspaces visible in
+                # discovery, matching the behavior of a fully-stopped
+                # container. Providers without an offline view
+                # (NotImplementedError) or without a persisted record for
+                # this host (HostNotFoundError) degrade to the legacy
+                # empty-list behavior.
+                try:
+                    offline_agents = self.to_offline_host(host_ref.host_id).discover_agents()
+                except (NotImplementedError, HostNotFoundError):
+                    logger.warning(
+                        "Skipping host {} ({}) during agent enumeration: {}",
+                        host_ref.host_id,
+                        host_ref.host_name,
+                        e,
+                    )
+                    results[host_ref] = []
+                else:
+                    logger.debug(
+                        "Falling back to offline agent enumeration for host {} ({}) after connection error: {}",
+                        host_ref.host_id,
+                        host_ref.host_name,
+                        e,
+                    )
+                    results[host_ref] = offline_agents
         return results
 
     @abstractmethod
