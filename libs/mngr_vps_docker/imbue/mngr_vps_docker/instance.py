@@ -223,22 +223,12 @@ LABEL_TAGS: Final[str] = f"{LABEL_PREFIX}tags"
 DEFAULT_IMAGE: Final[str] = "debian:bookworm-slim"
 
 # Path inside the agent container where the unified host volume is mounted.
-# This is the same path as the agent's mngr ``host_dir`` -- the volume IS the
-# host_dir rather than being mounted under it via a symlink, which keeps the
-# layout aligned with the forever-claude-template symlink-code design where
-# ``/mngr/code/``, ``/mngr/worktree/``, ``/mngr/runtime/``, etc. all live on
-# the same volume next to mngr's own ``agents/`` + ``host_state.json``. The
-# provider's persisted ``agents/<id>.json`` files coexist with mngr core's
-# ``agents/<id>/`` per-agent directories (file vs directory at the same name
-# stem) without conflict.
-HOST_VOLUME_MOUNT_PATH: Final[str] = "/mngr"
+# The container sees three top-level entries under this mount: host_state.json,
+# agents/, and host_dir/. The container's mngr host_dir symlink resolves into
+# the host_dir/ subdirectory so all of the agent's writes end up on the volume.
+HOST_VOLUME_MOUNT_PATH: Final[str] = "/mngr-vol"
 
-# Subdirectory inside the unified volume reserved for the agent-side mngr
-# host_dir. Historical -- predates ``HOST_VOLUME_MOUNT_PATH=/mngr`` when the
-# volume mounted at ``/mngr-vol`` and a symlink redirected ``/mngr`` to this
-# subpath. With the new model the agent writes directly under the volume
-# root, so this directory exists (still seeded for backward compatibility)
-# but is no longer in the live read/write path.
+# Subdirectory inside the unified volume that backs the agent's mngr host_dir.
 HOST_DIR_SUBPATH: Final[str] = "host_dir"
 
 # Shell command for the agent container's PID 1: trap SIGTERM and stay alive
@@ -1433,17 +1423,10 @@ class VpsDockerProvider(BaseProviderInstance):
 
         logger.log(LogLevel.BUILD.value, "Setting up SSH in container...", source="vps")
         with log_span("Setting up SSH in container"):
-            # host_volume_mount_path=None: the volume is mounted directly at
-            # mngr_host_dir (=/mngr), so no symlink redirection is needed.
-            # Passing a path here would cause build_check_and_install_packages_command
-            # to `rm -rf /mngr` and then symlink it, which (1) is wrong on the
-            # new direct-mount layout and (2) races destructively with FCT's
-            # CMD that seeds /mngr/code from /docker_build_code at container
-            # start.
             self._setup_container_ssh(
                 outer=outer,
                 container_name=container_name,
-                host_volume_mount_path=None,
+                host_volume_mount_path=f"{HOST_VOLUME_MOUNT_PATH}/{HOST_DIR_SUBPATH}",
                 known_hosts_entries=tuple(known_hosts or ()),
                 authorized_keys_entries=tuple(authorized_keys or ()),
             )
