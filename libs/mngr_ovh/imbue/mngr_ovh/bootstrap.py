@@ -39,6 +39,14 @@ _ROOT_VERIFY_COMMAND: str = 'test "$(whoami)" = root && echo OK'
 #   (Vultr) get rsync for free because their base images include it;
 #   OVH does not, so the gap has to be closed here.
 #
+# * ``inotify-tools`` and ``jq`` -- both required by the per-host
+#   ``snapshot_helper.service`` that ``mngr_vps_docker`` installs on
+#   every outer (the script blocks on ``inotifywait`` for snapshot
+#   requests from the in-container ``host_backup`` service, and uses
+#   ``jq`` to parse + emit the JSON request/result files). Cloud-init
+#   backends pull these in via the cloud-init ``packages:`` list; OVH
+#   has to install them here for parity.
+#
 # Kept as a tuple so the list is easy to extend if future vps_docker
 # revisions need another tool the image doesn't ship.
 _REQUIRED_OUTER_PACKAGES: tuple[str, ...] = ("rsync", "inotify-tools", "jq")
