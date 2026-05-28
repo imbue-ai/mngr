@@ -2,6 +2,7 @@ import os
 import tomllib
 from pathlib import Path
 from typing import Any
+from typing import Final
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mngr.config.consts import PROFILES_DIRNAME
@@ -9,6 +10,14 @@ from imbue.mngr.config.consts import ROOT_CONFIG_FILENAME
 from imbue.mngr.config.host_dir import read_default_host_dir
 from imbue.mngr.errors import ConfigParseError
 from imbue.mngr.utils.git_utils import find_git_worktree_root
+
+# Filenames of the per-scope settings files, relative to their containing
+# directory (the user profile dir, or the resolved project config dir). Private
+# so callers go through the path helpers below (``get_user_config_path`` /
+# ``get_project_config_path`` / ``get_local_config_path``) instead of
+# reconstructing paths from a shared filename constant.
+_SETTINGS_FILENAME: Final[str] = "settings.toml"
+_LOCAL_SETTINGS_FILENAME: Final[str] = "settings.local.toml"
 
 # =============================================================================
 # Config File Discovery and Loading
@@ -51,17 +60,27 @@ def find_profile_dir_lightweight(base_dir: Path) -> Path | None:
 
 def get_user_config_path(profile_dir: Path) -> Path:
     """Get the user config path based on profile directory."""
-    return profile_dir / "settings.toml"
+    return profile_dir / _SETTINGS_FILENAME
+
+
+def get_project_config_path(project_config_dir: Path) -> Path:
+    """Get the project settings file inside a resolved project config directory."""
+    return project_config_dir / _SETTINGS_FILENAME
+
+
+def get_local_config_path(project_config_dir: Path) -> Path:
+    """Get the local settings file inside a resolved project config directory."""
+    return project_config_dir / _LOCAL_SETTINGS_FILENAME
 
 
 def get_project_config_name(root_name: str) -> Path:
     """Get the project config relative path based on root name."""
-    return Path(f".{root_name}") / "settings.toml"
+    return Path(f".{root_name}") / _SETTINGS_FILENAME
 
 
 def get_local_config_name(root_name: str) -> Path:
     """Get the local config relative path based on root name."""
-    return Path(f".{root_name}") / "settings.local.toml"
+    return Path(f".{root_name}") / _LOCAL_SETTINGS_FILENAME
 
 
 def _find_project_root(cg: ConcurrencyGroup, start: Path | None = None) -> Path | None:
@@ -87,22 +106,6 @@ def resolve_project_config_dir(
     if root is None:
         return None
     return root / f".{root_name}"
-
-
-def load_project_config(context_dir: Path | None, root_name: str, cg: ConcurrencyGroup) -> dict[str, Any] | None:
-    """Find and load the project config file, returning None if not found."""
-    project_dir = resolve_project_config_dir(context_dir, root_name, cg)
-    if project_dir is None:
-        return None
-    return try_load_toml(project_dir / "settings.toml")
-
-
-def load_local_config(context_dir: Path | None, root_name: str, cg: ConcurrencyGroup) -> dict[str, Any] | None:
-    """Find and load the local config file, returning None if not found."""
-    project_dir = resolve_project_config_dir(context_dir, root_name, cg)
-    if project_dir is None:
-        return None
-    return try_load_toml(project_dir / "settings.local.toml")
 
 
 # =============================================================================
@@ -149,10 +152,10 @@ def _resolve_config_files(
         project_dir = resolve_project_config_dir(context_dir, root_name, cg)
 
     if project_dir is not None:
-        raw_project = try_load_toml(project_dir / "settings.toml")
+        raw_project = try_load_toml(get_project_config_path(project_dir))
         if raw_project is not None:
             configs.append(raw_project)
-        raw_local = try_load_toml(project_dir / "settings.local.toml")
+        raw_local = try_load_toml(get_local_config_path(project_dir))
         if raw_local is not None:
             configs.append(raw_local)
 
