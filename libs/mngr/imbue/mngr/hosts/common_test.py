@@ -7,6 +7,8 @@ from datetime import timezone
 from pathlib import Path
 from typing import cast
 
+import pytest
+
 from imbue.mngr.api.testing import FakeHost
 from imbue.mngr.config.agent_class_registry import register_agent_class
 from imbue.mngr.config.agent_class_registry import reset_agent_class_registry
@@ -18,6 +20,7 @@ from imbue.mngr.hosts.common import check_agent_type_known
 from imbue.mngr.hosts.common import compute_idle_seconds
 from imbue.mngr.hosts.common import determine_lifecycle_state
 from imbue.mngr.hosts.common import get_descendant_process_names
+from imbue.mngr.hosts.common import get_offline_agent_state
 from imbue.mngr.hosts.common import get_ssh_known_hosts_file
 from imbue.mngr.hosts.common import resolve_expected_process_name
 from imbue.mngr.hosts.common import timestamp_to_datetime
@@ -25,6 +28,7 @@ from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import CommandString
+from imbue.mngr.primitives import HostState
 
 # =========================================================================
 # timestamp_to_datetime tests
@@ -391,3 +395,43 @@ def test_get_ssh_known_hosts_file_returns_none_for_dev_null() -> None:
     host = _make_host_with_known_hosts("/dev/null")
     result = get_ssh_known_hosts_file(host)
     assert result is None
+
+
+# =========================================================================
+# get_offline_agent_state tests
+# =========================================================================
+
+# Down states: the host is provably not running the agent process.
+_OFFLINE_STOPPED_HOST_STATES = (
+    HostState.BUILDING,
+    HostState.STARTING,
+    HostState.STOPPING,
+    HostState.STOPPED,
+    HostState.PAUSED,
+    HostState.CRASHED,
+    HostState.FAILED,
+    HostState.DESTROYED,
+)
+
+# Indeterminate states: we cannot observe the agent, so its state is unknowable.
+_OFFLINE_UNKNOWN_HOST_STATES = (
+    HostState.RUNNING,
+    HostState.UNAUTHENTICATED,
+    HostState.UNKNOWN,
+)
+
+
+@pytest.mark.parametrize("host_state", _OFFLINE_STOPPED_HOST_STATES)
+def test_get_offline_agent_state_stopped_for_down_host(host_state: HostState) -> None:
+    assert get_offline_agent_state(host_state) == AgentLifecycleState.STOPPED
+
+
+@pytest.mark.parametrize("host_state", _OFFLINE_UNKNOWN_HOST_STATES)
+def test_get_offline_agent_state_unknown_for_indeterminate_host(host_state: HostState) -> None:
+    assert get_offline_agent_state(host_state) == AgentLifecycleState.UNKNOWN
+
+
+def test_get_offline_agent_state_covers_every_host_state() -> None:
+    """Guard against a new HostState member slipping through without a deliberate mapping."""
+    covered = set(_OFFLINE_STOPPED_HOST_STATES) | set(_OFFLINE_UNKNOWN_HOST_STATES)
+    assert covered == set(HostState)

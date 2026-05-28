@@ -11,6 +11,7 @@ from imbue.mngr.api.find import find_one_agent
 from imbue.mngr.api.providers import get_provider_instance
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import HostConnectionError
+from imbue.mngr.hosts.common import get_offline_agent_state
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import AgentAddress
 from imbue.mngr.primitives import AgentId
@@ -103,15 +104,17 @@ def poll_target_state(
             if isinstance(host_interface, OnlineHostInterface):
                 agent_state = _get_agent_lifecycle_state(host_interface, resolved.agent_id)
             else:
-                agent_state = AgentLifecycleState.STOPPED
+                # Host is offline -- derive the agent state from the host state.
+                agent_state = get_offline_agent_state(host_state)
 
         return CombinedState(host_state=host_state, agent_state=agent_state)
     except HostConnectionError as exc:
         # Host is unreachable (e.g. destroyed, stopped) -- get state from provider metadata
         logger.debug("Host unreachable, falling back to offline state: {}", exc)
         offline_host = resolved.provider.to_offline_host(resolved.host_id)
-        offline_agent_state = AgentLifecycleState.STOPPED if resolved.agent_id is not None else None
-        return CombinedState(host_state=offline_host.get_state(), agent_state=offline_agent_state)
+        offline_host_state = offline_host.get_state()
+        offline_agent_state = get_offline_agent_state(offline_host_state) if resolved.agent_id is not None else None
+        return CombinedState(host_state=offline_host_state, agent_state=offline_agent_state)
 
 
 def _get_agent_lifecycle_state(

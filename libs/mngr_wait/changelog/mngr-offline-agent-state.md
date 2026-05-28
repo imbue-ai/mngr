@@ -1,0 +1,3 @@
+## Derive offline agent state when polling an unreachable host
+
+- `poll_target_state` no longer hardcodes `AgentLifecycleState.STOPPED` for offline agents. Both offline paths -- when the provider returns an already-offline host, and when connecting raises `HostConnectionError` and we fall back to the offline host representation -- now derive the agent state from the host state via `get_offline_agent_state`. A waiting agent on a host that is provably down resolves to `STOPPED` as before, but an agent on a host whose state is indeterminate (e.g. reported `RUNNING` but unreachable) now resolves to `UNKNOWN` instead of a misleading `STOPPED`.

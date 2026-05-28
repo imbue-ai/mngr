@@ -1,10 +1,15 @@
 import json
+from datetime import datetime
+from datetime import timezone
 from pathlib import Path
 
 import pytest
 
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import UserInputError
+from imbue.mngr.hosts.offline_host import OfflineHost
+from imbue.mngr.interfaces.data_types import CertifiedHostData
+from imbue.mngr.primitives import ActivitySource
 from imbue.mngr.primitives import AgentAddress
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentLifecycleState
@@ -13,8 +18,12 @@ from imbue.mngr.primitives import HostAddress
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import HostState
+from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
+from imbue.mngr.providers.mock_provider_test import MockProviderInstance
+from imbue.mngr_wait.api import ResolvedTarget
 from imbue.mngr_wait.api import _detect_state_changes
+from imbue.mngr_wait.api import poll_target_state
 from imbue.mngr_wait.api import resolve_wait_target
 from imbue.mngr_wait.api import wait_for_state
 from imbue.mngr_wait.data_types import CombinedState
@@ -79,6 +88,78 @@ def test_resolve_wait_target_raises_when_host_not_found(
     nonexistent_host_id = HostId.generate()
     with pytest.raises(UserInputError, match="Could not find host"):
         resolve_wait_target(HostAddress(host=nonexistent_host_id), temp_mngr_ctx)
+
+
+# === poll_target_state (offline host) ===
+
+
+def _make_offline_resolved_target(
+    host_id: HostId,
+    stop_reason: str | None,
+    temp_host_dir: Path,
+    temp_mngr_ctx: MngrContext,
+) -> ResolvedTarget:
+    """Build a ResolvedTarget whose provider returns an offline (non-online) host.
+
+    The offline host derives its state from ``stop_reason`` (the mock provider
+    supports controlled shutdown), letting us drive a deterministic host state.
+    """
+    now = datetime.now(timezone.utc)
+    provider = MockProviderInstance(
+        name=ProviderInstanceName("test"),
+        host_dir=temp_host_dir,
+        mngr_ctx=temp_mngr_ctx,
+    )
+    offline_host = OfflineHost(
+        id=host_id,
+        certified_host_data=CertifiedHostData(
+            host_id=str(host_id),
+            host_name="test-host",
+            idle_timeout_seconds=3600,
+            activity_sources=(ActivitySource.SSH,),
+            image="test-image:latest",
+            created_at=now,
+            updated_at=now,
+            stop_reason=stop_reason,
+        ),
+        provider_instance=provider,
+        mngr_ctx=temp_mngr_ctx,
+    )
+    provider.mock_hosts = [offline_host]
+    return ResolvedTarget(
+        target=WaitTarget(identifier=str(host_id), target_type=WaitTargetType.AGENT),
+        provider=provider,
+        host_id=host_id,
+        agent_id=AgentId.generate(),
+    )
+
+
+def test_poll_target_state_offline_host_derives_stopped_agent(
+    temp_host_dir: Path,
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """A down offline host yields a STOPPED agent (process provably not running)."""
+    host_id = HostId.generate()
+    resolved = _make_offline_resolved_target(host_id, "STOPPED", temp_host_dir, temp_mngr_ctx)
+    state = poll_target_state(resolved)
+    assert state.host_state == HostState.STOPPED
+    assert state.agent_state == AgentLifecycleState.STOPPED
+
+
+def test_poll_target_state_offline_host_derives_unknown_agent(
+    temp_host_dir: Path,
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """When the offline host's state is indeterminate, the agent state is UNKNOWN.
+
+    This proves the agent state is now derived from the host state rather than
+    hardcoded to STOPPED.
+    """
+    host_id = HostId.generate()
+    resolved = _make_offline_resolved_target(host_id, "RUNNING", temp_host_dir, temp_mngr_ctx)
+    state = poll_target_state(resolved)
+    assert state.host_state == HostState.RUNNING
+    assert state.agent_state == AgentLifecycleState.UNKNOWN
 
 
 # === _detect_state_changes ===

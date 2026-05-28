@@ -6,6 +6,7 @@ from datetime import datetime
 from datetime import timezone
 from pathlib import Path
 from typing import Final
+from typing import assert_never
 
 from loguru import logger
 
@@ -17,6 +18,7 @@ from imbue.mngr.primitives import ActivitySource
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import CommandString
+from imbue.mngr.primitives import HostState
 
 LOCAL_CONNECTOR_NAME: Final[str] = "LocalConnector"
 
@@ -312,3 +314,43 @@ def determine_lifecycle_state(
         return AgentLifecycleState.DONE
 
     return replaced_state
+
+
+@pure
+def get_offline_agent_state(host_state: HostState) -> AgentLifecycleState:
+    """Derive an agent's lifecycle state when its host is offline/unreachable.
+
+    An agent is just a process inside its host, so it cannot be running unless
+    the host is. No agent lifecycle state is persisted anywhere (it is computed
+    live from tmux/process info by determine_lifecycle_state), so when we cannot
+    connect to the host the host's own state is the only signal available. This
+    is the canonical mapping, used by both mngr_wait polling and the offline
+    AgentDetails builder so the rule lives in exactly one place -- analogous to
+    derive_offline_host_state for hosts.
+
+    There is deliberately no agent equivalent of HostState.DESTROYED: agent
+    destruction is modeled at the host/discovery layer (the host's DESTROYED
+    state plus the include_destroyed listing filter), not as an agent lifecycle
+    value, so a destroyed host yields a STOPPED agent here.
+
+    When the host's own state cannot be determined (UNKNOWN/UNAUTHENTICATED), or
+    the host metadata claims it is still RUNNING even though we reached this
+    offline path because we could not observe it, the agent's true state is
+    genuinely unknowable, so we report UNKNOWN rather than a misleading STOPPED.
+    """
+    match host_state:
+        case (
+            HostState.BUILDING
+            | HostState.STARTING
+            | HostState.STOPPING
+            | HostState.STOPPED
+            | HostState.PAUSED
+            | HostState.CRASHED
+            | HostState.FAILED
+            | HostState.DESTROYED
+        ):
+            return AgentLifecycleState.STOPPED
+        case HostState.RUNNING | HostState.UNAUTHENTICATED | HostState.UNKNOWN:
+            return AgentLifecycleState.UNKNOWN
+        case _ as unreachable:
+            assert_never(unreachable)

@@ -22,6 +22,7 @@ from imbue.mngr.errors import AgentNotFoundOnHostError
 from imbue.mngr.errors import HostAuthenticationError
 from imbue.mngr.errors import HostConnectionError
 from imbue.mngr.errors import MngrError
+from imbue.mngr.hosts.common import get_offline_agent_state
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.interfaces.data_types import HostDetails
@@ -221,7 +222,12 @@ def build_agent_details_from_offline_ref(
         initial_branch=agent_ref.created_branch_name,
         create_time=create_time,
         start_on_boot=agent_ref.start_on_boot,
-        state=AgentLifecycleState.STOPPED,
+        # No agent lifecycle state is persisted, so derive it from the host's
+        # offline state. A None host state means "not observed", which is as
+        # unknowable for the agent as it is for the host.
+        state=(
+            AgentLifecycleState.UNKNOWN if host_details.state is None else get_offline_agent_state(host_details.state)
+        ),
         url=None,
         start_time=None,
         runtime_seconds=None,
