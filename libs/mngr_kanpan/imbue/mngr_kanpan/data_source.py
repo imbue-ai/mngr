@@ -169,6 +169,11 @@ class KanpanDataSource(Protocol):
         ...
 
 
+# Plugin name used as the key for kanpan's certified plugin data (the `muted`
+# flag is stored under `plugin.<PLUGIN_NAME>` in each agent's certified data) and
+# as the field-generator namespace.
+PLUGIN_NAME = "kanpan"
+
 # Well-known field keys used by multiple components (section logic, TUI rendering, etc.)
 FIELD_MUTED = "muted"
 FIELD_PR = "pr"

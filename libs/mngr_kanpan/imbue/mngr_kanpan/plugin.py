@@ -1,4 +1,5 @@
 import types
+from collections.abc import Callable
 from collections.abc import Sequence
 from typing import Any
 
@@ -7,8 +8,14 @@ import click
 from imbue.mngr import hookimpl
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.plugin_registry import register_plugin_config
+from imbue.mngr.interfaces.agent import AgentInterface
+from imbue.mngr.interfaces.data_types import HostDetails
+from imbue.mngr.interfaces.host import OnlineHostInterface
+from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr_kanpan import hookspecs as kanpan_hookspecs
 from imbue.mngr_kanpan.cli import kanpan
+from imbue.mngr_kanpan.data_source import FIELD_MUTED
+from imbue.mngr_kanpan.data_source import PLUGIN_NAME
 from imbue.mngr_kanpan.data_sources.git_info import GitInfoDataSource
 from imbue.mngr_kanpan.data_sources.github import GitHubDataSource
 from imbue.mngr_kanpan.data_sources.github import GitHubDataSourceConfig
@@ -19,7 +26,7 @@ from imbue.mngr_kanpan.data_sources.shell import ShellCommandConfig
 from imbue.mngr_kanpan.data_sources.shell import ShellCommandDataSource
 from imbue.mngr_kanpan.data_types import KanpanPluginConfig
 
-register_plugin_config("kanpan", KanpanPluginConfig)
+register_plugin_config(PLUGIN_NAME, KanpanPluginConfig)
 
 
 def _is_source_enabled(config: KanpanPluginConfig, name: str) -> bool:
@@ -40,6 +47,40 @@ def register_hookspecs() -> types.ModuleType | None:
 def register_cli_commands() -> Sequence[click.Command] | None:
     """Register the kanpan command with mngr."""
     return [kanpan]
+
+
+def _muted_online_field(agent: AgentInterface, host: OnlineHostInterface) -> bool | None:
+    """Surface the kanpan ``muted`` flag from an online agent's certified plugin data.
+
+    Returns ``True`` when the agent is muted, else ``None`` (omitted) so the field
+    stays sparse on listings -- the board reads it back as ``False`` when absent.
+    """
+    return True if agent.get_plugin_data(PLUGIN_NAME).get(FIELD_MUTED) else None
+
+
+def _muted_offline_field(agent_ref: DiscoveredAgent, host_details: HostDetails) -> bool | None:
+    """Surface the kanpan ``muted`` flag for an offline/unreachable agent.
+
+    Reads the persisted ``plugin.<PLUGIN_NAME>.muted`` from the discovered agent's
+    certified data -- present both when the ref came from a reachable host's
+    ``data.json`` and when it was carried forward from the last online listing into
+    a discovery snapshot. Mirrors :func:`_muted_online_field`: ``True`` when muted,
+    else ``None``.
+    """
+    plugin_section = agent_ref.certified_data.get("plugin", {})
+    return True if plugin_section.get(PLUGIN_NAME, {}).get(FIELD_MUTED) else None
+
+
+@hookimpl
+def agent_field_generators() -> tuple[str, dict[str, Callable[[AgentInterface, OnlineHostInterface], Any]]] | None:
+    """Expose the kanpan ``muted`` flag as an agent field for online agents."""
+    return (PLUGIN_NAME, {FIELD_MUTED: _muted_online_field})
+
+
+@hookimpl
+def offline_agent_field_generators() -> tuple[str, dict[str, Callable[[DiscoveredAgent, HostDetails], Any]]] | None:
+    """Expose the kanpan ``muted`` flag as an agent field for offline/unreachable agents."""
+    return (PLUGIN_NAME, {FIELD_MUTED: _muted_offline_field})
 
 
 @hookimpl
