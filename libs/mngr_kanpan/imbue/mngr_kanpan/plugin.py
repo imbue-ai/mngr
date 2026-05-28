@@ -89,7 +89,7 @@ def kanpan_data_sources(mngr_ctx: MngrContext) -> Sequence[Any] | None:
 
     Each source checks its own enabled status from config before being included.
     """
-    config = mngr_ctx.get_plugin_config("kanpan", KanpanPluginConfig)
+    config = mngr_ctx.get_plugin_config(PLUGIN_NAME, KanpanPluginConfig)
 
     sources: list[Any] = []
 
