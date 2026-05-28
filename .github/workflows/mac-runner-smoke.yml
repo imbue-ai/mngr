@@ -1,0 +1,26 @@
+name: mac-runner smoke
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [mngr/mac-runner]
+    paths: ['.github/workflows/mac-runner-smoke.yml']
+
+concurrency:
+  group: mac-runner
+  cancel-in-progress: false
+
+jobs:
+  smoke:
+    runs-on: [self-hosted, macOS, minds-runner]
+    timeout-minutes: 5
+    steps:
+      - name: hello
+        run: |
+          echo "hostname: $(hostname)"
+          echo "uname:    $(uname -a)"
+          echo "date:     $(date)"
+          echo "whoami:   $(whoami)"
+          echo "pwd:      $(pwd)"
+          echo "runner:   ${RUNNER_NAME:-unset} (labels via job runs-on)"
+          /Applications/Tailscale.app/Contents/MacOS/Tailscale ip -4 || true
