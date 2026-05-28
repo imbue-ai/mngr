@@ -33,7 +33,8 @@ set -euo pipefail
 # on-demand command targets the same deployment. To change providers,
 # edit that constant and re-run this script.
 #
-# To trigger a fire on demand and read its JSON outcome (status / pr_url / notes):
+# To trigger a fire on demand and read its JSON outcome (status, with pr_url on
+# success or notes on failure):
 #   env -u MNGR_HOST_DIR -u MNGR_PREFIX MNGR_ROOT_NAME=mngr-changelog-schedule \
 #     uv run mngr schedule run changelog-consolidation --provider modal $DISABLE_PLUGIN_ARGS
 # (claude's final assistant message is the structured outcome; see also Modal app logs)
