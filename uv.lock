@@ -7,6 +7,9 @@ resolution-markers = [
     "python_full_version < '3.13'",
 ]
 
+[options]
+exclude-newer = "2026-05-23T00:00:00Z"
+
 [manifest]
 members = [
     "concurrency-group",
@@ -23,6 +26,7 @@ members = [
     "imbue-mngr-kanpan",
     "imbue-mngr-latchkey",
     "imbue-mngr-lima",
+    "imbue-mngr-mapreduce",
     "imbue-mngr-modal",
     "imbue-mngr-notifications",
     "imbue-mngr-opencode",
@@ -1976,6 +1980,17 @@ requires-dist = [
 ]
 
 [[package]]
+name = "imbue-mngr-mapreduce"
+version = "0.1.0"
+source = { editable = "libs/mngr_mapreduce" }
+dependencies = [
+    { name = "imbue-mngr" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "imbue-mngr", editable = "libs/mngr" }]
+
+[[package]]
 name = "imbue-mngr-modal"
 version = "0.2.8"
 source = { editable = "libs/mngr_modal" }
@@ -2110,6 +2125,8 @@ source = { editable = "libs/mngr_tmr" }
 dependencies = [
     { name = "boto3" },
     { name = "imbue-mngr" },
+    { name = "imbue-mngr-mapreduce" },
+    { name = "jinja2" },
     { name = "markdown-it-py" },
 ]
 
@@ -2117,6 +2134,8 @@ dependencies = [
 requires-dist = [
     { name = "boto3", specifier = ">=1.40,<2" },
     { name = "imbue-mngr", editable = "libs/mngr" },
+    { name = "imbue-mngr-mapreduce", editable = "libs/mngr_mapreduce" },
+    { name = "jinja2", specifier = ">=3.1" },
     { name = "markdown-it-py", specifier = ">=3.0.0" },
 ]
 

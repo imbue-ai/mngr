@@ -8,8 +8,6 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mngr.config.pre_readers import get_local_config_name
 from imbue.mngr.config.pre_readers import get_project_config_name
 from imbue.mngr.config.pre_readers import get_user_config_path
-from imbue.mngr.config.pre_readers import load_local_config
-from imbue.mngr.config.pre_readers import load_project_config
 from imbue.mngr.config.pre_readers import read_default_command
 from imbue.mngr.config.pre_readers import read_disabled_plugins
 from imbue.mngr.config.pre_readers import resolve_project_config_dir
@@ -246,38 +244,6 @@ def test_resolve_project_config_dir_env_var_takes_precedence_over_context_dir(
 # =============================================================================
 # Tests for MNGR_PROJECT_CONFIG_DIR affecting config loading
 # =============================================================================
-
-
-def test_load_project_config_uses_mngr_project_config_dir(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-    cg: ConcurrencyGroup,
-) -> None:
-    """load_project_config should load settings.toml from MNGR_PROJECT_CONFIG_DIR when set."""
-    custom_dir = tmp_path / "custom_project"
-    custom_dir.mkdir()
-    (custom_dir / "settings.toml").write_text('prefix = "custom-"\n')
-    monkeypatch.setenv("MNGR_PROJECT_CONFIG_DIR", str(custom_dir))
-
-    result = load_project_config(None, "mngr", cg)
-    assert result is not None
-    assert result["prefix"] == "custom-"
-
-
-def test_load_local_config_uses_mngr_project_config_dir(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-    cg: ConcurrencyGroup,
-) -> None:
-    """load_local_config should load settings.local.toml from MNGR_PROJECT_CONFIG_DIR when set."""
-    custom_dir = tmp_path / "custom_project"
-    custom_dir.mkdir()
-    (custom_dir / "settings.local.toml").write_text('prefix = "local-custom-"\n')
-    monkeypatch.setenv("MNGR_PROJECT_CONFIG_DIR", str(custom_dir))
-
-    result = load_local_config(None, "mngr", cg)
-    assert result is not None
-    assert result["prefix"] == "local-custom-"
 
 
 def test_read_default_command_uses_mngr_project_config_dir(

@@ -6,6 +6,17 @@ For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
 ## 2026-05-26
 
+- Pruned non-notable entries (test-only changes, internal refactors, and doc-only tweaks with no user-facing effect) from this project's CHANGELOG.md, per the new notable-only changelog policy.
+
+Adopted the `PREVENT_BARE_TMUX_TARGETS` ratchet rule (added in `imbue_common`) via
+`rc.check_bare_tmux_targets(_DIR, snapshot(0))` in this project's `test_ratchets.py`.
+This ratchet prevents new occurrences of `tmux <subcmd> -t '<bare-name>'` -- targets
+without a leading `=` exact-match prefix, which can silently route commands to a
+sibling session whose name shares a prefix with the intended one. No production code
+changes in this project; the adopting test starts at a baseline of zero violations.
+
+## 2026-05-26
+
 Collapse the GitHub data source's four separate `gh` calls (`gh pr list --state open`, `gh pr list --state all`, `gh pr view --json mergeable`, `gh api graphql` for unresolved threads) into a single `gh api graphql` request per board refresh. The new query uses GitHub search's OR semantics over `repo:` and `head:` qualifiers to filter directly to the (repo, branch) pairs the agents need, and embeds `mergeable`, `statusCheckRollup { state }`, `reviewThreads`, and `comments` inline on every returned PullRequest. This eliminates the gh HTTP cache race that the lock-based fix was working around (no `gh pr list`, no SearchType introspection, no cache file to corrupt), provides an atomic point-in-time snapshot of the entire board, and cuts the refresh from 2M+2K HTTP calls (where M = unique repos, K = open PRs) to exactly one. Removes ~250 lines of fetch/parse/orchestration code along with the `_GH_PR_LIST_LOCK`, the `ThreadPoolExecutor`, and the conflicts/unresolved second-pass fetcher.
 
 ## 2026-05-21

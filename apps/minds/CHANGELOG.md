@@ -8,6 +8,8 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ### Added
 
+- Added: `mngr latchkey register-agent --host-id ID --agent-id ID` CLI as the operator-facing equivalent of the per-agent registration the desktop client now does directly.
+- Added: Lima 2.1.1 is bundled into the desktop app — `scripts/build.js` downloads and extracts the official release tarball into `resources/lima/`, and the packaged backend prepends `resources/lima/bin` to `PATH` so `limactl` is found without a separate `brew install lima`. macOS Apple Silicon is fully self-contained via Lima's `vz` backend; macOS Intel and Linux still require host QEMU.
 - Added: New WebDAV file-server mount at `/api/v1/files` (backed by `wsgidav` + `a2wsgi`) exposing the user's home directory and `/tmp` to agents through the `minds-api-proxy` Latchkey extension, with per-agent Bearer-token auth.
 - Added: Latchkey gateway ships a new bundled `minds-api-proxy` extension that reverse-proxies `/minds-api-proxy` to the minds desktop client's bare-origin Minds API, with the upstream URL re-published on every `minds run` startup.
 - Added: File-sharing permission requests carry a required `access` field (`READ` / `WRITE`); the minds approval dialog renders a green "read-only" / amber "read & write" badge per file path.
@@ -25,6 +27,12 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ### Changed
 
+- Changed: Renamed `LaunchMode.LOCAL` compute provider to `LaunchMode.DOCKER` everywhere (Python code, `/create` form HTML, `/api/create-agent` JSON payloads, docs); the old name collided with mngr's own `local` provider. Submitting `launch_mode=LOCAL` is no longer recognized.
+- Changed: `MINDS_API_KEY` is no longer minted per-agent — `minds run` generates a single in-memory key on startup, the latchkey gateway's `minds-api-proxy` extension injects it on forwarded requests, and workspaces no longer carry the env var. Rotating per-startup removes a long-lived secret from the filesystem.
+- Changed: Notifications endpoint moved from `POST /api/v1/notifications` to `POST /api/v1/agents/<agent_id>/notifications`; every `/api/v1` route is now per-agent. The bearer-auth gate now compares against the single in-memory key with a constant-time check.
+- Changed: Every agent created by minds gets added to the host's `minds-api-proxy-allowed-agent` enum at finalize-host-permissions time, so an agent on host A cannot reach the Minds API on behalf of an agent on host B.
+- Changed: Desktop client now registers each agent via `imbue.mngr_latchkey.agent_setup.register_agent_for_host(...)` (a single atomic file edit) instead of the previous gateway-extension dance that POSTed two schemas + one rule per agent.
+- Changed: `workspace_ready_timeout_seconds` bumped from 60s to 300s in `agent_creator.py` so first-boot provisioning (uv sync, npm ci + run build for the system_interface frontend) no longer bounces users to the recovery page while the agent is still finishing provisioning.
 - Changed: `minds run` no longer dictates the `mngr forward` plugin's port — the `--mngr-forward-port` flag and `MINDS_MNGR_FORWARD_PORT` env var are removed; the plugin picks its own port and reports it back via its `listening` envelope.
 - Changed: Bumped bundled Latchkey version to 2.11.3.
 - Changed: Latchkey gateway's `permission-requests` extension grows a typed request schema (`{agent_id, rationale, type, payload}`) and a new `POST /permission-requests/approve/<id>` endpoint; pending requests live under `permission_requests/v2/`.
@@ -50,10 +58,14 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ### Removed
 
+- Removed: Per-agent reverse SSH tunnel that exposed `/api/v1/...` to workspaces, along with `MindsApiUrlWriter`, `LocalAgentDiscoveryHandler`, and the `$MNGR_AGENT_STATE_DIR/minds_api_url` write; agents now reach the Minds API exclusively through the latchkey gateway's `minds-api-proxy` extension.
+- Removed: Per-agent `MINDS_API_KEY` generation in `agent_creator.py` (no more `--host-env MINDS_API_KEY=...` to `mngr create`, no more per-agent `api_key_hash` file).
+- Removed: `gateway_client` field on `AgentCreator` and the low-level schema-altering methods on `LatchkeyGatewayClient` (`set_permission_schema`, `delete_permission_schema`, `delete_permission_rule`); the user-grant API (`set_permission_rule`, etc.) stays.
 - Removed: Silent auto-disable on `imbue_cloud` auth errors — `_ImbueCloudAuthErrorDisabler` and the provider-error callback plumbing on `EnvelopeStreamConsumer` are gone; the user now drives the Disable action explicitly via the providers panel.
 
 ### Fixed
 
+- Fixed: Hardened the workspace-restart shell command in `desktop_client/app.py` to use `tmux kill-window -t "=${MNGR_PREFIX}system-services:svc-system_interface"` (with the `=` exact-match prefix) so the kill no longer silently lands on a sibling-prefix session's window.
 - Fixed: Startup race where the minds desktop client could cache a stale latchkey gateway port and then fail every call with `[Errno 111] Connection refused`; the gateway client now self-heals on `httpx.ConnectError`/`ConnectTimeout`, and supervisor restart + pre-warm now run sequentially on a single background thread.
 - Fixed: `minds env deploy` is now actually idempotent against Neon — `create_neon_project` / `delete_neon_project` look up by name first via `_find_projects_by_name` and raise on ambiguous matches instead of silently leaking duplicate projects.
 - Fixed: Desktop client tolerates legacy `service_name` fields on disk by dropping them before validating `RequestResponseEvent`, eliminating the per-startup pydantic-extras warning and unresolved-request bug.
