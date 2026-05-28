@@ -168,18 +168,6 @@ _CREDENTIAL_STATUS_BY_LATCHKEY_VALUE: Final[dict[str, CredentialStatus]] = {
 LATCHKEY_AUTH_OPTION_BROWSER: Final[str] = "browser"
 LATCHKEY_AUTH_OPTION_SET: Final[str] = "set"
 
-# Substring (matched case-insensitively against latchkey's stderr/stdout)
-# that signals ``latchkey auth browser <service>`` failed because the
-# service first needs a one-off ``latchkey auth browser-prepare
-# <service>`` step. ``Latchkey.auth_browser`` detects this and
-# transparently runs prepare followed by a single retry of the browser
-# flow. The exact message from upstream latchkey at the time of writing
-# is ``"Error: Service <name> requires preparation first. Run 'latchkey
-# auth browser-prepare <name>' before logging in."``; we match on the
-# stable middle of that sentence so minor wording tweaks around it do
-# not break the detection.
-_AUTH_BROWSER_PREPARATION_REQUIRED_MARKER: Final[str] = "requires preparation first"
-
 
 class LatchkeyServiceInfo(FrozenModel):
     """Parsed output of ``latchkey services info <service>``."""
@@ -841,13 +829,9 @@ class Latchkey(MutableModel):
         stderr (or stdout, or a generic fallback).
 
         Some latchkey services require a one-off ``latchkey auth
-        browser-prepare <service>`` step before the regular browser
-        sign-in flow can run; latchkey signals this by exiting non-zero
-        with a message containing ``requires preparation first``. When
-        we see that, we transparently run ``auth browser-prepare`` and
-        retry ``auth browser`` once. Failures of either the prepare or
-        the retry attempt are reported as plain ``(False, message)``
-        results, just like any other ``auth browser`` failure.
+        browser-prepare <service>`` step before the regular browser sign-in
+        flow can run;. In such a case, we transparently run ``auth
+        browser-prepare`` and retry ``auth browser`` once.
         """
         is_success, detail = self._run_latchkey_auth_command(
             log_label="auth browser",
@@ -856,7 +840,7 @@ class Latchkey(MutableModel):
         )
         if is_success:
             return True, ""
-        if _AUTH_BROWSER_PREPARATION_REQUIRED_MARKER not in detail.lower():
+        if "latchkey auth browser-prepare" not in detail.lower():
             return False, detail
         logger.info(
             "latchkey auth browser {} reports preparation required; running 'auth browser-prepare' and retrying",
