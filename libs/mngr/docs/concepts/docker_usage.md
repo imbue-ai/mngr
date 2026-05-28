@@ -116,47 +116,49 @@ User-supplied bind mounts (`-s -v=...`) are independent of the host volume. They
 
 If the agent has `GH_TOKEN` (via `pass_env` in a template or `--pass-env` on the CLI), it can `git push` directly.
 
-### Option B: Use `mngr pull`
+### Option B: Use `mngr rsync` or `mngr git pull`
 
-`mngr pull` transfers changes from the agent to your local machine without needing git credentials on the agent. It supports two sync modes:
+`mngr rsync` and `mngr git pull` transfer changes from the agent to your local
+machine without needing git credentials on the agent.
 
 **Pull git commits** (when the agent has committed its work):
 
 ```bash
-mngr pull my-agent --sync-mode=git
+mngr git pull my-agent
 ```
 
 This merges the agent's branch into your current local branch.
 
-**Pull files** (default -- works for uncommitted changes and non-git-tracked files):
+**Pull files** (works for uncommitted changes and non-git-tracked files):
 
 ```bash
-mngr pull my-agent
+mngr rsync my-agent ./
 ```
 
-This uses rsync over SSH to sync the agent's working directory to your current directory. To preview what would be transferred first:
+This uses rsync over SSH to sync the agent's working directory to your current
+directory. To preview what would be transferred first:
 
 ```bash
-mngr pull my-agent --dry-run
+mngr rsync my-agent ./ --dry-run
 ```
 
 You can also pull a specific subdirectory:
 
 ```bash
-mngr pull my-agent:src ./local-src
+mngr rsync my-agent:src ./local-src
 ```
 
 To push local changes to the agent (e.g. a config file you edited locally):
 
 ```bash
-mngr push my-agent:config ./config
+mngr rsync ./config my-agent:config
 ```
 
-See [mngr pull](../commands/primary/pull.md) and [mngr push](../commands/primary/push.md) for all options.
+See [mngr rsync](../commands/primary/rsync.md) and [mngr git](../commands/primary/git.md) for all options.
 
 ### Option C: Fetch the branch directly from the host volume
 
-When `is_host_volume_created = true` (the default) and the agent's work directory lives under `host_dir` (the default for worktree/git-mirror transfer modes -- e.g. `/mngr/worktrees/<name>-<uuid>/`), the agent's git repo sits on the shared Docker named volume. You can git-fetch from it without involving SSH or `mngr pull`.
+When `is_host_volume_created = true` (the default) and the agent's work directory lives under `host_dir` (the default for worktree/git-mirror transfer modes -- e.g. `/mngr/worktrees/<name>-<uuid>/`), the agent's git repo sits on the shared Docker named volume. You can git-fetch from it without involving SSH or `mngr git pull`.
 
 On **Linux**, the volume is a real path on the daemon host, so you can fetch from it directly:
 
@@ -199,7 +201,7 @@ You can also create named snapshots manually:
 mngr snapshot create my-agent --name before-refactor
 ```
 
-Snapshots are stored as Docker images (`mngr-snapshot:<host_id>-<name>`). They capture the container's filesystem layers but **not** the contents of any volumes -- bind mounts (`-s -v=...`), named volumes, or the shared host volume. When mngr restores a host from a snapshot, it re-mounts the same host volume sub-folder, so anything the agent wrote under `host_dir` (e.g. `/mngr`) reappears via the persistent volume rather than via the snapshot image itself. The snapshot image alone is therefore not a self-contained backup of agent state. If you need a portable filesystem snapshot of the host, also copy the contents of `host_dir` separately (e.g. with `mngr pull`).
+Snapshots are stored as Docker images (`mngr-snapshot:<host_id>-<name>`). They capture the container's filesystem layers but **not** the contents of any volumes -- bind mounts (`-s -v=...`), named volumes, or the shared host volume. When mngr restores a host from a snapshot, it re-mounts the same host volume sub-folder, so anything the agent wrote under `host_dir` (e.g. `/mngr`) reappears via the persistent volume rather than via the snapshot image itself. The snapshot image alone is therefore not a self-contained backup of agent state. If you need a portable filesystem snapshot of the host, also copy the contents of `host_dir` separately (e.g. with `mngr rsync`).
 
 See [mngr snapshot](../commands/secondary/snapshot.md) for details.
 

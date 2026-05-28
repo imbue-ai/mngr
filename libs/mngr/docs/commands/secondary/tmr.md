@@ -99,7 +99,7 @@ mngr tmr [OPTIONS] [PYTEST_ARGS]...
 
 - [mngr create](../primary/create.md) - Create a new agent
 - [mngr list](../primary/list.md) - List agents
-- [mngr pull](../primary/pull.md) - Pull files or git commits from an agent
+- [mngr help pull](mngr help pull) - Pull files or git commits from an agent
 
 ## Examples
 

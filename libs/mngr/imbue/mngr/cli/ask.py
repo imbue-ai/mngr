@@ -74,10 +74,10 @@ _QUERY_PREFIX: Final[str] = (
     "response: mngr pair my-agent\n\n"
     #
     "user: How do I pull an agent's git commits back to my local repo?\n"
-    "response: mngr pull my-agent --sync-mode git\n\n"
+    "response: mngr git pull my-agent\n\n"
     #
     "user: How do I push my local changes to a running agent?\n"
-    "response: mngr push my-agent\n\n"
+    "response: mngr rsync ./ my-agent\n\n"
     #
     "user: How do I clone an existing agent to try something risky?\n"
     "response: mngr clone my-agent experiment\n\n"
@@ -214,7 +214,7 @@ _EXECUTE_QUERY_PREFIX: Final[str] = (
     "response: mngr clone my-agent experiment\n\n"
     #
     "user: pull git commits from my-agent\n"
-    "response: mngr pull my-agent --sync-mode git\n\n"
+    "response: mngr git pull my-agent\n\n"
     #
     "user: create a local agent with opus\n"
     "response: mngr create -- --model opus\n\n"
