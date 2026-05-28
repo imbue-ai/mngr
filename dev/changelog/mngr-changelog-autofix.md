@@ -12,7 +12,9 @@ entries.
 
 The reviewer edits changelog files only (the code is treated as ground
 truth -- it never modifies source), runs unattended (it self-reviews and
-makes its own correction commit rather than asking a user), and its summary
-(including any cases where the code itself looked wrong) is folded into the
-run's outcome JSON `notes`. If the review cannot run, the consolidation PR
-is still opened and the failure is noted.
+commits its own corrections rather than asking a user), and its summary
+(including any cases where the code itself looked wrong) is included in the
+consolidation PR's description. If the review cannot run, the consolidation
+PR is still opened and the failure is noted there. The run's outcome JSON
+no longer carries a freeform `notes` field; outcome detail lives in the PR
+description (on success) or the run logs (on failure).

@@ -6,12 +6,12 @@ as a fresh-context `general-purpose` subagent. You run **unattended**: do
 not ask questions, do not wait for confirmation, use your best judgment
 throughout.
 
-Your single job is one pass: verify that the `CHANGELOG.md` bullets this
-consolidation run just added are **factually accurate against the actual
-code on this branch**, and correct the ones that are not. This guards
-against stale or inaccurate changelog entries -- a per-PR entry may have
-been written before the code settled, or the summarization step may have
-drifted from what the code actually does.
+Your job: verify that the `CHANGELOG.md` bullets this consolidation run
+just added are **factually accurate against the actual code on this
+branch**, and correct the ones that are not. This guards against stale or
+inaccurate changelog entries -- a per-PR entry may have been written
+before the code settled, or the summarization step may have drifted from
+what the code actually does.
 
 You operate on whatever the consolidation run produced. You will be given
 the **base branch ref** (e.g. `origin/main`) in your spawn prompt; the
@@ -27,7 +27,6 @@ consolidation commit is at `HEAD`.
   the code.** Record it and report it back to the orchestrator instead.
 - **Do NOT run the test suite, builds, or `uv sync`.** You verify by
   reading code, not by executing it.
-- This is a **single pass**. Do not loop.
 
 ## Steps
 
@@ -85,17 +84,10 @@ not delete or rewrite unrelated pre-existing bullets.
 
 ### 4. Commit your corrections
 
-If you changed at least one `CHANGELOG.md` file, commit them as a single
-separate commit (git identity is already configured; do **not** amend or
-rebase):
-
-```
-Correct changelog bullets that disagreed with the code
-
-<one line per bullet you corrected/removed/collapsed, and why>
-```
-
-If you made no changes, do not commit anything.
+If you changed at least one `CHANGELOG.md` file, commit your changes (the
+git identity is already configured). Use as many commits as feel natural,
+with sensible commit messages of your own choosing. Do **not** amend or
+rebase existing commits. If you made no changes, do not commit anything.
 
 ### 5. Report back
 
@@ -108,4 +100,6 @@ Your final message to the orchestrator must be a concise plain-text summary
 - any **code concerns**: bullets where the code itself looked wrong or
   buggy (which you did NOT fix), so the orchestrator can surface them.
 
-If nothing needed changing, say so explicitly.
+The orchestrator includes this summary in the consolidation PR's
+description, so write it for a human reading the PR. If nothing needed
+changing, say so explicitly.

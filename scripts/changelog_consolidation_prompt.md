@@ -13,13 +13,14 @@ to determine outcome.
 ```
 {
   "status": "done" | "skipped-no-entries" | "failed",
-  "pr_url": "<url>" | null,
-  "notes": "<freeform human-readable string; multi-line ok>"
+  "pr_url": "<url>" | null
 }
 ```
 
 If any step fails, your final message must be a `failed` JSON object
-with the failing step number and error detail in `notes`.
+(with `pr_url` null). Before emitting it, state the failing step number
+and the error detail in your narration — that narration is captured in
+the run logs, which is where failures are diagnosed.
 
 Background: this repo uses an in-project changelog layout. Each project
 under `libs/`, `apps/`, plus the synthetic top-level `dev/` directory,
@@ -32,13 +33,12 @@ the right project's consolidated files.
 1. `cd "$MNGR_AGENT_WORK_DIR"`. Verify with `git rev-parse --abbrev-ref
    HEAD` that you are on a `mngr/changelog-consolidation-*` branch (not
    `HEAD`). If you are on detached HEAD, the schedule topology has
-   drifted from the assumption above; emit a `failed` JSON object
-   with `pwd` + branch state in `notes`.
+   drifted from the assumption above; narrate `pwd` + branch state, then
+   emit a `failed` JSON object.
 
 2. Run `python3 scripts/consolidate_changelog.py`. Capture stdout. If
    stdout contains the literal string "No changelog entries", emit
-   `{"status": "skipped-no-entries", "pr_url": null, "notes": ""}` and
-   stop. Otherwise stdout contains one or more `SECTION <project>
+   `{"status": "skipped-no-entries", "pr_url": null}` and stop. Otherwise stdout contains one or more `SECTION <project>
    <YYYY-MM-DD>` lines — each one is a `## YYYY-MM-DD` section the
    consolidator just inserted at the top of
    `<project_dir>/UNABRIDGED_CHANGELOG.md`, where `<project_dir>` is
@@ -91,9 +91,8 @@ the right project's consolidated files.
    file header — `scripts/release.py` guarantees it is always present
    after each release, and the initial one is created when the project's
    changelog is set up). If it is *not* present, the invariant has been
-   broken for that project; emit a `failed` JSON object with "missing
-   [Unreleased] heading in <project_dir>/CHANGELOG.md" in `notes` and
-   stop.
+   broken for that project; narrate "missing [Unreleased] heading in
+   <project_dir>/CHANGELOG.md", then emit a `failed` JSON object and stop.
 
    Group the bullets you generated in step 3 for that project (across
    all dates for that project) by category and merge them into the
@@ -123,22 +122,21 @@ the right project's consolidated files.
    entry was written). `git add -A` and `git commit -m "Consolidate
    changelog entries (run <RUN_DATE>)"`.
 
-8. Run a one-pass changelog accuracy review on the bullets you just
-   added, to guard against stale or inaccurate entries. Use the Task tool
-   to spawn a single `general-purpose` subagent -- a fresh context, so it
-   reviews the bullets with eyes that did not write them. Give it exactly
-   this prompt: "Read `scripts/changelog_accuracy_reviewer.md` and follow
-   its instructions exactly. The base branch ref is `origin/main`; the
+8. Run a changelog accuracy review on the bullets you just added, to
+   guard against stale or inaccurate entries. Use the Task tool to spawn
+   a single `general-purpose` subagent -- a fresh context, so it reviews
+   the bullets with eyes that did not write them. Give it exactly this
+   prompt: "Read `scripts/changelog_accuracy_reviewer.md` and follow its
+   instructions exactly. The base branch ref is `origin/main`; the
    consolidation commit is at HEAD." You MUST explicitly wait for that
    subagent to finish before continuing -- do not proceed in parallel. It
    verifies each newly-added `CHANGELOG.md` bullet against the actual
    code, corrects or removes inaccurate ones (and may collapse a bullet
    that another materially supersedes), editing changelog files only, and
-   commits any corrections as its own separate commit. Capture its final
-   summary -- you will fold it into `notes` in the final step. If the
-   subagent cannot run or errors out, do NOT fail the run: the
-   consolidation commit is still valid; proceed to the next steps and
-   record the accuracy-review failure prominently in `notes`.
+   commits any corrections. Capture its final summary -- you will include
+   it in the PR body (step 10). If the subagent cannot run or errors out,
+   do NOT fail the run: the consolidation commit is still valid; proceed
+   to the next steps and note the accuracy-review failure in the PR body.
 
 9. Capture the current branch name with `BRANCH=$(git rev-parse
    --abbrev-ref HEAD)` and push it: `git push --set-upstream origin
@@ -148,21 +146,20 @@ the right project's consolidated files.
    contains only this run's commits (the consolidation commit plus any
    accuracy-review correction commit).
 
-10. Open a PR with `gh pr create --base main --title "Changelog
-   consolidation (run <RUN_DATE>)" --body "Automated changelog
-   consolidation run on <RUN_DATE>."`. Capture the URL from stdout
-   into `PR_URL` while diverting stderr to a temp file, e.g.
-   `PR_URL=$(gh pr create --base main --title "..." --body "..." 2>/tmp/gh_stderr)`.
+10. Open a PR with `gh pr create`. Title: `Changelog consolidation (run
+   <RUN_DATE>)`. Body: state that this is an automated changelog
+   consolidation run on <RUN_DATE>, then include the changelog accuracy
+   reviewer's summary from step 8 (the bullets it corrected, removed, or
+   collapsed, and any code concerns it flagged; if the review could not
+   run, say so). Write the body to a temp file and pass it via
+   `--body-file` so the multi-line summary is preserved. Capture the URL
+   from stdout into `PR_URL` while diverting stderr to a temp file, e.g.
+   `PR_URL=$(gh pr create --base main --title "..." --body-file /tmp/pr_body.md 2>/tmp/gh_stderr)`.
    **Do not** fold stderr in via `2>&1` — `gh pr create` writes progress
    lines (e.g. "Creating pull request for X into Y in Z") to stderr
    that would mangle the captured URL. If `gh pr create` exits
-   non-zero, read `/tmp/gh_stderr` and emit a `failed` JSON object
-   with that stderr content in `notes`.
+   non-zero, narrate the contents of `/tmp/gh_stderr`, then emit a
+   `failed` JSON object.
 
 11. Emit your final JSON object: `{"status": "done", "pr_url":
-    "<PR_URL>", "notes": "<summary>"}`, substituting the PR URL and branch
-    from steps 9 and 10. In `notes`, state that the PR was opened for the
-    branch, and include the changelog accuracy reviewer's summary from
-    step 8 (how many bullets it corrected, removed, or collapsed, and any
-    code concerns it flagged). If the accuracy review could not run, say
-    so here.
+    "<PR_URL>"}`, substituting the PR URL from step 10.
