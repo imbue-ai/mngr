@@ -271,8 +271,8 @@ class _LocalFakeOuter(OuterHostInterface):
     def get_ssh_connection_info(self) -> tuple[str, str, int, Path] | None:
         return None
 
-    def path_exists(self, path: Path) -> bool:
-        return path.exists()
+    # path_exists is inherited from OuterHostInterface, which already routes to
+    # Path.exists() when is_local is True.
 
 
 def _make_local_connector() -> PyinfraConnector:
