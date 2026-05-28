@@ -9,4 +9,3 @@ cd ../..
 mkdir -p .git/hooks
 
 ln -sf ../../scripts/githooks/pre-commit .git/hooks/pre-commit
-ln -sf ../../scripts/githooks/pre-push .git/hooks/pre-push
