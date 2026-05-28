@@ -84,6 +84,7 @@ from imbue.mngr.providers.ssh_utils import create_pyinfra_host
 from imbue.mngr.providers.ssh_utils import load_or_create_host_keypair
 from imbue.mngr.providers.ssh_utils import load_or_create_ssh_keypair
 from imbue.mngr.providers.ssh_utils import wait_for_sshd
+from imbue.mngr.utils.git_utils import rsync_worktree_over_clone
 from imbue.mngr_vps_docker.cloud_init import generate_cloud_init_user_data
 from imbue.mngr_vps_docker.config import VpsDockerProviderConfig
 from imbue.mngr_vps_docker.errors import VpsProvisioningError
@@ -448,9 +449,17 @@ def _exec_in_container(
 ) -> str:
     """Execute a shell command inside a running container on outer. Returns stdout.
 
+    Forces ``--workdir /`` so the exec succeeds regardless of whether the
+    image's declared ``WORKDIR`` exists at exec time. Mngr's first
+    container exec is its own sshd setup -- which runs *before* any
+    ``post_host_create_command`` hook -- so a WORKDIR like ``/mngr/code/``
+    that the image expects to be populated by a first-boot seed step
+    won't be on disk yet. None of mngr's automated setup commands depend
+    on the image's WORKDIR; they all use absolute paths.
+
     Raises MngrError if the command exits non-zero.
     """
-    remote = f"docker exec {shlex.quote(container_name)} sh -c {shlex.quote(command)}"
+    remote = f"docker exec --workdir / {shlex.quote(container_name)} sh -c {shlex.quote(command)}"
     result = outer.execute_idempotent_command(remote, timeout_seconds=timeout_seconds)
     if not result.success:
         raise MngrError(f"docker exec in {container_name} failed: {result.stderr.strip() or result.stdout.strip()}")
@@ -1561,7 +1570,8 @@ class VpsDockerProvider(BaseProviderInstance):
                 if git_depth is not None:
                     clone_cmd.extend(["--depth", str(git_depth)])
                 # Use file:// so --depth is honored for local repos
-                clone_cmd.extend([f"file://{local_context}", str(local_clone_dir / "repo")])
+                clone_target = local_clone_dir / "repo"
+                clone_cmd.extend([f"file://{local_context}", str(clone_target)])
                 cg = ConcurrencyGroup(name="git-clone-build-context")
                 with cg:
                     clone_result = cg.run_process_to_completion(
@@ -1569,9 +1579,25 @@ class VpsDockerProvider(BaseProviderInstance):
                         is_checked_after=False,
                         timeout=120.0,
                     )
-                if clone_result.returncode != 0:
-                    raise MngrError(f"Failed to clone build context: {clone_result.stderr.strip()}")
-                context_args[-1] = str(local_clone_dir / "repo")
+                    if clone_result.returncode != 0:
+                        raise MngrError(f"Failed to clone build context: {clone_result.stderr.strip()}")
+                    # Overlay the worktree's working tree on top of the
+                    # fresh clone so uncommitted edits (e.g. a locally-
+                    # rsynced ``vendor/mngr/`` from
+                    # ``mngr imbue_cloud admin pool create --mngr-source``,
+                    # or any in-flight FCT edits the operator hasn't
+                    # committed yet) actually reach the docker build.
+                    # ``git clone`` alone only carries committed files,
+                    # which silently rolls the build context back to
+                    # HEAD and produces "Unknown field" / "wrong code"
+                    # surprises at image-build time. Mirrors the
+                    # corresponding overlay step in minds' agent_creator
+                    # (Apr 12 fix, commit a3dc008b4); the shared helper
+                    # in ``imbue.mngr.utils.git_utils`` keeps the two
+                    # call sites in lockstep.
+                    if is_worktree:
+                        rsync_worktree_over_clone(local_context, clone_target, cg=cg)
+                context_args[-1] = str(clone_target)
 
         try:
             logger.log(

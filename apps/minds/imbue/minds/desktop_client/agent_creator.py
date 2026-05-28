@@ -55,6 +55,7 @@ from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
+from imbue.mngr.utils.git_utils import rsync_worktree_over_clone
 from imbue.mngr_latchkey.agent_setup import AgentLatchkeySetup
 from imbue.mngr_latchkey.agent_setup import finalize_host_permissions
 from imbue.mngr_latchkey.agent_setup import prepare_agent_latchkey
@@ -376,42 +377,16 @@ def _rsync_worktree_over_clone(
     *,
     parent_cg: ConcurrencyGroup | None = None,
 ) -> None:
-    """Rsync a worktree's working directory over a shallow clone.
+    """Rsync a worktree's working directory over a fresh clone.
 
-    Copies all files from the worktree into the clone, preserving the
-    clone's ``.git`` directory (which is a proper standalone git dir,
-    unlike the worktree's ``.git`` file). This ensures uncommitted
-    changes in the worktree are present in the clone.
+    Thin wrapper around :func:`imbue.mngr.utils.git_utils.rsync_worktree_over_clone`
+    that owns the per-call ``rsync-worktree`` child CG. The shared helper
+    is also what ``mngr_vps_docker`` uses for its docker-build-context
+    assembly, so the two paths can't drift again.
     """
-    logger.debug("Rsyncing worktree {} over clone {}", worktree_dir, clone_dir)
-    command = [
-        "rsync",
-        "-a",
-        "--delete",
-        "--exclude=.git",
-        "--exclude=__pycache__",
-        "--exclude=.venv",
-        "--exclude=node_modules",
-        "--exclude=.mypy_cache",
-        "--exclude=.ruff_cache",
-        "--exclude=.pytest_cache",
-        "--exclude=.test_output",
-        f"{worktree_dir}/",
-        f"{clone_dir}/",
-    ]
     cg = _make_child_cg("rsync-worktree", parent_cg)
     with cg:
-        result = cg.run_process_to_completion(
-            command=command,
-            is_checked_after=False,
-            on_output=on_output,
-        )
-    if result.returncode != 0:
-        logger.warning(
-            "rsync worktree over clone exited with code {}: {}",
-            result.returncode,
-            result.stderr.strip() if result.stderr.strip() else result.stdout.strip(),
-        )
+        rsync_worktree_over_clone(worktree_dir, clone_dir, cg=cg, on_output=on_output)
 
 
 # Constant agent name for every minds-created agent. Minds runs one agent
@@ -1136,8 +1111,14 @@ class AgentCreator(MutableModel):
                     if _is_git_worktree(resolved_path):
                         # Worktrees have a .git file pointing to the parent repo's
                         # .git/worktrees/ dir, which breaks when copied into Docker.
-                        # Clone locally to get a standalone repo. Use file:// protocol
-                        # so --depth 1 is honored (git ignores --depth for local paths).
+                        # Clone locally to get a standalone repo.
+                        #
+                        # Full clone (no --depth=1): mngr's downstream mirror push
+                        # to the agent container's bare `.git` rejects shallow
+                        # updates with "shallow update not allowed" whenever the
+                        # source's tip has a parent not in the pack. Cloning
+                        # deeply avoids that failure mode. Local file:// clones
+                        # are cheap regardless.
                         # Use a stable path based on repo name so Docker layer caching works.
                         log_queue.put("[minds] Cloning local worktree: {}".format(resolved_path))
                         repo_name = extract_repo_name(repo_source)
@@ -1149,13 +1130,11 @@ class AgentCreator(MutableModel):
                             file_url,
                             clone_target,
                             on_output=emit_log,
-                            is_shallow=True,
                             parent_cg=self.root_concurrency_group,
                         )
-                        # The shallow clone only contains committed content. Rsync
-                        # the worktree's working directory over so that uncommitted
-                        # changes (e.g. a locally-rsynced vendor/mngr/) are included
-                        # in the Docker build context.
+                        # Rsync the worktree's working directory over so that
+                        # uncommitted changes (e.g. a locally-rsynced
+                        # vendor/mngr/) are included in the Docker build context.
                         _rsync_worktree_over_clone(
                             resolved_path,
                             clone_target,
