@@ -305,99 +305,18 @@ async function downloadGit(resourcesDir, { platform }) {
   }
 }
 
-// Pin pnpm to a version that works on both ToDesktop CI runners.
-// ToDesktop's CI command is `npx pnpm@latest install --prod=false
-// --no-frozen-lockfile`. `@latest` currently resolves to pnpm 11.1.0
-// (released 2026-05-11), which (a) requires Node >=22.13 and `require`s
-// `node:sqlite` (built-in only in Node >=22.5) -- ToDesktop's Azure
-// Linux runner has Node 20.20.0, so 11.1.0 crashes there with
-// ERR_UNKNOWN_BUILTIN_MODULE; and (b) made the strict-builds policy a
-// hard exit even when an `allowBuilds` entry exists for the dep. Pinning
-// to pnpm 10.33.4 (the version that was `@latest` during our last green
-// builds on 2026-05-06) avoids both: 10.x has no Node-22 requirement,
-// doesn't use node:sqlite, and only warns (not errors) on unapproved
-// build scripts. ToDesktop's CI does a `pnpm --version` check before
-// running `npx pnpm@latest`, so if pnpm is on PATH from this hook it
-// uses that version directly.
-const PNPM_VERSION = '10.33.4';
-
-function _logErr(label, err) {
-  console.log(`[download-binaries] ${label} FAILED:`);
-  if (err && err.stderr) console.log(String(err.stderr).slice(0, 2000));
-  if (err && err.stdout) console.log(String(err.stdout).slice(0, 2000));
-  if (err && err.status != null) console.log(`exit=${err.status}`);
-}
-
-function _verifyPnpm() {
-  try {
-    return execSync('pnpm --version', { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
-  } catch {
-    return null;
-  }
-}
-
-function _try(label, cmd) {
-  try {
-    console.log(`[download-binaries] ${label}: ${cmd}`);
-    execSync(cmd, { stdio: 'pipe', encoding: 'utf-8' });
-    return true;
-  } catch (err) {
-    _logErr(label, err);
-    return false;
-  }
-}
-
-function installPnpm() {
-  // Skip if a compatible pnpm is already on PATH (covers local re-runs
-  // where the user already has pnpm via corepack / brew / etc.).
-  const existing = _verifyPnpm();
-  if (existing && existing.startsWith('10.')) {
-    console.log(`[download-binaries] pnpm ${existing} already on PATH; skipping reinstall.`);
-    return;
-  }
-  console.log(`[download-binaries] Need pnpm@${PNPM_VERSION} on PATH so ToDesktop's "pnpm --version" check picks it up (avoids npx pnpm@latest -> 11.1.0 which breaks both CI runners).`);
-
-  // Strategy 1: plain `npm install -g`. Works on Mac (admin user) and on
-  // Linux when npm's prefix is user-writable.
-  if (_try('npm install -g', `npm install -g pnpm@${PNPM_VERSION} --no-audit --no-fund`)) {
-    const v = _verifyPnpm();
-    if (v) { console.log(`[download-binaries] pnpm ${v} on PATH (npm -g)`); return; }
-  }
-
-  // Strategy 2: sudo npm install -g. Azure DevOps hosted Linux runners
-  // give the CI user passwordless sudo, so this works there even when
-  // the user can't write to /usr/lib/node_modules.
-  if (_try('sudo -n npm install -g', `sudo -n npm install -g pnpm@${PNPM_VERSION} --no-audit --no-fund`)) {
-    const v = _verifyPnpm();
-    if (v) { console.log(`[download-binaries] pnpm ${v} on PATH (sudo npm -g)`); return; }
-  }
-
-  // Strategy 3: direct binary download from pnpm's GitHub releases into
-  // /usr/local/bin via sudo. pnpm publishes static single-binary builds
-  // for linux-x64 / macos-arm64 / macos-x64 with no Node.js dependency.
-  const dlPlat = process.platform === 'darwin'
-    ? (process.arch === 'arm64' ? 'macos-arm64' : 'macos-x64')
-    : 'linux-x64';
-  const url = `https://github.com/pnpm/pnpm/releases/download/v${PNPM_VERSION}/pnpm-${dlPlat}`;
-  if (_try('sudo -n direct binary install', `sudo -n bash -c 'curl -fL -o /usr/local/bin/pnpm "${url}" && chmod 755 /usr/local/bin/pnpm'`)) {
-    const v = _verifyPnpm();
-    if (v) { console.log(`[download-binaries] pnpm ${v} on PATH (direct binary)`); return; }
-  }
-
-  // If nothing put pnpm on PATH, fail loudly. Better than a silent fallback
-  // to `npx pnpm@latest` which is what got us into this mess.
-  throw new Error(`Could not install pnpm@${PNPM_VERSION} via any strategy. ToDesktop's install will fall back to pnpm@latest (currently 11.1.0) which breaks both runners.`);
-}
-
 /**
  * Download platform-specific binaries into the given resources directory.
  * Can be called directly or from a ToDesktop hook.
+ *
+ * pnpm and Node are NOT provisioned here -- ToDesktop's ``pnpmVersion``
+ * (and ``nodeVersion`` / ``npmVersion``) fields in ``todesktop.json``
+ * cover that. This hook only handles binaries ToDesktop has no
+ * first-class knob for: ``uv`` and ``git``.
  */
 async function downloadBinaries(resourcesDir) {
   const { platform, arch } = getPlatformArch();
   console.log(`[download-binaries] Platform: ${platform}, Architecture: ${arch}`);
-
-  installPnpm();
 
   await Promise.all([
     downloadUv(resourcesDir, { platform, arch }),
