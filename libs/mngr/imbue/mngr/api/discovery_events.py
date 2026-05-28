@@ -222,8 +222,6 @@ def discovered_agent_from_agent_details(agent_details: AgentDetails) -> Discover
             "create_time": agent_details.create_time.isoformat(),
             "start_on_boot": agent_details.start_on_boot,
             "labels": agent_details.labels,
-            # Preserve plugin fields so offline_agent_field_generators can read them back
-            # when a fully-unreachable host falls back to this persisted snapshot.
             "plugin": dict(agent_details.plugin),
         },
     )
