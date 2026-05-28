@@ -234,6 +234,35 @@ def limactl_delete(
         raise LimaCommandError("delete", result.returncode, result.stderr)
 
 
+def limactl_disk_delete(
+    cg: ConcurrencyGroup,
+    disk_name: str,
+    force: bool = True,
+    timeout: float = 60.0,
+) -> None:
+    """Delete a Lima-managed disk.
+
+    Runs: limactl disk delete [--force] <disk_name>
+
+    Tolerates the disk already being absent (returncode != 0 plus a stderr
+    that mentions "not found") -- this is the case after a normal host
+    destroy that already removed the VM but the disk record is still
+    referenced.
+    """
+    cmd = ["limactl", "disk", "delete"]
+    if force:
+        cmd.append("--force")
+    cmd.append(disk_name)
+    with log_span("Running limactl disk delete: {}", disk_name):
+        result = cg.run_process_to_completion(cmd, timeout=timeout)
+    if result.returncode != 0:
+        stderr_lower = result.stderr.lower()
+        if "not found" in stderr_lower or "does not exist" in stderr_lower:
+            logger.debug("Lima disk {} already absent, skipping", disk_name)
+            return
+        raise LimaCommandError("disk delete", result.returncode, result.stderr)
+
+
 def limactl_list(cg: ConcurrencyGroup, timeout: float = 30.0) -> list[dict[str, Any]]:
     """List all Lima instances as parsed JSON.
 

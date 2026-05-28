@@ -1,5 +1,9 @@
 from pathlib import Path
 
+import pytest
+
+from imbue.mngr.errors import MngrError
+from imbue.mngr_lima.constants import HOST_VOLUME_MOUNT_PATH
 from imbue.mngr_lima.lima_yaml import generate_default_lima_yaml
 from imbue.mngr_lima.lima_yaml import load_user_lima_yaml
 from imbue.mngr_lima.lima_yaml import merge_lima_yaml
@@ -170,6 +174,80 @@ def test_merge_lima_yaml_forces_port_forwards_disabled() -> None:
     merged = merge_lima_yaml(base, user_override)
     assert merged["cpus"] == 8
     assert merged["portForwards"] == _EXPECTED_DISABLED_PORT_FORWARDS
+
+
+def test_generate_default_lima_yaml_bind_mount_mode_omits_additional_disks(tmp_path: Path) -> None:
+    """Today's default (is_host_data_volume_exposed=True equivalent): the YAML has
+    a 9p mount and no additionalDisks; the provisioning script does not contain
+    the host-data-disk block."""
+    volume_path = tmp_path / "volume"
+    volume_path.mkdir()
+    config = generate_default_lima_yaml(volume_host_path=volume_path, host_dir="/mngr")
+    assert "additionalDisks" not in config
+    assert "mounts" in config and len(config["mounts"]) == 1
+    assert config["mounts"][0]["mountPoint"] == "/mngr"
+    script = config["provision"][0]["script"]
+    assert "mount --bind" not in script
+    assert HOST_VOLUME_MOUNT_PATH not in script
+
+
+def test_generate_default_lima_yaml_btrfs_mode_omits_mounts_adds_disk(tmp_path: Path) -> None:
+    """When host_data_disk_name is set and volume_host_path is None, the YAML
+    omits the `mounts:` block entirely, attaches a btrfs additionalDisk with
+    format: true, and the provisioning script bind-mounts and symlinks
+    host_dir into it."""
+    del tmp_path
+    config = generate_default_lima_yaml(
+        volume_host_path=None,
+        host_dir="/mngr",
+        host_data_disk_name="mngr-abc123-data",
+        host_data_disk_size="100GiB",
+    )
+    assert "mounts" not in config
+    assert "additionalDisks" in config
+    assert len(config["additionalDisks"]) == 1
+    disk_entry = config["additionalDisks"][0]
+    assert disk_entry["name"] == "mngr-abc123-data"
+    assert disk_entry["format"] is True
+    assert disk_entry["fsType"] == "btrfs"
+    assert disk_entry["size"] == "100GiB"
+
+    script = config["provision"][0]["script"]
+    assert "/mnt/lima-mngr-abc123-data" in script
+    assert HOST_VOLUME_MOUNT_PATH in script
+    assert "mount --bind /mnt/lima-mngr-abc123-data" in script
+    assert "ln -sfn" in script
+    # Hardens the chicken-and-egg: provisioning script waits for Lima's auto-mount
+    # before symlinking host_dir into it.
+    assert "mountpoint -q /mnt/lima-mngr-abc123-data" in script
+    # Persists the bind across reboots.
+    assert "/etc/fstab" in script
+
+
+def test_generate_default_lima_yaml_disk_name_without_size_raises(tmp_path: Path) -> None:
+    """host_data_disk_size is required whenever a disk name is set; the helper
+    raises MngrError rather than silently producing a malformed YAML."""
+    volume_path = tmp_path / "volume"
+    volume_path.mkdir()
+    with pytest.raises(MngrError):
+        generate_default_lima_yaml(
+            volume_host_path=volume_path,
+            host_dir="/mngr",
+            host_data_disk_name="mngr-abc-data",
+            host_data_disk_size=None,
+        )
+
+
+def test_merge_lima_yaml_additional_disks_extends() -> None:
+    """A user --file YAML adding its own additionalDisks must not silently drop
+    mngr's btrfs host-data disk. _LIST_EXTEND_KEYS makes the merge concatenate
+    rather than replace."""
+    base = {"additionalDisks": [{"name": "mngr-host-data", "format": True, "fsType": "btrfs", "size": "100GiB"}]}
+    override = {"additionalDisks": [{"name": "user-extra", "format": True, "fsType": "ext4", "size": "20GiB"}]}
+    merged = merge_lima_yaml(base, override)
+    assert len(merged["additionalDisks"]) == 2
+    assert merged["additionalDisks"][0]["name"] == "mngr-host-data"
+    assert merged["additionalDisks"][1]["name"] == "user-extra"
 
 
 def test_parse_build_args_for_yaml_path() -> None:
