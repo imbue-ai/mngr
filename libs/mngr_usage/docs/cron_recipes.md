@@ -15,17 +15,19 @@ Across the usage-driven recipes below:
 
 ## A spare-capacity check
 
-Deciding whether to soak a window or launch new task work boils down to one
-question -- is there headroom to spend right now? This small helper answers it:
-the dispatch recipe gates on it directly, while the window-soaking recipe inlines
-the same pace/budget test (it needs the raw numbers for its hysteresis).
+A useful building block is spotting when there's capacity that's likely to go
+unused, so a recipe can spend it. "Spare" means the 5h window still has budget
+(<80% used) *and* weekly usage is under pace -- below a line that starts ~30%
+under the plain `used% = elapsed%` pace early in the rolling 7-day cycle
+(elapsed% = how far into the cycle you are) and tapers up to meet it by the
+cycle's end. The early margin keeps automation from crowding your own usage; the
+taper means that near the end it spends whatever's genuinely left.
 
 ```bash
 #!/usr/bin/env bash
 # spare-capacity.sh -- exit 0 if there's Claude capacity worth spending now: the
-# current 5h window still has budget (<80% used) AND weekly usage is under pace
-# (below the tapering-margin line). Exits non-zero otherwise, including when
-# there's no usage data to judge from.
+# 5h window still has budget (<80% used) AND weekly usage is under the tapering
+# pace line described above. Exits non-zero otherwise (including no usage data).
 set -euo pipefail
 
 mngr usage --format json | jq -e '
@@ -60,16 +62,14 @@ snapshot="$(mngr usage --format json)"
 # age-stale readings (a quiet account is when there's leftover budget) but treat
 # an already-reset 5h window (seconds_until_reset <= 0) as a reason to stop -- its
 # cached numbers are from the previous window. Emit one of:
-#   START -- (re)launch: in the tail of an open 5h window (>90% elapsed), with
-#            <80% of it used and weekly usage comfortably under pace.
+#   START -- (re)launch: in the tail of an open 5h window (>90% elapsed) with
+#            spare capacity (5h budget left, weekly under the pace line above).
 #   STOP  -- shut down: the 5h window left its tail / rolled over, OR weekly usage
-#            has reached the linear pace line.
-#   KEEP  -- hold the current state (weekly usage is between the two pace lines).
+#            reaches the strict pace line, used% = elapsed%.
+#   KEEP  -- hold the current state (weekly usage between those two lines).
 #   ""    -- no Claude usage data this tick: do nothing.
-# Two pace lines give hysteresis so we don't thrash: START needs weekly used%
-# below the lower tapering-margin line; STOP needs it above the higher strict
-# line, used% = elapsed%. The 0.30 margin both leaves headroom early in the
-# rolling 7-day cycle and sets the width of that no-thrash gap.
+# START uses the tapering margin line; STOP the looser strict line -- the gap is
+# hysteresis, so a running agent isn't stopped the moment it nudges past margin.
 status="$(jq -r '
   .sources[]
   | select(.source == "claude")
