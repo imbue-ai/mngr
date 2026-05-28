@@ -11,12 +11,12 @@ set -euo pipefail
 # orchestration steps live in scripts/changelog_consolidation_prompt.md and
 # are executed by claude itself (running consolidate_changelog.py, summarizing
 # each project's new dated sections into its per-project CHANGELOG.md
-# [Unreleased], committing, spawning a subagent to review the new bullets
-# for factual accuracy against the code, pushing a branch, opening a PR).
-# Claude's final assistant message is a single JSON object describing the
-# outcome ({status, pr_url}) -- visible in `mngr schedule run` stdout and
-# Modal logs. Per-run detail (accuracy-review findings on success, errors
-# on failure) lives in the PR description and the run logs, not the JSON.
+# [Unreleased], committing, spawning one subagent per touched project to
+# review the new bullets for factual accuracy against the code, pushing a
+# branch, opening a PR). Claude's final assistant message is a single JSON
+# object describing the outcome ({status, pr_url}, plus a `notes` field on
+# failed runs) -- visible in `mngr schedule run` stdout and Modal logs. On
+# success the per-project accuracy-review findings go in the PR description.
 #
 # Usage:
 #   ./scripts/setup_changelog_agent.sh
@@ -145,4 +145,4 @@ echo ""
 echo "To trigger a run on demand and read its outcome JSON:"
 echo "  env -u MNGR_HOST_DIR -u MNGR_PREFIX MNGR_ROOT_NAME=mngr-changelog-schedule \\"
 echo "    uv run mngr schedule run $TRIGGER_NAME --provider $PROVIDER $DISABLE_PLUGIN_ARGS"
-echo "(claude's final assistant message is a single JSON object: {status, pr_url})"
+echo "(claude's final assistant message is a single JSON object: {status, pr_url}; failed runs add a notes field)"
