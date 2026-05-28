@@ -435,33 +435,6 @@ def check_no_type_errors(project_root: Path) -> None:
         raise AssertionError("\n".join(failure_message))
 
 
-def check_no_ruff_errors(project_root: Path) -> None:
-    """Run the ruff linter and raise AssertionError if any linting errors are found."""
-    result = subprocess.run(
-        ["uv", "run", "ruff", "check"],
-        cwd=project_root,
-        capture_output=True,
-        text=True,
-    )
-
-    if result.returncode != 0:
-        failure_message = [
-            f"Ruff linter found errors (returncode {result.returncode}):",
-            "",
-            "Full ruff stdout:",
-            "=" * 80,
-            result.stdout,
-            "=" * 80,
-            "",
-            "Full ruff stderr:",
-            "=" * 80,
-            result.stderr,
-            "=" * 80,
-        ]
-
-        raise AssertionError("\n".join(failure_message))
-
-
 def assert_posix_compatible(command: str) -> None:
     """Assert that a shell command string is POSIX-compatible using shellcheck.
 

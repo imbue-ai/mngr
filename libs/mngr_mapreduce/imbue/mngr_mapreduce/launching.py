@@ -13,7 +13,7 @@ from imbue.mngr.api.create import create as api_create
 from imbue.mngr.api.create import resolve_target_host
 from imbue.mngr.api.data_types import CreateAgentResult
 from imbue.mngr.api.providers import get_provider_instance
-from imbue.mngr.api.push import push_files
+from imbue.mngr.api.rsync import rsync_to_remote
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import AgentError
 from imbue.mngr.errors import HostError
@@ -554,13 +554,13 @@ def launch_reducer_agent(
 
     destination = create_result.agent.work_dir / REDUCER_INPUTS_DIRNAME
     logger.info("Rsyncing reducer inputs to '{}:{}'", create_result.host.id, destination)
-    push_files(
-        agent=create_result.agent,
-        host=create_result.host,
-        source=output_dir,
-        destination_path=destination,
-        is_dry_run=False,
-        is_delete=False,
+    # Trailing slash so rsync copies the *contents* of output_dir into the
+    # reducer's inputs directory, not output_dir itself as a child.
+    rsync_to_remote(
+        local_path=f"{output_dir}/",
+        remote_host=create_result.host,
+        remote_path=destination,
+        extra_args=(),
         uncommitted_changes=UncommittedChangesMode.CLOBBER,
         cg=mngr_ctx.concurrency_group,
     )

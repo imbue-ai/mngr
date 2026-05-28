@@ -98,8 +98,9 @@ class HostLocationAddressParamType(click.ParamType):
     """Click param type for ``[NAME[@HOST[.PROVIDER]]][:PATH]`` source/target arguments.
 
     Used by commands that designate "a location on any host" -- e.g. the
-    ``--from`` argument of ``mngr create``, the ``TARGET``/``SOURCE`` argument
-    of ``mngr push``/``mngr pull``, and the source argument of ``mngr pair``.
+    ``--from`` argument of ``mngr create``, the ``SOURCE``/``DESTINATION``
+    arguments of ``mngr rsync``, the ``TARGET``/``SOURCE`` argument of
+    ``mngr git push``/``mngr git pull``, and the source argument of ``mngr pair``.
     """
 
     name = "host_location_address"

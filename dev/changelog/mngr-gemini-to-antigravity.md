@@ -1,1 +1,0 @@
-Workspace + scripts metadata follows the rename of `libs/mngr_gemini` to `libs/mngr_antigravity`: workspace `pyproject.toml` cov target, `test_profiles.toml` mngr-suite test paths, top-level `README.md`, and the package list in `scripts/utils.py`.

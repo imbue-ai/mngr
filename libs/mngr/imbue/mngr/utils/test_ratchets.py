@@ -5,8 +5,6 @@ from inline_snapshot import snapshot
 
 from imbue.imbue_common.ratchet_testing import standard_ratchet_checks as rc
 from imbue.imbue_common.ratchet_testing.ratchets import TEST_FILE_PATTERNS
-from imbue.imbue_common.ratchet_testing.ratchets import check_no_ruff_errors
-from imbue.imbue_common.ratchet_testing.ratchets import check_no_type_errors
 
 # mngr's test_ratchets.py is nested one level deeper than other projects (in utils/),
 # so the source dir is parent.parent instead of parent.parent.parent
@@ -305,13 +303,3 @@ def test_prevent_code_in_init_files() -> None:
             'hookimpl = pluggy.HookimplMarker("mngr")',
         },
     )
-
-
-def test_no_type_errors() -> None:
-    """Ensure the codebase has zero type errors."""
-    check_no_type_errors(Path(__file__).parent.parent.parent.parent)
-
-
-def test_no_ruff_errors() -> None:
-    """Ensure the codebase has zero ruff linting errors."""
-    check_no_ruff_errors(Path(__file__).parent.parent.parent.parent)

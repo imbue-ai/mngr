@@ -1,1 +1,0 @@
-Replaced the `gemini` entry in `PLUGIN_CATALOG` and `plugin_isolation` test fixtures with `antigravity`. The `AntigravitySignalCheck` detects the new CLI via `agy --version`. Touched-up some prose references in `mngr` resource scripts and docs to drop or refresh mentions of `mngr_gemini` now that the plugin has been renamed.

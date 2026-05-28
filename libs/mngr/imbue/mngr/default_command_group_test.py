@@ -214,7 +214,9 @@ def test_config_key_custom_default(
     temp_git_repo: Path,
 ) -> None:
     """A group with _config_key should use default_subcommand from config."""
-    (project_config_dir / "settings.toml").write_text('[commands.testgrp]\ndefault_subcommand = "list"\n')
+    (project_config_dir / "settings.toml").write_text(
+        'is_allowed_in_pytest = true\n\n[commands.testgrp]\ndefault_subcommand = "list"\n'
+    )
     monkeypatch.chdir(temp_git_repo)
 
     record: dict[str, str | None] = {}
@@ -231,7 +233,9 @@ def test_config_key_disabled_shows_help(
     temp_git_repo: Path,
 ) -> None:
     """When default_subcommand is empty string, bare invocation shows help."""
-    (project_config_dir / "settings.toml").write_text('[commands.testgrp]\ndefault_subcommand = ""\n')
+    (project_config_dir / "settings.toml").write_text(
+        'is_allowed_in_pytest = true\n\n[commands.testgrp]\ndefault_subcommand = ""\n'
+    )
     monkeypatch.chdir(temp_git_repo)
 
     record: dict[str, str | None] = {}
@@ -248,7 +252,9 @@ def test_config_key_disabled_unrecognized_errors(
     temp_git_repo: Path,
 ) -> None:
     """When default_subcommand is empty string, unrecognized command shows error."""
-    (project_config_dir / "settings.toml").write_text('[commands.testgrp]\ndefault_subcommand = ""\n')
+    (project_config_dir / "settings.toml").write_text(
+        'is_allowed_in_pytest = true\n\n[commands.testgrp]\ndefault_subcommand = ""\n'
+    )
     monkeypatch.chdir(temp_git_repo)
 
     record: dict[str, str | None] = {}
