@@ -880,6 +880,7 @@ def make_test_agent_details(
     host_plugin: dict | None = None,
     host_tags: dict[str, str] | None = None,
     labels: dict[str, str] | None = None,
+    plugin: dict | None = None,
     host_id: HostId | None = None,
     provider_name: ProviderInstanceName | None = None,
     ssh: SSHInfo | None = None,
@@ -911,6 +912,7 @@ def make_test_agent_details(
         start_on_boot=False,
         state=state,
         labels=labels or {},
+        plugin=plugin or {},
         host=host_details,
     )
 

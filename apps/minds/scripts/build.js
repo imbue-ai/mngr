@@ -9,9 +9,8 @@
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const https = require('https');
-const http = require('http');
 const { execSync, execFileSync } = require('child_process');
+const { downloadGit, download } = require('./download-binaries.js');
 
 const ROOT = path.resolve(__dirname, '..');
 const RESOURCES_DIR = path.join(ROOT, 'resources');
@@ -34,28 +33,6 @@ function getUvDownloadUrl({ platform, arch }) {
     ? `uv-${arch}-apple-darwin`
     : `uv-${arch}-unknown-linux-gnu`;
   return `https://github.com/astral-sh/uv/releases/download/${UV_VERSION}/${target}.tar.gz`;
-}
-
-function download(url) {
-  return new Promise((resolve, reject) => {
-    const client = url.startsWith('https') ? https : http;
-    client.get(url, { headers: { 'User-Agent': 'minds-build' } }, (res) => {
-      if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-        res.resume(); // Drain the redirect response to free the connection
-        download(res.headers.location).then(resolve).catch(reject);
-        return;
-      }
-      if (res.statusCode !== 200) {
-        res.resume(); // Drain the error response to free the connection
-        reject(new Error(`HTTP ${res.statusCode} for ${url}`));
-        return;
-      }
-      const chunks = [];
-      res.on('data', (chunk) => chunks.push(chunk));
-      res.on('end', () => resolve(Buffer.concat(chunks)));
-      res.on('error', reject);
-    }).on('error', reject);
-  });
 }
 
 /**
@@ -380,23 +357,6 @@ async function downloadLima({ platform, arch }) {
   }
 }
 
-async function downloadGit() {
-  const gitDir = path.join(RESOURCES_DIR, 'git');
-  const binDir = path.join(gitDir, 'bin');
-  fs.mkdirSync(binDir, { recursive: true });
-
-  // Copy the system git binary into the resources directory.
-  const systemGit = execSync('which git', { encoding: 'utf-8' }).trim();
-  if (!systemGit) {
-    throw new Error('git not found on system -- install git first');
-  }
-
-  const destGit = path.join(binDir, 'git');
-  fs.copyFileSync(systemGit, destGit);
-  fs.chmodSync(destGit, 0o755);
-  console.log(`git binary copied to ${destGit}`);
-}
-
 function copyPyproject() {
   const srcDir = path.join(ROOT, 'electron', 'pyproject');
   const destDir = path.join(RESOURCES_DIR, 'pyproject');
@@ -543,7 +503,7 @@ async function main() {
   await Promise.all([
     downloadUv({ platform, arch }),
     downloadLima({ platform, arch }),
-    downloadGit(),
+    downloadGit(RESOURCES_DIR, { platform }),
   ]);
 
   bundleLatchkey();
