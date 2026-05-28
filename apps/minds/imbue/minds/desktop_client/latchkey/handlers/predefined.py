@@ -39,6 +39,7 @@ from loguru import logger
 from pydantic import Field
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.concurrency_group.subprocess_utils import FinishedProcess
 from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.minds.config.data_types import MNGR_BINARY
@@ -408,21 +409,25 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
             )
             return None
 
-    def _resolve_host_id_via_mngr_list(self, agent_id: AgentId) -> HostId | None:
-        """Authoritative agent_id -> host_id lookup via ``mngr list --format json``.
+    def _run_mngr_list(self) -> FinishedProcess:
+        """Run ``mngr list --format json --on-error continue`` to completion.
 
         ``--on-error continue`` keeps one unreachable provider from
         collapsing the answer for agents on reachable providers. Tests
-        override this with a concrete stub so the unit suite never shells
-        out.
+        override this seam with a synthetic result so the unit suite never
+        shells out.
         """
         cg = ConcurrencyGroup(name="mngr-list-host-resolve")
         with cg:
-            result = cg.run_process_to_completion(
+            return cg.run_process_to_completion(
                 command=[MNGR_BINARY, "list", "--format", "json", "--on-error", "continue"],
                 timeout=_MNGR_LIST_FALLBACK_TIMEOUT_SECONDS,
                 is_checked_after=False,
             )
+
+    def _resolve_host_id_via_mngr_list(self, agent_id: AgentId) -> HostId | None:
+        """Authoritative agent_id -> host_id lookup via ``mngr list --format json``."""
+        result = self._run_mngr_list()
         if result.is_timed_out:
             logger.warning("mngr list fallback for agent {} timed out", agent_id)
             return None

@@ -3,9 +3,11 @@ import shlex
 from pathlib import Path
 
 import pytest
+from pydantic import Field
 from starlette.responses import HTMLResponse
 from starlette.testclient import TestClient
 
+from imbue.concurrency_group.subprocess_utils import FinishedProcess
 from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client.app import create_desktop_client
 from imbue.minds.desktop_client.auth import FileAuthStore
@@ -897,3 +899,97 @@ def test_grant_preserves_existing_schemas_block_in_permissions_file(tmp_path: Pa
     assert on_disk["schemas"] == baseline["schemas"]
     assert {"latchkey-self": baseline["rules"][0]["latchkey-self"]} in on_disk["rules"]
     assert {"slack-api": ["slack-read-all"]} in on_disk["rules"]
+
+
+class _CannedMngrListHandler(LatchkeyPermissionGrantHandler):
+    """Handler whose ``mngr list`` seam returns a canned process result.
+
+    Lets the JSON-parsing / exit-code logic of
+    ``_resolve_host_id_via_mngr_list`` be exercised without shelling out.
+    """
+
+    canned_mngr_list_result: FinishedProcess = Field()
+
+    def _run_mngr_list(self) -> FinishedProcess:
+        return self.canned_mngr_list_result
+
+
+def _build_handler_with_canned_mngr_list(tmp_path: Path, canned_result: FinishedProcess) -> _CannedMngrListHandler:
+    return _CannedMngrListHandler(
+        data_dir=tmp_path,
+        latchkey=_make_latchkey_with_status(tmp_path, credential_status="valid"),
+        services_catalog=_build_slack_services_catalog(),
+        mngr_message_sender=MngrMessageSender(mngr_binary=str(_make_recording_binary(tmp_path, "mngr"))),
+        gateway_client=build_fake_gateway_client(),
+        canned_mngr_list_result=canned_result,
+    )
+
+
+def _mngr_list_payload(agent_id: AgentId, host_id: HostId) -> str:
+    return json.dumps(
+        {
+            "agents": [{"id": str(agent_id), "host": {"id": str(host_id)}}],
+            "errors": [{"provider": "lima", "message": "unreachable"}],
+        }
+    )
+
+
+def test_resolve_host_id_via_mngr_list_uses_partial_results_on_nonzero_exit(tmp_path: Path) -> None:
+    """A non-zero ``mngr list`` exit still resolves agents on reachable providers.
+
+    With ``--on-error continue``, ``mngr list`` exits non-zero whenever any
+    provider errored but still prints valid JSON listing the agents it could
+    reach. The fallback must search that partial list rather than discarding it.
+    """
+    agent_id = AgentId()
+    host_id = HostId()
+    canned = FinishedProcess(
+        returncode=1,
+        stdout=_mngr_list_payload(agent_id, host_id),
+        stderr="provider lima unreachable",
+        command=("mngr", "list", "--format", "json", "--on-error", "continue"),
+        is_output_already_logged=False,
+    )
+    handler = _build_handler_with_canned_mngr_list(tmp_path, canned)
+
+    assert handler._resolve_host_id_via_mngr_list(agent_id) == host_id
+
+
+def test_resolve_host_id_via_mngr_list_returns_none_on_timeout(tmp_path: Path) -> None:
+    canned = FinishedProcess(
+        returncode=None,
+        stdout="",
+        stderr="",
+        command=("mngr", "list", "--format", "json", "--on-error", "continue"),
+        is_timed_out=True,
+        is_output_already_logged=False,
+    )
+    handler = _build_handler_with_canned_mngr_list(tmp_path, canned)
+
+    assert handler._resolve_host_id_via_mngr_list(AgentId()) is None
+
+
+def test_resolve_host_id_via_mngr_list_returns_none_on_non_json_output(tmp_path: Path) -> None:
+    canned = FinishedProcess(
+        returncode=2,
+        stdout="not json",
+        stderr="boom",
+        command=("mngr", "list", "--format", "json", "--on-error", "continue"),
+        is_output_already_logged=False,
+    )
+    handler = _build_handler_with_canned_mngr_list(tmp_path, canned)
+
+    assert handler._resolve_host_id_via_mngr_list(AgentId()) is None
+
+
+def test_resolve_host_id_via_mngr_list_returns_none_when_agent_absent(tmp_path: Path) -> None:
+    canned = FinishedProcess(
+        returncode=0,
+        stdout=_mngr_list_payload(AgentId(), HostId()),
+        stderr="",
+        command=("mngr", "list", "--format", "json", "--on-error", "continue"),
+        is_output_already_logged=False,
+    )
+    handler = _build_handler_with_canned_mngr_list(tmp_path, canned)
+
+    assert handler._resolve_host_id_via_mngr_list(AgentId()) is None
