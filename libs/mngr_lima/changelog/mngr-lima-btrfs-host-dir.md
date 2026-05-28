@@ -24,7 +24,12 @@ predate the field default to `True`, preserving today's behavior for
 all existing Lima hosts. `destroy_host` and `delete_host` now also
 remove the named Lima disk when a host was created in btrfs mode.
 
-A new `host_data_disk_size` config field (default `"100GiB"`) and a
-new `limactl_disk_delete` helper in `limactl.py` round out the
-plumbing. Snapshot/backup API support stays out of scope for this
-change (`supports_snapshots` remains `False`).
+A new `host_data_disk_size` config field (default `"100GiB"`) and new
+`limactl_disk_create` / `limactl_disk_delete` helpers in `limactl.py`
+round out the plumbing. `create_host` pre-creates the named disk via
+`limactl disk create` before starting the VM (Lima's `additionalDisks
++ format: true` only auto-formats an already-existing disk). The
+provisioning script `chmod 0777`s the btrfs root after the bind-mount
+so the Lima default non-root user can write to `host_dir` without
+sudo. Snapshot/backup API support stays out of scope for this change
+(`supports_snapshots` remains `False`).

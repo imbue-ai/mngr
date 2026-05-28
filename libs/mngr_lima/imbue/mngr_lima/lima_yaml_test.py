@@ -222,6 +222,9 @@ def test_generate_default_lima_yaml_btrfs_mode_omits_mounts_adds_disk(tmp_path: 
     assert "mountpoint -q /mnt/lima-mngr-abc123-data" in script
     # Persists the bind across reboots.
     assert "/etc/fstab" in script
+    # Opens the btrfs root for the Lima default non-root user (fresh mkfs.btrfs
+    # leaves the root dir owned by root:root).
+    assert f"chmod 0777 {HOST_VOLUME_MOUNT_PATH}" in script
 
 
 def test_generate_default_lima_yaml_disk_name_without_size_raises(tmp_path: Path) -> None:

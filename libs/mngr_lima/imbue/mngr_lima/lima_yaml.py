@@ -245,6 +245,11 @@ if ! grep -qE "[[:space:]]{HOST_VOLUME_MOUNT_PATH}[[:space:]]" /etc/fstab; then
     echo "{lima_mount} {HOST_VOLUME_MOUNT_PATH} none bind 0 0" >> /etc/fstab
 fi
 
+# Open up the btrfs root so the Lima default (non-root) user can write to
+# host_dir without sudo (a fresh mkfs.btrfs leaves the root dir owned by
+# root:root with 0755). Mirrors the chmod 777 the script applies to /code.
+chmod 0777 {HOST_VOLUME_MOUNT_PATH}
+
 # Replace host_dir with a symlink to the btrfs-backed mount. ``ln -sfn``
 # alone won't replace an existing directory, so rm any real dir first.
 if [ -L {host_dir} ] || [ ! -e {host_dir} ]; then

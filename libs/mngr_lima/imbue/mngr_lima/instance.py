@@ -68,6 +68,7 @@ from imbue.mngr_lima.lima_yaml import write_lima_yaml
 from imbue.mngr_lima.limactl import LimaSshConfig
 from imbue.mngr_lima.limactl import lima_instance_name
 from imbue.mngr_lima.limactl import limactl_delete
+from imbue.mngr_lima.limactl import limactl_disk_create
 from imbue.mngr_lima.limactl import limactl_disk_delete
 from imbue.mngr_lima.limactl import limactl_list
 from imbue.mngr_lima.limactl import limactl_shell
@@ -451,6 +452,17 @@ sudo poweroff
         effective_start_args = tuple(self.config.default_start_args) + tuple(start_args or ())
 
         try:
+            # Pre-create the Lima-managed additional disk in btrfs mode.
+            # `additionalDisks` with `format: true` only auto-formats an
+            # already-existing disk; without this pre-create, `limactl start`
+            # fails with "could not load disk ... no such file or directory".
+            if host_data_disk_name is not None:
+                limactl_disk_create(
+                    self.mngr_ctx.concurrency_group,
+                    host_data_disk_name,
+                    self.config.host_data_disk_size,
+                )
+
             # Create and start the Lima instance
             limactl_start_new(
                 self.mngr_ctx.concurrency_group,
@@ -482,6 +494,17 @@ sudo poweroff
                 logger.debug(
                     "Failed to clean up Lima instance {} during error recovery: {}", instance_name, cleanup_err
                 )
+            # Also clean up the orphaned btrfs additional disk so a retry with
+            # the same host_id can re-create it without colliding.
+            if host_data_disk_name is not None:
+                try:
+                    limactl_disk_delete(self.mngr_ctx.concurrency_group, host_data_disk_name, force=True)
+                except (LimaCommandError, OSError) as cleanup_err:
+                    logger.debug(
+                        "Failed to clean up Lima disk {} during error recovery: {}",
+                        host_data_disk_name,
+                        cleanup_err,
+                    )
             self._save_failed_host_record(
                 host_id=host_id,
                 host_name=name,

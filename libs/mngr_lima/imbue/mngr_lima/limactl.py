@@ -234,6 +234,30 @@ def limactl_delete(
         raise LimaCommandError("delete", result.returncode, result.stderr)
 
 
+def limactl_disk_create(
+    cg: ConcurrencyGroup,
+    disk_name: str,
+    size: str,
+    timeout: float = 60.0,
+) -> None:
+    """Create a Lima-managed disk.
+
+    Runs: limactl disk create <disk_name> --size <size>
+
+    Lima only auto-formats an additionalDisk when the disk record already
+    exists at ``~/.lima/_disks/<name>/datadisk``; without this pre-create
+    step, ``limactl start`` fails with "could not load disk ... no such
+    file or directory". Always creates the disk as the default qcow2
+    format; the in-VM ``fsType`` (e.g. btrfs) is applied by Lima's
+    ``format: true`` machinery on first attach.
+    """
+    cmd = ["limactl", "disk", "create", disk_name, "--size", size]
+    with log_span("Running limactl disk create: {} (size {})", disk_name, size):
+        result = cg.run_process_to_completion(cmd, timeout=timeout)
+    if result.returncode != 0:
+        raise LimaCommandError("disk create", result.returncode, result.stderr)
+
+
 def limactl_disk_delete(
     cg: ConcurrencyGroup,
     disk_name: str,
