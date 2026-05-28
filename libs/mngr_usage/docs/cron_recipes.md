@@ -13,8 +13,6 @@ Across the usage-driven recipes below:
 - The 5h / 7d windows are account-level: the snapshot reflects the freshest
   reading across all your agents *and* your own interactive Claude Code
   sessions, so you don't need a dedicated agent alive just to keep it current.
-- `cron` runs with a minimal `PATH`; make sure `mngr`, `jq`, `at`, and `claude`
-  resolve (set `PATH` at the top of the crontab, or call them by absolute path).
 
 ## Soak up an about-to-expire 5h window
 
@@ -79,6 +77,8 @@ echo "mngr stop $AGENT" | at "now + $(( (secs + 59) / 60 )) minutes"
 ```
 
 ```cron
+# cron starts with a bare PATH; set one that finds mngr, jq, and at (adjust to your install)
+PATH=/usr/local/bin:/usr/bin:/bin:/home/you/.local/bin
 */10 * * * * /path/to/soak-window.sh
 ```
 
@@ -131,6 +131,8 @@ claude -p 'just say hi' --model haiku >/dev/null
 ```
 
 ```cron
+# cron starts with a bare PATH; set one that finds mngr, jq, and claude (adjust to your install)
+PATH=/usr/local/bin:/usr/bin:/bin:/home/you/.local/bin
 */10 * * * * /path/to/warm-window.sh
 ```
 
@@ -181,6 +183,8 @@ mngr create "$name" claude --label queue=tasks --message-file "$claimed" --no-co
 ```
 
 ```cron
+# cron starts with a bare PATH; set one that finds mngr and jq (adjust to your install)
+PATH=/usr/local/bin:/usr/bin:/bin:/home/you/.local/bin
 */10 * * * * /path/to/dispatch-task.sh
 ```
 
