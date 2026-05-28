@@ -1993,5 +1993,3 @@ def test_host_health_api_requires_authentication(tmp_path: Path) -> None:
     client, _, agent_id = _setup_test_server(tmp_path)
     response = client.get(f"/api/agents/{agent_id}/host-health")
     assert response.status_code == 403
-
-

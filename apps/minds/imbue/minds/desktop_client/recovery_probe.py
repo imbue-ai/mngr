@@ -137,7 +137,9 @@ class HostHealthResponse(FrozenModel):
     ``dispatch_tier``. There are no parallel natural-language fields.
     """
 
-    probes: tuple[Probe, ...] = Field(default=(), description="Ordered probe results to render in the diagnostics list.")
+    probes: tuple[Probe, ...] = Field(
+        default=(), description="Ordered probe results to render in the diagnostics list."
+    )
     dispatch_tier: DispatchTier = Field(
         default=DispatchTier.MANUAL,
         description="Restart-tier classification derived from probe answers.",

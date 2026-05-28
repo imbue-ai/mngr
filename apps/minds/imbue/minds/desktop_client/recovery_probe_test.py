@@ -32,7 +32,9 @@ def _answer(response: HostHealthResponse, question_fragment: str) -> ProbeAnswer
     for probe in response.probes:
         if question_fragment in probe.question:
             return probe.answer
-    raise AssertionError(f"no probe matched fragment {question_fragment!r}; got {[p.question for p in response.probes]}")
+    raise AssertionError(
+        f"no probe matched fragment {question_fragment!r}; got {[p.question for p in response.probes]}"
+    )
 
 
 def _probe_for(response: HostHealthResponse, question_fragment: str) -> Probe:
