@@ -44,11 +44,16 @@ networks: []
 """
 
 
-def _build_provider(host_dir: Path, profile_dir: Path) -> tuple[LimaProviderInstance, ConcurrencyGroup]:
+def _build_provider(profile_dir: Path) -> tuple[LimaProviderInstance, ConcurrencyGroup]:
     cg = ConcurrencyGroup(name="lima-btrfs-release")
     cg.__enter__()
+    # host_dir is the IN-VM canonical path for mngr state -- the same
+    # default (/mngr) every other mngr-on-lima install uses. The helper's
+    # tempfile.TemporaryDirectory lives on the *host*; we use it only for
+    # the per-provider profile dir (where the host-side host record + ssh
+    # keys live), never as host_dir.
     config = LimaProviderConfig(
-        host_dir=host_dir,
+        host_dir=Path("/mngr"),
         is_host_data_volume_exposed=False,
         # Small disk so the modal sandbox finishes mkfs quickly.
         host_data_disk_size="2GiB",
@@ -61,7 +66,7 @@ def _build_provider(host_dir: Path, profile_dir: Path) -> tuple[LimaProviderInst
     pm = create_plugin_manager()
     mngr_config = MngrConfig.model_construct(
         prefix="mngr-",
-        default_host_dir=host_dir,
+        default_host_dir=Path("/mngr"),
         agent_types={},
         providers={"lima": config},
         plugins={},
@@ -69,7 +74,7 @@ def _build_provider(host_dir: Path, profile_dir: Path) -> tuple[LimaProviderInst
     ctx = make_mngr_ctx(mngr_config, pm, profile_dir, concurrency_group=cg)
     provider = LimaProviderInstance(
         name=ProviderInstanceName("lima"),
-        host_dir=host_dir,
+        host_dir=Path("/mngr"),
         mngr_ctx=ctx,
         config=config,
     )
@@ -86,94 +91,6 @@ def _limactl_disk_list(cg: ConcurrencyGroup) -> list[dict[str, object]]:
             continue
         disks.append(json.loads(line))
     return disks
-
-
-_IDEMPOTENT_LIMA_BOOT_SCRIPT = """\
-#!/bin/sh
-set -eux
-LIMA_CIDATA_MNT="/mnt/lima-cidata"
-LIMA_CIDATA_DEV="/dev/disk/by-label/cidata"
-mkdir -p -m 700 "${LIMA_CIDATA_MNT}"
-mountpoint -q "${LIMA_CIDATA_MNT}" || mount -o ro,mode=0700,dmode=0700,overriderockperm,exec,uid=0 "${LIMA_CIDATA_DEV}" "${LIMA_CIDATA_MNT}"
-export LIMA_CIDATA_MNT
-exec "${LIMA_CIDATA_MNT}"/boot.sh
-"""
-
-
-def _apply_lima_cidata_remount_workaround_if_needed(provider: LimaProviderInstance, host: Host) -> Host:
-    """Detect + recover from the Lima 1.x per-boot cidata remount race.
-
-    Lima 1.x's `/var/lib/cloud/scripts/per-boot/00-lima.boot.sh` does an
-    unconditional `mount` of `/dev/sr0` at `/mnt/lima-cidata`. On guests
-    where systemd auto-mounts disks by label (some Ubuntu cloud-image +
-    qemu/TCG combinations on Linux hosts -- e.g. Modal sandboxes), cidata
-    is already mounted by the time the per-boot script runs and `mount`
-    fails with "already mounted". `set -e` then aborts the script before
-    it `exec`s into Lima's cidata/boot.sh -- which means our
-    `provision[mode=system]` script (where the btrfs `chmod 0777` +
-    `ln -sfn` for host_dir lives) never runs. Lima still reports the VM
-    as READY because cloud-init.target is reached.
-
-    Detection: after create_host, if `host_dir` is NOT a symlink to a
-    btrfs mountpoint, assume we hit the race. The fix is to rewrite the
-    per-boot script with a `mountpoint -q` guard, then reboot the VM via
-    the provider (stop_host + start_host). On the second boot the
-    patched per-boot script succeeds, the wrapper's `exec` reaches Lima's
-    cidata/boot.sh, and that runs the once-per-instance
-    `run_provision_system` for the first time (its sentinel was never
-    written, since the wrapper failed before reaching it). After the
-    reboot host_dir is the expected btrfs symlink.
-
-    Returns the post-reboot Host (or the original if no workaround was
-    needed). Idempotent.
-
-    Upstream Lima ticket / discussion has not been filed yet -- not
-    fixed in 1.2.3 / 2.0.3 / 2.1.1 either as of 2026-05-28. Should be
-    filed as a follow-up; for now the workaround keeps the release test
-    deterministic regardless of guest-side auto-mount behaviour.
-    """
-    stat_probe = host.execute_idempotent_command(f"stat -fc %T {host.host_dir}")
-    if stat_probe.stdout.strip() == "btrfs":
-        # No race triggered on this boot -- nothing to do.
-        return host
-
-    # Race triggered: verify the per-boot script is the buggy Lima one
-    # (and not some other failure mode) before patching it.
-    script_path = "/var/lib/cloud/scripts/per-boot/00-lima.boot.sh"
-    head_probe = host.execute_idempotent_command(f"sudo head -10 {script_path} 2>&1 || true")
-    if "mountpoint -q" in head_probe.stdout:
-        # Already patched (somehow) but still not btrfs -- a different
-        # failure. Surface a meaningful error.
-        raise AssertionError(
-            f"host_dir is not btrfs after create_host even though per-boot script is patched. "
-            f"stat={stat_probe.stdout!r}; per-boot head={head_probe.stdout!r}"
-        )
-
-    # Atomically rewrite the per-boot script with a `mountpoint -q`
-    # guard. `tee` requires sudo because /var/lib/cloud/scripts is root.
-    quoted = _IDEMPOTENT_LIMA_BOOT_SCRIPT.replace("'", "'\"'\"'")
-    rewrite_cmd = f"printf '%s' '{quoted}' | sudo tee {script_path} > /dev/null && sudo chmod 0755 {script_path}"
-    rewrite_result = host.execute_idempotent_command(rewrite_cmd)
-    if not rewrite_result.success:
-        raise AssertionError(
-            f"Failed to patch per-boot script: stdout={rewrite_result.stdout!r} stderr={rewrite_result.stderr!r}"
-        )
-
-    # Stop + start to re-run the (now-idempotent) per-boot wrapper.
-    # On the second boot the wrapper succeeds, exec's cidata/boot.sh,
-    # which runs once-per-instance provision_system -> our chmod + symlink.
-    provider.stop_host(host)
-    host_after = provider.start_host(host.id)
-    if not isinstance(host_after, Host):
-        raise AssertionError(f"start_host returned non-Host after workaround: {type(host_after).__name__}")
-
-    # Confirm the fix took. If still not btrfs, the patch path is broken.
-    stat_after = host_after.execute_idempotent_command(f"stat -fc %T {host_after.host_dir}")
-    if stat_after.stdout.strip() != "btrfs":
-        raise AssertionError(
-            f"After applying Lima cidata-remount workaround + reboot, host_dir still not btrfs: {stat_after.stdout!r}"
-        )
-    return host_after
 
 
 def _verify_btrfs_layout(host: Host) -> None:
@@ -220,12 +137,10 @@ def main() -> int:
 
     with tempfile.TemporaryDirectory(prefix="mngr-lima-release-") as tmp:
         tmp_path = Path(tmp)
-        host_dir = tmp_path / "host-dir"
         profile_dir = tmp_path / "profile"
-        host_dir.mkdir()
         profile_dir.mkdir()
 
-        provider, cg = _build_provider(host_dir, profile_dir)
+        provider, cg = _build_provider(profile_dir)
         host_name = HostName("release-btrfs")
         override_yaml_path = tmp_path / "qemu64-override.yaml"
         override_yaml_path.write_text(_QEMU64_OVERRIDE_YAML)
@@ -256,12 +171,6 @@ def main() -> int:
             disk_names_before = {d.get("name") for d in _limactl_disk_list(cg)}
             if disk_name not in disk_names_before:
                 raise AssertionError(f"Created disk {disk_name} not in limactl disk list: {disk_names_before}")
-
-            # Lima 1.x has a per-boot cidata-remount race that can prevent
-            # our provision script from running on first boot; if so,
-            # rewrite the upstream script and reboot. See the function
-            # docstring for the full story.
-            host = _apply_lima_cidata_remount_workaround_if_needed(provider, host)
 
             _verify_btrfs_layout(host)
             _verify_persistence_across_restart(provider, host)
