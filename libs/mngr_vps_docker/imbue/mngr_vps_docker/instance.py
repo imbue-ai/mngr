@@ -12,6 +12,7 @@ from collections.abc import Sequence
 from contextlib import contextmanager
 from datetime import datetime
 from datetime import timezone
+from importlib import resources as importlib_resources
 from pathlib import Path
 from typing import Any
 from typing import Final
@@ -235,10 +236,37 @@ HOST_DIR_SUBPATH: Final[str] = "host_dir"
 # until SIGTERM arrives so `docker stop` (idle timeout, manual stop) exits cleanly.
 CONTAINER_ENTRYPOINT_CMD: Final[str] = "trap 'exit 0' TERM; tail -f /dev/null & wait"
 
+# In-container path the host_backup service writes / reads snapshot
+# request and result JSON to. Backed by the per-host docker volume
+# ``mngr-snapshot-trigger-<host_id_hex>`` which is also bind-mounted on the
+# outer at ``/var/lib/mngr-snapshot/`` so the outer-side snapshot helper
+# can watch it.
+SNAPSHOT_TRIGGER_MOUNT_PATH: Final[str] = "/mngr-snapshot"
+
+# In-container path that exposes the outer's <btrfs-mount>/snapshots/
+# directory read-only. host_backup reads ``<this>/current`` after the
+# outer helper produces a snapshot there.
+SNAPSHOT_READ_MOUNT_PATH: Final[str] = "/mngr-snapshots"
+
+# Outer-host paths for the snapshot-helper protocol files. Must match
+# what ``resources/snapshot_helper.sh`` watches.
+OUTER_SNAPSHOT_TRIGGER_DIR: Final[Path] = Path("/var/lib/mngr-snapshot")
+
+# Outer-host install paths for the helper script + systemd unit + env file.
+OUTER_HELPER_SCRIPT_PATH: Final[Path] = Path("/usr/local/sbin/snapshot_helper.sh")
+OUTER_HELPER_SERVICE_PATH: Final[Path] = Path("/etc/systemd/system/snapshot_helper.service")
+OUTER_HELPER_ENV_PATH: Final[Path] = Path("/etc/mngr-snapshot-helper.env")
+OUTER_HELPER_SERVICE_NAME: Final[str] = "snapshot_helper.service"
+
 
 def _host_volume_name_for(host_id: HostId) -> str:
     """Return the unified Docker volume name for a host."""
     return f"mngr-host-vol-{host_id.get_uuid().hex}"
+
+
+def _snapshot_trigger_volume_name_for(host_id: HostId) -> str:
+    """Return the per-host snapshot-trigger Docker volume name."""
+    return f"mngr-snapshot-trigger-{host_id.get_uuid().hex}"
 
 
 def _read_host_id_label_from_vps(outer: OuterHostInterface) -> HostId | None:
@@ -500,6 +528,73 @@ def _remove_container(outer: OuterHostInterface, container_name: str, force: boo
 def _remove_volume(outer: OuterHostInterface, volume_name: str) -> None:
     """Remove a Docker named volume (force)."""
     _run_docker(outer, ["volume", "rm", "-f", volume_name])
+
+
+def _load_resource_text(resource_name: str) -> str:
+    """Read a bundled package resource as text (e.g. snapshot_helper.sh)."""
+    return importlib_resources.files("imbue.mngr_vps_docker.resources").joinpath(resource_name).read_text()
+
+
+def _install_snapshot_helper_on_outer(
+    outer: OuterHostInterface,
+    *,
+    host_id: HostId,
+    btrfs_mount_path: Path,
+    subvolume_path: Path,
+) -> None:
+    """Install the snapshot helper systemd unit on the outer and enable+start it.
+
+    Idempotent: rewriting the script / unit / env file is harmless; the
+    ``systemctl enable --now`` re-runs are no-ops when the unit is already
+    enabled and active.
+
+    Assumes ``inotify-tools`` and ``jq`` are already installed (cloud-init
+    installs them; OVH installs them via ``_REQUIRED_OUTER_PACKAGES``).
+    """
+    helper_script = _load_resource_text("snapshot_helper.sh")
+    helper_service = _load_resource_text("snapshot_helper.service")
+    helper_env = (
+        f"MNGR_BTRFS_MOUNT_PATH={btrfs_mount_path}\n"
+        f"MNGR_HOST_SUBVOLUME={subvolume_path}\n"
+        f"MNGR_TRIGGER_DIR={OUTER_SNAPSHOT_TRIGGER_DIR}\n"
+    )
+
+    with log_span("Installing snapshot helper on outer (host_id={})", host_id):
+        _write_outer_file(outer, path=OUTER_HELPER_SCRIPT_PATH, content=helper_script, mode="0755")
+        _write_outer_file(outer, path=OUTER_HELPER_SERVICE_PATH, content=helper_service, mode="0644")
+        _write_outer_file(outer, path=OUTER_HELPER_ENV_PATH, content=helper_env, mode="0644")
+        _ensure_outer_dir(outer, OUTER_SNAPSHOT_TRIGGER_DIR)
+        # `daemon-reload` so systemd picks up edits to snapshot_helper.service
+        # if we ever change the unit definition in a future bake.
+        reload_result = outer.execute_idempotent_command("systemctl daemon-reload", timeout_seconds=10.0)
+        if not reload_result.success:
+            raise VpsProvisioningError(f"systemctl daemon-reload failed: stderr={reload_result.stderr.strip()!r}")
+        enable_result = outer.execute_idempotent_command(
+            f"systemctl enable --now {OUTER_HELPER_SERVICE_NAME}", timeout_seconds=15.0
+        )
+        if not enable_result.success:
+            raise VpsProvisioningError(
+                f"systemctl enable --now {OUTER_HELPER_SERVICE_NAME} failed: stderr={enable_result.stderr.strip()!r}"
+            )
+
+
+def _write_outer_file(
+    outer: OuterHostInterface,
+    *,
+    path: Path,
+    content: str,
+    mode: str,
+) -> None:
+    """Atomically write `content` to `path` on the outer with the given chmod."""
+    _ensure_outer_dir(outer, path.parent)
+    outer.write_file(path, content.encode("utf-8"), mode=mode, is_atomic=True)
+
+
+def _ensure_outer_dir(outer: OuterHostInterface, path: Path) -> None:
+    """`mkdir -p` on the outer; raises VpsProvisioningError on failure."""
+    result = outer.execute_idempotent_command(f"mkdir -p {shlex.quote(str(path))}", timeout_seconds=10.0)
+    if not result.success:
+        raise VpsProvisioningError(f"Failed to create outer dir {path}: stderr={result.stderr.strip()!r}")
 
 
 def _create_bind_volume_on_outer(
@@ -1349,11 +1444,36 @@ class VpsDockerProvider(BaseProviderInstance):
         later step in this method fails.
         """
         volume_name = _host_volume_name_for(host_id)
+        snapshot_trigger_volume_name = _snapshot_trigger_volume_name_for(host_id)
 
         with log_span("Provisioning unified host volume on btrfs subvolume"):
             subvolume_path = self._prepare_btrfs_on_outer(outer, host_id)
             _seed_host_volume_layout_on_outer(outer, subvolume_path)
             _create_bind_volume_on_outer(outer, volume_name=volume_name, device_path=subvolume_path)
+
+        # Snapshot helper: lets the in-container host_backup service request
+        # `btrfs subvolume snapshot` against the per-host subvolume via a
+        # request.json / result.json file protocol in a dedicated docker
+        # volume. Both the systemd unit on the outer and the docker volume
+        # mounted at /mngr-snapshot/ in the container need to exist before
+        # the agent boots.
+        with log_span("Provisioning host_backup snapshot helper + trigger volume"):
+            _ensure_outer_dir(outer, OUTER_SNAPSHOT_TRIGGER_DIR)
+            # The `snapshots/` dir holds `current/` (the live btrfs snapshot
+            # the helper creates). Pre-create it so the read-only bind mount
+            # into the container has something to point at on first boot.
+            _ensure_outer_dir(outer, self.config.btrfs_mount_path / "snapshots")
+            _install_snapshot_helper_on_outer(
+                outer,
+                host_id=host_id,
+                btrfs_mount_path=self.config.btrfs_mount_path,
+                subvolume_path=subvolume_path,
+            )
+            _create_bind_volume_on_outer(
+                outer,
+                volume_name=snapshot_trigger_volume_name,
+                device_path=OUTER_SNAPSHOT_TRIGGER_DIR,
+            )
 
         if docker_build_args:
             base_image = self._build_image_on_vps(outer, host_id, base_image, docker_build_args, git_depth)
@@ -1370,13 +1490,24 @@ class VpsDockerProvider(BaseProviderInstance):
             LABEL_TAGS: json.dumps(dict(tags) if tags else {}),
         }
         logger.log(LogLevel.BUILD.value, "Starting Docker container on VPS...", source="vps")
+        snapshots_dir_on_outer = self.config.btrfs_mount_path / "snapshots"
         with log_span("Starting Docker container"):
             container_id = _run_container(
                 outer,
                 image=base_image,
                 name=container_name,
                 port_mappings={f"0.0.0.0:{self.config.container_ssh_port}": "22"},
-                volumes=[f"{volume_name}:{HOST_VOLUME_MOUNT_PATH}:rw"],
+                volumes=[
+                    f"{volume_name}:{HOST_VOLUME_MOUNT_PATH}:rw",
+                    # Snapshot helper IPC volume (bind-shared with the outer
+                    # at OUTER_SNAPSHOT_TRIGGER_DIR via the named volume created
+                    # above; host_backup writes request.json / reads result.json).
+                    f"{snapshot_trigger_volume_name}:{SNAPSHOT_TRIGGER_MOUNT_PATH}:rw",
+                    # Read-only view of the outer's <btrfs-mount>/snapshots/
+                    # directory so restic-in-container can read the snapshot
+                    # the outer helper produced at <btrfs-mount>/snapshots/current.
+                    f"{snapshots_dir_on_outer}:{SNAPSHOT_READ_MOUNT_PATH}:ro",
+                ],
                 labels=labels,
                 extra_args=list(effective_start_args),
                 entrypoint_cmd=CONTAINER_ENTRYPOINT_CMD,
@@ -1769,6 +1900,14 @@ class VpsDockerProvider(BaseProviderInstance):
                     _remove_volume(outer, vps_config.volume_name)
                 except (HostConnectionError, MngrError) as e:
                     logger.warning("Failed to remove host volume: {}", e)
+
+                # Remove the per-host snapshot-trigger volume (the named entry;
+                # the bind source at OUTER_SNAPSHOT_TRIGGER_DIR is shared across
+                # all containers on this outer and is left alone).
+                try:
+                    _remove_volume(outer, _snapshot_trigger_volume_name_for(host_id))
+                except (HostConnectionError, MngrError) as e:
+                    logger.warning("Failed to remove snapshot trigger volume: {}", e)
 
         # Destroy the VPS instance
         with log_span("Destroying VPS instance"):

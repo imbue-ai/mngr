@@ -41,7 +41,7 @@ _ROOT_VERIFY_COMMAND: str = 'test "$(whoami)" = root && echo OK'
 #
 # Kept as a tuple so the list is easy to extend if future vps_docker
 # revisions need another tool the image doesn't ship.
-_REQUIRED_OUTER_PACKAGES: tuple[str, ...] = ("rsync",)
+_REQUIRED_OUTER_PACKAGES: tuple[str, ...] = ("rsync", "inotify-tools", "jq")
 # apt-get update + install on a fresh VPS routinely takes 30-90s
 # (Debian mirrors plus package extraction). The default
 # ``exec_command(timeout=60)`` is the per-read I/O timeout, but
