@@ -9,9 +9,11 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 ### Added
 
 - Added: `mngr_forward` emits `system_interface_backend_failure` envelopes (renamed from `workspace_backend_failure`) on connection errors, mid-SSE EOF, or 5xx responses, so consumers like minds can drive a recovery UI; the plugin's 503 fallback page is now a styled card with a loading spinner.
+- Added: `ReverseTunnelInfo.agent_id` field and matching `agent_id` parameter on `setup_reverse_tunnel`; new `remove_reverse_tunnels_for_agent(agent_id)` method that tears down every reverse tunnel tagged with a given agent (careful not to close an SSH client shared with live forward tunnels).
 
 ### Changed
 
+- Changed: `SSHTunnelManager` (in `mngr_forward/ssh_tunnel.py`) is now the single SSH tunneling implementation in the monorepo — absorbed the latchkey package's parallel copy. The reverse-tunnel repair loop now uses per-tunnel exponential backoff (1s, 2s, 4s, ..., capped at 5min) instead of a flat 30s cadence; failures clear on successful repair.
 - Changed: `mngr forward` no longer crashes when its bind port is already in use — `--port` is now optional and falls back to an OS-assigned port if the default (8421) is taken; the server binds its listen socket up front and hands it to uvicorn so the `listening` envelope always reports the bound port.
 - Changed: Renamed the workspace-server envelope contract to system-interface in lockstep with the mngr-side rename (`WorkspaceBackendFailure*` → `SystemInterfaceBackendFailure*`, envelope type `workspace_backend_failure` → `system_interface_backend_failure`); the 503 loader page now reads "System interface starting".
 - Changed: Picks up the `FullDiscoverySnapshotEvent` schema bump (`providers`, `error_by_provider_name`); older builds raise `DiscoverySchemaChangedError` against new snapshots.
