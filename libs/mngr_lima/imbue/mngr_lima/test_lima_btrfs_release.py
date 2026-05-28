@@ -119,13 +119,20 @@ def test_lima_btrfs_host_end_to_end_release() -> None:
     _ensure_test_user_exists()
     _grant_user_repo_access()
 
-    # Satisfy the @pytest.mark.lima resource-guard. The guard tracks
-    # `limactl` invocations via a PATH wrapper, but the helper runs
-    # limactl in a subprocess under `runuser` with `env -i`, which
-    # bypasses both the wrapper and the guard's tracking env vars.
-    # A direct invocation here (with the parent pytest env intact)
-    # touches the guard's tracking file so makereport accepts the mark.
-    subprocess.run(["limactl", "--version"], check=True, timeout=10, capture_output=True)
+    # Satisfy the @pytest.mark.lima resource-guard. The guard wraps the
+    # `lima` binary on PATH (see libs/mngr_lima/.../register_guards.py:
+    # register_resource_guard("lima")) and tracks invocations that go
+    # through that wrapper. Our helper subprocess uses `limactl` (not
+    # `lima`) and runs under `runuser` with `env -i`, so neither the
+    # wrapper nor the guard's `_PYTEST_GUARD_*` tracking env vars are
+    # visible to the helper. A direct `lima` invocation from the test
+    # process (with the parent pytest env intact, including the
+    # wrapper-bearing PATH and tracking env vars) is what touches the
+    # guard's tracking file so makereport accepts the mark.
+    # `lima --help` is used instead of `lima --version` because `lima`
+    # (without an instance argument) requires the help text; the
+    # important thing is that the wrapper is invoked.
+    subprocess.run(["lima", "--help"], check=False, timeout=10, capture_output=True)
 
     # Path layout: libs/mngr_lima/imbue/mngr_lima/test_lima_btrfs_release.py
     #              parents:  [4]     [3]    [2]   [1]            [0]
