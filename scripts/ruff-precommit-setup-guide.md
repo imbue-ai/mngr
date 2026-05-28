@@ -91,7 +91,7 @@ The hook runs two ruff commands in sequence:
 
 ## Step 4: Install the Hooks
 
-From your repository root, install the git hooks with pre-commit, run through `uv`:
+From your repository root, install the git hooks by running pre-commit through `uv`:
 
 ```bash
 uv run pre-commit install
