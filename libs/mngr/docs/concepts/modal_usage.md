@@ -64,49 +64,52 @@ default_idle_timeout = 600
 
 ## Getting changes back
 
-To retrieve changes from the remote sandbox, either **let the agent push via git** or **use `mngr pull`**.
+To retrieve changes from the remote sandbox, either **let the agent push via git**
+or **use `mngr rsync` / `mngr git pull`**.
 
 ### Option A: Give the agent git credentials
 
 If the agent has `GH_TOKEN` (via `pass_env` in a template or `--pass-env` on the CLI), it can `git push` directly.
 
-### Option B: Use `mngr pull`
+### Option B: Use `mngr rsync` or `mngr git pull`
 
-`mngr pull` transfers changes from the agent to your local machine without needing git credentials on the agent. It supports two sync modes:
+These transfer changes from the agent to your local machine without needing git
+credentials on the agent.
 
 **Pull git commits** (when the agent has committed its work):
 
 ```bash
-mngr pull my-agent --sync-mode=git
+mngr git pull my-agent
 ```
 
 This merges the agent's branch into your current local branch.
 
-**Pull files** (default -- works for uncommitted changes and non-git-tracked files):
+**Pull files** (works for uncommitted changes and non-git-tracked files):
 
 ```bash
-mngr pull my-agent
+mngr rsync my-agent ./
 ```
 
-This uses rsync to sync the agent's working directory to your current directory. To preview what would be transferred first:
+This uses rsync to sync the agent's working directory to your current
+directory. To preview what would be transferred first:
 
 ```bash
-mngr pull my-agent --dry-run
+mngr rsync my-agent ./ --dry-run
 ```
 
 You can also pull a specific subdirectory:
 
 ```bash
-mngr pull my-agent:src ./local-src
+mngr rsync my-agent:src ./local-src
 ```
 
 To push local changes to the agent (e.g. a config file you edited locally):
 
 ```bash
-mngr push my-agent:config ./config
+mngr rsync ./config my-agent:config
 ```
 
-See [mngr pull](../commands/primary/pull.md) and [mngr push](../commands/primary/push.md) for all options.
+See [mngr rsync](../commands/primary/rsync.md) and [mngr git](../commands/primary/git.md) for all options.
 
 ## Lifecycle and snapshots
 

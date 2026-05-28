@@ -6,6 +6,46 @@ For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
 ## 2026-05-26
 
+# Repo-root spec annotation
+
+[`specs/minds-rest-api/spec.md`](../../specs/minds-rest-api/spec.md)
+got a top-of-file banner noting that the per-agent `MINDS_API_KEY` and
+the per-agent reverse SSH tunnel for the Minds API are both gone --
+agents now reach the API exclusively through the latchkey gateway's
+`minds-api-proxy` extension, with a single installation-wide
+`MINDS_API_KEY`. See the changelogs for the `minds` and `mngr_latchkey`
+projects for the full design + implementation notes.
+
+- Updated the minds Electron acceptance test spec (``specs/minds-electron-acceptance-test/spec.md``) to reference ``launch_mode=DOCKER`` instead of ``launch_mode=LOCAL``, matching the corresponding minds enum rename. The test code in ``apps/minds`` was already updated; this brings the spec in sync.
+
+- Updated the nightly changelog consolidation prompt (`scripts/changelog_consolidation_prompt.md`) so the concise `CHANGELOG.md` is a notable-only summary: non-notable changes (canonically, changes that only affect tests rather than user-facing behavior) are now omitted from `CHANGELOG.md` entirely instead of being forced into a `Changed` bullet. Such entries are still preserved verbatim in each project's `UNABRIDGED_CHANGELOG.md`.
+- Added a `dev`-project exception to that rule: because `dev` tracks repo-level developer tooling (CI, scripts, build config, ratchets, the changelog system) rather than product behavior, `dev` entries are judged by developer/maintainer impact rather than end-user-facing behavior.
+
+# CI guard for stale generated CLI docs
+
+`scripts/make_cli_docs.py` gained a `--check` mode that reports any stale
+generated docs (and the exact regen command) and exits non-zero without writing
+anything. Its content generation was refactored so a single
+`collect_generated_files()` function is the shared source of truth for both
+writing the docs and checking them, so the writer and checker cannot drift.
+
+A new `test_cli_docs_are_up_to_date` (in `test_meta_ratchets.py`, alongside the
+existing repo-wide ruff check) runs that `--check` mode and fails if the
+committed CLI docs or PyPI README are out of date, pointing you at
+`uv run python scripts/make_cli_docs.py`. This complements the existing
+`test_all_non_hidden_commands_have_generated_docs`, which only checks that a doc
+file exists per command, by also verifying the file contents are current.
+
+Workspace + scripts metadata follows the rename of `libs/mngr_gemini` to `libs/mngr_antigravity`: workspace `pyproject.toml` cov target, `test_profiles.toml` mngr-suite test paths, top-level `README.md`, and the package list in `scripts/utils.py`.
+
+- Added `specs/env-settings-overrides/concise.md` documenting the new `MNGR__*` env-var override scheme, the `__extend` operator, and the assign-by-default merge semantics shipped with this PR. See the `mngr` changelog entry for the user-visible behavior.
+
+Broadened the autofix auto-accept rules to cover any pure DRY cleanup that is a clear
+improvement and doesn't change behavior (e.g. inline-re-construction folded into a
+pre-existing local). Previously the rule only listed specific cases.
+
+## 2026-05-26
+
 ## dev
 
 - TMR workflows (`tmr.yml`, `tmr-reintegrate.yml`) now re-assert `mngr tmr`'s exit code via `exit "${PIPESTATUS[0]}"` after the `| tee tmr-report/events.jsonl` pipeline. The implicit `pipefail` propagation was observed to not catch the left-side failure in this step, letting a failed run be reported as successful.

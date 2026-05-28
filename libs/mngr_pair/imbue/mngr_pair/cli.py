@@ -259,8 +259,8 @@ During rapid concurrent edits, changes will be debounced to avoid partial writes
         ("Use --source-agent flag", "mngr pair --source-agent my-agent --target ./local-copy"),
     ),
     see_also=(
-        ("push", "Push files or git commits to an agent"),
-        ("pull", "Pull files or git commits from an agent"),
+        ("rsync", "One-shot file sync between local and a remote host or agent"),
+        ("git", "Push or pull git commits between local and a remote agent or host"),
         ("create", "Create a new agent"),
         ("list", "List agents to find one to pair with"),
     ),
