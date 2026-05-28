@@ -78,25 +78,6 @@ class BackendResolverInterface(MutableModel, ABC):
         """
         return self.list_known_agent_ids()
 
-    def list_known_or_cached_workspace_ids(self) -> tuple[AgentId, ...]:
-        """Return workspace agent ids including any persisted cache entries.
-
-        Default implementation returns the live-only list. Subclasses that
-        maintain a workspace cache should override this so the landing page
-        and chrome workspaces list keep rendering tiles for workspaces whose
-        live discovery has transiently dropped them (e.g. SSH-dead docker).
-        """
-        return self.list_known_workspace_ids()
-
-    def evict_cached_workspace(self, agent_id: AgentId) -> None:
-        """Drop ``agent_id`` from any persisted workspace cache, if applicable.
-
-        Default implementation is a no-op. Subclasses that maintain a
-        workspace cache should override this; callers use it to prune a
-        cache entry once minds has confirmed the workspace was destroyed.
-        """
-        return None
-
     @abstractmethod
     def list_services_for_agent(self, agent_id: AgentId) -> tuple[ServiceName, ...]:
         """Return all known service names for an agent, sorted alphabetically."""
@@ -361,92 +342,6 @@ def _write_services_agent_id_cache(path: Path, cache: dict[str, str]) -> None:
         logger.warning("Could not write services-agent-id cache to {}: {}", path, exc)
 
 
-# -- Workspace cache helpers --
-
-
-class WorkspaceCacheEntry(FrozenModel):
-    """Persisted, display-only data for a workspace agent.
-
-    Captured each time discovery surfaces a primary workspace agent, so the
-    landing-page tile (and the chrome workspaces list) keep rendering when
-    the live discovery snapshot transiently drops the agent -- the SSH-dead
-    docker-container failure mode that motivates this cache existing in the
-    first place. The cache is *not* consulted for control-flow decisions
-    that need ground truth (e.g. the destroying-record DONE/FAILED status):
-    ``list_known_workspace_ids`` continues to return live-only ids so those
-    decisions remain authoritative.
-    """
-
-    name: str = Field(description="Human-readable workspace name (the ``workspace`` label value).")
-
-
-def _workspace_cache_from_agents(agents: tuple[DiscoveredAgent, ...]) -> dict[str, WorkspaceCacheEntry]:
-    """Snapshot primary workspace agents into ``{agent_id_str: WorkspaceCacheEntry}``.
-
-    Only includes agents whose labels contain both ``workspace`` and
-    ``is_primary`` -- the same filter ``list_known_workspace_ids`` applies --
-    so the cache exactly mirrors what the live workspace list would emit.
-    Returns an empty dict when no primary workspace agents are present in
-    the current snapshot.
-    """
-    entries: dict[str, WorkspaceCacheEntry] = {}
-    for agent in agents:
-        labels = agent.labels
-        if "workspace" not in labels or "is_primary" not in labels:
-            continue
-        entries[str(agent.agent_id)] = WorkspaceCacheEntry(name=labels.get("workspace", str(agent.agent_name)))
-    return entries
-
-
-def _read_workspace_cache(path: Path) -> dict[str, WorkspaceCacheEntry]:
-    """Read the persisted ``{agent_id: WorkspaceCacheEntry}`` map from ``path``.
-
-    Returns an empty dict for a missing file, a malformed JSON file, or any
-    JSON whose top level is not an object of string-keyed entry-shaped values;
-    we never want a corrupt cache to break minds startup. The next successful
-    discovery snapshot rewrites the file.
-    """
-    try:
-        raw = path.read_text(encoding="utf-8")
-    except FileNotFoundError:
-        return {}
-    except OSError as exc:
-        logger.warning("Could not read workspace cache from {}: {}", path, exc)
-        return {}
-    try:
-        payload = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        logger.warning("Workspace cache at {} is not valid JSON: {}", path, exc)
-        return {}
-    if not isinstance(payload, dict):
-        return {}
-    entries: dict[str, WorkspaceCacheEntry] = {}
-    for key, value in payload.items():
-        if not isinstance(key, str) or not isinstance(value, dict):
-            continue
-        name = value.get("name")
-        if not isinstance(name, str):
-            continue
-        entries[key] = WorkspaceCacheEntry(name=name)
-    return entries
-
-
-def _write_workspace_cache(path: Path, cache: dict[str, WorkspaceCacheEntry]) -> None:
-    """Persist the workspace cache atomically to ``path``.
-
-    Writes to a sibling ``.tmp`` file then renames; a write failure logs a
-    warning but does not propagate, matching the services-agent-id cache.
-    """
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(path.suffix + ".tmp")
-        serializable = {key: entry.model_dump(mode="json") for key, entry in cache.items()}
-        tmp.write_text(json.dumps(serializable, indent=2, sort_keys=True), encoding="utf-8")
-        tmp.replace(path)
-    except OSError as exc:
-        logger.warning("Could not write workspace cache to {}: {}", path, exc)
-
-
 # -- MngrCliBackendResolver --
 
 
@@ -471,20 +366,6 @@ class MngrCliBackendResolver(BackendResolverInterface):
         ),
     )
 
-    workspaces_cache_path: Path | None = Field(
-        default=None,
-        description=(
-            "Optional JSON file recording per-workspace display metadata "
-            "(``WorkspaceCacheEntry``). Populated as discovery surfaces primary "
-            "workspace agents; consulted by ``list_known_or_cached_workspace_ids`` "
-            "and ``get_workspace_name`` so the landing-page tile and chrome workspaces "
-            "list keep rendering when live discovery has transiently dropped the "
-            "agent (the SSH-dead docker-container failure mode). Entries are evicted "
-            "via ``evict_cached_workspace`` once minds confirms the workspace was "
-            "destroyed. When None, the cache is in-memory only."
-        ),
-    )
-
     _agents_result: ParsedAgentsResult = PrivateAttr(default_factory=ParsedAgentsResult)
     _services_by_agent: dict[str, dict[str, str]] = PrivateAttr(default_factory=dict)
     _initial_discovery_done: bool = PrivateAttr(default=False)
@@ -506,20 +387,11 @@ class MngrCliBackendResolver(BackendResolverInterface):
     # live discovery has lost the pair (the SSH-dead path that motivated this
     # cache existing in the first place).
     _services_agent_id_cache: dict[str, str] = PrivateAttr(default_factory=dict)
-    # workspace_agent_id_str -> WorkspaceCacheEntry. Populated under _lock by
-    # update_agents whenever discovery surfaces a primary workspace agent.
-    # Read by list_known_or_cached_workspace_ids / get_workspace_name as a
-    # fallback so the landing-page tile keeps rendering when live discovery
-    # has lost the agent (the SSH-dead failure mode). Entries are evicted via
-    # evict_cached_workspace once a destroy completes.
-    _workspace_info_cache: dict[str, WorkspaceCacheEntry] = PrivateAttr(default_factory=dict)
 
     def model_post_init(self, __context: object) -> None:
-        """Load the persisted caches from disk, if configured."""
+        """Load the persisted services-agent-id cache from disk, if configured."""
         if self.services_agent_cache_path is not None:
             self._services_agent_id_cache = _read_services_agent_id_cache(self.services_agent_cache_path)
-        if self.workspaces_cache_path is not None:
-            self._workspace_info_cache = _read_workspace_cache(self.workspaces_cache_path)
 
     def add_on_change_callback(self, callback: Callable[[], None]) -> None:
         """Register a callback invoked whenever agent or service data changes.
@@ -572,53 +444,30 @@ class MngrCliBackendResolver(BackendResolverInterface):
     def update_agents(self, result: ParsedAgentsResult) -> None:
         """Replace the known agent list and SSH info. Thread-safe.
 
-        Also refreshes two persistent caches from the new agent list:
-
-        - The services-agent-id cache: each workspace agent that shares a
-          host with a ``system-services`` agent gets an entry written through
-          to ``services_agent_cache_path`` (if configured).
-        - The workspace cache: each primary workspace agent in the snapshot
-          gets a ``WorkspaceCacheEntry`` written through to
-          ``workspaces_cache_path`` (if configured), so the landing page can
-          keep rendering the tile when live discovery later transiently drops
-          the agent (e.g. SSH dies inside the docker container).
-
+        Also refreshes the services-agent-id cache from the new agent list: each
+        workspace agent that shares a host with a ``system-services`` agent
+        gets an entry written through to the on-disk cache (if configured).
         Existing cache entries are preserved when the current snapshot can't
-        observe the pair / agent (i.e. transient discovery loss); that is
-        the entire point of the caches. Workspace entries are evicted by
-        ``evict_cached_workspace`` once a destroy completes.
+        observe the pair (e.g. transient discovery loss); that is the entire
+        point of the cache.
         """
-        services_path_to_write: Path | None = None
-        services_cache_to_write: dict[str, str] | None = None
-        workspaces_path_to_write: Path | None = None
-        workspaces_cache_to_write: dict[str, WorkspaceCacheEntry] | None = None
+        path_to_write: Path | None = None
+        cache_to_write: dict[str, str] | None = None
         with self._lock:
             self._agents_result = result
             self._initial_discovery_done = True
             new_pairs = _services_pairs_from_agents(result.discovered_agents)
             if new_pairs:
-                services_changed = False
+                changed = False
                 for workspace_id_str, services_id_str in new_pairs.items():
                     if self._services_agent_id_cache.get(workspace_id_str) != services_id_str:
                         self._services_agent_id_cache[workspace_id_str] = services_id_str
-                        services_changed = True
-                if services_changed and self.services_agent_cache_path is not None:
-                    services_path_to_write = self.services_agent_cache_path
-                    services_cache_to_write = dict(self._services_agent_id_cache)
-            new_workspace_entries = _workspace_cache_from_agents(result.discovered_agents)
-            if new_workspace_entries:
-                workspaces_changed = False
-                for workspace_id_str, entry in new_workspace_entries.items():
-                    if self._workspace_info_cache.get(workspace_id_str) != entry:
-                        self._workspace_info_cache[workspace_id_str] = entry
-                        workspaces_changed = True
-                if workspaces_changed and self.workspaces_cache_path is not None:
-                    workspaces_path_to_write = self.workspaces_cache_path
-                    workspaces_cache_to_write = dict(self._workspace_info_cache)
-        if services_path_to_write is not None and services_cache_to_write is not None:
-            _write_services_agent_id_cache(services_path_to_write, services_cache_to_write)
-        if workspaces_path_to_write is not None and workspaces_cache_to_write is not None:
-            _write_workspace_cache(workspaces_path_to_write, workspaces_cache_to_write)
+                        changed = True
+                if changed and self.services_agent_cache_path is not None:
+                    path_to_write = self.services_agent_cache_path
+                    cache_to_write = dict(self._services_agent_id_cache)
+        if path_to_write is not None and cache_to_write is not None:
+            _write_services_agent_id_cache(path_to_write, cache_to_write)
         self._fire_on_change()
 
     def update_providers(
@@ -695,16 +544,9 @@ class MngrCliBackendResolver(BackendResolverInterface):
             return self._agents_result.discovered_agents
 
     def list_known_workspace_ids(self) -> tuple[AgentId, ...]:
-        """Return agent IDs that are primary workspace agents in the live snapshot.
+        """Return agent IDs that are primary workspace agents.
 
         Filters for agents with both ``workspace`` and ``is_primary`` labels.
-
-        This is deliberately live-only: ``destroying.read_destroying`` uses
-        the answer to ``agent_id in list_known_workspace_ids()`` to derive
-        DONE vs FAILED status, so including cached entries here would
-        misclassify a successful destroy as FAILED. For UI-render callers
-        (landing page, chrome workspaces list) that want the cached entries
-        too, see :meth:`list_known_or_cached_workspace_ids`.
         """
         with self._lock:
             return tuple(
@@ -713,69 +555,12 @@ class MngrCliBackendResolver(BackendResolverInterface):
                 if "workspace" in agent.labels and "is_primary" in agent.labels
             )
 
-    def list_known_or_cached_workspace_ids(self) -> tuple[AgentId, ...]:
-        """Return live primary workspace agent ids augmented with cached ids.
-
-        Live ids first (preserving their order), followed by cached-only ids
-        (i.e. cache entries whose agent is not present in the live snapshot)
-        in sorted order for stable rendering. This is what the landing page
-        and chrome workspaces list should call: a workspace whose docker
-        container is up but whose sshd is dead drops out of the live
-        snapshot, and we still want its tile to render so the user can
-        trigger a restart.
-        """
-        with self._lock:
-            live_ids = tuple(
-                agent.agent_id
-                for agent in self._agents_result.discovered_agents
-                if "workspace" in agent.labels and "is_primary" in agent.labels
-            )
-            live_id_strs = {str(aid) for aid in live_ids}
-            cached_only_id_strs = sorted(
-                aid_str for aid_str in self._workspace_info_cache if aid_str not in live_id_strs
-            )
-        return live_ids + tuple(AgentId(aid_str) for aid_str in cached_only_id_strs)
-
-    def evict_cached_workspace(self, agent_id: AgentId) -> None:
-        """Drop ``agent_id``'s entry from the workspace cache (in-memory + on-disk).
-
-        Called by the landing-page destroying-record handler once a destroy
-        transitions to DONE (pid dead AND agent missing from the live
-        resolver), which is the only signal we treat as authoritative proof
-        that a workspace is truly gone. SSH-dead is explicitly not such a
-        signal -- those cache entries persist across the outage.
-
-        No-op when the entry is not in the cache.
-        """
-        path_to_write: Path | None = None
-        cache_to_write: dict[str, WorkspaceCacheEntry] | None = None
-        with self._lock:
-            if str(agent_id) not in self._workspace_info_cache:
-                return
-            del self._workspace_info_cache[str(agent_id)]
-            if self.workspaces_cache_path is not None:
-                path_to_write = self.workspaces_cache_path
-                cache_to_write = dict(self._workspace_info_cache)
-        if path_to_write is not None and cache_to_write is not None:
-            _write_workspace_cache(path_to_write, cache_to_write)
-        self._fire_on_change()
-
     def get_workspace_name(self, agent_id: AgentId) -> str | None:
-        """Return the workspace label value for an agent, or None.
-
-        Falls back to the workspace cache when the live snapshot does not
-        contain the agent, so a tile whose backing agent is transiently
-        SSH-dead still renders with its proper human-readable name instead
-        of degrading to the raw agent id.
-        """
-        agent_id_str = str(agent_id)
+        """Return the workspace label value for an agent, or None."""
         with self._lock:
             for agent in self._agents_result.discovered_agents:
                 if agent.agent_id == agent_id:
                     return agent.labels.get("workspace")
-            cached = self._workspace_info_cache.get(agent_id_str)
-            if cached is not None:
-                return cached.name
             return None
 
     def get_ssh_info(self, agent_id: AgentId) -> RemoteSSHInfo | None:

@@ -178,7 +178,6 @@ def run(
     notification_dispatcher = NotificationDispatcher(is_electron=is_electron)
     backend_resolver = MngrCliBackendResolver(
         services_agent_cache_path=paths.data_dir / "system_services_agent_cache.json",
-        workspaces_cache_path=paths.data_dir / "workspaces_cache.json",
     )
     latchkey = _build_latchkey(data_directory=data_directory)
     latchkey.initialize()
