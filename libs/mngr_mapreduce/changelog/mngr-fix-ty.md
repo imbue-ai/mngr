@@ -1,0 +1,1 @@
+Removed the per-project `test_no_type_errors` and `test_no_ruff_errors` ratchet tests from `mngr_mapreduce`. These checks now run repo-wide from the root `test_meta_ratchets.py`, and the per-project copy imported `check_no_ruff_errors` (which was never centralized into `ratchet_testing.ratchets`), producing a ty `unresolved-import` error.
