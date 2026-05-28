@@ -58,13 +58,25 @@ The pool host is fully pre-provisioned, so mngr's create pipeline only
 writes the agent env file (and patches the claude config when an
 `ANTHROPIC_API_KEY` lands in env) before starting the tmux session.
 
-## Destroy vs delete
+## Destroy / delete / stop
 
-- `mngr destroy <agent>` stops the docker container on the leased VPS only;
-  the lease and on-disk data are preserved. `mngr start <agent>` brings it
-  back on the same VPS.
+- `mngr destroy <agent>` is *terminal* for imbue_cloud-leased hosts. It
+  (1) stops + removes the workspace container, drops the per-host docker
+  named volume, deletes the per-host btrfs subvolume under `/mngr-btrfs/`,
+  runs `docker system prune -a -f --volumes`, and wipes `/root` + `/tmp`
+  (keeping `/root/.ssh/authorized_keys` so the pool-management ssh path
+  keeps working through cleanup); then (2) releases the lease back to the
+  pool via the connector. Privacy-first ordering: the user's data is gone
+  before the connector flips the row to `released`. The underlying VPS is
+  destroyed later by
+  `apps/remote_service_connector/scripts/cleanup_released_hosts.py`.
 - `mngr delete <agent>` (or `mngr imbue_cloud hosts release <lease-id>`)
-  releases the VPS back to the pool and drops all data.
+  runs the same flow; it's the path mngr's GC takes after the
+  destroyed-host grace period. Safe to re-run on an already-released lease.
+- `mngr stop <agent>` is the "I'll resume this workspace later" path:
+  `docker stop`s the container on the leased VPS, preserves the lease +
+  the on-disk volume, and `mngr start <agent>` brings the same workspace
+  back up on the same VPS.
 
 ## Pool admin
 
