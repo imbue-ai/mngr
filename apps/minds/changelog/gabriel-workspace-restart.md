@@ -77,3 +77,11 @@ Tiered system-interface restart for the minds recovery flow.
   interface health tracker now fires an on-recovery callback. Minds
   wires it to a loguru INFO line so the final recovery is visible in
   the log alongside the per-probe diagnostics line.
+- Fix a race during sidebar-initiated workspace restarts where the
+  recovery page would briefly redirect back to the workspace, then
+  flip back to "Loading workspace" once the container actually went
+  down. The background health probe loop now skips RESTARTING agents
+  -- only the restart worker (which probes after its ``mngr stop``
+  completes) can transition an in-flight restart to HEALTHY, so a
+  probe of the still-alive pre-restart system interface can no longer
+  prematurely declare recovery.

@@ -318,18 +318,52 @@ def test_snapshot_all_omits_healthy_and_suspect_agents() -> None:
     assert tracker.snapshot_all() == {a1: AgentHealth.RESTARTING}
 
 
-def test_snapshot_probe_targets_includes_suspect_and_non_healthy() -> None:
+def test_snapshot_probe_targets_includes_suspect_stuck_and_restart_failed() -> None:
+    """Probe targets are the agents the bg loop is responsible for recovering.
+
+    RESTARTING agents are deliberately excluded -- the restart worker owns the
+    recovery decision for those, since a bg probe during the gap between
+    ``mark_restarting`` and the worker's ``mngr stop`` would observe the
+    pre-restart system interface as still healthy and prematurely flip the
+    agent back to HEALTHY.
+    """
     tracker = SystemInterfaceHealthTracker(stuck_threshold_seconds=_FAST_THRESHOLD)
     suspect = AgentId.generate()
+    stuck = AgentId.generate()
+    restart_failed = AgentId.generate()
     restarting = AgentId.generate()
     recovered = AgentId.generate()
 
     tracker.record_failure(suspect)
+    tracker.mark_stuck(stuck)
+    tracker.mark_restart_failed(restart_failed, "boom")
     tracker.mark_restarting(restarting)
     tracker.record_failure(recovered)
     tracker.record_probe_success(recovered)
 
-    assert tracker.snapshot_probe_targets() == frozenset({suspect, restarting})
+    assert tracker.snapshot_probe_targets() == frozenset({suspect, stuck, restart_failed})
+
+
+def test_snapshot_probe_targets_excludes_restarting_agents() -> None:
+    """RESTARTING agents are never probed by the background loop.
+
+    Regression for the race where a bg probe between ``mark_restarting`` and
+    the restart worker's ``mngr stop`` actually tearing down the backend would
+    see the old system interface as healthy and call ``record_probe_success``,
+    flipping the agent prematurely to HEALTHY -- which the recovery page then
+    302'd back to the about-to-disappear workspace.
+    """
+    tracker = SystemInterfaceHealthTracker(stuck_threshold_seconds=_FAST_THRESHOLD)
+    aid = AgentId.generate()
+
+    tracker.mark_restarting(aid)
+
+    assert aid not in tracker.snapshot_probe_targets()
+    # ...and even a prior failure envelope (which would normally enroll the
+    # agent as a suspect probe target) does not pull it back into the loop
+    # while the restart is in flight.
+    tracker.record_failure(aid)
+    assert aid not in tracker.snapshot_probe_targets()
 
 
 def test_concurrent_failure_envelopes_then_one_stuck_event() -> None:

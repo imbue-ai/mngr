@@ -319,17 +319,27 @@ class SystemInterfaceHealthTracker(MutableModel):
         """Return every agent the background probe loop should poll this tick.
 
         An agent is a probe target when it is suspect (a failure envelope
-        enrolled it and no probe has since cleared it) or non-HEALTHY (STUCK /
-        RESTARTING / RESTART_FAILED -- the loop polls those for recovery).
-        HEALTHY non-suspect agents are omitted; probing every workspace
-        unconditionally would scale probe traffic with workspace count for no
-        benefit.
+        enrolled it and no probe has since cleared it), STUCK, or
+        RESTART_FAILED -- the loop polls those for recovery. HEALTHY
+        non-suspect agents are omitted; probing every workspace unconditionally
+        would scale probe traffic with workspace count for no benefit.
+
+        RESTARTING agents are deliberately excluded: while the restart worker
+        is in flight, the *old* system interface is still answering 200 in the
+        window between ``mark_restarting`` and the worker's ``mngr stop``
+        actually tearing down the backend. A background probe in that window
+        would prematurely flip the agent back to HEALTHY (via
+        ``record_probe_success``), causing the recovery page to 302 the user
+        back into a workspace that is about to disappear. The restart worker
+        owns the recovery decision via its own ``_await_system_interface_ready``
+        probe, which only runs *after* the stop step completes.
         """
         with self._lock:
             return frozenset(
                 AgentId(aid)
                 for aid, record in self._records.items()
-                if record.is_suspect or record.health != AgentHealth.HEALTHY
+                if (record.is_suspect and record.health == AgentHealth.HEALTHY)
+                or record.health in (AgentHealth.STUCK, AgentHealth.RESTART_FAILED)
             )
 
     # -- Internals --------------------------------------------------------
