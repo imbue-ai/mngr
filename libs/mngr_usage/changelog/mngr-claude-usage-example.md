@@ -8,7 +8,9 @@ mode (`mngr usage --format json`) rather than the blocking `mngr usage wait`:
   < seven_day.elapsed_percentage`) rather than a flat ceiling, so it won't spend
   when you're already ahead of the sustainable weekly burn.
 - Warm a fresh window: detect that the last recorded 5h window has elapsed
-  (`five_hour.resets_at < now`) and touch an agent to open/prime the new window.
+  (`five_hour.resets_at < now`) and fire a throwaway headless `claude -p`
+  prompt to open/prime the new window, guarded by a marker file so it warms at
+  most once per boundary.
 - Dispatch a queue of task files: name each agent after its task file and cap
   concurrency by a shared `queue=tasks` label (counting `RUNNING`/`WAITING`
   pool members via `mngr list`).

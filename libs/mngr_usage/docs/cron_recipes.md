@@ -22,8 +22,8 @@ A few things hold across the usage-driven recipes below:
 - The 5h / 7d windows are account-level: the snapshot reflects the freshest
   reading across all your agents *and* your own interactive Claude Code
   sessions, so you don't need a dedicated agent alive just to keep it current.
-- `cron` runs with a minimal `PATH`; make sure `mngr`, `jq`, and `at` resolve
-  (set `PATH` at the top of the crontab, or call them by absolute path).
+- `cron` runs with a minimal `PATH`; make sure `mngr`, `jq`, `at`, and `claude`
+  resolve (set `PATH` at the top of the crontab, or call them by absolute path).
 
 ## Soak up an about-to-expire 5h window
 
@@ -93,45 +93,47 @@ that fires the human "a window already reset" warning. In JSON you reconstruct
 it precisely by comparing a window's `resets_at` (a unix timestamp) against the
 snapshot's own top-level `now`: `resets_at < now` means the most recently
 recorded 5h window boundary is in the past, i.e. a fresh window is open and
-unclaimed. Touch the agent then to open (and prime the cache of) the new window:
+unclaimed. Fire one throwaway headless turn then -- `claude -p` runs a single
+non-interactive prompt and exits -- to open (and prime the cache of) the new
+window without standing up a full agent:
 
 ```bash
 #!/usr/bin/env bash
-# warm-window.sh -- start a fresh 5h window as soon as the last one has elapsed.
+# warm-window.sh -- open a fresh 5h window as soon as the last one has elapsed.
 set -euo pipefail
-
-AGENT="my-agent"
 
 snapshot="$(mngr usage --format json)"
 
-# Note: we compare resets_at to `now` directly rather than keying off is_stale,
-# which would also fire on merely age-stale data whose window has NOT yet reset.
-expired="$(jq -r '
+# Emit the elapsed window's resets_at (a unix ts) when it lies in the past. We
+# compare against the snapshot's own `now` rather than keying off is_stale, which
+# would also fire on merely age-stale data whose window has NOT yet reset.
+elapsed_at="$(jq -r '
   .now as $now
   | .sources[]
   | select(.source == "claude")
   | select((.five_hour.resets_at // 0) > 0 and .five_hour.resets_at < $now)
-  | "yes"
+  | .five_hour.resets_at
 ' <<<"$snapshot")"
 
-[[ "$expired" == "yes" ]] || exit 0
+[[ -n "$elapsed_at" ]] || exit 0
 
-# Already up (RUNNING or WAITING)? Then the agent has a live window already --
-# nothing to warm, and no redundant message to send.
-if mngr list --include "name == \"$AGENT\" && (state == \"RUNNING\" || state == \"WAITING\")" --ids | grep -q .; then
-  exit 0
-fi
+# Warm at most once per boundary. Headless `claude -p` may not refresh the usage
+# reading (the statusline writer captures interactive sessions), so without this
+# marker the script could re-warm every tick until your next real session lands.
+# Keying the marker on the elapsed resets_at makes it a no-op until the *next*
+# window elapses with a different boundary.
+marker="$HOME/.cache/mngr-warm-window-last-resets-at"
+[[ "$(cat "$marker" 2>/dev/null)" == "$elapsed_at" ]] && exit 0
+mkdir -p "$(dirname "$marker")"
+printf '%s' "$elapsed_at" > "$marker"
 
-mngr start "$AGENT" && mngr message "$AGENT" --message "warm the cache for the new window"
+# One cheap non-interactive turn: opens the new 5h window and warms the cache.
+claude -p 'just say hi' >/dev/null
 ```
 
 ```cron
 */10 * * * * /path/to/warm-window.sh
 ```
-
-The signal self-clears: the relaunched agent's statusline records the new
-window's `resets_at` (5h out) within seconds of its first response, so the next
-tick sees `resets_at > now` and does nothing.
 
 ## Dispatch tasks from a queue directory
 
