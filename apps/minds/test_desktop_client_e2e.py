@@ -41,6 +41,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
+import tomlkit
 from loguru import logger
 
 from imbue.minds.desktop_client.e2e_workspace_runner import configure_logging
@@ -59,16 +60,20 @@ def _fct_settings_opted_into_pytest(fct_path: Path) -> Iterator[None]:
     The Electron-spawned ``mngr create`` loads FCT's ``.mngr/settings.toml`` (the
     runner pins ``MNGR_ROOT_NAME=mngr`` to get the main/docker create templates).
     mngr's pytest guard requires every config it loads during a test run to set
-    ``is_allowed_in_pytest = true``. We add it to this checkout only -- not to
-    FCT's shipped config, which would disable the guard for every FCT-based
-    project -- and restore the original on exit so an operator-managed
+    ``is_allowed_in_pytest = true``. We set that key here -- editing the parsed
+    TOML so any pre-existing value is overwritten in place rather than producing
+    a duplicate key -- but only on this checkout, not FCT's shipped config (which
+    would disable the guard for every FCT-based project). The original file
+    contents are saved verbatim and restored on exit (or the file removed if it
+    did not exist) so an operator-managed
     ``.external_worktrees/forever-claude-template/`` checkout is not left dirty.
     """
     settings_path = fct_path / ".mngr" / "settings.toml"
     original = settings_path.read_text() if settings_path.exists() else None
-    if original is None or "is_allowed_in_pytest" not in original:
-        settings_path.parent.mkdir(parents=True, exist_ok=True)
-        settings_path.write_text("is_allowed_in_pytest = true\n" + (original or ""))
+    doc = tomlkit.parse(original) if original is not None else tomlkit.document()
+    doc["is_allowed_in_pytest"] = True
+    settings_path.parent.mkdir(parents=True, exist_ok=True)
+    settings_path.write_text(tomlkit.dumps(doc))
     try:
         yield
     finally:
