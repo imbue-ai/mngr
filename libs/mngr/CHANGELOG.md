@@ -22,6 +22,8 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Added: `__extend` operator suffix on a leaf key (e.g. `cli_args__extend`) opts into additive merging (append for lists/tuples, key-merge for dicts, union for sets); `mngr config extend KEY VALUE` writes the `__extend` form.
 - Added: `mngr config schema` lists every settable key with its type and effective value; `mngr config list --all` now includes default-valued fields.
 - Added: New top-level `allow_settings_key_assignment_narrowing` setting (default `false`) — assigning over a non-empty list/tuple/dict/set from a lower-precedence layer raises `ConfigParseError` unless opted in or expressed via `__extend`.
+- Added: New `mngr rsync`, `mngr git push`, and `mngr git pull` thin-wrapper commands replacing the experimental `mngr push` / `mngr pull`. `mngr git push`/`mngr git pull` pass everything after `--` verbatim to the underlying `git push`/`git pull`; `mngr rsync` takes one local and one remote endpoint.
+- Added: `isolate_host_volumes` field on the Docker provider config — when `True`, each host container only sees its own per-host sub-folder of the shared state volume (`--mount ... volume-subpath=...`, requires Docker Engine >= 25.0). Persisted per host; default is unset (today's shared-volume behavior, with a startup deprecation warning).
 
 ### Changed
 
@@ -45,6 +47,8 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Changed: Breaking — config layer merging is now assign-by-default for every aggregate (list, tuple, dict, set); configs relying on implicit cross-scope concatenation (e.g. accumulating `cli_args`) must use `field__extend` to stay additive, and agent-type parent-type inheritance likewise no longer auto-concatenates. CLI tuple/list flags (`--env`, `--label`, `--extra-window`, …) are a deliberate carve-out: they still extend the settings-file value (config-supplied entries first, CLI values appended), preserving the prior "settings → CLI" layering. No compatibility shim is provided; the major-version bump is the migration signal.
 - Changed: The `__extend` operator and the assignment-narrowing guard apply uniformly to nested `agent_types.<name>`, `providers.<name>`, `create_templates.<name>`, and `plugins.<name>` fields; create templates now assign-by-default with pipeline order `config_defaults → templates → CLI`.
 - Changed: Config field names may no longer contain `__` (reserved as the env-var path separator and `__extend` suffix); renamed env var `MNGR_RETAIN_LOCK_FOR_FAILED_HOSTS_DURING_CREATE` → `MNGR_DEBUG_RETAIN_LOCK_FOR_FAILED_HOSTS_DURING_CREATE`.
+- Changed: `is_allowed_in_pytest` config field now defaults to `False` — during a pytest run, every loaded config layer (user/project/local) must opt in explicitly; configs not picked up at all are unaffected. Real configs loaded by a poorly-scoped test now trip the guard instead of running real operations.
+- Changed: Bumped the offload version baked into `libs/mngr/imbue/mngr/resources/Dockerfile` from 0.9.5 to 0.9.6 to match the CI pin; 0.9.6 adds `offload run --override-image-id <ID>` (Modal provider only).
 
 ### Removed
 
@@ -52,6 +56,8 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Removed: The agent-`permissions` concept from `mngr` core — `Permission`, `AgentPermissionsOptions`, `NoPermissionsAgentMixin`, `get_permissions`/`set_permissions`, the `--grant`/`--revoke` flags on `mngr limit`, and `--grant` on `mngr create` are gone. Higher-level libraries (latchkey, minds) keep their own permission concepts.
 - Removed: The buggy `--on-error continue` flag the outer `mngr observe` was passing to its inner `mngr observe --discovery-only` child.
 - Removed: The `MNGR_COMMANDS_<CMD>_<PARAM>`, `MNGR_ENABLE_PARAMIKO_LOGGING`, and `MNGR_AGENT_READY_TIMEOUT` env vars; the latter two are promoted to config fields `logging.enable_paramiko_logging` and `agent_ready_timeout` (settable via `MNGR__*`).
+- Removed: `mngr push` and `mngr pull` commands (and their `--sync-mode` / `--rsync-only` flags, plus the `SyncMode` enum, `GitSyncResult`, `NotAGitRepositoryError`, `pull_files`/`push_files`/`pull_git`/`push_git` in `imbue.mngr.api.sync`). Replaced by `mngr rsync` / `mngr git push` / `mngr git pull`; no compatibility shim.
+- Removed: `MNGR_ALLOW_PYTEST=1` escape hatch — had a single user, and was not worth the risk of being reached for as a quick bypass instead of properly fixing a test with a leaky environment.
 
 ### Fixed
 
@@ -60,6 +66,10 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Fixed: `Host._get_all_descendant_pids` no longer hits `RecursionError` on a PID-reuse cycle in the process tree, unsticking `host.stop_agents` on long-lived agents' cleanup paths.
 - Fixed: `mngr config` help text and docs example use `--scope user` instead of the nonexistent `--user`.
 - Fixed: tmux `-t` targets now use the exact-match `=` prefix, so commands no longer misroute to the wrong agent under session-name prefix collision (e.g. `gemini` vs `gemini-to-antigravity`) — fixing wrong-session kill/send/capture and stopped-agent state misreports.
+- Fixed: Settings-narrowing error now names both implicated layers (the file doing the narrowing assignment and the lower-precedence file whose value would be dropped), with resolved file paths and the matching `mngr config set --scope <user|project|local>` flag; `--setting allow_settings_key_assignment_narrowing=...` is now rejected with a clear error pointing at `settings.toml` or `MNGR__ALLOW_SETTINGS_KEY_ASSIGNMENT_NARROWING=true`.
+- Fixed: Settings-narrowing false-positive on a brand-new `[create_templates.<name>]` block whose only entry was a `<opt>__extend = [...]` — the `__extend` suffix is now preserved verbatim when the base has nothing to extend.
+- Fixed: Settings-narrowing false-positive on string-form aggregates — `agent_types.<name>.cli_args = "..."` (and other `tuple[str, ...]` fields that accept the string shorthand: `env`, `env_file`, `extra_provision_command`, `upload_file`, `create_directory`) no longer trip the narrowing guard, since strings represent a coherent single value rather than an aggregate.
+- Fixed: `is_error_reporting_enabled` config field description corrected — it described prompting to file GitHub issues, but the actual behavior is suggesting a diagnostic agent on an unexpected interactive error.
 
 ## [v0.2.8] - 2026-05-13
 

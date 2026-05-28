@@ -24,6 +24,8 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Added: Per-dev-env Neon project named `minds-<env>` containing `host_pool` and `litellm_cost` DBs, provisioned and torn down atomically by `minds env deploy` / `destroy`.
 - Added: Per-tier generation id minted at deploy and exposed at `GET /generation`; `minds env activate` wipes stale `mngr/` / `auth/` / `logs/` when the tier was redeployed since the dev last activated.
 - Added: `apps/minds/docs/staging-bringup.md` — end-to-end checklist for standing up the `staging` tier from scratch.
+- Added: 7-day dependency cooldown for supply-chain hardening — `minimumReleaseAge: 10080` in `apps/minds/pnpm-workspace.yaml` and `exclude-newer = "7 days"` under `[tool.uv]` in the packaged `apps/minds/electron/pyproject/pyproject.toml`. Refuses to resolve any distribution (including transitive ones) published within the last week. Frozen-lockfile installs are unaffected.
+- Added: `.nvmrc` pinning Node.js for nvm/fnm users.
 
 ### Changed
 
@@ -55,6 +57,10 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Changed: Speed up local minds workspace creation by restructuring the `forever-claude-template` Dockerfile and deferring Playwright into a post-boot install (warm rebuild 1m33s → 30s → ~25.6s).
 - Changed: Latchkey permission dialog no longer pre-checks the catch-all `any` permission as an implicit default; initial check state is now the union of existing grants and the agent's requested permissions.
 - Changed: Streamed-permission-request handler now dedupes redeliveries by `event_id` so the requests inbox no longer grows unbounded on every gateway reconnect.
+- Changed: Pinned desktop client JS toolchain to exact versions — pnpm 10.33.4 and Node.js 24.15.0 with `engine-strict=true` plus exact `engines.node`/`engines.pnpm`, so installs fail fast on mismatch. End-user Python pinned to `==3.12.13` in the packaged `apps/minds/electron/pyproject/pyproject.toml` so every install downloads the same interpreter.
+- Changed: Upgraded Electron from 35.7.5 to 40.10.1 so the runtime shipped to end users bundles Node.js 24.15.0 — matching the version pinned for development. Previously the bundled Electron shipped a different (Node 22.x) runtime than developers built against. Picked 40.10.1 (vs. a newer major) to avoid Electron 41/42's cookie and macOS-notification behavior changes.
+- Changed: Bumped bundled `UV_VERSION` in `apps/minds/scripts/build.js` from 0.7.12 to 0.11.15 so the shipped uv understands `exclude-newer = "7 days"` and honors the committed lockfile (older uv silently dropped the cooldown and re-resolved unpinned at end-user first launch).
+- Changed: Bumped bundled Latchkey to 2.12.2 (and 2.12.1) — first-time Google Cloud users now see the ToS dialog, and Google Projects can be reused (important because the default Google Project count limit is low).
 
 ### Removed
 
@@ -72,6 +78,8 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Fixed: `minds env destroy` proceeds with cloud-side cleanup even when the local env root has already been removed by hand.
 - Fixed: `minds env deploy` runs `apply_pool_hosts_migrations` for every tier (not just dev), so shared-tier schema no longer diverges.
 - Fixed: `find_monorepo_root` check runs before Vault credential read and `make_deploy_id` so running from outside the monorepo fails cleanly.
+- Fixed: Signing-key generation race in `FileAuthStore.get_signing_key` that intermittently logged users out — generation is now serialized behind a per-store lock with a double-checked re-read and atomic key file writes, so concurrent first-time callers always converge on a single persisted key. Eliminates the dominant cause of flaky failures in the `test-docker-electron` CI job.
+- Fixed: Deny button on the latchkey permission-request dialog now works when the requested scope is not in the gateway's services catalog (e.g. a typo from the agent or a stale catalog); the deny flow now falls back to the raw scope string for both the persisted response event and the agent-facing message.
 
 ## [v0.2.8] - 2026-05-13
 

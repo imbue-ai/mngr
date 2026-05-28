@@ -8,11 +8,18 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ### Changed
 
+- Changed: `mngr_tmr` is now a thin recipe on top of the new `mngr_mapreduce` framework — all agent launching / polling / extraction code moved out, and TMR is expressed as a `TestMapReduceRecipe` (in `imbue.mngr_tmr.recipe`). The `mngr tmr` CLI surface is unchanged for users. Server-side labels renamed to `mapreduce_role` / `mapreduce_run_name`; outputs-archive path simplified to `plugin/mapreduce/outputs.tar.gz`. Agents from older TMR runs are not discoverable by this version.
+- Changed: Integrator now runs on the same `--provider` as the testing agents and reuses any snapshot they built, so on remote providers it spins up just as quickly as the test agents do instead of running locally. Local testing agents switched from `GIT_WORKTREE` to `GIT_MIRROR` transfer mode to unify the integrator code path across providers.
 - Changed: `mngr tmr` testing agents now publish a single `outputs.tar.gz` archive into the per-agent volume API, replacing the rsync + git-pull finalization; SSH provider no longer supported for testing-agent outputs.
 - Changed: TMR run names are now a single compact timestamp `YYYYMMDDHHMMSS` used consistently across the output directory, the `tmr_run_name` agent label, and every TMR-spawned entity's agent / host / branch names. Testing agents are `tmr-<run>-<test_name>`, branches `mngr-tmr/<run>/<test_name>`, and the random hex id is gone.
 - Changed: Added `--run-name` flag to override the auto-generated run name.
 - Changed: HTML report is now mirrored to `s3://int8-shared-internal/tmr-reports/<run>.html` (us-west-2) on every regeneration when AWS credentials are set; the public URL `http://go/shared/tmr-reports/<run>.html` is printed and emitted as a structured `report_url` event.
 - Changed: `tmr_role` agent label (`testing` / `snapshotter` / `integrator`) replaces the previous name-prefix matching for filtering integrator agents during `--reintegrate`; derived directly from `AgentKind` which gained a `SNAPSHOTTER` variant.
+
+### Removed
+
+- Removed: `--integrator-provider`, `--integrator-type`, `--integrator-template` CLI flags — pass `--provider` once for both testing agents and the integrator. `--integrator-timeout` is unchanged.
+- Removed: `--use-snapshot` CLI flag — snapshot building is now automatic whenever the provider supports it (modal today). `--snapshot <ID>` still works for reusing an existing snapshot.
 
 ### Fixed
 

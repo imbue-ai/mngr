@@ -14,6 +14,10 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Added: `.github/actions/tmr-setup` composite action shared between the two TMR workflows; new `TMR (reintegrate)` workflow that runs `mngr tmr --reintegrate <run>` against a previous run name.
 - Added: `scripts/make_cli_docs.py` gained a `--check` mode that reports stale generated CLI docs (and the exact regen command) and exits non-zero without writing; a new `test_cli_docs_are_up_to_date` meta-ratchet runs `--check` so committed CLI docs and the PyPI README cannot drift from the generator output.
 - Added: `specs/env-settings-overrides/concise.md` documenting the new `MNGR__*` env-var override scheme, the `__extend` operator, and the assign-by-default merge semantics.
+- Added: `[tool.uv] exclude-newer` in the root `pyproject.toml` enforces a two-week supply-chain dependency cooldown at lock time (initial cutoff `2026-05-23T00:00:00Z`). `scripts/release.py` advances the cutoff forward-only at each release (`max(current, release_date - 2 weeks)`), committing the root `pyproject.toml` alongside the version bumps.
+- Added: `libs/mngr_mapreduce` to the uv workspace; root `pyproject.toml` now collects coverage for `imbue.mngr_mapreduce`.
+- Added: `scripts/snapshot_minds_e2e_state.py` demonstration script that captures a Modal sandbox state with a warm minds workspace + Docker container (using `experimental_options={"vm_runtime": True}` + `sandbox.snapshot_filesystem()`), so future test runs can boot from a pre-built Modal image via offload's new `--override-image-id` instead of rebuilding from scratch.
+- Added: `ty` pre-push hook in `.pre-commit-config.yaml` running `uv run ty check` over the whole workspace, so scoped local runs (`just test-quick libs/<project>`) still get a type-check gate after the consolidation.
 
 ### Changed
 
@@ -28,10 +32,18 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Changed: Workspace + scripts metadata (workspace `pyproject.toml` cov target, `test_profiles.toml` mngr-suite test paths, top-level `README.md`, `scripts/utils.py` package list) follows the `libs/mngr_gemini` → `libs/mngr_antigravity` rename.
 - Changed: `specs/minds-rest-api/spec.md` got a top-of-file banner noting that the per-agent `MINDS_API_KEY` and the per-agent reverse SSH tunnel for the Minds API are both gone (agents now reach the API exclusively through the latchkey gateway's `minds-api-proxy` extension); `specs/minds-electron-acceptance-test/spec.md` now references `launch_mode=DOCKER` instead of `LOCAL`.
 - Changed: Broadened the autofix auto-accept rules to cover any pure DRY cleanup that is a clear improvement and doesn't change behavior (e.g. inline re-construction folded into a pre-existing local).
+- Changed: Consolidated per-project `test_no_type_errors` and `test_no_ruff_errors` (~36 copies, one per workspace member) into a single repo-wide pair in `test_meta_ratchets.py`. Each duplicate invocation was a full ~0.8s cold workspace scan with no cross-process cache benefit.
+- Changed: Bumped the `test-docker-electron` CI job's Node.js to 24.15.0 and pnpm to 10.33.4 to match the new exact-version pins in `apps/minds/package.json`; refreshed `specs/electron-desktop-app/spec.md` so the example `pyproject.toml` block matches the real packaged file.
+- Changed: Bumped the offload CI pin from 0.9.5 to 0.9.6 in `.github/workflows/ci.yml`; 0.9.6 adds `offload run --override-image-id <ID>` (Modal provider only) for skipping image setup.
+- Changed: Raised the `ty` type-checker floor from 0.0.24 to 0.0.39 in the root `pyproject.toml`; bumped pinned `paramiko` 3.5.1 → 4.0.0 and `coolname` 3.0.0 → 5.0.0 in `uv.lock` (paramiko pulls `pyinfra` 3.6.1 → 3.8.0 and adds `invoke` / `types-paramiko` transitively). All bracketed `# type: ignore[...]` suppressions converted to `# ty: ignore[...]` (ty 0.0.39 no longer honors the bracketed mypy-style form).
+- Changed: Bumped many floating dependencies under the two-week supply-chain cooldown via `uv lock --upgrade`. Notable bumps within the window: `starlette` 0.50 → 1.0, `urwid` 3.0 → 4.0, `pydantic` 2.12 → 2.13, `cryptography` 46 → 48, `typer` 0.21 → 0.25, `uvicorn` 0.40 → 0.46.
+- Changed: Tightened recorded ratchet violation counts to their current exact values across all projects via `--inline-snapshot=trim`, locking in previously-unrecorded reductions. Documented the workflow in `CLAUDE.md`.
 
 ### Removed
 
 - Removed: Unused `libs/flexmux/` project and all references (justfile recipes, `EXCLUDED_RATCHET_PROJECTS` exclusions, `uv.lock` workspace member).
+- Removed: `test_no_dependencies_younger_than_two_weeks` meta-ratchet (and its `_FRESHNESS_EXEMPT_PACKAGES` / `_lock_package_upload_time` helpers) — uv now enforces the cooldown at lock time via `[tool.uv] exclude-newer`, so the test is redundant.
+- Removed: Stale `MNGR_ALLOW_PYTEST` reference from `specs/env-settings-overrides/concise.md` (the env var was removed from mngr).
 
 ### Fixed
 

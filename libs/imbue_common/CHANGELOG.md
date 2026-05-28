@@ -11,6 +11,10 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Added: `PREVENT_BARE_TMUX_TARGETS` ratchet rule and `check_bare_tmux_targets` helper that flag `tmux <subcmd> -t '<target>'` invocations whose quoted target doesn't begin with `=` (scans every tracked file type, not just `.py`).
 - Added: Promoted `BINARY_FILE_EXCLUSION` to a public `Final` constant in `imbue.imbue_common.ratchet_testing.core` so project ratchets and repo-wide meta-ratchets share one canonical list.
 
+### Removed
+
+- Removed: `check_no_ruff_errors` helper from `imbue.imbue_common.ratchet_testing.ratchets` — its only callers were the deleted per-project `test_no_ruff_errors` tests, and the repo-wide ruff test runs its own `ruff check` / `ruff format --check` invocations rather than using the helper. `check_no_type_errors` is kept.
+
 ## [v0.2.7] - 2026-05-11
 
 ### Changed
