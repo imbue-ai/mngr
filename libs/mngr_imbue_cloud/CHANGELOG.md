@@ -13,6 +13,10 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Changed: The bake's services agent now uses the constant name `system-services` (was per-bake `pool-<hex>` UUID); the bake also destroys the FCT-bootstrap-created chat agent and `rm -f`'s `/code/runtime/initial_chat_created` so the user's first start re-fires the bootstrap cleanly.
 - Changed: `_get_agent_info` now takes `host_name` as a keyword arg and filters by both `name` and `host.name`, so the operator's local mngr state accumulating one `system-services` agent per bake no longer routes subsequent calls to the wrong VPS.
 
+### Removed
+
+- Removed: Dead `build_combined_inject_command`, `normalize_inject_args`, `_sed_replace_env_line`, and `_ensure_no_quote_chars` helpers on `ImbueCloudHost` (and the now-empty `host_test.py`); the central `MINDS_API_KEY` is injected on the fly by the latchkey gateway's `minds-api-proxy` extension and no longer needs to be pushed onto leased pool hosts.
+
 ### Fixed
 
 - Fixed: `pool_hosts` INSERT now picks up the schema's `host_name` column; every successful pool bake had been dying at the last step with `null value in column "host_name"` and leaking a fully-provisioned VPS.

@@ -16,10 +16,14 @@
   },
   "dependencies": {
     "@todesktop/runtime": "^1.6.0",
-    "latchkey": "^2.12.1"
+    "latchkey": "^2.12.2"
   },
   "devDependencies": {
-    "electron": "35.7.5",
+    "electron": "40.10.1",
     "@todesktop/cli": "^1.8.0"
+  },
+  "engines": {
+    "node": "24.15.0",
+    "pnpm": "10.33.4"
   }
 }

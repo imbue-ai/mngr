@@ -120,13 +120,47 @@ test-offload-release args="":
         cp test-results/junit.xml "$MAIN_WORKTREE/test-results/junit.xml"
     fi
 
+# Run the minds-snapshot-resume test suite against a pre-built Modal
+# image produced by ``scripts/snapshot_minds_e2e_state.py``.
+# Usage:
+#     just test-offload-minds-snapshot im-01...    # required: snapshot image id
+#     just test-offload-minds-snapshot im-01... '--filter test_foo'
+# The snapshot image already has the entire mngr checkout, the FCT
+# workspace's Docker container (in a stopped state), and dockerd's
+# /var/lib/docker tree baked in -- so offload skips its normal image-
+# setup phase entirely and boots straight from the snapshot via
+# ``--override-image-id`` (offload v0.9.6+).
+test-offload-minds-snapshot snapshot_image_id args="":
+    #!/bin/bash
+    set -ueo pipefail
+    : "${MODAL_TOKEN_ID:?must be set}"
+    : "${MODAL_TOKEN_SECRET:?must be set}"
+    if [ -z "{{snapshot_image_id}}" ]; then
+        echo "Usage: just test-offload-minds-snapshot <snapshot-image-id> [args...]" >&2
+        echo "Generate the image id by running: uv run python scripts/snapshot_minds_e2e_state.py" >&2
+        exit 2
+    fi
+    just _generate-dockerignore
+    trap "rm -f .dockerignore" EXIT
+    offload -c offload-modal-minds-snapshot.toml run --trace \
+        --override-image-id "{{snapshot_image_id}}" \
+        --env "GITHUB_HEAD_REF=${GITHUB_HEAD_REF:-}" \
+        --env "GITHUB_REF_NAME=${GITHUB_REF_NAME:-}" {{args}} || [[ $? -eq 2 ]]
+
+    # Copy results to the main worktree so new worktrees inherit baselines via COPY mode.
+    MAIN_WORKTREE=$(git worktree list --porcelain | head -1 | sed 's/^worktree //')
+    if [ -f test-results/junit.xml ] && [ -n "$MAIN_WORKTREE" ] && [ "$MAIN_WORKTREE" != "$(pwd)" ]; then
+        mkdir -p "$MAIN_WORKTREE/test-results"
+        cp test-results/junit.xml "$MAIN_WORKTREE/test-results/junit.xml"
+    fi
+
 # Xdist parallelism args for local dev recipes. Kept out of pyproject addopts
 # so they don't leak into offload sandboxes (which run `-p no:xdist`).
 _parallel := "-n 4 --dist=worksteal --max-worker-restart=0"
 # Default mark filter for local unit + integration recipes. Kept out of
 # pyproject addopts because it would collide with offload-modal-acceptance
 # (which runs the opposite filter). A later -m on CLI overrides this.
-_skip_acceptance_and_release := "-m 'not acceptance and not release and not minds_deployment and not minds_services'"
+_skip_acceptance_and_release := "-m 'not acceptance and not release and not minds_deployment and not minds_services and not minds_snapshot_resume'"
 
 test-unit:
   uv run pytest {{_parallel}} {{_skip_acceptance_and_release}} --cov-report=html --ignore-glob="**/test_*.py" --cov-fail-under=36

@@ -21,7 +21,7 @@ const http = require('http');
 const crypto = require('crypto');
 const { execSync } = require('child_process');
 
-const UV_VERSION = '0.7.12';
+const UV_VERSION = '0.11.15';
 const GIT_FOR_WINDOWS_VERSION = '2.49.0';
 const GIT_FOR_WINDOWS_TAG = `v${GIT_FOR_WINDOWS_VERSION}.windows.1`;
 
@@ -37,10 +37,10 @@ const GIT_FOR_WINDOWS_TAG = `v${GIT_FOR_WINDOWS_VERSION}.windows.1`;
  * extracting or executing any downloaded bytes.
  */
 const EXPECTED_SHA256 = {
-  'uv-aarch64-apple-darwin.tar.gz':     '189108cd026c25d40fb086eaaf320aac52c3f7aab63e185bac51305a1576fc7e',
-  'uv-x86_64-apple-darwin.tar.gz':      'a338354420dba089218c05d4d585e4bcf174a65fe53260592b2af19ceec85835',
-  'uv-x86_64-unknown-linux-gnu.tar.gz': '735891fb553d0be129f3aa39dc8e9c4c49aaa76ec17f7dfb6a732e79a714873a',
-  'uv-x86_64-pc-windows-msvc.zip':      '2cf29c8ffaa2549aa0f86927b2510008e8ca3dcd2100277d86faf437382a371b',
+  'uv-aarch64-apple-darwin.tar.gz':     '7e5b336108f8576eda1939920ca0a805b4a9a3c3d3eb2f6140e38b7092fbe4f3',
+  'uv-x86_64-apple-darwin.tar.gz':      '42bca7cc879d117ed7139a0e26de8cab0b6f033ad439a32144f324d1f8580d8c',
+  'uv-x86_64-unknown-linux-gnu.tar.gz': 'b03e572f010bea94a4a52d42671ba72981e12894f71576181a1d26ff68546da7',
+  'uv-x86_64-pc-windows-msvc.zip':      '04b98d414a9000e25e5e0e7c9f53749e66b790cdaffc582829e6f58c544ee11c',
   'MinGit-2.49.0-64-bit.zip':           '971cdee7c0feaa1e41369c46da88d1000a24e79a6f50191c820100338fb7eca5',
 };
 

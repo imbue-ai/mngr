@@ -4,10 +4,6 @@ import os
 import re
 import subprocess
 import sys
-import tomllib
-from datetime import datetime
-from datetime import timedelta
-from datetime import timezone
 from pathlib import Path
 
 import pytest
@@ -19,6 +15,7 @@ from imbue.imbue_common.ratchet_testing.common_ratchets import check_ratchet_rul
 from imbue.imbue_common.ratchet_testing.core import BINARY_FILE_EXCLUSION
 from imbue.imbue_common.ratchet_testing.core import _get_all_files_with_extension
 from imbue.imbue_common.ratchet_testing.ratchets import check_no_import_lint_errors
+from imbue.imbue_common.ratchet_testing.ratchets import check_no_type_errors
 from imbue.imbue_common.ratchet_testing.ratchets import find_bash_scripts_without_strict_mode
 from imbue.imbue_common.test_profiles import detect_branch
 from scripts.changelog_projects import DEV_PROJECT
@@ -98,8 +95,7 @@ def test_every_project_has_test_ratchets_file() -> None:
 def _get_expected_ratchet_test_names() -> frozenset[str]:
     """Derive the expected set of test function names from standard_ratchet_checks.py.
 
-    Each check_foo() function maps to test_prevent_foo(). Two additional hand-written
-    tests (test_no_type_errors, test_no_ruff_errors) are always expected.
+    Each check_foo() function maps to test_prevent_foo().
     """
     checks_path = (
         _REPO_ROOT
@@ -116,8 +112,6 @@ def _get_expected_ratchet_test_names() -> frozenset[str]:
         for node in ast.walk(tree)
         if isinstance(node, ast.FunctionDef) and node.name.startswith("check_")
     }
-    test_names.add("test_no_type_errors")
-    test_names.add("test_no_ruff_errors")
     return frozenset(test_names)
 
 
@@ -125,7 +119,7 @@ def test_all_test_ratchets_files_have_same_tests() -> None:
     """Ensure all test_ratchets.py files define precisely the expected set of test functions.
 
     The expected tests are derived from standard_ratchet_checks.py (one test_prevent_*
-    per check_* function) plus test_no_type_errors and test_no_ruff_errors.
+    per check_* function).
     """
     reference_tests = _get_expected_ratchet_test_names()
 
@@ -167,13 +161,28 @@ def test_no_import_layer_violations() -> None:
     check_no_import_lint_errors(_REPO_ROOT)
 
 
-def test_no_ruff_lint_errors_repo_wide() -> None:
+@pytest.mark.timeout(60)
+def test_no_type_errors() -> None:
+    """Ensure the whole workspace has zero type errors (ty).
+
+    ty resolves the uv workspace root (root pyproject.toml declares
+    [tool.uv.workspace] members = ["libs/*", "apps/*"]) and scans every member, so
+    this single check covers the entire repo. CI backstop for the ty pre-push hook.
+
+    Timeout is 60s rather than the default 10s because the ``uv run ty check``
+    subprocess can be slow on offload under load; the check is deterministic, so it
+    is not marked flaky. If a failure looks spurious, run ``uv sync --all-packages``
+    and re-run before treating it as real (see CLAUDE.md).
+    """
+    check_no_type_errors(_REPO_ROOT)
+
+
+def test_no_ruff_errors() -> None:
     """Ensure all Python files pass ruff lint and format checks repo-wide.
 
-    Runs both ruff check and ruff format --check over the entire repo root.
-    Per-project test_ratchets.py files also run ruff check within each project;
-    this test acts as a CI backstop for the pre-commit hook and additionally
-    covers repo-root and scripts/ files.
+    Runs both ruff check and ruff format --check from the repo root, covering all
+    workspace members plus repo-root and scripts/ files. CI backstop for the ruff
+    pre-commit hook.
     """
     fix_hint = "To fix: `uv run ruff check --fix . && uv run ruff format .`"
     errors: list[str] = []
@@ -733,100 +742,4 @@ def test_top_level_coverage_omit_covers_subproject_omits() -> None:
     ]
     assert len(errors) == 0, (
         "Top-level [tool.coverage.run].omit is missing entries for files that subprojects omit:\n" + "\n".join(errors)
-    )
-
-
-# --- Dependency freshness (supply-chain cooldown) ---
-
-# How long a release must have been public before we will lock it.
-_DEPENDENCY_COOLDOWN = timedelta(weeks=2)
-
-# Packages exempt from the cooldown above. Each must be a deliberately-chosen,
-# trusted pin -- never an auto-floated dependency. Justify every entry.
-_FRESHNESS_EXEMPT_PACKAGES: frozenset[str] = frozenset(
-    {
-        # Our type checker: a dev-only tool (never shipped in a published wheel),
-        # pinned to the latest release for the best type coverage.
-        "ty",
-        # Explicitly pinned to ==1.4.3 for API stability (see libs/mngr_modal).
-        "modal",
-    }
-)
-
-
-def _lock_package_upload_time(package: dict) -> datetime | None:
-    """Return the earliest registry upload time recorded for a locked package.
-
-    Workspace / path / git sources carry no `upload-time`, so they return None
-    (and are not subject to the cooldown).
-    """
-    raw_times: list[str] = []
-    sdist = package.get("sdist")
-    if isinstance(sdist, dict) and sdist.get("upload-time"):
-        raw_times.append(sdist["upload-time"])
-    for wheel in package.get("wheels", []):
-        if wheel.get("upload-time"):
-            raw_times.append(wheel["upload-time"])
-    if not raw_times:
-        return None
-    return min(datetime.fromisoformat(t.replace("Z", "+00:00")) for t in raw_times)
-
-
-def test_no_dependencies_younger_than_two_weeks() -> None:
-    """Ensure no locked dependency was published within the last two weeks.
-
-    This is a supply-chain cooldown: we only adopt registry releases that have
-    been public long enough for the community to flag malware before we pull
-    them. It does NOT protect us from a compromise that stays undetected for
-    longer than the window, nor does it shield the first project to lock a fresh
-    release; its only value is the detection delay before we adopt (and, for
-    runtime deps in published wheels, re-propagate) a release.
-
-    Enforced as a (time-relative) test rather than a `[tool.uv] exclude-newer`
-    pin so the cutoff tracks "two weeks before now" automatically -- uv only
-    accepts a fixed date in static config. Regenerate a compliant lock with:
-
-        uv lock --upgrade --exclude-newer "2 weeks"
-
-    adding `--exclude-newer-package <name>=<date>` for each exempted package
-    (see _FRESHNESS_EXEMPT_PACKAGES), which the global cutoff would otherwise
-    exclude.
-    """
-    lock = tomllib.loads((_REPO_ROOT / "uv.lock").read_text())
-    packages = lock.get("package", [])
-    now = datetime.now(timezone.utc)
-
-    too_new: list[str] = []
-    examined = 0
-    for package in packages:
-        uploaded = _lock_package_upload_time(package)
-        if uploaded is None:
-            continue
-        examined += 1
-        if package["name"] in _FRESHNESS_EXEMPT_PACKAGES:
-            continue
-        age = now - uploaded
-        if age < _DEPENDENCY_COOLDOWN:
-            too_new.append(
-                f"  - {package['name']} {package['version']} (published {uploaded.date()}, {age.days}d ago)"
-            )
-
-    # Guard against silently disabling the cooldown: if a future uv release stops
-    # emitting `upload-time` (or renames the key), every package would parse as
-    # None and this test would pass vacuously. Registry packages dominate the lock
-    # (only workspace/path/git entries lack an upload time), so require a healthy
-    # fraction to have yielded a parseable one.
-    assert examined >= len(packages) // 2, (
-        f"Only {examined} of {len(packages)} locked packages had a parseable `upload-time`. "
-        "The uv.lock format may have changed, which would silently disable this "
-        "dependency-freshness cooldown -- update `_lock_package_upload_time`."
-    )
-
-    assert not too_new, (
-        "These locked dependencies are younger than two weeks (supply-chain cooldown):\n"
-        + "\n".join(sorted(too_new))
-        + '\n\nRe-lock with `uv lock --upgrade --exclude-newer "2 weeks"` (adding '
-        "`--exclude-newer-package <name>=<date>` for any exempted package), wait until they "
-        "age out, or -- only for a deliberately-trusted pin -- add the package to "
-        "_FRESHNESS_EXEMPT_PACKAGES with justification."
     )

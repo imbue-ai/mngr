@@ -4,6 +4,95 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-05-26
+
+# Minds API access: gateway-only, single key, per-agent URL prefix
+
+The minds desktop client used to expose its `/api/v1/...` REST API to
+workspaces over a per-agent reverse SSH tunnel, writing the resulting
+URL to `$MNGR_AGENT_STATE_DIR/minds_api_url` and injecting a per-agent
+UUID4 `MINDS_API_KEY` into each new host's env file. None of that is
+how agents actually reach the Minds API anymore -- the latchkey
+gateway's `minds-api-proxy` extension already handled it -- so the
+machinery is gone:
+
+- `minds run` no longer asks the `mngr forward` plugin for a
+  `--reverse 0:<port>` tunnel and no longer registers any
+  `on_reverse_tunnel_established` callback. The `MindsApiUrlWriter`
+  and `LocalAgentDiscoveryHandler` classes (and their tests) have
+  been removed from `forward_cli.py`.
+- `agent_creator.py` no longer generates a per-agent `MINDS_API_KEY`,
+  no longer adds `--host-env MINDS_API_KEY=...` to `mngr create`, and
+  no longer stores any per-agent `api_key_hash` file. Workspaces no
+  longer carry the env var at all.
+- The `apps/minds/imbue/minds/desktop_client/api_key_store.py` module
+  has been rewritten around a single central key, freshly generated
+  in memory on every `minds run` via `generate_api_key()`. The key is
+  not persisted to disk -- the supervisor is always restarted on
+  minds startup and gets the current value in its env, the bare-
+  origin auth gate sees the same in-memory value, and no other
+  process reads the key. Rotating per-startup removes a long-lived
+  secret from the filesystem.
+- The `/api/v1/...` bearer-auth gate (used by both `api_v1.py` and the
+  WebDAV mount under `/api/v1/files`) now compares the inbound
+  `Authorization: Bearer <key>` against that single value with a
+  constant-time check. Routes that need an agent id take it from the
+  URL path -- the auth dependency itself returns `None`.
+- The notifications endpoint moved from `POST /api/v1/notifications`
+  to `POST /api/v1/agents/<agent_id>/notifications`, matching the
+  Telegram routes. Every `/api/v1` route is now per-agent.
+- Every agent created by minds gets added to the host's
+  `minds-api-proxy-allowed-agent` enum at finalize-host-permissions
+  time. The baseline permissions file's first rule rejects any
+  `/minds-api-proxy/api/v1/agents/<id>/...` whose `<id>` is not in
+  that enum, so an agent on host A cannot reach the Minds API on
+  behalf of an agent on host B (B's id only appears in B's host's
+  permissions file).
+- The desktop client now calls
+  `imbue.mngr_latchkey.agent_setup.register_agent_for_host(...)` directly
+  -- a single library call that does an atomic file edit -- instead of
+  the previous gateway-extension dance that POSTed two schemas + one
+  rule per agent. The `gateway_client` field on `AgentCreator` is
+  gone; `LatchkeyGatewayClient` keeps its existing user-grant API
+  (`set_permission_rule`, etc.) but no longer ships the low-level
+  schema-altering methods (`set_permission_schema`,
+  `delete_permission_schema`, `delete_permission_rule`).
+- The operator-facing equivalent is the new
+  `mngr latchkey register-agent --host-id ID --agent-id ID` CLI command.
+- The `inject_tunnel_token_into_agent` helper moved out of
+  `api_v1.py` into its own module so it can be imported without
+  pulling the FastAPI router in.
+
+Documentation:
+[`apps/minds/docs/latchkey-permissions.md`](docs/latchkey-permissions.md)
+now has a "Minds API access through the gateway" section describing
+the new model; [`specs/minds-rest-api/spec.md`](../../specs/minds-rest-api/spec.md)
+has a banner pointing out which parts are superseded.
+
+- Renamed the minds ``LaunchMode.LOCAL`` compute provider to ``LaunchMode.DOCKER`` everywhere (Python code, ``/create`` form HTML, ``/api/create-agent`` JSON payloads, docs). The mode has always meant "Docker container on the user's machine"; the old name collided with mngr's own ``local`` provider (which runs agents as host processes), so the rename eliminates that ambiguity. The other modes (``LIMA``, ``CLOUD``, ``IMBUE_CLOUD``) are unchanged. ``/api/create-agent`` and the create form now expect ``launch_mode=DOCKER`` instead of ``LOCAL``; submitting ``LOCAL`` is no longer recognized.
+
+- Pruned non-notable entries (test-only changes, internal refactors, and doc-only tweaks with no user-facing effect) from this project's CHANGELOG.md, per the new notable-only changelog policy.
+
+- `apps/minds`: bundle Lima into the desktop app. `scripts/build.js` now downloads the official Lima 2.1.1 release tarball for the build host's platform/arch and extracts it into `resources/lima/`; the packaged backend prepends `resources/lima/bin` to `PATH` so `limactl` is found without a separate `brew install lima` step. The unsigned `lima-guestagent.Darwin-*.gz` Mach-O payloads are stripped after extraction -- they break macOS notarization and are unreachable (we run Linux VMs only). A new `entitlements.mac.plist` carries `com.apple.security.virtualization` (required by `limactl`'s VZ driver), and `todesktop.json` wires it in via a `mac` block that also deep-signs the bundled `limactl`. On macOS Apple Silicon this is fully self-contained via Lima's `vz` backend; macOS Intel and Linux still require QEMU on the host machine.
+- `apps/minds`: bump `workspace_ready_timeout_seconds` from 60s to 300s (`agent_creator.py`). First-boot provisioning (uv sync, npm ci + run build for the system_interface frontend) regularly takes 90-180s on a fresh VM or Docker host, so the 60s default was bouncing users to the recovery page while the agent was still finishing provisioning. The probe is cheap so a generous cap is harmless.
+
+- Fixed a stale `LaunchMode.LOCAL` reference in `agent_creator_test.py` that was missed during the `LaunchMode.LOCAL` -> `LaunchMode.DOCKER` rename, which was causing `test_no_type_errors` to fail. No user-visible behavior change.
+
+Hardened the workspace-restart shell command in `desktop_client/app.py` to use
+exact-session matching. The previous `tmux kill-window -t "${MNGR_PREFIX}system-services:svc-system_interface"`
+form had no leading `=`, so if the `${MNGR_PREFIX}system-services` session was gone
+but a sibling-prefix session was alive, the kill-window could silently land on the
+wrong agent's session and kill a window there. The command now uses
+`-t "=${MNGR_PREFIX}system-services:svc-system_interface"` so tmux refuses to misroute.
+
+To prevent recurrences, adopted the `PREVENT_BARE_TMUX_TARGETS` ratchet rule
+(added in `imbue_common`) via `rc.check_bare_tmux_targets(_DIR, snapshot(0))` in
+this project's `test_ratchets.py`. The ratchet flags new occurrences of
+`tmux <subcmd> -t '<bare-name>'` -- targets without a leading `=` exact-match
+prefix, which can silently route commands to a sibling session whose name shares
+a prefix with the intended one. The adopting test starts at a baseline of zero
+violations.
+
 ## 2026-05-22
 
 `minds run` no longer dictates the `mngr forward` plugin's port. The `--mngr-forward-port` flag and the `MINDS_MNGR_FORWARD_PORT` environment variable are removed: the plugin now picks its own port (its default, or an OS-assigned fallback when the default is taken) and reports it back via its `listening` envelope. `minds run` blocks briefly at startup until that envelope arrives, then uses the reported port for everything downstream; if the plugin fails to report a port within 5s, startup aborts with a clear error.
