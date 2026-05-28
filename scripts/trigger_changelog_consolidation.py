@@ -31,6 +31,13 @@ PROVIDER: Final[str] = "modal"
 # Plugins the schedule trigger needs to function; everything else is
 # disabled to avoid loading repo-specific plugins that would error on
 # import in this isolated mngr config namespace.
+#
+# Keep claude_subagent_proxy OUT of this set: the changelog prompt's
+# accuracy-review step (changelog_consolidation_prompt.md step 8) spawns its
+# reviewer via the native Task tool and the built-in `general-purpose`
+# subagent type. With the proxy plugin disabled, Task runs natively; if it
+# were enabled it would intercept Task (PreToolUse) and route subagents
+# through mngr, breaking that step.
 _ENABLED_PLUGINS: Final[frozenset[str]] = frozenset({"schedule", "modal", "headless_claude", "claude", "file"})
 
 
