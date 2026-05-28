@@ -2,8 +2,7 @@
 
 Ideas for **recurring** usage-driven automation: let `cron` poll
 `mngr usage --format json` on a schedule and act when usage looks a certain way.
-For a **one-off** ("when the 5h window frees up, kick off this batch") see
-[Waiting on a predicate](../README.md#waiting-on-a-predicate).
+For a **one-off**, see [Waiting on a predicate](../README.md#waiting-on-a-predicate).
 
 Across the usage-driven recipes below:
 
