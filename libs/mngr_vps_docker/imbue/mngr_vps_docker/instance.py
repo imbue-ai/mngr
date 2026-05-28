@@ -535,18 +535,33 @@ def _load_resource_text(resource_name: str) -> str:
     return importlib_resources.files("imbue.mngr_vps_docker.resources").joinpath(resource_name).read_text()
 
 
-def _install_snapshot_helper_on_outer(
+def _provision_snapshot_helper_on_outer(
     outer: OuterHostInterface,
+    cg: ConcurrencyGroup,
     *,
     host_id: HostId,
     btrfs_mount_path: Path,
     subvolume_path: Path,
+    trigger_volume_name: str,
 ) -> None:
-    """Install the snapshot helper systemd unit on the outer and enable+start it.
+    """Install the snapshot helper systemd unit + the trigger docker volume on the outer.
+
+    Two-phase pipeline (parallelized within each phase via ``cg`` so
+    independent SSH operations don't serialize, since each one round-trips
+    over the WAN):
+
+    1. Phase A -- 5 parallel ops: write the 3 helper files + ``mkdir -p``
+       the trigger dir + ``mkdir -p`` the snapshots dir.
+    2. Phase B -- 2 parallel ops: ``systemctl daemon-reload && systemctl
+       enable --now snapshot_helper.service`` (chained into one SSH RTT)
+       and ``docker volume create`` for the trigger volume (lazy bind, so
+       safe to run in parallel with the systemctl step now that the trigger
+       dir exists).
 
     Idempotent: rewriting the script / unit / env file is harmless; the
     ``systemctl enable --now`` re-runs are no-ops when the unit is already
-    enabled and active.
+    enabled and active; the ``docker volume create`` is no-op-with-warning
+    when the volume already exists.
 
     Assumes ``inotify-tools`` and ``jq`` are already installed (cloud-init
     installs them; OVH installs them via ``_REQUIRED_OUTER_PACKAGES``).
@@ -558,24 +573,77 @@ def _install_snapshot_helper_on_outer(
         f"MNGR_HOST_SUBVOLUME={subvolume_path}\n"
         f"MNGR_TRIGGER_DIR={OUTER_SNAPSHOT_TRIGGER_DIR}\n"
     )
+    snapshots_dir = btrfs_mount_path / "snapshots"
 
-    with log_span("Installing snapshot helper on outer (host_id={})", host_id):
-        _write_outer_file(outer, path=OUTER_HELPER_SCRIPT_PATH, content=helper_script, mode="0755")
-        _write_outer_file(outer, path=OUTER_HELPER_SERVICE_PATH, content=helper_service, mode="0644")
-        _write_outer_file(outer, path=OUTER_HELPER_ENV_PATH, content=helper_env, mode="0644")
-        _ensure_outer_dir(outer, OUTER_SNAPSHOT_TRIGGER_DIR)
-        # `daemon-reload` so systemd picks up edits to snapshot_helper.service
-        # if we ever change the unit definition in a future bake.
-        reload_result = outer.execute_idempotent_command("systemctl daemon-reload", timeout_seconds=10.0)
-        if not reload_result.success:
-            raise VpsProvisioningError(f"systemctl daemon-reload failed: stderr={reload_result.stderr.strip()!r}")
-        enable_result = outer.execute_idempotent_command(
-            f"systemctl enable --now {OUTER_HELPER_SERVICE_NAME}", timeout_seconds=15.0
+    with log_span("Provisioning snapshot helper on outer (host_id={})", host_id):
+        with ConcurrencyGroupExecutor(
+            parent_cg=cg,
+            name="snapshot_helper_phase_a",
+            max_workers=5,
+        ) as phase_a:
+            phase_a_futures = [
+                phase_a.submit(
+                    _write_outer_file,
+                    outer,
+                    path=OUTER_HELPER_SCRIPT_PATH,
+                    content=helper_script,
+                    mode="0755",
+                ),
+                phase_a.submit(
+                    _write_outer_file,
+                    outer,
+                    path=OUTER_HELPER_SERVICE_PATH,
+                    content=helper_service,
+                    mode="0644",
+                ),
+                phase_a.submit(
+                    _write_outer_file,
+                    outer,
+                    path=OUTER_HELPER_ENV_PATH,
+                    content=helper_env,
+                    mode="0644",
+                ),
+                phase_a.submit(_ensure_outer_dir, outer, OUTER_SNAPSHOT_TRIGGER_DIR),
+                phase_a.submit(_ensure_outer_dir, outer, snapshots_dir),
+            ]
+        for future in phase_a_futures:
+            future.result()
+
+        with ConcurrencyGroupExecutor(
+            parent_cg=cg,
+            name="snapshot_helper_phase_b",
+            max_workers=2,
+        ) as phase_b:
+            phase_b_futures = [
+                phase_b.submit(_enable_snapshot_helper_unit, outer),
+                phase_b.submit(
+                    _create_bind_volume_on_outer,
+                    outer,
+                    volume_name=trigger_volume_name,
+                    device_path=OUTER_SNAPSHOT_TRIGGER_DIR,
+                ),
+            ]
+        for future in phase_b_futures:
+            future.result()
+
+
+def _enable_snapshot_helper_unit(outer: OuterHostInterface) -> None:
+    """`systemctl daemon-reload && systemctl enable --now snapshot_helper.service`.
+
+    Chained into a single SSH round-trip so this step costs one RTT
+    instead of two. The combined command is idempotent: daemon-reload
+    re-reads unit files (no effect if nothing changed) and ``enable --now``
+    is a no-op when the unit is already enabled + active.
+    """
+    result = outer.execute_idempotent_command(
+        f"systemctl daemon-reload && systemctl enable --now {OUTER_HELPER_SERVICE_NAME}",
+        timeout_seconds=20.0,
+    )
+    if not result.success:
+        raise VpsProvisioningError(
+            f"systemctl daemon-reload && systemctl enable --now "
+            f"{OUTER_HELPER_SERVICE_NAME} failed: stderr={result.stderr.strip()!r}"
         )
-        if not enable_result.success:
-            raise VpsProvisioningError(
-                f"systemctl enable --now {OUTER_HELPER_SERVICE_NAME} failed: stderr={enable_result.stderr.strip()!r}"
-            )
 
 
 def _write_outer_file(
@@ -1456,25 +1524,18 @@ class VpsDockerProvider(BaseProviderInstance):
         # request.json / result.json file protocol in a dedicated docker
         # volume. Both the systemd unit on the outer and the docker volume
         # mounted at /mngr-snapshot/ in the container need to exist before
-        # the agent boots.
-        with log_span("Provisioning host_backup snapshot helper + trigger volume"):
-            # The `snapshots/` dir holds `current/` (the live btrfs snapshot
-            # the helper creates). Pre-create it so the read-only bind mount
-            # into the container has something to point at on first boot.
-            _ensure_outer_dir(outer, self.config.btrfs_mount_path / "snapshots")
-            # `_install_snapshot_helper_on_outer` ensures OUTER_SNAPSHOT_TRIGGER_DIR
-            # exists internally before starting the helper that watches it.
-            _install_snapshot_helper_on_outer(
-                outer,
-                host_id=host_id,
-                btrfs_mount_path=self.config.btrfs_mount_path,
-                subvolume_path=subvolume_path,
-            )
-            _create_bind_volume_on_outer(
-                outer,
-                volume_name=snapshot_trigger_volume_name,
-                device_path=OUTER_SNAPSHOT_TRIGGER_DIR,
-            )
+        # the agent boots. The helper provisioning is internally a 2-phase
+        # parallel pipeline (see _provision_snapshot_helper_on_outer) so
+        # the ~7 SSH round-trips it would otherwise serialize collapse to
+        # the latency of 2.
+        _provision_snapshot_helper_on_outer(
+            outer,
+            self.mngr_ctx.concurrency_group,
+            host_id=host_id,
+            btrfs_mount_path=self.config.btrfs_mount_path,
+            subvolume_path=subvolume_path,
+            trigger_volume_name=snapshot_trigger_volume_name,
+        )
 
         if docker_build_args:
             base_image = self._build_image_on_vps(outer, host_id, base_image, docker_build_args, git_depth)
