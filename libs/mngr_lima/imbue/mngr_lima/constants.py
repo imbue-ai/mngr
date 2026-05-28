@@ -1,5 +1,6 @@
 from typing import Final
 
+from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import ProviderBackendName
 
 LIMA_BACKEND_NAME: Final[ProviderBackendName] = ProviderBackendName("lima")
@@ -26,3 +27,23 @@ SSH_CONNECT_TIMEOUT_SECONDS: Final[float] = 120.0
 
 # cloud-init completion timeout
 CLOUD_INIT_TIMEOUT_SECONDS: Final[float] = 300.0
+
+# In-VM mount point at which the optional btrfs host-data volume is bind-mounted.
+# When `is_host_data_volume_exposed=False`, `host_dir` (e.g. /mngr) becomes a
+# symlink to this path. Naming mirrors Modal's `/host_volume` for symmetry with
+# the other providers' host_volume_mount_path pattern.
+HOST_VOLUME_MOUNT_PATH: Final[str] = "/mnt/host-volume"
+
+# Default logical size of the btrfs additional disk. qcow2 is sparse so this
+# is a logical cap visible to the guest, not upfront host disk usage.
+DEFAULT_HOST_DATA_DISK_SIZE: Final[str] = "100GiB"
+
+
+def lima_host_data_disk_name(host_id: HostId) -> str:
+    """Return the Lima `additionalDisks` name for a host's btrfs data volume.
+
+    Embeds the mngr `HostId` so the disk under `~/.lima/_disks/` is unique
+    across every mngr-managed Lima host and can be cross-referenced via
+    `limactl disk list`.
+    """
+    return f"mngr-{host_id.get_uuid().hex}-data"

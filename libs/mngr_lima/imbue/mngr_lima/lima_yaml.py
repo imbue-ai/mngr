@@ -9,6 +9,7 @@ from loguru import logger
 from imbue.mngr.errors import MngrError
 from imbue.mngr_lima.constants import DEFAULT_IMAGE_URL_AARCH64
 from imbue.mngr_lima.constants import DEFAULT_IMAGE_URL_X86_64
+from imbue.mngr_lima.constants import HOST_VOLUME_MOUNT_PATH
 
 
 def _get_default_image_url(
@@ -63,18 +64,22 @@ def _disable_port_forwards_rules() -> list[dict]:
 
 
 def generate_default_lima_yaml(
-    volume_host_path: Path,
+    volume_host_path: Path | None,
     host_dir: str,
     custom_image_url: str | None = None,
     config_image_url_aarch64: str | None = None,
     config_image_url_x86_64: str | None = None,
     host_private_key_pem: str | None = None,
     host_public_key_openssh: str | None = None,
+    host_data_disk_name: str | None = None,
+    host_data_disk_size: str | None = None,
 ) -> dict:
     """Generate the default Lima YAML configuration.
 
     Args:
-        volume_host_path: Path on the host machine for the persistent volume.
+        volume_host_path: Path on the host machine for the 9p bind-mounted
+            persistent volume. Pass None to omit the `mounts:` block entirely
+            (used when the host_dir is instead backed by an additional disk).
         host_dir: Mount point inside the VM (e.g. /mngr).
         custom_image_url: Optional override for the image URL (takes highest priority).
         config_image_url_aarch64: Config-level override for aarch64 image URL.
@@ -85,6 +90,12 @@ def generate_default_lima_yaml(
             VM bring-up.
         host_public_key_openssh: Optional matching public key (single-line OpenSSH format,
             e.g. ``ssh-ed25519 AAAA...``).
+        host_data_disk_name: Optional Lima `additionalDisks` name backing the
+            host_dir. When provided alongside `host_data_disk_size`, an
+            additional btrfs-formatted disk is attached and `host_dir` is
+            symlinked into it via the provisioning script.
+        host_data_disk_size: Logical size of the additional disk (Lima size
+            string, e.g. '100GiB'). Ignored unless `host_data_disk_name` is set.
     """
     image_url = custom_image_url or _get_default_image_url(config_image_url_aarch64, config_image_url_x86_64)
     arch = _get_arch_string()
@@ -96,22 +107,41 @@ def generate_default_lima_yaml(
                 "arch": arch,
             },
         ],
-        "mounts": [
-            {
-                "location": str(volume_host_path),
-                "mountPoint": host_dir,
-                "writable": True,
-            },
-        ],
         "portForwards": _disable_port_forwards_rules(),
         # Provision required packages if not in the image
         "provision": [
             {
                 "mode": "system",
-                "script": _build_provisioning_script(host_private_key_pem, host_public_key_openssh),
+                "script": _build_provisioning_script(
+                    host_private_key_pem,
+                    host_public_key_openssh,
+                    host_dir=host_dir,
+                    host_data_disk_name=host_data_disk_name,
+                ),
             },
         ],
     }
+
+    if volume_host_path is not None:
+        config["mounts"] = [
+            {
+                "location": str(volume_host_path),
+                "mountPoint": host_dir,
+                "writable": True,
+            },
+        ]
+
+    if host_data_disk_name is not None:
+        if host_data_disk_size is None:
+            raise MngrError("host_data_disk_size is required when host_data_disk_name is set")
+        config["additionalDisks"] = [
+            {
+                "name": host_data_disk_name,
+                "format": True,
+                "fsType": "btrfs",
+                "size": host_data_disk_size,
+            },
+        ]
 
     return config
 
@@ -119,9 +149,12 @@ def generate_default_lima_yaml(
 def _build_provisioning_script(
     host_private_key_pem: str | None = None,
     host_public_key_openssh: str | None = None,
+    host_dir: str = "/mngr",
+    host_data_disk_name: str | None = None,
 ) -> str:
-    """Build the Lima ``provision[mode=system]`` script that installs required packages, configures sshd, and (when a keypair is supplied) installs it as the guest's ed25519 sshd host key."""
+    """Build the Lima ``provision[mode=system]`` script that installs required packages, configures sshd, optionally lands the btrfs host-data disk at the canonical mount point, and (when a keypair is supplied) installs it as the guest's ed25519 sshd host key."""
     host_key_block = _build_host_key_block(host_private_key_pem, host_public_key_openssh)
+    host_data_disk_block = _build_host_data_disk_block(host_data_disk_name, host_dir)
     return f"""\
 #!/bin/bash
 set -eux -o pipefail
@@ -168,7 +201,58 @@ fi
 if [ "$SSH_KEY_CHANGED" = "1" ] || [ "$SSHD_CONFIG_CHANGED" = "1" ]; then
     systemctl restart sshd 2>/dev/null || service ssh restart 2>/dev/null || true
 fi
+
+# Optional: if a Lima-managed btrfs additional disk was attached, bind-mount
+# it at the canonical HOST_VOLUME_MOUNT_PATH and replace host_dir with a
+# symlink. No-op when the block below is the inert comment placeholder.
+{host_data_disk_block}
 """
+
+
+def _build_host_data_disk_block(host_data_disk_name: str | None, host_dir: str) -> str:
+    """Return a bash block that bind-mounts Lima's btrfs additional disk at HOST_VOLUME_MOUNT_PATH and replaces ``host_dir`` with a symlink to it, or an inert comment when no disk was attached.
+
+    Lima auto-mounts named ``additionalDisks`` with ``format: true`` inside
+    the guest under ``/mnt/lima-<disk_name>``. We bind-mount that to the
+    canonical ``HOST_VOLUME_MOUNT_PATH`` (matching the host_volume_mount_path
+    naming used by the other providers) and add an /etc/fstab entry so the
+    bind survives reboots. ``host_dir`` is then replaced (even if it already
+    exists as a real directory from a pre-btrfs image) with a symlink.
+    """
+    if host_data_disk_name is None:
+        return "# (no host-data disk attached; host_dir uses today's bind mount or local fs)"
+    lima_mount = f"/mnt/lima-{host_data_disk_name}"
+    return f"""\
+# Wait for Lima to finish auto-mounting the additional btrfs disk.
+for _ in $(seq 1 60); do
+    if mountpoint -q {lima_mount}; then
+        break
+    fi
+    sleep 1
+done
+if ! mountpoint -q {lima_mount}; then
+    echo "ERROR: Lima additional disk not mounted at {lima_mount}" >&2
+    exit 1
+fi
+
+# Bind-mount the btrfs filesystem at the canonical host-volume path.
+mkdir -p {HOST_VOLUME_MOUNT_PATH}
+if ! mountpoint -q {HOST_VOLUME_MOUNT_PATH}; then
+    mount --bind {lima_mount} {HOST_VOLUME_MOUNT_PATH}
+fi
+# Persist the bind across reboots (idempotent).
+if ! grep -qE "[[:space:]]{HOST_VOLUME_MOUNT_PATH}[[:space:]]" /etc/fstab; then
+    echo "{lima_mount} {HOST_VOLUME_MOUNT_PATH} none bind 0 0" >> /etc/fstab
+fi
+
+# Replace host_dir with a symlink to the btrfs-backed mount. ``ln -sfn``
+# alone won't replace an existing directory, so rm any real dir first.
+if [ -L {host_dir} ] || [ ! -e {host_dir} ]; then
+    ln -sfn {HOST_VOLUME_MOUNT_PATH} {host_dir}
+else
+    rm -rf {host_dir}
+    ln -sfn {HOST_VOLUME_MOUNT_PATH} {host_dir}
+fi"""
 
 
 def _build_host_key_block(
@@ -223,7 +307,7 @@ def load_user_lima_yaml(yaml_path: Path) -> dict:
     return config
 
 
-_LIST_EXTEND_KEYS = frozenset({"provision", "mounts"})
+_LIST_EXTEND_KEYS = frozenset({"provision", "mounts", "additionalDisks"})
 _LOCKED_KEYS = frozenset({"portForwards"})
 
 
