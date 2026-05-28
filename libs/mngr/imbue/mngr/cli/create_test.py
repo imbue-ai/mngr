@@ -65,16 +65,27 @@ from imbue.mngr.utils.toml_config import save_config_file
 
 
 def _write_agent_type_command_to_settings(settings_path: Path, type_name: str, command: str) -> None:
-    """Register ``type_name`` with ``command`` in ``settings.toml`` for tests.
+    """Register ``type_name`` with ``command`` in a fresh test ``settings.toml``.
 
-    Inlines the load / setdefault("agent_types") / save dance so tests that
-    declare a lightweight agent type do not need a top-level helper.
+    Every caller passes the settings.toml of a just-created profile
+    (``get_or_create_profile_dir(temp_host_dir)``), which does not exist yet, so
+    we build the document from scratch. We still load first and assert it is
+    empty -- rather than blindly writing -- so that if a future caller hands us a
+    populated settings.toml this fails loudly here instead of silently
+    overwriting their content. ``is_allowed_in_pytest`` opts the config into the
+    pytest run (the field defaults to False, so a loaded config must opt in).
     """
     settings_doc = load_config_file_tomlkit(settings_path)
-    agent_types = settings_doc.setdefault("agent_types", tomlkit.table())
+    assert len(settings_doc) == 0, (
+        f"{settings_path} unexpectedly already has content {dict(settings_doc)!r}. This helper "
+        "writes a fresh profile's settings.toml from scratch; pass a freshly-created profile."
+    )
+    settings_doc["is_allowed_in_pytest"] = True
     type_table = tomlkit.table()
     type_table["command"] = command
+    agent_types = tomlkit.table()
     agent_types[type_name] = type_table
+    settings_doc["agent_types"] = agent_types
     save_config_file(settings_path, settings_doc)
 
 
