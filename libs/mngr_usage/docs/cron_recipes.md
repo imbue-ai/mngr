@@ -1,9 +1,5 @@
 # Cron automation recipes
 
-Recipes for driving `mngr` from `cron`, built on `mngr usage --format json`
-(rolling-window snapshots) and `mngr list` (agent state), branching in plain
-shell.
-
 `mngr usage wait` blocks one process until its predicate matches once -- right
 for a **one-off** ("when the 5h window frees up, kick off this batch"). For a
 **recurring** policy, let `cron` own the cadence and poll the plain snapshot on
@@ -131,8 +127,7 @@ marker="$HOME/.cache/mngr-warm-window-last-resets-at"
 mkdir -p "$(dirname "$marker")"
 printf '%s' "$elapsed_at" > "$marker"
 
-# One cheap non-interactive turn is enough to start the next 5h window; pin it to
-# the cheapest model with --model haiku since we only need to anchor the window.
+# One cheap non-interactive turn is enough to start the next 5h window.
 claude -p 'just say hi' --model haiku >/dev/null
 ```
 
