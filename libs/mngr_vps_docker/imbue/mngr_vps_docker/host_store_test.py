@@ -22,6 +22,7 @@ from imbue.mngr.interfaces.data_types import PyinfraConnector
 from imbue.mngr.interfaces.host import OuterHostInterface
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
+from imbue.mngr_vps_docker.host_store import AGENTS_SUBPATH
 from imbue.mngr_vps_docker.host_store import VpsDockerHostRecord
 from imbue.mngr_vps_docker.host_store import VpsDockerHostStore
 from imbue.mngr_vps_docker.host_store import VpsHostConfig
@@ -414,7 +415,7 @@ def test_delete_host_record_removes_state_and_agents(tmp_path: Path) -> None:
     store.delete_host_record()
 
     assert not (tmp_path / "host_state.json").exists()
-    assert not (tmp_path / "agents").exists()
+    assert not (tmp_path / AGENTS_SUBPATH).exists()
     # Subsequent read sees no record.
     assert store.read_host_record() is None
 
@@ -452,7 +453,7 @@ def test_list_persisted_agent_data_skips_corrupt_entries(tmp_path: Path) -> None
     store.persist_agent_data({"id": str(_AGENT_ID_1), "name": "valid"})
 
     # Inject a corrupt sibling file (filename need not be a valid AgentId).
-    corrupt = tmp_path / "agents" / "agent-bad.json"
+    corrupt = tmp_path / AGENTS_SUBPATH / "agent-bad.json"
     corrupt.write_text("{not valid json")
 
     listed = store.list_persisted_agent_data()
@@ -471,7 +472,7 @@ def test_remove_persisted_agent_data_deletes_only_target(tmp_path: Path) -> None
 
     remaining_ids = {entry["id"] for entry in store.list_persisted_agent_data()}
     assert remaining_ids == {str(keep_id)}
-    assert not (tmp_path / "agents" / f"{drop_id}.json").exists()
+    assert not (tmp_path / AGENTS_SUBPATH / f"{drop_id}.json").exists()
 
 
 def test_remove_persisted_agent_data_is_idempotent(tmp_path: Path) -> None:
@@ -498,7 +499,7 @@ def test_list_persisted_agent_data_raises_on_shell_failure(tmp_path: Path) -> No
                 return CommandResult(stdout="", stderr="permission denied", success=False)
             return super().execute_idempotent_command(command, user, cwd, env, timeout_seconds)
 
-    (tmp_path / "agents").mkdir()
+    (tmp_path / AGENTS_SUBPATH).mkdir()
     outer = _FailingShellOuter(
         id=HostId.generate(),
         connector=_make_local_connector(),

@@ -27,10 +27,18 @@ from imbue.mngr_vps_docker.primitives import VpsInstanceId
 _AGENT_FILE_SEP: Final[str] = "---MNGR_AGENT_FILE_SEP---"
 
 # Subdirectory inside the unified volume holding one JSON file per persisted
-# agent record (``<agent_id>.json``). Lives next to ``HOST_DIR_SUBPATH`` /
-# ``host_state.json`` -- shared with ``instance.py`` so the on-disk layout has
-# a single source of truth and renaming the directory requires a single edit.
-AGENTS_SUBPATH: Final[str] = "agents"
+# agent record (``<agent_id>.json``). Lives next to ``host_state.json``;
+# shared with ``instance.py`` so the on-disk layout has a single source of
+# truth.
+#
+# Deliberately NOT ``agents/`` -- with the volume now mounted directly at
+# mngr's ``host_dir`` root (``/mngr`` inside the container), the provider's
+# flat ``<id>.json`` files would otherwise live in the same parent as mngr
+# core's ``<id>/`` per-agent state directories. ``Host.get_agents()`` walks
+# ``host_dir/agents/`` and treats every entry as a directory containing
+# ``data.json``, so the ``.json`` files would trip its ``[Errno 20] Not a
+# directory`` enumeration. A separate name keeps the two namespaces apart.
+AGENTS_SUBPATH: Final[str] = "persisted_agents"
 
 
 class VpsHostConfig(HostConfig):
