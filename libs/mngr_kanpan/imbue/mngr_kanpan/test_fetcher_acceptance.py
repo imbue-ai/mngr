@@ -103,9 +103,9 @@ def _ctx_with_failing_provider(mngr_ctx: MngrContext) -> MngrContext:
 
     The provider references a backend that does not exist, so any attempt to
     instantiate or discover it raises. This stands in for a real provider that
-    becomes unreachable during a refresh -- e.g. a remote provider right after
-    the machine wakes from sleep, before the network is back -- which is the
-    condition that used to make muted agents leak out of the Muted section.
+    becomes unreachable during a refresh -- e.g. a remote provider behind a
+    flaky network connection -- which is the condition that used to make muted
+    agents leak out of the Muted section.
     """
     failing_config = ProviderInstanceConfig(backend=ProviderBackendName("nonexistent-backend-xyz"))
     updated_config = mngr_ctx.config.model_copy_update(
@@ -344,9 +344,9 @@ def test_load_muted_agents_survives_a_failing_provider(
 ) -> None:
     """A muted agent is still reported as muted when an unrelated provider fails.
 
-    Regression test for the sleep/wake bug: muted state is discovered
-    per-provider, so one provider failing must not wipe out the muted set of
-    agents discovered from the providers that did succeed.
+    Regression test for the transient-provider-failure bug: muted state is
+    discovered per-provider, so one provider failing must not wipe out the muted
+    set of agents discovered from the providers that did succeed.
     """
     create_test_agent_state(local_host, work_dir, "resilient-muted-agent")
     toggle_agent_mute(temp_mngr_ctx, AgentName("resilient-muted-agent"))
@@ -366,11 +366,11 @@ def test_fetch_board_snapshot_muted_agent_stays_muted_when_a_provider_fails(
 ) -> None:
     """A muted agent stays in the MUTED section even when a provider fails to load.
 
-    Reproduces the sleep/wake symptom: when a provider's discovery fails during
-    a refresh, the muted agent used to lose its muted bit and get reclassified
-    by PR state -- landing in PRS_FAILED once the GitHub fetch also failed, so
-    it appeared mixed in with the non-muted rows. With per-provider resilient
-    muted-loading it must remain in MUTED.
+    Reproduces the symptom of a transient provider-discovery failure: when a
+    provider's discovery fails during a refresh, the muted agent used to lose
+    its muted bit and get reclassified by PR state -- landing in PRS_FAILED once
+    the GitHub fetch also failed, so it appeared mixed in with the non-muted
+    rows. With per-provider resilient muted-loading it must remain in MUTED.
     """
     create_test_agent_state(local_host, work_dir, "muted-despite-failure-agent")
     toggle_agent_mute(temp_mngr_ctx, AgentName("muted-despite-failure-agent"))
