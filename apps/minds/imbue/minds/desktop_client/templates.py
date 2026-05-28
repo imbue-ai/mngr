@@ -688,9 +688,7 @@ def render_recovery_page(
         "      </details>\n"
     )
     card_extra = (
-        error_block
-        + '      <button id="recovery-host-btn" class="hidden">Restart workspace</button>\n'
-        + debug_block
+        error_block + '      <button id="recovery-host-btn" class="hidden">Restart workspace</button>\n' + debug_block
     )
     card_attrs = (
         f' data-agent-id="{html.escape(str(agent_id))}"'
