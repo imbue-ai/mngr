@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+#
+# This script uses uv to call pre-commit to run hooks on commits about to be pushed.
+#
+# Why not use `pre-commit install` directly?
+# `pre-commit install` depends on the system Python version, whose packages may
+# not be kept up-to-date. Using uv ensures consistent dependency management.
+#
+HERE=$(cd "$(dirname "$0")" && pwd)
+
+# Run pre-commit through uv (last command so return code propagates to git)
+uv run pre-commit hook-impl --config=.pre-commit-config.yaml --hook-type=pre-push --hook-dir "$HERE" -- "$@"
