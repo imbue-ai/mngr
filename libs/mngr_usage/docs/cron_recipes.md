@@ -1,20 +1,16 @@
 # Cron automation recipes
 
-Recipes for driving `mngr` from `cron` -- relaunching an agent to use up an
-expiring usage window, warming a fresh window, or feeding a task queue. Treat
-them as inspiration: copy a script, point it at your agents, tune the
-thresholds. They build on `mngr usage --format json` (rolling-window snapshots)
-and `mngr list` (agent state), branching in plain shell.
+Recipes for driving `mngr` from `cron`, built on `mngr usage --format json`
+(rolling-window snapshots) and `mngr list` (agent state), branching in plain
+shell.
 
-`mngr usage wait` blocks a single process until its predicate matches once --
-the right tool for a **one-off**: "when the 5h window frees up, kick off this
-batch." For a **recurring** policy -- "every so often, if usage looks like X,
-do Y" -- you don't want to sit on a `wait` and manually re-arm it after every
-match. Let `cron` own the cadence instead: poll the plain snapshot on a schedule
-and branch in the shell. The snapshot is the same per-source shape `wait`
-evaluates, so `jq` plays the role `--until`'s CEL did.
+`mngr usage wait` blocks one process until its predicate matches once -- right
+for a **one-off** ("when the 5h window frees up, kick off this batch"). For a
+**recurring** policy, let `cron` own the cadence and poll the plain snapshot on
+a schedule. It's the same per-source shape `wait` evaluates, so `jq` plays the
+role `--until`'s CEL did.
 
-A few things hold across the usage-driven recipes below:
+Across the usage-driven recipes below:
 
 - `mngr usage --format json` always prints a `sources` array (empty on a
   no-data tick), so a `jq` predicate that matches nothing yields no output and
@@ -84,22 +80,17 @@ mngr start "$AGENT" && mngr message "$AGENT" --message "continue where you left 
 echo "mngr stop $AGENT" | at "now + $(( secs / 60 )) minutes"
 ```
 
-Run it every 10 minutes from `cron`:
-
 ```cron
 */10 * * * * /path/to/soak-window.sh
 ```
 
 ## Warm a fresh window once the last one has elapsed
 
-The reader already computes a past-reset signal -- it's the half of `is_stale`
-that fires the human "a window already reset" warning. In JSON you reconstruct
-it precisely by comparing a window's `resets_at` (a unix timestamp) against the
-snapshot's own top-level `now`: `resets_at < now` means the most recently
-recorded 5h window boundary is in the past, i.e. a fresh window is open and
-unclaimed. Fire one throwaway headless turn then -- `claude -p` runs a single
-non-interactive prompt and exits -- to open (and prime the cache of) the new
-window without standing up a full agent:
+`resets_at < now` means the last recorded 5h window boundary is already past --
+a fresh window is open and unclaimed (the past-reset half of `is_stale`). Fire a
+throwaway headless turn then -- `claude -p` runs one non-interactive prompt and
+exits -- to open and prime the cache of the new window without standing up a
+full agent:
 
 ```bash
 #!/usr/bin/env bash
@@ -142,12 +133,10 @@ claude -p 'just say hi' >/dev/null
 ## Dispatch tasks from a queue directory
 
 Drop one Markdown file per task into a `todo/` directory and let `cron` fan them
-out to agents, capped at two in flight. Unlike the recipes above (which relaunch
-one known agent), this one *creates* a fresh agent per task, named after the
-task file. The concurrency cap is enforced **by label, not by name**: every
-agent in the pool gets the same `queue=tasks` label, so counting alive
-pool members is one `mngr list` filter regardless of what the individual agents
-are called.
+out, capped at two in flight. Unlike the recipes above, this *creates* a fresh
+agent per task, named after the task file. The concurrency cap is **by label,
+not by name**: every pool agent shares the `queue=tasks` label, so counting live
+members is one `mngr list` filter no matter what the agents are called.
 
 ```bash
 #!/usr/bin/env bash
