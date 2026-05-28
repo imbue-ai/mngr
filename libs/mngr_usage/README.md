@@ -88,7 +88,7 @@ json` snapshot on a schedule and branch in the shell (the snapshot is the same
 per-source shape `wait` evaluates, so `jq` plays the role `--until`'s CEL did).
 
 See [cron automation recipes](docs/cron_recipes.md) for worked examples:
-soaking up an about-to-expire 5h window (with a weekly pace check), warming a
+using up an about-to-expire 5h window (with a weekly pace check), warming a
 fresh window the moment the last one elapses, and fanning a queue of task files
 out to label-capped agents.
 

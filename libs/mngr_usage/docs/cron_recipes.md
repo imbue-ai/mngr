@@ -14,7 +14,7 @@ Across the usage-driven recipes below:
   reading across all your agents *and* your own interactive Claude Code
   sessions, so you don't need a dedicated agent alive just to keep it current.
 
-## Soak up an about-to-expire 5h window
+## Use up an about-to-expire 5h window
 
 Fire near the end of a 5h window when there's budget left both in that window
 and (on pace) in the week, relaunch a known agent, and schedule a stop for the
@@ -22,7 +22,7 @@ window boundary so it doesn't bleed into the next window:
 
 ```bash
 #!/usr/bin/env bash
-# soak-window.sh -- relaunch an agent to use up an about-to-expire 5h window.
+# use-window.sh -- relaunch an agent to use up an about-to-expire 5h window.
 set -euo pipefail
 
 AGENT="my-agent"
@@ -79,7 +79,7 @@ echo "mngr stop $AGENT" | at "now + $(( (secs + 59) / 60 )) minutes"
 ```cron
 # cron starts with a bare PATH; set one that finds mngr, jq, and at (adjust to your install)
 PATH=/usr/local/bin:/usr/bin:/bin:/home/you/.local/bin
-*/10 * * * * /path/to/soak-window.sh
+*/10 * * * * /path/to/use-window.sh
 ```
 
 ## Warm a fresh 5h window early

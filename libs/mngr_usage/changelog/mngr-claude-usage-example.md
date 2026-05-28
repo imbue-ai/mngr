@@ -2,7 +2,7 @@ Added a "cron automation recipes" doc (`docs/cron_recipes.md`), linked from the
 README, with three worked examples of driving `mngr` from `cron` using check
 mode (`mngr usage --format json`) rather than the blocking `mngr usage wait`:
 
-- Soak up an about-to-expire 5h window: relaunch a known agent when the 5h
+- Use up an about-to-expire 5h window: relaunch a known agent when the 5h
   window is near its end with budget left, and schedule a `mngr stop` for the
   window boundary. The weekly guard is a *pace* check with a tapering safety
   margin -- `used% < elapsed% * (1 - 0.30 * (100 - elapsed%) / 100)` -- so it
