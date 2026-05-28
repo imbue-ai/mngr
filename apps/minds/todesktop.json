@@ -3,7 +3,7 @@
   "id": "26032588hqdzk",
   "icon": "./electron/assets/icon.png",
   "appPath": ".",
-  "uploadSizeLimit": 300,
+  "uploadSizeLimit": 600,
   "extraResources": [
     {
       "from": "resources/",

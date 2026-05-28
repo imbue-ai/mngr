@@ -22,7 +22,6 @@ from imbue.imbue_common.pure import pure
 from imbue.mngr.agents.agent_registry import list_available_agent_types
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
-from imbue.mngr.cli.config import ConfigScope
 from imbue.mngr.cli.config import get_config_path
 from imbue.mngr.cli.help_formatter import CommandHelpMetadata
 from imbue.mngr.cli.help_formatter import add_pager_help_option
@@ -33,6 +32,7 @@ from imbue.mngr.cli.output_helpers import emit_format_template_lines
 from imbue.mngr.cli.output_helpers import write_human_line
 from imbue.mngr.cli.plugin_install_wizard import install_wizard
 from imbue.mngr.config.data_types import CommonCliOptions
+from imbue.mngr.config.data_types import ConfigScope
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import OutputOptions
