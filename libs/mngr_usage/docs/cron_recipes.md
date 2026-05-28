@@ -131,8 +131,9 @@ marker="$HOME/.cache/mngr-warm-window-last-resets-at"
 mkdir -p "$(dirname "$marker")"
 printf '%s' "$elapsed_at" > "$marker"
 
-# One cheap non-interactive turn is enough to start the next 5h window.
-claude -p 'just say hi' >/dev/null
+# One cheap non-interactive turn is enough to start the next 5h window; pin it to
+# the cheapest model with --model haiku since we only need to anchor the window.
+claude -p 'just say hi' --model haiku >/dev/null
 ```
 
 ```cron
