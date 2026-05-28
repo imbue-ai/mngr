@@ -6,10 +6,18 @@ const paths = require('./paths');
 const { runEnvSetup } = require('./env-setup');
 const { startBackend, shutdown, getBackendProcess } = require('./backend');
 
+// Use ToDesktop's default auto-update behavior: it checks on launch +
+// on an interval, downloads in the background, and shows its own
+// "Restart to update" prompt when a download completes. We previously
+// suppressed that prompt to build a custom titlebar pill, but the pill
+// renderer was never wired up -- leaving users with detection but no
+// way to install. Defaults are simpler and actually work.
+//
 // Only init when packaged: in dev (`pnpm start`), `electron.autoUpdater`
 // is undefined on macOS (Squirrel is not linked in the unsigned dev
 // binary), and todesktop's constructor throws trying to subscribe to
-// it. 
+// it. Skipping init keeps dev launches working; the auto-updater is
+// never useful in dev anyway.
 if (app.isPackaged) {
   todesktop.init();
 } else {
