@@ -166,3 +166,24 @@ Tiered system-interface restart for the minds recovery flow.
   re-runs the host-health probe (with auto-dispatch off so it does not
   stack another restart attempt) so the user can see both the failure
   reason and the current probe answers at once.
+- The post-restart startup-wait budget is now tier-aware. A surgical
+  (in-place) restart still waits 15s, but a host restart -- which
+  cold-boots the whole container -- now waits 30s before declaring the
+  attempt failed. The previous shared 15s budget routinely bounced a
+  still-booting workspace to the "Workspace unresponsive" page even
+  though the container came up healthy moments later.
+- A failed restart is no longer a dead end. The "Workspace unresponsive"
+  page (restart-failed state) now polls in the background and, the moment
+  the workspace's system interface answers again (the background health
+  probe recovers it on its own -- e.g. a cold boot that finished just
+  after the restart worker's wait elapsed), returns the user to the
+  workspace automatically. Previously the page sat unresponsive until the
+  user manually navigated away and back. The poll uses a lightweight
+  redirect check, so the displayed failure reason and diagnostics stay
+  put and the heavy host-health probe is not re-run on each tick.
+- The auto-dispatched host restart (chosen only when the container is
+  already fully stopped) now skips the redundant ``mngr stop --stop-host``
+  step and cold-boots straight away, shaving a full ``mngr`` invocation
+  off the recovery path. The manual "Restart workspace" button and the
+  SSH-dead escalation still stop first, since they may target a
+  still-running container.

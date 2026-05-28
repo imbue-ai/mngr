@@ -482,6 +482,28 @@ _RECOVERY_SCRIPT: Final[str] = """\
         function scheduleRefresh() {
           setTimeout(function () { window.location.assign(pollUrl()); }, REFRESH_INTERVAL_MS);
         }
+        // Background convergence poll for the restart_failed state. Unlike
+        // scheduleRefresh (which reloads the whole page), this fetches pollUrl
+        // with manual redirect handling: while the workspace is still down the
+        // server returns the recovery HTML (200), which we discard so the
+        // displayed failure reason + diagnostics stay put and the heavy
+        // host-health probe is not re-run. Once the background probe loop flips
+        // the tracker to HEALTHY the server starts 302ing to return_to, which
+        // surfaces as an opaque-redirect response; we then follow it to send
+        // the user back to the now-recovered workspace.
+        function scheduleHealthyPoll() {
+          setTimeout(function () {
+            fetch(pollUrl(), { credentials: 'same-origin', redirect: 'manual' }).then(function (resp) {
+              if (resp.type === 'opaqueredirect' || (resp.status >= 300 && resp.status < 400)) {
+                window.location.assign(pollUrl());
+                return;
+              }
+              scheduleHealthyPoll();
+            }, function () {
+              scheduleHealthyPoll();
+            });
+          }, REFRESH_INTERVAL_MS);
+        }
 
         function renderLoading() {
           titleEl.textContent = 'Loading workspace';
@@ -575,8 +597,10 @@ _RECOVERY_SCRIPT: Final[str] = """\
               return;
             }
             if (tier === 'host') {
-              // Container fully stopped: nothing live to interrupt, dispatch unattended.
-              postRestart('/restart-host');
+              // Container fully stopped: nothing live to interrupt, dispatch
+              // unattended. Tell the endpoint the host is already stopped so it
+              // skips the redundant stop step and cold-boots straight away.
+              postRestart('/restart-host?host_already_stopped=1');
               return;
             }
             if (tier === 'surgical') {
@@ -606,6 +630,12 @@ _RECOVERY_SCRIPT: Final[str] = """\
           // the probe with auto-dispatch off so the renderUnresponsive path
           // also has the diagnostics populated.
           runProbe(false);
+          // A failed restart is not necessarily terminal: the background probe
+          // loop keeps polling the workspace and may recover it on its own
+          // (e.g. a cold container boot that finished just after the restart
+          // worker's bounded wait elapsed). Watch for that recovery so we can
+          // return the user to the workspace without them having to act.
+          scheduleHealthyPoll();
         } else if (initialStatus === 'healthy') {
           // Degenerate: rendered HEALTHY with no return_to to 302 to. Offer a
           // manual restart rather than auto-dispatching one on a healthy page.

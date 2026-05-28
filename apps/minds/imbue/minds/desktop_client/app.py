@@ -1680,10 +1680,16 @@ _WORKSPACE_PROBE_TIMEOUT_SECONDS: Final[float] = 2.0
 # Generous: a host stop/start bounces a container and can legitimately take
 # tens of seconds, so this is a "definitely wedged" ceiling, not an estimate.
 _RESTART_COMMAND_TIMEOUT_SECONDS: Final[float] = 120.0
-# Shared budget for how long we wait for the system interface to answer again
-# after a restart. Used by every recovery wait point; initial agent-creation
-# readiness waiting deliberately keeps its own (longer) timeout.
-_SYSTEM_INTERFACE_STARTUP_WAIT_SECONDS: Final[float] = 15.0
+# How long we wait for the system interface to answer again after a restart,
+# split by tier. A surgical (in-place) restart leaves the container running, so
+# the interface should answer again quickly. A host restart cold-boots the
+# container (restore-from-snapshot + the bootstrap service manager spawning the
+# system interface), which legitimately takes longer -- the old shared 15s
+# budget routinely bounced a still-booting workspace to RESTART_FAILED. Initial
+# agent-creation readiness waiting deliberately keeps its own, much longer,
+# timeout.
+_SURGICAL_STARTUP_WAIT_SECONDS: Final[float] = 15.0
+_HOST_RESTART_STARTUP_WAIT_SECONDS: Final[float] = 30.0
 # Poll cadence while waiting for the system interface to come back post-restart.
 _RESTART_PROBE_INTERVAL_SECONDS: Final[float] = 1.0
 
@@ -1904,9 +1910,11 @@ def _capture_mngr_command(
     return finished.stdout
 
 
-def _await_system_interface_ready(agent_id: AgentId, mngr_forward_port: int, preauth_cookie: str) -> bool:
-    """Poll the system interface through the plugin until it answers 200, or the wait budget elapses."""
-    deadline = time.monotonic() + _SYSTEM_INTERFACE_STARTUP_WAIT_SECONDS
+def _await_system_interface_ready(
+    agent_id: AgentId, mngr_forward_port: int, preauth_cookie: str, wait_seconds: float
+) -> bool:
+    """Poll the system interface through the plugin until it answers 200, or ``wait_seconds`` elapses."""
+    deadline = time.monotonic() + wait_seconds
     with make_workspace_probe_client(
         preauth_cookie=preauth_cookie,
         probe_timeout_seconds=_WORKSPACE_PROBE_TIMEOUT_SECONDS,
@@ -1953,16 +1961,25 @@ def _run_restart_sequence(
     concurrency_group: ConcurrencyGroup,
     mngr_forward_port: int,
     mngr_forward_preauth_cookie: str | None,
+    skip_stop: bool = False,
 ) -> None:
     """Background worker: stop + start the system-services agent, then await recovery.
 
-    Drives the health tracker to HEALTHY on recovery or RESTART_FAILED (with
-    a reason) when a step errors or the system interface does not return
-    within the shared startup-wait budget. A crash of this worker is turned
-    into RESTART_FAILED by ``_RestartWorkerFailureHandler``, wired as the
+    Drives the health tracker to HEALTHY on recovery or RESTART_FAILED (with a
+    reason) when a step errors or the system interface does not return within
+    the tier's startup-wait budget (the host tier cold-boots a container, so it
+    waits longer than the in-place surgical tier). A crash of this worker is
+    turned into RESTART_FAILED by ``_RestartWorkerFailureHandler``, wired as the
     thread's ``on_failure`` callback.
+
+    ``skip_stop`` is set only for the auto-dispatched host tier, which is chosen
+    exclusively when the host-health probe found the container fully stopped --
+    there is nothing to stop, so the (idempotent but not free) ``mngr stop
+    --stop-host`` subprocess is skipped to shave a full mngr invocation off the
+    cold boot's critical path.
     """
     tier_label = "host restart" if is_host_restart else "system-interface restart"
+    startup_wait_seconds = _HOST_RESTART_STARTUP_WAIT_SECONDS if is_host_restart else _SURGICAL_STARTUP_WAIT_SECONDS
     services_agent_id = backend_resolver.get_system_services_agent_id(workspace_agent_id)
     if services_agent_id is None:
         tracker.mark_restart_failed(
@@ -1973,12 +1990,15 @@ def _run_restart_sequence(
     env = dict(os.environ)
     env["MNGR_HOST_DIR"] = str(mngr_host_dir)
 
-    stop_error = _run_mngr_command(
-        concurrency_group, _build_mngr_stop_argv(mngr_binary, services_agent_id, is_host_restart), env
-    )
-    if stop_error is not None:
-        tracker.mark_restart_failed(workspace_agent_id, f"Stop step of {tier_label} failed: {stop_error}")
-        return
+    if skip_stop:
+        logger.info("Skipping stop step for {} ({}): container already fully stopped", workspace_agent_id, tier_label)
+    else:
+        stop_error = _run_mngr_command(
+            concurrency_group, _build_mngr_stop_argv(mngr_binary, services_agent_id, is_host_restart), env
+        )
+        if stop_error is not None:
+            tracker.mark_restart_failed(workspace_agent_id, f"Stop step of {tier_label} failed: {stop_error}")
+            return
 
     start_error = _run_mngr_command(concurrency_group, _build_mngr_start_argv(mngr_binary, services_agent_id), env)
     if start_error is not None:
@@ -1991,13 +2011,14 @@ def _run_restart_sequence(
         tracker.record_probe_success(workspace_agent_id)
         return
 
-    if _await_system_interface_ready(workspace_agent_id, mngr_forward_port, mngr_forward_preauth_cookie):
+    if _await_system_interface_ready(
+        workspace_agent_id, mngr_forward_port, mngr_forward_preauth_cookie, startup_wait_seconds
+    ):
         tracker.record_probe_success(workspace_agent_id)
     else:
         tracker.mark_restart_failed(
             workspace_agent_id,
-            f"The system interface did not respond within "
-            f"{int(_SYSTEM_INTERFACE_STARTUP_WAIT_SECONDS)}s of the {tier_label}.",
+            f"The system interface did not respond within {int(startup_wait_seconds)}s of the {tier_label}.",
         )
 
 
@@ -2024,6 +2045,13 @@ def _dispatch_restart(
     if not tracker.mark_restarting(aid):
         return Response(status_code=202, content="{}", media_type="application/json")
 
+    # The auto-dispatched host tier (chosen only when the host-health probe
+    # found the container fully stopped) passes ``host_already_stopped=1`` so
+    # the worker can skip the redundant stop step. Honored only for host
+    # restarts: the manual "Restart workspace" button and the SSH-dead path
+    # may target a still-running container, which must be stopped first.
+    skip_stop = is_host_restart and request.query_params.get("host_already_stopped") == "1"
+
     # is_checked=False + on_failure: a crash of the one-shot worker is handled
     # by transitioning the tracker to RESTART_FAILED (so the recovery page does
     # not hang), rather than being surfaced later when the root group is checked.
@@ -2048,6 +2076,7 @@ def _dispatch_restart(
                 "concurrency_group": concurrency_group,
                 "mngr_forward_port": request.app.state.mngr_forward_port or 0,
                 "mngr_forward_preauth_cookie": request.app.state.mngr_forward_preauth_cookie,
+                "skip_stop": skip_stop,
             },
             name=f"system-interface-restart-{aid}",
             daemon=True,

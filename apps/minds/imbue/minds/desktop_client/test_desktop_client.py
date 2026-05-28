@@ -1875,14 +1875,26 @@ def _write_fake_mngr(tmp_path: Path, stop_exit: int = 0, start_exit: int = 0) ->
     """Write an executable stub that stands in for the ``mngr`` binary.
 
     Exits per-subcommand so a test can simulate a failing stop or start
-    without a real mngr / provider.
+    without a real mngr / provider. Every invocation appends its argv to a
+    ``<script>.log`` sibling file so a test can assert which subcommands ran
+    (e.g. that the stop step was skipped).
     """
     script = tmp_path / "fake_mngr"
     script.write_text(
-        f'#!/bin/sh\ncase "$1" in\n  stop) exit {stop_exit} ;;\n  start) exit {start_exit} ;;\n  *) exit 0 ;;\nesac\n'
+        "#!/bin/sh\n"
+        'echo "$@" >> "$0.log"\n'
+        f'case "$1" in\n  stop) exit {stop_exit} ;;\n  start) exit {start_exit} ;;\n  *) exit 0 ;;\nesac\n'
     )
     script.chmod(0o755)
     return str(script)
+
+
+def _read_fake_mngr_invocations(mngr_binary: str) -> list[str]:
+    """Return the recorded argv lines for a ``_write_fake_mngr`` stub (empty if never invoked)."""
+    log_path = Path(mngr_binary + ".log")
+    if not log_path.exists():
+        return []
+    return log_path.read_text().splitlines()
 
 
 def _resolver_with_system_services(workspace_agent: AgentId, services_agent: AgentId) -> MngrCliBackendResolver:
@@ -1981,6 +1993,66 @@ def test_run_restart_sequence_recovers_on_clean_dispatch_without_plugin(tmp_path
         )
 
     assert tracker.get_health(workspace_agent) == AgentHealth.HEALTHY
+
+
+def test_run_restart_sequence_skips_stop_when_host_already_stopped(tmp_path: Path) -> None:
+    """``skip_stop=True`` on a host restart goes straight to ``mngr start`` (no stop subprocess)."""
+    tracker = SystemInterfaceHealthTracker()
+    workspace_agent = AgentId.generate()
+    services_agent = AgentId.generate()
+    tracker.mark_restarting(workspace_agent)
+    resolver = _resolver_with_system_services(workspace_agent, services_agent)
+    mngr_binary = _write_fake_mngr(tmp_path)
+
+    with ConcurrencyGroup(name="test-restart") as cg:
+        _run_restart_sequence(
+            workspace_agent_id=workspace_agent,
+            is_host_restart=True,
+            tracker=tracker,
+            backend_resolver=resolver,
+            mngr_binary=mngr_binary,
+            mngr_host_dir=tmp_path,
+            concurrency_group=cg,
+            mngr_forward_port=0,
+            mngr_forward_preauth_cookie=None,
+            skip_stop=True,
+        )
+
+    assert tracker.get_health(workspace_agent) == AgentHealth.HEALTHY
+    invocations = _read_fake_mngr_invocations(mngr_binary)
+    assert any(line.startswith("start ") for line in invocations)
+    assert not any(line.startswith("stop ") for line in invocations)
+
+
+def test_run_restart_sequence_stops_before_start_by_default(tmp_path: Path) -> None:
+    """Without ``skip_stop``, a host restart stops the host before starting it."""
+    tracker = SystemInterfaceHealthTracker()
+    workspace_agent = AgentId.generate()
+    services_agent = AgentId.generate()
+    tracker.mark_restarting(workspace_agent)
+    resolver = _resolver_with_system_services(workspace_agent, services_agent)
+    mngr_binary = _write_fake_mngr(tmp_path)
+
+    with ConcurrencyGroup(name="test-restart") as cg:
+        _run_restart_sequence(
+            workspace_agent_id=workspace_agent,
+            is_host_restart=True,
+            tracker=tracker,
+            backend_resolver=resolver,
+            mngr_binary=mngr_binary,
+            mngr_host_dir=tmp_path,
+            concurrency_group=cg,
+            mngr_forward_port=0,
+            mngr_forward_preauth_cookie=None,
+        )
+
+    assert tracker.get_health(workspace_agent) == AgentHealth.HEALTHY
+    invocations = _read_fake_mngr_invocations(mngr_binary)
+    stop_index = next((i for i, line in enumerate(invocations) if line.startswith("stop ")), None)
+    start_index = next((i for i, line in enumerate(invocations) if line.startswith("start ")), None)
+    assert stop_index is not None, invocations
+    assert start_index is not None, invocations
+    assert stop_index < start_index
 
 
 def test_restart_host_api_requires_authentication(tmp_path: Path) -> None:
