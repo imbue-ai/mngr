@@ -25,9 +25,8 @@ from imbue.mngr.primitives import HostId
 from imbue.mngr_vps_docker.host_store import VpsDockerHostRecord
 from imbue.mngr_vps_docker.host_store import VpsDockerHostStore
 from imbue.mngr_vps_docker.host_store import VpsHostConfig
-from imbue.mngr_vps_docker.host_store import create_volume_with_layout
 from imbue.mngr_vps_docker.host_store import open_host_store
-from imbue.mngr_vps_docker.host_store import resolve_volume_mountpoint
+from imbue.mngr_vps_docker.host_store import resolve_volume_device
 from imbue.mngr_vps_docker.primitives import VpsInstanceId
 
 _AGENT_ID_1 = AgentId.generate()
@@ -159,25 +158,26 @@ def test_vps_docker_host_record_model_copy() -> None:
 # execute_idempotent_command shells out locally for the few shell primitives
 # the store actually uses (mkdir, rm, ls, docker volume inspect).
 #
-# docker volume inspect is special-cased to return the tmp_path so
-# resolve_volume_mountpoint resolves to the fake mountpoint without needing
-# a real docker daemon.
+# docker volume inspect is special-cased to return the registered
+# ``device_by_volume`` path so ``resolve_volume_device`` resolves to the fake
+# bind-source path without needing a real docker daemon.
 # =============================================================================
 
 
 class _LocalFakeOuter(OuterHostInterface):
     """An OuterHostInterface stand-in backed by a local tmp directory.
 
-    Only the methods VpsDockerHostStore (and its create-helpers) call are
-    implemented in any meaningful way. ``mountpoint_by_volume`` lets the
-    fake answer ``docker volume inspect <name>`` queries deterministically.
-    The remaining ``@abstractmethod`` methods on OuterHostInterface raise
-    so the fake fails loudly if a test exercises an unsupported path.
+    Only the methods VpsDockerHostStore calls are implemented in any
+    meaningful way. ``device_by_volume`` lets the fake answer
+    ``docker volume inspect --format '{{.Options.device}}'`` queries
+    deterministically. The remaining ``@abstractmethod`` methods on
+    OuterHostInterface raise so the fake fails loudly if a test exercises an
+    unsupported path.
     """
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
-    mountpoint_by_volume: dict[str, Path] = Field(default_factory=dict)
+    device_by_volume: dict[str, Path] = Field(default_factory=dict)
     recorded_commands: list[str] = Field(default_factory=list)
 
     @property
@@ -201,26 +201,14 @@ class _LocalFakeOuter(OuterHostInterface):
         if command.startswith("docker volume inspect "):
             tokens = shlex.split(command)
             volume_name = tokens[3]
-            mountpoint = self.mountpoint_by_volume.get(volume_name)
-            if mountpoint is None:
+            device = self.device_by_volume.get(volume_name)
+            if device is None:
                 return CommandResult(
                     stdout="",
                     stderr=f"Error: No such volume: {volume_name}",
                     success=False,
                 )
-            return CommandResult(stdout=f"{mountpoint}\n", stderr="", success=True)
-
-        if command.startswith("docker volume create "):
-            tokens = shlex.split(command)
-            volume_name = tokens[3]
-            # Provision a local directory to stand in for the volume's _data dir.
-            if volume_name not in self.mountpoint_by_volume:
-                raise RuntimeError(
-                    f"Test setup error: must register a mountpoint for {volume_name!r} before "
-                    f"create_volume_with_layout is called."
-                )
-            self.mountpoint_by_volume[volume_name].mkdir(parents=True, exist_ok=True)
-            return CommandResult(stdout=volume_name, stderr="", success=True)
+            return CommandResult(stdout=f"{device}\n", stderr="", success=True)
 
         # Shell out for the remaining primitives (mkdir / rm / ls / test).
         completed = subprocess.run(
@@ -292,11 +280,11 @@ def _make_local_connector() -> PyinfraConnector:
     return PyinfraConnector(cast(PyinfraHost, object()))
 
 
-def _outer_with_mountpoint(mountpoint: Path, volume_name: str = "mngr-host-vol-test") -> _LocalFakeOuter:
+def _outer_with_device(device: Path, volume_name: str = "mngr-host-vol-test") -> _LocalFakeOuter:
     return _LocalFakeOuter(
         id=HostId.generate(),
         connector=_make_local_connector(),
-        mountpoint_by_volume={volume_name: mountpoint},
+        device_by_volume={volume_name: device},
     )
 
 
@@ -304,39 +292,58 @@ def _make_store(mountpoint: Path) -> VpsDockerHostStore:
     outer = _LocalFakeOuter(
         id=HostId.generate(),
         connector=_make_local_connector(),
-        mountpoint_by_volume={"unused": mountpoint},
+        device_by_volume={"unused": mountpoint},
     )
     return VpsDockerHostStore(outer=outer, mountpoint=mountpoint)
 
 
-def test_resolve_volume_mountpoint_returns_inspected_path(tmp_path: Path) -> None:
-    outer = _outer_with_mountpoint(tmp_path / "_data", volume_name="mngr-host-vol-aaaa")
-    result = resolve_volume_mountpoint(cast(OuterHostInterface, outer), "mngr-host-vol-aaaa")
-    assert result == tmp_path / "_data"
+def test_resolve_volume_device_returns_inspected_device_path(tmp_path: Path) -> None:
+    outer = _outer_with_device(tmp_path / "subvol", volume_name="mngr-host-vol-aaaa")
+    result = resolve_volume_device(cast(OuterHostInterface, outer), "mngr-host-vol-aaaa")
+    assert result == tmp_path / "subvol"
 
 
-def test_resolve_volume_mountpoint_raises_when_volume_missing(tmp_path: Path) -> None:
-    outer = _outer_with_mountpoint(tmp_path / "_data", volume_name="mngr-host-vol-aaaa")
+def test_resolve_volume_device_raises_when_volume_missing(tmp_path: Path) -> None:
+    outer = _outer_with_device(tmp_path / "subvol", volume_name="mngr-host-vol-aaaa")
     with pytest.raises(MngrError, match="docker-volume-inspect"):
-        resolve_volume_mountpoint(cast(OuterHostInterface, outer), "mngr-host-vol-does-not-exist")
+        resolve_volume_device(cast(OuterHostInterface, outer), "mngr-host-vol-does-not-exist")
 
 
-def test_create_volume_with_layout_seeds_host_dir_and_agents(tmp_path: Path) -> None:
-    mountpoint = tmp_path / "_data"
-    outer = _outer_with_mountpoint(mountpoint, volume_name="mngr-host-vol-aaaa")
-    returned = create_volume_with_layout(cast(OuterHostInterface, outer), "mngr-host-vol-aaaa")
-    assert returned == mountpoint
-    assert (mountpoint / "host_dir").is_dir()
-    assert (mountpoint / "agents").is_dir()
+def test_resolve_volume_device_raises_when_options_device_empty() -> None:
+    """A volume created without bind options (no ``Options.device``) must fail loudly."""
+
+    class _EmptyDeviceOuter(_LocalFakeOuter):
+        def execute_idempotent_command(
+            self,
+            command: str,
+            user: str | None = None,
+            cwd: Path | None = None,
+            env: Mapping[str, str] | None = None,
+            timeout_seconds: float | None = None,
+        ) -> CommandResult:
+            self.recorded_commands.append(command)
+            if command.startswith("docker volume inspect "):
+                # Docker's text/template prints "<no value>" for a missing
+                # nested field; an empty options map prints as an empty string.
+                return CommandResult(stdout="\n", stderr="", success=True)
+            return super().execute_idempotent_command(command, user, cwd, env, timeout_seconds)
+
+    outer = _EmptyDeviceOuter(
+        id=HostId.generate(),
+        connector=_make_local_connector(),
+        device_by_volume={},
+    )
+    with pytest.raises(MngrError, match="empty Options.device"):
+        resolve_volume_device(cast(OuterHostInterface, outer), "mngr-host-vol-no-bind-opts")
 
 
-def test_open_host_store_resolves_mountpoint(tmp_path: Path) -> None:
+def test_open_host_store_binds_to_inspected_device_path(tmp_path: Path) -> None:
     # open_host_store only consults the stubbed `docker volume inspect`; no
-    # real directory is required for resolving the mountpoint.
-    mountpoint = tmp_path / "_data"
-    outer = _outer_with_mountpoint(mountpoint, volume_name="mngr-host-vol-aaaa")
+    # real directory is required for resolving the bind-source path.
+    device_path = tmp_path / "subvol"
+    outer = _outer_with_device(device_path, volume_name="mngr-host-vol-aaaa")
     store = open_host_store(cast(OuterHostInterface, outer), "mngr-host-vol-aaaa")
-    assert store.mountpoint == mountpoint
+    assert store.mountpoint == device_path
 
 
 def test_write_then_read_host_record_roundtrips(tmp_path: Path) -> None:
@@ -390,7 +397,7 @@ def test_read_host_record_propagates_mngr_error(tmp_path: Path) -> None:
     outer = _FailingReadOuter(
         id=HostId.generate(),
         connector=_make_local_connector(),
-        mountpoint_by_volume={"unused": tmp_path},
+        device_by_volume={"unused": tmp_path},
     )
     store = VpsDockerHostStore(outer=outer, mountpoint=tmp_path)
     with pytest.raises(MngrError, match="simulated transient SSH failure"):
@@ -495,7 +502,7 @@ def test_list_persisted_agent_data_raises_on_shell_failure(tmp_path: Path) -> No
     outer = _FailingShellOuter(
         id=HostId.generate(),
         connector=_make_local_connector(),
-        mountpoint_by_volume={"unused": tmp_path},
+        device_by_volume={"unused": tmp_path},
     )
     store = VpsDockerHostStore(outer=outer, mountpoint=tmp_path)
     with pytest.raises(MngrError, match="list-agent-records"):
@@ -507,7 +514,7 @@ def test_list_persisted_agent_data_uses_one_round_trip(tmp_path: Path) -> None:
     outer = _LocalFakeOuter(
         id=HostId.generate(),
         connector=_make_local_connector(),
-        mountpoint_by_volume={"unused": tmp_path},
+        device_by_volume={"unused": tmp_path},
     )
     store = VpsDockerHostStore(outer=outer, mountpoint=tmp_path)
     store.persist_agent_data({"id": str(_AGENT_ID_1), "name": "first"})

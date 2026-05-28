@@ -7,6 +7,7 @@ keeps these unit tests fast and free of any real SSH/Docker dependency.
 """
 
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 from typing import cast
 
@@ -20,12 +21,21 @@ from imbue.mngr.interfaces.data_types import CommandResult
 from imbue.mngr.interfaces.host import OuterHostInterface
 from imbue.mngr.primitives import DockerBuilder
 from imbue.mngr.primitives import HostId
+from imbue.mngr_vps_docker.errors import VpsProvisioningError
 from imbue.mngr_vps_docker.instance import LABEL_HOST_ID
 from imbue.mngr_vps_docker.instance import _build_image_on_outer
+from imbue.mngr_vps_docker.instance import _check_directory_exists_on_outer
 from imbue.mngr_vps_docker.instance import _check_file_exists_on_outer
 from imbue.mngr_vps_docker.instance import _commit_container
+from imbue.mngr_vps_docker.instance import _create_bind_volume_on_outer
+from imbue.mngr_vps_docker.instance import _delete_btrfs_subvolume_on_outer
 from imbue.mngr_vps_docker.instance import _docker_inspect_running
 from imbue.mngr_vps_docker.instance import _exec_in_container
+from imbue.mngr_vps_docker.instance import _get_outer_free_disk_gb
+from imbue.mngr_vps_docker.instance import _install_btrfs_progs_on_outer
+from imbue.mngr_vps_docker.instance import _is_btrfs_progs_installed_on_outer
+from imbue.mngr_vps_docker.instance import _is_fstab_entry_present_on_outer
+from imbue.mngr_vps_docker.instance import _is_path_mounted_on_outer
 from imbue.mngr_vps_docker.instance import _is_retryable_rsync_error
 from imbue.mngr_vps_docker.instance import _pull_image
 from imbue.mngr_vps_docker.instance import _read_host_id_label_from_vps
@@ -34,8 +44,10 @@ from imbue.mngr_vps_docker.instance import _remove_container
 from imbue.mngr_vps_docker.instance import _remove_volume
 from imbue.mngr_vps_docker.instance import _run_container
 from imbue.mngr_vps_docker.instance import _run_docker
+from imbue.mngr_vps_docker.instance import _seed_host_volume_layout_on_outer
 from imbue.mngr_vps_docker.instance import _start_container
 from imbue.mngr_vps_docker.instance import _stop_container
+from imbue.mngr_vps_docker.instance import prepare_btrfs_on_outer
 
 
 class _Recorded(MutableModel):
@@ -162,13 +174,13 @@ def test_docker_inspect_running_returns_false_when_command_fails() -> None:
 
 def test_check_file_exists_returns_true_when_test_succeeds() -> None:
     outer = _outer(CommandResult(stdout="", stderr="", success=True))
-    assert _check_file_exists_on_outer(outer, "/tmp/some-file") is True
+    assert _check_file_exists_on_outer(outer, Path("/tmp/some-file")) is True
     assert _stub(outer).recorded[0].command.startswith("test -f")
 
 
 def test_check_file_exists_returns_false_when_test_fails() -> None:
     outer = _outer(CommandResult(stdout="", stderr="", success=False))
-    assert _check_file_exists_on_outer(outer, "/tmp/missing") is False
+    assert _check_file_exists_on_outer(outer, Path("/tmp/missing")) is False
 
 
 # =============================================================================
@@ -411,3 +423,385 @@ def test_read_host_id_label_raises_when_docker_ps_fails() -> None:
     outer = _outer(CommandResult(stdout="", stderr="docker daemon not running", success=False))
     with pytest.raises(MngrError, match="Failed to list mngr containers"):
         _read_host_id_label_from_vps(outer)
+
+
+# =============================================================================
+# Btrfs helpers (probe + mutate primitives used by _prepare_btrfs_on_outer)
+# =============================================================================
+
+
+def test_is_btrfs_progs_installed_returns_true_when_command_v_succeeds() -> None:
+    outer = _outer(CommandResult(stdout="", stderr="", success=True))
+    assert _is_btrfs_progs_installed_on_outer(outer) is True
+    assert "command -v mkfs.btrfs" in _stub(outer).recorded[0].command
+
+
+def test_is_btrfs_progs_installed_returns_false_when_command_v_fails() -> None:
+    outer = _outer(CommandResult(stdout="", stderr="not found", success=False))
+    assert _is_btrfs_progs_installed_on_outer(outer) is False
+
+
+def test_install_btrfs_progs_runs_apt_get_update_then_install() -> None:
+    outer = _outer(CommandResult(stdout="", stderr="", success=True))
+    _install_btrfs_progs_on_outer(outer)
+    cmd = _stub(outer).recorded[0].command
+    assert "apt-get update" in cmd
+    assert "apt-get install -y btrfs-progs" in cmd
+    assert "DEBIAN_FRONTEND=noninteractive" in cmd
+
+
+def test_install_btrfs_progs_raises_on_apt_failure() -> None:
+    outer = _outer(CommandResult(stdout="", stderr="E: Unable to locate package btrfs-progs", success=False))
+    with pytest.raises(VpsProvisioningError, match="btrfs-progs"):
+        _install_btrfs_progs_on_outer(outer)
+
+
+def test_get_outer_free_disk_gb_parses_df_output() -> None:
+    # ``df --output=avail -B 1`` prints "Avail\n<bytes>\n"; tail -n 1 leaves the bytes.
+    # 37 GiB + 500 MiB of free bytes must floor-divide to 37 (NOT round up to 38).
+    free_bytes = 37 * (1024**3) + 500 * (1024**2)
+    outer = _outer(CommandResult(stdout=f"     {free_bytes}\n", stderr="", success=True))
+    free = _get_outer_free_disk_gb(outer, Path("/"))
+    assert free == 37
+    cmd = _stub(outer).recorded[0].command
+    assert "df --output=avail -B 1 " in cmd
+    assert "tail -n 1" in cmd
+
+
+def test_get_outer_free_disk_gb_uses_pipefail_so_df_failure_is_surfaced() -> None:
+    # Regression: without ``set -o pipefail`` the pipeline's exit status is
+    # whatever ``tail -n 1`` returned (zero), masking a failing ``df`` and
+    # routing the failure into the wrong VpsProvisioningError branch.
+    outer = _outer(CommandResult(stdout="0\n", stderr="", success=True))
+    _get_outer_free_disk_gb(outer, Path("/"))
+    cmd = _stub(outer).recorded[0].command
+    assert "set -o pipefail" in cmd
+    # The pipeline must run under bash so ``set -o pipefail`` is honored
+    # (dash, the default ``/bin/sh`` on Debian, does not support it).
+    assert cmd.startswith("bash -c ")
+
+
+def test_get_outer_free_disk_gb_floors_to_whole_gib() -> None:
+    # 1 GiB - 1 byte free must report 0, not 1, so the caller's
+    # ``free_gb - reserved_gb`` math never over-allocates.
+    free_bytes = (1024**3) - 1
+    outer = _outer(CommandResult(stdout=f"{free_bytes}\n", stderr="", success=True))
+    assert _get_outer_free_disk_gb(outer, Path("/")) == 0
+
+
+def test_get_outer_free_disk_gb_raises_on_shell_failure() -> None:
+    outer = _outer(CommandResult(stdout="", stderr="df: /: No such file", success=False))
+    with pytest.raises(VpsProvisioningError, match="free disk space"):
+        _get_outer_free_disk_gb(outer, Path("/"))
+
+
+def test_get_outer_free_disk_gb_raises_on_unparseable_output() -> None:
+    outer = _outer(CommandResult(stdout="totally not an integer\n", stderr="", success=True))
+    with pytest.raises(VpsProvisioningError, match="Could not parse"):
+        _get_outer_free_disk_gb(outer, Path("/"))
+
+
+def test_is_path_mounted_returns_true_when_mountpoint_q_succeeds() -> None:
+    outer = _outer(CommandResult(stdout="", stderr="", success=True))
+    assert _is_path_mounted_on_outer(outer, Path("/mngr-btrfs")) is True
+    assert "mountpoint -q" in _stub(outer).recorded[0].command
+
+
+def test_is_path_mounted_returns_false_when_mountpoint_q_fails() -> None:
+    outer = _outer(CommandResult(stdout="", stderr="", success=False))
+    assert _is_path_mounted_on_outer(outer, Path("/mngr-btrfs")) is False
+
+
+def test_is_fstab_entry_present_returns_true_when_grep_succeeds() -> None:
+    outer = _outer(CommandResult(stdout="", stderr="", success=True))
+    assert _is_fstab_entry_present_on_outer(outer, Path("/var/lib/mngr-btrfs.img")) is True
+    cmd = _stub(outer).recorded[0].command
+    # grep -qE for the path anchored at line start and followed by whitespace;
+    # re.escape escapes both the dot and the hyphen in the path.
+    assert "grep -qE" in cmd
+    assert "/var/lib/mngr\\-btrfs\\.img[[:space:]]" in cmd
+    assert "/etc/fstab" in cmd
+
+
+def test_is_fstab_entry_present_returns_false_when_grep_fails() -> None:
+    outer = _outer(CommandResult(stdout="", stderr="", success=False))
+    assert _is_fstab_entry_present_on_outer(outer, Path("/var/lib/mngr-btrfs.img")) is False
+
+
+def test_check_directory_exists_uses_test_dash_d() -> None:
+    outer = _outer(CommandResult(stdout="", stderr="", success=True))
+    assert _check_directory_exists_on_outer(outer, Path("/some/dir")) is True
+    assert _stub(outer).recorded[0].command == "test -d /some/dir"
+
+
+def test_check_directory_exists_returns_false_when_missing() -> None:
+    outer = _outer(CommandResult(stdout="", stderr="", success=False))
+    assert _check_directory_exists_on_outer(outer, Path("/missing")) is False
+
+
+def test_create_bind_volume_runs_docker_volume_create_with_bind_opts() -> None:
+    outer = _outer(CommandResult(stdout="my-vol\n", stderr="", success=True))
+    _create_bind_volume_on_outer(outer, volume_name="my-vol", device_path=Path("/mngr-btrfs/abcd"))
+    cmd = _stub(outer).recorded[0].command
+    assert "docker volume create" in cmd
+    assert "--driver local" in cmd
+    assert "--opt type=none" in cmd
+    assert "--opt device=/mngr-btrfs/abcd" in cmd
+    assert "--opt o=bind" in cmd
+    assert "my-vol" in cmd
+
+
+def test_create_bind_volume_raises_on_docker_failure() -> None:
+    outer = _outer(CommandResult(stdout="", stderr="volume already exists", success=False))
+    with pytest.raises(MngrError, match="docker"):
+        _create_bind_volume_on_outer(outer, volume_name="my-vol", device_path=Path("/mngr-btrfs/abcd"))
+
+
+def test_seed_host_volume_layout_mkdirs_host_dir_and_agents() -> None:
+    outer = _outer(CommandResult(stdout="", stderr="", success=True))
+    _seed_host_volume_layout_on_outer(outer, Path("/mngr-btrfs/abcd"))
+    cmd = _stub(outer).recorded[0].command
+    assert cmd.startswith("mkdir -p")
+    assert "/mngr-btrfs/abcd/host_dir" in cmd
+    assert "/mngr-btrfs/abcd/agents" in cmd
+
+
+def test_seed_host_volume_layout_raises_on_mkdir_failure() -> None:
+    outer = _outer(CommandResult(stdout="", stderr="permission denied", success=False))
+    with pytest.raises(MngrError, match="seed host volume"):
+        _seed_host_volume_layout_on_outer(outer, Path("/mngr-btrfs/abcd"))
+
+
+def test_delete_btrfs_subvolume_is_noop_when_path_missing() -> None:
+    # test -d returns failure -> the helper short-circuits without running the delete.
+    outer = _outer(CommandResult(stdout="", stderr="", success=False))
+    _delete_btrfs_subvolume_on_outer(outer, Path("/mngr-btrfs/missing"))
+    # Only one command was issued (the existence check); the delete was skipped.
+    assert len(_stub(outer).recorded) == 1
+    assert _stub(outer).recorded[0].command.startswith("test -d")
+
+
+def test_delete_btrfs_subvolume_runs_btrfs_delete_when_path_exists() -> None:
+    # Two responses in order: the test -d probe, then the btrfs subvolume delete.
+    outer = _outer(
+        CommandResult(stdout="", stderr="", success=True),
+        CommandResult(stdout="", stderr="", success=True),
+    )
+    _delete_btrfs_subvolume_on_outer(outer, Path("/mngr-btrfs/abcd"))
+    assert len(_stub(outer).recorded) == 2
+    assert "btrfs subvolume delete" in _stub(outer).recorded[1].command
+    assert "/mngr-btrfs/abcd" in _stub(outer).recorded[1].command
+
+
+def test_delete_btrfs_subvolume_raises_on_delete_failure() -> None:
+    # First response: test -d succeeds. Second response: btrfs subvolume delete fails.
+    outer = _outer(
+        CommandResult(stdout="", stderr="", success=True),
+        CommandResult(stdout="", stderr="ERROR: Could not destroy subvolume", success=False),
+    )
+    with pytest.raises(MngrError, match="btrfs subvolume delete"):
+        _delete_btrfs_subvolume_on_outer(outer, Path("/mngr-btrfs/abcd"))
+
+
+# =============================================================================
+# prepare_btrfs_on_outer (full setup pipeline)
+#
+# A scripted outer that picks a CommandResult per probe by matching substrings
+# in the command lets each test exercise a specific "state" of the VPS
+# (everything missing, everything already present, etc.) and assert on the
+# resulting sequence of mutating commands.
+# =============================================================================
+
+
+class _ScriptedOuter(MutableModel):
+    """Outer that returns canned responses keyed by substring of the issued command.
+
+    For each ``execute_idempotent_command`` call, the first key in ``script``
+    that appears in the command string supplies the response. Anything not
+    matching falls back to a default success (so calls we don't care about
+    sequencing for don't need a dedicated entry).
+    """
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    script: list[tuple[str, CommandResult]] = Field(default_factory=list)
+    recorded: list[str] = Field(default_factory=list)
+
+    def execute_idempotent_command(
+        self,
+        command: str,
+        user: str | None = None,
+        cwd: Any = None,
+        env: Any = None,
+        timeout_seconds: float | None = None,
+    ) -> CommandResult:
+        self.recorded.append(command)
+        for substring, response in self.script:
+            if substring in command:
+                return response
+        return CommandResult(stdout="", stderr="", success=True)
+
+
+def _scripted(script: list[tuple[str, CommandResult]]) -> OuterHostInterface:
+    return cast(OuterHostInterface, _ScriptedOuter(script=script))
+
+
+def _ok(stdout: str = "") -> CommandResult:
+    return CommandResult(stdout=stdout, stderr="", success=True)
+
+
+def _fail(stderr: str = "boom") -> CommandResult:
+    return CommandResult(stdout="", stderr=stderr, success=False)
+
+
+_TEST_HOST_ID = HostId.generate()
+_TEST_HOST_HEX = _TEST_HOST_ID.get_uuid().hex
+_TEST_MOUNT_PATH = Path("/mngr-btrfs")
+_TEST_LOOP_FILE = Path("/var/lib/mngr-btrfs.img")
+_TEST_RESERVED_GB = 20
+
+
+def _fresh_vps_script() -> list[tuple[str, CommandResult]]:
+    # Every probe reports "missing/not-yet" so each gated mutating step runs.
+    # Used by both fresh-vps tests below to share the canonical layout.
+    # df --output=avail -B 1 returns bytes; 100 GiB worth keeps the arithmetic
+    # in the assertions (free 100 - reserved 20 = 80 GiB loop file) easy to read.
+    return [
+        ("command -v mkfs.btrfs", _fail()),
+        ("test -f /var/lib/mngr-btrfs.img", _fail()),
+        ("df --output=avail", _ok(f"{100 * (1024**3)}\n")),
+        ("mountpoint -q", _fail()),
+        ("grep -qE", _fail()),
+        (f"test -d /mngr-btrfs/{_TEST_HOST_HEX}", _fail()),
+    ]
+
+
+def test_prepare_btrfs_on_outer_returns_per_host_subvolume_path() -> None:
+    outer = _scripted(_fresh_vps_script())
+    result = prepare_btrfs_on_outer(
+        outer,
+        host_id=_TEST_HOST_ID,
+        btrfs_mount_path=_TEST_MOUNT_PATH,
+        loop_file_path=_TEST_LOOP_FILE,
+        outer_disk_reserved_gb=_TEST_RESERVED_GB,
+    )
+    assert result == _TEST_MOUNT_PATH / _TEST_HOST_HEX
+
+
+def test_prepare_btrfs_on_outer_runs_every_mutating_step_on_fresh_vps() -> None:
+    outer = _scripted(_fresh_vps_script())
+    prepare_btrfs_on_outer(
+        outer,
+        host_id=_TEST_HOST_ID,
+        btrfs_mount_path=_TEST_MOUNT_PATH,
+        loop_file_path=_TEST_LOOP_FILE,
+        outer_disk_reserved_gb=_TEST_RESERVED_GB,
+    )
+    recorded = cast(_ScriptedOuter, outer).recorded
+    joined = "\n".join(recorded)
+    # Every mutating step must appear. Loop file size = 100GB free - 20GB reserved = 80GB.
+    assert "apt-get install -y btrfs-progs" in joined
+    assert "fallocate -l 80G /var/lib/mngr-btrfs.img" in joined
+    assert "mkfs.btrfs /var/lib/mngr-btrfs.img" in joined
+    assert "mount -o loop /var/lib/mngr-btrfs.img /mngr-btrfs" in joined
+    # The fstab line goes through shlex.quote so it ends up single-quoted as one arg.
+    assert "echo '/var/lib/mngr-btrfs.img  /mngr-btrfs  btrfs  loop,defaults  0 0' >> /etc/fstab" in joined
+    assert f"btrfs subvolume create /mngr-btrfs/{_TEST_HOST_HEX}" in joined
+
+
+def test_prepare_btrfs_on_outer_is_idempotent_when_everything_in_place() -> None:
+    # All probes succeed -> every step is skipped, no mutating commands issued.
+    outer = _scripted(
+        [
+            ("command -v mkfs.btrfs", _ok()),
+            ("test -f /var/lib/mngr-btrfs.img", _ok()),
+            ("mountpoint -q", _ok()),
+            ("grep -qE", _ok()),
+            (f"test -d /mngr-btrfs/{_TEST_HOST_HEX}", _ok()),
+        ]
+    )
+    prepare_btrfs_on_outer(
+        outer,
+        host_id=_TEST_HOST_ID,
+        btrfs_mount_path=_TEST_MOUNT_PATH,
+        loop_file_path=_TEST_LOOP_FILE,
+        outer_disk_reserved_gb=_TEST_RESERVED_GB,
+    )
+    recorded = cast(_ScriptedOuter, outer).recorded
+    # No mutating command was issued -- only probes ran. We assert this by
+    # listing the probe substrings and ensuring every recorded command starts
+    # with one of them (rather than substring-searching for ``mkfs.btrfs``
+    # which is also part of the ``command -v mkfs.btrfs`` probe).
+    probe_prefixes = (
+        "command -v",
+        "test -f",
+        "mkdir -p",
+        "mountpoint -q",
+        "grep -qE",
+        "test -d",
+    )
+    for cmd in recorded:
+        assert cmd.startswith(probe_prefixes), f"unexpected mutating command issued: {cmd!r}"
+
+
+def test_prepare_btrfs_on_outer_raises_when_free_space_below_reserve() -> None:
+    # Loop file missing forces the free-space check, which sees only 15 GiB < 20 GiB reserved.
+    outer = _scripted(
+        [
+            ("command -v mkfs.btrfs", _ok()),
+            ("test -f /var/lib/mngr-btrfs.img", _fail()),
+            ("df --output=avail", _ok(f"{15 * (1024**3)}\n")),
+        ]
+    )
+    with pytest.raises(VpsProvisioningError, match="Insufficient free space"):
+        prepare_btrfs_on_outer(
+            outer,
+            host_id=_TEST_HOST_ID,
+            btrfs_mount_path=_TEST_MOUNT_PATH,
+            loop_file_path=_TEST_LOOP_FILE,
+            outer_disk_reserved_gb=_TEST_RESERVED_GB,
+        )
+
+
+def test_prepare_btrfs_on_outer_raises_when_free_space_equal_to_reserve() -> None:
+    # Boundary: free == reserved means loop_file_size would be 0; reject.
+    outer = _scripted(
+        [
+            ("command -v mkfs.btrfs", _ok()),
+            ("test -f /var/lib/mngr-btrfs.img", _fail()),
+            ("df --output=avail", _ok(f"{20 * (1024**3)}\n")),
+        ]
+    )
+    with pytest.raises(VpsProvisioningError, match="Insufficient free space"):
+        prepare_btrfs_on_outer(
+            outer,
+            host_id=_TEST_HOST_ID,
+            btrfs_mount_path=_TEST_MOUNT_PATH,
+            loop_file_path=_TEST_LOOP_FILE,
+            outer_disk_reserved_gb=_TEST_RESERVED_GB,
+        )
+
+
+def test_prepare_btrfs_on_outer_skips_free_space_check_when_loop_file_present() -> None:
+    """Re-runs on an already-allocated VPS must not fail just because docker images filled the reserve."""
+    # No "df" entry in the script: if df is called the script falls back to
+    # default-success with empty stdout, which would crash the int-parse and
+    # fail the test loudly.
+    outer = _scripted(
+        [
+            ("command -v mkfs.btrfs", _ok()),
+            ("test -f /var/lib/mngr-btrfs.img", _ok()),
+            ("mountpoint -q", _ok()),
+            ("grep -qE", _ok()),
+            (f"test -d /mngr-btrfs/{_TEST_HOST_HEX}", _ok()),
+        ]
+    )
+    prepare_btrfs_on_outer(
+        outer,
+        host_id=_TEST_HOST_ID,
+        btrfs_mount_path=_TEST_MOUNT_PATH,
+        loop_file_path=_TEST_LOOP_FILE,
+        outer_disk_reserved_gb=_TEST_RESERVED_GB,
+    )
+    joined = "\n".join(cast(_ScriptedOuter, outer).recorded)
+    assert "df --output=avail" not in joined
