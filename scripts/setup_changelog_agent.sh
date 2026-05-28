@@ -11,7 +11,9 @@ set -euo pipefail
 # orchestration steps live in scripts/changelog_consolidation_prompt.md and
 # are executed by claude itself (running consolidate_changelog.py, summarizing
 # each project's new dated sections into its per-project CHANGELOG.md
-# [Unreleased], committing, pushing a branch, opening a PR). Claude's final
+# [Unreleased], committing, spawning a subagent to review the new bullets
+# for factual accuracy against the code, pushing a branch, opening a PR).
+# Claude's final
 # assistant message is a single JSON object describing the outcome
 # ({status, pr_url, notes}) -- visible in `mngr schedule run` stdout and
 # Modal logs, no separate state-volume artifact needed.

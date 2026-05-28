@@ -123,14 +123,32 @@ the right project's consolidated files.
    entry was written). `git add -A` and `git commit -m "Consolidate
    changelog entries (run <RUN_DATE>)"`.
 
-8. Capture the current branch name with `BRANCH=$(git rev-parse
+8. Run a one-pass changelog accuracy review on the bullets you just
+   added, to guard against stale or inaccurate entries. Use the Task tool
+   to spawn a single `general-purpose` subagent -- a fresh context, so it
+   reviews the bullets with eyes that did not write them. Give it exactly
+   this prompt: "Read `scripts/changelog_accuracy_reviewer.md` and follow
+   its instructions exactly. The base branch ref is `origin/main`; the
+   consolidation commit is at HEAD." You MUST explicitly wait for that
+   subagent to finish before continuing -- do not proceed in parallel. It
+   verifies each newly-added `CHANGELOG.md` bullet against the actual
+   code, corrects or removes inaccurate ones (and may collapse a bullet
+   that another materially supersedes), editing changelog files only, and
+   commits any corrections as its own separate commit. Capture its final
+   summary -- you will fold it into `notes` in the final step. If the
+   subagent cannot run or errors out, do NOT fail the run: the
+   consolidation commit is still valid; proceed to the next steps and
+   record the accuracy-review failure prominently in `notes`.
+
+9. Capture the current branch name with `BRANCH=$(git rev-parse
    --abbrev-ref HEAD)` and push it: `git push --set-upstream origin
    "$BRANCH"`. The schedule's auto-merge step ran `git fetch && checkout
    && merge origin/main` before this agent started, so the per-run
    branch is forked off current `origin/main` and the eventual PR diff
-   contains only the consolidation commit.
+   contains only this run's commits (the consolidation commit plus any
+   accuracy-review correction commit).
 
-9. Open a PR with `gh pr create --base main --title "Changelog
+10. Open a PR with `gh pr create --base main --title "Changelog
    consolidation (run <RUN_DATE>)" --body "Automated changelog
    consolidation run on <RUN_DATE>."`. Capture the URL from stdout
    into `PR_URL` while diverting stderr to a temp file, e.g.
@@ -141,6 +159,10 @@ the right project's consolidated files.
    non-zero, read `/tmp/gh_stderr` and emit a `failed` JSON object
    with that stderr content in `notes`.
 
-10. Emit your final JSON object: `{"status": "done", "pr_url":
-    "<PR_URL>", "notes": "Opened PR <PR_URL> for branch <BRANCH>."}`,
-    substituting the values from steps 8 and 9.
+11. Emit your final JSON object: `{"status": "done", "pr_url":
+    "<PR_URL>", "notes": "<summary>"}`, substituting the PR URL and branch
+    from steps 9 and 10. In `notes`, state that the PR was opened for the
+    branch, and include the changelog accuracy reviewer's summary from
+    step 8 (how many bullets it corrected, removed, or collapsed, and any
+    code concerns it flagged). If the accuracy review could not run, say
+    so here.
