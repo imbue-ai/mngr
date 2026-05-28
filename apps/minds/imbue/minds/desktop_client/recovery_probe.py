@@ -1,31 +1,29 @@
 """Recovery diagnostics probe.
 
-Powers the workspace-recovery page's diagnostics menu (Q1-Q7). On
-recovery-page load (and only then), minds runs a batched ``mngr exec``
-against the workspace's system-services agent that emits a single JSON
-payload describing:
+Powers the workspace-recovery page's diagnostics list. The endpoint runs
+a batched in-container probe via ``mngr exec`` and reads ``mngr list``
+state, then returns a flat list of named probes -- each capturing the
+question asked, the command (or pseudo-command label) that produced the
+data, the raw output captured, and a derived yes/no/unknown answer.
 
-- Q3: ``tmux ls`` (services tmux session listing).
-- Q4: whether ``/code/services.toml`` declares ``[services.system_interface]``.
-- Q5: whether anything is bound to the system-interface inner port (``ss -ltnp``).
-- Q6: the result of a localhost ``curl`` against the inner port.
+The recovery-page client renders each probe row as a question with a
+check / x / question-mark indicator and an expandable command + output
+panel. The page's restart-tier branching keys off a single derived
+``dispatch_tier`` field so the rendering stays a pure projection of the
+probe data, not a parallel set of natural-language fields.
 
-Q1 (host state) / Q2 (SSH reachable) / Q7 (plugin resolver entry) come from
-data minds already has -- ``mngr list --format json`` and the
-``EnvelopeStreamConsumer`` snapshot mirror -- and are merged into the
-endpoint response alongside the batched probe.
-
-The single sentinel ``===PROBE-READY===`` is printed before the JSON
-payload. If the sentinel is absent from stdout, minds treats the run as
-"SSH dead" -- the ``mngr exec`` plumbing returned without ever invoking
-the in-container script, so we have no in-container observations and the
-recovery page steers the user to a host restart rather than auto-dispatching
-surgical.
+The single sentinel ``===PROBE-READY===`` is printed before the in-container
+JSON payload. If the sentinel is absent from stdout, the "Can we run a
+command inside the container?" probe answers ``no`` -- the ``mngr exec``
+plumbing returned without ever invoking the in-container script, so we
+have no in-container observations and the page steers the user to a host
+restart rather than auto-dispatching surgical.
 """
 
 import base64
 import json
 import re
+from enum import Enum
 from functools import cache
 from pathlib import Path
 from typing import Final
@@ -42,8 +40,7 @@ PROBE_SENTINEL: Final[str] = "===PROBE-READY==="
 # subprocesses (``tmux ls`` / TOML parse / ``ss`` / ``curl``) whose
 # individual subprocess timeouts sum to a worst case of 1+1+2 = 4s, so the
 # 5s ceiling leaves a comfortable margin while still keeping a wedged
-# container from hanging the recovery UI. The endpoint surfaces a timeout
-# as ssh_dead, same as a missing sentinel.
+# container from hanging the recovery UI.
 PROBE_TIMEOUT_SECONDS: Final[float] = 5.0
 
 
@@ -53,37 +50,17 @@ PROBE_TIMEOUT_SECONDS: Final[float] = 5.0
 # ratchets that only inspect ``.py`` files. The script is then base64-encoded
 # in ``build_probe_shell_command`` so the outer ``mngr exec`` argv stays a
 # single shell-safe token without quoting headaches.
-#
-# Loaded lazily on first use (via ``functools.cache`` on the helper below)
-# rather than at module import: if the .txt file is missing (e.g. an
-# incomplete install), an eager read would raise during import and break
-# every importer of this module (app.py and the rest of the desktop-client
-# chain). Lazy load keeps the rest of the app working; only the
-# recovery-probe endpoint hits the missing file, where the FileNotFoundError
-# surfaces as a 500 from the host-health endpoint.
 _PROBE_SCRIPT_PATH: Final[Path] = Path(__file__).parent / "recovery_probe_script.txt"
 
 
 @cache
 def _get_probe_python_script() -> str:
-    """Return the inner-probe Python source, loading it from disk on first call.
-
-    Cached via ``functools.cache`` so the file is read at most once per
-    process even though every recovery-probe invocation calls through here.
-    Using ``functools.cache`` rather than a module-level mutable variable
-    avoids the ``global`` keyword, which the repo style guide forbids.
-    """
+    """Return the inner-probe Python source, loading it from disk on first call."""
     return _PROBE_SCRIPT_PATH.read_text(encoding="utf-8")
 
 
 def build_probe_shell_command() -> str:
-    """Return the shell command minds passes to ``mngr exec``.
-
-    Prints the sentinel, then base64-decodes and runs the inner Python
-    script. Base64 keeps the entire batched probe a single shell-safe
-    token, so we don't have to escape Python source through the layers of
-    ``mngr exec`` / sshd / the container shell.
-    """
+    """Return the shell command minds passes to ``mngr exec``."""
     encoded = base64.b64encode(_get_probe_python_script().encode("utf-8")).decode("ascii")
     return f"echo '{PROBE_SENTINEL}' && echo {encoded} | base64 -d | python3"
 
@@ -93,8 +70,7 @@ def build_probe_argv(mngr_binary: str, services_agent_id: AgentId) -> list[str]:
 
     ``--quiet`` suppresses mngr's own progress chatter so stdout starts
     with the sentinel directly. ``--no-start`` keeps us from accidentally
-    starting a stopped host just by probing it (the recovery page tier
-    logic owns the decision to restart).
+    starting a stopped host just by probing it.
     """
     return [
         mngr_binary,
@@ -108,55 +84,117 @@ def build_probe_argv(mngr_binary: str, services_agent_id: AgentId) -> list[str]:
     ]
 
 
-class ProbeRecord(FrozenModel):
-    """Parsed result of the in-container batched probe.
+class ProbeAnswer(str, Enum):
+    """yes / no / unknown answer for a single probe."""
 
-    ``ssh_dead`` is True when the sentinel was never seen on stdout --
-    either ``mngr exec`` could not reach the agent (SSH transport down)
-    or the run timed out before printing anything. In that case every
-    other field is None / its default.
+    YES = "yes"
+    NO = "no"
+    UNKNOWN = "unknown"
+
+
+class Probe(FrozenModel):
+    """A single diagnostic check.
+
+    Each probe is a (question, command, output, answer) tuple. The
+    recovery page renders the question as a row, the answer as a
+    check / x / ? glyph, and the command + output in an expander so the
+    operator can re-run the command outside minds to verify.
     """
 
-    ssh_dead: bool = Field(default=False, description="True when the sentinel is absent from stdout")
-    tmux_ls: str | None = Field(default=None, description="Stdout (and stderr on non-zero) of `tmux ls`")
-    tmux_error: str | None = Field(default=None, description="Python repr of any exception running tmux")
-    services_toml_declares_system_interface: bool | None = Field(
-        default=None,
-        description="True when [services.system_interface] exists in /code/services.toml",
+    question: str = Field(description="The yes/no/unknown question this probe answers.")
+    command: str = Field(
+        description=(
+            "Exact command (or short pseudo-command label for an internal "
+            "observation) that produced ``output``, for the operator to "
+            "re-run outside minds."
+        ),
     )
+    output: str = Field(description="Raw output captured for this probe.")
+    answer: ProbeAnswer = Field(description="Derived answer to the question.")
+
+
+class DispatchTier(str, Enum):
+    """How the recovery page should respond, derived from the probe answers."""
+
+    SURGICAL = "surgical"
+    """Container running and exec works -- restart the system-services agent."""
+
+    HOST = "host"
+    """Container is offline -- restart the host (no live work to interrupt)."""
+
+    MANUAL = "manual"
+    """Ambiguous -- show "Restart workspace" and require explicit user consent."""
+
+    MISCONFIGURED = "misconfigured"
+    """services.toml lacks [services.system_interface] -- a restart won't help."""
+
+
+class HostHealthResponse(FrozenModel):
+    """List of probes plus the derived restart tier.
+
+    Intentionally narrow: every datum the recovery page renders is a
+    ``Probe`` in ``probes``, and the page's branching reads only
+    ``dispatch_tier``. There are no parallel natural-language fields.
+    """
+
+    probes: tuple[Probe, ...] = Field(default=(), description="Ordered probe results to render in the diagnostics list.")
+    dispatch_tier: DispatchTier = Field(
+        default=DispatchTier.MANUAL,
+        description="Restart-tier classification derived from probe answers.",
+    )
+
+
+# -- Probe questions (canonical wording, shared with tests) ----------------
+
+
+_QUESTION_CONTAINER_RUNNING: Final[str] = "Is the workspace's container running?"
+_QUESTION_SERVICES_AGENT_REGISTERED: Final[str] = "Is the system-services agent registered?"
+_QUESTION_CAN_RUN_COMMANDS_INSIDE: Final[str] = "Can we run a command inside the container?"
+_QUESTION_SERVICES_TOML_DECLARES: Final[str] = "Does services.toml declare [services.system_interface]?"
+_QUESTION_PORT_LISTENING: Final[str] = "Is anything listening on the system-interface inner port?"
+_QUESTION_CURL_OK: Final[str] = "Does the system interface answer locally inside the container?"
+_QUESTION_PLUGIN_RESOLVER: Final[str] = "Has the system interface registered with the plugin resolver?"
+
+
+# -- Inner-probe payload parsing -------------------------------------------
+
+
+class _InContainerProbe(FrozenModel):
+    """Internal: parsed payload from the in-container batched probe.
+
+    Not exposed in the endpoint response; folded into probes 3-6 by
+    ``_build_probes_from_in_container``. ``sentinel_seen`` is the single
+    bit that distinguishes "probe ran" from "ssh dead" -- without it,
+    every other field is None.
+    """
+
+    sentinel_seen: bool = Field(default=False)
+    raw_stdout: str = Field(default="")
+    tmux_ls: str | None = Field(default=None)
+    tmux_error: str | None = Field(default=None)
+    services_toml_declares_system_interface: bool | None = Field(default=None)
     services_toml_path: str = Field(default="/code/services.toml")
-    services_toml_error: str | None = Field(default=None, description="Python repr of any exception parsing TOML")
-    inner_port: int | None = Field(
-        default=None,
-        description="Port parsed out of services.system_interface.command (--url http://host:PORT)",
-    )
-    port_listener: str | None = Field(
-        default=None,
-        description="Matching lines from `ss -ltnp` filtered to inner_port",
-    )
-    port_listener_error: str | None = Field(default=None, description="Python repr of any exception running ss")
-    curl_status: str | None = Field(default=None, description="HTTP status code from curl, as a string")
-    curl_error: str | None = Field(default=None, description="Python repr of any exception running curl")
-    raw_stdout: str = Field(default="", description="Full captured stdout from the batched probe, for the debug menu")
+    services_toml_error: str | None = Field(default=None)
+    inner_port: int | None = Field(default=None)
+    port_listener: str | None = Field(default=None)
+    port_listener_error: str | None = Field(default=None)
+    curl_status: str | None = Field(default=None)
+    curl_error: str | None = Field(default=None)
 
 
-def parse_probe_output(stdout: str | None) -> ProbeRecord:
-    """Parse the batched probe's stdout into a :class:`ProbeRecord`.
+def _parse_in_container_probe(stdout: str | None) -> _InContainerProbe:
+    """Parse the batched probe's stdout into a typed record.
 
-    Returns an ``ssh_dead=True`` record when stdout is None (the
-    underlying ``mngr exec`` could not be run at all) or the sentinel is
-    absent. Otherwise extracts the JSON payload that follows the sentinel
-    and folds it into the record.
+    Returns a record with ``sentinel_seen=False`` when stdout is None or
+    the sentinel never landed. Otherwise extracts the JSON payload that
+    follows the sentinel and folds it into the record.
     """
     if stdout is None:
-        return ProbeRecord(ssh_dead=True, raw_stdout="")
+        return _InContainerProbe(sentinel_seen=False, raw_stdout="")
     if PROBE_SENTINEL not in stdout:
-        return ProbeRecord(ssh_dead=True, raw_stdout=stdout)
+        return _InContainerProbe(sentinel_seen=False, raw_stdout=stdout)
 
     after = stdout.split(PROBE_SENTINEL, 1)[1]
-    # The first non-empty line after the sentinel is the JSON payload. Any
-    # extra trailing lines (the ``mngr exec`` per-agent footer when not
-    # quieted enough, or anything else) are tolerated.
     json_line: str | None = None
     for line in after.splitlines():
         candidate = line.strip()
@@ -165,16 +203,17 @@ def parse_probe_output(stdout: str | None) -> ProbeRecord:
         json_line = candidate
         break
     if json_line is None:
-        return ProbeRecord(ssh_dead=False, raw_stdout=stdout)
+        return _InContainerProbe(sentinel_seen=True, raw_stdout=stdout)
     try:
         payload = json.loads(json_line)
     except json.JSONDecodeError:
-        return ProbeRecord(ssh_dead=False, raw_stdout=stdout)
+        return _InContainerProbe(sentinel_seen=True, raw_stdout=stdout)
     if not isinstance(payload, dict):
-        return ProbeRecord(ssh_dead=False, raw_stdout=stdout)
+        return _InContainerProbe(sentinel_seen=True, raw_stdout=stdout)
 
-    return ProbeRecord(
-        ssh_dead=False,
+    return _InContainerProbe(
+        sentinel_seen=True,
+        raw_stdout=stdout,
         tmux_ls=_coerce_optional_str(payload.get("tmux_ls")),
         tmux_error=_coerce_optional_str(payload.get("tmux_error")),
         services_toml_declares_system_interface=_coerce_optional_bool(
@@ -187,7 +226,6 @@ def parse_probe_output(stdout: str | None) -> ProbeRecord:
         port_listener_error=_coerce_optional_str(payload.get("port_listener_error")),
         curl_status=_coerce_optional_str(payload.get("curl_status")),
         curl_error=_coerce_optional_str(payload.get("curl_error")),
-        raw_stdout=stdout,
     )
 
 
@@ -211,118 +249,14 @@ def _coerce_optional_int(value: object) -> int | None:
     return None
 
 
-class SshConnectionInfo(FrozenModel):
-    """SSH connection info for a single host, ready to render in the debug menu."""
-
-    host_id: str = Field(description="Host ID this SSH info belongs to")
-    user: str = Field(description="SSH username")
-    host: str = Field(description="SSH hostname")
-    port: int = Field(description="SSH port")
-    key_path: str = Field(default="", description="Path to the private key file")
-    command: str = Field(default="", description="Full ssh command string from mngr list")
-
-
-class HostHealthResponse(FrozenModel):
-    """Response from the host-health endpoint.
-
-    Backwards-compatible with the previous shape (``reachable`` /
-    ``host_offline``). The new fields are surfaced to the recovery page's
-    JS for misconfigured-tier classification and the diagnostics menu.
-    """
-
-    reachable: bool = Field(description="Host is RUNNING (surgical restart is appropriate)")
-    host_offline: bool = Field(description="Host is in an offline state (host restart non-destructive)")
-    host_state: str = Field(default="", description="Raw host state string from mngr list")
-    ssh_dead: bool = Field(default=False, description="Batched probe timed out / never saw sentinel")
-    is_misconfigured: bool = Field(
-        default=False,
-        description="services.toml does not declare [services.system_interface]; restart will not help",
-    )
-    services_agent_state: str = Field(default="", description="Lifecycle state of the system-services agent")
-    ssh_connections: tuple[SshConnectionInfo, ...] = Field(
-        default=(),
-        description="SSH connection info per host (only remote hosts; local hosts omit ssh)",
-    )
-    plugin_resolver_services: dict[str, str] = Field(
-        default_factory=dict,
-        description="Per-agent service map from the plugin's resolver snapshot, or {} if not yet seen",
-    )
-    plugin_resolver_has_services: bool = Field(
-        default=False,
-        description=(
-            "True iff the plugin's resolver has registered at least one service URL for this "
-            "agent. Distinct from ``len(plugin_resolver_services) > 0`` in spirit only -- this "
-            "field is named for what it means rather than asking the reader to compute it. False "
-            "could mean the plugin hasn't yet discovered the agent OR has discovered it but no "
-            "service has registered yet."
-        ),
-    )
-    mngr_list_command: str = Field(
-        default="",
-        description=(
-            "The exact shell-quoted ``mngr list`` command minds ran to populate ``host_state`` "
-            "etc., for the diagnostics menu. Empty when no listing was attempted (e.g. tests "
-            "that bypass the subprocess). Surfaced verbatim so the user can paste and re-run "
-            "outside minds to inspect what ``mngr`` itself saw."
-        ),
-    )
-    mngr_list_stdout: str = Field(
-        default="",
-        description=(
-            "Raw stdout from the ``mngr list`` subprocess. The same payload the host-health "
-            "endpoint parsed for everything below. Showing it on the diagnostics page lets the "
-            "user see exactly what the listing produced (which agents, which host states, which "
-            "per-provider errors) instead of relying on minds' summarization."
-        ),
-    )
-    mngr_list_stderr: str = Field(
-        default="",
-        description=(
-            "Raw stderr from the ``mngr list`` subprocess. Warnings (skipped hosts, "
-            "vultr-key-missing, ...) land here. Surfaced alongside stdout so the diagnostic "
-            "view matches what an operator would see in a terminal."
-        ),
-    )
-    mngr_list_exit_code: int | None = Field(
-        default=None,
-        description=(
-            "Exit code from the ``mngr list`` subprocess, or None when the subprocess could not "
-            "be spawned at all. Non-zero with valid stdout means the listing reported errors "
-            "via its ``errors`` field but still produced a usable payload."
-        ),
-    )
-    mngr_list_error: str | None = Field(
-        default=None,
-        description=(
-            "Non-None when ``mngr list`` did not exit cleanly: either the subprocess could not "
-            "be spawned, timed out, exited non-zero, or returned a payload whose ``errors`` "
-            "field was non-empty. The string is a best-effort human-readable summary "
-            "(stderr / exit code / first error message) intended for the diagnostics menu. "
-            "None means the listing was clean."
-        ),
-    )
-    probe: ProbeRecord = Field(default_factory=ProbeRecord, description="Parsed in-container probe result")
+# -- mngr-list extraction --------------------------------------------------
 
 
 _RUNNING_STATE: Final[str] = "RUNNING"
 _OFFLINE_HOST_STATES: Final[frozenset[str]] = frozenset({"STOPPED", "STOPPING", "CRASHED", "FAILED"})
 
 
-def classify_host_state(host_state: str) -> tuple[bool, bool]:
-    """Return ``(reachable, host_offline)`` for a raw host state string.
-
-    Mirrors the previous tiering in app.py's ``_classify_host_health`` so
-    the existing auto-dispatch behavior is preserved exactly.
-    """
-    upper = host_state.upper()
-    if upper == _RUNNING_STATE:
-        return True, False
-    if upper in _OFFLINE_HOST_STATES:
-        return False, True
-    return False, False
-
-
-def extract_agent_row(list_json: str | None, agent_id: AgentId) -> dict | None:
+def _extract_agent_row(list_json: str | None, agent_id: AgentId) -> dict | None:
     """Pull the row for ``agent_id`` from ``mngr list --format json`` output."""
     if list_json is None:
         return None
@@ -336,7 +270,7 @@ def extract_agent_row(list_json: str | None, agent_id: AgentId) -> dict | None:
     return None
 
 
-def extract_host_state(agent_row: dict | None) -> str:
+def _extract_host_state(agent_row: dict | None) -> str:
     """Read ``host.state`` from a row of ``mngr list --format json``."""
     if agent_row is None:
         return ""
@@ -349,11 +283,11 @@ def extract_host_state(agent_row: dict | None) -> str:
     return state
 
 
-def extract_services_agent_state(list_json: str | None, services_agent_id: AgentId | None) -> str:
+def _extract_services_agent_state(list_json: str | None, services_agent_id: AgentId | None) -> str:
     """Return the lifecycle state of the system-services agent from ``mngr list`` output."""
     if services_agent_id is None:
         return ""
-    row = extract_agent_row(list_json, services_agent_id)
+    row = _extract_agent_row(list_json, services_agent_id)
     if row is None:
         return ""
     state = row.get("state")
@@ -362,90 +296,270 @@ def extract_services_agent_state(list_json: str | None, services_agent_id: Agent
     return state
 
 
-def extract_ssh_connections(list_json: str | None) -> tuple[SshConnectionInfo, ...]:
-    """Return SSH connection info per unique host from ``mngr list`` output.
+# -- Per-probe builders ----------------------------------------------------
 
-    Local hosts (no ``host.ssh`` block) are omitted. Hosts that appear on
-    multiple agents are deduplicated by ``host.id``.
-    """
-    if list_json is None:
-        return ()
-    try:
-        agents = json.loads(list_json).get("agents", [])
-    except (json.JSONDecodeError, AttributeError):
-        return ()
-    seen: dict[str, SshConnectionInfo] = {}
-    for agent in agents:
-        if not isinstance(agent, dict):
-            continue
-        host = agent.get("host")
-        if not isinstance(host, dict):
-            continue
-        host_id = host.get("id")
-        if not isinstance(host_id, str) or host_id in seen:
-            continue
-        ssh = host.get("ssh")
-        if not isinstance(ssh, dict):
-            continue
-        user = ssh.get("user")
-        host_name = ssh.get("host")
-        port = ssh.get("port")
-        if not isinstance(user, str) or not isinstance(host_name, str) or not isinstance(port, int):
-            continue
-        key_path = ssh.get("key_path")
-        command = ssh.get("command")
-        seen[host_id] = SshConnectionInfo(
-            host_id=host_id,
-            user=user,
-            host=host_name,
-            port=port,
-            key_path=key_path if isinstance(key_path, str) else "",
-            command=command if isinstance(command, str) else "",
+
+def _build_container_running_probe(host_state: str, mngr_list_command: str) -> Probe:
+    """Probe 1: host.state from ``mngr list``."""
+    upper = host_state.upper()
+    if upper == _RUNNING_STATE:
+        answer = ProbeAnswer.YES
+    elif upper in _OFFLINE_HOST_STATES:
+        answer = ProbeAnswer.NO
+    else:
+        answer = ProbeAnswer.UNKNOWN
+    output = host_state or "(host row missing from mngr list)"
+    return Probe(
+        question=_QUESTION_CONTAINER_RUNNING,
+        command=mngr_list_command or "(mngr list --format json)",
+        output=output,
+        answer=answer,
+    )
+
+
+def _build_services_agent_registered_probe(
+    list_json: str | None,
+    services_agent_id: AgentId | None,
+    mngr_list_command: str,
+) -> Probe:
+    """Probe 2: presence + lifecycle state of the system-services agent."""
+    services_state = _extract_services_agent_state(list_json, services_agent_id)
+    if services_agent_id is None:
+        answer = ProbeAnswer.UNKNOWN
+        output = "(no system-services agent id known -- discovery has not surfaced one)"
+    elif services_state:
+        answer = ProbeAnswer.YES
+        output = f"state={services_state}"
+    else:
+        answer = ProbeAnswer.NO
+        output = "(system-services agent absent from mngr list)"
+    return Probe(
+        question=_QUESTION_SERVICES_AGENT_REGISTERED,
+        command=mngr_list_command or "(mngr list --format json)",
+        output=output,
+        answer=answer,
+    )
+
+
+def _build_can_run_commands_probe(in_container: _InContainerProbe, mngr_exec_command: str) -> Probe:
+    """Probe 3: did the ``mngr exec`` sentinel reach stdout?"""
+    answer = ProbeAnswer.YES if in_container.sentinel_seen else ProbeAnswer.NO
+    if in_container.sentinel_seen:
+        output = f"sentinel '{PROBE_SENTINEL}' observed on stdout"
+    elif in_container.raw_stdout:
+        output = f"sentinel '{PROBE_SENTINEL}' NOT observed; raw stdout:\n{in_container.raw_stdout}"
+    else:
+        output = f"sentinel '{PROBE_SENTINEL}' NOT observed; stdout was empty (mngr exec returned without invoking the in-container script)"
+    return Probe(
+        question=_QUESTION_CAN_RUN_COMMANDS_INSIDE,
+        command=mngr_exec_command,
+        output=output,
+        answer=answer,
+    )
+
+
+def _build_services_toml_probe(in_container: _InContainerProbe) -> Probe:
+    """Probe 4: does services.toml declare [services.system_interface]?"""
+    if not in_container.sentinel_seen:
+        return Probe(
+            question=_QUESTION_SERVICES_TOML_DECLARES,
+            command=f"python3 -c 'tomllib.load(open({in_container.services_toml_path!r}, \"rb\"))'",
+            output="(in-container probe did not run)",
+            answer=ProbeAnswer.UNKNOWN,
         )
-    return tuple(seen.values())
+    if in_container.services_toml_error is not None:
+        return Probe(
+            question=_QUESTION_SERVICES_TOML_DECLARES,
+            command=f"python3 -c 'tomllib.load(open({in_container.services_toml_path!r}, \"rb\"))'",
+            output=f"error: {in_container.services_toml_error}",
+            answer=ProbeAnswer.UNKNOWN,
+        )
+    if in_container.services_toml_declares_system_interface is True:
+        answer = ProbeAnswer.YES
+        output = "[services.system_interface] is declared"
+    elif in_container.services_toml_declares_system_interface is False:
+        answer = ProbeAnswer.NO
+        output = "[services.system_interface] is MISSING"
+    else:
+        answer = ProbeAnswer.UNKNOWN
+        output = "(no declaration data returned)"
+    return Probe(
+        question=_QUESTION_SERVICES_TOML_DECLARES,
+        command=f"python3 -c 'tomllib.load(open({in_container.services_toml_path!r}, \"rb\"))'",
+        output=output,
+        answer=answer,
+    )
+
+
+def _build_port_listening_probe(in_container: _InContainerProbe) -> Probe:
+    """Probe 5: ss -ltnp filtered to the inner port."""
+    port_label = "?" if in_container.inner_port is None else str(in_container.inner_port)
+    command = f"ss -ltnp | grep ':{port_label}'"
+    if not in_container.sentinel_seen:
+        return Probe(
+            question=_QUESTION_PORT_LISTENING,
+            command=command,
+            output="(in-container probe did not run)",
+            answer=ProbeAnswer.UNKNOWN,
+        )
+    if in_container.inner_port is None:
+        return Probe(
+            question=_QUESTION_PORT_LISTENING,
+            command=command,
+            output="(could not parse inner port from services.toml command)",
+            answer=ProbeAnswer.UNKNOWN,
+        )
+    if in_container.port_listener_error is not None:
+        return Probe(
+            question=_QUESTION_PORT_LISTENING,
+            command=command,
+            output=f"error: {in_container.port_listener_error}",
+            answer=ProbeAnswer.UNKNOWN,
+        )
+    listener_output = in_container.port_listener or ""
+    if listener_output.strip():
+        return Probe(
+            question=_QUESTION_PORT_LISTENING,
+            command=command,
+            output=listener_output,
+            answer=ProbeAnswer.YES,
+        )
+    return Probe(
+        question=_QUESTION_PORT_LISTENING,
+        command=command,
+        output="(no LISTEN entry for the inner port)",
+        answer=ProbeAnswer.NO,
+    )
+
+
+def _build_curl_probe(in_container: _InContainerProbe) -> Probe:
+    """Probe 6: curl http://localhost:<port>/."""
+    port_label = "?" if in_container.inner_port is None else str(in_container.inner_port)
+    command = f"curl -m1 -s -o /dev/null -w '%{{http_code}}' http://localhost:{port_label}/"
+    if not in_container.sentinel_seen:
+        return Probe(
+            question=_QUESTION_CURL_OK,
+            command=command,
+            output="(in-container probe did not run)",
+            answer=ProbeAnswer.UNKNOWN,
+        )
+    if in_container.inner_port is None:
+        return Probe(
+            question=_QUESTION_CURL_OK,
+            command=command,
+            output="(could not parse inner port from services.toml command)",
+            answer=ProbeAnswer.UNKNOWN,
+        )
+    if in_container.curl_error is not None:
+        return Probe(
+            question=_QUESTION_CURL_OK,
+            command=command,
+            output=f"error: {in_container.curl_error}",
+            answer=ProbeAnswer.NO,
+        )
+    status = in_container.curl_status or ""
+    if status == "200":
+        return Probe(
+            question=_QUESTION_CURL_OK,
+            command=command,
+            output=f"HTTP {status}",
+            answer=ProbeAnswer.YES,
+        )
+    if status:
+        return Probe(
+            question=_QUESTION_CURL_OK,
+            command=command,
+            output=f"HTTP {status}",
+            answer=ProbeAnswer.NO,
+        )
+    return Probe(
+        question=_QUESTION_CURL_OK,
+        command=command,
+        output="(no response captured)",
+        answer=ProbeAnswer.UNKNOWN,
+    )
+
+
+def _build_plugin_resolver_probe(plugin_resolver_services: dict[str, str]) -> Probe:
+    """Probe 7: mngr_forward plugin's resolver snapshot for this agent."""
+    if plugin_resolver_services:
+        lines = [f"{k} = {v}" for k, v in plugin_resolver_services.items()]
+        return Probe(
+            question=_QUESTION_PLUGIN_RESOLVER,
+            command="(mngr_forward plugin resolver snapshot)",
+            output="\n".join(lines),
+            answer=ProbeAnswer.YES,
+        )
+    return Probe(
+        question=_QUESTION_PLUGIN_RESOLVER,
+        command="(mngr_forward plugin resolver snapshot)",
+        output="(no services registered with the plugin resolver for this agent)",
+        answer=ProbeAnswer.NO,
+    )
+
+
+# -- Top-level builder + dispatch tier -------------------------------------
+
+
+def _classify_dispatch_tier(probes: tuple[Probe, ...]) -> DispatchTier:
+    """Derive the dispatch tier from probe answers.
+
+    Ordered by precedence:
+
+    * MISCONFIGURED beats everything: a missing [services.system_interface]
+      block means no restart will help, so don't bury that behind any
+      transport / container check.
+    * HOST when the container is offline: nothing live to interrupt, so
+      a host restart can run unattended.
+    * MANUAL when the container claims running but we can't exec into it
+      (the SSH-dead path): a host restart bounces a live container so it
+      requires explicit user consent.
+    * SURGICAL when both container and exec are healthy: the system-services
+      agent can be restarted in place without touching the user's agents.
+    * MANUAL on anything else (ambiguous host states).
+    """
+    answers = {probe.question: probe.answer for probe in probes}
+    if answers.get(_QUESTION_SERVICES_TOML_DECLARES) == ProbeAnswer.NO:
+        return DispatchTier.MISCONFIGURED
+    container_running = answers.get(_QUESTION_CONTAINER_RUNNING)
+    if container_running == ProbeAnswer.NO:
+        return DispatchTier.HOST
+    can_run = answers.get(_QUESTION_CAN_RUN_COMMANDS_INSIDE)
+    if container_running == ProbeAnswer.YES and can_run == ProbeAnswer.YES:
+        return DispatchTier.SURGICAL
+    return DispatchTier.MANUAL
 
 
 def build_host_health_response(
     list_json: str | None,
     agent_id: AgentId,
     services_agent_id: AgentId | None,
-    probe: ProbeRecord,
+    in_container_stdout: str | None,
     plugin_resolver_services: dict[str, str],
-    mngr_list_error: str | None = None,
     mngr_list_command: str = "",
-    mngr_list_stdout: str = "",
-    mngr_list_stderr: str = "",
-    mngr_list_exit_code: int | None = None,
+    mngr_exec_command: str = "",
 ) -> HostHealthResponse:
-    """Assemble the host-health endpoint response from raw inputs.
+    """Assemble the host-health response (probes + dispatch tier) from raw inputs.
 
-    Pure function so the integration is easy to unit-test: mock the
-    ``mngr exec`` / ``mngr list`` stdout and the resolver snapshot, then
-    feed them in and assert on the response shape.
+    Pure function so the integration is straightforward to unit-test:
+    feed in raw ``mngr list`` / in-container stdout / plugin snapshot,
+    assert on the probe answers and the derived tier.
     """
-    agent_row = extract_agent_row(list_json, agent_id)
-    host_state = extract_host_state(agent_row)
-    reachable, host_offline = classify_host_state(host_state)
-    services_state = extract_services_agent_state(list_json, services_agent_id)
-    ssh_connections = extract_ssh_connections(list_json)
-    is_misconfigured = probe.services_toml_declares_system_interface is False
-    return HostHealthResponse(
-        reachable=reachable,
-        host_offline=host_offline,
-        host_state=host_state,
-        ssh_dead=probe.ssh_dead,
-        is_misconfigured=is_misconfigured,
-        services_agent_state=services_state,
-        ssh_connections=ssh_connections,
-        plugin_resolver_services=dict(plugin_resolver_services),
-        plugin_resolver_has_services=bool(plugin_resolver_services),
-        mngr_list_command=mngr_list_command,
-        mngr_list_stdout=mngr_list_stdout,
-        mngr_list_stderr=mngr_list_stderr,
-        mngr_list_exit_code=mngr_list_exit_code,
-        mngr_list_error=mngr_list_error,
-        probe=probe,
+    in_container = _parse_in_container_probe(in_container_stdout)
+    agent_row = _extract_agent_row(list_json, agent_id)
+    host_state = _extract_host_state(agent_row)
+    list_cmd = mngr_list_command or "(mngr list --format json)"
+    exec_cmd = mngr_exec_command or "(mngr exec <system-services-agent>)"
+    probes: tuple[Probe, ...] = (
+        _build_container_running_probe(host_state, list_cmd),
+        _build_services_agent_registered_probe(list_json, services_agent_id, list_cmd),
+        _build_can_run_commands_probe(in_container, exec_cmd),
+        _build_services_toml_probe(in_container),
+        _build_port_listening_probe(in_container),
+        _build_curl_probe(in_container),
+        _build_plugin_resolver_probe(plugin_resolver_services),
     )
+    return HostHealthResponse(probes=probes, dispatch_tier=_classify_dispatch_tier(probes))
 
 
 # Regex used in tests that need to assert on the embedded inner-port parse.

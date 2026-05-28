@@ -1,4 +1,5 @@
 import json
+import os
 import queue
 from pathlib import Path
 
@@ -15,14 +16,12 @@ from imbue.minds.desktop_client import recovery_probe as _recovery_probe
 from imbue.minds.desktop_client.agent_creator import AgentCreationStatus
 from imbue.minds.desktop_client.agent_creator import AgentCreator
 from imbue.minds.desktop_client.agent_creator import LOG_SENTINEL
-from imbue.minds.desktop_client.app import _HostHealthCache
-from imbue.minds.desktop_client.app import _LogProbeOnRecoveryCallback
 from imbue.minds.desktop_client.app import _build_mngr_host_state_argv
 from imbue.minds.desktop_client.app import _build_mngr_start_argv
 from imbue.minds.desktop_client.app import _build_mngr_stop_argv
 from imbue.minds.desktop_client.app import _build_workspace_list
+from imbue.minds.desktop_client.app import _destroying_agent_ids
 from imbue.minds.desktop_client.app import _run_restart_sequence
-from imbue.minds.desktop_client.app import _summarize_mngr_list_payload_errors
 from imbue.minds.desktop_client.app import create_desktop_client
 from imbue.minds.desktop_client.auth import FileAuthStore
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
@@ -40,7 +39,6 @@ from imbue.minds.desktop_client.cookie_manager import create_session_cookie
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.notification import NotificationDispatcher
-from imbue.minds.desktop_client.recovery_probe import HostHealthResponse
 from imbue.minds.desktop_client.request_events import RequestInbox
 from imbue.minds.desktop_client.request_events import create_latchkey_predefined_permission_request_event
 from imbue.minds.desktop_client.system_interface_health import AgentHealth
@@ -1215,6 +1213,33 @@ def test_chrome_events_sse_returns_workspaces_when_authenticated(tmp_path: Path)
     assert workspaces[0]["id"] == str(agent_id)
 
 
+def test_destroying_agent_ids_returns_ids_with_live_destroy(tmp_path: Path) -> None:
+    """An agent with an alive destroy pid + still in the resolver shows up as running.
+
+    main.js keys its "ok to navigate the user away from this workspace"
+    decision off this list, so the helper must surface every in-flight or
+    failed destroy id whose marker dir exists on disk.
+    """
+    agent_id = AgentId()
+    paths = WorkspacePaths(data_dir=tmp_path)
+    destroying_dir = tmp_path / "destroying" / str(agent_id)
+    destroying_dir.mkdir(parents=True)
+    # The current process pid is alive, so the helper sees the destroy as
+    # RUNNING (rather than DONE/FAILED, which would still be a valid hit but
+    # the running case is the most direct check).
+    (destroying_dir / "pid").write_text(str(os.getpid()))
+    (destroying_dir / "output.log").write_text("destroy in flight...\n")
+
+    ids = _destroying_agent_ids(paths, (agent_id,))
+    assert ids == [str(agent_id)]
+
+
+def test_destroying_agent_ids_returns_empty_when_paths_is_none() -> None:
+    """The test-server helper builds a minimal app without WorkspacePaths;
+    the helper must tolerate that without raising."""
+    assert _destroying_agent_ids(None, ()) == []
+
+
 # -- Tests for new account management and request routes --
 
 
@@ -1541,66 +1566,27 @@ def test_build_mngr_host_state_argv_omits_services_id_when_unresolved() -> None:
     assert include_value == f'id == "{agent}"'
 
 
-def test_summarize_mngr_list_payload_errors_extracts_provider_and_message() -> None:
-    """The payload-errors summary feeds the recovery page's "this is collateral
-    damage of another host" hint, so the provider name and original error
-    message must both be present."""
-    payload = json.dumps(
-        {
-            "agents": [],
-            "errors": [
-                {
-                    "exception_type": "HostConnectionError",
-                    "message": "SSH error (Error reading SSH protocol banner)",
-                    "provider_name": "docker",
-                }
-            ],
-        }
-    )
-    summary = _summarize_mngr_list_payload_errors(payload)
-    assert summary is not None
-    assert "docker" in summary
-    assert "HostConnectionError" in summary
-    assert "SSH error" in summary
-
-
-def test_summarize_mngr_list_payload_errors_returns_none_for_clean_listing() -> None:
-    """An empty errors array means a clean listing; the summary is None so the
-    diagnostic doesn't render a spurious error banner."""
-    payload = json.dumps({"agents": [], "errors": []})
-    assert _summarize_mngr_list_payload_errors(payload) is None
-    assert _summarize_mngr_list_payload_errors(None) is None
-
-
-def test_summarize_mngr_list_payload_errors_notes_additional_errors() -> None:
-    """The summary mentions how many other errors followed, so the reader knows
-    the first one is just a sample."""
-    payload = json.dumps(
-        {
-            "agents": [],
-            "errors": [
-                {"exception_type": "A", "message": "one", "provider_name": "p1"},
-                {"exception_type": "B", "message": "two", "provider_name": "p2"},
-                {"exception_type": "C", "message": "three", "provider_name": "p3"},
-            ],
-        }
-    )
-    summary = _summarize_mngr_list_payload_errors(payload)
-    assert summary is not None
-    assert "(+2 more)" in summary
-
-
 def _classify_host_health_compat(list_json: str | None, agent_id: AgentId) -> dict[str, bool]:
-    """Legacy-shape wrapper around the new host-state extraction / classification.
+    """Legacy-shape wrapper around the probe-list response.
 
-    Preserves the prior ``{"reachable": ..., "host_offline": ...}`` contract
-    so the existing classification cases stay covered after the refactor
-    that moved the logic into ``recovery_probe``.
+    Projects the new "container running?" probe + dispatch_tier classification
+    back onto the prior ``{"reachable": ..., "host_offline": ...}`` contract
+    so the existing host-state classification cases stay covered.
     """
-    agent_row = _recovery_probe.extract_agent_row(list_json, agent_id)
-    host_state = _recovery_probe.extract_host_state(agent_row)
-    reachable, host_offline = _recovery_probe.classify_host_state(host_state)
-    return {"reachable": reachable, "host_offline": host_offline}
+    response = _recovery_probe.build_host_health_response(
+        list_json=list_json,
+        agent_id=agent_id,
+        services_agent_id=None,
+        in_container_stdout=None,
+        plugin_resolver_services={},
+    )
+    for probe in response.probes:
+        if "container running" in probe.question:
+            return {
+                "reachable": probe.answer == _recovery_probe.ProbeAnswer.YES,
+                "host_offline": probe.answer == _recovery_probe.ProbeAnswer.NO,
+            }
+    return {"reachable": False, "host_offline": False}
 
 
 def test_classify_host_health_running_host_is_reachable() -> None:
@@ -2009,41 +1995,3 @@ def test_host_health_api_requires_authentication(tmp_path: Path) -> None:
     assert response.status_code == 403
 
 
-def test_log_probe_on_recovery_callback_sees_external_cache_writes() -> None:
-    """The callback must hold the cache holder by reference, not by Pydantic-copy.
-
-    The host-health endpoint writes to the shared _HostHealthCache on every
-    probe; the recovery callback reads from the same instance on a
-    non-HEALTHY -> HEALTHY transition. If the callback held a raw dict /
-    OrderedDict field, Pydantic validation would copy the input on
-    construction and the callback would never observe the endpoint's writes.
-    The _HostHealthCache wrapper sidesteps this -- Pydantic passes nested
-    models through by identity.
-    """
-    cache = _HostHealthCache()
-    callback = _LogProbeOnRecoveryCallback(cache=cache)
-    # The shared-reference invariant the docstring promises:
-    assert callback.cache is cache
-
-    # An external write after construction must be visible to the callback.
-    aid = AgentId.generate()
-    cache.put(aid, HostHealthResponse(reachable=True, host_offline=False))
-    callback(aid)
-    # After the callback fires, the entry is popped from the shared cache.
-    assert cache.pop(aid) is None
-
-
-def test_host_health_cache_evicts_oldest_on_overflow() -> None:
-    """LRU cap: the oldest entry is evicted once the cap is exceeded; touched entries survive."""
-    cache = _HostHealthCache(max_entries=2)
-    a, b, c = AgentId.generate(), AgentId.generate(), AgentId.generate()
-    cache.put(a, HostHealthResponse(reachable=True, host_offline=False))
-    cache.put(b, HostHealthResponse(reachable=True, host_offline=False))
-    # Refreshing `a` should move it to the most-recently-used slot; the next
-    # insert (`c`) must evict `b`, not `a`.
-    cache.put(a, HostHealthResponse(reachable=False, host_offline=True))
-    cache.put(c, HostHealthResponse(reachable=True, host_offline=False))
-
-    assert cache.pop(b) is None
-    assert cache.pop(a) is not None
-    assert cache.pop(c) is not None

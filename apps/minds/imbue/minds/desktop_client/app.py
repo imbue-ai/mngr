@@ -8,7 +8,6 @@ import shlex
 import subprocess
 import threading
 import time
-from collections import OrderedDict
 from collections.abc import AsyncGenerator
 from collections.abc import Mapping
 from contextlib import asynccontextmanager
@@ -28,9 +27,7 @@ from fastapi.responses import Response
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from loguru import logger
-from pydantic import ConfigDict
 from pydantic import Field
-from pydantic import PrivateAttr
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyExceptionGroup
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
@@ -71,10 +68,8 @@ from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.notification import NotificationRequest
 from imbue.minds.desktop_client.notification import NotificationUrgency
 from imbue.minds.desktop_client.recovery_probe import HostHealthResponse
-from imbue.minds.desktop_client.recovery_probe import ProbeRecord
 from imbue.minds.desktop_client.recovery_probe import build_host_health_response
 from imbue.minds.desktop_client.recovery_probe import build_probe_argv
-from imbue.minds.desktop_client.recovery_probe import parse_probe_output
 from imbue.minds.desktop_client.request_events import RequestInbox
 from imbue.minds.desktop_client.request_events import RequestType
 from imbue.minds.desktop_client.request_events import parse_request_event
@@ -1397,10 +1392,19 @@ async def _handle_chrome_events(
         try:
             # Send initial workspace list and request count
             session_store: MultiAccountSessionStore | None = request.app.state.session_store
+            paths: WorkspacePaths | None = request.app.state.api_v1_paths
             last_workspace_data = _build_workspace_list(backend_resolver, session_store)
+            last_destroying_ids = _destroying_agent_ids(paths, backend_resolver.list_known_workspace_ids())
             has_accounts = bool(session_store and session_store.list_accounts())
             yield "data: {}\n\n".format(
-                json.dumps({"type": "workspaces", "workspaces": last_workspace_data, "has_accounts": has_accounts})
+                json.dumps(
+                    {
+                        "type": "workspaces",
+                        "workspaces": last_workspace_data,
+                        "destroying_agent_ids": last_destroying_ids,
+                        "has_accounts": has_accounts,
+                    }
+                )
             )
             # Send the initial providers panel state so the chrome can render
             # the providers section before the first resolver change fires.
@@ -1475,9 +1479,19 @@ async def _handle_chrome_events(
                     yield "data: {}\n\n".format(json.dumps(_system_interface_status_payload(tracker, aid_str, status)))
 
                 current_data = _build_workspace_list(backend_resolver, session_store)
-                if current_data != last_workspace_data:
+                current_destroying_ids = _destroying_agent_ids(paths, backend_resolver.list_known_workspace_ids())
+                if current_data != last_workspace_data or current_destroying_ids != last_destroying_ids:
                     last_workspace_data = current_data
-                    yield "data: {}\n\n".format(json.dumps({"type": "workspaces", "workspaces": current_data}))
+                    last_destroying_ids = current_destroying_ids
+                    yield "data: {}\n\n".format(
+                        json.dumps(
+                            {
+                                "type": "workspaces",
+                                "workspaces": current_data,
+                                "destroying_agent_ids": current_destroying_ids,
+                            }
+                        )
+                    )
 
                 current_providers_data = _build_providers_state_payload(backend_resolver)
                 if current_providers_data != last_providers_data:
@@ -1594,6 +1608,23 @@ def _build_providers_state_payload(backend_resolver: BackendResolverInterface) -
     }
 
 
+def _destroying_agent_ids(paths: WorkspacePaths | None, known_workspace_ids: tuple[AgentId, ...]) -> list[str]:
+    """Return the agent ids currently in any in-flight / failed destroy state.
+
+    Pure read of the on-disk ``destroying/`` dir; never deletes records (the
+    landing-page render path owns DONE-record cleanup). The chrome SSE emits
+    this alongside the workspaces list so Electron can distinguish "the
+    workspace disappeared because we destroyed it" from "discovery transiently
+    lost it" -- the latter must not navigate the user's window away from a
+    workspace that is still around.
+    """
+    if paths is None:
+        return []
+    in_resolver = frozenset(known_workspace_ids)
+    records = list_destroying(paths, in_resolver)
+    return [str(agent_id) for agent_id, record in records.items() if record.status != DestroyingStatus.DONE]
+
+
 def _build_workspace_list(
     backend_resolver: BackendResolverInterface,
     session_store: MultiAccountSessionStore | None = None,
@@ -1655,13 +1686,6 @@ _RESTART_COMMAND_TIMEOUT_SECONDS: Final[float] = 120.0
 _SYSTEM_INTERFACE_STARTUP_WAIT_SECONDS: Final[float] = 15.0
 # Poll cadence while waiting for the system interface to come back post-restart.
 _RESTART_PROBE_INTERVAL_SECONDS: Final[float] = 1.0
-# Cap on the per-agent host-health probe cache. Entries are popped on a
-# non-HEALTHY -> HEALTHY transition by _LogProbeOnRecoveryCallback, but a
-# workspace that the user gives up on while RESTART_FAILED never recovers --
-# so without a cap, the cache grows monotonically with every distinct
-# workspace whose recovery page is ever visited. 256 is generous for any
-# realistic user (dozens of workspaces) and bounds pathological cases.
-_HOST_HEALTH_CACHE_MAX_ENTRIES: Final[int] = 256
 
 
 def _build_mngr_stop_argv(mngr_binary: str, agent_id: AgentId, is_host_restart: bool) -> list[str]:
@@ -1880,52 +1904,6 @@ def _capture_mngr_command(
     return finished.stdout
 
 
-def _summarize_mngr_list_payload_errors(list_json: str | None) -> str | None:
-    """Return a one-line summary of the ``errors`` array in ``mngr list`` JSON, or None.
-
-    With ``--on-error continue`` the subprocess can exit 0 (or non-zero, depending
-    on whether ``result.errors`` is empty) but still report per-provider failures
-    in the payload's ``errors`` field. Surfacing the first error's message lets
-    the recovery page tell the user that their workspace's apparent
-    unreachability is collateral damage of a different host's discovery failure
-    rather than a problem with their own workspace.
-    """
-    if list_json is None:
-        return None
-    try:
-        payload = json.loads(list_json)
-    except json.JSONDecodeError as e:
-        # mngr list emitting non-JSON on stdout is unexpected; surface it so a
-        # malformed payload is visible instead of a silent None that the
-        # diagnostic would otherwise render the same as "no errors".
-        logger.warning("Could not parse `mngr list` stdout as JSON: {}", e)
-        return None
-    if not isinstance(payload, dict):
-        return None
-    errors = payload.get("errors")
-    if not isinstance(errors, list) or not errors:
-        return None
-    first = errors[0]
-    if not isinstance(first, dict):
-        return None
-    message = first.get("message")
-    exception_type = first.get("exception_type")
-    provider_name = first.get("provider_name")
-    parts: list[str] = []
-    if isinstance(provider_name, str) and provider_name:
-        parts.append(f"provider={provider_name}")
-    if isinstance(exception_type, str) and exception_type:
-        parts.append(exception_type)
-    if isinstance(message, str) and message:
-        parts.append(message)
-    if not parts:
-        return None
-    summary = ": ".join(parts)
-    if len(errors) > 1:
-        summary = f"{summary} (+{len(errors) - 1} more)"
-    return summary
-
-
 def _await_system_interface_ready(agent_id: AgentId, mngr_forward_port: int, preauth_cookie: str) -> bool:
     """Poll the system interface through the plugin until it answers 200, or the wait budget elapses."""
     deadline = time.monotonic() + _SYSTEM_INTERFACE_STARTUP_WAIT_SECONDS
@@ -2106,15 +2084,11 @@ def _handle_host_health_probe_api(
     request: Request,
     auth_store: AuthStoreDep,
 ) -> Response:
-    """Layer-2 probe: classify the workspace host + run the recovery-diagnostics probe.
+    """Layer-2 probe: run each recovery-diagnostics probe, classify the dispatch tier.
 
-    Reads the host's lifecycle state from ``mngr list`` AND runs a batched
-    in-container probe via ``mngr exec`` (recovery-diagnostics: tmux ls,
-    services.toml parse, ss/curl on the inner port). Returns the full
-    :class:`HostHealthResponse` -- the recovery page uses ``reachable`` /
-    ``host_offline`` for auto-dispatch tiering, ``is_misconfigured`` /
-    ``ssh_dead`` to choose between the misconfigured / unresponsive
-    variants, and the rest of the payload for the diagnostics menu.
+    Returns a flat ``HostHealthResponse`` -- a list of named probes plus a
+    derived ``dispatch_tier``. The recovery page renders each probe as a
+    row and keys its restart-tier branching off ``dispatch_tier``.
     """
     if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
         return _json_error("Not authenticated", status_code=403)
@@ -2123,14 +2097,7 @@ def _handle_host_health_probe_api(
     if concurrency_group is None:
         return _json_error("Host health probe is unavailable in this configuration", status_code=503)
     response = _run_host_health_probe(aid, request, concurrency_group)
-    logger.info(
-        "Layer-2 host-state probe for {}: reachable={} host_offline={} ssh_dead={} is_misconfigured={}",
-        aid,
-        response.reachable,
-        response.host_offline,
-        response.ssh_dead,
-        response.is_misconfigured,
-    )
+    logger.info("Layer-2 host-state probe for {}: dispatch_tier={}", aid, response.dispatch_tier.value)
     return Response(
         content=response.model_dump_json(),
         media_type="application/json",
@@ -2145,12 +2112,8 @@ def _run_host_health_probe(
     """Run the batched ``mngr exec`` probe + ``mngr list`` lookup, return the response.
 
     Composes the response from three independent inputs: ``mngr list`` for
-    host state / services-agent state / SSH connection info, the batched
-    in-container ``mngr exec`` probe, and the plugin's resolver-snapshot
-    mirror. Caches the response on the ``_HostHealthCache`` held at
-    ``app.state.host_health_cache`` so the on-recovery callback can log
-    the most recent observation on the next non-HEALTHY -> HEALTHY
-    transition.
+    host state / services-agent state, the batched in-container
+    ``mngr exec`` probe, and the plugin's resolver-snapshot mirror.
     """
     env = dict(os.environ)
     env["MNGR_HOST_DIR"] = str(request.app.state.mngr_host_dir)
@@ -2159,156 +2122,26 @@ def _run_host_health_probe(
     services_agent_id = backend_resolver.get_system_services_agent_id(agent_id)
     list_argv = _build_mngr_host_state_argv(mngr_binary, agent_id, services_agent_id)
     list_command = shlex.join(list_argv)
-    finished, mngr_list_error = _run_mngr_subprocess(concurrency_group, list_argv, env)
-    if finished is not None:
-        list_json: str | None = finished.stdout
-        list_stdout = finished.stdout
-        list_stderr = finished.stderr
-        list_exit_code = finished.returncode
-    else:
-        # Subprocess could not be spawned at all -- mngr_list_error already
-        # carries the exec failure as a str(exc). Leave the captured streams
-        # empty so the diagnostics page shows the error alone.
-        list_json = None
-        list_stdout = ""
-        list_stderr = ""
-        list_exit_code = None
-    # When the listing exited 0 but reported per-provider errors in its JSON
-    # payload, surface those as ``mngr_list_error`` too -- the recovery page
-    # needs the failing host name to explain that the user's workspace is
-    # collateral damage of a sibling host failure, not a problem with their
-    # own workspace.
-    if mngr_list_error is None:
-        mngr_list_error = _summarize_mngr_list_payload_errors(list_json)
-    probe = _run_batched_probe(concurrency_group, mngr_binary, services_agent_id, env)
+    finished, _mngr_list_error = _run_mngr_subprocess(concurrency_group, list_argv, env)
+    list_json: str | None = finished.stdout if finished is not None else None
+    in_container_stdout = _run_batched_probe(concurrency_group, mngr_binary, services_agent_id, env)
     consumer: EnvelopeStreamConsumer | None = request.app.state.envelope_stream_consumer
     plugin_resolver_services: dict[str, str] = (
         consumer.get_resolver_snapshot_for_agent(agent_id) if consumer is not None else {}
     )
-    response = build_host_health_response(
+    if services_agent_id is not None:
+        exec_command = shlex.join(build_probe_argv(mngr_binary, services_agent_id))
+    else:
+        exec_command = "(mngr exec <system-services-agent>) -- no services agent id known"
+    return build_host_health_response(
         list_json=list_json,
         agent_id=agent_id,
         services_agent_id=services_agent_id,
-        probe=probe,
+        in_container_stdout=in_container_stdout,
         plugin_resolver_services=plugin_resolver_services,
-        mngr_list_error=mngr_list_error,
         mngr_list_command=list_command,
-        mngr_list_stdout=list_stdout,
-        mngr_list_stderr=list_stderr,
-        mngr_list_exit_code=list_exit_code,
+        mngr_exec_command=exec_command,
     )
-    cache: _HostHealthCache = request.app.state.host_health_cache
-    cache.put(agent_id, response)
-    return response
-
-
-class _HostHealthCache(MutableModel):
-    """Reference holder around the LRU-capped host-health response cache.
-
-    Exists to give the host-health endpoint and the on-recovery callback a
-    by-reference handle on the same OrderedDict. A Pydantic model with a
-    ``dict`` / ``OrderedDict`` field validates and *copies* the input on
-    construction, breaking the shared-reference contract; holding the
-    OrderedDict inside a ``PrivateAttr`` makes Pydantic leave it alone,
-    and passing this holder as a field to another Pydantic model passes
-    the holder through by identity (Pydantic does not copy nested models).
-
-    The cap and LRU semantics live here rather than at every call site so
-    the endpoint code is just ``cache.put(agent_id, response)`` and the
-    callback code is just ``cache.pop(agent_id)``.
-    """
-
-    max_entries: int = Field(
-        default=_HOST_HEALTH_CACHE_MAX_ENTRIES,
-        description="Cap on the number of cached entries; oldest evicted on overflow.",
-    )
-
-    _entries: "OrderedDict[str, HostHealthResponse]" = PrivateAttr(default_factory=OrderedDict)
-    # Guards the compound put / pop operations. CPython's GIL serializes each
-    # individual dict op, but ``put`` is three ops (setitem, move_to_end, an
-    # eviction loop) and can interleave with concurrent calls from the FastAPI
-    # threadpool (one per host-health probe) and the on-recovery callback
-    # thread. Without this lock two concurrent puts could each see ``len > max``
-    # and both evict, shrinking the cache below the cap.
-    _lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
-
-    model_config = ConfigDict(arbitrary_types_allowed=True)
-
-    def put(self, agent_id: AgentId, response: HostHealthResponse) -> None:
-        """Insert or refresh the cached response for ``agent_id`` (LRU on the back)."""
-        aid_str = str(agent_id)
-        with self._lock:
-            self._entries[aid_str] = response
-            self._entries.move_to_end(aid_str)
-            while len(self._entries) > self.max_entries:
-                # KeyError can only fire if the cache was emptied concurrently
-                # (impossible under the lock, but kept as a defense in depth).
-                try:
-                    self._entries.popitem(last=False)
-                except KeyError:
-                    break
-
-    def pop(self, agent_id: AgentId) -> HostHealthResponse | None:
-        """Remove and return the cached response for ``agent_id``, or None if not cached."""
-        with self._lock:
-            return self._entries.pop(str(agent_id), None)
-
-
-class _LogProbeOnRecoveryCallback(MutableModel):
-    """Callable that logs the cached probe at INFO on every non-HEALTHY -> HEALTHY recovery.
-
-    Registered with the health tracker so that when a workspace recovers
-    (from STUCK, RESTARTING, or RESTART_FAILED back to HEALTHY), the most
-    recent host-health probe response (cached by the host-health endpoint)
-    lands in a single INFO log line as a compact summary -- key host /
-    transport / config booleans plus the in-container port/curl status,
-    not the full ``HostHealthResponse`` JSON, which would otherwise carry
-    multi-KB ``mngr_list_*`` and ``probe.raw_stdout`` payloads with no
-    programmatic consumer. A "(no probe observation cached)" marker is
-    logged when the endpoint was never hit for this workspace.
-
-    Holds an :class:`_HostHealthCache` reference (a Pydantic model is passed
-    through by identity, unlike a raw OrderedDict field which Pydantic
-    would copy on construction), so the endpoint's writes are visible
-    here. ``_HostHealthCache`` serializes its own ``put`` and ``pop``
-    operations under an internal lock, so concurrent calls from the
-    FastAPI threadpool and this callback thread interleave safely.
-    """
-
-    cache: _HostHealthCache = Field(
-        frozen=True,
-        description="Shared cache populated by the host-health endpoint.",
-    )
-
-    model_config = ConfigDict(arbitrary_types_allowed=True)
-
-    def __call__(self, agent_id: AgentId) -> None:
-        response = self.cache.pop(agent_id)
-        if response is None:
-            logger.info("Workspace {} recovered (no probe observation cached)", agent_id)
-            return
-        # Compact summary rather than the full HostHealthResponse JSON: nothing
-        # consumes this log programmatically, and the full payload includes
-        # ``mngr_list_stdout`` / ``mngr_list_stderr`` / ``probe.raw_stdout``
-        # which can run to many KB on a real workspace. The fields below
-        # capture what was wrong at the last probe (host state, transport,
-        # config, services-agent lifecycle, plugin discovery, in-container
-        # port + curl) without the kitchen sink.
-        probe = response.probe
-        logger.info(
-            "Workspace {} recovered; final probe summary: "
-            "host_state={} ssh_dead={} is_misconfigured={} "
-            "services_agent_state={} plugin_has_services={} "
-            "probe_inner_port={} probe_curl_status={}",
-            agent_id,
-            response.host_state,
-            response.ssh_dead,
-            response.is_misconfigured,
-            response.services_agent_state,
-            response.plugin_resolver_has_services,
-            probe.inner_port,
-            probe.curl_status,
-        )
 
 
 def _run_batched_probe(
@@ -2316,25 +2149,23 @@ def _run_batched_probe(
     mngr_binary: str,
     services_agent_id: AgentId | None,
     env: dict[str, str],
-) -> ProbeRecord:
-    """Run the batched in-container probe via ``mngr exec``.
+) -> str | None:
+    """Run the batched in-container probe via ``mngr exec``, return raw stdout or None.
 
-    Returns a probe record with ``ssh_dead=True`` when the
-    system-services agent has not yet been discovered (so we can't even
-    address the in-container script), when ``mngr exec`` could not be
-    run, or when the sentinel never lands on stdout (SSH transport down
-    or container hang). Recovery-page client steers SSH-dead to the
-    host-restart tier.
+    Returns None when the system-services agent has not yet been discovered
+    (so we can't even address the in-container script) or when ``mngr exec``
+    could not be run. ``build_host_health_response`` parses the stdout into
+    probes; a None / sentinel-less stdout becomes a "no" answer on the
+    can-we-run-commands probe.
     """
     if services_agent_id is None:
-        return ProbeRecord(ssh_dead=True)
+        return None
     argv = build_probe_argv(mngr_binary, services_agent_id)
     # Suppress the per-failure WARNING from ``_run_mngr_subprocess``: the
     # probe argv embeds a long base64-encoded inner script that adds nothing
-    # to operator diagnostics, and the Layer-2 host-state INFO log emitted
-    # by the endpoint already captures the outcome (e.g. ``ssh_dead=True``).
-    stdout = _capture_mngr_command(concurrency_group, argv, env, log_failures=False)
-    return parse_probe_output(stdout)
+    # to operator diagnostics, and the Layer-2 dispatch_tier INFO log emitted
+    # by the endpoint already captures the outcome.
+    return _capture_mngr_command(concurrency_group, argv, env, log_failures=False)
 
 
 # -- Account management routes --
@@ -3177,22 +3008,6 @@ def create_desktop_client(
     app.state.system_interface_health_tracker = system_interface_health_tracker
     app.state.mngr_binary = mngr_binary
     app.state.mngr_host_dir = mngr_host_dir if mngr_host_dir is not None else Path.home() / ".mngr"
-    # Per-agent cache of the most recent host-health probe response. The
-    # host-health endpoint writes here on every probe; the recovery-log
-    # callback below reads on every non-HEALTHY -> HEALTHY transition
-    # (STUCK, RESTARTING, or RESTART_FAILED -> HEALTHY) so the final
-    # observed state of a recovered workspace gets a single INFO log line.
-    # Wrapped in an _HostHealthCache holder so the same instance is shared
-    # by the endpoint and the callback (a raw OrderedDict field on a
-    # Pydantic model is validate-copied on construction). The holder
-    # enforces the LRU cap so a workspace that the user gives up on
-    # (stays in RESTART_FAILED and never fires the recovery callback)
-    # cannot grow the cache without bound.
-    app.state.host_health_cache = _HostHealthCache()
-    if system_interface_health_tracker is not None:
-        system_interface_health_tracker.add_on_recovery_callback(
-            _LogProbeOnRecoveryCallback(cache=app.state.host_health_cache)
-        )
     # Populated with the running loop by _managed_lifespan on startup. Defined
     # up-front as None so background callbacks fired before startup (e.g. mngr
     # events produced between consumer.start() and uvicorn.run()) see a

@@ -285,9 +285,11 @@ def test_render_recovery_page_includes_diagnostics_dom_hooks() -> None:
     assert 'id="copy-diagnostics-btn"' in html
 
 
-def test_render_recovery_page_script_handles_misconfigured_tier() -> None:
-    """The recovery page's JS must implement the misconfigured branch and
-    surface a "Try restart anyway" secondary button without auto-dispatching.
+def test_render_recovery_page_script_branches_on_dispatch_tier() -> None:
+    """The recovery page reads ``dispatch_tier`` directly off the host-health response.
+
+    Each restart tier the server may report must have a corresponding
+    code branch in the page's JS.
     """
     html = render_recovery_page(
         agent_id=_AGENT_A,
@@ -295,16 +297,20 @@ def test_render_recovery_page_script_handles_misconfigured_tier() -> None:
         initial_status="stuck",
         initial_error="",
     )
-    assert "is_misconfigured" in html
+    assert "dispatch_tier" in html
+    for tier in ("'misconfigured'", "'host'", "'surgical'", "'manual'"):
+        assert tier in html, f"recovery page JS missing branch for {tier}"
+    # The shared landing places for each branch.
+    assert "renderMisconfigured" in html
+    assert "renderUnresponsive" in html
     assert "Workspace misconfigured" in html
     assert "Try restart anyway" in html
-    assert "renderMisconfigured" in html
 
 
-def test_render_recovery_page_script_handles_ssh_dead_path() -> None:
-    """The SSH-dead path renders the shared 'Workspace unresponsive' page and
-    routes the primary button to the host restart -- bouncing a live container
-    requires consent, so no auto-dispatch.
+def test_render_recovery_page_loading_hides_diagnostic_dropdown() -> None:
+    """renderLoading must hide the diagnostic dropdown so a stale prior diagnostic
+    does not linger on the page while a fresh check is in flight (issue: user
+    clicked Restart workspace and the previous probe's diagnostic stayed open).
     """
     html = render_recovery_page(
         agent_id=_AGENT_A,
@@ -312,31 +318,30 @@ def test_render_recovery_page_script_handles_ssh_dead_path() -> None:
         initial_status="stuck",
         initial_error="",
     )
-    # The script must actually branch on `data.ssh_dead` (not merely
-    # mention the string elsewhere), and the branch must call
-    # renderUnresponsive() so the user sees the shared "Workspace
-    # unresponsive" copy with no auto-dispatch.
-    assert "data.ssh_dead" in html
-    assert "renderUnresponsive" in html
+    # renderLoading clears the cached payload and hides the debug details.
+    loading_block_start = html.find("function renderLoading")
+    assert loading_block_start >= 0
+    loading_block_end = html.find("function ", loading_block_start + 1)
+    loading_block = html[loading_block_start:loading_block_end]
+    assert "show(debugDetailsEl, false)" in loading_block
+    assert "latestHealth = null" in loading_block
 
 
-def test_render_recovery_page_script_prefers_host_offline_over_ssh_dead() -> None:
-    """A STOPPED/CRASHED host also has ssh_dead=True (the in-container probe
-    couldn't run). The runProbe() branches must auto-dispatch the host
-    restart (host_offline branch) instead of falling into the manual-consent
-    ssh_dead branch -- pinning the relative order so a regression flags here.
+def test_render_recovery_page_restart_failed_also_runs_probe() -> None:
+    """The restart_failed entry must run the diagnostic probe so the page
+    shows both the error details and the diagnostics (in separate elements),
+    not just the error.
     """
     html = render_recovery_page(
         agent_id=_AGENT_A,
         return_to="",
-        initial_status="stuck",
-        initial_error="",
+        initial_status="restart_failed",
+        initial_error="Stop step of host restart failed: exited 1",
     )
-    host_offline_index = html.find("data.host_offline")
-    ssh_dead_index = html.find("data.ssh_dead")
-    assert host_offline_index >= 0, "host_offline branch must be present"
-    assert ssh_dead_index >= 0, "ssh_dead branch must be present"
-    assert host_offline_index < ssh_dead_index, (
-        "host_offline must be checked before ssh_dead in runProbe(), so a stopped "
-        "container's ssh_dead does not block the host-restart auto-dispatch."
-    )
+    # The restart_failed branch in the dispatcher calls runProbe(false) so
+    # the diagnostics are populated without auto-dispatching another restart.
+    assert "restart_failed" in html
+    assert "runProbe(false)" in html
+    # The error-details DOM hook is rendered alongside the diagnostic.
+    assert 'id="recovery-error"' in html
+    assert 'id="recovery-debug-details"' in html

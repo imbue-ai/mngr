@@ -122,3 +122,47 @@ Tiered system-interface restart for the minds recovery flow.
   already captured by the Layer-2 host-state INFO line via
   ``ssh_dead=True``. Restart-step and ``mngr list`` failures still emit
   the WARNING as before.
+- A transient discovery loss (e.g. SSH dying inside a docker container)
+  no longer kicks the user out of an open workspace window to the
+  landing page. Electron now only navigates the content view to landing
+  when the workspace was explicitly destroyed -- the chrome SSE
+  ``workspaces`` payload includes a ``destroying_agent_ids`` list, and
+  the desktop client remembers which agent ids it has ever seen
+  destroying. When a workspace disappears from the live workspaces list,
+  Electron checks that set; if the id is not there, the existing
+  recovery flow handles the unresponsive workspace via the
+  ``system_interface_status`` SSE event, with no nav.
+- Minds now caches the workspace-agent → system-services-agent mapping
+  to a persistent ``system_services_agent_cache.json`` under the data
+  directory whenever discovery surfaces both agents on the same host.
+  ``get_system_services_agent_id`` falls back to the cache when live
+  discovery has lost the pair (the SSH-dead failure mode), so a restart
+  can still address the system-services agent for ``mngr stop`` /
+  ``mngr start``. Without this, a restart attempted while the docker
+  provider could not enumerate agents would fail with "Could not locate
+  the system-services agent for this workspace."
+- Recovery diagnostics rewritten as a flat probe list. The host-health
+  endpoint now returns ``probes: [{question, command, output, answer},
+  ...]`` plus a derived ``dispatch_tier`` enum
+  (``surgical``/``host``/``manual``/``misconfigured``) instead of the
+  prior natural-language fields (``reachable``, ``host_offline``,
+  ``ssh_dead``, ``is_misconfigured``, ``host_state``,
+  ``services_agent_state``, ``ssh_connections``, ``mngr_list_*``,
+  ``plugin_resolver_*``). The recovery page renders each probe as a row
+  with a check/x/? glyph and an expander showing the exact command and
+  raw output, so the JSON object and the rendered view are kept simple
+  and consistent. The page's restart-tier dispatch is now a single
+  switch over ``dispatch_tier``. The cached probe-on-recovery INFO log
+  and its ``_HostHealthCache`` holder were dropped along the way.
+- The recovery page's "Loading workspace" state now hides the
+  Diagnostics dropdown and clears the cached host-health payload, so a
+  stale diagnostic from the previous tick does not linger on the page
+  while a fresh check is in flight (the previous behavior was to leave
+  the diagnostic visible after clicking "Restart workspace", which made
+  the dropdown look like fresh data when it was already stale).
+- The recovery page's restart-failed state now shows the failure error
+  details and the diagnostics list together (in separate elements),
+  instead of replacing the diagnostics with just the error. The page
+  re-runs the host-health probe (with auto-dispatch off so it does not
+  stack another restart attempt) so the user can see both the failure
+  reason and the current probe answers at once.

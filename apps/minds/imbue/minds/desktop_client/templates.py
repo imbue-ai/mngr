@@ -340,34 +340,30 @@ _RECOVERY_STYLE: Final[str] = """\
         font-size: 0.75rem;
         font-weight: 600;
       }
-      .ssh-list {
-        list-style: none;
-        padding: 0;
-        margin: 4px 0 0;
+      .probe-row {
+        margin: 0 12px 4px;
+        border: 1px solid #fde68a;
+        background: #fffdf6;
+        border-radius: 4px;
       }
-      .ssh-list li {
+      .probe-row summary {
         display: flex;
         align-items: center;
-        gap: 6px;
-        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-        font-size: 0.75rem;
-        padding: 2px 0;
+        gap: 8px;
+        padding: 6px 10px;
+        font-size: 0.8125rem;
+        font-weight: 500;
       }
-      .ssh-list code {
-        flex: 1;
-        white-space: nowrap;
-        overflow-x: auto;
-        background: #fef3c7;
-        padding: 1px 4px;
-        border-radius: 3px;
+      .probe-row .probe-question { flex: 1; }
+      .probe-glyph {
+        display: inline-block;
+        width: 1em;
+        text-align: center;
+        font-weight: 700;
       }
-      .copy-row-btn {
-        margin: 0;
-        padding: 2px 6px;
-        font-size: 0.7rem;
-        background: #d97706;
-      }
-      .copy-row-btn:hover { background: #b45309; }
+      .probe-glyph-yes { color: #047857; }
+      .probe-glyph-no { color: #b91c1c; }
+      .probe-glyph-unknown { color: #92400e; }
       button {
         margin-top: 16px;
         background: #18181b;
@@ -438,87 +434,32 @@ _RECOVERY_SCRIPT: Final[str] = """\
             .replace(/'/g, '&#39;');
         }
 
+        function answerGlyph(answer) {
+          if (answer === 'yes') return '<span class="probe-glyph probe-glyph-yes" aria-label="yes">&#x2713;</span>';
+          if (answer === 'no') return '<span class="probe-glyph probe-glyph-no" aria-label="no">&#x2717;</span>';
+          return '<span class="probe-glyph probe-glyph-unknown" aria-label="unknown">?</span>';
+        }
+
         function renderDebugMenu(data) {
           if (!debugContentEl || !debugDetailsEl) return;
-          if (!data) {
+          if (!data || !Array.isArray(data.probes) || data.probes.length === 0) {
             debugContentEl.innerHTML = '';
             show(debugDetailsEl, false);
             return;
           }
-          var probe = data.probe || {};
-          var parts = [];
-          // Show the raw ``mngr list`` command and its output first. Every
-          // host-state-ish field below is derived from this -- if the user
-          // wants to know why a field is empty, they can read the listing
-          // directly instead of trusting minds' summarization.
-          if (data.mngr_list_command) {
-            var exitLabel = data.mngr_list_exit_code === null || data.mngr_list_exit_code === undefined
-              ? '(subprocess never spawned)'
-              : 'exit ' + data.mngr_list_exit_code;
-            var listBody = '$ ' + data.mngr_list_command + '\\n# ' + exitLabel;
-            if (data.mngr_list_error) {
-              listBody += '\\n# error: ' + data.mngr_list_error;
-            }
-            if (data.mngr_list_stderr) {
-              listBody += '\\n--- stderr ---\\n' + data.mngr_list_stderr.replace(/\\n$/, '');
-            }
-            if (data.mngr_list_stdout) {
-              listBody += '\\n--- stdout ---\\n' + data.mngr_list_stdout.replace(/\\n$/, '');
-            }
-            parts.push('<div class="debug-section"><h4>mngr list</h4><pre>'
-              + escapeHtml(listBody) + '</pre></div>');
-          }
-          parts.push('<div class="debug-section"><h4>Host state</h4><pre>'
-            + escapeHtml(data.host_state || 'unknown')
-            + ' (reachable=' + data.reachable + ', host_offline=' + data.host_offline + ')</pre></div>');
-          parts.push('<div class="debug-section"><h4>tmux ls</h4><pre>'
-            + escapeHtml(probe.tmux_ls || probe.tmux_error || '(no output)') + '</pre></div>');
-          var tomlBlock = (probe.services_toml_declares_system_interface === true)
-            ? '[services.system_interface] declared'
-            : (probe.services_toml_declares_system_interface === false
-                ? '[services.system_interface] MISSING'
-                : 'unknown');
-          if (probe.services_toml_error) {
-            tomlBlock += '\\n(error: ' + probe.services_toml_error + ')';
-          }
-          parts.push('<div class="debug-section"><h4>services.toml @ '
-            + escapeHtml(probe.services_toml_path || '/code/services.toml')
-            + '</h4><pre>' + escapeHtml(tomlBlock) + '</pre></div>');
-          parts.push('<div class="debug-section"><h4>Inner port ss -ltnp (port='
-            + escapeHtml(probe.inner_port === null || probe.inner_port === undefined ? 'unknown' : probe.inner_port)
-            + ')</h4><pre>' + escapeHtml(probe.port_listener || probe.port_listener_error || '(no output)') + '</pre></div>');
-          parts.push('<div class="debug-section"><h4>curl http://localhost:'
-            + escapeHtml(probe.inner_port === null || probe.inner_port === undefined ? '?' : probe.inner_port)
-            + '/</h4><pre>HTTP ' + escapeHtml(probe.curl_status || (probe.curl_error || 'no response')) + '</pre></div>');
-          var resolverEntries = data.plugin_resolver_services || {};
-          var resolverLines = Object.keys(resolverEntries).map(function (k) {
-            return k + ' = ' + resolverEntries[k];
+          // Each probe is one row: glyph + question, with an expander
+          // revealing the command that produced the answer and its raw output.
+          var rows = data.probes.map(function (probe) {
+            var glyph = answerGlyph(probe.answer);
+            var body = '$ ' + probe.command + '\\n\\n' + probe.output;
+            return '<details class="probe-row probe-row-' + escapeHtml(probe.answer || 'unknown') + '">'
+              + '<summary>' + glyph + '<span class="probe-question">'
+              + escapeHtml(probe.question) + '</span></summary>'
+              + '<pre>' + escapeHtml(body) + '</pre>'
+              + '</details>';
           });
-          var resolverLabel = data.plugin_resolver_has_services
-            ? resolverLines.join('\\n')
-            : '(no services registered with the plugin resolver yet)';
-          parts.push('<div class="debug-section"><h4>Plugin resolver entry</h4><pre>'
-            + escapeHtml(resolverLabel) + '</pre></div>');
-          var sshConns = data.ssh_connections || [];
-          if (sshConns.length > 0) {
-            var sshRows = sshConns.map(function (entry) {
-              var cmd = entry.command || ('ssh -i ' + entry.key_path + ' -p ' + entry.port + ' ' + entry.user + '@' + entry.host);
-              return '<li><code>' + escapeHtml(cmd) + '</code>'
-                + '<button type="button" class="copy-row-btn" data-copy="' + escapeHtml(cmd) + '">Copy</button></li>';
-            });
-            parts.push('<div class="debug-section"><h4>SSH</h4><ul class="ssh-list">'
-              + sshRows.join('') + '</ul></div>');
-          }
-          debugContentEl.innerHTML = parts.join('');
+          debugContentEl.innerHTML = rows.join('');
           show(debugDetailsEl, true);
-          // Wire per-row Copy buttons.
-          var copyRowBtns = debugContentEl.querySelectorAll('.copy-row-btn');
-          for (var i = 0; i < copyRowBtns.length; i += 1) {
-            copyRowBtns[i].addEventListener('click', function (e) {
-              var text = e.currentTarget.getAttribute('data-copy') || '';
-              if (navigator.clipboard) navigator.clipboard.writeText(text);
-            });
-          }
         }
 
         function copyDiagnostics() {
@@ -548,6 +489,12 @@ _RECOVERY_SCRIPT: Final[str] = """\
           show(spinnerEl, true);
           show(errorEl, false);
           show(hostBtn, false);
+          // A stale diagnostic from the previous tick would be misleading
+          // while we're in flight to a fresh check; hide it and drop the
+          // cached payload so renderDebugMenu starts blank next time.
+          show(debugDetailsEl, false);
+          if (debugContentEl) debugContentEl.innerHTML = '';
+          latestHealth = null;
         }
         // The shared "Workspace unresponsive" state -- shown for ambiguous-host
         // states, after a restart failure, and for the SSH-dead path (where
@@ -602,7 +549,12 @@ _RECOVERY_SCRIPT: Final[str] = """\
           }, renderDispatchError);
         }
 
-        function runProbe() {
+        // Fetch the host-health probe and populate the diagnostic. When
+        // ``autoDispatch`` is true (the live stuck/probe entry) we also pick
+        // a restart tier from ``dispatch_tier``; when it's false (the
+        // restart_failed entry) we only render the diagnostic alongside the
+        // existing failure-reason error block, so the user sees both.
+        function runProbe(autoDispatch) {
           renderLoading();
           fetch('/api/agents/' + encodeURIComponent(agentId) + '/host-health', {
             credentials: 'same-origin',
@@ -611,41 +563,29 @@ _RECOVERY_SCRIPT: Final[str] = """\
           }).then(function (data) {
             latestHealth = data || null;
             renderDebugMenu(latestHealth);
-            if (data && data.is_misconfigured) {
-              // services.toml lacks the system_interface declaration. No
-              // restart will recover this; surface the misconfigured tier and
-              // do NOT auto-dispatch.
+            var tier = data && data.dispatch_tier;
+            if (!autoDispatch) {
+              // restart_failed entry: render unresponsive so the failure
+              // reason and the diagnostics list both stay visible.
+              renderUnresponsive();
+              return;
+            }
+            if (tier === 'misconfigured') {
               renderMisconfigured();
               return;
             }
-            if (data && data.host_offline) {
-              // Container fully stopped: nothing is running, so a host restart
-              // just starts it back up -- dispatch it, no confirmation needed.
-              // Checked BEFORE ssh_dead because a stopped container also has
-              // ssh_dead set (the in-container probe couldn't run), and we
-              // want the auto-dispatch path, not the manual-consent one.
+            if (tier === 'host') {
+              // Container fully stopped: nothing live to interrupt, dispatch unattended.
               postRestart('/restart-host');
               return;
             }
-            if (data && data.ssh_dead) {
-              // The sentinel never arrived but the host is not offline:
-              // the container's SSH transport is down (or hung) while the
-              // host claims to be running. A surgical restart's `mngr stop`
-              // would just fail at the same SSH layer; a host restart
-              // bypasses that path but would bounce a live container, so
-              // we require explicit consent rather than auto-dispatching.
-              renderUnresponsive();
+            if (tier === 'surgical') {
+              // Container running, exec works: restart the system-services agent in place.
+              postRestart('/restart-system-interface');
               return;
             }
-            if (data && data.reachable) {
-              // Container running and SSH alive: the surgical system-interface
-              // restart can recover the workspace without interrupting agents.
-              postRestart('/restart-system-interface');
-            } else {
-              // Ambiguous host state: a host restart could interrupt running
-              // agents, so make the user confirm by clicking.
-              renderUnresponsive();
-            }
+            // 'manual' or anything else: require explicit user consent for a host restart.
+            renderUnresponsive();
           }, function () {
             renderUnresponsive();
           });
@@ -662,13 +602,16 @@ _RECOVERY_SCRIPT: Final[str] = """\
           renderLoading();
           scheduleRefresh();
         } else if (initialStatus === 'restart_failed') {
-          renderUnresponsive();
+          // Show the failure reason AND the diagnostic together: re-run
+          // the probe with auto-dispatch off so the renderUnresponsive path
+          // also has the diagnostics populated.
+          runProbe(false);
         } else if (initialStatus === 'healthy') {
           // Degenerate: rendered HEALTHY with no return_to to 302 to. Offer a
           // manual restart rather than auto-dispatching one on a healthy page.
           renderUnresponsive();
         } else {
-          runProbe();
+          runProbe(true);
         }
       })();
 """

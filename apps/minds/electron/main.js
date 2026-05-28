@@ -26,6 +26,14 @@ let appMenuInstalled = false;
 let backendBaseUrl = null;
 let mngrForwardBaseUrl = null;
 let workspaceList = []; // [{id, name, account}]
+// Persistent set of agent ids we have ever seen in the chrome SSE's
+// ``destroying_agent_ids`` payload. Used to decide whether a workspace
+// disappearing from the workspaces list is an actual user-initiated destroy
+// (navigate the window to landing) or a transient discovery loss like an
+// SSH-dead docker container (leave the window alone -- the recovery flow
+// kicks in via the system_interface_status event). Never cleared once
+// added; a destroyed workspace's id is dead forever.
+const everSeenDestroying = new Set();
 let isShuttingDown = false;
 let initialBundle = null; // the first window created at startup
 let hasCompletedInitialStart = false;
@@ -835,29 +843,40 @@ function handleChromeSSEEvent(evt) {
       account: w.account ? String(w.account) : '',
     }));
     const newIds = new Set(workspaceList.map((w) => w.id));
+    // Anything currently in destroying state stays in the ever-seen set so
+    // we can recognize it as a real destroy once it later disappears from
+    // the workspaces list.
+    if (Array.isArray(evt.destroying_agent_ids)) {
+      for (const aid of evt.destroying_agent_ids) {
+        everSeenDestroying.add(String(aid));
+      }
+    }
 
-    // Handle windows for destroyed workspaces: close them if other
-    // windows exist, otherwise navigate to home so the user isn't left
-    // with nothing.
+    // Handle windows whose workspace disappeared. We ONLY navigate the user
+    // away when we have positive evidence the workspace was destroyed (the
+    // id was in destroying state at some prior tick). Otherwise (typical
+    // SSH-dead docker container with a transient discovery hiccup) we leave
+    // the content view alone -- the recovery flow handles the unresponsive
+    // workspace via the system_interface_status SSE event, no nav required.
     for (const oldId of oldIds) {
-      if (!newIds.has(oldId)) {
-        const affected = [];
-        for (const b of bundles) {
-          if (!b.window.isDestroyed() && b.currentWorkspaceId === oldId) {
-            affected.push(b);
-          }
+      if (newIds.has(oldId)) continue;
+      if (!everSeenDestroying.has(oldId)) continue;
+      const affected = [];
+      for (const b of bundles) {
+        if (!b.window.isDestroyed() && b.currentWorkspaceId === oldId) {
+          affected.push(b);
         }
-        const liveBundleCount = [...bundles].filter((b) => !b.window.isDestroyed()).length;
-        for (const b of affected) {
-          if (liveBundleCount - affected.length >= 1) {
-            b.window.close();
-          } else {
-            b.currentWorkspaceId = null;
-            if (b.contentView && !b.contentView.webContents.isDestroyed() && backendBaseUrl) {
-              b.contentView.webContents.loadURL(backendBaseUrl + '/');
-            }
-            updateOsTitle(b);
+      }
+      const liveBundleCount = [...bundles].filter((b) => !b.window.isDestroyed()).length;
+      for (const b of affected) {
+        if (liveBundleCount - affected.length >= 1) {
+          b.window.close();
+        } else {
+          b.currentWorkspaceId = null;
+          if (b.contentView && !b.contentView.webContents.isDestroyed() && backendBaseUrl) {
+            b.contentView.webContents.loadURL(backendBaseUrl + '/');
           }
+          updateOsTitle(b);
         }
       }
     }

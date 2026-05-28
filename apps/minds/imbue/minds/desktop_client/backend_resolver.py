@@ -272,6 +272,76 @@ def parse_service_log_records(text: str) -> list[ServiceLogRecord | ServiceDereg
     return records
 
 
+# -- Services-agent-id cache helpers --
+
+
+def _services_pairs_from_agents(agents: tuple[DiscoveredAgent, ...]) -> dict[str, str]:
+    """Map each workspace agent id to the system-services agent id on its host.
+
+    Skips hosts that contain only one of the two. Returns ``{}`` when no pair
+    can be observed in the current discovery snapshot.
+    """
+    services_by_host: dict[str, str] = {}
+    workspaces_by_host: dict[str, list[str]] = {}
+    for agent in agents:
+        host_id_str = str(agent.host_id)
+        if str(agent.agent_name) == SYSTEM_SERVICES_AGENT_NAME:
+            services_by_host[host_id_str] = str(agent.agent_id)
+        else:
+            workspaces_by_host.setdefault(host_id_str, []).append(str(agent.agent_id))
+    pairs: dict[str, str] = {}
+    for host_id_str, workspace_ids in workspaces_by_host.items():
+        services_id = services_by_host.get(host_id_str)
+        if services_id is None:
+            continue
+        for workspace_id in workspace_ids:
+            pairs[workspace_id] = services_id
+    return pairs
+
+
+def _read_services_agent_id_cache(path: Path) -> dict[str, str]:
+    """Read the persisted ``{workspace_id: services_id}`` map from ``path``.
+
+    Returns an empty dict for a missing file, a malformed JSON file, or any
+    JSON whose top level is not an object of string-keyed string values; we
+    never want a corrupt cache to break minds startup. The next successful
+    discovery snapshot rewrites the file.
+    """
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return {}
+    except OSError as exc:
+        logger.warning("Could not read services-agent-id cache from {}: {}", path, exc)
+        return {}
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        logger.warning("Services-agent-id cache at {} is not valid JSON: {}", path, exc)
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    return {str(k): str(v) for k, v in payload.items() if isinstance(k, str) and isinstance(v, str)}
+
+
+def _write_services_agent_id_cache(path: Path, cache: dict[str, str]) -> None:
+    """Persist the ``{workspace_id: services_id}`` map atomically to ``path``.
+
+    Writes to a sibling ``.tmp`` file then renames to defend against a crash
+    mid-write leaving a truncated file. A write failure logs a warning but
+    does not propagate -- the cache is a best-effort fallback, and crashing
+    the discovery thread over a transient I/O error would be worse than
+    losing one update.
+    """
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_text(json.dumps(cache, indent=2, sort_keys=True), encoding="utf-8")
+        tmp.replace(path)
+    except OSError as exc:
+        logger.warning("Could not write services-agent-id cache to {}: {}", path, exc)
+
+
 # -- MngrCliBackendResolver --
 
 
@@ -284,6 +354,17 @@ class MngrCliBackendResolver(BackendResolverInterface):
 
     All reads are thread-safe via an internal lock.
     """
+
+    services_agent_cache_path: Path | None = Field(
+        default=None,
+        description=(
+            "Optional JSON file recording each workspace agent's paired system-services "
+            "agent id. Populated as discovery surfaces both agents on the same host; "
+            "consulted by ``get_system_services_agent_id`` when live discovery has "
+            "transiently dropped the pair (e.g. when the container's SSH transport "
+            "goes down). When None, the cache is in-memory only."
+        ),
+    )
 
     _agents_result: ParsedAgentsResult = PrivateAttr(default_factory=ParsedAgentsResult)
     _services_by_agent: dict[str, dict[str, str]] = PrivateAttr(default_factory=dict)
@@ -300,6 +381,17 @@ class MngrCliBackendResolver(BackendResolverInterface):
     _on_change_callbacks: list[Callable[[], None]] = PrivateAttr(default_factory=list)
     _on_request_callbacks: list[Callable[[str, str], None]] = PrivateAttr(default_factory=list)
     _on_refresh_callbacks: list[Callable[[str, str], None]] = PrivateAttr(default_factory=list)
+    # workspace_agent_id_str -> services_agent_id_str. Populated under _lock by
+    # update_agents whenever discovery surfaces both agents on the same host.
+    # Read by get_system_services_agent_id as a fallback for the case where
+    # live discovery has lost the pair (the SSH-dead path that motivated this
+    # cache existing in the first place).
+    _services_agent_id_cache: dict[str, str] = PrivateAttr(default_factory=dict)
+
+    def model_post_init(self, __context: object) -> None:
+        """Load the persisted services-agent-id cache from disk, if configured."""
+        if self.services_agent_cache_path is not None:
+            self._services_agent_id_cache = _read_services_agent_id_cache(self.services_agent_cache_path)
 
     def add_on_change_callback(self, callback: Callable[[], None]) -> None:
         """Register a callback invoked whenever agent or service data changes.
@@ -350,10 +442,32 @@ class MngrCliBackendResolver(BackendResolverInterface):
         self._fire_on_change()
 
     def update_agents(self, result: ParsedAgentsResult) -> None:
-        """Replace the known agent list and SSH info. Thread-safe."""
+        """Replace the known agent list and SSH info. Thread-safe.
+
+        Also refreshes the services-agent-id cache from the new agent list: each
+        workspace agent that shares a host with a ``system-services`` agent
+        gets an entry written through to the on-disk cache (if configured).
+        Existing cache entries are preserved when the current snapshot can't
+        observe the pair (e.g. transient discovery loss); that is the entire
+        point of the cache.
+        """
+        path_to_write: Path | None = None
+        cache_to_write: dict[str, str] | None = None
         with self._lock:
             self._agents_result = result
             self._initial_discovery_done = True
+            new_pairs = _services_pairs_from_agents(result.discovered_agents)
+            if new_pairs:
+                changed = False
+                for workspace_id_str, services_id_str in new_pairs.items():
+                    if self._services_agent_id_cache.get(workspace_id_str) != services_id_str:
+                        self._services_agent_id_cache[workspace_id_str] = services_id_str
+                        changed = True
+                if changed and self.services_agent_cache_path is not None:
+                    path_to_write = self.services_agent_cache_path
+                    cache_to_write = dict(self._services_agent_id_cache)
+        if path_to_write is not None and cache_to_write is not None:
+            _write_services_agent_id_cache(path_to_write, cache_to_write)
         self._fire_on_change()
 
     def update_providers(
@@ -458,20 +572,26 @@ class MngrCliBackendResolver(BackendResolverInterface):
         """Return the ``system-services`` agent sharing the workspace agent's host.
 
         The workspace (claude) agent and the system-services agent run in the
-        same container, so they share a host id. Returns None when discovery
-        has not yet surfaced either agent.
+        same container, so they share a host id. The lookup uses the current
+        discovery snapshot first; if that snapshot does not contain the pair
+        (the typical SSH-dead failure mode that motivates the recovery flow),
+        falls back to the persisted services-agent-id cache so a restart can
+        still address the system-services agent.
         """
+        workspace_id_str = str(workspace_agent_id)
         with self._lock:
             host_id: str | None = None
             for agent in self._agents_result.discovered_agents:
                 if agent.agent_id == workspace_agent_id:
                     host_id = str(agent.host_id)
                     break
-            if host_id is None:
-                return None
-            for agent in self._agents_result.discovered_agents:
-                if str(agent.host_id) == host_id and str(agent.agent_name) == SYSTEM_SERVICES_AGENT_NAME:
-                    return agent.agent_id
+            if host_id is not None:
+                for agent in self._agents_result.discovered_agents:
+                    if str(agent.host_id) == host_id and str(agent.agent_name) == SYSTEM_SERVICES_AGENT_NAME:
+                        return agent.agent_id
+            cached = self._services_agent_id_cache.get(workspace_id_str)
+            if cached is not None:
+                return AgentId(cached)
             return None
 
     def get_agent_display_info(self, agent_id: AgentId) -> AgentDisplayInfo | None:

@@ -303,6 +303,106 @@ def test_get_system_services_agent_id_returns_none_when_not_discovered() -> None
     assert resolver.get_system_services_agent_id(AgentId.generate()) is None
 
 
+def test_services_agent_id_cache_persists_pair_seen_during_discovery(tmp_path: Path) -> None:
+    """First time discovery surfaces both agents on a host, the cache is written through to disk."""
+    cache_path = tmp_path / "system_services_agent_cache.json"
+    resolver = MngrCliBackendResolver(services_agent_cache_path=cache_path)
+    host = HostId.generate()
+    workspace_agent = AgentId.generate()
+    services_agent = AgentId.generate()
+    resolver.update_agents(
+        ParsedAgentsResult(
+            agent_ids=(workspace_agent, services_agent),
+            discovered_agents=(
+                _discovered_agent(host, workspace_agent, "my-claude-agent"),
+                _discovered_agent(host, services_agent, "system-services"),
+            ),
+        )
+    )
+
+    assert cache_path.exists()
+    persisted = json.loads(cache_path.read_text(encoding="utf-8"))
+    assert persisted == {str(workspace_agent): str(services_agent)}
+
+
+def test_services_agent_id_cache_falls_back_when_discovery_loses_the_pair(tmp_path: Path) -> None:
+    """After the cache has seen the pair, discovery losing both agents still resolves via the cache.
+
+    Reproduces the SSH-dead failure mode: the docker provider's enumeration
+    falls over and ``update_agents`` is called with an empty agent list. The
+    restart path must still be able to address the system-services agent so
+    a host restart can proceed.
+    """
+    cache_path = tmp_path / "system_services_agent_cache.json"
+    resolver = MngrCliBackendResolver(services_agent_cache_path=cache_path)
+    host = HostId.generate()
+    workspace_agent = AgentId.generate()
+    services_agent = AgentId.generate()
+    resolver.update_agents(
+        ParsedAgentsResult(
+            agent_ids=(workspace_agent, services_agent),
+            discovered_agents=(
+                _discovered_agent(host, workspace_agent, "my-claude-agent"),
+                _discovered_agent(host, services_agent, "system-services"),
+            ),
+        )
+    )
+    # SSH dies; discovery loses both agents.
+    resolver.update_agents(ParsedAgentsResult())
+
+    assert resolver.get_system_services_agent_id(workspace_agent) == services_agent
+
+
+def test_services_agent_id_cache_loads_from_disk_on_construction(tmp_path: Path) -> None:
+    """A persisted cache from a previous minds run is loaded at construction time."""
+    cache_path = tmp_path / "system_services_agent_cache.json"
+    workspace_agent = AgentId.generate()
+    services_agent = AgentId.generate()
+    cache_path.write_text(
+        json.dumps({str(workspace_agent): str(services_agent)}),
+        encoding="utf-8",
+    )
+
+    resolver = MngrCliBackendResolver(services_agent_cache_path=cache_path)
+
+    # No live discovery has happened yet, so the cache is the only source.
+    assert resolver.get_system_services_agent_id(workspace_agent) == services_agent
+
+
+def test_services_agent_id_cache_ignores_malformed_persisted_file(tmp_path: Path) -> None:
+    """A garbage cache file is treated as empty rather than crashing minds startup."""
+    cache_path = tmp_path / "system_services_agent_cache.json"
+    cache_path.write_text("not json {{{", encoding="utf-8")
+
+    resolver = MngrCliBackendResolver(services_agent_cache_path=cache_path)
+    assert resolver.get_system_services_agent_id(AgentId.generate()) is None
+
+
+def test_services_agent_id_cache_prefers_live_discovery_when_pair_present(tmp_path: Path) -> None:
+    """The cache is a fallback, not an override: live discovery wins when both agents are visible."""
+    cache_path = tmp_path / "system_services_agent_cache.json"
+    workspace_agent = AgentId.generate()
+    stale_services_agent = AgentId.generate()
+    current_services_agent = AgentId.generate()
+    cache_path.write_text(
+        json.dumps({str(workspace_agent): str(stale_services_agent)}),
+        encoding="utf-8",
+    )
+    resolver = MngrCliBackendResolver(services_agent_cache_path=cache_path)
+    host = HostId.generate()
+    resolver.update_agents(
+        ParsedAgentsResult(
+            agent_ids=(workspace_agent, current_services_agent),
+            discovered_agents=(
+                _discovered_agent(host, workspace_agent, "my-claude-agent"),
+                _discovered_agent(host, current_services_agent, "system-services"),
+            ),
+        )
+    )
+
+    assert resolver.get_system_services_agent_id(workspace_agent) == current_services_agent
+
+
 def test_mngr_cli_resolver_update_services_replaces_state() -> None:
     """Calling update_services replaces the service map for that agent."""
     resolver = MngrCliBackendResolver()

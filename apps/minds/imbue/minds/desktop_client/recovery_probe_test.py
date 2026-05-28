@@ -1,22 +1,19 @@
-"""Unit tests for the recovery-diagnostics probe parsing + classification."""
+"""Unit tests for the recovery-diagnostics probe builder + dispatch tier."""
 
 import json
 
+from imbue.minds.desktop_client.recovery_probe import DispatchTier
+from imbue.minds.desktop_client.recovery_probe import HostHealthResponse
 from imbue.minds.desktop_client.recovery_probe import PROBE_SENTINEL
+from imbue.minds.desktop_client.recovery_probe import Probe
+from imbue.minds.desktop_client.recovery_probe import ProbeAnswer
 from imbue.minds.desktop_client.recovery_probe import build_host_health_response
 from imbue.minds.desktop_client.recovery_probe import build_probe_argv
-from imbue.minds.desktop_client.recovery_probe import classify_host_state
-from imbue.minds.desktop_client.recovery_probe import extract_agent_row
-from imbue.minds.desktop_client.recovery_probe import extract_host_state
-from imbue.minds.desktop_client.recovery_probe import extract_services_agent_state
-from imbue.minds.desktop_client.recovery_probe import extract_ssh_connections
 from imbue.minds.desktop_client.recovery_probe import parse_inner_port_from_command
-from imbue.minds.desktop_client.recovery_probe import parse_probe_output
 from imbue.mngr.primitives import AgentId
 
 _AGENT_ID: AgentId = AgentId("agent-" + "0" * 31 + "1")
 _SERVICES_AGENT_ID: AgentId = AgentId("agent-" + "0" * 31 + "2")
-_OTHER_AGENT_ID: AgentId = AgentId("agent-" + "0" * 31 + "3")
 
 
 def _probe_stdout(payload: dict[str, object]) -> str:
@@ -24,55 +21,25 @@ def _probe_stdout(payload: dict[str, object]) -> str:
     return PROBE_SENTINEL + "\n" + json.dumps(payload) + "\n"
 
 
-# --- parse_probe_output ---------------------------------------------------
+def _list_json(host_state: str = "RUNNING", services_state: str | None = "RUNNING") -> str:
+    agents: list[dict[str, object]] = [{"id": str(_AGENT_ID), "host": {"state": host_state}}]
+    if services_state is not None:
+        agents.append({"id": str(_SERVICES_AGENT_ID), "state": services_state})
+    return json.dumps({"agents": agents, "errors": []})
 
 
-def test_parse_probe_output_returns_ssh_dead_when_stdout_is_none() -> None:
-    record = parse_probe_output(None)
-    assert record.ssh_dead is True
-    assert record.services_toml_declares_system_interface is None
+def _answer(response: HostHealthResponse, question_fragment: str) -> ProbeAnswer:
+    for probe in response.probes:
+        if question_fragment in probe.question:
+            return probe.answer
+    raise AssertionError(f"no probe matched fragment {question_fragment!r}; got {[p.question for p in response.probes]}")
 
 
-def test_parse_probe_output_returns_ssh_dead_when_sentinel_absent() -> None:
-    record = parse_probe_output("nothing interesting here\n")
-    assert record.ssh_dead is True
-    # Original stdout is preserved for the debug menu.
-    assert record.raw_stdout == "nothing interesting here\n"
-
-
-def test_parse_probe_output_extracts_full_payload() -> None:
-    payload: dict[str, object] = {
-        "tmux_ls": "svc-system_interface: 1 window",
-        "services_toml_declares_system_interface": True,
-        "services_toml_path": "/code/services.toml",
-        "inner_port": 8000,
-        "port_listener": 'LISTEN 0 128 *:8000 *:* users:(("python3",pid=10,fd=3))',
-        "curl_status": "200",
-    }
-    record = parse_probe_output(_probe_stdout(payload))
-    assert record.ssh_dead is False
-    assert record.services_toml_declares_system_interface is True
-    assert record.inner_port == 8000
-    assert record.port_listener is not None and "LISTEN" in record.port_listener
-    assert record.curl_status == "200"
-
-
-def test_parse_probe_output_handles_missing_services_toml() -> None:
-    payload: dict[str, object] = {
-        "tmux_ls": "",
-        "services_toml_declares_system_interface": False,
-        "inner_port": None,
-    }
-    record = parse_probe_output(_probe_stdout(payload))
-    assert record.ssh_dead is False
-    assert record.services_toml_declares_system_interface is False
-    assert record.inner_port is None
-
-
-def test_parse_probe_output_tolerates_malformed_json_after_sentinel() -> None:
-    record = parse_probe_output(PROBE_SENTINEL + "\nnot json\n")
-    assert record.ssh_dead is False
-    assert record.services_toml_declares_system_interface is None
+def _probe_for(response: HostHealthResponse, question_fragment: str) -> Probe:
+    for probe in response.probes:
+        if question_fragment in probe.question:
+            return probe
+    raise AssertionError(f"no probe matched fragment {question_fragment!r}")
 
 
 # --- inner-port regex -----------------------------------------------------
@@ -87,266 +54,285 @@ def test_parse_inner_port_returns_none_when_command_lacks_url_flag() -> None:
     assert parse_inner_port_from_command("system-interface") is None
 
 
-# --- classify_host_state --------------------------------------------------
-
-
-def test_classify_host_state_running_is_reachable() -> None:
-    assert classify_host_state("RUNNING") == (True, False)
-
-
-def test_classify_host_state_stopped_states_are_offline() -> None:
-    for state in ("STOPPED", "STOPPING", "CRASHED", "FAILED"):
-        assert classify_host_state(state) == (False, True), state
-
-
-def test_classify_host_state_ambiguous_is_neither() -> None:
-    for state in ("STARTING", "PAUSED", "", "DESTROYED", "UNAUTHENTICATED"):
-        assert classify_host_state(state) == (False, False), state
-
-
-# --- extract_* helpers ----------------------------------------------------
-
-
-def test_extract_agent_row_finds_matching_id() -> None:
-    list_json = json.dumps({"agents": [{"id": "agent-other"}, {"id": str(_AGENT_ID), "host": {"state": "RUNNING"}}]})
-    row = extract_agent_row(list_json, _AGENT_ID)
-    assert row is not None
-    assert row["id"] == str(_AGENT_ID)
-
-
-def test_extract_agent_row_returns_none_for_unknown_agent() -> None:
-    list_json = json.dumps({"agents": [{"id": "agent-other"}]})
-    assert extract_agent_row(list_json, _AGENT_ID) is None
-
-
-def test_extract_host_state_reads_nested_field() -> None:
-    row = {"id": str(_AGENT_ID), "host": {"state": "RUNNING"}}
-    assert extract_host_state(row) == "RUNNING"
-
-
-def test_extract_services_agent_state_returns_state_for_services_agent() -> None:
-    list_json = json.dumps(
-        {
-            "agents": [
-                {"id": str(_AGENT_ID), "state": "RUNNING"},
-                {"id": str(_SERVICES_AGENT_ID), "state": "WAITING"},
-            ]
-        }
-    )
-    assert extract_services_agent_state(list_json, _SERVICES_AGENT_ID) == "WAITING"
-
-
-def test_extract_services_agent_state_handles_none_agent_id() -> None:
-    list_json = json.dumps({"agents": []})
-    assert extract_services_agent_state(list_json, None) == ""
-
-
-def test_extract_ssh_connections_includes_remote_hosts_only() -> None:
-    list_json = json.dumps(
-        {
-            "agents": [
-                {
-                    "id": str(_AGENT_ID),
-                    "host": {
-                        "id": "host-1",
-                        "ssh": {
-                            "user": "root",
-                            "host": "1.2.3.4",
-                            "port": 22,
-                            "key_path": "/tmp/key",
-                            "command": "ssh -i /tmp/key -p 22 root@1.2.3.4",
-                        },
-                    },
-                },
-                # Local host: no ssh block.
-                {"id": str(_OTHER_AGENT_ID), "host": {"id": "host-local"}},
-            ]
-        }
-    )
-    conns = extract_ssh_connections(list_json)
-    assert len(conns) == 1
-    assert conns[0].user == "root"
-    assert conns[0].host == "1.2.3.4"
-    assert conns[0].port == 22
-    assert conns[0].host_id == "host-1"
-
-
-def test_extract_ssh_connections_dedupes_by_host_id() -> None:
-    """Two agents on the same remote host produce a single ssh entry."""
-    common_ssh = {
-        "user": "root",
-        "host": "1.2.3.4",
-        "port": 22,
-        "key_path": "/tmp/key",
-        "command": "ssh -i /tmp/key -p 22 root@1.2.3.4",
-    }
-    list_json = json.dumps(
-        {
-            "agents": [
-                {"id": str(_AGENT_ID), "host": {"id": "host-1", "ssh": common_ssh}},
-                {"id": str(_SERVICES_AGENT_ID), "host": {"id": "host-1", "ssh": common_ssh}},
-            ]
-        }
-    )
-    conns = extract_ssh_connections(list_json)
-    assert len(conns) == 1
-
-
 # --- build_probe_argv -----------------------------------------------------
 
 
 def test_build_probe_argv_targets_services_agent_with_timeout_and_no_start() -> None:
     argv = build_probe_argv("/usr/local/bin/mngr", _SERVICES_AGENT_ID)
     assert argv[:3] == ["/usr/local/bin/mngr", "exec", str(_SERVICES_AGENT_ID)]
-    # The probe must never auto-start a stopped host (that's the recovery
-    # tier's decision) and must run under a hard timeout.
     assert "--no-start" in argv
     assert "--timeout" in argv
     assert "--quiet" in argv
 
 
-# --- build_host_health_response ------------------------------------------
+# --- per-probe answers ----------------------------------------------------
 
 
-def test_build_host_health_response_misconfigured_when_services_toml_lacks_entry() -> None:
-    list_json = json.dumps({"agents": [{"id": str(_AGENT_ID), "host": {"state": "RUNNING"}}]})
-    probe = parse_probe_output(_probe_stdout({"services_toml_declares_system_interface": False, "inner_port": None}))
+def test_container_running_probe_says_yes_when_host_state_is_running() -> None:
     response = build_host_health_response(
-        list_json=list_json,
+        list_json=_list_json(host_state="RUNNING"),
         agent_id=_AGENT_ID,
         services_agent_id=_SERVICES_AGENT_ID,
-        probe=probe,
+        in_container_stdout=_probe_stdout({"services_toml_declares_system_interface": True}),
         plugin_resolver_services={},
     )
-    assert response.is_misconfigured is True
-    # Host is still RUNNING; only services.toml is wrong.
-    assert response.reachable is True
-    assert response.host_offline is False
+    assert _answer(response, "container running") == ProbeAnswer.YES
 
 
-def test_build_host_health_response_ssh_dead_when_probe_missing_sentinel() -> None:
-    list_json = json.dumps({"agents": [{"id": str(_AGENT_ID), "host": {"state": "RUNNING"}}]})
-    probe = parse_probe_output(None)
+def test_container_running_probe_says_no_when_host_state_is_stopped() -> None:
     response = build_host_health_response(
-        list_json=list_json,
+        list_json=_list_json(host_state="STOPPED"),
         agent_id=_AGENT_ID,
         services_agent_id=_SERVICES_AGENT_ID,
-        probe=probe,
+        in_container_stdout=None,
         plugin_resolver_services={},
     )
-    assert response.ssh_dead is True
-    # is_misconfigured stays False on ssh_dead -- the probe never ran, so
-    # we have no evidence about services.toml either way.
-    assert response.is_misconfigured is False
+    assert _answer(response, "container running") == ProbeAnswer.NO
 
 
-def test_build_host_health_response_carries_plugin_resolver_services() -> None:
-    list_json = json.dumps({"agents": [{"id": str(_AGENT_ID), "host": {"state": "RUNNING"}}]})
-    probe = parse_probe_output(_probe_stdout({"services_toml_declares_system_interface": True}))
+def test_container_running_probe_is_unknown_for_ambiguous_host_state() -> None:
     response = build_host_health_response(
-        list_json=list_json,
+        list_json=_list_json(host_state="STARTING"),
         agent_id=_AGENT_ID,
         services_agent_id=_SERVICES_AGENT_ID,
-        probe=probe,
+        in_container_stdout=None,
+        plugin_resolver_services={},
+    )
+    assert _answer(response, "container running") == ProbeAnswer.UNKNOWN
+
+
+def test_services_agent_registered_probe_yes_when_row_present() -> None:
+    response = build_host_health_response(
+        list_json=_list_json(services_state="RUNNING"),
+        agent_id=_AGENT_ID,
+        services_agent_id=_SERVICES_AGENT_ID,
+        in_container_stdout=_probe_stdout({"services_toml_declares_system_interface": True}),
+        plugin_resolver_services={},
+    )
+    assert _answer(response, "system-services agent registered") == ProbeAnswer.YES
+
+
+def test_services_agent_registered_probe_no_when_row_absent() -> None:
+    response = build_host_health_response(
+        list_json=_list_json(services_state=None),
+        agent_id=_AGENT_ID,
+        services_agent_id=_SERVICES_AGENT_ID,
+        in_container_stdout=None,
+        plugin_resolver_services={},
+    )
+    assert _answer(response, "system-services agent registered") == ProbeAnswer.NO
+
+
+def test_services_agent_registered_probe_unknown_when_id_not_known() -> None:
+    response = build_host_health_response(
+        list_json=_list_json(services_state=None),
+        agent_id=_AGENT_ID,
+        services_agent_id=None,
+        in_container_stdout=None,
+        plugin_resolver_services={},
+    )
+    assert _answer(response, "system-services agent registered") == ProbeAnswer.UNKNOWN
+
+
+def test_can_run_commands_probe_no_when_sentinel_absent() -> None:
+    response = build_host_health_response(
+        list_json=_list_json(),
+        agent_id=_AGENT_ID,
+        services_agent_id=_SERVICES_AGENT_ID,
+        in_container_stdout=None,
+        plugin_resolver_services={},
+    )
+    assert _answer(response, "run a command") == ProbeAnswer.NO
+
+
+def test_can_run_commands_probe_yes_when_sentinel_present() -> None:
+    response = build_host_health_response(
+        list_json=_list_json(),
+        agent_id=_AGENT_ID,
+        services_agent_id=_SERVICES_AGENT_ID,
+        in_container_stdout=_probe_stdout({"services_toml_declares_system_interface": True}),
+        plugin_resolver_services={},
+    )
+    assert _answer(response, "run a command") == ProbeAnswer.YES
+
+
+def test_services_toml_probe_no_when_declaration_missing() -> None:
+    response = build_host_health_response(
+        list_json=_list_json(),
+        agent_id=_AGENT_ID,
+        services_agent_id=_SERVICES_AGENT_ID,
+        in_container_stdout=_probe_stdout({"services_toml_declares_system_interface": False}),
+        plugin_resolver_services={},
+    )
+    assert _answer(response, "services.toml") == ProbeAnswer.NO
+
+
+def test_services_toml_probe_yes_when_declaration_present() -> None:
+    response = build_host_health_response(
+        list_json=_list_json(),
+        agent_id=_AGENT_ID,
+        services_agent_id=_SERVICES_AGENT_ID,
+        in_container_stdout=_probe_stdout({"services_toml_declares_system_interface": True}),
+        plugin_resolver_services={},
+    )
+    assert _answer(response, "services.toml") == ProbeAnswer.YES
+
+
+def test_services_toml_probe_unknown_when_probe_did_not_run() -> None:
+    response = build_host_health_response(
+        list_json=_list_json(),
+        agent_id=_AGENT_ID,
+        services_agent_id=_SERVICES_AGENT_ID,
+        in_container_stdout=None,
+        plugin_resolver_services={},
+    )
+    assert _answer(response, "services.toml") == ProbeAnswer.UNKNOWN
+
+
+def test_curl_probe_yes_for_200() -> None:
+    response = build_host_health_response(
+        list_json=_list_json(),
+        agent_id=_AGENT_ID,
+        services_agent_id=_SERVICES_AGENT_ID,
+        in_container_stdout=_probe_stdout(
+            {"services_toml_declares_system_interface": True, "inner_port": 8000, "curl_status": "200"}
+        ),
+        plugin_resolver_services={},
+    )
+    assert _answer(response, "answer locally") == ProbeAnswer.YES
+
+
+def test_curl_probe_no_for_non_200() -> None:
+    response = build_host_health_response(
+        list_json=_list_json(),
+        agent_id=_AGENT_ID,
+        services_agent_id=_SERVICES_AGENT_ID,
+        in_container_stdout=_probe_stdout(
+            {"services_toml_declares_system_interface": True, "inner_port": 8000, "curl_status": "502"}
+        ),
+        plugin_resolver_services={},
+    )
+    assert _answer(response, "answer locally") == ProbeAnswer.NO
+
+
+def test_port_listener_probe_yes_when_listener_present() -> None:
+    response = build_host_health_response(
+        list_json=_list_json(),
+        agent_id=_AGENT_ID,
+        services_agent_id=_SERVICES_AGENT_ID,
+        in_container_stdout=_probe_stdout(
+            {
+                "services_toml_declares_system_interface": True,
+                "inner_port": 8000,
+                "port_listener": 'LISTEN 0 128 *:8000 *:* users:(("python3",pid=10,fd=3))',
+            }
+        ),
+        plugin_resolver_services={},
+    )
+    assert _answer(response, "listening on the system-interface inner port") == ProbeAnswer.YES
+
+
+def test_plugin_resolver_probe_yes_when_services_registered() -> None:
+    response = build_host_health_response(
+        list_json=_list_json(),
+        agent_id=_AGENT_ID,
+        services_agent_id=_SERVICES_AGENT_ID,
+        in_container_stdout=_probe_stdout({"services_toml_declares_system_interface": True}),
         plugin_resolver_services={"system_interface": "http://127.0.0.1:9100"},
     )
-    assert response.plugin_resolver_services == {"system_interface": "http://127.0.0.1:9100"}
+    probe = _probe_for(response, "registered with the plugin resolver")
+    assert probe.answer == ProbeAnswer.YES
+    assert "system_interface" in probe.output
 
 
-def test_build_host_health_response_offline_host_drives_host_restart_tier() -> None:
-    list_json = json.dumps({"agents": [{"id": str(_AGENT_ID), "host": {"state": "STOPPED"}}]})
-    # ssh_dead because the host is down.
-    probe = parse_probe_output(None)
+def test_plugin_resolver_probe_no_when_no_services_registered() -> None:
     response = build_host_health_response(
-        list_json=list_json,
+        list_json=_list_json(),
         agent_id=_AGENT_ID,
         services_agent_id=_SERVICES_AGENT_ID,
-        probe=probe,
+        in_container_stdout=_probe_stdout({"services_toml_declares_system_interface": True}),
         plugin_resolver_services={},
     )
-    assert response.reachable is False
-    assert response.host_offline is True
+    assert _answer(response, "registered with the plugin resolver") == ProbeAnswer.NO
 
 
-# --- raw mngr list capture -----------------------------------------------
+# --- dispatch_tier classification ----------------------------------------
 
 
-def test_build_host_health_response_passes_mngr_list_capture_through_verbatim() -> None:
-    """The diagnostics menu renders the raw command + stdout + stderr + exit
-    code, so build_host_health_response must pass each through untouched."""
-    list_json = json.dumps({"agents": [], "errors": []})
+def test_dispatch_tier_surgical_when_container_running_and_exec_works() -> None:
     response = build_host_health_response(
-        list_json=list_json,
+        list_json=_list_json(host_state="RUNNING"),
         agent_id=_AGENT_ID,
         services_agent_id=_SERVICES_AGENT_ID,
-        probe=parse_probe_output(None),
+        in_container_stdout=_probe_stdout(
+            {"services_toml_declares_system_interface": True, "inner_port": 8000, "curl_status": "502"}
+        ),
+        plugin_resolver_services={},
+    )
+    assert response.dispatch_tier == DispatchTier.SURGICAL
+
+
+def test_dispatch_tier_host_when_container_is_offline() -> None:
+    response = build_host_health_response(
+        list_json=_list_json(host_state="STOPPED"),
+        agent_id=_AGENT_ID,
+        services_agent_id=_SERVICES_AGENT_ID,
+        in_container_stdout=None,
+        plugin_resolver_services={},
+    )
+    assert response.dispatch_tier == DispatchTier.HOST
+
+
+def test_dispatch_tier_manual_when_container_running_but_exec_dead() -> None:
+    """SSH-dead path: host claims RUNNING but mngr exec failed -- require user consent."""
+    response = build_host_health_response(
+        list_json=_list_json(host_state="RUNNING"),
+        agent_id=_AGENT_ID,
+        services_agent_id=_SERVICES_AGENT_ID,
+        in_container_stdout=None,
+        plugin_resolver_services={},
+    )
+    assert response.dispatch_tier == DispatchTier.MANUAL
+
+
+def test_dispatch_tier_misconfigured_beats_other_signals() -> None:
+    """A missing [services.system_interface] block dominates: no restart will help."""
+    response = build_host_health_response(
+        list_json=_list_json(host_state="RUNNING"),
+        agent_id=_AGENT_ID,
+        services_agent_id=_SERVICES_AGENT_ID,
+        in_container_stdout=_probe_stdout({"services_toml_declares_system_interface": False}),
+        plugin_resolver_services={"system_interface": "http://127.0.0.1:9100"},
+    )
+    assert response.dispatch_tier == DispatchTier.MISCONFIGURED
+
+
+def test_dispatch_tier_manual_for_ambiguous_host_state() -> None:
+    response = build_host_health_response(
+        list_json=_list_json(host_state="STARTING"),
+        agent_id=_AGENT_ID,
+        services_agent_id=_SERVICES_AGENT_ID,
+        in_container_stdout=None,
+        plugin_resolver_services={},
+    )
+    assert response.dispatch_tier == DispatchTier.MANUAL
+
+
+# --- shape sanity --------------------------------------------------------
+
+
+def test_every_probe_has_a_command_and_an_output() -> None:
+    """No probe should render with an empty command label or empty output text."""
+    response = build_host_health_response(
+        list_json=_list_json(),
+        agent_id=_AGENT_ID,
+        services_agent_id=_SERVICES_AGENT_ID,
+        in_container_stdout=None,
         plugin_resolver_services={},
         mngr_list_command="/usr/local/bin/mngr list --format json --quiet",
-        mngr_list_stdout=list_json,
-        mngr_list_stderr="WARNING: Vultr API key not configured, skipping VPS discovery\n",
-        mngr_list_exit_code=0,
+        mngr_exec_command="/usr/local/bin/mngr exec ... probe-script",
     )
-    assert response.mngr_list_command == "/usr/local/bin/mngr list --format json --quiet"
-    assert response.mngr_list_stdout == list_json
-    assert "Vultr API key" in response.mngr_list_stderr
-    assert response.mngr_list_exit_code == 0
-
-
-def test_build_host_health_response_carries_subprocess_failure_state() -> None:
-    """When the subprocess could not be spawned at all, exit_code is None and
-    the streams are empty -- but mngr_list_error carries the exec failure."""
-    response = build_host_health_response(
-        list_json=None,
-        agent_id=_AGENT_ID,
-        services_agent_id=_SERVICES_AGENT_ID,
-        probe=parse_probe_output(None),
-        plugin_resolver_services={},
-        mngr_list_command="/usr/local/bin/mngr list --format json",
-        mngr_list_stdout="",
-        mngr_list_stderr="",
-        mngr_list_exit_code=None,
-        mngr_list_error="[Errno 2] No such file or directory: 'mngr'",
-    )
-    assert response.mngr_list_exit_code is None
-    assert response.mngr_list_stdout == ""
-    assert response.mngr_list_stderr == ""
-    assert response.mngr_list_error is not None
-    assert "No such file" in response.mngr_list_error
-
-
-def test_build_host_health_response_plugin_resolver_has_services_reflects_presence() -> None:
-    list_json = json.dumps({"agents": [{"id": str(_AGENT_ID), "host": {"id": "host-abc", "state": "RUNNING"}}]})
-    response_empty = build_host_health_response(
-        list_json=list_json,
-        agent_id=_AGENT_ID,
-        services_agent_id=_SERVICES_AGENT_ID,
-        probe=parse_probe_output(None),
-        plugin_resolver_services={},
-    )
-    assert response_empty.plugin_resolver_has_services is False
-
-    response_present = build_host_health_response(
-        list_json=list_json,
-        agent_id=_AGENT_ID,
-        services_agent_id=_SERVICES_AGENT_ID,
-        probe=parse_probe_output(None),
-        plugin_resolver_services={"system_interface": "http://127.0.0.1:9100"},
-    )
-    assert response_present.plugin_resolver_has_services is True
-
-
-def test_build_host_health_response_carries_mngr_list_error_for_blast_radius() -> None:
-    """When mngr list errored on a *different* host, surface that as
-    mngr_list_error so the recovery page can tell the user the issue is
-    elsewhere."""
-    response = build_host_health_response(
-        list_json=None,
-        agent_id=_AGENT_ID,
-        services_agent_id=_SERVICES_AGENT_ID,
-        probe=parse_probe_output(None),
-        plugin_resolver_services={},
-        mngr_list_error="provider=docker: HostConnectionError: SSH error (Error reading SSH protocol banner)",
-    )
-    assert response.mngr_list_error is not None
-    assert "docker" in response.mngr_list_error
-    assert "SSH" in response.mngr_list_error
+    assert response.probes
+    for probe in response.probes:
+        assert probe.command, f"probe {probe.question!r} rendered with no command"
+        assert probe.output, f"probe {probe.question!r} rendered with no output"
