@@ -164,8 +164,9 @@ the right project's consolidated files.
    **Do not** fold stderr in via `2>&1` — `gh pr create` writes progress
    lines (e.g. "Creating pull request for X into Y in Z") to stderr that
    would mangle the captured URL. If `gh pr create` exits non-zero, read
-   `/tmp/gh_stderr` and emit a `failed` JSON object with that stderr
-   content in `notes`.
+   `/tmp/gh_stderr`; if the error is something you can fix (e.g. a
+   malformed invocation), correct it and retry, otherwise emit a `failed`
+   JSON object with that stderr content in `notes`.
 
 11. Emit your final JSON object: `{"status": "done", "pr_url":
     "<PR_URL>"}`, substituting the PR URL from step 10.
