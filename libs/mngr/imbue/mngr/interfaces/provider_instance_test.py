@@ -311,18 +311,18 @@ def test_build_agent_details_from_offline_ref_populates_plugin_data(host_id: Hos
         agent_id=AgentId.generate(),
         agent_name=AgentName("test-agent"),
         provider_name=provider_name,
-        certified_data={"plugin": {"kanpan": {"muted": True}}},
+        certified_data={"plugin": {"demo_plugin": {"flag": True}}},
     )
     host_details = _make_offline_host_details(host_id, provider_name)
     offline_field_generators = {
-        "kanpan": {
-            "muted": lambda ref, host: ref.certified_data.get("plugin", {}).get("kanpan", {}).get("muted", False),
+        "demo_plugin": {
+            "flag": lambda ref, host: ref.certified_data.get("plugin", {}).get("demo_plugin", {}).get("flag", False),
         }
     }
 
     agent_details = build_agent_details_from_offline_ref(agent_ref, host_details, offline_field_generators)
 
-    assert agent_details.plugin == {"kanpan": {"muted": True}}
+    assert agent_details.plugin == {"demo_plugin": {"flag": True}}
 
 
 def test_build_agent_details_from_offline_ref_omits_none_field_values(host_id: HostId) -> None:

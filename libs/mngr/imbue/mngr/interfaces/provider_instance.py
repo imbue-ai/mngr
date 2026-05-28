@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 from typing import Mapping
 from typing import Sequence
+from typing import TypeVar
 
 from loguru import logger
 from pydantic import Field
@@ -141,6 +142,33 @@ def _build_host_details_from_host(
     return host_details, ssh_activity
 
 
+_FieldGeneratorAgent = TypeVar("_FieldGeneratorAgent")
+_FieldGeneratorHost = TypeVar("_FieldGeneratorHost")
+
+
+def _compute_plugin_fields(
+    field_generators: Mapping[str, Mapping[str, Callable[[_FieldGeneratorAgent, _FieldGeneratorHost], Any]]],
+    agent: _FieldGeneratorAgent,
+    host: _FieldGeneratorHost,
+) -> dict[str, Any]:
+    """Run plugin field generators, building plugin.<plugin_name>.<field> data.
+
+    Shared by the online path (live agent/host) and the offline path
+    (DiscoveredAgent/HostDetails). Fields that evaluate to None are omitted, and
+    plugins that contribute no fields are dropped.
+    """
+    plugin_data: dict[str, Any] = {}
+    for plugin_name, generators in field_generators.items():
+        plugin_fields: dict[str, Any] = {}
+        for field_name, field_generator in generators.items():
+            value = field_generator(agent, host)
+            if value is not None:
+                plugin_fields[field_name] = value
+        if plugin_fields:
+            plugin_data[plugin_name] = plugin_fields
+    return plugin_data
+
+
 def _build_agent_details_from_online_agent(
     agent: AgentInterface,
     host_details: HostDetails,
@@ -168,15 +196,7 @@ def _build_agent_details_from_online_agent(
     idle_seconds = _compute_idle_seconds(user_activity, agent_activity, ssh_activity)
 
     # Compute plugin-specific fields from field generators
-    plugin_data: dict[str, Any] = {}
-    for plugin_name, generators in field_generators.items():
-        plugin_fields: dict[str, Any] = {}
-        for field_name, generator in generators.items():
-            value = generator(agent, host)
-            if value is not None:
-                plugin_fields[field_name] = value
-        if plugin_fields:
-            plugin_data[plugin_name] = plugin_fields
+    plugin_data = _compute_plugin_fields(field_generators, agent, host)
 
     return AgentDetails(
         id=agent.id,
@@ -203,28 +223,6 @@ def _build_agent_details_from_online_agent(
     )
 
 
-def _build_offline_plugin_data(
-    agent_ref: DiscoveredAgent,
-    host_details: HostDetails,
-    offline_field_generators: Mapping[str, Mapping[str, Callable[[DiscoveredAgent, HostDetails], Any]]],
-) -> dict[str, Any]:
-    """Compute plugin-namespaced fields for an offline agent from offline field generators.
-
-    Mirrors the online plugin loop in _build_agent_details_from_online_agent: fields
-    that evaluate to None are omitted, and plugins that contribute no fields are dropped.
-    """
-    plugin_data: dict[str, Any] = {}
-    for plugin_name, generators in offline_field_generators.items():
-        plugin_fields: dict[str, Any] = {}
-        for field_name, generator in generators.items():
-            value = generator(agent_ref, host_details)
-            if value is not None:
-                plugin_fields[field_name] = value
-        if plugin_fields:
-            plugin_data[plugin_name] = plugin_fields
-    return plugin_data
-
-
 def build_agent_details_from_offline_ref(
     agent_ref: DiscoveredAgent,
     host_details: HostDetails,
@@ -232,11 +230,7 @@ def build_agent_details_from_offline_ref(
 ) -> AgentDetails:
     """Build AgentDetails from a discovered agent reference when the host is offline."""
     create_time = agent_ref.create_time or datetime(1970, 1, 1, tzinfo=timezone.utc)
-    plugin_data = (
-        _build_offline_plugin_data(agent_ref, host_details, offline_field_generators)
-        if offline_field_generators
-        else {}
-    )
+    plugin_data = _compute_plugin_fields(offline_field_generators or {}, agent_ref, host_details)
     return AgentDetails(
         id=agent_ref.agent_id,
         name=agent_ref.agent_name,
