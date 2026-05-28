@@ -187,3 +187,19 @@ Tiered system-interface restart for the minds recovery flow.
   off the recovery path. The manual "Restart workspace" button and the
   SSH-dead escalation still stop first, since they may target a
   still-running container.
+- The "Is anything listening on the system-interface inner port?"
+  diagnostic no longer depends on ``ss``. The agent container image ships
+  no ``iproute2``, so the previous ``ss -ltnp`` probe always failed with a
+  bare ``FileNotFoundError(2, 'No such file or directory')`` -- which read
+  like the port was down when really the tool was simply absent. The probe
+  now scans ``/proc/net/tcp{,6}`` in pure Python for a TCP_LISTEN socket on
+  the inner port (decoding the listen address to ``ip:port``), so it works
+  on the stock image and answers the question accurately.
+- The expandable command shown for the "services.toml declares
+  [services.system_interface]?" diagnostic is now a correct, paste-runnable
+  ``python3 -c`` one-liner that reflects the actual check. The prior label
+  nested single quotes inside a single-quoted ``-c`` body
+  (``python3 -c 'tomllib.load(open('/code/services.toml', "rb"))'``), which
+  was neither runnable nor representative of the declaration test. The
+  port-listening probe's command label likewise now shows the real
+  ``/proc/net/tcp`` scan an operator can re-run inside the container.

@@ -23,6 +23,7 @@ restart rather than auto-dispatching surgical.
 import base64
 import json
 import re
+import socket
 from enum import Enum
 from functools import cache
 from pathlib import Path
@@ -36,11 +37,12 @@ from imbue.mngr.primitives import AgentId
 PROBE_SENTINEL: Final[str] = "===PROBE-READY==="
 
 # Hard ceiling for a single batched ``mngr exec``. Bounded so a wedged
-# container can't gate the recovery UI. The inner probe is four small
-# subprocesses (``tmux ls`` / TOML parse / ``ss`` / ``curl``) whose
-# individual subprocess timeouts sum to a worst case of 1+1+2 = 4s, so the
-# 5s ceiling leaves a comfortable margin while still keeping a wedged
-# container from hanging the recovery UI.
+# container can't gate the recovery UI. Only two of the inner checks spawn
+# subprocesses (``tmux ls`` at 1s and ``curl`` at 2s); the TOML parse and
+# the ``/proc/net/tcp`` LISTEN scan run in-process and effectively instantly.
+# The subprocess timeouts sum to a worst case of 1+2 = 3s, so the 5s ceiling
+# leaves a comfortable margin while still keeping a wedged container from
+# hanging the recovery UI.
 PROBE_TIMEOUT_SECONDS: Final[float] = 5.0
 
 
@@ -360,19 +362,35 @@ def _build_can_run_commands_probe(in_container: _InContainerProbe, mngr_exec_com
     )
 
 
+def _services_toml_command(services_toml_path: str) -> str:
+    """Operator-runnable reproduction of the services.toml declaration check.
+
+    Mirrors the inline probe script's ``isinstance(si, dict)`` test. The
+    ``-c`` body is double-quoted with single-quoted literals inside, so it
+    pastes into a shell cleanly (the previous ``{path!r}`` form nested
+    single quotes inside a single-quoted body and was not runnable).
+    """
+    return (
+        'python3 -c "import tomllib; '
+        f"d = tomllib.load(open('{services_toml_path}', 'rb')); "
+        "print(isinstance(d.get('services', {}).get('system_interface'), dict))\""
+    )
+
+
 def _build_services_toml_probe(in_container: _InContainerProbe) -> Probe:
     """Probe 4: does services.toml declare [services.system_interface]?"""
+    command = _services_toml_command(in_container.services_toml_path)
     if not in_container.sentinel_seen:
         return Probe(
             question=_QUESTION_SERVICES_TOML_DECLARES,
-            command=f"python3 -c 'tomllib.load(open({in_container.services_toml_path!r}, \"rb\"))'",
+            command=command,
             output="(in-container probe did not run)",
             answer=ProbeAnswer.UNKNOWN,
         )
     if in_container.services_toml_error is not None:
         return Probe(
             question=_QUESTION_SERVICES_TOML_DECLARES,
-            command=f"python3 -c 'tomllib.load(open({in_container.services_toml_path!r}, \"rb\"))'",
+            command=command,
             output=f"error: {in_container.services_toml_error}",
             answer=ProbeAnswer.UNKNOWN,
         )
@@ -387,16 +405,33 @@ def _build_services_toml_probe(in_container: _InContainerProbe) -> Probe:
         output = "(no declaration data returned)"
     return Probe(
         question=_QUESTION_SERVICES_TOML_DECLARES,
-        command=f"python3 -c 'tomllib.load(open({in_container.services_toml_path!r}, \"rb\"))'",
+        command=command,
         output=output,
         answer=answer,
     )
 
 
+def _port_listening_command(port_label: str) -> str:
+    """Operator-runnable reproduction of the inner-port LISTEN check.
+
+    The agent container image ships no ``iproute2`` (so no ``ss``); this
+    scans ``/proc/net/tcp{,6}`` for a TCP_LISTEN (state ``0A``) socket whose
+    local port matches the inner port, mirroring the inline probe script.
+    Prints the raw matching hex ``local_address`` columns; the probe's
+    output panel renders the same sockets decoded to ``ip:port``.
+    """
+    return (
+        'python3 -c "'
+        "rows = [line.split() for path in ('/proc/net/tcp', '/proc/net/tcp6') "
+        "for line in open(path).read().splitlines()[1:]]; "
+        f"print([r[1] for r in rows if r[3] == '0A' and int(r[1].rsplit(':', 1)[1], 16) == {port_label}])\""
+    )
+
+
 def _build_port_listening_probe(in_container: _InContainerProbe) -> Probe:
-    """Probe 5: ss -ltnp filtered to the inner port."""
+    """Probe 5: scan /proc/net/tcp{,6} for a LISTEN socket on the inner port."""
     port_label = "?" if in_container.inner_port is None else str(in_container.inner_port)
-    command = f"ss -ltnp | grep ':{port_label}'"
+    command = _port_listening_command(port_label)
     if not in_container.sentinel_seen:
         return Probe(
             question=_QUESTION_PORT_LISTENING,
@@ -582,3 +617,56 @@ def parse_inner_port_from_command(command: str) -> int | None:
         return int(match.group(1))
     except ValueError:
         return None
+
+
+# TCP socket state ``0A`` is ``TCP_LISTEN`` in the kernel's ``/proc/net/tcp``
+# table (see ``include/net/tcp_states.h``).
+_PROC_TCP_LISTEN_STATE: Final[str] = "0A"
+
+
+def _decode_proc_local_address(local_address: str) -> str:
+    """Decode a ``/proc/net/tcp{,6}`` ``local_address`` (``HEXIP:HEXPORT``) to ``ip:port``.
+
+    The kernel writes the IP as little-endian 32-bit words in hex -- 8 hex
+    chars for IPv4, 32 for IPv6 -- so each 4-byte group is byte-reversed
+    before formatting. Falls back to the raw hex on anything unexpected so a
+    decode quirk never hides a real LISTEN socket from the operator.
+    """
+    ip_hex, _, port_hex = local_address.rpartition(":")
+    try:
+        port = int(port_hex, 16)
+    except ValueError:
+        return local_address
+    if len(ip_hex) == 8:
+        ip = ".".join(str(octet) for octet in bytes.fromhex(ip_hex)[::-1])
+    elif len(ip_hex) == 32:
+        packed = b"".join(bytes.fromhex(ip_hex[i : i + 8])[::-1] for i in range(0, 32, 8))
+        ip = socket.inet_ntop(socket.AF_INET6, packed)
+    else:
+        ip = ip_hex
+    return f"{ip}:{port}"
+
+
+def parse_listening_sockets(proc_net_tcp_text: str, port: int) -> list[str]:
+    """Return decoded ``ip:port`` for LISTEN sockets matching ``port`` in /proc/net/tcp{,6} text.
+
+    Mirror of the inline probe script's scan, exposed for unit tests; the
+    in-container script duplicates this logic because it can't import this
+    module (same arrangement as ``parse_inner_port_from_command``). The
+    header row is skipped naturally because its state column is the literal
+    ``st`` rather than a hex state code.
+    """
+    listeners: list[str] = []
+    for line in proc_net_tcp_text.splitlines():
+        fields = line.split()
+        if len(fields) < 4 or fields[3] != _PROC_TCP_LISTEN_STATE:
+            continue
+        local_address = fields[1]
+        _, _, port_hex = local_address.rpartition(":")
+        try:
+            matched = int(port_hex, 16) == port
+        except ValueError:
+            continue
+        if matched:
+            listeners.append(_decode_proc_local_address(local_address))
+    return listeners

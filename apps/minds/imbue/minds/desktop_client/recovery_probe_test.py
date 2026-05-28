@@ -1,6 +1,7 @@
 """Unit tests for the recovery-diagnostics probe builder + dispatch tier."""
 
 import json
+import shlex
 
 from imbue.minds.desktop_client.recovery_probe import DispatchTier
 from imbue.minds.desktop_client.recovery_probe import HostHealthResponse
@@ -10,6 +11,7 @@ from imbue.minds.desktop_client.recovery_probe import ProbeAnswer
 from imbue.minds.desktop_client.recovery_probe import build_host_health_response
 from imbue.minds.desktop_client.recovery_probe import build_probe_argv
 from imbue.minds.desktop_client.recovery_probe import parse_inner_port_from_command
+from imbue.minds.desktop_client.recovery_probe import parse_listening_sockets
 from imbue.mngr.primitives import AgentId
 
 _AGENT_ID: AgentId = AgentId("agent-" + "0" * 31 + "1")
@@ -226,7 +228,7 @@ def test_port_listener_probe_yes_when_listener_present() -> None:
             {
                 "services_toml_declares_system_interface": True,
                 "inner_port": 8000,
-                "port_listener": 'LISTEN 0 128 *:8000 *:* users:(("python3",pid=10,fd=3))',
+                "port_listener": "LISTEN 0.0.0.0:8000\nLISTEN ::1:8000",
             }
         ),
         plugin_resolver_services={},
@@ -338,3 +340,77 @@ def test_every_probe_has_a_command_and_an_output() -> None:
     for probe in response.probes:
         assert probe.command, f"probe {probe.question!r} rendered with no command"
         assert probe.output, f"probe {probe.question!r} rendered with no output"
+
+
+def _python_c_body(command: str) -> str | None:
+    """Return the ``-c`` body of a ``python3 -c "..."`` command, or None."""
+    tokens = shlex.split(command)
+    if len(tokens) >= 3 and tokens[0] == "python3" and tokens[1] == "-c":
+        return tokens[2]
+    return None
+
+
+def test_python_probe_commands_are_well_formed_and_runnable() -> None:
+    """Every ``python3 -c`` probe command must shlex-split and compile as Python.
+
+    Guards against quote-nesting bugs like the original services.toml
+    command (single quotes nested inside a single-quoted ``-c`` body), which
+    rendered an un-runnable, un-parseable string.
+    """
+    response = build_host_health_response(
+        list_json=_list_json(),
+        agent_id=_AGENT_ID,
+        services_agent_id=_SERVICES_AGENT_ID,
+        in_container_stdout=_probe_stdout(
+            {"services_toml_declares_system_interface": True, "inner_port": 8000, "curl_status": "200"}
+        ),
+        plugin_resolver_services={},
+    )
+    python_commands = [(p.question, _python_c_body(p.command)) for p in response.probes]
+    checked = [(q, body) for q, body in python_commands if body is not None]
+    assert checked, "expected at least one python3 -c probe command"
+    for question, body in checked:
+        # compile() validates syntax without executing; a botched quote nest
+        # yields a body that fails here.
+        compile(body, f"<probe:{question}>", "exec")
+
+
+# --- /proc/net/tcp LISTEN parsing -----------------------------------------
+
+# A representative /proc/net/tcp sample. Columns: ``sl local_address
+# rem_address st ...``; state ``0A`` is LISTEN, ``01`` is ESTABLISHED. The
+# local port is hex: 0x1F90 == 8080, 0x0016 == 22.
+_PROC_NET_TCP_SAMPLE = """\
+  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode
+   0: 0100007F:1F90 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 100 1
+   1: 00000000:0016 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 200 1
+   2: 0100007F:1F90 0100007F:C722 01 00000000:00000000 00:00000000 00000000  1000        0 300 1
+"""
+
+# IPv6 /proc/net/tcp6 sample: ::1 (loopback) listening on 0x1F90 == 8080.
+_PROC_NET_TCP6_SAMPLE = """\
+  sl  local_address                         remote_address                        st ...
+   0: 00000000000000000000000001000000:1F90 00000000000000000000000000000000:0000 0A 0 0 0
+"""
+
+
+def test_parse_listening_sockets_matches_listen_state_and_port() -> None:
+    listeners = parse_listening_sockets(_PROC_NET_TCP_SAMPLE, 8080)
+    # Row 0 is LISTEN on 127.0.0.1:8080; row 2 has the same port but is
+    # ESTABLISHED (state 01) so it must be excluded.
+    assert listeners == ["127.0.0.1:8080"]
+
+
+def test_parse_listening_sockets_decodes_all_interfaces_and_ignores_other_ports() -> None:
+    assert parse_listening_sockets(_PROC_NET_TCP_SAMPLE, 22) == ["0.0.0.0:22"]
+    assert parse_listening_sockets(_PROC_NET_TCP_SAMPLE, 9999) == []
+
+
+def test_parse_listening_sockets_decodes_ipv6() -> None:
+    assert parse_listening_sockets(_PROC_NET_TCP6_SAMPLE, 8080) == ["::1:8080"]
+
+
+def test_parse_listening_sockets_skips_header_and_blank_lines() -> None:
+    # Header row (state column is the literal "st") and blank lines must not
+    # be misread as sockets.
+    assert parse_listening_sockets("\n\n" + _PROC_NET_TCP_SAMPLE + "\n", 80) == []
