@@ -1,18 +1,11 @@
 /**
- * Download platform-specific uv and git binaries into the resources directory.
+ * Bundle the platform-specific git binary into `<resourcesDir>/git/`.
  *
- * This script is used in two contexts:
- * 1. Locally via `npm run build` (downloads binaries for the current platform)
- * 2. On ToDesktop build servers via the `todesktop:beforeInstall` hook
- *    (re-downloads binaries for the build server's platform, replacing any
- *    that were uploaded from the developer's machine)
- *
- * When run as a ToDesktop hook, receives { appDir } in the exported function.
- * When run directly, uses __dirname to find the project root.
- *
- * Every downloaded archive is verified against a pinned SHA256 from
- * `EXPECTED_SHA256` before extraction. Bump the version constants and the
- * hash map together when upgrading uv or MinGit.
+ * macOS:   real binary via `xcrun --find git`, plus libexec/git-core helpers
+ *          and templates. `/usr/bin/git` is an xcode-select shim that
+ *          SIGKILLs at runtime once re-signed by ToDesktop.
+ * Linux:   copy from `which git`.
+ * Windows: SHA256-verified MinGit download from git-for-windows releases.
  */
 
 const fs = require('fs');
@@ -22,52 +15,20 @@ const http = require('http');
 const crypto = require('crypto');
 const { execSync } = require('child_process');
 
-const UV_VERSION = '0.7.12';
 const GIT_FOR_WINDOWS_VERSION = '2.49.0';
 const GIT_FOR_WINDOWS_TAG = `v${GIT_FOR_WINDOWS_VERSION}.windows.1`;
 
 /**
- * SHA256 hashes for each downloaded archive, pinned by filename.
- *
- * Sources:
- * - uv: https://github.com/astral-sh/uv/releases/download/<version>/<file>.sha256
- * - MinGit: https://github.com/git-for-windows/git/releases/tag/<tag> release notes
- *
- * Update this map whenever UV_VERSION or GIT_FOR_WINDOWS_VERSION changes.
- * If a download hash doesn't match an entry here, the script aborts before
- * extracting or executing any downloaded bytes.
+ * SHA256 hash for the Windows MinGit archive, pinned by filename.
+ * Source: https://github.com/git-for-windows/git/releases/tag/<tag> release notes.
+ * Update when GIT_FOR_WINDOWS_VERSION changes.
  */
 const EXPECTED_SHA256 = {
-  'uv-aarch64-apple-darwin.tar.gz':     '189108cd026c25d40fb086eaaf320aac52c3f7aab63e185bac51305a1576fc7e',
-  'uv-x86_64-apple-darwin.tar.gz':      'a338354420dba089218c05d4d585e4bcf174a65fe53260592b2af19ceec85835',
-  'uv-x86_64-unknown-linux-gnu.tar.gz': '735891fb553d0be129f3aa39dc8e9c4c49aaa76ec17f7dfb6a732e79a714873a',
-  'uv-x86_64-pc-windows-msvc.zip':      '2cf29c8ffaa2549aa0f86927b2510008e8ca3dcd2100277d86faf437382a371b',
-  'MinGit-2.49.0-64-bit.zip':           '971cdee7c0feaa1e41369c46da88d1000a24e79a6f50191c820100338fb7eca5',
+  'MinGit-2.49.0-64-bit.zip': '971cdee7c0feaa1e41369c46da88d1000a24e79a6f50191c820100338fb7eca5',
 };
 
 const MAX_REDIRECTS = 5;
 const DOWNLOAD_RETRIES = 3;
-
-function getPlatformArch() {
-  const platform = process.platform;
-  const arch = process.arch;
-
-  if (platform === 'darwin' && arch === 'arm64') return { platform: 'darwin', arch: 'aarch64' };
-  if (platform === 'darwin' && arch === 'x64') return { platform: 'darwin', arch: 'x86_64' };
-  if (platform === 'linux' && arch === 'x64') return { platform: 'linux', arch: 'x86_64' };
-  if (platform === 'win32' && arch === 'x64') return { platform: 'win32', arch: 'x86_64' };
-  throw new Error(`Unsupported platform/arch: ${platform}/${arch}`);
-}
-
-function getUvDownloadUrl({ platform, arch }) {
-  if (platform === 'win32') {
-    return `https://github.com/astral-sh/uv/releases/download/${UV_VERSION}/uv-x86_64-pc-windows-msvc.zip`;
-  }
-  const target = platform === 'darwin'
-    ? `uv-${arch}-apple-darwin`
-    : `uv-${arch}-unknown-linux-gnu`;
-  return `https://github.com/astral-sh/uv/releases/download/${UV_VERSION}/${target}.tar.gz`;
-}
 
 /**
  * Download a URL to an in-memory buffer, following up to MAX_REDIRECTS
@@ -80,7 +41,9 @@ function downloadOnce(url, redirectsRemaining = MAX_REDIRECTS) {
       if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
         res.resume();
         if (redirectsRemaining <= 0) {
-          reject(new Error(`Too many redirects while fetching ${url}`));
+          const err = new Error(`Too many redirects while fetching ${url}`);
+          err.permanent = true;
+          reject(err);
           return;
         }
         downloadOnce(res.headers.location, redirectsRemaining - 1).then(resolve).catch(reject);
@@ -88,7 +51,9 @@ function downloadOnce(url, redirectsRemaining = MAX_REDIRECTS) {
       }
       if (res.statusCode !== 200) {
         res.resume();
-        reject(new Error(`HTTP ${res.statusCode} for ${url}`));
+        const err = new Error(`HTTP ${res.statusCode} for ${url}`);
+        err.permanent = true;
+        reject(err);
         return;
       }
       const chunks = [];
@@ -101,7 +66,8 @@ function downloadOnce(url, redirectsRemaining = MAX_REDIRECTS) {
 
 /**
  * Download with exponential-backoff retry. Network blips during ToDesktop
- * build time shouldn't fail the entire build.
+ * build time shouldn't fail the entire build. Errors tagged `permanent`
+ * (bad HTTP status, redirect-loop) are raised immediately without retrying.
  */
 async function download(url) {
   let lastErr;
@@ -110,6 +76,7 @@ async function download(url) {
       return await downloadOnce(url);
     } catch (err) {
       lastErr = err;
+      if (err.permanent) break;
       if (attempt === DOWNLOAD_RETRIES) break;
       const delayMs = 1000 * 2 ** (attempt - 1);
       console.log(`[download-binaries] ${url} failed (attempt ${attempt}/${DOWNLOAD_RETRIES}): ${err.message}. Retrying in ${delayMs}ms...`);
@@ -142,85 +109,41 @@ function verifyChecksum(buffer, filename) {
   console.log(`[download-binaries] ${filename} SHA256 OK`);
 }
 
-async function downloadUv(resourcesDir, { platform, arch }) {
-  const uvDir = path.join(resourcesDir, 'uv');
-  if (fs.existsSync(uvDir)) fs.rmSync(uvDir, { recursive: true });
-  fs.mkdirSync(uvDir, { recursive: true });
-
-  const url = getUvDownloadUrl({ platform, arch });
-  const filename = path.basename(new URL(url).pathname);
-  console.log(`[download-binaries] Downloading uv from ${url}...`);
-
-  const archive = await download(url);
-  verifyChecksum(archive, filename);
-
-  if (platform === 'win32') {
-    const zipPath = path.join(uvDir, 'uv.zip');
-    fs.writeFileSync(zipPath, archive);
-    execSync(`powershell -Command "Expand-Archive -Path '${zipPath}' -DestinationPath '${uvDir}'"`, { stdio: 'inherit' });
-    fs.unlinkSync(zipPath);
-  } else {
-    const tarPath = path.join(uvDir, 'uv.tar.gz');
-    fs.writeFileSync(tarPath, archive);
-    execSync(`tar xzf "${tarPath}" -C "${uvDir}" --strip-components=1`, { stdio: 'inherit' });
-    fs.unlinkSync(tarPath);
-  }
-
-  const uvBinary = path.join(uvDir, platform === 'win32' ? 'uv.exe' : 'uv');
-  if (!fs.existsSync(uvBinary)) {
-    throw new Error(`uv binary not found at ${uvBinary} after extraction`);
-  }
-  if (platform === 'win32') {
-    // The runtime resolves uv as 'uv' (no .exe). Copy so both names work.
-    const uvWithoutExt = path.join(uvDir, 'uv');
-    if (!fs.existsSync(uvWithoutExt)) {
-      fs.copyFileSync(uvBinary, uvWithoutExt);
-    }
-  } else {
-    fs.chmodSync(uvBinary, 0o755);
-  }
-  console.log(`[download-binaries] uv installed at ${uvBinary}`);
-}
-
 /**
- * Recursively copy Apple's git libexec tree into destDir, with two
- * transforms:
- *   1. Skip symlinks whose target is the main git binary. Apple ships ~100
- *      shims (git-add, git-commit, git-diff, ...) that are all symlinks to
- *      `git` itself; git uses argv[0] to dispatch when invoked as git-add
- *      directly. We don't need any of these because our code invokes git
- *      via `git <subcommand>`, not `git-subcommand`. Including them would
- *      bloat the bundle by ~1GB (each dereferenced shim = a full copy of
- *      the 7.6MB git binary).
- *   2. Dereference the remaining symlinks (git-remote-https -> git-remote-http
- *      etc.) into real file copies. Keeping them as symlinks is risky for
- *      cross-platform packaging: ToDesktop's Windows build server chokes
- *      when 7zip encounters an absolute macOS symlink, and the original
- *      Apple symlinks point at absolute Xcode paths which break on any
- *      machine without Xcode at that exact path.
+ * Recursively copy Apple's git libexec tree into destDir, dereferencing
+ * symlinks into real file copies.
+ *
+ * Symlinks pointing back at the main `git` binary (Apple's ~100 argv[0]
+ * shims like git-add, git-commit) are skipped -- the invoked-as-subcommand
+ * dispatch they enable is unused here, and dereferencing each would add
+ * ~7.6 MB per shim. Other symlinks must be dereferenced because Apple's
+ * targets are absolute paths into Xcode that break on any machine without
+ * Xcode at that exact path, and ToDesktop's Windows packager rejects
+ * absolute macOS symlinks.
  */
 function copyGitCoreDereferencingSymlinks(srcDir, destDir) {
   for (const entry of fs.readdirSync(srcDir, { withFileTypes: true })) {
     const srcPath = path.join(srcDir, entry.name);
     const destPath = path.join(destDir, entry.name);
     if (entry.isSymbolicLink()) {
-      let realTarget;
-      try {
-        realTarget = fs.realpathSync(srcPath);
-      } catch {
-        continue; // broken symlink -- skip
-      }
+      const realTarget = fs.realpathSync(srcPath);
       if (path.basename(realTarget) === 'git') {
         continue; // skip argv[0] shims pointing at the main binary
       }
-      fs.copyFileSync(srcPath, destPath);
-      try { fs.chmodSync(destPath, 0o755); } catch {}
+      const realStats = fs.statSync(realTarget);
+      if (realStats.isDirectory()) {
+        fs.mkdirSync(destPath, { recursive: true });
+        copyGitCoreDereferencingSymlinks(realTarget, destPath);
+      } else {
+        fs.copyFileSync(realTarget, destPath);
+        fs.chmodSync(destPath, realStats.mode);
+      }
     } else if (entry.isDirectory()) {
       fs.mkdirSync(destPath, { recursive: true });
       copyGitCoreDereferencingSymlinks(srcPath, destPath);
     } else if (entry.isFile()) {
       fs.copyFileSync(srcPath, destPath);
-      try { fs.chmodSync(destPath, fs.statSync(srcPath).mode); } catch {}
+      fs.chmodSync(destPath, fs.statSync(srcPath).mode);
     }
   }
 }
@@ -232,7 +155,6 @@ async function downloadGit(resourcesDir, { platform }) {
   fs.mkdirSync(binDir, { recursive: true });
 
   if (platform === 'win32') {
-    // Download Git for Windows portable (MinGit)
     const filename = `MinGit-${GIT_FOR_WINDOWS_VERSION}-64-bit.zip`;
     const url = `https://github.com/git-for-windows/git/releases/download/${GIT_FOR_WINDOWS_TAG}/${filename}`;
     console.log(`[download-binaries] Downloading MinGit from ${url}...`);
@@ -252,24 +174,18 @@ async function downloadGit(resourcesDir, { platform }) {
     fs.copyFileSync(gitExe, path.join(binDir, 'git'));
     console.log(`[download-binaries] git installed at ${path.join(binDir, 'git.exe')}`);
   } else if (platform === 'darwin') {
-    // macOS: /usr/bin/git is the Xcode CommandLineTools *shim*, not a real
-    // binary. Copying it into the app bundle produces something macOS kills
-    // with SIGKILL on invocation (the shim can't find its expected Xcode
-    // paths). Resolve the shim via `xcrun --find git` and copy the real
-    // binary instead.
-    //
-    // Git also needs its runtime helpers -- it invokes `git-remote-https`
-    // and friends from <prefix>/libexec/git-core/ via relative-to-binary
-    // lookup, and reads default templates from <prefix>/share/git-core/
-    // templates/. Copy all three into the bundle so clone works with no
-    // external dependencies on the user's machine.
+    // git invokes `git-remote-https` and friends from <prefix>/libexec/git-core/
+    // via relative-to-binary lookup, and reads default templates from
+    // <prefix>/share/git-core/templates/. Copy the binary, the libexec
+    // helpers, and the templates so the bundled git is self-contained.
     let resolvedGit;
     try {
       resolvedGit = execSync('xcrun --find git', { encoding: 'utf-8' }).trim();
     } catch (err) {
       throw new Error(
         'git not resolvable via `xcrun --find git`. Install Xcode Command ' +
-        'Line Tools (`xcode-select --install`) and retry.',
+        `Line Tools (\`xcode-select --install\`) and retry. Underlying error: ${err.message}`,
+        { cause: err },
       );
     }
     if (!resolvedGit || !fs.existsSync(resolvedGit)) {
@@ -310,46 +226,4 @@ async function downloadGit(resourcesDir, { platform }) {
   }
 }
 
-/**
- * Download platform-specific binaries into the given resources directory.
- * Can be called directly or from a ToDesktop hook.
- *
- * pnpm and Node are NOT provisioned here -- ToDesktop's ``pnpmVersion``
- * (and ``nodeVersion`` / ``npmVersion``) fields in ``todesktop.json``
- * cover that. This hook only handles binaries ToDesktop has no
- * first-class knob for: ``uv`` and ``git``.
- */
-async function downloadBinaries(resourcesDir) {
-  const { platform, arch } = getPlatformArch();
-  console.log(`[download-binaries] Platform: ${platform}, Architecture: ${arch}`);
-
-  await Promise.all([
-    downloadUv(resourcesDir, { platform, arch }),
-    downloadGit(resourcesDir, { platform }),
-  ]);
-
-  console.log('[download-binaries] Done.');
-}
-
-/**
- * ToDesktop hook entry point. Receives { appDir, pkgJsonPath, ... }.
- * Re-downloads binaries for the build server's platform.
- */
-module.exports = async ({ appDir }) => {
-  const resourcesDir = path.join(appDir, 'resources');
-  fs.mkdirSync(resourcesDir, { recursive: true });
-  await downloadBinaries(resourcesDir);
-};
-
-// Exposed so build.js can reuse the real-git resolution (xcrun-resolved
-// binary + libexec + templates) instead of copying the macOS git shim.
-module.exports.downloadGit = downloadGit;
-
-// Allow direct execution: node scripts/download-binaries.js [resources-dir]
-if (require.main === module) {
-  const resourcesDir = process.argv[2] || path.join(path.resolve(__dirname, '..'), 'resources');
-  downloadBinaries(resourcesDir).catch((err) => {
-    console.error('[download-binaries] Failed:', err);
-    process.exit(1);
-  });
-}
+module.exports = { downloadGit, download };

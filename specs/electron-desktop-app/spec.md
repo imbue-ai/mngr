@@ -128,8 +128,9 @@ apps/minds/
     assets/
       icon.svg              # Placeholder brain icon
       icon.png              # Generated from SVG for Electron (multiple sizes)
-    pyproject.toml          # Standalone: declares imbue-minds dependency
-    uv.lock                 # Pinned lockfile for reproducible installs
+    pyproject/
+      pyproject.toml        # Standalone: declares imbue-minds dependency
+      uv.lock               # Pinned lockfile for reproducible installs
   # ... existing Python code unchanged ...
   imbue/minds/
   pyproject.toml            # Existing monorepo pyproject.toml (unchanged)
@@ -419,7 +420,7 @@ Every monorepo workspace package must be listed as a direct dependency — uv ig
 [project]
 name = "minds-desktop"
 version = "0.1.0"
-requires-python = ">=3.12"
+requires-python = "==3.12.13"
 dependencies = [
     "minds>=0.1.0",
     "imbue-mngr>=0.2.0",

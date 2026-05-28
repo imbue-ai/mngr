@@ -1,32 +1,11 @@
-# pnpm 11+ strict-builds policy: any dep with an install script must be
-# explicitly approved here, or pnpm exits 1 with ERR_PNPM_IGNORED_BUILDS.
-# (The older `onlyBuiltDependencies` / `ignoredBuiltDependencies` keys are
-# documented in pnpm 9 docs but are NOT respected by pnpm 11 -- verified
-# by reproducing ToDesktop's exact `npx pnpm@11.1.0 install --prod=false
-# --no-frozen-lockfile` locally. The supported key is `allowBuilds`,
-# produced by `pnpm approve-builds`.)
-#
-# electron@35.7.5 has a postinstall that downloads the prebuilt Electron
-# binary. ToDesktop bundles its own Electron at build time, so this
-# postinstall is just there to make `pnpm start` work locally during dev.
-# Approving it costs ~100MB of cache space in CI but unblocks the build.
-allowBuilds:
-  electron: true
+onlyBuiltDependencies:
+  - electron
 
-# Make pnpm produce a flat npm-style `node_modules/` with every transitive
-# dep visible at top level. The default pnpm layout puts most modules under
-# `node_modules/.pnpm/<pkg>@<ver>/node_modules/<pkg>/` -- which is fine for
-# Node's own resolution but invisible to packagers (electron-builder /
-# ToDesktop's asar bundler) that only walk top-level `node_modules/`.
-#
-# Without this, @todesktop/runtime's regular deps (electron-updater, del,
-# execa, eventemitter2, lodash.once, semver, winston) all live under .pnpm/
-# and are missing from app.asar -- the v0.2.17 build packaged cleanly but
-# crashed at launch with `Cannot find module 'electron-updater'`. With
-# `nodeLinker: hoisted`, every transitive dep is materialised at
-# `node_modules/<pkg>/` (same shape npm/pnpm 10 produced by default in
-# our older greens), so the bundler picks them up automatically.
-#
-# We use `hoisted` (not `isolated`) because we don't need pnpm's per-package
-# isolation here and the cost is just disk space.
-nodeLinker: hoisted
+# Supply-chain hardening: refuse to install any version published less than
+# 7 days ago (10080 minutes), including transitive dependencies. A
+# freshly-compromised release therefore cannot be pulled in until it has had
+# time to be noticed and yanked. Only bites during resolution (e.g. `pnpm
+# install` without --frozen-lockfile, `pnpm add`, `pnpm update`); frozen
+# installs replay the existing lockfile unaffected. Available since pnpm
+# 10.16.0 (this app pins 10.33.4).
+minimumReleaseAge: 10080

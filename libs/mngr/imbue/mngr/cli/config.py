@@ -4,7 +4,6 @@ import subprocess
 import tomllib
 import typing
 from collections.abc import MutableMapping
-from enum import auto
 from pathlib import Path
 from typing import Any
 from typing import assert_never
@@ -16,7 +15,6 @@ from loguru import logger
 from pydantic import BaseModel
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
-from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
 from imbue.mngr.cli.help_formatter import CommandHelpMetadata
@@ -27,6 +25,7 @@ from imbue.mngr.cli.output_helpers import emit_final_json
 from imbue.mngr.cli.output_helpers import emit_format_template_lines
 from imbue.mngr.cli.output_helpers import write_human_line
 from imbue.mngr.config.data_types import CommonCliOptions
+from imbue.mngr.config.data_types import ConfigScope
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import OutputOptions
 from imbue.mngr.config.key_resolver import EXTEND_SUFFIX
@@ -34,6 +33,8 @@ from imbue.mngr.config.key_resolver import is_extend_key
 from imbue.mngr.config.key_resolver import parse_scalar_value
 from imbue.mngr.config.key_resolver import resolve_extends
 from imbue.mngr.config.loader import parse_config
+from imbue.mngr.config.pre_readers import get_local_config_path
+from imbue.mngr.config.pre_readers import get_project_config_path
 from imbue.mngr.config.pre_readers import get_user_config_path
 from imbue.mngr.config.pre_readers import resolve_project_config_dir
 from imbue.mngr.errors import ConfigKeyNotFoundError
@@ -45,14 +46,6 @@ from imbue.mngr.utils.interactive_subprocess import run_interactive_subprocess
 from imbue.mngr.utils.toml_config import load_config_file_tomlkit
 from imbue.mngr.utils.toml_config import save_config_file
 from imbue.mngr.utils.toml_config import set_nested_value
-
-
-class ConfigScope(UpperCaseStrEnum):
-    """Scope for configuration file operations."""
-
-    USER = auto()
-    PROJECT = auto()
-    LOCAL = auto()
 
 
 class ConfigCliOptions(CommonCliOptions):
@@ -89,15 +82,15 @@ def get_config_path(scope: ConfigScope, root_name: str, profile_dir: Path, cg: C
                 raise ConfigNotFoundError("profile_dir is required for USER scope")
             return get_user_config_path(profile_dir)
         case ConfigScope.PROJECT:
-            project_dir = resolve_project_config_dir(None, root_name, cg)
+            project_dir = resolve_project_config_dir(root_name, cg)
             if project_dir is None:
                 raise ConfigNotFoundError("No git repository found for project config")
-            return project_dir / "settings.toml"
+            return get_project_config_path(project_dir)
         case ConfigScope.LOCAL:
-            project_dir = resolve_project_config_dir(None, root_name, cg)
+            project_dir = resolve_project_config_dir(root_name, cg)
             if project_dir is None:
                 raise ConfigNotFoundError("No git repository found for local config")
-            return project_dir / "settings.local.toml"
+            return get_local_config_path(project_dir)
         case _ as unreachable:
             assert_never(unreachable)
 

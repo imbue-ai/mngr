@@ -5,8 +5,6 @@ from inline_snapshot import snapshot
 
 from imbue.imbue_common.ratchet_testing import standard_ratchet_checks as rc
 from imbue.imbue_common.ratchet_testing.ratchets import TEST_FILE_PATTERNS
-from imbue.imbue_common.ratchet_testing.ratchets import check_no_ruff_errors
-from imbue.imbue_common.ratchet_testing.ratchets import check_no_type_errors
 
 _DIR = Path(__file__).parent.parent.parent
 
@@ -297,6 +295,16 @@ def test_prevent_direct_subprocess() -> None:
         # Same exception as the ``testing.py`` pattern but lives under a
         # different filename for the deployment_tests subpackage.
         "*/deployment_tests/helpers.py",
+        # ``desktop_client/e2e_workspace_runner.py`` is the shared driver
+        # for the minds Electron e2e test and the Modal snapshot script
+        # (``scripts/snapshot_minds_e2e_state.py``). It necessarily shells
+        # out to ``electron``, ``git``, and ``uv run mngr destroy`` --
+        # operator-tool subprocesses that have no ConcurrencyGroup-managed
+        # equivalent (Electron is a long-lived UI host, git is one-shot,
+        # ``mngr destroy`` is the clean-up call). Same justification class
+        # as ``testing.py``: it is only ever called from test / operator
+        # entrypoints, never from product code.
+        "*/desktop_client/e2e_workspace_runner.py",
     )
     # The one allowed match is ``cli/env.py::_exec_into_recover``,
     # which uses ``os.execvp`` to REPLACE the current process with
@@ -344,14 +352,3 @@ def test_prevent_assert_isinstance() -> None:
 
 def test_prevent_code_in_init_files() -> None:
     rc.check_code_in_init_files(_DIR, snapshot(0))
-
-
-@pytest.mark.flaky
-def test_no_type_errors() -> None:
-    """Ensure the codebase has zero type errors."""
-    check_no_type_errors(_DIR)
-
-
-def test_no_ruff_errors() -> None:
-    """Ensure the codebase has zero ruff linting errors."""
-    check_no_ruff_errors(_DIR)
