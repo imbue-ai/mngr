@@ -46,18 +46,21 @@ snapshot="$(mngr usage --format json)"
 # seconds-until-reset only when:
 #   - >90% of the 5h window has elapsed (we're near its end), AND
 #   - <80% of the 5h window is used (budget left to burn before it resets), AND
-#   - the 7d window is BEHIND PACE: used% < elapsed%. A flat "< 80% of the week
-#     used" ceiling would happily spend at 70% on a Monday; comparing against how
-#     much of the week has *elapsed* means we only top up when we're under the
-#     sustainable burn line. (Both windows carry window_seconds, so the reader
-#     derives elapsed_percentage for each. Widen the margin -- e.g.
-#     `< (.seven_day.elapsed_percentage // 0) - 10` -- to leave weekly slack.)
+#   - the 7d window has PACE headroom: remaining budget exceeds 70% of the
+#     remaining week, i.e. (100 - used%) > 0.70 * (100 - elapsed%). This is the
+#     linear-pace line (used% < elapsed%) loosened by a 30% margin on what's LEFT
+#     of the week rather than a fixed margin on used%. So it stays strict early
+#     (a flat ceiling would happily spend at 70% on a Monday) yet, as the week
+#     ends and remaining time -> 0, the right side -> 0 and it converges to
+#     "launch if there's any capacity left at all." Both windows carry
+#     window_seconds, so the reader derives elapsed_percentage; raise the 0.70
+#     toward 1.0 to shrink the margin (1.0 == strict linear pace, no headroom).
 secs="$(jq -r '
   .sources[]
   | select(.source == "claude" and .is_stale == false)
   | select((.five_hour.elapsed_percentage // 0) > 90)
   | select((.five_hour.used_percentage    // 100) < 80)
-  | select((.seven_day.used_percentage    // 100) < (.seven_day.elapsed_percentage // 0))
+  | select((100 - (.seven_day.used_percentage // 100)) > 0.70 * (100 - (.seven_day.elapsed_percentage // 0)))
   | .five_hour.seconds_until_reset
 ' <<<"$snapshot")"
 
