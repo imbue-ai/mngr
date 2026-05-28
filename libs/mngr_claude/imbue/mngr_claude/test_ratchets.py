@@ -189,7 +189,7 @@ def test_prevent_typing_builtin_imports() -> None:
 
 
 def test_prevent_short_uuid_ids() -> None:
-    rc.check_short_uuid_ids(_DIR, snapshot(1))
+    rc.check_short_uuid_ids(_DIR, snapshot(0))
 
 
 # --- Pydantic / models ---

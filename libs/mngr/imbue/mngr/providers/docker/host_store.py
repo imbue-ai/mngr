@@ -28,6 +28,16 @@ class ContainerConfig(HostConfig):
         default=(), description="Raw docker run arguments for replay on snapshot restore"
     )
     image: str | None = Field(default=None, description="Base Docker image name")
+    # Sticky per-host mount-strategy choice. Defaults to False so records
+    # written before this field existed deserialize to the legacy shared-volume
+    # behavior they were actually created with. New hosts created when the
+    # provider config has `isolate_host_volumes=True` persist True here, and
+    # subsequent start/restart/snapshot-restore replays the same value
+    # regardless of any later config change.
+    is_isolated_host_volume: bool = Field(
+        default=False,
+        description="Whether this host was created with isolated volume-subpath mounting",
+    )
 
 
 class HostRecord(FrozenModel):
