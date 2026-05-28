@@ -10,7 +10,7 @@
   normally. `_resolve_host_id` and `_resolve_host_id_via_mngr_list` are
   now methods on `LatchkeyPermissionGrantHandler` so the unit suite can
   override the fallback via a concrete `_RecordingHandler` subclass
-  instead of monkeypatching, and the implementation uses
-  `ConcurrencyGroup.run_process_to_completion` instead of
-  `subprocess.run` to participate in the existing concurrency-group
-  lifecycle and respect the `PREVENT_DIRECT_SUBPROCESS` ratchet.
+  instead of monkeypatching, and the implementation runs the fallback
+  through a self-contained `ConcurrencyGroup.run_process_to_completion`
+  (instead of `subprocess.run`) to respect the
+  `PREVENT_DIRECT_SUBPROCESS` ratchet.
