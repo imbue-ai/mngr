@@ -1078,13 +1078,18 @@ def test_offline_agent_field_generators_hookspec_is_registered_and_collected(
     """The offline_agent_field_generators hookspec is registered and collects plugin results.
 
     This mirrors the collection loop in list_agents, guarding against the hookspec
-    being missing (which would make the hook call silently return nothing)."""
+    being missing (which would make the hook call silently return nothing).
+
+    Asserts membership rather than exact equality: the fixture loads real plugins
+    via entry points, and any of them (e.g. kanpan's `muted` field) may legitimately
+    register this hook too, so the collected results are not limited to this test's
+    plugin."""
     generators = {"muted": lambda ref, host: True}
-    plugin_manager.register(_OfflineFieldGeneratorPlugin("kanpan", generators))
+    plugin_manager.register(_OfflineFieldGeneratorPlugin("test_offline_fields", generators))
 
     collected = [result for result in plugin_manager.hook.offline_agent_field_generators() if result is not None]
 
-    assert collected == [("kanpan", generators)]
+    assert ("test_offline_fields", generators) in collected
 
 
 def _find_agent_by_name(result: ListResult, name: str) -> AgentDetails:
