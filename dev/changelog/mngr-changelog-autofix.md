@@ -3,9 +3,9 @@
 The nightly changelog consolidation agent now runs a one-pass accuracy
 review of the `CHANGELOG.md` bullets it just generated before opening its
 PR. After committing the consolidation, it spawns a fresh-context
-`general-purpose` subagent (spec in
-[`scripts/changelog_accuracy_reviewer.md`](../../scripts/changelog_accuracy_reviewer.md))
-that verifies each newly-added bullet against the actual code, correcting
+`general-purpose` subagent (spec in `scripts/changelog_accuracy_reviewer.md`,
+relative to the repo root) that verifies each newly-added bullet against the
+actual code, correcting
 or removing inaccurate ones and collapsing bullets that another bullet
 materially supersedes. This guards against stale or inaccurate changelog
 entries.
