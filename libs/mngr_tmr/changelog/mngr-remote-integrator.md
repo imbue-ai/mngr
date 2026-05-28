@@ -1,0 +1,9 @@
+Integrator now runs on the same `--provider` as the testing agents and reuses any snapshot the testing agents built, so on `--provider modal` (or any remote provider) it spins up just as quickly as the test agents do instead of running locally.
+
+To make that work, the integrator now publishes its results the same way testing agents do — packaging `test_output/` + `branch.bundle` into `outputs.tar.gz` under `$MNGR_AGENT_STATE_DIR/plugin/test-map-reduce/` — so the orchestrator can pull and apply the integrated branch via the same volume-based path it already uses for testing-agent outputs.
+
+The integrator path is now identical across providers (including local): the orchestrator rsyncs the local output directory (every testing agent's extracted outputs) into `<work_dir>/.tmr_inputs/` on the integrator host and then sends the integrator prompt; the prompt's inline bash walks each subdirectory, applies the "should pull" predicate to filter qualifying agents, fetches the qualifying bundles into local branches, and cherry-picks. Achieving this required switching local testing agents from `GIT_WORKTREE` to `GIT_MIRROR` transfer mode — branches now live only in each agent's own clone (rather than auto-appearing in the orchestrator's source repo) and surface in the source repo only via the published bundle. Slightly slower than the worktree mode on local, but the unified code path makes the local provider a meaningful proxy for testing the remote one.
+
+Removed CLI flags (the integrator now follows the testing-agent settings): `--integrator-provider`, `--integrator-type`, `--integrator-template`. Pass `--provider` once for both. `--integrator-timeout` is unchanged.
+
+Also dropped `--use-snapshot`: snapshot building is now automatic whenever the provider supports it (modal today, with no warning when the provider doesn't). `--snapshot <ID>` still works for reusing an existing snapshot.

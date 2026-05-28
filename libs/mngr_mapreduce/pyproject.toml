@@ -1,19 +1,12 @@
 [project]
-name = "imbue-mngr-tmr"
+name = "imbue-mngr-mapreduce"
 version = "0.1.0"
-description = "Test map-reduce plugin for mngr - launch agents to run and fix tests in parallel"
+description = "Map-reduce framework for mngr - run independent map agents in parallel, then reduce with a single agent"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "boto3>=1.40,<2",
     "imbue-mngr==0.1.6",
-    "imbue-mngr-mapreduce==0.1.0",
-    "jinja2>=3.1",
-    "markdown-it-py>=3.0.0",
 ]
-
-[project.entry-points.mngr]
-tmr = "imbue.mngr_tmr.plugin"
 
 [build-system]
 requires = ["hatchling"]
@@ -25,7 +18,6 @@ exclude = ["*_test.py", "test_*.py", "**/conftest.py", "**/testing.py"]
 
 [tool.uv.sources]
 imbue-mngr = { workspace = true }
-imbue-mngr-mapreduce = { workspace = true }
 
 # Shared pytest settings (markers, filterwarnings, coverage report config)
 # are centralized in:
@@ -37,7 +29,7 @@ timeout_func_only = true
 junit_family = "xunit1"
 testpaths = ["."]
 addopts = [
-  "--cov=imbue.mngr_tmr",
+  "--cov=imbue.mngr_mapreduce",
   "--cov-report=term-missing",
   "--cov-report=xml",
   "--durations=20",
