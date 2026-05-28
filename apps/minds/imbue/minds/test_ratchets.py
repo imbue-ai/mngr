@@ -290,6 +290,16 @@ def test_prevent_direct_subprocess() -> None:
         # Same exception as the ``testing.py`` pattern but lives under a
         # different filename for the deployment_tests subpackage.
         "*/deployment_tests/helpers.py",
+        # ``desktop_client/e2e_workspace_runner.py`` is the shared driver
+        # for the minds Electron e2e test and the Modal snapshot script
+        # (``scripts/snapshot_minds_e2e_state.py``). It necessarily shells
+        # out to ``electron``, ``git``, and ``uv run mngr destroy`` --
+        # operator-tool subprocesses that have no ConcurrencyGroup-managed
+        # equivalent (Electron is a long-lived UI host, git is one-shot,
+        # ``mngr destroy`` is the clean-up call). Same justification class
+        # as ``testing.py``: it is only ever called from test / operator
+        # entrypoints, never from product code.
+        "*/desktop_client/e2e_workspace_runner.py",
     )
     # The one allowed match is ``cli/env.py::_exec_into_recover``,
     # which uses ``os.execvp`` to REPLACE the current process with
