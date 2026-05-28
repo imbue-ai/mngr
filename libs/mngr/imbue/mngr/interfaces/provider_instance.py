@@ -460,6 +460,13 @@ class ProviderInstanceInterface(MutableModel, ABC):
                 # whole provider, so mngr_forward's resolver knows zero agents
                 # and every workspace on the provider becomes unreachable through
                 # the plugin. Skipping the bad host preserves the rest.
+                #
+                # Mirror get_host_and_agent_details' on_connection_error call so
+                # providers that cache per-host state (docker's container cache,
+                # modal/lima/vps_docker host caches) drop the wedged entry --
+                # otherwise the next discovery cycle keeps re-hitting the same
+                # stale handle.
+                self.on_connection_error(host_ref.host_id)
                 logger.warning(
                     "Skipping host {} ({}) during agent enumeration: {}",
                     host_ref.host_id,

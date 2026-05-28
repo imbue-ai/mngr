@@ -292,3 +292,8 @@ def test_discover_hosts_and_agents_tolerates_per_host_connection_error(
     # failure path, so both hosts had disconnect() called.
     healthy_host.disconnect.assert_called_once()
     broken_host.disconnect.assert_called_once()
+
+    # The cache-invalidation hook must fire for the broken host so providers
+    # that cache per-host state (docker/modal/lima/vps_docker) drop the
+    # wedged entry instead of replaying it on the next discovery cycle.
+    assert provider.connection_errors_cleared == [broken_host_id]
