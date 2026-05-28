@@ -97,8 +97,8 @@ def fetch_board_snapshot(
     entries: list[AgentBoardEntry] = []
     for agent in agents:
         agent_fields = dict(all_fields.get(agent.name, {}))
-        muted = is_muted(agent.plugin.get(PLUGIN_NAME, {}))
-        agent_fields[FIELD_MUTED] = BoolField(value=muted, created=now)
+        is_agent_muted = is_muted(agent.plugin.get(PLUGIN_NAME, {}))
+        agent_fields[FIELD_MUTED] = BoolField(value=is_agent_muted, created=now)
 
         cells = {key: field.display() for key, field in agent_fields.items()}
         section = compute_section(agent_fields)
@@ -111,7 +111,7 @@ def fetch_board_snapshot(
                 provider_name=agent.host.provider_name,
                 branch=agent.initial_branch,
                 work_dir=work_dir,
-                is_muted=muted,
+                is_muted=is_agent_muted,
                 fields=agent_fields,
                 cells=cells,
                 section=section,
@@ -230,10 +230,10 @@ def toggle_agent_mute(mngr_ctx: MngrContext, agent_name: AgentName) -> bool:
         mngr_ctx=mngr_ctx,
     )
     plugin_data = agent.get_plugin_data(PLUGIN_NAME)
-    muted = not plugin_data.get(FIELD_MUTED, False)
-    plugin_data[FIELD_MUTED] = muted
+    is_agent_muted = not plugin_data.get(FIELD_MUTED, False)
+    plugin_data[FIELD_MUTED] = is_agent_muted
     agent.set_plugin_data(PLUGIN_NAME, plugin_data)
-    return muted
+    return is_agent_muted
 
 
 def _cache_file_path(mngr_ctx: MngrContext) -> Path:
