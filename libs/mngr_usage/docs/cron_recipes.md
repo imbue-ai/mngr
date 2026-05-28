@@ -43,12 +43,14 @@ snapshot="$(mngr usage --format json)"
 #   - >90% of the 5h window has elapsed (we're near its end), AND
 #   - <80% of the 5h window is used (budget left to burn before it resets), AND
 #   - the 7d window passes a PACE check with a tapering safety margin:
-#     used% < elapsed% * (1 - 0.30 * (100 - elapsed%) / 100). Early in the week
-#     that margin holds us well under the linear-pace line (Monday, ~14% elapsed
-#     -> require used% < ~10) so automation leaves headroom and doesn't crowd
-#     your own usage; the margin shrinks as the week runs out and vanishes at the
-#     end, so by Sunday it converges to "launch if there's any capacity left at
-#     all." Both windows carry window_seconds, so the reader derives
+#     used% < elapsed% * (1 - 0.30 * (100 - elapsed%) / 100). The 7d window is
+#     rolling (it resets ~7 days after the cycle's first request, not on a fixed
+#     weekday), so elapsed% is how far into the current cycle you are. Early in
+#     the cycle the margin holds us well under the linear-pace line (~1 day in,
+#     ~14% elapsed -> require used% < ~10) so automation leaves headroom and
+#     doesn't crowd your own usage; the margin shrinks as the cycle runs out and
+#     vanishes at the end, where it converges to "launch if there's any capacity
+#     left at all." Both windows carry window_seconds, so the reader derives
 #     elapsed_percentage. The 0.30 sets the peak headroom: raise it toward 1.0 to
 #     stay further from the limit early, lower it toward 0 to track plain pace.
 secs="$(jq -r '

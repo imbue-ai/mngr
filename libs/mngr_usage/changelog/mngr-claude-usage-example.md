@@ -6,9 +6,9 @@ mode (`mngr usage --format json`) rather than the blocking `mngr usage wait`:
   window is near its end with budget left, and schedule a `mngr stop` for the
   window boundary. The weekly guard is a *pace* check with a tapering safety
   margin -- `used% < elapsed% * (1 - 0.30 * (100 - elapsed%) / 100)` -- so it
-  leaves headroom early in the week (requires used% < ~10 on a Monday, staying
-  out of the user's way) but, as the margin shrinks toward week's end, converges
-  to "launch if any capacity is left."
+  leaves headroom early in the rolling 7-day cycle (requires used% < ~10 around
+  ~1 day in, staying out of the user's way) but, as the margin shrinks toward the
+  cycle's end, converges to "launch if any capacity is left."
 - Warm a fresh 5h window early: detect that the last recorded window has elapsed
   (`five_hour.resets_at < now`) and fire a throwaway headless `claude -p` prompt
   to start the next window. The 5h window starts on your first prompt, so
