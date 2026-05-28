@@ -1751,8 +1751,12 @@ class VpsDockerProvider(BaseProviderInstance):
         """Discover host records and agent data from all VPSes for this provider.
 
         Calls ``_list_provider_vps_hostnames`` to enumerate VPSes
-        (provider-specific), then SSHes to each in parallel to read host
-        records and agent data in a single command per VPS.
+        (provider-specific), then SSHes to each in parallel. Within each
+        VPS, ``_read_records_from_vps`` issues a small sequence of SSH
+        commands (find the mngr container by host-id label, resolve the
+        unified volume's mountpoint, read ``host_state.json``, list
+        ``agents/*.json``); the parallel fan-out across VPSes keeps wall
+        time bounded by the slowest VPS rather than the sum.
         """
         vps_ips = self._list_provider_vps_hostnames()
         if not vps_ips:

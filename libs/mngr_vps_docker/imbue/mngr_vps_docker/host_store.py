@@ -19,7 +19,11 @@ from imbue.mngr.primitives import AgentId
 from imbue.mngr_vps_docker.primitives import VpsInstanceId
 
 # Sentinel marking the start of each agent JSON file in batched-read output.
-# Chosen to be a string that cannot appear inside a serialized JSON record.
+# Chosen to be extremely unlikely to appear inside any real agent record:
+# long, all-uppercase, dash-delimited, and namespaced with the project tag.
+# (It is *not* impossible -- the sentinel is plain ASCII and would be valid
+# unescaped inside a JSON string value -- but no realistic agent record
+# contains this exact substring.)
 _AGENT_FILE_SEP: Final[str] = "---MNGR_AGENT_FILE_SEP---"
 
 
@@ -157,9 +161,10 @@ class VpsDockerHostStore(MutableModel):
             return None
         try:
             data = self.outer.read_text_file(path)
-        except (FileNotFoundError, OSError) as e:
-            # File raced from under us between path_exists and read, or a
-            # local-outer raised a real OSError. Treat as "missing".
+        except OSError as e:
+            # File raced from under us between path_exists and read
+            # (FileNotFoundError) or a local-outer raised some other
+            # OSError. Treat as "missing".
             logger.debug("Host record at {} not readable: {}", path, e)
             return None
         try:
@@ -170,7 +175,9 @@ class VpsDockerHostStore(MutableModel):
 
     def delete_host_record(self) -> None:
         """Delete the host record and all per-agent metadata on the volume."""
-        # Remove both files in a single SSH round-trip; -f makes both targets idempotent.
+        # Remove the agents/ directory and the host_state.json file in a single
+        # SSH round-trip. ``-r`` is required because agents/ is a directory;
+        # ``-f`` makes both targets idempotent (no error if either is missing).
         _run_outer_command(
             self.outer,
             f"rm -rf {shlex.quote(str(self._agents_dir))} {shlex.quote(str(self._host_state_path))}",
