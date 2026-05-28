@@ -6,36 +6,13 @@ Covers the OAuth localhost callback listener's handler. The handler must:
   (favicon, prefetches, service-worker pings) arrive at the same listener
   with no query params. Before the fix, those secondary GETs erased the
   captured params and the CLI then hung until the 300s OAuth timeout.
+
+The ``running_callback_server`` fixture lives in ``cli/conftest.py``.
 """
 
-import http.server
-import threading
 import urllib.request
-from collections.abc import Iterator
 
-import pytest
-
-from imbue.mngr_imbue_cloud.cli.auth import _make_callback_handler_class
 from imbue.mngr_imbue_cloud.cli.auth import _OAuthCaptureBox
-
-
-@pytest.fixture
-def running_callback_server() -> Iterator[tuple[_OAuthCaptureBox, int]]:
-    box = _OAuthCaptureBox()
-    handler_class = _make_callback_handler_class(box)
-    # Bind to port 0 and read back the kernel-assigned port from the live
-    # server. Picking a port via a separate socket and rebinding leaves a
-    # TOCTOU window where a parallel xdist worker can steal the port.
-    server = http.server.HTTPServer(("127.0.0.1", 0), handler_class)
-    port = server.server_address[1]
-    thread = threading.Thread(target=server.serve_forever, daemon=True, name="oauth-cb-test")
-    thread.start()
-    try:
-        yield box, port
-    finally:
-        server.shutdown()
-        server.server_close()
-        thread.join(timeout=5.0)
 
 
 def _get(port: int, path: str) -> int:
