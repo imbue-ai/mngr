@@ -15,12 +15,16 @@ from pathlib import Path
 import pytest
 from pydantic import TypeAdapter
 
+from imbue.imbue_common.model_update import to_update
 from imbue.mngr.cli.testing import create_test_agent_state
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.config.data_types import ProviderInstanceConfig
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import HostName
+from imbue.mngr.primitives import ProviderBackendName
+from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr_kanpan.data_source import BoolField
@@ -92,6 +96,25 @@ def work_dir(tmp_path: Path) -> Path:
     d = tmp_path / "work_dir"
     d.mkdir()
     return d
+
+
+def _ctx_with_failing_provider(mngr_ctx: MngrContext) -> MngrContext:
+    """Return a copy of ``mngr_ctx`` with an extra provider that fails to load.
+
+    The provider references a backend that does not exist, so any attempt to
+    instantiate or discover it raises. This stands in for a real provider that
+    becomes unreachable during a refresh -- e.g. a remote provider right after
+    the machine wakes from sleep, before the network is back -- which is the
+    condition that used to make muted agents leak out of the Muted section.
+    """
+    failing_config = ProviderInstanceConfig(backend=ProviderBackendName("nonexistent-backend-xyz"))
+    updated_config = mngr_ctx.config.model_copy_update(
+        to_update(
+            mngr_ctx.config.field_ref().providers,
+            {**mngr_ctx.config.providers, ProviderInstanceName("failing-provider"): failing_config},
+        ),
+    )
+    return mngr_ctx.model_copy_update(to_update(mngr_ctx.field_ref().config, updated_config))
 
 
 # =============================================================================
@@ -311,3 +334,51 @@ def test_fetch_board_snapshot_muted_agent_in_muted_section(
     muted_field = entry.fields[FIELD_MUTED]
     assert isinstance(muted_field, BoolField)
     assert muted_field.value is True
+
+
+@pytest.mark.acceptance
+def test_load_muted_agents_survives_a_failing_provider(
+    local_host: Host,
+    work_dir: Path,
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """A muted agent is still reported as muted when an unrelated provider fails.
+
+    Regression test for the sleep/wake bug: muted state is discovered
+    per-provider, so one provider failing must not wipe out the muted set of
+    agents discovered from the providers that did succeed.
+    """
+    create_test_agent_state(local_host, work_dir, "resilient-muted-agent")
+    toggle_agent_mute(temp_mngr_ctx, AgentName("resilient-muted-agent"))
+
+    failing_ctx = _ctx_with_failing_provider(temp_mngr_ctx)
+    muted = _load_muted_agents(failing_ctx)
+
+    assert AgentName("resilient-muted-agent") in muted
+
+
+@pytest.mark.acceptance
+@pytest.mark.tmux
+def test_fetch_board_snapshot_muted_agent_stays_muted_when_a_provider_fails(
+    local_host: Host,
+    work_dir: Path,
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """A muted agent stays in the MUTED section even when a provider fails to load.
+
+    Reproduces the sleep/wake symptom: when a provider's discovery fails during
+    a refresh, the muted agent used to lose its muted bit and get reclassified
+    by PR state -- landing in PRS_FAILED once the GitHub fetch also failed, so
+    it appeared mixed in with the non-muted rows. With per-provider resilient
+    muted-loading it must remain in MUTED.
+    """
+    create_test_agent_state(local_host, work_dir, "muted-despite-failure-agent")
+    toggle_agent_mute(temp_mngr_ctx, AgentName("muted-despite-failure-agent"))
+
+    failing_ctx = _ctx_with_failing_provider(temp_mngr_ctx)
+    result = fetch_board_snapshot(failing_ctx, [], {})
+
+    entries = {e.name: e for e in result.snapshot.entries}
+    entry = entries[AgentName("muted-despite-failure-agent")]
+    assert entry.is_muted is True
+    assert entry.section == BoardSection.MUTED

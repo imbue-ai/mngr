@@ -17,12 +17,17 @@ from imbue.mngr.api.discover import discover_hosts_and_agents
 from imbue.mngr.api.find import find_one_agent
 from imbue.mngr.api.find import resolve_to_started_host_and_agent
 from imbue.mngr.api.list import list_agents
+from imbue.mngr.api.providers import list_provider_names_to_load
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.primitives import AgentAddress
 from imbue.mngr.primitives import AgentName
+from imbue.mngr.primitives import DiscoveredAgent
+from imbue.mngr.primitives import DiscoveredHost
 from imbue.mngr.primitives import ErrorBehavior
 from imbue.mngr.primitives import LOCAL_PROVIDER_NAME
+from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr.utils.thread_cleanup import mngr_executor
 from imbue.mngr_kanpan.data_source import BoolField
 from imbue.mngr_kanpan.data_source import FIELD_MUTED
 from imbue.mngr_kanpan.data_source import FIELD_PR
@@ -239,23 +244,71 @@ def toggle_agent_mute(mngr_ctx: MngrContext, agent_name: AgentName) -> bool:
 
 
 def _load_muted_agents(mngr_ctx: MngrContext) -> set[AgentName]:
-    """Load the set of muted agent names from certified data."""
+    """Load the set of muted agent names from certified data.
+
+    Each provider is discovered independently (and in parallel) so that one
+    provider failing cannot wipe out the muted state of agents on the others.
+    This mirrors how ``list_agents`` -- which produces the board's agent list --
+    tolerates per-provider failures via ``ErrorBehavior.CONTINUE``.
+
+    The muted bit must be sourced at least as resiliently as the agent list:
+    an agent that is still listed on the board has to keep its MUTED
+    classification even when an unrelated provider is momentarily unreachable
+    (e.g. right after the machine wakes from sleep, before the network is back).
+    Previously a single all-or-nothing ``discover_hosts_and_agents`` call meant
+    that any one provider's failure produced an empty muted set, so every agent
+    was treated as unmuted and reclassified by its PR state -- and since the
+    GitHub fetch also fails post-wake, the previously-muted rows landed under
+    "PRs not loaded" mixed in with the others instead of staying in the Muted
+    section.
+    """
+    provider_names = list_provider_names_to_load(mngr_ctx)
+    if not provider_names:
+        return set()
+
     muted: set[AgentName] = set()
-    try:
-        agents_by_host, _providers = discover_hosts_and_agents(
-            mngr_ctx,
-            provider_names=None,
-            agent_identifiers=None,
-            include_destroyed=False,
-            reset_caches=False,
-        )
-        for _host_ref, agent_refs in agents_by_host.items():
-            for agent_ref in agent_refs:
-                if _is_agent_muted(agent_ref.certified_data):
-                    muted.add(agent_ref.agent_name)
-    except Exception as e:
-        logger.debug("Failed to load muted agents: {}", e)
+    with mngr_executor(
+        parent_cg=mngr_ctx.concurrency_group,
+        name="kanpan_load_muted_agents",
+        max_workers=min(len(provider_names), 8),
+    ) as executor:
+        future_by_name = {
+            provider_name: executor.submit(_discover_provider_agent_refs, mngr_ctx, provider_name)
+            for provider_name in provider_names
+        }
+        for provider_name, future in future_by_name.items():
+            try:
+                agents_by_host = future.result()
+            except Exception as e:
+                # Tolerate a per-provider failure the same way list_agents does:
+                # skip this provider rather than dropping every provider's muted state.
+                logger.debug("Failed to load muted agents from provider {}: {}", provider_name, e)
+                continue
+            for agent_refs in agents_by_host.values():
+                for agent_ref in agent_refs:
+                    if _is_agent_muted(agent_ref.certified_data):
+                        muted.add(agent_ref.agent_name)
     return muted
+
+
+def _discover_provider_agent_refs(
+    mngr_ctx: MngrContext,
+    provider_name: ProviderInstanceName,
+) -> dict[DiscoveredHost, list[DiscoveredAgent]]:
+    """Discover one provider's hosts and agent refs in isolation.
+
+    Scoping discovery to a single provider means a failure here (raised by
+    ``discover_hosts_and_agents``) is confined to that provider's future and
+    handled by ``_load_muted_agents`` without aborting the others.
+    """
+    agents_by_host, _providers = discover_hosts_and_agents(
+        mngr_ctx,
+        provider_names=(str(provider_name),),
+        agent_identifiers=None,
+        include_destroyed=False,
+        reset_caches=False,
+    )
+    return agents_by_host
 
 
 def _is_agent_muted(certified_data: Any) -> bool:
