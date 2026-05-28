@@ -18,7 +18,7 @@
 - **Owner identity.** The `r2_keys` table stores the **full SuperTokens user id** (with hyphens) as the owner -- exact ownership checks + auditing, matching what the existing LiteLLM `/keys/*` endpoints already do. The 16-hex bucket-name prefix is the truncation of that same id (its first 16 hex chars), so a key's bucket can always be tied back to its owner.
 - **Credential model.** Access Key ID = the Cloudflare token `id`; Secret Access Key = `sha256(token value)`. The token value is a secret: returned to the user once at creation and never persisted.
 - **State.** Buckets are not tracked in our DB (listed from the R2 API). Keys **are** tracked in a new `r2_keys` table in the connector's existing Neon DB.
-- **Single broadened Cloudflare token.** Reuse the existing `CLOUDFLARE_API_TOKEN`, widened to include R2 admin + "API Tokens Write" (rather than a separate secret). Existing deployed tiers must have this widened manually -- see Migration / rollout.
+- **Single account-owned Cloudflare token.** The connector still uses one `CLOUDFLARE_API_TOKEN` (no separate secret), but it must be an **account-owned token (`cfat_`)** -- not the user-owned (`cfut_`) token the tunnels feature shipped with. User-owned tokens are the wrong model here: the connector *creates* the per-bucket R2 tokens, and those should be account-owned service principals (durable, not tied to one operator's Cloudflare user). So the per-tier migration is a **replace**, not an in-place widen -- see Migration / rollout. The token carries R2 + Account-API-Tokens permissions on top of the existing tunnel/DNS/Access/KV set.
 - **Cap.** A hard-coded limit (≈50) on **buckets per account** prevents unbounded resource creation (e.g. forgotten CI cleanup). Keys-per-bucket are unbounded in v1.
 
 ## Expected Behavior
@@ -132,14 +132,18 @@ This file is intentionally self-contained (stdlib + 3rd-party only, no monorepo 
 
 ### Documentation + secrets
 
-- `.minds/template/cloudflare.sh`: update the `CLOUDFLARE_API_TOKEN` comment to note it now also needs R2 admin + "API Tokens Write".
-- `apps/remote_service_connector/README.md`: document the new `/buckets/*` routes and the broadened token requirement (with the migration note).
+- `.minds/template/cloudflare.sh`: update the `CLOUDFLARE_API_TOKEN` comment to note it must be an **account-owned** (`cfat_`) token carrying R2 (Workers R2 Storage: Edit) + Account API Tokens: Edit, in addition to the existing tunnel/DNS/Access/KV permissions.
+- `apps/remote_service_connector/README.md`: document the new `/buckets/*` routes and the account-owned token requirement + the one-time R2 account enablement (with the migration note).
 - `libs/mngr_imbue_cloud/README.md`: document the `bucket` command group.
 - Changelog entries for both touched projects (`libs/mngr_imbue_cloud`, `apps/remote_service_connector`). Editing `.minds/template/cloudflare.sh` does **not** require a separate `dev` changelog entry.
 
 ### Migration / rollout (manual, operator action)
 
-- **Broaden `CLOUDFLARE_API_TOKEN`** for every already-deployed tier (dev/staging/production) to add R2 admin + "API Tokens Write" before these routes will work. This is a manual Cloudflare dashboard / Vault update; capture it in the PR description and deploy runbook.
+Two manual prerequisites per tier before the bucket routes work. Capture both in the PR description and deploy runbook.
+
+- **Replace `CLOUDFLARE_API_TOKEN` with an account-owned token.** The tunnels feature shipped a **user-owned** (`cfut_`) token; the bucket feature needs an **account-owned** (`cfat_`) token so the connector can mint account-owned per-bucket R2 tokens. For each tier (dev/staging/production): create a custom **account-owned** token carrying the existing permissions (Cloudflare Tunnel: Edit, DNS: Edit on the tier zone, Access: Apps and Policies: Edit, Access: Service Tokens: Edit, Workers KV Storage: Edit) **plus** the new ones (Workers R2 Storage: Edit, Account API Tokens: Edit), then `vault kv patch -mount=secrets minds/<tier>/cloudflare CLOUDFLARE_API_TOKEN='cfat_...'` and redeploy. Verify account-owned tokens via `GET /accounts/{acct}/tokens/verify` (NOT `/user/tokens/verify`, which 401s for `cfat_`).
+  - **Status: dev done.** The `secrets/minds/dev/cloudflare` token has already been replaced with an active `cfat_` token (account `63b8d372...`). Staging and production still need it.
+- **Enable R2 on each Cloudflare account (one-time).** Even a correctly-permissioned token gets `403 code 10042 "Please enable R2 through the Cloudflare Dashboard"` until R2 is turned on for the account (accept R2 terms / add billing in the dashboard). **dev is NOT yet enabled** -- do this before testing the feature in dev.
 
 ## Implementation Phases
 
