@@ -22,7 +22,7 @@ window boundary so it doesn't bleed into the next window:
 
 ```bash
 #!/usr/bin/env bash
-# use-window.sh -- relaunch an agent to use up an about-to-expire 5h window.
+# use-extra.sh -- relaunch an agent to use up an about-to-expire 5h window.
 set -euo pipefail
 
 AGENT="my-agent"
@@ -79,7 +79,7 @@ echo "mngr stop $AGENT" | at "now + $(( (secs + 59) / 60 )) minutes"
 ```cron
 # cron starts with a bare PATH; set one that finds mngr, jq, and at (adjust to your install)
 PATH=/usr/local/bin:/usr/bin:/bin:/home/you/.local/bin
-*/10 * * * * /path/to/use-window.sh
+*/10 * * * * /path/to/use-extra.sh
 ```
 
 ## Warm a fresh 5h window early
