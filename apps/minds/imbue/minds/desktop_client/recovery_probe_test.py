@@ -203,7 +203,7 @@ def test_curl_probe_yes_for_200() -> None:
         ),
         plugin_resolver_services={},
     )
-    assert _answer(response, "answer locally") == ProbeAnswer.YES
+    assert _answer(response, "GET /api/agents") == ProbeAnswer.YES
 
 
 def test_curl_probe_no_for_non_200() -> None:
@@ -216,7 +216,28 @@ def test_curl_probe_no_for_non_200() -> None:
         ),
         plugin_resolver_services={},
     )
-    assert _answer(response, "answer locally") == ProbeAnswer.NO
+    assert _answer(response, "GET /api/agents") == ProbeAnswer.NO
+
+
+def test_curl_probe_no_for_404_wrong_process_on_port() -> None:
+    """A 404 from /api/agents means a non-SI process holds the inner port.
+
+    The system interface serves its SPA index for every unmatched GET, so it
+    never 404s; a static-file squatter (or any other process bound to the port)
+    returns 404 for /api/agents. The probe must read that as NO so the recovery
+    page surfaces the real problem instead of a green check (which curling ``/``
+    would have produced, since the squatter answers 200 there).
+    """
+    response = build_host_health_response(
+        list_json=_list_json(),
+        agent_id=_AGENT_ID,
+        services_agent_id=_SERVICES_AGENT_ID,
+        in_container_stdout=_probe_stdout(
+            {"services_toml_declares_system_interface": True, "inner_port": 8000, "curl_status": "404"}
+        ),
+        plugin_resolver_services={},
+    )
+    assert _answer(response, "GET /api/agents") == ProbeAnswer.NO
 
 
 def test_port_listener_probe_yes_when_listener_present() -> None:
@@ -417,8 +438,10 @@ def test_container_running_command_derives_state_with_jq() -> None:
     )
     probe = _probe_for(response, "container running")
     assert " | jq -r " in probe.command
-    assert str(_AGENT_ID) in probe.command  # the jq filter targets this agent
-    assert probe.output == "RUNNING"  # exactly what the jq pipeline prints
+    # the jq filter targets this agent
+    assert str(_AGENT_ID) in probe.command
+    # exactly what the jq pipeline prints
+    assert probe.output == "RUNNING"
 
 
 def test_services_agent_command_outputs_bare_state_without_prefix() -> None:
@@ -432,7 +455,8 @@ def test_services_agent_command_outputs_bare_state_without_prefix() -> None:
     )
     probe = _probe_for(response, "services agent")
     assert " | jq -r " in probe.command
-    assert probe.output == "RUNNING_UNKNOWN_AGENT_TYPE"  # no synthetic "state=" prefix
+    # no synthetic "state=" prefix
+    assert probe.output == "RUNNING_UNKNOWN_AGENT_TYPE"
 
 
 def test_can_run_commands_output_is_the_raw_exec_stdout() -> None:
@@ -447,7 +471,8 @@ def test_can_run_commands_output_is_the_raw_exec_stdout() -> None:
     )
     probe = _probe_for(response, "run a command")
     assert probe.command == "mngr exec agent-x 'echo hi' --quiet"
-    assert probe.output == stdout  # the verbatim stdout the command produced
+    # the verbatim stdout the command produced
+    assert probe.output == stdout
 
 
 def test_services_toml_command_is_mngr_exec_and_output_is_declared() -> None:
@@ -483,10 +508,12 @@ def test_curl_output_is_bare_status_code() -> None:
         in_container_stdout=_healthy_probe_stdout(curl_status="200"),
         plugin_resolver_services={},
     )
-    probe = _probe_for(response, "answer locally")
+    probe = _probe_for(response, "GET /api/agents")
     assert probe.command.startswith(f"mngr exec {_SERVICES_AGENT_ID} ")
     assert "curl" in probe.command
-    assert probe.output == "200"  # not "HTTP 200"
+    assert "/api/agents" in probe.command
+    # not "HTTP 200"
+    assert probe.output == "200"
 
 
 def test_port_listening_output_matches_listener_lines() -> None:

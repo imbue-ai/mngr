@@ -70,6 +70,17 @@ from imbue.mngr_latchkey.store import LatchkeyStoreError
 # together.
 _MNGR_FORWARD_SESSION_COOKIE_NAME: Final[str] = "mngr_forward_session"
 
+# Path the workspace-readiness / health probes hit through the plugin. We probe
+# a real system-interface API route rather than ``/`` so a 200 is an *identity*
+# check, not merely "something is answering on the port". The SI serves its SPA
+# index for every unmatched GET (a ``/{path:path}`` catch-all), so ``/`` returns
+# 200 even from an unrelated process (e.g. a static file server) that happens to
+# hold the inner port. ``/api/agents`` is a core SI endpoint that returns 200
+# JSON from the real system interface but 404 from anything that does not
+# implement it, so probing it lets the health loop distinguish the real backend
+# from a port squatter / wrong process.
+_WORKSPACE_PROBE_PATH: Final[str] = "/api/agents"
+
 
 def make_workspace_probe_client(preauth_cookie: str, probe_timeout_seconds: float) -> httpx.Client:
     """Construct a reusable httpx.Client preconfigured for workspace probes.
@@ -115,11 +126,13 @@ def probe_workspace_through_plugin(
 ) -> int | None:
     """Issue a single probe through the plugin to the agent's system_interface.
 
-    Returns the HTTP status code observed (any 200 means ready), or ``None``
-    if the probe failed at the transport layer (connect error, mid-stream
-    EOF, read timeout). Shared by ``_wait_for_workspace_ready`` (creation
-    flow) and the system-interface-health tracker's background probe loop
-    so both paths agree on what "ready" means.
+    Probes the ``/api/agents`` SI route (see ``_WORKSPACE_PROBE_PATH``).
+    Returns the HTTP status code observed (a 200 means the real SI is ready;
+    a 404 means something other than the SI is answering on the port), or
+    ``None`` if the probe failed at the transport layer (connect error,
+    mid-stream EOF, read timeout). Shared by ``_wait_for_workspace_ready``
+    (creation flow) and the system-interface-health tracker's background
+    probe loop so both paths agree on what "ready" means.
 
     Pass a pre-constructed ``client`` (via ``make_workspace_probe_client``)
     to reuse the connection pool across a tight poll loop. When omitted, a
@@ -130,7 +143,7 @@ def probe_workspace_through_plugin(
     ``agent-<hex>.localhost`` vhost in the ``Host`` header, so it does not
     depend on ``*.localhost`` resolving.
     """
-    probe_url = f"http://127.0.0.1:{mngr_forward_port}/"
+    probe_url = f"http://127.0.0.1:{mngr_forward_port}{_WORKSPACE_PROBE_PATH}"
     host_header = f"{agent_id}.localhost"
     if client is not None:
         return _probe_once(client, probe_url, host_header)

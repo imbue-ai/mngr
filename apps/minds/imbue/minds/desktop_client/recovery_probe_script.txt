@@ -84,13 +84,17 @@ if result["inner_port"] is not None:
     except Exception as e:
         result["port_listener_error"] = repr(e)
 
+# Curl /api/agents rather than / so a 200 is an identity check: the system
+# interface serves its SPA index for every unmatched GET (a catch-all), so /
+# returns 200 even from an unrelated process holding the inner port. /api/agents
+# is a core SI endpoint, so a 404 here reveals a wrong-process responder.
 if result["inner_port"] is not None:
     try:
         proc = subprocess.run(
             [
                 "curl", "-m1", "-s", "-o", "/dev/null",
                 "-w", "%{http_code}",
-                "http://localhost:{}/".format(result["inner_port"]),
+                "http://localhost:{}/api/agents".format(result["inner_port"]),
             ],
             capture_output=True, text=True, timeout=2,
         )

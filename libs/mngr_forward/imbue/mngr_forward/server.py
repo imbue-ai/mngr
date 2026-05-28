@@ -410,6 +410,27 @@ async def _forward_workspace_http(
             SystemInterfaceBackendFailureReason.FIVEXX_RESPONSE,
             backend_response.status_code,
         )
+    elif backend_response.status_code == 404 and request.method == "GET":
+        # The real system interface serves its SPA index for every unmatched
+        # GET (a ``/{path:path}`` catch-all), so it never 404s a page/route
+        # load. A 404 on a proxied GET therefore means the responder is not
+        # behaving like the system interface (e.g. another process has bound
+        # the inner port). Scoped to GET because non-GET 404/405s are ordinary
+        # method/resource outcomes, not an identity signal. Only a hint: it
+        # enrolls the agent as a probe suspect, and the minds background probe
+        # loop -- which probes a real SI route -- decides STUCK.
+        _emit_backend_failure(
+            envelope_writer,
+            agent_id,
+            SystemInterfaceBackendFailureReason.NOT_FOUND_RESPONSE,
+            backend_response.status_code,
+        )
+    else:
+        # Every other response (normal 2xx/3xx, an application-layer 4xx other
+        # than a GET 404, a non-infrastructure 5xx like a 500 stack trace) is a
+        # legitimate backend reply, not a health signal: forward it as-is and
+        # emit no failure envelope.
+        pass
 
     response = Response(content=backend_response.content, status_code=backend_response.status_code)
     for header_key, header_value in backend_response.headers.multi_items():

@@ -631,6 +631,77 @@ def test_subdomain_forward_does_not_emit_failure_on_2xx(tmp_path: Path) -> None:
     assert _envelope_lines(env_out) == []
 
 
+def test_subdomain_forward_emits_not_found_response_on_404_get(tmp_path: Path) -> None:
+    """A 404 to a proxied GET emits a ``NOT_FOUND_RESPONSE`` failure envelope.
+
+    The real system interface serves its SPA index for every unmatched GET, so
+    it never 404s a page/route load. A 404 reaching the proxy on a GET means the
+    responder is not behaving like the system interface (e.g. a different process
+    has bound the inner port), which should enroll the agent as a probe suspect.
+    """
+    agent_id = AgentId()
+    preauth = "preauth-cookie-404"
+    captured: list[httpx.Request] = []
+    app, env_out, mock_client = _make_forward_app_with_capture(
+        tmp_path,
+        captured,
+        agent_id,
+        preauth,
+        backend_status=404,
+    )
+
+    with TestClient(app, base_url=f"http://{agent_id}.localhost:18421", follow_redirects=False) as client:
+        app.state.http_client = mock_client
+        response = client.get(
+            "/api/agents/agent-deadbeef/screen",
+            headers={
+                "cookie": f"{MNGR_FORWARD_SESSION_COOKIE_NAME}={preauth}",
+                "accept": "application/json",
+            },
+        )
+
+    assert response.status_code == 404
+    lines = _envelope_lines(env_out)
+    assert len(lines) == 1
+    payload = json.loads(lines[0])["payload"]
+    assert payload["type"] == "system_interface_backend_failure"
+    assert payload["reason"] == "NOT_FOUND_RESPONSE"
+    assert payload["status_code"] == 404
+
+
+def test_subdomain_forward_does_not_emit_failure_on_non_get_404(tmp_path: Path) -> None:
+    """A 404 to a non-GET request must not emit a failure envelope.
+
+    The SPA catch-all guarantee that makes a 404 an identity signal only holds
+    for GET. A POST/PUT/DELETE returning 404 (or 405) is an ordinary
+    method/resource outcome, not evidence of a wrong backend, so it must not
+    enroll the agent.
+    """
+    agent_id = AgentId()
+    preauth = "preauth-cookie-404-post"
+    captured: list[httpx.Request] = []
+    app, env_out, mock_client = _make_forward_app_with_capture(
+        tmp_path,
+        captured,
+        agent_id,
+        preauth,
+        backend_status=404,
+    )
+
+    with TestClient(app, base_url=f"http://{agent_id}.localhost:18421", follow_redirects=False) as client:
+        app.state.http_client = mock_client
+        response = client.post(
+            "/api/agents/agent-deadbeef/message",
+            headers={
+                "cookie": f"{MNGR_FORWARD_SESSION_COOKIE_NAME}={preauth}",
+                "accept": "application/json",
+            },
+        )
+
+    assert response.status_code == 404
+    assert _envelope_lines(env_out) == []
+
+
 def test_subdomain_forward_emits_system_interface_backend_failure_on_sse_startup_disconnect(tmp_path: Path) -> None:
     """``RemoteProtocolError`` on an SSE-startup ``send()`` must emit ``CONNECT_ERROR``.
 

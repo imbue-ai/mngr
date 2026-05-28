@@ -15,6 +15,7 @@ from http.server import BaseHTTPRequestHandler
 from http.server import HTTPServer
 from pathlib import Path
 
+import httpx
 import pytest
 from pydantic import AnyUrl
 from pydantic import Field
@@ -30,6 +31,7 @@ from imbue.minds.desktop_client.agent_creator import _is_local_path
 from imbue.minds.desktop_client.agent_creator import _redact_url_credentials
 from imbue.minds.desktop_client.agent_creator import _redact_url_credentials_in_text
 from imbue.minds.desktop_client.agent_creator import extract_repo_name
+from imbue.minds.desktop_client.agent_creator import probe_workspace_through_plugin
 from imbue.minds.desktop_client.conftest import FAKE_CONNECTOR_URL
 from imbue.minds.desktop_client.conftest import FakeImbueCloudCli
 from imbue.minds.desktop_client.imbue_cloud_cli import LiteLLMKeyMaterial
@@ -405,6 +407,64 @@ def test_wait_for_workspace_ready_calls_record_probe_success_on_ready(tmp_path) 
     assert tracker.get_health(aid) == AgentHealth.HEALTHY
     assert aid not in tracker.snapshot_all()
     assert aid not in tracker.snapshot_probe_targets()
+
+
+def test_probe_workspace_through_plugin_targets_system_interface_api_route() -> None:
+    """The probe hits a real SI route (/api/agents), carrying the vhost in Host.
+
+    Probing ``/`` would only confirm that *something* answers on the inner port:
+    the SI serves its SPA index for every unmatched GET, so an unrelated process
+    holding the port (e.g. a static file server) also returns 200 at ``/``.
+    ``/api/agents`` is a core SI endpoint, so a 200 there is an identity check
+    and a 404 reveals a non-SI responder.
+    """
+    captured: list[httpx.Request] = []
+
+    def _capture(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return httpx.Response(200, json={"agents": []})
+
+    aid = AgentId.generate()
+    with httpx.Client(transport=httpx.MockTransport(_capture)) as client:
+        status = probe_workspace_through_plugin(
+            mngr_forward_port=18999,
+            preauth_cookie="any-preauth",
+            agent_id=aid,
+            probe_timeout_seconds=0.5,
+            client=client,
+        )
+
+    assert status == 200
+    assert len(captured) == 1
+    assert captured[0].url.path == "/api/agents"
+    # The agent vhost rides the Host header, not the URL host, so the probe
+    # does not depend on ``*.localhost`` resolution.
+    assert captured[0].headers["host"] == f"{aid}.localhost"
+
+
+def test_probe_workspace_through_plugin_returns_404_for_non_si_responder() -> None:
+    """A 404 from the probed route surfaces as a 404 status (not None / not 200).
+
+    A non-SI responder on the inner port (e.g. a static file server) 404s
+    ``/api/agents``. The probe returns that 404 so the caller's ``== 200`` check
+    treats the workspace as unready and the background loop records a probe
+    failure, driving the agent toward STUCK.
+    """
+
+    def _capture(request: httpx.Request) -> httpx.Response:
+        del request
+        return httpx.Response(404, text="Not Found")
+
+    with httpx.Client(transport=httpx.MockTransport(_capture)) as client:
+        status = probe_workspace_through_plugin(
+            mngr_forward_port=18999,
+            preauth_cookie="any-preauth",
+            agent_id=AgentId.generate(),
+            probe_timeout_seconds=0.5,
+            client=client,
+        )
+
+    assert status == 404
 
 
 def test_wait_for_workspace_ready_publishes_anyway_on_timeout(tmp_path) -> None:

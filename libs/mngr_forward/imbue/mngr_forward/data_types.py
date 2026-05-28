@@ -29,12 +29,20 @@ class SystemInterfaceBackendFailureReason(UpperCaseStrEnum):
       covers non-SSE mid-response read failures.
     - ``FIVEXX_RESPONSE``: the backend returned a 502/503/504. Other 5xx
       codes (e.g. application-layer 500s) are *not* tagged as failures.
+    - ``NOT_FOUND_RESPONSE``: the backend answered a ``GET`` with a 404. The
+      real system interface serves its SPA index for every unmatched ``GET``
+      (a catch-all route), so it never 404s a page/route load -- a 404 reaching
+      the proxy means whatever is answering on the port is not behaving like
+      the system interface (e.g. a different process has bound the port). This
+      is only a hint: like the other reasons it merely enrolls the agent as a
+      probe suspect; the minds background probe loop confirms STUCK.
     - ``UNRESOLVED``: the backend resolver had no entry for the agent.
     """
 
     CONNECT_ERROR = auto()
     SSE_EOF = auto()
     FIVEXX_RESPONSE = auto()
+    NOT_FOUND_RESPONSE = auto()
     UNRESOLVED = auto()
 
 
@@ -85,8 +93,8 @@ class SystemInterfaceBackendFailurePayload(FrozenModel):
     """Emitted when the plugin observes a per-agent backend failure.
 
     The plugin's role is observation only: it surfaces the kind of failure
-    it saw (connect error, mid-SSE EOF, 5xx response) so the minds-side
-    ``SystemInterfaceHealthTracker`` can apply policy (e.g. 5s
+    it saw (connect error, mid-SSE EOF, 5xx response, 404 GET) so the
+    minds-side ``SystemInterfaceHealthTracker`` can apply policy (e.g. 5s
     HEALTHY -> STUCK transition).
     """
 
@@ -95,7 +103,7 @@ class SystemInterfaceBackendFailurePayload(FrozenModel):
     reason: SystemInterfaceBackendFailureReason = Field(description="Why the forward attempt failed")
     status_code: int | None = Field(
         default=None,
-        description="HTTP status code returned by the backend (only set when reason is FIVEXX_RESPONSE)",
+        description="HTTP status code returned by the backend (set when reason is FIVEXX_RESPONSE or NOT_FOUND_RESPONSE)",
     )
 
 

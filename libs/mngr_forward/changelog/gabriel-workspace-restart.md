@@ -26,3 +26,13 @@ backend failure instead of flashing a raw error.
   startup. No periodic flushes, no debouncing, no initial empty
   emission; the first envelope is sent on the first real services
   event.
+- The plugin now also treats a 404 on a proxied `GET` as a backend
+  failure (`NOT_FOUND_RESPONSE`). The system interface serves its SPA
+  index for every unmatched `GET`, so it never 404s a page/route load --
+  a 404 reaching the proxy means whatever holds the inner port is not
+  the system interface (e.g. a different process has bound the port).
+  This enrolls the agent as a probe suspect so the minds health loop can
+  confirm and recover, instead of letting a wrong-process responder look
+  healthy. Scoped to `GET` only; non-`GET` 404/405s are ordinary
+  method/resource outcomes and do not enroll. Like the other reasons it
+  is only a hint -- STUCK is still decided by minds' background probe.
