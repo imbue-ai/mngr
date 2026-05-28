@@ -347,9 +347,13 @@ def _handle_landing_page(
         html = render_login_page()
         return HTMLResponse(content=html)
 
-    all_agent_ids = backend_resolver.list_known_workspace_ids()
+    # Use the cache-augmented list for tile rendering (so an SSH-dead docker
+    # workspace still shows up), but key the destroying-record resolver off
+    # the live-only list so DONE/FAILED classification stays authoritative.
+    live_workspace_ids = backend_resolver.list_known_workspace_ids()
+    all_agent_ids = backend_resolver.list_known_or_cached_workspace_ids()
     paths: WorkspacePaths | None = request.app.state.api_v1_paths
-    destroying_status_by_agent_id = _resolve_destroying_for_landing(paths, all_agent_ids)
+    destroying_status_by_agent_id = _resolve_destroying_for_landing(paths, live_workspace_ids, backend_resolver)
 
     if all_agent_ids:
         telegram_orchestrator: TelegramSetupOrchestrator | None = request.app.state.telegram_orchestrator
@@ -982,14 +986,24 @@ async def _handle_creation_logs_sse(
 
 def _resolve_destroying_for_landing(
     paths: WorkspacePaths | None,
-    all_agent_ids: tuple[AgentId, ...],
+    live_workspace_ids: tuple[AgentId, ...],
+    backend_resolver: BackendResolverInterface,
 ) -> dict[str, str]:
     """Walk ``<paths.data_dir>/destroying/``, delete DONE records, return marker map.
 
     Returns ``{agent_id_str: "running" | "failed"}`` for any in-flight or
     failed destroy whose agent_id is currently known to the resolver. DONE
     records (pid dead AND agent missing from the resolver) are deleted on
-    the spot so the row vanishes naturally on the next refresh.
+    the spot so the row vanishes naturally on the next refresh. The same
+    DONE transition also evicts the agent from the resolver's persisted
+    workspace cache (if present), so a tile that was being rendered solely
+    from the cache (e.g. SSH-dead container at destroy time) goes away with
+    the destroying record.
+
+    ``live_workspace_ids`` MUST be the live snapshot
+    (``list_known_workspace_ids``), not the cache-augmented list -- the
+    DONE/FAILED classification keys off whether mngr still sees the agent,
+    not whether the UI is still rendering a tile for it.
 
     Returns an empty dict (and does no work) when ``paths`` is None --
     that path is exercised by tests that build a minimal app without
@@ -997,12 +1011,13 @@ def _resolve_destroying_for_landing(
     """
     if paths is None:
         return {}
-    in_resolver = frozenset(all_agent_ids)
+    in_resolver = frozenset(live_workspace_ids)
     records = list_destroying(paths, in_resolver)
     marker: dict[str, str] = {}
     for agent_id, record in records.items():
         if record.status == DestroyingStatus.DONE:
             delete_destroying(agent_id, paths)
+            backend_resolver.evict_cached_workspace(agent_id)
             continue
         marker[str(agent_id)] = "running" if record.status == DestroyingStatus.RUNNING else "failed"
     return marker
@@ -1394,7 +1409,9 @@ async def _handle_chrome_events(
             session_store: MultiAccountSessionStore | None = request.app.state.session_store
             paths: WorkspacePaths | None = request.app.state.api_v1_paths
             last_workspace_data = _build_workspace_list(backend_resolver, session_store)
-            last_destroying_ids = _destroying_agent_ids(paths, backend_resolver.list_known_workspace_ids())
+            last_destroying_ids = _destroying_agent_ids(
+                paths, backend_resolver.list_known_workspace_ids(), backend_resolver
+            )
             has_accounts = bool(session_store and session_store.list_accounts())
             yield "data: {}\n\n".format(
                 json.dumps(
@@ -1479,7 +1496,9 @@ async def _handle_chrome_events(
                     yield "data: {}\n\n".format(json.dumps(_system_interface_status_payload(tracker, aid_str, status)))
 
                 current_data = _build_workspace_list(backend_resolver, session_store)
-                current_destroying_ids = _destroying_agent_ids(paths, backend_resolver.list_known_workspace_ids())
+                current_destroying_ids = _destroying_agent_ids(
+                    paths, backend_resolver.list_known_workspace_ids(), backend_resolver
+                )
                 if current_data != last_workspace_data or current_destroying_ids != last_destroying_ids:
                     last_workspace_data = current_data
                     last_destroying_ids = current_destroying_ids
@@ -1608,21 +1627,40 @@ def _build_providers_state_payload(backend_resolver: BackendResolverInterface) -
     }
 
 
-def _destroying_agent_ids(paths: WorkspacePaths | None, known_workspace_ids: tuple[AgentId, ...]) -> list[str]:
+def _destroying_agent_ids(
+    paths: WorkspacePaths | None,
+    live_workspace_ids: tuple[AgentId, ...],
+    backend_resolver: BackendResolverInterface,
+) -> list[str]:
     """Return the agent ids currently in any in-flight / failed destroy state.
 
     Pure read of the on-disk ``destroying/`` dir; never deletes records (the
-    landing-page render path owns DONE-record cleanup). The chrome SSE emits
-    this alongside the workspaces list so Electron can distinguish "the
-    workspace disappeared because we destroyed it" from "discovery transiently
-    lost it" -- the latter must not navigate the user's window away from a
-    workspace that is still around.
+    landing-page render path owns DONE-record cleanup). DONE records do
+    incidentally evict the resolver's workspace-cache entry so the chrome
+    workspaces list stops emitting the destroyed tile on the next tick --
+    waiting for the landing page would leave a dead tile in the sidebar
+    until the user happens to visit home.
+
+    The chrome SSE emits this alongside the workspaces list so Electron
+    can distinguish "the workspace disappeared because we destroyed it"
+    from "discovery transiently lost it" -- the latter must not navigate
+    the user's window away from a workspace that is still around.
+
+    ``live_workspace_ids`` MUST be the live snapshot
+    (``list_known_workspace_ids``), not the cache-augmented list -- the
+    DONE/FAILED classification keys off whether mngr still sees the agent.
     """
     if paths is None:
         return []
-    in_resolver = frozenset(known_workspace_ids)
+    in_resolver = frozenset(live_workspace_ids)
     records = list_destroying(paths, in_resolver)
-    return [str(agent_id) for agent_id, record in records.items() if record.status != DestroyingStatus.DONE]
+    destroying_ids: list[str] = []
+    for agent_id, record in records.items():
+        if record.status == DestroyingStatus.DONE:
+            backend_resolver.evict_cached_workspace(agent_id)
+            continue
+        destroying_ids.append(str(agent_id))
+    return destroying_ids
 
 
 def _build_workspace_list(
@@ -1634,8 +1672,13 @@ def _build_workspace_list(
     Each entry carries a deterministic "accent" CSS color derived from the
     agent id so the chrome and sidebar can render a per-workspace accent
     without running a digest in JS.
+
+    Uses the cache-augmented list so a workspace whose docker container is
+    up but whose sshd is dead still appears -- the user can then click the
+    tile and reach the recovery / restart flow that the rest of this
+    branch already handles.
     """
-    agent_ids = backend_resolver.list_known_workspace_ids()
+    agent_ids = backend_resolver.list_known_or_cached_workspace_ids()
     workspaces: list[dict[str, str]] = []
     for aid in agent_ids:
         ws_name = backend_resolver.get_workspace_name(aid)

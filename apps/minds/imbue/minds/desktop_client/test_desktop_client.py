@@ -1230,14 +1230,14 @@ def test_destroying_agent_ids_returns_ids_with_live_destroy(tmp_path: Path) -> N
     (destroying_dir / "pid").write_text(str(os.getpid()))
     (destroying_dir / "output.log").write_text("destroy in flight...\n")
 
-    ids = _destroying_agent_ids(paths, (agent_id,))
+    ids = _destroying_agent_ids(paths, (agent_id,), MngrCliBackendResolver())
     assert ids == [str(agent_id)]
 
 
 def test_destroying_agent_ids_returns_empty_when_paths_is_none() -> None:
     """The test-server helper builds a minimal app without WorkspacePaths;
     the helper must tolerate that without raising."""
-    assert _destroying_agent_ids(None, ()) == []
+    assert _destroying_agent_ids(None, (), MngrCliBackendResolver()) == []
 
 
 # -- Tests for new account management and request routes --

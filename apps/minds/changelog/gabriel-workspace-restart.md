@@ -166,3 +166,18 @@ Tiered system-interface restart for the minds recovery flow.
   re-runs the host-health probe (with auto-dispatch off so it does not
   stack another restart attempt) so the user can see both the failure
   reason and the current probe answers at once.
+- Persisted workspace cache. The landing-page tile and chrome workspaces
+  list now keep rendering a workspace whose live discovery snapshot has
+  transiently dropped it -- the SSH-dead docker-container failure mode.
+  ``MngrCliBackendResolver`` writes each primary workspace agent it sees
+  into ``workspaces_cache.json`` under the data directory and exposes
+  ``list_known_or_cached_workspace_ids`` / a cache-fallback
+  ``get_workspace_name``; the landing-page renderer and chrome SSE
+  workspace-list builder consume the augmented list. ``list_known_workspace_ids``
+  stays live-only so the destroying-records DONE/FAILED classification
+  remains authoritative; entries are evicted via ``evict_cached_workspace``
+  the moment a destroy transitions to DONE, in both the landing-page
+  cleanup path and the chrome SSE poll. Without this, ``pkill sshd``
+  inside a docker container made the workspace tile vanish from the home
+  page even though the container was still up, leaving the user with no
+  re-entry point to the recovery / restart flow.
