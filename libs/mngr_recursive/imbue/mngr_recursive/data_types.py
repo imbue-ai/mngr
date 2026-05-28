@@ -18,7 +18,7 @@ class RecursivePluginConfig(PluginConfig):
         description="How mngr should be installed on remote hosts: auto, package, editable, or skip",
     )
 
-    def merge_with(self, override: "RecursivePluginConfig") -> "RecursivePluginConfig":  # type: ignore[override]
+    def merge_with(self, override: "RecursivePluginConfig") -> "RecursivePluginConfig":  # ty: ignore[invalid-method-override]
         """Merge this config with an override config.
 
         Scalar fields: override wins if not None.

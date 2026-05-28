@@ -32,9 +32,8 @@ def test_prevent_while_true() -> None:
 
 
 def test_prevent_time_sleep() -> None:
-    # Ratchet at 5: launch_all_test_agents (1 launch-delay)
-    # + launch_and_poll_agents (2 poll sleeps) + wait_for_integrator (2 poll sleeps)
-    rc.check_time_sleep(_DIR, snapshot(5))
+    # The orchestration sleeps live in mngr_mapreduce now.
+    rc.check_time_sleep(_DIR, snapshot(0))
 
 
 def test_prevent_global_keyword() -> None:
@@ -70,7 +69,7 @@ def test_prevent_builtin_exception_raises() -> None:
 
 
 def test_prevent_silent_decode_error_catches() -> None:
-    rc.check_silent_decode_error_catches(_DIR, snapshot(1))
+    rc.check_silent_decode_error_catches(_DIR, snapshot(0))
 
 
 # --- Import style ---
