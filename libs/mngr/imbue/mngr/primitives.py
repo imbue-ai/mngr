@@ -456,6 +456,13 @@ class HostLocationAddress(FrozenModel):
     agent: AgentNameOrId | None = Field(default=None, description="Optional agent name or ID")
     host: HostAddress | None = Field(default=None, description="Optional host")
     path: Path | None = Field(default=None, description="Optional path")
+    has_trailing_path_slash: bool = Field(
+        default=False,
+        description=(
+            "True if the user-typed PATH ended with ``/``. ``Path`` strips trailing slashes, "
+            "so this flag is the only way to preserve rsync's contents-vs-child semantics."
+        ),
+    )
 
 
 class AgentTypeName(SafeName):

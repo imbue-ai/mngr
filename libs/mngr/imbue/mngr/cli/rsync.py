@@ -1,3 +1,4 @@
+from pathlib import Path
 from typing import Any
 
 import click
@@ -37,6 +38,14 @@ class RsyncCliOptions(CommonCliOptions):
     rsync_args: tuple[str, ...]
 
 
+def _user_path_to_str(path: Path, has_trailing_slash: bool) -> str:
+    """Format a user-supplied Path back into a string, preserving the trailing ``/``."""
+    s = str(path)
+    if has_trailing_slash and not s.endswith("/"):
+        s += "/"
+    return s
+
+
 def _resolve_endpoint(
     parsed: HostLocationAddress,
     mngr_ctx: MngrContext,
@@ -45,11 +54,12 @@ def _resolve_endpoint(
 ) -> tuple[OnlineHostInterface, str]:
     """Resolve a HostLocationAddress to ``(host, path_str)``.
 
-    When the user supplied a ``:PATH`` (or a bare local path), it's returned
-    verbatim. When they didn't (e.g. ``mngr rsync ./foo my-agent``), the resolved
-    agent or host workdir is returned with a trailing ``/`` appended -- that's
-    rsync's "copy contents into destination" shorthand, which is almost always
-    what the user wants when they referred to an agent/host by name only.
+    User-supplied paths are returned verbatim, including a trailing ``/`` if the
+    user typed one (``Path`` strips it, so we read the side-channel flag set by
+    the parser). When the user didn't supply a path (``mngr rsync ./foo my-agent``),
+    the resolved agent or host workdir is returned with a trailing ``/`` appended
+    -- that's rsync's "copy contents into destination" shorthand, which is almost
+    always what the user wants when they referred to an agent/host by name only.
     """
     if parsed.agent is None and parsed.host is None:
         if parsed.path is None:
@@ -57,7 +67,7 @@ def _resolve_endpoint(
         provider = get_provider_instance(LOCAL_PROVIDER_NAME, mngr_ctx)
         host = provider.get_host(HostName(LOCAL_HOST_NAME))
         online_host, _ = ensure_host_started(host, is_start_desired=is_start_desired, provider=provider)
-        return online_host, str(parsed.path)
+        return online_host, _user_path_to_str(parsed.path, parsed.has_trailing_path_slash)
 
     agents_by_host, _ = discover_hosts_and_agents(
         mngr_ctx,
@@ -72,10 +82,14 @@ def _resolve_endpoint(
         mngr_ctx,
         is_start_desired=is_start_desired,
     )
-    path_str = str(resolved.location.path)
-    if parsed.path is None and not path_str.endswith("/"):
-        path_str += "/"
-    return resolved.location.host, path_str
+    if parsed.path is None:
+        # mngr-generated path (the agent/host workdir): suffix with ``/`` so
+        # rsync copies contents into destination.
+        path_str = str(resolved.location.path)
+        if not path_str.endswith("/"):
+            path_str += "/"
+        return resolved.location.host, path_str
+    return resolved.location.host, _user_path_to_str(resolved.location.path, parsed.has_trailing_path_slash)
 
 
 @click.command(context_settings={"ignore_unknown_options": True})
