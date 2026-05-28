@@ -26,6 +26,16 @@ repos:
         language: system
         files: '^style_guide\.md$|scripts/compile_style_guide\.py$|scripts/style_guide\.py$'
         pass_filenames: false
+    -   id: uv-sync-pre-push
+#        Runs before pushing whenever a push touches dependency files (e.g. after the code-guardian
+#        stop hook merges origin/main and that merge updates uv.lock or a pyproject.toml). This keeps
+#        the local environment in sync with the just-merged dependencies before any push-time gates run.
+        name: "Sync workspace packages before push (deps changed)"
+        entry: uv sync --all-packages
+        language: system
+        stages: [pre-push]
+        files: '(^|/)(uv\.lock|pyproject\.toml)$'
+        pass_filenames: false
     -   id: clean-stale-workspace-dirs
 #        Without this, when a workspace member is removed, its directory and contents remain, which causes uv to explode with a cryptic error message any time you run any uv command
         name: "Clean stale workspace member directories"
