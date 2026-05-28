@@ -4,8 +4,6 @@ Ideas for **recurring** usage-driven automation: let `cron` poll
 `mngr usage --format json` on a schedule and act when usage looks a certain way.
 For a **one-off** ("when the 5h window frees up, kick off this batch") reach for
 `mngr usage wait` instead -- see [Waiting on a predicate](../README.md#waiting-on-a-predicate).
-The polled snapshot is the same per-source shape `wait` evaluates, so `jq` plays
-the role `--until`'s CEL did.
 
 Across the usage-driven recipes below:
 
