@@ -30,6 +30,7 @@ from functools import cache
 from pathlib import Path
 from typing import Final
 
+from loguru import logger
 from pydantic import Field
 
 from imbue.imbue_common.frozen_model import FrozenModel
@@ -46,7 +47,7 @@ PROBE_TIMEOUT_SECONDS: Final[float] = 5.0
 
 # Inner Python script executed on the agent's host, loaded from a sibling
 # .txt resource so the in-container script's patterns (tomllib import,
-# subprocess.run calls, broad Exception catches, ...) don't trip minds-side
+# subprocess calls, broad Exception catches, ...) don't trip minds-side
 # ratchets that only inspect ``.py`` files. The script is then base64-encoded
 # in ``build_probe_shell_command`` so the outer ``mngr exec`` argv stays a
 # single shell-safe token without quoting headaches.
@@ -208,7 +209,8 @@ def _parse_in_container_probe(stdout: str | None) -> _InContainerProbe:
         return _InContainerProbe(sentinel_seen=True, raw_stdout=stdout)
     try:
         payload = json.loads(json_line)
-    except json.JSONDecodeError:
+    except json.JSONDecodeError as exc:
+        logger.warning("In-container probe emitted a non-JSON payload line ({!r}): {}", json_line, exc)
         return _InContainerProbe(sentinel_seen=True, raw_stdout=stdout)
     if not isinstance(payload, dict):
         return _InContainerProbe(sentinel_seen=True, raw_stdout=stdout)
@@ -264,7 +266,8 @@ def _extract_agent_row(list_json: str | None, agent_id: AgentId) -> dict | None:
         return None
     try:
         agents = json.loads(list_json).get("agents", [])
-    except (json.JSONDecodeError, AttributeError):
+    except (json.JSONDecodeError, AttributeError) as exc:
+        logger.warning("Could not parse `mngr list` output while extracting agent row: {}", exc)
         return None
     for agent in agents:
         if isinstance(agent, dict) and agent.get("id") == str(agent_id):
