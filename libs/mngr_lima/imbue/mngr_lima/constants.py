@@ -28,15 +28,21 @@ SSH_CONNECT_TIMEOUT_SECONDS: Final[float] = 120.0
 # cloud-init completion timeout
 CLOUD_INIT_TIMEOUT_SECONDS: Final[float] = 300.0
 
-# In-VM mount point at which the optional btrfs host-data volume is bind-mounted.
-# When `is_host_data_volume_exposed=False`, `host_dir` (e.g. /mngr) becomes a
-# symlink to this path. Naming mirrors Modal's `/host_volume` for symmetry with
-# the other providers' host_volume_mount_path pattern.
-HOST_VOLUME_MOUNT_PATH: Final[str] = "/mnt/host-volume"
-
 # Default logical size of the btrfs additional disk. qcow2 is sparse so this
 # is a logical cap visible to the guest, not upfront host disk usage.
 DEFAULT_HOST_DATA_DISK_SIZE: Final[str] = "100GiB"
+
+
+def lima_host_data_disk_mount_path(disk_name: str) -> str:
+    """Return the in-VM path Lima auto-mounts an additional disk at.
+
+    Lima's additionalDisks machinery generates a systemd mount unit that
+    mounts each named disk under ``/mnt/lima-<disk_name>``. This is where
+    host_dir symlinks in btrfs mode; no separate canonical bind-mount path
+    is introduced, since adding one stacked an empty-ext4 layer underneath
+    the btrfs mount when the bind unit fired before Lima's auto-mount.
+    """
+    return f"/mnt/lima-{disk_name}"
 
 
 def lima_host_data_disk_name(host_id: HostId) -> str:

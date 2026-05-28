@@ -11,9 +11,9 @@ record) controls how `host_dir` is backed:
 
 - `False` attaches a Lima-managed btrfs `additionalDisk`
   (`mngr-<host_id_hex>-data`, 100GiB default logical size, qcow2 sparse
-  storage under `~/.lima/_disks/`), bind-mounts it at
-  `/mnt/host-volume` inside the VM, symlinks `host_dir` into it, and
-  omits the 9p mount entirely. This makes `host_dir` snapshottable as
+  storage under `~/.lima/_disks/`) and symlinks `host_dir` directly to
+  Lima's auto-mount path for that disk (`/mnt/lima-<disk_name>`); the
+  9p mount is omitted entirely. This makes `host_dir` snapshottable as
   a single consistent btrfs filesystem. `get_volume_for_host()` returns
   `None` in this mode; callers (events API, mngr_claude session
   preservation, mngr_tmr, mngr_file) already degrade gracefully.
