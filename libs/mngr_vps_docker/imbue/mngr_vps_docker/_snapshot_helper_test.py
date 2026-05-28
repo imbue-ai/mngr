@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -30,7 +31,7 @@ def test_load_resource_text_returns_snapshot_helper_service() -> None:
 
 
 @pytest.mark.skipif(shutil.which("bash") is None, reason="bash not on PATH")
-def test_snapshot_helper_script_passes_bash_syntax_check(tmp_path) -> None:
+def test_snapshot_helper_script_passes_bash_syntax_check(tmp_path: Path) -> None:
     """`bash -n` must accept snapshot_helper.sh as valid syntax."""
     script_path = tmp_path / "snapshot_helper.sh"
     script_path.write_text(_load_resource_text("snapshot_helper.sh"))
