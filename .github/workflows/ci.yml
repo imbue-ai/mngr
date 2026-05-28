@@ -59,12 +59,12 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             ~/.cargo/bin/offload
-          key: cargo-offload-0.9.5-${{ runner.os }}
+          key: cargo-offload-0.9.7-${{ runner.os }}
 
       - name: Install offload
         run: |
-          if ! command -v offload &> /dev/null || ! offload --version | grep -q '0.9.5'; then
-            cargo install offload@0.9.5 --force
+          if ! command -v offload &> /dev/null || ! offload --version | grep -q '0.9.7'; then
+            cargo install offload@0.9.7 --force
           fi
 
       - name: Restore offload test durations from previous run
@@ -256,12 +256,12 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             ~/.cargo/bin/offload
-          key: cargo-offload-0.9.5-${{ runner.os }}
+          key: cargo-offload-0.9.7-${{ runner.os }}
 
       - name: Install offload
         run: |
-          if ! command -v offload &> /dev/null || ! offload --version | grep -q '0.9.5'; then
-            cargo install offload@0.9.5 --force
+          if ! command -v offload &> /dev/null || ! offload --version | grep -q '0.9.7'; then
+            cargo install offload@0.9.7 --force
           fi
 
       - name: Restore offload test durations from previous run
@@ -348,7 +348,13 @@ jobs:
         # spin-up (apps/minds/test_desktop_client_e2e.py) does not serialize
         # behind every other docker-marked test in this batch. That test
         # gets its own `test-docker-electron` job below.
-        run: PYTEST_MAX_DURATION_SECONDS=600 uv run pytest -n 0 --timeout 300 --no-cov --cov-fail-under=0 -v --tb=short -m '(docker or docker_sdk) and not release and not minds_electron'
+        # Excludes `minds_snapshot_resume` because those tests only make
+        # sense inside a Modal sandbox booted from a pre-built snapshot
+        # (see scripts/snapshot_minds_e2e_state.py); they assume a
+        # workspace Docker container is already in /var/lib/docker, which
+        # is not the case on a fresh GitHub runner. Runs via
+        # `just test-offload-minds-snapshot <image-id>` instead.
+        run: PYTEST_MAX_DURATION_SECONDS=600 uv run pytest -n 0 --timeout 300 --no-cov --cov-fail-under=0 -v --tb=short -m '(docker or docker_sdk) and not release and not minds_electron and not minds_snapshot_resume'
 
   # Sibling to `test-docker` for the single minds Electron e2e test. Split
   # out because the test (~2 min end-to-end: docker pull + container start

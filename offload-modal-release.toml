@@ -60,7 +60,7 @@ retry_count = 4
 # `test-docker-release` CI job on a GitHub runner with a real Docker daemon,
 # since Docker-in-Docker under gVisor is too flaky (dockerd startup races,
 # intermittent container networking). Non-docker release tests run here.
-filters = "-m 'release and not docker and not docker_sdk and not minds_deployment and not minds_services'"
+filters = "-m 'release and not docker and not docker_sdk and not minds_deployment and not minds_services and not minds_snapshot_resume'"
 
 [history]
 path = "offload-history-modal-release.jsonl"
