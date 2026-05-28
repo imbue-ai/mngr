@@ -80,14 +80,12 @@ to a specific writer, use the top-level `source` field in CEL (e.g.
 
 ## Polling from cron (check mode)
 
-For a **recurring** policy -- "every so often, if usage looks like X, do Y" --
-let `cron` own the cadence: poll the plain `mngr usage --format json` snapshot on
-a schedule and branch in the shell.
-
-See [cron automation recipes](docs/cron_recipes.md) for worked examples:
-using up an about-to-expire 5h window (with a weekly pace check), warming a
-fresh window the moment the last one elapses, and working through a queue of task
-files a couple at a time.
+For recurring automation, let `cron` own the cadence: poll the plain
+`mngr usage --format json` snapshot on a schedule and branch in the shell. See
+[cron automation recipes](docs/cron_recipes.md) for worked examples: using up an
+about-to-expire 5h window (with a weekly pace check), warming a fresh window the
+moment the last one elapses, and working through a queue of task files a couple
+at a time.
 
 ## Implementing a writer plugin
 

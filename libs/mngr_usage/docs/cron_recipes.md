@@ -18,16 +18,13 @@ Across the usage-driven recipes below:
 Dedicate an agent to this and let one cron job own its whole lifecycle: it starts
 the agent during the tail of a 5h window when there's budget to spare and the week
 is on pace, then stops it once the window rolls over or the week falls off pace.
-Branching on the agent's state each tick needs no `at`/`atd` and no second job --
-and letting it run one tick into the fresh window warms that window too.
+Letting it run one tick into the fresh window warms that window too.
 
 ```bash
 #!/usr/bin/env bash
 # use-extra.sh -- run a DEDICATED agent during the tail of a 5h window when
 # there's budget to spare, and stop it once the window rolls over or the week is
-# no longer on pace. One cron job owns the whole start/stop lifecycle (no `at`).
-# Point it at an agent set aside for this -- it gets started and stopped
-# automatically, so don't aim it at one you're actively driving yourself.
+# no longer on pace.
 set -euo pipefail
 
 AGENT="my-agent"
@@ -129,9 +126,9 @@ elapsed="$(jq -r '
 
 [[ "$elapsed" == "yes" ]] || exit 0
 
-# Make sure the warmer is up: create it the first time (pinned to cheap Haiku),
-# else (re)start the one we stopped last boundary (`|| true` tolerates it already
-# running from an interrupted run).
+# Make sure the warmer is up: create it the first time, else (re)start the one we
+# stopped last boundary (`|| true` tolerates it already running from an
+# interrupted run).
 if mngr list --include "name == \"$WARMER\"" --ids | grep -q .; then
   mngr start "$WARMER" 2>/dev/null || true
 else
@@ -151,10 +148,35 @@ PATH=/usr/local/bin:/usr/bin:/bin:/home/you/.local/bin
 */10 * * * * /path/to/warm-window.sh
 ```
 
+## A spare-capacity check
+
+Soaking a window and launching new task work both come down to one question --
+is there headroom to spend right now? Factor it into a small helper the dispatch
+recipe gates on (the first recipe embeds the same test inline, since it also needs
+the raw numbers for its stop-side hysteresis):
+
+```bash
+#!/usr/bin/env bash
+# spare-capacity.sh -- exit 0 if there's Claude capacity worth spending now: the
+# current 5h window still has budget (<80% used) AND weekly usage is under pace
+# (below the tapering-margin line). Exits non-zero otherwise, including when
+# there's no usage data to judge from.
+set -euo pipefail
+
+mngr usage --format json | jq -e '
+  .sources[]
+  | select(.source == "claude")
+  | (.five_hour.used_percentage // 100)  as $u5
+  | (.seven_day.elapsed_percentage // 0) as $elw
+  | (.seven_day.used_percentage // 100)  as $uw
+  | $u5 < 80 and $uw < $elw * (1 - 0.30 * (100 - $elw) / 100)
+' >/dev/null
+```
+
 ## Dispatch tasks from a queue directory
 
 Drop one Markdown file per task into a `todo/` directory and let `cron` fan them
-out, capped at two in flight.
+out -- capped at two in flight, and only while there's spare capacity to spend.
 
 ```bash
 #!/usr/bin/env bash
@@ -179,6 +201,10 @@ done
 # and bail if we're at the cap.
 alive="$(mngr list --include 'labels.queue == "live" && state == "RUNNING"' --ids | wc -l | tr -d ' ')"
 [[ "$alive" -lt "$MAX_PARALLEL" ]] || exit 0
+
+# Don't launch new work unless there's capacity to spend -- otherwise a fresh task
+# would just stall on a limit.
+"$(dirname "$0")/spare-capacity.sh" || exit 0
 
 # Grab the oldest queued task, if any.
 task_file="$(find "$TODO_DIR" -maxdepth 1 -name '*.md' -type f | sort | head -n1)"
@@ -208,6 +234,5 @@ PATH=/usr/local/bin:/usr/bin:/bin:/home/you/.local/bin
 */10 * * * * /path/to/dispatch-task.sh
 ```
 
-Note: a finished agent (one that's gone `WAITING`) is stopped and relabeled
-`queue=in-review` rather than left running -- the slot frees up, and you can
-review their work whenever with `mngr list --label queue=in-review`.
+Finished agents are stopped and moved to `queue=in-review`; to see them, run
+`mngr list --label queue=in-review`.
