@@ -2,6 +2,7 @@ import os
 import tomllib
 from pathlib import Path
 from typing import Any
+from typing import Final
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mngr.config.consts import PROFILES_DIRNAME
@@ -9,6 +10,14 @@ from imbue.mngr.config.consts import ROOT_CONFIG_FILENAME
 from imbue.mngr.config.host_dir import read_default_host_dir
 from imbue.mngr.errors import ConfigParseError
 from imbue.mngr.utils.git_utils import find_git_worktree_root
+
+# Filenames of the per-scope settings files, relative to their containing
+# directory (the user profile dir, or the resolved project config dir). Private
+# so callers go through the path helpers below (``get_user_config_path`` /
+# ``get_project_config_path`` / ``get_local_config_path``) instead of
+# reconstructing paths from a shared filename constant.
+_SETTINGS_FILENAME: Final[str] = "settings.toml"
+_LOCAL_SETTINGS_FILENAME: Final[str] = "settings.local.toml"
 
 # =============================================================================
 # Config File Discovery and Loading
@@ -90,17 +99,27 @@ def find_profile_dir_lightweight(base_dir: Path) -> Path | None:
 
 def get_user_config_path(profile_dir: Path) -> Path:
     """Get the user config path based on profile directory."""
-    return profile_dir / "settings.toml"
+    return profile_dir / _SETTINGS_FILENAME
+
+
+def get_project_config_path(project_config_dir: Path) -> Path:
+    """Get the project settings file inside a resolved project config directory."""
+    return project_config_dir / _SETTINGS_FILENAME
+
+
+def get_local_config_path(project_config_dir: Path) -> Path:
+    """Get the local settings file inside a resolved project config directory."""
+    return project_config_dir / _LOCAL_SETTINGS_FILENAME
 
 
 def get_project_config_name(root_name: str) -> Path:
     """Get the project config relative path based on root name."""
-    return Path(f".{root_name}") / "settings.toml"
+    return Path(f".{root_name}") / _SETTINGS_FILENAME
 
 
 def get_local_config_name(root_name: str) -> Path:
     """Get the local config relative path based on root name."""
-    return Path(f".{root_name}") / "settings.local.toml"
+    return Path(f".{root_name}") / _LOCAL_SETTINGS_FILENAME
 
 
 def _find_project_root(cg: ConcurrencyGroup, start: Path | None = None) -> Path | None:
@@ -149,33 +168,34 @@ def resolve_project_config_dir(
 def read_config_layers(
     profile_dir: Path | None,
     project_config_dir: Path | None,
-) -> list[tuple[str, dict[str, Any]]]:
+) -> list[tuple[str, Path, dict[str, Any]]]:
     """Read the user/project/local config layers and enforce the pytest guard.
 
     This is the single chokepoint for reading config files: it loads each layer
     that exists and runs ``enforce_pytest_config_opt_in`` over them, so no code
     path can read config during a pytest run without the guard being applied.
-    Returns ``(path, raw)`` per present layer, in precedence order (user <
-    project < local).
+    Returns ``(scope, path, raw)`` per present layer, in precedence order (user <
+    project < local); ``scope`` is the matching ``mngr config set --scope`` value
+    (``user`` / ``project`` / ``local``), which lets ``load_config`` attribute
+    narrowing diagnostics to a specific file.
 
     ``profile_dir`` and ``project_config_dir`` are resolved by the caller (so
     this does no directory resolution and needs no ConcurrencyGroup): profile_dir
     via the lightweight read-only lookup for the pre-readers, or create-on-demand
     for ``load_config``; project_config_dir via ``resolve_project_config_dir``.
     """
-    loaded: list[tuple[str, dict[str, Any]]] = []
+    candidate_paths: list[tuple[str, Path]] = []
     if profile_dir is not None:
-        user_path = get_user_config_path(profile_dir)
-        raw = try_load_toml(user_path)
-        if raw is not None:
-            loaded.append((str(user_path), raw))
+        candidate_paths.append(("user", get_user_config_path(profile_dir)))
     if project_config_dir is not None:
-        for filename in ("settings.toml", "settings.local.toml"):
-            path = project_config_dir / filename
-            raw = try_load_toml(path)
-            if raw is not None:
-                loaded.append((str(path), raw))
-    enforce_pytest_config_opt_in(loaded)
+        candidate_paths.append(("project", get_project_config_path(project_config_dir)))
+        candidate_paths.append(("local", get_local_config_path(project_config_dir)))
+    loaded: list[tuple[str, Path, dict[str, Any]]] = []
+    for scope, path in candidate_paths:
+        raw = try_load_toml(path)
+        if raw is not None:
+            loaded.append((scope, path, raw))
+    enforce_pytest_config_opt_in([(str(path), raw) for _scope, path, raw in loaded])
     return loaded
 
 
@@ -197,7 +217,7 @@ def _resolve_config_files() -> list[dict[str, Any]]:
     with cg:
         project_config_dir = resolve_project_config_dir(root_name, cg)
 
-    return [raw for _source, raw in read_config_layers(profile_dir, project_config_dir)]
+    return [raw for _scope, _path, raw in read_config_layers(profile_dir, project_config_dir)]
 
 
 # --- Default subcommand pre-reader ---

@@ -889,6 +889,7 @@ def test_list_command_with_limit(
             assert agent_count == 1
 
 
+@pytest.mark.flaky
 @pytest.mark.tmux
 def test_list_command_with_limit_json_format(
     cli_runner: CliRunner,

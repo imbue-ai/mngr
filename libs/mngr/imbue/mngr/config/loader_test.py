@@ -14,12 +14,17 @@ from imbue.mngr.cli.common_opts import apply_create_template
 from imbue.mngr.config.agent_config_registry import register_agent_config
 from imbue.mngr.config.agent_config_registry import reset_agent_config_registry
 from imbue.mngr.config.data_types import AgentTypeConfig
+from imbue.mngr.config.data_types import CommandDefaults
 from imbue.mngr.config.data_types import CreateTemplateName
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import PluginConfig
 from imbue.mngr.config.data_types import get_or_create_user_id
+from imbue.mngr.config.loader import _FileSettingsSource
+from imbue.mngr.config.loader import _NarrowingViolation
 from imbue.mngr.config.loader import _apply_plugin_overrides
 from imbue.mngr.config.loader import _collect_env_overrides
+from imbue.mngr.config.loader import _collect_layer_narrowing
+from imbue.mngr.config.loader import _display_path
 from imbue.mngr.config.loader import _normalize_tuple_fields_for_construct
 from imbue.mngr.config.loader import _parse_agent_types
 from imbue.mngr.config.loader import _parse_commands
@@ -2179,3 +2184,96 @@ def test_load_config_string_cli_args_replacement_does_not_narrow(
     )
     mngr_ctx = load_config(pm=pm, concurrency_group=cg)
     assert mngr_ctx.config.agent_types[AgentTypeName("my_claude")].cli_args == ("--baz",)
+
+
+# =============================================================================
+# Tests for narrowing diagnostics: both-sides attribution (which layer assigns
+# over which layer's dropped value).
+# =============================================================================
+
+
+def test_display_path_contracts_home_dir(tmp_path: Path) -> None:
+    """A path under the user's home is shown with ``~``; a path outside home is
+    shown absolute. The autouse env fixture already points HOME at ``tmp_path``.
+    """
+    assert _display_path(tmp_path / ".mngr" / "settings.toml") == "~/.mngr/settings.toml"
+    outside = tmp_path.parent / "outside" / "settings.toml"
+    assert _display_path(outside) == str(outside)
+
+
+def test_collect_layer_narrowing_attributes_highest_precedence_lower_layer() -> None:
+    """The dropped-from side is the highest-precedence already-merged layer whose
+    value the new layer narrows. Because the merge is assign-by-default, that
+    layer holds the merged base value being dropped.
+    """
+    user_source = _FileSettingsSource(scope="user", path=Path("/u/settings.toml"))
+    project_source = _FileSettingsSource(scope="project", path=Path("/p/settings.toml"))
+    local_source = _FileSettingsSource(scope="local", path=Path("/p/settings.local.toml"))
+    user_layer = MngrConfig(prefix="a-", commands={"create": CommandDefaults(defaults={"env": ["A"]})})
+    project_layer = MngrConfig(prefix="a-", commands={"create": CommandDefaults(defaults={"env": ["A", "B"]})})
+    # ``base`` is the accumulated merge the local layer is detected against; under
+    # assign-by-default it equals the project layer's value (the highest prior).
+    base = user_layer.merge_with(project_layer)
+    local_layer = MngrConfig(prefix="a-", commands={"create": CommandDefaults(defaults={"env": ["C"]})})
+
+    violations = _collect_layer_narrowing(
+        base,
+        local_layer,
+        local_source,
+        [(user_source, user_layer), (project_source, project_layer)],
+    )
+    assert violations == [
+        _NarrowingViolation(
+            key_path="commands.create.defaults.env",
+            assigned_by=local_source,
+            dropped_from=project_source,
+        )
+    ]
+
+
+def test_load_config_narrowing_error_names_both_sides_with_paths_and_scopes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, cg: ConcurrencyGroup
+) -> None:
+    """The narrowing error names the assigning layer and the layer whose value is
+    dropped, each with the resolved file path and matching ``config set --scope``
+    flag, so the user knows exactly which files are implicated.
+    """
+    pm, project_dir = _setup_layered_test_env(monkeypatch, tmp_path)
+    _write_two_layer_narrowing_config(project_dir, allow_narrowing=None)
+
+    with pytest.raises(ConfigParseError) as exc_info:
+        load_config(pm=pm, concurrency_group=cg)
+
+    message = str(exc_info.value)
+    # Paths are rendered with the home dir contracted to ``~`` (the test clamps
+    # HOME to tmp_path, so these settings files live directly under it).
+    # Assigning side: the local file, with its scope flag.
+    assert "~/settings.local.toml" in message
+    assert "mngr config set --scope local" in message
+    # Dropped-from side: the project file, with its scope flag.
+    assert "~/settings.toml" in message
+    assert "mngr config set --scope project" in message
+    assert "assigned by" in message
+    assert "would drop a value from" in message
+
+
+def test_load_config_narrowing_error_names_env_var_layer(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, cg: ConcurrencyGroup
+) -> None:
+    """When an ``MNGR__*`` env var narrows a file layer, the assigning side is named
+    as the scopeless env layer (no path, no ``config set --scope`` flag) while the
+    dropped-from side still names the file and its scope.
+    """
+    pm, project_dir = _setup_layered_test_env(monkeypatch, tmp_path)
+    (project_dir / "settings.toml").write_text('is_allowed_in_pytest = true\n\n[commands.create]\nenv = ["X=4"]\n')
+    monkeypatch.setenv("MNGR__COMMANDS__CREATE__ENV", '["X=5"]')
+
+    with pytest.raises(ConfigParseError) as exc_info:
+        load_config(pm=pm, concurrency_group=cg)
+
+    message = str(exc_info.value)
+    # Assigning side: the env layer, named as such with no path / scope flag.
+    assert "assigned by MNGR__* environment variables" in message
+    # Dropped-from side: the project file (home contracted to ``~``), with its scope flag.
+    assert "~/settings.toml" in message
+    assert "mngr config set --scope project" in message

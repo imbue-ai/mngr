@@ -34,6 +34,8 @@ from imbue.mngr.config.key_resolver import is_extend_key
 from imbue.mngr.config.key_resolver import parse_scalar_value
 from imbue.mngr.config.key_resolver import resolve_extends
 from imbue.mngr.config.loader import parse_config
+from imbue.mngr.config.pre_readers import get_local_config_path
+from imbue.mngr.config.pre_readers import get_project_config_path
 from imbue.mngr.config.pre_readers import get_user_config_path
 from imbue.mngr.config.pre_readers import resolve_project_config_dir
 from imbue.mngr.errors import ConfigKeyNotFoundError
@@ -92,12 +94,12 @@ def get_config_path(scope: ConfigScope, root_name: str, profile_dir: Path, cg: C
             project_dir = resolve_project_config_dir(root_name, cg)
             if project_dir is None:
                 raise ConfigNotFoundError("No git repository found for project config")
-            return project_dir / "settings.toml"
+            return get_project_config_path(project_dir)
         case ConfigScope.LOCAL:
             project_dir = resolve_project_config_dir(root_name, cg)
             if project_dir is None:
                 raise ConfigNotFoundError("No git repository found for local config")
-            return project_dir / "settings.local.toml"
+            return get_local_config_path(project_dir)
         case _ as unreachable:
             assert_never(unreachable)
 

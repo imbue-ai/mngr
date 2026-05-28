@@ -13,6 +13,7 @@ from loguru import logger
 from pydantic import BaseModel
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.model_update import to_update
 from imbue.mngr.config.agent_config_registry import get_agent_config_class
 from imbue.mngr.config.agent_config_registry import is_agent_config_registered
@@ -83,6 +84,45 @@ _PRESERVED_ALIASES: Final[dict[str, tuple[str, Callable[[str], Any]]]] = {
 }
 
 
+class _FileSettingsSource(FrozenModel):
+    """A TOML settings-file layer for narrowing diagnostics.
+
+    ``scope`` is the matching ``mngr config set --scope`` value (``user`` /
+    ``project`` / ``local``) and ``path`` is the resolved file path. The
+    human-readable label is derived from ``scope`` in ``_describe_source``
+    rather than stored, so the two can't drift.
+    """
+
+    scope: str
+    path: Path
+
+
+class _EnvSettingsSource(FrozenModel):
+    """The ``MNGR__*`` environment-variable layer: not a file, so it carries no
+    path and has no ``config set`` scope.
+    """
+
+
+# A settings layer the narrowing guard can attribute a value to. The loader only
+# ever deals with these two; ``--setting`` narrowing is a separate path
+# (``apply_settings_to_config``) that does not use this type.
+_SettingsSource = _FileSettingsSource | _EnvSettingsSource
+
+
+class _NarrowingViolation(FrozenModel):
+    """A single narrowing assignment, with both sides attributed.
+
+    ``assigned_by`` is the higher-precedence layer doing the (narrowing)
+    assignment; ``dropped_from`` is the lower-precedence layer whose value would
+    be silently dropped (``None`` only if no contributing layer could be
+    identified, which should not happen for a real violation).
+    """
+
+    key_path: str
+    assigned_by: _SettingsSource
+    dropped_from: _SettingsSource | None = None
+
+
 def load_config(
     pm: pluggy.PluginManager,
     concurrency_group: ConcurrencyGroup,
@@ -105,6 +145,15 @@ def load_config(
        via _collect_env_overrides). See docs/concepts/environment_variables.md for the full surface.
     6. ``--setting KEY=VALUE`` CLI overrides (applied later in setup_command_context)
     7. CLI arguments (handled by caller)
+
+    Note: the narrowing guard below runs over layers 2-5 (the config files and
+    env vars) only. It does NOT see the layer-6 ``--setting`` overrides, which
+    are merged afterwards in ``setup_command_context``. ``--setting`` cannot
+    fully resolve until this function has produced the config it extends against
+    (``__extend`` keys resolve against the loaded config), so it deliberately
+    runs after. Consequently ``allow_settings_key_assignment_narrowing`` can only
+    be opted into via a settings file or the ``MNGR__*`` env var, not via
+    ``--setting`` (see the error message and changelog).
 
     MNGR_ROOT_NAME is read before config-file resolution to derive:
     1. Config file paths (where to look for settings files)
@@ -147,21 +196,27 @@ def load_config(
     if strict is None:
         strict = resolve_strict_from_env()
 
-    # Read the user/project/local config layers (in precedence order). This goes
-    # through read_config_layers -- the single chokepoint that applies the pytest
-    # config guard -- so a real (non-test) config can never be loaded here during
-    # a test run. The project root is resolved from the cwd's git worktree root
-    # (or MNGR_PROJECT_CONFIG_DIR).
+    # Read the user/project/local config layers (in precedence order) through
+    # read_config_layers -- the single chokepoint that applies the pytest config
+    # guard -- so a real (non-test) config can never be loaded here during a test
+    # run. The project root is resolved from the cwd's git worktree root (or
+    # MNGR_PROJECT_CONFIG_DIR). Each layer carries its resolved path and its
+    # ``config set --scope`` value so narrowing diagnostics can name the actual
+    # file rather than an opaque layer label.
     project_config_dir = resolve_project_config_dir(root_name, concurrency_group)
     loaded_layers = read_config_layers(profile_dir, project_config_dir)
 
-    # Merge the layers. Narrowing violations -- a higher-precedence layer
-    # assigning over a non-empty aggregate value from a lower-precedence layer --
-    # are collected as we go, then turned into a single error after all layers
-    # are merged (when the final ``allow_settings_key_assignment_narrowing``
-    # resolves to False).
-    narrowing_violations: list[tuple[str, str]] = []
-    for source_label, raw in loaded_layers:
+    # Merge config files in precedence order (user, project, local). Narrowing
+    # violations -- a higher-precedence layer assigning over a non-empty aggregate
+    # value from a lower-precedence layer -- are collected as we go, then turned
+    # into a single error after all layers are merged (when the final
+    # ``allow_settings_key_assignment_narrowing`` resolves to False).
+    # ``processed_sources`` lets each violation be attributed to the specific
+    # lower-precedence layer whose value is being dropped.
+    narrowing_violations: list[_NarrowingViolation] = []
+    processed_sources: list[tuple[_SettingsSource, MngrConfig]] = []
+    for scope, config_path, raw in loaded_layers:
+        file_source = _FileSettingsSource(scope=scope, path=config_path)
         parsed_layer = _parse_config_with_extends(
             raw,
             base_config=config,
@@ -169,9 +224,9 @@ def load_config(
             strict=strict,
             silent=silent_unknown_fields,
         )
-        for violation in detect_settings_narrowing(config, parsed_layer):
-            narrowing_violations.append((source_label, violation))
+        narrowing_violations.extend(_collect_layer_narrowing(config, parsed_layer, file_source, processed_sources))
         config = config.merge_with(parsed_layer)
+        processed_sources.append((file_source, parsed_layer))
 
     # Apply ``MNGR__*`` env-var overrides plus the preserved-alias env vars
     # (MNGR_PREFIX, MNGR_HOST_DIR, MNGR_HEADLESS). These all flow through the
@@ -180,6 +235,7 @@ def load_config(
     # form raise ConfigParseError.
     env_override_raw = _collect_env_overrides(os.environ)
     if env_override_raw:
+        env_source = _EnvSettingsSource()
         parsed_env_layer = _parse_config_with_extends(
             env_override_raw,
             base_config=config,
@@ -187,9 +243,9 @@ def load_config(
             strict=strict,
             silent=silent_unknown_fields,
         )
-        for violation in detect_settings_narrowing(config, parsed_env_layer):
-            narrowing_violations.append(("MNGR__* env vars", violation))
+        narrowing_violations.extend(_collect_layer_narrowing(config, parsed_env_layer, env_source, processed_sources))
         config = config.merge_with(parsed_env_layer)
+        processed_sources.append((env_source, parsed_env_layer))
 
     # Raise on collected narrowing assignments unless the user has opted in.
     # Done before further config_dict mutation so the error surfaces with the
@@ -303,23 +359,94 @@ def get_or_create_profile_dir(base_dir: Path) -> Path:
 # =============================================================================
 
 
-def _build_narrowing_error(violations: Sequence[tuple[str, str]]) -> ConfigParseError:
+def _collect_layer_narrowing(
+    base: MngrConfig,
+    parsed_layer: MngrConfig,
+    source: _SettingsSource,
+    processed_sources: Sequence[tuple[_SettingsSource, MngrConfig]],
+) -> list["_NarrowingViolation"]:
+    """Detect narrowing of ``base`` by ``parsed_layer`` and attribute each side.
+
+    ``source`` is the layer doing the assignment. The lower-precedence layer
+    whose value is dropped is attributed by re-running ``detect_settings_narrowing``
+    of ``parsed_layer`` against each already-merged layer: because the merge is
+    assign-by-default, the merged base value at any path equals the value written
+    by the highest-precedence layer that set it, so the highest-precedence prior
+    layer that ``parsed_layer`` narrows at a given path is the one whose value is
+    being dropped. Reusing ``detect_settings_narrowing`` here (rather than walking
+    field values directly) keeps the field traversal in one place -- the place the
+    ``PREVENT_GETATTR`` ratchet already accounts for. ``dropped_from`` is ``None``
+    only if no contributing layer is found (should not happen for a real
+    violation, but keeps the diagnostic robust).
+    """
+    violation_paths = detect_settings_narrowing(base, parsed_layer)
+    if not violation_paths:
+        return []
+    # For each already-merged layer (highest precedence first), the set of paths
+    # where ``parsed_layer`` narrows that specific layer.
+    narrowed_paths_by_prior_source = [
+        (prior_source, set(detect_settings_narrowing(prior_layer, parsed_layer)))
+        for prior_source, prior_layer in reversed(processed_sources)
+    ]
+    violations: list[_NarrowingViolation] = []
+    for key_path in violation_paths:
+        dropped_from = next(
+            (prior_source for prior_source, paths in narrowed_paths_by_prior_source if key_path in paths),
+            None,
+        )
+        violations.append(_NarrowingViolation(key_path=key_path, assigned_by=source, dropped_from=dropped_from))
+    return violations
+
+
+def _display_path(path: Path) -> str:
+    """Render ``path`` with the user's home directory contracted to ``~`` (e.g.
+    ``~/.mngr/profiles/<id>/settings.toml``), falling back to the absolute path
+    when it is not under home. Keeps the narrowing error readable and avoids
+    spelling out the full home path.
+    """
+    home = Path.home()
+    if path.is_relative_to(home):
+        return f"~/{path.relative_to(home)}"
+    return str(path)
+
+
+def _describe_source(source: _SettingsSource) -> str:
+    """Render a settings layer for the narrowing error.
+
+    A TOML file layer is described as ``<scope> settings (<path>) [edit with:
+    mngr config set --scope <scope> ...]``; the ``MNGR__*`` env-var layer is
+    named as such.
+    """
+    match source:
+        case _FileSettingsSource(scope=scope, path=path):
+            return f"{scope} settings ({_display_path(path)}) [edit with: mngr config set --scope {scope} ...]"
+        case _EnvSettingsSource():
+            return "MNGR__* environment variables"
+
+
+def _build_narrowing_error(violations: Sequence["_NarrowingViolation"]) -> ConfigParseError:
     """Construct the user-facing error raised when a higher-precedence layer
     silently narrows a non-empty aggregate value.
 
-    Lists every offending source-and-key pair, explains how to opt in to the
-    new assign-by-default semantics, points at the ``__extend`` operator for
-    additive opt-out, and warns that the safety net itself is temporary.
+    For each offending key it names both sides -- the file/scope doing the
+    assignment and the file/scope whose value would be dropped -- then explains
+    how to opt in to the new assign-by-default semantics, points at the
+    ``__extend`` operator for additive opt-out, and warns that the safety net
+    itself is temporary.
     """
-    detail_lines = [f"  {source}: {key}" for source, key in violations]
+    detail_lines: list[str] = []
+    for violation in violations:
+        detail_lines.append(f"  {violation.key_path}")
+        detail_lines.append(f"      assigned by {_describe_source(violation.assigned_by)}")
+        if violation.dropped_from is not None:
+            detail_lines.append(f"      would drop a value from {_describe_source(violation.dropped_from)}")
     return ConfigParseError(
         "Settings narrowing detected: a higher-precedence settings layer would assign over "
         "a non-empty list/tuple/dict/set value from a lower-precedence layer, silently "
         "dropping the earlier entries.\n" + "\n".join(detail_lines) + "\n"
         "To opt into this assign-by-default behavior (and silence this error), set "
-        "`allow_settings_key_assignment_narrowing = true` in your settings.toml (or "
-        "MNGR__ALLOW_SETTINGS_KEY_ASSIGNMENT_NARROWING=true, or --setting "
-        "allow_settings_key_assignment_narrowing=true).\n"
+        "`allow_settings_key_assignment_narrowing = true` in one of the settings files above "
+        "(or MNGR__ALLOW_SETTINGS_KEY_ASSIGNMENT_NARROWING=true).\n"
         "To keep the additive behavior for a specific key, use the `__extend` suffix on the "
         'key in the higher-precedence layer (e.g. `env__extend = ["X=5"]`).\n'
         "NOTE: the default for `allow_settings_key_assignment_narrowing` will change to True "
