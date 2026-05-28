@@ -4,11 +4,11 @@ mode (`mngr usage --format json`) rather than the blocking `mngr usage wait`:
 
 - Soak up an about-to-expire 5h window: relaunch a known agent when the 5h
   window is near its end with budget left, and schedule a `mngr stop` for the
-  window boundary. The weekly guard is a *pace* check with a 30% margin on the
-  remaining week -- `(100 - used%) > 0.70 * (100 - elapsed%)` -- so it stays
-  strict early in the week (won't spend at 70% used on a Monday) but converges,
-  as the week ends, to "launch if any capacity is left," rather than using a
-  flat ceiling.
+  window boundary. The weekly guard is a *pace* check with a tapering safety
+  margin -- `used% < elapsed% * (1 - 0.30 * (100 - elapsed%) / 100)` -- so it
+  leaves headroom early in the week (requires used% < ~10 on a Monday, staying
+  out of the user's way) but, as the margin shrinks toward week's end, converges
+  to "launch if any capacity is left."
 - Warm a fresh window: detect that the last recorded 5h window has elapsed
   (`five_hour.resets_at < now`) and fire a throwaway headless `claude -p`
   prompt to open/prime the new window, guarded by a marker file so it warms at

@@ -46,21 +46,22 @@ snapshot="$(mngr usage --format json)"
 # seconds-until-reset only when:
 #   - >90% of the 5h window has elapsed (we're near its end), AND
 #   - <80% of the 5h window is used (budget left to burn before it resets), AND
-#   - the 7d window has PACE headroom: remaining budget exceeds 70% of the
-#     remaining week, i.e. (100 - used%) > 0.70 * (100 - elapsed%). This is the
-#     linear-pace line (used% < elapsed%) loosened by a 30% margin on what's LEFT
-#     of the week rather than a fixed margin on used%. So it stays strict early
-#     (a flat ceiling would happily spend at 70% on a Monday) yet, as the week
-#     ends and remaining time -> 0, the right side -> 0 and it converges to
-#     "launch if there's any capacity left at all." Both windows carry
-#     window_seconds, so the reader derives elapsed_percentage; raise the 0.70
-#     toward 1.0 to shrink the margin (1.0 == strict linear pace, no headroom).
+#   - the 7d window passes a PACE check with a tapering safety margin:
+#     used% < elapsed% * (1 - 0.30 * (100 - elapsed%) / 100). Early in the week
+#     that margin holds us well under the linear-pace line (Monday, ~14% elapsed
+#     -> require used% < ~10) so automation leaves headroom and doesn't crowd
+#     your own usage; the margin shrinks as the week runs out and vanishes at the
+#     end, so by Sunday it converges to "launch if there's any capacity left at
+#     all." Both windows carry window_seconds, so the reader derives
+#     elapsed_percentage. The 0.30 sets the peak headroom: raise it toward 1.0 to
+#     stay further from the limit early, lower it toward 0 to track plain pace.
 secs="$(jq -r '
   .sources[]
   | select(.source == "claude" and .is_stale == false)
   | select((.five_hour.elapsed_percentage // 0) > 90)
   | select((.five_hour.used_percentage    // 100) < 80)
-  | select((100 - (.seven_day.used_percentage // 100)) > 0.70 * (100 - (.seven_day.elapsed_percentage // 0)))
+  | (.seven_day.elapsed_percentage // 0) as $week_elapsed
+  | select((.seven_day.used_percentage // 100) < $week_elapsed * (1 - 0.30 * (100 - $week_elapsed) / 100))
   | .five_hour.seconds_until_reset
 ' <<<"$snapshot")"
 
