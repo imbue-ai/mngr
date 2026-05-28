@@ -125,25 +125,32 @@ the right project's consolidated files.
    changelog entries (run <RUN_DATE>)"`.
 
 8. Run a changelog accuracy review on the bullets you just added, to
-   guard against stale or inaccurate entries. For **each** project you
-   added `[Unreleased]` bullets to in step 4, use the Task tool to spawn
-   one `general-purpose` subagent -- a fresh context, so it reviews the
-   bullets with eyes that did not write them. Spawn them **in parallel**
-   (issue all the Task calls in a single batch) so the projects are
-   reviewed concurrently. Give each subagent exactly this prompt, with its
-   own project directory substituted in: "Read
+   guard against stale or inaccurate entries. Spawn one or more
+   `general-purpose` reviewer subagents (fresh contexts, so they review
+   the bullets with eyes that did not write them), using the Task tool,
+   and **partition the projects you added `[Unreleased]` bullets to in
+   step 4 across them however you judge best** -- you have full
+   discretion. Balance overhead against context load: a single trivial
+   change that touched many packages can be reviewed by one subagent
+   covering all of them; a large run, or a project with many substantial
+   bullets, is better split across several subagents so no one subagent is
+   overloaded. Assign each project to **exactly one** subagent (disjoint
+   partitions, so no two subagents touch the same file). Spawn them **in
+   parallel** (issue all the Task calls in a single batch). Give each
+   subagent exactly this prompt, with the project directory or directories
+   you assigned it substituted in: "Read
    `scripts/changelog_accuracy_reviewer.md` and follow its instructions
-   exactly. You are assigned the project at `<project_dir>` -- review only
-   `<project_dir>/CHANGELOG.md`." You MUST explicitly wait for **all** of
-   the subagents to finish before continuing. Each verifies its project's
-   newly-added bullets against the actual code, corrects or removes
-   inaccurate ones (and may collapse a bullet that another materially
-   supersedes), edits only its own `CHANGELOG.md`, and commits its own
-   corrections (staging only its file). Collect every subagent's final
-   summary -- you will include them in the PR body (step 10). If a
-   subagent cannot run or errors out, do NOT fail the run: the
-   consolidation commit is still valid; proceed and note that project's
-   accuracy-review failure in the PR body.
+   exactly. You are assigned these project(s): `<project_dirs>` -- review
+   only their `CHANGELOG.md` files." You MUST explicitly wait for **all**
+   of the subagents to finish before continuing. Each verifies its
+   assigned projects' newly-added bullets against the actual code,
+   corrects or removes inaccurate ones (and may collapse a bullet that
+   another materially supersedes), edits only its assigned `CHANGELOG.md`
+   files, and commits its own corrections (staging only those files).
+   Collect every subagent's final summary -- you will include them in the
+   PR body (step 10). If a subagent cannot run or errors out, do NOT fail
+   the run: the consolidation commit is still valid; proceed and note the
+   affected projects' accuracy-review failure in the PR body.
 
 9. Capture the current branch name with `BRANCH=$(git rev-parse
    --abbrev-ref HEAD)` and push it: `git push --set-upstream origin
