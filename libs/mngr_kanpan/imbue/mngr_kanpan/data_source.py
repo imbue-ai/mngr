@@ -1,3 +1,4 @@
+from collections.abc import Mapping
 from collections.abc import Sequence
 from datetime import datetime
 from datetime import timezone
@@ -182,6 +183,19 @@ FIELD_REPO_PATH = "repo_path"
 FIELD_COMMITS_AHEAD = "commits_ahead"
 FIELD_CONFLICTS = "conflicts"
 FIELD_UNRESOLVED = "unresolved"
+
+
+def is_muted(kanpan_plugin_data: Mapping[str, Any]) -> bool:
+    """Whether kanpan's per-agent plugin data marks the agent as muted.
+
+    Takes the agent's ``plugin.<PLUGIN_NAME>`` sub-dict, however it was obtained --
+    a live agent's ``get_plugin_data(PLUGIN_NAME)``, an offline ref's
+    ``certified_data["plugin"][PLUGIN_NAME]``, or a built
+    ``AgentDetails.plugin[PLUGIN_NAME]``. Centralizes the ``FIELD_MUTED`` read so
+    the producers (field generators) and the consumer (board fetcher) agree on
+    what "muted" means.
+    """
+    return bool(kanpan_plugin_data.get(FIELD_MUTED, False))
 
 
 def deserialize_fields(

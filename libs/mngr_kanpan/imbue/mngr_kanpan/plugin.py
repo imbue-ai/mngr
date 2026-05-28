@@ -16,6 +16,7 @@ from imbue.mngr_kanpan import hookspecs as kanpan_hookspecs
 from imbue.mngr_kanpan.cli import kanpan
 from imbue.mngr_kanpan.data_source import FIELD_MUTED
 from imbue.mngr_kanpan.data_source import PLUGIN_NAME
+from imbue.mngr_kanpan.data_source import is_muted
 from imbue.mngr_kanpan.data_sources.git_info import GitInfoDataSource
 from imbue.mngr_kanpan.data_sources.github import GitHubDataSource
 from imbue.mngr_kanpan.data_sources.github import GitHubDataSourceConfig
@@ -54,21 +55,23 @@ def _muted_online_field(agent: AgentInterface, host: OnlineHostInterface) -> boo
 
     Returns ``True`` when the agent is muted, else ``None`` (omitted) so the field
     stays sparse on listings -- the board reads it back as ``False`` when absent.
+    The ``host`` argument is unused: muted is agent-level state, not host state.
     """
-    return True if agent.get_plugin_data(PLUGIN_NAME).get(FIELD_MUTED) else None
+    return True if is_muted(agent.get_plugin_data(PLUGIN_NAME)) else None
 
 
 def _muted_offline_field(agent_ref: DiscoveredAgent, host_details: HostDetails) -> bool | None:
     """Surface the kanpan ``muted`` flag for an offline/unreachable agent.
 
-    Reads the persisted ``plugin.<PLUGIN_NAME>.muted`` from the discovered agent's
+    Reads the persisted ``plugin.<PLUGIN_NAME>`` sub-dict from the discovered agent's
     certified data -- present both when the ref came from a reachable host's
     ``data.json`` and when it was carried forward from the last online listing into
     a discovery snapshot. Mirrors :func:`_muted_online_field`: ``True`` when muted,
-    else ``None``.
+    else ``None``. The ``host_details`` argument is unused: muted is agent-level
+    state, not host state.
     """
     plugin_section = agent_ref.certified_data.get("plugin", {})
-    return True if plugin_section.get(PLUGIN_NAME, {}).get(FIELD_MUTED) else None
+    return True if is_muted(plugin_section.get(PLUGIN_NAME, {})) else None
 
 
 @hookimpl

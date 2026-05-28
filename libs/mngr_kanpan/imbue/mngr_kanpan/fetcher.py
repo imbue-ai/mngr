@@ -30,6 +30,7 @@ from imbue.mngr_kanpan.data_source import KanpanDataSource
 from imbue.mngr_kanpan.data_source import KanpanFieldTypeError
 from imbue.mngr_kanpan.data_source import PLUGIN_NAME
 from imbue.mngr_kanpan.data_source import deserialize_fields
+from imbue.mngr_kanpan.data_source import is_muted
 from imbue.mngr_kanpan.data_source import now_utc
 from imbue.mngr_kanpan.data_sources.github import CreatePrUrlField
 from imbue.mngr_kanpan.data_sources.github import PrFetchFailedField
@@ -96,8 +97,8 @@ def fetch_board_snapshot(
     entries: list[AgentBoardEntry] = []
     for agent in agents:
         agent_fields = dict(all_fields.get(agent.name, {}))
-        is_muted = bool(agent.plugin.get(PLUGIN_NAME, {}).get(FIELD_MUTED, False))
-        agent_fields[FIELD_MUTED] = BoolField(value=is_muted, created=now)
+        muted = is_muted(agent.plugin.get(PLUGIN_NAME, {}))
+        agent_fields[FIELD_MUTED] = BoolField(value=muted, created=now)
 
         cells = {key: field.display() for key, field in agent_fields.items()}
         section = compute_section(agent_fields)
@@ -110,7 +111,7 @@ def fetch_board_snapshot(
                 provider_name=agent.host.provider_name,
                 branch=agent.initial_branch,
                 work_dir=work_dir,
-                is_muted=is_muted,
+                is_muted=muted,
                 fields=agent_fields,
                 cells=cells,
                 section=section,
