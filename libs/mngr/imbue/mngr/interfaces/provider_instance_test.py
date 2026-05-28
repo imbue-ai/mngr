@@ -276,9 +276,7 @@ def test_discover_hosts_and_agents_tolerates_per_host_connection_error(
     broken_host.id = broken_host_id
     broken_host.get_name.return_value = HostName("broken-host")
     broken_host.get_state.return_value = HostState.RUNNING
-    broken_host.discover_agents.side_effect = HostConnectionError(
-        "SSH error (Error reading SSH protocol banner)"
-    )
+    broken_host.discover_agents.side_effect = HostConnectionError("SSH error (Error reading SSH protocol banner)")
 
     provider.mock_hosts = [healthy_host, broken_host]
 
