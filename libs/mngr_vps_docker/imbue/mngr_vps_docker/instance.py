@@ -2012,12 +2012,16 @@ class VpsDockerProvider(BaseProviderInstance):
         Each VPS hosts exactly one mngr container (1:1 invariant). We find
         that container by its host-id label, derive its unified volume name,
         and read host_state.json + agents/*.json from the volume's
-        mountpoint. If the container does not exist yet (e.g., the VPS is
-        still being set up by a concurrent ``mngr create``), returns empty
-        results. If outer SSH to the VPS fails, fall back to any
-        in-process cached records for that VPS so the hosts still appear
-        in the listing (with an offline state) instead of disappearing
-        entirely; one bad VPS must not silently drop its hosts.
+        bind-source path (the per-host btrfs subvolume the volume's
+        ``Options.device`` points at, resolved via
+        ``docker volume inspect --format '{{.Options.device}}'``; the
+        docker-managed ``Mountpoint`` placeholder is never consulted). If
+        the container does not exist yet (e.g., the VPS is still being set
+        up by a concurrent ``mngr create``), returns empty results. If
+        outer SSH to the VPS fails, fall back to any in-process cached
+        records for that VPS so the hosts still appear in the listing
+        (with an offline state) instead of disappearing entirely; one bad
+        VPS must not silently drop its hosts.
         """
         try:
             with self._make_outer_for_vps_ip(vps_ip) as outer:
