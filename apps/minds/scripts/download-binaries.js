@@ -305,10 +305,10 @@ async function downloadGit(resourcesDir, { platform }) {
  * Download platform-specific binaries into the given resources directory.
  * Can be called directly or from a ToDesktop hook.
  *
- * pnpm and Node are NOT provisioned here -- ToDesktop's ``pnpmVersion``
- * (and ``nodeVersion`` / ``npmVersion``) fields in ``todesktop.json``
- * cover that. This hook only handles binaries ToDesktop has no
- * first-class knob for: ``uv`` and ``git``.
+ * pnpm and Node are NOT provisioned here -- ToDesktop's `pnpmVersion`
+ * (and `nodeVersion` / `npmVersion`) fields in `todesktop.json` cover
+ * that. This hook only handles binaries ToDesktop has no first-class
+ * knob for: `uv` and `git`.
  */
 async function downloadBinaries(resourcesDir) {
   const { platform, arch } = getPlatformArch();
