@@ -19,8 +19,18 @@ from imbue.mngr.primitives import AgentId
 from imbue.mngr_vps_docker.primitives import VpsInstanceId
 
 # Sentinel marking the start of each agent JSON file in batched-read output.
-# Chosen to be a string that cannot appear inside a serialized JSON record.
+# Chosen to be extremely unlikely to appear inside any real agent record:
+# long, all-uppercase, dash-delimited, and namespaced with the project tag.
+# (It is *not* impossible -- the sentinel is plain ASCII and would be valid
+# unescaped inside a JSON string value -- but no realistic agent record
+# contains this exact substring.)
 _AGENT_FILE_SEP: Final[str] = "---MNGR_AGENT_FILE_SEP---"
+
+# Subdirectory inside the unified volume holding one JSON file per persisted
+# agent record (``<agent_id>.json``). Lives next to ``HOST_DIR_SUBPATH`` /
+# ``host_state.json`` -- shared with ``instance.py`` so the on-disk layout has
+# a single source of truth and renaming the directory requires a single edit.
+AGENTS_SUBPATH: Final[str] = "agents"
 
 
 class VpsHostConfig(HostConfig):
@@ -63,64 +73,62 @@ def _run_outer_command(outer: OuterHostInterface, command: str, *, label: str) -
     return result.stdout
 
 
-def resolve_volume_mountpoint(outer: OuterHostInterface, volume_name: str) -> Path:
-    """Return the absolute filesystem path where docker has mounted ``volume_name`` on the outer."""
+def resolve_volume_device(outer: OuterHostInterface, volume_name: str) -> Path:
+    """Return the bind-source path of ``volume_name`` on the outer.
+
+    The per-host unified volume is created with
+    ``docker volume create --driver=local --opt type=none --opt device=<path> --opt o=bind``,
+    so the real on-disk storage is wherever ``.Options.device`` points -- the
+    docker-managed ``.Mountpoint`` (under ``/var/lib/docker/volumes/<name>/_data``)
+    is an unused placeholder. Reading ``.Options.device`` keeps the docker
+    volume as the single source of truth for the bind-source path.
+    """
     output = _run_outer_command(
         outer,
-        f"docker volume inspect {shlex.quote(volume_name)} --format '{{{{.Mountpoint}}}}'",
+        f"docker volume inspect {shlex.quote(volume_name)} --format '{{{{.Options.device}}}}'",
         label="docker-volume-inspect",
     )
-    mountpoint = output.strip()
-    if not mountpoint:
-        raise MngrError(f"docker volume inspect returned empty mountpoint for {volume_name!r}")
-    return Path(mountpoint)
-
-
-def create_volume_with_layout(outer: OuterHostInterface, volume_name: str, host_dir_subpath: str = "host_dir") -> Path:
-    """Create the unified host volume and seed its directory layout.
-
-    Creates the named Docker volume (idempotent) and pre-creates the
-    ``<mountpoint>/<host_dir_subpath>`` and ``<mountpoint>/agents``
-    subdirectories so that callers writing to either of those locations
-    don't have to mkdir first. Returns the resolved mountpoint.
-    """
-    _run_outer_command(
-        outer,
-        f"docker volume create {shlex.quote(volume_name)}",
-        label="docker-volume-create",
-    )
-    mountpoint = resolve_volume_mountpoint(outer, volume_name)
-    _run_outer_command(
-        outer,
-        f"mkdir -p {shlex.quote(str(mountpoint / host_dir_subpath))} {shlex.quote(str(mountpoint / 'agents'))}",
-        label="seed-volume-layout",
-    )
-    return mountpoint
+    device = output.strip()
+    if not device:
+        raise MngrError(
+            f"docker volume inspect returned empty Options.device for {volume_name!r}; "
+            "volume may have been created without bind options (--opt type=none --opt device=... --opt o=bind)"
+        )
+    return Path(device)
 
 
 class VpsDockerHostStore(MutableModel):
     """Reads/writes one host's metadata directly on its unified Docker volume.
 
     Each VPS hosts exactly one mngr container (1:1 invariant), so each store
-    instance is bound to a single volume's mountpoint on the outer (typically
-    ``/var/lib/docker/volumes/<volume_name>/_data``). File operations go
-    through the outer host's ``read_text_file`` / ``write_text_file`` /
+    instance is bound to a single per-host btrfs subvolume on the outer
+    (``<btrfs_mount_path>/<host_id_hex>``). The docker named volume is created
+    with bind options pointing at that subvolume, so the docker-managed
+    ``Mountpoint`` placeholder under ``/var/lib/docker/volumes`` is never read
+    from -- ``Options.device`` is the real path. File operations go through the
+    outer host's ``read_text_file`` / ``write_text_file`` /
     ``execute_idempotent_command``.
 
-    Layout inside the volume mountpoint::
+    Layout inside the subvolume::
 
         host_state.json
         agents/<agent_id>.json
         host_dir/<...agent host data...>
 
     Construct via :func:`open_host_store`, which resolves the volume's
-    mountpoint via ``docker volume inspect``.
+    bind-source path via ``docker volume inspect --format '{{.Options.device}}'``.
     """
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     outer: OuterHostInterface = Field(frozen=True, description="Outer host used to reach the VPS")
-    mountpoint: Path = Field(frozen=True, description="Absolute path on the outer where the host volume is mounted")
+    mountpoint: Path = Field(
+        frozen=True,
+        description=(
+            "Absolute path on the outer of the per-host btrfs subvolume backing this docker volume "
+            "(value of the volume's ``Options.device``)."
+        ),
+    )
 
     @property
     def _host_state_path(self) -> Path:
@@ -128,7 +136,7 @@ class VpsDockerHostStore(MutableModel):
 
     @property
     def _agents_dir(self) -> Path:
-        return self.mountpoint / "agents"
+        return self.mountpoint / AGENTS_SUBPATH
 
     def _agent_data_path(self, agent_id: AgentId) -> Path:
         return self._agents_dir / f"{agent_id}.json"
@@ -157,9 +165,10 @@ class VpsDockerHostStore(MutableModel):
             return None
         try:
             data = self.outer.read_text_file(path)
-        except (FileNotFoundError, OSError) as e:
-            # File raced from under us between path_exists and read, or a
-            # local-outer raised a real OSError. Treat as "missing".
+        except OSError as e:
+            # File raced from under us between path_exists and read
+            # (FileNotFoundError) or a local-outer raised some other
+            # OSError. Treat as "missing".
             logger.debug("Host record at {} not readable: {}", path, e)
             return None
         try:
@@ -170,7 +179,9 @@ class VpsDockerHostStore(MutableModel):
 
     def delete_host_record(self) -> None:
         """Delete the host record and all per-agent metadata on the volume."""
-        # Remove both files in a single SSH round-trip; -f makes both targets idempotent.
+        # Remove the agents/ directory and the host_state.json file in a single
+        # SSH round-trip. ``-r`` is required because agents/ is a directory;
+        # ``-f`` makes both targets idempotent (no error if either is missing).
         _run_outer_command(
             self.outer,
             f"rm -rf {shlex.quote(str(self._agents_dir))} {shlex.quote(str(self._host_state_path))}",
@@ -243,10 +254,15 @@ class VpsDockerHostStore(MutableModel):
 
 
 def open_host_store(outer: OuterHostInterface, volume_name: str) -> VpsDockerHostStore:
-    """Resolve ``volume_name``'s mountpoint on ``outer`` and bind a store to it.
+    """Resolve ``volume_name``'s bind-source path on ``outer`` and bind a store to it.
+
+    The store's underlying directory is the btrfs subvolume the docker volume's
+    ``Options.device`` points at, not the unused docker-managed
+    ``/var/lib/docker/volumes/<name>/_data`` placeholder.
 
     Raises ``MngrError`` if the volume does not exist on the outer (which
-    means the host was never finalized or has already been destroyed).
+    means the host was never finalized or has already been destroyed) or
+    does not carry the expected bind options.
     """
-    mountpoint = resolve_volume_mountpoint(outer, volume_name)
-    return VpsDockerHostStore(outer=outer, mountpoint=mountpoint)
+    device_path = resolve_volume_device(outer, volume_name)
+    return VpsDockerHostStore(outer=outer, mountpoint=device_path)

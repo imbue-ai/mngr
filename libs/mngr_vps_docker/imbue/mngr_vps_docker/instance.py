@@ -86,9 +86,10 @@ from imbue.mngr.providers.ssh_utils import load_or_create_ssh_keypair
 from imbue.mngr.providers.ssh_utils import wait_for_sshd
 from imbue.mngr_vps_docker.cloud_init import generate_cloud_init_user_data
 from imbue.mngr_vps_docker.config import VpsDockerProviderConfig
+from imbue.mngr_vps_docker.errors import VpsProvisioningError
+from imbue.mngr_vps_docker.host_store import AGENTS_SUBPATH
 from imbue.mngr_vps_docker.host_store import VpsDockerHostRecord
 from imbue.mngr_vps_docker.host_store import VpsHostConfig
-from imbue.mngr_vps_docker.host_store import create_volume_with_layout
 from imbue.mngr_vps_docker.host_store import open_host_store
 from imbue.mngr_vps_docker.primitives import VpsInstanceId
 from imbue.mngr_vps_docker.vps_client import VpsClientInterface
@@ -355,9 +356,87 @@ def _docker_inspect_running(outer: OuterHostInterface, container_name: str) -> b
     return result.stdout.strip().lower() == "true"
 
 
-def _check_file_exists_on_outer(outer: OuterHostInterface, path: str) -> bool:
+def _check_file_exists_on_outer(outer: OuterHostInterface, path: Path) -> bool:
     """Return True iff a file exists on outer."""
-    result = outer.execute_idempotent_command(f"test -f {shlex.quote(path)}", timeout_seconds=10.0)
+    result = outer.execute_idempotent_command(f"test -f {shlex.quote(str(path))}", timeout_seconds=10.0)
+    return result.success
+
+
+def _check_directory_exists_on_outer(outer: OuterHostInterface, path: Path) -> bool:
+    """Return True iff a directory exists on outer."""
+    result = outer.execute_idempotent_command(f"test -d {shlex.quote(str(path))}", timeout_seconds=10.0)
+    return result.success
+
+
+def _is_btrfs_progs_installed_on_outer(outer: OuterHostInterface) -> bool:
+    """Return True iff ``mkfs.btrfs`` is on the outer's PATH (i.e. btrfs-progs is installed)."""
+    result = outer.execute_idempotent_command(
+        "command -v mkfs.btrfs >/dev/null 2>&1",
+        timeout_seconds=10.0,
+    )
+    return result.success
+
+
+def _install_btrfs_progs_on_outer(outer: OuterHostInterface) -> None:
+    """Install btrfs-progs on the outer via apt-get; raise VpsProvisioningError on failure."""
+    command = (
+        "DEBIAN_FRONTEND=noninteractive apt-get update && "
+        "DEBIAN_FRONTEND=noninteractive apt-get install -y btrfs-progs"
+    )
+    result = outer.execute_idempotent_command(command, timeout_seconds=300.0)
+    if not result.success:
+        raise VpsProvisioningError(f"Failed to install btrfs-progs on outer: stderr={result.stderr.strip()!r}")
+
+
+def _get_outer_free_disk_gb(outer: OuterHostInterface, path: Path) -> int:
+    """Return free space at ``path`` on the outer, floor-divided to whole GiB.
+
+    Reads the available-bytes count with ``df --output=avail -B 1`` and does
+    the GiB conversion (`// (1024 ** 3)`) in Python so the result is always
+    less-than-or-equal-to the true free space. ``df``'s own ``-B 1G`` form
+    rounds up, which would let the caller compute a loop-file size up to
+    ~1 GiB larger than actually available; floor-dividing here keeps the
+    caller's allocation math conservative.
+
+    Runs the ``df | tail`` pipeline under ``bash -c 'set -o pipefail; ...'``
+    so a failing ``df`` (e.g. invalid path, permission issue) is surfaced
+    through the "failed to read" branch rather than being masked by
+    ``tail``'s zero exit code and falling through to the "could not parse"
+    branch.
+    """
+    pipeline = f"set -o pipefail; df --output=avail -B 1 {shlex.quote(str(path))} | tail -n 1"
+    result = outer.execute_idempotent_command(
+        f"bash -c {shlex.quote(pipeline)}",
+        timeout_seconds=10.0,
+    )
+    if not result.success:
+        raise VpsProvisioningError(
+            f"Failed to read free disk space at {path} on outer: stderr={result.stderr.strip()!r}"
+        )
+    raw = result.stdout.strip()
+    try:
+        free_bytes = int(raw)
+    except ValueError as e:
+        raise VpsProvisioningError(f"Could not parse free-space output {raw!r} from df at {path} on outer") from e
+    return free_bytes // (1024**3)
+
+
+def _is_path_mounted_on_outer(outer: OuterHostInterface, path: Path) -> bool:
+    """Return True iff ``path`` is currently a mountpoint on the outer."""
+    result = outer.execute_idempotent_command(
+        f"mountpoint -q {shlex.quote(str(path))}",
+        timeout_seconds=10.0,
+    )
+    return result.success
+
+
+def _is_fstab_entry_present_on_outer(outer: OuterHostInterface, loop_file_path: Path) -> bool:
+    """Return True iff ``/etc/fstab`` already references ``loop_file_path`` at column 1."""
+    pattern = f"^{re.escape(str(loop_file_path))}[[:space:]]"
+    result = outer.execute_idempotent_command(
+        f"grep -qE {shlex.quote(pattern)} /etc/fstab",
+        timeout_seconds=10.0,
+    )
     return result.success
 
 
@@ -421,6 +500,189 @@ def _remove_container(outer: OuterHostInterface, container_name: str, force: boo
 def _remove_volume(outer: OuterHostInterface, volume_name: str) -> None:
     """Remove a Docker named volume (force)."""
     _run_docker(outer, ["volume", "rm", "-f", volume_name])
+
+
+def _create_bind_volume_on_outer(
+    outer: OuterHostInterface,
+    *,
+    volume_name: str,
+    device_path: Path,
+) -> None:
+    """Create a docker named volume that bind-mounts ``device_path`` on container start.
+
+    Uses the ``local`` driver's bind options
+    (``type=none``, ``device=<path>``, ``o=bind``) so the docker volume is just
+    a name plus a record of the host path it should bind into containers; the
+    actual data lives at ``device_path`` (a btrfs subvolume here).
+    """
+    _run_docker(
+        outer,
+        [
+            "volume",
+            "create",
+            "--driver",
+            "local",
+            "--opt",
+            "type=none",
+            "--opt",
+            f"device={device_path}",
+            "--opt",
+            "o=bind",
+            volume_name,
+        ],
+    )
+
+
+def prepare_btrfs_on_outer(
+    outer: OuterHostInterface,
+    *,
+    host_id: HostId,
+    btrfs_mount_path: Path,
+    loop_file_path: Path,
+    outer_disk_reserved_gb: int,
+) -> Path:
+    """Ensure btrfs loop FS + per-host subvolume exist on the outer; return the subvolume path.
+
+    Each step is independently idempotent so a partially-failed earlier
+    ``mngr create`` (e.g. allocate succeeded, mount failed) can be retried
+    cleanly: btrfs-progs install, loop-file allocation + ``mkfs.btrfs``,
+    loop mount, ``/etc/fstab`` line append, and ``btrfs subvolume create``
+    each gate on a probe and skip when already in place. Never
+    ``mkfs.btrfs -f`` -- a populated image file is always preserved.
+
+    Returns the absolute path of the per-host subvolume on the outer,
+    suitable for use as the ``device=`` value of a bind-options docker volume.
+
+    Raises ``VpsProvisioningError`` if free space on ``/`` (after subtracting
+    ``outer_disk_reserved_gb``) is not positive, or if any setup step fails.
+    """
+    subvolume_path = btrfs_mount_path / host_id.get_uuid().hex
+
+    with log_span("Ensuring btrfs-progs is installed on outer"):
+        if not _is_btrfs_progs_installed_on_outer(outer):
+            _install_btrfs_progs_on_outer(outer)
+
+    # Allocate the loop file (if missing) sized to free-space-minus-reserve.
+    # The free-space check is skipped when the loop file already exists, so
+    # re-running on an already-provisioned VPS doesn't fail when the
+    # reserve has since been consumed by docker image layers.
+    if not _check_file_exists_on_outer(outer, loop_file_path):
+        with log_span("Computing btrfs loop file size from free space on /"):
+            free_gb = _get_outer_free_disk_gb(outer, Path("/"))
+            loop_file_size_gb = free_gb - outer_disk_reserved_gb
+            if loop_file_size_gb <= 0:
+                raise VpsProvisioningError(
+                    f"Insufficient free space on outer for btrfs loop file: "
+                    f"free={free_gb}GB, outer_disk_reserved_gb={outer_disk_reserved_gb}GB. "
+                    f"Need free > reserved. Lower outer_disk_reserved_gb or use a larger VPS plan."
+                )
+        with log_span("Allocating btrfs loop file at {} ({}GB)", loop_file_path, loop_file_size_gb):
+            mkdir_result = outer.execute_idempotent_command(
+                f"mkdir -p {shlex.quote(str(loop_file_path.parent))}",
+                timeout_seconds=10.0,
+            )
+            if not mkdir_result.success:
+                raise VpsProvisioningError(
+                    f"Failed to create parent dir {loop_file_path.parent} for btrfs loop file: "
+                    f"stderr={mkdir_result.stderr.strip()!r}"
+                )
+            allocate_result = outer.execute_idempotent_command(
+                f"fallocate -l {loop_file_size_gb}G {shlex.quote(str(loop_file_path))}",
+                timeout_seconds=120.0,
+            )
+            if not allocate_result.success:
+                raise VpsProvisioningError(
+                    f"Failed to fallocate btrfs loop file at {loop_file_path}: "
+                    f"stderr={allocate_result.stderr.strip()!r}"
+                )
+            mkfs_result = outer.execute_idempotent_command(
+                f"mkfs.btrfs {shlex.quote(str(loop_file_path))}",
+                timeout_seconds=180.0,
+            )
+            if not mkfs_result.success:
+                raise VpsProvisioningError(
+                    f"Failed to mkfs.btrfs on {loop_file_path}: stderr={mkfs_result.stderr.strip()!r}"
+                )
+
+    with log_span("Mounting btrfs loop file at {}", btrfs_mount_path):
+        mkdir_mount_result = outer.execute_idempotent_command(
+            f"mkdir -p {shlex.quote(str(btrfs_mount_path))}",
+            timeout_seconds=10.0,
+        )
+        if not mkdir_mount_result.success:
+            raise VpsProvisioningError(
+                f"Failed to create btrfs mount path {btrfs_mount_path}: stderr={mkdir_mount_result.stderr.strip()!r}"
+            )
+        if not _is_path_mounted_on_outer(outer, btrfs_mount_path):
+            mount_result = outer.execute_idempotent_command(
+                f"mount -o loop {shlex.quote(str(loop_file_path))} {shlex.quote(str(btrfs_mount_path))}",
+                timeout_seconds=30.0,
+            )
+            if not mount_result.success:
+                raise VpsProvisioningError(
+                    f"Failed to loop-mount {loop_file_path} at {btrfs_mount_path}: "
+                    f"stderr={mount_result.stderr.strip()!r}"
+                )
+
+    if not _is_fstab_entry_present_on_outer(outer, loop_file_path):
+        with log_span("Appending fstab entry for {}", loop_file_path):
+            fstab_line = f"{loop_file_path}  {btrfs_mount_path}  btrfs  loop,defaults  0 0"
+            # echo + >> is the simplest idempotency-safe form here once the grep
+            # above has confirmed the line is absent (no risk of duplicating).
+            append_result = outer.execute_idempotent_command(
+                f"echo {shlex.quote(fstab_line)} >> /etc/fstab",
+                timeout_seconds=10.0,
+            )
+            if not append_result.success:
+                raise VpsProvisioningError(
+                    f"Failed to append fstab entry for {loop_file_path}: stderr={append_result.stderr.strip()!r}"
+                )
+
+    if not _check_directory_exists_on_outer(outer, subvolume_path):
+        with log_span("Creating btrfs subvolume {}", subvolume_path):
+            create_subvol_result = outer.execute_idempotent_command(
+                f"btrfs subvolume create {shlex.quote(str(subvolume_path))}",
+                timeout_seconds=30.0,
+            )
+            if not create_subvol_result.success:
+                raise VpsProvisioningError(
+                    f"Failed to create btrfs subvolume at {subvolume_path}: "
+                    f"stderr={create_subvol_result.stderr.strip()!r}"
+                )
+
+    return subvolume_path
+
+
+def _delete_btrfs_subvolume_on_outer(outer: OuterHostInterface, subvolume_path: Path) -> None:
+    """Delete a btrfs subvolume on the outer; raise MngrError on failure.
+
+    No-op when the subvolume's path is already absent on the outer (caller has
+    nothing else to do for an already-cleaned-up host).
+    """
+    if not _check_directory_exists_on_outer(outer, subvolume_path):
+        return
+    result = outer.execute_idempotent_command(
+        f"btrfs subvolume delete {shlex.quote(str(subvolume_path))}",
+        timeout_seconds=60.0,
+    )
+    if not result.success:
+        raise MngrError(f"btrfs subvolume delete {subvolume_path} failed: stderr={result.stderr.strip()!r}")
+
+
+def _seed_host_volume_layout_on_outer(outer: OuterHostInterface, subvolume_path: Path) -> None:
+    """Pre-create the ``host_dir/`` and ``agents/`` subdirectories of the subvolume.
+
+    A single ``mkdir -p`` so downstream writers (the agent container,
+    ``persist_agent_data``) don't need to mkdir first. Idempotent.
+    """
+    host_dir_path = subvolume_path / HOST_DIR_SUBPATH
+    agents_dir_path = subvolume_path / AGENTS_SUBPATH
+    result = outer.execute_idempotent_command(
+        f"mkdir -p {shlex.quote(str(host_dir_path))} {shlex.quote(str(agents_dir_path))}",
+        timeout_seconds=10.0,
+    )
+    if not result.success:
+        raise MngrError(f"Failed to seed host volume layout under {subvolume_path}: stderr={result.stderr.strip()!r}")
 
 
 def _pull_image(outer: OuterHostInterface, image: str, timeout_seconds: float = 300.0) -> None:
@@ -718,8 +980,12 @@ class VpsDockerProvider(BaseProviderInstance):
     # Host Store
     # =========================================================================
     # The store is opened via ``open_host_store(outer, volume_name)`` (free
-    # function in ``host_store``) which resolves the volume's mountpoint via
-    # ``docker volume inspect``. This used to be the per-user state container.
+    # function in ``host_store``) which resolves the volume's bind-source path
+    # via ``docker volume inspect --format '{{.Options.device}}'`` -- the docker
+    # named volume is a bind-options entry pointing at the per-host btrfs
+    # subvolume, so ``Options.device`` (not the unused ``Mountpoint``
+    # placeholder under ``/var/lib/docker/volumes``) is the real on-disk path.
+    # This used to be the per-user state container.
 
     # =========================================================================
     # Host Object Construction
@@ -796,7 +1062,7 @@ class VpsDockerProvider(BaseProviderInstance):
         """Wait for cloud-init to finish (Docker installed, marker file present)."""
         start = time.monotonic()
         while time.monotonic() - start < timeout_seconds:
-            if _check_file_exists_on_outer(outer, "/var/run/mngr-ready"):
+            if _check_file_exists_on_outer(outer, Path("/var/run/mngr-ready")):
                 elapsed = time.monotonic() - start
                 if elapsed > 30.0:
                     logger.warning("Cloud-init took {:.1f}s (threshold: 30s)", elapsed)
@@ -868,6 +1134,21 @@ class VpsDockerProvider(BaseProviderInstance):
         # We need to add the key for that endpoint. Since we don't know the
         # VPS IP here, the caller is responsible for adding the known_hosts entry.
 
+    def _prepare_btrfs_on_outer(self, outer: OuterHostInterface, host_id: HostId) -> Path:
+        """Ensure btrfs loop FS + per-host subvolume exist on the outer; return the subvolume path.
+
+        Thin wrapper around :func:`prepare_btrfs_on_outer` that pulls the
+        loop-file path, mount path, and reserved-GB knob out of
+        ``self.config``. See the free function for the full step-by-step.
+        """
+        return prepare_btrfs_on_outer(
+            outer,
+            host_id=host_id,
+            btrfs_mount_path=self.config.btrfs_mount_path,
+            loop_file_path=self.config.btrfs_loop_file_path,
+            outer_disk_reserved_gb=self.config.outer_disk_reserved_gb,
+        )
+
     # =========================================================================
     # Core Lifecycle: create_host
     # =========================================================================
@@ -915,13 +1196,11 @@ class VpsDockerProvider(BaseProviderInstance):
             )
 
             with self._make_outer_for_vps_ip(vps_ip) as outer:
-                # Create the unified host volume eagerly, before the (potentially
-                # slow and failure-prone) image pull/build, so the volume always
-                # exists by the time we need to write a host_state.json -- whether
-                # the host succeeds or fails partway through setup.
-                with log_span("Creating unified host volume"):
-                    create_volume_with_layout(outer, _host_volume_name_for(host_id), HOST_DIR_SUBPATH)
-
+                # The unified host volume is provisioned at the top of
+                # ``_setup_container_on_vps`` -- that runs before the
+                # (potentially slow and failure-prone) image pull/build so the
+                # volume still exists by the time ``_finalize_host_creation``
+                # writes ``host_state.json``.
                 container_name, container_id, volume_name = self._setup_container_on_vps(
                     outer=outer,
                     host_id=host_id,
@@ -1063,11 +1342,18 @@ class VpsDockerProvider(BaseProviderInstance):
 
         Returns (container_name, container_id, volume_name).
 
-        The unified host volume must already exist before this method runs --
-        ``create_host`` creates it eagerly right after allocating the host_id
-        so that failed-host metadata can still be written to it.
+        The btrfs loop FS and the per-host unified docker named volume are
+        provisioned at the top of this method, before the (slow, failure-prone)
+        image pull/build, so the bind-source path always exists by the time
+        ``_finalize_host_creation`` writes ``host_state.json`` -- even if a
+        later step in this method fails.
         """
         volume_name = _host_volume_name_for(host_id)
+
+        with log_span("Provisioning unified host volume on btrfs subvolume"):
+            subvolume_path = self._prepare_btrfs_on_outer(outer, host_id)
+            _seed_host_volume_layout_on_outer(outer, subvolume_path)
+            _create_bind_volume_on_outer(outer, volume_name=volume_name, device_path=subvolume_path)
 
         if docker_build_args:
             base_image = self._build_image_on_vps(outer, host_id, base_image, docker_build_args, git_depth)
@@ -1464,9 +1750,21 @@ class VpsDockerProvider(BaseProviderInstance):
                 except (HostConnectionError, MngrError) as e:
                     logger.warning("Failed to remove container: {}", e)
 
-                # Remove the unified host volume. This deletes host_state.json,
-                # agents/*.json, and host_dir/ in one go -- no separate state
-                # volume to clean up.
+                # Delete the per-host btrfs subvolume before the named volume.
+                # The VPS-destroy that follows takes the whole loop file with it,
+                # so this is primarily belt-and-suspenders for the rare case of
+                # a destroy retried on a still-existing VPS (e.g. the operator
+                # re-runs `mngr destroy` after VPS termination has failed).
+                subvolume_path = self.config.btrfs_mount_path / host_id.get_uuid().hex
+                try:
+                    _delete_btrfs_subvolume_on_outer(outer, subvolume_path)
+                except (HostConnectionError, MngrError) as e:
+                    logger.warning("Failed to delete btrfs subvolume {}: {}", subvolume_path, e)
+
+                # Remove the unified host volume. With bind options the volume
+                # itself holds no data (the subvolume above did), but the named
+                # entry still needs cleanup so a later create with the same
+                # volume name doesn't collide.
                 try:
                     _remove_volume(outer, vps_config.volume_name)
                 except (HostConnectionError, MngrError) as e:
@@ -1608,9 +1906,11 @@ class VpsDockerProvider(BaseProviderInstance):
         """Load hosts and agent references from each VPS's unified host volume.
 
         For each VPS, reads the host record and any persisted agent data
-        directly from the unified host volume's mountpoint, then determines
-        container running status. Avoids the default implementation's
-        per-host SSH calls into containers for agent discovery.
+        directly from the docker volume's bind-source path (the per-host
+        btrfs subvolume the volume's ``Options.device`` points at), then
+        determines container running status. Avoids the default
+        implementation's per-host SSH calls into containers for agent
+        discovery.
         """
         with log_span("VPS Docker discover_hosts_and_agents for provider={}", self.name):
             all_records, agent_data_by_host_id = self._discover_host_records_with_agents()
@@ -1712,12 +2012,16 @@ class VpsDockerProvider(BaseProviderInstance):
         Each VPS hosts exactly one mngr container (1:1 invariant). We find
         that container by its host-id label, derive its unified volume name,
         and read host_state.json + agents/*.json from the volume's
-        mountpoint. If the container does not exist yet (e.g., the VPS is
-        still being set up by a concurrent ``mngr create``), returns empty
-        results. If outer SSH to the VPS fails, fall back to any
-        in-process cached records for that VPS so the hosts still appear
-        in the listing (with an offline state) instead of disappearing
-        entirely; one bad VPS must not silently drop its hosts.
+        bind-source path (the per-host btrfs subvolume the volume's
+        ``Options.device`` points at, resolved via
+        ``docker volume inspect --format '{{.Options.device}}'``; the
+        docker-managed ``Mountpoint`` placeholder is never consulted). If
+        the container does not exist yet (e.g., the VPS is still being set
+        up by a concurrent ``mngr create``), returns empty results. If
+        outer SSH to the VPS fails, fall back to any in-process cached
+        records for that VPS so the hosts still appear in the listing
+        (with an offline state) instead of disappearing entirely; one bad
+        VPS must not silently drop its hosts.
         """
         try:
             with self._make_outer_for_vps_ip(vps_ip) as outer:
@@ -1751,8 +2055,13 @@ class VpsDockerProvider(BaseProviderInstance):
         """Discover host records and agent data from all VPSes for this provider.
 
         Calls ``_list_provider_vps_hostnames`` to enumerate VPSes
-        (provider-specific), then SSHes to each in parallel to read host
-        records and agent data in a single command per VPS.
+        (provider-specific), then SSHes to each in parallel. Within each
+        VPS, ``_read_records_from_vps`` issues a small sequence of SSH
+        commands (find the mngr container by host-id label, resolve the
+        unified volume's bind-source path via ``docker volume inspect
+        --format '{{.Options.device}}'``, read ``host_state.json``, list
+        ``agents/*.json``); the parallel fan-out across VPSes keeps wall
+        time bounded by the slowest VPS rather than the sum.
         """
         vps_ips = self._list_provider_vps_hostnames()
         if not vps_ips:
