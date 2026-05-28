@@ -448,9 +448,17 @@ def _exec_in_container(
 ) -> str:
     """Execute a shell command inside a running container on outer. Returns stdout.
 
+    Forces ``--workdir /`` so the exec succeeds regardless of whether the
+    image's declared ``WORKDIR`` exists at exec time. Mngr's first
+    container exec is its own sshd setup -- which runs *before* any
+    ``post_host_create_command`` hook -- so a WORKDIR like ``/mngr/code/``
+    that the image expects to be populated by a first-boot seed step
+    won't be on disk yet. None of mngr's automated setup commands depend
+    on the image's WORKDIR; they all use absolute paths.
+
     Raises MngrError if the command exits non-zero.
     """
-    remote = f"docker exec {shlex.quote(container_name)} sh -c {shlex.quote(command)}"
+    remote = f"docker exec --workdir / {shlex.quote(container_name)} sh -c {shlex.quote(command)}"
     result = outer.execute_idempotent_command(remote, timeout_seconds=timeout_seconds)
     if not result.success:
         raise MngrError(f"docker exec in {container_name} failed: {result.stderr.strip() or result.stdout.strip()}")
