@@ -426,19 +426,26 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
         if result.is_timed_out:
             logger.warning("mngr list fallback for agent {} timed out", agent_id)
             return None
-        if result.returncode != 0:
+        try:
+            payload = json.loads(result.stdout)
+        except json.JSONDecodeError as e:
             logger.warning(
-                "mngr list fallback for agent {} exited {}: {}",
+                "mngr list fallback for agent {} returned non-JSON (exit {}): {}; stderr: {}",
+                agent_id,
+                result.returncode,
+                e,
+                result.stderr.strip()[-500:],
+            )
+            return None
+        if result.returncode != 0:
+            # ``--on-error continue`` still exits non-zero when any provider
+            # errored, but the JSON above lists every agent it could reach.
+            logger.warning(
+                "mngr list fallback for agent {} exited {} (partial results): {}",
                 agent_id,
                 result.returncode,
                 result.stderr.strip()[-500:],
             )
-            return None
-        try:
-            payload = json.loads(result.stdout)
-        except json.JSONDecodeError as e:
-            logger.warning("mngr list fallback for agent {} returned non-JSON: {}", agent_id, e)
-            return None
         target = str(agent_id)
         for agent in payload.get("agents", ()):
             if agent.get("id") != target:
