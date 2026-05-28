@@ -21,6 +21,7 @@ from imbue.mngr.config.consts import PROFILES_DIRNAME
 from imbue.mngr.config.consts import ROOT_CONFIG_FILENAME
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import CommandDefaults
+from imbue.mngr.config.data_types import ConfigScope
 from imbue.mngr.config.data_types import CreateCliOptions
 from imbue.mngr.config.data_types import CreateTemplate
 from imbue.mngr.config.data_types import CreateTemplateName
@@ -40,9 +41,7 @@ from imbue.mngr.config.key_resolver import parse_scalar_value
 from imbue.mngr.config.key_resolver import resolve_extends
 from imbue.mngr.config.key_resolver import set_at_path
 from imbue.mngr.config.plugin_registry import get_plugin_config_class
-from imbue.mngr.config.pre_readers import get_local_config_path
-from imbue.mngr.config.pre_readers import get_project_config_path
-from imbue.mngr.config.pre_readers import get_user_config_path
+from imbue.mngr.config.pre_readers import read_config_layers
 from imbue.mngr.config.pre_readers import read_disabled_plugins
 from imbue.mngr.config.pre_readers import resolve_project_config_dir
 from imbue.mngr.config.pre_readers import try_load_toml
@@ -89,13 +88,13 @@ _PRESERVED_ALIASES: Final[dict[str, tuple[str, Callable[[str], Any]]]] = {
 class _FileSettingsSource(FrozenModel):
     """A TOML settings-file layer for narrowing diagnostics.
 
-    ``scope`` is the matching ``mngr config set --scope`` value (``user`` /
-    ``project`` / ``local``) and ``path`` is the resolved file path. The
-    human-readable label is derived from ``scope`` in ``_describe_source``
-    rather than stored, so the two can't drift.
+    ``scope`` is the :class:`ConfigScope` the file belongs to (which is exactly
+    what ``mngr config set --scope`` accepts) and ``path`` is the resolved file
+    path. The human-readable label is derived from ``scope`` in
+    ``_describe_source`` rather than stored, so the two can't drift.
     """
 
-    scope: str
+    scope: ConfigScope
     path: Path
 
 
@@ -128,7 +127,6 @@ class _NarrowingViolation(FrozenModel):
 def load_config(
     pm: pluggy.PluginManager,
     concurrency_group: ConcurrencyGroup,
-    context_dir: Path | None = None,
     enabled_plugins: Sequence[str] | None = None,
     disabled_plugins: Sequence[str] | None = None,
     is_interactive: bool = False,
@@ -140,8 +138,8 @@ def load_config(
     Precedence (lowest to highest):
     1. Built-in MngrConfig defaults
     2. User config (~/.{root_name}/profiles/<profile_id>/settings.toml)
-    3. Project config (.{root_name}/settings.toml at context_dir, git root, or MNGR_PROJECT_CONFIG_DIR)
-    4. Local config (.{root_name}/settings.local.toml at context_dir, git root, or MNGR_PROJECT_CONFIG_DIR)
+    3. Project config (.{root_name}/settings.toml at the git root or MNGR_PROJECT_CONFIG_DIR)
+    4. Local config (.{root_name}/settings.local.toml at the git root or MNGR_PROJECT_CONFIG_DIR)
     5. MNGR__* env vars (each ``__``-separated segment after ``MNGR__`` maps to a dotted config
        key; values are JSON-parsed with raw-string fallback) plus the preserved aliases
        ``MNGR_PREFIX``, ``MNGR_HOST_DIR``, and ``MNGR_HEADLESS`` (synthesised into the same form
@@ -199,35 +197,26 @@ def load_config(
     if strict is None:
         strict = resolve_strict_from_env()
 
-    # Resolve the concrete file path of each TOML layer up front so narrowing
-    # diagnostics can name the actual files (and the matching ``config set
-    # --scope`` flag) rather than an opaque layer label. ``project_config_dir``
-    # is resolved once here so the project and local files share one git-root
-    # lookup.
-    project_config_dir = resolve_project_config_dir(context_dir, root_name, concurrency_group)
-    user_config_path = get_user_config_path(profile_dir)
-    project_config_path = get_project_config_path(project_config_dir) if project_config_dir is not None else None
-    local_config_path = get_local_config_path(project_config_dir) if project_config_dir is not None else None
+    # Read the user/project/local config layers (in precedence order) through
+    # read_config_layers -- the single chokepoint that applies the pytest config
+    # guard -- so a real (non-test) config can never be loaded here during a test
+    # run. The project root is resolved from the cwd's git worktree root (or
+    # MNGR_PROJECT_CONFIG_DIR). Each layer carries its resolved path and its
+    # ``config set --scope`` value so narrowing diagnostics can name the actual
+    # file rather than an opaque layer label.
+    project_config_dir = resolve_project_config_dir(root_name, concurrency_group)
+    loaded_layers = read_config_layers(profile_dir, project_config_dir)
 
-    # Load and merge config files in precedence order (user, project, local).
-    # Narrowing violations -- a higher-precedence layer assigning over a non-
-    # empty aggregate value from a lower-precedence layer -- are collected as
-    # we go, then turned into a single error after all layers are merged (when
-    # the final ``allow_settings_key_assignment_narrowing`` resolves to False).
+    # Merge config files in precedence order (user, project, local). Narrowing
+    # violations -- a higher-precedence layer assigning over a non-empty aggregate
+    # value from a lower-precedence layer -- are collected as we go, then turned
+    # into a single error after all layers are merged (when the final
+    # ``allow_settings_key_assignment_narrowing`` resolves to False).
     # ``processed_sources`` lets each violation be attributed to the specific
     # lower-precedence layer whose value is being dropped.
     narrowing_violations: list[_NarrowingViolation] = []
     processed_sources: list[tuple[_SettingsSource, MngrConfig]] = []
-    for config_path, scope in (
-        (user_config_path, "user"),
-        (project_config_path, "project"),
-        (local_config_path, "local"),
-    ):
-        if config_path is None:
-            continue
-        raw = try_load_toml(config_path)
-        if raw is None:
-            continue
+    for scope, config_path, raw in loaded_layers:
         file_source = _FileSettingsSource(scope=scope, path=config_path)
         parsed_layer = _parse_config_with_extends(
             raw,
@@ -320,35 +309,10 @@ def load_config(
     # Validate and apply defaults using normal constructor
     final_config = MngrConfig.model_validate(config_dict)
 
-    # Check whether we're in pytest. The expected way to hit this branch is a
-    # poorly-scoped test whose subprocess mngr picked up the repo's
-    # .mngr/settings.toml because MNGR_ROOT_NAME / MNGR_HOST_DIR aren't pointed
-    # at a tmp directory. The shared plugin test fixtures handle that
-    # scoping; if they aren't available for a given test, use MNGR_ALLOW_PYTEST
-    # as the explicit opt-in instead of stripping PYTEST_CURRENT_TEST or
-    # setting is_allowed_in_pytest=True in the repo config (both dodge the
-    # guard without actually fixing the isolation).
-    if not final_config.is_allowed_in_pytest and "PYTEST_CURRENT_TEST" in os.environ:
-        if os.environ.get("MNGR_ALLOW_PYTEST") != "1":
-            raise ConfigParseError(
-                "Running mngr within pytest is not allowed by the current configuration. "
-                "For an intentional end-to-end test, set MNGR_ALLOW_PYTEST=1. For extra "
-                "safety, also point MNGR_HOST_DIR at a tmp directory so the subprocess "
-                "cannot mutate real mngr state."
-            )
-        # MNGR_ALLOW_PYTEST=1 is the explicit opt-in. We considered requiring
-        # MNGR_HOST_DIR to also be under tempfile.gettempdir() here, but
-        # test_schedule_add.py's local-dev path intentionally runs against the
-        # developer's real ~/.mngr so the subprocess can pick up their Modal
-        # SSH key config, which would trip such a check. MNGR_PREFIX isolation
-        # is enforced by the Modal backend guard (libs/mngr_modal/...:backend.py)
-        # which rejects env names that don't match TEST_ENV_PATTERN during
-        # pytest -- that's the actual leak-prevention gate.
-
     # Resolve project root for use as cwd in pre-command scripts.
     # Note: MNGR_PROJECT_CONFIG_DIR is NOT used here because it points to the config
     # directory (containing settings.toml), not the project root.
-    project_root = context_dir or find_git_worktree_root(start=None, cg=concurrency_group)
+    project_root = find_git_worktree_root(start=None, cg=concurrency_group)
 
     # Return MngrContext containing both config and plugin manager
     return MngrContext(
@@ -456,7 +420,10 @@ def _describe_source(source: _SettingsSource) -> str:
     """
     match source:
         case _FileSettingsSource(scope=scope, path=path):
-            return f"{scope} settings ({_display_path(path)}) [edit with: mngr config set --scope {scope} ...]"
+            scope_flag = scope.value.lower()
+            return (
+                f"{scope_flag} settings ({_display_path(path)}) [edit with: mngr config set --scope {scope_flag} ...]"
+            )
         case _EnvSettingsSource():
             return "MNGR__* environment variables"
 
