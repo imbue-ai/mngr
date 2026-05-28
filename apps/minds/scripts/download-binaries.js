@@ -290,9 +290,15 @@ async function downloadGit(resourcesDir, { platform }) {
     console.log(`[download-binaries] git copied from ${gitPrefix} to ${gitDir}`);
   } else {
     // Linux: copy the system git binary (no shim indirection).
-    const systemGit = execSync('which git', { encoding: 'utf-8' }).trim();
-    if (!systemGit) {
-      throw new Error('git not found on system -- install git first');
+    let systemGit;
+    try {
+      systemGit = execSync('which git', { encoding: 'utf-8' }).trim();
+    } catch (err) {
+      throw new Error(
+        'git not found on system -- install git first. ' +
+        `Underlying error: ${err.message}`,
+        { cause: err },
+      );
     }
     const destGit = path.join(binDir, 'git');
     fs.copyFileSync(systemGit, destGit);
