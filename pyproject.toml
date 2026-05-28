@@ -10,6 +10,15 @@ dependencies = [
     "click>=8.0.0",
 ]
 
+[tool.uv]
+# Supply-chain cooldown: uv ignores any package uploaded after this timestamp
+# when resolving, so we only adopt releases public long enough for malware to
+# surface. scripts/release.py advances it to 2 weeks before each release, but
+# only ever forward -- pushing it back would re-exclude a deliberately-pinned
+# fresh dep and break resolution. This only buys a detection delay;
+# it can't catch a compromise that stays undetected past the window.
+exclude-newer = "2026-05-23T00:00:00Z"
+
 [tool.uv.sources]
 imbue-common = { workspace = true }
 
