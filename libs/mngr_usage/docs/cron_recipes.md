@@ -25,9 +25,8 @@ means that near the end it spends whatever's genuinely left.
 
 ```bash
 #!/usr/bin/env bash
-# spare-capacity.sh -- exit 0 if there's Claude capacity worth spending now: the
-# 5h window still has budget (<80% used) AND weekly usage is under the tapering
-# pace line described above. Exits non-zero otherwise (including no usage data).
+# spare-capacity.sh -- exit 0 if there's spare capacity (as defined above), else
+# non-zero (including when there's no usage data to judge from).
 set -euo pipefail
 
 mngr usage --format json | jq -e '
