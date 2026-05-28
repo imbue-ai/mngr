@@ -1,13 +1,17 @@
 """``mngr rsync`` API: one-shot file transfer between local and a remote host.
 
-Wraps the ``rsync`` binary. mngr supplies the trailing slash on the source
-(to get "copy contents" semantics), passes ``-avz --stats --exclude=.git``, and
-arranges the SSH transport when the remote isn't local. Before transferring,
-if the destination is a git repo, ``stash_guard`` protects any uncommitted
-changes there per the caller's ``UncommittedChangesMode``.
+A thin wrapper around the ``rsync`` binary. mngr handles three things:
+constructs the SSH transport for the remote endpoint, sets a few defaults
+(``-avz --stats --exclude=.git``), and -- when the destination is a git
+repo -- guards uncommitted changes there via ``stash_guard`` per the
+caller's ``UncommittedChangesMode``. Path strings are passed through to
+rsync verbatim; the caller controls trailing-slash semantics. Anything the
+caller passes via ``extra_args`` is forwarded to rsync, sandwiched between
+the defaults and the source/destination args.
 """
 
 import shlex
+from collections.abc import Sequence
 from contextlib import nullcontext
 from pathlib import Path
 
@@ -60,96 +64,38 @@ class RsyncResult(FrozenModel):
         default=0,
         description="Total bytes transferred",
     )
-    source_path: Path = Field(
-        description="Source path",
+    source_path: str = Field(
+        description="Source path (verbatim string passed to rsync)",
     )
-    destination_path: Path = Field(
-        description="Destination path",
-    )
-    is_dry_run: bool = Field(
-        default=False,
-        description="Whether this was a dry run",
+    destination_path: str = Field(
+        description="Destination path (verbatim string passed to rsync)",
     )
 
 
-# === Command builders ===
+# === Command builder ===
 
 
 @pure
 def _build_rsync_command(
-    source_path: Path,
-    destination_path: Path,
-    is_dry_run: bool,
-    is_delete: bool,
+    source: str,
+    destination: str,
+    extra_args: Sequence[str],
+    ssh_transport: str | None,
 ) -> list[str]:
-    """Build an rsync command for local-to-local file synchronization.
+    """Assemble the ``rsync`` argv.
 
-    The trailing slash on the source path makes rsync copy the *contents* of the
-    source into the destination, rather than copying the source directory itself
-    as a child of the destination. The destination side doesn't need a trailing
-    slash -- rsync ignores it there.
+    Layout is ``rsync <mngr defaults> [-e <ssh>] <caller extras> <source> <destination>``.
+    Source and destination are passed verbatim, including any trailing slash the
+    caller intended (rsync's "/" suffix on source means "copy contents into the
+    destination" -- mngr does not impose this; the caller decides).
     """
-    rsync_cmd = ["rsync", "-avz", "--stats", "--exclude=.git"]
-
-    if is_dry_run:
-        rsync_cmd.append("--dry-run")
-
-    if is_delete:
-        rsync_cmd.append("--delete")
-
-    source_str = str(source_path)
-    if not source_str.endswith("/"):
-        source_str += "/"
-
-    rsync_cmd.append(source_str)
-    rsync_cmd.append(str(destination_path))
-
-    return rsync_cmd
-
-
-@pure
-def _build_remote_rsync_command(
-    local_path: Path,
-    remote_path: Path,
-    ssh_info: _SshConnectionInfo,
-    known_hosts_file: Path | None,
-    is_push: bool,
-    is_dry_run: bool,
-    is_delete: bool,
-) -> list[str]:
-    """Build an rsync command that transfers files over SSH between local and remote.
-
-    ``is_push`` True: local→remote (the local path is the source, remote is the destination).
-    ``is_push`` False: remote→local (the remote path is the source, local is the destination).
-
-    Only the source path gets a trailing slash; rsync ignores trailing slashes on
-    the destination.
-    """
-    user, hostname, port, key_path = ssh_info
-    ssh_transport = build_ssh_transport_command(key_path, port, known_hosts_file)
-
-    rsync_cmd = ["rsync", "-avz", "--stats", "--exclude=.git", "-e", ssh_transport]
-
-    if is_dry_run:
-        rsync_cmd.append("--dry-run")
-
-    if is_delete:
-        rsync_cmd.append("--delete")
-
-    if is_push:
-        local_str = str(local_path)
-        if not local_str.endswith("/"):
-            local_str += "/"
-        rsync_cmd.append(local_str)
-        rsync_cmd.append(f"{user}@{hostname}:{remote_path}")
-    else:
-        remote_str = str(remote_path)
-        if not remote_str.endswith("/"):
-            remote_str += "/"
-        rsync_cmd.append(f"{user}@{hostname}:{remote_str}")
-        rsync_cmd.append(str(local_path))
-
-    return rsync_cmd
+    cmd = ["rsync", "-avz", "--stats", "--exclude=.git"]
+    if ssh_transport is not None:
+        cmd.extend(["-e", ssh_transport])
+    cmd.extend(extra_args)
+    cmd.append(source)
+    cmd.append(destination)
+    return cmd
 
 
 # === Helpers ===
@@ -177,61 +123,71 @@ def _mkdir_on_host(host: OnlineHostInterface, path: Path) -> None:
 
 
 def _do_rsync(
-    local_path: Path,
+    local_path: str | Path,
     remote_host: OnlineHostInterface,
-    remote_path: Path,
+    remote_path: str | Path,
     is_push: bool,
-    is_dry_run: bool,
-    is_delete: bool,
+    extra_args: Sequence[str],
     uncommitted_changes: UncommittedChangesMode,
     cg: ConcurrencyGroup,
 ) -> RsyncResult:
     """Internal workhorse that runs the actual rsync command.
 
-    ``is_push`` True: local→remote (the local path is the source, remote is the destination).
-    ``is_push`` False: remote→local (the remote path is the source, local is the destination).
+    ``is_push`` True: local→remote (local is source, remote is destination).
+    ``is_push`` False: remote→local (remote is source, local is destination).
+
+    Path strings are passed through verbatim. The caller is responsible for any
+    trailing-slash semantics (rsync interprets a trailing slash on the source
+    as "copy contents into destination" rather than "copy as a child of
+    destination").
     """
     RSYNC.require()
 
-    source_path = local_path if is_push else remote_path
-    destination_path = remote_path if is_push else local_path
+    local_str = str(local_path)
+    remote_str = str(remote_path)
+    source_str = local_str if is_push else remote_str
+    destination_str = remote_str if is_push else local_str
 
-    # The git context lives on the destination side, which is where files may collide.
+    # The git context lives on the destination side (where files may collide).
+    # Convert to Path for the git operations -- trailing slashes are irrelevant
+    # for git's view of the directory.
+    destination_for_git = Path(remote_str if is_push else local_str)
     if is_push:
         destination_git_ctx: GitContextInterface = RemoteGitContext(host=remote_host)
     else:
         destination_git_ctx = LocalGitContext(cg=cg)
 
-    # Handle uncommitted changes in the destination. CLOBBER skips the git check
-    # entirely in rsync (the destination is overwritten in place). Also skip when
-    # the destination doesn't yet exist or isn't a git repo.
+    # CLOBBER skips the git check entirely. Also skip when the destination
+    # doesn't yet exist or isn't a git repo.
     if is_push:
-        is_destination_exists = _dir_exists(remote_host, destination_path)
+        is_destination_exists = _dir_exists(remote_host, destination_for_git)
     else:
-        is_destination_exists = destination_path.is_dir()
+        is_destination_exists = destination_for_git.is_dir()
     is_destination_git_repo = (
-        destination_git_ctx.is_git_repository(destination_path) if is_destination_exists else False
+        destination_git_ctx.is_git_repository(destination_for_git) if is_destination_exists else False
     )
     should_stash = uncommitted_changes != UncommittedChangesMode.CLOBBER and is_destination_git_repo
 
     stash_cm = (
-        stash_guard(destination_git_ctx, destination_path, uncommitted_changes) if should_stash else nullcontext(False)
+        stash_guard(destination_git_ctx, destination_for_git, uncommitted_changes)
+        if should_stash
+        else nullcontext(False)
     )
 
     with stash_cm:
         # Ensure destination directory exists for subdirectory targets. Always
         # attempt mkdir (idempotent) to avoid TOCTOU race with _dir_exists.
         if is_push:
-            _mkdir_on_host(remote_host, destination_path)
+            _mkdir_on_host(remote_host, destination_for_git)
         else:
-            destination_path.mkdir(parents=True, exist_ok=True)
+            destination_for_git.mkdir(parents=True, exist_ok=True)
 
         direction = "Pushing" if is_push else "Pulling"
 
         if remote_host.is_local:
-            rsync_cmd = _build_rsync_command(source_path, destination_path, is_dry_run, is_delete)
+            rsync_cmd = _build_rsync_command(source_str, destination_str, extra_args, ssh_transport=None)
             cmd_str = shlex.join(rsync_cmd)
-            with log_span("{} files from {} to {}", direction, source_path, destination_path):
+            with log_span("{} files from {} to {}", direction, source_str, destination_str):
                 logger.debug("Running rsync command: {}", cmd_str)
                 result: CommandResult = remote_host.execute_idempotent_command(cmd_str)
             if not result.success:
@@ -240,18 +196,14 @@ def _do_rsync(
         else:
             ssh_info = remote_host.get_ssh_connection_info()
             assert ssh_info is not None, "Remote host must provide SSH connection info"
-            known_hosts_file = get_ssh_known_hosts_file(remote_host)
-            rsync_cmd = _build_remote_rsync_command(
-                local_path=local_path,
-                remote_path=remote_path,
-                ssh_info=ssh_info,
-                known_hosts_file=known_hosts_file,
-                is_push=is_push,
-                is_dry_run=is_dry_run,
-                is_delete=is_delete,
-            )
+            user, hostname, port, key_path = ssh_info
+            ssh_transport = build_ssh_transport_command(key_path, port, get_ssh_known_hosts_file(remote_host))
+            remote_uri = f"{user}@{hostname}:{remote_str}"
+            ssh_source = local_str if is_push else remote_uri
+            ssh_destination = remote_uri if is_push else local_str
+            rsync_cmd = _build_rsync_command(ssh_source, ssh_destination, extra_args, ssh_transport=ssh_transport)
 
-            with log_span("{} files from {} to {} via SSH", direction, source_path, destination_path):
+            with log_span("{} files from {} to {} via SSH", direction, source_str, destination_str):
                 logger.debug("Running rsync command: {}", shlex.join(rsync_cmd))
                 try:
                     process_result = cg.run_process_to_completion(rsync_cmd)
@@ -262,43 +214,37 @@ def _do_rsync(
 
         files_transferred, bytes_transferred = parse_rsync_output(rsync_stdout)
 
-    logger.debug(
-        "Sync complete: {} files, {} bytes transferred{}",
-        files_transferred,
-        bytes_transferred,
-        " (dry run)" if is_dry_run else "",
-    )
+    logger.debug("Sync complete: {} files, {} bytes transferred", files_transferred, bytes_transferred)
 
     return RsyncResult(
         files_transferred=files_transferred,
         bytes_transferred=bytes_transferred,
-        source_path=source_path,
-        destination_path=destination_path,
-        is_dry_run=is_dry_run,
+        source_path=source_str,
+        destination_path=destination_str,
     )
 
 
 def rsync_to_remote(
-    local_path: Path,
+    local_path: str | Path,
     remote_host: OnlineHostInterface,
-    remote_path: Path,
-    is_dry_run: bool,
-    is_delete: bool,
+    remote_path: str | Path,
+    extra_args: Sequence[str],
     uncommitted_changes: UncommittedChangesMode,
     cg: ConcurrencyGroup,
 ) -> RsyncResult:
     """Rsync files from a local path to a path on ``remote_host``.
 
-    If ``remote_host.is_local`` is True both sides are on the local machine and rsync
-    runs without SSH.
+    If ``remote_host.is_local`` is True both sides are on the local machine and
+    rsync runs without SSH. Path strings are passed to rsync verbatim -- include
+    a trailing slash on ``local_path`` if you want "copy contents into
+    destination" semantics rather than "copy as a child of destination".
     """
     return _do_rsync(
         local_path=local_path,
         remote_host=remote_host,
         remote_path=remote_path,
         is_push=True,
-        is_dry_run=is_dry_run,
-        is_delete=is_delete,
+        extra_args=extra_args,
         uncommitted_changes=uncommitted_changes,
         cg=cg,
     )
@@ -306,25 +252,25 @@ def rsync_to_remote(
 
 def rsync_from_remote(
     remote_host: OnlineHostInterface,
-    remote_path: Path,
-    local_path: Path,
-    is_dry_run: bool,
-    is_delete: bool,
+    remote_path: str | Path,
+    local_path: str | Path,
+    extra_args: Sequence[str],
     uncommitted_changes: UncommittedChangesMode,
     cg: ConcurrencyGroup,
 ) -> RsyncResult:
     """Rsync files from a path on ``remote_host`` to a local path.
 
-    If ``remote_host.is_local`` is True both sides are on the local machine and rsync
-    runs without SSH.
+    If ``remote_host.is_local`` is True both sides are on the local machine and
+    rsync runs without SSH. Path strings are passed to rsync verbatim -- include
+    a trailing slash on ``remote_path`` if you want "copy contents into
+    destination" semantics rather than "copy as a child of destination".
     """
     return _do_rsync(
         local_path=local_path,
         remote_host=remote_host,
         remote_path=remote_path,
         is_push=False,
-        is_dry_run=is_dry_run,
-        is_delete=is_delete,
+        extra_args=extra_args,
         uncommitted_changes=uncommitted_changes,
         cg=cg,
     )
@@ -332,11 +278,10 @@ def rsync_from_remote(
 
 def rsync(
     source_host: OnlineHostInterface,
-    source_path: Path,
+    source_path: str | Path,
     destination_host: OnlineHostInterface,
-    destination_path: Path,
-    is_dry_run: bool,
-    is_delete: bool,
+    destination_path: str | Path,
+    extra_args: Sequence[str],
     uncommitted_changes: UncommittedChangesMode,
     cg: ConcurrencyGroup,
 ) -> RsyncResult:
@@ -356,8 +301,7 @@ def rsync(
             local_path=source_path,
             remote_host=destination_host,
             remote_path=destination_path,
-            is_dry_run=is_dry_run,
-            is_delete=is_delete,
+            extra_args=extra_args,
             uncommitted_changes=uncommitted_changes,
             cg=cg,
         )
@@ -365,8 +309,7 @@ def rsync(
         remote_host=source_host,
         remote_path=source_path,
         local_path=destination_path,
-        is_dry_run=is_dry_run,
-        is_delete=is_delete,
+        extra_args=extra_args,
         uncommitted_changes=uncommitted_changes,
         cg=cg,
     )

@@ -13,17 +13,10 @@ def test_rsync_cli_options_can_be_instantiated() -> None:
     opts = RsyncCliOptions(
         source=HostLocationAddress(),
         destination=HostLocationAddress(),
-        dry_run=False,
         start=True,
-        delete=False,
         uncommitted_changes="fail",
-        exclude=(),
-        include=(),
         include_gitignored=False,
-        include_file=None,
-        exclude_file=None,
-        rsync_arg=(),
-        rsync_args=None,
+        rsync_args=(),
         output_format="human",
         quiet=False,
         verbose=0,
@@ -32,8 +25,7 @@ def test_rsync_cli_options_can_be_instantiated() -> None:
         plugin=(),
         disable_plugin=(),
     )
-    assert opts.dry_run is False
-    assert opts.delete is False
+    assert opts.start is True
     assert opts.uncommitted_changes == "fail"
 
 

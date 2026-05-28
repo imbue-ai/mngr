@@ -113,11 +113,13 @@ def test_rsync_transfers_files_to_agent(
     run_git_command(repo_path, "add", "pushed_file.txt")
     run_git_command(repo_path, "commit", "-m", "Add pushed file")
 
+    # Trailing slash on the source: copy contents of repo into agent's workdir
+    # (rather than copying repo itself as a child).
     result = run_mngr_subprocess(
         "rsync",
         "--disable-plugin",
         "modal",
-        str(repo_path),
+        f"{repo_path}/",
         created_agent,
         env=sync_test_env,
     )
@@ -147,6 +149,7 @@ def test_rsync_dry_run_does_not_transfer(
         "modal",
         str(repo_path),
         created_agent,
+        "--",
         "--dry-run",
         env=sync_test_env,
     )
@@ -336,7 +339,7 @@ def test_rsync_round_trips_files(
         "rsync",
         "--disable-plugin",
         "modal",
-        str(repo_path),
+        f"{repo_path}/",
         created_agent,
         env=sync_test_env,
     )

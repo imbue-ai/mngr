@@ -602,14 +602,7 @@ _SYNOPSIS_OPTOUT_FLAGS: dict[str, frozenset[str]] = {
     ),
     "rsync": frozenset(
         {
-            "--exclude",
-            "--exclude-file",
-            "--include",
-            "--include-file",
             "--include-gitignored",
-            "--rsync-arg",
-            "--rsync-args",
-            "--uncommitted-changes",
         }
     ),
     "git.push": frozenset(),

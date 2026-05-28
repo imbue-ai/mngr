@@ -1,3 +1,9 @@
+"""Integration tests for ``rsync_to_remote`` and ``rsync_from_remote``.
+
+The API takes path strings verbatim; tests append ``/`` to source paths to get
+"copy contents into destination" semantics.
+"""
+
 import subprocess
 from pathlib import Path
 from typing import cast
@@ -36,6 +42,16 @@ def pull_ctx(tmp_path: Path) -> SyncTestContext:
     )
 
 
+def _agent_src(ctx: SyncTestContext) -> str:
+    """Trailing-slash form of ``ctx.agent_dir`` -- "copy contents into destination"."""
+    return f"{ctx.agent_dir}/"
+
+
+def _local_src(ctx: SyncTestContext) -> str:
+    """Trailing-slash form of ``ctx.local_dir`` -- "copy contents into destination"."""
+    return f"{ctx.local_dir}/"
+
+
 # =============================================================================
 # rsync_from_remote: FAIL mode (default)
 # =============================================================================
@@ -51,17 +67,16 @@ def test_rsync_from_remote_fail_mode_with_clean_destination_succeeds(
 
     result = rsync_from_remote(
         remote_host=pull_ctx.host,
-        remote_path=pull_ctx.agent_dir,
+        remote_path=_agent_src(pull_ctx),
         local_path=pull_ctx.local_dir,
-        is_dry_run=False,
-        is_delete=False,
+        extra_args=(),
         uncommitted_changes=UncommittedChangesMode.FAIL,
         cg=cg,
     )
 
     assert (pull_ctx.local_dir / "file.txt").read_text() == "agent content"
-    assert result.destination_path == pull_ctx.local_dir
-    assert result.source_path == pull_ctx.agent_dir
+    assert result.destination_path == str(pull_ctx.local_dir)
+    assert result.source_path == _agent_src(pull_ctx)
 
 
 def test_rsync_from_remote_fail_mode_with_uncommitted_changes_raises(
@@ -75,10 +90,9 @@ def test_rsync_from_remote_fail_mode_with_uncommitted_changes_raises(
     with pytest.raises(UncommittedChangesError) as exc_info:
         rsync_from_remote(
             remote_host=pull_ctx.host,
-            remote_path=pull_ctx.agent_dir,
+            remote_path=_agent_src(pull_ctx),
             local_path=pull_ctx.local_dir,
-            is_dry_run=False,
-            is_delete=False,
+            extra_args=(),
             uncommitted_changes=UncommittedChangesMode.FAIL,
             cg=cg,
         )
@@ -102,10 +116,9 @@ def test_rsync_from_remote_clobber_overwrites_local_changes(
 
     rsync_from_remote(
         remote_host=pull_ctx.host,
-        remote_path=pull_ctx.agent_dir,
+        remote_path=_agent_src(pull_ctx),
         local_path=pull_ctx.local_dir,
-        is_dry_run=False,
-        is_delete=False,
+        extra_args=(),
         uncommitted_changes=UncommittedChangesMode.CLOBBER,
         cg=cg,
     )
@@ -125,10 +138,9 @@ def test_rsync_from_remote_clobber_with_delete_removes_local_only_files(
 
     rsync_from_remote(
         remote_host=pull_ctx.host,
-        remote_path=pull_ctx.agent_dir,
+        remote_path=_agent_src(pull_ctx),
         local_path=pull_ctx.local_dir,
-        is_dry_run=False,
-        is_delete=True,
+        extra_args=("--delete",),
         uncommitted_changes=UncommittedChangesMode.CLOBBER,
         cg=cg,
     )
@@ -154,10 +166,9 @@ def test_rsync_from_remote_stash_leaves_changes_stashed(
 
     rsync_from_remote(
         remote_host=pull_ctx.host,
-        remote_path=pull_ctx.agent_dir,
+        remote_path=_agent_src(pull_ctx),
         local_path=pull_ctx.local_dir,
-        is_dry_run=False,
-        is_delete=False,
+        extra_args=(),
         uncommitted_changes=UncommittedChangesMode.STASH,
         cg=cg,
     )
@@ -179,10 +190,9 @@ def test_rsync_from_remote_stash_stashes_untracked_files(
 
     rsync_from_remote(
         remote_host=pull_ctx.host,
-        remote_path=pull_ctx.agent_dir,
+        remote_path=_agent_src(pull_ctx),
         local_path=pull_ctx.local_dir,
-        is_dry_run=False,
-        is_delete=False,
+        extra_args=(),
         uncommitted_changes=UncommittedChangesMode.STASH,
         cg=cg,
     )
@@ -208,10 +218,9 @@ def test_rsync_from_remote_merge_restores_changes(
 
     rsync_from_remote(
         remote_host=pull_ctx.host,
-        remote_path=pull_ctx.agent_dir,
+        remote_path=_agent_src(pull_ctx),
         local_path=pull_ctx.local_dir,
-        is_dry_run=False,
-        is_delete=False,
+        extra_args=(),
         uncommitted_changes=UncommittedChangesMode.MERGE,
         cg=cg,
     )
@@ -232,10 +241,9 @@ def test_rsync_from_remote_merge_restores_untracked_files(
 
     rsync_from_remote(
         remote_host=pull_ctx.host,
-        remote_path=pull_ctx.agent_dir,
+        remote_path=_agent_src(pull_ctx),
         local_path=pull_ctx.local_dir,
-        is_dry_run=False,
-        is_delete=False,
+        extra_args=(),
         uncommitted_changes=UncommittedChangesMode.MERGE,
         cg=cg,
     )
@@ -271,10 +279,9 @@ def test_rsync_from_remote_excludes_git_directory(
 
     rsync_from_remote(
         remote_host=pull_ctx.host,
-        remote_path=pull_ctx.agent_dir,
+        remote_path=_agent_src(pull_ctx),
         local_path=pull_ctx.local_dir,
-        is_dry_run=False,
-        is_delete=False,
+        extra_args=(),
         uncommitted_changes=UncommittedChangesMode.CLOBBER,
         cg=cg,
     )
@@ -290,7 +297,7 @@ def test_rsync_from_remote_excludes_git_directory(
 
 
 # =============================================================================
-# rsync_from_remote: dry-run
+# rsync_from_remote: dry-run pass-through
 # =============================================================================
 
 
@@ -302,18 +309,16 @@ def test_rsync_from_remote_dry_run_does_not_modify_files(
     (pull_ctx.agent_dir / "new_file.txt").write_text("agent content")
     assert not (pull_ctx.local_dir / "new_file.txt").exists()
 
-    result = rsync_from_remote(
+    rsync_from_remote(
         remote_host=pull_ctx.host,
-        remote_path=pull_ctx.agent_dir,
+        remote_path=_agent_src(pull_ctx),
         local_path=pull_ctx.local_dir,
-        is_dry_run=True,
-        is_delete=False,
+        extra_args=("--dry-run",),
         uncommitted_changes=UncommittedChangesMode.FAIL,
         cg=cg,
     )
 
     assert not (pull_ctx.local_dir / "new_file.txt").exists()
-    assert result.is_dry_run is True
 
 
 # =============================================================================
@@ -337,10 +342,9 @@ def test_rsync_from_remote_to_non_git_directory_succeeds(
 
     rsync_from_remote(
         remote_host=host,
-        remote_path=agent_dir,
+        remote_path=f"{agent_dir}/",
         local_path=dest_dir,
-        is_dry_run=False,
-        is_delete=False,
+        extra_args=(),
         uncommitted_changes=UncommittedChangesMode.FAIL,
         cg=cg,
     )
@@ -378,18 +382,17 @@ def test_rsync_to_remote_transfers_files(
     run_git_command(push_ctx.local_dir, "commit", "-m", "Add file")
 
     result = rsync_to_remote(
-        local_path=push_ctx.local_dir,
+        local_path=_local_src(push_ctx),
         remote_host=push_ctx.host,
         remote_path=push_ctx.agent_dir,
-        is_dry_run=False,
-        is_delete=False,
+        extra_args=(),
         uncommitted_changes=UncommittedChangesMode.FAIL,
         cg=cg,
     )
 
     assert (push_ctx.agent_dir / "file.txt").read_text() == "local content"
-    assert result.source_path == push_ctx.local_dir
-    assert result.destination_path == push_ctx.agent_dir
+    assert result.source_path == _local_src(push_ctx)
+    assert result.destination_path == str(push_ctx.agent_dir)
 
 
 @pytest.mark.rsync
@@ -405,11 +408,10 @@ def test_rsync_to_remote_creates_destination_subdirectory(
     assert not new_remote.exists()
 
     rsync_to_remote(
-        local_path=push_ctx.local_dir,
+        local_path=_local_src(push_ctx),
         remote_host=push_ctx.host,
         remote_path=new_remote,
-        is_dry_run=False,
-        is_delete=False,
+        extra_args=(),
         uncommitted_changes=UncommittedChangesMode.FAIL,
         cg=cg,
     )
@@ -427,18 +429,16 @@ def test_rsync_to_remote_dry_run_does_not_transfer(
     run_git_command(push_ctx.local_dir, "add", "file.txt")
     run_git_command(push_ctx.local_dir, "commit", "-m", "Add file")
 
-    result = rsync_to_remote(
-        local_path=push_ctx.local_dir,
+    rsync_to_remote(
+        local_path=_local_src(push_ctx),
         remote_host=push_ctx.host,
         remote_path=push_ctx.agent_dir,
-        is_dry_run=True,
-        is_delete=False,
+        extra_args=("--dry-run",),
         uncommitted_changes=UncommittedChangesMode.FAIL,
         cg=cg,
     )
 
     assert not (push_ctx.agent_dir / "file.txt").exists()
-    assert result.is_dry_run is True
 
 
 @pytest.fixture
@@ -465,10 +465,9 @@ def test_rsync_from_remote_without_ssh_info_raises_assertion(
     with pytest.raises(AssertionError, match="SSH connection info"):
         rsync_from_remote(
             remote_host=remote_pull_ctx.host,
-            remote_path=remote_pull_ctx.agent_dir,
+            remote_path=_agent_src(remote_pull_ctx),
             local_path=remote_pull_ctx.local_dir,
-            is_dry_run=False,
-            is_delete=False,
+            extra_args=(),
             uncommitted_changes=UncommittedChangesMode.CLOBBER,
             cg=cg,
         )

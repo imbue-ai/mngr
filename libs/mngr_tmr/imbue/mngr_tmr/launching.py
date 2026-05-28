@@ -553,12 +553,13 @@ def launch_integrator_agent(
 
     destination = create_result.agent.work_dir / INTEGRATOR_INPUTS_DIRNAME
     logger.info("Rsyncing integrator inputs to '{}:{}'", create_result.host.id, destination)
+    # Trailing slash so rsync copies the *contents* of output_dir into the
+    # integrator's inputs directory, not output_dir itself as a child.
     rsync_to_remote(
-        local_path=output_dir,
+        local_path=f"{output_dir}/",
         remote_host=create_result.host,
         remote_path=destination,
-        is_dry_run=False,
-        is_delete=False,
+        extra_args=(),
         uncommitted_changes=UncommittedChangesMode.CLOBBER,
         cg=mngr_ctx.concurrency_group,
     )

@@ -1,7 +1,6 @@
 """Tests for CLI output helpers."""
 
 import json
-from pathlib import Path
 
 import pytest
 
@@ -346,9 +345,8 @@ def test_output_rsync_result_json(capsys: pytest.CaptureFixture[str]) -> None:
     result = RsyncResult(
         files_transferred=5,
         bytes_transferred=1024,
-        source_path=Path("/src"),
-        destination_path=Path("/dst"),
-        is_dry_run=False,
+        source_path="/src",
+        destination_path="/dst",
     )
     output_rsync_result(result, OutputFormat.JSON)
     captured = capsys.readouterr()
@@ -361,9 +359,8 @@ def test_output_rsync_result_jsonl(capsys: pytest.CaptureFixture[str]) -> None:
     result = RsyncResult(
         files_transferred=3,
         bytes_transferred=512,
-        source_path=Path("/src"),
-        destination_path=Path("/dst"),
-        is_dry_run=False,
+        source_path="/src",
+        destination_path="/dst",
     )
     output_rsync_result(result, OutputFormat.JSONL)
     captured = capsys.readouterr()
@@ -375,28 +372,13 @@ def test_output_rsync_result_human(capsys: pytest.CaptureFixture[str]) -> None:
     result = RsyncResult(
         files_transferred=5,
         bytes_transferred=1024,
-        source_path=Path("/src"),
-        destination_path=Path("/dst"),
-        is_dry_run=False,
+        source_path="/src",
+        destination_path="/dst",
     )
     output_rsync_result(result, OutputFormat.HUMAN)
     captured = capsys.readouterr()
     assert "Rsync complete" in captured.out
     assert "5 files" in captured.out
-
-
-def test_output_rsync_result_human_dry_run(capsys: pytest.CaptureFixture[str]) -> None:
-    result = RsyncResult(
-        files_transferred=2,
-        bytes_transferred=256,
-        source_path=Path("/src"),
-        destination_path=Path("/dst"),
-        is_dry_run=True,
-    )
-    output_rsync_result(result, OutputFormat.HUMAN)
-    captured = capsys.readouterr()
-    assert "Dry run complete" in captured.out
-    assert "would be transferred" in captured.out
 
 
 # =============================================================================

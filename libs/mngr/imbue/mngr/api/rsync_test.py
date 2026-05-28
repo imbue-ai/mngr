@@ -8,7 +8,6 @@ import pytest
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mngr.api.rsync import RsyncEndpointError
 from imbue.mngr.api.rsync import RsyncResult
-from imbue.mngr.api.rsync import _build_remote_rsync_command
 from imbue.mngr.api.rsync import _build_rsync_command
 from imbue.mngr.api.rsync import rsync
 from imbue.mngr.api.testing import FakeHost
@@ -24,84 +23,53 @@ def test_rsync_result_can_be_created_with_all_fields() -> None:
     result = RsyncResult(
         files_transferred=10,
         bytes_transferred=1024,
-        source_path=Path("/source"),
-        destination_path=Path("/dest"),
-        is_dry_run=False,
+        source_path="/source",
+        destination_path="/dest",
     )
 
     assert result.files_transferred == 10
     assert result.bytes_transferred == 1024
-    assert result.source_path == Path("/source")
-    assert result.destination_path == Path("/dest")
-    assert result.is_dry_run is False
-
-
-def test_rsync_result_supports_dry_run() -> None:
-    result = RsyncResult(
-        files_transferred=5,
-        bytes_transferred=0,
-        source_path=Path("/source"),
-        destination_path=Path("/dest"),
-        is_dry_run=True,
-    )
-
-    assert result.is_dry_run is True
+    assert result.source_path == "/source"
+    assert result.destination_path == "/dest"
 
 
 # =============================================================================
-# rsync command builders
+# rsync command builder
 # =============================================================================
 
 
-def test_build_rsync_command_includes_stats_and_excludes_git() -> None:
-    cmd = _build_rsync_command(Path("/src"), Path("/dst"), is_dry_run=False, is_delete=False)
+def test_build_rsync_command_includes_defaults_and_passes_paths_verbatim() -> None:
+    cmd = _build_rsync_command("/src", "/dst", extra_args=(), ssh_transport=None)
+    assert cmd[0] == "rsync"
+    assert "-avz" in cmd
     assert "--stats" in cmd
     assert "--exclude=.git" in cmd
+    # Paths are passed through with no mangling.
+    assert cmd[-2] == "/src"
+    assert cmd[-1] == "/dst"
+
+
+def test_build_rsync_command_preserves_trailing_slash_on_source() -> None:
+    cmd = _build_rsync_command("/src/", "/dst", extra_args=(), ssh_transport=None)
     assert cmd[-2] == "/src/"
     assert cmd[-1] == "/dst"
 
 
-def test_build_rsync_command_adds_dry_run_flag() -> None:
-    cmd = _build_rsync_command(Path("/src"), Path("/dst"), is_dry_run=True, is_delete=False)
+def test_build_rsync_command_inserts_extra_args_between_defaults_and_paths() -> None:
+    cmd = _build_rsync_command("/src", "/dst", extra_args=("--dry-run", "--delete"), ssh_transport=None)
     assert "--dry-run" in cmd
-
-
-def test_build_rsync_command_adds_delete_flag() -> None:
-    cmd = _build_rsync_command(Path("/src"), Path("/dst"), is_dry_run=False, is_delete=True)
     assert "--delete" in cmd
+    # User args precede the source/destination so they're parsed as options.
+    assert cmd.index("--dry-run") < cmd.index("/src")
+    assert cmd.index("--delete") < cmd.index("/src")
 
 
-def test_build_remote_rsync_command_push_uses_remote_destination() -> None:
-    ssh_info = ("root", "example.com", 22, Path("/tmp/key"))
-    cmd = _build_remote_rsync_command(
-        local_path=Path("/local/src"),
-        remote_path=Path("/remote/dst"),
-        ssh_info=ssh_info,
-        known_hosts_file=None,
-        is_push=True,
-        is_dry_run=False,
-        is_delete=False,
-    )
-    # Only the source gets a trailing slash; rsync ignores trailing slashes on
-    # the destination.
-    assert cmd[-2] == "/local/src/"
-    assert cmd[-1] == "root@example.com:/remote/dst"
+def test_build_rsync_command_adds_ssh_transport_when_provided() -> None:
+    cmd = _build_rsync_command("/src", "user@host:/dst", extra_args=(), ssh_transport="ssh -i /key")
     assert "-e" in cmd
-
-
-def test_build_remote_rsync_command_pull_uses_remote_source() -> None:
-    ssh_info = ("user", "host.com", 2222, Path("/key"))
-    cmd = _build_remote_rsync_command(
-        local_path=Path("/local/dst"),
-        remote_path=Path("/remote/src"),
-        ssh_info=ssh_info,
-        known_hosts_file=None,
-        is_push=False,
-        is_dry_run=False,
-        is_delete=False,
-    )
-    assert cmd[-2] == "user@host.com:/remote/src/"
-    assert cmd[-1] == "/local/dst"
+    e_index = cmd.index("-e")
+    assert cmd[e_index + 1] == "ssh -i /key"
+    assert cmd[-1] == "user@host:/dst"
 
 
 # =============================================================================
@@ -118,11 +86,10 @@ def test_rsync_rejects_remote_to_remote_transfers(
     with pytest.raises(RsyncEndpointError):
         rsync(
             source_host=source_host,
-            source_path=tmp_path / "src",
+            source_path=str(tmp_path / "src"),
             destination_host=destination_host,
-            destination_path=tmp_path / "dst",
-            is_dry_run=False,
-            is_delete=False,
+            destination_path=str(tmp_path / "dst"),
+            extra_args=(),
             uncommitted_changes=UncommittedChangesMode.FAIL,
             cg=cg,
         )

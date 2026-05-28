@@ -226,9 +226,8 @@ def output_rsync_result(
     result_data = {
         "files_transferred": result.files_transferred,
         "bytes_transferred": result.bytes_transferred,
-        "source_path": str(result.source_path),
-        "destination_path": str(result.destination_path),
-        "is_dry_run": result.is_dry_run,
+        "source_path": result.source_path,
+        "destination_path": result.destination_path,
     }
 
     match output_format:
@@ -237,14 +236,11 @@ def output_rsync_result(
         case OutputFormat.JSONL:
             emit_event("rsync_complete", result_data, OutputFormat.JSONL)
         case OutputFormat.HUMAN:
-            if result.is_dry_run:
-                write_human_line("Dry run complete: {} files would be transferred", result.files_transferred)
-            else:
-                write_human_line(
-                    "Rsync complete: {} files, {} bytes transferred",
-                    result.files_transferred,
-                    result.bytes_transferred,
-                )
+            write_human_line(
+                "Rsync complete: {} files, {} bytes transferred",
+                result.files_transferred,
+                result.bytes_transferred,
+            )
         case _ as unreachable:
             assert_never(unreachable)
 
