@@ -247,6 +247,45 @@ class HostHealthResponse(FrozenModel):
         default_factory=dict,
         description="Per-agent service map from the plugin's resolver snapshot, or {} if not yet seen",
     )
+    plugin_resolver_has_services: bool = Field(
+        default=False,
+        description=(
+            "True iff the plugin's resolver has registered at least one service URL for this "
+            "agent. Distinct from ``len(plugin_resolver_services) > 0`` in spirit only -- this "
+            "field is named for what it means rather than asking the reader to compute it. False "
+            "could mean the plugin hasn't yet discovered the agent OR has discovered it but no "
+            "service has registered yet; see ``mngr_knows_agent`` to disambiguate."
+        ),
+    )
+    mngr_knows_agent: bool = Field(
+        default=False,
+        description=(
+            "True iff ``mngr list`` returned a row for this workspace's chat agent. False when "
+            "either ``mngr list`` failed entirely (see ``mngr_list_error``) or the listing ran "
+            "but did not include this agent ID. Distinguishes the two cases that previously "
+            "both rendered as ``host_state == ''``."
+        ),
+    )
+    mngr_knows_host: bool = Field(
+        default=False,
+        description=(
+            "True iff ``mngr list`` returned a row whose ``host.id`` is non-empty for this "
+            "workspace's chat agent. False when the host row is missing entirely or the host "
+            "id is unset. Lets the recovery page tell ``mngr_knows_agent=true / host=offline`` "
+            "from ``mngr_knows_agent=false`` (which is the symptom of an outer-mngr discovery "
+            "failure, not a workspace-side problem)."
+        ),
+    )
+    mngr_list_error: str | None = Field(
+        default=None,
+        description=(
+            "Non-None when ``mngr list`` did not exit cleanly: either the subprocess could not "
+            "be spawned, timed out, exited non-zero, or returned a payload whose ``errors`` "
+            "field was non-empty. The string is a best-effort human-readable summary "
+            "(stderr / exit code / first error message) intended for the diagnostics menu. "
+            "None means the listing was clean."
+        ),
+    )
     probe: ProbeRecord = Field(default_factory=ProbeRecord, description="Parsed in-container probe result")
 
 
@@ -357,6 +396,7 @@ def build_host_health_response(
     services_agent_id: AgentId | None,
     probe: ProbeRecord,
     plugin_resolver_services: dict[str, str],
+    mngr_list_error: str | None = None,
 ) -> HostHealthResponse:
     """Assemble the host-health endpoint response from raw inputs.
 
@@ -370,6 +410,18 @@ def build_host_health_response(
     services_state = extract_services_agent_state(list_json, services_agent_id)
     ssh_connections = extract_ssh_connections(list_json)
     is_misconfigured = probe.services_toml_declares_system_interface is False
+    # extract_agent_row returns the matched row or None; a None list_json (we
+    # never even got stdout) also lands here as "not known".
+    mngr_knows_agent = agent_row is not None
+    # The host id lives at agent_row["host"]["id"]; a row whose host block is
+    # missing or has no id means mngr saw the agent but couldn't enumerate its
+    # host (an exotic state, but worth distinguishing from "agent missing").
+    mngr_knows_host = False
+    if isinstance(agent_row, dict):
+        host_block = agent_row.get("host")
+        if isinstance(host_block, dict):
+            host_id_value = host_block.get("id")
+            mngr_knows_host = isinstance(host_id_value, str) and bool(host_id_value)
     return HostHealthResponse(
         reachable=reachable,
         host_offline=host_offline,
@@ -379,6 +431,10 @@ def build_host_health_response(
         services_agent_state=services_state,
         ssh_connections=ssh_connections,
         plugin_resolver_services=dict(plugin_resolver_services),
+        plugin_resolver_has_services=bool(plugin_resolver_services),
+        mngr_knows_agent=mngr_knows_agent,
+        mngr_knows_host=mngr_knows_host,
+        mngr_list_error=mngr_list_error,
         probe=probe,
     )
 

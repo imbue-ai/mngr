@@ -18,3 +18,12 @@ agent on it) instead of just the named agent.
   `mngr start <agent>` reliably bounces an unresponsive workspace.
 - This supports the minds tiered workspace-restart recovery flow, which
   uses a full host restart as its heavier recovery tier.
+
+Fix `mngr list --format json` crashing on `ProviderErrorInfo` when no
+agents were returned. With `--on-error continue` and a per-provider
+failure, the empty-agents path passed raw `ErrorInfo` pydantic models to
+`json.dumps`, which crashed with `TypeError: Object of type
+ProviderErrorInfo is not JSON serializable`. The empty-agents path now
+goes through the same `_emit_json_output` serializer as the non-empty
+path, so `mngr list --on-error continue --format json` produces a clean
+`{"agents": [], "errors": [...]}` payload instead of a traceback.

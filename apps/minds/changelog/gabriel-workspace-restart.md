@@ -85,3 +85,25 @@ Tiered system-interface restart for the minds recovery flow.
   completes) can transition an in-flight restart to HEALTHY, so a
   probe of the still-alive pre-restart system interface can no longer
   prematurely declare recovery.
+- Recovery-page diagnostics now explain "the issue is somewhere else,
+  not this workspace" when applicable. The host-health endpoint surfaces:
+  - ``mngr_knows_agent`` / ``mngr_knows_host``: explicit booleans saying
+    whether ``mngr list`` returned a row for this workspace's agent /
+    host. Previously both states (mngr-list never returned vs. agent
+    missing from the listing) rendered identically as an empty
+    ``host_state`` string.
+  - ``mngr_list_error``: a one-line summary of why ``mngr list`` could
+    not produce a clean listing -- whether the subprocess errored, the
+    payload's per-provider ``errors`` array was non-empty, or the
+    listing timed out. When set, the diagnostics menu surfaces it so
+    the user can tell that the issue lives in a sibling workspace's
+    host rather than their own.
+  - ``plugin_resolver_has_services``: a self-describing boolean
+    derived from the existing ``plugin_resolver_services`` map, named
+    for what it means rather than asking the reader to compute it.
+- The host-state ``mngr list`` is now scoped to this workspace's chat
+  agent + system-services agent via a CEL ``id == ...`` include, and
+  runs with ``--on-error continue`` so per-provider errors do not blank
+  out the entire diagnostic. The recovery page therefore renders
+  meaningful per-workspace data even when an unrelated host on the same
+  provider is wedged.

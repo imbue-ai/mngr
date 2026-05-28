@@ -266,3 +266,111 @@ def test_build_host_health_response_offline_host_drives_host_restart_tier() -> N
     )
     assert response.reachable is False
     assert response.host_offline is True
+
+
+# --- new visibility booleans ---------------------------------------------
+
+
+def test_build_host_health_response_mngr_knows_agent_and_host_when_listed() -> None:
+    list_json = json.dumps(
+        {
+            "agents": [{"id": str(_AGENT_ID), "host": {"id": "host-abc", "state": "RUNNING"}}],
+            "errors": [],
+        }
+    )
+    response = build_host_health_response(
+        list_json=list_json,
+        agent_id=_AGENT_ID,
+        services_agent_id=_SERVICES_AGENT_ID,
+        probe=parse_probe_output(None),
+        plugin_resolver_services={},
+    )
+    assert response.mngr_knows_agent is True
+    assert response.mngr_knows_host is True
+
+
+def test_build_host_health_response_distinguishes_missing_agent_from_failed_list() -> None:
+    """list_json=None (mngr list failed entirely) and an empty agents list look
+    identical via the legacy host_state field. The booleans surface the
+    distinction so the recovery page can route correctly."""
+    # Case A: mngr list ran but did NOT include our agent.
+    list_json_without_agent = json.dumps({"agents": [], "errors": []})
+    response_without = build_host_health_response(
+        list_json=list_json_without_agent,
+        agent_id=_AGENT_ID,
+        services_agent_id=_SERVICES_AGENT_ID,
+        probe=parse_probe_output(None),
+        plugin_resolver_services={},
+        mngr_list_error=None,
+    )
+    assert response_without.mngr_knows_agent is False
+    assert response_without.mngr_knows_host is False
+    assert response_without.mngr_list_error is None
+
+    # Case B: mngr list never produced stdout (subprocess failed).
+    response_failed = build_host_health_response(
+        list_json=None,
+        agent_id=_AGENT_ID,
+        services_agent_id=_SERVICES_AGENT_ID,
+        probe=parse_probe_output(None),
+        plugin_resolver_services={},
+        mngr_list_error="exited 1: SSH error (Error reading SSH protocol banner)",
+    )
+    assert response_failed.mngr_knows_agent is False
+    assert response_failed.mngr_knows_host is False
+    assert response_failed.mngr_list_error is not None
+    assert "SSH error" in response_failed.mngr_list_error
+
+
+def test_build_host_health_response_mngr_knows_agent_but_not_host_when_host_id_missing() -> None:
+    """An agent row whose host block has no id is the exotic case where the
+    listing knows the agent but couldn't enumerate its host. Kept distinct
+    from "neither known"."""
+    list_json = json.dumps({"agents": [{"id": str(_AGENT_ID), "host": {"state": "RUNNING"}}]})
+    response = build_host_health_response(
+        list_json=list_json,
+        agent_id=_AGENT_ID,
+        services_agent_id=_SERVICES_AGENT_ID,
+        probe=parse_probe_output(None),
+        plugin_resolver_services={},
+    )
+    assert response.mngr_knows_agent is True
+    assert response.mngr_knows_host is False
+
+
+def test_build_host_health_response_plugin_resolver_has_services_reflects_presence() -> None:
+    list_json = json.dumps({"agents": [{"id": str(_AGENT_ID), "host": {"id": "host-abc", "state": "RUNNING"}}]})
+    response_empty = build_host_health_response(
+        list_json=list_json,
+        agent_id=_AGENT_ID,
+        services_agent_id=_SERVICES_AGENT_ID,
+        probe=parse_probe_output(None),
+        plugin_resolver_services={},
+    )
+    assert response_empty.plugin_resolver_has_services is False
+
+    response_present = build_host_health_response(
+        list_json=list_json,
+        agent_id=_AGENT_ID,
+        services_agent_id=_SERVICES_AGENT_ID,
+        probe=parse_probe_output(None),
+        plugin_resolver_services={"system_interface": "http://127.0.0.1:9100"},
+    )
+    assert response_present.plugin_resolver_has_services is True
+
+
+def test_build_host_health_response_carries_mngr_list_error_for_blast_radius() -> None:
+    """When mngr list errored on a *different* host, surface that as
+    mngr_list_error so the recovery page can tell the user the issue is
+    elsewhere."""
+    response = build_host_health_response(
+        list_json=None,
+        agent_id=_AGENT_ID,
+        services_agent_id=_SERVICES_AGENT_ID,
+        probe=parse_probe_output(None),
+        plugin_resolver_services={},
+        mngr_list_error="provider=docker: HostConnectionError: SSH error (Error reading SSH protocol banner)",
+    )
+    assert response.mngr_list_error is not None
+    assert "docker" in response.mngr_list_error
+    assert "SSH" in response.mngr_list_error

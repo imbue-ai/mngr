@@ -1676,15 +1676,46 @@ def _build_mngr_start_argv(mngr_binary: str, agent_id: AgentId) -> list[str]:
     return [mngr_binary, "start", str(agent_id), "--quiet"]
 
 
-def _build_mngr_host_state_argv(mngr_binary: str) -> list[str]:
+def _build_mngr_host_state_argv(
+    mngr_binary: str,
+    agent_id: AgentId,
+    services_agent_id: AgentId | None,
+) -> list[str]:
     """Build the argv for the layer-2 probe: list agents to read each host's lifecycle state.
 
     The recovery page keys its restart tier off the workspace host's state:
     a RUNNING host can be recovered with the surgical system-interface
     restart, while a stopped host needs a full host restart. ``mngr list``
     is a pure read -- it never starts a stopped container.
+
+    Scopes the listing to just this workspace's chat agent + system-services
+    agent via a CEL ``id == ...`` include. Smaller payload, easier to reason
+    about in the diagnostics menu, and the include filter never confuses
+    enumeration since the per-host SSH-tolerance fix in libs/mngr means a
+    broken sibling host no longer poisons the whole provider's discovery.
+
+    ``--on-error continue`` keeps the listing from hard-failing when one
+    provider couldn't be reached (the surviving providers still emit their
+    agents). The CLI exits non-zero whenever ``result.errors`` is non-empty,
+    so the caller cannot rely on returncode alone -- the ``mngr_list_error``
+    field in the response is sourced from stderr / parsed errors / exit
+    code together.
     """
-    return [mngr_binary, "list", "--format", "json", "--quiet"]
+    if services_agent_id is None:
+        include = f'id == "{agent_id}"'
+    else:
+        include = f'id == "{agent_id}" || id == "{services_agent_id}"'
+    return [
+        mngr_binary,
+        "list",
+        "--format",
+        "json",
+        "--quiet",
+        "--include",
+        include,
+        "--on-error",
+        "continue",
+    ]
 
 
 def _sanitize_recovery_return_to(raw: str) -> str:
@@ -1827,6 +1858,74 @@ def _capture_mngr_command(concurrency_group: ConcurrencyGroup, argv: list[str], 
     if failure_reason is not None or finished is None:
         return None
     return finished.stdout
+
+
+def _capture_mngr_command_with_error(
+    concurrency_group: ConcurrencyGroup, argv: list[str], env: dict[str, str]
+) -> tuple[str | None, str | None]:
+    """Run a read-only ``mngr`` subprocess and return ``(stdout, failure_reason)``.
+
+    Unlike ``_capture_mngr_command``, this returns stdout even when the
+    subprocess exited non-zero -- ``mngr list --on-error continue`` exits 1
+    when ``result.errors`` is non-empty, but the JSON on stdout is still
+    valid and useful. The caller can parse stdout for partial data AND
+    surface ``failure_reason`` to the user as diagnostic context.
+
+    ``failure_reason`` is None when the subprocess exited cleanly (rc=0,
+    not timed out, no exec error). The string format matches
+    ``_run_mngr_subprocess``: exec failures are wrapped in str(exc),
+    timeouts read ``timed out after Xs``, non-zero exits read
+    ``exited N: <stderr>``.
+    """
+    finished, failure_reason = _run_mngr_subprocess(concurrency_group, argv, env)
+    stdout = finished.stdout if finished is not None else None
+    return stdout, failure_reason
+
+
+def _summarize_mngr_list_payload_errors(list_json: str | None) -> str | None:
+    """Return a one-line summary of the ``errors`` array in ``mngr list`` JSON, or None.
+
+    With ``--on-error continue`` the subprocess can exit 0 (or non-zero, depending
+    on whether ``result.errors`` is empty) but still report per-provider failures
+    in the payload's ``errors`` field. Surfacing the first error's message lets
+    the recovery page tell the user that their workspace's apparent
+    unreachability is collateral damage of a different host's discovery failure
+    rather than a problem with their own workspace.
+    """
+    if list_json is None:
+        return None
+    try:
+        payload = json.loads(list_json)
+    except json.JSONDecodeError as e:
+        # mngr list emitting non-JSON on stdout is unexpected; surface it so a
+        # malformed payload is visible instead of a silent None that the
+        # diagnostic would otherwise render the same as "no errors".
+        logger.warning("Could not parse `mngr list` stdout as JSON: {}", e)
+        return None
+    if not isinstance(payload, dict):
+        return None
+    errors = payload.get("errors")
+    if not isinstance(errors, list) or not errors:
+        return None
+    first = errors[0]
+    if not isinstance(first, dict):
+        return None
+    message = first.get("message")
+    exception_type = first.get("exception_type")
+    provider_name = first.get("provider_name")
+    parts: list[str] = []
+    if isinstance(provider_name, str) and provider_name:
+        parts.append(f"provider={provider_name}")
+    if isinstance(exception_type, str) and exception_type:
+        parts.append(exception_type)
+    if isinstance(message, str) and message:
+        parts.append(message)
+    if not parts:
+        return None
+    summary = ": ".join(parts)
+    if len(errors) > 1:
+        summary = f"{summary} (+{len(errors) - 1} more)"
+    return summary
 
 
 def _await_system_interface_ready(agent_id: AgentId, mngr_forward_port: int, preauth_cookie: str) -> bool:
@@ -2058,9 +2157,20 @@ def _run_host_health_probe(
     env = dict(os.environ)
     env["MNGR_HOST_DIR"] = str(request.app.state.mngr_host_dir)
     mngr_binary: str = request.app.state.mngr_binary
-    list_json = _capture_mngr_command(concurrency_group, _build_mngr_host_state_argv(mngr_binary), env)
     backend_resolver: BackendResolverInterface = request.app.state.backend_resolver
     services_agent_id = backend_resolver.get_system_services_agent_id(agent_id)
+    list_json, mngr_list_error = _capture_mngr_command_with_error(
+        concurrency_group,
+        _build_mngr_host_state_argv(mngr_binary, agent_id, services_agent_id),
+        env,
+    )
+    # When the listing exited 0 but reported per-provider errors in its JSON
+    # payload, surface those as ``mngr_list_error`` too -- the recovery page
+    # needs the failing host name to explain that the user's workspace is
+    # collateral damage of a sibling host failure, not a problem with their
+    # own workspace.
+    if mngr_list_error is None:
+        mngr_list_error = _summarize_mngr_list_payload_errors(list_json)
     probe = _run_batched_probe(concurrency_group, mngr_binary, services_agent_id, env)
     consumer: EnvelopeStreamConsumer | None = request.app.state.envelope_stream_consumer
     plugin_resolver_services: dict[str, str] = (
@@ -2072,6 +2182,7 @@ def _run_host_health_probe(
         services_agent_id=services_agent_id,
         probe=probe,
         plugin_resolver_services=plugin_resolver_services,
+        mngr_list_error=mngr_list_error,
     )
     cache: _HostHealthCache = request.app.state.host_health_cache
     cache.put(agent_id, response)

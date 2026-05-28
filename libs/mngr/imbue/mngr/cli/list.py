@@ -712,7 +712,13 @@ def _run_list_iteration(params: _ListIterationParams, ctx: click.Context) -> Non
         elif params.output_opts.output_format == OutputFormat.HUMAN:
             write_human_line("No agents found")
         elif params.output_opts.output_format == OutputFormat.JSON:
-            emit_final_json({"agents": [], "errors": result.errors})
+            # Route through `_emit_json_output` so errors get pydantic-dumped to
+            # JSON-friendly dicts; passing raw ErrorInfo objects to
+            # `json.dumps` crashes with "Object of type ProviderErrorInfo is
+            # not JSON serializable", which is what made `mngr list --on-error
+            # continue --format json` hard-fail whenever discovery hit a
+            # broken host.
+            _emit_json_output([], result.errors)
         else:
             # JSONL is handled above with streaming, so this should be unreachable
             raise AssertionError(f"Unexpected output format: {params.output_opts.output_format}")

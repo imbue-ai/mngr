@@ -17,10 +17,12 @@ from imbue.minds.desktop_client.agent_creator import AgentCreator
 from imbue.minds.desktop_client.agent_creator import LOG_SENTINEL
 from imbue.minds.desktop_client.app import _HostHealthCache
 from imbue.minds.desktop_client.app import _LogProbeOnRecoveryCallback
+from imbue.minds.desktop_client.app import _build_mngr_host_state_argv
 from imbue.minds.desktop_client.app import _build_mngr_start_argv
 from imbue.minds.desktop_client.app import _build_mngr_stop_argv
 from imbue.minds.desktop_client.app import _build_workspace_list
 from imbue.minds.desktop_client.app import _run_restart_sequence
+from imbue.minds.desktop_client.app import _summarize_mngr_list_payload_errors
 from imbue.minds.desktop_client.app import create_desktop_client
 from imbue.minds.desktop_client.auth import FileAuthStore
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
@@ -1510,6 +1512,82 @@ def test_build_mngr_start_argv_targets_the_agent() -> None:
     aid = AgentId.generate()
     argv = _build_mngr_start_argv("/usr/local/bin/mngr", aid)
     assert argv[:3] == ["/usr/local/bin/mngr", "start", str(aid)]
+
+
+def test_build_mngr_host_state_argv_scopes_to_workspace_and_continues_on_error() -> None:
+    """The host-state probe filters to just this workspace's agents and
+    tolerates per-provider failures so a broken sibling host doesn't blank
+    out the diagnostic."""
+    agent = AgentId.generate()
+    services = AgentId.generate()
+    argv = _build_mngr_host_state_argv("/usr/local/bin/mngr", agent, services)
+    assert argv[:5] == ["/usr/local/bin/mngr", "list", "--format", "json", "--quiet"]
+    # CEL include matches both the chat agent and the system-services agent.
+    assert "--include" in argv
+    include_value = argv[argv.index("--include") + 1]
+    assert f'id == "{agent}"' in include_value
+    assert f'id == "{services}"' in include_value
+    # --on-error continue is required so one broken provider does not abort
+    # the listing for the rest.
+    assert argv[argv.index("--on-error") + 1] == "continue"
+
+
+def test_build_mngr_host_state_argv_omits_services_id_when_unresolved() -> None:
+    """When the services-agent id is unknown, the filter degenerates to just
+    the chat agent's id -- the listing is still scoped, just with one term."""
+    agent = AgentId.generate()
+    argv = _build_mngr_host_state_argv("/usr/local/bin/mngr", agent, None)
+    include_value = argv[argv.index("--include") + 1]
+    assert include_value == f'id == "{agent}"'
+
+
+def test_summarize_mngr_list_payload_errors_extracts_provider_and_message() -> None:
+    """The payload-errors summary feeds the recovery page's "this is collateral
+    damage of another host" hint, so the provider name and original error
+    message must both be present."""
+    payload = json.dumps(
+        {
+            "agents": [],
+            "errors": [
+                {
+                    "exception_type": "HostConnectionError",
+                    "message": "SSH error (Error reading SSH protocol banner)",
+                    "provider_name": "docker",
+                }
+            ],
+        }
+    )
+    summary = _summarize_mngr_list_payload_errors(payload)
+    assert summary is not None
+    assert "docker" in summary
+    assert "HostConnectionError" in summary
+    assert "SSH error" in summary
+
+
+def test_summarize_mngr_list_payload_errors_returns_none_for_clean_listing() -> None:
+    """An empty errors array means a clean listing; the summary is None so the
+    diagnostic doesn't render a spurious error banner."""
+    payload = json.dumps({"agents": [], "errors": []})
+    assert _summarize_mngr_list_payload_errors(payload) is None
+    assert _summarize_mngr_list_payload_errors(None) is None
+
+
+def test_summarize_mngr_list_payload_errors_notes_additional_errors() -> None:
+    """The summary mentions how many other errors followed, so the reader knows
+    the first one is just a sample."""
+    payload = json.dumps(
+        {
+            "agents": [],
+            "errors": [
+                {"exception_type": "A", "message": "one", "provider_name": "p1"},
+                {"exception_type": "B", "message": "two", "provider_name": "p2"},
+                {"exception_type": "C", "message": "three", "provider_name": "p3"},
+            ],
+        }
+    )
+    summary = _summarize_mngr_list_payload_errors(payload)
+    assert summary is not None
+    assert "(+2 more)" in summary
 
 
 def _classify_host_health_compat(list_json: str | None, agent_id: AgentId) -> dict[str, bool]:

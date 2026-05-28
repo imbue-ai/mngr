@@ -447,6 +447,20 @@ _RECOVERY_SCRIPT: Final[str] = """\
           }
           var probe = data.probe || {};
           var parts = [];
+          // ``mngr list`` knowledge first: if mngr could not see this
+          // workspace's agent at all, every host-derived field below will be
+          // empty for a reason that has nothing to do with the workspace
+          // itself. Surfacing this up front saves the reader from chasing
+          // empty fields.
+          var listKnowledgeLines = [
+            'mngr_knows_agent = ' + data.mngr_knows_agent,
+            'mngr_knows_host = ' + data.mngr_knows_host,
+          ];
+          if (data.mngr_list_error) {
+            listKnowledgeLines.push('mngr_list_error = ' + data.mngr_list_error);
+          }
+          parts.push('<div class="debug-section"><h4>mngr list visibility</h4><pre>'
+            + escapeHtml(listKnowledgeLines.join('\\n')) + '</pre></div>');
           parts.push('<div class="debug-section"><h4>Host state</h4><pre>'
             + escapeHtml(data.host_state || 'unknown')
             + ' (reachable=' + data.reachable + ', host_offline=' + data.host_offline + ')</pre></div>');
@@ -473,8 +487,11 @@ _RECOVERY_SCRIPT: Final[str] = """\
           var resolverLines = Object.keys(resolverEntries).map(function (k) {
             return k + ' = ' + resolverEntries[k];
           });
+          var resolverLabel = data.plugin_resolver_has_services
+            ? resolverLines.join('\\n')
+            : '(no services registered with the plugin resolver yet)';
           parts.push('<div class="debug-section"><h4>Plugin resolver entry</h4><pre>'
-            + escapeHtml(resolverLines.length ? resolverLines.join('\\n') : '(no entry yet)') + '</pre></div>');
+            + escapeHtml(resolverLabel) + '</pre></div>');
           var sshConns = data.ssh_connections || [];
           if (sshConns.length > 0) {
             var sshRows = sshConns.map(function (entry) {
