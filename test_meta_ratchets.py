@@ -15,6 +15,7 @@ from imbue.imbue_common.ratchet_testing.common_ratchets import check_ratchet_rul
 from imbue.imbue_common.ratchet_testing.core import BINARY_FILE_EXCLUSION
 from imbue.imbue_common.ratchet_testing.core import _get_all_files_with_extension
 from imbue.imbue_common.ratchet_testing.ratchets import check_no_import_lint_errors
+from imbue.imbue_common.ratchet_testing.ratchets import check_no_type_errors
 from imbue.imbue_common.ratchet_testing.ratchets import find_bash_scripts_without_strict_mode
 from imbue.imbue_common.test_profiles import detect_branch
 from scripts.changelog_projects import DEV_PROJECT
@@ -94,8 +95,7 @@ def test_every_project_has_test_ratchets_file() -> None:
 def _get_expected_ratchet_test_names() -> frozenset[str]:
     """Derive the expected set of test function names from standard_ratchet_checks.py.
 
-    Each check_foo() function maps to test_prevent_foo(). Two additional hand-written
-    tests (test_no_type_errors, test_no_ruff_errors) are always expected.
+    Each check_foo() function maps to test_prevent_foo().
     """
     checks_path = (
         _REPO_ROOT
@@ -112,8 +112,6 @@ def _get_expected_ratchet_test_names() -> frozenset[str]:
         for node in ast.walk(tree)
         if isinstance(node, ast.FunctionDef) and node.name.startswith("check_")
     }
-    test_names.add("test_no_type_errors")
-    test_names.add("test_no_ruff_errors")
     return frozenset(test_names)
 
 
@@ -121,7 +119,7 @@ def test_all_test_ratchets_files_have_same_tests() -> None:
     """Ensure all test_ratchets.py files define precisely the expected set of test functions.
 
     The expected tests are derived from standard_ratchet_checks.py (one test_prevent_*
-    per check_* function) plus test_no_type_errors and test_no_ruff_errors.
+    per check_* function).
     """
     reference_tests = _get_expected_ratchet_test_names()
 
@@ -163,13 +161,28 @@ def test_no_import_layer_violations() -> None:
     check_no_import_lint_errors(_REPO_ROOT)
 
 
-def test_no_ruff_lint_errors_repo_wide() -> None:
+@pytest.mark.timeout(60)
+def test_no_type_errors() -> None:
+    """Ensure the whole workspace has zero type errors (ty).
+
+    ty resolves the uv workspace root (root pyproject.toml declares
+    [tool.uv.workspace] members = ["libs/*", "apps/*"]) and scans every member, so
+    this single check covers the entire repo. CI backstop for the ty pre-push hook.
+
+    Timeout is 60s rather than the default 10s because the ``uv run ty check``
+    subprocess can be slow on offload under load; the check is deterministic, so it
+    is not marked flaky. If a failure looks spurious, run ``uv sync --all-packages``
+    and re-run before treating it as real (see CLAUDE.md).
+    """
+    check_no_type_errors(_REPO_ROOT)
+
+
+def test_no_ruff_errors() -> None:
     """Ensure all Python files pass ruff lint and format checks repo-wide.
 
-    Runs both ruff check and ruff format --check over the entire repo root.
-    Per-project test_ratchets.py files also run ruff check within each project;
-    this test acts as a CI backstop for the pre-commit hook and additionally
-    covers repo-root and scripts/ files.
+    Runs both ruff check and ruff format --check from the repo root, covering all
+    workspace members plus repo-root and scripts/ files. CI backstop for the ruff
+    pre-commit hook.
     """
     fix_hint = "To fix: `uv run ruff check --fix . && uv run ruff format .`"
     errors: list[str] = []
