@@ -1458,11 +1458,12 @@ class VpsDockerProvider(BaseProviderInstance):
         # mounted at /mngr-snapshot/ in the container need to exist before
         # the agent boots.
         with log_span("Provisioning host_backup snapshot helper + trigger volume"):
-            _ensure_outer_dir(outer, OUTER_SNAPSHOT_TRIGGER_DIR)
             # The `snapshots/` dir holds `current/` (the live btrfs snapshot
             # the helper creates). Pre-create it so the read-only bind mount
             # into the container has something to point at on first boot.
             _ensure_outer_dir(outer, self.config.btrfs_mount_path / "snapshots")
+            # `_install_snapshot_helper_on_outer` ensures OUTER_SNAPSHOT_TRIGGER_DIR
+            # exists internally before starting the helper that watches it.
             _install_snapshot_helper_on_outer(
                 outer,
                 host_id=host_id,
