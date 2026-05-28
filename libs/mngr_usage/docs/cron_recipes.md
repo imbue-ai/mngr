@@ -64,33 +64,40 @@ secs="$(jq -r '
 # No source matched the predicate -> nothing to do this tick.
 [[ -n "$secs" ]] || exit 0
 
-# Don't nudge an agent that's already up (RUNNING or WAITING): `mngr start` errors
-# on a live agent, and we'd just be firing a redundant "continue" into a session
-# that's already working. Only a STOPPED agent gets (re)launched here.
-if mngr list --include "name == \"$AGENT\" && (state == \"RUNNING\" || state == \"WAITING\")" --ids | grep -q .; then
-  exit 0
-fi
+# Only (re)launch a STOPPED agent. If it's RUNNING/WAITING it's already working
+# (and `mngr start` would error); if it's DONE or in any other state, leave it be
+# rather than assume a relaunch is the right move. Gating positively on STOPPED
+# avoids baking in assumptions about which other states exist.
+mngr list --include "name == \"$AGENT\" && state == \"STOPPED\"" --ids | grep -q . || exit 0
 
 mngr start "$AGENT" && mngr message "$AGENT" --message "continue where you left off"
 
-# Schedule the stop for the window boundary, floored to the minute (`at`'s
-# resolution). Requires a running `at` daemon (`atd`). No atd? A detached timer
-# works too and keeps the exact seconds:
-#   nohup bash -c "sleep $secs && mngr stop $AGENT" >/dev/null 2>&1 &
-echo "mngr stop $AGENT" | at "now + $(( secs / 60 )) minutes"
+# Schedule the stop just past the window boundary, rounding UP to the minute
+# (`at`'s resolution). The slack lets the agent's first request land in the fresh
+# window and open it -- window warming, same idea as the warm-window recipe --
+# before we stop. Requires a running `at` daemon (`atd`); without one, a detached
+# timer with a little grace works too:
+#   nohup bash -c "sleep $((secs + 30)) && mngr stop $AGENT" >/dev/null 2>&1 &
+echo "mngr stop $AGENT" | at "now + $(( (secs + 59) / 60 )) minutes"
 ```
 
 ```cron
 */10 * * * * /path/to/soak-window.sh
 ```
 
-## Warm a fresh window once the last one has elapsed
+## Warm a fresh 5h window early
+
+The 5h window starts when you send your first prompt and runs five hours from
+there -- so it pays to start it *before* you actually sit down to work. If a
+throwaway prompt opens the window an hour or two ahead, it resets partway
+through your session (on average ~2.5h in) instead of a full 5h later, giving
+you a fresh quota window sooner. This recipe keeps a window warm automatically:
+the moment the last one elapses, it fires a one-off prompt to open the next.
 
 `resets_at < now` means the last recorded 5h window boundary is already past --
 a fresh window is open and unclaimed (the past-reset half of `is_stale`). Fire a
 throwaway headless turn then -- `claude -p` runs one non-interactive prompt and
-exits -- to open and prime the cache of the new window without standing up a
-full agent:
+exits -- to open the new window without standing up a full agent:
 
 ```bash
 #!/usr/bin/env bash
@@ -122,7 +129,7 @@ marker="$HOME/.cache/mngr-warm-window-last-resets-at"
 mkdir -p "$(dirname "$marker")"
 printf '%s' "$elapsed_at" > "$marker"
 
-# One cheap non-interactive turn: opens the new 5h window and warms the cache.
+# One cheap non-interactive turn is enough to start the next 5h window.
 claude -p 'just say hi' >/dev/null
 ```
 

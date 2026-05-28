@@ -9,10 +9,11 @@ mode (`mngr usage --format json`) rather than the blocking `mngr usage wait`:
   leaves headroom early in the week (requires used% < ~10 on a Monday, staying
   out of the user's way) but, as the margin shrinks toward week's end, converges
   to "launch if any capacity is left."
-- Warm a fresh window: detect that the last recorded 5h window has elapsed
-  (`five_hour.resets_at < now`) and fire a throwaway headless `claude -p`
-  prompt to open/prime the new window, guarded by a marker file so it warms at
-  most once per boundary.
+- Warm a fresh 5h window early: detect that the last recorded window has elapsed
+  (`five_hour.resets_at < now`) and fire a throwaway headless `claude -p` prompt
+  to start the next window. The 5h window starts on your first prompt, so
+  pre-starting it makes it reset partway through your work rather than a full 5h
+  later. Guarded by a marker file so it fires at most once per boundary.
 - Dispatch a queue of task files: name each agent after its task file and cap
   concurrency by a shared `queue=tasks` label (counting `RUNNING`/`WAITING`
   pool members via `mngr list`).
