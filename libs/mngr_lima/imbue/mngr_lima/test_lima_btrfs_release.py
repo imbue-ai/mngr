@@ -129,6 +129,13 @@ def test_lima_btrfs_host_end_to_end_release() -> None:
     if not venv_python.exists():
         pytest.skip(f"venv python not found at {venv_python} (release env not bootstrapped?)")
 
+    # `env -i ...` scrubs the inherited environment. The pytest harness
+    # sets MNGR_HOST_DIR / MNGR_ROOT_NAME / TMPDIR pointed at the
+    # per-test pytest tmp_path (root-owned), which the non-root helper
+    # cannot read. The helper sets up its own host_dir + profile_dir
+    # under a fresh `tempfile.TemporaryDirectory()`, so it only needs
+    # HOME (for ~ expansion) and PATH (to find limactl + qemu) on the
+    # child env.
     result = subprocess.run(
         [
             "runuser",
@@ -136,6 +143,7 @@ def test_lima_btrfs_host_end_to_end_release() -> None:
             _LIMA_USER,
             "--",
             "env",
+            "-i",
             f"HOME=/home/{_LIMA_USER}",
             "PATH=/usr/local/bin:/usr/bin:/bin",
             str(venv_python),
