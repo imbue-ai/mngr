@@ -236,3 +236,15 @@ Tiered system-interface restart for the minds recovery flow.
   inside the container?" to "Does the system interface answer GET
   /api/agents inside the container?" and its copy-pasteable `curl` command
   reflects the new path.
+- The "Workspace unresponsive" page was restyled for a clearer hierarchy.
+  The "Restart workspace" button is now the page's focal point -- a
+  full-width primary button directly under the message -- rather than being
+  sandwiched between the error and diagnostics dropdowns. The error and
+  diagnostics disclosures are grouped together below the button under a
+  muted "Troubleshooting" label, restyled from the heavy amber-filled boxes
+  into quiet white cards with faint borders, a subtle shadow, and a chevron
+  affordance (including on each diagnostic-question row). The troubleshooting
+  block hides itself entirely whenever neither disclosure is showing, so the
+  divider and label never appear over an empty section. Most users only ever
+  need the button; the dropdowns are now visibly secondary, for the rare
+  deep-debugging case.

@@ -345,3 +345,26 @@ def test_render_recovery_page_restart_failed_also_runs_probe() -> None:
     # The error-details DOM hook is rendered alongside the diagnostic.
     assert 'id="recovery-error"' in html
     assert 'id="recovery-debug-details"' in html
+
+
+def test_render_recovery_page_promotes_button_above_troubleshooting() -> None:
+    """The restart button is the page's primary action, so it must appear
+    before the de-emphasized troubleshooting block -- not sandwiched between
+    the error and diagnostics disclosures as in the previous layout. Both
+    disclosures live inside that troubleshooting block.
+    """
+    html = render_recovery_page(
+        agent_id=_AGENT_A,
+        return_to="",
+        initial_status="restart_failed",
+        initial_error="boom",
+    )
+    button_pos = html.index('id="recovery-host-btn"')
+    block_pos = html.index('class="recovery-troubleshooting"')
+    error_pos = html.index('id="recovery-error"')
+    debug_pos = html.index('id="recovery-debug-details"')
+    # Button first, then the troubleshooting block, then both disclosures.
+    assert button_pos < block_pos < error_pos < debug_pos
+    # The block self-hides via CSS when neither disclosure is shown, so the
+    # divider and label never render over an empty section.
+    assert ":has(> details:not(.hidden))" in html

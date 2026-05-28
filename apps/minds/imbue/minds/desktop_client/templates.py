@@ -311,17 +311,81 @@ def render_auth_error_page(message: str) -> str:
 # byte-identical to the mngr_forward proxy loader.
 _RECOVERY_STYLE: Final[str] = """\
       .hidden { display: none; }
-      details {
-        margin-top: 16px;
-        border: 1px solid #fde68a;
-        background: #fffbeb;
-        border-radius: 6px;
-        color: #92400e;
+
+      /* Primary action. The restart button is the page's focal point: full
+         width, prominent, directly under the message. Most users only ever
+         need this -- the troubleshooting disclosures below are for the rare
+         deep-debugging case. */
+      #recovery-host-btn {
+        margin-top: 20px;
+        width: 100%;
+        background: #18181b;
+        color: #fff;
+        border: 0;
+        border-radius: 8px;
+        padding: 12px 16px;
+        font-size: 0.9375rem;
+        font-weight: 600;
+        cursor: pointer;
       }
-      summary { cursor: pointer; padding: 8px 12px; font-weight: 500; font-size: 0.8125rem; }
+      #recovery-host-btn:hover { background: #3f3f46; }
+      #recovery-host-btn.secondary { background: #6b7280; }
+      #recovery-host-btn.secondary:hover { background: #4b5563; }
+
+      /* Secondary, rarely-needed troubleshooting block: the error and
+         diagnostics disclosures, grouped below a muted label and a thin
+         divider. The whole block self-hides whenever neither disclosure is
+         currently shown (both carry ``.hidden``), so the divider and label
+         never appear over an empty section. */
+      .recovery-troubleshooting {
+        margin-top: 20px;
+        padding-top: 16px;
+        border-top: 1px solid #f4f4f5;
+      }
+      .recovery-troubleshooting:not(:has(> details:not(.hidden))) { display: none; }
+      .recovery-troubleshooting-label {
+        font-size: 0.6875rem;
+        font-weight: 600;
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+        color: #a1a1aa;
+        margin: 0 0 6px;
+      }
+      .recovery-troubleshooting > details {
+        margin: 0 0 8px;
+        border: 1px solid #f4f4f5;
+        background: #fff;
+        border-radius: 8px;
+        box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
+        color: #52525b;
+      }
+      .recovery-troubleshooting > details:last-child { margin-bottom: 0; }
+      .recovery-troubleshooting > details > summary {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        cursor: pointer;
+        padding: 9px 12px;
+        font-weight: 500;
+        font-size: 0.8125rem;
+        color: #52525b;
+        list-style: none;
+      }
+      .recovery-troubleshooting > details > summary::-webkit-details-marker { display: none; }
+      .recovery-troubleshooting > details > summary::after {
+        content: "\\25BE";
+        color: #a1a1aa;
+        font-size: 0.75rem;
+        transition: transform 0.15s;
+      }
+      .recovery-troubleshooting > details[open] > summary::after { transform: rotate(180deg); }
+      .recovery-troubleshooting > details > summary:hover { color: #3f3f46; }
+      .recovery-troubleshooting > details[open] > summary { border-bottom: 1px solid #f4f4f5; }
+      .recovery-troubleshooting > details > :not(summary) { padding: 10px 12px; }
+
       details pre {
         margin: 0;
-        padding: 0 12px 12px;
+        padding: 10px 12px;
         max-height: 240px;
         overflow-y: auto;
         white-space: pre-wrap;
@@ -329,22 +393,16 @@ _RECOVERY_STYLE: Final[str] = """\
         font-size: 0.75rem;
         line-height: 1.5;
         font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-      }
-      details .debug-section {
-        padding: 0 12px 8px;
-        font-size: 0.75rem;
-        line-height: 1.4;
-      }
-      details .debug-section h4 {
-        margin: 8px 0 4px;
-        font-size: 0.75rem;
-        font-weight: 600;
+        background: #fafafa;
+        color: #3f3f46;
+        border-radius: 6px;
       }
       .probe-row {
-        margin: 0 12px 4px;
-        border: 1px solid #fde68a;
-        background: #fffdf6;
-        border-radius: 4px;
+        margin: 4px 0 0;
+        border: 1px solid #f4f4f5;
+        background: #fff;
+        border-radius: 6px;
+        box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
       }
       .probe-row summary {
         display: flex;
@@ -353,7 +411,18 @@ _RECOVERY_STYLE: Final[str] = """\
         padding: 6px 10px;
         font-size: 0.8125rem;
         font-weight: 500;
+        cursor: pointer;
+        color: #52525b;
+        list-style: none;
       }
+      .probe-row summary::-webkit-details-marker { display: none; }
+      .probe-row summary::after {
+        content: "\\25BE";
+        color: #a1a1aa;
+        font-size: 0.75rem;
+        transition: transform 0.15s;
+      }
+      .probe-row[open] summary::after { transform: rotate(180deg); }
       .probe-row .probe-question { flex: 1; }
       .probe-glyph {
         display: inline-block;
@@ -364,28 +433,18 @@ _RECOVERY_STYLE: Final[str] = """\
       .probe-glyph-yes { color: #047857; }
       .probe-glyph-no { color: #b91c1c; }
       .probe-glyph-unknown { color: #92400e; }
-      button {
-        margin-top: 16px;
-        background: #18181b;
-        color: #fff;
-        border: 0;
+      #copy-diagnostics-btn {
+        margin-top: 8px;
+        background: #fff;
+        color: #52525b;
+        border: 1px solid #d4d4d8;
         border-radius: 6px;
-        padding: 8px 16px;
-        font-size: 0.875rem;
+        font-size: 0.75rem;
         font-weight: 500;
+        padding: 6px 12px;
         cursor: pointer;
       }
-      button:hover { background: #3f3f46; }
-      button.secondary {
-        background: #6b7280;
-      }
-      button.secondary:hover { background: #4b5563; }
-      #copy-diagnostics-btn {
-        background: #6b7280;
-        font-size: 0.75rem;
-        padding: 6px 12px;
-      }
-      #copy-diagnostics-btn:hover { background: #4b5563; }
+      #copy-diagnostics-btn:hover { background: #f4f4f5; }
 """
 
 # The recovery page's behavior. It drives the shared loading card (toggling
@@ -667,25 +726,35 @@ def render_recovery_page(
     error_block = ""
     if initial_error:
         error_block = (
-            '      <details id="recovery-error" class="hidden">\n'
-            "        <summary>Show error details</summary>\n"
-            f"        <pre>{html.escape(initial_error)}</pre>\n"
-            "      </details>\n"
+            '        <details id="recovery-error" class="hidden">\n'
+            "          <summary>Error details</summary>\n"
+            f"          <pre>{html.escape(initial_error)}</pre>\n"
+            "        </details>\n"
         )
     # Debug details are populated dynamically by the recovery JS once it gets
     # a host-health response. The block is in the DOM from the start (hidden)
     # so the JS can fill it in place without re-templating.
     debug_block = (
-        '      <details id="recovery-debug-details" class="hidden">\n'
-        "        <summary>Diagnostics</summary>\n"
-        '        <div id="recovery-debug-content"></div>\n'
-        '        <div class="debug-section">'
+        '        <details id="recovery-debug-details" class="hidden">\n'
+        "          <summary>Diagnostics</summary>\n"
+        '          <div id="recovery-debug-content"></div>\n'
+        '          <div class="debug-section">'
         '<button type="button" id="copy-diagnostics-btn">Copy diagnostics</button>'
         "</div>\n"
-        "      </details>\n"
+        "        </details>\n"
     )
+    # The restart button is the page's primary action, so it comes first --
+    # directly under the message. The error and diagnostics disclosures are
+    # grouped together below it in the de-emphasized troubleshooting block;
+    # ``_RECOVERY_STYLE`` self-hides that block (divider + label included)
+    # whenever neither disclosure is currently visible.
     card_extra = (
-        error_block + '      <button id="recovery-host-btn" class="hidden">Restart workspace</button>\n' + debug_block
+        '      <button id="recovery-host-btn" class="hidden">Restart workspace</button>\n'
+        '      <div class="recovery-troubleshooting">\n'
+        '        <p class="recovery-troubleshooting-label">Troubleshooting</p>\n'
+        + error_block
+        + debug_block
+        + "      </div>\n"
     )
     card_attrs = (
         f' data-agent-id="{html.escape(str(agent_id))}"'
