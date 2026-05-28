@@ -1136,8 +1136,14 @@ class AgentCreator(MutableModel):
                     if _is_git_worktree(resolved_path):
                         # Worktrees have a .git file pointing to the parent repo's
                         # .git/worktrees/ dir, which breaks when copied into Docker.
-                        # Clone locally to get a standalone repo. Use file:// protocol
-                        # so --depth 1 is honored (git ignores --depth for local paths).
+                        # Clone locally to get a standalone repo.
+                        #
+                        # Full clone (no --depth=1): mngr's downstream mirror push
+                        # to the agent container's bare `.git` rejects shallow
+                        # updates with "shallow update not allowed" whenever the
+                        # source's tip has a parent not in the pack. Cloning
+                        # deeply avoids that failure mode. Local file:// clones
+                        # are cheap regardless.
                         # Use a stable path based on repo name so Docker layer caching works.
                         log_queue.put("[minds] Cloning local worktree: {}".format(resolved_path))
                         repo_name = extract_repo_name(repo_source)
@@ -1149,13 +1155,11 @@ class AgentCreator(MutableModel):
                             file_url,
                             clone_target,
                             on_output=emit_log,
-                            is_shallow=True,
                             parent_cg=self.root_concurrency_group,
                         )
-                        # The shallow clone only contains committed content. Rsync
-                        # the worktree's working directory over so that uncommitted
-                        # changes (e.g. a locally-rsynced vendor/mngr/) are included
-                        # in the Docker build context.
+                        # Rsync the worktree's working directory over so that
+                        # uncommitted changes (e.g. a locally-rsynced
+                        # vendor/mngr/) are included in the Docker build context.
                         _rsync_worktree_over_clone(
                             resolved_path,
                             clone_target,
