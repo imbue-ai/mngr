@@ -446,7 +446,28 @@ class ProviderInstanceInterface(MutableModel, ABC):
                     host_ref.host_id,
                 )
 
-        return {host_ref: future.result() for host_ref, future in future_by_host_ref.items()}
+        results: dict[DiscoveredHost, list[DiscoveredAgent]] = {}
+        for host_ref, future in future_by_host_ref.items():
+            try:
+                results[host_ref] = future.result()
+            except HostConnectionError as e:
+                # One unreachable host must not poison the whole provider's
+                # enumeration. Without this, a single wedged container (sshd
+                # crashed, banner-reset, auth failure, ...) makes the discovery
+                # future raise, which bubbles up to _construct_and_discover_for_provider
+                # and is recorded as a per-provider error -- the resulting
+                # DISCOVERY_FULL event then reports agents=[] / hosts=[] for the
+                # whole provider, so mngr_forward's resolver knows zero agents
+                # and every workspace on the provider becomes unreachable through
+                # the plugin. Skipping the bad host preserves the rest.
+                logger.warning(
+                    "Skipping host {} ({}) during agent enumeration: {}",
+                    host_ref.host_id,
+                    host_ref.host_name,
+                    e,
+                )
+                results[host_ref] = []
+        return results
 
     @abstractmethod
     def get_host_resources(self, host: HostInterface) -> HostResources:

@@ -247,3 +247,54 @@ def test_discover_hosts_and_agents_disconnects_hosts(
     provider.discover_hosts_and_agents(cg=temp_mngr_ctx.concurrency_group)
 
     mock_host.disconnect.assert_called_once()
+
+
+@pytest.mark.allow_warnings(match=r"^Skipping host ")
+def test_discover_hosts_and_agents_tolerates_per_host_connection_error(
+    provider: MockProviderInstance, temp_mngr_ctx: MngrContext
+) -> None:
+    """One host's HostConnectionError must not poison the provider's whole enumeration.
+
+    A wedged container (sshd hang, banner reset, auth failure) used to abort
+    the provider's entire discovery, which downstream blanked the discovery
+    snapshot and broke mngr_forward's resolver for every workspace. The
+    unreachable host is now skipped with an empty agent list while the rest
+    of the provider's hosts come through normally.
+    """
+    healthy_host_id = HostId.generate()
+    broken_host_id = HostId.generate()
+    healthy_agent_id = AgentId.generate()
+    healthy_agent_ref = _make_agent_ref(healthy_host_id, healthy_agent_id, provider.name)
+
+    healthy_host = MagicMock(spec=HostInterface)
+    healthy_host.id = healthy_host_id
+    healthy_host.get_name.return_value = HostName("healthy-host")
+    healthy_host.get_state.return_value = HostState.RUNNING
+    healthy_host.discover_agents.return_value = [healthy_agent_ref]
+
+    broken_host = MagicMock(spec=HostInterface)
+    broken_host.id = broken_host_id
+    broken_host.get_name.return_value = HostName("broken-host")
+    broken_host.get_state.return_value = HostState.RUNNING
+    broken_host.discover_agents.side_effect = HostConnectionError(
+        "SSH error (Error reading SSH protocol banner)"
+    )
+
+    provider.mock_hosts = [healthy_host, broken_host]
+
+    results = provider.discover_hosts_and_agents(cg=temp_mngr_ctx.concurrency_group)
+
+    # The healthy host's agents are returned untouched.
+    healthy_ref = next(ref for ref in results if ref.host_id == healthy_host_id)
+    assert results[healthy_ref] == [healthy_agent_ref]
+
+    # The broken host appears with an empty list rather than vanishing or
+    # tanking the whole call.
+    broken_ref = next(ref for ref in results if ref.host_id == broken_host_id)
+    assert results[broken_ref] == []
+
+    # Both hosts were still disconnected (the connected_host context manager
+    # always runs its finally block, regardless of whether discover_agents
+    # raised).
+    healthy_host.disconnect.assert_called_once()
+    broken_host.disconnect.assert_called_once()
