@@ -13,11 +13,10 @@ set -euo pipefail
 # each project's new dated sections into its per-project CHANGELOG.md
 # [Unreleased], committing, spawning a subagent to review the new bullets
 # for factual accuracy against the code, pushing a branch, opening a PR).
-# Claude's final
-# assistant message is a single JSON object describing the outcome
-# ({status, pr_url}) -- visible in `mngr schedule run` stdout and Modal
-# logs. Per-run detail (accuracy-review findings on success, errors on
-# failure) lives in the PR description and the run logs, not the JSON.
+# Claude's final assistant message is a single JSON object describing the
+# outcome ({status, pr_url}) -- visible in `mngr schedule run` stdout and
+# Modal logs. Per-run detail (accuracy-review findings on success, errors
+# on failure) lives in the PR description and the run logs, not the JSON.
 #
 # Usage:
 #   ./scripts/setup_changelog_agent.sh
