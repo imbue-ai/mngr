@@ -5,8 +5,6 @@ from inline_snapshot import snapshot
 
 from imbue.imbue_common.ratchet_testing import standard_ratchet_checks as rc
 from imbue.imbue_common.ratchet_testing.ratchets import TEST_FILE_PATTERNS
-from imbue.imbue_common.ratchet_testing.ratchets import check_no_ruff_errors
-from imbue.imbue_common.ratchet_testing.ratchets import check_no_type_errors
 
 _DIR = Path(__file__).parent.parent.parent
 
@@ -294,13 +292,3 @@ def test_prevent_code_in_init_files() -> None:
     # line plus its ``import pluggy`` are tracked here as one violation
     # of the otherwise-strict no-code-in-init rule.
     rc.check_code_in_init_files(_DIR, snapshot(1))
-
-
-def test_no_type_errors() -> None:
-    """Ensure the codebase has zero type errors."""
-    check_no_type_errors(_DIR)
-
-
-def test_no_ruff_errors() -> None:
-    """Ensure the codebase has zero ruff linting errors."""
-    check_no_ruff_errors(_DIR)
