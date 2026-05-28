@@ -2058,7 +2058,8 @@ class VpsDockerProvider(BaseProviderInstance):
         (provider-specific), then SSHes to each in parallel. Within each
         VPS, ``_read_records_from_vps`` issues a small sequence of SSH
         commands (find the mngr container by host-id label, resolve the
-        unified volume's mountpoint, read ``host_state.json``, list
+        unified volume's bind-source path via ``docker volume inspect
+        --format '{{.Options.device}}'``, read ``host_state.json``, list
         ``agents/*.json``); the parallel fan-out across VPSes keeps wall
         time bounded by the slowest VPS rather than the sum.
         """
