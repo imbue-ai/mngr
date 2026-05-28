@@ -177,10 +177,7 @@ async function downloadUv(resourcesDir, { platform, arch }) {
   }
   if (platform === 'win32') {
     // The runtime resolves uv as 'uv' (no .exe). Copy so both names work.
-    const uvWithoutExt = path.join(uvDir, 'uv');
-    if (!fs.existsSync(uvWithoutExt)) {
-      fs.copyFileSync(uvBinary, uvWithoutExt);
-    }
+    fs.copyFileSync(uvBinary, path.join(uvDir, 'uv'));
   } else {
     fs.chmodSync(uvBinary, 0o755);
   }
