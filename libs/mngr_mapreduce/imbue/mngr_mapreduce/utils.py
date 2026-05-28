@@ -1,11 +1,9 @@
-"""Utility functions for the test-mapreduce plugin."""
+"""Utility functions for the mngr-mapreduce framework."""
 
 import itertools
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
-
-from loguru import logger
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mngr.config.data_types import CreateTemplateName
@@ -14,7 +12,7 @@ from imbue.mngr.errors import MngrError
 
 
 def make_run_name() -> str:
-    """Compact timestamp identifying a TMR run, e.g. '20260514184215'.
+    """Compact timestamp identifying a map-reduce run, e.g. '20260514184215'.
 
     14 chars, all digits, sortable by alphabetical comparison. UTC.
     """
@@ -25,9 +23,8 @@ def dedup_name(base: str, used: set[str]) -> str:
     """Return ``base`` if unused, else ``base-2``, ``base-3``, ... .
 
     Mutates ``used`` to include the returned value. Used to keep agent /
-    branch names unique within a single TMR run after sanitization
-    truncation may have collapsed two distinct test node ids onto the
-    same suffix.
+    branch names unique within a single run after sanitization truncation
+    may have collapsed two distinct task ids onto the same suffix.
     """
     if base not in used:
         used.add(base)
@@ -38,6 +35,27 @@ def dedup_name(base: str, used: set[str]) -> str:
             used.add(candidate)
             return candidate
     raise AssertionError("itertools.count is infinite; loop must return")
+
+
+def sanitize_for_agent_name(raw: str) -> str:
+    """Convert an arbitrary task identifier into a valid agent-name suffix.
+
+    Replaces non-alphanumeric (and non-hyphen) characters with hyphens,
+    collapses runs of hyphens, strips leading/trailing hyphens, lowercases,
+    and truncates to 40 chars.
+    """
+    cleaned = ""
+    for ch in raw:
+        if ch.isalnum() or ch == "-":
+            cleaned += ch
+        else:
+            cleaned += "-"
+    sanitized = ""
+    for ch in cleaned:
+        if ch == "-" and sanitized.endswith("-"):
+            continue
+        sanitized += ch
+    return sanitized.strip("-").lower()[:40]
 
 
 def resolve_templates(
@@ -62,60 +80,7 @@ def resolve_templates(
     return merged
 
 
-class CollectTestsError(MngrError, RuntimeError):
-    """Raised when pytest test collection fails."""
-
-    ...
-
-
 def get_base_commit(source_dir: Path, cg: ConcurrencyGroup) -> str:
     """Get the current HEAD commit hash, used as the base for all agent branches."""
     result = cg.run_process_to_completion(["git", "rev-parse", "HEAD"], cwd=source_dir)
     return result.stdout.strip()
-
-
-def collect_tests(
-    pytest_args: tuple[str, ...],
-    source_dir: Path,
-    cg: ConcurrencyGroup,
-) -> list[str]:
-    """Run pytest --collect-only -q and return the list of test node IDs."""
-    cmd = ["python", "-m", "pytest", "--collect-only", "-q", *pytest_args]
-    logger.info("Collecting tests: {}", " ".join(cmd))
-    result = cg.run_process_to_completion(cmd, cwd=source_dir, timeout=60.0, is_checked_after=False)
-    if result.returncode != 0:
-        raise CollectTestsError(f"pytest --collect-only failed (exit code {result.returncode}):\n{result.stderr}")
-
-    test_ids: list[str] = []
-    for line in result.stdout.splitlines():
-        stripped = line.strip()
-        if stripped and "::" in stripped and not stripped.startswith("="):
-            test_ids.append(stripped)
-
-    if not test_ids:
-        raise CollectTestsError("pytest --collect-only returned no tests")
-
-    logger.info("Collected {} test(s)", len(test_ids))
-    return test_ids
-
-
-def sanitize_test_name_for_agent(test_node_id: str) -> str:
-    """Convert a pytest node ID into a valid agent name suffix.
-
-    Strips the file path prefix and replaces characters that are not valid in
-    agent names.
-    """
-    parts = test_node_id.split("::")
-    short_name = parts[-1] if parts else test_node_id
-    cleaned = ""
-    for ch in short_name:
-        if ch.isalnum() or ch == "-":
-            cleaned += ch
-        else:
-            cleaned += "-"
-    sanitized = ""
-    for ch in cleaned:
-        if ch == "-" and sanitized.endswith("-"):
-            continue
-        sanitized += ch
-    return sanitized.strip("-").lower()[:40]

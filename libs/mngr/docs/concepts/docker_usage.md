@@ -96,12 +96,17 @@ Whatever image you provide must include (or be able to install at runtime) `open
 
 ## Persistent host volume
 
-By default, each host's `host_dir` (e.g. `/mngr`) is symlinked to a sub-folder of a shared Docker named volume (`<prefix>docker-state-<user_id>`). This volume is mounted into both the host container and a small singleton "state container" that mngr uses as a file server. Two consequences:
+Each host's `host_dir` (e.g. `/mngr`) is backed by a sub-folder of a shared Docker named volume (`<prefix>docker-state-<user_id>`). The state container always mounts the full volume at `/mngr-state` so mngr can read host metadata and per-host data even when the host container is stopped. How that storage is exposed *inside the host container* depends on the `isolate_host_volumes` provider config field:
 
-- **Offline access**: logs, agent data, and host metadata stay readable via `mngr events` and `mngr list` even after the container is stopped, because mngr reads them through the state container.
-- **Shared daemon, multiple clients**: multiple mngr clients pointing at the same Docker daemon see the same hosts and agents (provided they use the same profile `user_id`). Different `user_id`s are isolated by separate state volumes.
+- **`isolate_host_volumes = true` (recommended; default in a future release).** Each host container sees only its own sub-folder, mounted directly at `host_dir` via `--mount type=volume,source=<vol>,target=<host_dir>,volume-subpath=volumes/vol-<host_hex>`. Sibling hosts are invisible. Requires Docker Engine >= 25.0 (the version that introduced `volume-subpath`); mngr fails fast at `mngr create` if the daemon is older.
+- **`isolate_host_volumes = false`.** Each host container mounts the entire shared volume at `/mngr-state` and `host_dir` is symlinked to `/mngr-state/volumes/vol-<host_hex>/`. This is today's behavior; it means an agent in one host can read every other host's `host_dir` under the same `user_id`. Pick this only if you actively want that cross-host visibility.
+- **`isolate_host_volumes` unset.** Same on-the-wire behavior as `false`, but mngr emits a one-shot warning at startup that the default will flip to `true` in a future release. Set the field explicitly (either way) to silence the warning.
 
-You can disable this by setting `is_host_volume_created = false` in your provider config. The `host_dir` then lives on the container's overlay filesystem; it survives stop/start (Docker preserves the container filesystem) but is not accessible while the container is stopped.
+The choice is *sticky per host*: each newly-created host records its mount strategy into its `HostRecord`, and every later start / restart / snapshot-restore replays the same strategy regardless of any later config change. Switching the provider config only affects hosts created after the switch.
+
+Either mode keeps the state container's offline-access story intact: `mngr events`, `mngr list`, and `mngr volume`-style reads all go through the state container, which always mounts the full volume.
+
+You can also disable persistence entirely by setting `is_host_volume_created = false`. The `host_dir` then lives on the container's overlay filesystem; it survives stop/start (Docker preserves the container filesystem) but is not accessible while the container is stopped. The combination `is_host_volume_created = false, isolate_host_volumes = true` is rejected at config load time.
 
 User-supplied bind mounts (`-s -v=...`) are independent of the host volume. They are **not** captured in snapshots -- only the container's filesystem layers are.
 

@@ -3,6 +3,7 @@ from pathlib import Path
 from typing import Final
 
 import coolname
+from coolname import CoolnameConfigT
 from coolname import RandomGenerator
 
 from imbue.imbue_common.pure import pure
@@ -61,6 +62,7 @@ def _get_agent_generator(style: AgentNameStyle) -> RandomGenerator:
     style_name = style.value.lower()
     first_names = _load_wordlist("agent", style_name)
 
+    config: CoolnameConfigT
     if style in _STYLES_WITH_LAST_NAMES:
         last_names = _load_wordlist("agent", f"{style_name}_last")
         config = {
@@ -92,7 +94,7 @@ def _get_host_generator(style: HostNameStyle) -> RandomGenerator:
     """Get a cached RandomGenerator for the given host name style."""
     style_name = style.value.lower()
     words = _load_wordlist("host", style_name)
-    config = {
+    config: CoolnameConfigT = {
         "all": {
             "type": "words",
             "words": words,

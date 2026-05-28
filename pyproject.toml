@@ -6,7 +6,7 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "pytest-xdist>=3.8.0",
-    "ty>=0.0.24",
+    "ty>=0.0.39",
     "click>=8.0.0",
 ]
 
@@ -80,6 +80,7 @@ addopts = [
   "--cov=imbue.mngr_imbue_cloud",
   "--cov=imbue.mngr_lima",
   "--cov=imbue.mngr_tmr",
+  "--cov=imbue.mngr_mapreduce",
   "--cov=imbue.skitwright",
   "--cov=imbue.minds",
   "--cov=imbue.slack_exporter",

@@ -1,4 +1,4 @@
-"""Agent and host launching for the test-mapreduce plugin."""
+"""Agent and host launching for the mngr-mapreduce framework."""
 
 import math
 import time
@@ -34,16 +34,17 @@ from imbue.mngr.primitives import LOCAL_PROVIDER_NAME
 from imbue.mngr.primitives import SnapshotName
 from imbue.mngr.primitives import TransferMode
 from imbue.mngr.primitives import UncommittedChangesMode
-from imbue.mngr_tmr.data_types import AgentKind
-from imbue.mngr_tmr.data_types import AgentMetadata
-from imbue.mngr_tmr.data_types import TestAgentInfo
-from imbue.mngr_tmr.data_types import TmrLaunchConfig
-from imbue.mngr_tmr.prompts import INTEGRATOR_INPUTS_DIRNAME
-from imbue.mngr_tmr.prompts import build_integrator_prompt
-from imbue.mngr_tmr.prompts import build_test_agent_prompt
-from imbue.mngr_tmr.utils import dedup_name
-from imbue.mngr_tmr.utils import resolve_templates
-from imbue.mngr_tmr.utils import sanitize_test_name_for_agent
+from imbue.mngr_mapreduce.data_types import AgentKind
+from imbue.mngr_mapreduce.data_types import AgentMetadata
+from imbue.mngr_mapreduce.data_types import LaunchConfig
+from imbue.mngr_mapreduce.data_types import MapReduceContext
+from imbue.mngr_mapreduce.data_types import MapReduceRecipe
+from imbue.mngr_mapreduce.data_types import MapReduceTask
+from imbue.mngr_mapreduce.data_types import MapperInfo
+from imbue.mngr_mapreduce.data_types import ReducerInfo
+from imbue.mngr_mapreduce.utils import dedup_name
+from imbue.mngr_mapreduce.utils import resolve_templates
+from imbue.mngr_mapreduce.utils import sanitize_for_agent_name
 
 _AGENT_CREATION_TIMEOUT_SECONDS = 600.0
 
@@ -53,44 +54,52 @@ _AGENT_CREATION_TIMEOUT_SECONDS = 600.0
 # re-uploading the source from the laptop.
 _HOST_CODE_DIR = Path("/code")
 
+# Subdirectory of the reducer's work_dir into which the orchestrator rsyncs
+# the local output directory before kicking the reducer off. Recipes that need
+# to reference this from their reducer prompt can import this constant.
+REDUCER_INPUTS_DIRNAME = ".mapreduce_inputs"
 
-def _make_test_agent_identity(run_name: str, test_node_id: str, used_suffixes: set[str]) -> tuple[AgentName, str]:
-    """Generate (agent_name, branch_name) for a test agent.
+# Label key the framework stamps on every launched agent to classify it
+# within the run. Value is an ``AgentKind`` string.
+ROLE_LABEL_KEY = "mapreduce_role"
 
-    The names are derived deterministically from ``(run_name,
-    test_node_id)`` so the launch attempt and any failure-report entry
-    share the same name. ``used_suffixes`` is mutated with the suffix
-    chosen for this test; if sanitization-truncation would have collapsed
-    two distinct test node ids onto the same suffix, ``-2`` / ``-3`` /
-    ... is appended to keep names unique within the run.
+
+def _make_mapper_identity(
+    recipe_name: str, run_name: str, task: MapReduceTask, used_suffixes: set[str]
+) -> tuple[AgentName, str]:
+    """Generate (agent_name, branch_name) for a mapper agent.
+
+    The names are derived deterministically from ``(recipe_name, run_name,
+    task)`` so the launch attempt and any failure-report entry share the
+    same name. ``used_suffixes`` is mutated with the suffix chosen for this
+    task; if sanitization-truncation would have collapsed two distinct
+    task ids onto the same suffix, ``-2`` / ``-3`` / ... is appended to
+    keep names unique within the run.
     """
-    sanitized = sanitize_test_name_for_agent(test_node_id)
+    sanitized = sanitize_for_agent_name(task.slug_source())
     suffix = dedup_name(sanitized, used_suffixes)
-    return AgentName(f"tmr-{run_name}-{suffix}"), f"mngr-tmr/{run_name}/{suffix}"
+    return AgentName(f"{recipe_name}-{run_name}-{suffix}"), f"{recipe_name}/{run_name}/{suffix}"
 
 
 def _make_launch_failure_metadata(
-    test_node_id: str, agent_name: AgentName, branch_name: str, error: object
+    task_id: str, agent_name: AgentName, branch_name: str, error: object
 ) -> AgentMetadata:
     """Build an AgentMetadata marking that an agent failed to launch.
 
-    Used so launch failures still appear in the HTML report (as errored
-    entries in the FAILED section) instead of silently disappearing.
-    ``agent_name`` should be the name that was used for the launch
-    attempt, so the report row matches the host/tmux session if the
-    user retained it for debugging.
+    Used so launch failures still appear in the report instead of silently
+    disappearing.
     """
     return AgentMetadata(
-        kind=AgentKind.TESTING_AGENT,
+        kind=AgentKind.MAPPER,
         agent_name=agent_name,
-        test_node_id=test_node_id,
+        task_id=task_id,
         branch_name=branch_name,
         error_summary=f"Failed to launch agent: {error}",
     )
 
 
-def _resolve_build_options(config: TmrLaunchConfig, mngr_ctx: MngrContext) -> NewHostBuildOptions:
-    """Resolve templates and build NewHostBuildOptions for a tmr agent or host pool entry."""
+def _resolve_build_options(config: LaunchConfig, mngr_ctx: MngrContext) -> NewHostBuildOptions:
+    """Resolve templates and build NewHostBuildOptions for an agent or host pool entry."""
     tmpl = resolve_templates(config.templates, mngr_ctx.config) if config.templates else {}
     raw_build_args = tmpl.get("build_args", ())
     raw_start_args = tmpl.get("start_args", ())
@@ -99,30 +108,23 @@ def _resolve_build_options(config: TmrLaunchConfig, mngr_ctx: MngrContext) -> Ne
     return NewHostBuildOptions(snapshot=config.snapshot, build_args=build_args, start_args=start_args)
 
 
-def _build_host_environment(config: TmrLaunchConfig) -> HostEnvironmentOptions:
-    """Build HostEnvironmentOptions for hosts created by tmr."""
+def _build_host_environment(config: LaunchConfig) -> HostEnvironmentOptions:
+    """Build HostEnvironmentOptions for hosts created by the framework."""
     return HostEnvironmentOptions(authorized_keys=config.additional_authorized_keys)
-
-
-# Server-side label that classifies a TMR-launched agent. The value is
-# always an AgentKind enum value so the in-process kind and the on-server
-# label have a single source of truth -- mngr ls --include
-# 'labels.tmr_role == "INTEGRATOR"' matches the in-process classification.
-_ROLE_LABEL_KEY = "tmr_role"
 
 
 def _build_agent_options(
     agent_name: AgentName,
     branch_name: str,
-    config: TmrLaunchConfig,
+    config: LaunchConfig,
     kind: AgentKind,
     initial_message: str | None = None,
     target_path: Path | None = None,
     transfer_mode: TransferMode = TransferMode.GIT_MIRROR,
 ) -> CreateAgentOptions:
-    """Build CreateAgentOptions for a tmr agent.
+    """Build CreateAgentOptions for a map-reduce agent.
 
-    ``kind`` is stamped onto ``label_options`` as the ``tmr_role`` label,
+    ``kind`` is stamped onto ``label_options`` as the ``mapreduce_role`` label,
     overriding any prior value carried on ``config``.
 
     ``target_path`` overrides where the agent's work_dir is placed on the
@@ -135,7 +137,7 @@ def _build_agent_options(
     from a snapshot sources from the host's own ``/code``).
     """
     is_remote = config.provider_name.lower() != LOCAL_PROVIDER_NAME
-    label_options = AgentLabelOptions(labels={**config.label_options.labels, _ROLE_LABEL_KEY: kind.value})
+    label_options = AgentLabelOptions(labels={**config.label_options.labels, ROLE_LABEL_KEY: kind.value})
     return CreateAgentOptions(
         agent_type=config.agent_type,
         name=agent_name,
@@ -153,10 +155,10 @@ def _build_agent_options(
     )
 
 
-def _create_tmr_agent(
+def _create_agent(
     agent_name: AgentName,
     branch_name: str,
-    config: TmrLaunchConfig,
+    config: LaunchConfig,
     mngr_ctx: MngrContext,
     kind: AgentKind,
     initial_message: str | None = None,
@@ -165,7 +167,7 @@ def _create_tmr_agent(
 ) -> CreateAgentResult:
     """Create an agent on the configured provider with an optional initial message.
 
-    ``kind`` classifies the agent -- it controls the ``tmr_role`` label
+    ``kind`` classifies the agent -- it controls the ``mapreduce_role`` label
     (set by ``_build_agent_options``) and triggers the snapshotter-specific
     work_dir pinning when ``kind is AgentKind.SNAPSHOTTER``.
 
@@ -232,41 +234,40 @@ def _create_tmr_agent(
     )
 
 
-def _launch_test_agent(
-    test_node_id: str,
+def _launch_mapper(
+    task: MapReduceTask,
     agent_name: AgentName,
     branch_name: str,
-    config: TmrLaunchConfig,
+    config: LaunchConfig,
     mngr_ctx: MngrContext,
-    pytest_flags: tuple[str, ...],
-    prompt_suffix: str = "",
+    initial_message: str,
     existing_host: OnlineHostInterface | None = None,
     host_name: HostName | None = None,
-) -> tuple[TestAgentInfo, OnlineHostInterface]:
-    """Launch a single agent to run and optionally fix one test.
+) -> tuple[MapperInfo, OnlineHostInterface]:
+    """Launch a single mapper agent for one task.
 
-    ``agent_name`` and ``branch_name`` are passed in (rather than derived
-    from ``test_node_id`` here) so the caller can reuse the same identity
-    when reporting a launch failure.
+    ``agent_name``, ``branch_name``, and ``initial_message`` are passed in
+    (rather than derived here) so the caller can build the prompt outside
+    the worker thread and so the same identity can be reused when reporting
+    a launch failure.
     """
-    logger.info("Launching agent '{}' for test: {}", agent_name, test_node_id)
-    create_result = _create_tmr_agent(
+    logger.info("Launching mapper '{}' for task: {}", agent_name, task.id)
+    create_result = _create_agent(
         agent_name=agent_name,
         branch_name=branch_name,
         config=config,
         mngr_ctx=mngr_ctx,
-        kind=AgentKind.TESTING_AGENT,
-        initial_message=build_test_agent_prompt(test_node_id, pytest_flags, prompt_suffix),
+        kind=AgentKind.MAPPER,
+        initial_message=initial_message,
         existing_host=existing_host,
         host_name=host_name,
     )
 
     return (
-        TestAgentInfo(
-            test_node_id=test_node_id,
+        MapperInfo(
+            task_id=task.id,
             agent_id=create_result.agent.id,
             agent_name=create_result.agent.name,
-            work_dir=create_result.agent.work_dir,
             branch_name=branch_name,
             created_at=time.monotonic(),
         ),
@@ -275,18 +276,19 @@ def _launch_test_agent(
 
 
 def _create_snapshot_host(
-    config: TmrLaunchConfig,
+    recipe_name: str,
+    config: LaunchConfig,
     mngr_ctx: MngrContext,
     run_name: str,
 ) -> SnapshotName:
     """Launch a dedicated snapshotter agent, snapshot its host, then stop it."""
-    agent_name = AgentName(f"tmr-{run_name}-snapshotter")
-    host_name = HostName(f"tmr-{run_name}-snapshotter")
+    agent_name = AgentName(f"{recipe_name}-{run_name}-snapshotter")
+    host_name = HostName(f"{recipe_name}-{run_name}-snapshotter")
 
     logger.info("Launching snapshotter agent '{}' for provisioning...", agent_name)
-    create_result = _create_tmr_agent(
+    create_result = _create_agent(
         agent_name=agent_name,
-        branch_name=f"mngr-tmr/{run_name}/snapshotter",
+        branch_name=f"{recipe_name}/{run_name}/snapshotter",
         config=config,
         mngr_ctx=mngr_ctx,
         kind=AgentKind.SNAPSHOTTER,
@@ -316,8 +318,9 @@ def stop_agent_on_host(host: OnlineHostInterface, agent_id: AgentId, agent_name:
 
 
 def _create_host_pool(
+    recipe_name: str,
     host_count: int,
-    config: TmrLaunchConfig,
+    config: LaunchConfig,
     mngr_ctx: MngrContext,
     run_name: str,
     max_parallel: int,
@@ -328,13 +331,13 @@ def _create_host_pool(
 
     with ConcurrencyGroupExecutor(
         parent_cg=mngr_ctx.concurrency_group,
-        name="tmr_create_hosts",
+        name="mapreduce_create_hosts",
         max_workers=max_parallel,
     ) as executor:
         futures = []
         host_environment = _build_host_environment(config)
         for i in range(host_count):
-            h_name = HostName(f"tmr-{run_name}-host-{i}")
+            h_name = HostName(f"{recipe_name}-{run_name}-host-{i}")
             new_host_opts = NewHostOptions(
                 provider=config.provider_name,
                 name=h_name,
@@ -352,19 +355,19 @@ def _create_host_pool(
     return hosts
 
 
-def launch_all_test_agents(
-    test_node_ids: list[str],
-    config: TmrLaunchConfig,
+def launch_all_mappers(
+    recipe: MapReduceRecipe,
+    ctx: MapReduceContext,
+    tasks: list[MapReduceTask],
+    config: LaunchConfig,
     mngr_ctx: MngrContext,
-    pytest_flags: tuple[str, ...],
     launch_failures: list[AgentMetadata],
     run_name: str,
-    prompt_suffix: str = "",
     max_parallel: int = 4,
     launch_delay_seconds: float = 2.0,
     agents_per_host: int = 4,
-) -> tuple[list[TestAgentInfo], dict[str, OnlineHostInterface], SnapshotName | None]:
-    """Launch agents for all collected tests.
+) -> tuple[list[MapperInfo], dict[str, OnlineHostInterface], SnapshotName | None]:
+    """Launch a mapper agent for every task.
 
     For remote providers, agents_per_host controls how many agents share a single
     host. Hosts are pre-created in a pool and agents are assigned round-robin.
@@ -376,10 +379,12 @@ def launch_all_test_agents(
     other agents are launched from it. Providers without snapshot support
     (local, docker, ...) skip this step silently.
 
-    Per-test launch failures are appended (in place) to ``launch_failures`` so
-    they can be surfaced in the report.
+    Per-task launch failures are appended (in place) to ``launch_failures`` so
+    they can be surfaced in the report. Mapper prompts are built on the calling
+    thread via ``recipe.build_mapper_prompt(ctx, task)`` before the launch
+    future is submitted, so the recipe doesn't need to be thread-safe.
     """
-    agents: list[TestAgentInfo] = []
+    agents: list[MapperInfo] = []
     agent_hosts: dict[str, OnlineHostInterface] = {}
 
     launch_config = config
@@ -393,7 +398,7 @@ def launch_all_test_agents(
         provider = get_provider_instance(config.provider_name, mngr_ctx, is_for_host_creation=True)
         if provider.supports_snapshots:
             try:
-                snapshot_name = _create_snapshot_host(config, mngr_ctx, run_name)
+                snapshot_name = _create_snapshot_host(recipe.name, config, mngr_ctx, run_name)
                 launch_config = config.model_copy_update(to_update(config.field_ref().snapshot, snapshot_name))
             except (MngrError, HostError, OSError, BaseExceptionGroup) as exc:
                 logger.warning("Failed to create snapshot, launching agents without snapshot: {}", exc)
@@ -401,106 +406,102 @@ def launch_all_test_agents(
     is_local = launch_config.provider_name.lower() == LOCAL_PROVIDER_NAME
     host_pool: list[OnlineHostInterface] = []
     if not is_local and agents_per_host > 0:
-        host_count = math.ceil(len(test_node_ids) / agents_per_host)
+        host_count = math.ceil(len(tasks) / agents_per_host)
         if host_count > 0:
-            host_pool = _create_host_pool(host_count, launch_config, mngr_ctx, run_name, max_parallel)
+            host_pool = _create_host_pool(recipe.name, host_count, launch_config, mngr_ctx, run_name, max_parallel)
 
     used_suffixes: set[str] = set()
     with ConcurrencyGroupExecutor(
         parent_cg=mngr_ctx.concurrency_group,
-        name="tmr_launch",
+        name="mapreduce_launch",
         max_workers=max_parallel,
     ) as executor:
-        futures: list[tuple[Future[tuple[TestAgentInfo, OnlineHostInterface]], str, AgentName, str]] = []
-        for i, test_node_id in enumerate(test_node_ids):
+        futures: list[tuple[Future[tuple[MapperInfo, OnlineHostInterface]], MapReduceTask, AgentName, str]] = []
+        for i, task in enumerate(tasks):
             if i > 0 and launch_delay_seconds > 0:
                 time.sleep(launch_delay_seconds)
             existing_host = host_pool[i % len(host_pool)] if host_pool else None
-            h_name = HostName(f"tmr-{run_name}-host-{i}") if not is_local and not host_pool else None
-            agent_name, branch_name = _make_test_agent_identity(run_name, test_node_id, used_suffixes)
+            h_name = HostName(f"{recipe.name}-{run_name}-host-{i}") if not is_local and not host_pool else None
+            agent_name, branch_name = _make_mapper_identity(recipe.name, run_name, task, used_suffixes)
+            initial_message = recipe.build_mapper_prompt(ctx, task)
             futures.append(
                 (
                     executor.submit(
-                        _launch_test_agent,
-                        test_node_id,
+                        _launch_mapper,
+                        task,
                         agent_name,
                         branch_name,
                         launch_config,
                         mngr_ctx,
-                        pytest_flags,
-                        prompt_suffix,
+                        initial_message,
                         existing_host,
                         h_name,
                     ),
-                    test_node_id,
+                    task,
                     agent_name,
                     branch_name,
                 )
             )
-        for future, test_node_id, agent_name, branch_name in futures:
+        for future, task, agent_name, branch_name in futures:
             try:
                 info, host = future.result()
                 agents.append(info)
                 agent_hosts[str(info.agent_id)] = host
             except (MngrError, HostError, AgentError, OSError, BaseExceptionGroup) as exc:
-                logger.warning("Failed to launch agent for {}: {}", test_node_id, exc)
-                launch_failures.append(_make_launch_failure_metadata(test_node_id, agent_name, branch_name, exc))
+                logger.warning("Failed to launch agent for {}: {}", task.id, exc)
+                launch_failures.append(_make_launch_failure_metadata(task.id, agent_name, branch_name, exc))
 
-    logger.info("Launched {} agent(s)", len(agents))
+    logger.info("Launched {} mapper agent(s)", len(agents))
     return agents, agent_hosts, launch_config.snapshot
 
 
-def _launch_with_timeout(
-    test_node_id: str,
+def _launch_mapper_with_timeout(
+    task: MapReduceTask,
     agent_name: AgentName,
     branch_name: str,
-    config: TmrLaunchConfig,
+    config: LaunchConfig,
     mngr_ctx: MngrContext,
-    pytest_flags: tuple[str, ...],
-    prompt_suffix: str,
-) -> tuple[TestAgentInfo, OnlineHostInterface]:
-    """Launch a test agent with a timeout. Raises TimeoutError if creation takes too long."""
-    with ConcurrencyGroupExecutor(mngr_ctx.concurrency_group, name="launch-agent", max_workers=1) as executor:
-        future = executor.submit(
-            _launch_test_agent, test_node_id, agent_name, branch_name, config, mngr_ctx, pytest_flags, prompt_suffix
-        )
+    initial_message: str,
+) -> tuple[MapperInfo, OnlineHostInterface]:
+    """Launch a mapper agent with a timeout. Raises TimeoutError if creation takes too long."""
+    with ConcurrencyGroupExecutor(mngr_ctx.concurrency_group, name="launch-mapper", max_workers=1) as executor:
+        future = executor.submit(_launch_mapper, task, agent_name, branch_name, config, mngr_ctx, initial_message)
         return future.result(timeout=_AGENT_CREATION_TIMEOUT_SECONDS)
 
 
-def launch_agents_up_to_limit(
-    remaining_tests: list[str],
+def launch_mappers_up_to_limit(
+    recipe: MapReduceRecipe,
+    ctx: MapReduceContext,
+    remaining_tasks: list[MapReduceTask],
     pending_ids: set[str],
     max_agents: int,
-    config: TmrLaunchConfig,
+    config: LaunchConfig,
     mngr_ctx: MngrContext,
-    pytest_flags: tuple[str, ...],
-    prompt_suffix: str,
-    all_agents: list[TestAgentInfo],
+    all_agents: list[MapperInfo],
     all_hosts: dict[str, OnlineHostInterface],
-    agent_id_to_info: dict[str, TestAgentInfo],
+    agent_id_to_info: dict[str, MapperInfo],
     launch_failures: list[AgentMetadata],
     run_name: str,
     used_suffixes: set[str],
 ) -> None:
-    """Launch agents from remaining_tests until we hit max_agents running.
+    """Launch mappers from remaining_tasks until we hit max_agents running.
 
-    Mutates remaining_tests (pops from front), pending_ids, all_agents,
+    Mutates remaining_tasks (pops from front), pending_ids, all_agents,
     all_hosts, agent_id_to_info, ``used_suffixes``, and launch_failures
-    in place. Per-test launch failures are appended to ``launch_failures``
+    in place. Per-task launch failures are appended to ``launch_failures``
     so they can be surfaced in the report.
     """
-    while remaining_tests and (max_agents <= 0 or len(pending_ids) < max_agents):
-        test_node_id = remaining_tests.pop(0)
-        agent_name, branch_name = _make_test_agent_identity(run_name, test_node_id, used_suffixes)
+    while remaining_tasks and (max_agents <= 0 or len(pending_ids) < max_agents):
+        task = remaining_tasks.pop(0)
+        agent_name, branch_name = _make_mapper_identity(recipe.name, run_name, task, used_suffixes)
+        initial_message = recipe.build_mapper_prompt(ctx, task)
         try:
-            info, host = _launch_with_timeout(
-                test_node_id, agent_name, branch_name, config, mngr_ctx, pytest_flags, prompt_suffix
-            )
+            info, host = _launch_mapper_with_timeout(task, agent_name, branch_name, config, mngr_ctx, initial_message)
         except TimeoutError:
-            logger.warning("Agent creation timed out after {}s for {}", _AGENT_CREATION_TIMEOUT_SECONDS, test_node_id)
+            logger.warning("Agent creation timed out after {}s for {}", _AGENT_CREATION_TIMEOUT_SECONDS, task.id)
             launch_failures.append(
                 _make_launch_failure_metadata(
-                    test_node_id,
+                    task.id,
                     agent_name,
                     branch_name,
                     f"creation timed out after {_AGENT_CREATION_TIMEOUT_SECONDS}s",
@@ -508,8 +509,8 @@ def launch_agents_up_to_limit(
             )
             continue
         except (MngrError, HostError, AgentError, OSError, BaseExceptionGroup) as exc:
-            logger.warning("Failed to launch agent for {}: {}", test_node_id, exc)
-            launch_failures.append(_make_launch_failure_metadata(test_node_id, agent_name, branch_name, exc))
+            logger.warning("Failed to launch agent for {}: {}", task.id, exc)
+            launch_failures.append(_make_launch_failure_metadata(task.id, agent_name, branch_name, exc))
             continue
         all_agents.append(info)
         all_hosts[str(info.agent_id)] = host
@@ -517,44 +518,44 @@ def launch_agents_up_to_limit(
         pending_ids.add(str(info.agent_id))
 
 
-def launch_integrator_agent(
-    config: TmrLaunchConfig,
+def launch_reducer_agent(
+    recipe_name: str,
+    prompt: str,
+    config: LaunchConfig,
     mngr_ctx: MngrContext,
     run_name: str,
     output_dir: Path,
-) -> tuple[TestAgentInfo, OnlineHostInterface]:
-    """Launch an integrator agent that cherry-picks fix branches into a linear stack.
+) -> tuple[ReducerInfo, OnlineHostInterface]:
+    """Launch a reducer agent that consumes the per-mapper output directories.
 
-    Test agents always run with ``GIT_MIRROR`` transfer mode (see
+    Mappers always run with ``GIT_MIRROR`` transfer mode (see
     ``_build_agent_options``), so their branches never appear in the
-    orchestrator's source repo automatically -- the only way the integrator
-    gets at them is via the per-agent ``branch.bundle`` files that the
+    orchestrator's source repo automatically -- the only way the reducer
+    gets at them is via the per-mapper ``branch.bundle`` files that the
     orchestrator has already pulled and extracted under ``output_dir``. The
-    integrator host has no knowledge of those branches either, so we rsync
-    ``output_dir`` into ``<work_dir>/INTEGRATOR_INPUTS_DIRNAME/`` and deliver
-    the integrator prompt via ``send_message``. The prompt walks that input
-    directory, applies the should-pull predicate to filter, fetches the
-    qualifying bundles into local branches, and cherry-picks.
+    reducer host has no knowledge of those branches either, so we rsync
+    ``output_dir`` into ``<work_dir>/REDUCER_INPUTS_DIRNAME/`` and deliver
+    the reducer prompt via ``send_message``.
     """
-    agent_name = AgentName(f"tmr-{run_name}-integrator")
-    branch_name = f"mngr-tmr/{run_name}/integrated"
-    host_name = HostName(f"tmr-{run_name}-integrator")
+    agent_name = AgentName(f"{recipe_name}-{run_name}-reducer")
+    branch_name = f"{recipe_name}/{run_name}/reducer"
+    host_name = HostName(f"{recipe_name}-{run_name}-reducer")
 
-    logger.info("Launching integrator agent '{}'", agent_name)
-    create_result = _create_tmr_agent(
+    logger.info("Launching reducer agent '{}'", agent_name)
+    create_result = _create_agent(
         agent_name=agent_name,
         branch_name=branch_name,
         config=config,
         mngr_ctx=mngr_ctx,
-        kind=AgentKind.INTEGRATOR,
+        kind=AgentKind.REDUCER,
         initial_message=None,
         host_name=host_name,
     )
 
-    destination = create_result.agent.work_dir / INTEGRATOR_INPUTS_DIRNAME
-    logger.info("Rsyncing integrator inputs to '{}:{}'", create_result.host.id, destination)
+    destination = create_result.agent.work_dir / REDUCER_INPUTS_DIRNAME
+    logger.info("Rsyncing reducer inputs to '{}:{}'", create_result.host.id, destination)
     # Trailing slash so rsync copies the *contents* of output_dir into the
-    # integrator's inputs directory, not output_dir itself as a child.
+    # reducer's inputs directory, not output_dir itself as a child.
     rsync_to_remote(
         local_path=f"{output_dir}/",
         remote_host=create_result.host,
@@ -563,17 +564,14 @@ def launch_integrator_agent(
         uncommitted_changes=UncommittedChangesMode.CLOBBER,
         cg=mngr_ctx.concurrency_group,
     )
-    logger.info("Sending integrator prompt to '{}'", agent_name)
-    create_result.agent.send_message(build_integrator_prompt())
+    logger.info("Sending reducer prompt to '{}'", agent_name)
+    create_result.agent.send_message(prompt)
 
     return (
-        TestAgentInfo(
-            test_node_id="integrator",
+        ReducerInfo(
             agent_id=create_result.agent.id,
             agent_name=create_result.agent.name,
-            work_dir=create_result.agent.work_dir,
             branch_name=branch_name,
-            created_at=time.monotonic(),
         ),
         create_result.host,
     )
