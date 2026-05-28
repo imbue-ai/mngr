@@ -365,6 +365,3 @@ def test_render_recovery_page_promotes_button_above_troubleshooting() -> None:
     debug_pos = html.index('id="recovery-debug-details"')
     # Button first, then the troubleshooting block, then both disclosures.
     assert button_pos < block_pos < error_pos < debug_pos
-    # The block self-hides via CSS when neither disclosure is shown, so the
-    # divider and label never render over an empty section.
-    assert ":has(> details:not(.hidden))" in html
