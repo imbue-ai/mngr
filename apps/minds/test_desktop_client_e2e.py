@@ -60,17 +60,28 @@ def _fct_settings_opted_into_pytest(fct_path: Path) -> Iterator[None]:
     The Electron-spawned ``mngr create`` loads FCT's ``.mngr/settings.toml`` (the
     runner pins ``MNGR_ROOT_NAME=mngr`` to get the main/docker create templates).
     mngr's pytest guard requires every config it loads during a test run to set
-    ``is_allowed_in_pytest = true``. We set that key here -- editing the parsed
-    TOML so any pre-existing value is overwritten in place rather than producing
-    a duplicate key -- but only on this checkout, not FCT's shipped config (which
-    would disable the guard for every FCT-based project). The original file
-    contents are saved verbatim and restored on exit (or the file removed if it
-    did not exist) so an operator-managed
-    ``.external_worktrees/forever-claude-template/`` checkout is not left dirty.
+    ``is_allowed_in_pytest = true``. We set that key here -- but only on this
+    checkout, not FCT's shipped config (which would disable the guard for every
+    FCT-based project). The original file contents are saved verbatim and
+    restored on exit (or the file removed if it did not exist) so an
+    operator-managed ``.external_worktrees/forever-claude-template/`` checkout is
+    not left dirty.
+
+    FCT is not expected to ship ``is_allowed_in_pytest`` at all. If the key is
+    already present we raise rather than overwrite it: a present key means the
+    opt-in (or an opt-out) has leaked into FCT's real config -- the exact thing
+    this transient edit exists to avoid -- so surface it loudly instead of
+    silently masking it.
     """
     settings_path = fct_path / ".mngr" / "settings.toml"
     original = settings_path.read_text() if settings_path.exists() else None
     doc = tomlkit.parse(original) if original is not None else tomlkit.document()
+    if "is_allowed_in_pytest" in doc:
+        raise AssertionError(
+            f"{settings_path} already sets is_allowed_in_pytest; FCT is not expected to ship this "
+            "key. The pytest guard opt-in may be leaking into FCT's real config -- investigate "
+            "rather than letting this test silently overwrite it."
+        )
     doc["is_allowed_in_pytest"] = True
     settings_path.parent.mkdir(parents=True, exist_ok=True)
     settings_path.write_text(tomlkit.dumps(doc))
