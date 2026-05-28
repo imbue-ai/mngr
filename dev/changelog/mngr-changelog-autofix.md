@@ -16,10 +16,8 @@ entries.
 Each reviewer edits only the `CHANGELOG.md` files of its assigned projects
 (the code is treated as ground truth -- reviewers never modify source) and
 commits its own corrections, staging only those files so the parallel
-reviewers don't clobber each other. Reviewers run unattended -- they self-review rather than
-asking a user. Their summaries (including any cases where the code itself
-looked wrong) are collected into the consolidation PR's description; if a
-project's review cannot run, the PR is still opened and that failure is
-noted. The run's outcome JSON keeps a freeform `notes` field only for failed
-runs (which have no PR to carry detail); successful runs put their detail in
-the PR description instead.
+reviewers don't clobber each other. Reviewers run unattended -- they
+self-review rather than asking a user -- and report their findings back to
+the consolidation agent, which decides what to do with them. The run's
+outcome JSON reports `pr_url` on success and `notes` (the failing step and
+error detail) on failure.

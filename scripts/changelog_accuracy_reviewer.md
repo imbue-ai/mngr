@@ -102,6 +102,7 @@ Your final message to the orchestrator must be a concise plain-text summary
 - how many you corrected, removed, and collapsed (with a one-line reason
   each, noting which project),
 - any **code concerns**: bullets where the code itself looked wrong or
-  buggy (which you did NOT fix), so the orchestrator can surface them.
+  buggy (which you did NOT fix), so the orchestrator can decide what to do
+  with them.
 
 If nothing needed changing, say so explicitly.
