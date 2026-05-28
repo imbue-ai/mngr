@@ -43,6 +43,13 @@ register_marker(
     "Linux). Split out into its own CI job (`test-docker-electron`) so the heavyweight "
     "Electron + docker spin-up does not serialize behind every other docker-marked test."
 )
+register_marker(
+    "minds_snapshot_resume: tests that assume the sandbox was booted from a Modal snapshot "
+    "produced by `scripts/snapshot_minds_e2e_state.py` (a stopped FCT workspace Docker "
+    "container already on disk). Run only via `just test-offload-minds-snapshot <image-id>` -- "
+    "explicitly excluded from every other offload run because they would fail anywhere without "
+    "the snapshot's pre-baked state."
+)
 register_conftest_hooks(globals())
 register_plugin_test_fixtures(globals())
 
