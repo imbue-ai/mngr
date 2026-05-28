@@ -330,6 +330,10 @@ def test_fetch_board_snapshot_muted_agent_stays_muted_when_a_provider_fails(
     failing_ctx = _ctx_with_failing_provider(temp_mngr_ctx)
     result = fetch_board_snapshot(failing_ctx, [], {})
 
+    # Sanity-check that the failing provider was actually exercised, so this test
+    # genuinely covers the provider-failure path rather than passing vacuously.
+    assert any("nonexistent-backend-xyz" in error for error in result.snapshot.errors)
+
     entries = {e.name: e for e in result.snapshot.entries}
     entry = entries[AgentName("muted-despite-failure-agent")]
     assert entry.is_muted is True
