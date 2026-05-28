@@ -40,6 +40,7 @@ from enum import auto
 from functools import wraps
 from pathlib import Path
 from typing import Any
+from typing import Protocol
 from typing import TypeVar
 from typing import assert_never
 from unittest.mock import patch
@@ -585,7 +586,17 @@ def _detect_guard_violations(
 
 _fixture_resource_marks: dict[Callable[..., Any], set[str]] = {}
 
-F = TypeVar("F", bound=Callable[..., Any])
+
+class _NamedCallable(Protocol):
+    """A callable that also carries a ``__name__`` (i.e. a function), which is
+    all that ``fixture_uses_resources`` decorates."""
+
+    __name__: str
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any: ...
+
+
+F = TypeVar("F", bound=_NamedCallable)
 
 
 def fixture_uses_resources(*resources: str) -> Callable[[F], F]:
@@ -806,7 +817,7 @@ class _ResourceGuardPlugin:
     def pytest_runtest_makereport(
         item: pytest.Item,
         call: pytest.CallInfo,
-    ) -> Generator[None, None, None]:
+    ) -> Generator[None, pluggy.Result[pytest.TestReport], None]:
         yield from _pytest_runtest_makereport(item, call)
 
     @staticmethod
@@ -814,7 +825,7 @@ class _ResourceGuardPlugin:
     def pytest_fixture_setup(
         fixturedef: Any,
         request: pytest.FixtureRequest,
-    ) -> Generator[None, None, None]:
+    ) -> Generator[None, pluggy.Result[object], None]:
         yield from _pytest_fixture_setup(fixturedef, request)
 
 
@@ -833,7 +844,7 @@ def _swapped_fixturedef_func(fixturedef: Any, new_func: Callable[..., Any]) -> G
 def _pytest_fixture_setup(
     fixturedef: Any,
     request: pytest.FixtureRequest,
-) -> Generator[None, None, None]:
+) -> Generator[None, pluggy.Result[object], None]:
     """Apply a fixture-scope guard around fixtures that opted in.
 
     Only fires for fixtures decorated with @fixture_uses_resources. Other
@@ -1031,7 +1042,7 @@ def _check_guard_violations(state: _PerTestGuardState, report: pytest.TestReport
 def _pytest_runtest_makereport(
     item: pytest.Item,
     call: pytest.CallInfo,
-) -> Generator[None, None, None]:
+) -> Generator[None, pluggy.Result[pytest.TestReport], None]:
     """Enforce resource guard invariants after each test phase."""
     outcome = yield
     report = outcome.get_result()

@@ -832,7 +832,7 @@ def test_paramiko_transport_log_patch_joins_list_messages() -> None:
 
 def _get_paramiko_traceback() -> types.TracebackType:
     try:
-        cast(Any, paramiko.channel.Channel._send)(None, b"test", None)
+        cast(Any, paramiko.channel.Channel._send)(None, b"test", None)  # ty: ignore[unresolved-attribute]
     except (AttributeError, TypeError, OSError) as e:
         assert e.__traceback__ is not None
         return e.__traceback__

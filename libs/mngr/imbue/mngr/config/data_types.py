@@ -54,6 +54,23 @@ _DEFAULT_MIN_ONLINE_HOST_AGE_SECONDS: Final[float] = 60.0 * 10.0
 PluginConfigT = TypeVar("PluginConfigT", bound="PluginConfig")
 
 
+class StringDerivedTuple(tuple):
+    """Marker tuple subclass for a tuple value that was originally provided as a
+    string in user settings.
+
+    Some tuple-typed fields (most notably ``cli_args``) accept either a list/tuple
+    or a single string in TOML. When the user writes a string, the natural unit is
+    the whole string -- so a higher-precedence layer that replaces one string with
+    another is scalar replacement, not aggregate narrowing. ``_check_narrowing``
+    uses this marker to short-circuit the per-entry narrowing check for those cases.
+
+    The marker survives ``model_construct`` (which bypasses validation) but is
+    intentionally not preserved through ``model_dump`` / merges. That is enough
+    because narrowing detection always compares a freshly-parsed layer (which
+    retains the marker on string-derived fields) against the already-merged base.
+    """
+
+
 @pure
 def split_cli_args_string(cli_args: str) -> tuple[str, ...]:
     """Split a CLI args string into individual argument tokens, preserving quoting.
@@ -122,12 +139,18 @@ def would_assignment_narrow(base_value: Any, override_value: Any) -> bool:
     settings-layer merge guard and the template-application guard agree on what
     counts as narrowing. Same exemptions: no-ops (override equals base) and
     supersets (every base entry survives, e.g. the materialised result of an
-    ``__extend`` operation) return ``False``. Scalars and empty/non-aggregate
-    bases never narrow.
+    ``__extend`` operation) return ``False``. Against a list/tuple base, a
+    ``StringDerivedTuple`` override is also exempt -- it represents a scalar
+    string replacement of the whole value, not aggregate narrowing. Scalars
+    and empty/non-aggregate bases never narrow.
     """
     if not isinstance(base_value, (list, tuple, dict, set, frozenset)) or not base_value:
         return False
     if isinstance(base_value, (list, tuple)):
+        # Mirror the StringDerivedTuple exemption in ``_check_narrowing`` so the
+        # template-application guard agrees with the settings-layer guard.
+        if isinstance(override_value, StringDerivedTuple):
+            return False
         if isinstance(override_value, (list, tuple)) and all(entry in override_value for entry in base_value):
             return False
         return True
@@ -157,10 +180,14 @@ def detect_settings_narrowing(base: Any, override: Any) -> list[str]:
 
     "Narrowing" is defined as the override losing at least one base entry --
     a missing list/set element, a missing dict key, or an explicit empty
-    aggregate over a non-empty base. Only no-ops (override equals base) and
+    aggregate over a non-empty base. No-ops (override equals base) and
     supersets (every base entry survives, e.g. an ``__extend`` result) pass
-    without flagging. Value mutations at a shared dict key recurse instead
-    of flagging at the parent.
+    without flagging. Against a list/tuple base, a ``StringDerivedTuple``
+    override is also exempt: a string-shaped TOML value (e.g.
+    ``cli_args = "..."``) is a coherent single value, so a higher-precedence
+    layer that replaces one string with another expresses scalar replacement
+    rather than aggregate narrowing. Value mutations at a shared dict key
+    recurse instead of flagging at the parent.
 
     Layers that didn't write the field (override value is ``None``, since
     ``parse_config`` defaults missing fields to ``None``) are skipped by
@@ -231,9 +258,13 @@ def _check_narrowing(
     treated as narrowing too: it drops every prior entry, which is the most
     extreme form of data loss the safety net is meant to catch. To clear,
     the user must set ``allow_settings_key_assignment_narrowing = true``.
-    The only assignments that pass without warning are no-ops (override
-    equals base) and supersets (every base entry survives, e.g. ``__extend``
-    results or additive assigns that happen to include every prior value).
+    Against a non-empty list/tuple base, three forms of override pass without
+    warning: no-ops (override equals base), supersets (every base entry
+    survives, e.g. ``__extend`` results or additive assigns that happen to
+    include every prior value), and ``StringDerivedTuple`` overrides (a
+    string-shaped TOML value such as ``cli_args = "..."`` is a coherent
+    single value, so replacing it is scalar replacement rather than
+    aggregate narrowing).
     """
     if isinstance(base_value, BaseModel) and isinstance(override_value, BaseModel):
         _walk_for_narrowing(base_value, override_value, path, violations)
@@ -241,6 +272,11 @@ def _check_narrowing(
     if not isinstance(base_value, (list, tuple, dict, set, frozenset)) or not base_value:
         return
     if isinstance(base_value, (list, tuple)):
+        # Scalar replacement intent: when the override was originally a string
+        # (e.g. ``cli_args = "..."`` in TOML), the user is replacing the whole
+        # value as a coherent unit, not narrowing a list.
+        if isinstance(override_value, StringDerivedTuple):
+            return
         if isinstance(override_value, (list, tuple)) and all(entry in override_value for entry in base_value):
             return
         violations.append(".".join(path))
