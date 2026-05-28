@@ -449,9 +449,18 @@ def offline_agent_field_generators() -> tuple[str, dict[str, Callable[[Discovere
     generators (which receive ``(agent, host)``) cannot run. Instead, each plugin
     returns (plugin_name, generators) where generators maps field names to callables
     that receive the offline ``(discovered_agent, host_details)`` and return a field
-    value (or None to omit). The ``discovered_agent`` exposes the cached ``data.json``
-    via ``certified_data``. Fields are namespaced under plugin.<plugin_name> in
+    value (or None to omit). Fields are namespaced under plugin.<plugin_name> in
     AgentDetails, exactly like the online path.
+
+    Generators read from ``discovered_agent.certified_data``. What that contains
+    depends on how the offline agent was discovered:
+    - For an agent on a still-reachable host (e.g. stopped agent, or a host that
+      went offline mid-listing), it is the agent's persisted ``data.json``,
+      including any ``plugin`` section written via ``agent.set_plugin_data``.
+    - For a fully-unreachable host served from a persisted discovery snapshot, it
+      is a reconstruction that carries forward the ``plugin`` fields that were on
+      AgentDetails the last time the agent was listed online (see
+      ``discovered_agent_from_agent_details``).
 
     Return None to contribute nothing. Generators must be thread-safe and fast
     (they run per-agent in the listing hot path).
