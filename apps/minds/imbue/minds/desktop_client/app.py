@@ -4,6 +4,7 @@ import html
 import json
 import os
 import queue
+import shlex
 import subprocess
 import threading
 import time
@@ -1860,28 +1861,6 @@ def _capture_mngr_command(concurrency_group: ConcurrencyGroup, argv: list[str], 
     return finished.stdout
 
 
-def _capture_mngr_command_with_error(
-    concurrency_group: ConcurrencyGroup, argv: list[str], env: dict[str, str]
-) -> tuple[str | None, str | None]:
-    """Run a read-only ``mngr`` subprocess and return ``(stdout, failure_reason)``.
-
-    Unlike ``_capture_mngr_command``, this returns stdout even when the
-    subprocess exited non-zero -- ``mngr list --on-error continue`` exits 1
-    when ``result.errors`` is non-empty, but the JSON on stdout is still
-    valid and useful. The caller can parse stdout for partial data AND
-    surface ``failure_reason`` to the user as diagnostic context.
-
-    ``failure_reason`` is None when the subprocess exited cleanly (rc=0,
-    not timed out, no exec error). The string format matches
-    ``_run_mngr_subprocess``: exec failures are wrapped in str(exc),
-    timeouts read ``timed out after Xs``, non-zero exits read
-    ``exited N: <stderr>``.
-    """
-    finished, failure_reason = _run_mngr_subprocess(concurrency_group, argv, env)
-    stdout = finished.stdout if finished is not None else None
-    return stdout, failure_reason
-
-
 def _summarize_mngr_list_payload_errors(list_json: str | None) -> str | None:
     """Return a one-line summary of the ``errors`` array in ``mngr list`` JSON, or None.
 
@@ -2159,11 +2138,22 @@ def _run_host_health_probe(
     mngr_binary: str = request.app.state.mngr_binary
     backend_resolver: BackendResolverInterface = request.app.state.backend_resolver
     services_agent_id = backend_resolver.get_system_services_agent_id(agent_id)
-    list_json, mngr_list_error = _capture_mngr_command_with_error(
-        concurrency_group,
-        _build_mngr_host_state_argv(mngr_binary, agent_id, services_agent_id),
-        env,
-    )
+    list_argv = _build_mngr_host_state_argv(mngr_binary, agent_id, services_agent_id)
+    list_command = shlex.join(list_argv)
+    finished, mngr_list_error = _run_mngr_subprocess(concurrency_group, list_argv, env)
+    if finished is not None:
+        list_json: str | None = finished.stdout
+        list_stdout = finished.stdout
+        list_stderr = finished.stderr
+        list_exit_code = finished.returncode
+    else:
+        # Subprocess could not be spawned at all -- mngr_list_error already
+        # carries the exec failure as a str(exc). Leave the captured streams
+        # empty so the diagnostics page shows the error alone.
+        list_json = None
+        list_stdout = ""
+        list_stderr = ""
+        list_exit_code = None
     # When the listing exited 0 but reported per-provider errors in its JSON
     # payload, surface those as ``mngr_list_error`` too -- the recovery page
     # needs the failing host name to explain that the user's workspace is
@@ -2183,6 +2173,10 @@ def _run_host_health_probe(
         probe=probe,
         plugin_resolver_services=plugin_resolver_services,
         mngr_list_error=mngr_list_error,
+        mngr_list_command=list_command,
+        mngr_list_stdout=list_stdout,
+        mngr_list_stderr=list_stderr,
+        mngr_list_exit_code=list_exit_code,
     )
     cache: _HostHealthCache = request.app.state.host_health_cache
     cache.put(agent_id, response)

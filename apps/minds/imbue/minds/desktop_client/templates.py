@@ -447,20 +447,27 @@ _RECOVERY_SCRIPT: Final[str] = """\
           }
           var probe = data.probe || {};
           var parts = [];
-          // ``mngr list`` knowledge first: if mngr could not see this
-          // workspace's agent at all, every host-derived field below will be
-          // empty for a reason that has nothing to do with the workspace
-          // itself. Surfacing this up front saves the reader from chasing
-          // empty fields.
-          var listKnowledgeLines = [
-            'mngr_knows_agent = ' + data.mngr_knows_agent,
-            'mngr_knows_host = ' + data.mngr_knows_host,
-          ];
-          if (data.mngr_list_error) {
-            listKnowledgeLines.push('mngr_list_error = ' + data.mngr_list_error);
+          // Show the raw ``mngr list`` command and its output first. Every
+          // host-state-ish field below is derived from this -- if the user
+          // wants to know why a field is empty, they can read the listing
+          // directly instead of trusting minds' summarization.
+          if (data.mngr_list_command) {
+            var exitLabel = data.mngr_list_exit_code === null || data.mngr_list_exit_code === undefined
+              ? '(subprocess never spawned)'
+              : 'exit ' + data.mngr_list_exit_code;
+            var listBody = '$ ' + data.mngr_list_command + '\\n# ' + exitLabel;
+            if (data.mngr_list_error) {
+              listBody += '\\n# error: ' + data.mngr_list_error;
+            }
+            if (data.mngr_list_stderr) {
+              listBody += '\\n--- stderr ---\\n' + data.mngr_list_stderr.replace(/\\n$/, '');
+            }
+            if (data.mngr_list_stdout) {
+              listBody += '\\n--- stdout ---\\n' + data.mngr_list_stdout.replace(/\\n$/, '');
+            }
+            parts.push('<div class="debug-section"><h4>mngr list</h4><pre>'
+              + escapeHtml(listBody) + '</pre></div>');
           }
-          parts.push('<div class="debug-section"><h4>mngr list visibility</h4><pre>'
-            + escapeHtml(listKnowledgeLines.join('\\n')) + '</pre></div>');
           parts.push('<div class="debug-section"><h4>Host state</h4><pre>'
             + escapeHtml(data.host_state || 'unknown')
             + ' (reachable=' + data.reachable + ', host_offline=' + data.host_offline + ')</pre></div>');

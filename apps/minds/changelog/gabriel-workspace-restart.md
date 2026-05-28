@@ -85,19 +85,21 @@ Tiered system-interface restart for the minds recovery flow.
   completes) can transition an in-flight restart to HEALTHY, so a
   probe of the still-alive pre-restart system interface can no longer
   prematurely declare recovery.
-- Recovery-page diagnostics now explain "the issue is somewhere else,
-  not this workspace" when applicable. The host-health endpoint surfaces:
-  - ``mngr_knows_agent`` / ``mngr_knows_host``: explicit booleans saying
-    whether ``mngr list`` returned a row for this workspace's agent /
-    host. Previously both states (mngr-list never returned vs. agent
-    missing from the listing) rendered identically as an empty
-    ``host_state`` string.
-  - ``mngr_list_error``: a one-line summary of why ``mngr list`` could
-    not produce a clean listing -- whether the subprocess errored, the
-    payload's per-provider ``errors`` array was non-empty, or the
-    listing timed out. When set, the diagnostics menu surfaces it so
-    the user can tell that the issue lives in a sibling workspace's
-    host rather than their own.
+- Recovery-page diagnostics now show the raw ``mngr list`` invocation
+  that fed every host-state field. The host-health endpoint surfaces:
+  - The exact shell-quoted command (``mngr_list_command``), the raw
+    ``stdout`` / ``stderr``, and the subprocess ``exit_code``. The
+    diagnostics menu renders them verbatim, so the user can read the
+    listing directly (which agents, which host states, which
+    per-provider errors) instead of relying on minds' summarization,
+    and can paste the command into a terminal to re-run it outside
+    minds.
+  - ``mngr_list_error``: a one-line summary of why ``mngr list`` did
+    not exit cleanly -- whether the subprocess errored, the payload's
+    per-provider ``errors`` array was non-empty, or the listing timed
+    out. When set, the diagnostics menu surfaces it so the user can
+    tell that the issue lives in a sibling workspace's host rather
+    than their own.
   - ``plugin_resolver_has_services``: a self-describing boolean
     derived from the existing ``plugin_resolver_services`` map, named
     for what it means rather than asking the reader to compute it.

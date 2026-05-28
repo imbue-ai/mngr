@@ -254,26 +254,41 @@ class HostHealthResponse(FrozenModel):
             "agent. Distinct from ``len(plugin_resolver_services) > 0`` in spirit only -- this "
             "field is named for what it means rather than asking the reader to compute it. False "
             "could mean the plugin hasn't yet discovered the agent OR has discovered it but no "
-            "service has registered yet; see ``mngr_knows_agent`` to disambiguate."
+            "service has registered yet."
         ),
     )
-    mngr_knows_agent: bool = Field(
-        default=False,
+    mngr_list_command: str = Field(
+        default="",
         description=(
-            "True iff ``mngr list`` returned a row for this workspace's chat agent. False when "
-            "either ``mngr list`` failed entirely (see ``mngr_list_error``) or the listing ran "
-            "but did not include this agent ID. Distinguishes the two cases that previously "
-            "both rendered as ``host_state == ''``."
+            "The exact shell-quoted ``mngr list`` command minds ran to populate ``host_state`` "
+            "etc., for the diagnostics menu. Empty when no listing was attempted (e.g. tests "
+            "that bypass the subprocess). Surfaced verbatim so the user can paste and re-run "
+            "outside minds to inspect what ``mngr`` itself saw."
         ),
     )
-    mngr_knows_host: bool = Field(
-        default=False,
+    mngr_list_stdout: str = Field(
+        default="",
         description=(
-            "True iff ``mngr list`` returned a row whose ``host.id`` is non-empty for this "
-            "workspace's chat agent. False when the host row is missing entirely or the host "
-            "id is unset. Lets the recovery page tell ``mngr_knows_agent=true / host=offline`` "
-            "from ``mngr_knows_agent=false`` (which is the symptom of an outer-mngr discovery "
-            "failure, not a workspace-side problem)."
+            "Raw stdout from the ``mngr list`` subprocess. The same payload the host-health "
+            "endpoint parsed for everything below. Showing it on the diagnostics page lets the "
+            "user see exactly what the listing produced (which agents, which host states, which "
+            "per-provider errors) instead of relying on minds' summarization."
+        ),
+    )
+    mngr_list_stderr: str = Field(
+        default="",
+        description=(
+            "Raw stderr from the ``mngr list`` subprocess. Warnings (skipped hosts, "
+            "vultr-key-missing, ...) land here. Surfaced alongside stdout so the diagnostic "
+            "view matches what an operator would see in a terminal."
+        ),
+    )
+    mngr_list_exit_code: int | None = Field(
+        default=None,
+        description=(
+            "Exit code from the ``mngr list`` subprocess, or None when the subprocess could not "
+            "be spawned at all. Non-zero with valid stdout means the listing reported errors "
+            "via its ``errors`` field but still produced a usable payload."
         ),
     )
     mngr_list_error: str | None = Field(
@@ -397,6 +412,10 @@ def build_host_health_response(
     probe: ProbeRecord,
     plugin_resolver_services: dict[str, str],
     mngr_list_error: str | None = None,
+    mngr_list_command: str = "",
+    mngr_list_stdout: str = "",
+    mngr_list_stderr: str = "",
+    mngr_list_exit_code: int | None = None,
 ) -> HostHealthResponse:
     """Assemble the host-health endpoint response from raw inputs.
 
@@ -410,18 +429,6 @@ def build_host_health_response(
     services_state = extract_services_agent_state(list_json, services_agent_id)
     ssh_connections = extract_ssh_connections(list_json)
     is_misconfigured = probe.services_toml_declares_system_interface is False
-    # extract_agent_row returns the matched row or None; a None list_json (we
-    # never even got stdout) also lands here as "not known".
-    mngr_knows_agent = agent_row is not None
-    # The host id lives at agent_row["host"]["id"]; a row whose host block is
-    # missing or has no id means mngr saw the agent but couldn't enumerate its
-    # host (an exotic state, but worth distinguishing from "agent missing").
-    mngr_knows_host = False
-    if isinstance(agent_row, dict):
-        host_block = agent_row.get("host")
-        if isinstance(host_block, dict):
-            host_id_value = host_block.get("id")
-            mngr_knows_host = isinstance(host_id_value, str) and bool(host_id_value)
     return HostHealthResponse(
         reachable=reachable,
         host_offline=host_offline,
@@ -432,8 +439,10 @@ def build_host_health_response(
         ssh_connections=ssh_connections,
         plugin_resolver_services=dict(plugin_resolver_services),
         plugin_resolver_has_services=bool(plugin_resolver_services),
-        mngr_knows_agent=mngr_knows_agent,
-        mngr_knows_host=mngr_knows_host,
+        mngr_list_command=mngr_list_command,
+        mngr_list_stdout=mngr_list_stdout,
+        mngr_list_stderr=mngr_list_stderr,
+        mngr_list_exit_code=mngr_list_exit_code,
         mngr_list_error=mngr_list_error,
         probe=probe,
     )

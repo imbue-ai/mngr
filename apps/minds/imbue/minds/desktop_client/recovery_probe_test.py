@@ -268,74 +268,50 @@ def test_build_host_health_response_offline_host_drives_host_restart_tier() -> N
     assert response.host_offline is True
 
 
-# --- new visibility booleans ---------------------------------------------
+# --- raw mngr list capture -----------------------------------------------
 
 
-def test_build_host_health_response_mngr_knows_agent_and_host_when_listed() -> None:
-    list_json = json.dumps(
-        {
-            "agents": [{"id": str(_AGENT_ID), "host": {"id": "host-abc", "state": "RUNNING"}}],
-            "errors": [],
-        }
-    )
+def test_build_host_health_response_passes_mngr_list_capture_through_verbatim() -> None:
+    """The diagnostics menu renders the raw command + stdout + stderr + exit
+    code, so build_host_health_response must pass each through untouched."""
+    list_json = json.dumps({"agents": [], "errors": []})
     response = build_host_health_response(
         list_json=list_json,
         agent_id=_AGENT_ID,
         services_agent_id=_SERVICES_AGENT_ID,
         probe=parse_probe_output(None),
         plugin_resolver_services={},
+        mngr_list_command="/usr/local/bin/mngr list --format json --quiet",
+        mngr_list_stdout=list_json,
+        mngr_list_stderr="WARNING: Vultr API key not configured, skipping VPS discovery\n",
+        mngr_list_exit_code=0,
     )
-    assert response.mngr_knows_agent is True
-    assert response.mngr_knows_host is True
+    assert response.mngr_list_command == "/usr/local/bin/mngr list --format json --quiet"
+    assert response.mngr_list_stdout == list_json
+    assert "Vultr API key" in response.mngr_list_stderr
+    assert response.mngr_list_exit_code == 0
 
 
-def test_build_host_health_response_distinguishes_missing_agent_from_failed_list() -> None:
-    """list_json=None (mngr list failed entirely) and an empty agents list look
-    identical via the legacy host_state field. The booleans surface the
-    distinction so the recovery page can route correctly."""
-    # Case A: mngr list ran but did NOT include our agent.
-    list_json_without_agent = json.dumps({"agents": [], "errors": []})
-    response_without = build_host_health_response(
-        list_json=list_json_without_agent,
-        agent_id=_AGENT_ID,
-        services_agent_id=_SERVICES_AGENT_ID,
-        probe=parse_probe_output(None),
-        plugin_resolver_services={},
-        mngr_list_error=None,
-    )
-    assert response_without.mngr_knows_agent is False
-    assert response_without.mngr_knows_host is False
-    assert response_without.mngr_list_error is None
-
-    # Case B: mngr list never produced stdout (subprocess failed).
-    response_failed = build_host_health_response(
+def test_build_host_health_response_carries_subprocess_failure_state() -> None:
+    """When the subprocess could not be spawned at all, exit_code is None and
+    the streams are empty -- but mngr_list_error carries the exec failure."""
+    response = build_host_health_response(
         list_json=None,
         agent_id=_AGENT_ID,
         services_agent_id=_SERVICES_AGENT_ID,
         probe=parse_probe_output(None),
         plugin_resolver_services={},
-        mngr_list_error="exited 1: SSH error (Error reading SSH protocol banner)",
+        mngr_list_command="/usr/local/bin/mngr list --format json",
+        mngr_list_stdout="",
+        mngr_list_stderr="",
+        mngr_list_exit_code=None,
+        mngr_list_error="[Errno 2] No such file or directory: 'mngr'",
     )
-    assert response_failed.mngr_knows_agent is False
-    assert response_failed.mngr_knows_host is False
-    assert response_failed.mngr_list_error is not None
-    assert "SSH error" in response_failed.mngr_list_error
-
-
-def test_build_host_health_response_mngr_knows_agent_but_not_host_when_host_id_missing() -> None:
-    """An agent row whose host block has no id is the exotic case where the
-    listing knows the agent but couldn't enumerate its host. Kept distinct
-    from "neither known"."""
-    list_json = json.dumps({"agents": [{"id": str(_AGENT_ID), "host": {"state": "RUNNING"}}]})
-    response = build_host_health_response(
-        list_json=list_json,
-        agent_id=_AGENT_ID,
-        services_agent_id=_SERVICES_AGENT_ID,
-        probe=parse_probe_output(None),
-        plugin_resolver_services={},
-    )
-    assert response.mngr_knows_agent is True
-    assert response.mngr_knows_host is False
+    assert response.mngr_list_exit_code is None
+    assert response.mngr_list_stdout == ""
+    assert response.mngr_list_stderr == ""
+    assert response.mngr_list_error is not None
+    assert "No such file" in response.mngr_list_error
 
 
 def test_build_host_health_response_plugin_resolver_has_services_reflects_presence() -> None:
