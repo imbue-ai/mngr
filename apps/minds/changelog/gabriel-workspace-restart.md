@@ -109,3 +109,16 @@ Tiered system-interface restart for the minds recovery flow.
   out the entire diagnostic. The recovery page therefore renders
   meaningful per-workspace data even when an unrelated host on the same
   provider is wedged.
+- Quieter recovery-probe logs. The on-recovery INFO line now carries a
+  compact summary of the cached probe (host state, ssh_dead,
+  is_misconfigured, services-agent lifecycle, plugin discovery, probe
+  inner port + curl status) instead of dumping the full
+  ``HostHealthResponse`` JSON -- the JSON dump otherwise carried
+  multi-KB ``mngr_list_*`` and ``probe.raw_stdout`` payloads with no
+  programmatic consumer. The recovery probe's ``mngr exec`` subprocess
+  also no longer emits a per-failure WARNING with its long
+  base64-encoded inner script in the argv: probe failures (e.g. SSH
+  transport down on a stopped host) are an expected diagnostic outcome
+  already captured by the Layer-2 host-state INFO line via
+  ``ssh_dead=True``. Restart-step and ``mngr list`` failures still emit
+  the WARNING as before.

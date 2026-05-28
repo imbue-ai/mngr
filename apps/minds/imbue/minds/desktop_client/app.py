@@ -1804,7 +1804,10 @@ def _handle_recovery_page(
 
 
 def _run_mngr_subprocess(
-    concurrency_group: ConcurrencyGroup, argv: list[str], env: dict[str, str]
+    concurrency_group: ConcurrencyGroup,
+    argv: list[str],
+    env: dict[str, str],
+    log_failures: bool = True,
 ) -> tuple[FinishedProcess | None, str | None]:
     """Run an ``mngr`` subprocess to completion and classify the outcome.
 
@@ -1815,6 +1818,12 @@ def _run_mngr_subprocess(
         failed, or None on a clean exit (returncode 0, not timed out).
     Shared by ``_run_mngr_command`` (which forwards the reason) and
     ``_capture_mngr_command`` (which needs the stdout on success).
+
+    ``log_failures`` controls whether non-clean outcomes are emitted at
+    WARNING. The recovery-diagnostics probe sets it to False because the
+    Layer-2 host-state INFO log at the endpoint level already captures
+    the outcome (``ssh_dead`` etc.), and the probe argv carries a long
+    base64-encoded inner script that adds nothing to operator diagnostics.
     """
     try:
         finished = concurrency_group.run_process_to_completion(
@@ -1827,17 +1836,20 @@ def _run_mngr_subprocess(
         # OSError covers fork/exec failures, RuntimeError the executor itself,
         # ConcurrencyGroupError the strand-level failures the group raises, and
         # TimeoutExpired any internal wait that surfaces it.
-        logger.warning("mngr command {} failed: {}", argv, exc)
+        if log_failures:
+            logger.warning("mngr command {} failed: {}", argv, exc)
         return None, str(exc)
     if finished.is_timed_out:
         # With is_checked_after=False the timeout ceiling does not raise; it
         # comes back as a finished process flagged is_timed_out (with a
         # signal-based returncode), so it must be detected explicitly here --
         # otherwise it would be misreported as a plain non-zero exit below.
-        logger.warning("mngr command {} timed out after {}s", argv, _RESTART_COMMAND_TIMEOUT_SECONDS)
+        if log_failures:
+            logger.warning("mngr command {} timed out after {}s", argv, _RESTART_COMMAND_TIMEOUT_SECONDS)
         return finished, f"timed out after {int(_RESTART_COMMAND_TIMEOUT_SECONDS)}s"
     if finished.returncode != 0:
-        logger.warning("mngr command {} exited {}: {}", argv, finished.returncode, finished.stderr)
+        if log_failures:
+            logger.warning("mngr command {} exited {}: {}", argv, finished.returncode, finished.stderr)
         return finished, f"exited {finished.returncode}: {finished.stderr.strip()}"
     return finished, None
 
@@ -1848,14 +1860,21 @@ def _run_mngr_command(concurrency_group: ConcurrencyGroup, argv: list[str], env:
     return failure_reason
 
 
-def _capture_mngr_command(concurrency_group: ConcurrencyGroup, argv: list[str], env: dict[str, str]) -> str | None:
+def _capture_mngr_command(
+    concurrency_group: ConcurrencyGroup,
+    argv: list[str],
+    env: dict[str, str],
+    log_failures: bool = True,
+) -> str | None:
     """Run a read-only ``mngr`` subprocess and return its stdout, or None if it failed.
 
     ``_run_mngr_command`` reports success/failure for restart steps and discards
     stdout; this is the counterpart for ``mngr`` queries whose stdout the caller
     needs to parse (currently the host-state probe).
+
+    ``log_failures`` is forwarded to ``_run_mngr_subprocess`` -- see its docstring.
     """
-    finished, failure_reason = _run_mngr_subprocess(concurrency_group, argv, env)
+    finished, failure_reason = _run_mngr_subprocess(concurrency_group, argv, env, log_failures=log_failures)
     if failure_reason is not None or finished is None:
         return None
     return finished.stdout
@@ -2241,9 +2260,12 @@ class _LogProbeOnRecoveryCallback(MutableModel):
     Registered with the health tracker so that when a workspace recovers
     (from STUCK, RESTARTING, or RESTART_FAILED back to HEALTHY), the most
     recent host-health probe response (cached by the host-health endpoint)
-    lands in a single INFO log line. The line includes either the probe
-    payload or a "(no probe observation cached)" marker so the operator
-    can correlate the recovery with the most recent observation.
+    lands in a single INFO log line as a compact summary -- key host /
+    transport / config booleans plus the in-container port/curl status,
+    not the full ``HostHealthResponse`` JSON, which would otherwise carry
+    multi-KB ``mngr_list_*`` and ``probe.raw_stdout`` payloads with no
+    programmatic consumer. A "(no probe observation cached)" marker is
+    logged when the endpoint was never hit for this workspace.
 
     Holds an :class:`_HostHealthCache` reference (a Pydantic model is passed
     through by identity, unlike a raw OrderedDict field which Pydantic
@@ -2265,7 +2287,28 @@ class _LogProbeOnRecoveryCallback(MutableModel):
         if response is None:
             logger.info("Workspace {} recovered (no probe observation cached)", agent_id)
             return
-        logger.info("Workspace {} recovered; final probe: {}", agent_id, response.model_dump_json())
+        # Compact summary rather than the full HostHealthResponse JSON: nothing
+        # consumes this log programmatically, and the full payload includes
+        # ``mngr_list_stdout`` / ``mngr_list_stderr`` / ``probe.raw_stdout``
+        # which can run to many KB on a real workspace. The fields below
+        # capture what was wrong at the last probe (host state, transport,
+        # config, services-agent lifecycle, plugin discovery, in-container
+        # port + curl) without the kitchen sink.
+        probe = response.probe
+        logger.info(
+            "Workspace {} recovered; final probe summary: "
+            "host_state={} ssh_dead={} is_misconfigured={} "
+            "services_agent_state={} plugin_has_services={} "
+            "probe_inner_port={} probe_curl_status={}",
+            agent_id,
+            response.host_state,
+            response.ssh_dead,
+            response.is_misconfigured,
+            response.services_agent_state,
+            response.plugin_resolver_has_services,
+            probe.inner_port,
+            probe.curl_status,
+        )
 
 
 def _run_batched_probe(
@@ -2286,7 +2329,11 @@ def _run_batched_probe(
     if services_agent_id is None:
         return ProbeRecord(ssh_dead=True)
     argv = build_probe_argv(mngr_binary, services_agent_id)
-    stdout = _capture_mngr_command(concurrency_group, argv, env)
+    # Suppress the per-failure WARNING from ``_run_mngr_subprocess``: the
+    # probe argv embeds a long base64-encoded inner script that adds nothing
+    # to operator diagnostics, and the Layer-2 host-state INFO log emitted
+    # by the endpoint already captures the outcome (e.g. ``ssh_dead=True``).
+    stdout = _capture_mngr_command(concurrency_group, argv, env, log_failures=False)
     return parse_probe_output(stdout)
 
 
