@@ -1060,6 +1060,33 @@ class _NoneFieldGeneratorPlugin:
         return None
 
 
+class _OfflineFieldGeneratorPlugin:
+    """Test plugin that registers offline field generators for agent listing."""
+
+    def __init__(self, plugin_name: str, generators: dict[str, Any]) -> None:
+        self._plugin_name = plugin_name
+        self._generators = generators
+
+    @hookimpl
+    def offline_agent_field_generators(self) -> tuple[str, dict[str, Any]] | None:
+        return (self._plugin_name, self._generators)
+
+
+def test_offline_agent_field_generators_hookspec_is_registered_and_collected(
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """The offline_agent_field_generators hookspec is registered and collects plugin results.
+
+    This mirrors the collection loop in list_agents, guarding against the hookspec
+    being missing (which would make the hook call silently return nothing)."""
+    generators = {"muted": lambda ref, host: True}
+    plugin_manager.register(_OfflineFieldGeneratorPlugin("kanpan", generators))
+
+    collected = [result for result in plugin_manager.hook.offline_agent_field_generators() if result is not None]
+
+    assert collected == [("kanpan", generators)]
+
+
 def _find_agent_by_name(result: ListResult, name: str) -> AgentDetails:
     """Find an agent by name in a ListResult, or raise."""
     for agent in result.agents:
@@ -1283,6 +1310,7 @@ class _RaisingDetailProviderInstance(MockProviderInstance):
         host_ref: DiscoveredHost,
         agent_refs: Sequence[DiscoveredAgent],
         field_generators: Mapping[str, Any] | None = None,
+        offline_field_generators: Mapping[str, Any] | None = None,
         on_error: Any = None,
     ) -> tuple[HostDetails, list[AgentDetails]]:
         raise MngrError("simulated detail retrieval failure from test")
@@ -1443,6 +1471,7 @@ def _make_list_params(
     on_agent: Any = None,
     include_filters: tuple[str, ...] = (),
     exclude_filters: tuple[str, ...] = (),
+    offline_field_generators: dict[str, dict[str, Any]] | None = None,
 ) -> _ListAgentsParams:
     """Build a _ListAgentsParams for testing, with optional CEL filters."""
     compiled_include: list[Any] = []
@@ -1455,6 +1484,7 @@ def _make_list_params(
         error_behavior=error_behavior,
         on_agent=on_agent,
         on_error=on_error,
+        offline_field_generators=offline_field_generators or {},
     )
 
 
@@ -2045,6 +2075,56 @@ def test_collect_and_emit_details_for_host_include_filter_keeps_matching_agent(
     assert len(result.agents) == 1
     assert str(result.agents[0].name) == "target-agent"
     assert len(collected_agents) == 1
+
+
+def test_collect_and_emit_details_for_host_populates_offline_plugin_data(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """The offline field generators threaded through params populate plugin data for offline agents."""
+    host_id = HostId.generate()
+    provider_name = "test-local"
+    provider = _make_offline_test_provider(host_id, provider_name, temp_mngr_ctx)
+
+    host_ref = DiscoveredHost(
+        host_id=host_id,
+        host_name=HostName("test-host"),
+        provider_name=ProviderInstanceName(provider_name),
+    )
+    agent_ref = DiscoveredAgent(
+        host_id=host_id,
+        agent_id=AgentId.generate(),
+        agent_name=AgentName("offline-agent"),
+        provider_name=ProviderInstanceName(provider_name),
+        certified_data={
+            "type": "generic",
+            "command": "sleep 1",
+            "work_dir": "/tmp",
+            "plugin": {"kanpan": {"muted": True}},
+        },
+    )
+
+    result = ListResult()
+    lock = Lock()
+    params = _make_list_params(
+        error_behavior=ErrorBehavior.CONTINUE,
+        offline_field_generators={
+            "kanpan": {
+                "muted": lambda ref, host: ref.certified_data.get("plugin", {}).get("kanpan", {}).get("muted", False),
+            }
+        },
+    )
+
+    _collect_and_emit_details_for_host(
+        host_ref=host_ref,
+        agent_refs=[agent_ref],
+        provider=provider,
+        params=params,
+        result=result,
+        results_lock=lock,
+    )
+
+    assert len(result.agents) == 1
+    assert result.agents[0].plugin == {"kanpan": {"muted": True}}
 
 
 def test_collect_and_emit_details_for_host_include_filter_drops_non_matching_agent(

@@ -14,11 +14,13 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import ProviderInstanceConfig
 from imbue.mngr.interfaces.agent import AgentInterface
+from imbue.mngr.interfaces.data_types import HostDetails
 from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.interfaces.host import HostInterface
 from imbue.mngr.interfaces.host import NewHostOptions
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.interfaces.provider_backend import ProviderBackendInterface
+from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import ProviderInstanceName
 
@@ -432,6 +434,24 @@ def agent_field_generators() -> tuple[str, dict[str, Callable[[AgentInterface, O
     Each plugin returns (plugin_name, generators) where generators maps field names
     to callables that receive (agent, host) and return a field value (or None to omit).
     Fields are namespaced under plugin.<plugin_name> in AgentDetails.
+
+    Return None to contribute nothing. Generators must be thread-safe and fast
+    (they run per-agent in the listing hot path).
+    """
+
+
+@hookspec
+def offline_agent_field_generators() -> tuple[str, dict[str, Callable[[DiscoveredAgent, HostDetails], Any]]] | None:
+    """[experimental] Return field generators for offline (host-unreachable) agents during listing.
+
+    This is the offline counterpart to ``agent_field_generators``. When an agent's
+    host is offline or unreachable, no live agent/host objects exist, so the online
+    generators (which receive ``(agent, host)``) cannot run. Instead, each plugin
+    returns (plugin_name, generators) where generators maps field names to callables
+    that receive the offline ``(discovered_agent, host_details)`` and return a field
+    value (or None to omit). The ``discovered_agent`` exposes the cached ``data.json``
+    via ``certified_data``. Fields are namespaced under plugin.<plugin_name> in
+    AgentDetails, exactly like the online path.
 
     Return None to contribute nothing. Generators must be thread-safe and fast
     (they run per-agent in the listing hot path).
