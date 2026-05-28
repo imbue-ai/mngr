@@ -15,62 +15,73 @@ Across the usage-driven recipes below:
 
 ## Use up an about-to-expire 5h window
 
-Fire near the end of a 5h window when there's budget left both in that window
-and (on pace) in the week, relaunch a known agent, and schedule a stop for the
-window boundary so it doesn't bleed into the next window:
+Dedicate an agent to this and let one cron job own its whole lifecycle: it starts
+the agent during the tail of a 5h window when there's budget to spare and the week
+is on pace, then stops it once the window rolls over or the week falls off pace.
+Branching on the agent's state each tick needs no `at`/`atd` and no second job --
+and letting it run one tick into the fresh window warms that window too.
 
 ```bash
 #!/usr/bin/env bash
-# use-extra.sh -- relaunch an agent to use up an about-to-expire 5h window.
+# use-extra.sh -- run a DEDICATED agent during the tail of a 5h window when
+# there's budget to spare, and stop it once the window rolls over or the week is
+# no longer on pace. One cron job owns the whole start/stop lifecycle (no `at`).
+# Point it at an agent set aside for this -- it gets started and stopped
+# automatically, so don't aim it at one you're actively driving yourself.
 set -euo pipefail
 
 AGENT="my-agent"
 
 snapshot="$(mngr usage --format json)"
 
-# Scope to the Claude writer's account-level windows, and skip stale readings
-# (is_stale also covers a window that already reset -- its cached percentage is
-# from the previous window, so acting on it would be wrong). Emit the window's
-# seconds-until-reset only when:
-#   - >90% of the 5h window has elapsed (we're near its end), AND
-#   - <80% of the 5h window is used (budget left to burn before it resets), AND
-#   - the week's budget looks on track to go partly unused -- a "pace check": are
-#     we spending it slower than the week is elapsing? If so there's headroom to
-#     spare, so filling the expiring 5h window costs us nothing we'd miss. A
-#     safety margin (widest early in the cycle, tapering to zero by its end) keeps
-#     us clear of your own usage. With elapsed% = how far into the rolling 7-day
-#     cycle we are:
-#     used% < elapsed% * (1 - 0.30 * (100 - elapsed%) / 100)
-secs="$(jq -r '
+# From account-level usage, decide whether the agent should be running now. We
+# keep age-stale readings (a quiet account is exactly when there's leftover
+# budget), but require the 5h window to still be OPEN (seconds_until_reset > 0):
+# once it has reset its cached used%/elapsed% are from the previous window. Emit:
+#   START -- worth (re)launching: last 10% of an open 5h window, <80% of it used
+#            (budget left to burn), and the week on pace to spare some.
+#   KEEP  -- should stay running, but not worth a fresh start (>=80% used).
+#   ""    -- shouldn't be running now (window rolled over, or week off pace).
+# Pace check: used% < elapsed% * (1 - 0.30 * (100 - elapsed%) / 100), with
+# elapsed% = how far into the rolling 7-day cycle we are -- a tapering safety
+# margin (widest early, zero by cycle's end) that keeps us clear of your usage.
+status="$(jq -r '
   .sources[]
-  | select(.source == "claude" and .is_stale == false)
+  | select(.source == "claude")
+  | select((.five_hour.seconds_until_reset // 0) > 0)
   | select((.five_hour.elapsed_percentage // 0) > 90)
-  | select((.five_hour.used_percentage    // 100) < 80)
   | (.seven_day.elapsed_percentage // 0) as $week_elapsed
-  | select((.seven_day.used_percentage // 100) < $week_elapsed * (1 - 0.30 * (100 - $week_elapsed) / 100))
-  | .five_hour.seconds_until_reset
+  | select((.seven_day.used_percentage // 100)
+           < $week_elapsed * (1 - 0.30 * (100 - $week_elapsed) / 100))
+  | if (.five_hour.used_percentage // 100) < 80 then "START" else "KEEP" end
 ' <<<"$snapshot")"
 
-# Nothing matched the predicate this tick -> nothing to do.
-[[ -n "$secs" ]] || exit 0
+# Branch on the agent's current lifecycle state.
+state="$(mngr list --include "name == \"$AGENT\"" --format json | jq -r '.agents[0].state // "MISSING"')"
 
-# Only (re)launch a STOPPED agent. If it's RUNNING/WAITING it's already working;
-# if it's DONE or in any other state, leave it be rather than assume a relaunch
-# is the right move.
-mngr list --include "name == \"$AGENT\" && state == \"STOPPED\"" --ids | grep -q . || exit 0
-
-mngr start "$AGENT" && mngr message "$AGENT" --message "continue where you left off"
-
-# Schedule the stop just past the window boundary, rounding UP to the minute
-# (`at`'s resolution) so the agent's first request lands in the fresh window and
-# warms it. Requires a running `at` daemon (`atd`); without one, a detached timer
-# with a little grace works too:
-#   nohup bash -c "sleep $((secs + 30)) && mngr stop $AGENT" >/dev/null 2>&1 &
-echo "mngr stop $AGENT" | at "now + $(( (secs + 59) / 60 )) minutes"
+case "$state" in
+  STOPPED)
+    # Launch into the window's tail. Running one tick past the reset warms the
+    # fresh window; the next tick then stops us (status goes empty).
+    if [[ "$status" == "START" ]]; then
+      mngr start "$AGENT" && mngr message "$AGENT" --message "continue where you left off"
+    fi
+    ;;
+  RUNNING | WAITING)
+    # Stop once the reason to run is gone: window rolled over (we're early in a
+    # fresh one) or the week fell off pace.
+    if [[ -z "$status" ]]; then
+      mngr stop "$AGENT"
+    fi
+    ;;
+  *)
+    : # MISSING / DONE / REPLACED / UNKNOWN -- leave it alone.
+    ;;
+esac
 ```
 
 ```cron
-# cron starts with a bare PATH; set one that finds mngr, jq, and at (adjust to your install)
+# cron starts with a bare PATH; set one that finds mngr and jq (adjust to your install)
 PATH=/usr/local/bin:/usr/bin:/bin:/home/you/.local/bin
 */10 * * * * /path/to/use-extra.sh
 ```
@@ -85,42 +96,49 @@ you a fresh quota window sooner. This recipe keeps a window warm automatically:
 the moment the last one elapses, it fires a one-off prompt to open the next.
 
 `resets_at < now` means the last recorded 5h window boundary is already past --
-a fresh window is open and unclaimed (the past-reset half of `is_stale`). Fire a
-throwaway headless turn then -- `claude -p` runs one non-interactive prompt and
-exits -- to open the new window without standing up a full agent:
+a fresh window is open and unclaimed (the past-reset half of `is_stale`). Nudge a
+dedicated warming agent then to fire one prompt and open the new window. We reuse
+one agent across boundaries (create once, then start/message/stop) and never
+destroy it: a *stopped* agent keeps its events, so the snapshot reflects the new
+window and the check below won't re-fire until the next window rolls -- no marker
+file needed.
 
 ```bash
 #!/usr/bin/env bash
 # warm-window.sh -- open a fresh 5h window as soon as the last one has elapsed.
 set -euo pipefail
 
+WARMER="window-warmer"
+
 snapshot="$(mngr usage --format json)"
 
-# Emit the elapsed window's resets_at (a unix ts) when it lies in the past. We
-# compare against the snapshot's own `now` rather than keying off is_stale, which
-# would also fire on merely age-stale data whose window has NOT yet reset.
-elapsed_at="$(jq -r '
+# Has the last recorded 5h window already reset? (resets_at in the past, compared
+# to the snapshot's own `now` -- not is_stale, which would also fire on merely
+# age-stale data whose window has NOT yet reset.)
+elapsed="$(jq -r '
   .now as $now
   | .sources[]
   | select(.source == "claude")
   | select((.five_hour.resets_at // 0) > 0 and .five_hour.resets_at < $now)
-  | .five_hour.resets_at
+  | "yes"
 ' <<<"$snapshot")"
 
-[[ -n "$elapsed_at" ]] || exit 0
+[[ "$elapsed" == "yes" ]] || exit 0
 
-# Warm at most once per boundary. Headless `claude -p` may not refresh the usage
-# reading (the statusline writer captures interactive sessions), so without this
-# marker the script could re-warm every tick until your next real session lands.
-# Keying the marker on the elapsed resets_at makes it a no-op until the *next*
-# window elapses with a different boundary.
-marker="$HOME/.cache/mngr-warm-window-last-resets-at"
-[[ "$(cat "$marker" 2>/dev/null)" == "$elapsed_at" ]] && exit 0
-mkdir -p "$(dirname "$marker")"
-printf '%s' "$elapsed_at" > "$marker"
+# Make sure the warmer is up: create it the first time (pinned to cheap Haiku),
+# else (re)start the one we stopped last boundary (`|| true` tolerates it already
+# running from an interrupted run).
+if mngr list --include "name == \"$WARMER\"" --ids | grep -q .; then
+  mngr start "$WARMER" 2>/dev/null || true
+else
+  mngr create "$WARMER" claude --no-connect -- --model haiku
+fi
 
-# One cheap non-interactive turn is enough to start the next 5h window.
-claude -p 'just say hi' --model haiku >/dev/null
+# One cheap prompt opens the new 5h window. Wait for the turn to finish, then STOP
+# (don't destroy) -- the agent and its fresh reading persist for reuse next time.
+mngr message "$WARMER" --message 'just say hi'
+mngr wait "$WARMER" WAITING --timeout 5m
+mngr stop "$WARMER"
 ```
 
 ```cron
@@ -132,10 +150,7 @@ PATH=/usr/local/bin:/usr/bin:/bin:/home/you/.local/bin
 ## Dispatch tasks from a queue directory
 
 Drop one Markdown file per task into a `todo/` directory and let `cron` fan them
-out, capped at two in flight. Unlike the recipes above, this *creates* a fresh
-agent per task, named after the task file. The concurrency cap is **by label,
-not by name**: every pool agent shares the `queue=tasks` label, so counting live
-members is one `mngr list` filter no matter what the agents are called.
+out, capped at two in flight.
 
 ```bash
 #!/usr/bin/env bash
@@ -144,7 +159,16 @@ set -euo pipefail
 
 TODO_DIR="$HOME/agent-tasks/todo"
 DOING_DIR="$HOME/agent-tasks/in-progress"
+PROJECT_DIR="$HOME/code/my-project"   # all tasks target this repo
 MAX_PARALLEL=2
+
+# Retire our own finished agents first: pool members that have gone WAITING (done
+# with their turn). The queue=tasks label is what marks them as ours -- agents you
+# start yourself don't carry it -- so this never stops your own work. Stopping
+# them frees pool slots for the cap below.
+for a in $(mngr list --include 'labels.queue == "tasks" && state == "WAITING"' --format '{name}'); do
+  mngr stop "$a"
+done
 
 # Count pool agents still alive (RUNNING or WAITING; not STOPPED/DONE/etc).
 # Capping by the shared `queue=tasks` label -- rather than by name -- lets each
@@ -169,10 +193,11 @@ mv "$task_file" "$claimed" || exit 0
 name="$(basename "$claimed" .md | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9]+/-/g; s/^-+//; s/-+$//')"
 [[ -n "$name" ]] || name="task-$(date +%s)"
 
-# Create (auto-starts), tag with the pool label so the cap above can see it, and
-# hand it the task file as its first message. --no-connect keeps it
-# non-interactive (cron has no TTY to attach a tmux session to).
-mngr create "$name" claude --label queue=tasks --message-file "$claimed" --no-connect
+# Create (auto-starts) from the project repo, tag with the pool label so the cap
+# above can see it, and hand it the task file as its first message. --no-connect
+# keeps it non-interactive (cron has no TTY to attach a tmux session to).
+mngr create "$name" claude --from ":$PROJECT_DIR" --label queue=tasks \
+  --message-file "$claimed" --no-connect
 ```
 
 ```cron
@@ -181,7 +206,6 @@ PATH=/usr/local/bin:/usr/bin:/bin:/home/you/.local/bin
 */10 * * * * /path/to/dispatch-task.sh
 ```
 
-Note: a finished agent sits in `WAITING`, which still counts as alive and so
-keeps holding a pool slot. To free slots automatically, create with an idle
-timeout (e.g. add `--idle-timeout 30m`) so idle agents retire themselves, or
-stop them in a separate cleanup step.
+Note: this treats `WAITING` (the agent finished its turn) as "task done" and
+stops it, freeing the slot. A task that needs a follow-up nudge would need extra
+logic.
