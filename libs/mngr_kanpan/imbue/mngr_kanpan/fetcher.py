@@ -230,10 +230,10 @@ def toggle_agent_mute(mngr_ctx: MngrContext, agent_name: AgentName) -> bool:
         mngr_ctx=mngr_ctx,
     )
     plugin_data = agent.get_plugin_data(PLUGIN_NAME)
-    is_muted = not plugin_data.get(FIELD_MUTED, False)
-    plugin_data[FIELD_MUTED] = is_muted
+    muted = not plugin_data.get(FIELD_MUTED, False)
+    plugin_data[FIELD_MUTED] = muted
     agent.set_plugin_data(PLUGIN_NAME, plugin_data)
-    return is_muted
+    return muted
 
 
 def _cache_file_path(mngr_ctx: MngrContext) -> Path:
