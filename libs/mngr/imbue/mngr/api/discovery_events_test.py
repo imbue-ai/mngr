@@ -198,10 +198,10 @@ def test_discovered_agent_from_agent_details_preserves_plugin_fields() -> None:
     details = make_test_agent_details(
         host_id=host_id,
         provider_name=provider_name,
-        plugin={"kanpan": {"muted": True}},
+        plugin={"demo_plugin": {"flag": True}},
     )
     discovered = discovered_agent_from_agent_details(details)
-    assert discovered.certified_data["plugin"] == {"kanpan": {"muted": True}}
+    assert discovered.certified_data["plugin"] == {"demo_plugin": {"flag": True}}
 
 
 def test_discovered_host_from_agent_details_preserves_key_fields() -> None:

@@ -685,7 +685,7 @@ def _collect_and_emit_details_for_host(
     _host_details, agent_details_list = provider.get_host_and_agent_details(
         host_ref,
         agent_refs,
-        params.field_generators,
+        field_generators=params.field_generators,
         offline_field_generators=params.offline_field_generators,
         on_error=lambda source, exc: _handle_listing_error(source, exc, params, result, results_lock),
     )

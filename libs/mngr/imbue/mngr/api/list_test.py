@@ -1083,7 +1083,7 @@ def test_offline_agent_field_generators_hookspec_is_registered_and_collected(
     # plugins (e.g. kanpan) may also register this hook. Use a unique test-plugin name
     # and assert membership rather than exact equality so the test stays correct
     # regardless of which real plugins are present.
-    generators = {"muted": lambda ref, host: True}
+    generators = {"flag": lambda ref, host: True}
     plugin_manager.register(_OfflineFieldGeneratorPlugin("test_offline_fields", generators))
 
     collected = [result for result in plugin_manager.hook.offline_agent_field_generators() if result is not None]
@@ -2103,7 +2103,7 @@ def test_collect_and_emit_details_for_host_populates_offline_plugin_data(
             "type": "generic",
             "command": "sleep 1",
             "work_dir": "/tmp",
-            "plugin": {"kanpan": {"muted": True}},
+            "plugin": {"demo_plugin": {"flag": True}},
         },
     )
 
@@ -2112,8 +2112,10 @@ def test_collect_and_emit_details_for_host_populates_offline_plugin_data(
     params = _make_list_params(
         error_behavior=ErrorBehavior.CONTINUE,
         offline_field_generators={
-            "kanpan": {
-                "muted": lambda ref, host: ref.certified_data.get("plugin", {}).get("kanpan", {}).get("muted", False),
+            "demo_plugin": {
+                "flag": lambda ref, host: ref.certified_data.get("plugin", {})
+                .get("demo_plugin", {})
+                .get("flag", False),
             }
         },
     )
@@ -2128,7 +2130,7 @@ def test_collect_and_emit_details_for_host_populates_offline_plugin_data(
     )
 
     assert len(result.agents) == 1
-    assert result.agents[0].plugin == {"kanpan": {"muted": True}}
+    assert result.agents[0].plugin == {"demo_plugin": {"flag": True}}
 
 
 def test_collect_and_emit_details_for_host_include_filter_drops_non_matching_agent(

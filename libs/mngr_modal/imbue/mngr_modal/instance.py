@@ -2489,7 +2489,7 @@ log "=== Shutdown script completed ==="
                     return super().get_host_and_agent_details(
                         host_ref,
                         agent_refs,
-                        field_generators,
+                        field_generators=field_generators,
                         offline_field_generators=offline_field_generators,
                         on_error=on_error,
                     )
@@ -2514,7 +2514,7 @@ log "=== Shutdown script completed ==="
                 return super().get_host_and_agent_details(
                     host_ref,
                     agent_refs,
-                    field_generators,
+                    field_generators=field_generators,
                     offline_field_generators=offline_field_generators,
                     on_error=on_error,
                 )
