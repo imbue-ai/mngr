@@ -598,16 +598,13 @@ def test_create_bind_volume_raises_on_docker_failure() -> None:
         _create_bind_volume_on_outer(outer, volume_name="my-vol", device_path=Path("/mngr-btrfs/abcd"))
 
 
-def test_seed_host_volume_layout_mkdirs_host_dir_and_persisted_agents() -> None:
+def test_seed_host_volume_layout_mkdirs_host_dir_and_agents() -> None:
     outer = _outer(CommandResult(stdout="", stderr="", success=True))
     _seed_host_volume_layout_on_outer(outer, Path("/mngr-btrfs/abcd"))
     cmd = _stub(outer).recorded[0].command
     assert cmd.startswith("mkdir -p")
     assert "/mngr-btrfs/abcd/host_dir" in cmd
-    # ``persisted_agents`` (not ``agents``) deliberately, to avoid name-
-    # colliding with mngr core's per-agent state directories under the
-    # same volume root once the volume is mounted at the host_dir.
-    assert "/mngr-btrfs/abcd/persisted_agents" in cmd
+    assert "/mngr-btrfs/abcd/agents" in cmd
 
 
 def test_seed_host_volume_layout_raises_on_mkdir_failure() -> None:
