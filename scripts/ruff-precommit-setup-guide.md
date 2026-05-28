@@ -89,58 +89,23 @@ The hook runs two ruff commands in sequence:
    - `--force-exclude`: Respects exclude patterns
    - `--config pyproject.toml`: Uses config from pyproject.toml
 
-## Step 4: Create Git Hook Scripts
+## Step 4: Install the Hooks
 
-Create `scripts/githooks/` directory with these files:
-
-### `scripts/githooks/install.sh`
-```bash
-#!/usr/bin/env bash
-
-set -euo pipefail
-
-# Go to the root of the repo
-cd -- "$(dirname -- "${BASH_SOURCE[0]}")"
-cd ../..
-
-mkdir -p .git/hooks
-
-ln -sf ../../scripts/githooks/pre-commit .git/hooks/pre-commit
-```
-
-### `scripts/githooks/pre-commit`
-```bash
-#!/usr/bin/env bash
-#
-# This script uses uv to call pre-commit to run hooks on files about to be committed.
-#
-# Why not use `pre-commit install` directly?
-# `pre-commit install` depends on the system Python version, whose packages may
-# not be kept up-to-date. Using uv ensures consistent dependency management.
-#
-HERE=$(cd "$(dirname "$0")" && pwd)
-
-# Run pre-commit through uv (last command so return code propagates to git)
-uv run pre-commit hook-impl --config=.pre-commit-config.yaml --hook-type=pre-commit --hook-dir "$HERE" -- "$@"
-```
-
-Make them executable:
-```bash
-chmod +x scripts/githooks/install.sh
-chmod +x scripts/githooks/pre-commit
-```
-
-## Step 5: Install the Hooks
-
-From your repository root:
+From your repository root, install the git hooks with pre-commit, run through `uv`:
 
 ```bash
-./scripts/githooks/install.sh
+uv run pre-commit install
 ```
 
-This creates a symlink from `.git/hooks/pre-commit` to your script.
+This installs a git hook for each type listed in `default_install_hook_types`.
 
-## Step 6: Test the Setup
+Running it through `uv run` matters: the hook scripts pre-commit generates pin
+their interpreter to the uv-managed virtual environment (`.venv`), so commits and
+pushes use the same `pre-commit` and `ruff` versions as the rest of the project
+rather than whatever system Python happens to be on `PATH`. This is why no
+hand-written wrapper scripts are needed.
+
+## Step 5: Test the Setup
 
 1. Make a change to a Python file
 2. Stage and commit:
@@ -165,5 +130,5 @@ uv run pre-commit run --all-files
 ## Troubleshooting
 
 ### pre-commit not found by uv
-- Run `uv sync` to install dependencies
+- Run `uv sync --all-packages` to install dependencies
 - Ensure pre-commit is in your pyproject.toml dependencies
