@@ -13,9 +13,9 @@
 ### Key design decisions (from Q&A)
 
 - **No prefix scoping.** Separate bucket per host; each bucket gets its own scoped credential.
-- **Bucket naming / ownership.** The server derives the real R2 name as `<user_id_prefix>--<slug>` where `user_id_prefix` is the **full SuperTokens user id with hyphens stripped (32 hex chars)** -- NOT the 16-hex truncation tunnels use. Using the full id eliminates any cross-user collision risk for bucket ownership; it leaves `63 - 32 - 2 = 29` chars for the slug. The user only ever passes/sees their **short** name; the full R2 name/URL is shown back in responses.
+- **Bucket naming / ownership.** The server derives the real R2 name as `<user_id_prefix>--<slug>` where `user_id_prefix` is the **16-hex-char SuperTokens prefix** already used for tunnel ownership (= `AdminAuth.username`). Keeping it short leaves `63 - 16 - 2 = 45` chars for the slug -- deliberately roomy so a host id can be encoded into the name in the future. The user only ever passes/sees their **short** name; the full R2 name/URL is shown back in responses. (Collision risk on a 64-bit prefix is negligible and identical to today's tunnel behavior.)
 - **Listing is double-checked.** Buckets are listed via the R2 `name_contains` filter, then **re-verified in our code** to start with `<user_id_prefix>--` (mirrors the tunnel `startswith` ownership check) so a crafted bucket name cannot grant cross-user access.
-- **Owner identity.** The `r2_keys` table stores the **full SuperTokens user id** (with hyphens) as the owner -- exact ownership checks + auditing, matching what the existing LiteLLM `/keys/*` endpoints already do. The 32-hex bucket-name prefix is just the same id hyphen-stripped, so the two stay consistent.
+- **Owner identity.** The `r2_keys` table stores the **full SuperTokens user id** (with hyphens) as the owner -- exact ownership checks + auditing, matching what the existing LiteLLM `/keys/*` endpoints already do. The 16-hex bucket-name prefix is the truncation of that same id (its first 16 hex chars), so a key's bucket can always be tied back to its owner.
 - **Credential model.** Access Key ID = the Cloudflare token `id`; Secret Access Key = `sha256(token value)`. The token value is a secret: returned to the user once at creation and never persisted.
 - **State.** Buckets are not tracked in our DB (listed from the R2 API). Keys **are** tracked in a new `r2_keys` table in the connector's existing Neon DB.
 - **Single broadened Cloudflare token.** Reuse the existing `CLOUDFLARE_API_TOKEN`, widened to include R2 admin + "API Tokens Write" (rather than a separate secret). Existing deployed tiers must have this widened manually -- see Migration / rollout.
@@ -30,7 +30,7 @@
   - Emits JSON with the bucket info **and** the default key's credentials inline (S3 endpoint, full bucket name, access key id, secret) -- one round trip.
   - **Errors** if the derived bucket already exists for that user (not idempotent).
   - **Errors** if the user is at the per-account bucket cap.
-  - **Errors** if the slugified name violates R2 rules after the prefix is prepended (final name 3-63 chars, lowercase alphanumeric + hyphens, no leading/trailing hyphen; with the 32-hex prefix + `--`, the slug budget is 29 chars).
+  - **Errors** if the slugified name violates R2 rules after the prefix is prepended (final name 3-63 chars, lowercase alphanumeric + hyphens, no leading/trailing hyphen; with the 16-hex prefix + `--`, the slug budget is 45 chars).
 - `mngr imbue_cloud bucket list` -- lists all of the caller's buckets (full R2 name + S3 endpoint), filtered via `name_contains` then re-verified by prefix.
 - `mngr imbue_cloud bucket info <name>` -- returns bucket metadata only (full R2 name, S3 endpoint). Keys come from `bucket keys list`.
 - `mngr imbue_cloud bucket destroy <name>`
@@ -68,9 +68,9 @@ This file is intentionally self-contained (stdlib + 3rd-party only, no monorepo 
   - `CreateKeyRequest { alias: str | None = None, access: str = "readwrite" }`
   - `KeyInfo { access_key_id: str, bucket_name: str, access: str, alias: str | None, created_at: str }`
   - Validate `access` against `{"read", "readwrite"}`; validate `name` with a field validator that rejects names which (after prefixing) break R2 rules.
-- **Owner / prefix derivation.** Bucket endpoints derive the owner from the full user id via `_get_user_id_from_access_token(...)` (NOT `admin.username`, which is the 16-hex truncation). The bucket-name prefix is that full id hyphen-stripped (`user_id.replace("-", "")`, 32 hex chars); the `r2_keys.owner_user_id` column stores the full id verbatim (with hyphens).
+- **Owner / prefix derivation.** The bucket-name prefix is the existing 16-hex `AdminAuth.username` (first 16 hex of the SuperTokens user id). The `r2_keys.owner_user_id` column separately stores the **full** user id (with hyphens), obtained via `_get_user_id_from_access_token(...)`. So each bucket endpoint resolves both: the 16-hex prefix for naming/ownership of buckets, and the full id for the key DB rows.
 - **Naming helpers** (mirror the existing tunnel helpers):
-  - `make_bucket_name(user_id_prefix, short_name) -> str` -> `f"{user_id_prefix}--{slug}"` (prefix = 32-hex hyphen-stripped user id) with a `slugify` (lowercase, alphanumeric + single hyphens, collapse runs).
+  - `make_bucket_name(user_id_prefix, short_name) -> str` -> `f"{user_id_prefix}--{slug}"` (prefix = 16-hex `AdminAuth.username`) with a `slugify` (lowercase, alphanumeric + single hyphens, collapse runs).
   - `verify_bucket_ownership(bucket_name, user_id_prefix)` -> raise on missing `f"{user_id_prefix}--"` prefix.
   - `_validate_r2_bucket_name(name)` -> enforce 3-63, lowercase alnum + hyphen, no leading/trailing hyphen.
   - Constant `_MAX_BUCKETS_PER_ACCOUNT = 50`.
@@ -165,7 +165,7 @@ Each phase ends in a working (if incomplete) system.
 - **Plugin unit tests**: client error mapping (`409`/`404` -> typed errors); data_type (de)serialization incl. `R2BucketAccess` <-> `read`/`readwrite`; CLI arg parsing / JSON output shape (using a fake/served connector or the existing test fixtures).
 - **Migration test**: extend the existing "insert has required columns" style check so the `r2_keys` schema and the `add_key` INSERT can't drift.
 - **Manual verification** (during development, not crystallized): real connector + real R2 -- create bucket, mint read-only + read-write keys, confirm S3 access honors the scope, destroy fails while non-empty, succeeds after emptying, tokens actually revoked in Cloudflare.
-- **Edge cases**: duplicate bucket name; slug collapsing two distinct names to the same slug; very long user short name overflowing the 29-char slug budget; CF token-create failure mid-`bucket create` -> assert the bucket is best-effort deleted and the call raises.
+- **Edge cases**: duplicate bucket name; slug collapsing two distinct names to the same slug; very long user short name overflowing the 45-char slug budget; CF token-create failure mid-`bucket create` -> assert the bucket is best-effort deleted and the call raises.
 - Run the full suite via `just test-offload`; iterate locally with `just test-quick`.
 
 ## Open Questions
@@ -177,4 +177,4 @@ Each phase ends in a working (if incomplete) system.
 - **R2 permission-group UUIDs** -> look them up at runtime (`GET /accounts/{acct}/tokens/permission_groups`) and cache, NOT hard-coded -- the connector serves multiple Cloudflare accounts across deploy environments.
 - **Partial-failure rollback on `bucket create`** -> best-effort delete the just-created bucket, then raise (keep create atomic).
 - **`dev` changelog** -> not required for the `.minds/template/cloudflare.sh` edit; only the two project changelog entries are needed.
-- **Owner identity in `r2_keys`** -> store the **full** SuperTokens user id (with hyphens) as the owner column; the 32-hex bucket-name prefix is the same id hyphen-stripped.
+- **Owner identity in `r2_keys`** -> store the **full** SuperTokens user id (with hyphens) as the owner column. The bucket-name prefix stays the **16-hex** truncation (matches tunnels) -- kept short on purpose to leave a 45-char slug budget so a host id can be encoded into bucket names later.
