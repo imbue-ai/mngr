@@ -33,9 +33,7 @@ class SystemInterfaceBackendFailureReason(UpperCaseStrEnum):
       real system interface serves its SPA index for every unmatched ``GET``
       (a catch-all route), so it never 404s a page/route load -- a 404 reaching
       the proxy means whatever is answering on the port is not behaving like
-      the system interface (e.g. a different process has bound the port). This
-      is only a hint: like the other reasons it merely enrolls the agent as a
-      probe suspect; the minds background probe loop confirms STUCK.
+      the system interface (e.g. a different process has bound the port).
     - ``UNRESOLVED``: the backend resolver had no entry for the agent.
     """
 

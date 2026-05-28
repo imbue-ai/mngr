@@ -37,18 +37,15 @@ from imbue.mngr.primitives import AgentId
 
 PROBE_SENTINEL: Final[str] = "===PROBE-READY==="
 
-# Hard ceiling for a single batched ``mngr exec``. Bounded so a wedged
-# container can't gate the recovery UI. Only two of the inner checks spawn
-# subprocesses (``tmux ls`` at 1s and ``curl`` at 2s); the TOML parse and
-# the ``/proc/net/tcp`` LISTEN scan run in-process and effectively instantly.
-# The subprocess timeouts sum to a worst case of 1+2 = 3s, so the 5s ceiling
-# leaves a comfortable margin while still keeping a wedged container from
-# hanging the recovery UI.
+# Hard ceiling for a single batched ``mngr exec``, so a wedged container can't
+# gate the recovery UI. Only two of the inner checks spawn subprocesses
+# (``tmux ls`` at 1s and ``curl`` at 2s, summing to 3s worst case); the TOML
+# parse and the ``/proc/net/tcp`` LISTEN scan run in-process. 5s leaves margin.
 PROBE_TIMEOUT_SECONDS: Final[float] = 5.0
 
 
 # Inner Python script executed on the agent's host, loaded from a sibling
-# .txt resource so the in-container script's pattern matches (tmllib import,
+# .txt resource so the in-container script's patterns (tomllib import,
 # subprocess.run calls, broad Exception catches, ...) don't trip minds-side
 # ratchets that only inspect ``.py`` files. The script is then base64-encoded
 # in ``build_probe_shell_command`` so the outer ``mngr exec`` argv stays a
@@ -559,9 +556,9 @@ def _classify_dispatch_tier(probes: tuple[Probe, ...]) -> DispatchTier:
       transport / container check.
     * HOST when the container is offline: nothing live to interrupt, so
       a host restart can run unattended.
-    * MANUAL when the container claims running but we can't exec into it
-      (the SSH-dead path): a host restart bounces a live container so it
-      requires explicit user consent.
+    * MANUAL when the container claims running but we can't exec into it:
+      a host restart bounces a live container so it requires explicit user
+      consent.
     * SURGICAL when both container and exec are healthy: the system-services
       agent can be restarted in place without touching the user's agents.
     * MANUAL on anything else (ambiguous host states).

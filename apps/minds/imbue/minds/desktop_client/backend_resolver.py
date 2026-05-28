@@ -361,8 +361,7 @@ class MngrCliBackendResolver(BackendResolverInterface):
             "Optional JSON file recording each workspace agent's paired system-services "
             "agent id. Populated as discovery surfaces both agents on the same host; "
             "consulted by ``get_system_services_agent_id`` when live discovery has "
-            "transiently dropped the pair (e.g. when the container's SSH transport "
-            "goes down). When None, the cache is in-memory only."
+            "transiently dropped the pair. When None, the cache is in-memory only."
         ),
     )
 
@@ -383,9 +382,8 @@ class MngrCliBackendResolver(BackendResolverInterface):
     _on_refresh_callbacks: list[Callable[[str, str], None]] = PrivateAttr(default_factory=list)
     # workspace_agent_id_str -> services_agent_id_str. Populated under _lock by
     # update_agents whenever discovery surfaces both agents on the same host.
-    # Read by get_system_services_agent_id as a fallback for the case where
-    # live discovery has lost the pair (the SSH-dead path that motivated this
-    # cache existing in the first place).
+    # Read by get_system_services_agent_id as a fallback when live discovery
+    # has lost the pair.
     _services_agent_id_cache: dict[str, str] = PrivateAttr(default_factory=dict)
 
     def model_post_init(self, __context: object) -> None:
@@ -573,8 +571,7 @@ class MngrCliBackendResolver(BackendResolverInterface):
 
         The workspace (claude) agent and the system-services agent run in the
         same container, so they share a host id. The lookup uses the current
-        discovery snapshot first; if that snapshot does not contain the pair
-        (the typical SSH-dead failure mode that motivates the recovery flow),
+        discovery snapshot first; if that snapshot does not contain the pair,
         falls back to the persisted services-agent-id cache so a restart can
         still address the system-services agent.
         """

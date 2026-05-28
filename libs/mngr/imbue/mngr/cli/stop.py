@@ -239,12 +239,8 @@ def stop(ctx: click.Context, **kwargs: Any) -> None:
             raise click.UsageError("Must specify at least one agent (use '-' to read from stdin)")
         return
 
-    # --stop-host stops the agent's whole host. Stopping a host is a
-    # daemon-level operation that does NOT require enumerating the agents on
-    # it, so resolve the host without SSH and stop it directly. This avoids
-    # the agent-enumeration scan, which SSHes into the host and would fail
-    # when the container is running but its sshd is unreachable -- the exact
-    # situation --stop-host exists to recover from.
+    # --stop-host stops the agent's whole host directly, without the
+    # agent-enumeration scan (see _stop_hosts_for_addresses).
     if opts.stop_host:
         stopped_host_agents = _stop_hosts_for_addresses(agent_addresses, mngr_ctx, output_opts)
         _output_result(stopped_host_agents, output_opts)

@@ -519,8 +519,8 @@ _RECOVERY_SCRIPT: Final[str] = """\
           latestHealth = null;
         }
         // The shared "Workspace unresponsive" state -- shown for ambiguous-host
-        // states, after a restart failure, and for the SSH-dead path (where
-        // bouncing a live container would interrupt user agents and we want
+        // states, after a restart failure, and whenever the container is live
+        // but unreachable (bouncing it would interrupt user agents, so we want
         // explicit consent before doing so).
         function renderUnresponsive() {
           titleEl.textContent = 'Workspace unresponsive';

@@ -1684,10 +1684,8 @@ _RESTART_COMMAND_TIMEOUT_SECONDS: Final[float] = 120.0
 # split by tier. A surgical (in-place) restart leaves the container running, so
 # the interface should answer again quickly. A host restart cold-boots the
 # container (restore-from-snapshot + the bootstrap service manager spawning the
-# system interface), which legitimately takes longer -- the old shared 15s
-# budget routinely bounced a still-booting workspace to RESTART_FAILED. Initial
-# agent-creation readiness waiting deliberately keeps its own, much longer,
-# timeout.
+# system interface), which legitimately takes longer. Initial agent-creation
+# readiness waiting keeps its own, much longer, timeout.
 _SURGICAL_STARTUP_WAIT_SECONDS: Final[float] = 15.0
 _HOST_RESTART_STARTUP_WAIT_SECONDS: Final[float] = 30.0
 # Poll cadence while waiting for the system interface to come back post-restart.
@@ -1720,17 +1718,10 @@ def _build_mngr_host_state_argv(
     is a pure read -- it never starts a stopped container.
 
     Scopes the listing to just this workspace's chat agent + system-services
-    agent via a CEL ``id == ...`` include. Smaller payload, easier to reason
-    about in the diagnostics menu, and the include filter never confuses
-    enumeration since the per-host SSH-tolerance fix in libs/mngr means a
-    broken sibling host no longer poisons the whole provider's discovery.
-
+    agent via a CEL ``id == ...`` include, for a smaller payload.
     ``--on-error continue`` keeps the listing from hard-failing when one
-    provider couldn't be reached (the surviving providers still emit their
-    agents). The CLI exits non-zero whenever ``result.errors`` is non-empty,
-    so the caller cannot rely on returncode alone -- the ``mngr_list_error``
-    field in the response is sourced from stderr / parsed errors / exit
-    code together.
+    provider couldn't be reached, so the surviving providers still emit their
+    agents.
     """
     if services_agent_id is None:
         include = f'id == "{agent_id}"'
@@ -1820,9 +1811,9 @@ def _handle_recovery_page(
             # were going.
             return RedirectResponse(url=return_to, status_code=302)
         else:
-            # HEALTHY with no return_to to redirect to: fall through and render
-            # with render_status still HEALTHY -- the page then offers a manual
-            # restart button. This is the correct no-op; nothing more to do.
+            # HEALTHY with no return_to to redirect to: render with
+            # render_status still HEALTHY -- the page then offers a manual
+            # restart button.
             pass
     html_body = render_recovery_page(
         agent_id=aid,
@@ -1850,10 +1841,7 @@ def _run_mngr_subprocess(
     ``_capture_mngr_command`` (which needs the stdout on success).
 
     ``log_failures`` controls whether non-clean outcomes are emitted at
-    WARNING. The recovery-diagnostics probe sets it to False because the
-    Layer-2 host-state INFO log at the endpoint level already captures
-    the outcome (``ssh_dead`` etc.), and the probe argv carries a long
-    base64-encoded inner script that adds nothing to operator diagnostics.
+    WARNING (callers that log the outcome themselves pass False).
     """
     try:
         finished = concurrency_group.run_process_to_completion(
@@ -2048,21 +2036,18 @@ def _dispatch_restart(
     # The auto-dispatched host tier (chosen only when the host-health probe
     # found the container fully stopped) passes ``host_already_stopped=1`` so
     # the worker can skip the redundant stop step. Honored only for host
-    # restarts: the manual "Restart workspace" button and the SSH-dead path
-    # may target a still-running container, which must be stopped first.
+    # restarts: a manually-requested restart may target a still-running
+    # container, which must be stopped first.
     skip_stop = is_host_restart and request.query_params.get("host_already_stopped") == "1"
 
     # is_checked=False + on_failure: a crash of the one-shot worker is handled
     # by transitioning the tracker to RESTART_FAILED (so the recovery page does
     # not hang), rather than being surfaced later when the root group is checked.
     #
-    # ``start_new_thread`` itself can raise (its concurrency-group decorators
-    # fire ``ConcurrencyGroupError`` when the group is shutting down or has
-    # already failed). If the spawn raises after we've already claimed
-    # RESTARTING, the tracker would otherwise be stuck in that state forever
-    # with no worker to advance it. Catch the spawn-time failures explicitly
-    # and roll the tracker into RESTART_FAILED so the recovery page surfaces
-    # the failure instead of polling indefinitely.
+    # The spawn itself can also raise (``ConcurrencyGroupError`` when the group
+    # is shutting down). Since we've already claimed RESTARTING, catch that here
+    # and roll the tracker into RESTART_FAILED too -- otherwise it would be stuck
+    # RESTARTING forever with no worker to advance it.
     try:
         concurrency_group.start_new_thread(
             target=_run_restart_sequence,

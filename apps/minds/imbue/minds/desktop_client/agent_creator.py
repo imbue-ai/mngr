@@ -138,10 +138,6 @@ def probe_workspace_through_plugin(
     to reuse the connection pool across a tight poll loop. When omitted, a
     one-shot client is constructed for this single probe -- fine for
     one-off / sporadic callers but wasteful in a loop.
-
-    The request connects to the plugin on loopback and carries the agent's
-    ``agent-<hex>.localhost`` vhost in the ``Host`` header, so it does not
-    depend on ``*.localhost`` resolving.
     """
     probe_url = f"http://127.0.0.1:{mngr_forward_port}{_WORKSPACE_PROBE_PATH}"
     host_header = f"{agent_id}.localhost"
@@ -1471,19 +1467,12 @@ class AgentCreator(MutableModel):
                     if status == 200:
                         logger.debug("Workspace ready for {} after {} probe(s)", agent_id, attempt)
                         log_queue.put("[minds] System interface is ready.")
-                        # Propagate the success into the shared health tracker.
-                        # Earlier probes in this loop go through ``mngr forward``
-                        # too, and each one's connect-refused failure trips a
-                        # ``system_interface_backend_failure`` envelope that
-                        # enrolls the freshly-created agent as a suspect probe
-                        # target. The background probe loop then polls it and,
-                        # while the container's system-interface is still
-                        # warming up, accumulates a probe-failure run that would
-                        # transition the agent to STUCK. This explicit
-                        # ``record_probe_success`` clears the run and suspect
-                        # flag the moment readiness is confirmed, so the chrome
-                        # does not jump to the recovery page right after the
-                        # user lands on their freshly-created workspace.
+                        # Propagate the success into the shared health tracker,
+                        # clearing the suspect flag and probe-failure run that
+                        # the warmup failures enrolled, so the chrome does not
+                        # jump to the recovery page right after the user lands on
+                        # their freshly-created workspace. (See the tracker's
+                        # ``system_interface_health_tracker`` field docstring.)
                         # Idempotent if the tracker has no record for this agent.
                         self.system_interface_health_tracker.record_probe_success(agent_id)
                         return
