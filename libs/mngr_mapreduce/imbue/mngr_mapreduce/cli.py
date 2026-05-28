@@ -405,41 +405,40 @@ def run_mapreduce(
     source_dir = Path(opts.source) if opts.source is not None else Path.cwd()
 
     # The AgentStopper owns background threads for fire-and-forget post-finalize
-    # stop_agents calls; see agent_stopper.py for the why. A single stopper
-    # covers both the mapper polling loop and the reducer wait so all in-flight
-    # stops drain under one budget on exit.
+    # stop_agents calls; see agent_stopper.py for the why.
+    if opts.reintegrate:
+        with AgentStopper() as stopper:
+            reintegrate_mapreduce(recipe, opts, mngr_ctx, output_opts, source_dir, stopper)
+        return
+
+    run_name = opts.run_name if opts.run_name else make_run_name()
+    base_commit = get_base_commit(source_dir, mngr_ctx.concurrency_group)
+    source_host = get_local_host(mngr_ctx)
+
+    output_dir = Path(opts.output_dir) if opts.output_dir is not None else Path(f"{recipe.name}_{run_name}")
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    ctx = MapReduceContext(
+        mngr_ctx=mngr_ctx,
+        source_dir=source_dir,
+        run_name=run_name,
+        output_dir=output_dir,
+        output_opts=output_opts,
+    )
+
+    tasks = recipe.discover(ctx)
+    emit_task_count(len(tasks), output_opts)
+
+    config = build_launch_config(
+        opts=opts,
+        source_dir=source_dir,
+        source_host=source_host,
+        base_commit=base_commit,
+        run_name=run_name,
+    )
+
     try:
         with AgentStopper() as stopper:
-            if opts.reintegrate:
-                reintegrate_mapreduce(recipe, opts, mngr_ctx, output_opts, source_dir, stopper)
-                return
-
-            run_name = opts.run_name if opts.run_name else make_run_name()
-            base_commit = get_base_commit(source_dir, mngr_ctx.concurrency_group)
-            source_host = get_local_host(mngr_ctx)
-
-            output_dir = Path(opts.output_dir) if opts.output_dir is not None else Path(f"{recipe.name}_{run_name}")
-            output_dir.mkdir(parents=True, exist_ok=True)
-
-            ctx = MapReduceContext(
-                mngr_ctx=mngr_ctx,
-                source_dir=source_dir,
-                run_name=run_name,
-                output_dir=output_dir,
-                output_opts=output_opts,
-            )
-
-            tasks = recipe.discover(ctx)
-            emit_task_count(len(tasks), output_opts)
-
-            config = build_launch_config(
-                opts=opts,
-                source_dir=source_dir,
-                source_host=source_host,
-                base_commit=base_commit,
-                run_name=run_name,
-            )
-
             _run_pipeline(recipe, ctx, opts, mngr_ctx, output_opts, config, tasks, stopper)
     except KeyboardInterrupt:
         traceback.print_exc()
