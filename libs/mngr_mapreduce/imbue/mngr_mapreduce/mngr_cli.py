@@ -1,8 +1,8 @@
 """Subprocess wrapper for mngr CLI commands.
 
-Instead of importing and calling mngr's internal Python API, this module
-shells out to the ``mngr`` CLI binary.  This decouples the TMR plugin from
-mngr internals and makes the interaction boundary explicit.
+Used by the reintegrate flow to discover prior agents via ``mngr list``.
+Shelling out (rather than importing mngr's internal Python API) makes the
+boundary explicit.
 """
 
 import json
@@ -42,27 +42,6 @@ def _run_mngr_raw(
     if result.is_timed_out:
         raise CliError("mngr {} timed out after {:.0f}s".format(args[0] if args else "unknown", timeout))
     return result
-
-
-def _run_mngr(
-    args: list[str],
-    cg: ConcurrencyGroup,
-    timeout: float,
-) -> str:
-    """Run a mngr CLI command and return its stdout.
-
-    Raises CliError when the command times out or exits with a non-zero return code.
-    """
-    result = _run_mngr_raw(args, cg, timeout)
-    if result.returncode != 0:
-        raise CliError(
-            "mngr {} failed (exit code {}): {}".format(
-                args[0] if args else "unknown",
-                result.returncode,
-                result.stderr.strip(),
-            )
-        )
-    return result.stdout
 
 
 def _parse_list_json(raw_json: str) -> ListResult:
