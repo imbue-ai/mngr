@@ -270,9 +270,9 @@ def test_render_recovery_page_carries_restart_failed_error() -> None:
 
 def test_render_recovery_page_includes_diagnostics_dom_hooks() -> None:
     """The recovery page must expose the DOM hooks the JS uses to render the
-    structured checklist, the debug-menu details block, and the Copy
-    diagnostics button. The hooks are present on every render -- the JS
-    populates them when the host-health endpoint response arrives.
+    debug-menu details block and the Copy diagnostics button. The hooks are
+    present on every render -- the JS populates them when the host-health
+    endpoint response arrives.
     """
     html = render_recovery_page(
         agent_id=_AGENT_A,
@@ -280,7 +280,6 @@ def test_render_recovery_page_includes_diagnostics_dom_hooks() -> None:
         initial_status="stuck",
         initial_error="",
     )
-    assert 'id="recovery-checklist"' in html
     assert 'id="recovery-debug-details"' in html
     assert 'id="recovery-debug-content"' in html
     assert 'id="copy-diagnostics-btn"' in html
@@ -299,7 +298,6 @@ def test_render_recovery_page_script_handles_misconfigured_tier() -> None:
     assert "is_misconfigured" in html
     assert "Workspace misconfigured" in html
     assert "Try restart anyway" in html
-    # Misconfigured tier renders the structured checklist visible.
     assert "renderMisconfigured" in html
 
 

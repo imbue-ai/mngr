@@ -2017,8 +2017,7 @@ def _handle_host_health_probe_api(
     :class:`HostHealthResponse` -- the recovery page uses ``reachable`` /
     ``host_offline`` for auto-dispatch tiering, ``is_misconfigured`` /
     ``ssh_dead`` to choose between the misconfigured / unresponsive
-    variants, and the rest of the payload for the structured checklist
-    and debug menu.
+    variants, and the rest of the payload for the diagnostics menu.
     """
     if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
         return _json_error("Not authenticated", status_code=403)

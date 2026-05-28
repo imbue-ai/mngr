@@ -1,6 +1,6 @@
 """Recovery diagnostics probe.
 
-Renders the workspace-recovery page's structured checklist (Q1-Q7). On
+Powers the workspace-recovery page's diagnostics menu (Q1-Q7). On
 recovery-page load (and only then), minds runs a batched ``mngr exec``
 against the workspace's system-services agent that emits a single JSON
 payload describing:
@@ -227,8 +227,7 @@ class HostHealthResponse(FrozenModel):
 
     Backwards-compatible with the previous shape (``reachable`` /
     ``host_offline``). The new fields are surfaced to the recovery page's
-    JS for misconfigured-tier classification, the structured checklist,
-    and the debug menu.
+    JS for misconfigured-tier classification and the diagnostics menu.
     """
 
     reachable: bool = Field(description="Host is RUNNING (surgical restart is appropriate)")
