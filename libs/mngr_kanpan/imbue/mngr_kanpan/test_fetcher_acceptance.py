@@ -1,7 +1,7 @@
 """Acceptance tests for fetch_board_snapshot and fetch_local_snapshot.
 
 These tests exercise the full fetch pipeline with real agents created via the
-local provider, rather than mocking list_agents or discover_hosts_and_agents.
+local provider, rather than mocking list_agents.
 
 To run these tests locally:
 
