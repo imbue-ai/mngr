@@ -448,9 +448,18 @@ def _exec_in_container(
 ) -> str:
     """Execute a shell command inside a running container on outer. Returns stdout.
 
+    Forces ``--workdir /`` so the exec succeeds regardless of whether the
+    image's declared ``WORKDIR`` has been populated yet. This matters for
+    images (e.g. forever-claude-template) whose ``CMD`` seeds the
+    ``WORKDIR`` directory onto a bind-mounted volume during first boot --
+    without ``--workdir /``, an exec that races the seed step would fail
+    with ``chdir to cwd ... failed: no such file or directory``. None of
+    the setup commands we run depend on the image's ``WORKDIR``; they
+    all reference absolute paths.
+
     Raises MngrError if the command exits non-zero.
     """
-    remote = f"docker exec {shlex.quote(container_name)} sh -c {shlex.quote(command)}"
+    remote = f"docker exec --workdir / {shlex.quote(container_name)} sh -c {shlex.quote(command)}"
     result = outer.execute_idempotent_command(remote, timeout_seconds=timeout_seconds)
     if not result.success:
         raise MngrError(f"docker exec in {container_name} failed: {result.stderr.strip() or result.stdout.strip()}")
@@ -700,8 +709,24 @@ def _run_container(
     labels: Mapping[str, str],
     extra_args: Sequence[str],
     entrypoint_cmd: str,
+    use_image_default_cmd: bool = False,
 ) -> str:
-    """Run a detached docker container on outer. Returns the container id."""
+    """Run a detached docker container on outer. Returns the container id.
+
+    When ``use_image_default_cmd`` is False (legacy default), the image's
+    ``ENTRYPOINT`` and ``CMD`` are overridden with ``sh -c entrypoint_cmd``.
+    Backwards-compat for raw images (e.g. ``debian:bookworm-slim``) whose
+    default CMD (``bash``) exits immediately when not attached to a tty.
+
+    When True, the image's own ``ENTRYPOINT`` and ``CMD`` run as-is. Used
+    for user-built images where the Dockerfile encodes its own keep-alive
+    + container-startup logic (e.g. FCT's
+    ``CMD ["/usr/local/bin/fct-entrypoint.sh"]`` which seeds the per-host
+    volume before going into the SIGTERM-trap keep-alive). Overriding
+    those would bypass any required first-boot setup, leaving the
+    container running but with the workspace ``WORKDIR`` unpopulated.
+    ``entrypoint_cmd`` is ignored in this mode.
+    """
     args: list[str] = ["run", "-d", "--name", name]
     for host_bind, container_port in port_mappings.items():
         args.extend(["-p", f"{host_bind}:{container_port}"])
@@ -710,7 +735,10 @@ def _run_container(
     for key, value in labels.items():
         args.extend(["--label", f"{key}={value}"])
     args.extend(extra_args)
-    args.extend(["--entrypoint", "sh", image, "-c", entrypoint_cmd])
+    if use_image_default_cmd:
+        args.append(image)
+    else:
+        args.extend(["--entrypoint", "sh", image, "-c", entrypoint_cmd])
     output = _run_docker(outer, args, timeout_seconds=120.0)
     container_id = output.strip()
     logger.debug("Started container {} ({})", name, container_id[:12])
@@ -1370,6 +1398,16 @@ class VpsDockerProvider(BaseProviderInstance):
             LABEL_TAGS: json.dumps(dict(tags) if tags else {}),
         }
         logger.log(LogLevel.BUILD.value, "Starting Docker container on VPS...", source="vps")
+        # When the user supplied a Dockerfile (``docker_build_args`` non-empty),
+        # the image's own ``CMD``/``ENTRYPOINT`` is the source of truth: it
+        # may encode required first-boot setup (e.g. forever-claude-template's
+        # ``fct-entrypoint.sh`` seeds ``/mngr/code`` on the bind-mounted volume
+        # before going into its keep-alive). Overriding with our generic
+        # ``tail -f /dev/null`` keep-alive would bypass that seeding and leave
+        # the image's ``WORKDIR`` unpopulated, breaking later ``docker exec``
+        # calls. For the raw-image path (no Dockerfile, default
+        # ``debian:bookworm-slim``) we still override -- those images have no
+        # long-running default CMD and would exit immediately on their own.
         with log_span("Starting Docker container"):
             container_id = _run_container(
                 outer,
@@ -1380,6 +1418,7 @@ class VpsDockerProvider(BaseProviderInstance):
                 labels=labels,
                 extra_args=list(effective_start_args),
                 entrypoint_cmd=CONTAINER_ENTRYPOINT_CMD,
+                use_image_default_cmd=bool(docker_build_args),
             )
 
         logger.log(LogLevel.BUILD.value, "Setting up SSH in container...", source="vps")

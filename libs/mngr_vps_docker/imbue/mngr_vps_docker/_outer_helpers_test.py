@@ -307,6 +307,47 @@ def test_run_container_command_includes_all_pieces() -> None:
     assert "--entrypoint sh my-image:tag -c 'echo hi'" in cmd
 
 
+def test_run_container_with_use_image_default_cmd_omits_entrypoint_override() -> None:
+    """When use_image_default_cmd=True, the image's own CMD/ENTRYPOINT runs as-is.
+
+    This is the path user-built images take (e.g. forever-claude-template's
+    seed-on-first-boot CMD that needs to run before WORKDIR is populated).
+    The entrypoint_cmd argument is ignored in this mode.
+    """
+    outer = _outer(CommandResult(stdout="cid\n", stderr="", success=True))
+    _run_container(
+        outer,
+        image="fct-image:latest",
+        name="my-container",
+        port_mappings={},
+        volumes=[],
+        labels={},
+        extra_args=[],
+        entrypoint_cmd="ignored-when-use-image-default-cmd-is-True",
+        use_image_default_cmd=True,
+    )
+    cmd = _stub(outer).recorded[0].command
+    assert cmd.startswith("docker run -d --name my-container")
+    # The image is the last token; no --entrypoint, no `-c`, no entrypoint_cmd.
+    assert cmd.rstrip().endswith("fct-image:latest")
+    assert "--entrypoint" not in cmd
+    assert "ignored-when-use-image-default-cmd-is-True" not in cmd
+
+
+def test_exec_in_container_uses_workdir_root_to_avoid_chdir_races() -> None:
+    """``docker exec`` must force workdir to ``/`` so it doesn't race image's WORKDIR seeding.
+
+    Regression test for the forever-claude-template flow where the image
+    declares ``WORKDIR /mngr/code/`` and the CMD seeds that path on first
+    boot. Without ``--workdir /``, an exec issued before the seed completes
+    fails with ``chdir to cwd ... failed: no such file or directory``.
+    """
+    outer = _outer(CommandResult(stdout="hello\n", stderr="", success=True))
+    _exec_in_container(outer, "my-container", "echo hello")
+    cmd = _stub(outer).recorded[0].command
+    assert "docker exec --workdir / my-container" in cmd
+
+
 # =============================================================================
 # _build_image_on_outer
 # =============================================================================
