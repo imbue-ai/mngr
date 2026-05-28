@@ -104,6 +104,4 @@ Your final message to the orchestrator must be a concise plain-text summary
 - any **code concerns**: bullets where the code itself looked wrong or
   buggy (which you did NOT fix), so the orchestrator can surface them.
 
-The orchestrator includes this summary (alongside the other reviewers') in
-the consolidation PR's description, so write it for a human reading the PR.
 If nothing needed changing, say so explicitly.
