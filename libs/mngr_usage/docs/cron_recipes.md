@@ -107,12 +107,6 @@ case "$state" in
 esac
 ```
 
-```cron
-# cron starts with a bare PATH; set one that finds mngr and jq (adjust to your install)
-PATH=/usr/local/bin:/usr/bin:/bin:/home/you/.local/bin
-*/10 * * * * /path/to/use-extra.sh
-```
-
 ## Warm a fresh 5h window early
 
 The 5h window starts when you send your first prompt and runs five hours from
@@ -121,13 +115,6 @@ throwaway prompt opens the window an hour or two ahead, it resets partway
 through your session (on average ~2.5h in) instead of a full 5h later, giving
 you a fresh quota window sooner. This recipe keeps a window warm automatically:
 the moment the last one elapses, it fires a one-off prompt to open the next.
-
-`resets_at < now` means the last recorded 5h window boundary is already past --
-a fresh window is open and unclaimed. Nudge a dedicated warming agent then to
-fire one prompt and open the new window. We reuse one agent across boundaries
-(create once, then start/message/stop) and never destroy it: a *stopped* agent
-keeps its events, so the snapshot reflects the new window and the check below
-won't re-fire until the next window rolls.
 
 ```bash
 #!/usr/bin/env bash
@@ -138,8 +125,8 @@ WARMER="window-warmer"
 
 snapshot="$(mngr usage --format json)"
 
-# Has the last recorded 5h window already reset? (resets_at in the past, compared
-# to the snapshot's own `now`.)
+# Fire only when the last recorded 5h window has already reset -- resets_at in the
+# past (vs the snapshot's own `now`) means a fresh window is open and unclaimed.
 elapsed="$(jq -r '
   .now as $now
   | .sources[]
@@ -160,16 +147,11 @@ else
 fi
 
 # One cheap prompt opens the new 5h window. Wait for the turn to finish, then STOP
-# (don't destroy) -- the agent and its fresh reading persist for reuse next time.
+# (don't destroy): a stopped agent keeps its events, so the snapshot reflects the
+# new window and the check above won't re-fire until the next window rolls.
 mngr message "$WARMER" --message 'just say hi'
 mngr wait "$WARMER" WAITING --timeout 5m
 mngr stop "$WARMER"
-```
-
-```cron
-# cron starts with a bare PATH; set one that finds mngr, jq, and claude (adjust to your install)
-PATH=/usr/local/bin:/usr/bin:/bin:/home/you/.local/bin
-*/10 * * * * /path/to/warm-window.sh
 ```
 
 ## Dispatch tasks from a queue directory
@@ -201,8 +183,7 @@ done
 alive="$(mngr list --include 'labels.queue == "live" && state == "RUNNING"' --ids | wc -l | tr -d ' ')"
 [[ "$alive" -lt "$MAX_PARALLEL" ]] || exit 0
 
-# Don't launch new work unless there's capacity to spend -- otherwise a fresh task
-# would just stall on a limit.
+# Only launch if there's spare capacity going unused.
 "$(dirname "$0")/spare-capacity.sh" || exit 0
 
 # Grab the oldest queued task, if any.
@@ -227,11 +208,18 @@ mngr create "$name" claude --from ":$PROJECT_DIR" --label queue=live \
   --message-file "$claimed" --no-connect
 ```
 
-```cron
-# cron starts with a bare PATH; set one that finds mngr and jq (adjust to your install)
-PATH=/usr/local/bin:/usr/bin:/bin:/home/you/.local/bin
-*/10 * * * * /path/to/dispatch-task.sh
-```
-
 Finished agents are stopped and moved to `queue=in-review`; to see them, run
 `mngr list --label queue=in-review`.
+
+## Scheduling
+
+Add whichever scripts you use to a crontab. `cron` runs with a bare `PATH`, so set
+one that finds `mngr`, `jq`, and `claude`:
+
+```cron
+PATH=/usr/local/bin:/usr/bin:/bin:/home/you/.local/bin
+
+*/5 * * * * /path/to/use-extra.sh
+*/5 * * * * /path/to/warm-window.sh
+*/5 * * * * /path/to/dispatch-task.sh
+```
