@@ -1780,6 +1780,71 @@ def test_run_shell_command_wraps_ssh_exception_in_host_connection_error(
 
 
 # =========================================================================
+# Tests for stop_agents wall-clock budget behavior
+# =========================================================================
+
+
+@pytest.mark.allow_warnings(match=r"^Aborted stop_agents -- host unreachable")
+def test_stop_agents_does_not_propagate_connection_errors(
+    local_provider: LocalProviderInstance,
+) -> None:
+    """stop_agents must swallow connection errors so a dead host doesn't bubble up.
+
+    Production case: in TMR the Modal sandbox is sometimes torn down before
+    the polling loop's post-finalize ``stop_agents`` runs. Earlier the SSH
+    call hung for ~15 min, then surfaced an exception that the caller didn't
+    handle. After the fix, ``stop_agents`` catches both ``OSError`` (the
+    paramiko channel-timeout shape) and ``HostConnectionError`` and logs a
+    warning instead.
+    """
+    # OSError without "Socket is closed" doesn't match the transient-retry
+    # filter, so it propagates from _run_shell_command without retrying --
+    # gives us a fast, deterministic simulation of a hard SSH timeout.
+    results: list[tuple[bool, CommandOutput] | Exception] = []
+    for _ in range(8):
+        results.append(OSError("timed out"))
+    fake = _FakePyinfraHost(run_shell_command_results=results)
+    host = _create_host_with_fake_connector(local_provider, fake)
+
+    # Should NOT raise.
+    host.stop_agents([AgentId.generate()], timeout_seconds=2.0)
+
+    # Confirm we actually attempted at least one SSH call (the agent-name
+    # lookup via cat) -- so the swallow wasn't a no-op short-circuit.
+    assert fake._run_shell_command_call_count >= 1
+
+
+def test_stop_agents_passes_per_call_timeout_to_ssh(
+    local_provider: LocalProviderInstance,
+) -> None:
+    """Each SSH call inside stop_agents must receive a positive _timeout kwarg.
+
+    This is what prevents the kernel TCP-retransmit hang (~15 min per call)
+    observed in the TMR scheduled job -- pyinfra propagates ``_timeout`` to
+    paramiko's channel timeout so an unreachable host fails fast.
+    """
+    timeouts_seen: list[int | None] = []
+
+    class _RecordingFake(_FakePyinfraHost):
+        def run_shell_command(
+            self,
+            command: StringCommand,
+            **kwargs: Any,
+        ) -> tuple[bool, CommandOutput]:
+            timeouts_seen.append(kwargs.get("_timeout"))
+            return super().run_shell_command(command, **kwargs)
+
+    fake = _RecordingFake()
+    host = _create_host_with_fake_connector(local_provider, fake)
+
+    host.stop_agents([AgentId.generate()], timeout_seconds=5.0)
+
+    assert timeouts_seen, "stop_agents made no SSH calls"
+    for t in timeouts_seen:
+        assert t is not None and t > 0, f"Expected positive _timeout, got {t!r}"
+
+
+# =========================================================================
 # Tests for disconnect / _close_paramiko_client
 # =========================================================================
 
