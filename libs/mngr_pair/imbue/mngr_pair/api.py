@@ -15,8 +15,11 @@ from imbue.concurrency_group.errors import ProcessError
 from imbue.concurrency_group.local_process import RunningProcess
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
-from imbue.mngr.api.pull import pull_git
-from imbue.mngr.api.push import push_git
+from imbue.mngr.api.git import LocalGitContext
+from imbue.mngr.api.git import RemoteGitContext
+from imbue.mngr.api.git import git_pull
+from imbue.mngr.api.git import git_push
+from imbue.mngr.api.git import stash_guard
 from imbue.mngr.errors import MngrError
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.host import OnlineHostInterface
@@ -285,6 +288,69 @@ def determine_git_sync_actions(
         )
 
 
+def _checkout(local_path: Path, branch: str, cg: ConcurrencyGroup) -> None:
+    """Run ``git checkout`` in ``local_path``; raise MngrError on failure."""
+    try:
+        cg.run_process_to_completion(["git", "checkout", branch], cwd=local_path)
+    except ProcessError as e:
+        raise MngrError(f"Failed to checkout {branch}: {e.stderr}") from e
+
+
+def _pull_agent_into_local(
+    agent: AgentInterface,
+    host: OnlineHostInterface,
+    local_path: Path,
+    agent_branch: str,
+    local_branch: str,
+    uncommitted_changes: UncommittedChangesMode,
+    cg: ConcurrencyGroup,
+) -> None:
+    """Fetch agent_branch from the agent and merge it into local_branch.
+
+    Stashes any uncommitted local changes (per ``uncommitted_changes``), checks
+    out local_branch if it's not already current, merges, then restores the
+    original branch on the way out.
+    """
+    local_git_ctx = LocalGitContext(cg=cg)
+    with stash_guard(local_git_ctx, local_path, uncommitted_changes):
+        original_branch = local_git_ctx.get_current_branch(local_path)
+        did_switch = original_branch != local_branch
+        if did_switch:
+            _checkout(local_path, local_branch, cg)
+        try:
+            git_pull(
+                local_path=local_path,
+                remote_host=host,
+                remote_path=agent.work_dir,
+                extra_args=(agent_branch, "--no-edit"),
+                cg=cg,
+            )
+        finally:
+            if did_switch:
+                _checkout(local_path, original_branch, cg)
+
+
+def _push_local_to_agent(
+    agent: AgentInterface,
+    host: OnlineHostInterface,
+    local_path: Path,
+    local_branch: str,
+    agent_branch: str,
+    uncommitted_changes: UncommittedChangesMode,
+    cg: ConcurrencyGroup,
+) -> None:
+    """Push local_branch to the agent's agent_branch, stashing the agent's uncommitted changes first."""
+    remote_git_ctx = RemoteGitContext(host=host)
+    with stash_guard(remote_git_ctx, agent.work_dir, uncommitted_changes):
+        git_push(
+            local_path=local_path,
+            remote_host=host,
+            remote_path=agent.work_dir,
+            extra_args=(f"{local_branch}:{agent_branch}",),
+            cg=cg,
+        )
+
+
 def sync_git_state(
     agent: AgentInterface,
     host: OnlineHostInterface,
@@ -302,13 +368,12 @@ def sync_git_state(
 
     if git_sync_action.agent_is_ahead:
         logger.debug("Pulling git state from agent to local")
-        pull_git(
+        _pull_agent_into_local(
             agent=agent,
             host=host,
-            destination=local_path,
-            source_branch=git_sync_action.agent_branch,
-            target_branch=git_sync_action.local_branch,
-            is_dry_run=False,
+            local_path=local_path,
+            agent_branch=git_sync_action.agent_branch,
+            local_branch=git_sync_action.local_branch,
             uncommitted_changes=uncommitted_changes,
             cg=cg,
         )
@@ -316,15 +381,13 @@ def sync_git_state(
 
     if git_sync_action.local_is_ahead:
         logger.debug("Pushing git state from local to agent")
-        push_git(
+        _push_local_to_agent(
             agent=agent,
             host=host,
-            source=local_path,
-            source_branch=git_sync_action.local_branch,
-            target_branch=git_sync_action.agent_branch,
-            is_dry_run=False,
+            local_path=local_path,
+            local_branch=git_sync_action.local_branch,
+            agent_branch=git_sync_action.agent_branch,
             uncommitted_changes=uncommitted_changes,
-            is_mirror=False,
             cg=cg,
         )
         did_push = True
