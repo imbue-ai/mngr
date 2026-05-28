@@ -1,1 +1,0 @@
-- Added `specs/env-settings-overrides/concise.md` documenting the new `MNGR__*` env-var override scheme, the `__extend` operator, and the assign-by-default merge semantics shipped with this PR. See the `mngr` changelog entry for the user-visible behavior.

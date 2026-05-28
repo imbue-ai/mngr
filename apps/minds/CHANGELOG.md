@@ -47,6 +47,10 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Changed: Speed up local minds workspace creation by restructuring the `forever-claude-template` Dockerfile and deferring Playwright into a post-boot install (warm rebuild 1m33s → 30s → ~25.6s).
 - Changed: Latchkey permission dialog no longer pre-checks the catch-all `any` permission as an implicit default; initial check state is now the union of existing grants and the agent's requested permissions.
 - Changed: Streamed-permission-request handler now dedupes redeliveries by `event_id` so the requests inbox no longer grows unbounded on every gateway reconnect.
+- Changed: `minds run` no longer asks the `mngr forward` plugin for a reverse SSH tunnel for the Minds API and no longer injects per-agent `MINDS_API_KEY` env vars; per-agent `api_key_hash` files are gone. Agents now reach the Minds API exclusively through the Latchkey gateway with a single installation-wide key, rotated in memory on every `minds run`.
+- Changed: `/api/v1/...` is now per-agent end-to-end — every route takes the agent id from the URL path (`/api/v1/agents/<agent_id>/...`), gated by the host's permissions file `anyOf` allowlist; the notifications endpoint moved from `POST /api/v1/notifications` to `POST /api/v1/agents/<agent_id>/notifications` to match the Telegram routes.
+- Changed: Desktop client now calls `imbue.mngr_latchkey.agent_setup.register_agent_for_host(...)` directly (a single atomic-file-edit library call) instead of the prior gateway-extension dance that POSTed two schemas + one rule per agent; the `gateway_client` field on `AgentCreator` is gone.
+- Changed: Bumped bundled Latchkey to 2.12.2 — first-time Google Cloud users now see the ToS dialog, and Google Projects can be reused (the default project-count cap is low).
 
 ### Removed
 
@@ -60,6 +64,8 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Fixed: `minds env destroy` proceeds with cloud-side cleanup even when the local env root has already been removed by hand.
 - Fixed: `minds env deploy` runs `apply_pool_hosts_migrations` for every tier (not just dev), so shared-tier schema no longer diverges.
 - Fixed: `find_monorepo_root` check runs before Vault credential read and `make_deploy_id` so running from outside the monorepo fails cleanly.
+- Fixed: Signing-key generation race in `FileAuthStore.get_signing_key` that intermittently logged users out during the desktop client's startup burst on a fresh data directory. Key generation is now serialized behind a per-store lock with a double-checked re-read and an atomic write, so concurrent first-time callers converge on a single persisted key.
+- Fixed: Deny button on the Latchkey permission-request dialog now works for scopes not in the gateway's services catalog (e.g. a typo from the agent or a stale catalog) — the deny flow falls back to the raw scope string for both the persisted response event and the agent-facing message, so the pending request is always torn down.
 
 ## [v0.2.8] - 2026-05-13
 

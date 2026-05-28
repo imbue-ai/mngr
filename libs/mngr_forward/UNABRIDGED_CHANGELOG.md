@@ -4,6 +4,60 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-05-27
+
+# ty 0.0.39 / paramiko 4.0 type fixes
+
+- Converted bracketed `# type: ignore[...]` suppressions to `# ty: ignore[...]` (test files), since `ty` 0.0.39 no longer honors the mypy-style bracketed form.
+- The new `types-paramiko` stubs (pulled in by the paramiko 4.0 bump) surfaced an intentional Liskov-violating `get_transport` override in the SSH-tunnel test fake (`FakeSSHClient`); this is now annotated with `# ty: ignore[invalid-method-override]`.
+
+- Tightened this project's `test_ratchets.py` violation counts to their exact current values (`--inline-snapshot=trim`).
+
+Test-only changes; no user-facing behavior change.
+
+## 2026-05-26
+
+# `SSHTunnelManager` is now the single SSH tunneling implementation
+
+`mngr_forward/ssh_tunnel.py`'s `SSHTunnelManager` (and `RemoteSSHInfo`,
+`ReverseTunnelInfo`, `SSHTunnelError`) absorbed the latchkey package's
+parallel copy and is now the only SSH tunneling implementation in the
+monorepo. Both the plugin's own forward (direct-tcpip) and reverse
+(`--reverse REMOTE:LOCAL`) paths as well as the `mngr latchkey forward`
+supervisor use it.
+
+Behavior changes the existing forward-plugin callers will see:
+
+- `ReverseTunnelInfo` gained an optional `agent_id: str | None = None`
+  field; `setup_reverse_tunnel` gained an optional `agent_id`
+  parameter. Existing callers can ignore both -- the default `None`
+  matches the pre-change behavior.
+- The reverse-tunnel repair loop now uses per-tunnel exponential
+  backoff (1s, 2s, 4s, ..., capped at 5min) instead of the previous
+  flat 30s cadence. A healthy target sees the same recovery latency;
+  a permanently-gone target costs one paramiko handshake every five
+  minutes instead of every 30s. Failures clear on a successful repair
+  (or when a sibling tunnel on the same SSH host gets repaired and
+  the connection comes back).
+- New `remove_reverse_tunnels_for_agent(agent_id)` method tears down
+  every reverse tunnel tagged with a given `agent_id`. It is careful
+  not to close an SSH client out from under any live *forward* tunnel
+  that shares the same host -- the two flavors of tunnel can coexist
+  on one connection.
+
+Public API additions are backward-compatible. The deleted
+`mngr_latchkey/ssh_tunnel.py` is now re-exported transparently from
+this module's existing public surface.
+
+- Pruned non-notable entries (test-only changes, internal refactors, and doc-only tweaks with no user-facing effect) from this project's CHANGELOG.md, per the new notable-only changelog policy.
+
+Adopted the `PREVENT_BARE_TMUX_TARGETS` ratchet rule (added in `imbue_common`) via
+`rc.check_bare_tmux_targets(_DIR, snapshot(0))` in this project's `test_ratchets.py`.
+This ratchet prevents new occurrences of `tmux <subcmd> -t '<bare-name>'` -- targets
+without a leading `=` exact-match prefix, which can silently route commands to a
+sibling session whose name shares a prefix with the intended one. No production code
+changes in this project; the adopting test starts at a baseline of zero violations.
+
 ## 2026-05-22
 
 `mngr forward` no longer crashes when its bind port is already in use. `--port` is now optional: when omitted, the server tries its default (8421) and falls back to an OS-assigned port if that is taken; when supplied explicitly, it still binds exactly that port and fails fast (with a clean error) if it is unavailable. The server binds its listen socket up front and hands it to uvicorn, so the `listening` envelope always reports the port actually bound.

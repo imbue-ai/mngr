@@ -4,6 +4,65 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-05-28
+
+Added `libs/mngr_mapreduce` to the workspace; root `pyproject.toml` now collects coverage for `imbue.mngr_mapreduce` alongside the other workspace packages.
+
+## 2026-05-27
+
+# Bump `ty` to 0.0.39, plus paramiko/coolname dependency bumps
+
+- Raised the `ty` type checker floor from `0.0.24` to `0.0.39` (root `pyproject.toml`).
+- Bumped pinned dependencies in `uv.lock`: `paramiko` 3.5.1 -> 4.0.0 and `coolname` 3.0.0 -> 5.0.0. The paramiko bump also pulls `pyinfra` 3.6.1 -> 3.8.0 and adds `invoke` and `types-paramiko` transitively (pyinfra 3.8.0 depends on `types-paramiko`).
+  - Note: paramiko 4.0.0 is the ceiling while we depend on `pyinfra`; pyinfra 3.8.0 constrains `paramiko<5`, so paramiko 5.0.0 is not yet installable.
+  - The newly-present `types-paramiko` stubs make ty type-check paramiko usage for the first time; resulting type errors were fixed across the affected projects.
+- Behavioral note for contributors: `ty` 0.0.39 no longer honors the bracketed PEP-484 form `# type: ignore[<mypy-code>]`. Only bare `# type: ignore` and `ty`'s own `# ty: ignore[<ty-rule>]` are respected. All bracketed `# type: ignore[...]` comments in the repo were converted to `# ty: ignore[...]` using ty's rule names.
+- Documented in `CLAUDE.md` (the "# Ratchets" section) how to tighten a ratchet count after reducing violations: `uv run pytest --inline-snapshot=trim <test_ratchets.py>` (only `=trim` lowers a count that already passes its `<=` check; `=fix`/`=update` do not).
+- Tightened recorded ratchet violation counts to their current exact values across all projects via `--inline-snapshot=trim`, locking in previously-unrecorded reductions (test-config only; no source or behavior change).
+- Ran `uv lock --upgrade` under a two-week supply-chain cooldown (adopting only releases that have been public for at least two weeks) to bump floating dependencies. Notable bumps within that window: `starlette` 0.50 -> 1.0, `urwid` 3.0 -> 4.0, `pydantic` 2.12 -> 2.13, `cryptography` 46 -> 48, `typer` 0.21 -> 0.25, `uvicorn` 0.40 -> 0.46. The cooldown holds back even-newer releases, e.g. `wsgidav` stays 4.3.3 rather than 4.3.4 (4.3.4 adds a `bcrypt<5` cap and a `passlib` dep), so `bcrypt` stays at 5.0.
+  - Bumped the `supertokens-python` floor (see the `remote_service_connector` changelog) so the resolver keeps it at the latest 0.31.3 instead of backtracking to 0.30.3; that also keeps `aiosmtplib` at 5.x for free.
+- Added `test_no_dependencies_younger_than_two_weeks` (in `test_meta_ratchets.py`) to enforce the cooldown: it fails if any locked dependency was published within the last two weeks, except deliberately-trusted exemptions (`ty` -- our dev-only type checker, pinned to the latest 0.0.39; `modal` -- explicitly pinned to ==1.4.3). uv's static `[tool.uv] exclude-newer` only accepts a fixed date, so the relative cutoff lives in this (time-relative) test instead; regenerate compliant locks with `uv lock --upgrade --exclude-newer "2 weeks"`. The cooldown does not protect us from a compromise that stays undetected past the window, nor the first project to lock a release -- its only value is the detection delay before we adopt (and, for runtime deps in published wheels, re-propagate) a release.
+
+## 2026-05-26
+
+# Repo-root spec annotation
+
+[`specs/minds-rest-api/spec.md`](../../specs/minds-rest-api/spec.md)
+got a top-of-file banner noting that the per-agent `MINDS_API_KEY` and
+the per-agent reverse SSH tunnel for the Minds API are both gone --
+agents now reach the API exclusively through the latchkey gateway's
+`minds-api-proxy` extension, with a single installation-wide
+`MINDS_API_KEY`. See the changelogs for the `minds` and `mngr_latchkey`
+projects for the full design + implementation notes.
+
+- Updated the minds Electron acceptance test spec (``specs/minds-electron-acceptance-test/spec.md``) to reference ``launch_mode=DOCKER`` instead of ``launch_mode=LOCAL``, matching the corresponding minds enum rename. The test code in ``apps/minds`` was already updated; this brings the spec in sync.
+
+- Updated the nightly changelog consolidation prompt (`scripts/changelog_consolidation_prompt.md`) so the concise `CHANGELOG.md` is a notable-only summary: non-notable changes (canonically, changes that only affect tests rather than user-facing behavior) are now omitted from `CHANGELOG.md` entirely instead of being forced into a `Changed` bullet. Such entries are still preserved verbatim in each project's `UNABRIDGED_CHANGELOG.md`.
+- Added a `dev`-project exception to that rule: because `dev` tracks repo-level developer tooling (CI, scripts, build config, ratchets, the changelog system) rather than product behavior, `dev` entries are judged by developer/maintainer impact rather than end-user-facing behavior.
+
+# CI guard for stale generated CLI docs
+
+`scripts/make_cli_docs.py` gained a `--check` mode that reports any stale
+generated docs (and the exact regen command) and exits non-zero without writing
+anything. Its content generation was refactored so a single
+`collect_generated_files()` function is the shared source of truth for both
+writing the docs and checking them, so the writer and checker cannot drift.
+
+A new `test_cli_docs_are_up_to_date` (in `test_meta_ratchets.py`, alongside the
+existing repo-wide ruff check) runs that `--check` mode and fails if the
+committed CLI docs or PyPI README are out of date, pointing you at
+`uv run python scripts/make_cli_docs.py`. This complements the existing
+`test_all_non_hidden_commands_have_generated_docs`, which only checks that a doc
+file exists per command, by also verifying the file contents are current.
+
+Workspace + scripts metadata follows the rename of `libs/mngr_gemini` to `libs/mngr_antigravity`: workspace `pyproject.toml` cov target, `test_profiles.toml` mngr-suite test paths, top-level `README.md`, and the package list in `scripts/utils.py`.
+
+- Added `specs/env-settings-overrides/concise.md` documenting the new `MNGR__*` env-var override scheme, the `__extend` operator, and the assign-by-default merge semantics shipped with this PR. See the `mngr` changelog entry for the user-visible behavior.
+
+Broadened the autofix auto-accept rules to cover any pure DRY cleanup that is a clear
+improvement and doesn't change behavior (e.g. inline-re-construction folded into a
+pre-existing local). Previously the rule only listed specific cases.
+
 ## 2026-05-26
 
 ## dev

@@ -9,12 +9,15 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 ### Added
 
 - Added: `mngr_forward` emits `system_interface_backend_failure` envelopes (renamed from `workspace_backend_failure`) on connection errors, mid-SSE EOF, or 5xx responses, so consumers like minds can drive a recovery UI; the plugin's 503 fallback page is now a styled card with a loading spinner.
+- Added: `ReverseTunnelInfo` gained an optional `agent_id: str | None = None` field; `setup_reverse_tunnel` gained an optional `agent_id` parameter; new `remove_reverse_tunnels_for_agent(agent_id)` method tears down every reverse tunnel tagged with a given agent_id without disturbing forward tunnels sharing the same SSH connection.
 
 ### Changed
 
 - Changed: `mngr forward` no longer crashes when its bind port is already in use — `--port` is now optional and falls back to an OS-assigned port if the default (8421) is taken; the server binds its listen socket up front and hands it to uvicorn so the `listening` envelope always reports the bound port.
 - Changed: Renamed the workspace-server envelope contract to system-interface in lockstep with the mngr-side rename (`WorkspaceBackendFailure*` → `SystemInterfaceBackendFailure*`, envelope type `workspace_backend_failure` → `system_interface_backend_failure`); the 503 loader page now reads "System interface starting".
 - Changed: Picks up the `FullDiscoverySnapshotEvent` schema bump (`providers`, `error_by_provider_name`); older builds raise `DiscoverySchemaChangedError` against new snapshots.
+- Changed: `SSHTunnelManager` (in `mngr_forward/ssh_tunnel.py`) is now the single SSH tunneling implementation in the monorepo — the latchkey package's parallel copy has been absorbed and re-exported transparently from this module. Both the plugin's forward and reverse paths and `mngr latchkey forward`'s supervisor use it.
+- Changed: Reverse-tunnel repair loop now uses per-tunnel exponential backoff (1s, 2s, 4s, ..., capped at 5min) instead of the previous flat 30s cadence — a permanently-gone target costs one paramiko handshake every five minutes instead of every 30s.
 
 ### Fixed
 

@@ -5,3 +5,7 @@ A concise, human-friendly summary of changes to the `mngr_ttyd` project. Entries
 For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDGED_CHANGELOG.md).
 
 ## [Unreleased]
+
+### Fixed
+
+- Fixed: `resources/ttyd_agent.sh` now uses exact-session matching (`=$_SESSION:0`) when attaching to a named agent via URL arg, so the browser ttyd window can no longer be silently routed to a sibling session whose name starts with the requested one.

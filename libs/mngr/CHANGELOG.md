@@ -18,6 +18,10 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Added: New `HasTranscriptMixin` / `HasCommonTranscriptMixin` on `AgentInterface` formalising the raw-capture contract for `mngr transcript`.
 - Added: `pre_baked_agent_id` field on `HostInterface` so `mngr create --reuse` honors the imbue_cloud lease-adopt scenario when the duplicate-name check would otherwise fire.
 - Added: New `is_for_host_creation: bool = False` parameter on `ProviderBackendInterface.build_provider_instance` — only `mngr create` may bootstrap host-creation state; read flows leave the default.
+- Added: `isolate_host_volumes` field on the Docker provider config — when `True`, each host container only sees its own per-host sub-folder of the shared state volume (via `--mount ... volume-subpath=...`, requires Docker Engine ≥25.0). Left unset, the provider emits a one-shot deprecation warning at startup noting the default will flip to `True` in a future release.
+- Added: New top-level `allow_settings_key_assignment_narrowing` setting (default `false`) that raises `ConfigParseError` when a higher-precedence settings layer would assign over a non-empty list/tuple/dict/set value from a lower-precedence layer with anything that doesn't preserve every prior entry. The error tells the user how to opt in or use the `__extend` operator suffix for additive behavior on a specific key. The default is expected to flip to `true` in a future version.
+- Added: `mngr config schema` lists every settable key with type and current effective value; `mngr config list --all` includes default-valued fields too; `mngr config extend KEY VALUE` writes the `__extend` form.
+- Added: `TmuxSessionTarget` and `TmuxWindowTarget` Pydantic classes in `imbue.mngr.hosts.tmux` whose `.as_shell_arg()` renders the `-t` argument with a leading `=` (tmux's exact-match prefix), eliminating tmux's session-name prefix-matching fallback as a footgun.
 
 ### Changed
 
@@ -37,12 +41,18 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Changed: `mngr create --provider lima` help text now shows `--memory=N` / `--disk=N` (plain integers).
 - Changed: mngr's generated `~/.mngr/tmux.conf` widens `status-left-length` to 20 so a full `mngr-…` session name shows in the status bar.
 - Changed: Discovery polling no longer retries failures at the top level — providers retry their own transient failures before raising.
+- Changed (breaking): Unified settings overrides — `MNGR__X__Y__Z=value` env vars (note the double underscores) now target the dotted path `x.y.z`, replacing the narrow `MNGR_COMMANDS_<CMD>_<PARAM>` scheme; `--setting x.y.z=value` and `mngr config set x.y.z value` go through the same resolver. The `__extend` operator suffix on a leaf key (e.g. `cli_args__extend = [...]`) opts into additive behavior (append/key-merge/union); bare keys always assign.
+- Changed (breaking): Layer merging is now assign-by-default for every aggregate (list, tuple, dict, set). Older configs that relied on implicit cross-scope concatenation of `cli_args`, etc. now need `field__extend = [...]` to keep additive behavior. The five top-level container dicts on `MngrConfig` (`agent_types`, `providers`, `plugins`, `commands`, `create_templates`) keep their per-key merge. Agent-type parent inheritance and create templates also stop auto-concatenating tuple options.
+- Changed: CLI tuple/list flags (`--env`, `--label`, `--extra-window`, etc.) now extend the merged settings value rather than replace it — config-supplied entries come first, CLI-supplied values appended. Pipeline order is now `config_defaults → templates → CLI`.
+- Changed: Renamed `gemini` agent type and `mngr_gemini` plugin to `antigravity` / `mngr_antigravity` to track Google's CLI rename. The plugin was never released, so this is a destructive rename with no shim.
+- Changed: Regenerated `mngr latchkey` CLI doc reference; a new CI check now fails if any generated CLI doc drifts from `uv run python scripts/make_cli_docs.py` output.
 
 ### Removed
 
 - Removed: `mngr provision` (aka `mngr prov`) subcommand and its docs; provisioning still runs automatically during `mngr create`.
 - Removed: The agent-`permissions` concept from `mngr` core — `Permission`, `AgentPermissionsOptions`, `NoPermissionsAgentMixin`, `get_permissions`/`set_permissions`, the `--grant`/`--revoke` flags on `mngr limit`, and `--grant` on `mngr create` are gone. Higher-level libraries (latchkey, minds) keep their own permission concepts.
 - Removed: The buggy `--on-error continue` flag the outer `mngr observe` was passing to its inner `mngr observe --discovery-only` child.
+- Removed (breaking): `MNGR_COMMANDS_<CMD>_<PARAM>`, `MNGR_ENABLE_PARAMIKO_LOGGING`, and `MNGR_AGENT_READY_TIMEOUT` env vars (promoted to first-class config fields `logging.enable_paramiko_logging` and `agent_ready_timeout`, settable via `MNGR__*`). `MNGR_RETAIN_LOCK_FOR_FAILED_HOSTS_DURING_CREATE` renamed to `MNGR_DEBUG_RETAIN_LOCK_FOR_FAILED_HOSTS_DURING_CREATE`. `MNGR_ROOT_NAME`, `MNGR_HOST_DIR`, `MNGR_PREFIX`, and `MNGR_HEADLESS` aliases are preserved.
 
 ### Fixed
 
@@ -50,6 +60,8 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Fixed: `mngr create --type X` now fails fast with `UnknownAgentTypeError` when `X` doesn't resolve to a registered agent class, instead of silently resolving to a generic `BaseAgent`.
 - Fixed: `Host._get_all_descendant_pids` no longer hits `RecursionError` on a PID-reuse cycle in the process tree, unsticking `host.stop_agents` on long-lived agents' cleanup paths.
 - Fixed: `mngr config` help text and docs example use `--scope user` instead of the nonexistent `--user`.
+- Fixed: tmux commands no longer silently misroute to the wrong agent's session under prefix collision (e.g. `gemini` vs `gemini-to-antigravity`). Every `-t` call site (lifecycle check, send-keys, paste-buffer, capture-pane, kill / rename / has-session, the post-attach resize script, and the TUI input pipeline) now routes through `TmuxSessionTarget` / `TmuxWindowTarget` so the rendered `-t` argument carries a leading `=` exact-match prefix.
+- Fixed: Settings narrowing safety net — a brand-new `[create_templates.<name>]` block whose only `<opt>__extend = [...]` entry was introduced in a single layer no longer loses its `__extend` suffix at config-load time; and `agent_types.<name>.cli_args = "..."` (string form) no longer trips the narrowing guard when two layers each supply a string with different tokens.
 
 ## [v0.2.8] - 2026-05-13
 

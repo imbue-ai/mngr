@@ -13,6 +13,13 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Changed: Added `--run-name` flag to override the auto-generated run name.
 - Changed: HTML report is now mirrored to `s3://int8-shared-internal/tmr-reports/<run>.html` (us-west-2) on every regeneration when AWS credentials are set; the public URL `http://go/shared/tmr-reports/<run>.html` is printed and emitted as a structured `report_url` event.
 - Changed: `tmr_role` agent label (`testing` / `snapshotter` / `integrator`) replaces the previous name-prefix matching for filtering integrator agents during `--reintegrate`; derived directly from `AgentKind` which gained a `SNAPSHOTTER` variant.
+- Changed: `mngr_tmr` is now a thin recipe (`TestMapReduceRecipe` in `imbue.mngr_tmr.recipe`) on top of the new `mngr_mapreduce` framework — the `mngr tmr` CLI surface is unchanged for users, but agent-launching / polling / extraction code moved out. Server-side labels were renamed to `mapreduce_role` / `mapreduce_run_name` and outputs-archive path simplified to `plugin/mapreduce/outputs.tar.gz`; agents from older TMR runs are not discoverable by this version (tear them down with the prior `mngr` build first).
+- Changed: Integrator now runs on the same `--provider` as the testing agents and reuses any snapshot they built; on `--provider modal` (or any remote provider) it spins up just as quickly as the test agents do. The integrator publishes its results the same way (`outputs.tar.gz` under `$MNGR_AGENT_STATE_DIR/plugin/test-map-reduce/`). Local testing agents switched from `GIT_WORKTREE` to `GIT_MIRROR` transfer mode so the local-provider path matches the remote one.
+
+### Removed
+
+- Removed: `--integrator-provider`, `--integrator-type`, and `--integrator-template` flags — the integrator now follows the testing-agent settings via a single `--provider`. `--integrator-timeout` is unchanged.
+- Removed: `--use-snapshot` flag — snapshot building is now automatic whenever the provider supports it. `--snapshot <ID>` still works for reusing an existing snapshot.
 
 ### Fixed
 
