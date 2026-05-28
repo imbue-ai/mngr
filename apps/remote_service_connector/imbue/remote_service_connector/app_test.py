@@ -1,6 +1,7 @@
 import hashlib
 import json
 from collections.abc import Callable
+from pathlib import Path
 from uuid import UUID
 
 import httpx
@@ -2230,3 +2231,11 @@ def test_buckets_require_paid_account(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("PAID_ACCOUNT_SUFFIXES", raising=False)
     resp = client.post("/buckets", json={"name": "x"}, headers=_admin_headers())
     assert resp.status_code == 403
+
+
+def test_r2_keys_migration_declares_all_persisted_columns() -> None:
+    """Guard against the r2_keys schema and the PostgresKeyStore INSERT drifting apart."""
+    migration_path = Path(__file__).parent.parent.parent / "migrations" / "004_r2_keys.sql"
+    migration_sql = migration_path.read_text()
+    for column in ("access_key_id", "owner_user_id", "bucket_name", "access", "alias", "created_at"):
+        assert column in migration_sql, f"r2_keys migration is missing column {column!r}"
