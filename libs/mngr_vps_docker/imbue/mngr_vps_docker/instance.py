@@ -84,6 +84,7 @@ from imbue.mngr.providers.ssh_utils import create_pyinfra_host
 from imbue.mngr.providers.ssh_utils import load_or_create_host_keypair
 from imbue.mngr.providers.ssh_utils import load_or_create_ssh_keypair
 from imbue.mngr.providers.ssh_utils import wait_for_sshd
+from imbue.mngr.utils.git_utils import rsync_worktree_over_clone
 from imbue.mngr_vps_docker.cloud_init import generate_cloud_init_user_data
 from imbue.mngr_vps_docker.config import VpsDockerProviderConfig
 from imbue.mngr_vps_docker.errors import VpsProvisioningError
@@ -1569,7 +1570,8 @@ class VpsDockerProvider(BaseProviderInstance):
                 if git_depth is not None:
                     clone_cmd.extend(["--depth", str(git_depth)])
                 # Use file:// so --depth is honored for local repos
-                clone_cmd.extend([f"file://{local_context}", str(local_clone_dir / "repo")])
+                clone_target = local_clone_dir / "repo"
+                clone_cmd.extend([f"file://{local_context}", str(clone_target)])
                 cg = ConcurrencyGroup(name="git-clone-build-context")
                 with cg:
                     clone_result = cg.run_process_to_completion(
@@ -1577,9 +1579,25 @@ class VpsDockerProvider(BaseProviderInstance):
                         is_checked_after=False,
                         timeout=120.0,
                     )
-                if clone_result.returncode != 0:
-                    raise MngrError(f"Failed to clone build context: {clone_result.stderr.strip()}")
-                context_args[-1] = str(local_clone_dir / "repo")
+                    if clone_result.returncode != 0:
+                        raise MngrError(f"Failed to clone build context: {clone_result.stderr.strip()}")
+                    # Overlay the worktree's working tree on top of the
+                    # fresh clone so uncommitted edits (e.g. a locally-
+                    # rsynced ``vendor/mngr/`` from
+                    # ``mngr imbue_cloud admin pool create --mngr-source``,
+                    # or any in-flight FCT edits the operator hasn't
+                    # committed yet) actually reach the docker build.
+                    # ``git clone`` alone only carries committed files,
+                    # which silently rolls the build context back to
+                    # HEAD and produces "Unknown field" / "wrong code"
+                    # surprises at image-build time. Mirrors the
+                    # corresponding overlay step in minds' agent_creator
+                    # (Apr 12 fix, commit a3dc008b4); the shared helper
+                    # in ``imbue.mngr.utils.git_utils`` keeps the two
+                    # call sites in lockstep.
+                    if is_worktree:
+                        rsync_worktree_over_clone(local_context, clone_target, cg=cg)
+                context_args[-1] = str(clone_target)
 
         try:
             logger.log(
