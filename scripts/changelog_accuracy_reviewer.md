@@ -85,22 +85,13 @@ not delete or rewrite unrelated pre-existing bullets.
 
 ### 4. Commit your corrections
 
-You run **concurrently with other reviewers**, each owning a *different*
-set of projects' `CHANGELOG.md` files. The files are disjoint across
-reviewers, but all commits share the repository's `.git/index.lock`, so:
-
-- Stage **only the files you changed** (the `CHANGELOG.md` files of your
-  assigned projects): `git add -- <changelog> [<changelog2> ...]`. **Never**
-  use `git add -A`, `git add .`, or `git commit -a` -- those would sweep up
-  other reviewers' half-finished edits into your commit.
-- Then commit. The git identity is already configured. Use as many commits
-  as feel natural, with sensible commit messages of your own choosing. Do
-  **not** amend or rebase existing commits.
-- If a `git add`/`git commit` fails because another reviewer is mid-commit
-  (an `index.lock` / "Unable to create '.git/index.lock'" error), wait a
-  second or two and retry (a few times if needed) -- the contention is
-  transient.
-- If you changed nothing, do not commit anything.
+Commit the `CHANGELOG.md` files you changed, using as many commits as feel
+natural, with sensible commit messages of your own choosing; do **not**
+amend or rebase existing commits. Because other reviewers are concurrently
+editing *other* projects' `CHANGELOG.md` files, stage **only the files you
+changed** (`git add -- <changelog> [<changelog2> ...]`) -- **never**
+`git add -A`, `git add .`, or `git commit -a`, which would sweep their
+in-progress edits into your commit.
 
 ### 5. Report back
 
