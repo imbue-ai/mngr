@@ -10,17 +10,21 @@ Each VPS runs exactly one Docker container (1:1 mapping). Docker is used purely 
 
 ```
 User Machine                              VPS
-+------------------+                      +-------------------------------+
-|                  |   SSH (port 22)      |  VPS OS (Debian/Ubuntu)       |
-|  mngr CLI        | ------------------> |  (Docker commands over SSH)   |
-|                  |                      |  Docker Engine                |
-|  ~/.mngr/        |   SSH (port 2222)   |  +-------------------------+ |
-|    profile/      | ------------------> |  | Container (sshd)        | |
-|      providers/  |   direct to         |  |  /mngr/ (host_dir)     | |
-|        <backend>/|   VPS:2222          |  +-------------------------+ |
-|          keys/   |                      |  Docker named volume          |
-+------------------+                      |  State container + volume     |
-                                          +-------------------------------+
++------------------+                      +---------------------------------------+
+|                  |   SSH (port 22)      |  VPS OS (Debian/Ubuntu)               |
+|  mngr CLI        | ------------------>  |  (Docker commands over SSH)           |
+|                  |                      |  Docker Engine                        |
+|  ~/.mngr/        |   SSH (port 2222)    |  +---------------------------------+  |
+|    profile/      | ------------------>  |  | Container (sshd)                |  |
+|      providers/  |   direct to          |  |   /mngr -> /mngr-vol/host_dir   |  |
+|        <backend>/|   VPS:2222           |  +---------------------------------+  |
+|          keys/   |                      |  Unified Docker volume                |
++------------------+                      |  (mngr-host-vol-<host_id_hex>)        |
+                                          |  mounted at /mngr-vol:                |
+                                          |    host_state.json                    |
+                                          |    agents/<agent_id>.json             |
+                                          |    host_dir/...                       |
+                                          +---------------------------------------+
 ```
 
 ### Key design decisions
@@ -28,15 +32,14 @@ User Machine                              VPS
 - **Docker commands over SSH**: All Docker operations are executed via `ssh user@vps docker ...`, not via the Docker SDK's remote host feature.
 - **Direct SSH to container**: The container's sshd port (default 2222) is exposed on the VPS's public IP. mngr connects directly to `<vps_ip>:2222` with key-based authentication.
 - **SSH host keys via cloud-init**: Host keys are generated locally and injected into the VPS via cloud-init `user_data`, eliminating TOFU (trust-on-first-use).
-- **State on the VPS**: All host records and agent data are stored on a Docker state volume on the VPS itself, following the same pattern as the existing Docker provider (state container + named volume).
+- **Unified per-host volume on the VPS**: Each VPS has exactly one mngr-managed Docker volume (`mngr-host-vol-<host_id_hex>`) holding both metadata (`host_state.json`, `agents/<agent_id>.json`) and the `host_dir/` contents. mngr reads and writes the metadata directly on the VPS filesystem via the volume's docker mountpoint (typically `/var/lib/docker/volumes/<name>/_data`), discovered with `docker volume inspect`. No separate state container is involved. This means a single `docker run --rm -v <volume>:/data ... tar ...` captures everything for that host.
 - **Separate SSH keypairs**: The VPS and container each have their own SSH keypair for defense in depth.
 
 ## Modules
 
 - `vps_client.py` -- Abstract `VpsClientInterface` that concrete providers implement (create/destroy instances, snapshots, SSH key management)
 - `instance.py` -- `VpsDockerProvider` implementation with full lifecycle (create, stop, start, destroy, snapshots, discovery)
-- `docker_over_ssh.py` -- `DockerOverSsh` helper for executing Docker commands on a remote VPS via SSH
-- `host_store.py` -- `VpsDockerHostStore` for reading/writing host records on the VPS state volume
+- `host_store.py` -- `VpsDockerHostStore` for reading/writing host records on the unified per-host volume; constructed via `open_host_store(outer, volume_name)`
 - `cloud_init.py` -- Cloud-init user_data generation for VPS provisioning
 - `config.py` -- `VpsDockerProviderConfig` base configuration
 - `errors.py` -- Error hierarchy (`VpsDockerError`, `VpsProvisioningError`, etc.)
@@ -95,10 +98,10 @@ mngr create my-agent --provider vultr -b --vps-plan=vc2-2c-4gb -b --file=Dockerf
 
 | Operation | What happens |
 |-----------|-------------|
-| `create` | Provision VPS, install Docker via cloud-init, run container, setup SSH, write state |
+| `create` | Provision VPS, install Docker via cloud-init, create the unified `mngr-host-vol-<hex>` volume (seeded with empty `host_dir/` and `agents/`), run container, set up SSH, write `host_state.json` |
 | `stop` | `docker stop` the container. VPS keeps running. |
 | `start` | `docker start` the container. Wait for SSH. |
-| `destroy` | Remove container and volume, destroy VPS, clean up SSH keys |
+| `destroy` | Remove container, remove the unified host volume (drops `host_state.json`, `agents/`, and `host_dir/` together), destroy VPS, clean up SSH keys |
 | idle timeout | `docker stop` the container. VPS keeps running. |
 
 ## Implementing a new VPS provider
