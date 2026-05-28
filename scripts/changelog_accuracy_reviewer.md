@@ -41,16 +41,14 @@ Apply steps 1-3 to **each** project assigned to you.
 ### 1. Find this run's newly-added bullets
 
 For an assigned project, let `<changelog>` be its `CHANGELOG.md` (e.g.
-`libs/mngr/CHANGELOG.md`). Get the lines this run added to it:
+`libs/mngr/CHANGELOG.md`). See what this run added to it:
 
 ```bash
 git diff origin/main...HEAD -- <changelog>
 ```
 
-The bullets you must review are the added lines (lines beginning with `+`)
-of the form `- <Category>: <description>` inside that file's `[Unreleased]`
-section. If a project has no added bullets, there is nothing to review for
-it.
+Review the bullets this run added to that file's `[Unreleased]` section; if
+it added none, there is nothing to review for that project.
 
 ### 2. Verify each bullet against the code
 
@@ -103,6 +101,8 @@ Your final message to the orchestrator must be a concise plain-text summary
   each, noting which project),
 - any **code concerns**: bullets where the code itself looked wrong or
   buggy (which you did NOT fix), so the orchestrator can decide what to do
-  with them.
+  with them,
+- anything else you encountered worth flagging: problems running the
+  review, ambiguities, or anything unexpected.
 
 If nothing needed changing, say so explicitly.
