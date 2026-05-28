@@ -101,7 +101,10 @@ def _grant_user_repo_access() -> None:
     the test user would also work but is heavier and would race other
     tests that share the sandbox.)
     """
-    repo_root = Path(__file__).resolve().parents[5]
+    # Path layout: libs/mngr_lima/imbue/mngr_lima/test_lima_btrfs_release.py
+    #              parents:  [4]     [3]    [2]   [1]            [0]
+    # parents[4] is the repo root.
+    repo_root = Path(__file__).resolve().parents[4]
     subprocess.run(["chmod", "-R", "o+rX", str(repo_root)], check=True, timeout=120)
 
 
@@ -116,7 +119,10 @@ def test_lima_btrfs_host_end_to_end_release() -> None:
     _ensure_test_user_exists()
     _grant_user_repo_access()
 
-    repo_root = Path(__file__).resolve().parents[5]
+    # Path layout: libs/mngr_lima/imbue/mngr_lima/test_lima_btrfs_release.py
+    #              parents:  [4]     [3]    [2]   [1]            [0]
+    # parents[4] is the repo root.
+    repo_root = Path(__file__).resolve().parents[4]
     venv_python = repo_root / ".venv" / "bin" / "python"
     helper_module = "imbue.mngr_lima._lima_btrfs_release_helper"
 
