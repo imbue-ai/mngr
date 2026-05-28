@@ -562,14 +562,21 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
         request_event_id = str(req_event.event_id)
         parsed_agent_id = AgentId(req_event.agent_id)
         backend_resolver: BackendResolverInterface = request.app.state.backend_resolver
-        host_id = self._resolve_host_id(backend_resolver, parsed_agent_id)
+        loop = asyncio.get_running_loop()
+        # ``_resolve_host_id`` may shell out to ``mngr list`` on a cache miss,
+        # which blocks for up to ``_MNGR_LIST_FALLBACK_TIMEOUT_SECONDS``; keep
+        # it off the event loop.
+        host_id = await loop.run_in_executor(
+            None,
+            lambda: self._resolve_host_id(backend_resolver, parsed_agent_id),
+        )
         if host_id is None:
             return _json_error(
                 f"Could not resolve host for agent {parsed_agent_id}; cannot apply grant.",
                 status_code=503,
             )
         try:
-            grant_result = await asyncio.get_running_loop().run_in_executor(
+            grant_result = await loop.run_in_executor(
                 None,
                 lambda: self.grant(
                     request_event_id=request_event_id,
