@@ -768,6 +768,8 @@ def test_template_applies_values_from_config(
     mngr_dir.mkdir()
     settings_file = mngr_dir / "settings.toml"
     settings_file.write_text("""
+is_allowed_in_pytest = true
+
 [create_templates.mytemplate]
 ensure_clean = false
 """)
@@ -824,6 +826,8 @@ def test_template_cli_args_take_precedence(
     mngr_dir.mkdir()
     settings_file = mngr_dir / "settings.toml"
     settings_file.write_text("""
+is_allowed_in_pytest = true
+
 [create_templates.mytemplate]
 message = "template-message"
 ensure_clean = false
@@ -886,6 +890,8 @@ def test_template_unknown_template_raises_error(
     mngr_dir.mkdir()
     settings_file = mngr_dir / "settings.toml"
     settings_file.write_text("""
+is_allowed_in_pytest = true
+
 [create_templates.existing]
 ensure_clean = false
 """)
