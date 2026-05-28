@@ -254,13 +254,12 @@ def _load_muted_agents(mngr_ctx: MngrContext) -> set[AgentName]:
     The muted bit must be sourced at least as resiliently as the agent list:
     an agent that is still listed on the board has to keep its MUTED
     classification even when an unrelated provider is momentarily unreachable
-    (e.g. right after the machine wakes from sleep, before the network is back).
-    Previously a single all-or-nothing ``discover_hosts_and_agents`` call meant
-    that any one provider's failure produced an empty muted set, so every agent
-    was treated as unmuted and reclassified by its PR state -- and since the
-    GitHub fetch also fails post-wake, the previously-muted rows landed under
-    "PRs not loaded" mixed in with the others instead of staying in the Muted
-    section.
+    (e.g. a remote provider behind a flaky network connection). Previously a
+    single all-or-nothing ``discover_hosts_and_agents`` call meant that any one
+    provider's failure produced an empty muted set, so every agent was treated
+    as unmuted and reclassified by its PR state -- and when the GitHub fetch was
+    failing at the same time, the previously-muted rows landed under "PRs not
+    loaded" mixed in with the others instead of staying in the Muted section.
     """
     provider_names = list_provider_names_to_load(mngr_ctx)
     if not provider_names:
