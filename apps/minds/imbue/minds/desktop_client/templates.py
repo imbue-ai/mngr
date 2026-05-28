@@ -651,23 +651,23 @@ _RECOVERY_SCRIPT: Final[str] = """\
               renderUnresponsive();
               return;
             }
-            if (tier === 'misconfigured') {
+            if (tier === 'workspace_misconfigured') {
               renderMisconfigured();
               return;
             }
-            if (tier === 'host') {
+            if (tier === 'host_offline') {
               // Container fully stopped: nothing live to interrupt, dispatch
               // unattended. Tell the endpoint the host is already stopped so it
               // skips the redundant stop step and cold-boots straight away.
               postRestart('/restart-host?host_already_stopped=1');
               return;
             }
-            if (tier === 'surgical') {
+            if (tier === 'interface_unresponsive') {
               // Container running, exec works: restart the system-services agent in place.
               postRestart('/restart-system-interface');
               return;
             }
-            // 'manual' or anything else: require explicit user consent for a host restart.
+            // 'host_unresponsive' or anything else: require explicit user consent for a host restart.
             renderUnresponsive();
           }, function () {
             renderUnresponsive();

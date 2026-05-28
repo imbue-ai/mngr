@@ -115,18 +115,28 @@ class Probe(FrozenModel):
 
 
 class DispatchTier(str, Enum):
-    """How the recovery page should respond, derived from the probe answers."""
+    """What is wrong with the workspace, derived from the probe answers.
 
-    SURGICAL = "surgical"
-    """Container running and exec works -- restart the system-services agent."""
+    Every member names a *condition* (what we observed), not the *action* the
+    recovery page takes in response -- the action is a consequence of the
+    condition (e.g. INTERFACE_UNRESPONSIVE -> in-place restart; HOST_OFFLINE ->
+    unattended host restart; HOST_UNRESPONSIVE -> ask the user first).
+    """
 
-    HOST = "host"
+    INTERFACE_UNRESPONSIVE = "interface_unresponsive"
+    """Container running and exec works -- restart the system-services agent in place."""
+
+    HOST_OFFLINE = "host_offline"
     """Container is offline -- restart the host (no live work to interrupt)."""
 
-    MANUAL = "manual"
-    """Ambiguous -- show "Restart workspace" and require explicit user consent."""
+    HOST_UNRESPONSIVE = "host_unresponsive"
+    """Container claims running but we can't reach it -- require explicit user consent.
 
-    MISCONFIGURED = "misconfigured"
+    Also the fallback for any ambiguous host state: the host is not responding
+    in the way we expect, so we ask the user before bouncing it.
+    """
+
+    WORKSPACE_MISCONFIGURED = "workspace_misconfigured"
     """services.toml lacks [services.system_interface] -- a restart won't help."""
 
 
@@ -142,7 +152,7 @@ class HostHealthResponse(FrozenModel):
         default=(), description="Ordered probe results to render in the diagnostics list."
     )
     dispatch_tier: DispatchTier = Field(
-        default=DispatchTier.MANUAL,
+        default=DispatchTier.HOST_UNRESPONSIVE,
         description="Restart-tier classification derived from probe answers.",
     )
 
@@ -554,28 +564,29 @@ def _classify_dispatch_tier(probes: tuple[Probe, ...]) -> DispatchTier:
 
     Ordered by precedence:
 
-    * MISCONFIGURED beats everything: a missing [services.system_interface]
-      block means no restart will help, so don't bury that behind any
-      transport / container check.
-    * HOST when the container is offline: nothing live to interrupt, so
+    * WORKSPACE_MISCONFIGURED beats everything: a missing
+      [services.system_interface] block means no restart will help, so don't
+      bury that behind any transport / container check.
+    * HOST_OFFLINE when the container is offline: nothing live to interrupt, so
       a host restart can run unattended.
-    * MANUAL when the container claims running but we can't exec into it:
-      a host restart bounces a live container so it requires explicit user
+    * HOST_UNRESPONSIVE when the container claims running but we can't exec into
+      it: a host restart bounces a live container so it requires explicit user
       consent.
-    * SURGICAL when both container and exec are healthy: the system-services
-      agent can be restarted in place without touching the user's agents.
-    * MANUAL on anything else (ambiguous host states).
+    * INTERFACE_UNRESPONSIVE when both container and exec are healthy: the
+      system-services agent can be restarted in place without touching the
+      user's agents.
+    * HOST_UNRESPONSIVE on anything else (ambiguous host states).
     """
     answers = {probe.question: probe.answer for probe in probes}
     if answers.get(_QUESTION_SERVICES_TOML_DECLARES) == ProbeAnswer.NO:
-        return DispatchTier.MISCONFIGURED
+        return DispatchTier.WORKSPACE_MISCONFIGURED
     container_running = answers.get(_QUESTION_CONTAINER_RUNNING)
     if container_running == ProbeAnswer.NO:
-        return DispatchTier.HOST
+        return DispatchTier.HOST_OFFLINE
     can_run = answers.get(_QUESTION_CAN_RUN_COMMANDS_INSIDE)
     if container_running == ProbeAnswer.YES and can_run == ProbeAnswer.YES:
-        return DispatchTier.SURGICAL
-    return DispatchTier.MANUAL
+        return DispatchTier.INTERFACE_UNRESPONSIVE
+    return DispatchTier.HOST_UNRESPONSIVE
 
 
 def build_host_health_response(

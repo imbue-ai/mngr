@@ -284,7 +284,7 @@ def test_plugin_resolver_probe_no_when_no_services_registered() -> None:
 # --- dispatch_tier classification ----------------------------------------
 
 
-def test_dispatch_tier_surgical_when_container_running_and_exec_works() -> None:
+def test_dispatch_tier_interface_unresponsive_when_container_running_and_exec_works() -> None:
     response = build_host_health_response(
         list_json=_list_json(host_state="RUNNING"),
         agent_id=_AGENT_ID,
@@ -294,10 +294,10 @@ def test_dispatch_tier_surgical_when_container_running_and_exec_works() -> None:
         ),
         plugin_resolver_services={},
     )
-    assert response.dispatch_tier == DispatchTier.SURGICAL
+    assert response.dispatch_tier == DispatchTier.INTERFACE_UNRESPONSIVE
 
 
-def test_dispatch_tier_host_when_container_is_offline() -> None:
+def test_dispatch_tier_host_offline_when_container_is_offline() -> None:
     response = build_host_health_response(
         list_json=_list_json(host_state="STOPPED"),
         agent_id=_AGENT_ID,
@@ -305,10 +305,10 @@ def test_dispatch_tier_host_when_container_is_offline() -> None:
         in_container_stdout=None,
         plugin_resolver_services={},
     )
-    assert response.dispatch_tier == DispatchTier.HOST
+    assert response.dispatch_tier == DispatchTier.HOST_OFFLINE
 
 
-def test_dispatch_tier_manual_when_container_running_but_exec_dead() -> None:
+def test_dispatch_tier_host_unresponsive_when_container_running_but_exec_dead() -> None:
     """SSH-dead path: host claims RUNNING but mngr exec failed -- require user consent."""
     response = build_host_health_response(
         list_json=_list_json(host_state="RUNNING"),
@@ -317,7 +317,7 @@ def test_dispatch_tier_manual_when_container_running_but_exec_dead() -> None:
         in_container_stdout=None,
         plugin_resolver_services={},
     )
-    assert response.dispatch_tier == DispatchTier.MANUAL
+    assert response.dispatch_tier == DispatchTier.HOST_UNRESPONSIVE
 
 
 def test_dispatch_tier_misconfigured_beats_other_signals() -> None:
@@ -329,10 +329,10 @@ def test_dispatch_tier_misconfigured_beats_other_signals() -> None:
         in_container_stdout=_probe_stdout({"services_toml_declares_system_interface": False}),
         plugin_resolver_services={"system_interface": "http://127.0.0.1:9100"},
     )
-    assert response.dispatch_tier == DispatchTier.MISCONFIGURED
+    assert response.dispatch_tier == DispatchTier.WORKSPACE_MISCONFIGURED
 
 
-def test_dispatch_tier_manual_for_ambiguous_host_state() -> None:
+def test_dispatch_tier_host_unresponsive_for_ambiguous_host_state() -> None:
     response = build_host_health_response(
         list_json=_list_json(host_state="STARTING"),
         agent_id=_AGENT_ID,
@@ -340,7 +340,7 @@ def test_dispatch_tier_manual_for_ambiguous_host_state() -> None:
         in_container_stdout=None,
         plugin_resolver_services={},
     )
-    assert response.dispatch_tier == DispatchTier.MANUAL
+    assert response.dispatch_tier == DispatchTier.HOST_UNRESPONSIVE
 
 
 # --- shape sanity --------------------------------------------------------

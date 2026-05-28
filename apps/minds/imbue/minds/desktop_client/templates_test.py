@@ -298,7 +298,7 @@ def test_render_recovery_page_script_branches_on_dispatch_tier() -> None:
         initial_error="",
     )
     assert "dispatch_tier" in html
-    for tier in ("'misconfigured'", "'host'", "'surgical'", "'manual'"):
+    for tier in ("'workspace_misconfigured'", "'host_offline'", "'interface_unresponsive'", "'host_unresponsive'"):
         assert tier in html, f"recovery page JS missing branch for {tier}"
     # The shared landing places for each branch.
     assert "renderMisconfigured" in html

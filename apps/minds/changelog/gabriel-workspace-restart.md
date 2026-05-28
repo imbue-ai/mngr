@@ -144,7 +144,8 @@ Tiered system-interface restart for the minds recovery flow.
 - Recovery diagnostics rewritten as a flat probe list. The host-health
   endpoint now returns ``probes: [{question, command, output, answer},
   ...]`` plus a derived ``dispatch_tier`` enum
-  (``surgical``/``host``/``manual``/``misconfigured``) instead of the
+  (``interface_unresponsive``/``host_offline``/``host_unresponsive``/``workspace_misconfigured``)
+  instead of the
   prior natural-language fields (``reachable``, ``host_offline``,
   ``ssh_dead``, ``is_misconfigured``, ``host_state``,
   ``services_agent_state``, ``ssh_connections``, ``mngr_list_*``,
