@@ -233,7 +233,6 @@ async function downloadGit(resourcesDir, { platform }) {
   fs.mkdirSync(binDir, { recursive: true });
 
   if (platform === 'win32') {
-    // Download Git for Windows portable (MinGit)
     const filename = `MinGit-${GIT_FOR_WINDOWS_VERSION}-64-bit.zip`;
     const url = `https://github.com/git-for-windows/git/releases/download/${GIT_FOR_WINDOWS_TAG}/${filename}`;
     console.log(`[download-binaries] Downloading MinGit from ${url}...`);
