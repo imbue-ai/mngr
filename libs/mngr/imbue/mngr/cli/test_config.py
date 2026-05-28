@@ -93,7 +93,7 @@ def test_config_list_with_scope_shows_file_path(
 
     # Create the settings.toml in the profile directory
     user_config_path = profile_dir / "settings.toml"
-    user_config_path.write_text('prefix = "custom-"\n')
+    user_config_path.write_text('prefix = "custom-"\nis_allowed_in_pytest = true\n')
 
     result = cli_runner.invoke(
         config,
@@ -315,7 +315,7 @@ def test_config_unset_removes_value(
     config_dir = temp_git_repo / f".{mngr_test_root_name}"
     config_dir.mkdir()
     config_path = config_dir / "settings.toml"
-    config_path.write_text('prefix = "test-"\ndefault_host_dir = "/tmp/keep"\n')
+    config_path.write_text('is_allowed_in_pytest = true\nprefix = "test-"\ndefault_host_dir = "/tmp/keep"\n')
 
     # Then unset it
     result = cli_runner.invoke(
@@ -344,11 +344,11 @@ def test_config_unset_nonexistent_key_fails(
     """Test config unset with nonexistent key returns an error."""
     monkeypatch.chdir(temp_git_repo)
 
-    # Create an empty config (using the test root name)
+    # Create a config with only the pytest opt-in (using the test root name)
     config_dir = temp_git_repo / f".{mngr_test_root_name}"
     config_dir.mkdir()
     config_path = config_dir / "settings.toml"
-    config_path.write_text("")
+    config_path.write_text("is_allowed_in_pytest = true\n")
 
     result = cli_runner.invoke(
         config,
