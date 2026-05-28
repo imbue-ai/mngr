@@ -29,3 +29,23 @@ returns, and the destroyed-host grace period only retains historical
 state -- aligning all provider types with the same semantic that the
 docker / mngr_vps_docker / imbue_cloud `destroy_host` implementations
 already implement individually.
+
+## New: `--post-host-create-command`
+
+`mngr create` learns a new repeatable flag, `--post-host-create-command`,
+that runs one or more shell commands inside a newly-created host
+synchronously after the host is online but before any agent work_dir is
+touched. Each command runs in order via the host's normal exec path; a
+non-zero exit aborts the create. Stackable from `create_templates.<name>`
+via `post_host_create_command__extend = [...]`.
+
+Motivation: an image may need first-boot setup (e.g.
+forever-claude-template seeds a baked workspace from `/docker_build_code`
+onto its `/mngr/` volume) that must complete before mngr's git mirror
+push or any other work_dir setup. Until now this had to be encoded in the
+container's `CMD`, which raced against mngr's `docker exec` calls and
+required an FCT-specific `use_image_default_cmd` opt-out in
+`mngr_vps_docker` / `providers.docker`. The opt-out and the
+defensive `--workdir /` exec override (from commits `d77714cdf` /
+`55c420c35`) are reverted in the same commit -- the new generic hook
+replaces both.

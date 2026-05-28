@@ -433,22 +433,13 @@ class DockerProviderInstance(BaseProviderInstance):
     ) -> tuple[int, str]:
         """Execute a command in a Docker container via docker exec.
 
-        Forces ``workdir="/"`` so the exec succeeds regardless of whether the
-        image's declared ``WORKDIR`` has been populated yet. This matters for
-        images (e.g. forever-claude-template) whose ``CMD`` seeds the
-        ``WORKDIR`` directory onto a bind-mounted volume during first boot --
-        without ``workdir="/"``, an exec that races the seed step would fail
-        with ``chdir to cwd ... failed: no such file or directory``. None of
-        our setup commands depend on the image's ``WORKDIR``; they all
-        reference absolute paths.
-
         Returns (exit_code, output). For detached commands, returns (0, "").
         """
         if detach:
-            container.exec_run(["sh", "-c", command], detach=True, workdir="/")
+            container.exec_run(["sh", "-c", command], detach=True)
             return 0, ""
 
-        exit_code, output = container.exec_run(["sh", "-c", command], workdir="/")
+        exit_code, output = container.exec_run(["sh", "-c", command])
         output_str = output.decode("utf-8") if isinstance(output, bytes) else str(output)
         return exit_code, output_str
 
@@ -785,7 +776,6 @@ kill -TERM 1
         labels: dict[str, str],
         start_args: Sequence[str],
         volume_mount_args: Sequence[str] = (),
-        use_image_default_cmd: bool = False,
     ) -> list[str]:
         """Build a docker run command with mandatory flags + user passthrough args.
 
@@ -793,20 +783,6 @@ kill -TERM 1
         either `["-v", "<spec>"]` for the legacy shared mount or
         `["--mount", "<spec>"]` for the isolated subpath mount). Empty when
         the host has no persistent volume.
-
-        When ``use_image_default_cmd`` is False (legacy default), the image's
-        ``ENTRYPOINT`` and ``CMD`` are overridden with ``sh -c CONTAINER_ENTRYPOINT_CMD``.
-        Backwards-compat for the mngr-built default image (no usable CMD on
-        ``debian:bookworm-slim``) and for arbitrary pulled images that might
-        exit immediately.
-
-        When True, the image's own ``ENTRYPOINT`` and ``CMD`` run as-is. Used
-        for user-built images where the Dockerfile encodes its own keep-alive
-        + container-startup logic (e.g. forever-claude-template's
-        ``CMD ["/usr/local/bin/fct-entrypoint.sh"]`` which seeds the per-host
-        volume before going into the SIGTERM-trap keep-alive). Overriding
-        those would bypass any required first-boot setup and leave the
-        container running but with the workspace ``WORKDIR`` unpopulated.
         """
         cmd = ["run", "-d", "--name", container_name, "-p", f":{CONTAINER_SSH_PORT}"]
 
@@ -816,10 +792,7 @@ kill -TERM 1
         cmd.extend(volume_mount_args)
 
         cmd.extend(list(start_args))
-        if use_image_default_cmd:
-            cmd.append(image)
-        else:
-            cmd.extend(["--entrypoint", "sh", image, "-c", CONTAINER_ENTRYPOINT_CMD])
+        cmd.extend(["--entrypoint", "sh", image, "-c", CONTAINER_ENTRYPOINT_CMD])
         return cmd
 
     def _run_container(
@@ -830,7 +803,6 @@ kill -TERM 1
         labels: dict[str, str],
         start_args: Sequence[str],
         volume_mount_args: Sequence[str] = (),
-        use_image_default_cmd: bool = False,
     ) -> docker.models.containers.Container:
         """Create and start a container via docker run subprocess.
 
@@ -842,7 +814,6 @@ kill -TERM 1
             labels=labels,
             start_args=start_args,
             volume_mount_args=volume_mount_args,
-            use_image_default_cmd=use_image_default_cmd,
         )
         result = self._run_docker_creation_command(cmd)
 
@@ -1073,18 +1044,12 @@ kill -TERM 1
                 self._ensure_host_volume_dir(host_id)
 
             with log_span("Creating Docker container", container_name=container_name):
-                # ``use_image_default_cmd`` only when the user supplied a
-                # Dockerfile -- their image's CMD may carry required
-                # first-boot setup (e.g. FCT's ``fct-entrypoint.sh``).
-                # For the mngr-built default image and arbitrary pulled
-                # images, fall back to our keep-alive override.
                 container = self._run_container(
                     image=image_name,
                     container_name=container_name,
                     labels=labels,
                     start_args=effective_start_args,
                     volume_mount_args=self._build_volume_mount_args(host_id, is_isolated=is_isolated),
-                    use_image_default_cmd=bool(build_args),
                 )
 
         except docker.errors.APIError as e:

@@ -1003,6 +1003,7 @@ class CreateCliOptions(CommonCliOptions):
     snapshot: str | None
     build_arg: tuple[str, ...]
     start_arg: tuple[str, ...]
+    post_host_create_command: tuple[str, ...]
     reconnect: bool
     message: str | None
     message_file: str | None

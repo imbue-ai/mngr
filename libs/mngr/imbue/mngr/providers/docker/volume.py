@@ -113,14 +113,8 @@ class DockerVolume(BaseVolume):
         return f"{root}/{path}" if path else root
 
     def _exec(self, command: str) -> tuple[int, str]:
-        """Execute a command in the state container.
-
-        Forces ``workdir="/"`` for consistency with the per-host container's
-        exec wrapper -- the state container doesn't currently race with any
-        seed step, but the override is harmless (all volume paths are
-        absolute) and keeps the exec pattern uniform across containers.
-        """
-        exit_code, output = self.container.exec_run(["sh", "-c", command], workdir="/")
+        """Execute a command in the state container."""
+        exit_code, output = self.container.exec_run(["sh", "-c", command])
         output_str = output.decode("utf-8") if isinstance(output, bytes) else str(output)
         return exit_code, output_str
 
@@ -167,7 +161,7 @@ class DockerVolume(BaseVolume):
 
     def read_file(self, path: str) -> bytes:
         resolved = self._resolve(path)
-        exit_code, output = self.container.exec_run(["cat", resolved], workdir="/")
+        exit_code, output = self.container.exec_run(["cat", resolved])
         if exit_code != 0:
             raise FileNotFoundError(f"File not found on volume: {path}")
         return output if isinstance(output, bytes) else output.encode("utf-8")

@@ -305,28 +305,6 @@ def test_build_docker_run_command_passes_through_volume_mount_args(temp_mngr_ctx
     assert cmd[mount_idx + 1] == "type=volume,source=foo,target=/bar,volume-subpath=baz"
 
 
-def test_build_docker_run_command_use_image_default_cmd_omits_entrypoint_override(
-    temp_mngr_ctx: MngrContext,
-) -> None:
-    """When use_image_default_cmd=True, image's own CMD/ENTRYPOINT runs as-is.
-
-    Used for user-built Dockerfiles whose CMD encodes required first-boot
-    setup (e.g. forever-claude-template's fct-entrypoint.sh that seeds
-    /mngr/code on the bind-mounted volume).
-    """
-    provider = make_docker_provider(temp_mngr_ctx)
-    cmd = provider._build_docker_run_command(
-        image="fct-image:latest",
-        container_name="test",
-        labels={},
-        start_args=(),
-        use_image_default_cmd=True,
-    )
-    # The image is the last token; no --entrypoint sh / -c override.
-    assert cmd[-1] == "fct-image:latest"
-    assert "--entrypoint" not in cmd
-
-
 # =========================================================================
 # Volume Mount Argument Building
 # =========================================================================
