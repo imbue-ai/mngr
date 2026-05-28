@@ -468,6 +468,19 @@ def test_get_outer_free_disk_gb_parses_df_output() -> None:
     assert "tail -n 1" in cmd
 
 
+def test_get_outer_free_disk_gb_uses_pipefail_so_df_failure_is_surfaced() -> None:
+    # Regression: without ``set -o pipefail`` the pipeline's exit status is
+    # whatever ``tail -n 1`` returned (zero), masking a failing ``df`` and
+    # routing the failure into the wrong VpsProvisioningError branch.
+    outer = _outer(CommandResult(stdout="0\n", stderr="", success=True))
+    _get_outer_free_disk_gb(outer, Path("/"))
+    cmd = _stub(outer).recorded[0].command
+    assert "set -o pipefail" in cmd
+    # The pipeline must run under bash so ``set -o pipefail`` is honored
+    # (dash, the default ``/bin/sh`` on Debian, does not support it).
+    assert cmd.startswith("bash -c ")
+
+
 def test_get_outer_free_disk_gb_floors_to_whole_gib() -> None:
     # 1 GiB - 1 byte free must report 0, not 1, so the caller's
     # ``free_gb - reserved_gb`` math never over-allocates.

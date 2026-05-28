@@ -396,9 +396,16 @@ def _get_outer_free_disk_gb(outer: OuterHostInterface, path: Path) -> int:
     rounds up, which would let the caller compute a loop-file size up to
     ~1 GiB larger than actually available; floor-dividing here keeps the
     caller's allocation math conservative.
+
+    Runs the ``df | tail`` pipeline under ``bash -c 'set -o pipefail; ...'``
+    so a failing ``df`` (e.g. invalid path, permission issue) is surfaced
+    through the "failed to read" branch rather than being masked by
+    ``tail``'s zero exit code and falling through to the "could not parse"
+    branch.
     """
+    pipeline = f"set -o pipefail; df --output=avail -B 1 {shlex.quote(str(path))} | tail -n 1"
     result = outer.execute_idempotent_command(
-        f"df --output=avail -B 1 {shlex.quote(str(path))} | tail -n 1",
+        f"bash -c {shlex.quote(pipeline)}",
         timeout_seconds=10.0,
     )
     if not result.success:
