@@ -35,17 +35,13 @@ snapshot="$(mngr usage --format json)"
 # seconds-until-reset only when:
 #   - >90% of the 5h window has elapsed (we're near its end), AND
 #   - <80% of the 5h window is used (budget left to burn before it resets), AND
-#   - the 7d window passes a PACE check with a tapering safety margin:
-#     used% < elapsed% * (1 - 0.30 * (100 - elapsed%) / 100). The 7d window is
-#     rolling (it resets ~7 days after the cycle's first request, not on a fixed
-#     weekday), so elapsed% is how far into the current cycle you are. Early in
-#     the cycle the margin holds us well under the linear-pace line (~1 day in,
-#     ~14% elapsed -> require used% < ~10) so automation leaves headroom and
-#     doesn't crowd your own usage; the margin shrinks as the cycle runs out and
-#     vanishes at the end, where it converges to "launch if there's any capacity
-#     left at all." Both windows carry window_seconds, so the reader derives
-#     elapsed_percentage. The 0.30 sets the peak headroom: raise it toward 1.0 to
-#     stay further from the limit early, lower it toward 0 to track plain pace.
+#   - the week's budget looks on track to go partly unused -- a "pace check": are
+#     we spending it slower than the week is elapsing? If so there's headroom to
+#     spare, so filling the expiring 5h window costs us nothing we'd miss. A
+#     safety margin (widest early in the cycle, tapering to zero by its end) keeps
+#     us clear of your own usage. With elapsed% = how far into the rolling 7-day
+#     cycle we are:
+#     used% < elapsed% * (1 - 0.30 * (100 - elapsed%) / 100)
 secs="$(jq -r '
   .sources[]
   | select(.source == "claude" and .is_stale == false)
@@ -56,22 +52,20 @@ secs="$(jq -r '
   | .five_hour.seconds_until_reset
 ' <<<"$snapshot")"
 
-# No source matched the predicate -> nothing to do this tick.
+# Nothing matched the predicate this tick -> nothing to do.
 [[ -n "$secs" ]] || exit 0
 
-# Only (re)launch a STOPPED agent. If it's RUNNING/WAITING it's already working
-# (and `mngr start` would error); if it's DONE or in any other state, leave it be
-# rather than assume a relaunch is the right move. Gating positively on STOPPED
-# avoids baking in assumptions about which other states exist.
+# Only (re)launch a STOPPED agent. If it's RUNNING/WAITING it's already working;
+# if it's DONE or in any other state, leave it be rather than assume a relaunch
+# is the right move.
 mngr list --include "name == \"$AGENT\" && state == \"STOPPED\"" --ids | grep -q . || exit 0
 
 mngr start "$AGENT" && mngr message "$AGENT" --message "continue where you left off"
 
 # Schedule the stop just past the window boundary, rounding UP to the minute
-# (`at`'s resolution). The slack lets the agent's first request land in the fresh
-# window and open it -- window warming, same idea as the warm-window recipe --
-# before we stop. Requires a running `at` daemon (`atd`); without one, a detached
-# timer with a little grace works too:
+# (`at`'s resolution) so the agent's first request lands in the fresh window and
+# warms it. Requires a running `at` daemon (`atd`); without one, a detached timer
+# with a little grace works too:
 #   nohup bash -c "sleep $((secs + 30)) && mngr stop $AGENT" >/dev/null 2>&1 &
 echo "mngr stop $AGENT" | at "now + $(( (secs + 59) / 60 )) minutes"
 ```
