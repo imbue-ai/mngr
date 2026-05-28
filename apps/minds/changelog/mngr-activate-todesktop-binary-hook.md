@@ -18,3 +18,10 @@
   message end-to-end. The `beforeInstall` hook stays for `uv` + `git`
   (no first-class ToDesktop knob); the four-strategy `installPnpm()`
   ladder, its helpers, and the `PNPM_VERSION` constant are gone.
+- `apps/minds`: consolidate `downloadUv` into a single definition in
+  `scripts/download-binaries.js` and import it into `scripts/build.js`,
+  mirroring how `downloadGit` and `download` are already shared.
+  Removes the duplicated `UV_VERSION` constant, `getUvDownloadUrl`,
+  and `downloadUv` from `build.js`. Both call sites (local
+  `pnpm build` and ToDesktop's `beforeInstall` hook) now run the same
+  implementation against their own resources directory.

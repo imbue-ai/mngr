@@ -333,6 +333,7 @@ async function beforeInstall({ appDir }) {
 }
 
 beforeInstall.downloadGit = downloadGit;
+beforeInstall.downloadUv = downloadUv;
 beforeInstall.download = download;
 module.exports = beforeInstall;
 
