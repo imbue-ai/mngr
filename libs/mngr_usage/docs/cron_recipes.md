@@ -13,6 +13,31 @@ Across the usage-driven recipes below:
   reading across all your agents *and* your own interactive Claude Code
   sessions, so you don't need a dedicated agent alive just to keep it current.
 
+## A spare-capacity check
+
+Deciding whether to soak a window or launch new task work boils down to one
+question -- is there headroom to spend right now? This small helper answers it:
+the dispatch recipe gates on it directly, while the window-soaking recipe inlines
+the same pace/budget test (it needs the raw numbers for its hysteresis).
+
+```bash
+#!/usr/bin/env bash
+# spare-capacity.sh -- exit 0 if there's Claude capacity worth spending now: the
+# current 5h window still has budget (<80% used) AND weekly usage is under pace
+# (below the tapering-margin line). Exits non-zero otherwise, including when
+# there's no usage data to judge from.
+set -euo pipefail
+
+mngr usage --format json | jq -e '
+  .sources[]
+  | select(.source == "claude")
+  | (.five_hour.used_percentage // 100)  as $u5
+  | (.seven_day.elapsed_percentage // 0) as $elw
+  | (.seven_day.used_percentage // 100)  as $uw
+  | $u5 < 80 and $uw < $elw * (1 - 0.30 * (100 - $elw) / 100)
+' >/dev/null
+```
+
 ## Use up an about-to-expire 5h window
 
 Dedicate an agent to this and let one cron job own its whole lifecycle: it starts
@@ -146,31 +171,6 @@ mngr stop "$WARMER"
 # cron starts with a bare PATH; set one that finds mngr, jq, and claude (adjust to your install)
 PATH=/usr/local/bin:/usr/bin:/bin:/home/you/.local/bin
 */10 * * * * /path/to/warm-window.sh
-```
-
-## A spare-capacity check
-
-Soaking a window and launching new task work both come down to one question --
-is there headroom to spend right now? Factor it into a small helper the dispatch
-recipe gates on (the first recipe embeds the same test inline, since it also needs
-the raw numbers for its stop-side hysteresis):
-
-```bash
-#!/usr/bin/env bash
-# spare-capacity.sh -- exit 0 if there's Claude capacity worth spending now: the
-# current 5h window still has budget (<80% used) AND weekly usage is under pace
-# (below the tapering-margin line). Exits non-zero otherwise, including when
-# there's no usage data to judge from.
-set -euo pipefail
-
-mngr usage --format json | jq -e '
-  .sources[]
-  | select(.source == "claude")
-  | (.five_hour.used_percentage // 100)  as $u5
-  | (.seven_day.elapsed_percentage // 0) as $elw
-  | (.seven_day.used_percentage // 100)  as $uw
-  | $u5 < 80 and $uw < $elw * (1 - 0.30 * (100 - $elw) / 100)
-' >/dev/null
 ```
 
 ## Dispatch tasks from a queue directory
