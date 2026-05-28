@@ -1,3 +1,4 @@
+import hashlib
 import json
 from collections.abc import Callable
 from uuid import UUID
@@ -14,25 +15,35 @@ from imbue.remote_service_connector.app import AdminAuth
 from imbue.remote_service_connector.app import AuthPolicy
 from imbue.remote_service_connector.app import CloudflareApiError
 from imbue.remote_service_connector.app import HttpCloudflareOps
+from imbue.remote_service_connector.app import InvalidR2BucketNameError
 from imbue.remote_service_connector.app import InvalidTunnelComponentError
+from imbue.remote_service_connector.app import R2BucketOwnershipError
 from imbue.remote_service_connector.app import ServiceNotFoundError
 from imbue.remote_service_connector.app import TunnelComponentTooLongError
 from imbue.remote_service_connector.app import TunnelNotFoundError
 from imbue.remote_service_connector.app import TunnelOwnershipError
+from imbue.remote_service_connector.app import _MAX_BUCKETS_PER_ACCOUNT
 from imbue.remote_service_connector.app import _authenticate_supertokens
 from imbue.remote_service_connector.app import _default_email_getter
 from imbue.remote_service_connector.app import cf_check
 from imbue.remote_service_connector.app import cf_list_all_pages
+from imbue.remote_service_connector.app import derive_s3_secret_access_key
 from imbue.remote_service_connector.app import extract_service_name
 from imbue.remote_service_connector.app import extract_username_from_tunnel_name
 from imbue.remote_service_connector.app import is_email_in_paid_account_allowlist
+from imbue.remote_service_connector.app import make_bucket_name
 from imbue.remote_service_connector.app import make_hostname
 from imbue.remote_service_connector.app import make_tunnel_name
 from imbue.remote_service_connector.app import require_paid_account
+from imbue.remote_service_connector.app import slugify_r2_name
+from imbue.remote_service_connector.app import verify_bucket_ownership
 from imbue.remote_service_connector.app import web_app
+from imbue.remote_service_connector.testing import FakeCloudflareOps
 from imbue.remote_service_connector.testing import FakePoolBackend
 from imbue.remote_service_connector.testing import FakeSuperTokensBackend
+from imbue.remote_service_connector.testing import InMemoryKeyStore
 from imbue.remote_service_connector.testing import make_fake_forwarding_ctx
+from imbue.remote_service_connector.testing import make_fake_key_store
 from imbue.remote_service_connector.testing import make_fake_pool_backend
 from imbue.remote_service_connector.testing import make_fake_supertokens_backend
 from imbue.remote_service_connector.testing import make_fake_tunnel_token
@@ -1998,3 +2009,224 @@ def test_route_list_services_is_not_gated_by_paid_account_suffixes(
     assert create_resp.status_code == 200
     list_resp = client.get(f"/tunnels/{_ADMIN_STUB_USERNAME}--agent1/services", headers=_admin_headers())
     assert list_resp.status_code == 200
+
+
+# -- R2 bucket endpoint tests --
+
+
+_ADMIN_STUB_USER_ID = "12345678-1234-5678-1234-567812345678"
+
+
+def _make_bucket_test_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[TestClient, FakeCloudflareOps, InMemoryKeyStore]:
+    """Create a TestClient with the R2 fakes installed (Cloudflare ops + key store)."""
+    client = _make_test_client(monkeypatch)
+    ctx = app_mod.get_ctx()
+    fake = ctx.fake
+    store = make_fake_key_store()
+    # Single-loop patching (same pattern as the Fake*Backend.install_on_app_module
+    # helpers) so the monkeypatch ratchet only counts one occurrence.
+    bucket_fakes: dict[str, object] = {
+        "get_key_store": lambda: store,
+        "_get_user_id_from_access_token": lambda token: _ADMIN_STUB_USER_ID,
+    }
+    for name, fake_impl in bucket_fakes.items():
+        monkeypatch.setattr(app_mod, name, fake_impl)
+    return client, fake, store
+
+
+# --- Unit tests for naming + helpers ---
+
+
+def test_make_bucket_name_slugifies() -> None:
+    assert make_bucket_name("user", "My Cool Data") == "user--my-cool-data"
+
+
+def test_make_bucket_name_collapses_separators() -> None:
+    assert make_bucket_name("user", "foo__bar--baz") == "user--foo-bar-baz"
+
+
+def test_make_bucket_name_rejects_invalid() -> None:
+    with pytest.raises(InvalidR2BucketNameError):
+        make_bucket_name("user", "!!!")
+
+
+def test_slugify_r2_name_strips_edges() -> None:
+    assert slugify_r2_name("  --Foo--  ") == "foo"
+
+
+def test_verify_bucket_ownership_rejects_foreign_prefix() -> None:
+    with pytest.raises(R2BucketOwnershipError):
+        verify_bucket_ownership("evil-user--x", "user")
+
+
+def test_verify_bucket_ownership_accepts_owned() -> None:
+    verify_bucket_ownership("user--x", "user")
+
+
+def test_derive_s3_secret_matches_sha256() -> None:
+    assert derive_s3_secret_access_key("hello") == hashlib.sha256(b"hello").hexdigest()
+
+
+# --- Route tests ---
+
+
+def test_create_bucket_returns_bucket_and_default_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    client, fake, store = _make_bucket_test_client(monkeypatch)
+    resp = client.post("/buckets", json={"name": "my-data"}, headers=_admin_headers())
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["bucket"]["bucket_name"] == "testuser--my-data"
+    assert body["bucket"]["s3_endpoint"] == "https://test-account.r2.cloudflarestorage.com"
+    assert body["key"]["access"] == "readwrite"
+    assert body["key"]["bucket_name"] == "testuser--my-data"
+    access_key_id = body["key"]["access_key_id"]
+    assert access_key_id
+    # Secret is the sha256 of the fake token value, returned once.
+    assert body["key"]["secret_access_key"] == derive_s3_secret_access_key(f"token-value-{access_key_id}")
+    # Bucket actually created in the fake.
+    assert "testuser--my-data" in fake.buckets
+    # Key metadata recorded; the secret/token value is NOT persisted.
+    rows = store.list_keys(_ADMIN_STUB_USER_ID, None)
+    assert len(rows) == 1
+    assert rows[0]["access_key_id"] == access_key_id
+    assert "secret_access_key" not in rows[0]
+    assert "value" not in rows[0]
+    assert rows[0]["owner_user_id"] == _ADMIN_STUB_USER_ID
+
+
+def test_create_bucket_with_read_access(monkeypatch: pytest.MonkeyPatch) -> None:
+    client, fake, store = _make_bucket_test_client(monkeypatch)
+    resp = client.post("/buckets", json={"name": "ro", "access": "read"}, headers=_admin_headers())
+    assert resp.status_code == 200
+    assert resp.json()["key"]["access"] == "read"
+
+
+def test_create_bucket_invalid_access_returns_422(monkeypatch: pytest.MonkeyPatch) -> None:
+    client, _fake, _store = _make_bucket_test_client(monkeypatch)
+    resp = client.post("/buckets", json={"name": "x", "access": "write"}, headers=_admin_headers())
+    assert resp.status_code == 422
+
+
+def test_create_bucket_invalid_name_returns_400(monkeypatch: pytest.MonkeyPatch) -> None:
+    client, _fake, _store = _make_bucket_test_client(monkeypatch)
+    resp = client.post("/buckets", json={"name": "!!!"}, headers=_admin_headers())
+    assert resp.status_code == 400
+
+
+def test_create_bucket_duplicate_returns_409(monkeypatch: pytest.MonkeyPatch) -> None:
+    client, _fake, _store = _make_bucket_test_client(monkeypatch)
+    assert client.post("/buckets", json={"name": "dup"}, headers=_admin_headers()).status_code == 200
+    resp = client.post("/buckets", json={"name": "dup"}, headers=_admin_headers())
+    assert resp.status_code == 409
+
+
+def test_create_bucket_at_cap_returns_409(monkeypatch: pytest.MonkeyPatch) -> None:
+    client, fake, _store = _make_bucket_test_client(monkeypatch)
+    for i in range(_MAX_BUCKETS_PER_ACCOUNT):
+        name = f"testuser--b{i}"
+        fake.buckets[name] = {"name": name}
+        fake.bucket_objects[name] = []
+    resp = client.post("/buckets", json={"name": "one-more"}, headers=_admin_headers())
+    assert resp.status_code == 409
+
+
+def test_list_buckets_returns_only_owned(monkeypatch: pytest.MonkeyPatch) -> None:
+    client, fake, _store = _make_bucket_test_client(monkeypatch)
+    client.post("/buckets", json={"name": "a"}, headers=_admin_headers())
+    client.post("/buckets", json={"name": "b"}, headers=_admin_headers())
+    # A bucket owned by someone else, plus a crafted name that merely *contains*
+    # the prefix -- the in-code startswith re-check must exclude it.
+    fake.buckets["otheruser--secret"] = {"name": "otheruser--secret"}
+    fake.buckets["evil-testuser--x"] = {"name": "evil-testuser--x"}
+    resp = client.get("/buckets", headers=_admin_headers())
+    assert resp.status_code == 200
+    names = sorted(b["bucket_name"] for b in resp.json())
+    assert names == ["testuser--a", "testuser--b"]
+
+
+def test_get_bucket_info(monkeypatch: pytest.MonkeyPatch) -> None:
+    client, _fake, _store = _make_bucket_test_client(monkeypatch)
+    client.post("/buckets", json={"name": "data"}, headers=_admin_headers())
+    resp = client.get("/buckets/data", headers=_admin_headers())
+    assert resp.status_code == 200
+    assert resp.json()["bucket_name"] == "testuser--data"
+
+
+def test_get_bucket_info_not_found(monkeypatch: pytest.MonkeyPatch) -> None:
+    client, _fake, _store = _make_bucket_test_client(monkeypatch)
+    resp = client.get("/buckets/missing", headers=_admin_headers())
+    assert resp.status_code == 404
+
+
+def test_destroy_bucket_non_empty_returns_409(monkeypatch: pytest.MonkeyPatch) -> None:
+    client, fake, _store = _make_bucket_test_client(monkeypatch)
+    client.post("/buckets", json={"name": "data"}, headers=_admin_headers())
+    fake.bucket_objects["testuser--data"].append("obj1")
+    resp = client.delete("/buckets/data", headers=_admin_headers())
+    assert resp.status_code == 409
+    assert "testuser--data" in fake.buckets
+
+
+def test_destroy_bucket_empty_cascades_keys(monkeypatch: pytest.MonkeyPatch) -> None:
+    client, fake, store = _make_bucket_test_client(monkeypatch)
+    client.post("/buckets", json={"name": "data"}, headers=_admin_headers())
+    client.post("/buckets/data/keys", json={}, headers=_admin_headers())
+    assert len(store.list_keys(_ADMIN_STUB_USER_ID, None)) == 2
+    assert len(fake.account_tokens) == 2
+    resp = client.delete("/buckets/data", headers=_admin_headers())
+    assert resp.status_code == 200
+    assert "testuser--data" not in fake.buckets
+    assert store.list_keys(_ADMIN_STUB_USER_ID, None) == []
+    assert fake.account_tokens == {}
+
+
+def test_create_additional_key_and_list(monkeypatch: pytest.MonkeyPatch) -> None:
+    client, _fake, _store = _make_bucket_test_client(monkeypatch)
+    client.post("/buckets", json={"name": "data"}, headers=_admin_headers())
+    resp = client.post("/buckets/data/keys", json={"alias": "ro", "access": "read"}, headers=_admin_headers())
+    assert resp.status_code == 200
+    assert resp.json()["access"] == "read"
+    per_bucket = client.get("/buckets/data/keys", headers=_admin_headers()).json()
+    assert sorted(k["alias"] for k in per_bucket) == ["default", "ro"]
+    account_wide = client.get("/bucket-keys", headers=_admin_headers()).json()
+    assert len(account_wide) == 2
+
+
+def test_create_key_for_missing_bucket_returns_404(monkeypatch: pytest.MonkeyPatch) -> None:
+    client, _fake, _store = _make_bucket_test_client(monkeypatch)
+    resp = client.post("/buckets/nope/keys", json={}, headers=_admin_headers())
+    assert resp.status_code == 404
+
+
+def test_destroy_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    client, fake, store = _make_bucket_test_client(monkeypatch)
+    create = client.post("/buckets", json={"name": "data"}, headers=_admin_headers()).json()
+    access_key_id = create["key"]["access_key_id"]
+    resp = client.delete(f"/bucket-keys/{access_key_id}", headers=_admin_headers())
+    assert resp.status_code == 200
+    assert access_key_id not in fake.account_tokens
+    assert store.get_key(access_key_id) is None
+
+
+def test_destroy_key_unknown_returns_404(monkeypatch: pytest.MonkeyPatch) -> None:
+    client, _fake, _store = _make_bucket_test_client(monkeypatch)
+    resp = client.delete("/bucket-keys/does-not-exist", headers=_admin_headers())
+    assert resp.status_code == 404
+
+
+def test_destroy_key_not_owned_returns_404(monkeypatch: pytest.MonkeyPatch) -> None:
+    client, _fake, store = _make_bucket_test_client(monkeypatch)
+    store.add_key("akid-other", "some-other-user", "other--bucket", "readwrite", "x")
+    resp = client.delete("/bucket-keys/akid-other", headers=_admin_headers())
+    assert resp.status_code == 404
+    # The other user's row is untouched.
+    assert store.get_key("akid-other") is not None
+
+
+def test_buckets_require_paid_account(monkeypatch: pytest.MonkeyPatch) -> None:
+    client, _fake, _store = _make_bucket_test_client(monkeypatch)
+    monkeypatch.delenv("PAID_ACCOUNT_SUFFIXES", raising=False)
+    resp = client.post("/buckets", json={"name": "x"}, headers=_admin_headers())
+    assert resp.status_code == 403
