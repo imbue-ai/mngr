@@ -213,13 +213,11 @@ Finished agents are stopped and moved to `queue=in-review`; to see them, run
 
 ## Scheduling
 
-Add whichever scripts you use to a crontab. `cron` runs with a bare `PATH`, so set
-one that finds `mngr`, `jq`, and `claude`:
+Add a `*/5` line per script you use. `cron` runs with a bare `PATH`, so set one
+that finds `mngr`, `jq`, and `claude`:
 
 ```cron
 PATH=/usr/local/bin:/usr/bin:/bin:/home/you/.local/bin
 
-*/5 * * * * /path/to/use-extra.sh
-*/5 * * * * /path/to/warm-window.sh
-*/5 * * * * /path/to/dispatch-task.sh
+*/5 * * * * /path/to/your/script.sh
 ```
