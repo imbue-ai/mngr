@@ -195,11 +195,25 @@ Tiered system-interface restart for the minds recovery flow.
   now scans ``/proc/net/tcp{,6}`` in pure Python for a TCP_LISTEN socket on
   the inner port (decoding the listen address to ``ip:port``), so it works
   on the stock image and answers the question accurately.
-- The expandable command shown for the "services.toml declares
-  [services.system_interface]?" diagnostic is now a correct, paste-runnable
-  ``python3 -c`` one-liner that reflects the actual check. The prior label
-  nested single quotes inside a single-quoted ``-c`` body
-  (``python3 -c 'tomllib.load(open('/code/services.toml', "rb"))'``), which
-  was neither runnable nor representative of the declaration test. The
-  port-listening probe's command label likewise now shows the real
-  ``/proc/net/tcp`` scan an operator can re-run inside the container.
+- Every recovery-diagnostic row now shows a complete, copy-pasteable command
+  whose stdout is exactly the output rendered beside it -- previously the
+  command was the data-fetch call while the output was a value minds derived
+  from it (e.g. command ``mngr list ... --format json`` but output
+  ``RUNNING``), so the two did not correspond. Now:
+  - The container-running and services-agent-registered rows pipe ``mngr
+    list`` through ``jq -r`` to print exactly the extracted ``.host.state`` /
+    ``.state`` (with a ``no host row`` / ``no agent row`` fallback line when
+    the row is absent). The synthetic ``state=`` prefix is gone.
+  - The in-container checks (services.toml declaration, inner-port LISTEN
+    scan, local curl) are wrapped as ``mngr exec <services-agent-id>
+    '<check>' --no-start --quiet`` so an operator can run them from the same
+    place ``mngr`` lives, without opening a shell inside the container. Each
+    inner check prints exactly the row's output: ``declared``/``MISSING`` for
+    services.toml, decoded ``LISTEN ip:port`` lines (or ``(no LISTEN socket on
+    port N)``) for the port scan, and the bare HTTP status code for curl.
+  - The "can we run a command inside" row shows the real batched ``mngr
+    exec`` and renders its verbatim stdout (the sentinel followed by the JSON
+    payload).
+  - The plugin-resolver row is the lone exception: its datum lives in minds'
+    own memory (fed by the forward-plugin event stream) and has no in-container
+    reproduction, so it stays a clearly-labelled internal observation.

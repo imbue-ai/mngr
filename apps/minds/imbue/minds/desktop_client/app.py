@@ -2170,6 +2170,7 @@ def _run_host_health_probe(
         plugin_resolver_services=plugin_resolver_services,
         mngr_list_command=list_command,
         mngr_exec_command=exec_command,
+        mngr_binary=mngr_binary,
     )
 
 

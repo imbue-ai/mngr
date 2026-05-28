@@ -23,6 +23,7 @@ restart rather than auto-dispatching surgical.
 import base64
 import json
 import re
+import shlex
 import socket
 from enum import Enum
 from functools import cache
@@ -301,10 +302,43 @@ def _extract_services_agent_state(list_json: str | None, services_agent_id: Agen
 
 
 # -- Per-probe builders ----------------------------------------------------
+#
+# Every probe's ``command`` is a complete, copy-pasteable command whose stdout
+# equals the probe's ``output`` when run in the same place minds ran it (the
+# mngr host for the ``mngr list`` / ``mngr exec`` probes). Host-state probes
+# pipe ``mngr list`` through ``jq`` to print exactly the extracted field;
+# in-container checks are wrapped in ``mngr exec <id> '<check>' --no-start
+# --quiet`` so the operator does not need a shell inside the container. The
+# only exception is the resolver probe, whose datum lives in minds' own memory
+# and has no runnable reproduction.
+
+# Display strings shared between a probe's rendered ``output`` and the fallback
+# its reproduction command prints, so the two stay byte-identical.
+_NO_HOST_ROW: Final[str] = "no host row"
+_NO_AGENT_ROW: Final[str] = "no agent row"
 
 
-def _build_container_running_probe(host_state: str, mngr_list_command: str) -> Probe:
-    """Probe 1: host.state from ``mngr list``."""
+def _mngr_list_jq_command(mngr_list_command: str, jq_filter: str) -> str:
+    """``mngr list ... | jq -r '<filter>'`` -- the list call plus its derivation."""
+    base = mngr_list_command or "mngr list --format json"
+    return f"{base} | jq -r {shlex.quote(jq_filter)}"
+
+
+def _mngr_exec_command(mngr_binary: str, services_agent_id: AgentId | None, inner_command: str) -> str:
+    """A copy-pasteable ``mngr exec`` that runs ``inner_command`` in the container.
+
+    ``--quiet`` strips mngr's progress chatter so stdout is exactly the inner
+    command's stdout; ``--no-start`` keeps a probe from booting a stopped host.
+    Falls back to a ``<system-services-agent>`` placeholder when the agent id
+    has not been discovered yet (the command is still shape-accurate).
+    """
+    if services_agent_id is None:
+        return f"mngr exec <system-services-agent> {shlex.quote(inner_command)} --no-start --quiet"
+    return shlex.join([mngr_binary, "exec", str(services_agent_id), inner_command, "--no-start", "--quiet"])
+
+
+def _build_container_running_probe(host_state: str, agent_id: AgentId, mngr_list_command: str) -> Probe:
+    """Probe 1: host.state from ``mngr list``, extracted with jq."""
     upper = host_state.upper()
     if upper == _RUNNING_STATE:
         answer = ProbeAnswer.YES
@@ -312,10 +346,11 @@ def _build_container_running_probe(host_state: str, mngr_list_command: str) -> P
         answer = ProbeAnswer.NO
     else:
         answer = ProbeAnswer.UNKNOWN
-    output = host_state or "(host row missing from mngr list)"
+    output = host_state or _NO_HOST_ROW
+    jq_filter = f'([.agents[] | select(.id == "{agent_id}")][0].host.state) // "{_NO_HOST_ROW}"'
     return Probe(
         question=_QUESTION_CONTAINER_RUNNING,
-        command=mngr_list_command or "(mngr list --format json)",
+        command=_mngr_list_jq_command(mngr_list_command, jq_filter),
         output=output,
         answer=answer,
     )
@@ -326,34 +361,40 @@ def _build_services_agent_registered_probe(
     services_agent_id: AgentId | None,
     mngr_list_command: str,
 ) -> Probe:
-    """Probe 2: presence + lifecycle state of the system-services agent."""
-    services_state = _extract_services_agent_state(list_json, services_agent_id)
+    """Probe 2: lifecycle state of the system-services agent, extracted with jq."""
     if services_agent_id is None:
-        answer = ProbeAnswer.UNKNOWN
-        output = "(no system-services agent id known -- discovery has not surfaced one)"
-    elif services_state:
+        # No id to filter on -> no runnable command (like the resolver probe).
+        return Probe(
+            question=_QUESTION_SERVICES_AGENT_REGISTERED,
+            command="(no system-services agent id known -- discovery has not surfaced one)",
+            output="(no system-services agent id known -- discovery has not surfaced one)",
+            answer=ProbeAnswer.UNKNOWN,
+        )
+    services_state = _extract_services_agent_state(list_json, services_agent_id)
+    jq_filter = f'([.agents[] | select(.id == "{services_agent_id}")][0].state) // "{_NO_AGENT_ROW}"'
+    if services_state:
         answer = ProbeAnswer.YES
-        output = f"state={services_state}"
+        output = services_state
     else:
         answer = ProbeAnswer.NO
-        output = "(system-services agent absent from mngr list)"
+        output = _NO_AGENT_ROW
     return Probe(
         question=_QUESTION_SERVICES_AGENT_REGISTERED,
-        command=mngr_list_command or "(mngr list --format json)",
+        command=_mngr_list_jq_command(mngr_list_command, jq_filter),
         output=output,
         answer=answer,
     )
 
 
 def _build_can_run_commands_probe(in_container: _InContainerProbe, mngr_exec_command: str) -> Probe:
-    """Probe 3: did the ``mngr exec`` sentinel reach stdout?"""
+    """Probe 3: did the batched ``mngr exec`` reach the container?
+
+    The command is the real batched ``mngr exec`` and the output is its raw
+    stdout -- the sentinel followed by the JSON payload when the probe ran, so
+    re-running the command reproduces exactly what is shown.
+    """
     answer = ProbeAnswer.YES if in_container.sentinel_seen else ProbeAnswer.NO
-    if in_container.sentinel_seen:
-        output = f"sentinel '{PROBE_SENTINEL}' observed on stdout"
-    elif in_container.raw_stdout:
-        output = f"sentinel '{PROBE_SENTINEL}' NOT observed; raw stdout:\n{in_container.raw_stdout}"
-    else:
-        output = f"sentinel '{PROBE_SENTINEL}' NOT observed; stdout was empty (mngr exec returned without invoking the in-container script)"
+    output = in_container.raw_stdout if in_container.raw_stdout.strip() else "(mngr exec produced no output on stdout)"
     return Probe(
         question=_QUESTION_CAN_RUN_COMMANDS_INSIDE,
         command=mngr_exec_command,
@@ -362,159 +403,121 @@ def _build_can_run_commands_probe(in_container: _InContainerProbe, mngr_exec_com
     )
 
 
-def _services_toml_command(services_toml_path: str) -> str:
-    """Operator-runnable reproduction of the services.toml declaration check.
+def _services_toml_inner_command(services_toml_path: str) -> str:
+    """In-container check that prints ``declared`` or ``MISSING``.
 
-    Mirrors the inline probe script's ``isinstance(si, dict)`` test. The
-    ``-c`` body is double-quoted with single-quoted literals inside, so it
-    pastes into a shell cleanly (the previous ``{path!r}`` form nested
-    single quotes inside a single-quoted body and was not runnable).
+    Mirrors the inline probe script's ``isinstance(si, dict)`` test. The body
+    uses only double quotes so it survives the single-quoted ``-c`` wrapper,
+    which in turn survives ``shlex.join`` quoting for ``mngr exec``.
     """
-    return (
-        'python3 -c "import tomllib; '
-        f"d = tomllib.load(open('{services_toml_path}', 'rb')); "
-        "print(isinstance(d.get('services', {}).get('system_interface'), dict))\""
+    body = (
+        "import tomllib; "
+        f'd = tomllib.load(open("{services_toml_path}", "rb")); '
+        'print("declared" if isinstance(d.get("services", {}).get("system_interface"), dict) else "MISSING")'
     )
+    return f"python3 -c '{body}'"
 
 
-def _build_services_toml_probe(in_container: _InContainerProbe) -> Probe:
+def _build_services_toml_probe(
+    in_container: _InContainerProbe,
+    mngr_binary: str,
+    services_agent_id: AgentId | None,
+) -> Probe:
     """Probe 4: does services.toml declare [services.system_interface]?"""
-    command = _services_toml_command(in_container.services_toml_path)
+    command = _mngr_exec_command(
+        mngr_binary, services_agent_id, _services_toml_inner_command(in_container.services_toml_path)
+    )
     if not in_container.sentinel_seen:
-        return Probe(
-            question=_QUESTION_SERVICES_TOML_DECLARES,
-            command=command,
-            output="(in-container probe did not run)",
-            answer=ProbeAnswer.UNKNOWN,
-        )
-    if in_container.services_toml_error is not None:
-        return Probe(
-            question=_QUESTION_SERVICES_TOML_DECLARES,
-            command=command,
-            output=f"error: {in_container.services_toml_error}",
-            answer=ProbeAnswer.UNKNOWN,
-        )
-    if in_container.services_toml_declares_system_interface is True:
-        answer = ProbeAnswer.YES
-        output = "[services.system_interface] is declared"
+        output, answer = "(in-container probe did not run)", ProbeAnswer.UNKNOWN
+    elif in_container.services_toml_error is not None:
+        output, answer = f"error: {in_container.services_toml_error}", ProbeAnswer.UNKNOWN
+    elif in_container.services_toml_declares_system_interface is True:
+        output, answer = "declared", ProbeAnswer.YES
     elif in_container.services_toml_declares_system_interface is False:
-        answer = ProbeAnswer.NO
-        output = "[services.system_interface] is MISSING"
+        output, answer = "MISSING", ProbeAnswer.NO
     else:
-        answer = ProbeAnswer.UNKNOWN
-        output = "(no declaration data returned)"
-    return Probe(
-        question=_QUESTION_SERVICES_TOML_DECLARES,
-        command=command,
-        output=output,
-        answer=answer,
-    )
+        output, answer = "(no declaration data returned)", ProbeAnswer.UNKNOWN
+    return Probe(question=_QUESTION_SERVICES_TOML_DECLARES, command=command, output=output, answer=answer)
 
 
-def _port_listening_command(port_label: str) -> str:
-    """Operator-runnable reproduction of the inner-port LISTEN check.
+def _no_listener_output(port: int) -> str:
+    """The exact line both the reproduction command and minds print for no listener."""
+    return f"(no LISTEN socket on port {port})"
 
-    The agent container image ships no ``iproute2`` (so no ``ss``); this
-    scans ``/proc/net/tcp{,6}`` for a TCP_LISTEN (state ``0A``) socket whose
-    local port matches the inner port, mirroring the inline probe script.
-    Prints the raw matching hex ``local_address`` columns; the probe's
-    output panel renders the same sockets decoded to ``ip:port``.
+
+def _port_listening_inner_command(port: int) -> str:
+    """In-container check that prints decoded ``LISTEN ip:port`` lines (or the no-listener line).
+
+    Dependency-free (the container image ships no iproute2): scans
+    ``/proc/net/tcp{,6}`` for TCP_LISTEN (state ``0A``) sockets on ``port`` and
+    decodes the little-endian hex local address. Mirrors the inline probe
+    script and ``parse_listening_sockets`` (kept textually parallel); the body
+    uses only double quotes so it survives the ``-c`` and ``mngr exec`` quoting.
     """
-    return (
-        'python3 -c "'
-        "rows = [line.split() for path in ('/proc/net/tcp', '/proc/net/tcp6') "
-        "for line in open(path).read().splitlines()[1:]]; "
-        f"print([r[1] for r in rows if r[3] == '0A' and int(r[1].rsplit(':', 1)[1], 16) == {port_label}])\""
+    body = (
+        "import socket,os; "
+        f"t={port}; "
+        'fmt=lambda h: ".".join(str(o) for o in bytes.fromhex(h)[::-1]) if len(h)==8 '
+        'else (socket.inet_ntop(socket.AF_INET6,b"".join(bytes.fromhex(h[i:i+8])[::-1] '
+        "for i in range(0,32,8))) if len(h)==32 else h); "
+        'rows=[l.split() for p in ("/proc/net/tcp","/proc/net/tcp6") if os.path.exists(p) '
+        "for l in open(p).read().splitlines()[1:]]; "
+        'out=["LISTEN %s:%d"%(fmt(f[1].rpartition(":")[0]),t) for f in rows '
+        'if len(f)>=4 and f[3]=="0A" and int(f[1].rpartition(":")[2],16)==t]; '
+        'print("\\n".join(out) or "(no LISTEN socket on port %d)"%t)'
     )
+    return f"python3 -c '{body}'"
 
 
-def _build_port_listening_probe(in_container: _InContainerProbe) -> Probe:
+def _build_port_listening_probe(
+    in_container: _InContainerProbe,
+    mngr_binary: str,
+    services_agent_id: AgentId | None,
+) -> Probe:
     """Probe 5: scan /proc/net/tcp{,6} for a LISTEN socket on the inner port."""
-    port_label = "?" if in_container.inner_port is None else str(in_container.inner_port)
-    command = _port_listening_command(port_label)
+    port = in_container.inner_port
+    inner = _port_listening_inner_command(port if port is not None else 0)
+    command = _mngr_exec_command(mngr_binary, services_agent_id, inner)
     if not in_container.sentinel_seen:
-        return Probe(
-            question=_QUESTION_PORT_LISTENING,
-            command=command,
-            output="(in-container probe did not run)",
-            answer=ProbeAnswer.UNKNOWN,
-        )
-    if in_container.inner_port is None:
-        return Probe(
-            question=_QUESTION_PORT_LISTENING,
-            command=command,
-            output="(could not parse inner port from services.toml command)",
-            answer=ProbeAnswer.UNKNOWN,
-        )
-    if in_container.port_listener_error is not None:
-        return Probe(
-            question=_QUESTION_PORT_LISTENING,
-            command=command,
-            output=f"error: {in_container.port_listener_error}",
-            answer=ProbeAnswer.UNKNOWN,
-        )
-    listener_output = in_container.port_listener or ""
-    if listener_output.strip():
-        return Probe(
-            question=_QUESTION_PORT_LISTENING,
-            command=command,
-            output=listener_output,
-            answer=ProbeAnswer.YES,
-        )
-    return Probe(
-        question=_QUESTION_PORT_LISTENING,
-        command=command,
-        output="(no LISTEN entry for the inner port)",
-        answer=ProbeAnswer.NO,
-    )
+        output, answer = "(in-container probe did not run)", ProbeAnswer.UNKNOWN
+    elif port is None:
+        output, answer = "(could not parse inner port from services.toml command)", ProbeAnswer.UNKNOWN
+    elif in_container.port_listener_error is not None:
+        output, answer = f"error: {in_container.port_listener_error}", ProbeAnswer.UNKNOWN
+    elif (in_container.port_listener or "").strip():
+        output, answer = in_container.port_listener or "", ProbeAnswer.YES
+    else:
+        output, answer = _no_listener_output(port), ProbeAnswer.NO
+    return Probe(question=_QUESTION_PORT_LISTENING, command=command, output=output, answer=answer)
 
 
-def _build_curl_probe(in_container: _InContainerProbe) -> Probe:
-    """Probe 6: curl http://localhost:<port>/."""
-    port_label = "?" if in_container.inner_port is None else str(in_container.inner_port)
-    command = f"curl -m1 -s -o /dev/null -w '%{{http_code}}' http://localhost:{port_label}/"
+def _curl_inner_command(port: int) -> str:
+    """In-container curl that prints just the HTTP status code (``000`` on no response)."""
+    return f'curl -m1 -s -o /dev/null -w "%{{http_code}}" http://localhost:{port}/'
+
+
+def _build_curl_probe(
+    in_container: _InContainerProbe,
+    mngr_binary: str,
+    services_agent_id: AgentId | None,
+) -> Probe:
+    """Probe 6: does the system interface answer locally inside the container?"""
+    port = in_container.inner_port
+    inner = _curl_inner_command(port if port is not None else 0)
+    command = _mngr_exec_command(mngr_binary, services_agent_id, inner)
     if not in_container.sentinel_seen:
-        return Probe(
-            question=_QUESTION_CURL_OK,
-            command=command,
-            output="(in-container probe did not run)",
-            answer=ProbeAnswer.UNKNOWN,
-        )
-    if in_container.inner_port is None:
-        return Probe(
-            question=_QUESTION_CURL_OK,
-            command=command,
-            output="(could not parse inner port from services.toml command)",
-            answer=ProbeAnswer.UNKNOWN,
-        )
-    if in_container.curl_error is not None:
-        return Probe(
-            question=_QUESTION_CURL_OK,
-            command=command,
-            output=f"error: {in_container.curl_error}",
-            answer=ProbeAnswer.NO,
-        )
-    status = in_container.curl_status or ""
-    if status == "200":
-        return Probe(
-            question=_QUESTION_CURL_OK,
-            command=command,
-            output=f"HTTP {status}",
-            answer=ProbeAnswer.YES,
-        )
-    if status:
-        return Probe(
-            question=_QUESTION_CURL_OK,
-            command=command,
-            output=f"HTTP {status}",
-            answer=ProbeAnswer.NO,
-        )
-    return Probe(
-        question=_QUESTION_CURL_OK,
-        command=command,
-        output="(no response captured)",
-        answer=ProbeAnswer.UNKNOWN,
-    )
+        output, answer = "(in-container probe did not run)", ProbeAnswer.UNKNOWN
+    elif port is None:
+        output, answer = "(could not parse inner port from services.toml command)", ProbeAnswer.UNKNOWN
+    elif in_container.curl_error is not None:
+        output, answer = f"error: {in_container.curl_error}", ProbeAnswer.NO
+    elif in_container.curl_status == "200":
+        output, answer = "200", ProbeAnswer.YES
+    elif in_container.curl_status:
+        output, answer = in_container.curl_status, ProbeAnswer.NO
+    else:
+        output, answer = "(no response captured)", ProbeAnswer.UNKNOWN
+    return Probe(question=_QUESTION_CURL_OK, command=command, output=output, answer=answer)
 
 
 def _build_plugin_resolver_probe(plugin_resolver_services: dict[str, str]) -> Probe:
@@ -575,25 +578,29 @@ def build_host_health_response(
     plugin_resolver_services: dict[str, str],
     mngr_list_command: str = "",
     mngr_exec_command: str = "",
+    mngr_binary: str = "mngr",
 ) -> HostHealthResponse:
     """Assemble the host-health response (probes + dispatch tier) from raw inputs.
 
     Pure function so the integration is straightforward to unit-test:
     feed in raw ``mngr list`` / in-container stdout / plugin snapshot,
     assert on the probe answers and the derived tier.
+
+    ``mngr_binary`` is used to render the ``mngr exec`` reproduction commands
+    for the in-container probes; ``mngr_list_command`` is the real list argv
+    those probes pipe through ``jq`` to print exactly their extracted field.
     """
     in_container = _parse_in_container_probe(in_container_stdout)
     agent_row = _extract_agent_row(list_json, agent_id)
     host_state = _extract_host_state(agent_row)
-    list_cmd = mngr_list_command or "(mngr list --format json)"
     exec_cmd = mngr_exec_command or "(mngr exec <system-services-agent>)"
     probes: tuple[Probe, ...] = (
-        _build_container_running_probe(host_state, list_cmd),
-        _build_services_agent_registered_probe(list_json, services_agent_id, list_cmd),
+        _build_container_running_probe(host_state, agent_id, mngr_list_command),
+        _build_services_agent_registered_probe(list_json, services_agent_id, mngr_list_command),
         _build_can_run_commands_probe(in_container, exec_cmd),
-        _build_services_toml_probe(in_container),
-        _build_port_listening_probe(in_container),
-        _build_curl_probe(in_container),
+        _build_services_toml_probe(in_container, mngr_binary, services_agent_id),
+        _build_port_listening_probe(in_container, mngr_binary, services_agent_id),
+        _build_curl_probe(in_container, mngr_binary, services_agent_id),
         _build_plugin_resolver_probe(plugin_resolver_services),
     )
     return HostHealthResponse(probes=probes, dispatch_tier=_classify_dispatch_tier(probes))

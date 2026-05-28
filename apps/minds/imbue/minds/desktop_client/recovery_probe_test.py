@@ -342,20 +342,32 @@ def test_every_probe_has_a_command_and_an_output() -> None:
         assert probe.output, f"probe {probe.question!r} rendered with no output"
 
 
-def _python_c_body(command: str) -> str | None:
-    """Return the ``-c`` body of a ``python3 -c "..."`` command, or None."""
+def _inner_python_body(command: str) -> str | None:
+    """Extract a ``python3 -c`` body from a probe command, unwrapping ``mngr exec``.
+
+    The in-container probe commands render as
+    ``mngr exec <id> 'python3 -c '\\''<body>'\\''' --no-start --quiet``; this
+    peels off the ``mngr exec`` wrapper and the inner ``-c`` to return the
+    body. Returns None for commands that are not python reproductions (the jq
+    and curl ones).
+    """
     tokens = shlex.split(command)
-    if len(tokens) >= 3 and tokens[0] == "python3" and tokens[1] == "-c":
-        return tokens[2]
+    if len(tokens) >= 4 and tokens[0].endswith("mngr") and tokens[1] == "exec":
+        inner_tokens = shlex.split(tokens[3])
+    else:
+        inner_tokens = tokens
+    if len(inner_tokens) >= 3 and inner_tokens[0] == "python3" and inner_tokens[1] == "-c":
+        return inner_tokens[2]
     return None
 
 
 def test_python_probe_commands_are_well_formed_and_runnable() -> None:
-    """Every ``python3 -c`` probe command must shlex-split and compile as Python.
+    """Every ``python3 -c`` probe command must unwrap and compile as Python.
 
-    Guards against quote-nesting bugs like the original services.toml
-    command (single quotes nested inside a single-quoted ``-c`` body), which
-    rendered an un-runnable, un-parseable string.
+    Guards against quote-nesting bugs (the original services.toml command
+    nested single quotes inside a single-quoted ``-c`` body) and against the
+    ``mngr exec`` wrapper mangling the inner script. compile() validates the
+    inner body's syntax without executing it.
     """
     response = build_host_health_response(
         list_json=_list_json(),
@@ -366,13 +378,145 @@ def test_python_probe_commands_are_well_formed_and_runnable() -> None:
         ),
         plugin_resolver_services={},
     )
-    python_commands = [(p.question, _python_c_body(p.command)) for p in response.probes]
-    checked = [(q, body) for q, body in python_commands if body is not None]
+    checked = [
+        (p.question, _inner_python_body(p.command))
+        for p in response.probes
+        if _inner_python_body(p.command) is not None
+    ]
     assert checked, "expected at least one python3 -c probe command"
     for question, body in checked:
-        # compile() validates syntax without executing; a botched quote nest
-        # yields a body that fails here.
         compile(body, f"<probe:{question}>", "exec")
+
+
+# --- command / output alignment -------------------------------------------
+#
+# Each probe's command, run where minds ran it, must print exactly its output.
+# These tests pin the command shape and assert the rendered output is the value
+# the command would emit (not a derived prose description).
+
+
+def _healthy_probe_stdout(**overrides: object) -> str:
+    payload: dict[str, object] = {
+        "services_toml_declares_system_interface": True,
+        "inner_port": 8000,
+        "curl_status": "200",
+        "port_listener": "LISTEN 0.0.0.0:8000",
+    }
+    payload.update(overrides)
+    return _probe_stdout(payload)
+
+
+def test_container_running_command_derives_state_with_jq() -> None:
+    response = build_host_health_response(
+        list_json=_list_json(host_state="RUNNING"),
+        agent_id=_AGENT_ID,
+        services_agent_id=_SERVICES_AGENT_ID,
+        in_container_stdout=None,
+        plugin_resolver_services={},
+        mngr_list_command="mngr list --format json --quiet --on-error continue",
+    )
+    probe = _probe_for(response, "container running")
+    assert " | jq -r " in probe.command
+    assert str(_AGENT_ID) in probe.command  # the jq filter targets this agent
+    assert probe.output == "RUNNING"  # exactly what the jq pipeline prints
+
+
+def test_services_agent_command_outputs_bare_state_without_prefix() -> None:
+    response = build_host_health_response(
+        list_json=_list_json(services_state="RUNNING_UNKNOWN_AGENT_TYPE"),
+        agent_id=_AGENT_ID,
+        services_agent_id=_SERVICES_AGENT_ID,
+        in_container_stdout=None,
+        plugin_resolver_services={},
+        mngr_list_command="mngr list --format json --quiet --on-error continue",
+    )
+    probe = _probe_for(response, "services agent")
+    assert " | jq -r " in probe.command
+    assert probe.output == "RUNNING_UNKNOWN_AGENT_TYPE"  # no synthetic "state=" prefix
+
+
+def test_can_run_commands_output_is_the_raw_exec_stdout() -> None:
+    stdout = _probe_stdout({"services_toml_declares_system_interface": True})
+    response = build_host_health_response(
+        list_json=_list_json(),
+        agent_id=_AGENT_ID,
+        services_agent_id=_SERVICES_AGENT_ID,
+        in_container_stdout=stdout,
+        plugin_resolver_services={},
+        mngr_exec_command="mngr exec agent-x 'echo hi' --quiet",
+    )
+    probe = _probe_for(response, "run a command")
+    assert probe.command == "mngr exec agent-x 'echo hi' --quiet"
+    assert probe.output == stdout  # the verbatim stdout the command produced
+
+
+def test_services_toml_command_is_mngr_exec_and_output_is_declared() -> None:
+    response = build_host_health_response(
+        list_json=_list_json(),
+        agent_id=_AGENT_ID,
+        services_agent_id=_SERVICES_AGENT_ID,
+        in_container_stdout=_healthy_probe_stdout(),
+        plugin_resolver_services={},
+    )
+    probe = _probe_for(response, "services.toml")
+    assert probe.command.startswith(f"mngr exec {_SERVICES_AGENT_ID} ")
+    assert "python3 -c" in probe.command
+    assert probe.output == "declared"
+
+
+def test_services_toml_output_is_missing_when_not_declared() -> None:
+    response = build_host_health_response(
+        list_json=_list_json(),
+        agent_id=_AGENT_ID,
+        services_agent_id=_SERVICES_AGENT_ID,
+        in_container_stdout=_healthy_probe_stdout(services_toml_declares_system_interface=False),
+        plugin_resolver_services={},
+    )
+    assert _probe_for(response, "services.toml").output == "MISSING"
+
+
+def test_curl_output_is_bare_status_code() -> None:
+    response = build_host_health_response(
+        list_json=_list_json(),
+        agent_id=_AGENT_ID,
+        services_agent_id=_SERVICES_AGENT_ID,
+        in_container_stdout=_healthy_probe_stdout(curl_status="200"),
+        plugin_resolver_services={},
+    )
+    probe = _probe_for(response, "answer locally")
+    assert probe.command.startswith(f"mngr exec {_SERVICES_AGENT_ID} ")
+    assert "curl" in probe.command
+    assert probe.output == "200"  # not "HTTP 200"
+
+
+def test_port_listening_output_matches_listener_lines() -> None:
+    response = build_host_health_response(
+        list_json=_list_json(),
+        agent_id=_AGENT_ID,
+        services_agent_id=_SERVICES_AGENT_ID,
+        in_container_stdout=_healthy_probe_stdout(port_listener="LISTEN 0.0.0.0:8000\nLISTEN ::1:8000"),
+        plugin_resolver_services={},
+    )
+    probe = _probe_for(response, "listening on the system-interface inner port")
+    assert probe.command.startswith(f"mngr exec {_SERVICES_AGENT_ID} ")
+    assert "/proc/net/tcp" in probe.command
+    assert probe.output == "LISTEN 0.0.0.0:8000\nLISTEN ::1:8000"
+
+
+def test_port_listening_no_listener_output_matches_command_fallback() -> None:
+    """The no-listener output must be byte-identical to what the command prints."""
+    response = build_host_health_response(
+        list_json=_list_json(),
+        agent_id=_AGENT_ID,
+        services_agent_id=_SERVICES_AGENT_ID,
+        in_container_stdout=_healthy_probe_stdout(port_listener=""),
+        plugin_resolver_services={},
+    )
+    probe = _probe_for(response, "listening on the system-interface inner port")
+    assert probe.answer == ProbeAnswer.NO
+    assert probe.output == "(no LISTEN socket on port 8000)"
+    # The command's own fallback (printed when no socket matches) is the same string.
+    assert '"(no LISTEN socket on port %d)"' in probe.command
 
 
 # --- /proc/net/tcp LISTEN parsing -----------------------------------------
