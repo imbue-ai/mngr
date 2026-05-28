@@ -16,7 +16,7 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import ProviderInstanceName
-from imbue.mngr_mapreduce.background_stopper import BackgroundStopper
+from imbue.mngr_mapreduce.agent_stopper import AgentStopper
 from imbue.mngr_mapreduce.data_types import AgentKind
 from imbue.mngr_mapreduce.data_types import AgentMetadata
 from imbue.mngr_mapreduce.data_types import LaunchConfig
@@ -86,7 +86,7 @@ def _finalize_mapper(
     provider_name: ProviderInstanceName,
     host: OnlineHostInterface,
     info: MapperInfo,
-    stopper: BackgroundStopper,
+    stopper: AgentStopper,
 ) -> bool:
     """Pull a finished mapper's outputs, fire the recipe hook, and stop the agent.
 
@@ -127,6 +127,7 @@ def launch_and_poll_mappers(
     all_agents: list[MapperInfo],
     all_hosts: dict[str, OnlineHostInterface],
     launch_failures: list[AgentMetadata],
+    stopper: AgentStopper,
 ) -> list[AgentMetadata]:
     """Launch mappers incrementally and poll until all finish.
 
@@ -142,6 +143,10 @@ def launch_and_poll_mappers(
     launched agents (or new launch failures) are appended during execution.
     Intermediate reports are rendered via ``recipe.render_report`` after every
     state change.
+
+    ``stopper`` owns the background threads for post-finalize stop calls so
+    a slow ``stop_agents`` doesn't serialize the polling loop. The caller is
+    responsible for ``__enter__``/``__exit__``; we just submit to it.
 
     Returns the final list of ``AgentMetadata`` (launch failures first, then
     one entry per launched agent).
@@ -179,52 +184,51 @@ def launch_and_poll_mappers(
     launch_mappers_up_to_limit(**launch_kwargs)
     _render_polling_tick(recipe, ctx, all_agents, timed_out_ids, launch_failures)
 
-    with BackgroundStopper() as stopper:
-        while pending_ids or remaining_tasks:
-            now = time.monotonic()
-            changed = False
+    while pending_ids or remaining_tasks:
+        now = time.monotonic()
+        changed = False
 
-            for agent_id_str in list(pending_ids):
-                info = agent_id_to_info[agent_id_str]
-                host = all_hosts[agent_id_str]
-                agent_id = AgentId(agent_id_str)
+        for agent_id_str in list(pending_ids):
+            info = agent_id_to_info[agent_id_str]
+            host = all_hosts[agent_id_str]
+            agent_id = AgentId(agent_id_str)
 
-                if is_agent_outputs_ready(mngr_ctx, config.provider_name, host.id, agent_id):
-                    logger.info("Mapper '{}' published outputs, finalizing", info.agent_name)
-                    _finalize_mapper(recipe, ctx, mngr_ctx, config.provider_name, host, info, stopper)
-                    pending_ids.discard(agent_id_str)
-                    changed = True
-                    continue
+            if is_agent_outputs_ready(mngr_ctx, config.provider_name, host.id, agent_id):
+                logger.info("Mapper '{}' published outputs, finalizing", info.agent_name)
+                _finalize_mapper(recipe, ctx, mngr_ctx, config.provider_name, host, info, stopper)
+                pending_ids.discard(agent_id_str)
+                changed = True
+                continue
 
-                elapsed = now - info.created_at
-                if elapsed >= agent_timeout_seconds:
-                    logger.warning(
-                        "Mapper '{}' timed out after {:.0f}s without publishing outputs, stopping",
-                        info.agent_name,
-                        elapsed,
-                    )
-                    stopper.submit(host, agent_id, info.agent_name)
-                    pending_ids.discard(agent_id_str)
-                    timed_out_ids.add(agent_id_str)
-                    changed = True
+            elapsed = now - info.created_at
+            if elapsed >= agent_timeout_seconds:
+                logger.warning(
+                    "Mapper '{}' timed out after {:.0f}s without publishing outputs, stopping",
+                    info.agent_name,
+                    elapsed,
+                )
+                stopper.submit(host, agent_id, info.agent_name)
+                pending_ids.discard(agent_id_str)
+                timed_out_ids.add(agent_id_str)
+                changed = True
 
-            launch_mappers_up_to_limit(**launch_kwargs)
+        launch_mappers_up_to_limit(**launch_kwargs)
 
-            if changed:
-                _render_polling_tick(recipe, ctx, all_agents, timed_out_ids, launch_failures)
+        if changed:
+            _render_polling_tick(recipe, ctx, all_agents, timed_out_ids, launch_failures)
 
-            if not pending_ids and not remaining_tasks:
-                break
+        if not pending_ids and not remaining_tasks:
+            break
 
-            pending_names = [agent_id_to_info[aid].agent_name for aid in pending_ids]
-            queued_msg = f", {len(remaining_tasks)} queued" if remaining_tasks else ""
-            logger.info(
-                "Polling {} pending mapper(s){}: {}",
-                len(pending_ids),
-                queued_msg,
-                ", ".join(str(n) for n in pending_names),
-            )
-            time.sleep(poll_interval_seconds)
+        pending_names = [agent_id_to_info[aid].agent_name for aid in pending_ids]
+        queued_msg = f", {len(remaining_tasks)} queued" if remaining_tasks else ""
+        logger.info(
+            "Polling {} pending mapper(s){}: {}",
+            len(pending_ids),
+            queued_msg,
+            ", ".join(str(n) for n in pending_names),
+        )
+        time.sleep(poll_interval_seconds)
 
     return [
         *launch_failures,
@@ -251,6 +255,7 @@ def wait_for_reducer(
     mngr_ctx: MngrContext,
     poll_interval_seconds: float,
     deadline: float,
+    stopper: AgentStopper,
 ) -> AgentMetadata:
     """Poll for the reducer's outputs archive; extract, hook, and stop.
 
@@ -260,43 +265,42 @@ def wait_for_reducer(
     extracted contents are interpreted. Returns the reducer's
     ``AgentMetadata`` either way; on timeout, ``error_summary`` is set.
     """
-    with BackgroundStopper() as stopper:
-        while time.monotonic() < deadline:
-            if is_agent_outputs_ready(mngr_ctx, provider_name, host.id, info.agent_id):
-                logger.info("Reducer outputs archive detected, finalizing")
-                local_dest = pull_agent_outputs(
-                    mngr_ctx=mngr_ctx,
-                    provider_name=provider_name,
-                    host_id=host.id,
-                    agent_id=info.agent_id,
-                    agent_name=info.agent_name,
-                    destination_dir=ctx.output_dir,
-                )
-                if local_dest is not None:
-                    try:
-                        recipe.on_reducer_finalized(ctx, local_dest, info)
-                    except (OSError, ValueError, RuntimeError) as exc:
-                        logger.warning("Recipe on_reducer_finalized raised: {}", exc)
-                stopper.submit(host, info.agent_id, info.agent_name)
-                if local_dest is None:
-                    return AgentMetadata(
-                        kind=AgentKind.REDUCER,
-                        agent_name=info.agent_name,
-                        branch_name=info.branch_name,
-                        error_summary="Reducer published an archive but it could not be extracted.",
-                    )
+    while time.monotonic() < deadline:
+        if is_agent_outputs_ready(mngr_ctx, provider_name, host.id, info.agent_id):
+            logger.info("Reducer outputs archive detected, finalizing")
+            local_dest = pull_agent_outputs(
+                mngr_ctx=mngr_ctx,
+                provider_name=provider_name,
+                host_id=host.id,
+                agent_id=info.agent_id,
+                agent_name=info.agent_name,
+                destination_dir=ctx.output_dir,
+            )
+            if local_dest is not None:
+                try:
+                    recipe.on_reducer_finalized(ctx, local_dest, info)
+                except (OSError, ValueError, RuntimeError) as exc:
+                    logger.warning("Recipe on_reducer_finalized raised: {}", exc)
+            stopper.submit(host, info.agent_id, info.agent_name)
+            if local_dest is None:
                 return AgentMetadata(
                     kind=AgentKind.REDUCER,
                     agent_name=info.agent_name,
                     branch_name=info.branch_name,
+                    error_summary="Reducer published an archive but it could not be extracted.",
                 )
-            time.sleep(poll_interval_seconds)
+            return AgentMetadata(
+                kind=AgentKind.REDUCER,
+                agent_name=info.agent_name,
+                branch_name=info.branch_name,
+            )
+        time.sleep(poll_interval_seconds)
 
-        logger.warning("Reducer agent timed out, stopping it")
-        stopper.submit(host, info.agent_id, info.agent_name)
-        return AgentMetadata(
-            kind=AgentKind.REDUCER,
-            agent_name=info.agent_name,
-            branch_name=info.branch_name,
-            error_summary="Reducer timed out before publishing outputs.",
-        )
+    logger.warning("Reducer agent timed out, stopping it")
+    stopper.submit(host, info.agent_id, info.agent_name)
+    return AgentMetadata(
+        kind=AgentKind.REDUCER,
+        agent_name=info.agent_name,
+        branch_name=info.branch_name,
+        error_summary="Reducer timed out before publishing outputs.",
+    )

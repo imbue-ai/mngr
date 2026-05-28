@@ -41,6 +41,7 @@ from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import SnapshotName
 from imbue.mngr.providers.registry import get_config_class
+from imbue.mngr_mapreduce.agent_stopper import AgentStopper
 from imbue.mngr_mapreduce.data_types import AgentKind
 from imbue.mngr_mapreduce.data_types import AgentMetadata
 from imbue.mngr_mapreduce.data_types import LaunchConfig
@@ -339,6 +340,7 @@ def _run_reducer_phase(
     mngr_ctx: MngrContext,
     config: LaunchConfig,
     mapper_metadata: list[AgentMetadata],
+    stopper: AgentStopper,
 ) -> AgentMetadata | None:
     """Launch the reducer agent if at least one mapper produced outputs.
 
@@ -377,6 +379,7 @@ def _run_reducer_phase(
         mngr_ctx=mngr_ctx,
         poll_interval_seconds=opts.poll_interval,
         deadline=deadline,
+        stopper=stopper,
     )
 
 
@@ -401,38 +404,43 @@ def run_mapreduce(
 
     source_dir = Path(opts.source) if opts.source is not None else Path.cwd()
 
-    if opts.reintegrate:
-        reintegrate_mapreduce(recipe, opts, mngr_ctx, output_opts, source_dir)
-        return
-
-    run_name = opts.run_name if opts.run_name else make_run_name()
-    base_commit = get_base_commit(source_dir, mngr_ctx.concurrency_group)
-    source_host = get_local_host(mngr_ctx)
-
-    output_dir = Path(opts.output_dir) if opts.output_dir is not None else Path(f"{recipe.name}_{run_name}")
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    ctx = MapReduceContext(
-        mngr_ctx=mngr_ctx,
-        source_dir=source_dir,
-        run_name=run_name,
-        output_dir=output_dir,
-        output_opts=output_opts,
-    )
-
-    tasks = recipe.discover(ctx)
-    emit_task_count(len(tasks), output_opts)
-
-    config = build_launch_config(
-        opts=opts,
-        source_dir=source_dir,
-        source_host=source_host,
-        base_commit=base_commit,
-        run_name=run_name,
-    )
-
+    # The AgentStopper owns background threads for fire-and-forget post-finalize
+    # stop_agents calls; see agent_stopper.py for the why. A single stopper
+    # covers both the mapper polling loop and the reducer wait so all in-flight
+    # stops drain under one budget on exit.
     try:
-        _run_pipeline(recipe, ctx, opts, mngr_ctx, output_opts, config, tasks)
+        with AgentStopper() as stopper:
+            if opts.reintegrate:
+                reintegrate_mapreduce(recipe, opts, mngr_ctx, output_opts, source_dir, stopper)
+                return
+
+            run_name = opts.run_name if opts.run_name else make_run_name()
+            base_commit = get_base_commit(source_dir, mngr_ctx.concurrency_group)
+            source_host = get_local_host(mngr_ctx)
+
+            output_dir = Path(opts.output_dir) if opts.output_dir is not None else Path(f"{recipe.name}_{run_name}")
+            output_dir.mkdir(parents=True, exist_ok=True)
+
+            ctx = MapReduceContext(
+                mngr_ctx=mngr_ctx,
+                source_dir=source_dir,
+                run_name=run_name,
+                output_dir=output_dir,
+                output_opts=output_opts,
+            )
+
+            tasks = recipe.discover(ctx)
+            emit_task_count(len(tasks), output_opts)
+
+            config = build_launch_config(
+                opts=opts,
+                source_dir=source_dir,
+                source_host=source_host,
+                base_commit=base_commit,
+                run_name=run_name,
+            )
+
+            _run_pipeline(recipe, ctx, opts, mngr_ctx, output_opts, config, tasks, stopper)
     except KeyboardInterrupt:
         traceback.print_exc()
         raise
@@ -446,6 +454,7 @@ def _run_pipeline(
     output_opts: OutputOptions,
     config: LaunchConfig,
     tasks: list[MapReduceTask],
+    stopper: AgentStopper,
 ) -> None:
     """Launch + poll + reduce + report.
 
@@ -494,6 +503,7 @@ def _run_pipeline(
         all_agents=agent_infos,
         all_hosts=agent_hosts,
         launch_failures=launch_failures,
+        stopper=stopper,
     )
 
     if use_batched:
@@ -502,7 +512,7 @@ def _run_pipeline(
     # The reducer runs on the same provider as the mappers and reuses any
     # snapshot built for them.
     reducer_config = config.model_copy_update(to_update(config.field_ref().snapshot, snapshot_name))
-    reducer_meta = _run_reducer_phase(recipe, ctx, opts, mngr_ctx, reducer_config, mapper_metadata)
+    reducer_meta = _run_reducer_phase(recipe, ctx, opts, mngr_ctx, reducer_config, mapper_metadata, stopper)
 
     final_path = _render_final_report(recipe, ctx, mapper_metadata, reducer_meta)
     if final_path is not None:
@@ -540,6 +550,7 @@ def reintegrate_mapreduce(
     mngr_ctx: MngrContext,
     output_opts: OutputOptions,
     source_dir: Path,
+    stopper: AgentStopper,
 ) -> None:
     """Re-read outcomes from a previous map-reduce run and re-run the reducer.
 
@@ -638,7 +649,7 @@ def reintegrate_mapreduce(
         base_commit=base_commit,
         run_name=run_name,
     )
-    reducer_meta = _run_reducer_phase(recipe, ctx, opts, mngr_ctx, config, mapper_metadata)
+    reducer_meta = _run_reducer_phase(recipe, ctx, opts, mngr_ctx, config, mapper_metadata, stopper)
 
     final_path = _render_final_report(recipe, ctx, mapper_metadata, reducer_meta)
     if final_path is not None:

@@ -27,7 +27,7 @@ from imbue.mngr_mapreduce.launching import stop_agent_on_host
 _STOP_DRAIN_TIMEOUT_SECONDS = 60.0
 
 
-class BackgroundStopper(MutableModel):
+class AgentStopper(MutableModel):
     """Fire-and-forget ``stop_agent_on_host`` calls so a slow stop can't wedge the polling loop.
 
     Production scenario: with a remote provider (e.g. Modal), an agent can
@@ -71,7 +71,7 @@ class BackgroundStopper(MutableModel):
         thread.start()
         self.threads.append(thread)
 
-    def __enter__(self) -> "BackgroundStopper":
+    def __enter__(self) -> "AgentStopper":
         return self
 
     def __exit__(
