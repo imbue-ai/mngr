@@ -213,8 +213,7 @@ Finished agents are stopped and moved to `queue=in-review`; to see them, run
 
 ## Scheduling
 
-Add a `*/5` line per script you use. `cron` runs with a bare `PATH`, so set one
-that finds `mngr`, `jq`, and `claude`:
+`cron` runs with a bare `PATH`, so set one that finds `mngr`, `jq`, and `claude`:
 
 ```cron
 PATH=/usr/local/bin:/usr/bin:/bin:/home/you/.local/bin
