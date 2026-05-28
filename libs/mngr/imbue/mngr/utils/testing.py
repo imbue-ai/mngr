@@ -361,9 +361,12 @@ def assert_home_is_temp_directory() -> None:
     """
     actual_home = Path.home()
     actual_home_str = str(actual_home)
-    # pytest's tmp_path uses /tmp on Linux, /var/folders or /private/var on macOS
+    # pytest's tmp_path uses /tmp on Linux, /var/folders or /private/var on macOS.
+    # /private/tmp is also valid: when TMPDIR points into /tmp (e.g. a /tmp/<runner> sandbox),
+    # macOS realpath-resolves the /tmp -> /private/tmp symlink, so tmp_path lands under /private/tmp.
     if not (
         actual_home_str.startswith("/tmp")
+        or actual_home_str.startswith("/private/tmp")
         or actual_home_str.startswith("/var/folders")
         or actual_home_str.startswith("/private/var")
     ):
