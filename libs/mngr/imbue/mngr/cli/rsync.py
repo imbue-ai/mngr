@@ -160,7 +160,7 @@ def rsync_command(ctx: click.Context, **kwargs: Any) -> None:
         extra_args=opts.rsync_args,
         uncommitted_changes=uncommitted_changes_mode,
         cg=mngr_ctx.concurrency_group,
-        exec_final_command=True,
+        run_in_terminal=True,
     )
 
 

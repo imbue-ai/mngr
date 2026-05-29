@@ -116,7 +116,7 @@ def git_push_command(ctx: click.Context, **kwargs: Any) -> None:
         remote_path=location.path,
         extra_args=opts.git_args,
         cg=mngr_ctx.concurrency_group,
-        exec_final_command=True,
+        run_in_terminal=True,
     )
 
 
@@ -152,7 +152,7 @@ def git_pull_command(ctx: click.Context, **kwargs: Any) -> None:
         remote_path=location.path,
         extra_args=opts.git_args,
         cg=mngr_ctx.concurrency_group,
-        exec_final_command=True,
+        run_in_terminal=True,
     )
 
 

@@ -16,6 +16,7 @@ around a sync operation.
 
 import os
 import shlex
+import subprocess
 from abc import ABC
 from abc import abstractmethod
 from collections.abc import Iterator
@@ -371,10 +372,19 @@ def _default_push_refspec(
     return f"{local_branch}:{result.stdout.strip()}"
 
 
-def _run_or_exec(cmd: list[str], env: dict[str, str] | None, cg: ConcurrencyGroup, exec_final_command: bool) -> None:
-    """Run ``cmd`` to completion, or replace the current process with it."""
-    if exec_final_command:
-        os.execvpe(cmd[0], cmd, env if env is not None else os.environ)
+def _run_git_command(cmd: list[str], env: dict[str, str] | None, cg: ConcurrencyGroup, run_in_terminal: bool) -> None:
+    """Run ``cmd`` either via cg (captured) or as a plain subprocess (passthrough).
+
+    Passthrough mode skips the cg wrapper and lets ``git`` own the user's stdin,
+    stdout, and stderr -- so progress, errors, and pager-style output flow
+    directly to the terminal. We still wait for ``git`` to exit, so the caller
+    can run cleanup (stash pop, etc.) afterwards.
+    """
+    if run_in_terminal:
+        result = subprocess.run(cmd, env=env)
+        if result.returncode != 0:
+            raise GitSyncError(f"git exited with status {result.returncode}")
+        return
     try:
         cg.run_process_to_completion(cmd, env=env)
     except ProcessError as e:
@@ -387,7 +397,7 @@ def git_push(
     remote_path: Path,
     extra_args: Sequence[str],
     cg: ConcurrencyGroup,
-    exec_final_command: bool = False,
+    run_in_terminal: bool = False,
 ) -> None:
     """Run ``git push`` from ``local_path`` to ``remote_path`` on ``remote_host``.
 
@@ -398,10 +408,10 @@ def git_push(
     ``<local_current_branch>:<remote_current_branch>`` so ``mngr git push my-agent``
     works on mngr's worktree-style agents (where the agent has its own branch).
 
-    With ``exec_final_command=True``, the current process is replaced by ``git`` once
-    setup is done (no return); the caller is responsible for any cleanup it
-    needs to run before then. Otherwise raises :class:`GitSyncError` on any
-    failure of the underlying git command.
+    With ``run_in_terminal=True``, ``git`` is run as a plain subprocess with the
+    user's stdin/stdout/stderr (no redirection), so progress and errors flow
+    directly to the terminal -- intended for use from ``mngr git push``.
+    Raises :class:`GitSyncError` on a non-zero exit either way.
     """
     add_safe_directory_on_remote(remote_host, remote_path)
     _configure_push_destination(remote_host, remote_path)
@@ -411,7 +421,7 @@ def git_push(
         positionals = [_default_push_refspec(local_path, remote_host, remote_path, cg)]
     cmd = ["git", "-C", str(local_path), "push", *options, url, *positionals]
     logger.debug("Running git push: {}", shlex.join(cmd))
-    _run_or_exec(cmd, env, cg, exec_final_command)
+    _run_git_command(cmd, env, cg, run_in_terminal)
 
 
 def git_pull(
@@ -420,7 +430,7 @@ def git_pull(
     remote_path: Path,
     extra_args: Sequence[str],
     cg: ConcurrencyGroup,
-    exec_final_command: bool = False,
+    run_in_terminal: bool = False,
 ) -> None:
     """Run ``git pull`` into ``local_path`` from ``remote_path`` on ``remote_host``.
 
@@ -428,13 +438,14 @@ def git_pull(
     starting with ``-`` (up to the first non-option) go before the constructed URL
     so they're parsed as options; the rest go after the URL as refspecs.
 
-    With ``exec_final_command=True``, the current process is replaced by ``git`` once
-    setup is done (no return). Otherwise raises :class:`GitSyncError` on any
-    failure of the underlying git command.
+    With ``run_in_terminal=True``, ``git`` is run as a plain subprocess with the
+    user's stdin/stdout/stderr (no redirection), so merge prompts and pager
+    output flow directly to the terminal -- intended for use from
+    ``mngr git pull``. Raises :class:`GitSyncError` on a non-zero exit either way.
     """
     add_safe_directory_on_remote(remote_host, remote_path)
     url, env = _build_git_url_and_env(remote_host, remote_path, is_push=False)
     options, positionals = _split_options_and_positionals(extra_args)
     cmd = ["git", "-C", str(local_path), "pull", *options, url, *positionals]
     logger.debug("Running git pull: {}", shlex.join(cmd))
-    _run_or_exec(cmd, env, cg, exec_final_command)
+    _run_git_command(cmd, env, cg, run_in_terminal)

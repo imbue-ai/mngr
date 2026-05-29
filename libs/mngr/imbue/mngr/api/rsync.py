@@ -10,8 +10,8 @@ caller passes via ``extra_args`` is forwarded to rsync, sandwiched between
 the defaults and the source/destination args.
 """
 
-import os
 import shlex
+import subprocess
 from collections.abc import Sequence
 from contextlib import nullcontext
 from pathlib import Path
@@ -131,7 +131,7 @@ def _do_rsync(
     extra_args: Sequence[str],
     uncommitted_changes: UncommittedChangesMode,
     cg: ConcurrencyGroup,
-    exec_final_command: bool = False,
+    run_in_terminal: bool = False,
 ) -> RsyncResult:
     """Internal workhorse that runs the actual rsync command.
 
@@ -143,19 +143,14 @@ def _do_rsync(
     as "copy contents into destination" rather than "copy as a child of
     destination").
 
-    With ``exec_final_command=True``, the current process is replaced by ``rsync``
-    once setup is done -- no return value, and ``uncommitted_changes=MERGE`` is
-    rejected (it relies on popping the stash *after* rsync exits, which has no
-    exec equivalent).
+    With ``run_in_terminal=True``, ``rsync`` is run as a plain subprocess with
+    the user's stdin/stdout/stderr (no redirection), so progress and errors
+    flow directly to the terminal. The function still waits for rsync to exit,
+    so destination-side cleanup (stash pop on MERGE) runs as usual. The
+    returned :class:`RsyncResult` has zero counts in that mode (no stdout to
+    parse), so this is intended for CLI use, not internal callers.
     """
     RSYNC.require()
-
-    if exec_final_command and uncommitted_changes == UncommittedChangesMode.MERGE:
-        raise UserInputError(
-            "uncommitted_changes=MERGE is incompatible with exec_final_command: "
-            "popping the destination stash after rsync exits has no equivalent under exec. "
-            "Use STASH and run ``git stash pop`` yourself afterwards."
-        )
 
     local_str = str(local_path)
     remote_str = str(remote_path)
@@ -210,11 +205,14 @@ def _do_rsync(
             ssh_destination = remote_uri if is_push else local_str
             rsync_cmd = _build_rsync_command(ssh_source, ssh_destination, extra_args, ssh_transport=ssh_transport)
 
-        if exec_final_command:
-            logger.debug("{} files from {} to {}: {}", direction, source_str, destination_str, shlex.join(rsync_cmd))
-            os.execvp(rsync_cmd[0], rsync_cmd)
-
-        if remote_host.is_local:
+        if run_in_terminal:
+            with log_span("{} files from {} to {}", direction, source_str, destination_str):
+                logger.debug("Running rsync command: {}", shlex.join(rsync_cmd))
+                terminal_result = subprocess.run(rsync_cmd)
+            if terminal_result.returncode != 0:
+                raise MngrError(f"rsync exited with status {terminal_result.returncode}")
+            rsync_stdout = ""
+        elif remote_host.is_local:
             cmd_str = shlex.join(rsync_cmd)
             with log_span("{} files from {} to {}", direction, source_str, destination_str):
                 logger.debug("Running rsync command: {}", cmd_str)
@@ -251,7 +249,7 @@ def rsync_to_remote(
     extra_args: Sequence[str],
     uncommitted_changes: UncommittedChangesMode,
     cg: ConcurrencyGroup,
-    exec_final_command: bool = False,
+    run_in_terminal: bool = False,
 ) -> RsyncResult:
     """Rsync files from a local path to a path on ``remote_host``.
 
@@ -260,7 +258,7 @@ def rsync_to_remote(
     a trailing slash on ``local_path`` if you want "copy contents into
     destination" semantics rather than "copy as a child of destination".
 
-    See :func:`_do_rsync` for ``exec_final_command`` semantics.
+    See :func:`_do_rsync` for ``run_in_terminal`` semantics.
     """
     return _do_rsync(
         local_path=local_path,
@@ -270,7 +268,7 @@ def rsync_to_remote(
         extra_args=extra_args,
         uncommitted_changes=uncommitted_changes,
         cg=cg,
-        exec_final_command=exec_final_command,
+        run_in_terminal=run_in_terminal,
     )
 
 
@@ -281,7 +279,7 @@ def rsync_from_remote(
     extra_args: Sequence[str],
     uncommitted_changes: UncommittedChangesMode,
     cg: ConcurrencyGroup,
-    exec_final_command: bool = False,
+    run_in_terminal: bool = False,
 ) -> RsyncResult:
     """Rsync files from a path on ``remote_host`` to a local path.
 
@@ -290,7 +288,7 @@ def rsync_from_remote(
     a trailing slash on ``remote_path`` if you want "copy contents into
     destination" semantics rather than "copy as a child of destination".
 
-    See :func:`_do_rsync` for ``exec_final_command`` semantics.
+    See :func:`_do_rsync` for ``run_in_terminal`` semantics.
     """
     return _do_rsync(
         local_path=local_path,
@@ -300,7 +298,7 @@ def rsync_from_remote(
         extra_args=extra_args,
         uncommitted_changes=uncommitted_changes,
         cg=cg,
-        exec_final_command=exec_final_command,
+        run_in_terminal=run_in_terminal,
     )
 
 
@@ -312,7 +310,7 @@ def rsync(
     extra_args: Sequence[str],
     uncommitted_changes: UncommittedChangesMode,
     cg: ConcurrencyGroup,
-    exec_final_command: bool = False,
+    run_in_terminal: bool = False,
 ) -> RsyncResult:
     """Generic two-endpoint rsync used by ``mngr rsync``.
 
@@ -323,7 +321,7 @@ def rsync(
     The CLI layer additionally rejects local-to-local; the API accepts it so internal
     callers whose agent lives on the local provider can use the same entry point.
 
-    See :func:`_do_rsync` for ``exec_final_command`` semantics.
+    See :func:`_do_rsync` for ``run_in_terminal`` semantics.
     """
     if not source_host.is_local and not destination_host.is_local:
         raise RsyncEndpointError("mngr rsync does not support remote-to-remote transfers")
@@ -335,7 +333,7 @@ def rsync(
             extra_args=extra_args,
             uncommitted_changes=uncommitted_changes,
             cg=cg,
-            exec_final_command=exec_final_command,
+            run_in_terminal=run_in_terminal,
         )
     return rsync_from_remote(
         remote_host=source_host,
@@ -344,5 +342,5 @@ def rsync(
         extra_args=extra_args,
         uncommitted_changes=uncommitted_changes,
         cg=cg,
-        exec_final_command=exec_final_command,
+        run_in_terminal=run_in_terminal,
     )
