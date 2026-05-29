@@ -233,7 +233,9 @@ def disable_remote_providers_for_subprocesses(
     the test environment, or would create Docker state containers that leak.
     """
     settings_path = project_config_dir / "settings.local.toml"
-    settings_path.write_text("[providers.modal]\nis_enabled = false\n\n[providers.docker]\nis_enabled = false\n")
+    settings_path.write_text(
+        "is_allowed_in_pytest = true\n\n[providers.modal]\nis_enabled = false\n\n[providers.docker]\nis_enabled = false\n"
+    )
     monkeypatch.chdir(temp_git_repo)
     return settings_path
 
