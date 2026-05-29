@@ -66,7 +66,8 @@
 ### minds `destroy_env` — `apps/minds/imbue/minds/envs/provisioning.py`
 
 - Update the `Providers` bundle field `destroy_mngr_agent` → plural (`DestroyMngrAgentsFn`) to match the refactor.
-- Insert the state-container sweep immediately after Step 1 (mngr-agent teardown), before the cloud steps: call `cleanup_env_state_container(name, parent_concurrency_group=...)`. Skipped implicitly when `keep_agents=True`? No — the container is independent of agents, so still attempt the sweep (it's a no-op if `user_id` is unresolved). Honor the documented "proceed on missing env root" behavior via the `user_id`-unresolved → skip path.
+- Add a new injected `Providers` field `cleanup_state_container: CleanupStateContainerFn = Callable[[DevEnvName, ConcurrencyGroup], None]`, wired to `docker_cleanup.cleanup_env_state_container` in `cli/env.py` (via a `_cleanup_state_container_for_provider` wrapper, like the other providers). This keeps `destroy_env` unit-testable with a fake and avoids real Docker in unit tests.
+- Insert the state-container sweep immediately after Step 1 (mngr-agent teardown), **inside the same teardown branch**: call `providers.cleanup_state_container(name, parent_concurrency_group)`. It is skipped under `keep_agents=True` — kept agents still rely on the singleton state container. The "proceed on missing env root" behavior is honored via the `user_id`-unresolved → skip path.
 
 ### minds CLI wiring + auto-wipe — `apps/minds/imbue/minds/cli/env.py`
 
@@ -107,8 +108,8 @@
 - **Edge cases:** Modal-only env (no Docker) destroy/auto-wipe does not raise; production path never triggers a sweep.
 - **Ratchets:** `docker_cleanup.py` uses `subprocess` to shell out to `docker`; if the broad-`subprocess` ratchet fires, follow the same documented-exclusion approach used by `mngr_agent_cleanup.py` / `desktop_client/destroying.py` rather than evading it.
 
-## Open Questions
+## Open Questions (resolved during implementation)
 
-- **Sweep failure during `activate`:** Q13/8 said the sweep should *raise* when Docker is present but removal fails. The activate path is `eval`-sourced (stdout reserved for shell exports) and today never lets the generation check block activation. Should a real `docker rm` failure abort activation (consistent with the raise semantics), or be downgraded to a warning in this one path so a transient Docker hiccup can't wedge the operator's shell? (`destroy_env` clearly should raise.)
-- **`keep_agents=True` in `destroy_env`:** with agents intentionally kept, their host containers still hold the state volume's per-host dirs but the singleton state container is separate. Should the state-container sweep still run (recommended: yes, it's independent), or be skipped alongside the agent teardown?
-- **Batch "not found" handling for the single `mngr destroy` call:** with multiple ids in one call, if some are already gone mngr may still exit non-zero. Confirm the desired success/failure rule for a partial batch (current plan: treat "not found / does not exist" in combined output as success, otherwise raise).
+- **Sweep failure during `activate`:** RESOLVED toward resilience. The sweep function itself still raises on a real `docker rm` failure (per Q13), but the activate-time wrapper `_destroy_agents_and_state_container_for_wipe` catches `DockerCleanupError` / `MngrAgentCleanupError` / `OSError` and logs a warning, so a transient Docker hiccup can never wedge the eval-sourced activation. `destroy_env` lets the same errors propagate (aborts the destroy).
+- **`keep_agents=True` in `destroy_env`:** RESOLVED to *skip* the state-container sweep under `keep_agents` — kept agents still rely on the singleton state container, so removing it would break them.
+- **Batch "not found" handling for the single `mngr destroy` call:** RESOLVED — treat "not found" / "does not exist" anywhere in the combined output as success; any other non-zero exit raises `MngrAgentCleanupError`.

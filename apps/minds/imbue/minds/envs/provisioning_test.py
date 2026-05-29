@@ -19,6 +19,7 @@ from imbue.minds.envs.local_store import client_config_exists
 from imbue.minds.envs.local_store import env_root_exists
 from imbue.minds.envs.local_store import read_client_config_file
 from imbue.minds.envs.local_store import read_secrets_file
+from imbue.minds.envs.docker_cleanup import DockerCleanupError
 from imbue.minds.envs.mngr_agent_cleanup import MngrAgentCleanupError
 from imbue.minds.envs.per_env_deploy import ModalDeployError
 from imbue.minds.envs.primitives import DevEnvName
@@ -297,10 +298,15 @@ def _build_fake_providers(
     def await_apps_healthy(connector_url, litellm_proxy_url):
         call_log["calls"].append(("await_apps_healthy", str(connector_url), str(litellm_proxy_url)))
 
-    def destroy_mngr_agent(agent_id, mngr_host_dir, mngr_prefix, cg):
-        call_log["calls"].append(("destroy_mngr_agent", agent_id, str(mngr_host_dir), mngr_prefix))
-        if fail_step == "destroy_mngr_agent":
+    def destroy_mngr_agents(agent_ids, mngr_host_dir, mngr_prefix, cg):
+        call_log["calls"].append(("destroy_mngr_agents", tuple(agent_ids), str(mngr_host_dir), mngr_prefix))
+        if fail_step == "destroy_mngr_agents":
             raise MngrAgentCleanupError("mngr destroy boom")
+
+    def cleanup_state_container(name, cg):
+        call_log["calls"].append(("cleanup_state_container", str(name)))
+        if fail_step == "cleanup_state_container":
+            raise DockerCleanupError("docker cleanup boom")
 
     def wipe_supertokens_app_data(app_id, core_base_url, api_key):
         call_log["calls"].append(("wipe_supertokens_app_data", app_id, core_base_url))
@@ -351,7 +357,8 @@ def _build_fake_providers(
         resolve_neon_default_branch_id=resolve_neon_default_branch_id,
         verify_neon_token_has_restore_scope=verify_neon_token_has_restore_scope,
         await_apps_healthy=await_apps_healthy,
-        destroy_mngr_agent=destroy_mngr_agent,
+        destroy_mngr_agents=destroy_mngr_agents,
+        cleanup_state_container=cleanup_state_container,
         wipe_supertokens_app_data=wipe_supertokens_app_data,
         wipe_neon_db_schema=wipe_neon_db_schema,
         ensure_generation_id=ensure_generation_id,
@@ -542,7 +549,9 @@ def test_destroy_env_dev_walks_providers_in_order_and_removes_root(
     step_names = [c[0] for c in call_log["calls"]]
     assert step_names == [
         # Step 1: mngr agents are listed but none exist in the fresh
-        # env root; no destroy_mngr_agent calls.
+        # env root; no destroy_mngr_agents call.
+        # Step 1b: state-container cleanup still runs (independent of agents).
+        "cleanup_state_container",
         # Step 2: OVH.
         "list_ovh_instances",
         # Step 3: read CF Vault entry + enumerate this env's tunnels.
@@ -591,13 +600,13 @@ def test_destroy_env_dev_destroys_mngr_agents_before_cloud_teardown(
         providers=providers,
         parent_concurrency_group=_root_cg,
     )
-    # Two destroy_mngr_agent calls (sorted by agent id) BEFORE any
-    # cloud-side teardown.
+    # A single destroy_mngr_agents call (all ids at once) then the
+    # state-container cleanup, BEFORE any cloud-side teardown.
     step_names = [c[0] for c in call_log["calls"]]
     first_cloud_index = step_names.index("list_ovh_instances")
-    assert step_names[:first_cloud_index] == ["destroy_mngr_agent", "destroy_mngr_agent"]
-    agent_ids_destroyed = [c[1] for c in call_log["calls"] if c[0] == "destroy_mngr_agent"]
-    assert agent_ids_destroyed == ["agent-1111", "agent-2222"]
+    assert step_names[:first_cloud_index] == ["destroy_mngr_agents", "cleanup_state_container"]
+    agent_id_batches = [c[1] for c in call_log["calls"] if c[0] == "destroy_mngr_agents"]
+    assert agent_id_batches == [("agent-1111", "agent-2222")]
 
 
 def test_destroy_env_dev_keep_agents_skips_mngr_destroy(_isolated_home: Path, _root_cg: ConcurrencyGroup) -> None:
@@ -627,7 +636,10 @@ def test_destroy_env_dev_keep_agents_skips_mngr_destroy(_isolated_home: Path, _r
         keep_agents=True,
     )
     step_names = [c[0] for c in call_log["calls"]]
-    assert "destroy_mngr_agent" not in step_names
+    assert "destroy_mngr_agents" not in step_names
+    # keep_agents must also skip the state-container cleanup: kept agents
+    # still rely on the singleton state container.
+    assert "cleanup_state_container" not in step_names
 
 
 def test_destroy_env_dev_leaves_env_root_when_step_fails(_isolated_home: Path, _root_cg: ConcurrencyGroup) -> None:
@@ -944,11 +956,11 @@ def test_destroy_env_tier_destroys_mngr_agents_first(_isolated_home: Path, _root
         providers=providers,
         parent_concurrency_group=_root_cg,
     )
-    # Two destroy_mngr_agent calls (sorted) BEFORE any stop_modal_app.
-    agent_calls = [c for c in call_log["calls"] if c[0] == "destroy_mngr_agent"]
-    assert [c[1] for c in agent_calls] == ["agent-8888", "agent-9999"]
+    # A single destroy_mngr_agents call (sorted ids) BEFORE any stop_modal_app.
+    agent_calls = [c for c in call_log["calls"] if c[0] == "destroy_mngr_agents"]
+    assert [c[1] for c in agent_calls] == [("agent-8888", "agent-9999")]
     first_app_index = next(i for i, c in enumerate(call_log["calls"]) if c[0] == "stop_modal_app")
-    last_agent_index = next(i for i, c in reversed(list(enumerate(call_log["calls"]))) if c[0] == "destroy_mngr_agent")
+    last_agent_index = next(i for i, c in reversed(list(enumerate(call_log["calls"]))) if c[0] == "destroy_mngr_agents")
     assert last_agent_index < first_app_index
 
 
@@ -1110,7 +1122,9 @@ def test_destroy_env_tier_full_step_order(_isolated_home: Path, _root_cg: Concur
     step_names = [c[0] for c in call_log["calls"]]
     assert step_names == [
         # 1: agents
-        "destroy_mngr_agent",
+        "destroy_mngr_agents",
+        # 1b: state-container cleanup (independent of agents).
+        "cleanup_state_container",
         # 2: OVH (shared with dev, by env name).
         "list_ovh_instances",
         # 3: CF tunnels (shared with dev, by env name).

@@ -22,7 +22,23 @@ import pytest
 from click.testing import CliRunner
 
 from imbue.minds.cli._activated_env import MODAL_PROFILE_ENV_VAR
+from imbue.minds.cli.env import _destroy_agents_and_state_container_for_wipe
 from imbue.minds.cli.env import env
+
+
+def test_wipe_teardown_is_noop_without_profile_or_agents(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    # The activate-time wipe teardown must never raise (activation is
+    # eval-sourced and must not be blocked). With no mngr profile + no agents
+    # under the env root, there is nothing to destroy and the state-container
+    # cleanup skips on an unresolved user_id -- a pure no-op.
+    monkeypatch.setenv("HOME", str(tmp_path))
+    _destroy_agents_and_state_container_for_wipe("staging")
+
+
+def test_wipe_teardown_swallows_invalid_env_name(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    # A bad env name is logged + swallowed rather than tanking activation.
+    monkeypatch.setenv("HOME", str(tmp_path))
+    _destroy_agents_and_state_container_for_wipe("not a valid env name!!")
 
 
 @pytest.fixture
