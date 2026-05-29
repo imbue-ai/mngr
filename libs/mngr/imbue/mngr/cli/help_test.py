@@ -5,11 +5,11 @@ from pathlib import Path
 import pluggy
 from click.testing import CliRunner
 
-from imbue.mngr.cli.help import TopicHelpPage
 from imbue.mngr.cli.help import format_topic_help
-from imbue.mngr.cli.help import get_all_topics
-from imbue.mngr.cli.help import get_topic
+from imbue.mngr.cli.help_topics import TopicHelpPage
 from imbue.mngr.cli.help_topics import build_topics_from_directory
+from imbue.mngr.cli.help_topics import get_all_topics
+from imbue.mngr.cli.help_topics import get_topic
 from imbue.mngr.main import cli
 from imbue.mngr.utils.testing import capture_loguru
 
