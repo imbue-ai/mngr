@@ -3,12 +3,22 @@
 
   Extends the generic ``permissions.html`` base, filling in:
 
-  * the form body with a checkbox per detent permission schema. The
-    initial check state is the union of (a) permissions already
-    granted for this scope on the agent's host and (b) the permissions
-    the agent requested in this event, so an unmodified Approve grants
-    exactly that union (and the dialog still doubles as a revoke UI
-    for the existing grants);
+  * the form body with two views over the same set of permissions:
+      - a *simple* (default) view: a read-only, informative list of the
+        permissions the agent is requesting (the union of permissions
+        already granted for this scope on the host and the permissions
+        the agent declared). It exposes no checkboxes -- the user only
+        decides Approve vs. Deny -- plus a small "Adjust permissions"
+        link that reveals the full editor.
+      - an *editor* view (hidden by default): a checkbox per detent
+        permission schema. The initial check state is the union
+        described above, so an unmodified Approve grants exactly that
+        union (and the editor doubles as a revoke UI for the existing
+        grants). Revealed when the user clicks "Adjust permissions".
+    The checkbox inputs always live in the DOM (the editor container is
+    merely hidden) so the generic submit handler can read the checked
+    set in either view: in the simple view it submits the pre-checked
+    union; in the editor view it submits whatever the user ticked.
   * an in-progress notice that surfaces while ``latchkey auth browser``
     is running -- shown automatically by the generic submit handler
     via the ``permissions-progress`` id.
@@ -33,23 +43,60 @@
 {% endblock %}
 
 {% block permissions_form_body %}
-  <h2 class="text-sm font-medium text-zinc-700 mb-2">Permissions to grant</h2>
-  <p class="text-xs text-zinc-500 mb-3">
-    Select which permissions to grant for {{ display_name }}.
-    Permissions already granted for this service and permissions the
-    agent is requesting now are pre-checked; tick more to broaden,
-    untick to revoke or narrow.
-    Permissions are shared across every agent running on this workspace's host.
-  </p>
-  <div class="bg-white border border-zinc-200 rounded-xl p-4 space-y-2">
-    {% for permission in permission_schemas %}
-      <label class="flex items-start gap-2 cursor-pointer">
-        <input type="checkbox" name="permissions" value="{{ permission }}"
-               class="mt-0.5"
-               {% if permission in checked_permissions %}checked{% endif %}>
-        <code class="text-sm font-mono text-zinc-900">{{ permission }}</code>
-      </label>
-    {% endfor %}
+  {# Simple (default) view: a read-only summary of the permissions that #}
+  {# will be granted on Approve, with no checkboxes. The full checkbox #}
+  {# editor is hidden behind the "Adjust permissions" link below. #}
+  <div id="permissions-simple-view">
+    <h2 class="text-sm font-medium text-zinc-700 mb-2">Permissions requested by {{ display_name }}</h2>
+    {% if checked_permissions %}
+      <p class="text-xs text-zinc-500 mb-3">
+        {{ display_name }} is requesting the following permissions.
+        These are shared across every agent running on this workspace's host.
+      </p>
+      <div class="bg-white border border-zinc-200 rounded-xl p-4 space-y-2">
+        {% for permission in permission_schemas %}
+          {% if permission in checked_permissions %}
+            <div class="flex items-start gap-2">
+              <code class="text-sm font-mono text-zinc-900">{{ permission }}</code>
+            </div>
+          {% endif %}
+        {% endfor %}
+      </div>
+    {% else %}
+      {% call ui.notice(variant='warn') %}
+        The agent did not request any specific permissions. Click
+        <span class="font-medium">Adjust permissions</span> below to choose what to grant.
+      {% endcall %}
+    {% endif %}
+    <button type="button" id="permissions-adjust-link"
+            onclick="showPermissionEditor()"
+            class="mt-3 text-xs text-blue-600 hover:underline cursor-pointer bg-transparent border-0 p-0">
+      Adjust permissions
+    </button>
+  </div>
+
+  {# Editor view: the full checkbox list, hidden until the user opts in #}
+  {# via "Adjust permissions". The inputs are present in the DOM either #}
+  {# way so the generic submit handler can read the checked set. #}
+  <div id="permissions-editor-view" class="hidden">
+    <h2 class="text-sm font-medium text-zinc-700 mb-2">Permissions to grant</h2>
+    <p class="text-xs text-zinc-500 mb-3">
+      Select which permissions to grant for {{ display_name }}.
+      Permissions already granted for this service and permissions the
+      agent is requesting now are pre-checked; tick more to broaden,
+      untick to revoke or narrow.
+      Permissions are shared across every agent running on this workspace's host.
+    </p>
+    <div class="bg-white border border-zinc-200 rounded-xl p-4 space-y-2">
+      {% for permission in permission_schemas %}
+        <label class="flex items-start gap-2 cursor-pointer">
+          <input type="checkbox" name="permissions" value="{{ permission }}"
+                 class="mt-0.5"
+                 {% if permission in checked_permissions %}checked{% endif %}>
+          <code class="text-sm font-mono text-zinc-900">{{ permission }}</code>
+        </label>
+      {% endfor %}
+    </div>
   </div>
 {% endblock %}
 
@@ -73,4 +120,19 @@
       {% endif %}
     {% endcall %}
   </div>
+{% endblock %}
+
+{% block permissions_extra_scripts %}
+<script>
+  {# Reveal the checkbox editor and hide the simple summary. The Approve #}
+  {# button's enabled state is driven by the generic handler's #}
+  {# ``updateApproveState`` (it watches the checkbox inputs), so no extra #}
+  {# wiring is needed here. #}
+  window.showPermissionEditor = function () {
+    var simple = document.getElementById("permissions-simple-view");
+    var editor = document.getElementById("permissions-editor-view");
+    if (simple) simple.classList.add("hidden");
+    if (editor) editor.classList.remove("hidden");
+  };
+</script>
 {% endblock %}

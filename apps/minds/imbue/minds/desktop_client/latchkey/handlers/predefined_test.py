@@ -602,11 +602,15 @@ def test_grant_re_checks_credentials_on_second_call_after_manual_setup(tmp_path:
 # -- LatchkeyPermissionGrantHandler.render_request_page --
 
 
-def _render_dialog_html(handler: LatchkeyPermissionGrantHandler) -> str:
+def _render_dialog_html(
+    handler: LatchkeyPermissionGrantHandler,
+    permissions: tuple[str, ...] = (),
+) -> str:
     """Run ``render_request_page`` for a fixed Slack request and return its HTML."""
     request = create_latchkey_predefined_permission_request_event(
         agent_id=str(AgentId()),
         scope=_SLACK_SERVICE_INFO.scope,
+        permissions=permissions,
         rationale="need slack access",
     )
     backend_resolver = StaticBackendResolver(url_by_agent_and_service={})
@@ -670,6 +674,63 @@ def test_render_request_page_notes_grants_are_shared_per_host(tmp_path: Path) ->
     assert "grants apply to every agent on this host" in html
     # Reinforced in the form body so users who skim past the header still see it.
     assert "shared across every agent running on this workspace's host" in html
+
+
+def test_render_request_page_defaults_to_simple_view_with_editor_hidden(tmp_path: Path) -> None:
+    """By default the dialog shows the simple summary; the checkbox editor is hidden.
+
+    Non-technical users should only face Approve / Deny plus an
+    "Adjust permissions" link, not a wall of checkboxes.
+    """
+    handler = _build_handler(tmp_path, credential_status="valid")
+
+    html = _render_dialog_html(handler, permissions=("slack-read-all",))
+
+    # The simple view is always present and visible (no ``hidden`` class).
+    simple_idx = html.find('id="permissions-simple-view"')
+    assert simple_idx != -1
+    simple_tag_end = html.find(">", simple_idx)
+    assert "hidden" not in html[html.rfind("<div", 0, simple_idx) : simple_tag_end]
+    # The editor (checkbox) view exists but starts hidden.
+    editor_idx = html.find('id="permissions-editor-view"')
+    assert editor_idx != -1
+    editor_tag_end = html.find(">", editor_idx)
+    assert "hidden" in html[html.rfind("<div", 0, editor_idx) : editor_tag_end]
+    # The "Adjust permissions" affordance is offered.
+    assert "Adjust permissions" in html
+    assert 'id="permissions-adjust-link"' in html
+
+
+def test_render_request_page_simple_view_lists_requested_permissions(tmp_path: Path) -> None:
+    """The simple view names the permissions that Approve will grant."""
+    handler = _build_handler(tmp_path, credential_status="valid")
+
+    html = _render_dialog_html(handler, permissions=("slack-read-all",))
+
+    simple_idx = html.find('id="permissions-simple-view"')
+    editor_idx = html.find('id="permissions-editor-view"')
+    simple_block = html[simple_idx:editor_idx]
+    # The requested permission is shown read-only (as a <code> label, not
+    # a checkbox input) inside the simple view.
+    assert "slack-read-all" in simple_block
+    assert 'name="permissions"' not in simple_block
+    # A permission that was neither requested nor previously granted must
+    # not appear in the simple summary.
+    assert "slack-write-all" not in simple_block
+
+
+def test_render_request_page_simple_view_prompts_to_adjust_when_nothing_requested(tmp_path: Path) -> None:
+    """With an empty request and no prior grants, the simple view points to the editor."""
+    handler = _build_handler(tmp_path, credential_status="valid")
+
+    html = _render_dialog_html(handler, permissions=())
+
+    simple_idx = html.find('id="permissions-simple-view"')
+    editor_idx = html.find('id="permissions-editor-view"')
+    simple_block = html[simple_idx:editor_idx]
+    assert "did not request any specific permissions" in simple_block
+    # The editor is still available so the user can pick something.
+    assert "Adjust permissions" in simple_block
 
 
 # -- LatchkeyPermissionGrantHandler.deny --
