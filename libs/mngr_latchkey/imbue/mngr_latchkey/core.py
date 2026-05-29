@@ -84,10 +84,9 @@ _CREATE_JWT_TIMEOUT_SECONDS: Final[float] = 15.0
 _VERSION_CHECK_TIMEOUT_SECONDS: Final[float] = 5.0
 
 # Minimum version of the upstream ``latchkey`` CLI this package will
-# operate against. 2.9.0 is the first release that ships the gateway
-# extension loader this package depends on (see ``extensions/`` for the
-# .mjs files it materializes into ``LATCHKEY_DIRECTORY/extensions/``).
-LATCHKEY_MIN_VERSION: Final[str] = "2.9.0"
+# operate against. 2.13.0 is the first release that supports GitHub git
+# operations over the gateway which is used for backups.
+LATCHKEY_MIN_VERSION: Final[str] = "2.13.0"
 
 # Fixed port that every containerized/VM/VPS agent sees on its own 127.0.0.1
 # when reaching the Latchkey gateway. A per-agent SSH reverse tunnel bridges
