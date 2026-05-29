@@ -285,6 +285,45 @@ def test_render_recovery_page_includes_diagnostics_dom_hooks() -> None:
     assert 'id="copy-diagnostics-btn"' in html
 
 
+def test_render_recovery_page_renders_copy_ssh_button_with_command() -> None:
+    """When given an ssh_command, the page renders a Copy SSH command button
+    that carries the exact command in its data attribute, beside Copy diagnostics.
+    """
+    html = render_recovery_page(
+        agent_id=_AGENT_A,
+        return_to="",
+        initial_status="stuck",
+        initial_error="",
+        ssh_command="ssh -i /home/user/.mngr/key -p 60022 root@127.0.0.1",
+    )
+    assert 'id="copy-ssh-btn"' in html
+    assert 'data-ssh-command="ssh -i /home/user/.mngr/key -p 60022 root@127.0.0.1"' in html
+    # The button must sit inside the diagnostics menu, alongside Copy diagnostics.
+    diag_pos = html.index('id="copy-diagnostics-btn"')
+    ssh_pos = html.index('id="copy-ssh-btn"')
+    details_pos = html.index('id="recovery-debug-details"')
+    assert details_pos < diag_pos < ssh_pos
+    # The click handler copies the data attribute to the clipboard.
+    assert "data-ssh-command" in html
+    assert "navigator.clipboard" in html
+
+
+def test_render_recovery_page_omits_copy_ssh_button_without_command() -> None:
+    """With no ssh_command (the default), the Copy SSH command button is absent
+    -- we never render an inert button that would copy nothing.
+    """
+    html = render_recovery_page(
+        agent_id=_AGENT_A,
+        return_to="",
+        initial_status="stuck",
+        initial_error="",
+    )
+    assert 'id="copy-ssh-btn"' not in html
+    assert "Copy SSH command" not in html
+    # Copy diagnostics is unaffected.
+    assert 'id="copy-diagnostics-btn"' in html
+
+
 def test_render_recovery_page_script_branches_on_dispatch_tier() -> None:
     """The recovery page reads ``dispatch_tier`` directly off the host-health response.
 

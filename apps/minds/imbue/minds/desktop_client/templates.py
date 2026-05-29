@@ -433,7 +433,8 @@ _RECOVERY_STYLE: Final[str] = """\
       .probe-glyph-yes { color: #047857; }
       .probe-glyph-no { color: #b91c1c; }
       .probe-glyph-unknown { color: #92400e; }
-      #copy-diagnostics-btn {
+      #copy-diagnostics-btn,
+      #copy-ssh-btn {
         margin-top: 8px;
         background: #fff;
         color: #52525b;
@@ -444,7 +445,9 @@ _RECOVERY_STYLE: Final[str] = """\
         padding: 6px 12px;
         cursor: pointer;
       }
-      #copy-diagnostics-btn:hover { background: #f4f4f5; }
+      #copy-ssh-btn { margin-left: 8px; }
+      #copy-diagnostics-btn:hover,
+      #copy-ssh-btn:hover { background: #f4f4f5; }
 """
 
 # The recovery page's behavior. It drives the shared loading card (toggling
@@ -468,6 +471,10 @@ _RECOVERY_SCRIPT: Final[str] = """\
         var debugDetailsEl = document.getElementById('recovery-debug-details');
         var debugContentEl = document.getElementById('recovery-debug-content');
         var copyBtn = document.getElementById('copy-diagnostics-btn');
+        // Present only for SSH-reachable hosts (every real workspace). Carries
+        // the prebuilt connection command in its data attribute; absent (and so
+        // null here) when the resolver has no SSH info for the agent.
+        var copySshBtn = document.getElementById('copy-ssh-btn');
 
         var latestHealth = null;
 
@@ -680,6 +687,16 @@ _RECOVERY_SCRIPT: Final[str] = """\
         if (copyBtn) {
           copyBtn.addEventListener('click', copyDiagnostics);
         }
+        if (copySshBtn) {
+          copySshBtn.addEventListener('click', function () {
+            var cmd = copySshBtn.getAttribute('data-ssh-command') || '';
+            try {
+              if (navigator.clipboard) navigator.clipboard.writeText(cmd);
+            } catch (e) {
+              /* ignore */
+            }
+          });
+        }
 
         if (initialStatus === 'restarting') {
           renderLoading();
@@ -712,6 +729,7 @@ def render_recovery_page(
     return_to: str,
     initial_status: str,
     initial_error: str,
+    ssh_command: str | None = None,
 ) -> str:
     """Render the workspace-recovery page shown when the system interface is unresponsive.
 
@@ -722,6 +740,12 @@ def render_recovery_page(
     reason shown (collapsed) when ``initial_status`` is ``"restart_failed"``.
     ``return_to`` is the URL the page navigates back to once the workspace is
     healthy again.
+
+    ``ssh_command`` is the copy-pasteable SSH command for the agent's host. When
+    provided, a "Copy SSH command" button sits beside "Copy diagnostics" in the
+    Diagnostics menu; when ``None`` (no SSH info -- e.g. the brief window before
+    discovery surfaces it) the button is omitted entirely rather than rendered
+    inert.
     """
     error_block = ""
     if initial_error:
@@ -734,12 +758,19 @@ def render_recovery_page(
     # Debug details are populated dynamically by the recovery JS once it gets
     # a host-health response. The block is in the DOM from the start (hidden)
     # so the JS can fill it in place without re-templating.
+    ssh_button = ""
+    if ssh_command is not None:
+        ssh_button = (
+            '<button type="button" id="copy-ssh-btn" '
+            f'data-ssh-command="{html.escape(ssh_command, quote=True)}">Copy SSH command</button>'
+        )
     debug_block = (
         '        <details id="recovery-debug-details" class="hidden">\n'
         "          <summary>Diagnostics</summary>\n"
         '          <div id="recovery-debug-content"></div>\n'
         '          <div class="debug-section">'
         '<button type="button" id="copy-diagnostics-btn">Copy diagnostics</button>'
+        f"{ssh_button}"
         "</div>\n"
         "        </details>\n"
     )

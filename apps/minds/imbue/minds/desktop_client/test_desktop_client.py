@@ -22,6 +22,7 @@ from imbue.minds.desktop_client.app import _build_mngr_stop_argv
 from imbue.minds.desktop_client.app import _build_workspace_list
 from imbue.minds.desktop_client.app import _destroying_agent_ids
 from imbue.minds.desktop_client.app import _run_restart_sequence
+from imbue.minds.desktop_client.app import _ssh_command_for_agent
 from imbue.minds.desktop_client.app import create_desktop_client
 from imbue.minds.desktop_client.auth import FileAuthStore
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
@@ -53,6 +54,7 @@ from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.utils.polling import wait_for
+from imbue.mngr_forward.ssh_tunnel import RemoteSSHInfo
 
 
 def _create_multi_backend_http_client(
@@ -1701,6 +1703,57 @@ def test_recovery_page_allows_relative_return_to(tmp_path: Path) -> None:
     )
     assert response.status_code == 200
     assert f"/agents/{agent_id}/" in response.text
+
+
+def test_ssh_command_for_agent_builds_command_from_resolver() -> None:
+    """_ssh_command_for_agent renders the resolver's SSH info as a runnable command."""
+    agent_id = AgentId()
+    resolver = StaticBackendResolver(
+        url_by_agent_and_service={},
+        ssh_info_by_agent_id={
+            str(agent_id): RemoteSSHInfo(
+                user="root", host="127.0.0.1", port=60022, key_path=Path("/home/u/.mngr/key")
+            )
+        },
+    )
+    assert _ssh_command_for_agent(resolver, agent_id) == "ssh -i /home/u/.mngr/key -p 60022 root@127.0.0.1"
+
+
+def test_ssh_command_for_agent_returns_none_without_ssh_info() -> None:
+    """An agent the resolver has no SSH info for yields no command (button is then omitted)."""
+    resolver = StaticBackendResolver(url_by_agent_and_service={})
+    assert _ssh_command_for_agent(resolver, AgentId()) is None
+
+
+def test_recovery_page_renders_copy_ssh_button_from_resolver(tmp_path: Path) -> None:
+    """End-to-end: the recovery handler pulls the host's SSH info from the
+    backend resolver and renders a Copy SSH command button carrying the command.
+    """
+    agent_id = AgentId()
+    auth_store = FileAuthStore(data_directory=tmp_path / "auth")
+    tracker = SystemInterfaceHealthTracker()
+    resolver = StaticBackendResolver(
+        url_by_agent_and_service={},
+        ssh_info_by_agent_id={
+            str(agent_id): RemoteSSHInfo(
+                user="root", host="127.0.0.1", port=60022, key_path=Path("/home/u/.mngr/key")
+            )
+        },
+    )
+    app = create_desktop_client(
+        auth_store=auth_store,
+        backend_resolver=resolver,
+        http_client=None,
+        system_interface_health_tracker=tracker,
+    )
+    client = TestClient(app, base_url="http://localhost")
+    _authenticate_client(client=client, auth_store=auth_store)
+    tracker.mark_stuck(agent_id)
+
+    response = client.get(f"/agents/{agent_id}/recovery", follow_redirects=False)
+    assert response.status_code == 200
+    assert 'id="copy-ssh-btn"' in response.text
+    assert 'data-ssh-command="ssh -i /home/u/.mngr/key -p 60022 root@127.0.0.1"' in response.text
 
 
 def test_restart_api_requires_authentication(tmp_path: Path) -> None:

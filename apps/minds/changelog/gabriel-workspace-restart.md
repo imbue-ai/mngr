@@ -249,3 +249,13 @@ Tiered system-interface restart for the minds recovery flow.
   divider and label never appear over an empty section. Most users only ever
   need the button; the dropdowns are now visibly secondary, for the rare
   deep-debugging case.
+- The Diagnostics menu regains a "Copy SSH command" button beside "Copy
+  diagnostics". It copies a ready-to-run ``ssh -i <key> -p <port>
+  <user>@<host>`` for the workspace host -- the same command mngr emits for
+  the host. The per-host SSH command was previously surfaced in the
+  diagnostics block but was dropped when the host-health response was
+  narrowed to the flat probe list. It is now rendered server-side from the
+  backend resolver's SSH info, so the host-health response stays narrow. The
+  button is shown for every workspace (Docker, Lima, and remote hosts are all
+  reached over SSH) and omitted only in the brief window before discovery has
+  surfaced the host's SSH info.

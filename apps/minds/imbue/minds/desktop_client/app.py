@@ -1777,6 +1777,20 @@ def _sanitize_recovery_return_to(raw: str) -> str:
     return ""
 
 
+def _ssh_command_for_agent(backend_resolver: BackendResolverInterface, agent_id: AgentId) -> str | None:
+    """Build the copy-pasteable SSH command for an agent's host, or None when it has no SSH info.
+
+    Every minds workspace (Docker, Lima, remote) is reached over SSH, so this is
+    populated in practice; it is None only during the brief window before
+    discovery surfaces the host's ``HOST_SSH_INFO`` event. The format matches the
+    command mngr itself emits for the host (``ssh -i <key> -p <port> <user>@<host>``).
+    """
+    ssh_info = backend_resolver.get_ssh_info(agent_id)
+    if ssh_info is None:
+        return None
+    return f"ssh -i {ssh_info.key_path} -p {ssh_info.port} {ssh_info.user}@{ssh_info.host}"
+
+
 def _handle_recovery_page(
     agent_id: str,
     request: Request,
@@ -1815,11 +1829,13 @@ def _handle_recovery_page(
             # render_status still HEALTHY -- the page then offers a manual
             # restart button.
             pass
+    backend_resolver: BackendResolverInterface = request.app.state.backend_resolver
     html_body = render_recovery_page(
         agent_id=aid,
         return_to=return_to,
         initial_status=render_status,
         initial_error=initial_error,
+        ssh_command=_ssh_command_for_agent(backend_resolver, aid),
     )
     return HTMLResponse(content=html_body)
 

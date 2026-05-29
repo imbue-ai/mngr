@@ -136,6 +136,11 @@ class StaticBackendResolver(BackendResolverInterface):
         frozen=True,
         description="Mapping of agent ID to mapping of service name to backend URL",
     )
+    ssh_info_by_agent_id: Mapping[str, RemoteSSHInfo] = Field(
+        default_factory=dict,
+        frozen=True,
+        description="Optional SSH info keyed by agent ID string, for static/remote agents.",
+    )
 
     def get_backend_url(self, agent_id: AgentId, service_name: ServiceName) -> str | None:
         services = self.url_by_agent_and_service.get(str(agent_id))
@@ -151,6 +156,9 @@ class StaticBackendResolver(BackendResolverInterface):
         if services is None:
             return ()
         return tuple(ServiceName(name) for name in sorted(services.keys()))
+
+    def get_ssh_info(self, agent_id: AgentId) -> RemoteSSHInfo | None:
+        return self.ssh_info_by_agent_id.get(str(agent_id))
 
 
 # -- Parsing helpers --
