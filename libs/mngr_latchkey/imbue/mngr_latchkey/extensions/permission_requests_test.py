@@ -12,8 +12,8 @@ this file follows the same pattern as ``minds_api_proxy_test.py``:
    plus on the on-disk side effects in the temporary
    ``LATCHKEY_DIRECTORY`` we point the child at.
 
-Tests skip cleanly when Node is unavailable, mirroring the
-minds-api-proxy test module.
+Marked ``node_required`` (routed to the ``test-node`` CI job), mirroring
+the minds-api-proxy test module.
 """
 
 import json
@@ -31,6 +31,8 @@ from typing import Final
 
 import pytest
 
+# Resolved to an absolute path: the Node driver runs with a restricted
+# PATH (env={"PATH": "/usr/bin:/bin"}), so a bare "node" would not be found.
 _NODE_BINARY: Final[str | None] = shutil.which("node")
 
 _EXTENSION_PATH: Final[Path] = Path(__file__).resolve().parent / "permission_requests.mjs"
@@ -67,7 +69,7 @@ _FILE_SHARING_WRITE_METHODS: Final[tuple[str, ...]] = (
 )
 
 
-pytestmark = pytest.mark.skipif(_NODE_BINARY is None, reason="node binary not available on PATH")
+pytestmark = pytest.mark.node_required
 
 
 def _file_sharing_permission_name(path: str, access: str) -> str:

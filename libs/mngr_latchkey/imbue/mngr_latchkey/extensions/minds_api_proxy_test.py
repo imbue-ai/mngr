@@ -12,11 +12,11 @@ this file drives it from the outside:
    the proxy returned and the request shape the upstream Minds API
    observed.
 
-These tests are unit-test-shaped (no marker) because the only external
+These tests are marked ``node_required`` because the only external
 dependency is Node, which is already a hard runtime requirement for the
-``latchkey gateway`` subprocess we ship alongside the extension. If
-Node is somehow not on ``PATH`` the test is skipped (rather than
-failing) so the rest of the suite still runs on minimal CI images.
+``latchkey gateway`` subprocess we ship alongside the extension. The
+marker routes them to the Node-equipped ``test-node`` CI job and keeps
+them out of the Node-less offload sandboxes.
 """
 
 import json
@@ -39,8 +39,8 @@ from pydantic import Field
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
 
-# Resolved once at import time so individual tests can skip cleanly on
-# images that don't have Node.
+# Resolved to an absolute path: the Node driver runs with a restricted
+# PATH (env={"PATH": "/usr/bin:/bin"}), so a bare "node" would not be found.
 _NODE_BINARY: Final[str | None] = shutil.which("node")
 
 _EXTENSION_PATH: Final[Path] = Path(__file__).resolve().parent / "minds_api_proxy.mjs"
@@ -51,7 +51,7 @@ _NODE_READY_TIMEOUT_SECONDS: Final[float] = 15.0
 _POLL_INTERVAL_SECONDS: Final[float] = 0.02
 
 
-pytestmark = pytest.mark.skipif(_NODE_BINARY is None, reason="node binary not available on PATH")
+pytestmark = pytest.mark.node_required
 
 
 class _RecordedRequest(FrozenModel):

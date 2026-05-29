@@ -9,7 +9,7 @@ import pytest
 
 APP_ROOT = Path(__file__).resolve().parents[1]
 
-pytestmark = pytest.mark.minds_node_required
+pytestmark = pytest.mark.node_required
 
 
 def _load_todesktop_config() -> dict:
