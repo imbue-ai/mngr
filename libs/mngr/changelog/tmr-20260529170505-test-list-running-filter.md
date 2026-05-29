@@ -1,0 +1,1 @@
+Fixed the `test_list_running_filter` e2e tutorial test so it deterministically exercises the modal provider (by creating a real modal-backed agent) instead of flakily failing the `@pytest.mark.modal` resource guard, and strengthened it to verify that `mngr list --running` actually filters by lifecycle state rather than just exiting cleanly.

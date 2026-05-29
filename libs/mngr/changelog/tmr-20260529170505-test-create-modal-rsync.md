@@ -1,0 +1,3 @@
+Fixed the tutorial e2e fixture so type-less `mngr create` commands work: the shared e2e session now configures a default agent type (`[commands.create] type = "claude"`), mirroring a real installed environment. This unblocks the Modal tutorial tests (e.g. `mngr create my-task --provider modal ...`) that, like the tutorial, rely on a configured default agent.
+
+Strengthened `test_create_modal_rsync` to verify the actual effect of `--rsync`/`--rsync-args`: it now seeds an untracked file plus a gitignored `node_modules/` dir, then checks on the remote host that the untracked extra data was transferred while `node_modules` was excluded by `--exclude=node_modules`.

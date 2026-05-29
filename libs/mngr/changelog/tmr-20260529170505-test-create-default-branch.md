@@ -1,0 +1,1 @@
+- Strengthened the `test_create_default_branch` e2e tutorial test to also assert the worktree-isolation property the default-branch tutorial block exists for: the agent runs in a work directory distinct from the source repo and its `initial_branch` is `mngr/my-task`.

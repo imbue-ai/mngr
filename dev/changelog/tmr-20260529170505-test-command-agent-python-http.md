@@ -1,0 +1,1 @@
+- Extended the root `.gitignore` so `tmr-report/` directories are ignored (the existing `**/tmr_*/` pattern used an underscore and did not match the hyphenated `tmr-report/` output directory produced by the TMR testing-agent orchestrator).

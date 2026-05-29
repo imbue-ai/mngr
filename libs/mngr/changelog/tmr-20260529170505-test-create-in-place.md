@@ -1,0 +1,1 @@
+Strengthened the `test_create_in_place` e2e tutorial test for `mngr create --transfer=none`: it now also asserts that no per-agent branch is created (`initial_branch is None`) and verifies the agent's actual runtime working directory by running `mngr exec my-task pwd` and checking it matches the in-place source directory, rather than relying solely on the `mngr list` metadata.

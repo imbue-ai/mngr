@@ -1,0 +1,1 @@
+Strengthened the `mngr --help` e2e test (`test_help_succeeds`) to verify that the help output advertises the top-level commands the tutorial promises (create, list, destroy, message, connect, clone, git), validating the tutorial's discovery claim rather than only checking for `create` and `list`.

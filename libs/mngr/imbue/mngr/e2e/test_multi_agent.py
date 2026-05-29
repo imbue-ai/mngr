@@ -40,7 +40,7 @@ def test_multiple_agents_coexist(e2e: E2eSession) -> None:
 @pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.modal
+@pytest.mark.timeout(300)
 def test_list_filter_by_state(e2e: E2eSession) -> None:
     # Pin a unique sleep value per agent so leaked processes trace back to the specific create call.
     for name, sleep_seconds in [("running-agent", 100103), ("stopped-agent", 100121)]:
@@ -54,7 +54,9 @@ def test_list_filter_by_state(e2e: E2eSession) -> None:
     # Stop one agent
     expect(e2e.run("mngr stop stopped-agent", comment="Stop one agent")).to_succeed()
 
-    # --stopped should show only the stopped agent
+    # --stopped should show only the stopped agent. Verify the filter by the
+    # authoritative state field, not just name membership: every returned agent
+    # must actually be STOPPED (--stopped translates to `state == "STOPPED"`).
     stopped_result = e2e.run(
         "mngr list --stopped --format json",
         comment="List only stopped agents",
@@ -64,15 +66,19 @@ def test_list_filter_by_state(e2e: E2eSession) -> None:
     stopped_names = [a["name"] for a in stopped_agents]
     assert "stopped-agent" in stopped_names
     assert "running-agent" not in stopped_names
+    assert all(a["state"] == "STOPPED" for a in stopped_agents), stopped_agents
 
-    # Without --stopped, both agents should appear (the non-stopped one may
-    # be RUNNING or WAITING depending on timing)
+    # Without --stopped, both agents should appear. Verify their concrete states:
+    # the stopped one is STOPPED, while the other is alive (RUNNING or WAITING,
+    # depending on timing) -- in particular it must not have leaked into STOPPED.
     all_result = e2e.run(
         "mngr list --format json",
         comment="List all agents (no state filter)",
     )
     expect(all_result).to_succeed()
     all_agents = json.loads(all_result.stdout)["agents"]
-    all_names = [a["name"] for a in all_agents]
-    assert "running-agent" in all_names
-    assert "stopped-agent" in all_names
+    state_by_name = {a["name"]: a["state"] for a in all_agents}
+    assert "running-agent" in state_by_name
+    assert "stopped-agent" in state_by_name
+    assert state_by_name["stopped-agent"] == "STOPPED", state_by_name
+    assert state_by_name["running-agent"] in ("RUNNING", "WAITING"), state_by_name

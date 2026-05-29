@@ -1,0 +1,1 @@
+Strengthened the `test_create_with_base_branch` tutorial e2e test to additionally verify, via `mngr exec`, that the agent's own worktree is checked out on the new `mngr/my-task` branch and that its HEAD is based on the specified base branch (`main`) rather than the current (diverged) branch.

@@ -1,0 +1,2 @@
+- Fixed the tutorial e2e plugin tests (`libs/mngr/imbue/mngr/e2e/tutorial/test_plugin.py`) to use a 60s timeout override instead of the repo-wide 10s default, since each test spawns the mngr CLI as a subprocess whose startup alone takes several seconds.
+- Strengthened `test_plugin_add_by_path` to assert the failure is not a usage error, confirming `--path` is genuinely wired up as a plugin source rather than passing on any arbitrary non-zero exit.

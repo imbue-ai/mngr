@@ -1,0 +1,1 @@
+Fixed the `test_troubleshoot_check_agent_state` e2e tutorial test: removed the superfluous `@pytest.mark.modal` mark (the test creates a local `--type command` agent, so `mngr list` never contacts Modal) and strengthened its assertion to verify the created agent actually appears in the `mngr list --fields` output with its name, local provider, and localhost host name.

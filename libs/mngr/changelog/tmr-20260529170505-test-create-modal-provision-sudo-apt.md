@@ -1,0 +1,1 @@
+Fixed the `test_create_modal_provision_sudo_apt` e2e release test so it runs in the isolated test profile (which has no configured default agent type) by pinning a lightweight `--type command` agent, and strengthened it to verify the `--extra-provision-command` actually executed on the Modal host by reading back a sentinel file via `mngr exec`.

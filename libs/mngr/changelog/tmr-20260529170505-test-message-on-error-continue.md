@@ -1,0 +1,1 @@
+- Fixed an outdated `mngr message`/`mngr msg` example in the tutorial (`mega_tutorial.sh`): the "all agents" form now uses `mngr list --ids | mngr msg - ...` instead of the removed `-a`/`--all` flag, matching the documented pipe-from-stdin pattern. The corresponding tutorial e2e test was updated to run and verify the corrected command.

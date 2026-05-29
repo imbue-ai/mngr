@@ -6,10 +6,17 @@ from imbue.mngr.e2e.conftest import E2eSession
 from imbue.skitwright.expect import expect
 
 
+# This test drives the lifecycle of a *local* ``command`` agent, so it never
+# invokes the Modal CLI binary (the only Modal usage the resource guard can
+# observe). The ``mngr list`` calls do attempt Modal *discovery*, but that runs
+# as in-process gRPC inside the ``mngr`` subprocess (invisible to the guard) and
+# the read-only discovery path never creates an environment, so no ``modal``
+# binary is spawned. Adding @pytest.mark.modal would therefore fail the guard's
+# NEVER_INVOKED check. Contrast with the Modal *creation* tests, which do carry
+# the mark because creating a host invokes ``modal environment create``.
 @pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.modal
 def test_full_lifecycle(e2e: E2eSession) -> None:
     # Create
     expect(

@@ -108,16 +108,16 @@ mngr create my-task --branch "main:mngr/*"
 # or set the new branch name explicitly:
 mngr create my-task --branch ":feature/my-task"
 
-# you can create a copy instead of a worktree:
-mngr create my-task --copy
-# that is used by default if you're not in a git repo
+# you can create an independent copy (its own clone of the repo) instead of a shared worktree:
+mngr create my-task --transfer=git-mirror
+# (for non-git projects, mngr makes an rsync copy by default instead)
 
 # you can disable new branch creation entirely by omitting the :NEW part:
 mngr create my-task --branch main
 # this checks out the existing branch in the worktree (or copy) without creating a new one
 
-# you can create a "clone" instead of worktree or copy, which is a lightweight copy that shares git objects with the original repo but has its own separate working directory:
-mngr create my-task --clone
+# you can transfer the project as a standalone git clone instead of a worktree or copy, which pushes all local branches and tags into a fresh repository with its own separate working directory:
+mngr create my-task --transfer=git-mirror
 
 # you can clone from an existing agent's work directory:
 mngr create my-task --from other-agent
@@ -328,7 +328,7 @@ mngr list --label TEAM=backend
 mngr list --host-label ENV=staging
 
 # choose which fields to display and sort order
-mngr list --fields "name,state,host.provider,created_at" --sort "-created_at"
+mngr list --fields "name,state,host.provider,create_time" --sort "create_time desc"
 # see mngr list --help for a complete list of fields you can reference
 
 # limit the number of results
@@ -407,7 +407,7 @@ mngr list --include 'host.provider == "modal"' --ids | mngr msg - -m "Almost out
 #   "abort", which means stop if any agent fails to receive the message
 # note that "abort" is kind of dangerous--you could easily have agents left in a strange state
 # thus the default is "continue"
-mngr msg -a -m "Status update please" --on-error continue
+mngr list --ids | mngr msg - -m "Status update please" --on-error continue
 
 ##############################################################################
 # EXECUTING COMMANDS ON AGENTS
@@ -424,7 +424,7 @@ mngr exec my-task "ls -la /workspace"
 mngr x my-task "git status"
 
 # run a command on all agents
-mngr exec -a "whoami"
+mngr list --ids | mngr exec - "whoami"
 
 # run a command as a specific user as you normally would on that host (ex: sudo -u other-user)
 mngr exec my-task "sudo -u other-user apt-get update"
@@ -444,7 +444,7 @@ mngr exec my-task --start "cat /etc/os-release"
 mngr exec my-task --no-start "cat /etc/os-release"
 
 # control error handling when running on multiple agents
-mngr exec -a --on-error continue "git log --oneline -5"
+mngr list --ids | mngr exec - --on-error continue "git log --oneline -5"
 # the choices for --on-error are the same as for messaging: "continue" (try all agents) and "abort" (stop if any agent fails)
 
 # FIXME: sure, these might be experimental, but they could at least use some tests! I think they work in theory...
@@ -543,8 +543,8 @@ mngr destroy agent-1 agent-2 agent-3 --force
 # destroy all agents (be careful!)
 mngr list --ids | mngr destroy - --force
 
-# dry-run to see what would be destroyed without actually doing it
-mngr list --ids | mngr destroy - --dry-run
+# to preview what would be destroyed, list the agents first (destroy composes with stdin)
+mngr list --ids
 
 # destroy and run garbage collection afterward (this is the default)
 mngr destroy my-task --force --gc
@@ -587,8 +587,8 @@ mngr snapshot create my-task --name "before-refactor"
 # snapshot all agents' hosts
 mngr list --ids | mngr snapshot create -
 
-# list all snapshots
-mngr snapshot list
+# list snapshots for all agents' hosts
+mngr list --ids | mngr snapshot list -
 
 # list snapshots for a specific agent's host
 mngr snapshot list my-task
@@ -597,7 +597,7 @@ mngr snapshot list my-task
 mngr snapshot list my-task --limit 5
 
 # destroy a specific snapshot
-mngr snapshot destroy --snapshot snap-123abc
+mngr snapshot destroy my-task --snapshot snap-123abc
 
 # destroy all snapshots for an agent's host
 mngr snapshot destroy my-task --all-snapshots --force
@@ -728,7 +728,7 @@ mngr plugin enable my-plugin --scope project
 mngr plugin disable my-plugin --scope user
 
 # list plugins with specific fields
-mngr plugin list --fields "name,version,active"
+mngr plugin list --fields "name,version,enabled"
 
 
 ##############################################################################
@@ -846,7 +846,7 @@ mngr wait agent-auth && mngr wait agent-tests && mngr wait agent-docs
 # run git status on all agents to see what they've changed
 mngr list --ids | mngr exec - "git diff --stat"
 # send a coordination message to all agents
-mngr msg -a -m "Reminder: commit and push your changes when done"
+mngr list --ids | mngr msg - -m "Reminder: commit and push your changes when done"
 # merge all of the changes
 git merge mngr/agent-auth
 git merge mngr/agent-tests
@@ -875,9 +875,8 @@ mngr destroy --force --remove-created-branch agent-auth agent-tests agent-docs
 # check what branch an agent is on (it may have shifted if the agent checked out a new branch)
 mngr exec my-task "git branch --show-current"
 
-# TODO: this field name isn't right, go fix (but that info is there somewhere in mngr list)
-# you can see the original branch as part of the details in "mngr list" as well (field name: "git.original_branch")
-mngr list --fields "name,state,git.original_branch"
+# you can see the branch created for each agent as part of the details in "mngr list" as well (field name: "initial_branch")
+mngr list --fields "name,state,initial_branch"
 
 # check if the agent has uncommitted changes
 mngr exec my-task "git status --short"
@@ -945,7 +944,7 @@ mngr list --include 'host.provider == "modal"' --ids | mngr exec - "df -h /works
 mngr list --include 'labels.team == "backend"' --include 'state == "STOPPED"' --ids | mngr destroy - --force --dry-run
 
 # you can also just list agents by filtering using jq:
-mngr list --format json | jq '.[] | select(.labels.priority == "high")'
+mngr list --format json | jq '.agents[] | select(.labels.priority == "high")'
 
 # or even stream the filters with jq by using jsonl:
 mngr list --format jsonl | jq --unbuffered 'select(.labels.priority == "high")'
@@ -1066,7 +1065,7 @@ mngr snapshot create my-task --name "checkpoint-1"
 mngr list --provider modal
 
 # destroy all Modal agents (be careful!)  Useful for cleaning up while prototyping
-mngr list --include 'host.provider == "modal"' --ids | mngr destroy -f
+mngr list --include 'host.provider == "modal"' --ids | mngr destroy - -f
 
 ##############################################################################
 # RUNNING AGENTS IN DOCKER
@@ -1090,13 +1089,13 @@ mngr create my-task --provider docker -s "-v /host/data:/container/data"
 # available even when a given "host" (container) is stopped
 
 # set resource limits via start args
-mngr create my-task --provider docker -s cpus=2
+mngr create my-task --provider docker -s --cpus=2
 
 # list Docker agents
 mngr list --provider docker
 
 # destroy all docker agents (be careful!)  Useful for cleaning up while prototyping
-mngr list --include 'host.provider == "docker"' --ids | mngr destroy -f
+mngr list --include 'host.provider == "docker"' --ids | mngr destroy -f -
 
 ##############################################################################
 # IDLE DETECTION AND TIMEOUTS
@@ -1149,8 +1148,8 @@ mngr stop agent-1
 # run a Python script as a managed process
 mngr create my-server --type command -- python -m http.server 8080
 
-# run a long-running data pipeline
-mngr create etl-job --type command --idle-mode run --idle-timeout 60 -- python etl_pipeline.py
+# run a long-running data pipeline (idle-mode/idle-timeout require a remote provider, so use Modal)
+mngr create etl-job --provider modal --type command --idle-mode run --idle-timeout 60 -- python etl_pipeline.py
 
 # run a dev server with extra tmux windows for logs
 mngr create dev-env --type command -w logs="tail -f /var/log/app.log" -- npm run dev
@@ -1253,10 +1252,10 @@ mngr list --format jsonl
 mngr observe --discovery-only
 
 # JSON and JSONL works with most commands
-mngr snapshot list --format json && mngr plugin list --format jsonl
+mngr config list --format json && mngr plugin list --format jsonl
 
 # combine json with jq for powerful filtering and transformation
-mngr list --format json | jq '.[] | select(.state == "RUNNING") | .name'
+mngr list --format json | jq '.agents[] | select(.state == "RUNNING") | .name'
 
 # combine jsonl with jq for streaming filtering
 mngr list --format jsonl | jq --unbuffered 'select(.state == "RUNNING") | .name'
@@ -1282,7 +1281,7 @@ mngr create my-task --provider modal --extra-provision-command "echo 'export PAT
 # combine multiple setup steps
 mngr create my-task --provider modal \
   --upload-file ./requirements.txt:/workspace/requirements.txt \
-  --sudo-command "apt-get update && apt-get install -y build-essential" \
+  --extra-provision-command "sudo apt-get update && apt-get install -y build-essential" \
   --extra-provision-command "pip install -r /workspace/requirements.txt"
 
 # TODO: also show how you can use "mngr rsync" or "mngr exec" after starting the agent, just as nice alternatives
@@ -1306,10 +1305,10 @@ watch -n 5 mngr list --running
 # or get a JSONL stream of host/agent discovery events for programmatic consumers
 mngr observe --discovery-only
 
-# collect results from all agents
+# collect results from all agents (the command must be quoted--it's the last arg to mngr exec)
 for agent in "fix-auth" "add-logging" "update-deps" "write-docs"; do
   echo "=== $agent ==="
-  mngr exec "$agent" -- git log --oneline -3
+  mngr exec "$agent" "git log --oneline -3"
 done
 
 # TODO: there are a LOT more cool advanced workflows besides just map-reduce! Add a bunch more examples here
@@ -1370,9 +1369,9 @@ mngr transcript my-task --tail 10
 
 # auto-generated by Claude, remove when a human has sanctioned this
 # run commands on the host to diagnose issues
-mngr exec my-task -- cat /var/log/syslog | tail -20
-mngr exec my-task -- ps aux
-mngr exec my-task -- df -h
+mngr exec my-task "cat /var/log/syslog | tail -20"
+mngr exec my-task "ps aux"
+mngr exec my-task "df -h"
 
 # auto-generated by Claude, remove when a human has sanctioned this
 # if an agent is stuck, try stopping and restarting it

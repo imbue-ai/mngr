@@ -22,6 +22,7 @@ from imbue.mngr.config.data_types import USER_ID_FILENAME
 from imbue.mngr.utils.polling import poll_until
 from imbue.mngr_modal.backend import MODAL_NAME_MAX_LENGTH
 from imbue.mngr_modal.backend import truncate_modal_name
+from imbue.skitwright.data_types import CommandResult
 from imbue.skitwright.runner import run_command
 from imbue.skitwright.session import Session
 
@@ -79,6 +80,64 @@ class E2eSession(Session):
             except OSError as exc:
                 diag_parts.append(f"\n[{label}] error: {exc!r}")
         return "\n".join(diag_parts)
+
+    def connect_and_verify_attached(
+        self,
+        command: str,
+        agent_name: str,
+        comment: str | None = None,
+        attach_timeout_seconds: int = 45,
+        timeout: float = 90.0,
+    ) -> CommandResult:
+        """Run an interactive ``mngr connect`` variant and verify it attaches.
+
+        ``mngr connect`` (and its ``conn`` alias) attaches to the agent's tmux
+        session via ``tmux attach``. That requires a controlling terminal and
+        then blocks for the lifetime of the session, so it does not fit
+        skitwright's piped, foreground subprocess model: without a tty
+        ``tmux attach`` aborts with "open terminal failed: not a terminal", and
+        with one it never returns.
+
+        To exercise the real command anyway, we run it through a pseudo-terminal
+        (Python's ``pty.spawn``) in the background and assert on its observable
+        effect -- a tmux client becomes attached to the agent's session. The
+        connect process is then detached and terminated.
+
+        Returns the recorded shell-command result; its exit code is 0 if and
+        only if a tmux client attached within ``attach_timeout_seconds``.
+        """
+        prefix = self._env.get("MNGR_PREFIX", "")
+        session_name = f"{prefix}{agent_name}"
+        connect_log = self.output_dir / f"connect-{agent_name}.log"
+        session_target = shlex.quote(f"={session_name}")
+        # pty.spawn allocates a pseudo-terminal so the inner `tmux attach`
+        # believes it has a real terminal; backgrounding it lets the attach
+        # persist while we poll for the resulting tmux client.
+        script = textwrap.dedent(
+            f"""
+            set -u
+            python3 -c 'import pty, sys; pty.spawn(["sh", "-c", sys.argv[1]])' {shlex.quote(command)} \
+                > {shlex.quote(str(connect_log))} 2>&1 < /dev/null &
+            connect_pid=$!
+            attached=
+            for _ in $(seq 1 {attach_timeout_seconds}); do
+                if tmux list-clients -t {session_target} 2>/dev/null | grep -q .; then
+                    attached=1
+                    break
+                fi
+                sleep 1
+            done
+            tmux detach-client -s {session_target} 2>/dev/null || true
+            kill "$connect_pid" 2>/dev/null || true
+            if [ -z "$attached" ]; then
+                echo "no tmux client attached to {session_name} within {attach_timeout_seconds}s" >&2
+                echo "--- connect output ---" >&2
+                cat {shlex.quote(str(connect_log))} >&2 || true
+                exit 1
+            fi
+            """
+        ).strip()
+        return self.run(script, comment=comment, timeout=timeout)
 
     def write_tutorial_block(self, block: str) -> None:
         """Write the original tutorial script block to the test output directory.
@@ -266,8 +325,20 @@ def _setup_test_profile(host_dir: Path) -> str:
     # Build a user_id that produces a Modal environment name matching the
     # mngr_test-YYYY-MM-DD-HH-MM-SS-{identifier} pattern (recognized by
     # cleanup_old_modal_test_environments).
+    #
+    # The unique token comes first in the identifier, before the (optional,
+    # long) MNGR_AGENT_NAME. The derived Modal environment name is truncated to
+    # MODAL_NAME_MAX_LENGTH from the *end*, so a long MNGR_AGENT_NAME would push
+    # any uniqueness off the end. Concurrent sibling test agents share a long
+    # MNGR_AGENT_NAME prefix (e.g. "...-test-create-modal-idle-timeout-60" vs
+    # "...-120"); without an early unique token their environment names truncate
+    # to an identical string and collide on creation ("same name or web label
+    # suffix as an existing one"). Keeping the agent name afterwards preserves
+    # human readability for any environments that are kept for debugging.
     timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d-%H-%M-%S")
-    identifier = os.environ.get("MNGR_AGENT_NAME") or uuid4().hex[:8]
+    unique_token = uuid4().hex[:8]
+    agent_name = os.environ.get("MNGR_AGENT_NAME")
+    identifier = f"{unique_token}-{agent_name}" if agent_name else unique_token
     user_id = f"{timestamp}-{identifier}"
     # Write without trailing newline (matching the format used by get_or_create_user_id)
     user_id_path = profile_dir / USER_ID_FILENAME
@@ -425,16 +496,116 @@ def e2e(
     # is_allowed_in_pytest opts this local-layer config into the pytest run.
     # Every config file loaded during a pytest run must opt in individually, and
     # this one is loaded alongside the profile's settings.toml.
+    #
+    # For the standalone `connect` command we cannot reuse `mngr-e2e-connect`:
+    # that recorder itself runs `mngr conn <agent>`, which would recurse forever
+    # now that `connect` honors connect_command. The builtin attach also can't run
+    # because the pipe-based test runner has no controlling TTY (`tmux attach`
+    # fails with "open terminal failed: not a terminal"). So `connect` gets a
+    # lightweight recorder that echoes the resolved agent/session/locality and
+    # exits, letting tests assert that `connect` resolved the agent and reached
+    # the connect step.
+    # `type = "claude"` mirrors a real installed environment: scripts/install.sh
+    # prompts for a default agent type and writes it to user config, so day-to-day
+    # `mngr create` has a default. The tutorial assumes "claude is your default
+    # agent type", and tutorial blocks like `mngr create my-task --provider modal`
+    # omit --type. Without this, those commands fail with "No agent type provided".
+    # Tests that need a different type still override it via explicit --type.
+    # Configure a default agent type so that tutorial commands which omit
+    # `--type` (relying on the user's configured default, as the tutorial
+    # assumes) can run as written. Without this, every `mngr create` without an
+    # explicit `--type` fails with "No agent type provided".
+    # The tutorial assumes the user has already configured a default agent type
+    # during onboarding (stored under "[commands.create] type"), so its create
+    # commands omit "--type". Mirror that onboarded-user setup here with a
+    # default of "claude"; without it, every "mngr create" that does not pass an
+    # explicit --type fails with "No agent type provided". Tests that pass
+    # --type explicitly still override this default.
+    # Set a default agent type ("claude") under [commands.create]. The source-coded
+    # default was removed (installer now writes it to user config), so without this
+    # any tutorial command that omits `--type` (e.g. `mngr create my-task --provider
+    # modal`) would fail with "No agent type provided". Setting it here mirrors a
+    # real user's configured default and lets tutorial commands run verbatim.
+    # `type = "claude"` configures the default agent type. A real user
+    # following the tutorial has completed onboarding and has this set, so the
+    # tutorial's `mngr create my-task ...` commands omit `--type`. `mngr create`
+    # no longer hard-codes a `claude` default, so without this the isolated
+    # environment would fail those commands with "No agent type provided".
+    # Tests that need a different type (e.g. command agents) still pass `--type`
+    # explicitly, which overrides this default. It is set in this same layer as
+    # connect_command (rather than the user-scope profile settings.toml) so that
+    # `[commands.create]` lives in a single settings layer, avoiding the config
+    # loader's cross-layer "settings narrowing" guard.
+    # Configure a default agent type so that type-less `mngr create` commands
+    # work. A real mngr environment always has this set (the installer prompts
+    # for it and writes [commands.create] type to the user-scope settings), and
+    # the tutorial's `mngr create my-task --provider modal ...` commands rely on
+    # it ("your default agent"). Tests that need a different type still pass
+    # --type explicitly, which takes precedence over this config default.
+    # A default agent type is set here (rather than in the user-scope profile
+    # settings.toml) so that all `[commands.create]` keys live in a single
+    # settings layer. `mngr create` no longer falls back to a built-in default
+    # when nothing is configured -- it errors with "No agent type provided".
+    # The tutorial commands (e.g. `mngr create my-task`) assume the user has
+    # configured a default agent (stored under `[commands.create] type`), so the
+    # test environment must provide one for those commands to run as written.
+    # Splitting `type` and `connect_command` across two layers would trip the
+    # settings-narrowing guard, so keep them together.
     settings_path = project_config_dir / "settings.local.toml"
+    #
+    # `type = "claude"` sets the default agent type. `mngr create --type` no
+    # longer has a source-coded default (it was removed when the installer
+    # started prompting for and writing `[commands.create] type` to user
+    # settings). The tutorial assumes the user has a configured default (it
+    # documents that the default lives under `[commands.create] type`), so
+    # commands like `mngr create my-task --provider modal` omit `--type`.
+    # Colocate it with connect_command in this same `[commands.create]` block
+    # so both keys merge in one settings layer -- splitting them across layers
+    # trips the settings-narrowing guard.
+    # A default agent type is required since the source-coded "claude" default
+    # was removed (scripts/install.sh now prompts for it). Tutorial blocks run
+    # bare `mngr create` relying on this configured default, so the test profile
+    # must supply one to match how a real (post-install) user is set up.
     settings_path.write_text(
         "is_allowed_in_pytest = true\n"
         "\n"
         "[commands.create]\n"
+        'type = "claude"\n'
         'connect_command = "mngr-e2e-connect"\n'
+        'type = "claude"\n'
         "\n"
         "[commands.start]\n"
         'connect_command = "mngr-e2e-connect"\n'
+        "\n"
+        "[commands.connect]\n"
+        'connect_command = "echo mngr-e2e-connected'
+        ' agent=$MNGR_AGENT_NAME session=$MNGR_SESSION_NAME local=$MNGR_HOST_IS_LOCAL"\n'
     )
+
+    # Pre-create the PROJECT-scope settings.toml opted into pytest. `mngr config
+    # set` defaults to the project scope, so a test that runs `mngr config set
+    # <key> <value>` writes into this file. If it did not already opt in, the
+    # next mngr command to load config would trip the pytest guard (every loaded
+    # config file must set is_allowed_in_pytest = true). `config set` edits the
+    # file with tomlkit, preserving this flag alongside whatever it writes.
+    # Pre-seed the project settings.toml with the opt-in flag too. The pytest
+    # guard checks every loaded config file individually, so a project-scope
+    # `mngr config set` (the default scope) -- which writes to this file -- would
+    # otherwise produce a settings.toml that lacks the flag, breaking every
+    # subsequent command that loads it. Seeding the flag here means project-scope
+    # writes preserve it.
+    project_settings_path = project_config_dir / "settings.toml"
+    project_settings_path.write_text("is_allowed_in_pytest = true\n")
+    # Pre-seed the project-scope settings.toml with the pytest opt-in. Commands
+    # that write project-scope config (the default scope for `mngr plugin
+    # enable/disable`, `mngr config set`, etc.) merge into this file; without an
+    # existing opt-in, the freshly-written settings.toml would lack
+    # is_allowed_in_pytest = true and the very next mngr command would refuse to
+    # run under pytest. Every config file loaded during a pytest run must opt in
+    # individually, so this one must too.
+    project_settings_path = project_config_dir / "settings.toml"
+    if not project_settings_path.exists():
+        project_settings_path.write_text("is_allowed_in_pytest = true\n")
 
     # Ensure .claude/settings.local.json is gitignored. Remote providers
     # (Modal, Docker) need to write Claude hooks to this file, and the

@@ -1,0 +1,2 @@
+- Dropped the unused `@pytest.mark.modal` from the `test_list_current_project_only` e2e test: `mngr list --project my-project` in an isolated environment with no agents never reaches the Modal backend, so the resource guard rejected the mark.
+- Added `test_list_current_project_only_filters_to_named_project`, which shares the same PROJECTS tutorial block but verifies the actual filtering effect: it creates two command agents tagged with different projects and asserts that `mngr list --project my-project` returns only the matching agent.

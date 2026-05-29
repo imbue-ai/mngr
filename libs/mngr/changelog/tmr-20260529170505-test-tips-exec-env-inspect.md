@@ -1,0 +1,2 @@
+- Fixed the `test_tips_exec_env_inspect` e2e tutorial test: removed the superfluous `@pytest.mark.modal` mark (the test only creates a local `--type command` agent and execs into it, so it never invokes Modal and was failing the resource guard's never-invoked check).
+- Strengthened the test to verify the concrete effect of `mngr exec my-task -- env | sort`: it now asserts the agent's injected `MNGR_AGENT_NAME`/`MNGR_AGENT_ID` variables are present and that the output is actually sorted, rather than only checking the exit code.

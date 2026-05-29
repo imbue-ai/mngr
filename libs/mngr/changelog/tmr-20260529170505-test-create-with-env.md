@@ -1,0 +1,1 @@
+Added an e2e release test (`test_create_with_env_file`) covering `mngr create --env-file`, which was documented in the env-vars tutorial block but previously untested. It writes an env file, creates a command agent that loads it, and verifies the variable is visible in the agent's tmux pane.

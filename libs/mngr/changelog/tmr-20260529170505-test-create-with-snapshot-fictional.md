@@ -1,0 +1,1 @@
+Fixed the `test_create_with_snapshot_fictional` e2e release test so it actually reaches the modal provider: the command now passes `--type command -- sleep ...` to get past agent-type resolution, and the test asserts the failure references the fictional snapshot id rather than only checking a non-zero exit code.

@@ -1,0 +1,1 @@
+Fixed and strengthened the `test_exec_with_start` e2e tutorial test for `mngr exec --start`. Removed a superfluous `@pytest.mark.modal` mark (the test only exercises a local command agent and never invokes Modal) and extended it to actually restart a stopped host, verify the command output, and confirm the host is left running afterward.
