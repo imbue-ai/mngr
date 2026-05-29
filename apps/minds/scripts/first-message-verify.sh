@@ -12,7 +12,7 @@ set -uo pipefail
 EVENTS_LOG="$HOME/.minds/logs/minds-events.jsonl"
 COOKIES="/tmp/first-message-cookies.txt"
 GIT_URL="${GIT_URL:-https://github.com/imbue-ai/forever-claude-template}"
-GIT_BRANCH="${GIT_BRANCH:-pilot}"
+GIT_BRANCH="${GIT_BRANCH:-pilot_2}"
 HOST_NAME="${HOST_NAME:-firstmsg$(date +%H%M%S)}"
 PROMPT="${PROMPT:-Reply with exactly the four characters: pong}"
 EXPECT_SUBSTRING="${EXPECT_SUBSTRING:-pong}"
