@@ -7,9 +7,6 @@ on:
         description: 'ToDesktop .zip URL to download as a fresh minds.app. Leave empty to clean only.'
         required: false
         default: ''
-  push:
-    branches: [mngr/mac-runner]
-    paths: ['.github/workflows/minds-runner-reset.yml', 'apps/minds/scripts/mac-runner-reset.sh']
 
 concurrency:
   group: mac-runner

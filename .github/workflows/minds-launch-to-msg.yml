@@ -24,14 +24,6 @@ on:
         description: 'Override the FCT git URL (forks). Empty -> https://github.com/imbue-ai/forever-claude-template.'
         required: false
         default: ''
-  push:
-    branches: [mngr/mac-runner]
-    paths:
-      - '.github/workflows/minds-launch-to-msg.yml'
-      - 'apps/minds/scripts/launch-and-verify.sh'
-      - 'apps/minds/scripts/first-message-verify.sh'
-      - 'apps/minds/scripts/mac-runner-reset.sh'
-      - 'apps/minds/scripts/resolve-latest-todesktop-url.sh'
 
 concurrency:
   group: mac-runner
