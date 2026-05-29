@@ -3,12 +3,16 @@ name: minds launch-to-first-message
 on:
   workflow_dispatch:
     inputs:
+      commit_sha:
+        description: 'Commit SHA (or branch / tag) to build a fresh ToDesktop draft from. Mutually exclusive with app_zip_url. Leave both empty to verify the latest released build.'
+        required: false
+        default: ''
       app_zip_url:
-        description: 'ToDesktop .zip URL to verify. Leave empty to resolve the latest released build from the electron-updater feed.'
+        description: 'ToDesktop .zip URL to verify directly (skips the build job). Takes precedence over commit_sha.'
         required: false
         default: ''
       skip_first_message:
-        description: 'Skip the first-message round-trip step (smoke-only: install + launch + backend-ready). Use when only validating the runner/install path.'
+        description: 'Skip the first-message round-trip step (smoke-only: install + launch + backend-ready).'
         type: boolean
         required: false
         default: false
@@ -26,7 +30,83 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  build:
+    # Run only when a commit_sha was supplied AND no direct URL was given.
+    # When both are empty, skip; `verify` will resolve the latest released
+    # build via the electron-updater feed instead.
+    if: ${{ inputs.commit_sha != '' && inputs.app_zip_url == '' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      TODESKTOP_API_TOKEN: ${{ secrets.TODESKTOP_API_TOKEN }}
+      MINDS_CLIENT_CONFIG_BUNDLE: apps/minds/imbue/minds/config/envs/production/client.toml
+      MINDS_ROOT_NAME_BUNDLE: minds
+    outputs:
+      app_zip_url: ${{ steps.parse.outputs.url }}
+      build_id:    ${{ steps.parse.outputs.build_id }}
+    steps:
+      - name: check TODESKTOP_API_TOKEN
+        run: |
+          if [[ -z "${TODESKTOP_API_TOKEN:-}" ]]; then
+            echo "::error::TODESKTOP_API_TOKEN secret is not set on this repo. Add it at Settings -> Secrets -> Actions."
+            exit 1
+          fi
+          echo "TODESKTOP_API_TOKEN present (length=${#TODESKTOP_API_TOKEN})"
+      - name: checkout @ ${{ inputs.commit_sha }}
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.commit_sha }}
+      - name: setup node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24.15.0'
+      - name: setup pnpm
+        run: |
+          npm install -g pnpm@10.33.4
+          pnpm --version
+      - name: pnpm install
+        working-directory: apps/minds
+        run: pnpm install --frozen-lockfile
+      - name: pnpm dist (build + upload to ToDesktop)
+        id: dist
+        working-directory: apps/minds
+        run: |
+          set -o pipefail
+          pnpm dist 2>&1 | tee /tmp/minds-dist.log
+      - name: parse build URL
+        id: parse
+        if: always()
+        run: |
+          BUILD_ID=$(grep -oE '26[0-9]{4}[a-z0-9]+' /tmp/minds-dist.log 2>/dev/null | sort -u | tail -1 || true)
+          URL=$(grep -oE 'https://dl\.todesktop[^[:space:]"]+arm64' /tmp/minds-dist.log 2>/dev/null | sort -u | tail -1 || true)
+          echo "build_id=$BUILD_ID" >> "$GITHUB_OUTPUT"
+          echo "url=$URL" >> "$GITHUB_OUTPUT"
+          {
+            echo "## Build result"
+            echo ""
+            echo "- commit: \`${{ inputs.commit_sha }}\`"
+            echo "- build_id: \`${BUILD_ID:-<not found>}\`"
+            echo "- url: ${URL:-<not found>}"
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [[ -z "$URL" ]]; then
+            echo "::error::could not extract a ToDesktop arm64 URL from the build log. Check the uploaded build-log artifact."
+            exit 1
+          fi
+      - name: upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: minds-dist-log-${{ github.run_id }}
+          path: /tmp/minds-dist.log
+          retention-days: 7
+
   verify:
+    needs: [build]
+    # Run even when `build` was skipped (no commit_sha) or failed (so we can
+    # still see artifacts). `success()` would skip both cases, so use always()
+    # plus a guard inside to skip the actual mac-runner work when the URL
+    # we'd verify is empty.
+    if: ${{ always() && (needs.build.result == 'success' || needs.build.result == 'skipped') }}
     runs-on: [self-hosted, macOS, minds-runner]
     timeout-minutes: 25
     env:
@@ -43,13 +123,24 @@ jobs:
         id: url
         run: |
           if [[ -n "${{ inputs.app_zip_url }}" ]]; then
-            echo "url=${{ inputs.app_zip_url }}" >> "$GITHUB_OUTPUT"
-            echo "Using input URL: ${{ inputs.app_zip_url }}"
+            URL='${{ inputs.app_zip_url }}'
+            SRC='direct input'
+          elif [[ -n '${{ needs.build.outputs.app_zip_url }}' ]]; then
+            URL='${{ needs.build.outputs.app_zip_url }}'
+            SRC='build job (commit ${{ inputs.commit_sha }}, build_id ${{ needs.build.outputs.build_id }})'
           else
-            u=$(bash apps/minds/scripts/resolve-latest-todesktop-url.sh)
-            echo "url=$u" >> "$GITHUB_OUTPUT"
-            echo "Resolved latest: $u"
+            URL=$(bash apps/minds/scripts/resolve-latest-todesktop-url.sh)
+            SRC='resolved latest released build'
           fi
+          echo "url=$URL" >> "$GITHUB_OUTPUT"
+          echo "Verifying: $URL"
+          echo "Source: $SRC"
+          {
+            echo "## Verifying"
+            echo ""
+            echo "- URL: $URL"
+            echo "- Source: $SRC"
+          } >> "$GITHUB_STEP_SUMMARY"
       - name: reset to clean state and install fresh app
         run: bash apps/minds/scripts/mac-runner-reset.sh "${{ steps.url.outputs.url }}"
       - name: launch and wait for backend
