@@ -12,4 +12,4 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ### Fixed
 
-- Fixed: Post-finalize `stop_agent_on_host` calls in `launch_and_poll_mappers` and `wait_for_reducer` are now dispatched through a new `_BackgroundStopper` (per-stop `ObservableThread` with a bounded 60s drain) instead of running synchronously on the polling loop's main thread, so a torn-down remote sandbox blocking SSH on TCP retransmit (~16 min/call) can no longer serialize the loop. Previously left ~50 of 80 mappers unfinalized when a TMR run hit the 4h GHA cap.
+- Fixed: Post-finalize `stop_agent_on_host` calls in `launch_and_poll_mappers` and `wait_for_reducer` are now dispatched through a new `AgentStopper` helper (per-stop `ObservableThread` with a bounded 60s drain) instead of running synchronously on the polling loop's main thread, so a torn-down remote sandbox blocking SSH on TCP retransmit (~16 min/call) can no longer serialize the loop. Previously left ~50 of 80 mappers unfinalized when a TMR run hit the 4h GHA cap.
