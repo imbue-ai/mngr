@@ -827,24 +827,71 @@ class Latchkey(MutableModel):
         from a cancelled browser flow, network failure, or something else --
         returns ``(False, message)`` where ``message`` carries the latchkey
         stderr (or stdout, or a generic fallback).
+
+        Some latchkey services require a one-off ``latchkey auth
+        browser-prepare <service>`` step before the regular browser sign-in
+        flow can run;. In such a case, we transparently run ``auth
+        browser-prepare`` and retry ``auth browser`` once.
+        """
+        is_success, detail = self._run_latchkey_auth_command(
+            log_label="auth browser",
+            argv=["auth", "browser", service_name],
+            service_name=service_name,
+        )
+        if is_success:
+            return True, ""
+        if "latchkey auth browser-prepare" not in detail.lower():
+            return False, detail
+        logger.info(
+            "latchkey auth browser {} reports preparation required; running 'auth browser-prepare' and retrying",
+            service_name,
+        )
+        is_prepared, prepare_detail = self._run_latchkey_auth_command(
+            log_label="auth browser-prepare",
+            argv=["auth", "browser-prepare", service_name],
+            service_name=service_name,
+        )
+        if not is_prepared:
+            return False, prepare_detail
+        return self._run_latchkey_auth_command(
+            log_label="auth browser",
+            argv=["auth", "browser", service_name],
+            service_name=service_name,
+        )
+
+    def _run_latchkey_auth_command(
+        self,
+        log_label: str,
+        argv: list[str],
+        service_name: str,
+    ) -> tuple[bool, str]:
+        """Run a single ``latchkey auth ...`` subcommand and translate its exit into ``(is_success, detail)``.
+
+        ``log_label`` is the human-readable name of the subcommand
+        (e.g. ``"auth browser"``, ``"auth browser-prepare"``) used in
+        log lines and the generic failure-message fallback.
         """
         env = _build_env_with_latchkey_directory(self.latchkey_directory, encryption_key=self._load_encryption_key())
-        cg = ConcurrencyGroup(name="latchkey-auth-browser")
+        cg = ConcurrencyGroup(name=f"latchkey-{log_label.replace(' ', '-')}")
         with cg:
-            # No timeout: this command waits on a real human completing
-            # the browser sign-in flow, which can take arbitrarily long.
+            # No timeout: ``auth browser`` waits on a real human
+            # completing the browser sign-in flow, which can take
+            # arbitrarily long. ``auth browser-prepare`` is typically
+            # non-interactive but may still hit the network, so we keep
+            # the same untimed treatment.
             result = cg.run_process_to_completion(
-                command=[self.latchkey_binary, "auth", "browser", service_name],
+                command=[self.latchkey_binary, *argv],
                 timeout=None,
                 is_checked_after=False,
                 env=env,
             )
         if result.returncode == 0:
-            logger.info("latchkey auth browser {} succeeded", service_name)
+            logger.info("latchkey {} {} succeeded", log_label, service_name)
             return True, ""
-        message = result.stderr.strip() or result.stdout.strip() or "latchkey auth browser failed"
+        message = result.stderr.strip() or result.stdout.strip() or f"latchkey {log_label} failed"
         logger.warning(
-            "latchkey auth browser {} exited {}: {}",
+            "latchkey {} {} exited {}: {}",
+            log_label,
             service_name,
             result.returncode,
             message,
