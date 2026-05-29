@@ -66,9 +66,10 @@ class TopicHelpPage(FrozenModel):
     def load_body(self) -> str:
         """Return the topic body text: inline markdown verbatim, or the file's contents.
 
-        The ``DocFile`` is read eagerly and its file must exist -- built-in topic
-        docs are shipped in the wheel and plugins must ship theirs -- so a missing
-        file raises (a packaging bug) rather than yielding a silently-empty page.
+        A ``DocFile`` is read here (at display time), and its file must exist --
+        built-in topic docs are shipped in the wheel and plugins must ship theirs
+        -- so a missing file raises (a packaging bug) rather than yielding a
+        silently-empty page.
         """
         match self.body:
             case InlineContent(markdown=markdown):
