@@ -2796,8 +2796,11 @@ def on_before_create(args: OnBeforeCreateArgs, mngr_ctx: MngrContext) -> OnBefor
         return None
 
     # Resolve through the centralized agent-type registry so any subtype of the
-    # claude agent is accepted, not just the literal "claude" type name. The
-    # default type when unset is "claude" (see api.create.create).
+    # claude agent is accepted, not just the literal "claude" type name. The CLI
+    # always supplies a concrete type (cli.create requires one); the "claude"
+    # fallback here only covers direct API callers that leave agent_type unset,
+    # mirroring api.create.create's own unset->"claude" fallback (which runs
+    # after this hook).
     agent_type = args.agent_options.agent_type or AgentTypeName("claude")
     resolved = resolve_agent_type(agent_type, mngr_ctx.config)
     if not issubclass(resolved.agent_class, ClaudeAgent):
