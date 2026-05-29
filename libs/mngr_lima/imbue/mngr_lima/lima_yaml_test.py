@@ -3,7 +3,6 @@ from pathlib import Path
 import pytest
 
 from imbue.mngr.errors import MngrError
-from imbue.mngr_lima.constants import HOST_VOLUME_MOUNT_PATH
 from imbue.mngr_lima.lima_yaml import generate_default_lima_yaml
 from imbue.mngr_lima.lima_yaml import load_user_lima_yaml
 from imbue.mngr_lima.lima_yaml import merge_lima_yaml
@@ -187,15 +186,15 @@ def test_generate_default_lima_yaml_bind_mount_mode_omits_additional_disks(tmp_p
     assert "mounts" in config and len(config["mounts"]) == 1
     assert config["mounts"][0]["mountPoint"] == "/mngr"
     script = config["provision"][0]["script"]
-    assert "mount --bind" not in script
-    assert HOST_VOLUME_MOUNT_PATH not in script
+    assert "/mnt/lima-" not in script
+    assert "ln -sfn" not in script
 
 
 def test_generate_default_lima_yaml_btrfs_mode_omits_mounts_adds_disk(tmp_path: Path) -> None:
     """When host_data_disk_name is set and volume_host_path is None, the YAML
     omits the `mounts:` block entirely, attaches a btrfs additionalDisk with
-    format: true, and the provisioning script bind-mounts and symlinks
-    host_dir into it."""
+    format: true, and the provisioning script symlinks host_dir to Lima's
+    auto-mount path for that disk."""
     del tmp_path
     config = generate_default_lima_yaml(
         volume_host_path=None,
@@ -213,15 +212,18 @@ def test_generate_default_lima_yaml_btrfs_mode_omits_mounts_adds_disk(tmp_path: 
     assert disk_entry["size"] == "100GiB"
 
     script = config["provision"][0]["script"]
-    assert "/mnt/lima-mngr-abc123-data" in script
-    assert HOST_VOLUME_MOUNT_PATH in script
-    assert "mount --bind /mnt/lima-mngr-abc123-data" in script
-    assert "ln -sfn" in script
+    # The symlink target is Lima's auto-mount path for the additional disk.
+    assert "ln -sfn /mnt/lima-mngr-abc123-data /mngr" in script
     # Hardens the chicken-and-egg: provisioning script waits for Lima's auto-mount
     # before symlinking host_dir into it.
     assert "mountpoint -q /mnt/lima-mngr-abc123-data" in script
-    # Persists the bind across reboots.
-    assert "/etc/fstab" in script
+    # Opens the btrfs root for the Lima default non-root user (fresh mkfs.btrfs
+    # leaves the root dir owned by root:root).
+    assert "chmod 0777 /mnt/lima-mngr-abc123-data" in script
+    # No intermediate bind-mount or fstab manipulation -- those caused
+    # stacked-mount ordering quirks on reboot.
+    assert "mount --bind" not in script
+    assert "/etc/fstab" not in script
 
 
 def test_generate_default_lima_yaml_disk_name_without_size_raises(tmp_path: Path) -> None:

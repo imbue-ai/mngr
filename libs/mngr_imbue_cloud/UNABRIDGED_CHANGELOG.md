@@ -4,6 +4,32 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-05-26
+
+# Delete the dead imbue_cloud inject helpers
+
+`build_combined_inject_command` and `normalize_inject_args` (and the
+`_sed_replace_env_line` / `_ensure_no_quote_chars` helpers that only
+they called) were added to support a "claim CLI" pattern that never
+landed. Trimming the `minds_api_key` argument earlier in this branch
+left them with no caller anywhere in the monorepo except their own
+test file; the central `MINDS_API_KEY` is now injected by the
+latchkey gateway's `minds-api-proxy` extension on the fly, not
+pushed down onto a leased pool host.
+
+This change deletes those four functions and the entire `host_test.py`
+file. The live `provision_agent` path on `ImbueCloudHost` still uses
+`_build_patch_claude_config_command`, which stays.
+
+- Pruned non-notable entries (test-only changes, internal refactors, and doc-only tweaks with no user-facing effect) from this project's CHANGELOG.md, per the new notable-only changelog policy.
+
+Adopted the `PREVENT_BARE_TMUX_TARGETS` ratchet rule (added in `imbue_common`) via
+`rc.check_bare_tmux_targets(_DIR, snapshot(0))` in this project's `test_ratchets.py`.
+This ratchet prevents new occurrences of `tmux <subcmd> -t '<bare-name>'` -- targets
+without a leading `=` exact-match prefix, which can silently route commands to a
+sibling session whose name shares a prefix with the intended one. No production code
+changes in this project; the adopting test starts at a baseline of zero violations.
+
 ## 2026-05-22
 
 ## No more silent auto-disable on auth errors

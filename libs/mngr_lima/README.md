@@ -38,8 +38,8 @@ mngr stores agent data under, default `/mngr`):
 - **Btrfs additional disk (`is_host_data_volume_exposed=False`).** mngr
   attaches a Lima-managed btrfs-formatted additional disk
   (`mngr-<host_id_hex>-data`, qcow2 sparse under `~/.lima/_disks/`, default
-  logical size `100GiB`), bind-mounts it at `/mnt/host-volume` inside the
-  VM, and symlinks `host_dir` into it. No 9p bind mount is created. The
+  logical size `100GiB`) and symlinks `host_dir` to Lima's auto-mount path
+  for that disk (`/mnt/lima-<disk_name>`). No 9p bind mount is created. The
   trade-off: `host_dir` is now a single consistent btrfs filesystem that
   can be snapshotted as one unit, but the host machine has no direct read
   path so `get_volume_for_host()` returns `None`. Offline reads

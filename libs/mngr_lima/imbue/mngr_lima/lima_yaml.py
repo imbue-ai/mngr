@@ -9,7 +9,7 @@ from loguru import logger
 from imbue.mngr.errors import MngrError
 from imbue.mngr_lima.constants import DEFAULT_IMAGE_URL_AARCH64
 from imbue.mngr_lima.constants import DEFAULT_IMAGE_URL_X86_64
-from imbue.mngr_lima.constants import HOST_VOLUME_MOUNT_PATH
+from imbue.mngr_lima.constants import lima_host_data_disk_mount_path
 
 
 def _get_default_image_url(
@@ -202,26 +202,27 @@ if [ "$SSH_KEY_CHANGED" = "1" ] || [ "$SSHD_CONFIG_CHANGED" = "1" ]; then
     systemctl restart sshd 2>/dev/null || service ssh restart 2>/dev/null || true
 fi
 
-# Optional: if a Lima-managed btrfs additional disk was attached, bind-mount
-# it at the canonical HOST_VOLUME_MOUNT_PATH and replace host_dir with a
-# symlink. No-op when the block below is the inert comment placeholder.
+# Optional: if a Lima-managed btrfs additional disk was attached, symlink
+# host_dir to Lima's auto-mount path for that disk. No-op when the block
+# below is the inert comment placeholder.
 {host_data_disk_block}
 """
 
 
 def _build_host_data_disk_block(host_data_disk_name: str | None, host_dir: str) -> str:
-    """Return a bash block that bind-mounts Lima's btrfs additional disk at HOST_VOLUME_MOUNT_PATH and replaces ``host_dir`` with a symlink to it, or an inert comment when no disk was attached.
+    """Return a bash block that symlinks ``host_dir`` to Lima's auto-mounted btrfs disk, or an inert comment when no disk was attached.
 
     Lima auto-mounts named ``additionalDisks`` with ``format: true`` inside
-    the guest under ``/mnt/lima-<disk_name>``. We bind-mount that to the
-    canonical ``HOST_VOLUME_MOUNT_PATH`` (matching the host_volume_mount_path
-    naming used by the other providers) and add an /etc/fstab entry so the
-    bind survives reboots. ``host_dir`` is then replaced (even if it already
-    exists as a real directory from a pre-btrfs image) with a symlink.
+    the guest under ``/mnt/lima-<disk_name>`` via a generated systemd .mount
+    unit. We symlink ``host_dir`` directly to that path -- no intermediate
+    bind-mount onto a canonical "host-volume" path. The bind-mount approach
+    we tried first stacked an empty-ext4 layer under the btrfs mount when
+    the fstab-generated unit fired before Lima's auto-mount; symlinking
+    directly to Lima's path avoids the ordering issue entirely.
     """
     if host_data_disk_name is None:
         return "# (no host-data disk attached; host_dir uses today's bind mount or local fs)"
-    lima_mount = f"/mnt/lima-{host_data_disk_name}"
+    lima_mount = lima_host_data_disk_mount_path(host_data_disk_name)
     return f"""\
 # Wait for Lima to finish auto-mounting the additional btrfs disk.
 for _ in $(seq 1 60); do
@@ -235,23 +236,19 @@ if ! mountpoint -q {lima_mount}; then
     exit 1
 fi
 
-# Bind-mount the btrfs filesystem at the canonical host-volume path.
-mkdir -p {HOST_VOLUME_MOUNT_PATH}
-if ! mountpoint -q {HOST_VOLUME_MOUNT_PATH}; then
-    mount --bind {lima_mount} {HOST_VOLUME_MOUNT_PATH}
-fi
-# Persist the bind across reboots (idempotent).
-if ! grep -qE "[[:space:]]{HOST_VOLUME_MOUNT_PATH}[[:space:]]" /etc/fstab; then
-    echo "{lima_mount} {HOST_VOLUME_MOUNT_PATH} none bind 0 0" >> /etc/fstab
-fi
+# Open up the btrfs root so the Lima default (non-root) user can write to
+# host_dir without sudo (a fresh mkfs.btrfs leaves the root dir owned by
+# root:root with 0755). Mirrors the chmod 777 the script applies to /code.
+chmod 0777 {lima_mount}
 
-# Replace host_dir with a symlink to the btrfs-backed mount. ``ln -sfn``
-# alone won't replace an existing directory, so rm any real dir first.
+# Replace host_dir with a symlink to Lima's auto-mounted btrfs disk.
+# ``ln -sfn`` alone won't replace an existing directory, so rm any real
+# dir first. Idempotent across re-runs.
 if [ -L {host_dir} ] || [ ! -e {host_dir} ]; then
-    ln -sfn {HOST_VOLUME_MOUNT_PATH} {host_dir}
+    ln -sfn {lima_mount} {host_dir}
 else
     rm -rf {host_dir}
-    ln -sfn {HOST_VOLUME_MOUNT_PATH} {host_dir}
+    ln -sfn {lima_mount} {host_dir}
 fi"""
 
 

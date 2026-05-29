@@ -16,7 +16,7 @@ const { execSync, execFileSync } = require('child_process');
 const ROOT = path.resolve(__dirname, '..');
 const RESOURCES_DIR = path.join(ROOT, 'resources');
 
-const UV_VERSION = '0.7.12';
+const UV_VERSION = '0.11.15';
 const LIMA_VERSION = '2.1.1';
 
 function getPlatformArch() {
