@@ -1,14 +1,16 @@
-"""Persistence for the user's shared restic backup master password.
+"""Persistence for the user's shared restic backup master/recovery password.
 
 One passphrase is shared across all of a user's workspaces. It is
 established the first time the user picks master-password encryption (with
 the "save this password" box checked) and written, mode 0600, under the
 activated minds env's data dir -- ``~/.<minds-env-name>/backup_password``
 (``~/.minds/backup_password`` for the default env). On later workspaces
-minds reports only that one exists; it never re-displays the value and
-reads the file solely to inject it into the host's restic.env. Changing a
-saved password is intentionally not handled here (a separate future flow
-updates it across all workspaces at once).
+minds reports only that one exists; it never re-displays the value. The
+master password never enters a workspace: minds reads the file solely to
+``restic init`` each repository and authenticate adding that workspace's own
+random key, all from the minds machine. Changing a saved password is
+intentionally not handled here (a separate future flow updates it across all
+workspaces at once).
 """
 
 import os
