@@ -71,25 +71,14 @@ ARG CLAUDE_CODE_VERSION="2.1.141"
 RUN curl -fsSL https://claude.ai/install.sh > /tmp/install_claude.sh && ( if [ -n "$CLAUDE_CODE_VERSION" ]; then cat /tmp/install_claude.sh | bash -s "$CLAUDE_CODE_VERSION"; else cat /tmp/install_claude.sh | bash; fi && test -x /root/.local/bin/claude ) || ( cat /tmp/install_claude.sh && exit 1 )
 ENV CLAUDE_CODE_VERSION=${CLAUDE_CODE_VERSION}
 
-# Install Node.js, pinned to the version apps/minds/package.json's engines.node
-# field declares. Needed by Python tests that read the apps/minds ToDesktop
-# config (apps/minds/scripts/build_test.py evaluates apps/minds/todesktop.js
-# via `node -e`). Direct binary install -- exact-patch pin, matching the
-# project's exact-pin philosophy (apps/minds/.nvmrc + engines.node).
+# Install Node.js, pinned to apps/minds/package.json's engines.node. Needed
+# by Python tests that read apps/minds/todesktop.js via `node -e`.
 ARG NODE_VERSION="24.15.0"
-RUN ARCH=$(uname -m) && case "$ARCH" in \
-        x86_64) NODE_ARCH=x64 ;; \
-        aarch64) NODE_ARCH=arm64 ;; \
-        *) echo "Unsupported arch for Node install: $ARCH" >&2; exit 1 ;; \
-    esac && \
-    for attempt in 1 2 3 4 5; do \
-        curl -fsSL --retry 3 --retry-delay 5 --retry-connrefused \
-            "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-${NODE_ARCH}.tar.gz" \
-            | tar -xz -C /usr/local --strip-components=1 && break ; \
-        echo "Node download attempt $attempt failed, retrying in $((attempt * 5))s..." ; \
-        sleep $((attempt * 5)) ; \
-    done && \
-    node --version | grep -q "^v${NODE_VERSION}$"
+RUN ARCH=$(uname -m | sed 's/x86_64/x64/;s/aarch64/arm64/') && \
+    curl -fsSL --retry 5 --retry-delay 5 --retry-connrefused \
+        "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-${ARCH}.tar.gz" \
+        | tar -xz -C /usr/local --strip-components=1 && \
+    test -x /usr/local/bin/node
 ENV NODE_VERSION=${NODE_VERSION}
 
 # without this, there are some annoying bugs on modal's side with snapshotting
