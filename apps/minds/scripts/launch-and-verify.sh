@@ -32,5 +32,5 @@ log "FAIL: backend did not write events log within ${TIMEOUT_SECONDS}s"
 log "Minds processes still alive:"
 pgrep -afl '/Applications/minds.app/Contents/' || echo "  (none)"
 log "Recent macOS unified-log entries from the Minds process:"
-log show --process Minds --last 3m 2>/dev/null | tail -40 || true
+/usr/bin/log show --process Minds --last 3m 2>/dev/null | tail -40 || true
 exit 1
