@@ -99,8 +99,8 @@ This file is intentionally self-contained (stdlib + 3rd-party only, no monorepo 
   - `GET /buckets/{name}` -> bucket info (ownership check).
   - `DELETE /buckets/{name}` -> verify ownership; delete bucket (relay non-empty); cascade revoke tokens + delete key rows.
   - `POST /buckets/{name}/keys` -> verify ownership; mint token; record; return `KeyMaterial`.
-  - `GET /buckets/keys` (account-wide) and `GET /buckets/{name}/keys` (per bucket) -> list `KeyInfo` from the store.
-  - `DELETE /buckets/keys/{access_key_id}` -> verify the key's owner == caller; revoke token; delete row.
+  - `GET /bucket-keys` (account-wide) and `GET /buckets/{name}/keys` (per bucket) -> list `KeyInfo` from the store. (The account-wide route uses `/bucket-keys` rather than `/buckets/keys` to avoid a path collision with `/buckets/{name}`.)
+  - `DELETE /bucket-keys/{access_key_id}` -> verify the key's owner == caller; revoke token; delete row.
 - **Context wiring**: extend `get_ctx()` (or add a sibling cached factory) to build `HttpR2Ops` + `PostgresKeyStore` from env.
 
 ### Connector -- migration
@@ -150,7 +150,7 @@ Two manual prerequisites per tier before the bucket routes work. Capture both in
 Each phase ends in a working (if incomplete) system.
 
 1. **Connector R2 ops + bucket lifecycle (no keys).** Add models, naming helpers, `R2Ops`/`HttpR2Ops`, and `POST/GET/DELETE /buckets` (+ `GET /buckets/{name}`). Cap enforcement, ownership re-verify, non-empty relay. Mock `R2Ops` in tests. No key minting yet (bucket create returns bucket only, temporarily).
-2. **Connector key store + key endpoints.** Add `migrations/004_r2_keys.sql`, `KeyStore`/`PostgresKeyStore`/`InMemoryKeyStore`, token minting, `/buckets/{name}/keys` + `/buckets/keys` + `DELETE /buckets/keys/{id}`. Wire `bucket create` to mint the default key inline and `bucket destroy` to cascade.
+2. **Connector key store + key endpoints.** Add `migrations/004_r2_keys.sql`, `KeyStore`/`PostgresKeyStore`/`InMemoryKeyStore`, token minting, `/buckets/{name}/keys` + `/bucket-keys` + `DELETE /bucket-keys/{id}`. Wire `bucket create` to mint the default key inline and `bucket destroy` to cascade.
 3. **Plugin data types + client.** Add primitives, data_types, errors, and `ImbueCloudConnectorClient` methods with typed error mapping.
 4. **Plugin CLI.** Add `cli/buckets.py` and register it in `root.py`. Manually verify end-to-end against a real connector + real R2.
 5. **Docs, secret template, changelogs, migration note.** Update READMEs, `cloudflare.sh`, and write changelog entries.
