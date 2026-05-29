@@ -4,6 +4,38 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-05-28
+
+# Dropped redundant per-project ty/ruff ratchet tests
+
+Removed this project's `test_no_type_errors` and `test_no_ruff_errors` from its
+`test_ratchets.py`. ty resolves the uv workspace root and ruff (run from the repo
+root) both scan across projects, so the per-project copies just re-ran the same
+checks. The single repo-wide equivalents now live in `test_meta_ratchets.py`
+(`test_no_type_errors` and `test_no_ruff_errors`).
+
+No user-facing behavior change.
+
+## 2026-05-26
+
+- Pruned non-notable entries (test-only changes, internal refactors, and doc-only tweaks with no user-facing effect) from this project's CHANGELOG.md, per the new notable-only changelog policy.
+
+Rename `mngr_gemini` to `mngr_antigravity`; agent type `gemini` is replaced by `antigravity`. Google announced on 2026-05-19 that the Gemini CLI is being superseded by the Antigravity CLI (`agy`); the legacy request path turns off for paid-tier accounts on 2026-06-18. The plugin was never released, so this is a destructive rename with no shim. The new CLI is architecturally closer to Claude Code than to Gemini CLI: process name is `agy`, hook event names match Claude's (`SessionStart`, `PreToolUse`, `PostToolUse`, `SessionEnd`, `Stop`, `Notification`), and `--dangerously-skip-permissions` is the documented auto-allow flag. `auto_allow_permissions=True` is wired through that CLI flag rather than a permission hook. The first-launch "Do you trust this folder?" dialog is dismissed Claude-style (mirroring `mngr_claude`'s `interactively_dismiss_claude_dialogs`): under `mngr create --yes` or `auto_dismiss_dialogs=True` (per-agent-type opt-in, default `False`) the agent's `work_dir` is silently appended to `~/.gemini/antigravity-cli/settings.json::trustedWorkspaces`; in interactive shells mngr prompts via `click.confirm` before mutating the file; non-interactive shells without either opt-in raise `UserInputError`. There is no `GEMINI_CLI_TRUST_WORKSPACE` env-var analog in agy 1.0.0, so the user-tier settings file is the only place to register trust. `emit_common_transcript=True` (default) wires the JSONL transcripts agy writes to `~/.gemini/antigravity-cli/brain/<conv_id>/.system_generated/logs/transcript.jsonl` into mngr's common-transcript schema, scoped per-agent by grepping agy's own `--log-file` for `Created conversation <uuid>` lines. The readiness sentinel that `mngr_gemini` shipped is **not** re-introduced -- live testing showed agy loads `hooks.json` correctly but hook execution is gated behind the `json-hooks-enabled` experiment flag (Google-controlled); once the flag is GA the sentinel can come back.
+
+- `AntigravityAgentConfig.merge_with` follows mngr's new assign-by-default semantics: an override's `cli_args` replaces the base's (rather than concatenating). To opt back into additive layering, use the `__extend` operator with an explicit list value, e.g. `cli_args__extend = ["--verbose"]`; the string-shorthand form that the bare `cli_args` field accepts (which the validator splits via shlex) is not accepted by the `__extend` resolver. See the `mngr` changelog entry for the full breaking-change writeup.
+
+Update the Antigravity plugin to use the structured `TmuxWindowTarget` type for
+tmux pane targeting. `_send_enter_and_validate` now takes
+`tmux_target: TmuxWindowTarget` instead of a bare string, matching the
+`BaseAgent` API change in `libs/mngr` that fixes stale `WAITING` lifecycle
+state caused by tmux session-name prefix matching.
+
+Fix `antigravity_background_tasks.sh` to use the `=` exact-match prefix in its
+`tmux has-session` polling loop. Without `=`, the loop would never exit when an
+Antigravity agent's session was killed but a sibling session whose name shares
+this name as a prefix was still alive, leaking the transcript streamer and
+common-transcript converter for stopped agents.
+
 ## 2026-05-21
 
 Fix the intro in `UNABRIDGED_CHANGELOG.md` so it references the correct entries directory. The path was `changelog/<project>/` (which never existed); the actual layout is `<project_dir>/changelog/`.

@@ -1415,7 +1415,9 @@ def test_setup_command_context_raises_on_unknown_command_param_by_default(
     """Without MNGR_ALLOW_UNKNOWN_CONFIG, a typo in [commands.create] must raise."""
     # MNGR_PROJECT_CONFIG_DIR points directly at the directory containing settings.toml
     # (see resolve_project_config_dir in config/pre_readers.py).
-    (tmp_path / "settings.toml").write_text('[commands.create]\nbogus_typo_param = "x"\n')
+    (tmp_path / "settings.toml").write_text(
+        'is_allowed_in_pytest = true\n\n[commands.create]\nbogus_typo_param = "x"\n'
+    )
 
     monkeypatch.delenv("MNGR_ALLOW_UNKNOWN_CONFIG", raising=False)
     monkeypatch.setenv("MNGR_PROJECT_CONFIG_DIR", str(tmp_path))
@@ -1440,7 +1442,9 @@ def test_setup_command_context_warns_on_unknown_command_param_when_lax(
     log_warnings: list[str],
 ) -> None:
     """With MNGR_ALLOW_UNKNOWN_CONFIG=1, a typo in [commands.create] should warn, not raise."""
-    (tmp_path / "settings.toml").write_text('[commands.create]\nbogus_typo_param = "x"\n')
+    (tmp_path / "settings.toml").write_text(
+        'is_allowed_in_pytest = true\n\n[commands.create]\nbogus_typo_param = "x"\n'
+    )
 
     monkeypatch.setenv("MNGR_ALLOW_UNKNOWN_CONFIG", "1")
     monkeypatch.setenv("MNGR_PROJECT_CONFIG_DIR", str(tmp_path))
@@ -1453,3 +1457,28 @@ def test_setup_command_context_warns_on_unknown_command_param_when_lax(
     assert any("bogus_typo_param" in msg for msg in log_warnings), (
         f"Expected a warning mentioning the unknown param, got: {log_warnings}"
     )
+
+
+# =============================================================================
+# Tests for the narrowing guard on --setting overrides.
+# =============================================================================
+
+
+@pytest.mark.parametrize(
+    "flag_setting",
+    [
+        "allow_settings_key_assignment_narrowing=true",
+        "allow_settings_key_assignment_narrowing=false",
+        # Hyphenated spelling normalizes to the same field.
+        "allow-settings-key-assignment-narrowing=true",
+    ],
+)
+def test_apply_settings_to_config_rejects_setting_the_narrowing_flag(flag_setting: str, mngr_test_prefix: str) -> None:
+    """``--setting`` cannot set ``allow_settings_key_assignment_narrowing``: the
+    narrowing guard runs while loading the settings files and env vars, before
+    ``--setting`` is applied, so a ``--setting`` value would be misleading. It
+    raises a clear error pointing to the settings file / env var instead.
+    """
+    config = MngrConfig(prefix=mngr_test_prefix)
+    with pytest.raises(UserInputError, match="allow_settings_key_assignment_narrowing"):
+        apply_settings_to_config(config, (flag_setting,), frozenset())
