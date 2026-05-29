@@ -6,12 +6,18 @@ set -euo pipefail
 
 log() { printf '[reset] %s\n' "$*" >&2; }
 
-log "killing Minds processes"
+log "asking Minds to quit"
+osascript -e 'tell application "Minds" to quit' 2>/dev/null || true
+for _ in 1 2 3 4 5; do
+  pids=$(pgrep -f '/Applications/minds.app/Contents/' || true)
+  [[ -z "$pids" ]] && break
+  sleep 1
+done
 pids=$(pgrep -f '/Applications/minds.app/Contents/' || true)
-for pid in $pids; do kill "$pid" 2>/dev/null || true; done
-sleep 2
-pids=$(pgrep -f '/Applications/minds.app/Contents/' || true)
-for pid in $pids; do kill -9 "$pid" 2>/dev/null || true; done
+for pid in $pids; do
+  log "force-kill straggler $pid"
+  kill -9 "$pid" 2>/dev/null || true
+done
 
 if command -v limactl >/dev/null 2>&1; then
   log "stopping and deleting Lima VM instances"

@@ -1,0 +1,33 @@
+name: mac-runner reset
+
+on:
+  workflow_dispatch:
+    inputs:
+      app_zip_url:
+        description: 'ToDesktop .zip URL to download as a fresh minds.app. Leave empty to clean only.'
+        required: false
+        default: ''
+  push:
+    branches: [mngr/mac-runner]
+    paths: ['.github/workflows/mac-runner-reset.yml', 'apps/minds/scripts/mac-runner-reset.sh']
+
+concurrency:
+  group: mac-runner
+  cancel-in-progress: false
+
+jobs:
+  reset:
+    runs-on: [self-hosted, macOS, minds-runner]
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - name: run reset script
+        run: bash apps/minds/scripts/mac-runner-reset.sh "${{ inputs.app_zip_url }}"
+      - name: verify clean state
+        run: |
+          echo "--- ~/.minds ---"
+          ls -d "$HOME/.minds" 2>&1 || echo "  absent"
+          echo "--- /Applications/minds.app ---"
+          ls -d /Applications/minds.app 2>&1 || echo "  absent"
+          echo "--- Minds processes ---"
+          pgrep -x Minds && echo "  STILL RUNNING (bug)" || echo "  none"
