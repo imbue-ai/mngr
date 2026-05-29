@@ -206,6 +206,16 @@ def test_create_or_reuse_reuses_existing_bucket_with_fresh_key() -> None:
     assert key.secret_access_key.get_secret_value() == "SECRET"
 
 
+def test_create_or_reuse_reuses_on_structured_error_class_without_prose() -> None:
+    # The plugin reports the bucket-exists condition via the structured
+    # error_class field; reuse must trigger even if the prose detail never
+    # literally says "already exists".
+    cli = _make_cli(create_error_stderr='{"error": "conflict", "error_class": "ImbueCloudBucketExistsError"}')
+    bucket_name, _endpoint, _key = _create_or_reuse_bucket(cli, "a@b.com", "host-abc")
+    assert bucket_name == "u--host-abc"
+    assert cli.minted_key_names == ["host-abc"]
+
+
 def test_create_or_reuse_propagates_non_exists_errors() -> None:
     cli = _make_cli(create_error_stderr='{"error": "internal error"}')
     with pytest.raises(ImbueCloudCliError):

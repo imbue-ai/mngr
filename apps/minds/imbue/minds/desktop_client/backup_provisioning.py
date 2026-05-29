@@ -263,9 +263,16 @@ def _read_remote_file(
 
 
 def _is_bucket_already_exists_error(error: ImbueCloudCliError) -> bool:
-    """Return whether an imbue_cloud CLI error means the bucket already exists."""
+    """Return whether an imbue_cloud CLI error means the bucket already exists.
+
+    Prefers the structured signal: the plugin's CLI writes the raising
+    exception's class name into the stderr JSON ("error_class"), so a
+    ``ImbueCloudBucketExistsError`` is detectable independently of the
+    (re-wordable) human-readable detail. The prose ``already exists`` match
+    is kept as a fallback for older / differently-shaped error bodies.
+    """
     haystack = f"{error.stderr} {error}".lower()
-    return "already exists" in haystack
+    return "imbuecloudbucketexistserror" in haystack or "already exists" in haystack
 
 
 def _create_or_reuse_bucket(
