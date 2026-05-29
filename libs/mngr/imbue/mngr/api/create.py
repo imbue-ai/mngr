@@ -63,7 +63,7 @@ def _call_on_before_create_hooks(
     hookimpls = pm.hook.on_before_create.get_hookimpls()
     for hookimpl in hookimpls:
         # Call the hook with current args
-        result = cast(OnBeforeCreateArgs | None, hookimpl.function(args=current_args))
+        result = cast(OnBeforeCreateArgs | None, hookimpl.function(args=current_args, mngr_ctx=mngr_ctx))
         # If the hook returned a new args object, use it for subsequent hooks
         if result is not None:
             current_args = result
@@ -346,7 +346,7 @@ def _create_new_host(
 ) -> OnlineHostInterface:
     """Create a new host and write its environment variables."""
     with log_span("Calling on_before_host_create hooks"):
-        mngr_ctx.pm.hook.on_before_host_create(name=host_name, provider_name=target_host.provider)
+        mngr_ctx.pm.hook.on_before_host_create(name=host_name, provider_name=target_host.provider, mngr_ctx=mngr_ctx)
     with log_span(
         "Creating new host '{}' using provider '{}'",
         host_name,

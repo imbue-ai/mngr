@@ -37,10 +37,13 @@ class _AgentHostHookTracker:
         self.hook_data: dict[str, Any] = {}
 
     @hookimpl
-    def on_before_host_create(self, name: HostName, provider_name: ProviderInstanceName) -> None:
+    def on_before_host_create(
+        self, name: HostName, provider_name: ProviderInstanceName, mngr_ctx: MngrContext
+    ) -> None:
         self.hook_log.append("on_before_host_create")
         self.hook_data["before_host_create_name"] = name
         self.hook_data["before_host_create_provider"] = provider_name
+        self.hook_data["before_host_create_ctx"] = mngr_ctx
 
     @hookimpl
     def on_host_created(self, host: Any, mngr_ctx: MngrContext) -> None:
@@ -218,6 +221,7 @@ def test_create_hooks_receive_correct_data(
     # Verify on_before_host_create received correct args
     assert tracker.hook_data["before_host_create_name"] == HostName(LOCAL_HOST_NAME)
     assert tracker.hook_data["before_host_create_provider"] == ProviderInstanceName(LOCAL_PROVIDER_NAME)
+    assert tracker.hook_data["before_host_create_ctx"] is ctx
 
     # Verify on_agent_state_dir_created received the agent
     assert tracker.hook_data["state_dir_agent_name"] == agent_name
