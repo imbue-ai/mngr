@@ -1,8 +1,9 @@
 """Unit tests for the pure / cli-driven logic in backup_provisioning.
 
-The remote-injection (mngr exec) path is exercised by release tests against
-a real agent; here we cover the pure plan computation, the bucket
-idempotency branch, and the request->plan dispatch with a canned cli.
+These cover the pure plan computation, the bucket idempotency branch, and
+the request->plan dispatch with a canned cli. The remote-injection
+(``mngr exec``) path is not unit-tested here because it requires a live
+agent host.
 """
 
 import pytest
