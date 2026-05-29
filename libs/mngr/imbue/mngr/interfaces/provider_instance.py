@@ -21,7 +21,6 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import AgentNotFoundOnHostError
 from imbue.mngr.errors import HostAuthenticationError
 from imbue.mngr.errors import HostConnectionError
-from imbue.mngr.errors import HostNotFoundError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.data_types import AgentDetails
@@ -452,50 +451,42 @@ class ProviderInstanceInterface(MutableModel, ABC):
             try:
                 results[host_ref] = future.result()
             except HostConnectionError as e:
-                # One unreachable host must not poison the whole provider's
-                # enumeration. Without this, a single wedged container (sshd
-                # crashed, banner-reset, auth failure, ...) makes the discovery
-                # future raise, which bubbles up to _construct_and_discover_for_provider
-                # and is recorded as a per-provider error -- the resulting
-                # DISCOVERY_FULL event then reports agents=[] / hosts=[] for the
-                # whole provider, so mngr_forward's resolver knows zero agents
-                # and every workspace on the provider becomes unreachable through
-                # the plugin. Skipping the bad host preserves the rest.
+                # The host was reachable enough to be discovered, but enumerating
+                # its agents failed (sshd crashed, banner reset, auth failure,
+                # ...). Rather than let that bubble up to
+                # _construct_and_discover_for_provider -- which records a
+                # per-provider error and reports agents=[] / hosts=[] for the
+                # WHOLE provider, making every workspace on it unreachable via
+                # mngr_forward -- recover the host's agents from the provider's
+                # offline view.
                 #
-                # Mirror get_host_and_agent_details' on_connection_error call so
-                # providers that cache per-host state (docker's container cache,
-                # modal/lima/vps_docker host caches) drop the wedged entry --
-                # otherwise the next discovery cycle keeps re-hitting the same
-                # stale handle.
+                # First mirror get_host_and_agent_details' on_connection_error
+                # call so providers that cache per-host state (docker's container
+                # cache, modal/lima/vps_docker host caches) drop the wedged entry;
+                # otherwise the next discovery cycle keeps re-hitting the stale
+                # handle.
                 self.on_connection_error(host_ref.host_id)
-                # Before giving up on this host, try the provider's offline
-                # view: a docker container that is RUNNING but whose sshd
-                # has died still exposes its persisted agent records via
-                # the docker daemon (labels + on-host-volume data). Falling
-                # back here keeps the host's workspaces visible in
-                # discovery, matching the behavior of a fully-stopped
-                # container. Providers without an offline view
-                # (NotImplementedError) or without a persisted record for
-                # this host (HostNotFoundError) degrade to the legacy
-                # empty-list behavior.
-                try:
-                    offline_agents = self.to_offline_host(host_ref.host_id).discover_agents()
-                except (NotImplementedError, HostNotFoundError):
-                    logger.warning(
-                        "Skipping host {} ({}) during agent enumeration: {}",
-                        host_ref.host_id,
-                        host_ref.host_name,
-                        e,
-                    )
-                    results[host_ref] = []
-                else:
-                    logger.debug(
-                        "Falling back to offline agent enumeration for host {} ({}) after connection error: {}",
-                        host_ref.host_id,
-                        host_ref.host_name,
-                        e,
-                    )
-                    results[host_ref] = offline_agents
+                # The offline view recovers the host's persisted records: a docker
+                # container that is RUNNING but whose sshd has died still exposes
+                # its agent records via the docker daemon (labels + on-host-volume
+                # data), so its workspaces stay visible -- matching the behavior of
+                # a fully-stopped container.
+                #
+                # Any provider whose hosts can raise HostConnectionError is assumed
+                # to implement to_offline_host: the local provider never opens a
+                # connection (so it never reaches here), and every remote provider
+                # persists host/agent state. If to_offline_host nonetheless fails
+                # (no offline view, or no persisted record for a host we just
+                # discovered), that signals a broken invariant / corrupt state, so
+                # we let it propagate rather than masking it as an empty agent list.
+                offline_agents = self.to_offline_host(host_ref.host_id).discover_agents()
+                logger.debug(
+                    "Falling back to offline agent enumeration for host {} ({}) after connection error: {}",
+                    host_ref.host_id,
+                    host_ref.host_name,
+                    e,
+                )
+                results[host_ref] = offline_agents
         return results
 
     @abstractmethod
