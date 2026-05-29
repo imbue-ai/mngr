@@ -20,7 +20,6 @@ instead of silently following along.
 """
 
 import os
-import tomllib
 from pathlib import Path
 from typing import Final
 
@@ -30,6 +29,7 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.errors import ProcessError
 from imbue.minds.bootstrap import mngr_host_dir_for
 from imbue.minds.bootstrap import mngr_prefix_for
+from imbue.minds.bootstrap import read_active_profile_dir
 from imbue.minds.bootstrap import root_name_for_env_name
 from imbue.minds.envs.primitives import DevEnvName
 from imbue.minds.errors import MindError
@@ -48,22 +48,14 @@ class DockerCleanupError(MindError):
 def read_profile_user_id(mngr_host_dir: Path) -> str | None:
     """Read the active mngr profile's ``user_id``, or None if it can't be resolved.
 
-    The active profile id lives in ``<mngr_host_dir>/config.toml`` and the
-    user id lives at ``<mngr_host_dir>/profiles/<profile>/user_id``.
-    Mirrors the resolution in ``bootstrap._imbue_cloud_accounts_path``.
+    The active profile dir is resolved via
+    ``bootstrap.read_active_profile_dir`` and the user id lives at
+    ``<profile_dir>/user_id``.
     """
-    config_path = mngr_host_dir / "config.toml"
-    if not config_path.is_file():
+    profile_dir = read_active_profile_dir(mngr_host_dir)
+    if profile_dir is None:
         return None
-    try:
-        config_data = tomllib.loads(config_path.read_text())
-    except (OSError, tomllib.TOMLDecodeError) as e:
-        logger.warning("Could not read mngr config {}: {}", config_path, e)
-        return None
-    profile_id = config_data.get("profile")
-    if not isinstance(profile_id, str) or not profile_id:
-        return None
-    user_id_path = mngr_host_dir / "profiles" / profile_id / _USER_ID_FILENAME
+    user_id_path = profile_dir / _USER_ID_FILENAME
     if not user_id_path.is_file():
         return None
     try:
