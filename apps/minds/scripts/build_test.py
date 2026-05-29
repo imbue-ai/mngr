@@ -22,7 +22,9 @@ test so it runs on every branch.
 
 import json
 import plistlib
+import re
 import subprocess
+import zipfile
 from pathlib import Path
 
 import pytest
