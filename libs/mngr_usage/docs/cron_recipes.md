@@ -40,11 +40,11 @@ mngr usage --format json | jq -e '
 
 ## Use up an about-to-expire 5h window
 
-Create a dedicated agent once up front (`mngr create my-agent claude
---no-connect`) and let one cron job own its lifecycle from there: it starts the
-agent during the tail of a 5h window when there's budget to spare and the week is
-on pace, then stops it once the window rolls over or the week falls off pace.
-Letting it run one tick into the fresh window warms that window too.
+Set up a dedicated agent with its task first, then let one cron job own its
+lifecycle: it starts the agent during the tail of a 5h window when there's budget
+to spare and the week is on pace, then stops it once the window rolls over or the
+week falls off pace. Letting it run one tick into the fresh window warms that
+window too.
 
 ```bash
 #!/usr/bin/env bash
@@ -207,6 +207,9 @@ name="$(basename "$claimed" .md | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-
 mngr create "$name" claude --from ":$PROJECT_DIR" --label queue=live \
   --message-file "$claimed" --no-connect
 ```
+
+Finished agents are stopped and moved to `queue=in-review`; to see them, run
+`mngr list --label queue=in-review`.
 
 ## Scheduling
 
