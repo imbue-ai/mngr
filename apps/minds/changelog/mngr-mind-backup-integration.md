@@ -22,7 +22,7 @@ workspace. Enabling backups: resolve the repository + credentials, generate a
 random per-workspace password, `restic init` the repo with the master
 password (or empty for `no_password`), `restic key add` the random password,
 write the canonical `restic.env` to a 0600 minds-side file, and inject that
-file into the workspace. The `api_key` block must not set `RESTIC_PASSWORD`
+file into the workspace. The `manual` block must not set `RESTIC_PASSWORD`
 (minds assigns it).
 
 Backup setup runs asynchronously after the host is created (mirroring the
