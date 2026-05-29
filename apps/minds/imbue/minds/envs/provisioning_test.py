@@ -960,7 +960,9 @@ def test_destroy_env_tier_destroys_mngr_agents_first(_isolated_home: Path, _root
     agent_calls = [c for c in call_log["calls"] if c[0] == "destroy_mngr_agents"]
     assert [c[1] for c in agent_calls] == [("agent-8888", "agent-9999")]
     first_app_index = next(i for i, c in enumerate(call_log["calls"]) if c[0] == "stop_modal_app")
-    last_agent_index = next(i for i, c in reversed(list(enumerate(call_log["calls"]))) if c[0] == "destroy_mngr_agents")
+    last_agent_index = next(
+        i for i, c in reversed(list(enumerate(call_log["calls"]))) if c[0] == "destroy_mngr_agents"
+    )
     assert last_agent_index < first_app_index
 
 

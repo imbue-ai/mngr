@@ -76,6 +76,7 @@ def test_cleanup_env_state_container_skips_when_user_id_unresolved(
     cleanup_env_state_container(DevEnvName("staging"), parent_concurrency_group=_root_cg)
 
 
+@pytest.mark.acceptance
 @pytest.mark.docker
 @pytest.mark.timeout(60)
 def test_remove_state_container_absent_is_noop(_root_cg: ConcurrencyGroup) -> None:
@@ -87,6 +88,7 @@ def test_remove_state_container_absent_is_noop(_root_cg: ConcurrencyGroup) -> No
     )
 
 
+@pytest.mark.acceptance
 @pytest.mark.docker
 @pytest.mark.timeout(120)
 def test_remove_state_container_removes_real_container_and_volume(_root_cg: ConcurrencyGroup) -> None:
