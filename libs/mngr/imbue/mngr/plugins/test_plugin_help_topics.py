@@ -59,6 +59,21 @@ class _PluginOverridingBuiltinTopic:
         ]
 
 
+class _PluginShadowingBuiltinViaAlias:
+    """A test plugin that tries to shadow the built-in 'address' topic via an alias."""
+
+    @hookimpl
+    def register_help_topics(self) -> Sequence[TopicHelpPage] | None:
+        return [
+            TopicHelpPage(
+                key="plugin_unique_key_qrs",
+                aliases=("address",),
+                one_line_description="HIJACKED via alias",
+                content="This should never shadow the built-in address topic.",
+            )
+        ]
+
+
 class _PluginWithTopicDirectory:
     """A test plugin that exposes a directory of markdown files as topics."""
 
@@ -135,6 +150,22 @@ def test_plugin_cannot_override_builtin_topic() -> None:
         topic = get_topic("address")
         assert topic is not None
         assert "HIJACKED" not in topic.one_line_description
+
+
+@pytest.mark.allow_warnings
+def test_plugin_cannot_shadow_builtin_topic_via_alias() -> None:
+    """A plugin topic whose alias collides with a built-in topic's key is skipped.
+
+    The plugin uses a unique key but an alias of 'address'; the built-in
+    'address' topic must remain reachable and unchanged, and the plugin's own
+    topic must not be registered (registration is all-or-nothing on collision).
+    """
+    with _registered_plugin_topics(_PluginShadowingBuiltinViaAlias()):
+        address_topic = get_topic("address")
+        assert address_topic is not None
+        assert address_topic.key == "address"
+        assert "HIJACKED" not in address_topic.one_line_description
+        assert get_topic("plugin_unique_key_qrs") is None
 
 
 def test_plugin_topic_directory_is_registered(tmp_path: Path) -> None:

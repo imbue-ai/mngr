@@ -84,14 +84,18 @@ def preserve_topic_registry() -> Iterator[None]:
 
 
 def register_topic(topic: TopicHelpPage) -> bool:
-    """Register a topic page unless its key is already taken.
+    """Register a topic page unless any of its names is already taken.
 
-    Returns True if the topic was registered, or False if a topic with the same
-    key already exists (in which case nothing changes). This gives the
-    first-registered topic precedence on key collisions -- mngr registers its
-    built-in topics first so plugins cannot override them.
+    Returns True if the topic was registered, or False if its key or any of its
+    aliases collides with an already-registered key or alias (in which case
+    nothing changes -- registration is all-or-nothing, so no aliases are added
+    on a collision). This gives the first-registered topic precedence on
+    collisions -- mngr registers its built-in topics first so plugins cannot
+    override them, including by shadowing a built-in key or alias with one of
+    their own aliases.
     """
-    if topic.key in _topic_registry:
+    taken_names = set(_topic_registry) | set(_topic_alias_to_canonical)
+    if topic.key in taken_names or any(alias in taken_names for alias in topic.aliases):
         return False
     topic.register()
     return True
