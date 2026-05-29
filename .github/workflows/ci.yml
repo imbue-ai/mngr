@@ -387,7 +387,7 @@ jobs:
         run: uv sync --all-packages
 
       - name: Run tests that need Node
-        run: env PYTEST_MAX_DURATION_SECONDS=300 uv run pytest -m 'node_required and not release' --no-cov --cov-fail-under=0 -v --tb=short
+        run: env PYTEST_MAX_DURATION_SECONDS=300 uv run pytest --timeout 60 -m 'node_required and not release' --no-cov --cov-fail-under=0 -v --tb=short
 
   # Sibling to `test-docker` for the single minds Electron e2e test. Split
   # out because the test (~2 min end-to-end: docker pull + container start
