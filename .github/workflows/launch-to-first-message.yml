@@ -12,6 +12,7 @@ on:
     paths:
       - '.github/workflows/launch-to-first-message.yml'
       - 'apps/minds/scripts/launch-and-verify.sh'
+      - 'apps/minds/scripts/first-message-verify.sh'
       - 'apps/minds/scripts/mac-runner-reset.sh'
       - 'apps/minds/scripts/resolve-latest-todesktop-url.sh'
 
@@ -22,7 +23,7 @@ concurrency:
 jobs:
   verify:
     runs-on: [self-hosted, macOS, minds-runner]
-    timeout-minutes: 10
+    timeout-minutes: 25
     env:
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
     steps:
@@ -48,14 +49,20 @@ jobs:
         run: bash apps/minds/scripts/mac-runner-reset.sh "${{ steps.url.outputs.url }}"
       - name: launch and wait for backend
         run: bash apps/minds/scripts/launch-and-verify.sh
+      - name: first message round-trip
+        run: bash apps/minds/scripts/first-message-verify.sh
       - name: collect diagnostic artifacts on failure
         if: failure()
         run: |
           mkdir -p artifacts
           [ -d "$HOME/.minds/logs" ] && cp -R "$HOME/.minds/logs" artifacts/ || true
           [ -d "$HOME/.minds/events" ] && cp -R "$HOME/.minds/events" artifacts/ || true
+          [ -d "$HOME/.minds/mngr" ] && cp -R "$HOME/.minds/mngr"/*/events artifacts/agent-events 2>/dev/null || true
           log show --process Minds --last 5m 2>/dev/null > artifacts/macos-console.log || true
           ls -la "$HOME/.minds" 2>&1 > artifacts/minds-dir-listing.txt || true
+          for f in /tmp/first-message-*.json /tmp/first-message-*.txt /tmp/first-message-*.html; do
+            [ -f "$f" ] && cp "$f" artifacts/ 2>/dev/null || true
+          done
       - uses: actions/upload-artifact@v4
         if: failure()
         with:
