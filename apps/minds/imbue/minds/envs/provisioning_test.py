@@ -15,11 +15,11 @@ from imbue.minds.config.data_types import DeployLifecycleConfig
 from imbue.minds.config.data_types import DeploySecretsConfig
 from imbue.minds.config.data_types import MinContainersConfig
 from imbue.minds.config.data_types import ModalEnvStrategy
+from imbue.minds.envs.docker_cleanup import DockerCleanupError
 from imbue.minds.envs.local_store import client_config_exists
 from imbue.minds.envs.local_store import env_root_exists
 from imbue.minds.envs.local_store import read_client_config_file
 from imbue.minds.envs.local_store import read_secrets_file
-from imbue.minds.envs.docker_cleanup import DockerCleanupError
 from imbue.minds.envs.mngr_agent_cleanup import MngrAgentCleanupError
 from imbue.minds.envs.per_env_deploy import ModalDeployError
 from imbue.minds.envs.primitives import DevEnvName
