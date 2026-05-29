@@ -27,9 +27,18 @@ from imbue.mngr_imbue_cloud.data_types import LeaseResult
 from imbue.mngr_imbue_cloud.data_types import LeasedHostInfo
 from imbue.mngr_imbue_cloud.data_types import LiteLLMKeyInfo
 from imbue.mngr_imbue_cloud.data_types import LiteLLMKeyMaterial
+from imbue.mngr_imbue_cloud.data_types import R2BucketCreateResult
+from imbue.mngr_imbue_cloud.data_types import R2BucketInfo
+from imbue.mngr_imbue_cloud.data_types import R2KeyInfo
+from imbue.mngr_imbue_cloud.data_types import R2KeyMaterial
 from imbue.mngr_imbue_cloud.data_types import ServiceInfo
 from imbue.mngr_imbue_cloud.data_types import TunnelInfo
 from imbue.mngr_imbue_cloud.errors import ImbueCloudAuthError
+from imbue.mngr_imbue_cloud.errors import ImbueCloudBucketError
+from imbue.mngr_imbue_cloud.errors import ImbueCloudBucketExistsError
+from imbue.mngr_imbue_cloud.errors import ImbueCloudBucketLimitError
+from imbue.mngr_imbue_cloud.errors import ImbueCloudBucketNotEmptyError
+from imbue.mngr_imbue_cloud.errors import ImbueCloudBucketNotFoundError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudConnectorError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudKeyError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudLeaseUnavailableError
@@ -466,6 +475,125 @@ class ImbueCloudConnectorClient(MutableModel):
             timeout=self.timeout_seconds,
         )
         self._check(response, ImbueCloudTunnelError)
+
+    # ------------------------------------------------------------------
+    # Buckets (R2)
+    # ------------------------------------------------------------------
+
+    def _check_bucket(self, response: httpx.Response) -> Any:
+        """Validate a bucket-route response, mapping status codes to typed errors."""
+        if response.status_code in (200, 201, 204):
+            if not response.content:
+                return {}
+            try:
+                return response.json()
+            except ValueError as exc:
+                raise ImbueCloudBucketError(f"Connector returned non-JSON response: {response.text[:200]}") from exc
+        if response.status_code in (401, 403):
+            raise ImbueCloudAuthError(f"Unauthenticated ({response.status_code}): {response.text[:300]}")
+        detail = _detail_from_response(response)
+        if response.status_code == 404:
+            raise ImbueCloudBucketNotFoundError(detail)
+        if response.status_code == 409:
+            lowered = detail.lower()
+            if "not empty" in lowered:
+                raise ImbueCloudBucketNotEmptyError(detail)
+            if "maximum" in lowered:
+                raise ImbueCloudBucketLimitError(detail)
+            if "already exists" in lowered:
+                raise ImbueCloudBucketExistsError(detail)
+            raise ImbueCloudBucketError(detail)
+        raise ImbueCloudBucketError(f"Connector error {response.status_code}: {detail}")
+
+    def create_bucket(self, access_token: SecretStr, name: str, access: str) -> R2BucketCreateResult:
+        response = httpx.post(
+            self._url("/buckets"),
+            headers=self._bearer(access_token),
+            json={"name": name, "access": access},
+            timeout=KEY_OP_TIMEOUT_SECONDS,
+        )
+        return R2BucketCreateResult.model_validate(self._check_bucket(response))
+
+    def list_buckets(self, access_token: SecretStr) -> list[R2BucketInfo]:
+        response = httpx.get(
+            self._url("/buckets"),
+            headers=self._bearer(access_token),
+            timeout=self.timeout_seconds,
+        )
+        body = self._check_bucket(response)
+        if not isinstance(body, list):
+            return []
+        return [R2BucketInfo.model_validate(entry) for entry in body if isinstance(entry, dict)]
+
+    def get_bucket_info(self, access_token: SecretStr, name: str) -> R2BucketInfo:
+        response = httpx.get(
+            self._url(f"/buckets/{name}"),
+            headers=self._bearer(access_token),
+            timeout=self.timeout_seconds,
+        )
+        return R2BucketInfo.model_validate(self._check_bucket(response))
+
+    def destroy_bucket(self, access_token: SecretStr, name: str) -> None:
+        response = httpx.delete(
+            self._url(f"/buckets/{name}"),
+            headers=self._bearer(access_token),
+            timeout=KEY_OP_TIMEOUT_SECONDS,
+        )
+        self._check_bucket(response)
+
+    def create_bucket_key(
+        self,
+        access_token: SecretStr,
+        name: str,
+        alias: str | None,
+        access: str,
+    ) -> R2KeyMaterial:
+        body: dict[str, Any] = {"access": access}
+        if alias is not None:
+            body["alias"] = alias
+        response = httpx.post(
+            self._url(f"/buckets/{name}/keys"),
+            headers=self._bearer(access_token),
+            json=body,
+            timeout=KEY_OP_TIMEOUT_SECONDS,
+        )
+        return R2KeyMaterial.model_validate(self._check_bucket(response))
+
+    def list_bucket_keys(self, access_token: SecretStr, name: str | None) -> list[R2KeyInfo]:
+        """List keys for one bucket (``name`` set) or across all the caller's buckets (``name`` None)."""
+        path = "/bucket-keys" if name is None else f"/buckets/{name}/keys"
+        response = httpx.get(
+            self._url(path),
+            headers=self._bearer(access_token),
+            timeout=self.timeout_seconds,
+        )
+        body = self._check_bucket(response)
+        if not isinstance(body, list):
+            return []
+        return [R2KeyInfo.model_validate(entry) for entry in body if isinstance(entry, dict)]
+
+    def destroy_bucket_key(self, access_token: SecretStr, access_key_id: str) -> None:
+        response = httpx.delete(
+            self._url(f"/bucket-keys/{access_key_id}"),
+            headers=self._bearer(access_token),
+            timeout=KEY_OP_TIMEOUT_SECONDS,
+        )
+        self._check_bucket(response)
+
+
+def _detail_from_response(response: httpx.Response) -> str:
+    """Extract the connector's ``detail`` error message, falling back to the raw body."""
+    try:
+        body = response.json()
+    except ValueError:
+        return response.text[:300]
+    if isinstance(body, dict):
+        detail = body.get("detail")
+        if isinstance(detail, str):
+            return detail
+        if detail is not None:
+            return str(detail)
+    return response.text[:300]
 
 
 def _parse_tunnel_info(raw: dict[str, Any]) -> TunnelInfo:
