@@ -27,6 +27,9 @@ jobs:
       - name: minimal node_modules for the CLI
         working-directory: apps/minds
         run: pnpm install --frozen-lockfile --ignore-scripts
+      - name: stub resources/ so todesktop.json validation passes
+        working-directory: apps/minds
+        run: mkdir -p resources
       - name: list builds (table)
         working-directory: apps/minds
         run: pnpm exec todesktop builds --count ${{ inputs.count || '5' }} --exit
