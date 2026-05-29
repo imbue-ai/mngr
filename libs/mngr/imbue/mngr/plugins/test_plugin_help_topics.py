@@ -97,7 +97,7 @@ class _PluginShadowingBuiltinViaAlias:
 
 
 class _PluginWithDocBackedTopic:
-    """A test plugin whose topic body comes from a markdown file (body_path)."""
+    """A test plugin whose topic body comes from a markdown file (DocFile)."""
 
     def __init__(self, body_path: Path) -> None:
         self._body_path = body_path
@@ -197,7 +197,7 @@ def test_plugin_cannot_shadow_builtin_topic_via_alias() -> None:
 
 
 def test_plugin_doc_backed_topic_is_registered(tmp_path: Path) -> None:
-    """A plugin can contribute a topic whose body is a markdown file (body_path)."""
+    """A plugin can contribute a topic whose body is a markdown file (DocFile)."""
     body = tmp_path / "from_dir_topic.md"
     body.write_text("# Directory Topic\n\nFrom a file.")
     with _registered_plugin_topics(_PluginWithDocBackedTopic(body)):
