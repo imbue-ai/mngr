@@ -1,0 +1,1 @@
+- The tutorial-tied e2e tests under `libs/mngr/imbue/mngr/e2e/` (the ones with `write_tutorial_block()` calls corresponding to blocks in `mega_tutorial.sh`) have moved into a `tutorial/` subdirectory, so other e2e tests can live at the top level without the tutorial-matcher script (and other tools) treating them as tutorial gaps.
