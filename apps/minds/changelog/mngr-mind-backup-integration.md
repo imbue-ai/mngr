@@ -44,7 +44,11 @@ backups stay recoverable.
 The Projects page now shows each project's backup status (Backing up / Backed
 up N ago / No backups / Unknown), fetched once on load from a new
 `/api/backup-status` route that queries restic per project from the minds
-machine.
+machine. While that request is in flight each tile shows "Checking backups…",
+and a freshly-created workspace with no backups yet shows "Created N ago"
+(for the first 75 minutes after creation) instead of "No backups", so a brand
+new project doesn't look alarming before its first backup has had a chance to
+run. The route includes each workspace's creation time for this.
 
 New `BackupProvider` / `BackupEncryptionMethod` primitives; new
 `mngr imbue_cloud bucket ...` wrappers on the imbue_cloud CLI client.

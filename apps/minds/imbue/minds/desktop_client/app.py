@@ -9,6 +9,7 @@ import threading
 from collections.abc import AsyncGenerator
 from collections.abc import Mapping
 from contextlib import asynccontextmanager
+from datetime import datetime
 from pathlib import Path
 from typing import Annotated
 from typing import Any
@@ -411,10 +412,20 @@ def _handle_backup_status_api(
     root_concurrency_group: ConcurrencyGroup | None = request.app.state.root_concurrency_group
     agent_ids = backend_resolver.list_known_workspace_ids()
     status_by_agent_id = compute_backup_status_for_workspaces(paths, agent_ids, parent_cg=root_concurrency_group)
+    # Workspace creation time lets the landing page show "Created N ago" instead
+    # of a scary "No backups" for a freshly-created, not-yet-backed-up workspace.
+    create_time_by_agent_id: dict[str, datetime] = {}
+    for agent_id in agent_ids:
+        display_info = backend_resolver.get_agent_display_info(agent_id)
+        if display_info is not None and display_info.create_time is not None:
+            create_time_by_agent_id[str(agent_id)] = display_info.create_time
     payload = {
         agent_id: {
             "state": str(status.state),
             "last_success_at": status.last_success_at.isoformat() if status.last_success_at is not None else None,
+            "created_at": (
+                create_time_by_agent_id[agent_id].isoformat() if agent_id in create_time_by_agent_id else None
+            ),
         }
         for agent_id, status in status_by_agent_id.items()
     }

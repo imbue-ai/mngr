@@ -318,12 +318,18 @@
       // queries restic per project from the minds machine) and rendered into
       // each row's backup badge. Best-effort -- failures just leave the badge
       // hidden.
+      var BACKUP_BADGE_BASE = 'landing-backup-badge inline-flex items-center px-2 py-0.5 rounded text-xs font-medium ';
+      // Window after creation during which a not-yet-backed-up workspace shows
+      // "Created N ago" instead of "No backups" -- enough time for the first
+      // backup to run (or for the user to do anything at all).
+      var BACKUP_RECENT_CREATE_MS = 75 * 60 * 1000;
+      var BACKUP_CHECKING_TEXT = 'Checking backups…';
+
       function applyBackupBadge(agentId, status) {
         var row = getRow(agentId);
         if (!row) return;
         var badge = row.querySelector('.landing-backup-badge');
         if (!badge) return;
-        var base = 'landing-backup-badge inline-flex items-center px-2 py-0.5 rounded text-xs font-medium ';
         var state = status && status.state;
         var text = '';
         var tone = 'bg-zinc-100 text-zinc-500';
@@ -336,19 +342,47 @@
         } else if (state === 'UNKNOWN') {
           text = 'Backup status unknown'; tone = 'bg-zinc-100 text-zinc-600';
         } else {
-          text = 'No backups'; tone = 'bg-zinc-100 text-zinc-500';
+          // No backups configured. For a freshly-created workspace, show how
+          // long ago it was created rather than a scary "No backups".
+          var createdMs = status && status.created_at ? Date.parse(status.created_at) : NaN;
+          if (!isNaN(createdMs) && (Date.now() - createdMs) < BACKUP_RECENT_CREATE_MS) {
+            text = 'Created ' + relativeAgo(status.created_at); tone = 'bg-zinc-100 text-zinc-500';
+          } else {
+            text = 'No backups'; tone = 'bg-zinc-100 text-zinc-500';
+          }
         }
         badge.textContent = text;
-        badge.className = base + tone;
+        badge.className = BACKUP_BADGE_BASE + tone;
+      }
+
+      function showBackupChecking() {
+        document.querySelectorAll('.landing-backup-badge').forEach(function (badge) {
+          badge.textContent = BACKUP_CHECKING_TEXT;
+          badge.className = BACKUP_BADGE_BASE + 'bg-zinc-100 text-zinc-500';
+        });
+      }
+
+      function clearBackupChecking() {
+        // Drop any still-pending placeholder (no status arrived for that row, or
+        // the fetch failed) rather than leaving "Checking backups…" stuck.
+        document.querySelectorAll('.landing-backup-badge').forEach(function (badge) {
+          if (badge.textContent === BACKUP_CHECKING_TEXT) {
+            badge.textContent = '';
+            badge.className = 'landing-backup-badge hidden inline-flex items-center px-2 py-0.5 rounded text-xs font-medium';
+          }
+        });
       }
 
       function loadBackupStatus() {
+        showBackupChecking();
         fetch('/api/backup-status').then(function (response) {
           return response.ok ? response.json() : {};
         }).then(function (data) {
           Object.keys(data).forEach(function (agentId) { applyBackupBadge(agentId, data[agentId]); });
+          clearBackupChecking();
         }).catch(function (err) {
           console.error('Backup status fetch failed:', err);
+          clearBackupChecking();
         });
       }
       loadBackupStatus();
