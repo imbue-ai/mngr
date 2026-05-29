@@ -30,7 +30,6 @@ import shlex
 from collections.abc import Sequence
 from enum import auto
 from pathlib import Path
-from typing import Final
 
 from fastapi import Request
 from fastapi.responses import HTMLResponse
@@ -38,10 +37,8 @@ from fastapi.responses import Response
 from loguru import logger
 from pydantic import Field
 
-from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
-from imbue.minds.config.data_types import MNGR_BINARY
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClient
@@ -166,7 +163,40 @@ def _resolve_workspace_name(
     return info.agent_name if info else fallback
 
 
-_MNGR_LIST_FALLBACK_TIMEOUT_SECONDS: Final[float] = 15.0
+def _resolve_host_id(
+    backend_resolver: BackendResolverInterface,
+    agent_id: AgentId,
+) -> HostId | None:
+    """Resolve the host an agent runs on, or ``None`` when discovery hasn't caught up.
+
+    Latchkey permissions are stored per-host (see :func:`permissions_path_for_host`):
+    every agent on the same host shares the same gateway wiring and the
+    same ``latchkey_permissions.json``. The handler maps the incoming
+    agent_id (carried by the permission request event) to its host_id
+    via the backend resolver, which has the discovery-stream view of
+    which agents live on which hosts. Returns ``None`` when the host
+    id isn't known yet (e.g. agent freshly created and discovery
+    stream hasn't pushed an update) or when the resolver reports the
+    placeholder ``"localhost"`` string used by static / in-memory
+    backend resolvers in tests.
+    """
+    info = backend_resolver.get_agent_display_info(agent_id)
+    if info is None:
+        return None
+    try:
+        return HostId(info.host_id)
+    except ValueError:
+        # Static / in-memory resolvers (e.g. ``StaticBackendResolver``
+        # used by tests) report ``"localhost"`` here; that does not
+        # match the ``host-<32 hex>`` HostId format. Treat it as
+        # "unknown host" so callers skip the existing-grants lookup
+        # rather than crash on every dialog render.
+        logger.debug(
+            "Backend resolver reported non-HostId host {!r} for agent {}; treating as unknown",
+            info.host_id,
+            agent_id,
+        )
+        return None
 
 
 def _render_unknown_scope_page(request_id: str, scope: str) -> Response:
@@ -381,78 +411,6 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
         )
         return message, response_event
 
-    # -- Host resolution -----------------------------------------------------
-
-    def _resolve_host_id(self, backend_resolver: BackendResolverInterface, agent_id: AgentId) -> HostId | None:
-        """Resolve the host an agent runs on, or ``None`` when no provider knows it.
-
-        Latchkey permissions are stored per-host (see
-        :func:`permissions_path_for_host`): every agent on a host shares
-        the same gateway wiring and ``latchkey_permissions.json``. On a
-        cache miss -- the discovery stream lags for agents created after
-        subscription -- fall back to ``mngr list`` for an authoritative
-        answer. A non-``HostId`` placeholder (the static resolver's
-        ``"localhost"``) is treated as unknown so callers skip the
-        existing-grants lookup rather than mis-key state.
-        """
-        info = backend_resolver.get_agent_display_info(agent_id)
-        if info is None:
-            return self._resolve_host_id_via_mngr_list(agent_id)
-        try:
-            return HostId(info.host_id)
-        except ValueError:
-            logger.debug(
-                "Backend resolver reported non-HostId host {!r} for agent {}; treating as unknown",
-                info.host_id,
-                agent_id,
-            )
-            return None
-
-    def _resolve_host_id_via_mngr_list(self, agent_id: AgentId) -> HostId | None:
-        """Authoritative agent_id -> host_id lookup via ``mngr list --format json``.
-
-        ``--on-error continue`` keeps one unreachable provider from
-        collapsing the answer for agents on reachable providers. Tests
-        override this with a concrete stub so the unit suite never shells
-        out.
-        """
-        cg = ConcurrencyGroup(name="mngr-list-host-resolve")
-        with cg:
-            result = cg.run_process_to_completion(
-                command=[MNGR_BINARY, "list", "--format", "json", "--on-error", "continue"],
-                timeout=_MNGR_LIST_FALLBACK_TIMEOUT_SECONDS,
-                is_checked_after=False,
-            )
-        if result.is_timed_out:
-            logger.warning("mngr list fallback for agent {} timed out", agent_id)
-            return None
-        if result.returncode != 0:
-            logger.warning(
-                "mngr list fallback for agent {} exited {}: {}",
-                agent_id,
-                result.returncode,
-                result.stderr.strip()[-500:],
-            )
-            return None
-        try:
-            payload = json.loads(result.stdout)
-        except json.JSONDecodeError as e:
-            logger.warning("mngr list fallback for agent {} returned non-JSON: {}", agent_id, e)
-            return None
-        target = str(agent_id)
-        for agent in payload.get("agents", ()):
-            if agent.get("id") != target:
-                continue
-            host = agent.get("host") or {}
-            raw_host_id = host.get("id")
-            if not isinstance(raw_host_id, str):
-                return None
-            try:
-                return HostId(raw_host_id)
-            except ValueError:
-                return None
-        return None
-
     # -- RequestEventHandler interface ---------------------------------------
 
     def handles_request_type(self) -> str:
@@ -495,7 +453,7 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
 
         parsed_id = AgentId(req_event.agent_id)
         ws_name = _resolve_workspace_name(backend_resolver, parsed_id, fallback=req_event.agent_id)
-        host_id = self._resolve_host_id(backend_resolver, parsed_id)
+        host_id = _resolve_host_id(backend_resolver, parsed_id)
         pre_checked = self._initial_checked_permissions(host_id, service_info, req_event.permissions)
 
         # Match ``grant()``: ``latchkey auth browser`` runs only when
@@ -550,7 +508,7 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
         request_event_id = str(req_event.event_id)
         parsed_agent_id = AgentId(req_event.agent_id)
         backend_resolver: BackendResolverInterface = request.app.state.backend_resolver
-        host_id = self._resolve_host_id(backend_resolver, parsed_agent_id)
+        host_id = _resolve_host_id(backend_resolver, parsed_agent_id)
         if host_id is None:
             return _json_error(
                 f"Could not resolve host for agent {parsed_agent_id}; cannot apply grant.",
