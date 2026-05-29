@@ -253,6 +253,15 @@ def _discover_agents_on_host(
     host_id: HostId,
 ) -> list[DiscoveredAgent]:
     """Discover agents on a host, disconnecting afterward."""
+    # FIXME: wrap this in a bounded retry (e.g. tenacity) so a *transient*
+    # connection failure (timeout, connection refused, banner reset) is retried
+    # here rather than immediately surfacing to the caller. The retry predicate
+    # must NOT retry permanent failures (HostAuthenticationError / bad key) --
+    # those should fail fast. This is the right layer for it: retrying here means
+    # a brief network blip never reaches discover_hosts_and_agents' offline
+    # fallback at all, which matters most for providers without an offline view
+    # (e.g. SSH), where a transient blip would otherwise propagate as a
+    # ProviderDiscoveryError.
     with connected_host(provider, host_id) as host:
         return host.discover_agents()
 
