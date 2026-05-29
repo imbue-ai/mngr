@@ -13,6 +13,13 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Changed: Added `--run-name` flag to override the auto-generated run name.
 - Changed: HTML report is now mirrored to `s3://int8-shared-internal/tmr-reports/<run>.html` (us-west-2) on every regeneration when AWS credentials are set; the public URL `http://go/shared/tmr-reports/<run>.html` is printed and emitted as a structured `report_url` event.
 - Changed: `tmr_role` agent label (`testing` / `snapshotter` / `integrator`) replaces the previous name-prefix matching for filtering integrator agents during `--reintegrate`; derived directly from `AgentKind` which gained a `SNAPSHOTTER` variant.
+- Changed: Restructured as a thin recipe on top of the new `mngr_mapreduce` framework — all agent launching / polling / extraction code moves out, and TMR is expressed as a `TestMapReduceRecipe` in `imbue.mngr_tmr.recipe`. The `mngr tmr` CLI surface is unchanged for users, but server-side labels are renamed to `mapreduce_role` / `mapreduce_run_name` and the outputs-archive path is simplified to `plugin/mapreduce/outputs.tar.gz` — agents from prior TMR runs are not discoverable by this version (drain them with the prior `mngr` build first).
+- Changed: Integrator now runs on the same `--provider` as the testing agents and reuses any snapshot they built, so on Modal (or any remote provider) it spins up as quickly as the test agents do instead of running locally; it publishes its results the same way testing agents do (packing `test_output/` + `branch.bundle` into `outputs.tar.gz`) so the orchestrator pulls and applies the integrated branch through the same volume-based path.
+- Changed: Unified integrator code path across providers (including local) — the orchestrator rsyncs every testing agent's extracted outputs into `<work_dir>/.tmr_inputs/` on the integrator host, and the integrator prompt walks each subdirectory and cherry-picks the qualifying bundles. To make that work, local testing agents now use `GIT_MIRROR` transfer mode instead of `GIT_WORKTREE`, so branches surface in the source repo only via the published bundle (slightly slower locally, but the unified code path makes the local provider a meaningful proxy for the remote one).
+
+### Removed
+
+- Removed: BREAKING — CLI flags `--integrator-provider`, `--integrator-type`, `--integrator-template`, and `--use-snapshot` are gone; pass `--provider` once for both testing agents and the integrator, and snapshot building is now automatic whenever the provider supports it. `--snapshot <ID>` still works for reusing an existing snapshot; `--integrator-timeout` is unchanged.
 
 ### Fixed
 

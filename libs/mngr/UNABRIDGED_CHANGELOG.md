@@ -4,6 +4,120 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-05-28
+
+# `is_allowed_in_pytest` now defaults to False, and the `MNGR_ALLOW_PYTEST` escape hatch is gone
+
+The `is_allowed_in_pytest` config field now defaults to `False` (previously
+`True`). During a pytest run, `load_config` refuses to run when a config file is
+loaded that does not set `is_allowed_in_pytest = true` -- and every config layer
+(user/project/local) is checked individually, so a real config can't ride in
+under a test config that opts in. If no config file is picked up at all, there
+is nothing to protect against and mngr runs normally. This makes the guard
+secure by default: a real config (the developer's `~/.mngr` or the repo's
+`.mngr/settings.toml`) loaded by a poorly-scoped test now trips the guard
+instead of being used to perform real operations, while configs written
+specifically for tests opt in explicitly.
+
+The `MNGR_ALLOW_PYTEST=1` environment variable, which used to bypass the guard
+entirely, has been removed. It had a single user, and the existence of such a
+variable was not worth the risk of it being reached for as a quick bypass
+instead of properly fixing a test with a leaky environment.
+
+# Corrected `is_error_reporting_enabled` config field description
+
+Separately, the `is_error_reporting_enabled` field description was out of date
+(it described prompting to file GitHub issues); it now matches the actual
+behavior -- suggesting a diagnostic agent on an unexpected interactive error.
+
+## Clearer settings-narrowing errors
+
+- The "settings narrowing detected" error now names **both** implicated layers for each offending key: the file doing the (narrowing) assignment and the lower-precedence file whose value would be dropped. Each side shows the resolved file path and the matching `mngr config set --scope <user|project|local>` flag, so it is immediately clear which configs conflict (instead of just an opaque layer label and the dotted key). The `MNGR__*` env-var layer is named as such (it has no `config set` scope).
+- `--setting allow_settings_key_assignment_narrowing=...` is now rejected with a clear error. That flag controls the narrowing guard, which runs while the settings files and env vars are loaded — before `--setting` is applied — so a `--setting` value could not take effect there. The error points you to set it in a `settings.toml` or via `MNGR__ALLOW_SETTINGS_KEY_ASSIGNMENT_NARROWING=true` instead. (Previously the narrowing error misleadingly suggested `--setting` as a remedy, and a `--setting` value for the flag was silently accepted without affecting that guard.)
+
+### Restructure `mngr push` and `mngr pull` into `mngr rsync` and `mngr git push`/`mngr git pull`
+
+The experimental `mngr push` and `mngr pull` commands combined three different
+primitives (rsync, git push, git pull) behind `--sync-mode={files,git}` and
+`--rsync-only` flags. They are replaced by three thin primitives that each wrap
+a single operation:
+
+- `mngr rsync SOURCE DESTINATION` — wraps rsync. Exactly one of `SOURCE` /
+  `DESTINATION` must reference a remote agent or host; the other must be a
+  local path. Local-to-local and remote-to-remote transfers are rejected.
+- `mngr git push TARGET [-- GIT_ARGS...]` — thin wrapper around `git push`
+  from the current working directory's repo to a remote agent or host's repo.
+  Anything after `--` is passed verbatim to the underlying `git push`.
+- `mngr git pull SOURCE [-- GIT_ARGS...]` — thin wrapper around `git pull`
+  from a remote agent or host's repo into the current working directory's
+  repo. Anything after `--` is passed verbatim to the underlying `git pull`.
+
+The git push/pull commands are thin pass-through wrappers: mngr resolves the
+endpoint, builds the SSH URL with mngr's managed credentials, sets
+`receive.denyCurrentBranch=updateInstead` on push targets, and adds a
+`safe.directory` entry — then runs vanilla `git push` / `git pull` with any
+flags the user supplies after `--`. The mngr-side flags
+`--source-branch`/`--target-branch`/`--mirror`/`--uncommitted-changes`/`--dry-run`
+are gone; use the corresponding git flags directly (`feature:main` refspec
+syntax, `--force --tags refs/heads/*:refs/heads/*` for a mirror push,
+`--dry-run`, `--rebase`, etc.).
+
+`mngr push` and `mngr pull` are removed (no compatibility shim).
+
+API-level changes in `imbue.mngr.api.sync`: `pull_files`/`push_files`/`pull_git`/`push_git`
+are replaced by `rsync_from_remote`, `rsync_to_remote`, `git_pull`, and
+`git_push`. There is also a top-level `rsync(source_host, source_path,
+destination_host, destination_path, ...)` for the two-endpoint shape used by
+the CLI. `git_push`/`git_pull` now take an `extra_args: Sequence[str]`
+parameter and have no structured return value (raise `GitSyncError` on
+failure). The `SyncMode` enum, `GitSyncResult`, and `NotAGitRepositoryError`
+are gone; `SyncFilesResult` is renamed to `RsyncResult`.
+
+# Offload pin bump to v0.9.6
+
+Bumped the offload version baked into `libs/mngr/imbue/mngr/resources/Dockerfile`
+from `0.9.5` to `0.9.6` to keep the in-image offload binary in lockstep
+with the CI pin. v0.9.6's headline feature is the new
+`offload run --override-image-id <ID>` CLI flag (Modal provider only),
+which lets a test run skip offload's image-setup pipeline entirely and
+boot from a pre-built Modal image. See
+https://github.com/imbue-ai/offload/releases/tag/v0.9.6 for the full
+release notes.
+
+# Dropped redundant per-project ty/ruff ratchet tests
+
+Removed this project's `test_no_type_errors` and `test_no_ruff_errors` from its
+`test_ratchets.py`. ty resolves the uv workspace root and ruff (run from the repo
+root) both scan across projects, so the per-project copies just re-ran the same
+checks. The single repo-wide equivalents now live in `test_meta_ratchets.py`
+(`test_no_type_errors` and `test_no_ruff_errors`).
+
+No user-facing behavior change.
+
+## 2026-05-27
+
+## Settings narrowing safety net: two false-positive fixes
+
+- A brand-new `[create_templates.<name>]` block whose only ``<opt>__extend = [...]`` entry was introduced in a single layer used to silently lose its `__extend` suffix at config-load time (`resolve_extends` resolved against a `None` base lookup and stored a bare assign). At `mngr create --template <name>` time the option was then treated as a bare assign and tripped the narrowing guard against the create command's runtime params, even though the user had written `__extend`. The suffix is now preserved verbatim inside a template's options when the base has nothing to extend, so `apply_create_template` can still apply it as an extend against the runtime params.
+- `agent_types.<name>.cli_args = "..."` (string form) used to be shell-tokenized into a tuple before the narrowing check ran, so two layers that each supplied a string with different tokens tripped the narrowing guard against each other's individual tokens. Strings represent a coherent single value (scalar replacement intent), not an aggregate, so the narrowing check now exempts tuples that were normalized from string-form values. This applies to every `tuple[str, ...]` field on `AgentTypeConfig` that accepts the string shorthand (`cli_args`, `env`, `env_file`, `extra_provision_command`, `upload_file`, `create_directory`).
+
+- Added `isolate_host_volumes` to the Docker provider config. When set to `True`, each host container only sees its own per-host sub-folder of the shared state volume (via `--mount ... volume-subpath=...`, requires Docker Engine >= 25.0), fixing the cross-host visibility that today's shared mount has. The choice is persisted per host so existing hosts keep the strategy they were created with.
+- Left at its default of unset (treated as today's shared-volume behavior), the provider now emits a one-shot deprecation warning at startup noting that the default will flip to `True` in a future release. Set `isolate_host_volumes = false` explicitly to silence the warning while keeping today's behavior, or `isolate_host_volumes = true` to opt in to isolation now.
+
+# ty 0.0.39 / paramiko 4.0 / coolname 5.0 type fixes
+
+- Converted bracketed `# type: ignore[...]` suppressions to `# ty: ignore[...]`, as required by `ty` 0.0.39.
+- coolname 5.0 widened `RandomGenerator`'s config type; the name-generator config dicts are now annotated with `coolname.CoolnameConfigT` so they type-check (coolname's value type is invariant).
+- The new `types-paramiko` stubs (from the paramiko 4.0 bump) surfaced several paramiko usages in `outer_host`:
+  - `_get_paramiko_transport` / `_create_sftp_client` are now typed as returning/accepting `paramiko.Transport` (was `object`).
+  - The private `_put_file*` helpers are narrowed from `str | IO[str] | IO[bytes]` to `str | IO[bytes]`; only `IO[bytes]` was ever passed, and `SFTPClient.putfo` requires bytes.
+- The e2e `pytest_runtest_makereport` hookwrapper's generator send type is now annotated as `pluggy.Result[pytest.TestReport]`, so `outcome.get_result()` resolves.
+- Intentional reaches into paramiko internals (the `Transport._log` logging monkeypatch and a `Channel._send` access in a test that manufactures a traceback) are annotated with `# ty: ignore[unresolved-attribute]`.
+
+- Tightened this project's `test_ratchets.py` violation counts to their exact current values (`--inline-snapshot=trim`).
+
+No user-facing behavior change.
+
 ## 2026-05-26
 
 - Pruned non-notable entries (test-only changes, internal refactors, and doc-only tweaks with no user-facing effect) from this project's CHANGELOG.md, per the new notable-only changelog policy.
