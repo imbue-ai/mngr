@@ -740,21 +740,21 @@ kill -TERM 1
         return f"mngr-build-{host_id}"
 
     def _remove_build_image(self, host_id: HostId) -> None:
-        """Untag the per-host build image created in create_host.
+        """Remove the per-host build image created in create_host.
 
-        No-op when the host used a pulled `--image` (no such tag) or when
-        the tag was already removed (e.g. destroy_host ran before
-        delete_host). Snapshot images are independent `docker commit`
-        images that retain the underlying layers, so untagging here does
-        not break snapshot restore.
+        No-op when the image is absent -- the host used a pulled `--image`
+        (no such tag), or the tag was already removed (destroy_host runs
+        before delete_host). When the image IS present, any removal failure
+        propagates so it is visible rather than silently leaking the image.
+        Snapshot images are independent `docker commit` images that retain
+        the underlying layers, so removing this tag does not break snapshot
+        restore.
         """
         tag = self._build_image_tag(host_id)
-        try:
-            self._docker_client.images.remove(tag)
-        except docker.errors.ImageNotFound:
+        if not self._docker_client.images.list(name=tag):
             logger.trace("No build image to remove for host {}", host_id)
-        except docker.errors.DockerException as e:
-            logger.warning("Error removing build image {}: {}", tag, e)
+            return
+        self._docker_client.images.remove(tag)
 
     def _build_image(self, build_args: Sequence[str], tag: str) -> str:
         """Build a Docker image using the configured builder (docker or depot)."""

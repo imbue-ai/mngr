@@ -17,7 +17,7 @@
 - After `delete_host` (gc of a destroyed host past its grace period), the tag is gone too (defensive second attempt; no-op if `destroy_host` already removed it).
 - Hosts created from a pulled `--image` (no build step) have no `mngr-build-<host_id>` tag; the removal call is a harmless no-op for them.
 - Snapshots keep working: untagging the build image does not break `mngr create --snapshot` or `start_host` from a snapshot (snapshot images are independent `docker commit` images and retain the underlying layers).
-- Removal failures (other than "image not found") are logged, mirroring how snapshot-image removal already logs warnings; they do not abort destroy/delete.
+- Removal does not swallow errors: when the image is present, a genuine `docker rmi` failure propagates so it is visible (the image-absent case is a clean no-op, not a failure).
 
 ### Problem 2 — state-container cleanup (minds)
 
@@ -35,9 +35,8 @@
 
 - Add `_build_image_tag(host_id: HostId) -> str` returning `f"mngr-build-{host_id}"`. Replace the two inline `build_tag = f"mngr-build-{host_id}"` constructions in `create_host` with calls to it so the tag has a single source of truth.
 - Add `_remove_build_image(host_id: HostId) -> None`:
-  - Calls `self._docker_client.images.remove(self._build_image_tag(host_id))` (untag by tag; force not required since the container is already gone by call time).
-  - Swallows `docker.errors.ImageNotFound` at `trace` level (expected for pulled-image hosts or a second/defensive call).
-  - Logs other `docker.errors.DockerException` at `warning` level and continues (same pattern as the existing snapshot-image `images.remove` in `delete_host` / `delete_snapshot`).
+  - Checks `self._docker_client.images.list(name=tag)`; if empty, it's a clean no-op (pulled-image host has no such tag, or a prior call already removed it) and returns.
+  - Otherwise calls `self._docker_client.images.remove(tag)` and does NOT catch the result — a genuine removal failure propagates so the leak is visible rather than silently logged-and-ignored.
 - `destroy_host`: after the container is removed, call `_remove_build_image(host_id)` (before/after `_mark_host_destroyed` — order is independent).
 - `delete_host`: after the existing snapshot-image removal loop, call `_remove_build_image(host_id)` (defensive; idempotent with `destroy_host`).
 
@@ -110,6 +109,6 @@
 
 ## Open Questions (resolved during implementation)
 
-- **Sweep failure during `activate`:** RESOLVED toward resilience. The sweep function itself still raises on a real `docker rm` failure (per Q13), but the activate-time wrapper `_destroy_agents_and_state_container_for_wipe` catches `DockerCleanupError` / `MngrAgentCleanupError` / `OSError` and logs a warning, so a transient Docker hiccup can never wedge the eval-sourced activation. `destroy_env` lets the same errors propagate (aborts the destroy).
+- **Sweep failure during `activate`:** RESOLVED toward surfacing errors (per PR review). The activate-time wrapper `_destroy_agents_and_state_container_for_wipe` does NOT swallow teardown errors — a failure to destroy agents or remove the state container propagates so the operator sees it and can fix it, rather than silently leaking containers. (The sweep is still a clean no-op when there is simply no Docker daemon; only genuine removal failures raise.)
 - **`keep_agents=True` in `destroy_env`:** RESOLVED to *skip* the state-container sweep under `keep_agents` — kept agents still rely on the singleton state container, so removing it would break them.
 - **Batch "not found" handling for the single `mngr destroy` call:** RESOLVED — treat "not found" / "does not exist" anywhere in the combined output as success; any other non-zero exit raises `MngrAgentCleanupError`.

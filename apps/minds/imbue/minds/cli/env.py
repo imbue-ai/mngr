@@ -34,7 +34,6 @@ from pydantic import AnyUrl
 from pydantic import SecretStr
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
-from imbue.concurrency_group.errors import ConcurrencyGroupError
 from imbue.minds.bootstrap import DEFAULT_MINDS_ROOT_NAME
 from imbue.minds.bootstrap import MINDS_ROOT_NAME_ENV_VAR
 from imbue.minds.bootstrap import mngr_host_dir_for
@@ -52,14 +51,12 @@ from imbue.minds.config.loader import EnvConfigError
 from imbue.minds.config.loader import load_client_config
 from imbue.minds.config.loader import load_deploy_config
 from imbue.minds.config.loader import repo_tier_client_config_path
-from imbue.minds.envs.docker_cleanup import DockerCleanupError
 from imbue.minds.envs.docker_cleanup import cleanup_env_state_container
 from imbue.minds.envs.generation import delete_generation_id as real_delete_generation_id
 from imbue.minds.envs.generation import ensure_generation_id as real_ensure_generation_id
 from imbue.minds.envs.health_check import await_apps_healthy as real_await_apps_healthy
 from imbue.minds.envs.local_store import env_root_exists
 from imbue.minds.envs.migrations import apply_pool_hosts_migrations as real_apply_pool_hosts_migrations
-from imbue.minds.envs.mngr_agent_cleanup import MngrAgentCleanupError
 from imbue.minds.envs.mngr_agent_cleanup import destroy_all_mngr_agents_in_env
 from imbue.minds.envs.mngr_agent_cleanup import real_destroy_mngr_agents
 from imbue.minds.envs.paths import active_env_name_or_none
@@ -868,37 +865,21 @@ def _destroy_agents_and_state_container_for_wipe(env_name: str) -> None:
     """Destroy the env's mngr agents + remove its Docker state container.
 
     Run from the activate-time auto-wipe, *before* the local profile is
-    rmtree'd. Failures are logged but never raised: the activate path is
-    eval-sourced (stdout is reserved for shell exports) and has always
-    been designed to never block on the generation check. The operator
-    can re-run ``minds env destroy`` to retry; the wipe still clears the
-    stale local pointer regardless.
+    rmtree'd, so the freed Docker resources (host containers, the singleton
+    state container) don't outlive the env. Errors are NOT swallowed: a
+    teardown failure must surface so the operator can fix it instead of
+    silently leaking containers.
     """
-    try:
-        dev_env_name = DevEnvName(env_name)
-    except InvalidDevEnvNameError as exc:
-        logger.warning("Skipping agent + state-container teardown for {!r}: {}", env_name, exc)
-        return
-    try:
-        with ConcurrencyGroup(name=f"minds-env-wipe-{env_name}") as cg:
-            destroyed_count = destroy_all_mngr_agents_in_env(
-                dev_env_name,
-                destroy_agents=real_destroy_mngr_agents,
-                parent_concurrency_group=cg,
-            )
-            if destroyed_count:
-                logger.info("Destroyed {} mngr agent(s) during wipe of env {!r}", destroyed_count, env_name)
-            cleanup_env_state_container(dev_env_name, parent_concurrency_group=cg)
-    except (MngrAgentCleanupError, DockerCleanupError, ConcurrencyGroupError, OSError) as exc:
-        # ConcurrencyGroupError covers a failure to launch the `mngr` / `docker`
-        # subprocess (e.g. the binary is missing) so a teardown hiccup can never
-        # wedge the eval-sourced activation.
-        logger.warning(
-            "Could not fully tear down agents / Docker state container for env {!r} during wipe "
-            "({}); proceeding with the local-state wipe anyway.",
-            env_name,
-            exc,
+    dev_env_name = DevEnvName(env_name)
+    with ConcurrencyGroup(name=f"minds-env-wipe-{env_name}") as cg:
+        destroyed_count = destroy_all_mngr_agents_in_env(
+            dev_env_name,
+            destroy_agents=real_destroy_mngr_agents,
+            parent_concurrency_group=cg,
         )
+        if destroyed_count:
+            logger.info("Destroyed {} mngr agent(s) during wipe of env {!r}", destroyed_count, env_name)
+        cleanup_env_state_container(dev_env_name, parent_concurrency_group=cg)
 
 
 def _check_generation_id_and_wipe_local_state_on_mismatch(
