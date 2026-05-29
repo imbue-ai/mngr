@@ -14,7 +14,6 @@ import click
 import pluggy
 from loguru import logger
 
-from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.pure import pure
 from imbue.mngr.cli.help_formatter import CommandHelpMetadata
 from imbue.mngr.cli.help_formatter import add_pager_help_option
@@ -285,14 +284,24 @@ def build_available_topics_section() -> str:
     return "\n".join(lines)
 
 
-# The "Available Topics" section is populated after the plugin manager loads and
-# topics are registered (see ``refresh_available_topics_help`` and its caller in
-# ``main.py``); at module import time no topics are registered yet.
-CommandHelpMetadata(
-    key="help",
-    one_line_description="Show help for a command or topic",
-    synopsis="mngr help [<command> | <topic>]",
-    description="""Show help for a mngr command or topic. Without arguments, lists all
+def register_help_command_metadata() -> None:
+    """Build and register the help command's own help metadata.
+
+    Called once after topics are registered (built-in and plugin), since the
+    "Available Topics" section lists every registered topic. Unlike the other
+    commands -- whose metadata is registered at module import -- the help
+    command's metadata is registered here so its topic list reflects the fully
+    loaded registry without any post-hoc mutation. (Compare
+    ``_update_create_help_with_provider_args`` in ``main.py``, which similarly
+    finalizes the create command's help once backends are loaded.)
+    """
+    available_topics = build_available_topics_section()
+    additional_sections = (("Available Topics", available_topics),) if available_topics else ()
+    CommandHelpMetadata(
+        key="help",
+        one_line_description="Show help for a command or topic",
+        synopsis="mngr help [<command> | <topic>]",
+        description="""Show help for a mngr command or topic. Without arguments, lists all
 available commands and help topics.
 
 For commands, 'mngr help <command>' is equivalent to 'mngr <command> --help'.
@@ -302,34 +311,14 @@ For subcommands, specify the full command path (e.g., 'mngr help snapshot create
 
 Help topics provide documentation on concepts that span multiple commands,
 such as agent address format.""",
-    examples=(
-        ("Show help for the create command", "mngr help create"),
-        ("Show help using a command alias", "mngr help c"),
-        ("Show help for a subcommand", "mngr help snapshot create"),
-        ("Show the address format topic", "mngr help address"),
-        ("List all commands and topics", "mngr help"),
-    ),
-).register()
-
-
-def refresh_available_topics_help() -> None:
-    """Add the "Available Topics" section to the help command's metadata.
-
-    Must be called after topics are registered (built-in and plugin), since the
-    section lists every registered topic. Mirrors how the create command's help
-    is refreshed with provider-specific arguments once backends are loaded.
-    """
-    section = build_available_topics_section()
-    existing = get_help_metadata("help")
-    if existing is None or not section:
-        return
-    # Append (rather than replace) so any other sections are preserved and a
-    # repeated call stays idempotent: drop a stale "Available Topics" section
-    # first, then add the freshly built one.
-    other_sections = tuple(s for s in existing.additional_sections if s[0] != "Available Topics")
-    updated_sections = other_sections + (("Available Topics", section),)
-    existing.model_copy_update(
-        to_update(existing.field_ref().additional_sections, updated_sections),
+        additional_sections=additional_sections,
+        examples=(
+            ("Show help for the create command", "mngr help create"),
+            ("Show help using a command alias", "mngr help c"),
+            ("Show help for a subcommand", "mngr help snapshot create"),
+            ("Show the address format topic", "mngr help address"),
+            ("List all commands and topics", "mngr help"),
+        ),
     ).register()
 
 

@@ -33,7 +33,7 @@ from imbue.mngr.cli.gc import gc
 from imbue.mngr.cli.git import git_command
 from imbue.mngr.cli.help import help_command
 from imbue.mngr.cli.help import load_help_topics_from_plugins
-from imbue.mngr.cli.help import refresh_available_topics_help
+from imbue.mngr.cli.help import register_help_command_metadata
 from imbue.mngr.cli.help_formatter import get_help_metadata
 from imbue.mngr.cli.issue_reporting import handle_not_implemented_error
 from imbue.mngr.cli.issue_reporting import handle_unexpected_error
@@ -397,9 +397,10 @@ for cmd in BUILTIN_COMMANDS + PLUGIN_COMMANDS:
     apply_plugin_cli_options(cmd)
 
 # Register help topics (built-in and plugin) once the plugin manager is loaded,
-# then refresh the help command's "Available Topics" section to list them.
+# then build the help command's own metadata so its "Available Topics" section
+# lists the fully loaded registry.
 load_help_topics_from_plugins(get_or_create_plugin_manager())
-refresh_available_topics_help()
+register_help_command_metadata()
 
 
 def _update_create_help_with_provider_args() -> None:
