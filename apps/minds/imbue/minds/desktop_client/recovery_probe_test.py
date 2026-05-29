@@ -247,7 +247,7 @@ def test_curl_probe_yes_for_200() -> None:
         ),
         plugin_resolver_services={},
     )
-    assert _answer(response, "GET /api/agents") == ProbeAnswer.YES
+    assert _answer(response, "GET /") == ProbeAnswer.YES
 
 
 def test_curl_probe_no_for_non_200() -> None:
@@ -260,28 +260,7 @@ def test_curl_probe_no_for_non_200() -> None:
         ),
         plugin_resolver_services={},
     )
-    assert _answer(response, "GET /api/agents") == ProbeAnswer.NO
-
-
-def test_curl_probe_no_for_404_wrong_process_on_port() -> None:
-    """A 404 from /api/agents means a non-SI process holds the inner port.
-
-    The system interface serves its SPA index for every unmatched GET, so it
-    never 404s; a static-file squatter (or any other process bound to the port)
-    returns 404 for /api/agents. The probe must read that as NO so the recovery
-    page surfaces the real problem instead of a green check (which curling ``/``
-    would have produced, since the squatter answers 200 there).
-    """
-    response = build_host_health_response(
-        list_json=_list_json(),
-        agent_id=_AGENT_ID,
-        services_agent_id=_SERVICES_AGENT_ID,
-        in_container_stdout=_probe_stdout(
-            {"services_toml_declares_system_interface": True, "inner_port": 8000, "curl_status": "404"}
-        ),
-        plugin_resolver_services={},
-    )
-    assert _answer(response, "GET /api/agents") == ProbeAnswer.NO
+    assert _answer(response, "GET /") == ProbeAnswer.NO
 
 
 def test_port_listener_probe_yes_when_listener_present() -> None:
@@ -552,10 +531,12 @@ def test_curl_output_is_bare_status_code() -> None:
         in_container_stdout=_healthy_probe_stdout(curl_status="200"),
         plugin_resolver_services={},
     )
-    probe = _probe_for(response, "GET /api/agents")
+    probe = _probe_for(response, "GET /")
     assert probe.command.startswith(f"mngr exec {_SERVICES_AGENT_ID} ")
     assert "curl" in probe.command
-    assert "/api/agents" in probe.command
+    # Probes the bare root, decoupled from any app-specific route.
+    assert "http://localhost:8000/" in probe.command
+    assert "/api/agents" not in probe.command
     # not "HTTP 200"
     assert probe.output == "200"
 

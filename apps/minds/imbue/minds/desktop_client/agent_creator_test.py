@@ -409,20 +409,19 @@ def test_wait_for_workspace_ready_calls_record_probe_success_on_ready(tmp_path) 
     assert aid not in tracker.snapshot_probe_targets()
 
 
-def test_probe_workspace_through_plugin_targets_system_interface_api_route() -> None:
-    """The probe hits a real SI route (/api/agents), carrying the vhost in Host.
+def test_probe_workspace_through_plugin_targets_root_path() -> None:
+    """The probe hits ``/``, carrying the agent vhost in the Host header.
 
-    Probing ``/`` would only confirm that *something* answers on the inner port:
-    the SI serves its SPA index for every unmatched GET, so an unrelated process
-    holding the port (e.g. a static file server) also returns 200 at ``/``.
-    ``/api/agents`` is a core SI endpoint, so a 200 there is an identity check
-    and a 404 reveals a non-SI responder.
+    Probing ``/`` deliberately decouples readiness from any particular app
+    running inside the workspace: a 200 only confirms that some web server is
+    answering on the inner port, with no assumption about which routes it
+    implements.
     """
     captured: list[httpx.Request] = []
 
     def _capture(request: httpx.Request) -> httpx.Response:
         captured.append(request)
-        return httpx.Response(200, json={"agents": []})
+        return httpx.Response(200, text="ok")
 
     aid = AgentId.generate()
     with httpx.Client(transport=httpx.MockTransport(_capture)) as client:
@@ -436,24 +435,24 @@ def test_probe_workspace_through_plugin_targets_system_interface_api_route() -> 
 
     assert status == 200
     assert len(captured) == 1
-    assert captured[0].url.path == "/api/agents"
+    assert captured[0].url.path == "/"
     # The agent vhost rides the Host header, not the URL host, so the probe
     # does not depend on ``*.localhost`` resolution.
     assert captured[0].headers["host"] == f"{aid}.localhost"
 
 
-def test_probe_workspace_through_plugin_returns_404_for_non_si_responder() -> None:
-    """A 404 from the probed route surfaces as a 404 status (not None / not 200).
+def test_probe_workspace_through_plugin_surfaces_non_200_status() -> None:
+    """A non-200 from the probed route surfaces as that status (not None / not 200).
 
-    A non-SI responder on the inner port (e.g. a static file server) 404s
-    ``/api/agents``. The probe returns that 404 so the caller's ``== 200`` check
-    treats the workspace as unready and the background loop records a probe
-    failure, driving the agent toward STUCK.
+    When the inner port answers but not with a 200 (e.g. a 503 while the server
+    is still warming up), the probe returns that status so the caller's
+    ``== 200`` check treats the workspace as unready and the background loop
+    records a probe failure, driving the agent toward STUCK.
     """
 
     def _capture(request: httpx.Request) -> httpx.Response:
         del request
-        return httpx.Response(404, text="Not Found")
+        return httpx.Response(503, text="Service Unavailable")
 
     with httpx.Client(transport=httpx.MockTransport(_capture)) as client:
         status = probe_workspace_through_plugin(
@@ -464,7 +463,7 @@ def test_probe_workspace_through_plugin_returns_404_for_non_si_responder() -> No
             client=client,
         )
 
-    assert status == 404
+    assert status == 503
 
 
 def test_wait_for_workspace_ready_publishes_anyway_on_timeout(tmp_path) -> None:

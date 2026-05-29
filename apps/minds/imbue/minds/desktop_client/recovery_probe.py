@@ -165,7 +165,7 @@ _QUESTION_SERVICES_AGENT_REGISTERED: Final[str] = "Is the system-services agent 
 _QUESTION_CAN_RUN_COMMANDS_INSIDE: Final[str] = "Can we run a command inside the container?"
 _QUESTION_SERVICES_TOML_DECLARES: Final[str] = "Does services.toml declare [services.system_interface]?"
 _QUESTION_PORT_LISTENING: Final[str] = "Is anything listening on the system-interface inner port?"
-_QUESTION_CURL_OK: Final[str] = "Does the system interface answer GET /api/agents inside the container?"
+_QUESTION_CURL_OK: Final[str] = "Does the inner web server answer GET / inside the container?"
 _QUESTION_PLUGIN_RESOLVER: Final[str] = "Has the system interface registered with the plugin resolver?"
 
 
@@ -517,16 +517,14 @@ def _build_port_listening_probe(
 
 
 def _curl_inner_command(port: int) -> str:
-    """In-container curl of ``/api/agents`` that prints just the HTTP status code (``000`` on no response).
+    """In-container curl of ``/`` that prints just the HTTP status code (``000`` on no response).
 
-    Probes ``/api/agents`` rather than ``/`` so a 200 is an identity check: the
-    system interface serves its SPA index for every unmatched GET (a catch-all
-    route), so ``/`` returns 200 even from an unrelated process holding the inner
-    port (e.g. a static file server). ``/api/agents`` is a core SI endpoint that
-    only the real system interface answers 200, so a 404 here reveals a
-    wrong-process responder that ``/`` would have hidden.
+    Probes ``/`` and treats a 200 as "answering" -- deliberately not coupled to
+    any particular application running inside the workspace. The check only
+    confirms that some web server is up on the inner port, making no assumption
+    about which app that is or which routes it implements.
     """
-    return f'curl -m1 -s -o /dev/null -w "%{{http_code}}" http://localhost:{port}/api/agents'
+    return f'curl -m1 -s -o /dev/null -w "%{{http_code}}" http://localhost:{port}/'
 
 
 def _build_curl_probe(
@@ -534,7 +532,7 @@ def _build_curl_probe(
     mngr_binary: str,
     services_agent_id: AgentId | None,
 ) -> Probe:
-    """Probe 6: does the system interface answer GET /api/agents inside the container?"""
+    """Probe 6: does the inner web server answer GET / inside the container?"""
     port = in_container.inner_port
     inner = _curl_inner_command(port if port is not None else 0)
     command = _mngr_exec_command(mngr_binary, services_agent_id, inner)

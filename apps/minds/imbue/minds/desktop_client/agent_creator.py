@@ -71,15 +71,11 @@ from imbue.mngr_latchkey.store import LatchkeyStoreError
 _MNGR_FORWARD_SESSION_COOKIE_NAME: Final[str] = "mngr_forward_session"
 
 # Path the workspace-readiness / health probes hit through the plugin. We probe
-# a real system-interface API route rather than ``/`` so a 200 is an *identity*
-# check, not merely "something is answering on the port". The SI serves its SPA
-# index for every unmatched GET (a ``/{path:path}`` catch-all), so ``/`` returns
-# 200 even from an unrelated process (e.g. a static file server) that happens to
-# hold the inner port. ``/api/agents`` is a core SI endpoint that returns 200
-# JSON from the real system interface but 404 from anything that does not
-# implement it, so probing it lets the health loop distinguish the real backend
-# from a port squatter / wrong process.
-_WORKSPACE_PROBE_PATH: Final[str] = "/api/agents"
+# ``/`` and treat any 200 as "ready" -- deliberately *not* coupled to any
+# particular application running inside the workspace. The probe only confirms
+# that some web server is up and answering on the inner port; it makes no
+# assumption about which app that is or which routes it implements.
+_WORKSPACE_PROBE_PATH: Final[str] = "/"
 
 
 def make_workspace_probe_client(preauth_cookie: str, probe_timeout_seconds: float) -> httpx.Client:
@@ -124,13 +120,12 @@ def probe_workspace_through_plugin(
     probe_timeout_seconds: float,
     client: httpx.Client | None = None,
 ) -> int | None:
-    """Issue a single probe through the plugin to the agent's system_interface.
+    """Issue a single probe through the plugin to the agent's inner web server.
 
-    Probes the ``/api/agents`` SI route (see ``_WORKSPACE_PROBE_PATH``).
-    Returns the HTTP status code observed (a 200 means the real SI is ready;
-    a 404 means something other than the SI is answering on the port), or
-    ``None`` if the probe failed at the transport layer (connect error,
-    mid-stream EOF, read timeout). Shared by ``_wait_for_workspace_ready``
+    Probes ``/`` (see ``_WORKSPACE_PROBE_PATH``). Returns the HTTP status code
+    observed (a 200 means some web server is up and answering on the inner
+    port), or ``None`` if the probe failed at the transport layer (connect
+    error, mid-stream EOF, read timeout). Shared by ``_wait_for_workspace_ready``
     (creation flow) and the system-interface-health tracker's background
     probe loop so both paths agree on what "ready" means.
 
