@@ -413,6 +413,24 @@ async function downloadLima({ platform, arch }) {
 }
 
 /**
+ * Write the current git SHA into electron/build-info.json so the runtime
+ * can surface it in the About panel. Falls back to "unknown" if the
+ * working tree has no .git (e.g. building from a tarball).
+ */
+function bakeBuildInfo() {
+  let gitSha;
+  try {
+    gitSha = execSync('git rev-parse HEAD', { cwd: MONOREPO_ROOT }).toString().trim();
+  } catch (err) {
+    console.warn(`Could not resolve git SHA (${err.message}); falling back to "unknown".`);
+    gitSha = 'unknown';
+  }
+  const buildInfoPath = path.join(ROOT, 'electron', 'build-info.json');
+  fs.writeFileSync(buildInfoPath, JSON.stringify({ gitSha }) + '\n');
+  console.log(`Bundled gitSha=${gitSha} -> ${buildInfoPath}`);
+}
+
+/**
  * Bake an explicit client.toml (and the matching MINDS_ROOT_NAME) into
  * _bundled/ so the shipped desktop client passes --config-file
  * explicitly at startup and writes its on-disk state to the right env
@@ -603,6 +621,7 @@ async function main() {
   const wheelByPackage = buildWorkspaceWheels();
   stageRuntimePyproject(wheelByPackage);
   bundleClientConfig();
+  bakeBuildInfo();
 
   console.log('\nBuild complete!');
   console.log(`Resources directory: ${RESOURCES_DIR}`);

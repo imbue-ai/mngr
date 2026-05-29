@@ -24,6 +24,25 @@ if (app.isPackaged) {
   console.log('[update] Skipping ToDesktop init (dev build -- not packaged)');
 }
 
+// Surface the git SHA the build was cut from in the standard macOS About
+// panel, appended to ToDesktop's buildId so you can map a shipped binary
+// back to a commit. Gated on app.isPackaged because dev runs do not
+// regenerate build-info.json and would otherwise show a stale SHA.
+if (app.isPackaged) {
+  try {
+    const { gitSha } = JSON.parse(fs.readFileSync(path.join(__dirname, 'build-info.json'), 'utf8'));
+    const pkg = require('../package.json');
+    const shortSha = gitSha.slice(0, 8);
+    app.setAboutPanelOptions({
+      applicationName: pkg.productName,
+      applicationVersion: pkg.version,
+      version: pkg.tdBuildId ? `${pkg.tdBuildId} · ${shortSha}` : shortSha,
+    });
+  } catch (err) {
+    console.warn(`[about-panel] Could not load build-info.json: ${err.message}`);
+  }
+}
+
 // Redirect Electron's userData directory to ~/.<MINDS_ROOT_NAME>/ so that dev
 // and production installs are fully isolated (cookies, sessions, caches, etc.).
 app.setPath('userData', paths.getDataDir());
