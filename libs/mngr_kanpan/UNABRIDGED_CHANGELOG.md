@@ -4,6 +4,30 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-05-28
+
+# Dropped redundant per-project ty/ruff ratchet tests
+
+Removed this project's `test_no_type_errors` and `test_no_ruff_errors` from its
+`test_ratchets.py`. ty resolves the uv workspace root and ruff (run from the repo
+root) both scan across projects, so the per-project copies just re-ran the same
+checks. The single repo-wide equivalents now live in `test_meta_ratchets.py`
+(`test_no_type_errors` and `test_no_ruff_errors`).
+
+No user-facing behavior change.
+
+## 2026-05-27
+
+# ty 0.0.39 type fixes
+
+- Converted bracketed `# type: ignore[...]` suppressions to `# ty: ignore[...]` (test file), as required by `ty` 0.0.39.
+- `_submit_batch_item` now dispatches on the command type with a `match` statement (`case MarkableBuiltinCommand()/ActionBuiltinCommand()/CustomCommand()`, with a `case _: assert_never(item.cmd)` catch-all) instead of an `isinstance` chain. This narrows `item.cmd` to `CustomCommand` before reading `.command` (which ty could not prove via the previous structure) and makes exhaustiveness explicit. Behavior is unchanged.
+- Documented the urwid `Widget` -> `Text` downcast on a row's name cell with a `# ty: ignore[invalid-assignment]` (the first column is always a `Text` by construction, but urwid types `.contents` only as `Widget`).
+
+- Tightened this project's `test_ratchets.py` violation counts to their exact current values (`--inline-snapshot=trim`).
+
+No user-facing behavior change.
+
 ## 2026-05-26
 
 - Pruned non-notable entries (test-only changes, internal refactors, and doc-only tweaks with no user-facing effect) from this project's CHANGELOG.md, per the new notable-only changelog policy.

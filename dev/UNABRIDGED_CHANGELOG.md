@@ -4,6 +4,140 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-05-28
+
+Bump the `test-docker-electron` CI job's Node.js to 24.15.0 and pnpm to 10.33.4 to match the new exact-version pins in `apps/minds/package.json`. Also refresh the example `pyproject.toml` block in `specs/electron-desktop-app/spec.md` so it matches the real packaged file (`requires-python = "==3.12.13"` and the actual three-dependency list) instead of the older `>=3.12` / single-`imbue-minds` snapshot, and correct the standalone-pyproject path reference in that spec from `electron/pyproject.toml` to `electron/pyproject/pyproject.toml`.
+
+# Changelog consolidation: accuracy review of new bullets
+
+The nightly changelog consolidation agent now reviews the `CHANGELOG.md`
+bullets it just generated for factual accuracy against the code, before
+opening its PR. After committing the consolidation, it spawns one or more
+fresh-context `general-purpose` reviewer subagents (spec in
+`scripts/changelog_accuracy_reviewer.md`, relative to the repo root) and
+partitions the projects that gained new bullets across them at its
+discretion -- so a trivial change touching every package needn't spawn a
+reviewer per package -- running them in parallel. Each verifies its
+assigned projects' newly-added bullets against the actual code, correcting
+or removing inaccurate ones and collapsing bullets that another bullet
+materially supersedes. This guards against stale or inaccurate changelog
+entries.
+
+Each reviewer edits only the `CHANGELOG.md` files of its assigned projects
+(the code is treated as ground truth -- reviewers never modify source) and
+commits its own corrections, staging only those files so the parallel
+reviewers don't clobber each other. Reviewers run unattended -- they
+self-review rather than asking a user -- and report their findings back to
+the consolidation agent, which decides what to do with them. The run's
+outcome JSON reports `pr_url` on success and `notes` (the failing step and
+error detail) on failure.
+
+# Enforce the supply-chain cooldown via `[tool.uv] exclude-newer`, refreshed at release
+
+- Moved the two-week dependency cooldown from a time-relative test to uv's native
+  resolver enforcement. Added `[tool.uv] exclude-newer` to the root `pyproject.toml`
+  (initial value `2026-05-23T00:00:00Z`), so `uv lock` simply refuses to consider any
+  package version uploaded after the cutoff. This is proactive (you cannot lock a
+  too-new package) rather than after-the-fact detection.
+- `scripts/release.py` now advances the cutoff at each release: it sets
+  `exclude-newer` to (today's UTC date - 2 weeks) just before regenerating
+  `uv.lock`, and commits the root `pyproject.toml` alongside the version bumps. The
+  update is **forward-only** -- it takes `max(current_cutoff, release_date - 2 weeks)`,
+  so a release cut while the current cutoff is still younger than two weeks leaves it
+  untouched rather than pushing it back. This avoids re-excluding a deliberately-pinned
+  fresh dependency and breaking resolution. The
+  initial value is set to just past the newest locked package for the same reason,
+  which makes per-package exemptions unnecessary.
+- Removed `test_no_dependencies_younger_than_two_weeks` (and its
+  `_FRESHNESS_EXEMPT_PACKAGES` / `_lock_package_upload_time` helpers) from
+  `test_meta_ratchets.py`; uv now enforces the cooldown at lock time, so the test is
+  redundant. Its `ty`/`modal` exemptions are no longer needed because the cutoff is
+  kept recent enough to admit them directly.
+- Added unit tests (`scripts/release_test.py`) covering the forward-only advance, the
+  no-op when the cutoff is still within the window, and the boundary case.
+- The cooldown does not protect against a compromise that stays undetected past the
+  window; its only value is the detection delay before we adopt a release.
+
+# Dropped the removed `MNGR_ALLOW_PYTEST` from the env-settings spec
+
+`MNGR_ALLOW_PYTEST` was removed from mngr in this PR (the pytest config guard is
+now per-config via `is_allowed_in_pytest`). Removed the now-stale reference to it
+from `specs/env-settings-overrides/concise.md`.
+
+Added `libs/mngr_mapreduce` to the workspace; root `pyproject.toml` now collects coverage for `imbue.mngr_mapreduce` alongside the other workspace packages.
+
+Add a `uv-sync-pre-push` hook to `.pre-commit-config.yaml` (registered for the `pre-push` stage, ordered as the first local hook) that runs `uv sync --all-packages` before a push whenever that push touches dependency files (`uv.lock` or any `pyproject.toml`). This keeps the local environment in sync with just-merged dependencies, primarily for the case where the code-guardian stop hook merges `origin/main` and then pushes the merge commit. Pushes that do not change dependency files are unaffected (the hook is skipped).
+
+The hook runs before the other pre-push hooks (`ruff`, `ty`, `regenerate-cli-docs`, `compile-style-guide`) on purpose: those all shell out to `uv run`, which does not install all workspace members on its own. When a merge of `origin/main` adds a new workspace member (or otherwise changes dependencies), those hooks would otherwise import a member missing from the shared `.venv` and fail with `ModuleNotFoundError`. Syncing `--all-packages` first populates the environment so they pass. (The complementary removed-member case is already handled by the existing `clean-stale-workspace-dirs` post-checkout hook.)
+
+Retire the hand-written git-hook installer: delete `scripts/githooks/install.sh` and `scripts/githooks/pre-commit`, and update `scripts/ruff-precommit-setup-guide.md` to install hooks with `uv run pre-commit install` instead. The hand-written shim existed to avoid `pre-commit install` depending on the system Python, but running `pre-commit install` through `uv` already pins the generated hooks to the uv-managed virtual environment (`.venv`), so the shim was redundant. The symlink-based installer was also incomplete -- it only ever installed the `pre-commit` hook, never the `pre-push` or `post-checkout` hooks the configuration relies on -- whereas `pre-commit install` installs every hook type in `default_install_hook_types`.
+
+# Test-efficiency groundwork: offload v0.9.6 + minds e2e snapshot script
+
+Two changes that together lay the groundwork for much faster minds
+end-to-end tests:
+
+- Bumped the offload CI pin from `0.9.5` to `0.9.6` (`.github/workflows/ci.yml`).
+  v0.9.6 adds `offload run --override-image-id <ID>`, which lets us point
+  offload at a pre-built Modal image and skip the entire image-setup
+  pipeline (Modal provider only). See
+  https://github.com/imbue-ai/offload/releases/tag/v0.9.6 for the full
+  release notes.
+- Added `scripts/snapshot_minds_e2e_state.py`, a demonstration script that
+  creates a Modal sandbox with `experimental_options={"vm_runtime": True}`,
+  installs the Docker + Node + pnpm + xvfb stack the
+  `test-docker-electron` CI job needs, calls the shared
+  `imbue.minds.desktop_client.e2e_workspace_runner.create_workspace_via_electron`
+  driver directly (no pytest) while deliberately skipping the
+  `mngr destroy` cleanup so the workspace agent + Docker container
+  survive into the snapshot, and then calls
+  `sandbox.snapshot_filesystem()` to capture the state. The resulting
+  Modal image ID can be fed back to offload via `--override-image-id` so
+  future test runs boot from an already-warm workspace + Docker
+  container in seconds instead of rebuilding from scratch every time.
+  The script intentionally opts in to `vm_runtime` only for itself --
+  Modal has capacity issues with that runtime, so we do not flip it on
+  for the general mngr_modal provider.
+
+# Consolidated ty/ruff ratchet tests to run once repo-wide
+
+The per-project `test_no_type_errors` and `test_no_ruff_errors` tests (~36 copies,
+one per workspace member) were redundant: `ty check` resolves the uv workspace
+root (root `pyproject.toml` declares `[tool.uv.workspace] members = ["libs/*",
+"apps/*"]`) and scans every member on each invocation regardless of the directory
+it runs from, and the repo-wide ruff check is a strict superset of the per-project
+ruff checks. Each duplicate invocation was a full ~0.8s cold workspace scan with
+no cross-process cache benefit.
+
+Removed the per-project copies and kept a single repo-wide `test_no_type_errors`
+and `test_no_ruff_errors` in `test_meta_ratchets.py`, updating the meta-ratchet
+expected-test-name set accordingly.
+
+Because `ty` (unlike `ruff`) was not in pre-commit, scoped local runs such as
+`just test-quick libs/<project>` no longer type-checked at all after the
+consolidation. Added a `ty` hook to `.pre-commit-config.yaml` that runs
+`uv run ty check` over the whole workspace at the `pre-push` stage (ty can't
+scope to staged files, so running it per-commit would add a fixed full-workspace
+scan to every commit). Pushes now get a type-check gate; the single
+`test_no_type_errors` in `test_meta_ratchets.py` remains the CI backstop.
+
+No user-facing behavior change.
+
+## 2026-05-27
+
+# Bump `ty` to 0.0.39, plus paramiko/coolname dependency bumps
+
+- Raised the `ty` type checker floor from `0.0.24` to `0.0.39` (root `pyproject.toml`).
+- Bumped pinned dependencies in `uv.lock`: `paramiko` 3.5.1 -> 4.0.0 and `coolname` 3.0.0 -> 5.0.0. The paramiko bump also pulls `pyinfra` 3.6.1 -> 3.8.0 and adds `invoke` and `types-paramiko` transitively (pyinfra 3.8.0 depends on `types-paramiko`).
+  - Note: paramiko 4.0.0 is the ceiling while we depend on `pyinfra`; pyinfra 3.8.0 constrains `paramiko<5`, so paramiko 5.0.0 is not yet installable.
+  - The newly-present `types-paramiko` stubs make ty type-check paramiko usage for the first time; resulting type errors were fixed across the affected projects.
+- Behavioral note for contributors: `ty` 0.0.39 no longer honors the bracketed PEP-484 form `# type: ignore[<mypy-code>]`. Only bare `# type: ignore` and `ty`'s own `# ty: ignore[<ty-rule>]` are respected. All bracketed `# type: ignore[...]` comments in the repo were converted to `# ty: ignore[...]` using ty's rule names.
+- Documented in `CLAUDE.md` (the "# Ratchets" section) how to tighten a ratchet count after reducing violations: `uv run pytest --inline-snapshot=trim <test_ratchets.py>` (only `=trim` lowers a count that already passes its `<=` check; `=fix`/`=update` do not).
+- Tightened recorded ratchet violation counts to their current exact values across all projects via `--inline-snapshot=trim`, locking in previously-unrecorded reductions (test-config only; no source or behavior change).
+- Ran `uv lock --upgrade` under a two-week supply-chain cooldown (adopting only releases that have been public for at least two weeks) to bump floating dependencies. Notable bumps within that window: `starlette` 0.50 -> 1.0, `urwid` 3.0 -> 4.0, `pydantic` 2.12 -> 2.13, `cryptography` 46 -> 48, `typer` 0.21 -> 0.25, `uvicorn` 0.40 -> 0.46. The cooldown holds back even-newer releases, e.g. `wsgidav` stays 4.3.3 rather than 4.3.4 (4.3.4 adds a `bcrypt<5` cap and a `passlib` dep), so `bcrypt` stays at 5.0.
+  - Bumped the `supertokens-python` floor (see the `remote_service_connector` changelog) so the resolver keeps it at the latest 0.31.3 instead of backtracking to 0.30.3; that also keeps `aiosmtplib` at 5.x for free.
+- Added `test_no_dependencies_younger_than_two_weeks` (in `test_meta_ratchets.py`) to enforce the cooldown: it fails if any locked dependency was published within the last two weeks, except deliberately-trusted exemptions (`ty` -- our dev-only type checker, pinned to the latest 0.0.39; `modal` -- explicitly pinned to ==1.4.3). uv's static `[tool.uv] exclude-newer` only accepts a fixed date, so the relative cutoff lives in this (time-relative) test instead; regenerate compliant locks with `uv lock --upgrade --exclude-newer "2 weeks"`. The cooldown does not protect us from a compromise that stays undetected past the window, nor the first project to lock a release -- its only value is the detection delay before we adopt (and, for runtime deps in published wheels, re-propagate) a release.
+
 ## 2026-05-26
 
 # Repo-root spec annotation
