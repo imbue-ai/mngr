@@ -295,11 +295,9 @@ def create_plugin_manager() -> pluggy.PluginManager:
     load_all_registries(pm)
     load_agents_from_plugins(pm)
 
-    # Register mngr's built-in topics as a built-in plugin (like the built-in
-    # backends/agents above). Only the hook provider is registered here; the hook
-    # is fired once at module import (see load_help_topics_from_plugins), not
-    # here, since create_plugin_manager can re-run (e.g. test resets) while the
-    # topic registry is process-global.
+    # Register mngr's built-in topics as a built-in plugin (like the backends/
+    # agents above). The register_help_topics hook is fired once at module
+    # import, not here (see load_help_topics_from_plugins).
     pm.register(builtin_help_topics_module, name="builtin_help_topics")
 
     return pm
@@ -395,11 +393,10 @@ except ConfigParseError as e:
 for cmd in BUILTIN_COMMANDS + PLUGIN_COMMANDS:
     apply_plugin_cli_options(cmd)
 
-# Fire the register_help_topics hook exactly once, now that the plugin manager
-# is fully built, to populate the process-global topic registry. This lives at
-# module scope (not in create_plugin_manager, which can be rebuilt) so it runs
-# once per process. Then build the help command's own metadata so its "Available
-# Topics" section lists the fully loaded registry.
+# Populate the (process-global) topic registry now that the plugin manager is
+# fully built. At module scope -- not in create_plugin_manager, which can be
+# rebuilt (e.g. test resets) -- so it runs once per process. Then build the help
+# command's "Available Topics" metadata from the loaded registry.
 load_help_topics_from_plugins(get_or_create_plugin_manager())
 register_help_command_metadata()
 
