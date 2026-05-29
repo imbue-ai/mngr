@@ -27,13 +27,17 @@ dependencies = [
     "modal-proxy>=0.1.0",
 ]
 
-# Supply-chain hardening: refuse to resolve any distribution published less
-# than 14 days ago, so a freshly-compromised release cannot be pulled into an
-# end-user install during first-launch `uv sync`. Applies to all dependencies,
-# including transitive ones. Only affects resolution (e.g. re-locking), not
-# installation from an already-pinned lockfile.
+# Supply-chain hardening: refuse to resolve any distribution uploaded after
+# this fixed cutoff, so we only adopt releases that have been public long
+# enough for malware to surface. Mirrors the root pyproject.toml's pattern
+# (set in PR #1768): a fixed ISO timestamp, advanced forward-only at the
+# explicit "we are cutting a release" moment, never re-applied per-build.
+# scripts/build.js re-resolves the bundle pyproject on every `pnpm build`
+# to rewrite [tool.uv.sources] to wheel paths, which makes a rolling
+# "N days" cutoff bite a new build for ~N days after every upstream
+# release of any pinned dep. The fixed cutoff avoids that.
 [tool.uv]
-exclude-newer = "14 days"
+exclude-newer = "2026-05-23T00:00:00Z"
 
 [tool.uv.sources]
 minds = { path = "../../../../apps/minds", editable = true }
