@@ -13,11 +13,11 @@ from pydantic import SecretStr
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.minds.desktop_client.backup_env_store import parse_restic_env
+from imbue.minds.desktop_client.backup_provisioning import BackupSetupRequest
 from imbue.minds.desktop_client.backup_provisioning import _create_or_reuse_bucket
 from imbue.minds.desktop_client.backup_provisioning import _is_bucket_already_exists_error
 from imbue.minds.desktop_client.backup_provisioning import _repository_url_for_bucket
 from imbue.minds.desktop_client.backup_provisioning import _resolve_repository_and_backend_env
-from imbue.minds.desktop_client.backup_provisioning import BackupSetupRequest
 from imbue.minds.desktop_client.backup_provisioning import build_canonical_env_content
 from imbue.minds.desktop_client.backup_provisioning import env_text_defines_restic_password
 from imbue.minds.desktop_client.backup_provisioning import generate_workspace_password

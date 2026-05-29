@@ -32,7 +32,9 @@ def test_parse_restic_timestamp_handles_offset() -> None:
     parsed = parse_restic_timestamp("2026-05-29T05:33:16+02:00")
     assert parsed is not None
     # Normalized to UTC.
-    assert parsed.utcoffset().total_seconds() == 0
+    offset = parsed.utcoffset()
+    assert offset is not None
+    assert offset.total_seconds() == 0
 
 
 def test_parse_restic_timestamp_assumes_utc_when_naive() -> None:
