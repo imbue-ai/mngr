@@ -5,13 +5,15 @@ existing "AI provider" toggle, with three options:
   id) and a scoped key, then injects a `runtime/secrets/restic.env` pointing
   the FCT `host_backup` service at that bucket. Gated on a selected account;
   the default when an account is present.
-- `api_key` -- a free-form `KEY=VALUE` block written verbatim to `restic.env`
+- `manual` -- a free-form `KEY=VALUE` block written verbatim to `restic.env`
   (you supply `RESTIC_REPOSITORY` and backend credentials).
 - `configure_later` -- injects nothing now; the default when no account is
   selected.
 
 When a real backup provider is chosen, a "Backup encryption method" row
-appears: `master_password` or `no_password`.
+appears: `master_password` or `no_password`. The conditional backup fields
+(restic environment, encryption method, master password) render as standard
+label-on-left / field-on-right rows like the rest of the form.
 
 minds (which now requires `restic` to be installed on the machine running it)
 initializes each workspace's restic repository itself and gives the workspace
