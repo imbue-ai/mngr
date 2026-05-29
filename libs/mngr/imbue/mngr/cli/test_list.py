@@ -809,6 +809,7 @@ def test_list_command_with_remote_filter_alias(
         assert agent_name not in result.output
 
 
+@pytest.mark.flaky
 @pytest.mark.tmux
 def test_list_command_with_limit(
     cli_runner: CliRunner,

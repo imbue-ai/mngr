@@ -93,6 +93,10 @@ omit = [
   "*/telegram/injector.py",
   # SuperTokens routes require a live Core connection -- tested via release test.
   "*/desktop_client/supertokens_routes.py",
+  # Docker state-container teardown shells out to the `docker` CLI and needs a
+  # real daemon -- exercised via a docker-marked test. The pure functions
+  # (user-id resolution, name building) are tested in docker_cleanup_test.py.
+  "*/envs/docker_cleanup.py",
   # The deployment_tests importable helper package is exercised only by the
   # minds_deployment / minds_services pytest suites against real cloud
   # (see apps/minds/deployment_tests/). Those suites are excluded from
