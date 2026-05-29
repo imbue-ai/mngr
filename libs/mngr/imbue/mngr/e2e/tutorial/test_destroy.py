@@ -37,3 +37,36 @@ def test_create_and_destroy_agent(e2e: E2eSession) -> None:
     list_result = e2e.run("mngr list", comment="Verify agent no longer appears in list")
     expect(list_result).to_succeed()
     expect(list_result.stdout).not_to_contain("my-task")
+
+
+@pytest.mark.rsync
+@pytest.mark.release
+@pytest.mark.tmux
+@pytest.mark.modal
+def test_destroy_all_via_stdin(e2e: E2eSession) -> None:
+    e2e.write_tutorial_block("""
+        # destroy all agents (be careful!)
+        mngr list --ids | mngr destroy - --force
+    """)
+    for name, sleep_seconds in [("agent-x", 100102), ("agent-y", 100120)]:
+        expect(
+            e2e.run(
+                f"mngr create {name} --type command --no-ensure-clean --no-connect -- sleep {sleep_seconds}",
+                comment=f"Create {name}",
+            )
+        ).to_succeed()
+
+    list_result = e2e.run("mngr list", comment="Verify both agents exist")
+    expect(list_result).to_succeed()
+    expect(list_result.stdout).to_contain("agent-x")
+    expect(list_result.stdout).to_contain("agent-y")
+
+    destroy_result = e2e.run(
+        "mngr list --ids | mngr destroy - --force",
+        comment="Destroy all agents via stdin piping",
+    )
+    expect(destroy_result).to_succeed()
+
+    list_after = e2e.run("mngr list", comment="Verify no agents remain")
+    expect(list_after).to_succeed()
+    expect(list_after.stdout).to_contain("No agents found")

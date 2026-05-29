@@ -49,10 +49,10 @@ def test_create_default(e2e: E2eSession) -> None:
 @pytest.mark.modal
 def test_create_in_place(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
-    # if you want the default behavior of claude (starting in-place), you can specify that:
-    mngr create --transfer=none
-    # mngr defaults to creating a new worktree for each agent because the whole point of mngr is to let you run multiple agents in parallel.
-    # without creating a new worktree for each, they will make conflicting changes with one another.
+        # you can run the agent in-place (directly in your source directory) without any transfer:
+        mngr create my-task --transfer=none
+        # mngr defaults to creating a new worktree for each agent because the whole point of mngr is to let you run multiple agents in parallel.
+        # without creating a new worktree for each, they will make conflicting changes with one another.
     """)
     result = e2e.run(
         "mngr create my-task --transfer=none --type command --no-ensure-clean -- sleep 100071",

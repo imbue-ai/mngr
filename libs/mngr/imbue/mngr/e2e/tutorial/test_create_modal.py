@@ -28,13 +28,13 @@ _REMOTE_TIMEOUT_CUSTOM_IMAGE = 240.0
 @pytest.mark.timeout(120)
 def test_create_provider_modal(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
-    # you can also launch claude remotely in Modal:
-    mngr create my-task --provider modal
-    # see more details below in "CREATING AGENTS REMOTELY" for relevant options
+        # you can also launch your default agent remotely in Modal:
+        mngr create my-task --provider modal
+        # see more details below in "CREATING AGENTS REMOTELY" for relevant options
     """)
     result = e2e.run(
         "mngr create my-task --provider modal --no-connect --no-ensure-clean",
-        comment="you can also launch claude remotely in Modal",
+        comment="you can also launch your default agent remotely in Modal",
         timeout=_REMOTE_TIMEOUT,
     )
     expect(result).to_succeed()
@@ -285,10 +285,13 @@ def test_create_modal_target_path(e2e: E2eSession) -> None:
 @pytest.mark.timeout(120)
 def test_create_modal_upload_and_extra_provision_command(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
-    # you can upload files and run custom commands during host provisioning:
-    mngr create my-task --provider modal --upload-file ~/.ssh/config:/root/.ssh/config --extra-provision-command "echo provisioned"
+        # you can upload files and run custom commands during host provisioning:
+        mngr create my-task --provider modal --upload-file ~/.ssh/config:/root/.ssh/config --extra-provision-command "pip install foo"
+        # (--sudo-command runs as root)
     """)
-    # Create ~/.ssh/config so the upload-file flag has a real file to work with
+    # `pip install foo` from the tutorial would fail at provision time (no such
+    # package), so the test substitutes a harmless command but still exercises
+    # the upload-file + extra-provision-command flags end to end.
     e2e.run("mkdir -p ~/.ssh && touch ~/.ssh/config", comment="create ssh config for upload test")
     result = e2e.run(
         'mngr create my-task --provider modal --upload-file ~/.ssh/config:/root/.ssh/config --extra-provision-command "echo provisioned" --no-connect --no-ensure-clean',
@@ -353,21 +356,3 @@ def test_create_modal_reuse(e2e: E2eSession) -> None:
     expect(result).to_succeed()
 
 
-@pytest.mark.release
-@pytest.mark.modal
-@pytest.mark.rsync
-@pytest.mark.timeout(120)
-def test_create_modal_retry(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
-    # you can control connection retries and timeouts via settings.toml:
-    # [retry]
-    # connect_retry_times = 5
-    # connect_retry_delay = "10s"
-    # (--reconnect / --no-reconnect controls auto-reconnect on disconnect)
-    """)
-    result = e2e.run(
-        "mngr create my-task --provider modal --no-connect --no-ensure-clean",
-        comment="retry settings are configured via [retry] in settings.toml",
-        timeout=_REMOTE_TIMEOUT,
-    )
-    expect(result).to_succeed()

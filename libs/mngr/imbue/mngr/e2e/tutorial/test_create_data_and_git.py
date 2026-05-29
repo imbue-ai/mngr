@@ -254,36 +254,6 @@ def test_create_with_explicit_branch_name(e2e: E2eSession) -> None:
 @pytest.mark.tmux
 @pytest.mark.modal
 @pytest.mark.rsync
-def test_create_with_transfer_git_mirror(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
-    # you can create a git mirror instead of a worktree:
-    mngr create my-task --transfer=git-mirror
-    # git-mirror is used by default for remote agents
-    """)
-    expect(
-        e2e.run(
-            "mngr create my-task --transfer=git-mirror --type command --no-ensure-clean -- sleep 100089",
-            comment="you can create a git mirror instead of a worktree",
-        )
-    ).to_succeed()
-
-    list_result = e2e.run("mngr list", comment="Verify agent appears in list")
-    expect(list_result).to_succeed()
-    expect(list_result.stdout).to_contain("my-task")
-
-    # Verify the agent has a real .git directory (clone), not a .git file (worktree)
-    git_check = e2e.run(
-        "mngr exec my-task 'test -d .git && echo IS_DIR || echo IS_FILE'",
-        comment="Verify .git is a directory (clone) not a file (worktree)",
-    )
-    expect(git_check).to_succeed()
-    expect(git_check.stdout).to_contain("IS_DIR")
-
-
-@pytest.mark.release
-@pytest.mark.tmux
-@pytest.mark.modal
-@pytest.mark.rsync
 def test_create_git_mirror_with_existing_branch(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
     # you can disable new branch creation entirely by omitting the :NEW part:

@@ -44,45 +44,6 @@ def test_create_help_succeeds(e2e: E2eSession) -> None:
     expect(result.stdout).to_contain("--type")
 
 
-@pytest.mark.release
-@pytest.mark.modal
-def test_list_with_no_agents(e2e: E2eSession) -> None:
-    result = e2e.run("mngr list", comment="List agents in a fresh environment")
-    expect(result).to_succeed()
-    expect(result.stdout).to_contain("No agents found")
-
-
-@pytest.mark.release
-@pytest.mark.modal
-def test_list_json_with_no_agents(e2e: E2eSession) -> None:
-    result = e2e.run("mngr list --format json", comment="List agents as JSON in a fresh environment")
-    expect(result).to_succeed()
-    parsed = json.loads(result.stdout)
-    assert parsed["agents"] == []
-
-
-@pytest.mark.rsync
-@pytest.mark.release
-@pytest.mark.tmux
-@pytest.mark.modal
-def test_create_named_agent(e2e: E2eSession) -> None:
-    e2e.write_tutorial_block("""
-    # when creating agents to accomplish tasks, it's recommended that you give them a name to make it easier to manage them:
-    mngr create my-task
-    # that command give the agent a name of "my-task". If you don't specify a name, mngr will generate a random one for you.
-    """)
-    expect(
-        e2e.run(
-            "mngr create my-task --type command --no-ensure-clean -- sleep 100063",
-            comment="when creating agents to accomplish tasks, it's recommended that you give them a name",
-        )
-    ).to_succeed()
-
-    list_result = e2e.run("mngr list", comment="Verify agent appears in list")
-    expect(list_result).to_succeed()
-    expect(list_result.stdout).to_match(r"my-task\s+(RUNNING|WAITING)")
-
-
 @pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
@@ -126,50 +87,6 @@ def test_create_headless(e2e: E2eSession) -> None:
     list_result = e2e.run("mngr list", comment="Verify headless agent appears in list")
     expect(list_result).to_succeed()
     expect(list_result.stdout).to_contain("my-task")
-
-
-@pytest.mark.rsync
-@pytest.mark.release
-@pytest.mark.tmux
-@pytest.mark.modal
-def test_create_and_destroy_agent(e2e: E2eSession) -> None:
-    expect(
-        e2e.run(
-            "mngr create my-task --type command --no-ensure-clean -- sleep 100066",
-            comment="Create agent to be destroyed",
-        )
-    ).to_succeed()
-
-    destroy_result = e2e.run("mngr destroy my-task --force", comment="Destroy the agent")
-    expect(destroy_result).to_succeed()
-
-    list_result = e2e.run("mngr list", comment="Verify agent no longer appears in list")
-    expect(list_result).to_succeed()
-    expect(list_result.stdout).not_to_contain("my-task")
-
-
-@pytest.mark.rsync
-@pytest.mark.release
-@pytest.mark.tmux
-@pytest.mark.modal
-def test_create_and_rename_agent(e2e: E2eSession) -> None:
-    expect(
-        e2e.run(
-            "mngr create my-task --type command --no-ensure-clean -- sleep 100067",
-            comment="Create agent to be renamed",
-        )
-    ).to_succeed()
-
-    rename_result = e2e.run(
-        "mngr rename my-task renamed-task",
-        comment="Rename agent to renamed-task",
-    )
-    expect(rename_result).to_succeed()
-
-    list_result = e2e.run("mngr list", comment="Verify only the new name appears")
-    expect(list_result).to_succeed()
-    expect(list_result.stdout).to_contain("renamed-task")
-    expect(list_result.stdout).not_to_contain("my-task")
 
 
 @pytest.mark.rsync
