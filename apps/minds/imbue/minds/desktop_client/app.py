@@ -51,6 +51,7 @@ from imbue.minds.desktop_client.backup_password_store import has_saved_backup_pa
 from imbue.minds.desktop_client.backup_password_store import read_saved_backup_password
 from imbue.minds.desktop_client.backup_password_store import save_backup_password_if_absent
 from imbue.minds.desktop_client.backup_provisioning import BackupSetupRequest
+from imbue.minds.desktop_client.backup_provisioning import env_text_defines_restic_password
 from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
 from imbue.minds.desktop_client.cookie_manager import create_session_cookie
 from imbue.minds.desktop_client.cookie_manager import verify_session_cookie
@@ -598,8 +599,14 @@ def _build_backup_request_or_error(
             "imbue_cloud backups require a selected account. Choose an account or pick a "
             "different backup provider."
         )
+    # When the api_key textarea already supplies RESTIC_PASSWORD, that value
+    # wins (see build_api_key_restic_env), so the master-password row is moot:
+    # don't resolve or require one.
+    is_password_in_api_key_env = backup_provider is BackupProvider.API_KEY and env_text_defines_restic_password(
+        api_key_env
+    )
     master_password: SecretStr | None = None
-    if encryption_method is BackupEncryptionMethod.MASTER_PASSWORD:
+    if encryption_method is BackupEncryptionMethod.MASTER_PASSWORD and not is_password_in_api_key_env:
         saved_password = read_saved_backup_password(paths)
         if saved_password is not None:
             master_password = SecretStr(saved_password)

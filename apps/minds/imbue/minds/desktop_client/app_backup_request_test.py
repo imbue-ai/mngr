@@ -131,6 +131,24 @@ def test_no_password_leaves_master_password_unset(tmp_path: Path) -> None:
     assert request is not None and request.master_password is None
 
 
+def test_api_key_master_password_not_required_when_textarea_supplies_it(tmp_path: Path) -> None:
+    # The textarea already defines RESTIC_PASSWORD, so picking master_password
+    # encryption must not force the user to also enter a master password --
+    # the textarea password wins.
+    request, error = _build(
+        tmp_path,
+        backup_provider=BackupProvider.API_KEY,
+        encryption_method=BackupEncryptionMethod.MASTER_PASSWORD,
+        typed_master_password="",
+        api_key_env="RESTIC_REPOSITORY=s3:r\nRESTIC_PASSWORD=fromtextarea\n",
+    )
+    assert error is None
+    assert request is not None
+    # No master password is resolved; the textarea value is used downstream.
+    assert request.master_password is None
+    assert "RESTIC_PASSWORD=fromtextarea" in request.api_key_env_text
+
+
 def test_api_key_env_text_is_carried_through(tmp_path: Path) -> None:
     request, error = _build(
         tmp_path,
