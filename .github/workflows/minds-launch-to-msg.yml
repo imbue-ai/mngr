@@ -83,6 +83,10 @@ jobs:
       - name: pnpm install
         working-directory: apps/minds
         run: pnpm install --frozen-lockfile
+      - name: read ToDesktop APP_ID from todesktop.json
+        run: |
+          APP_ID=$(python3 -c 'import json; print(json.load(open("apps/minds/todesktop.json"))["id"])')
+          echo "APP_ID=$APP_ID" >> "$GITHUB_ENV"
       - name: resolve full commit_sha (input may be a branch/tag)
         id: sha
         working-directory: apps/minds
@@ -159,7 +163,6 @@ jobs:
             echo "::error::could not extract build ID from /tmp/minds-dist.log. Check the uploaded build-log artifact."
             exit 1
           fi
-          APP_ID=26032588hqdzk
           URL="https://dl.todesktop.com/${APP_ID}/builds/${BUILD_ID}/mac/zip/arm64"
           echo "build_id=$BUILD_ID" >> "$GITHUB_OUTPUT"
           echo "url=$URL"           >> "$GITHUB_OUTPUT"
@@ -175,7 +178,6 @@ jobs:
             BID='${{ steps.parse.outputs.build_id }}'
             SRC='freshly built'
           fi
-          APP_ID=26032588hqdzk
           {
             echo "## Build result ($SRC)"
             echo ""

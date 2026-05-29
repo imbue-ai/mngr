@@ -4,7 +4,12 @@
 # Prints the URL to stdout, suitable for piping into mac-runner-reset.sh.
 set -euo pipefail
 
-APP_ID="${1:-26032588hqdzk}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+TODESKTOP_JSON="$SCRIPT_DIR/../todesktop.json"
+APP_ID="${1:-}"
+if [[ -z "$APP_ID" ]]; then
+  APP_ID=$(python3 -c "import json; print(json.load(open('$TODESKTOP_JSON'))['id'])")
+fi
 FEED="https://download.todesktop.com/${APP_ID}/latest-mac.yml"
 
 fname=$(curl -fsSL --max-time 30 "$FEED" \
