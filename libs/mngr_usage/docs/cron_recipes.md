@@ -64,7 +64,9 @@ snapshot="$(mngr usage --format json)"
 #            spare capacity (5h budget left, weekly under the pace line above).
 #   STOP  -- shut down: the 5h window left its tail / rolled over, OR weekly usage
 #            passes the strict pace line, used% > elapsed%.
-#   KEEP  -- hold the current state (weekly usage between those two lines).
+#   KEEP  -- hold the current state: still in the tail and under the strict weekly
+#            line, but not eligible to (re)launch -- weekly is in the hysteresis band,
+#            or the 5h budget is already spent.
 #   ""    -- no Claude usage data this tick: do nothing.
 # The two lines differ on purpose: the gap is hysteresis, so a running agent isn't
 # stopped the moment it nudges past the START margin.
