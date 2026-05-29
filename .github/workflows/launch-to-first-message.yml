@@ -4,15 +4,16 @@ on:
   workflow_dispatch:
     inputs:
       app_zip_url:
-        description: 'ToDesktop .zip URL for the build to verify'
-        required: true
-        default: 'https://dl.todesktop.com/26032588hqdzk/builds/260528yf2ma2jd4/mac/zip/arm64'
+        description: 'ToDesktop .zip URL to verify. Leave empty to resolve the latest released build from the electron-updater feed.'
+        required: false
+        default: ''
   push:
     branches: [mngr/mac-runner]
     paths:
       - '.github/workflows/launch-to-first-message.yml'
       - 'apps/minds/scripts/launch-and-verify.sh'
       - 'apps/minds/scripts/mac-runner-reset.sh'
+      - 'apps/minds/scripts/resolve-latest-todesktop-url.sh'
 
 concurrency:
   group: mac-runner
@@ -32,8 +33,19 @@ jobs:
             echo "ANTHROPIC_API_KEY is empty — secret not reaching the runner"; exit 1
           fi
           echo "ANTHROPIC_API_KEY present, length=${#ANTHROPIC_API_KEY}"
+      - name: resolve build URL
+        id: url
+        run: |
+          if [[ -n "${{ inputs.app_zip_url }}" ]]; then
+            echo "url=${{ inputs.app_zip_url }}" >> "$GITHUB_OUTPUT"
+            echo "Using input URL: ${{ inputs.app_zip_url }}"
+          else
+            u=$(bash apps/minds/scripts/resolve-latest-todesktop-url.sh)
+            echo "url=$u" >> "$GITHUB_OUTPUT"
+            echo "Resolved latest: $u"
+          fi
       - name: reset to clean state and install fresh app
-        run: bash apps/minds/scripts/mac-runner-reset.sh "${{ inputs.app_zip_url || 'https://dl.todesktop.com/26032588hqdzk/builds/260528yf2ma2jd4/mac/zip/arm64' }}"
+        run: bash apps/minds/scripts/mac-runner-reset.sh "${{ steps.url.outputs.url }}"
       - name: launch and wait for backend
         run: bash apps/minds/scripts/launch-and-verify.sh
       - name: collect diagnostic artifacts on failure
