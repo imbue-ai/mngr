@@ -408,9 +408,7 @@ def exec_rsync(
 
     _mkdir_on_host(destination_host, destination_for_git)
 
-    argv = _build_two_sided_rsync_argv(
-        source_host, source_str, destination_host, destination_str, extra_args
-    )
+    argv = _build_two_sided_rsync_argv(source_host, source_str, destination_host, destination_str, extra_args)
     direction = "Pushing" if source_host.is_local and not destination_host.is_local else "Pulling"
     logger.debug("{} files from {} to {}: {}", direction, source_str, destination_str, shlex.join(argv))
     os.execvp(argv[0], argv)

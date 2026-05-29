@@ -215,5 +215,3 @@ def emit_format_template_lines(
         line = render_format_template(template, item)
         sys.stdout.write(line + "\n")
     sys.stdout.flush()
-
-
