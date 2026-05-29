@@ -10,8 +10,14 @@ from click.testing import CliRunner
 
 from imbue.mngr.api.find import AgentMatch
 from imbue.mngr.cli.stop import StopCliOptions
+from imbue.mngr.cli.stop import _output_dry_run
 from imbue.mngr.cli.stop import _output_result
 from imbue.mngr.cli.stop import stop
+from imbue.mngr.api.find import AgentMatch
+from imbue.mngr.primitives import AgentId
+from imbue.mngr.primitives import HostId
+from imbue.mngr.primitives import HostName
+from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.config.data_types import OutputOptions
 from imbue.mngr.primitives import AgentAddress
 from imbue.mngr.primitives import AgentId
@@ -28,6 +34,7 @@ def test_stop_cli_options_fields() -> None:
         agents=("agent1", "agent2"),
         agent_list=(AgentAddress(agent=AgentName("agent3")),),
         archive=False,
+        dry_run=False,
         sessions=(),
         snapshot_mode=None,
         graceful=True,
@@ -104,6 +111,7 @@ def test_stop_cli_options_accepts_all_optional_fields() -> None:
         agents=("a1", "a2", "a3"),
         agent_list=(AgentAddress(agent=AgentName("a4")),),
         archive=True,
+        dry_run=True,
         sessions=("mngr-session-1", "mngr-session-2"),
         snapshot_mode="auto",
         graceful=False,
@@ -125,6 +133,7 @@ def test_stop_cli_options_accepts_all_optional_fields() -> None:
     assert opts.verbose == 2
     assert opts.plugin == ("my-plugin",)
     assert opts.disable_plugin == ("other-plugin",)
+    assert opts.dry_run is True
 
 
 # =============================================================================
@@ -177,6 +186,45 @@ def test_stop_output_result_format_template(capsys: pytest.CaptureFixture[str]) 
     assert "template-agent" in captured.out
 
 
+def _make_agent_match(name: str) -> AgentMatch:
+    return AgentMatch(
+        agent_id=AgentId.generate(),
+        agent_name=AgentName(name),
+        host_id=HostId.generate(),
+        host_name=HostName("local"),
+        provider_name=ProviderInstanceName("local"),
+    )
+
+
+def test_stop_output_dry_run_human(capsys: pytest.CaptureFixture[str]) -> None:
+    """_output_dry_run in HUMAN format lists the agents that would be stopped."""
+    output_opts = OutputOptions(output_format=OutputFormat.HUMAN)
+    _output_dry_run([_make_agent_match("agent-1"), _make_agent_match("agent-2")], output_opts)
+    captured = capsys.readouterr()
+    assert "Would stop 2 agent(s):" in captured.out
+    assert "agent-1" in captured.out
+    assert "agent-2" in captured.out
+
+
+def test_stop_output_dry_run_json(capsys: pytest.CaptureFixture[str]) -> None:
+    """_output_dry_run in JSON format reports dry_run=True and the agent list."""
+    output_opts = OutputOptions(output_format=OutputFormat.JSON)
+    _output_dry_run([_make_agent_match("agent-x")], output_opts)
+    captured = capsys.readouterr()
+    data = json.loads(captured.out.strip())
+    assert data["dry_run"] is True
+    assert data["count"] == 1
+    assert data["agents"][0]["name"] == "agent-x"
+
+
+def test_stop_output_dry_run_format_template(capsys: pytest.CaptureFixture[str]) -> None:
+    """_output_dry_run with a format template emits one line per agent."""
+    output_opts = OutputOptions(output_format=OutputFormat.HUMAN, format_template="{name}")
+    _output_dry_run([_make_agent_match("template-agent")], output_opts)
+    captured = capsys.readouterr()
+    assert "template-agent" in captured.out
+
+
 # =============================================================================
 # Archive integration tests (require tmux for running agents)
 # =============================================================================
@@ -216,3 +264,35 @@ def test_stop_archive_sets_archived_at_label(
                 return
 
     raise AssertionError("Could not find archive-test-agent data.json")
+
+
+@pytest.mark.tmux
+def test_stop_dry_run_does_not_stop_agent(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    create_test_agent: Callable[..., str],
+) -> None:
+    """stop --dry-run should report the agent but leave it running."""
+    create_test_agent("dry-run-test-agent", "sleep 300019")
+
+    result = cli_runner.invoke(
+        stop,
+        ["dry-run-test-agent", "--dry-run"],
+        obj=plugin_manager,
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 0
+    assert "Would stop" in result.output
+    assert "dry-run-test-agent" in result.output
+    # The dry run must not actually stop the agent.
+    assert "Stopped agent" not in result.output
+
+    # Verify the agent is still running by listing only running agents.
+    list_result = cli_runner.invoke(
+        stop,
+        ["dry-run-test-agent", "--dry-run", "--format", "{name}"],
+        obj=plugin_manager,
+        catch_exceptions=False,
+    )
+    assert list_result.exit_code == 0
+    assert "dry-run-test-agent" in list_result.output
