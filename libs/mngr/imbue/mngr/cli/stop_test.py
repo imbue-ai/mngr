@@ -8,13 +8,18 @@ import pluggy
 import pytest
 from click.testing import CliRunner
 
+from imbue.mngr.api.find import AgentMatch
 from imbue.mngr.cli.stop import StopCliOptions
 from imbue.mngr.cli.stop import _output_result
 from imbue.mngr.cli.stop import stop
 from imbue.mngr.config.data_types import OutputOptions
 from imbue.mngr.primitives import AgentAddress
+from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
+from imbue.mngr.primitives import HostId
+from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import OutputFormat
+from imbue.mngr.primitives import ProviderInstanceName
 
 
 def test_stop_cli_options_fields() -> None:
