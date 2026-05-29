@@ -323,8 +323,13 @@ def refresh_available_topics_help() -> None:
     existing = get_help_metadata("help")
     if existing is None or not section:
         return
+    # Append (rather than replace) so any other sections are preserved and a
+    # repeated call stays idempotent: drop a stale "Available Topics" section
+    # first, then add the freshly built one.
+    other_sections = tuple(s for s in existing.additional_sections if s[0] != "Available Topics")
+    updated_sections = other_sections + (("Available Topics", section),)
     existing.model_copy_update(
-        to_update(existing.field_ref().additional_sections, (("Available Topics", section),)),
+        to_update(existing.field_ref().additional_sections, updated_sections),
     ).register()
 
 
