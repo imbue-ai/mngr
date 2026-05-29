@@ -239,8 +239,16 @@ def _read_remote_file(
     *,
     parent_cg: ConcurrencyGroup | None,
 ) -> str:
-    """Read ``remote_path`` from the agent work_dir; return "" if it is absent."""
-    command_str = f"cat {shlex.quote(remote_path)} 2>/dev/null || true"
+    """Read ``remote_path`` from the agent work_dir; return "" if it is absent.
+
+    An absent file is a legitimate first-run state and yields ``""`` with a
+    zero exit. A *present* file that cannot be read (e.g. permission denied)
+    is a genuine error: it exits non-zero and raises rather than being
+    masked as empty, which would otherwise let the empty-string path clobber
+    a backup.toml that bootstrap actually wrote.
+    """
+    quoted = shlex.quote(remote_path)
+    command_str = f"if [ -f {quoted} ]; then cat {quoted}; fi"
     result = _run_mngr_exec(agent_id, command_str, parent_cg=parent_cg)
     if result.returncode != 0:
         raise BackupProvisioningError(
