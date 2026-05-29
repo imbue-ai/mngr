@@ -1,0 +1,3 @@
+Fixed the "combine multiple setup steps" tutorial example in the mega tutorial: it referenced the removed `--sudo-command` flag, which no longer exists. The example now uses `--extra-provision-command "sudo ..."` (the supported way to run a root command during provisioning), matching the rest of the provisioning examples.
+
+Also hardened the corresponding release e2e test (`test_create_modal_combined_setup_steps`) to verify the actual effects of provisioning -- the uploaded file lands at its remote path with the right contents, and both repeated `--extra-provision-command` invocations run on the host.

@@ -1,0 +1,1 @@
+Strengthened the `test_plugin_list_shows_installed` e2e tutorial test to verify the `mngr plugin list` output is a structured table (asserting on the NAME/VERSION/ENABLED column headers) and that several stable built-in plugins (claude, modal, local) are listed as named rows, rather than only checking for an incidental "claude" substring.

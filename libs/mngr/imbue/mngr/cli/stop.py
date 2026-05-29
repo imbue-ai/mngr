@@ -44,6 +44,7 @@ class StopCliOptions(CommonCliOptions):
     agents: tuple[str, ...]
     agent_list: tuple[AgentAddress, ...]
     archive: bool
+    dry_run: bool
     sessions: tuple[str, ...]
     # Planned features (not yet implemented)
     snapshot_mode: str | None
@@ -55,6 +56,34 @@ def _output(message: str, output_opts: OutputOptions) -> None:
     """Output a message according to the format."""
     if output_opts.output_format == OutputFormat.HUMAN:
         write_human_line(message)
+
+
+def _output_dry_run(matches: Sequence[AgentMatch], output_opts: OutputOptions) -> None:
+    """Output what would be stopped in a dry run, without stopping anything."""
+    if output_opts.format_template is not None:
+        items = [{"name": str(m.agent_name)} for m in matches]
+        emit_format_template_lines(output_opts.format_template, items)
+        return
+    agent_data = [
+        {
+            "name": str(m.agent_name),
+            "id": str(m.agent_id),
+            "host_id": str(m.host_id),
+            "provider": str(m.provider_name),
+        }
+        for m in matches
+    ]
+    match output_opts.output_format:
+        case OutputFormat.JSON:
+            emit_final_json({"dry_run": True, "agents": agent_data, "count": len(agent_data)})
+        case OutputFormat.JSONL:
+            emit_event("dry_run", {"agents": agent_data}, OutputFormat.JSONL)
+        case OutputFormat.HUMAN:
+            write_human_line("Would stop {} agent(s):", len(matches))
+            for m in matches:
+                write_human_line("  - {} (on host {})", m.agent_name, m.host_id)
+        case _ as unreachable:
+            assert_never(unreachable)
 
 
 def _output_result(stopped_agents: Sequence[str], output_opts: OutputOptions) -> None:
@@ -98,6 +127,11 @@ def _output_result(stopped_agents: Sequence[str], output_opts: OutputOptions) ->
     "--archive",
     is_flag=True,
     help="Set an 'archived_at' label on each stopped agent (marks it as archived)",
+)
+@optgroup.option(
+    "--dry-run",
+    is_flag=True,
+    help="Show which agents would be stopped without actually stopping them",
 )
 @optgroup.option(
     "--snapshot-mode",
@@ -170,6 +204,11 @@ def stop(ctx: click.Context, **kwargs: Any) -> None:
         _output("No running agents found to stop", output_opts)
         return
 
+    # In dry-run mode, report what would be stopped and exit without stopping.
+    if opts.dry_run:
+        _output_dry_run(agents_to_stop, output_opts)
+        return
+
     # Stop each agent
     stopped_agents: list[str] = []
     stopped_matches: list[AgentMatch] = []
@@ -217,7 +256,7 @@ def stop(ctx: click.Context, **kwargs: Any) -> None:
 CommandHelpMetadata(
     key="stop",
     one_line_description="Stop running agent(s)",
-    synopsis="mngr [stop|s] [AGENTS...|-] [--agent <AGENT>] [--session <SESSION>] [--archive] [--snapshot-mode <MODE>] [--graceful/--no-graceful]",
+    synopsis="mngr [stop|s] [AGENTS...|-] [--agent <AGENT>] [--session <SESSION>] [--archive] [--dry-run] [--snapshot-mode <MODE>] [--graceful/--no-graceful]",
     description="""For remote hosts, this stops the agent's tmux session. The host remains
 running unless idle detection stops it automatically.
 
@@ -238,6 +277,7 @@ Supports custom format templates via --format. Available fields: name.""",
         ("Stop multiple agents", "mngr stop agent1 agent2"),
         ("Stop all running agents", "mngr list --ids | mngr stop -"),
         ("Stop and archive an agent", "mngr stop my-agent --archive"),
+        ("Preview what would be stopped", "mngr list --ids | mngr stop - --dry-run"),
         ("Stop by tmux session name", "mngr stop --session mngr-my-agent"),
         ("Custom format template output", "mngr stop agent1 agent2 --format '{name}'"),
     ),

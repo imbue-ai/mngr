@@ -1,0 +1,5 @@
+- Fixed and hardened the e2e tutorial test `test_config_set_list_active_default` (LISTING section):
+  - The shared `e2e` fixture now pre-creates a project-scope `settings.toml` opted into pytest (`is_allowed_in_pytest = true`). `mngr config set <key> <value>` writes to the project scope by default, so without this any test running `mngr config set ...` left a project `settings.toml` that the next mngr command refused to load under pytest.
+  - Dropped the superfluous `@pytest.mark.modal` mark, since `mngr list` with no agents never provisions a Modal host and therefore never invokes the Modal CLI that the resource guard tracks (the mark tripped the guard's "never invoked" check on the otherwise-passing test).
+  - Marked the test `@pytest.mark.flaky`, raised its per-test timeout with `@pytest.mark.timeout(120)`, and gave the `mngr list` call a matching command timeout, because Modal host discovery occasionally runs past the default 10s per-test timeout.
+  - Added an assertion that the value is persisted to the project-scope config so the test verifies the actual effect of `config set`, not just its exit code.

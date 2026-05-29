@@ -1,0 +1,1 @@
+Strengthened the `mngr create --help` e2e tutorial test: it now also checks the NAME section, the command summary line, a clean stderr, and several flags (`--provider`, `--branch`, `--message`) that the surrounding tutorial demonstrates. Added a sibling test that exercises the documented `c` alias and `-h` short flag and verifies they resolve to the `mngr create` help.

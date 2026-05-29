@@ -1,0 +1,1 @@
+Improved the `test_create_with_template_modal_disabled` e2e tutorial test: it now verifies the concrete effect of the failed create (no agent is registered under `$MNGR_HOST_DIR/agents`) via a fast filesystem check, and tightened the error-message assertion to require both a `modal` mention and a provider/backend/plugin reference.

@@ -1,0 +1,2 @@
+- Fixed the `test_create_with_pass_env` e2e release test, which was incorrectly marked `@pytest.mark.modal`. The test creates a local `--type command` agent and never invokes the Modal CLI, so the resource guard failed it with "Test marked with @pytest.mark.modal but never invoked modal". Removed the spurious mark, matching the sibling `test_create_with_env`.
+- Added `test_create_with_pass_env_unset`, an unhappy-path companion that verifies `--pass-env` for a variable that is not set in the shell is silently omitted from the agent's environment while creation still succeeds.

@@ -70,9 +70,12 @@ _HEADER_LABELS: Final[dict[str, str]] = {
 
 # Aliases that let users reference fields by the same name in --fields/--format
 # templates as they do in CEL filters and --sort. host.provider is the short form
-# documented for CEL; the underlying attribute is host.provider_name.
+# documented for CEL; the underlying attribute is host.provider_name. project is the
+# short form for the project label (matching the --project filter flag); the underlying
+# attribute is labels.project.
 _FIELD_ALIASES: Final[dict[str, str]] = {
     "host.provider": "host.provider_name",
+    "project": "labels.project",
 }
 
 

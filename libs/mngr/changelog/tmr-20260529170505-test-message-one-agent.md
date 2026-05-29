@@ -1,0 +1,2 @@
+- Fixed the `test_message_one_agent` tutorial e2e test: removed the superfluous `@pytest.mark.modal` mark. The test creates a local `--type command` agent and messages it, so it never invokes the Modal binary during the call phase; the resource guard correctly flagged the mark as never-invoked.
+- Strengthened `test_message_one_agent` to assert the message was actually delivered to the named agent (stdout reports "Message sent to: my-task" and "Successfully sent message to 1 agent(s)") rather than only checking the exit code.

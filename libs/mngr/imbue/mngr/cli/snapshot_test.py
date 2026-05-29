@@ -90,6 +90,7 @@ def test_snapshot_destroy_cli_options_fields() -> None:
         snapshots=("snap-123",),
         all_snapshots=False,
         force=True,
+        dry_run=False,
         output_format="human",
         quiet=False,
         verbose=0,
@@ -271,6 +272,7 @@ def test_snapshot_destroy_cli_options_can_be_instantiated() -> None:
         snapshots=(),
         all_snapshots=True,
         force=False,
+        dry_run=False,
         output_format="json",
         quiet=True,
         verbose=1,
@@ -487,6 +489,31 @@ def test_emit_destroy_result_human_format(capsys: pytest.CaptureFixture[str]) ->
     _emit_destroy_result(destroyed, output_opts)
     captured = capsys.readouterr()
     assert "Destroyed 2 snapshot(s)" in captured.out
+
+
+def test_emit_destroy_result_human_format_dry_run(capsys: pytest.CaptureFixture[str]) -> None:
+    """In dry-run mode the human message reports what *would* be destroyed."""
+    output_opts = OutputOptions(output_format=OutputFormat.HUMAN)
+    would_destroy = [
+        {"snapshot_id": "snap-1", "host_id": "host-1", "provider": "local"},
+    ]
+    _emit_destroy_result(would_destroy, output_opts, dry_run=True)
+    captured = capsys.readouterr()
+    assert "Would destroy 1 snapshot(s)" in captured.out
+    assert "Destroyed" not in captured.out
+
+
+def test_emit_destroy_result_json_format_dry_run(capsys: pytest.CaptureFixture[str]) -> None:
+    """In dry-run mode the JSON output carries dry_run=True."""
+    output_opts = OutputOptions(output_format=OutputFormat.JSON)
+    would_destroy = [
+        {"snapshot_id": "snap-1", "host_id": "host-1", "provider": "local"},
+    ]
+    _emit_destroy_result(would_destroy, output_opts, dry_run=True)
+    data = json.loads(capsys.readouterr().out.strip())
+    assert data["dry_run"] is True
+    assert data["count"] == 1
+    assert data["snapshots_destroyed"] == would_destroy
 
 
 # =============================================================================

@@ -1,0 +1,5 @@
+Fixed and hardened the `test_destroy_remove_branch` e2e tutorial test for `mngr destroy --remove-created-branch`:
+
+- Removed the superfluous `@pytest.mark.modal` mark. The test creates a local command agent, so it never invokes the Modal CLI (the only Modal usage trackable from a subprocess); the default garbage collection on destroy only performs SDK listing, which the resource guard cannot observe in a subprocess. The mark therefore tripped the "marked but never invoked" guard.
+- Added `@pytest.mark.timeout(60)` to match the sibling create/destroy test. Destroy runs gc by default, which probes provider discovery (Modal/Docker/Vultr) over the network and can exceed the global 10s per-test timeout, making the test flaky.
+- Strengthened assertions to verify the actual effect of `--remove-created-branch`: the agent's `mngr/my-task` branch exists before destroy, the destroy output reports the agent destroyed and the branch deleted, and afterwards the agent no longer appears in `mngr list` and the git branch is gone.

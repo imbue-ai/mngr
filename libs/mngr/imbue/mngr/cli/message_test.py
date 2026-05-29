@@ -23,6 +23,7 @@ from imbue.mngr.primitives import OutputFormat
 _DEFAULT_OPTS = MessageCliOptions(
     agents=(),
     agent_list=(),
+    all_agents=False,
     message_content=None,
     message_file=None,
     on_error="continue",
@@ -43,6 +44,7 @@ def test_message_cli_options_has_expected_fields() -> None:
     opts = MessageCliOptions(
         agents=("agent1", "agent2"),
         agent_list=(AgentAddress(agent=AgentName("agent3")),),
+        all_agents=False,
         message_content="Hello",
         message_file=None,
         on_error="continue",
@@ -127,6 +129,42 @@ def test_message_requires_agent(
 
     assert result.exit_code != 0
     assert "Must specify at least one agent" in result.output
+
+
+def test_message_all_with_named_agents_is_rejected(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """Test that combining named agents with --all is rejected."""
+    result = cli_runner.invoke(
+        message,
+        ["my-agent", "--all", "-m", "hello"],
+        obj=plugin_manager,
+        catch_exceptions=True,
+    )
+
+    assert result.exit_code != 0
+    assert "Cannot specify both agent names and --all" in result.output
+
+
+def test_message_all_with_no_agents_reports_none_found(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """Test that --all succeeds (and reports no agents) when none exist.
+
+    This exercises the all-agents code path without requiring any running
+    agents: discovery finds nothing, so the command reports that and exits 0.
+    """
+    result = cli_runner.invoke(
+        message,
+        ["--all", "-m", "hello"],
+        obj=plugin_manager,
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 0
+    assert "No agents found" in result.output
 
 
 def test_message_nonexistent_agent(

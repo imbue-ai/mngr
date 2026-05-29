@@ -1,0 +1,1 @@
+Fixed the `test_create_modal_custom_image_base` release test, which created a Modal agent with a custom base image (`-b image=python:3.12`) but no agent type, causing a "No agent type provided" failure. The test now passes `--type command` (matching the other Modal e2e tests) and verifies the custom base image is actually in use on the remote host.

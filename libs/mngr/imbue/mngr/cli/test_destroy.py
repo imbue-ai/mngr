@@ -73,6 +73,60 @@ def test_destroy_single_agent(
 
 
 @pytest.mark.tmux
+def test_destroy_dry_run_previews_without_destroying(
+    cli_runner: CliRunner,
+    temp_work_dir: Path,
+    mngr_test_prefix: str,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """--dry-run reports the targeted agent but leaves it running."""
+    agent_name = f"test-destroy-dryrun-{int(time.time())}"
+    session_name = f"{mngr_test_prefix}{agent_name}"
+
+    with tmux_session_cleanup(session_name):
+        create_result = cli_runner.invoke(
+            create,
+            [
+                "--name",
+                agent_name,
+                "--type",
+                "command",
+                "--source",
+                str(temp_work_dir),
+                "--transfer=none",
+                "--no-connect",
+                "--no-ensure-clean",
+                "--",
+                "sleep",
+                "120012",
+            ],
+            obj=plugin_manager,
+            catch_exceptions=False,
+        )
+        assert create_result.exit_code == 0, f"Create failed: {create_result.output}"
+        wait_for(
+            lambda: tmux_session_exists(session_name),
+            timeout=15.0,
+            error_message=f"Expected tmux session {session_name} to exist",
+        )
+
+        destroy_result = cli_runner.invoke(
+            destroy,
+            [agent_name, "--force", "--dry-run"],
+            obj=plugin_manager,
+            catch_exceptions=False,
+        )
+
+        assert destroy_result.exit_code == 0, f"Dry-run destroy failed: {destroy_result.output}"
+        # The agent is reported as a destroy candidate ...
+        assert "Would destroy" in destroy_result.output
+        assert agent_name in destroy_result.output
+        # ... but nothing is actually destroyed.
+        assert "Destroyed agent:" not in destroy_result.output
+        assert tmux_session_exists(session_name), "Dry-run must not destroy the agent"
+
+
+@pytest.mark.tmux
 def test_destroy_single_agent_via_session(
     cli_runner: CliRunner,
     temp_work_dir: Path,

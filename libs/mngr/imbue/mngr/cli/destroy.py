@@ -131,6 +131,7 @@ class DestroyCliOptions(CommonCliOptions):
     remove_created_branch: bool
     allow_worktree_removal: bool
     sessions: tuple[str, ...]
+    dry_run: bool
 
 
 @click.command(name="destroy")
@@ -172,6 +173,11 @@ class DestroyCliOptions(CommonCliOptions):
     "--allow-worktree-removal/--no-allow-worktree-removal",
     default=True,
     help="Allow GC to remove the git worktree directory (default: enabled)",
+)
+@optgroup.option(
+    "--dry-run",
+    is_flag=True,
+    help="Show which agents would be destroyed without actually destroying them",
 )
 @add_common_options
 @click.pass_context
@@ -223,6 +229,12 @@ def destroy(ctx: click.Context, **kwargs) -> None:
 
     if not targets.online_agents and not targets.offline_hosts:
         _output("No agents found to destroy", output_opts)
+        return
+
+    # In dry-run mode, report what would be destroyed and stop before touching
+    # anything (no confirmation prompt, no destruction, no GC).
+    if opts.dry_run:
+        _emit_dry_run_output(targets, output_opts)
         return
 
     # Confirm destruction if not forced
@@ -500,6 +512,37 @@ def _check_all_agents_targeted_on_offline_host(
             )
 
 
+def _emit_dry_run_output(targets: _DestroyTargets, output_opts: OutputOptions) -> None:
+    """Report which agents would be destroyed, respecting the output format.
+
+    Used by --dry-run: it lists every targeted agent (on both online and
+    offline hosts) without destroying anything.
+    """
+    agent_data = [
+        {"name": str(agent.name), "id": str(agent.id), "host": str(host.get_name()), "offline": False}
+        for agent, host in targets.online_agents
+    ]
+    for offline in targets.offline_hosts:
+        host_name = offline.host.get_name()
+        agent_data.extend(
+            {"name": str(name), "id": str(agent_id), "host": str(host_name), "offline": True}
+            for name, agent_id in zip(offline.agent_names, offline.agent_ids)
+        )
+
+    match output_opts.output_format:
+        case OutputFormat.JSON:
+            emit_final_json({"dry_run": True, "agents": agent_data, "count": len(agent_data)})
+        case OutputFormat.JSONL:
+            emit_event("dry_run", {"agents": agent_data, "count": len(agent_data)}, OutputFormat.JSONL)
+        case OutputFormat.HUMAN:
+            write_human_line("\nWould destroy {} agent(s):", len(agent_data))
+            for entry in agent_data:
+                suffix = " (offline)" if entry["offline"] else ""
+                write_human_line("  - {}@{}{}", entry["name"], entry["host"], suffix)
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
 def _confirm_destruction(targets: _DestroyTargets) -> None:
     """Prompt user to confirm destruction of agents."""
     write_human_line("\nThe following agents will be destroyed:")
@@ -612,7 +655,7 @@ def _run_post_destroy_gc(
 CommandHelpMetadata(
     key="destroy",
     one_line_description="Destroy agent(s) and clean up resources",
-    synopsis="mngr [destroy|rm] [AGENTS...|-] [--agent <AGENT>] [--session <SESSION>] [-f|--force] [-b|--remove-created-branch] [--[no-]gc] [--[no-]allow-worktree-removal]",
+    synopsis="mngr [destroy|rm] [AGENTS...|-] [--agent <AGENT>] [--session <SESSION>] [-f|--force] [-b|--remove-created-branch] [--[no-]gc] [--[no-]allow-worktree-removal] [--dry-run]",
     description="""When the last agent on a host is destroyed, the host itself is also destroyed
 (including containers, volumes, snapshots, and any remote infrastructure).
 
@@ -633,6 +676,7 @@ Supports custom format templates via --format. Available fields: name.""",
         ("Destroy using --agent flag (repeatable)", "mngr destroy --agent my-agent --agent another-agent"),
         ("Destroy by tmux session name", "mngr destroy --session mngr-my-agent"),
         ("Pipe agent names from list", "mngr list --ids | mngr destroy - --force"),
+        ("Preview what would be destroyed", "mngr list --ids | mngr destroy - --force --dry-run"),
         ("Custom format template output", "mngr destroy my-agent --force --format '{name}'"),
     ),
     see_also=(

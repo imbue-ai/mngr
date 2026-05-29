@@ -194,9 +194,26 @@ def test_get_field_value_provider_alias() -> None:
     assert result == "local"
 
 
+def test_get_field_value_project_alias() -> None:
+    """project should resolve via the alias to the same value as labels.project."""
+    agent = make_test_agent_details(labels={"project": "my-project"})
+    assert _get_field_value(agent, "project") == _get_field_value(agent, "labels.project") == "my-project"
+
+
+def test_get_field_value_project_alias_empty_when_unset() -> None:
+    """project resolves to empty (not an error) when the label is absent."""
+    agent = make_test_agent_details()
+    assert _get_field_value(agent, "project") == ""
+
+
 def test_get_header_label_resolves_alias() -> None:
     """The alias host.provider should produce the same header label as host.provider_name."""
     assert _get_header_label("host.provider") == _get_header_label("host.provider_name") == "PROVIDER"
+
+
+def test_get_header_label_resolves_project_alias() -> None:
+    """The alias project should produce the same header label as labels.project."""
+    assert _get_header_label("project") == _get_header_label("labels.project") == "PROJECT"
 
 
 def test_compute_column_widths_resolves_alias_for_min_widths() -> None:

@@ -160,6 +160,47 @@ def _flatten_config(config: dict[str, Any], prefix: str = "") -> list[tuple[str,
     return result
 
 
+# Container dicts whose per-entry model wraps the user-facing keys in a nested
+# sub-dict. ``mngr config set commands.create.provider modal`` writes
+# ``[commands.create]\nprovider = "modal"`` to the TOML file, which the loader
+# parses into ``CommandDefaults.defaults['provider']`` (and the analogous
+# ``CreateTemplate.options`` for ``create_templates``). The merged
+# ``model_dump`` therefore nests these values under ``defaults`` / ``options``,
+# but ``config set``, the per-scope TOML files, and the docs all address them at
+# the flat ``commands.<cmd>.<param>`` path. ``_to_user_facing_view`` re-flattens
+# the dump so merged ``config get`` / ``config list`` round-trip with the path
+# that ``config set`` accepts.
+_WRAPPED_CONTAINERS: typing.Final = {"commands": "defaults", "create_templates": "options"}
+
+
+def _to_user_facing_view(full_view: dict[str, Any]) -> dict[str, Any]:
+    """Lift wrapped command-default / template-option keys to their flat path.
+
+    For each entry of a wrapped container, the wrapper sub-dict
+    (``defaults`` / ``options``) is merged up into the entry, so
+    ``commands.create.defaults.provider`` becomes ``commands.create.provider``.
+    First-class sibling fields with a ``None`` value (e.g. an unset
+    ``default_subcommand``) are dropped so they don't surface as settable keys.
+    """
+    result = dict(full_view)
+    for container, wrapper in _WRAPPED_CONTAINERS.items():
+        entries = result.get(container)
+        if not isinstance(entries, dict):
+            continue
+        flattened_entries: dict[str, Any] = {}
+        for entry_name, entry in entries.items():
+            if not isinstance(entry, dict):
+                flattened_entries[entry_name] = entry
+                continue
+            flat_entry = dict(entry)
+            wrapped = flat_entry.pop(wrapper, None)
+            if isinstance(wrapped, dict):
+                flat_entry = {**wrapped, **flat_entry}
+            flattened_entries[entry_name] = {k: v for k, v in flat_entry.items() if v is not None}
+        result[container] = flattened_entries
+    return result
+
+
 @click.group(name="config", invoke_without_command=True)
 @click.option(
     "--scope",
@@ -250,7 +291,7 @@ def _config_list_impl(ctx: click.Context, **kwargs: Any) -> None:
         config_data = _load_config_file(config_path)
         _emit_config_list(config_data, output_opts, scope, config_path)
     else:
-        full_view = mngr_ctx.config.model_dump(mode="json")
+        full_view = _to_user_facing_view(mngr_ctx.config.model_dump(mode="json"))
         if opts.all:
             config_data = full_view
         else:
@@ -444,7 +485,9 @@ def _config_get_impl(ctx: click.Context, key: str, **kwargs: Any) -> None:
         return
 
     # Merged mode: extends are already applied; bare key lookup is sufficient.
-    config_data = mngr_ctx.config.model_dump(mode="json")
+    # Re-flatten command defaults / template options so the lookup path matches
+    # what ``config set`` writes (e.g. ``commands.create.provider``).
+    config_data = _to_user_facing_view(mngr_ctx.config.model_dump(mode="json"))
     try:
         value = _get_nested_value(config_data, key)
         _emit_config_value(key, value, output_opts)

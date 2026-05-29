@@ -1,0 +1,1 @@
+Strengthened the `mngr create --plugin/--disable-plugin` tutorial e2e coverage: the existing unhappy-path test now also verifies the failed create leaves no dangling agent, and a new happy-path test (`test_create_with_valid_plugin_flags`) confirms that enabling and disabling registered plugins succeeds and creates the agent.

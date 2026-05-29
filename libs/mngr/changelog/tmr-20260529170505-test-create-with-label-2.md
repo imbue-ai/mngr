@@ -1,0 +1,1 @@
+Removed the superfluous `@pytest.mark.modal` mark from the `test_create_with_label` tutorial e2e test. The test creates a local `--type command` agent to exercise `--label`/`--host-label` and never invokes modal, so the resource guard was failing the test for a never-invoked marked resource.

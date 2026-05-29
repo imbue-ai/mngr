@@ -1,0 +1,1 @@
+- Fixed the release e2e test `test_create_with_custom_branch_pattern` (in `libs/mngr/imbue/mngr/e2e/tutorial/test_create_data_and_git.py`), which was hitting the default 10s per-test timeout while `mngr create` was still running. Added a `@pytest.mark.timeout(120)` marker and strengthened the test to verify that the custom `:feature/*` branch is based off the current branch.

@@ -1,0 +1,1 @@
+- Fixed the `test_create_docker_default_image` e2e tutorial test: `mngr create` now requires a configured default agent type (the default was pulled into user config), so the test passes `--type command -- sleep N` to stay runnable in the isolated test profile. The default-image behavior under test is unaffected by the agent type.

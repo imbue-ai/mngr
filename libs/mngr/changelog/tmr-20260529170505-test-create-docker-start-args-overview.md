@@ -1,0 +1,1 @@
+- Fixed the `test_create_docker_start_args_overview` e2e tutorial test: it now passes `--type command -- sleep ...` to `mngr create` so the command resolves an agent type (the isolated test profile has no default configured), and it verifies that the `-s "--hostname=..."` start arg is actually forwarded to `docker run` by reading the value back via `mngr exec my-task hostname`.

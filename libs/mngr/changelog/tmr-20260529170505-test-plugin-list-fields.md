@@ -1,0 +1,1 @@
+- Fixed the `mngr plugin list --fields` example in the tutorial to use the real `enabled` field instead of the non-existent `active` field (which rendered an all-`-` column), and strengthened the corresponding e2e test to assert the requested columns are honored.

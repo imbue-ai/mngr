@@ -1,0 +1,1 @@
+- Fixed the `mngr list` tutorial example that referenced a nonexistent `git.original_branch` field. The correct field name is `initial_branch` (the branch mngr creates for each agent, e.g. `mngr/my-task`), so `mngr list --fields "name,state,initial_branch"` now shows the agent's branch as intended.

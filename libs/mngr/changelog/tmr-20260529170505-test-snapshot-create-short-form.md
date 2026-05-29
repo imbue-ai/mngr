@@ -1,0 +1,2 @@
+- Fixed the `test_snapshot_create_short_form` e2e release test: the shared `_create_modal_my_task` helper now passes `--type command -- sleep ...` (the isolated e2e environment configures no default agent type) and the test is marked `@pytest.mark.rsync` to satisfy the resource guard hit while transferring the git repository to the Modal host.
+- Strengthened the test to verify the `mngr snap create` short form actually produces a real snapshot: it now extracts the created snapshot id from the command output and asserts that id appears in `mngr snapshot list my-task`.

@@ -66,6 +66,7 @@ def test_destroy_cli_options_can_be_instantiated() -> None:
         remove_created_branch=False,
         allow_worktree_removal=True,
         sessions=(),
+        dry_run=False,
         output_format="human",
         quiet=False,
         verbose=0,

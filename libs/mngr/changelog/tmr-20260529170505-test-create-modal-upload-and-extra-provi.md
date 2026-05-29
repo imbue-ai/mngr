@@ -1,0 +1,1 @@
+Fixed the `test_create_modal_upload_and_extra_provision_command` e2e tutorial test to pass an explicit `--type claude` (the isolated test profile has no default `commands.create.type`), and strengthened it to verify that `--upload-file` and `--extra-provision-command` actually take effect on the remote Modal host.

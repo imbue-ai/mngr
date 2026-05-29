@@ -866,7 +866,15 @@ def wait_for_usage(
         if timeout_seconds is not None and elapsed >= timeout_seconds:
             is_waiting = False
         else:
-            sleep_fn(interval_seconds)
+            # Cap the inter-poll sleep at the remaining time before the
+            # timeout so ``--timeout`` is a true upper bound on the wait.
+            # Without this, ``--timeout 1 --interval 30`` would sleep a full
+            # 30s interval before re-checking the deadline, ignoring the
+            # caller's much shorter timeout.
+            sleep_seconds = interval_seconds
+            if timeout_seconds is not None:
+                sleep_seconds = min(interval_seconds, timeout_seconds - elapsed)
+            sleep_fn(sleep_seconds)
     return WaitForUsageResult(
         is_matched=False,
         is_timed_out=True,
