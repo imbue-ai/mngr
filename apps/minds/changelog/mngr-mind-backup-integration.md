@@ -25,6 +25,13 @@ write the canonical `restic.env` to a 0600 minds-side file, and inject that
 file into the workspace. The `manual` block must not set `RESTIC_PASSWORD`
 (minds assigns it).
 
+A freshly-minted imbue_cloud (Cloudflare R2) credential takes a few seconds to
+become active at the storage backend's edge, so the immediate `restic init`
+could fail with a transient `Unauthorized`. minds now retries the `restic init`
+/ `restic key add` bootstrap on such transient auth failures for a bounded
+window, so backup provisioning rides out that propagation delay instead of
+failing outright.
+
 Backup setup runs asynchronously after the host is created (mirroring the
 Cloudflare tunnel-token injection) and is non-fatal: a failure surfaces as a
 notification and leaves the workspace running. The reusable

@@ -12,6 +12,7 @@ the password is passed as ``RESTIC_PASSWORD``, or via the global
 import json
 import os
 import shutil
+from collections.abc import Callable
 from collections.abc import Mapping
 from collections.abc import Sequence
 from datetime import datetime
@@ -19,22 +20,46 @@ from datetime import timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Final
+from typing import NoReturn
+from typing import TypeVar
 
 from loguru import logger
+from tenacity import RetryCallState
+from tenacity import Retrying
+from tenacity import retry_if_exception_type
+from tenacity import stop_after_delay
+from tenacity import wait_fixed
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.subprocess_utils import FinishedProcess
 from imbue.minds.errors import BackupProvisioningError
+
+_T = TypeVar("_T")
 
 _RESTIC_BINARY: Final[str] = "restic"
 # restic treats locks older than 30 minutes as stale and ignores them.
 _LOCK_STALE_SECONDS: Final[float] = 30 * 60.0
 _DEFAULT_TIMEOUT_SECONDS: Final[float] = 60.0
 _INIT_TIMEOUT_SECONDS: Final[float] = 120.0
+# A freshly-minted R2 / S3 credential can take a few seconds to become active
+# at the storage backend's edge; the first restic call against it then fails
+# with an auth error ("Unauthorized" / "InvalidAccessKeyId"). Retry the repo
+# bootstrap for a bounded window so provisioning rides out that propagation.
+_AUTH_PROPAGATION_RETRY_SECONDS: Final[float] = 60.0
+_AUTH_PROPAGATION_WAIT_SECONDS: Final[float] = 3.0
+_TRANSIENT_AUTH_SIGNALS: Final[tuple[str, ...]] = ("unauthorized", "invalidaccesskeyid", "signaturedoesnotmatch")
 
 
 class ResticNotInstalledError(BackupProvisioningError):
     """Raised when the ``restic`` binary is not available on the minds machine."""
+
+
+class ResticTransientAuthError(BackupProvisioningError):
+    """Raised when restic auth fails in a way that is likely transient.
+
+    Typically a just-minted storage credential that has not yet propagated to
+    the backend edge; a short retry succeeds.
+    """
 
 
 def ensure_restic_available() -> None:
@@ -91,14 +116,56 @@ def _looks_already_initialized(stderr: str) -> bool:
     return "already initialized" in lowered or "already exists" in lowered
 
 
-def init_repo(
+def _looks_like_transient_auth_failure(stderr: str) -> bool:
+    """Return whether a restic failure looks like a not-yet-active credential."""
+    lowered = stderr.lower()
+    return any(signal in lowered for signal in _TRANSIENT_AUTH_SIGNALS)
+
+
+def _raise_restic_failure(operation_label: str, returncode: int | None, stderr: str) -> NoReturn:
+    """Raise the right error for a failed restic invocation.
+
+    Auth failures that look like a freshly-minted credential still propagating
+    raise the retryable ``ResticTransientAuthError``; everything else is fatal.
+    """
+    detail = stderr.strip()
+    if _looks_like_transient_auth_failure(stderr):
+        raise ResticTransientAuthError(f"{operation_label} auth not ready (exit {returncode}): {detail}")
+    raise BackupProvisioningError(f"{operation_label} failed (exit {returncode}): {detail}")
+
+
+def _log_auth_retry(retry_state: RetryCallState) -> None:
+    logger.debug(
+        "Retrying restic after transient auth failure (freshly-minted credential likely still propagating); attempt {}",
+        retry_state.attempt_number,
+    )
+
+
+def _retry_on_transient_auth(
+    operation: Callable[[], _T],
+    *,
+    timeout_seconds: float = _AUTH_PROPAGATION_RETRY_SECONDS,
+    wait_seconds: float = _AUTH_PROPAGATION_WAIT_SECONDS,
+) -> _T:
+    """Run ``operation``, retrying only ``ResticTransientAuthError`` for a bounded window."""
+    retryer = Retrying(
+        retry=retry_if_exception_type(ResticTransientAuthError),
+        stop=stop_after_delay(timeout_seconds),
+        wait=wait_fixed(wait_seconds),
+        before_sleep=_log_auth_retry,
+        reraise=True,
+    )
+    return retryer(operation)
+
+
+def _init_repo_once(
     *,
     repository: str,
     backend_env: Mapping[str, str],
     password: str | None,
-    parent_cg: ConcurrencyGroup | None = None,
+    parent_cg: ConcurrencyGroup | None,
 ) -> None:
-    """``restic init`` the repository; treat an already-initialized repo as success."""
+    """Run a single ``restic init`` attempt; treat an already-initialized repo as success."""
     env, flags = _env_and_flags(repository, backend_env, password)
     result = _run_restic(
         [*flags, "init"], env_overrides=env, parent_cg=parent_cg, timeout_seconds=_INIT_TIMEOUT_SECONDS
@@ -108,18 +175,35 @@ def init_repo(
     if _looks_already_initialized(result.stderr):
         logger.debug("restic repo already initialized; reusing it")
         return
-    raise BackupProvisioningError(f"restic init failed (exit {result.returncode}): {result.stderr.strip()}")
+    _raise_restic_failure("restic init", result.returncode, result.stderr)
 
 
-def add_password_key(
+def init_repo(
+    *,
+    repository: str,
+    backend_env: Mapping[str, str],
+    password: str | None,
+    parent_cg: ConcurrencyGroup | None = None,
+) -> None:
+    """``restic init`` the repository; treat an already-initialized repo as success.
+
+    Retries a transient auth failure (a freshly-minted storage credential that
+    has not yet propagated to the backend edge) for a bounded window.
+    """
+    _retry_on_transient_auth(
+        lambda: _init_repo_once(repository=repository, backend_env=backend_env, password=password, parent_cg=parent_cg)
+    )
+
+
+def _add_password_key_once(
     *,
     repository: str,
     backend_env: Mapping[str, str],
     existing_password: str | None,
     new_password: str,
-    parent_cg: ConcurrencyGroup | None = None,
+    parent_cg: ConcurrencyGroup | None,
 ) -> None:
-    """Add ``new_password`` as an additional key, authenticating with ``existing_password``."""
+    """Run a single ``restic key add`` attempt, authenticating with ``existing_password``."""
     env, flags = _env_and_flags(repository, backend_env, existing_password)
     with TemporaryDirectory() as temp_dir:
         new_password_file = Path(temp_dir) / "new_password"
@@ -136,7 +220,30 @@ def add_password_key(
             timeout_seconds=_DEFAULT_TIMEOUT_SECONDS,
         )
     if result.returncode != 0:
-        raise BackupProvisioningError(f"restic key add failed (exit {result.returncode}): {result.stderr.strip()}")
+        _raise_restic_failure("restic key add", result.returncode, result.stderr)
+
+
+def add_password_key(
+    *,
+    repository: str,
+    backend_env: Mapping[str, str],
+    existing_password: str | None,
+    new_password: str,
+    parent_cg: ConcurrencyGroup | None = None,
+) -> None:
+    """Add ``new_password`` as an additional key, authenticating with ``existing_password``.
+
+    Retries a transient auth failure for a bounded window (see ``init_repo``).
+    """
+    _retry_on_transient_auth(
+        lambda: _add_password_key_once(
+            repository=repository,
+            backend_env=backend_env,
+            existing_password=existing_password,
+            new_password=new_password,
+            parent_cg=parent_cg,
+        )
+    )
 
 
 def parse_restic_timestamp(raw: str) -> datetime | None:

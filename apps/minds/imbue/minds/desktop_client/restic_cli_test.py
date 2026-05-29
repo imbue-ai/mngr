@@ -17,6 +17,7 @@ from imbue.minds.desktop_client import restic_cli
 from imbue.minds.desktop_client.restic_cli import _env_and_flags
 from imbue.minds.desktop_client.restic_cli import _looks_already_initialized
 from imbue.minds.desktop_client.restic_cli import parse_restic_timestamp
+from imbue.minds.errors import BackupProvisioningError
 
 # --- parse_restic_timestamp ---
 
@@ -75,6 +76,64 @@ def test_looks_already_initialized_matches_common_phrases() -> None:
     assert _looks_already_initialized("Fatal: repository master key already initialized") is True
     assert _looks_already_initialized("config file already exists") is True
     assert _looks_already_initialized("network timeout") is False
+
+
+# --- transient-auth detection + bounded retry ---
+
+
+def test_looks_like_transient_auth_failure_matches_known_signals() -> None:
+    assert restic_cli._looks_like_transient_auth_failure("Fatal: open repository failed: Unauthorized") is True
+    assert restic_cli._looks_like_transient_auth_failure("InvalidAccessKeyId: key is not valid") is True
+    assert restic_cli._looks_like_transient_auth_failure("SignatureDoesNotMatch") is True
+    assert restic_cli._looks_like_transient_auth_failure("Fatal: network unreachable") is False
+    assert restic_cli._looks_like_transient_auth_failure("repository master key already initialized") is False
+
+
+def test_raise_restic_failure_raises_transient_for_auth_errors() -> None:
+    with pytest.raises(restic_cli.ResticTransientAuthError):
+        restic_cli._raise_restic_failure("restic init", 1, "Fatal: create repository failed: Unauthorized")
+
+
+def test_raise_restic_failure_raises_fatal_for_other_errors() -> None:
+    with pytest.raises(BackupProvisioningError) as exc_info:
+        restic_cli._raise_restic_failure("restic init", 1, "Fatal: host unreachable")
+    # A non-auth failure must be the plain (non-retryable) error, not the transient subclass.
+    assert not isinstance(exc_info.value, restic_cli.ResticTransientAuthError)
+
+
+def test_retry_on_transient_auth_retries_until_success() -> None:
+    attempts: list[int] = []
+
+    def operation() -> str:
+        attempts.append(1)
+        if len(attempts) < 3:
+            raise restic_cli.ResticTransientAuthError("Unauthorized")
+        return "ok"
+
+    result = restic_cli._retry_on_transient_auth(operation, timeout_seconds=5.0, wait_seconds=0.01)
+    assert result == "ok"
+    assert len(attempts) == 3
+
+
+def test_retry_on_transient_auth_reraises_after_timeout() -> None:
+    def operation() -> str:
+        raise restic_cli.ResticTransientAuthError("Unauthorized")
+
+    with pytest.raises(restic_cli.ResticTransientAuthError):
+        restic_cli._retry_on_transient_auth(operation, timeout_seconds=0.05, wait_seconds=0.01)
+
+
+def test_retry_on_transient_auth_does_not_retry_fatal_errors() -> None:
+    attempts: list[int] = []
+
+    def operation() -> str:
+        attempts.append(1)
+        raise BackupProvisioningError("fatal")
+
+    with pytest.raises(BackupProvisioningError):
+        restic_cli._retry_on_transient_auth(operation, timeout_seconds=5.0, wait_seconds=0.01)
+    # A fatal (non-transient) error must not be retried.
+    assert len(attempts) == 1
 
 
 # --- ensure_restic_available ---
