@@ -47,6 +47,7 @@ jobs:
     timeout-minutes: 25
     env:
       TODESKTOP_ACCESS_TOKEN: ${{ secrets.TODESKTOP_ACCESS_TOKEN }}
+      TODESKTOP_EMAIL:        ${{ secrets.TODESKTOP_EMAIL }}
       # Resolved relative to pnpm's CWD (apps/minds), not the repo root.
       MINDS_CLIENT_CONFIG_BUNDLE: imbue/minds/config/envs/production/client.toml
       MINDS_ROOT_NAME_BUNDLE: minds
@@ -54,13 +55,22 @@ jobs:
       app_zip_url: ${{ steps.parse.outputs.url }}
       build_id:    ${{ steps.parse.outputs.build_id }}
     steps:
-      - name: check TODESKTOP_ACCESS_TOKEN
+      - name: check ToDesktop secrets
         run: |
+          missing=0
           if [[ -z "${TODESKTOP_ACCESS_TOKEN:-}" ]]; then
-            echo "::error::TODESKTOP_ACCESS_TOKEN secret is not set on this repo. Add it at Settings -> Secrets -> Actions."
+            echo "::error::TODESKTOP_ACCESS_TOKEN secret is not set."
+            missing=1
+          fi
+          if [[ -z "${TODESKTOP_EMAIL:-}" ]]; then
+            echo "::error::TODESKTOP_EMAIL secret is not set."
+            missing=1
+          fi
+          if (( missing )); then
+            echo "Add both at Settings -> Secrets and variables -> Actions."
             exit 1
           fi
-          echo "TODESKTOP_ACCESS_TOKEN present (length=${#TODESKTOP_ACCESS_TOKEN})"
+          echo "TODESKTOP_ACCESS_TOKEN length=${#TODESKTOP_ACCESS_TOKEN}, TODESKTOP_EMAIL length=${#TODESKTOP_EMAIL}"
       - name: checkout @ ${{ inputs.commit_sha }}
         uses: actions/checkout@v6
         with:
