@@ -8,15 +8,13 @@ Both commands and topics support aliases (e.g., ``mngr help c`` for create,
 ``mngr help addr`` for address).
 """
 
-import re
 from io import StringIO
-from pathlib import Path
 
 import click
+import pluggy
 from loguru import logger
-from pydantic import Field
 
-from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.pure import pure
 from imbue.mngr.cli.help_formatter import CommandHelpMetadata
 from imbue.mngr.cli.help_formatter import add_pager_help_option
@@ -24,122 +22,39 @@ from imbue.mngr.cli.help_formatter import format_git_style_help
 from imbue.mngr.cli.help_formatter import get_all_help_metadata
 from imbue.mngr.cli.help_formatter import get_help_metadata
 from imbue.mngr.cli.help_formatter import run_pager
+from imbue.mngr.cli.help_topics import TopicHelpPage
+from imbue.mngr.cli.help_topics import get_all_topics
+from imbue.mngr.cli.help_topics import get_topic
+from imbue.mngr.cli.help_topics import register_topic
 from imbue.mngr.config.data_types import MngrConfig
 
 # =============================================================================
-# Topic help page data model and registry
+# Topic registration
 # =============================================================================
 
 
-class TopicHelpPage(FrozenModel):
-    """A standalone help topic page (not associated with any CLI command).
+def load_help_topics_from_plugins(pm: pluggy.PluginManager) -> None:
+    """Register all help topics contributed via the ``register_help_topics`` hook.
 
-    Topic pages document concepts that span multiple commands, such as
-    filter syntax or agent address format.
+    Both mngr's built-in topics and external plugins' topics flow through this
+    one path: built-in topics come from the ``builtin_help_topics`` module that
+    ``create_plugin_manager`` registers as a built-in plugin, and external
+    topics come from installed plugins. Called once after the plugin manager has
+    loaded (see ``main.py``).
+
+    A topic whose key is already taken is skipped. Built-in topics are
+    registered first (their hook is marked ``tryfirst``), so they win on
+    collisions and an external plugin cannot override a built-in topic.
     """
-
-    key: str = Field(description="Topic identifier (e.g., 'filter')")
-    one_line_description: str = Field(description="Brief one-line description")
-    content: str = Field(description="Full content of the topic page")
-    aliases: tuple[str, ...] = Field(default=(), description="Topic aliases (e.g., ('addr',) for 'address')")
-    see_also: tuple[tuple[str, str], ...] = Field(
-        default=(), description="See Also references as (name, description) tuples"
-    )
-    docs_path: str | None = Field(
-        default=None,
-        description="Path to the source doc file relative to the docs root (e.g., 'concepts/idle_detection.md'). "
-        "Used by the doc generator to create correct relative links.",
-    )
-
-    def register(self) -> None:
-        """Register this topic page in the global topic registry."""
-        _topic_registry[self.key] = self
-        for alias in self.aliases:
-            _topic_alias_to_canonical[alias] = self.key
-
-
-_topic_registry: dict[str, TopicHelpPage] = {}
-_topic_alias_to_canonical: dict[str, str] = {}
-
-
-def get_topic(name: str) -> TopicHelpPage | None:
-    """Look up a topic by name or alias."""
-    canonical = _topic_alias_to_canonical.get(name, name)
-    return _topic_registry.get(canonical)
-
-
-def get_all_topics() -> dict[str, TopicHelpPage]:
-    """Return a copy of the topic registry."""
-    return dict(_topic_registry)
-
-
-# =============================================================================
-# Doc-based topic registration
-# =============================================================================
-
-# Docs root relative to this file:
-# this file: libs/mngr/imbue/mngr/cli/help.py
-# docs root: libs/mngr/docs/
-_DOCS_ROOT = Path(__file__).resolve().parents[3] / "docs"
-
-# Directories containing topic documentation, mapped to their path prefix
-# relative to the docs root.
-_TOPIC_DOC_DIRECTORIES: tuple[tuple[str, Path], ...] = (
-    ("commands/generic", _DOCS_ROOT / "commands" / "generic"),
-    ("concepts", _DOCS_ROOT / "concepts"),
-)
-
-
-def _extract_first_heading(content: str) -> str:
-    """Extract the text of the first markdown heading from content."""
-    for line in content.split("\n"):
-        stripped = line.strip()
-        if stripped.startswith("#"):
-            title = stripped.lstrip("#").strip()
-            # Remove [future] tags
-            title = re.sub(r"\s*\[future\]", "", title)
-            return title
-    return ""
-
-
-def _strip_first_heading(content: str) -> str:
-    """Strip the first markdown heading and any trailing blank lines after it."""
-    lines = content.split("\n")
-    for i, line in enumerate(lines):
-        if line.strip().startswith("#"):
-            remaining = lines[i + 1 :]
-            while remaining and not remaining[0].strip():
-                remaining.pop(0)
-            return "\n".join(remaining)
-    return content
-
-
-def _register_docs_topics() -> None:
-    """Register topic pages from markdown documentation files.
-
-    Scans the generic/ and concepts/ doc directories, and creates a
-    TopicHelpPage for each .md file found. The topic key is the filename
-    stem (e.g., ``multi_target`` from ``multi_target.md``).
-    """
-    for path_prefix, directory in _TOPIC_DOC_DIRECTORIES:
-        if not directory.exists():
+    for topic_list in pm.hook.register_help_topics():
+        if topic_list is None:
             continue
-        for md_file in sorted(directory.glob("*.md")):
-            key = md_file.stem
-            if key in _topic_registry:
-                continue
-            raw_content = md_file.read_text()
-            title = _extract_first_heading(raw_content)
-            body = _strip_first_heading(raw_content)
-            TopicHelpPage(
-                key=key,
-                one_line_description=title,
-                content=body,
-                docs_path=f"{path_prefix}/{md_file.name}",
-            ).register()
-
-
-_register_docs_topics()
+        for topic in topic_list:
+            if not register_topic(topic):
+                logger.warning(
+                    "Help topic '{}' conflicts with an already-registered topic and was skipped.",
+                    topic.key,
+                )
 
 
 # =============================================================================
@@ -347,94 +262,16 @@ def help_command(ctx: click.Context, topic: tuple[str, ...]) -> None:
 
 
 # =============================================================================
-# Topic page definitions
-# =============================================================================
-
-TopicHelpPage(
-    key="address",
-    one_line_description="Agent address syntax for targeting agents and hosts",
-    aliases=("addr",),
-    content="""\
-Many mngr commands accept an agent address to specify which agent (and
-optionally which host and provider) to target. The address format is:
-
-  [NAME][@[HOST][.PROVIDER]]
-
-All parts are optional:
-
-  NAME                  Agent name only (searches all hosts; local in create)
-  NAME@HOST             Agent on a specific existing host
-  NAME@HOST.PROVIDER    Agent on a specific host with provider disambiguation
-  NAME@.PROVIDER        Agent on a new host (auto-generated host name)
-  @HOST                 Auto-named agent on an existing host
-  @HOST.PROVIDER        Auto-named agent on an existing host with provider
-  @.PROVIDER            Auto-named agent on a new auto-named host
-
-COMPONENTS
-
-  NAME
-      The agent name. Must be a valid identifier (lowercase letters, digits,
-      and hyphens). If omitted, a name is auto-generated. Without a host
-      component, commands that target existing agents search across all
-      hosts and providers. In 'mngr create', it defaults to the local host.
-
-  HOST
-      The host name. Refers to an existing host unless --new-host is specified.
-      If omitted with a provider (e.g., @.modal), a new host with an
-      auto-generated name is created.
-
-  PROVIDER
-      The provider backend name (e.g., local, docker, modal). Used to
-      disambiguate when multiple providers have hosts with the same name,
-      or to specify which provider should create a new host.
-
-COMMANDS THAT ACCEPT ADDRESSES
-
-  mngr create   Primary address argument for creating agents
-  mngr connect  Agent identifier (supports @HOST.PROVIDER disambiguation)
-  mngr destroy  Agent identifier(s)
-  mngr exec     Agent identifier(s)
-  mngr start    Agent identifier(s)
-  mngr stop     Agent identifier(s)
-  mngr list     --addrs flag outputs addresses for listed agents
-
-EXAMPLES
-
-  Create an agent locally:
-      $ mngr create my-agent
-
-  Create an agent in a new Docker container:
-      $ mngr create my-agent@.docker
-
-  Create an agent on an existing Modal host:
-      $ mngr create my-agent@my-host.modal
-
-  Create a new named host on Modal:
-      $ mngr create my-agent@my-host.modal --new-host
-
-  Connect to an agent, disambiguating by provider:
-      $ mngr connect my-agent@my-host.docker
-
-  Destroy an agent on a specific host:
-      $ mngr destroy my-agent@my-host\
-""",
-    see_also=(
-        ("create", "Create and run an agent"),
-        ("connect", "Connect to an existing agent"),
-    ),
-).register()
-
-
-# =============================================================================
 # Help metadata for the help command itself
 # =============================================================================
 
 
-def _build_available_topics_section() -> str:
+def build_available_topics_section() -> str:
     """Build the Available Topics section content from the topic registry.
 
     Uses a bullet-list format that renders well in both terminal (indented
-    by the help formatter) and markdown (in generated docs).
+    by the help formatter) and markdown (in generated docs). Returns an empty
+    string when no topics are registered yet.
     """
     all_topics = get_all_topics()
     if not all_topics:
@@ -448,6 +285,9 @@ def _build_available_topics_section() -> str:
     return "\n".join(lines)
 
 
+# The "Available Topics" section is populated after the plugin manager loads and
+# topics are registered (see ``refresh_available_topics_help`` and its caller in
+# ``main.py``); at module import time no topics are registered yet.
 CommandHelpMetadata(
     key="help",
     one_line_description="Show help for a command or topic",
@@ -462,7 +302,6 @@ For subcommands, specify the full command path (e.g., 'mngr help snapshot create
 
 Help topics provide documentation on concepts that span multiple commands,
 such as agent address format.""",
-    additional_sections=(("Available Topics", _build_available_topics_section()),),
     examples=(
         ("Show help for the create command", "mngr help create"),
         ("Show help using a command alias", "mngr help c"),
@@ -471,5 +310,22 @@ such as agent address format.""",
         ("List all commands and topics", "mngr help"),
     ),
 ).register()
+
+
+def refresh_available_topics_help() -> None:
+    """Add the "Available Topics" section to the help command's metadata.
+
+    Must be called after topics are registered (built-in and plugin), since the
+    section lists every registered topic. Mirrors how the create command's help
+    is refreshed with provider-specific arguments once backends are loaded.
+    """
+    section = build_available_topics_section()
+    existing = get_help_metadata("help")
+    if existing is None or not section:
+        return
+    existing.model_copy_update(
+        to_update(existing.field_ref().additional_sections, (("Available Topics", section),)),
+    ).register()
+
 
 add_pager_help_option(help_command)

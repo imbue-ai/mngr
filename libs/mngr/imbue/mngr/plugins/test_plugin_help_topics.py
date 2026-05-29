@@ -1,0 +1,153 @@
+"""Tests for the plugin help-topics hook (register_help_topics)."""
+
+from collections.abc import Generator
+from collections.abc import Sequence
+from contextlib import contextmanager
+from pathlib import Path
+from typing import Any
+
+import pluggy
+import pytest
+from click.testing import CliRunner
+
+import imbue.mngr.main
+from imbue.mngr import hookimpl
+from imbue.mngr.cli.help import load_help_topics_from_plugins
+from imbue.mngr.cli.help_topics import TopicHelpPage
+from imbue.mngr.cli.help_topics import _topic_alias_to_canonical
+from imbue.mngr.cli.help_topics import _topic_registry
+from imbue.mngr.cli.help_topics import build_topics_from_directory
+from imbue.mngr.cli.help_topics import get_topic
+from imbue.mngr.main import cli
+from imbue.mngr.main import reset_plugin_manager
+from imbue.mngr.plugins import hookspecs
+
+
+class _PluginWithTopic:
+    """A test plugin that contributes a single topic page."""
+
+    @hookimpl
+    def register_help_topics(self) -> Sequence[TopicHelpPage] | None:
+        return [
+            TopicHelpPage(
+                key="plugin_topic_xyz",
+                aliases=("ptx",),
+                one_line_description="A topic from a test plugin",
+                content="This topic is contributed by a plugin.",
+            )
+        ]
+
+
+class _PluginWithNoTopics:
+    """A test plugin that returns None (no topics)."""
+
+    @hookimpl
+    def register_help_topics(self) -> Sequence[TopicHelpPage] | None:
+        return None
+
+
+class _PluginOverridingBuiltinTopic:
+    """A test plugin that tries to override the built-in 'address' topic."""
+
+    @hookimpl
+    def register_help_topics(self) -> Sequence[TopicHelpPage] | None:
+        return [
+            TopicHelpPage(
+                key="address",
+                one_line_description="HIJACKED by a plugin",
+                content="This should never replace the built-in topic.",
+            )
+        ]
+
+
+class _PluginWithTopicDirectory:
+    """A test plugin that exposes a directory of markdown files as topics."""
+
+    def __init__(self, directory: Path) -> None:
+        self._directory = directory
+
+    @hookimpl
+    def register_help_topics(self) -> Sequence[TopicHelpPage] | None:
+        return build_topics_from_directory("dir_plugin", self._directory)
+
+
+@contextmanager
+def _registered_plugin_topics(plugin: Any) -> Generator[pluggy.PluginManager, None, None]:
+    """Register a plugin's help topics, restoring the global registry on exit."""
+    reset_plugin_manager()
+    pm = pluggy.PluginManager("mngr")
+    pm.add_hookspecs(hookspecs)
+    pm.register(plugin)
+
+    old_pm = imbue.mngr.main._plugin_manager_container["pm"]
+    imbue.mngr.main._plugin_manager_container["pm"] = pm
+
+    keys_before = set(_topic_registry)
+    aliases_before = set(_topic_alias_to_canonical)
+    try:
+        load_help_topics_from_plugins(pm)
+        yield pm
+    finally:
+        for key in set(_topic_registry) - keys_before:
+            del _topic_registry[key]
+        for alias in set(_topic_alias_to_canonical) - aliases_before:
+            del _topic_alias_to_canonical[alias]
+        imbue.mngr.main._plugin_manager_container["pm"] = old_pm
+
+
+def test_plugin_topic_is_registered() -> None:
+    """A plugin topic becomes resolvable via get_topic once registered."""
+    with _registered_plugin_topics(_PluginWithTopic()):
+        topic = get_topic("plugin_topic_xyz")
+        assert topic is not None
+        assert topic.one_line_description == "A topic from a test plugin"
+
+
+def test_plugin_topic_alias_resolves() -> None:
+    """A plugin topic's alias resolves to its canonical key."""
+    with _registered_plugin_topics(_PluginWithTopic()):
+        topic = get_topic("ptx")
+        assert topic is not None
+        assert topic.key == "plugin_topic_xyz"
+
+
+def test_plugin_topic_appears_in_help_overview() -> None:
+    """A plugin topic shows up in the 'mngr help' overview."""
+    with _registered_plugin_topics(_PluginWithTopic()) as pm:
+        result = CliRunner().invoke(cli, ["help"], obj=pm, catch_exceptions=False)
+        assert result.exit_code == 0
+        assert "plugin_topic_xyz" in result.output
+
+
+def test_plugin_topic_page_is_viewable() -> None:
+    """'mngr help <plugin topic>' renders the plugin topic page."""
+    with _registered_plugin_topics(_PluginWithTopic()) as pm:
+        result = CliRunner().invoke(cli, ["help", "plugin_topic_xyz"], obj=pm, catch_exceptions=False)
+        assert result.exit_code == 0
+        assert "This topic is contributed by a plugin." in result.output
+
+
+def test_plugin_returning_no_topics_is_harmless() -> None:
+    """A plugin returning None contributes no topics and does not error."""
+    with _registered_plugin_topics(_PluginWithNoTopics()) as pm:
+        result = CliRunner().invoke(cli, ["help"], obj=pm, catch_exceptions=False)
+        assert result.exit_code == 0
+
+
+@pytest.mark.allow_warnings
+def test_plugin_cannot_override_builtin_topic() -> None:
+    """A plugin topic whose key collides with a built-in is skipped (and logs a warning)."""
+    with _registered_plugin_topics(_PluginOverridingBuiltinTopic()):
+        topic = get_topic("address")
+        assert topic is not None
+        assert "HIJACKED" not in topic.one_line_description
+
+
+def test_plugin_topic_directory_is_registered(tmp_path: Path) -> None:
+    """A plugin can expose a directory of markdown files via build_topics_from_directory."""
+    (tmp_path / "from_dir_topic.md").write_text("# Directory Topic\n\nFrom a file.")
+    with _registered_plugin_topics(_PluginWithTopicDirectory(tmp_path)):
+        topic = get_topic("from_dir_topic")
+        assert topic is not None
+        assert topic.one_line_description == "Directory Topic"
+        assert "From a file." in topic.content

@@ -11,6 +11,7 @@ from click_option_group import OptionGroup
 from pydantic import Field
 
 from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.mngr.cli.help_topics import TopicHelpPage
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import ProviderInstanceConfig
 from imbue.mngr.interfaces.agent import AgentInterface
@@ -331,6 +332,32 @@ def register_cli_commands() -> Sequence[click.Command] | None:
         @click.option("--example", help="An example option")
         def my_custom_command(example: str) -> None:
             logger.info("Running custom command with: {}", example)
+    """
+
+
+@hookspec
+def register_help_topics() -> Sequence[TopicHelpPage] | None:
+    """Register standalone help topic pages with mngr.
+
+    Plugins implement this hook to contribute topic pages that document concepts
+    spanning multiple commands (the same kind of page mngr ships for ``address``,
+    ``filter``, etc.). When the plugin is installed, its topics appear in
+    ``mngr help`` and are viewable via ``mngr help <topic>``.
+
+    Return a sequence of ``TopicHelpPage`` objects, or None to contribute
+    nothing. A topic whose key collides with an existing built-in topic is
+    skipped, so plugins cannot override mngr's own topics.
+
+    The easiest way to contribute topics is to ship a directory of markdown
+    files and pass it to ``build_topics_from_directory`` (in
+    ``imbue.mngr.cli.help_topics``), which turns each ``.md`` file into one topic
+    keyed by its filename stem. For full control (aliases, "See Also"
+    references, inline content) return ``TopicHelpPage`` objects directly. See
+    the plugin docs (``concepts/plugins.md``) for complete examples::
+
+        @hookimpl
+        def register_help_topics():
+            return build_topics_from_directory("my_plugin", my_docs_dir)
     """
 
 

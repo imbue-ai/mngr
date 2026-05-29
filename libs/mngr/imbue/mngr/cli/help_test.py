@@ -1,5 +1,7 @@
 """Unit tests for the help command and topic pages."""
 
+from pathlib import Path
+
 import pluggy
 from click.testing import CliRunner
 
@@ -7,6 +9,7 @@ from imbue.mngr.cli.help import TopicHelpPage
 from imbue.mngr.cli.help import format_topic_help
 from imbue.mngr.cli.help import get_all_topics
 from imbue.mngr.cli.help import get_topic
+from imbue.mngr.cli.help_topics import build_topics_from_directory
 from imbue.mngr.main import cli
 from imbue.mngr.utils.testing import capture_loguru
 
@@ -68,6 +71,37 @@ def test_doc_based_topic_has_description_from_heading() -> None:
     topic = get_topic("idle_detection")
     assert topic is not None
     assert topic.one_line_description == "Idle Detection"
+
+
+# =============================================================================
+# build_topics_from_directory tests
+# =============================================================================
+
+
+def test_build_topics_from_directory_returns_page_per_file(tmp_path: Path) -> None:
+    """build_topics_from_directory creates one topic page per markdown file."""
+    (tmp_path / "alpha.md").write_text("# Alpha Topic\n\nAlpha body.")
+    (tmp_path / "beta.md").write_text("# Beta Topic\n\nBeta body.")
+    topics = build_topics_from_directory("my_plugin", tmp_path)
+    by_key = {topic.key: topic for topic in topics}
+    assert set(by_key) == {"alpha", "beta"}
+    assert by_key["alpha"].one_line_description == "Alpha Topic"
+    assert "Alpha body." in by_key["alpha"].content
+    assert by_key["alpha"].docs_path == "my_plugin/alpha.md"
+
+
+def test_build_topics_from_directory_ignores_non_markdown(tmp_path: Path) -> None:
+    """build_topics_from_directory only picks up .md files."""
+    (tmp_path / "topic.md").write_text("# A Topic\n\nBody.")
+    (tmp_path / "notes.txt").write_text("not a topic")
+    (tmp_path / "README").write_text("also not a topic")
+    topics = build_topics_from_directory("my_plugin", tmp_path)
+    assert [topic.key for topic in topics] == ["topic"]
+
+
+def test_build_topics_from_directory_missing_directory_is_empty(tmp_path: Path) -> None:
+    """build_topics_from_directory returns nothing for a directory that does not exist."""
+    assert build_topics_from_directory("my_plugin", tmp_path / "does_not_exist") == ()
 
 
 # =============================================================================

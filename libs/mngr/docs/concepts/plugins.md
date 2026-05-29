@@ -40,6 +40,7 @@ Plugins implement these to register new capabilities with mngr. They are called 
 | `register_provider_backend`  | Register a new provider backend (e.g., cloud platforms)                                                        |
 | `register_cli_commands`      | Define an entirely new CLI command                                                                             |
 | `register_cli_options`       | Add custom CLI options to any existing command's schema so that they appear in `--help`                        |
+| `register_help_topics`       | Add standalone help topic pages that appear in `mngr help` and `mngr help <topic>` when the plugin is installed |
 
 ### Deployment hooks
 
@@ -314,6 +315,43 @@ def override_command_options(command_name, command_class, params):
 ```
 
 To add visible CLI options to existing commands (so they appear in `--help`), implement `register_cli_options`.
+
+### Help topics
+
+`mngr help` lists standalone topic pages (concepts that span multiple commands, like `mngr help address`) alongside per-command help. Implement `register_help_topics` to contribute your own pages; they appear in `mngr help` and are viewable via `mngr help <topic>` whenever your plugin is installed.
+
+The easiest approach is to ship a directory of markdown files and expose it with `build_topics_from_directory`. Each `.md` file becomes one topic, keyed by its filename stem, with its first heading as the one-line description:
+
+```python
+from pathlib import Path
+
+from imbue.mngr import hookimpl
+from imbue.mngr.cli.help_topics import build_topics_from_directory
+
+@hookimpl
+def register_help_topics():
+    return build_topics_from_directory("my_plugin", Path(__file__).parent / "docs")
+```
+
+For full control (aliases, "See Also" references, inline content), return `TopicHelpPage` objects directly:
+
+```python
+from imbue.mngr.cli.help_topics import TopicHelpPage
+
+@hookimpl
+def register_help_topics():
+    return [
+        TopicHelpPage(
+            key="my_topic",
+            aliases=("mt",),
+            one_line_description="What my plugin adds",
+            content="Detailed explanation ...",
+            see_also=(("create", "Create and run an agent"),),
+        ),
+    ]
+```
+
+A plugin topic whose key collides with a built-in topic is skipped (built-in topics always win), so pick distinctive keys.
 
 ### Error handling
 

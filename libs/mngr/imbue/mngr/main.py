@@ -8,6 +8,7 @@ import pluggy
 import setproctitle
 from click_option_group import OptionGroup
 
+import imbue.mngr.cli.builtin_help_topics as builtin_help_topics_module
 from imbue.imbue_common.model_update import to_update
 from imbue.mngr.agents.agent_registry import load_agents_from_plugins
 from imbue.mngr.cli.archive import archive
@@ -31,6 +32,8 @@ from imbue.mngr.cli.extras import extras
 from imbue.mngr.cli.gc import gc
 from imbue.mngr.cli.git import git_command
 from imbue.mngr.cli.help import help_command
+from imbue.mngr.cli.help import load_help_topics_from_plugins
+from imbue.mngr.cli.help import refresh_available_topics_help
 from imbue.mngr.cli.help_formatter import get_help_metadata
 from imbue.mngr.cli.issue_reporting import handle_not_implemented_error
 from imbue.mngr.cli.issue_reporting import handle_unexpected_error
@@ -274,6 +277,11 @@ def create_plugin_manager() -> pluggy.PluginManager:
     pm = pluggy.PluginManager("mngr")
     pm.add_hookspecs(hookspecs)
 
+    # Register mngr's built-in topic pages as a built-in plugin, the same way
+    # built-in provider backends and agent types register through the plugin
+    # manager. Done unconditionally (never blocked) since these ship with mngr.
+    pm.register(builtin_help_topics_module, name="builtin_help_topics")
+
     # Block plugins that are disabled in config files. This must happen before
     # load_setuptools_entrypoints so disabled plugins are never registered.
     # MNGR_LOAD_ALL_PLUGINS overrides this so that tooling (e.g. doc generation)
@@ -387,6 +395,11 @@ except ConfigParseError as e:
 
 for cmd in BUILTIN_COMMANDS + PLUGIN_COMMANDS:
     apply_plugin_cli_options(cmd)
+
+# Register help topics (built-in and plugin) once the plugin manager is loaded,
+# then refresh the help command's "Available Topics" section to list them.
+load_help_topics_from_plugins(get_or_create_plugin_manager())
+refresh_available_topics_help()
 
 
 def _update_create_help_with_provider_args() -> None:
