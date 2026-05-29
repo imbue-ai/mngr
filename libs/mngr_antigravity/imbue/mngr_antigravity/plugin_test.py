@@ -251,26 +251,37 @@ def test_assemble_command_appends_user_agent_args(antigravity_agent: Antigravity
 def test_assemble_command_never_uses_dangerously_skip_permissions_flag(
     antigravity_agent_auto_allow: AntigravityAgent,
 ) -> None:
-    """Even with auto_allow_permissions=True the CLI flag is gone -- approval is via a PreToolUse hook.
+    """The CLI flag is never emitted, even with auto_allow_permissions=True -- approval goes through a PreToolUse hook.
 
-    The flag is now removed unconditionally (it is no longer gated on
-    auto_allow_permissions), so asserting its absence under the auto-allow case
-    -- where the flag would previously have appeared -- is the strongest check.
+    The auto-allow case is the strongest check: it is the only mode that could
+    plausibly carry the flag, so asserting its absence there covers both modes.
     """
     agent = antigravity_agent_auto_allow
     command = str(agent.assemble_command(agent.host, (), command_override=None))
     assert "--dangerously-skip-permissions" not in command
 
 
-def test_assemble_command_adds_hooks_dir_via_add_dir(antigravity_agent: AntigravityAgent) -> None:
-    """agy is pointed at the per-agent hooks dir via --add-dir so it loads .agents/hooks.json."""
+def test_assemble_command_adds_hooks_via_nondotted_tmp_symlink(antigravity_agent: AntigravityAgent) -> None:
+    """agy gets --add-dir pointing at a non-dotted /tmp symlink to the hooks dir.
+
+    Regression for the hidden-path bug: agy rejects --add-dir paths with a
+    dot-prefixed segment, so pointing it straight at the state-dir hooks path
+    (under ~/.mngr/) silently loads no hooks. A /tmp symlink resolving to the
+    durable hooks dir bypasses the rejection.
+    """
     agent = antigravity_agent
     command = str(agent.assemble_command(agent.host, (), command_override=None))
+    hooks_symlink = agent._get_agy_hooks_symlink_path()
     hooks_dir = str(agent._get_agy_hooks_dir())
-    assert f"--add-dir {hooks_dir}" in command
-    # The hooks dir lives in the durable per-agent state dir, not /tmp.
-    assert "/agents/" in hooks_dir
-    assert hooks_dir.endswith("/agy_hooks")
+    # --add-dir uses the symlink, never the dotted state-dir path.
+    assert f"--add-dir {hooks_symlink}" in command
+    assert f"--add-dir {hooks_dir}" not in command
+    # The symlink path must be non-dotted (no dot-prefixed segment) so agy accepts it.
+    assert hooks_symlink.startswith("/tmp/")
+    assert not any(segment.startswith(".") for segment in hooks_symlink.split("/") if segment)
+    # And it is created (ln -sfn <hooks_dir> <symlink>) before agy launches.
+    assert f"ln -sfn {hooks_dir} {hooks_symlink}" in command
+    assert command.index(f"ln -sfn {hooks_dir} {hooks_symlink}") < command.index(" agy ")
 
 
 def test_assemble_command_premakes_hooks_agents_dir(antigravity_agent: AntigravityAgent) -> None:
@@ -832,7 +843,7 @@ def test_provision_hooks_json_omits_pretooluse_when_auto_allow_disabled(
 def test_provision_hooks_json_adds_pretooluse_allow_when_auto_allow_enabled(
     antigravity_agent_auto_allow_and_dismiss: AntigravityAgent, isolated_home: Path
 ) -> None:
-    """auto_allow_permissions=True provisions the PreToolUse allow hook (replacing the old CLI flag)."""
+    """auto_allow_permissions=True provisions the PreToolUse allow hook that auto-approves tool calls."""
     agent = antigravity_agent_auto_allow_and_dismiss
     _provision(agent)
     pre_tool_use = _read_hooks_json(agent)["mngr"]["PreToolUse"]

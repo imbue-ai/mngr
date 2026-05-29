@@ -81,10 +81,19 @@ from imbue.mngr_antigravity.antigravity_config import serialize_antigravity_hook
 from imbue.mngr_antigravity.antigravity_config import serialize_antigravity_settings
 
 # Per-agent directory (under the agent state dir) whose ``.agents/hooks.json``
-# holds mngr's hooks. Passed to agy via ``--add-dir`` so agy loads it as an
-# extra workspace and executes the hooks. Lives in the durable state dir (not
-# /tmp) so it survives restarts; see ``build_antigravity_hooks_config``.
+# holds mngr's hooks; see ``build_antigravity_hooks_config``. It lives in the
+# durable state dir, but agy is pointed at it through a /tmp symlink (below):
+# agy rejects any ``--add-dir`` path with a dot-prefixed segment, and the state
+# dir is under ``~/.mngr/`` -- the same hidden-path rule the workspace symlink
+# works around.
 _AGY_HOOKS_DIR_NAME: Final[str] = "agy_hooks"
+
+# Parent of the per-agent /tmp symlink that points at the (dotted) hooks dir.
+# agy is given ``--add-dir <this>/<agent_id>`` -- a non-dotted path it accepts
+# -- which resolves through the symlink to ``<state>/agy_hooks``. Mirrors
+# ``_AGY_WORKSPACE_SYMLINK_PARENT``; recreated via ``ln -sfn`` each launch so
+# /tmp wipes self-repair.
+_AGY_HOOKS_SYMLINK_PARENT: Final[str] = "/tmp/mngr_antigravity_hooks"
 
 _COMMON_TRANSCRIPT_SCRIPT_NAME: Final[str] = "common_transcript.sh"
 _RAW_TRANSCRIPT_SCRIPT_NAME: Final[str] = "stream_transcript.sh"
@@ -234,13 +243,22 @@ class AntigravityAgent(InteractiveTuiAgent[AntigravityAgentConfig], HasCommonTra
         return self._get_agent_dir() / _AGY_LOG_FILE_RELATIVE_PATH
 
     def _get_agy_hooks_dir(self) -> Path:
-        """Directory passed to agy via ``--add-dir`` so it loads mngr's hooks.
+        """Durable per-agent dir holding ``.agents/hooks.json`` (the symlink target).
 
-        Lives under the per-agent state dir (durable across restarts, unlike
-        the /tmp workspace symlink). agy discovers ``hooks.json`` inside this
-        directory's ``.agents/`` subdir; see ``_get_agy_hooks_file_path``.
+        Lives under the per-agent state dir so it survives restarts. agy is not
+        pointed here directly -- this path is under ``~/.mngr/`` (dotted), which
+        agy rejects -- but via the ``_get_agy_hooks_symlink_path`` /tmp symlink.
         """
         return self._get_agent_dir() / _AGY_HOOKS_DIR_NAME
+
+    def _get_agy_hooks_symlink_path(self) -> str:
+        """Non-dotted /tmp symlink path that agy receives as ``--add-dir``.
+
+        Points at ``_get_agy_hooks_dir``; agy reads ``<symlink>/.agents/hooks.json``
+        through it. Non-dotted so agy doesn't reject it as a hidden path (the
+        state dir under ``~/.mngr/`` would be). Mirrors the workspace symlink.
+        """
+        return f"{_AGY_HOOKS_SYMLINK_PARENT}/{self.id}"
 
     def _get_agy_hooks_file_path(self) -> Path:
         """Path of the per-agent ``hooks.json`` agy reads from the ``--add-dir`` dir.
@@ -569,24 +587,24 @@ class AntigravityAgent(InteractiveTuiAgent[AntigravityAgentConfig], HasCommonTra
 
         1. ``( bash background_tasks.sh <session> ) &`` -- backgrounded
            supervisor for the transcript streamer + converter.
-        2. ``mkdir -p <state>/logs <symlink_parent> <hooks>/.agents`` --
-           guarantees the agy ``--log-file`` directory, the workspace-symlink
-           parent, and the hooks ``.agents`` dir all exist before launch (the
-           last so ``--add-dir`` never points at a missing directory, even on
-           a restart before re-provision; ``provision`` writes the hooks.json
+        2. ``mkdir -p <state>/logs <ws_symlink_parent> <hooks_symlink_parent>
+           <hooks>/.agents`` -- guarantees the agy ``--log-file`` directory,
+           both symlink parents, and the hooks ``.agents`` dir exist before
+           launch (the last so the hooks ``--add-dir`` resolves even on a
+           restart before re-provision; ``provision`` writes the hooks.json
            into it).
-        3. ``ln -sfn <work_dir> <symlink>`` -- creates / refreshes the
-           non-dotted workspace symlink that agy will treat as its
-           workspace root. Workaround for agy's hidden-path rejection;
-           see ``_AGY_WORKSPACE_SYMLINK_PARENT``.
-        4. ``cd <symlink>`` -- launches agy with cwd set to the symlink,
-           so agy's "project: using project ..." log line names the
+        3. ``ln -sfn <work_dir> <ws_symlink>`` and
+           ``ln -sfn <state>/agy_hooks <hooks_symlink>`` -- create / refresh
+           the non-dotted /tmp symlinks for the workspace and the hooks dir.
+           Both work around agy's rejection of dot-prefixed (hidden) paths;
+           see ``_AGY_WORKSPACE_SYMLINK_PARENT`` / ``_AGY_HOOKS_SYMLINK_PARENT``.
+        4. ``cd <ws_symlink>`` -- launches agy with cwd set to the workspace
+           symlink, so agy's "project: using project ..." log line names the
            symlink path (not the resolved dotted target).
         5. ``agy <user_args> --log-file <state>/logs/agy_cli.log
-           --add-dir <state>/agy_hooks`` -- foreground process. The
-           ``--add-dir`` makes agy load and execute the per-agent
-           ``hooks.json`` (active marker + optional auto-allow); see
-           ``build_antigravity_hooks_config``.
+           --add-dir <hooks_symlink>`` -- foreground process. The ``--add-dir``
+           makes agy load and execute the per-agent ``hooks.json`` (active
+           marker + optional auto-allow); see ``build_antigravity_hooks_config``.
 
         Bash precedence note: ``A & B && C && D && E`` parses as ``A &``
         followed by ``B && C && D && E``. The supervisor's subshell is
@@ -604,12 +622,16 @@ class AntigravityAgent(InteractiveTuiAgent[AntigravityAgentConfig], HasCommonTra
         log_file_path = self._get_agy_log_file_path()
         hooks_dir = self._get_agy_hooks_dir()
         hooks_agents_dir = self._get_agy_hooks_file_path().parent
-        # --add-dir makes agy load .agents/hooks.json from the per-agent hooks
-        # dir and execute the hooks (active marker + optional auto-allow); the
-        # auto-allow hook replaces the old --dangerously-skip-permissions flag.
+        hooks_symlink_path = self._get_agy_hooks_symlink_path()
+        # agy loads .agents/hooks.json from each --add-dir workspace and runs
+        # the hooks (active marker + optional auto-allow). It must be the /tmp
+        # symlink, not hooks_dir itself: agy rejects --add-dir paths with a
+        # dot-prefixed segment (hooks_dir is under ~/.mngr/), so pointing it
+        # straight at hooks_dir silently loads nothing. The symlink resolves to
+        # hooks_dir.
         extra_args: list[str] = [
             f"--log-file {shlex.quote(str(log_file_path))}",
-            f"--add-dir {shlex.quote(str(hooks_dir))}",
+            f"--add-dir {shlex.quote(hooks_symlink_path)}",
         ]
         base_command = super().assemble_command(host, agent_args, command_override, initial_message)
         background_cmd = self._build_background_tasks_command()
@@ -617,13 +639,16 @@ class AntigravityAgent(InteractiveTuiAgent[AntigravityAgentConfig], HasCommonTra
         symlink_path = self._get_agy_workspace_symlink_path()
         mkdir_cmd = (
             f"mkdir -p {shlex.quote(str(log_file_path.parent))} "
-            f"{shlex.quote(_AGY_WORKSPACE_SYMLINK_PARENT)} {shlex.quote(str(hooks_agents_dir))}"
+            f"{shlex.quote(_AGY_WORKSPACE_SYMLINK_PARENT)} {shlex.quote(_AGY_HOOKS_SYMLINK_PARENT)} "
+            f"{shlex.quote(str(hooks_agents_dir))}"
         )
         ln_cmd = f"ln -sfn {shlex.quote(str(self.work_dir))} {shlex.quote(symlink_path)}"
+        hooks_ln_cmd = f"ln -sfn {shlex.quote(str(hooks_dir))} {shlex.quote(hooks_symlink_path)}"
         cd_cmd = f"cd {shlex.quote(symlink_path)}"
 
         return CommandString(
-            f"{background_cmd} {mkdir_cmd} && {ln_cmd} && {cd_cmd} && {base_command} {' '.join(extra_args)}"
+            f"{background_cmd} {mkdir_cmd} && {ln_cmd} && {hooks_ln_cmd} && {cd_cmd} "
+            f"&& {base_command} {' '.join(extra_args)}"
         )
 
 
