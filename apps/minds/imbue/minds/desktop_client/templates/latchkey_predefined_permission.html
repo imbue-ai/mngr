@@ -51,8 +51,9 @@
           {% endif %}
         {% endfor %}
         {# Right-aligned within the list card so it reads as a secondary #}
-        {# affordance rather than another permission row. #}
-        <div class="flex justify-end">
+        {# affordance rather than another permission row. A faint top #}
+        {# border separates it from the permission list above. #}
+        <div class="flex justify-end border-t border-zinc-100 pt-2">
           <button type="button" id="permissions-adjust-link"
                   onclick="showPermissionEditor()"
                   class="text-xs text-blue-600 hover:underline cursor-pointer bg-transparent border-0 p-0">
