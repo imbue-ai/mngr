@@ -248,30 +248,51 @@ def test_assemble_command_appends_user_agent_args(antigravity_agent: Antigravity
     assert "agy --add-dir /tmp --log-file" in command
 
 
-def test_assemble_command_omits_dangerously_skip_permissions_when_auto_allow_disabled(
-    antigravity_agent: AntigravityAgent,
+def test_assemble_command_never_uses_dangerously_skip_permissions_flag(
+    antigravity_agent_auto_allow: AntigravityAgent,
 ) -> None:
-    command = str(antigravity_agent.assemble_command(antigravity_agent.host, (), command_override=None))
+    """Even with auto_allow_permissions=True the CLI flag is gone -- approval is via a PreToolUse hook.
+
+    The disabled-mode case is covered by
+    ``test_assemble_command_omits_dangerously_skip_permissions_when_auto_allow_disabled``.
+    """
+    agent = antigravity_agent_auto_allow
+    command = str(agent.assemble_command(agent.host, (), command_override=None))
     assert "--dangerously-skip-permissions" not in command
 
 
-def test_assemble_command_appends_dangerously_skip_permissions_when_auto_allow_enabled(
-    antigravity_agent_auto_allow: AntigravityAgent,
-) -> None:
-    """`auto_allow_permissions=True` wires Antigravity's documented auto-approve flag."""
-    agent = antigravity_agent_auto_allow
+def test_assemble_command_adds_hooks_dir_via_add_dir(antigravity_agent: AntigravityAgent) -> None:
+    """agy is pointed at the per-agent hooks dir via --add-dir so it loads .agents/hooks.json."""
+    agent = antigravity_agent
     command = str(agent.assemble_command(agent.host, (), command_override=None))
-    assert command.endswith("--dangerously-skip-permissions")
+    hooks_dir = str(agent._get_agy_hooks_dir())
+    assert f"--add-dir {hooks_dir}" in command
+    # The hooks dir lives in the durable per-agent state dir, not /tmp.
+    assert "/agents/" in hooks_dir
+    assert hooks_dir.endswith("/agy_hooks")
+
+
+def test_assemble_command_premakes_hooks_agents_dir(antigravity_agent: AntigravityAgent) -> None:
+    """The foreground mkdir creates the hooks .agents dir so --add-dir never points at a missing path.
+
+    Provision writes hooks.json there, but the mkdir keeps --add-dir valid on
+    a restart that runs before re-provision (or for agents created before this
+    feature existed).
+    """
+    agent = antigravity_agent
+    command = str(agent.assemble_command(agent.host, (), command_override=None))
+    hooks_agents_dir = str(agent._get_agy_hooks_file_path().parent)
+    assert hooks_agents_dir in command.split(" agy ")[0]
+    assert command.index("mkdir -p") < command.index(" agy "), command
 
 
 def test_assemble_command_preserves_user_args_when_auto_allow_enabled(
     antigravity_agent_auto_allow: AntigravityAgent,
 ) -> None:
-    """User-supplied agent_args still land before the auto-allow flag."""
+    """User-supplied agent_args still land right after `agy`, before the appended flags."""
     agent = antigravity_agent_auto_allow
     command = str(agent.assemble_command(agent.host, ("--add-dir", "/tmp"), command_override=None))
     assert "agy --add-dir /tmp --log-file" in command
-    assert command.endswith("--dangerously-skip-permissions")
 
 
 def test_assemble_command_launches_background_tasks_supervisor(antigravity_agent: AntigravityAgent) -> None:
@@ -749,3 +770,79 @@ def test_provision_writes_supervisor_even_when_common_transcript_disabled(
         antigravity_agent_without_common_transcript._get_agent_dir() / "commands" / "antigravity_background_tasks.sh"
     )
     assert expected.exists()
+
+
+# =============================================================================
+# Per-agent hooks.json provisioning
+# =============================================================================
+
+
+@pytest.fixture
+def antigravity_agent_auto_allow_and_dismiss(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+) -> AntigravityAgent:
+    """auto_allow_permissions=True with auto_dismiss_dialogs=True so provision() completes in tests."""
+    return _make_antigravity_agent(
+        local_provider,
+        tmp_path,
+        AntigravityAgentConfig(auto_allow_permissions=True, auto_dismiss_dialogs=True),
+    )
+
+
+def _read_hooks_json(agent: AntigravityAgent) -> dict[str, Any]:
+    """Read the per-agent hooks.json that provision() writes into the agent state dir."""
+    parsed: Any = json.loads(agent._get_agy_hooks_file_path().read_text())
+    assert isinstance(parsed, dict)
+    return parsed
+
+
+def test_provision_writes_hooks_json_into_state_dir_agents_subdir(
+    antigravity_agent_auto_dismiss: AntigravityAgent, isolated_home: Path
+) -> None:
+    """hooks.json lands at <state>/agy_hooks/.agents/hooks.json -- the path agy reads via --add-dir."""
+    agent = antigravity_agent_auto_dismiss
+    _provision(agent)
+    hooks_path = agent._get_agy_hooks_file_path()
+    assert hooks_path == agent._get_agent_dir() / "agy_hooks" / ".agents" / "hooks.json"
+    assert hooks_path.exists()
+
+
+def test_provision_hooks_json_sets_active_marker_on_preinvocation_and_clears_on_stop(
+    antigravity_agent_auto_dismiss: AntigravityAgent, isolated_home: Path
+) -> None:
+    """The active marker hooks are always present (they drive RUNNING vs WAITING)."""
+    agent = antigravity_agent_auto_dismiss
+    _provision(agent)
+    mngr = _read_hooks_json(agent)["mngr"]
+    assert mngr["PreInvocation"][0]["command"] == 'touch "$MNGR_AGENT_STATE_DIR/active"'
+    assert mngr["Stop"][0]["command"] == 'rm -f "$MNGR_AGENT_STATE_DIR/active"'
+
+
+def test_provision_hooks_json_omits_pretooluse_when_auto_allow_disabled(
+    antigravity_agent_auto_dismiss: AntigravityAgent, isolated_home: Path
+) -> None:
+    """Default (no auto-allow): no PreToolUse hook, so tool calls prompt normally."""
+    agent = antigravity_agent_auto_dismiss
+    _provision(agent)
+    assert "PreToolUse" not in _read_hooks_json(agent)["mngr"]
+
+
+def test_provision_hooks_json_adds_pretooluse_allow_when_auto_allow_enabled(
+    antigravity_agent_auto_allow_and_dismiss: AntigravityAgent, isolated_home: Path
+) -> None:
+    """auto_allow_permissions=True provisions the PreToolUse allow hook (replacing the old CLI flag)."""
+    agent = antigravity_agent_auto_allow_and_dismiss
+    _provision(agent)
+    pre_tool_use = _read_hooks_json(agent)["mngr"]["PreToolUse"]
+    assert pre_tool_use[0]["matcher"] == "*"
+    assert pre_tool_use[0]["hooks"][0]["command"] == 'echo \'{"decision":"allow"}\''
+
+
+def test_provision_does_not_write_hooks_into_work_dir(
+    antigravity_agent_auto_dismiss: AntigravityAgent, isolated_home: Path
+) -> None:
+    """Hooks live in the agent state dir, never in the user's work_dir/.agents."""
+    agent = antigravity_agent_auto_dismiss
+    _provision(agent)
+    assert not (agent.work_dir / ".agents").exists()

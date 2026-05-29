@@ -8,11 +8,24 @@ array. On subsequent launches, agy reads the array and suppresses the dialog
 for any matching path.
 
 Antigravity does **not** expose an env-var override for this file
-(no ``GEMINI_CLI_SYSTEM_SETTINGS_PATH`` analog exists in the v1.0.0 binary), so
+(no ``GEMINI_CLI_SYSTEM_SETTINGS_PATH`` analog exists in the binary), so
 mngr cannot redirect the file to a per-agent path. We therefore *merge* into
 the user's global file -- appending the agent's ``work_dir`` to the
 ``trustedWorkspaces`` array if it isn't already present, leaving every other
 key untouched. This is additive and idempotent.
+
+Hooks, by contrast, ARE provisioned per-agent. agy discovers a ``hooks.json``
+from any workspace directory's ``.agents/`` subdir (in addition to the global
+``~/.gemini/config/hooks.json``) and aggregates across all of them. mngr
+exploits this: it writes a per-agent ``hooks.json`` into the agent state dir
+and points agy at it with ``--add-dir`` (see ``build_antigravity_hooks_config``
+and the plugin's ``assemble_command``), so the user's global config stays
+untouched and each agent's marker files land in its own state dir. This
+recovers the per-agent isolation that ``mngr_gemini`` got from the
+(now-removed) ``GEMINI_CLI_SYSTEM_SETTINGS_PATH`` env var. Verified against
+``agy`` 1.0.3: the ``/hooks`` TUI writes to ``~/.gemini/antigravity-cli/``,
+which the runtime does NOT read (see google-antigravity/antigravity-cli#49),
+but a ``.agents/hooks.json`` under an ``--add-dir`` path is loaded and executed.
 """
 
 from __future__ import annotations
@@ -107,3 +120,79 @@ def merge_trusted_workspace(settings: Mapping[str, Any], workspace_path: str) ->
     merged: dict[str, Any] = dict(settings)
     merged[TRUSTED_WORKSPACES_KEY] = existing + [workspace_path]
     return merged
+
+
+# =============================================================================
+# Hook config builder
+# =============================================================================
+
+# Top-level key for mngr's named hook group in the per-agent ``hooks.json``.
+# agy keys hooks.json by hook *name* (each name maps to per-event handler
+# lists); a single mngr-owned name keeps the file self-contained and easy to
+# identify.
+_MNGR_HOOK_NAME: str = "mngr"
+
+# Marker file (in ``$MNGR_AGENT_STATE_DIR``) whose presence the base
+# ``BaseAgent.get_lifecycle_state`` reads as "agent is actively working"
+# (RUNNING); its absence means WAITING. Name kept in sync with the literal
+# ``"active"`` that ``BaseAgent`` and the provider listing scripts check.
+ACTIVE_MARKER_FILENAME: str = "active"
+
+# ``active`` is touched on every ``PreInvocation`` (the loop is about to call
+# the model, i.e. the agent is working) and removed on ``Stop`` (the execution
+# loop terminated and the agent is back to waiting for input). ``$MNGR_AGENT_STATE_DIR``
+# expands in agy's shell at hook-execution time. Both commands intentionally
+# emit no stdout: ``PreInvocation``/``Stop`` treat empty output as "no
+# injected steps" / "allow stop" (verified live against agy 1.0.3).
+_SET_ACTIVE_COMMAND: str = f'touch "$MNGR_AGENT_STATE_DIR/{ACTIVE_MARKER_FILENAME}"'
+_CLEAR_ACTIVE_COMMAND: str = f'rm -f "$MNGR_AGENT_STATE_DIR/{ACTIVE_MARKER_FILENAME}"'
+
+# A ``PreToolUse`` hook that returns ``{"decision": "allow"}`` auto-approves
+# every tool call, replacing agy's ``--dangerously-skip-permissions`` flag with
+# a hook so mngr controls approval through one mechanism. Verified live: the
+# decision suppresses the permission dialog that would otherwise appear.
+_AUTO_ALLOW_COMMAND: str = 'echo \'{"decision":"allow"}\''
+
+# Matcher that matches every tool (agy treats "" or "*" as match-all).
+_MATCH_ALL: str = "*"
+
+
+@pure
+def build_antigravity_hooks_config(auto_allow_permissions: bool) -> dict[str, Any]:
+    """Build the per-agent ``hooks.json`` body for the antigravity agent.
+
+    Always includes the ``active``-marker hooks (``PreInvocation`` sets,
+    ``Stop`` clears) so the agent reports RUNNING while working and WAITING
+    when idle -- without these, agy writes no ``active`` file and the
+    marker-only lifecycle detection would peg the agent at WAITING forever.
+
+    When ``auto_allow_permissions`` is True, also emits a ``PreToolUse`` hook
+    returning ``{"decision": "allow"}`` so tool calls never block on a
+    permission dialog. This replaces the ``--dangerously-skip-permissions``
+    CLI flag mngr_antigravity previously used.
+
+    Note the schema differs by event: ``PreToolUse``/``PostToolUse`` take
+    matcher groups (``{"matcher", "hooks": [...]}``), while ``PreInvocation``
+    and ``Stop`` take a flat list of handlers (their matcher is ignored). The
+    file is mngr-owned and rewritten from scratch each provision, so no
+    merge-with-existing-content logic is needed.
+    """
+    mngr_hook: dict[str, Any] = {
+        "PreInvocation": [{"type": "command", "command": _SET_ACTIVE_COMMAND}],
+        "Stop": [{"type": "command", "command": _CLEAR_ACTIVE_COMMAND}],
+    }
+    if auto_allow_permissions:
+        mngr_hook["PreToolUse"] = [
+            {"matcher": _MATCH_ALL, "hooks": [{"type": "command", "command": _AUTO_ALLOW_COMMAND}]}
+        ]
+    return {_MNGR_HOOK_NAME: mngr_hook}
+
+
+@pure
+def serialize_antigravity_hooks(hooks_config: Mapping[str, Any]) -> str:
+    """Serialize a ``hooks.json`` body as two-space-indented JSON.
+
+    Matches the indentation agy itself uses for its config files; the file is
+    mngr-owned so the exact formatting only matters for readable diffs.
+    """
+    return json.dumps(dict(hooks_config), indent=2)

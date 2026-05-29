@@ -10,14 +10,17 @@ from imbue.mngr.errors import UserInputError
 from imbue.mngr.primitives import HostName
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
+from imbue.mngr_antigravity.antigravity_config import ACTIVE_MARKER_FILENAME
+from imbue.mngr_antigravity.antigravity_config import build_antigravity_hooks_config
 from imbue.mngr_antigravity.antigravity_config import get_antigravity_user_settings_path
 from imbue.mngr_antigravity.antigravity_config import merge_trusted_workspace
 from imbue.mngr_antigravity.antigravity_config import read_antigravity_settings
+from imbue.mngr_antigravity.antigravity_config import serialize_antigravity_hooks
 from imbue.mngr_antigravity.antigravity_config import serialize_antigravity_settings
 
 
 def test_user_settings_path_lives_under_gemini_antigravity_cli() -> None:
-    """Path is fixed by agy; no env-var override exists in the v1.0.0 binary."""
+    """Path is fixed by agy; no env-var override exists in the binary."""
     path = get_antigravity_user_settings_path()
     assert path == Path.home() / ".gemini" / "antigravity-cli" / "settings.json"
 
@@ -125,3 +128,63 @@ def test_read_antigravity_settings_returns_parsed_dict(
     parsed = read_antigravity_settings(host, settings_with_existing_trust)
     assert parsed["trustedWorkspaces"] == ["/work/prior"]
     assert parsed["enableTelemetry"] is False
+
+
+# =============================================================================
+# Hook config builder
+# =============================================================================
+
+
+def test_hooks_config_always_emits_active_marker_via_preinvocation_and_stop() -> None:
+    """PreInvocation touches the active marker; Stop removes it.
+
+    The active marker drives BaseAgent's RUNNING/WAITING detection. agy fires
+    PreInvocation before each model call (agent working) and Stop when the
+    loop terminates (agent idle), so this pair flips the marker at the right
+    boundaries.
+    """
+    config = build_antigravity_hooks_config(auto_allow_permissions=False)
+
+    mngr = config["mngr"]
+    # PreInvocation/Stop use the flat handler-list shape (no matcher wrapper).
+    pre = mngr["PreInvocation"]
+    stop = mngr["Stop"]
+    assert pre == [{"type": "command", "command": f'touch "$MNGR_AGENT_STATE_DIR/{ACTIVE_MARKER_FILENAME}"'}]
+    assert stop == [{"type": "command", "command": f'rm -f "$MNGR_AGENT_STATE_DIR/{ACTIVE_MARKER_FILENAME}"'}]
+
+
+def test_hooks_config_omits_pretooluse_when_auto_allow_disabled() -> None:
+    """Without auto-allow there is no PreToolUse hook -- tool calls prompt normally."""
+    config = build_antigravity_hooks_config(auto_allow_permissions=False)
+    assert "PreToolUse" not in config["mngr"]
+
+
+def test_hooks_config_auto_allow_emits_pretooluse_allow_decision() -> None:
+    """auto_allow_permissions adds a match-all PreToolUse hook returning decision=allow.
+
+    PreToolUse uses the matcher-group shape; the command echoes the JSON
+    decision agy reads from stdout to suppress the permission dialog.
+    """
+    config = build_antigravity_hooks_config(auto_allow_permissions=True)
+
+    pre_tool_use = config["mngr"]["PreToolUse"]
+    assert len(pre_tool_use) == 1
+    group = pre_tool_use[0]
+    assert group["matcher"] == "*"
+    assert group["hooks"] == [{"type": "command", "command": 'echo \'{"decision":"allow"}\''}]
+
+
+def test_hooks_config_auto_allow_decision_is_valid_json_allow() -> None:
+    """The echoed payload must parse to exactly {"decision": "allow"} so agy honors it."""
+    config = build_antigravity_hooks_config(auto_allow_permissions=True)
+    command = config["mngr"]["PreToolUse"][0]["hooks"][0]["command"]
+    # Strip the surrounding `echo '...'` to recover the JSON payload.
+    payload = command[len("echo '") : -len("'")]
+    assert json.loads(payload) == {"decision": "allow"}
+
+
+def test_serialize_antigravity_hooks_round_trips() -> None:
+    config = build_antigravity_hooks_config(auto_allow_permissions=True)
+    serialized = serialize_antigravity_hooks(config)
+    assert json.loads(serialized) == config
+    assert "  " in serialized
