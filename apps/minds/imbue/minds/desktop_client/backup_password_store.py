@@ -11,6 +11,7 @@ saved password is intentionally not handled here (a separate future flow
 updates it across all workspaces at once).
 """
 
+import os
 from pathlib import Path
 
 from imbue.minds.config.data_types import WorkspacePaths
@@ -52,8 +53,19 @@ def save_backup_password_if_absent(paths: WorkspacePaths, password: str) -> bool
         return False
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(password)
-        path.chmod(0o600)
+        # Create the file with mode 0600 atomically: O_EXCL guarantees the
+        # secret is never visible to other local users (not even in the brief
+        # window a write-then-chmod would leave it world-readable), and also
+        # closes the TOCTOU gap with the path.exists() check above -- a file
+        # that appears in between is treated as "already saved" rather than
+        # overwritten.
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        try:
+            os.write(fd, password.encode("utf-8"))
+        finally:
+            os.close(fd)
+    except FileExistsError:
+        return False
     except OSError as e:
         raise BackupProvisioningError(f"Could not save backup password at {path}: {e}") from e
     return True
