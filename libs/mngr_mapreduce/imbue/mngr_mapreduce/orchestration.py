@@ -16,6 +16,7 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr_mapreduce.agent_stopper import AgentStopper
 from imbue.mngr_mapreduce.data_types import AgentKind
 from imbue.mngr_mapreduce.data_types import AgentMetadata
 from imbue.mngr_mapreduce.data_types import LaunchConfig
@@ -25,7 +26,6 @@ from imbue.mngr_mapreduce.data_types import MapReduceTask
 from imbue.mngr_mapreduce.data_types import MapperInfo
 from imbue.mngr_mapreduce.data_types import ReducerInfo
 from imbue.mngr_mapreduce.launching import launch_mappers_up_to_limit
-from imbue.mngr_mapreduce.launching import stop_agent_on_host
 from imbue.mngr_mapreduce.pulling import is_agent_outputs_ready
 from imbue.mngr_mapreduce.pulling import pull_agent_outputs
 
@@ -86,12 +86,14 @@ def _finalize_mapper(
     provider_name: ProviderInstanceName,
     host: OnlineHostInterface,
     info: MapperInfo,
+    stopper: AgentStopper,
 ) -> bool:
     """Pull a finished mapper's outputs, fire the recipe hook, and stop the agent.
 
     Returns True if the outputs archive was extracted (the hook fires only
     in that case). Hook exceptions are caught and logged so one mapper's
-    broken hook never aborts the rest of the run.
+    broken hook never aborts the rest of the run. The stop is delegated to
+    ``stopper`` so a slow SSH teardown doesn't serialize the polling loop.
     """
     local_dest = pull_agent_outputs(
         mngr_ctx=mngr_ctx,
@@ -109,7 +111,7 @@ def _finalize_mapper(
             # reasons; one broken hook shouldn't bring the whole run down.
             # Unexpected exception types still bubble.
             logger.warning("Recipe on_mapper_finalized raised for agent '{}': {}", info.agent_name, exc)
-    stop_agent_on_host(host, info.agent_id, info.agent_name)
+    stopper.submit(host, info.agent_id, info.agent_name)
     return local_dest is not None
 
 
@@ -125,6 +127,7 @@ def launch_and_poll_mappers(
     all_agents: list[MapperInfo],
     all_hosts: dict[str, OnlineHostInterface],
     launch_failures: list[AgentMetadata],
+    stopper: AgentStopper,
 ) -> list[AgentMetadata]:
     """Launch mappers incrementally and poll until all finish.
 
@@ -140,6 +143,10 @@ def launch_and_poll_mappers(
     launched agents (or new launch failures) are appended during execution.
     Intermediate reports are rendered via ``recipe.render_report`` after every
     state change.
+
+    ``stopper`` owns the background threads for post-finalize stop calls so
+    a slow ``stop_agents`` doesn't serialize the polling loop. The caller is
+    responsible for ``__enter__``/``__exit__``; we just submit to it.
 
     Returns the final list of ``AgentMetadata`` (launch failures first, then
     one entry per launched agent).
@@ -188,7 +195,7 @@ def launch_and_poll_mappers(
 
             if is_agent_outputs_ready(mngr_ctx, config.provider_name, host.id, agent_id):
                 logger.info("Mapper '{}' published outputs, finalizing", info.agent_name)
-                _finalize_mapper(recipe, ctx, mngr_ctx, config.provider_name, host, info)
+                _finalize_mapper(recipe, ctx, mngr_ctx, config.provider_name, host, info, stopper)
                 pending_ids.discard(agent_id_str)
                 changed = True
                 continue
@@ -200,7 +207,7 @@ def launch_and_poll_mappers(
                     info.agent_name,
                     elapsed,
                 )
-                stop_agent_on_host(host, agent_id, info.agent_name)
+                stopper.submit(host, agent_id, info.agent_name)
                 pending_ids.discard(agent_id_str)
                 timed_out_ids.add(agent_id_str)
                 changed = True
@@ -248,6 +255,7 @@ def wait_for_reducer(
     mngr_ctx: MngrContext,
     poll_interval_seconds: float,
     deadline: float,
+    stopper: AgentStopper,
 ) -> AgentMetadata:
     """Poll for the reducer's outputs archive; extract, hook, and stop.
 
@@ -273,7 +281,7 @@ def wait_for_reducer(
                     recipe.on_reducer_finalized(ctx, local_dest, info)
                 except (OSError, ValueError, RuntimeError) as exc:
                     logger.warning("Recipe on_reducer_finalized raised: {}", exc)
-            stop_agent_on_host(host, info.agent_id, info.agent_name)
+            stopper.submit(host, info.agent_id, info.agent_name)
             if local_dest is None:
                 return AgentMetadata(
                     kind=AgentKind.REDUCER,
@@ -289,7 +297,7 @@ def wait_for_reducer(
         time.sleep(poll_interval_seconds)
 
     logger.warning("Reducer agent timed out, stopping it")
-    stop_agent_on_host(host, info.agent_id, info.agent_name)
+    stopper.submit(host, info.agent_id, info.agent_name)
     return AgentMetadata(
         kind=AgentKind.REDUCER,
         agent_name=info.agent_name,
