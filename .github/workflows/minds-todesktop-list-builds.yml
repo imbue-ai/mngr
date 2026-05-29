@@ -1,0 +1,82 @@
+name: minds todesktop list builds (debug)
+
+on:
+  workflow_dispatch:
+    inputs:
+      count:
+        description: 'How many recent builds to list'
+        required: false
+        default: '5'
+
+jobs:
+  list:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      TODESKTOP_ACCESS_TOKEN: ${{ secrets.TODESKTOP_ACCESS_TOKEN }}
+      TODESKTOP_EMAIL:        ${{ secrets.TODESKTOP_EMAIL }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.15.0'
+      - run: npm install -g pnpm@10.33.4
+      - name: minimal node_modules for the CLI
+        working-directory: apps/minds
+        run: pnpm install --frozen-lockfile --ignore-scripts
+      - name: list builds (table)
+        working-directory: apps/minds
+        run: pnpm exec todesktop builds --count ${{ inputs.count }} --exit
+      - name: list builds (raw JSON)
+        working-directory: apps/minds
+        run: |
+          # We want to see the exact JSON keys returned. Stream stdout
+          # straight to the log; nothing is masked here that isn't already
+          # a public ToDesktop artifact URL.
+          pnpm exec todesktop builds --format json --count ${{ inputs.count }} --exit \
+            | tee /tmp/builds.json
+      - name: inspect first build's keys
+        working-directory: apps/minds
+        run: |
+          python3 -c '
+          import json, sys
+          builds = json.load(open("/tmp/builds.json"))
+          print("type:", type(builds).__name__)
+          print("count:", len(builds) if isinstance(builds, list) else "n/a")
+          if isinstance(builds, list) and builds:
+              first = builds[0]
+              print("first build keys:", sorted(first.keys()))
+              # any field whose name hints at a commit?
+              for k, v in first.items():
+                  ks = k.lower()
+                  if any(t in ks for t in ("sha","commit","git","ref","revision")):
+                      print(f"  COMMIT-LIKE: {k} = {v!r}")
+              # show artifacts shape too
+              arts = first.get("artifacts") or first.get("downloadUrls") or first.get("urls")
+              print("artifacts-ish field:", arts)
+          '
+      - name: inspect one build by id (richer detail)
+        working-directory: apps/minds
+        run: |
+          BUILD_ID=$(python3 -c '
+          import json; b = json.load(open("/tmp/builds.json"))
+          print(b[0].get("id") or b[0].get("buildId") or "")
+          ')
+          echo "build_id=$BUILD_ID"
+          pnpm exec todesktop builds "$BUILD_ID" --format json --exit | tee /tmp/build-detail.json
+          python3 -c '
+          import json
+          b = json.load(open("/tmp/build-detail.json"))
+          if isinstance(b, list): b = b[0]
+          print("detail keys:", sorted(b.keys()))
+          for k, v in b.items():
+              ks = k.lower()
+              if any(t in ks for t in ("sha","commit","git","ref","revision")):
+                  print(f"  COMMIT-LIKE: {k} = {v!r}")
+          '
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: todesktop-builds-debug-${{ github.run_id }}
+          path: /tmp/build*.json
+          retention-days: 3
