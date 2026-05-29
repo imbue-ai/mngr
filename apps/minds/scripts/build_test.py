@@ -27,6 +27,7 @@ import shutil
 import subprocess
 import zipfile
 from pathlib import Path
+from typing import Final
 
 import pytest
 
@@ -191,20 +192,19 @@ def test_workspace_package_lists_are_consistent() -> None:
         "Update every file so the package sets match exactly."
     )
 
+_NODE_BINARY: Final[str | None] = shutil.which("node")
+
+pytestmark = pytest.mark.skipif(
+    _NODE_BINARY is None,
+    reason="evaluating apps/minds/todesktop.js requires a node binary on PATH",
+)
+
 
 def _load_todesktop_config() -> dict:
-    """Evaluate ``apps/minds/todesktop.js`` and return its exported config.
-
-    Skips the calling test when ``node`` is not on PATH: the offload sandbox
-    only installs Python deps, so the JS-evaluation path can't run there.
-    Local devs always have node (it ships with pnpm), so the entitlement
-    guard still runs on every dev box; a pre-release smoke build covers
-    the path end-to-end.
-    """
-    if shutil.which("node") is None:
-        pytest.skip("`node` not on PATH; cannot evaluate todesktop.js to read the entitlement config.")
+    """Evaluate ``apps/minds/todesktop.js`` and return its exported config."""
+    assert _NODE_BINARY is not None
     result = subprocess.run(
-        ["node", "-e", "console.log(JSON.stringify(require('./todesktop.js')))"],
+        [_NODE_BINARY, "-e", "console.log(JSON.stringify(require('./todesktop.js')))"],
         cwd=APP_ROOT,
         check=True,
         capture_output=True,
