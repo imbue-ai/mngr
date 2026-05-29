@@ -72,6 +72,10 @@ jobs:
         run: |
           npm install -g pnpm@10.33.4
           pnpm --version
+      - name: setup uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          version: latest
       - name: pnpm install
         working-directory: apps/minds
         run: pnpm install --frozen-lockfile
