@@ -186,10 +186,10 @@ Run `pnpm --version` -- it must print `10.33.4`. To swap back to a newer pnpm af
 
 ### Dependency cooldown (minimum release age)
 
-Both package managers are configured to refuse any distribution published less than **7 days** ago, so a freshly-compromised release cannot be pulled into a build (or an end-user install) before it has had time to be noticed and yanked. This applies to transitive dependencies too.
+Both package managers are configured to refuse any distribution published less than **14 days** ago, so a freshly-compromised release cannot be pulled into a build (or an end-user install) before it has had time to be noticed and yanked. This applies to transitive dependencies too.
 
-- **JS (pnpm)**: `minimumReleaseAge: 10080` (minutes) in `apps/minds/pnpm-workspace.yaml`. Requires pnpm >= 10.16.0 (we pin 10.33.4).
-- **Python (uv)**: `exclude-newer = "7 days"` under `[tool.uv]` in `apps/minds/electron/pyproject/pyproject.toml` (the packaged end-user app).
+- **JS (pnpm)**: `minimumReleaseAge: 20160` (minutes) in `apps/minds/pnpm-workspace.yaml`. Requires pnpm >= 10.16.0 (we pin 10.33.4).
+- **Python (uv)**: `exclude-newer = "14 days"` under `[tool.uv]` in `apps/minds/electron/pyproject/pyproject.toml` (the packaged end-user app).
 
 The cooldown only bites during **resolution** -- `pnpm install` without `--frozen-lockfile`, `pnpm add`/`update`, and `uv lock`/`uv add` or a re-resolve. Frozen installs (CI's `pnpm install --frozen-lockfile`, and `uv sync` replaying an up-to-date lockfile) replay the committed lockfile and are unaffected. If you add or update a dependency and pnpm/uv refuses a version that is too new, either wait out the window or, for pnpm, add a targeted exception via `minimumReleaseAgeExclude`.
 
@@ -229,7 +229,7 @@ To ship a change:
 ```
 apps/minds/
   package.json              # pnpm + Electron + ToDesktop config
-  todesktop.json            # ToDesktop build settings
+  todesktop.js              # ToDesktop build settings
   electron/
     main.js                 # Electron main process entry point
     preload.js              # Context bridge for renderer IPC

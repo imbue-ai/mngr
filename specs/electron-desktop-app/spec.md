@@ -116,7 +116,7 @@ All Electron code lives in `apps/minds/` alongside the existing Python code:
 apps/minds/
   package.json              # pnpm, Electron, ToDesktop config
   pnpm-lock.yaml
-  todesktop.json            # ToDesktop for Electron config
+  todesktop.js              # ToDesktop for Electron config
   electron/
     main.js                 # Electron main process entry point
     preload.js              # Preload script (minimal for now)
