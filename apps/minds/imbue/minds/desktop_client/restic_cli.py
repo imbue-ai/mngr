@@ -41,6 +41,8 @@ _RESTIC_BINARY: Final[str] = "restic"
 _LOCK_STALE_SECONDS: Final[float] = 30 * 60.0
 _DEFAULT_TIMEOUT_SECONDS: Final[float] = 60.0
 _INIT_TIMEOUT_SECONDS: Final[float] = 120.0
+# Dumping a whole snapshot to a zip can take a while for a large workspace.
+_DUMP_TIMEOUT_SECONDS: Final[float] = 600.0
 # A freshly-minted R2 / S3 credential can take a few seconds to become active
 # at the storage backend's edge; the first restic call against it then fails
 # with an auth error ("Unauthorized" / "InvalidAccessKeyId"). Retry the repo
@@ -244,6 +246,33 @@ def add_password_key(
             parent_cg=parent_cg,
         )
     )
+
+
+def dump_snapshot_archive(
+    *,
+    repository: str,
+    backend_env: Mapping[str, str],
+    password: str | None,
+    target_path: Path,
+    snapshot: str = "latest",
+    source_path: str = "/",
+    parent_cg: ConcurrencyGroup | None = None,
+    timeout_seconds: float = _DUMP_TIMEOUT_SECONDS,
+) -> None:
+    """Write a zip archive of ``snapshot``'s ``source_path`` to ``target_path`` via ``restic dump``.
+
+    ``restic dump --archive zip --target <path>`` writes the archive directly to
+    the file (the contents never pass through this process's memory).
+    """
+    env, flags = _env_and_flags(repository, backend_env, password)
+    result = _run_restic(
+        [*flags, "dump", "--archive", "zip", "--target", str(target_path), snapshot, source_path],
+        env_overrides=env,
+        parent_cg=parent_cg,
+        timeout_seconds=timeout_seconds,
+    )
+    if result.returncode != 0:
+        raise BackupProvisioningError(f"restic dump failed (exit {result.returncode}): {result.stderr.strip()}")
 
 
 def parse_restic_timestamp(raw: str) -> datetime | None:

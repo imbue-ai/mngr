@@ -50,5 +50,12 @@ and a freshly-created workspace with no backups yet shows "Created N ago"
 new project doesn't look alarming before its first backup has had a chance to
 run. The route includes each workspace's creation time for this.
 
+A backed-up project also gets a "download" link next to its status that exports
+the latest snapshot as a zip. minds builds the zip on demand from the minds
+machine via `restic dump --archive zip` (no workspace access needed) to a /tmp
+file keyed by host id (so re-exports overwrite rather than accumulate), served
+via a new `GET /api/backup-export/{agent_id}` route. The link shows a spinner
+and "exporting…" while the zip is being built.
+
 New `BackupProvider` / `BackupEncryptionMethod` primitives; new
 `mngr imbue_cloud bucket ...` wrappers on the imbue_cloud CLI client.

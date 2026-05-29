@@ -20,6 +20,7 @@ import httpx
 from fastapi import Depends
 from fastapi import FastAPI
 from fastapi import Request
+from fastapi.responses import FileResponse
 from fastapi.responses import HTMLResponse
 from fastapi.responses import RedirectResponse
 from fastapi.responses import Response
@@ -48,6 +49,7 @@ from imbue.minds.desktop_client.api_v1 import create_api_v1_router
 from imbue.minds.desktop_client.auth import AuthStoreInterface
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
+from imbue.minds.desktop_client.backup_export import export_latest_snapshot_zip
 from imbue.minds.desktop_client.backup_password_store import has_saved_backup_password
 from imbue.minds.desktop_client.backup_password_store import read_saved_backup_password
 from imbue.minds.desktop_client.backup_password_store import save_backup_password_if_absent
@@ -105,6 +107,7 @@ from imbue.minds.desktop_client.templates import status_text_for
 from imbue.minds.desktop_client.templates import workspace_accent
 from imbue.minds.desktop_client.tunnel_token_injection import inject_tunnel_token_into_agent
 from imbue.minds.desktop_client.webdav import create_webdav_app
+from imbue.minds.errors import BackupProvisioningError
 from imbue.minds.primitives import AIProvider
 from imbue.minds.primitives import BackupEncryptionMethod
 from imbue.minds.primitives import BackupProvider
@@ -430,6 +433,42 @@ def _handle_backup_status_api(
         for agent_id, status in status_by_agent_id.items()
     }
     return Response(content=json.dumps(payload), media_type="application/json")
+
+
+def _handle_backup_export_api(
+    agent_id: str,
+    request: Request,
+    auth_store: AuthStoreDep,
+    backend_resolver: BackendResolverDep,
+) -> Response:
+    """Build + stream a zip of the workspace's latest snapshot (GET /api/backup-export/{agent_id}).
+
+    Produces the zip on the minds machine via ``restic dump --archive zip`` to a
+    /tmp file keyed by host id (so re-exports overwrite), then returns it.
+    """
+    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
+        return Response(status_code=403, content='{"error": "Not authenticated"}', media_type="application/json")
+    paths: WorkspacePaths | None = request.app.state.api_v1_paths
+    if paths is None:
+        return Response(status_code=404, content='{"error": "No backups configured"}', media_type="application/json")
+    try:
+        typed_agent_id = AgentId(agent_id)
+    except ValueError:
+        return Response(status_code=400, content='{"error": "Invalid agent id"}', media_type="application/json")
+    display_info = backend_resolver.get_agent_display_info(typed_agent_id)
+    # The zip file is keyed by host id (per the export contract); fall back to the
+    # agent id only if discovery has no display info for this agent.
+    host_id = display_info.host_id if display_info is not None else agent_id
+    download_label = display_info.agent_name if display_info is not None else agent_id
+    root_concurrency_group: ConcurrencyGroup | None = request.app.state.root_concurrency_group
+    try:
+        zip_path = export_latest_snapshot_zip(
+            paths=paths, agent_id=typed_agent_id, host_id=host_id, parent_cg=root_concurrency_group
+        )
+    except BackupProvisioningError as e:
+        logger.warning("Backup export failed for {}: {}", agent_id, e)
+        return Response(status_code=500, content=json.dumps({"error": str(e)}), media_type="application/json")
+    return FileResponse(path=str(zip_path), media_type="application/zip", filename=f"{download_label}-backup.zip")
 
 
 # -- Agent creation route handlers --
@@ -2950,6 +2989,7 @@ def create_desktop_client(
     app.get("/create")(_handle_create_page)
     app.post("/create")(_handle_create_form_submit)
     app.get("/api/backup-status")(_handle_backup_status_api)
+    app.get("/api/backup-export/{agent_id}")(_handle_backup_export_api)
     app.post("/api/create-agent")(_handle_create_agent_api)
     app.get("/api/create-agent/{agent_id}/status")(_handle_creation_status_api)
     app.get("/api/create-agent/{agent_id}/logs")(_handle_creation_logs_sse)

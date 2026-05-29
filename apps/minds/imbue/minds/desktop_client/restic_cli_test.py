@@ -5,8 +5,7 @@ test images), so the integration tests run unconditionally and FAIL -- not
 skip -- if the ``restic`` binary is missing.
 """
 
-import os
-import subprocess
+import zipfile
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
@@ -17,6 +16,7 @@ from imbue.minds.desktop_client import restic_cli
 from imbue.minds.desktop_client.restic_cli import _env_and_flags
 from imbue.minds.desktop_client.restic_cli import _looks_already_initialized
 from imbue.minds.desktop_client.restic_cli import parse_restic_timestamp
+from imbue.minds.desktop_client.testing import restic_backup_a_file
 from imbue.minds.errors import BackupProvisioningError
 
 # --- parse_restic_timestamp ---
@@ -147,21 +147,6 @@ def test_ensure_restic_available_does_not_raise() -> None:
 # --- local restic integration ---
 
 
-def _restic_backup_a_file(repo: str, password: str, source: Path) -> None:
-    """Create one snapshot in ``repo`` using plain restic (test helper)."""
-    env = dict(os.environ)
-    env.update({"RESTIC_REPOSITORY": repo, "RESTIC_PASSWORD": password})
-    result = subprocess.run(
-        ["restic", "backup", str(source)],
-        capture_output=True,
-        text=True,
-        check=False,
-        env=env,
-        timeout=120.0,
-    )
-    assert result.returncode == 0, result.stderr
-
-
 @pytest.mark.timeout(60)
 def test_init_add_key_and_status_against_local_repo(tmp_path: Path) -> None:
     repo = str(tmp_path / "repo")
@@ -186,7 +171,7 @@ def test_init_add_key_and_status_against_local_repo(tmp_path: Path) -> None:
     # After a backup, the latest-snapshot time is populated.
     source = tmp_path / "data.txt"
     source.write_text("hello backup")
-    _restic_backup_a_file(repo, workspace_password, source)
+    restic_backup_a_file(repo, workspace_password, source)
     latest = restic_cli.get_latest_snapshot_time(repository=repo, backend_env={}, password=workspace_password)
     assert latest is not None
     assert latest.tzinfo is not None
@@ -198,3 +183,22 @@ def test_init_repo_is_idempotent_on_existing_repo(tmp_path: Path) -> None:
     restic_cli.init_repo(repository=repo, backend_env={}, password="pw")
     # Initializing again must not raise (already-initialized is treated as success).
     restic_cli.init_repo(repository=repo, backend_env={}, password="pw")
+
+
+@pytest.mark.timeout(60)
+def test_dump_snapshot_archive_writes_valid_zip(tmp_path: Path) -> None:
+    repo = str(tmp_path / "repo")
+    password = "dump-test-pw"
+    restic_cli.init_repo(repository=repo, backend_env={}, password=password)
+    source = tmp_path / "data.txt"
+    source.write_text("hello export")
+    restic_backup_a_file(repo, password, source)
+
+    target = tmp_path / "out.zip"
+    restic_cli.dump_snapshot_archive(repository=repo, backend_env={}, password=password, target_path=target)
+
+    assert target.is_file()
+    assert zipfile.is_zipfile(target)
+    with zipfile.ZipFile(target) as archive:
+        names = archive.namelist()
+    assert any(name.endswith("data.txt") for name in names), names

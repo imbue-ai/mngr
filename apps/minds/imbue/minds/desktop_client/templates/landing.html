@@ -351,9 +351,61 @@
             text = 'No backups'; tone = 'bg-zinc-100 text-zinc-500';
           }
         }
-        badge.textContent = text;
         badge.className = BACKUP_BADGE_BASE + tone;
+        if (state === 'BACKED_UP') {
+          // Offer a download of the latest snapshot as a zip, after the text.
+          badge.textContent = text + ' ';
+          var link = document.createElement('a');
+          link.href = '#';
+          link.textContent = 'download';
+          link.className = 'underline decoration-dotted hover:decoration-solid cursor-pointer';
+          link.onclick = function (ev) { return window.backupExport(ev, agentId); };
+          badge.appendChild(link);
+        } else {
+          badge.textContent = text;
+        }
       }
+
+      // Download a zip of the workspace's latest snapshot. The server builds it
+      // on demand (a few seconds), so swap the link for a spinner + "exporting…"
+      // until the blob arrives, then trigger the browser download.
+      window.backupExport = function (ev, agentId) {
+        ev.preventDefault();
+        ev.stopPropagation();
+        var link = ev.currentTarget;
+        if (link.getAttribute('data-exporting') === '1') return false;
+        link.setAttribute('data-exporting', '1');
+        link.style.pointerEvents = 'none';
+        var original = link.textContent;
+        link.innerHTML = '<span class="inline-block w-3 h-3 border-2 border-emerald-300 border-t-emerald-700 rounded-full animate-spin align-middle"></span> exporting…';
+        function restore(text) {
+          link.textContent = text;
+          link.style.pointerEvents = '';
+          link.removeAttribute('data-exporting');
+        }
+        fetch('/api/backup-export/' + encodeURIComponent(agentId)).then(function (resp) {
+          if (!resp.ok) throw new Error('export failed: ' + resp.status);
+          var disp = resp.headers.get('Content-Disposition') || '';
+          var match = /filename="?([^"]+)"?/.exec(disp);
+          var name = match ? match[1] : (agentId + '-backup.zip');
+          return resp.blob().then(function (blob) { return { blob: blob, name: name }; });
+        }).then(function (result) {
+          var url = URL.createObjectURL(result.blob);
+          var anchor = document.createElement('a');
+          anchor.href = url;
+          anchor.download = result.name;
+          document.body.appendChild(anchor);
+          anchor.click();
+          document.body.removeChild(anchor);
+          URL.revokeObjectURL(url);
+          restore(original);
+        }).catch(function (err) {
+          console.error('Backup export failed:', err);
+          link.textContent = 'export failed';
+          setTimeout(function () { restore(original); }, 3000);
+        });
+        return false;
+      };
 
       function showBackupChecking() {
         document.querySelectorAll('.landing-backup-badge').forEach(function (badge) {
