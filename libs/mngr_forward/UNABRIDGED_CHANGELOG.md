@@ -4,6 +4,29 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-05-28
+
+# Dropped redundant per-project ty/ruff ratchet tests
+
+Removed this project's `test_no_type_errors` and `test_no_ruff_errors` from its
+`test_ratchets.py`. ty resolves the uv workspace root and ruff (run from the repo
+root) both scan across projects, so the per-project copies just re-ran the same
+checks. The single repo-wide equivalents now live in `test_meta_ratchets.py`
+(`test_no_type_errors` and `test_no_ruff_errors`).
+
+No user-facing behavior change.
+
+## 2026-05-27
+
+# ty 0.0.39 / paramiko 4.0 type fixes
+
+- Converted bracketed `# type: ignore[...]` suppressions to `# ty: ignore[...]` (test files), since `ty` 0.0.39 no longer honors the mypy-style bracketed form.
+- The new `types-paramiko` stubs (pulled in by the paramiko 4.0 bump) surfaced an intentional Liskov-violating `get_transport` override in the SSH-tunnel test fake (`FakeSSHClient`); this is now annotated with `# ty: ignore[invalid-method-override]`.
+
+- Tightened this project's `test_ratchets.py` violation counts to their exact current values (`--inline-snapshot=trim`).
+
+Test-only changes; no user-facing behavior change.
+
 ## 2026-05-26
 
 # `SSHTunnelManager` is now the single SSH tunneling implementation

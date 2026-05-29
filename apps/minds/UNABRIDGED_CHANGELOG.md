@@ -4,6 +4,124 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-05-28
+
+Pin minds desktop client JS toolchain to exact versions: pnpm 10.33.4 and Node.js 24.15.0. With `engine-strict=true` plus exact `engines.node`/`engines.pnpm`, installs fail fast on mismatch instead of breaking in confusing ways. Added `.nvmrc` so nvm/fnm users pick up the pinned Node automatically. Documented how existing developers can install the pinned versions (nvm/fnm for Node, `npm install --global pnpm@10.33.4` for pnpm, with a note that Homebrew's `@<major>` kegs drift) in `apps/minds/docs/desktop-app.md`. Also pinned end-user Python to `==3.12.13` in `apps/minds/electron/pyproject/pyproject.toml` (the packaged-app pyproject that uv reads at first launch) so every install downloads the same interpreter instead of the latest 3.12 patch available at the time.
+
+Added a 7-day dependency cooldown (minimum release age) for supply-chain hardening: `minimumReleaseAge: 10080` in `apps/minds/pnpm-workspace.yaml` (pnpm) and `exclude-newer = "7 days"` under `[tool.uv]` in the packaged `apps/minds/electron/pyproject/pyproject.toml` (uv). Both refuse to resolve any distribution -- including transitive ones -- published within the last week, so a freshly-compromised release cannot be pulled in before it is noticed. The cooldown only affects resolution; frozen-lockfile installs are unaffected.
+
+Upgraded Electron from `35.7.5` to `40.10.1` so the runtime shipped to end users bundles Node.js `24.15.0` -- matching the exact Node version pinned for development (`engines.node` / `.nvmrc`). Previously the bundled Electron shipped a different (Node 22.x) runtime than the one developers built against. Electron 40 is the lowest major on the Node 24 line, so 40.10.1 is the smallest jump that reaches the pinned `24.15.0`; staying on 40 avoids the behavior changes introduced in 41 (cookie `changed`-event cause values) and 42 (macOS notifications require code-signing) that a jump to the newest line would pull in, none of which our Electron code depends on today but which would otherwise widen the review/test surface. 40.10.1 also clears the new 7-day pnpm cooldown (published more than a week ago), so it needs no `minimumReleaseAgeExclude`.
+
+Bumped the bundled `UV_VERSION` in `apps/minds/scripts/build.js` from `0.7.12` to `0.11.15`. uv only supports the relative-duration form of `exclude-newer` (e.g. `"7 days"`) as of 0.10.0; the older 0.7.12 fails to parse it, silently ignores the cooldown, and -- because the committed lockfile was generated with a timestamp cutoff that 0.7.12 then sees as "removed" -- discards the lockfile and re-resolves unpinned at end-user first launch. (The lockfile's `revision = 3` format is not the issue: 0.7.12 reads revision-3 lockfiles fine; the trigger is purely the unparseable relative `exclude-newer`.) Bumping to 0.11.15 makes the shipped uv able to parse the cooldown, so it takes effect and the committed lockfile is honored.
+
+Bumped the dependency cooldown (minimum release age) for the minds desktop toolchain from 7 days to 14 days. `minimumReleaseAge` in `apps/minds/pnpm-workspace.yaml` is now `20160` minutes (pnpm), and `exclude-newer` under `[tool.uv]` in the packaged `apps/minds/electron/pyproject/pyproject.toml` is now `"14 days"` (uv). The packaged `uv.lock`'s metadata `exclude-newer-span` was bumped in parallel from `P7D` to `P14D` to stay consistent without a full re-resolve. Behavior is unchanged otherwise: the cooldown only bites during resolution, frozen-lockfile installs are unaffected.
+
+Bump Latchkey dependency to 2.12.2. The newest Latchkey version properly shows the ToS dialog to first-time Google Cloud users.
+
+- `apps/minds`: bundle the real macOS `git` binary plus its `libexec/git-core`
+  helpers instead of the xcode-select shim. The previous inline `downloadGit()`
+  in `scripts/build.js` ran `which git`, which on macOS returns the 118 KB
+  `/usr/bin/git` shim -- a launcher that re-invokes the real git from
+  `/Library/Developer/CommandLineTools/`. Bundling the shim into a sandboxed
+  packaged app meant runtime `git clone` SIGKILLs on any Mac without Xcode CLT
+  installed at the expected path. The new `scripts/download-binaries.js`
+  resolves the real binary via `xcrun --find git`, copies it plus its
+  `libexec/git-core` helpers and templates, and SHA256-verifies all
+  downloaded archives. Also bumps the ToDesktop `uploadSizeLimit` from 300 to
+  600 because the real binary plus its libexec push the bundle over the
+  previous limit.
+
+# Desktop e2e opts FCT's config into the pytest guard (test-only)
+
+mngr's `is_allowed_in_pytest` config field now defaults to `False`, and every
+config loaded during a pytest run must opt in. The desktop-client Docker e2e
+(`test_desktop_client_e2e.py`) deliberately loads forever-claude-template's real
+`.mngr/settings.toml` (it pins `MNGR_ROOT_NAME=mngr` to get the create
+templates), so it now adds `is_allowed_in_pytest = true` to that checkout for the
+duration of the test and restores it afterward. The opt-in is intentionally
+added in-test (not shipped in FCT's config, which would disable the guard for
+every FCT-based project). Test-only change.
+
+# Extract Electron e2e workspace creation flow into a reusable runner
+
+Split the Playwright-over-CDP driver out of
+`apps/minds/test_desktop_client_e2e.py` into a new module at
+`apps/minds/imbue/minds/desktop_client/e2e_workspace_runner.py` so the
+same flow can be invoked outside pytest. The new module exposes the
+public entry points `create_workspace_via_electron`, `resolve_fct_path`,
+`ensure_minds_env_defaults`, `configure_logging`, `find_free_port`, and
+`destroy_agent_best_effort`; everything else stays underscore-prefixed.
+
+The existing pytest test was reduced to a thin wrapper that:
+
+- calls `ensure_minds_env_defaults(setenv=monkeypatch.setenv)` so any
+  injected env vars get reverted between tests,
+- delegates the actual Electron / Playwright flow to
+  `create_workspace_via_electron`, and
+- always calls `destroy_agent_best_effort` in `finally` so a successful
+  test never leaks an agent into the host.
+
+`scripts/snapshot_minds_e2e_state.py` is the second caller: it invokes
+`create_workspace_via_electron` directly and deliberately omits the
+`mngr destroy` cleanup, because the whole point of the snapshot is to
+capture a sandbox in which the workspace's Docker container is alive.
+
+Also added a `*/desktop_client/e2e_workspace_runner.py` exclusion to the
+`test_prevent_direct_subprocess` ratchet, since the new module
+necessarily shells out to `electron`, `git`, and `uv run mngr destroy`
+(operator-tool subprocesses with no `ConcurrencyGroup`-managed
+equivalent). No user-visible behavior change.
+
+# Dropped redundant per-project ty/ruff ratchet tests
+
+Removed this project's `test_no_type_errors` and `test_no_ruff_errors` from its
+`test_ratchets.py`. ty resolves the uv workspace root and ruff (run from the repo
+root) both scan across projects, so the per-project copies just re-ran the same
+checks. The single repo-wide equivalents now live in `test_meta_ratchets.py`
+(`test_no_type_errors` and `test_no_ruff_errors`).
+
+No user-facing behavior change.
+
+## 2026-05-27
+
+Bump Latchkey dependency to 2.12.1. The newest Latchkey version is capable of reusing Google Projects which is important because the default limit on Google Project count is low.
+
+# Fix a signing-key generation race that intermittently logged users out
+
+`FileAuthStore.get_signing_key` generated the cookie signing key lazily
+on first access without any synchronization. FastAPI dispatches sync
+route handlers on a threadpool, so on a fresh data directory the desktop
+client's startup burst -- `/authenticate` plus the `/` redirect target,
+`/_chrome`, and `/welcome`, each of which checks authentication -- could
+all reach key generation concurrently. Two interleavings both broke auth:
+
+- A reader saw the just-created key file as momentarily empty (the old
+  code did a non-atomic `write_text`) and raised `SigningKeyError`, so
+  `/authenticate` returned 500 and no session cookie was set.
+- Two threads each generated a *different* key and raced to write it;
+  the last writer won and silently invalidated the cookie that had just
+  been signed with the earlier key, so the next request's
+  `verify_session_cookie` failed and the user appeared logged out.
+
+Either way the subsequent page load came back unauthenticated. This was
+the dominant cause of flaky failures in the `test-docker-electron` CI job
+(`test_create_local_docker_workspace_via_electron` timing out on the
+`#create-form` selector because `GET /create` returned 403).
+
+`get_signing_key` now reads the existing key on the fast path and, when
+it must generate one, serializes generation behind a per-store lock with
+a double-checked re-read and writes the key via `atomic_write` so a
+concurrent reader never observes a partial file. Concurrent first-time
+callers now always converge on a single persisted key.
+
+Fixed the Deny button on the latchkey permission-request dialog so it works even when the requested scope is not in the gateway's services catalog (e.g. a typo from the agent or a stale catalog). Previously clicking Deny returned `{"error": "Scope 'XYZ' is not in the gateway catalog"}`; the deny flow now falls back to the raw scope string for both the persisted response event and the agent-facing message, so the pending request is always torn down and the agent is always notified.
+
+# ty 0.0.39 type fix
+
+- `_resolve_ws_name_and_account` now returns `list[AccountSession]` instead of `list[object]`. `ty` 0.0.39 rejected the previous annotation because `list` is invariant (`list[AccountSession]` is not assignable to `list[object]`); the precise element type is also more accurate.
+
+No user-facing behavior change.
+
 ## 2026-05-26
 
 # Minds API access: gateway-only, single key, per-agent URL prefix
