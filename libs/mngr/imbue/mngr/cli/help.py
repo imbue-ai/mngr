@@ -96,7 +96,10 @@ def format_topic_help(topic: TopicHelpPage, *, use_ansi: bool, width: int) -> st
     if topic.see_also:
         output.write("SEE ALSO\n")
         for name, description in topic.see_also:
-            output.write(f"       mngr help {name} - {description}\n")
+            # Strip any "#anchor" suffix; anchors are only meaningful for the
+            # markdown doc generator, not for a terminal `mngr help <name>`.
+            bare_name = name.partition("#")[0]
+            output.write(f"       mngr help {bare_name} - {description}\n")
         output.write("\n")
 
     return output.getvalue()

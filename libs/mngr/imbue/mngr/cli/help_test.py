@@ -142,6 +142,19 @@ def test_format_topic_help_contains_see_also() -> None:
     assert "mngr help other-topic" in output
 
 
+def test_format_topic_help_see_also_strips_anchor() -> None:
+    """format_topic_help drops a '#anchor' suffix from see_also refs (terminal can't jump to it)."""
+    topic = TopicHelpPage(
+        key="test-topic",
+        one_line_description="A test topic",
+        content="Some content.",
+        see_also=(("list#filtering", "Filtering agents"),),
+    )
+    output = format_topic_help(topic, use_ansi=False, width=80)
+    assert "mngr help list - Filtering agents" in output
+    assert "list#filtering" not in output
+
+
 def test_format_topic_help_omits_see_also_when_empty() -> None:
     """format_topic_help omits SEE ALSO section when there are no references."""
     topic = TopicHelpPage(
