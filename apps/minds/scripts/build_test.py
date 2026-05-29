@@ -23,6 +23,7 @@ test so it runs on every branch.
 import json
 import plistlib
 import re
+import shutil
 import subprocess
 import zipfile
 from pathlib import Path
@@ -192,7 +193,16 @@ def test_workspace_package_lists_are_consistent() -> None:
 
 
 def _load_todesktop_config() -> dict:
-    """Evaluate ``apps/minds/todesktop.js`` and return its exported config."""
+    """Evaluate ``apps/minds/todesktop.js`` and return its exported config.
+
+    Skips the calling test when ``node`` is not on PATH: the offload sandbox
+    only installs Python deps, so the JS-evaluation path can't run there.
+    Local devs always have node (it ships with pnpm), so the entitlement
+    guard still runs on every dev box; a pre-release smoke build covers
+    the path end-to-end.
+    """
+    if shutil.which("node") is None:
+        pytest.skip("`node` not on PATH; cannot evaluate todesktop.js to read the entitlement config.")
     result = subprocess.run(
         ["node", "-e", "console.log(JSON.stringify(require('./todesktop.js')))"],
         cwd=APP_ROOT,
