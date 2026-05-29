@@ -15,3 +15,7 @@ The assertion now polls with `wait_for` (mirroring the sibling test
 resolves within the timeout. No production code changed: real callers of
 `get_volume_for_host` only run against long-lived hosts, never within a second
 of creation.
+
+The sibling test `test_host_volume_data_readable_via_volume_interface` had the
+same single-shot probe of `get_volume_for_host` right after `create_host`; it
+is now polled the same way to close the identical latent race.
