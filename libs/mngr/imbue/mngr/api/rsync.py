@@ -10,6 +10,7 @@ caller passes via ``extra_args`` is forwarded to rsync, sandwiched between
 the defaults and the source/destination args.
 """
 
+import os
 import shlex
 from collections.abc import Sequence
 from contextlib import nullcontext
@@ -26,6 +27,7 @@ from imbue.imbue_common.pure import pure
 from imbue.mngr.api.git import GitContextInterface
 from imbue.mngr.api.git import LocalGitContext
 from imbue.mngr.api.git import RemoteGitContext
+from imbue.mngr.api.git import UncommittedChangesError
 from imbue.mngr.api.git import stash_guard
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import UserInputError
@@ -313,3 +315,102 @@ def rsync(
         uncommitted_changes=uncommitted_changes,
         cg=cg,
     )
+
+
+def _build_two_sided_rsync_argv(
+    source_host: OnlineHostInterface,
+    source_path: str,
+    destination_host: OnlineHostInterface,
+    destination_path: str,
+    extra_args: Sequence[str],
+) -> list[str]:
+    """Build the rsync argv for a two-endpoint transfer.
+
+    Either side may be local; if exactly one side is remote, that host's SSH
+    info is woven in via ``-e`` and its path is prefixed with ``user@host:``.
+    Path strings are passed through verbatim (caller controls trailing slash).
+    """
+    if source_host.is_local and destination_host.is_local:
+        return _build_rsync_command(source_path, destination_path, extra_args, ssh_transport=None)
+
+    remote_host = destination_host if source_host.is_local else source_host
+    ssh_info = remote_host.get_ssh_connection_info()
+    assert ssh_info is not None, "Remote host must provide SSH connection info"
+    user, hostname, port, key_path = ssh_info
+    ssh_transport = build_ssh_transport_command(key_path, port, get_ssh_known_hosts_file(remote_host))
+    if source_host.is_local:
+        ssh_source = source_path
+        ssh_destination = f"{user}@{hostname}:{destination_path}"
+    else:
+        ssh_source = f"{user}@{hostname}:{source_path}"
+        ssh_destination = destination_path
+    return _build_rsync_command(ssh_source, ssh_destination, extra_args, ssh_transport=ssh_transport)
+
+
+def exec_rsync(
+    source_host: OnlineHostInterface,
+    source_path: str | Path,
+    destination_host: OnlineHostInterface,
+    destination_path: str | Path,
+    extra_args: Sequence[str],
+    uncommitted_changes: UncommittedChangesMode,
+    cg: ConcurrencyGroup,
+) -> None:
+    """Run mngr's pre-rsync setup, then exec into ``rsync``.
+
+    Equivalent to :func:`rsync` for the CLI: same endpoint validation, same
+    destination-side stash / mkdir setup, same argv assembly -- but replaces
+    the current process with the rsync binary instead of running it via
+    ``cg.run_process_to_completion``. Suitable for ``mngr rsync`` where the
+    user benefits from direct stdout/stderr passthrough, native signal
+    handling, and rsync's own exit code propagating up.
+
+    Rejects ``uncommitted_changes=MERGE``: that mode pops the destination stash
+    *after* rsync exits, which has no equivalent under exec semantics. The
+    caller should use ``STASH`` and pop manually.
+
+    Never returns when successful: control passes to rsync. Raises before
+    exec when validation or setup fails.
+    """
+    RSYNC.require()
+
+    if not source_host.is_local and not destination_host.is_local:
+        raise RsyncEndpointError("mngr rsync does not support remote-to-remote transfers")
+    if uncommitted_changes == UncommittedChangesMode.MERGE:
+        raise UserInputError(
+            "--uncommitted-changes=merge is not supported by ``mngr rsync``: it requires "
+            "popping the stash after rsync exits, which the exec-based CLI cannot do. "
+            "Use --uncommitted-changes=stash and run ``git stash pop`` yourself afterwards."
+        )
+
+    source_str = str(source_path)
+    destination_str = str(destination_path)
+    destination_for_git = Path(destination_str)
+    destination_git_ctx: GitContextInterface = (
+        LocalGitContext(cg=cg) if destination_host.is_local else RemoteGitContext(host=destination_host)
+    )
+
+    is_destination_exists = _dir_exists(destination_host, destination_for_git)
+    is_destination_git_repo = (
+        destination_git_ctx.is_git_repository(destination_for_git) if is_destination_exists else False
+    )
+    if uncommitted_changes != UncommittedChangesMode.CLOBBER and is_destination_git_repo:
+        if destination_git_ctx.has_uncommitted_changes(destination_for_git):
+            match uncommitted_changes:
+                case UncommittedChangesMode.FAIL:
+                    raise UncommittedChangesError(destination_for_git)
+                case UncommittedChangesMode.STASH:
+                    logger.debug("Stashing uncommitted changes")
+                    destination_git_ctx.git_stash(destination_for_git)
+                case _:
+                    # MERGE was rejected above; CLOBBER took the outer branch.
+                    raise MngrError(f"Unhandled UncommittedChangesMode: {uncommitted_changes}")
+
+    _mkdir_on_host(destination_host, destination_for_git)
+
+    argv = _build_two_sided_rsync_argv(
+        source_host, source_str, destination_host, destination_str, extra_args
+    )
+    direction = "Pushing" if source_host.is_local and not destination_host.is_local else "Pulling"
+    logger.debug("{} files from {} to {}: {}", direction, source_str, destination_str, shlex.join(argv))
+    os.execvp(argv[0], argv)

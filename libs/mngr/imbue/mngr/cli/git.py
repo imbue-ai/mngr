@@ -1,13 +1,16 @@
+import os
+import shlex
 from pathlib import Path
 from typing import Any
 
 import click
 from click_option_group import optgroup
+from loguru import logger
 
 from imbue.mngr.api.discover import discover_hosts_and_agents
 from imbue.mngr.api.find import resolve_host_location_address
-from imbue.mngr.api.git import git_pull
-from imbue.mngr.api.git import git_push
+from imbue.mngr.api.git import build_git_pull_command
+from imbue.mngr.api.git import build_git_push_command
 from imbue.mngr.cli.address_params import HOST_LOCATION_ADDRESS
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
@@ -15,8 +18,6 @@ from imbue.mngr.cli.default_command_group import DefaultCommandGroup
 from imbue.mngr.cli.help_formatter import CommandHelpMetadata
 from imbue.mngr.cli.help_formatter import add_pager_help_option
 from imbue.mngr.cli.output_helpers import emit_info
-from imbue.mngr.cli.output_helpers import output_git_pull_success
-from imbue.mngr.cli.output_helpers import output_git_push_success
 from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import UserInputError
@@ -112,15 +113,15 @@ def git_push_command(ctx: click.Context, **kwargs: Any) -> None:
 
     emit_info(f"Pushing to {location.path} on host {location.host.id}", output_opts.output_format)
 
-    git_push(
+    argv, env = build_git_push_command(
         local_path=Path.cwd(),
         remote_host=location.host,
         remote_path=location.path,
         extra_args=opts.git_args,
         cg=mngr_ctx.concurrency_group,
     )
-
-    output_git_push_success(output_opts.output_format)
+    logger.debug("Running git push: {}", shlex.join(argv))
+    os.execvpe(argv[0], argv, env)
 
 
 @git_command.command(
@@ -149,15 +150,14 @@ def git_pull_command(ctx: click.Context, **kwargs: Any) -> None:
 
     emit_info(f"Pulling from {location.path} on host {location.host.id}", output_opts.output_format)
 
-    git_pull(
+    argv, env = build_git_pull_command(
         local_path=Path.cwd(),
         remote_host=location.host,
         remote_path=location.path,
         extra_args=opts.git_args,
-        cg=mngr_ctx.concurrency_group,
     )
-
-    output_git_pull_success(output_opts.output_format)
+    logger.debug("Running git pull: {}", shlex.join(argv))
+    os.execvpe(argv[0], argv, env if env is not None else os.environ)
 
 
 CommandHelpMetadata(
