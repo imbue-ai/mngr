@@ -52,10 +52,13 @@ run. The route includes each workspace's creation time for this.
 
 A backed-up project also gets a "download" link next to its status that exports
 the latest snapshot as a zip. minds builds the zip on demand from the minds
-machine via `restic dump --archive zip` (no workspace access needed) to a /tmp
-file keyed by host id (so re-exports overwrite rather than accumulate), served
-via a new `GET /api/backup-export/{agent_id}` route. The link shows a spinner
-and "exporting…" while the zip is being built.
+machine (no workspace access needed) by restoring the latest snapshot to a temp
+dir and zipping it -- `restic restore` downloads in parallel and is ~50x faster
+than `restic dump --archive zip` (which fetches blobs sequentially: ~5 min vs
+~10 s for a ~95 MiB snapshot). The zip lands in a /tmp file keyed by host id
+(so re-exports overwrite rather than accumulate) and is served via a new
+`GET /api/backup-export/{agent_id}` route; the temp restore dir is always
+cleaned up. The link shows a spinner and "exporting…" while the zip is built.
 
 New `BackupProvider` / `BackupEncryptionMethod` primitives; new
 `mngr imbue_cloud bucket ...` wrappers on the imbue_cloud CLI client.

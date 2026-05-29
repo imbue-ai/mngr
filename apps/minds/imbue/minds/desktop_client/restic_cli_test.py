@@ -5,7 +5,6 @@ test images), so the integration tests run unconditionally and FAIL -- not
 skip -- if the ``restic`` binary is missing.
 """
 
-import zipfile
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
@@ -186,19 +185,17 @@ def test_init_repo_is_idempotent_on_existing_repo(tmp_path: Path) -> None:
 
 
 @pytest.mark.timeout(60)
-def test_dump_snapshot_archive_writes_valid_zip(tmp_path: Path) -> None:
+def test_restore_snapshot_restores_files(tmp_path: Path) -> None:
     repo = str(tmp_path / "repo")
-    password = "dump-test-pw"
+    password = "restore-test-pw"
     restic_cli.init_repo(repository=repo, backend_env={}, password=password)
     source = tmp_path / "data.txt"
     source.write_text("hello export")
     restic_backup_a_file(repo, password, source)
 
-    target = tmp_path / "out.zip"
-    restic_cli.dump_snapshot_archive(repository=repo, backend_env={}, password=password, target_path=target)
+    restore_dir = tmp_path / "restore"
+    restic_cli.restore_snapshot(repository=repo, backend_env={}, password=password, target_dir=restore_dir)
 
-    assert target.is_file()
-    assert zipfile.is_zipfile(target)
-    with zipfile.ZipFile(target) as archive:
-        names = archive.namelist()
-    assert any(name.endswith("data.txt") for name in names), names
+    restored = list(restore_dir.rglob("data.txt"))
+    assert restored, list(restore_dir.rglob("*"))
+    assert restored[0].read_text() == "hello export"
