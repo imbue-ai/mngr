@@ -9,11 +9,13 @@ which surfaces later as confusing errors when the operator next
 ``mngr list``s the env.
 
 The cleanup walks ``<env_root>/mngr/agents/<agent-id>/`` to enumerate
-known agent ids, then shells out to ``mngr destroy <agent-id>`` per
-agent with the env's MNGR_HOST_DIR / MNGR_PREFIX exported in the
-subprocess env so the inner ``mngr`` reads the right host_dir. Pure
-subprocess-based to avoid pulling ``imbue.mngr`` into the envs
-package's import surface.
+known agent ids, then shells out to a single ``mngr destroy -f
+<agent-id>...`` call with the env's MNGR_HOST_DIR / MNGR_PREFIX
+exported in the subprocess env so the inner ``mngr`` reads the right
+host_dir. Destroying all ids in one pass also cleans up their
+host-mates (and the docker containers + build images those reference)
+in one quick call. Pure subprocess-based to avoid pulling ``imbue.mngr``
+into the envs package's import surface.
 """
 
 import os
