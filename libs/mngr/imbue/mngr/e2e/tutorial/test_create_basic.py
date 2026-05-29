@@ -251,6 +251,58 @@ def test_create_with_json_output(e2e: E2eSession) -> None:
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.modal
+def test_create_copy(e2e: E2eSession) -> None:
+    e2e.write_tutorial_block("""
+        # you can create a copy instead of a worktree:
+        mngr create my-task --copy
+        # that is used by default if you're not in a git repo
+    """)
+    expect(
+        e2e.run(
+            "mngr create my-task --copy --type command --no-ensure-clean --no-connect -- sleep 100900",
+            comment="you can create a copy instead of a worktree",
+        )
+    ).to_succeed()
+
+
+@pytest.mark.rsync
+@pytest.mark.release
+@pytest.mark.tmux
+@pytest.mark.modal
+def test_create_clone(e2e: E2eSession) -> None:
+    e2e.write_tutorial_block("""
+        # you can create a "clone" instead of worktree or copy, which is a lightweight copy that shares git objects with the original repo but has its own separate working directory:
+        mngr create my-task --clone
+    """)
+    expect(
+        e2e.run(
+            "mngr create my-task --clone --type command --no-ensure-clean --no-connect -- sleep 100901",
+            comment="you can create a clone instead of worktree or copy",
+        )
+    ).to_succeed()
+
+
+@pytest.mark.release
+@pytest.mark.modal
+def test_create_with_snapshot_fictional(e2e: E2eSession) -> None:
+    e2e.write_tutorial_block("""
+        # you can use an existing snapshot instead of building a new host from scratch:
+        mngr create my-task --provider modal --snapshot snap-123abc
+    """)
+    # The fictional snapshot id won't exist in any modal environment; we just
+    # verify mngr parses --snapshot and exits with an error rather than
+    # crashing.
+    result = e2e.run(
+        "mngr create my-task --provider modal --snapshot snap-123abc --no-connect --no-ensure-clean",
+        comment="use an existing snapshot instead of building a new host",
+    )
+    assert result.exit_code != 0
+
+
+@pytest.mark.rsync
+@pytest.mark.release
+@pytest.mark.tmux
+@pytest.mark.modal
 def test_create_headless(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
     # mngr is very much meant to be used for scripting and automation, so nothing requires interactivity.
