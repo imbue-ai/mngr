@@ -46,6 +46,7 @@ mngr help [OPTIONS] [TOPIC]...
 - agents - Agents
 - api - mngr Plugin API
 - common - Common Options
+- cron_recipes - Cron automation recipes
 - docker_usage - Using Docker
 - environment_variables - Environment Variables
 - hosts - Hosts
