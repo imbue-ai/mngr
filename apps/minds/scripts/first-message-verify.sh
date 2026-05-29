@@ -129,20 +129,16 @@ log "agent DONE"
 # "user's actual chat agent is a separate mngr agent ... named after the host").
 AGENT_NAME="$HOST_NAME"
 
-log "disabling unused providers so mngr doesn't bail on missing modal/docker creds"
-"$MNGR_BIN" config set --scope user providers.modal.is_enabled false 2>&1 | tee /tmp/first-message-mngr-config.txt >&2 || true
-"$MNGR_BIN" config set --scope user providers.docker.is_enabled false 2>&1 | tee -a /tmp/first-message-mngr-config.txt >&2 || true
-
-log "settling 5s then listing what mngr sees"
+log "settling 5s then listing what mngr sees (lima provider only)"
 sleep 5
-"$MNGR_BIN" list 2>&1 | tee /tmp/first-message-mngr-list.txt >&2 || true
+"$MNGR_BIN" list --provider lima 2>&1 | tee /tmp/first-message-mngr-list.txt >&2 || true
 
 log "sending message to '$AGENT_NAME': $PROMPT"
-"$MNGR_BIN" message "$AGENT_NAME" -m "$PROMPT" 2>&1 | tee /tmp/first-message-mngr-message.txt >&2
+"$MNGR_BIN" message --provider lima "$AGENT_NAME" -m "$PROMPT" 2>&1 | tee /tmp/first-message-mngr-message.txt >&2
 mngr_message_rc=${PIPESTATUS[0]}
 if [[ $mngr_message_rc -ne 0 ]]; then
   log "mngr message exit=$mngr_message_rc -- trying 'system-services' as fallback"
-  "$MNGR_BIN" message system-services -m "$PROMPT" 2>&1 | tee -a /tmp/first-message-mngr-message.txt >&2
+  "$MNGR_BIN" message --provider lima system-services -m "$PROMPT" 2>&1 | tee -a /tmp/first-message-mngr-message.txt >&2
   mngr_message_rc=${PIPESTATUS[0]}
   if [[ $mngr_message_rc -ne 0 ]]; then
     fail "mngr message failed (both '$AGENT_NAME' and 'system-services') -- see /tmp/first-message-mngr-message.txt"
@@ -156,7 +152,7 @@ rm -f "$REPLY_FILE"
 reply_deadline=$((SECONDS + REPLY_TIMEOUT_SECONDS))
 while (( SECONDS < reply_deadline )); do
   EXPECT_SUBSTRING="$EXPECT_SUBSTRING" SEND_AT="$SEND_AT" \
-    "$MNGR_BIN" event "$AGENT_NAME" --include 'event.type == "assistant_message"' --format json 2>/dev/null \
+    "$MNGR_BIN" event --provider lima "$AGENT_NAME" --include 'event.type == "assistant_message"' --format json 2>/dev/null \
     | EXPECT_SUBSTRING="$EXPECT_SUBSTRING" SEND_AT="$SEND_AT" python3 -c "
 import json, sys, os
 expect = os.environ['EXPECT_SUBSTRING']
