@@ -276,9 +276,9 @@ def test_assemble_command_adds_hooks_dir_via_add_dir(antigravity_agent: Antigrav
 def test_assemble_command_premakes_hooks_agents_dir(antigravity_agent: AntigravityAgent) -> None:
     """The foreground mkdir creates the hooks .agents dir so --add-dir never points at a missing path.
 
-    Provision writes hooks.json there, but the mkdir keeps --add-dir valid on
-    a restart that runs before re-provision (or for agents created before this
-    feature existed).
+    provision() writes hooks.json there; the mkdir guarantees the directory
+    exists at launch even when the hooks file has not been provisioned (e.g. a
+    restart that runs before re-provision).
     """
     agent = antigravity_agent
     command = str(agent.assemble_command(agent.host, (), command_override=None))

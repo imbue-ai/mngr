@@ -6,35 +6,30 @@ CLI is architecturally closer to Claude Code than to Gemini -- hook event
 names and permission-dialog phrasing match Claude's surface. The structural
 choices below reflect that: the process name is the Go binary ``agy``.
 
-Hooks: as of ``agy`` 1.0.3 hook *execution* works (an earlier comment here
-claimed it was gated behind a ``json-hooks-enabled`` per-account experiment;
-re-verified live against 1.0.3, hooks both load and execute). mngr provisions
-a per-agent ``hooks.json`` (see ``build_antigravity_hooks_config``) into the
-agent state dir and points agy at it with ``--add-dir``:
+Hooks: mngr provisions a per-agent ``hooks.json`` (see
+``build_antigravity_hooks_config``) into the agent state dir and points agy at
+it with ``--add-dir`` (agy 1.0.3 loads and executes hooks discovered this way):
 
-* An ``active`` marker (``PreInvocation`` touches it, ``Stop`` removes it) so
-  the marker-only lifecycle detection in ``BaseAgent.get_lifecycle_state``
-  reports RUNNING while the agent works and WAITING when it's idle. Without
-  this agy writes no ``active`` file and the agent would peg at WAITING.
-* ``auto_allow_permissions`` is wired through a ``PreToolUse`` hook returning
-  ``{"decision": "allow"}`` rather than the ``--dangerously-skip-permissions``
-  flag, so approval is controlled by one mechanism.
+* An ``active`` marker (``PreInvocation`` touches it, ``Stop`` removes it).
+  ``BaseAgent.get_lifecycle_state`` reads this marker to report RUNNING while
+  the agent works and WAITING when it's idle; agy maintains no such marker on
+  its own.
+* When ``auto_allow_permissions`` is set, a ``PreToolUse`` hook returns
+  ``{"decision": "allow"}`` so tool calls never block on a permission dialog.
 
-Note: the in-TUI ``/hooks`` command writes ``hooks.json`` to
-``~/.gemini/antigravity-cli/``, which the hook-execution engine never runs --
-that file is loaded only for the TUI's display/management view, while only
-``~/.gemini/config/hooks.json`` and per-workspace ``.agents/hooks.json`` are
-actually executed (reported as google-antigravity/antigravity-cli#49). mngr
-therefore writes its own file under an ``--add-dir`` path and never relies on
-the TUI.
+The in-TUI ``/hooks`` command writes ``hooks.json`` to
+``~/.gemini/antigravity-cli/``, which the execution engine never runs -- that
+path is loaded only for the TUI's display, while hooks execute only from
+``~/.gemini/config/hooks.json`` and per-workspace ``.agents/hooks.json``
+(google-antigravity/antigravity-cli#49). mngr writes its own file under an
+``--add-dir`` path and does not use the TUI.
 
-Readiness is still signalled purely by the ``InteractiveTuiAgent`` banner-poll:
-agy's hook events (``PreToolUse``/``PostToolUse``/``PreInvocation``/
-``PostInvocation``/``Stop``) are execution-loop events with no "input prompt
-drawn" analog, so they cannot replace the banner poll. Detecting a permission
-dialog via hooks is likewise not possible -- no hook fires while the agent is
-blocked at the dialog and the hook input exposes no dialog state -- so a
-permission-specific WAITING reason is deliberately left for a follow-up.
+Readiness is signalled by the ``InteractiveTuiAgent`` banner-poll: agy's hook
+events (``PreToolUse``/``PostToolUse``/``PreInvocation``/``PostInvocation``/
+``Stop``) are execution-loop events with no "input prompt drawn" analog. A
+permission dialog can't be detected via hooks either -- none fires while the
+agent is blocked at it, and the hook input carries no dialog state -- so the
+agent exposes no permission-specific WAITING reason.
 
 Transcript support: enabled by default. ``stream_transcript.sh`` tails agy's
 per-conversation JSONL files at
@@ -144,12 +139,10 @@ class AntigravityAgentConfig(AgentTypeConfig):
         default=(),
         description="Additional CLI arguments to pass to the antigravity agent.",
     )
-    # auto_allow_permissions is wired through a ``PreToolUse`` hook that
-    # returns ``{"decision": "allow"}`` (see ``build_antigravity_hooks_config``),
-    # not the ``--dangerously-skip-permissions`` CLI flag. Verified live
-    # against agy 1.0.3 that the hook decision suppresses the permission
-    # dialog; routing through hooks keeps approval under one mechanism and
-    # leaves room for finer per-tool control later.
+    # auto_allow_permissions emits a match-all ``PreToolUse`` hook returning
+    # ``{"decision": "allow"}`` (see ``build_antigravity_hooks_config``), so
+    # tool calls are approved without a dialog. Routing approval through a hook
+    # keeps it under one mechanism and leaves room for per-tool control.
     auto_allow_permissions: bool = Field(
         default=False,
         description="When True, auto-approve every tool call without prompting.",
