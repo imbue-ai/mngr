@@ -380,9 +380,7 @@ def _handle_landing_page(
     agent_creator: AgentCreator | None = request.app.state.agent_creator
     accounts = session_store.list_accounts() if session_store else []
     default_account_id = minds_config.get_default_account_id() if minds_config else None
-    is_backup_password_saved = (
-        has_saved_backup_password(agent_creator.paths) if agent_creator is not None else False
-    )
+    is_backup_password_saved = has_saved_backup_password(agent_creator.paths) if agent_creator is not None else False
     html = render_create_form(
         git_url=git_url,
         branch=branch,
@@ -596,8 +594,7 @@ def _build_backup_request_or_error(
         return BackupSetupRequest(backup_provider=BackupProvider.CONFIGURE_LATER), None
     if backup_provider is BackupProvider.IMBUE_CLOUD and not account_email:
         return None, (
-            "imbue_cloud backups require a selected account. Choose an account or pick a "
-            "different backup provider."
+            "imbue_cloud backups require a selected account. Choose an account or pick a different backup provider."
         )
     # When the api_key textarea already supplies RESTIC_PASSWORD, that value
     # wins (see build_api_key_restic_env), so the master-password row is moot:
@@ -787,9 +784,7 @@ def _handle_create_page(
     agent_creator: AgentCreator | None = request.app.state.agent_creator
     accounts = session_store.list_accounts() if session_store else []
     default_account_id = minds_config.get_default_account_id() if minds_config else None
-    is_backup_password_saved = (
-        has_saved_backup_password(agent_creator.paths) if agent_creator is not None else False
-    )
+    is_backup_password_saved = has_saved_backup_password(agent_creator.paths) if agent_creator is not None else False
     html = render_create_form(
         git_url=git_url,
         branch=branch,

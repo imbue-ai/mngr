@@ -156,7 +156,7 @@ def test_merge_preserves_other_sections() -> None:
     existing = '[snapshot]\nmethod = "DIRECT"\n\n[retention]\nkeep_hourly = 99\n'
     merged = merge_allow_empty_password_into_backup_toml(existing, True)
     assert "allow_empty_password = true" in merged
-    assert '[snapshot]' in merged
+    assert "[snapshot]" in merged
     assert "keep_hourly = 99" in merged
 
 

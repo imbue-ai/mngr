@@ -251,9 +251,7 @@ def _read_remote_file(
     command_str = f"if [ -f {quoted} ]; then cat {quoted}; fi"
     result = _run_mngr_exec(agent_id, command_str, parent_cg=parent_cg)
     if result.returncode != 0:
-        raise BackupProvisioningError(
-            f"Failed to read {remote_path} on agent {agent_id}: {result.stderr.strip()}"
-        )
+        raise BackupProvisioningError(f"Failed to read {remote_path} on agent {agent_id}: {result.stderr.strip()}")
     return result.stdout
 
 
