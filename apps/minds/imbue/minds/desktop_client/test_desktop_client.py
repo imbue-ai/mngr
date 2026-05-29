@@ -1711,9 +1711,7 @@ def test_ssh_command_for_agent_builds_command_from_resolver() -> None:
     resolver = StaticBackendResolver(
         url_by_agent_and_service={},
         ssh_info_by_agent_id={
-            str(agent_id): RemoteSSHInfo(
-                user="root", host="127.0.0.1", port=60022, key_path=Path("/home/u/.mngr/key")
-            )
+            str(agent_id): RemoteSSHInfo(user="root", host="127.0.0.1", port=60022, key_path=Path("/home/u/.mngr/key"))
         },
     )
     assert _ssh_command_for_agent(resolver, agent_id) == "ssh -i /home/u/.mngr/key -p 60022 root@127.0.0.1"
@@ -1735,9 +1733,7 @@ def test_recovery_page_renders_copy_ssh_button_from_resolver(tmp_path: Path) -> 
     resolver = StaticBackendResolver(
         url_by_agent_and_service={},
         ssh_info_by_agent_id={
-            str(agent_id): RemoteSSHInfo(
-                user="root", host="127.0.0.1", port=60022, key_path=Path("/home/u/.mngr/key")
-            )
+            str(agent_id): RemoteSSHInfo(user="root", host="127.0.0.1", port=60022, key_path=Path("/home/u/.mngr/key"))
         },
     )
     app = create_desktop_client(
