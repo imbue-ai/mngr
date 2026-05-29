@@ -213,5 +213,9 @@ log "destroying agent"
 DEL=$(curl -s -b "$COOKIES" -o /tmp/first-message-delete.json -w '%{http_code}' \
   -X POST --max-time $DESTROY_TIMEOUT_SECONDS "$BASE/workspace/$AGENT_ID/delete")
 log "delete HTTP $DEL"
+case "$DEL" in
+  2*|404) ;;
+  *) fail "delete returned HTTP '$DEL' -- agent may be dangling; body at /tmp/first-message-delete.json";;
+esac
 
 log "SUCCESS"
