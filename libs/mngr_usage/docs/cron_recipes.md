@@ -47,9 +47,8 @@ Letting it run one tick into the fresh window warms that window too.
 
 ```bash
 #!/usr/bin/env bash
-# use-extra.sh -- run a DEDICATED agent during the tail of a 5h window when
-# there's budget to spare, and stop it once the window rolls over or the week is
-# no longer on pace.
+# use-extra.sh -- run a dedicated agent through the tail of a 5h window, then
+# stop it once the window or weekly pace rolls over.
 set -euo pipefail
 
 AGENT="my-agent"
