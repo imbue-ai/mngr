@@ -253,8 +253,9 @@ def test_assemble_command_never_uses_dangerously_skip_permissions_flag(
 ) -> None:
     """Even with auto_allow_permissions=True the CLI flag is gone -- approval is via a PreToolUse hook.
 
-    The disabled-mode case is covered by
-    ``test_assemble_command_omits_dangerously_skip_permissions_when_auto_allow_disabled``.
+    The flag is now removed unconditionally (it is no longer gated on
+    auto_allow_permissions), so asserting its absence under the auto-allow case
+    -- where the flag would previously have appeared -- is the strongest check.
     """
     agent = antigravity_agent_auto_allow
     command = str(agent.assemble_command(agent.host, (), command_override=None))
