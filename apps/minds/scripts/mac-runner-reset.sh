@@ -37,7 +37,12 @@ if [[ -n "$URL" ]]; then
   curl -fSL --silent --show-error -o "$TMP/minds.zip" "$URL"
   unzip -q -d "$TMP" "$TMP/minds.zip"
   sudo mv "$TMP/minds.app" /Applications/minds.app
-  sudo xattr -dr com.apple.quarantine /Applications/minds.app
+  # xattr -dr returns non-zero when some signed-bundle internals refuse the
+  # delete with "Operation not permitted"; we only care about the top-level
+  # quarantine bit so Gatekeeper lets the app launch. Per-file failures
+  # inside signed frameworks are harmless.
+  sudo xattr -dr com.apple.quarantine /Applications/minds.app 2>/dev/null || true
+  sudo xattr -d com.apple.quarantine /Applications/minds.app 2>/dev/null || true
   version=$(defaults read /Applications/minds.app/Contents/Info.plist CFBundleShortVersionString)
   build=$(defaults read /Applications/minds.app/Contents/Info.plist CFBundleVersion)
   log "installed $version ($build)"
