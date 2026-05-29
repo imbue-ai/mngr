@@ -64,7 +64,7 @@ snapshot="$(mngr usage --format json)"
 #   START -- (re)launch: in the tail of an open 5h window (>90% elapsed) with
 #            spare capacity (5h budget left, weekly under the pace line above).
 #   STOP  -- shut down: the 5h window left its tail / rolled over, OR weekly usage
-#            reaches the strict pace line, used% = elapsed%.
+#            passes the strict pace line, used% > elapsed%.
 #   KEEP  -- hold the current state (weekly usage between those two lines).
 #   ""    -- no Claude usage data this tick: do nothing.
 # START uses the tapering margin line; STOP the looser strict line -- the gap is
