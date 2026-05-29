@@ -100,21 +100,26 @@ jobs:
         id: parse
         if: always()
         run: |
-          BUILD_ID=$(grep -oE '26[0-9]{4}[a-z0-9]+' /tmp/minds-dist.log 2>/dev/null | sort -u | tail -1 || true)
-          URL=$(grep -oE 'https://dl\.todesktop[^[:space:]"]+arm64' /tmp/minds-dist.log 2>/dev/null | sort -u | tail -1 || true)
+          # ToDesktop prints "Retrieved build ID: <id>" early in the upload
+          # step. Construct the arm64 .zip URL from it — pnpm dist's final
+          # "Build complete!" line is the dashboard URL, not a direct artifact.
+          BUILD_ID=$(grep -oE 'Retrieved build ID: [a-z0-9]+' /tmp/minds-dist.log 2>/dev/null | awk '{print $NF}' | tail -1 || true)
+          if [[ -z "$BUILD_ID" ]]; then
+            echo "::error::could not extract build ID from /tmp/minds-dist.log. Check the uploaded build-log artifact."
+            exit 1
+          fi
+          APP_ID=26032588hqdzk
+          URL="https://dl.todesktop.com/${APP_ID}/builds/${BUILD_ID}/mac/zip/arm64"
           echo "build_id=$BUILD_ID" >> "$GITHUB_OUTPUT"
-          echo "url=$URL" >> "$GITHUB_OUTPUT"
+          echo "url=$URL"           >> "$GITHUB_OUTPUT"
           {
             echo "## Build result"
             echo ""
             echo "- commit: \`${{ inputs.commit_sha }}\`"
-            echo "- build_id: \`${BUILD_ID:-<not found>}\`"
-            echo "- url: ${URL:-<not found>}"
+            echo "- build_id: \`$BUILD_ID\`"
+            echo "- url: $URL"
+            echo "- dashboard: https://app.todesktop.com/apps/${APP_ID}/builds/${BUILD_ID}"
           } >> "$GITHUB_STEP_SUMMARY"
-          if [[ -z "$URL" ]]; then
-            echo "::error::could not extract a ToDesktop arm64 URL from the build log. Check the uploaded build-log artifact."
-            exit 1
-          fi
       - name: upload build log
         if: always()
         uses: actions/upload-artifact@v4
