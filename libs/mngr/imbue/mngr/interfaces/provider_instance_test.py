@@ -249,7 +249,6 @@ def test_discover_hosts_and_agents_disconnects_hosts(
     mock_host.disconnect.assert_called_once()
 
 
-@pytest.mark.allow_warnings(match=r"^Skipping host ")
 def test_discover_hosts_and_agents_tolerates_per_host_connection_error(
     provider: MockProviderInstance, temp_mngr_ctx: MngrContext
 ) -> None:
@@ -258,8 +257,9 @@ def test_discover_hosts_and_agents_tolerates_per_host_connection_error(
     A wedged container (sshd hang, banner reset, auth failure) used to abort
     the provider's entire discovery, which downstream blanked the discovery
     snapshot and broke mngr_forward's resolver for every workspace. The
-    unreachable host is now skipped with an empty agent list while the rest
-    of the provider's hosts come through normally.
+    unreachable host now falls back to its offline view (here yielding no
+    persisted agents) while the rest of the provider's hosts come through
+    normally.
     """
     healthy_host_id = HostId.generate()
     broken_host_id = HostId.generate()
@@ -279,6 +279,10 @@ def test_discover_hosts_and_agents_tolerates_per_host_connection_error(
     broken_host.discover_agents.side_effect = HostConnectionError("SSH error (Error reading SSH protocol banner)")
 
     provider.mock_hosts = [healthy_host, broken_host]
+    # The broken host has an offline view (mock_agent_data is empty, so it
+    # yields no agents). Without one, to_offline_host would raise and -- since
+    # the offline fallback no longer swallows that -- re-poison the provider.
+    provider.mock_offline_hosts = {str(broken_host_id): _make_offline_host(broken_host_id, provider, temp_mngr_ctx)}
 
     results = provider.discover_hosts_and_agents(cg=temp_mngr_ctx.concurrency_group)
 
@@ -343,36 +347,3 @@ def test_discover_hosts_and_agents_falls_back_to_offline_on_connection_error(
     # The connected_host cleanup and on_connection_error hook still run.
     broken_host.disconnect.assert_called_once()
     assert provider.connection_errors_cleared == [host_id]
-
-
-@pytest.mark.allow_warnings(match=r"^Skipping host ")
-def test_discover_hosts_and_agents_offline_fallback_handles_not_implemented(
-    provider: MockProviderInstance, temp_mngr_ctx: MngrContext
-) -> None:
-    """Providers that do not implement to_offline_host (raise
-    NotImplementedError) must degrade to the legacy empty-list behavior
-    instead of crashing the whole provider's discovery."""
-    host_id = HostId.generate()
-
-    broken_host = MagicMock(spec=HostInterface)
-    broken_host.id = host_id
-    broken_host.get_name.return_value = HostName("ssh-dead-host")
-    broken_host.get_state.return_value = HostState.RUNNING
-    broken_host.discover_agents.side_effect = HostConnectionError("SSH error")
-
-    class _NoOfflineProvider(MockProviderInstance):
-        def to_offline_host(self, host_id: HostId) -> OfflineHost:
-            raise NotImplementedError("Offline hosts not supported for this provider")
-
-    no_offline_provider = _NoOfflineProvider(
-        name=ProviderInstanceName("no-offline"),
-        host_dir=provider.host_dir,
-        mngr_ctx=temp_mngr_ctx,
-    )
-    no_offline_provider.mock_hosts = [broken_host]
-
-    results = no_offline_provider.discover_hosts_and_agents(cg=temp_mngr_ctx.concurrency_group)
-
-    host_ref = next(iter(results))
-    assert results[host_ref] == []
-    assert no_offline_provider.connection_errors_cleared == [host_id]
