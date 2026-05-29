@@ -1,11 +1,11 @@
 """The runtime registry of help topic pages.
 
-Built-in topics are registered from markdown files in the docs tree (see
-``builtin_help_topics.py``) and plugins contribute their own via the
-``register_help_topics`` hook; both flow through the same hook and land in this
-module-level registry. The :class:`TopicHelpPage` model and the
-``build_topics_from_directory`` helper live in ``imbue.mngr.interfaces.help_topic``
-so the plugin hookspec can reference the model without importing the CLI.
+Built-in topics are declared explicitly in ``builtin_help_topics.py`` (the
+``_DOC_TOPICS`` registry, each backed by a markdown doc file, plus the inline
+address topic) and plugins contribute their own via the ``register_help_topics``
+hook; both flow through the same hook and land in this module-level registry. The
+:class:`TopicHelpPage` model lives in ``imbue.mngr.interfaces.help_topic`` so the
+plugin hookspec can reference it without importing the CLI.
 """
 
 from imbue.mngr.interfaces.help_topic import TopicHelpPage
