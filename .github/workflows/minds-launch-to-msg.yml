@@ -52,8 +52,9 @@ jobs:
       MINDS_CLIENT_CONFIG_BUNDLE: imbue/minds/config/envs/production/client.toml
       MINDS_ROOT_NAME_BUNDLE: minds
     outputs:
-      app_zip_url: ${{ steps.parse.outputs.url }}
-      build_id:    ${{ steps.parse.outputs.build_id }}
+      app_zip_url: ${{ steps.existing.outputs.url || steps.parse.outputs.url }}
+      build_id:    ${{ steps.existing.outputs.build_id || steps.parse.outputs.build_id }}
+      reused:      ${{ steps.existing.outputs.url != '' }}
     steps:
       - name: check ToDesktop secrets
         run: |
@@ -90,15 +91,73 @@ jobs:
       - name: pnpm install
         working-directory: apps/minds
         run: pnpm install --frozen-lockfile
+      - name: resolve full commit_sha (input may be a branch/tag)
+        id: sha
+        working-directory: apps/minds
+        run: |
+          FULL_SHA=$(git -C "$GITHUB_WORKSPACE" rev-parse HEAD)
+          echo "full_sha=$FULL_SHA" >> "$GITHUB_OUTPUT"
+          echo "Resolved input ${{ inputs.commit_sha }} -> $FULL_SHA"
+      - name: check for existing ToDesktop build matching this commit
+        id: existing
+        working-directory: apps/minds
+        env:
+          TARGET_SHA: ${{ steps.sha.outputs.full_sha }}
+        run: |
+          # ToDesktop returns versionControlInfo.commitId on each build via
+          # `todesktop builds --format json`. If a clean ready build exists
+          # for this SHA we can skip the 15+ min build by reusing its
+          # arm64 .zip URL.
+          mkdir -p resources  # todesktop.json validation requires the dir to exist
+          pnpm exec todesktop builds --format json --count 30 --exit > /tmp/td-builds.json 2>&1 || true
+          URL=$(python3 -c '
+          import json, os, sys
+          try:
+              builds = json.load(open("/tmp/td-builds.json"))
+          except Exception:
+              sys.exit(0)
+          if not isinstance(builds, list):
+              sys.exit(0)
+          target = os.environ["TARGET_SHA"]
+          for b in builds:
+              vci = b.get("versionControlInfo") or {}
+              if vci.get("commitId") != target:                continue
+              if vci.get("hasUncommittedChanges"):              continue
+              if b.get("status") not in ("ready",):             continue
+              mac = (b.get("mac") or {}).get("zip") or {}
+              # mac.zip can be a dict {arm64: {url}, x64: {url}} OR a list of
+              # {arch, url} entries depending on CLI version; cover both.
+              if isinstance(mac, dict):
+                  arm = mac.get("arm64") or {}
+                  url = arm.get("url") if isinstance(arm, dict) else None
+              elif isinstance(mac, list):
+                  url = next((e.get("url") for e in mac if isinstance(e, dict) and e.get("arch") == "arm64"), None)
+              else:
+                  url = None
+              if url:
+                  print(url)
+                  print(b.get("id", ""), file=sys.stderr)
+                  sys.exit(0)
+          ' 2> /tmp/td-existing-build-id.txt || true)
+          if [[ -n "$URL" ]]; then
+            BID=$(cat /tmp/td-existing-build-id.txt | tr -d '[:space:]')
+            echo "url=$URL"      >> "$GITHUB_OUTPUT"
+            echo "build_id=$BID" >> "$GITHUB_OUTPUT"
+            echo "Reusing existing build $BID for commit $TARGET_SHA"
+            echo "  -> $URL"
+          else
+            echo "No existing build matches $TARGET_SHA; will build fresh."
+          fi
       - name: pnpm dist (build + upload to ToDesktop)
         id: dist
+        if: steps.existing.outputs.url == ''
         working-directory: apps/minds
         run: |
           set -o pipefail
           pnpm dist 2>&1 | tee /tmp/minds-dist.log
       - name: parse build URL
         id: parse
-        if: always()
+        if: steps.existing.outputs.url == ''
         run: |
           # ToDesktop prints "Retrieved build ID: <id>" early in the upload
           # step. Construct the arm64 .zip URL from it — pnpm dist's final
@@ -112,13 +171,26 @@ jobs:
           URL="https://dl.todesktop.com/${APP_ID}/builds/${BUILD_ID}/mac/zip/arm64"
           echo "build_id=$BUILD_ID" >> "$GITHUB_OUTPUT"
           echo "url=$URL"           >> "$GITHUB_OUTPUT"
+      - name: emit build summary
+        if: always()
+        run: |
+          if [[ -n "${{ steps.existing.outputs.url }}" ]]; then
+            URL='${{ steps.existing.outputs.url }}'
+            BID='${{ steps.existing.outputs.build_id }}'
+            SRC='reused (no rebuild needed)'
+          else
+            URL='${{ steps.parse.outputs.url }}'
+            BID='${{ steps.parse.outputs.build_id }}'
+            SRC='freshly built'
+          fi
+          APP_ID=26032588hqdzk
           {
-            echo "## Build result"
+            echo "## Build result ($SRC)"
             echo ""
-            echo "- commit: \`${{ inputs.commit_sha }}\`"
-            echo "- build_id: \`$BUILD_ID\`"
-            echo "- url: $URL"
-            echo "- dashboard: https://app.todesktop.com/apps/${APP_ID}/builds/${BUILD_ID}"
+            echo "- commit: \`${{ inputs.commit_sha }}\` (resolved \`${{ steps.sha.outputs.full_sha }}\`)"
+            echo "- build_id: \`${BID:-<none>}\`"
+            echo "- url: ${URL:-<none>}"
+            echo "- dashboard: https://app.todesktop.com/apps/${APP_ID}/builds/${BID}"
           } >> "$GITHUB_STEP_SUMMARY"
       - name: upload build log
         if: always()
@@ -197,3 +269,10 @@ jobs:
           name: launch-to-first-message-${{ github.run_id }}
           path: artifacts/
           retention-days: 7
+      - name: post-test cleanup (best effort)
+        if: always()
+        run: |
+          # Wipe state after the run so the runner sits idle clean.
+          # Pre-test reset on the NEXT run also cleans, this is belt+braces.
+          # All steps are best-effort; we never want cleanup to fail the job.
+          bash apps/minds/scripts/mac-runner-reset.sh 2>&1 || true
