@@ -1657,6 +1657,51 @@ def test_parse_target_host_non_local_provider_creates_new_host(
     assert result.provider == ProviderInstanceName("modal")
 
 
+def test_parse_target_host_threads_post_host_create_commands(
+    default_create_cli_opts: CreateCliOptions,
+) -> None:
+    """--post-host-create-command values land on NewHostOptions.provisioning in order."""
+    address = parse_new_agent_location("foo@.modal")
+    opts = default_create_cli_opts.model_copy_update(
+        to_update(
+            default_create_cli_opts.field_ref().post_host_create_command,
+            ("/usr/local/bin/fct-seed", "echo second"),
+        ),
+    )
+    lifecycle = HostLifecycleOptions()
+
+    result = _parse_target_host(
+        opts=opts,
+        address=address,
+        agent_and_host_loader=lambda: {},
+        lifecycle=lifecycle,
+    )
+
+    assert isinstance(result, NewHostOptions)
+    assert result.provisioning.post_host_create_commands == (
+        CommandString("/usr/local/bin/fct-seed"),
+        CommandString("echo second"),
+    )
+
+
+def test_parse_target_host_empty_post_host_create_commands_is_default(
+    default_create_cli_opts: CreateCliOptions,
+) -> None:
+    """When no --post-host-create-command is given, provisioning is the empty default."""
+    address = parse_new_agent_location("foo@.modal")
+    lifecycle = HostLifecycleOptions()
+
+    result = _parse_target_host(
+        opts=default_create_cli_opts,
+        address=address,
+        agent_and_host_loader=lambda: {},
+        lifecycle=lifecycle,
+    )
+
+    assert isinstance(result, NewHostOptions)
+    assert result.provisioning.post_host_create_commands == ()
+
+
 def test_parse_new_agent_location_rejects_multiple_dots() -> None:
     """Locations with more than one dot in the host part are invalid."""
     with pytest.raises(UserInputError, match="more than one dot"):
