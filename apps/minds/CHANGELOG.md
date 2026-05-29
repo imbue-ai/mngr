@@ -24,6 +24,8 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Added: Per-dev-env Neon project named `minds-<env>` containing `host_pool` and `litellm_cost` DBs, provisioned and torn down atomically by `minds env deploy` / `destroy`.
 - Added: Per-tier generation id minted at deploy and exposed at `GET /generation`; `minds env activate` wipes stale `mngr/` / `auth/` / `logs/` when the tier was redeployed since the dev last activated.
 - Added: `apps/minds/docs/staging-bringup.md` — end-to-end checklist for standing up the `staging` tier from scratch.
+- Added: 14-day dependency-cooldown supply-chain gate for the packaged toolchain — `minimumReleaseAge: 20160` in `apps/minds/pnpm-workspace.yaml` (pnpm) and `exclude-newer = "14 days"` under `[tool.uv]` in `apps/minds/electron/pyproject/pyproject.toml` (uv). Resolution refuses any distribution (including transitive) published within the window; frozen-lockfile installs are unaffected.
+- Added: Packaged macOS desktop now bundles the real `git` binary plus its `libexec/git-core` helpers (resolved via `xcrun --find git`) instead of the `/usr/bin/git` shim, so `git clone` in a packaged app no longer SIGKILLs on Macs without Xcode Command Line Tools at the expected path; ToDesktop `uploadSizeLimit` bumped 300 → 600 to fit the larger bundle.
 
 ### Changed
 
@@ -55,6 +57,10 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Changed: Speed up local minds workspace creation by restructuring the `forever-claude-template` Dockerfile and deferring Playwright into a post-boot install (warm rebuild 1m33s → 30s → ~25.6s).
 - Changed: Latchkey permission dialog no longer pre-checks the catch-all `any` permission as an implicit default; initial check state is now the union of existing grants and the agent's requested permissions.
 - Changed: Streamed-permission-request handler now dedupes redeliveries by `event_id` so the requests inbox no longer grows unbounded on every gateway reconnect.
+- Changed: Pinned the desktop client's JS toolchain to exact versions (pnpm `10.33.4` + Node.js `24.15.0`) with `engine-strict=true` so mismatched installs fail fast; added an `.nvmrc` so nvm/fnm users pick up the pinned Node automatically. Pinned the packaged end-user Python to `==3.12.13` in `apps/minds/electron/pyproject/pyproject.toml`.
+- Changed: Bumped bundled Electron from `35.7.5` to `40.10.1` so the runtime shipped to end users bundles Node.js `24.15.0`, matching the development pin (the prior bundled runtime was Node 22.x).
+- Changed: Bumped the bundled `UV_VERSION` in `apps/minds/scripts/build.js` from `0.7.12` to `0.11.15` so the shipped uv can parse the relative `exclude-newer` cooldown (0.7.12 failed to parse it, silently discarded the lockfile, and re-resolved unpinned at first launch).
+- Changed: Bumped bundled Latchkey to `2.12.2` — first-time Google Cloud users now see the ToS dialog, and Google Projects are reused when possible to work around the low default project-count limit.
 
 ### Removed
 
@@ -72,6 +78,8 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Fixed: `minds env destroy` proceeds with cloud-side cleanup even when the local env root has already been removed by hand.
 - Fixed: `minds env deploy` runs `apply_pool_hosts_migrations` for every tier (not just dev), so shared-tier schema no longer diverges.
 - Fixed: `find_monorepo_root` check runs before Vault credential read and `make_deploy_id` so running from outside the monorepo fails cleanly.
+- Fixed: `FileAuthStore.get_signing_key` race on a fresh data directory that intermittently logged users out — the prior lazy non-atomic generation could let one thread read a momentarily-empty key file (raising `SigningKeyError`, returning 500 from `/authenticate`) or two threads each generate a different key and race to write it (silently invalidating the just-signed cookie). Generation is now serialized behind a per-store lock with a double-checked re-read and `atomic_write`. This was the dominant cause of `test-docker-electron` CI flake.
+- Fixed: Deny button on the latchkey permission-request dialog now works even when the requested scope is not in the gateway's services catalog (e.g. a typo or stale catalog); the deny flow falls back to the raw scope string so the pending request is always torn down and the agent is always notified.
 
 ## [v0.2.8] - 2026-05-13
 

@@ -4,6 +4,29 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-05-28
+
+# Dropped redundant per-project ty/ruff ratchet tests
+
+Removed this project's `test_no_type_errors` and `test_no_ruff_errors` from its
+`test_ratchets.py`. ty resolves the uv workspace root and ruff (run from the repo
+root) both scan across projects, so the per-project copies just re-ran the same
+checks. The single repo-wide equivalents now live in `test_meta_ratchets.py`
+(`test_no_type_errors` and `test_no_ruff_errors`).
+
+No user-facing behavior change.
+
+## 2026-05-27
+
+# ty 0.0.39 type fixes
+
+- Converted bracketed `# type: ignore[...]` suppressions to `# ty: ignore[...]`, as required by `ty` 0.0.39.
+- Reworked the exit-path exception handling in `ConcurrencyGroup` to accumulate a typed `list[Exception]` (the non-`Exception` `BaseException`s are still re-raised exactly as before) so that the `_deduplicate_exceptions` call type-checks under the stricter checker. Behavior is unchanged.
+
+- Tightened this project's `test_ratchets.py` violation counts to their exact current values (`--inline-snapshot=trim`).
+
+No user-facing behavior change.
+
 ## 2026-05-26
 
 - Pruned non-notable entries (test-only changes, internal refactors, and doc-only tweaks with no user-facing effect) from this project's CHANGELOG.md, per the new notable-only changelog policy.
