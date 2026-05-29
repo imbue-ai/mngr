@@ -86,8 +86,7 @@ state="$(mngr list --include "name == \"$AGENT\"" --format json | jq -r '.agents
 
 case "$state" in
   STOPPED)
-    # Launch into the window's tail. Running one tick past the reset warms the
-    # fresh window; next tick's STOP then shuts us down.
+    # Launch into the window's tail; the next tick's STOP shuts us down once it rolls.
     if [[ "$status" == "START" ]]; then
       mngr start "$AGENT" && mngr message "$AGENT" --message "continue where you left off"
     fi
