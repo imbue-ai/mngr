@@ -21,8 +21,10 @@ REPLY_TIMEOUT_SECONDS=180
 DESTROY_TIMEOUT_SECONDS=180
 
 MNGR_BIN="$HOME/.minds/.venv/bin/mngr"
+LIMA_BIN_DIR="/Applications/minds.app/Contents/Resources/lima/bin"
 export MNGR_HOST_DIR="$HOME/.minds/mngr"
 export MNGR_PREFIX="minds-"
+export PATH="$LIMA_BIN_DIR:$PATH"
 
 log() { printf '[first-msg] %s\n' "$*" >&2; }
 fail() { log "FAIL: $*"; exit 1; }
@@ -127,15 +129,25 @@ log "agent DONE"
 # "user's actual chat agent is a separate mngr agent ... named after the host").
 AGENT_NAME="$HOST_NAME"
 
-log "discovering agent via bundled mngr (5s settle)"
+log "disabling unused providers so mngr doesn't bail on missing modal/docker creds"
+"$MNGR_BIN" config set --scope user providers.modal.is_enabled false 2>&1 | tee /tmp/first-message-mngr-config.txt >&2 || true
+"$MNGR_BIN" config set --scope user providers.docker.is_enabled false 2>&1 | tee -a /tmp/first-message-mngr-config.txt >&2 || true
+
+log "settling 5s then listing what mngr sees"
 sleep 5
-"$MNGR_BIN" list --format json 2>/dev/null | head -20 | tee /tmp/first-message-mngr-list.json >&2 || true
+"$MNGR_BIN" list 2>&1 | tee /tmp/first-message-mngr-list.txt >&2 || true
 
-EVENTS_DIR_BEFORE=$(mktemp)
-"$MNGR_BIN" event "$AGENT_NAME" --tail 1 --format json > "$EVENTS_DIR_BEFORE" 2>/dev/null || true
-
-log "sending message: $PROMPT"
-"$MNGR_BIN" message "$AGENT_NAME" -m "$PROMPT" || fail "mngr message failed"
+log "sending message to '$AGENT_NAME': $PROMPT"
+"$MNGR_BIN" message "$AGENT_NAME" -m "$PROMPT" 2>&1 | tee /tmp/first-message-mngr-message.txt >&2
+mngr_message_rc=${PIPESTATUS[0]}
+if [[ $mngr_message_rc -ne 0 ]]; then
+  log "mngr message exit=$mngr_message_rc -- trying 'system-services' as fallback"
+  "$MNGR_BIN" message system-services -m "$PROMPT" 2>&1 | tee -a /tmp/first-message-mngr-message.txt >&2
+  mngr_message_rc=${PIPESTATUS[0]}
+  if [[ $mngr_message_rc -ne 0 ]]; then
+    fail "mngr message failed (both '$AGENT_NAME' and 'system-services') -- see /tmp/first-message-mngr-message.txt"
+  fi
+fi
 SEND_AT=$(date +%s)
 
 log "waiting for assistant reply (timeout ${REPLY_TIMEOUT_SECONDS}s)"
