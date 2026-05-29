@@ -218,25 +218,17 @@ Tiered system-interface restart for the minds recovery flow.
   - The plugin-resolver row is the lone exception: its datum lives in minds'
     own memory (fed by the forward-plugin event stream) and has no in-container
     reproduction, so it stays a clearly-labelled internal observation.
-- The workspace-readiness / health probes now hit the system interface's
-  `/api/agents` route instead of `/`. Probing `/` only confirmed that
-  *something* answered on the inner port -- the system interface serves
-  its SPA index for every unmatched `GET`, so an unrelated process holding
-  the port (e.g. a static file server) also returns 200 at `/` and looked
-  healthy. `/api/agents` is a core SI endpoint that returns 200 only from
-  the real system interface, so a 200 is now an identity check and a 404
-  reveals a wrong-process responder, letting the background probe loop
-  drive such a workspace to the recovery page. Paired with the forwarding
-  plugin now enrolling agents as probe suspects when a proxied `GET`
-  returns 404.
-- The recovery-page diagnostic that curls the system interface inside the
-  container now targets `/api/agents` rather than `/`, for the same reason:
-  a process squatting the inner port answers 200 at `/` but 404s
-  `/api/agents`, so the old `/` curl showed a misleading green check. The
-  diagnostic row is reworded from "Does the system interface answer locally
-  inside the container?" to "Does the system interface answer GET
-  /api/agents inside the container?" and its copy-pasteable `curl` command
-  reflects the new path.
+- The workspace-readiness / health probes hit `/` and treat any 200 as
+  "ready", deliberately decoupled from whatever application happens to be
+  running inside the workspace. The probe makes no assumption about which
+  app answers on the inner port or which routes it implements -- it only
+  confirms that some web server is up and serving 200s for `GET /`.
+- The recovery-page diagnostic that curls the inner web server inside the
+  container targets `/`, for the same reason: it confirms a web server is
+  answering on the inner port without coupling to any app-specific route.
+  The diagnostic row reads "Does the inner web server answer GET / inside
+  the container?" and its copy-pasteable `curl` command reflects the `/`
+  path.
 - The "Workspace unresponsive" page was restyled for a clearer hierarchy.
   The "Restart workspace" button is now the page's focal point -- a
   full-width primary button directly under the message -- rather than being
