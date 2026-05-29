@@ -6,9 +6,11 @@ the plugin manager as a built-in plugin (see ``create_plugin_manager`` in
 ``main.py``), mirroring how built-in provider backends and agent types register
 through ``register_provider_backend`` / ``register_agent_type``.
 
-The hook is marked ``tryfirst`` so built-in topics are registered before any
-external plugin's topics, which guarantees built-in topics win on key
-collisions (the registration loop skips keys that are already taken).
+The hook is marked ``tryfirst`` so built-in topics are registered before
+normally-registered external plugins' topics. Precedence on collisions is
+actually enforced by ``register_topic``, which skips any topic whose key or
+alias is already taken: because built-in topics register first, a plugin
+cannot override them.
 """
 
 from collections.abc import Sequence
