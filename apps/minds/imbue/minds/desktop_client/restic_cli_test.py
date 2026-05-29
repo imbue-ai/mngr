@@ -86,7 +86,8 @@ def test_looks_already_initialized_matches_common_phrases() -> None:
 
 @_requires_restic
 def test_ensure_restic_available_passes_when_installed() -> None:
-    restic_cli.ensure_restic_available()  # should not raise
+    # Should not raise when restic is on PATH.
+    restic_cli.ensure_restic_available()
 
 
 # --- local restic integration ---
@@ -123,9 +124,7 @@ def test_init_add_key_and_status_against_local_repo(tmp_path: Path) -> None:
     now = datetime.now(timezone.utc)
     # Fresh repo: no snapshots, no in-progress lock -- queried with the
     # workspace key (proving the added key opens the repo).
-    assert (
-        restic_cli.get_latest_snapshot_time(repository=repo, backend_env={}, password=workspace_password) is None
-    )
+    assert restic_cli.get_latest_snapshot_time(repository=repo, backend_env={}, password=workspace_password) is None
     assert (
         restic_cli.is_backup_in_progress(repository=repo, backend_env={}, password=workspace_password, now=now)
         is False

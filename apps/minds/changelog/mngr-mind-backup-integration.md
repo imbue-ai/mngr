@@ -11,19 +11,31 @@ existing "AI provider" toggle, with three options:
   selected.
 
 When a real backup provider is chosen, a "Backup encryption method" row
-appears: `master_password` (a passphrase established once and saved, mode
-0600, to `~/.<minds-env>/backup_password`, shared across all your workspaces;
-never re-displayed) or `no_password` (an empty-password repo via restic
-`--insecure-no-password`).
+appears: `master_password` or `no_password`.
+
+minds (which now requires `restic` to be installed on the machine running it)
+initializes each workspace's restic repository itself and gives the workspace
+its own random repository password, so the master password never enters the
+workspace. Enabling backups: resolve the repository + credentials, generate a
+random per-workspace password, `restic init` the repo with the master
+password (or empty for `no_password`), `restic key add` the random password,
+write the canonical `restic.env` to a 0600 minds-side file, and inject that
+file into the workspace. The `api_key` block must not set `RESTIC_PASSWORD`
+(minds assigns it).
 
 Backup setup runs asynchronously after the host is created (mirroring the
 Cloudflare tunnel-token injection) and is non-fatal: a failure surfaces as a
-notification and leaves the workspace running with backups unconfigured. The
-provisioning logic is factored into a single reusable operation
-(`configure_backups_for_host`) so it can be re-applied to an existing host
-later. Bucket creation is idempotent (an already-created bucket is reused with
-a freshly minted key). Destroying a workspace never deletes its bucket or
-backups.
+notification and leaves the workspace running. The reusable
+`configure_backups_for_host` operation can be re-applied to an existing host
+later and is idempotent (an existing canonical env is re-injected; an
+already-created bucket / initialized repo is reused). The canonical
+`restic.env` is never auto-deleted, so a stopped or destroyed workspace's
+backups stay recoverable.
+
+The Projects page now shows each project's backup status (Backing up / Backed
+up N ago / No backups / Unknown), fetched once on load from a new
+`/api/backup-status` route that queries restic per project from the minds
+machine.
 
 New `BackupProvider` / `BackupEncryptionMethod` primitives; new
 `mngr imbue_cloud bucket ...` wrappers on the imbue_cloud CLI client.

@@ -308,9 +308,7 @@ def configure_backups_for_host(
         repository, backend_env = _resolve_repository_and_backend_env(
             request, host_id, imbue_cloud_cli=imbue_cloud_cli
         )
-        master_password = (
-            request.master_password.get_secret_value() if request.master_password is not None else None
-        )
+        master_password = request.master_password.get_secret_value() if request.master_password is not None else None
         workspace_password = generate_workspace_password()
 
         # Initialize the repo with the master (or empty) password, then add the
