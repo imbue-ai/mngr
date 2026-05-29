@@ -20,8 +20,7 @@ unused, so a recipe can spend it. Here we call it "spare" when the 5h window sti
 has budget (<80% used) *and* weekly usage is under pace -- below a line that starts
 ~30% under the plain `used% = elapsed%` pace early in the rolling 7-day cycle
 (elapsed% = how far into the cycle you are) and tapers up to meet it by the cycle's
-end. The early margin keeps automation from crowding your own usage; the taper
-means that near the end it spends whatever's genuinely left.
+end. The early margin keeps automation from crowding your own usage.
 
 ```bash
 #!/usr/bin/env bash
