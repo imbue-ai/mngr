@@ -277,11 +277,6 @@ def create_plugin_manager() -> pluggy.PluginManager:
     pm = pluggy.PluginManager("mngr")
     pm.add_hookspecs(hookspecs)
 
-    # Register mngr's built-in topic pages as a built-in plugin, the same way
-    # built-in provider backends and agent types register through the plugin
-    # manager. Done unconditionally (never blocked) since these ship with mngr.
-    pm.register(builtin_help_topics_module, name="builtin_help_topics")
-
     # Block plugins that are disabled in config files. This must happen before
     # load_setuptools_entrypoints so disabled plugins are never registered.
     # MNGR_LOAD_ALL_PLUGINS overrides this so that tooling (e.g. doc generation)
@@ -300,8 +295,15 @@ def create_plugin_manager() -> pluggy.PluginManager:
     load_all_registries(pm)
     load_agents_from_plugins(pm)
 
-    # Wire up the agent type resolver so hosts can resolve agent types
-    # without directly importing from the agents layer
+    # Register mngr's own built-in topic pages as a built-in plugin (parallel to
+    # the built-in backends/agents above; registered after blocking so it is
+    # never disabled, since it ships with mngr). Note we only REGISTER the hook
+    # provider here; the register_help_topics hook is FIRED once at module import
+    # (see load_help_topics_from_plugins at module scope), not here, because it
+    # populates a process-global topic registry. create_plugin_manager can be
+    # re-invoked (test fixtures reset and rebuild the singleton), and firing the
+    # hook on each rebuild would re-register the already-registered topics.
+    pm.register(builtin_help_topics_module, name="builtin_help_topics")
 
     return pm
 
@@ -396,9 +398,11 @@ except ConfigParseError as e:
 for cmd in BUILTIN_COMMANDS + PLUGIN_COMMANDS:
     apply_plugin_cli_options(cmd)
 
-# Register help topics (built-in and plugin) once the plugin manager is loaded,
-# then build the help command's own metadata so its "Available Topics" section
-# lists the fully loaded registry.
+# Fire the register_help_topics hook exactly once, now that the plugin manager
+# is fully built, to populate the process-global topic registry. This lives at
+# module scope (not in create_plugin_manager, which can be rebuilt) so it runs
+# once per process. Then build the help command's own metadata so its "Available
+# Topics" section lists the fully loaded registry.
 load_help_topics_from_plugins(get_or_create_plugin_manager())
 register_help_command_metadata()
 

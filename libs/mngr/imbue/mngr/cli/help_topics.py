@@ -8,9 +8,6 @@ module-level registry. The :class:`TopicHelpPage` model and the
 so the plugin hookspec can reference the model without importing the CLI.
 """
 
-from collections.abc import Iterator
-from contextlib import contextmanager
-
 from imbue.mngr.interfaces.help_topic import TopicHelpPage
 
 _topic_registry: dict[str, TopicHelpPage] = {}
@@ -26,26 +23,6 @@ def get_topic(name: str) -> TopicHelpPage | None:
 def get_all_topics() -> dict[str, TopicHelpPage]:
     """Return a copy of the topic registry."""
     return dict(_topic_registry)
-
-
-@contextmanager
-def preserve_topic_registry() -> Iterator[None]:
-    """Snapshot the topic registry on entry and restore it on exit.
-
-    The topic registry is populated once at import time (built-in topics plus
-    any installed plugins' topics) and is not rebuilt per-test, so tests that
-    register temporary topics use this to undo their additions without
-    disturbing the topics other tests rely on.
-    """
-    saved_topics = dict(_topic_registry)
-    saved_aliases = dict(_topic_alias_to_canonical)
-    try:
-        yield
-    finally:
-        _topic_registry.clear()
-        _topic_registry.update(saved_topics)
-        _topic_alias_to_canonical.clear()
-        _topic_alias_to_canonical.update(saved_aliases)
 
 
 def register_topic(topic: TopicHelpPage) -> bool:

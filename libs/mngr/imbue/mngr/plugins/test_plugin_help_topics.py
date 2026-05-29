@@ -13,13 +13,34 @@ from click.testing import CliRunner
 import imbue.mngr.main
 from imbue.mngr import hookimpl
 from imbue.mngr.cli.help import load_help_topics_from_plugins
+from imbue.mngr.cli.help_topics import _topic_alias_to_canonical
+from imbue.mngr.cli.help_topics import _topic_registry
 from imbue.mngr.cli.help_topics import get_topic
-from imbue.mngr.cli.help_topics import preserve_topic_registry
 from imbue.mngr.interfaces.help_topic import TopicHelpPage
 from imbue.mngr.interfaces.help_topic import build_topics_from_directory
 from imbue.mngr.main import cli
 from imbue.mngr.main import reset_plugin_manager
 from imbue.mngr.plugins import hookspecs
+
+
+@contextmanager
+def preserve_topic_registry() -> Generator[None, None, None]:
+    """Snapshot the topic registry on entry and restore it on exit.
+
+    The topic registry is populated once at import time (built-in topics plus
+    any installed plugins' topics) and is not rebuilt per-test, so tests that
+    register temporary topics use this to undo their additions without
+    disturbing the topics other tests rely on.
+    """
+    saved_topics = dict(_topic_registry)
+    saved_aliases = dict(_topic_alias_to_canonical)
+    try:
+        yield
+    finally:
+        _topic_registry.clear()
+        _topic_registry.update(saved_topics)
+        _topic_alias_to_canonical.clear()
+        _topic_alias_to_canonical.update(saved_aliases)
 
 
 class _PluginWithTopic:
