@@ -2803,7 +2803,10 @@ def on_before_create(args: OnBeforeCreateArgs, mngr_ctx: MngrContext) -> OnBefor
     agent_type = args.agent_options.agent_type or AgentTypeName("claude")
     resolved = resolve_agent_type(agent_type, mngr_ctx.config)
     if not issubclass(resolved.agent_class, ClaudeAgent):
-        raise UserInputError(f"--adopt-session can only be used with the claude agent type, not '{agent_type}'.")
+        raise UserInputError(
+            f"--adopt-session can only be used with a Claude agent type (claude or a subtype of it), "
+            f"not '{agent_type}'."
+        )
 
     if args.agent_options.source_agent_state_location is not None:
         raise UserInputError(
