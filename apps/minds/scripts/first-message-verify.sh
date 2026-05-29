@@ -58,6 +58,15 @@ done
 BASE=$(echo "$LOGIN_URL" | sed -E 's|^http://localhost|http://127.0.0.1|; s|^(http://[^/]+).*|\1|')
 log "base=$BASE"
 
+log "waiting for HTTP server to actually bind (up to 60s)"
+http_deadline=$((SECONDS + 60))
+while (( SECONDS < http_deadline )); do
+  if curl -s -o /dev/null -w '%{http_code}' --max-time 3 "$BASE/" | grep -qE '^[123]'; then
+    break
+  fi
+  sleep 2
+done
+
 log "minting fresh one-time code"
 CODES_PATH="$HOME/.minds/auth/one_time_codes.json"
 CODE=$(CODES_PATH="$CODES_PATH" python3 -c '
