@@ -28,6 +28,15 @@
   spelling: both Linux and Mac arm64 finished, packaged binary
   launches and round-trips a first message E2E. The `beforeInstall`
   hook stays for `uv` + `git` (no first-class ToDesktop knob).
+  `apps/minds/scripts/build_test.py` (which reads the ToDesktop config
+  to assert the limactl signing contract) now shells out to `node -e
+  "console.log(JSON.stringify(require('./todesktop.js')))"`. It
+  module-level-skips via `pytest.mark.skipif(shutil.which('node') is
+  None, ...)` when no node is on PATH -- matches the existing
+  `mngr_latchkey` precedent for Node-dependent Python tests. Coverage
+  gap: this test currently doesn't run in the offload sandbox (no
+  node there). Adding node to the offload image -- or to a
+  minds-specific sandbox image -- is a follow-up.
 - `apps/minds`: consolidate `downloadUv` into a single definition in
   `scripts/download-binaries.js` and import it into `scripts/build.js`,
   mirroring how `downloadGit` and `download` are already shared.
