@@ -5,6 +5,7 @@ from pathlib import Path
 from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client.app import _build_backup_request_or_error
 from imbue.minds.desktop_client.backup_password_store import read_saved_backup_password
+from imbue.minds.desktop_client.backup_provisioning import BackupSetupRequest
 from imbue.minds.primitives import BackupEncryptionMethod
 from imbue.minds.primitives import BackupProvider
 
@@ -13,18 +14,25 @@ def _paths(tmp_path: Path) -> WorkspacePaths:
     return WorkspacePaths(data_dir=tmp_path)
 
 
-def _build(tmp_path: Path, **overrides: object) -> tuple[object, str | None]:
-    kwargs: dict[str, object] = {
-        "backup_provider": BackupProvider.CONFIGURE_LATER,
-        "encryption_method": BackupEncryptionMethod.NO_PASSWORD,
-        "typed_master_password": "",
-        "is_save_password": False,
-        "api_key_env": "",
-        "account_email": "",
-        "paths": _paths(tmp_path),
-    }
-    kwargs.update(overrides)
-    return _build_backup_request_or_error(**kwargs)  # type: ignore[arg-type]
+def _build(
+    tmp_path: Path,
+    *,
+    backup_provider: BackupProvider = BackupProvider.CONFIGURE_LATER,
+    encryption_method: BackupEncryptionMethod = BackupEncryptionMethod.NO_PASSWORD,
+    typed_master_password: str = "",
+    is_save_password: bool = False,
+    api_key_env: str = "",
+    account_email: str = "",
+) -> tuple[BackupSetupRequest | None, str | None]:
+    return _build_backup_request_or_error(
+        backup_provider=backup_provider,
+        encryption_method=encryption_method,
+        typed_master_password=typed_master_password,
+        is_save_password=is_save_password,
+        api_key_env=api_key_env,
+        account_email=account_email,
+        paths=_paths(tmp_path),
+    )
 
 
 def test_configure_later_yields_request_without_error(tmp_path: Path) -> None:
