@@ -17,3 +17,4 @@ minimumReleaseAge: 20160
 # would block ToDesktop's `pnpm install --no-frozen-lockfile`).
 minimumReleaseAgeExclude:
   - latchkey
+  - electron
