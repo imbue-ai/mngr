@@ -81,15 +81,17 @@ _SLACK_SERVICE_INFO = ServicePermissionInfo(
 
 
 _SLACK_AVAILABLE_PAYLOAD: dict[str, object] = {
-    "slack": {
-        "scope": "slack-api",
-        "display_name": "Slack",
-        "permissions": [
-            "slack-read-all",
-            "slack-write-all",
-            "slack-chat-read",
-        ],
-    },
+    "slack": [
+        {
+            "scope": "slack-api",
+            "display_name": "Slack",
+            "permissions": [
+                "slack-read-all",
+                "slack-write-all",
+                "slack-chat-read",
+            ],
+        },
+    ],
 }
 
 

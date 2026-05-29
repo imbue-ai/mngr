@@ -155,20 +155,24 @@ def _get_app_request_inbox(client: TestClient) -> RequestInbox:
 
 
 _TEST_SERVICES_CATALOG_PAYLOAD: dict[str, object] = {
-    "slack": {
-        "scope": "slack-api",
-        "display_name": "Slack",
-        "permissions": [
-            "slack-read-all",
-            "slack-write-all",
-            "slack-chat-read",
-        ],
-    },
-    "github": {
-        "scope": "github-rest-api",
-        "display_name": "GitHub",
-        "permissions": ["github-read-all"],
-    },
+    "slack": [
+        {
+            "scope": "slack-api",
+            "display_name": "Slack",
+            "permissions": [
+                "slack-read-all",
+                "slack-write-all",
+                "slack-chat-read",
+            ],
+        },
+    ],
+    "github": [
+        {
+            "scope": "github-rest-api",
+            "display_name": "GitHub",
+            "permissions": ["github-read-all"],
+        },
+    ],
 }
 
 

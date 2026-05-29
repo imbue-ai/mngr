@@ -303,12 +303,16 @@ def test_start_gateway_drops_bundled_extensions(tmp_path: Path) -> None:
         assert services_json_path.is_file()
         services_catalog = json.loads(services_json_path.read_text())
         assert isinstance(services_catalog, dict) and len(services_catalog) > 0
-        for service_name, entry in services_catalog.items():
+        for service_name, entries in services_catalog.items():
             assert isinstance(service_name, str) and len(service_name) > 0
-            assert set(entry.keys()) == {"scope", "display_name", "permissions"}
-            assert isinstance(entry["scope"], str) and len(entry["scope"]) > 0
-            assert isinstance(entry["display_name"], str) and len(entry["display_name"]) > 0
-            assert isinstance(entry["permissions"], list)
+            # Each service maps to a list of scope entries (a service may
+            # expose more than one detent scope).
+            assert isinstance(entries, list) and len(entries) > 0
+            for entry in entries:
+                assert set(entry.keys()) == {"scope", "display_name", "permissions"}
+                assert isinstance(entry["scope"], str) and len(entry["scope"]) > 0
+                assert isinstance(entry["display_name"], str) and len(entry["display_name"]) > 0
+                assert isinstance(entry["permissions"], list)
         manager.stop_gateway()
 
 
