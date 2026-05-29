@@ -6,6 +6,8 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+## [v0.1.10] - 2026-05-28
+
 ### Added
 
 - Added: New `ModalProxyPermissionDeniedError`; `_translate_modal_error` now maps `modal.exception.PermissionDeniedError` to the new typed error (was falling through to the bare `ModalProxyError`).
