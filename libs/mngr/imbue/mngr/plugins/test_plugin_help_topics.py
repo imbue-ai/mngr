@@ -16,6 +16,8 @@ from imbue.mngr.cli.help import load_help_topics_from_plugins
 from imbue.mngr.cli.help_topics import _topic_alias_to_canonical
 from imbue.mngr.cli.help_topics import _topic_registry
 from imbue.mngr.cli.help_topics import get_topic
+from imbue.mngr.interfaces.help_topic import DocFile
+from imbue.mngr.interfaces.help_topic import InlineContent
 from imbue.mngr.interfaces.help_topic import TopicHelpPage
 from imbue.mngr.main import cli
 from imbue.mngr.main import reset_plugin_manager
@@ -52,7 +54,7 @@ class _PluginWithTopic:
                 key="plugin_topic_xyz",
                 aliases=("ptx",),
                 one_line_description="A topic from a test plugin",
-                content="This topic is contributed by a plugin.",
+                body=InlineContent(markdown="This topic is contributed by a plugin."),
             )
         ]
 
@@ -74,7 +76,7 @@ class _PluginOverridingBuiltinTopic:
             TopicHelpPage(
                 key="address",
                 one_line_description="HIJACKED by a plugin",
-                content="This should never replace the built-in topic.",
+                body=InlineContent(markdown="This should never replace the built-in topic."),
             )
         ]
 
@@ -89,7 +91,7 @@ class _PluginShadowingBuiltinViaAlias:
                 key="plugin_unique_key_qrs",
                 aliases=("address",),
                 one_line_description="HIJACKED via alias",
-                content="This should never shadow the built-in address topic.",
+                body=InlineContent(markdown="This should never shadow the built-in address topic."),
             )
         ]
 
@@ -106,7 +108,7 @@ class _PluginWithDocBackedTopic:
             TopicHelpPage(
                 key="from_dir_topic",
                 one_line_description="Directory Topic",
-                body_path=self._body_path,
+                body=DocFile(path=self._body_path),
             )
         ]
 
@@ -201,5 +203,5 @@ def test_plugin_doc_backed_topic_is_registered(tmp_path: Path) -> None:
     with _registered_plugin_topics(_PluginWithDocBackedTopic(body)):
         topic = get_topic("from_dir_topic")
         assert topic is not None
-        assert topic.is_markdown_body
+        assert isinstance(topic.body, DocFile)
         assert "From a file." in topic.load_body()

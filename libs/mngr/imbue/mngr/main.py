@@ -295,14 +295,11 @@ def create_plugin_manager() -> pluggy.PluginManager:
     load_all_registries(pm)
     load_agents_from_plugins(pm)
 
-    # Register mngr's own built-in topic pages as a built-in plugin (parallel to
-    # the built-in backends/agents above; registered after blocking so it is
-    # never disabled, since it ships with mngr). Note we only REGISTER the hook
-    # provider here; the register_help_topics hook is FIRED once at module import
-    # (see load_help_topics_from_plugins at module scope), not here, because it
-    # populates a process-global topic registry. create_plugin_manager can be
-    # re-invoked (test fixtures reset and rebuild the singleton), and firing the
-    # hook on each rebuild would re-register the already-registered topics.
+    # Register mngr's built-in topics as a built-in plugin (like the built-in
+    # backends/agents above). Only the hook provider is registered here; the hook
+    # is fired once at module import (see load_help_topics_from_plugins), not
+    # here, since create_plugin_manager can re-run (e.g. test resets) while the
+    # topic registry is process-global.
     pm.register(builtin_help_topics_module, name="builtin_help_topics")
 
     return pm

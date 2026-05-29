@@ -66,31 +66,13 @@ def load_help_topics_from_plugins(pm: pluggy.PluginManager) -> None:
 def format_topic_help(topic: TopicHelpPage, *, use_ansi: bool, width: int) -> str:
     """Format a topic help page for terminal display.
 
-    A topic whose body is a markdown file (``body_path``) is rendered as markdown
-    -- via rich when ``use_ansi`` is True, otherwise as raw markdown -- and the
-    file's own heading serves as the page title. A topic with inline ``content``
-    is shown verbatim in git-style man-page format (NAME / DESCRIPTION). Both
-    layouts append a SEE ALSO section when references are present.
+    The body (inline or file-backed, markdown either way) is rendered as markdown
+    -- via rich when ``use_ansi`` is True, otherwise emitted as raw markdown. A
+    SEE ALSO section is appended when references are present.
     """
     output = StringIO()
-    body = topic.load_body()
-
-    if topic.is_markdown_body:
-        output.write(render_markdown(body, use_ansi=use_ansi, width=width))
-        if not output.getvalue().endswith("\n"):
-            output.write("\n")
-    else:
-        output.write("NAME\n")
-        name_str = topic.key
-        if topic.aliases:
-            name_str += f" ({', '.join(topic.aliases)})"
-        output.write(f"       {name_str} - {topic.one_line_description}\n\n")
-        output.write("DESCRIPTION\n")
-        for line in body.strip().split("\n"):
-            if line.strip():
-                output.write(f"       {line}\n")
-            else:
-                output.write("\n")
+    output.write(render_markdown(topic.load_body(), use_ansi=use_ansi, width=width))
+    if not output.getvalue().endswith("\n"):
         output.write("\n")
 
     if topic.see_also:

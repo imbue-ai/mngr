@@ -65,8 +65,9 @@ exclude = ["*_test.py", "test_*.py", "**/conftest.py", "**/testing.py", "**/util
 
 # Ship the help-topic doc files inside the package so `mngr help <topic>` works
 # in a PyPI wheel install (the top-level docs/ tree is otherwise not packaged).
-# builtin_help_topics.py reads these from imbue/mngr/docs at runtime. Keep in
-# sync with the topic dirs referenced there.
+# builtin_help_topics.py reads these from imbue/mngr/docs at runtime;
+# test_builtin_topic_docs_are_force_included_in_wheel enforces that every
+# built-in topic's doc lives under one of these dirs.
 [tool.hatch.build.targets.wheel.force-include]
 "docs/concepts" = "imbue/mngr/docs/concepts"
 "docs/commands/generic" = "imbue/mngr/docs/commands/generic"

@@ -17,6 +17,7 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from imbue.mngr import hookimpl
+from imbue.mngr.interfaces.help_topic import DocFile
 from imbue.mngr.interfaces.help_topic import TopicHelpPage
 
 # Docs root resolution. In a wheel the docs are force-included under the package
@@ -47,7 +48,7 @@ def _doc_topic(
         aliases=aliases,
         see_also=see_also,
         docs_path=rel_path,
-        body_path=_DOCS_ROOT / rel_path,
+        body=DocFile(path=_DOCS_ROOT / rel_path),
     )
 
 

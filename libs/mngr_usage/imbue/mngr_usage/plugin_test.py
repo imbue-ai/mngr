@@ -15,5 +15,4 @@ def test_register_help_topics_exposes_cron_recipes() -> None:
     assert "usage_cron_recipes" in by_key
     cron_recipes = by_key["usage_cron_recipes"]
     assert cron_recipes.one_line_description == "mngr usage: Cron automation recipes"
-    assert cron_recipes.is_markdown_body
     assert "cron" in cron_recipes.load_body().lower()

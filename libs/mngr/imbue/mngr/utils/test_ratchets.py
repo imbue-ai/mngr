@@ -71,10 +71,6 @@ def test_prevent_silent_decode_error_catches() -> None:
 
 
 def test_prevent_inline_imports() -> None:
-    # The +1 over the historical baseline is a deliberate lazy import in
-    # cli/help_formatter.py: rich is imported inside render_markdown (only when
-    # rendering help for an interactive terminal) so it stays out of the CLI
-    # startup path. See cli/markdown_render.py.
     rc.check_inline_imports(_DIR, snapshot(4))
 
 

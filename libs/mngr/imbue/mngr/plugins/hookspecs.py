@@ -339,32 +339,14 @@ def register_cli_commands() -> Sequence[click.Command] | None:
 def register_help_topics() -> Sequence[TopicHelpPage] | None:
     """Register standalone help topic pages with mngr.
 
-    Plugins implement this hook to contribute topic pages that document concepts
-    spanning multiple commands (the same kind of page mngr ships for ``address``,
-    ``filter``, etc.). When the plugin is installed, its topics appear in
-    ``mngr help`` and are viewable via ``mngr help <topic>``.
+    Plugins implement this hook to contribute topic pages (the kind mngr ships
+    for ``address``, ``filter``, etc.); when the plugin is installed they appear
+    in ``mngr help`` and are viewable via ``mngr help <topic>``.
 
-    Return a sequence of ``TopicHelpPage`` objects, or None to contribute
-    nothing. A topic whose key collides with an existing built-in topic is
-    skipped, so plugins cannot override mngr's own topics.
-
-    Each topic declares its metadata explicitly and provides its body either
-    inline (``content``) or as a markdown file (``body_path``, read lazily and
-    rendered as markdown). To keep long-form prose in a ``.md`` file that ships
-    in the wheel, point ``body_path`` at it. See the plugin docs
-    (``concepts/plugins.md``) for complete examples::
-
-        @hookimpl
-        def register_help_topics():
-            # docs/ is shipped inside the package (e.g. via wheel force-include)
-            docs = Path(__file__).parent / "docs"
-            return [
-                TopicHelpPage(
-                    key="my_plugin_topic",
-                    one_line_description="What my plugin adds",
-                    body_path=docs / "my_topic.md",
-                ),
-            ]
+    Return a sequence of ``TopicHelpPage`` objects, or None. A topic whose key or
+    alias collides with an existing built-in topic is skipped, so plugins cannot
+    override mngr's own topics. See the plugin docs (``concepts/plugins.md``) for
+    how to author topics.
     """
 
 

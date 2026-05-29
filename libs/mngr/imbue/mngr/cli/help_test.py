@@ -1,13 +1,17 @@
 """Unit tests for the help command and topic pages."""
 
+import tomllib
 from pathlib import Path
 
 import pluggy
 from click.testing import CliRunner
 
+from imbue.mngr.cli import builtin_help_topics
 from imbue.mngr.cli.help import format_topic_help
 from imbue.mngr.cli.help_topics import get_all_topics
 from imbue.mngr.cli.help_topics import get_topic
+from imbue.mngr.interfaces.help_topic import DocFile
+from imbue.mngr.interfaces.help_topic import InlineContent
 from imbue.mngr.interfaces.help_topic import TopicHelpPage
 from imbue.mngr.main import cli
 from imbue.mngr.utils.testing import capture_loguru
@@ -60,8 +64,7 @@ def test_doc_based_topic_loads_body_from_file() -> None:
     """A doc-backed topic loads its body lazily from the markdown file."""
     topic = get_topic("idle_detection")
     assert topic is not None
-    assert topic.is_markdown_body
-    assert topic.content is None
+    assert isinstance(topic.body, DocFile)
     assert "idle" in topic.load_body().lower()
     assert topic.docs_path is not None
     assert topic.docs_path.endswith(".md")
@@ -74,59 +77,55 @@ def test_doc_based_topic_has_explicit_description() -> None:
     assert topic.one_line_description == "Idle Detection"
 
 
+def test_builtin_topic_docs_are_force_included_in_wheel() -> None:
+    """Every built-in topic's doc file lives under a dir force-included into the wheel.
+
+    The top-level docs/ tree isn't packaged, so only the force-included subdirs
+    ship; if a built-in topic's doc fell outside them, `mngr help <topic>` would
+    show nothing in a PyPI/wheel install. This keeps the pyproject force-include
+    in sync with the topics registered in builtin_help_topics.py.
+    """
+    pyproject = Path(builtin_help_topics.__file__).resolve().parents[3] / "pyproject.toml"
+    force_include = tomllib.loads(pyproject.read_text())["tool"]["hatch"]["build"]["targets"]["wheel"]["force-include"]
+    # included_dirs are the force-include keys, e.g. ("docs/concepts", "docs/commands/generic").
+    included_dirs = tuple(force_include.keys())
+    for topic in builtin_help_topics.register_help_topics():
+        assert topic.docs_path is not None, f"built-in topic {topic.key!r} has no docs_path"
+        repo_rel = f"docs/{topic.docs_path}"
+        assert any(repo_rel == d or repo_rel.startswith(f"{d}/") for d in included_dirs), (
+            f"built-in topic {topic.key!r} doc {repo_rel!r} is not under a wheel force-included dir "
+            f"{included_dirs}; add it to [tool.hatch.build.targets.wheel.force-include] in libs/mngr/pyproject.toml"
+        )
+
+
 # =============================================================================
 # Topic formatting tests
 # =============================================================================
 
 
-def test_format_topic_help_inline_contains_name_section() -> None:
-    """An inline-content topic renders in man-page format with a NAME section."""
+def test_format_topic_help_renders_inline_body() -> None:
+    """An inline (str) body is rendered as markdown -- raw markdown when not ansi."""
     topic = TopicHelpPage(
         key="test-topic",
         one_line_description="A test topic",
-        content="Some content here.",
+        body=InlineContent(markdown="First line.\n\nSecond paragraph."),
     )
     output = format_topic_help(topic, use_ansi=False, width=80)
-    assert "NAME" in output
-    assert "test-topic - A test topic" in output
-
-
-def test_format_topic_help_inline_contains_aliases() -> None:
-    """An inline-content topic shows aliases in the NAME section."""
-    topic = TopicHelpPage(
-        key="test-topic",
-        one_line_description="A test topic",
-        aliases=("tt", "test"),
-        content="Some content here.",
-    )
-    output = format_topic_help(topic, use_ansi=False, width=80)
-    assert "test-topic (tt, test)" in output
-
-
-def test_format_topic_help_inline_contains_description() -> None:
-    """An inline-content topic includes a DESCRIPTION section with the content."""
-    topic = TopicHelpPage(
-        key="test-topic",
-        one_line_description="A test topic",
-        content="First line.\n\nSecond paragraph.",
-    )
-    output = format_topic_help(topic, use_ansi=False, width=80)
-    assert "DESCRIPTION" in output
     assert "First line." in output
     assert "Second paragraph." in output
+    # Topics render their (markdown) body -- no man-page NAME/DESCRIPTION chrome.
+    assert "NAME" not in output
 
 
-def test_format_topic_help_doc_backed_renders_body(tmp_path: Path) -> None:
-    """A doc-backed topic renders its markdown file body (no man-page NAME chrome)."""
+def test_format_topic_help_renders_file_body(tmp_path: Path) -> None:
+    """A file (Path) body is rendered from the markdown file, including its heading."""
     md = tmp_path / "topic.md"
     md.write_text("# A Doc Topic\n\nThe body prose.")
-    topic = TopicHelpPage(key="doc-topic", one_line_description="A Doc Topic", body_path=md)
+    topic = TopicHelpPage(key="doc-topic", one_line_description="A Doc Topic", body=DocFile(path=md))
     output = format_topic_help(topic, use_ansi=False, width=80)
-    # Non-ansi: the raw markdown body is emitted verbatim (rich is only used
-    # for interactive terminals), including the file's own heading.
+    # Non-ansi emits the raw markdown body (rich is only used for interactive terminals).
     assert "# A Doc Topic" in output
     assert "The body prose." in output
-    assert "NAME" not in output
 
 
 def test_format_topic_help_contains_see_also() -> None:
@@ -134,7 +133,7 @@ def test_format_topic_help_contains_see_also() -> None:
     topic = TopicHelpPage(
         key="test-topic",
         one_line_description="A test topic",
-        content="Some content.",
+        body=InlineContent(markdown="Some content."),
         see_also=(("other-topic", "Related topic"),),
     )
     output = format_topic_help(topic, use_ansi=False, width=80)
@@ -147,7 +146,7 @@ def test_format_topic_help_see_also_strips_anchor() -> None:
     topic = TopicHelpPage(
         key="test-topic",
         one_line_description="A test topic",
-        content="Some content.",
+        body=InlineContent(markdown="Some content."),
         see_also=(("list#filtering", "Filtering agents"),),
     )
     output = format_topic_help(topic, use_ansi=False, width=80)
@@ -160,7 +159,7 @@ def test_format_topic_help_omits_see_also_when_empty() -> None:
     topic = TopicHelpPage(
         key="test-topic",
         one_line_description="A test topic",
-        content="Some content.",
+        body=InlineContent(markdown="Some content."),
     )
     output = format_topic_help(topic, use_ansi=False, width=80)
     assert "SEE ALSO" not in output
