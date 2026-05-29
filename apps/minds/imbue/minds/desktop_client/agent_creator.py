@@ -1141,9 +1141,16 @@ class AgentCreator(MutableModel):
                     if _is_git_worktree(resolved_path):
                         # Worktrees have a .git file pointing to the parent repo's
                         # .git/worktrees/ dir, which breaks when copied into Docker.
-                        # Clone locally to get a standalone repo. Use file:// protocol
-                        # so --depth 1 is honored (git ignores --depth for local paths).
-                        # Use a stable path based on repo name so Docker layer caching works.
+                        # Clone locally to get a standalone repo.
+                        #
+                        # Full clone (no --depth=1): a shallow clone only pulls
+                        # the default branch (e.g. main) and not the user's
+                        # target branch (e.g. pilot), so the subsequent
+                        # `git checkout <branch>` fails with `pathspec did not
+                        # match`. mngr's downstream mirror push into the agent
+                        # container's bare receiver also rejects shallow source
+                        # packs with "shallow update not allowed". Cloning
+                        # deeply avoids both. Local file:// clones are cheap.
                         log_queue.put("[minds] Cloning local worktree: {}".format(resolved_path))
                         repo_name = extract_repo_name(repo_source)
                         clone_target = Path(tempfile.gettempdir()) / "minds-clone-{}".format(repo_name)
@@ -1154,13 +1161,11 @@ class AgentCreator(MutableModel):
                             file_url,
                             clone_target,
                             on_output=emit_log,
-                            is_shallow=True,
                             parent_cg=self.root_concurrency_group,
                         )
-                        # The shallow clone only contains committed content. Rsync
-                        # the worktree's working directory over so that uncommitted
-                        # changes (e.g. a locally-rsynced vendor/mngr/) are included
-                        # in the Docker build context.
+                        # Rsync the worktree's working directory over so that
+                        # uncommitted changes (e.g. a locally-rsynced
+                        # vendor/mngr/) are included in the Docker build context.
                         _rsync_worktree_over_clone(
                             resolved_path,
                             clone_target,
@@ -1177,11 +1182,14 @@ class AgentCreator(MutableModel):
                     if clone_target.exists():
                         shutil.rmtree(clone_target)
                     log_queue.put("[minds] Cloning {}...".format(_redact_url_credentials(repo_source)))
+                    # Full clone (no --depth=1): a shallow clone only pulls
+                    # the default branch, so the subsequent `git checkout
+                    # <branch>` for any non-default target branch fails with
+                    # `pathspec did not match`.
                     clone_git_repo(
                         GitUrl(repo_source),
                         clone_target,
                         on_output=emit_log,
-                        is_shallow=True,
                         parent_cg=self.root_concurrency_group,
                     )
                     workspace_dir = clone_target
