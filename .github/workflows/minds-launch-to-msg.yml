@@ -196,10 +196,10 @@ jobs:
 
   verify:
     needs: [build]
-    # Run even when `build` was skipped (no commit_sha) or failed (so we can
-    # still see artifacts). `success()` would skip both cases, so use always()
-    # plus a guard inside to skip the actual mac-runner work when the URL
-    # we'd verify is empty.
+    # Run when build succeeded, or when build was skipped (workflow_dispatch
+    # with app_zip_url, or no inputs at all). On build failure verify is
+    # skipped; the build job's own `upload build log` step uses always() so
+    # the dist log artifact is preserved either way.
     if: ${{ always() && (needs.build.result == 'success' || needs.build.result == 'skipped') }}
     runs-on: [self-hosted, macOS, minds-runner]
     timeout-minutes: 25
