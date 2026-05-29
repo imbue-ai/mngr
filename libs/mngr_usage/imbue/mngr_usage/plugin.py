@@ -14,6 +14,7 @@ from pathlib import Path
 
 import click
 
+from imbue.imbue_common.model_update import to_update
 from imbue.mngr import hookimpl
 from imbue.mngr.config.plugin_registry import register_plugin_config
 from imbue.mngr.interfaces.help_topic import TopicHelpPage
@@ -41,7 +42,17 @@ def register_cli_commands() -> Sequence[click.Command] | None:
 def register_help_topics() -> Sequence[TopicHelpPage]:
     """Expose this plugin's markdown docs (e.g. cron_recipes) as `mngr help` topics.
 
-    When the usage plugin is installed, `mngr help cron_recipes` shows the cron
-    automation recipes and the topic is listed in `mngr help`.
+    Topic keys and descriptions are namespaced (``usage_`` key prefix, ``mngr
+    usage:`` description prefix) so they are unambiguous in the global `mngr
+    help` topic list -- e.g. the docs/cron_recipes.md file surfaces as
+    ``usage_cron_recipes`` -- "mngr usage: Cron automation recipes". The doc
+    file itself keeps its plain name/heading, which read fine in its own
+    mngr_usage/docs context.
     """
-    return build_topics_from_directory("usage", _DOCS_DIR)
+    return [
+        topic.model_copy_update(
+            to_update(topic.field_ref().key, f"usage_{topic.key}"),
+            to_update(topic.field_ref().one_line_description, f"mngr usage: {topic.one_line_description}"),
+        )
+        for topic in build_topics_from_directory("usage", _DOCS_DIR)
+    ]
