@@ -15,7 +15,7 @@ on:
   push:
     branches: [mngr/mac-runner]
     paths:
-      - '.github/workflows/launch-to-first-message.yml'
+      - '.github/workflows/minds-launch-to-msg.yml'
       - 'apps/minds/scripts/launch-and-verify.sh'
       - 'apps/minds/scripts/first-message-verify.sh'
       - 'apps/minds/scripts/mac-runner-reset.sh'

@@ -1,4 +1,4 @@
-name: mac-runner reset
+name: minds runner reset
 
 on:
   workflow_dispatch:
@@ -9,7 +9,7 @@ on:
         default: ''
   push:
     branches: [mngr/mac-runner]
-    paths: ['.github/workflows/mac-runner-reset.yml', 'apps/minds/scripts/mac-runner-reset.sh']
+    paths: ['.github/workflows/minds-runner-reset.yml', 'apps/minds/scripts/mac-runner-reset.sh']
 
 concurrency:
   group: mac-runner
