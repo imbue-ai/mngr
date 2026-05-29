@@ -8,13 +8,13 @@
         permissions the agent is requesting (the union of permissions
         already granted for this scope on the host and the permissions
         the agent declared). It exposes no checkboxes -- the user only
-        decides Approve vs. Deny -- plus a small "Adjust permissions"
-        link that reveals the full editor.
+        decides Approve vs. Deny -- plus a small "Adjust" link that
+        reveals the full editor.
       - an *editor* view (hidden by default): a checkbox per detent
         permission schema. The initial check state is the union
         described above, so an unmodified Approve grants exactly that
         union (and the editor doubles as a revoke UI for the existing
-        grants). Revealed when the user clicks "Adjust permissions".
+        grants). Revealed when the user clicks "Adjust".
     The checkbox inputs always live in the DOM (the editor container is
     merely hidden) so the generic submit handler can read the checked
     set in either view: in the simple view it submits the pre-checked
@@ -33,25 +33,27 @@
 {% extends 'permissions.html' %}
 {% import '_macros.html' as ui %}
 
-{% block workspace_meta %}
-  {# Latchkey state (gateway URL, password, JWT, permissions config) #}
-  {# is keyed per-host: every agent that runs on this workspace's host #}
-  {# inherits the same grants. The bracket note tells the user the #}
-  {# scope of the decision they are about to make is host-wide, not #}
-  {# just for the agent that triggered the request. #}
-  <span class="ml-1 text-xs text-zinc-500">(grants apply to every agent on this host)</span>
+{# The service display name (e.g. "Slack") reads better as plain heading #}
+{# text than in a boxed monospace pill, so drop the base's code styling. #}
+{% block header_display_name %}{{ display_name }}{% endblock %}
+
+{# The host-sharing scope is conveyed inline ("and its sibling agents"), #}
+{# so the separate workspace line is dropped to keep the dialog compact. #}
+{% block workspace_line %}{% endblock %}
+
+{# Attribute the rationale to the requesting workspace, e.g. "shimmering-fox says:". #}
+{% block rationale_label %}
+  <p class="text-xs font-medium text-zinc-500 mb-1">{{ ws_name or agent_id }} says:</p>
 {% endblock %}
 
 {% block permissions_form_body %}
   {# Simple (default) view: a read-only summary of the permissions that #}
   {# will be granted on Approve, with no checkboxes. The full checkbox #}
-  {# editor is hidden behind the "Adjust permissions" link below. #}
+  {# editor is hidden behind the "Adjust" link below. #}
   <div id="permissions-simple-view">
-    <h2 class="text-sm font-medium text-zinc-700 mb-2">Permissions requested by {{ display_name }}</h2>
     {% if checked_permissions %}
-      <p class="text-xs text-zinc-500 mb-3">
-        {{ display_name }} is requesting the following permissions.
-        These are shared across every agent running on this workspace's host.
+      <p class="text-sm text-zinc-700 mb-3">
+        Approving will grant {{ ws_name or agent_id }} and its sibling agents the following permissions:
       </p>
       <div class="bg-white border border-zinc-200 rounded-xl p-4 space-y-2">
         {% for permission in permission_schemas %}
@@ -65,28 +67,21 @@
     {% else %}
       {% call ui.notice(variant='warn') %}
         The agent did not request any specific permissions. Click
-        <span class="font-medium">Adjust permissions</span> below to choose what to grant.
+        <span class="font-medium">Adjust</span> below to choose what to grant.
       {% endcall %}
     {% endif %}
     <button type="button" id="permissions-adjust-link"
             onclick="showPermissionEditor()"
             class="mt-3 text-xs text-blue-600 hover:underline cursor-pointer bg-transparent border-0 p-0">
-      Adjust permissions
+      Adjust
     </button>
   </div>
 
   {# Editor view: the full checkbox list, hidden until the user opts in #}
-  {# via "Adjust permissions". The inputs are present in the DOM either #}
-  {# way so the generic submit handler can read the checked set. #}
+  {# via "Adjust". The inputs are present in the DOM either way so the #}
+  {# generic submit handler can read the checked set. #}
   <div id="permissions-editor-view" class="hidden">
     <h2 class="text-sm font-medium text-zinc-700 mb-2">Permissions to grant</h2>
-    <p class="text-xs text-zinc-500 mb-3">
-      Select which permissions to grant for {{ display_name }}.
-      Permissions already granted for this service and permissions the
-      agent is requesting now are pre-checked; tick more to broaden,
-      untick to revoke or narrow.
-      Permissions are shared across every agent running on this workspace's host.
-    </p>
     <div class="bg-white border border-zinc-200 rounded-xl p-4 space-y-2">
       {% for permission in permission_schemas %}
         <label class="flex items-start gap-2 cursor-pointer">

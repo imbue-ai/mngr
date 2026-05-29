@@ -663,24 +663,21 @@ def test_render_request_page_notes_grants_are_shared_per_host(tmp_path: Path) ->
 
     Latchkey state (gateway URL, password, JWT, permissions config) is
     keyed per-host, so every agent that runs on this workspace's host
-    inherits the same grants. The dialog surfaces that scope so the user
-    isn't surprised by it.
+    inherits the same grants. The simple view surfaces that scope inline
+    ("and its sibling agents") so the user isn't surprised by it.
     """
     handler = _build_handler(tmp_path, credential_status="valid")
 
-    html = _render_dialog_html(handler)
+    html = _render_dialog_html(handler, permissions=("slack-read-all",))
 
-    # Short bracket note next to the workspace link.
-    assert "grants apply to every agent on this host" in html
-    # Reinforced in the form body so users who skim past the header still see it.
-    assert "shared across every agent running on this workspace's host" in html
+    assert "and its sibling agents" in html
 
 
 def test_render_request_page_defaults_to_simple_view_with_editor_hidden(tmp_path: Path) -> None:
     """By default the dialog shows the simple summary; the checkbox editor is hidden.
 
-    Non-technical users should only face Approve / Deny plus an
-    "Adjust permissions" link, not a wall of checkboxes.
+    Non-technical users should only face Approve / Deny plus an "Adjust"
+    link, not a wall of checkboxes.
     """
     handler = _build_handler(tmp_path, credential_status="valid")
 
@@ -696,8 +693,7 @@ def test_render_request_page_defaults_to_simple_view_with_editor_hidden(tmp_path
     assert editor_idx != -1
     editor_tag_end = html.find(">", editor_idx)
     assert "hidden" in html[html.rfind("<div", 0, editor_idx) : editor_tag_end]
-    # The "Adjust permissions" affordance is offered.
-    assert "Adjust permissions" in html
+    # The "Adjust" affordance is offered.
     assert 'id="permissions-adjust-link"' in html
 
 
@@ -730,7 +726,42 @@ def test_render_request_page_simple_view_prompts_to_adjust_when_nothing_requeste
     simple_block = html[simple_idx:editor_idx]
     assert "did not request any specific permissions" in simple_block
     # The editor is still available so the user can pick something.
-    assert "Adjust permissions" in simple_block
+    assert 'id="permissions-adjust-link"' in simple_block
+
+
+def test_render_request_page_drops_workspace_line(tmp_path: Path) -> None:
+    """The standalone "Workspace: ..." line is removed from the predefined dialog."""
+    handler = _build_handler(tmp_path, credential_status="valid")
+
+    html = _render_dialog_html(handler, permissions=("slack-read-all",))
+
+    assert "Workspace:" not in html
+
+
+def test_render_request_page_attributes_rationale_to_workspace(tmp_path: Path) -> None:
+    """The rationale is introduced with "<workspace> says:" instead of a generic label."""
+    handler = _build_handler(tmp_path, credential_status="valid")
+
+    html = _render_dialog_html(handler, permissions=("slack-read-all",))
+
+    assert "says:" in html
+    assert "Reason given by the agent" not in html
+
+
+def test_render_request_page_header_service_name_has_no_boxed_background(tmp_path: Path) -> None:
+    """The service name in the header renders as plain text, not a grey-boxed pill."""
+    handler = _build_handler(tmp_path, credential_status="valid")
+
+    html = _render_dialog_html(handler, permissions=("slack-read-all",))
+
+    # The display name still appears in the header line.
+    header_idx = html.find("Permission request:")
+    assert header_idx != -1
+    header_end = html.find("</h1>", header_idx)
+    header_block = html[header_idx:header_end]
+    assert _SLACK_SERVICE_INFO.display_name in header_block
+    # ...but without the boxed grey-background treatment.
+    assert "bg-zinc-100" not in header_block
 
 
 # -- LatchkeyPermissionGrantHandler.deny --
