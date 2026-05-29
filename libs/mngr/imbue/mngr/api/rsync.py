@@ -27,7 +27,6 @@ from imbue.imbue_common.pure import pure
 from imbue.mngr.api.git import GitContextInterface
 from imbue.mngr.api.git import LocalGitContext
 from imbue.mngr.api.git import RemoteGitContext
-from imbue.mngr.api.git import UncommittedChangesError
 from imbue.mngr.api.git import stash_guard
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import UserInputError
@@ -132,6 +131,7 @@ def _do_rsync(
     extra_args: Sequence[str],
     uncommitted_changes: UncommittedChangesMode,
     cg: ConcurrencyGroup,
+    exec_final_command: bool = False,
 ) -> RsyncResult:
     """Internal workhorse that runs the actual rsync command.
 
@@ -142,8 +142,20 @@ def _do_rsync(
     trailing-slash semantics (rsync interprets a trailing slash on the source
     as "copy contents into destination" rather than "copy as a child of
     destination").
+
+    With ``exec_final_command=True``, the current process is replaced by ``rsync``
+    once setup is done -- no return value, and ``uncommitted_changes=MERGE`` is
+    rejected (it relies on popping the stash *after* rsync exits, which has no
+    exec equivalent).
     """
     RSYNC.require()
+
+    if exec_final_command and uncommitted_changes == UncommittedChangesMode.MERGE:
+        raise UserInputError(
+            "uncommitted_changes=MERGE is incompatible with exec_final_command: "
+            "popping the destination stash after rsync exits has no equivalent under exec. "
+            "Use STASH and run ``git stash pop`` yourself afterwards."
+        )
 
     local_str = str(local_path)
     remote_str = str(remote_path)
@@ -188,13 +200,6 @@ def _do_rsync(
 
         if remote_host.is_local:
             rsync_cmd = _build_rsync_command(source_str, destination_str, extra_args, ssh_transport=None)
-            cmd_str = shlex.join(rsync_cmd)
-            with log_span("{} files from {} to {}", direction, source_str, destination_str):
-                logger.debug("Running rsync command: {}", cmd_str)
-                result: CommandResult = remote_host.execute_idempotent_command(cmd_str)
-            if not result.success:
-                raise MngrError(f"rsync failed: {result.stderr}")
-            rsync_stdout = result.stdout
         else:
             ssh_info = remote_host.get_ssh_connection_info()
             assert ssh_info is not None, "Remote host must provide SSH connection info"
@@ -205,6 +210,19 @@ def _do_rsync(
             ssh_destination = remote_uri if is_push else local_str
             rsync_cmd = _build_rsync_command(ssh_source, ssh_destination, extra_args, ssh_transport=ssh_transport)
 
+        if exec_final_command:
+            logger.debug("{} files from {} to {}: {}", direction, source_str, destination_str, shlex.join(rsync_cmd))
+            os.execvp(rsync_cmd[0], rsync_cmd)
+
+        if remote_host.is_local:
+            cmd_str = shlex.join(rsync_cmd)
+            with log_span("{} files from {} to {}", direction, source_str, destination_str):
+                logger.debug("Running rsync command: {}", cmd_str)
+                result: CommandResult = remote_host.execute_idempotent_command(cmd_str)
+            if not result.success:
+                raise MngrError(f"rsync failed: {result.stderr}")
+            rsync_stdout = result.stdout
+        else:
             with log_span("{} files from {} to {} via SSH", direction, source_str, destination_str):
                 logger.debug("Running rsync command: {}", shlex.join(rsync_cmd))
                 try:
@@ -233,6 +251,7 @@ def rsync_to_remote(
     extra_args: Sequence[str],
     uncommitted_changes: UncommittedChangesMode,
     cg: ConcurrencyGroup,
+    exec_final_command: bool = False,
 ) -> RsyncResult:
     """Rsync files from a local path to a path on ``remote_host``.
 
@@ -240,6 +259,8 @@ def rsync_to_remote(
     rsync runs without SSH. Path strings are passed to rsync verbatim -- include
     a trailing slash on ``local_path`` if you want "copy contents into
     destination" semantics rather than "copy as a child of destination".
+
+    See :func:`_do_rsync` for ``exec_final_command`` semantics.
     """
     return _do_rsync(
         local_path=local_path,
@@ -249,6 +270,7 @@ def rsync_to_remote(
         extra_args=extra_args,
         uncommitted_changes=uncommitted_changes,
         cg=cg,
+        exec_final_command=exec_final_command,
     )
 
 
@@ -259,6 +281,7 @@ def rsync_from_remote(
     extra_args: Sequence[str],
     uncommitted_changes: UncommittedChangesMode,
     cg: ConcurrencyGroup,
+    exec_final_command: bool = False,
 ) -> RsyncResult:
     """Rsync files from a path on ``remote_host`` to a local path.
 
@@ -266,6 +289,8 @@ def rsync_from_remote(
     rsync runs without SSH. Path strings are passed to rsync verbatim -- include
     a trailing slash on ``remote_path`` if you want "copy contents into
     destination" semantics rather than "copy as a child of destination".
+
+    See :func:`_do_rsync` for ``exec_final_command`` semantics.
     """
     return _do_rsync(
         local_path=local_path,
@@ -275,6 +300,7 @@ def rsync_from_remote(
         extra_args=extra_args,
         uncommitted_changes=uncommitted_changes,
         cg=cg,
+        exec_final_command=exec_final_command,
     )
 
 
@@ -286,6 +312,7 @@ def rsync(
     extra_args: Sequence[str],
     uncommitted_changes: UncommittedChangesMode,
     cg: ConcurrencyGroup,
+    exec_final_command: bool = False,
 ) -> RsyncResult:
     """Generic two-endpoint rsync used by ``mngr rsync``.
 
@@ -295,6 +322,8 @@ def rsync(
 
     The CLI layer additionally rejects local-to-local; the API accepts it so internal
     callers whose agent lives on the local provider can use the same entry point.
+
+    See :func:`_do_rsync` for ``exec_final_command`` semantics.
     """
     if not source_host.is_local and not destination_host.is_local:
         raise RsyncEndpointError("mngr rsync does not support remote-to-remote transfers")
@@ -306,6 +335,7 @@ def rsync(
             extra_args=extra_args,
             uncommitted_changes=uncommitted_changes,
             cg=cg,
+            exec_final_command=exec_final_command,
         )
     return rsync_from_remote(
         remote_host=source_host,
@@ -314,101 +344,5 @@ def rsync(
         extra_args=extra_args,
         uncommitted_changes=uncommitted_changes,
         cg=cg,
+        exec_final_command=exec_final_command,
     )
-
-
-def _build_two_sided_rsync_argv(
-    source_host: OnlineHostInterface,
-    source_path: str,
-    destination_host: OnlineHostInterface,
-    destination_path: str,
-    extra_args: Sequence[str],
-) -> list[str]:
-    """Build the rsync argv for a two-endpoint transfer.
-
-    Either side may be local; if exactly one side is remote, that host's SSH
-    info is woven in via ``-e`` and its path is prefixed with ``user@host:``.
-    Path strings are passed through verbatim (caller controls trailing slash).
-    """
-    if source_host.is_local and destination_host.is_local:
-        return _build_rsync_command(source_path, destination_path, extra_args, ssh_transport=None)
-
-    remote_host = destination_host if source_host.is_local else source_host
-    ssh_info = remote_host.get_ssh_connection_info()
-    assert ssh_info is not None, "Remote host must provide SSH connection info"
-    user, hostname, port, key_path = ssh_info
-    ssh_transport = build_ssh_transport_command(key_path, port, get_ssh_known_hosts_file(remote_host))
-    if source_host.is_local:
-        ssh_source = source_path
-        ssh_destination = f"{user}@{hostname}:{destination_path}"
-    else:
-        ssh_source = f"{user}@{hostname}:{source_path}"
-        ssh_destination = destination_path
-    return _build_rsync_command(ssh_source, ssh_destination, extra_args, ssh_transport=ssh_transport)
-
-
-def exec_rsync(
-    source_host: OnlineHostInterface,
-    source_path: str | Path,
-    destination_host: OnlineHostInterface,
-    destination_path: str | Path,
-    extra_args: Sequence[str],
-    uncommitted_changes: UncommittedChangesMode,
-    cg: ConcurrencyGroup,
-) -> None:
-    """Run mngr's pre-rsync setup, then exec into ``rsync``.
-
-    Equivalent to :func:`rsync` for the CLI: same endpoint validation, same
-    destination-side stash / mkdir setup, same argv assembly -- but replaces
-    the current process with the rsync binary instead of running it via
-    ``cg.run_process_to_completion``. Suitable for ``mngr rsync`` where the
-    user benefits from direct stdout/stderr passthrough, native signal
-    handling, and rsync's own exit code propagating up.
-
-    Rejects ``uncommitted_changes=MERGE``: that mode pops the destination stash
-    *after* rsync exits, which has no equivalent under exec semantics. The
-    caller should use ``STASH`` and pop manually.
-
-    Never returns when successful: control passes to rsync. Raises before
-    exec when validation or setup fails.
-    """
-    RSYNC.require()
-
-    if not source_host.is_local and not destination_host.is_local:
-        raise RsyncEndpointError("mngr rsync does not support remote-to-remote transfers")
-    if uncommitted_changes == UncommittedChangesMode.MERGE:
-        raise UserInputError(
-            "--uncommitted-changes=merge is not supported by ``mngr rsync``: it requires "
-            "popping the stash after rsync exits, which the exec-based CLI cannot do. "
-            "Use --uncommitted-changes=stash and run ``git stash pop`` yourself afterwards."
-        )
-
-    source_str = str(source_path)
-    destination_str = str(destination_path)
-    destination_for_git = Path(destination_str)
-    destination_git_ctx: GitContextInterface = (
-        LocalGitContext(cg=cg) if destination_host.is_local else RemoteGitContext(host=destination_host)
-    )
-
-    is_destination_exists = _dir_exists(destination_host, destination_for_git)
-    is_destination_git_repo = (
-        destination_git_ctx.is_git_repository(destination_for_git) if is_destination_exists else False
-    )
-    if uncommitted_changes != UncommittedChangesMode.CLOBBER and is_destination_git_repo:
-        if destination_git_ctx.has_uncommitted_changes(destination_for_git):
-            match uncommitted_changes:
-                case UncommittedChangesMode.FAIL:
-                    raise UncommittedChangesError(destination_for_git)
-                case UncommittedChangesMode.STASH:
-                    logger.debug("Stashing uncommitted changes")
-                    destination_git_ctx.git_stash(destination_for_git)
-                case _:
-                    # MERGE was rejected above; CLOBBER took the outer branch.
-                    raise MngrError(f"Unhandled UncommittedChangesMode: {uncommitted_changes}")
-
-    _mkdir_on_host(destination_host, destination_for_git)
-
-    argv = _build_two_sided_rsync_argv(source_host, source_str, destination_host, destination_str, extra_args)
-    direction = "Pushing" if source_host.is_local and not destination_host.is_local else "Pulling"
-    logger.debug("{} files from {} to {}: {}", direction, source_str, destination_str, shlex.join(argv))
-    os.execvp(argv[0], argv)

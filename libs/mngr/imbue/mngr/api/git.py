@@ -371,53 +371,14 @@ def _default_push_refspec(
     return f"{local_branch}:{result.stdout.strip()}"
 
 
-def build_git_push_command(
-    local_path: Path,
-    remote_host: OnlineHostInterface,
-    remote_path: Path,
-    extra_args: Sequence[str],
-    cg: ConcurrencyGroup,
-) -> tuple[list[str], dict[str, str]]:
-    """Prepare the ``git push`` argv and environment, plus the remote-side setup.
-
-    Performs the destination setup ``git push`` depends on -- registers the
-    repo as a safe directory and sets ``receive.denyCurrentBranch=updateInstead``
-    -- then builds the URL, env, and full argv. If ``extra_args`` has no
-    positional (i.e. no refspec), defaults to
-    ``<local_current_branch>:<remote_current_branch>`` so ``mngr git push``
-    works on mngr's worktree-style agents.
-
-    Returns ``(argv, env)`` ready to be run as a subprocess (via the
-    ConcurrencyGroup helper) or to exec into via ``os.exec*``.
-    """
-    add_safe_directory_on_remote(remote_host, remote_path)
-    _configure_push_destination(remote_host, remote_path)
-    url, env = _build_git_url_and_env(remote_host, remote_path, is_push=True)
-    assert env is not None, "push always sets GIT_LFS_SKIP_PUSH"
-    options, positionals = _split_options_and_positionals(extra_args)
-    if not positionals:
-        positionals = [_default_push_refspec(local_path, remote_host, remote_path, cg)]
-    cmd = ["git", "-C", str(local_path), "push", *options, url, *positionals]
-    return cmd, env
-
-
-def build_git_pull_command(
-    local_path: Path,
-    remote_host: OnlineHostInterface,
-    remote_path: Path,
-    extra_args: Sequence[str],
-) -> tuple[list[str], dict[str, str] | None]:
-    """Prepare the ``git pull`` argv and environment, plus the remote-side setup.
-
-    Registers the source repo as a safe directory, then builds the URL, env,
-    and full argv. ``env`` is ``None`` for a local source (no SSH transport
-    needed); callers should fall back to ``os.environ`` in that case.
-    """
-    add_safe_directory_on_remote(remote_host, remote_path)
-    url, env = _build_git_url_and_env(remote_host, remote_path, is_push=False)
-    options, positionals = _split_options_and_positionals(extra_args)
-    cmd = ["git", "-C", str(local_path), "pull", *options, url, *positionals]
-    return cmd, env
+def _run_or_exec(cmd: list[str], env: dict[str, str] | None, cg: ConcurrencyGroup, exec_final_command: bool) -> None:
+    """Run ``cmd`` to completion, or replace the current process with it."""
+    if exec_final_command:
+        os.execvpe(cmd[0], cmd, env if env is not None else os.environ)
+    try:
+        cg.run_process_to_completion(cmd, env=env)
+    except ProcessError as e:
+        raise GitSyncError(e.stderr) from e
 
 
 def git_push(
@@ -426,6 +387,7 @@ def git_push(
     remote_path: Path,
     extra_args: Sequence[str],
     cg: ConcurrencyGroup,
+    exec_final_command: bool = False,
 ) -> None:
     """Run ``git push`` from ``local_path`` to ``remote_path`` on ``remote_host``.
 
@@ -436,14 +398,20 @@ def git_push(
     ``<local_current_branch>:<remote_current_branch>`` so ``mngr git push my-agent``
     works on mngr's worktree-style agents (where the agent has its own branch).
 
-    Raises :class:`GitSyncError` on any failure of the underlying git command.
+    With ``exec_final_command=True``, the current process is replaced by ``git`` once
+    setup is done (no return); the caller is responsible for any cleanup it
+    needs to run before then. Otherwise raises :class:`GitSyncError` on any
+    failure of the underlying git command.
     """
-    cmd, env = build_git_push_command(local_path, remote_host, remote_path, extra_args, cg)
+    add_safe_directory_on_remote(remote_host, remote_path)
+    _configure_push_destination(remote_host, remote_path)
+    url, env = _build_git_url_and_env(remote_host, remote_path, is_push=True)
+    options, positionals = _split_options_and_positionals(extra_args)
+    if not positionals:
+        positionals = [_default_push_refspec(local_path, remote_host, remote_path, cg)]
+    cmd = ["git", "-C", str(local_path), "push", *options, url, *positionals]
     logger.debug("Running git push: {}", shlex.join(cmd))
-    try:
-        cg.run_process_to_completion(cmd, env=env)
-    except ProcessError as e:
-        raise GitSyncError(e.stderr) from e
+    _run_or_exec(cmd, env, cg, exec_final_command)
 
 
 def git_pull(
@@ -452,6 +420,7 @@ def git_pull(
     remote_path: Path,
     extra_args: Sequence[str],
     cg: ConcurrencyGroup,
+    exec_final_command: bool = False,
 ) -> None:
     """Run ``git pull`` into ``local_path`` from ``remote_path`` on ``remote_host``.
 
@@ -459,11 +428,13 @@ def git_pull(
     starting with ``-`` (up to the first non-option) go before the constructed URL
     so they're parsed as options; the rest go after the URL as refspecs.
 
-    Raises :class:`GitSyncError` on any failure of the underlying git command.
+    With ``exec_final_command=True``, the current process is replaced by ``git`` once
+    setup is done (no return). Otherwise raises :class:`GitSyncError` on any
+    failure of the underlying git command.
     """
-    cmd, env = build_git_pull_command(local_path, remote_host, remote_path, extra_args)
+    add_safe_directory_on_remote(remote_host, remote_path)
+    url, env = _build_git_url_and_env(remote_host, remote_path, is_push=False)
+    options, positionals = _split_options_and_positionals(extra_args)
+    cmd = ["git", "-C", str(local_path), "pull", *options, url, *positionals]
     logger.debug("Running git pull: {}", shlex.join(cmd))
-    try:
-        cg.run_process_to_completion(cmd, env=env)
-    except ProcessError as e:
-        raise GitSyncError(e.stderr) from e
+    _run_or_exec(cmd, env, cg, exec_final_command)

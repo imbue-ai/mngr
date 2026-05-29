@@ -9,7 +9,7 @@ from imbue.mngr.api.find import ensure_host_started
 from imbue.mngr.api.find import resolve_host_location_address
 from imbue.mngr.api.providers import get_provider_instance
 from imbue.mngr.api.rsync import RsyncEndpointError
-from imbue.mngr.api.rsync import exec_rsync
+from imbue.mngr.api.rsync import rsync
 from imbue.mngr.cli.address_params import HOST_LOCATION_ADDRESS
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
@@ -152,7 +152,7 @@ def rsync_command(ctx: click.Context, **kwargs: Any) -> None:
 
     uncommitted_changes_mode = UncommittedChangesMode(opts.uncommitted_changes.upper())
 
-    exec_rsync(
+    rsync(
         source_host=source_host,
         source_path=source_path_str,
         destination_host=destination_host,
@@ -160,6 +160,7 @@ def rsync_command(ctx: click.Context, **kwargs: Any) -> None:
         extra_args=opts.rsync_args,
         uncommitted_changes=uncommitted_changes_mode,
         cg=mngr_ctx.concurrency_group,
+        exec_final_command=True,
     )
 
 
