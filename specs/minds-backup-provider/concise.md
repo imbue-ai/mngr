@@ -10,6 +10,7 @@ Wire the `imbue_cloud bucket` capability into the minds workspace-creation flow 
 - The injection logic is factored into a single reusable "configure backups for host X" function so it can be re-invoked against any already-created host later (a future management screen, not this PR).
 - Backups must work uniformly across docker, lima, and docker-on-VPS hosts (including imbue_cloud) — the snapshot mechanism is already auto-detected by FCT bootstrap, so only the repository address and credentials differ per workspace.
 - This PR also adjusts the FCT `host_backup` contract so the repository URL and empty-password behavior are driven by the injected config rather than a hand-edited template.
+- `host_backup` has no existing consumers yet, so **backward compatibility is explicitly a non-goal** — the contract is changed cleanly (no shims, no deprecation path) to get the design right.
 
 ## Expected Behavior
 
@@ -70,7 +71,7 @@ Wire the `imbue_cloud bucket` capability into the minds workspace-creation flow 
 
 ### forever-claude-template `host_backup` (`libs/host_backup`)
 
-- Make `RESTIC_REPOSITORY` (from `restic.env`) the sole source of the repository address; drop `repository_url_template` / `template_values` (and the runtime `host_id` URL formatting) from the `backup.toml` contract.
+- Make `RESTIC_REPOSITORY` (from `restic.env`) the sole source of the repository address; drop `repository_url_template` / `template_values` (and the runtime `host_id` URL formatting) from the `backup.toml` contract. No backward-compatibility shim is needed — there are no existing consumers, so old-style `backup.toml` files do not need to keep working.
 - Add a `restic.allow_empty_password` setting in `backup.toml` that maps to passing restic `--insecure-no-password` on all restic invocations (init, probe, backup, forget, prune).
 - Relax the required-key gating: a workspace is ready to back up when `RESTIC_REPOSITORY` is set and either `RESTIC_PASSWORD` is set or `allow_empty_password` is true. `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` are no longer strictly required (so non-S3 backends configured via `api_key` work).
 - Update FCT bootstrap seeding/templates and any docs (`libs/host_backup/README.md`, default template writers in `config.py`) to match the new contract (repo URL in `restic.env`, empty-password flag in `backup.toml`).
