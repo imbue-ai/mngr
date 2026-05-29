@@ -11,6 +11,8 @@ set -uo pipefail
 
 EVENTS_LOG="$HOME/.minds/logs/minds-events.jsonl"
 COOKIES="/tmp/first-message-cookies.txt"
+# `${VAR:-default}` substitutes default for both unset and empty string,
+# so a workflow input that defaulted to '' still falls through to these.
 GIT_URL="${GIT_URL:-https://github.com/imbue-ai/forever-claude-template}"
 GIT_BRANCH="${GIT_BRANCH:-pilot_2}"
 HOST_NAME="${HOST_NAME:-firstmsg$(date +%H%M%S)}"
@@ -29,6 +31,7 @@ export PATH="$LIMA_BIN_DIR:$PATH"
 log() { printf '[first-msg] %s\n' "$*" >&2; }
 fail() { log "FAIL: $*"; exit 1; }
 
+log "template repo: $GIT_URL @ $GIT_BRANCH"
 if [[ -z "${ANTHROPIC_API_KEY:-}" ]]; then
   fail "ANTHROPIC_API_KEY is empty"
 fi

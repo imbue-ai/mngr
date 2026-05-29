@@ -16,6 +16,14 @@ on:
         type: boolean
         required: false
         default: false
+      template_ref:
+        description: 'forever-claude-template ref (branch / tag / SHA) the agent is created from. Empty -> script default (pilot_2, known-compatible with the bundled mngr). Set to "main" to verify the user-default path.'
+        required: false
+        default: ''
+      template_url:
+        description: 'Override the FCT git URL (forks). Empty -> https://github.com/imbue-ai/forever-claude-template.'
+        required: false
+        default: ''
   push:
     branches: [mngr/mac-runner]
     paths:
@@ -147,6 +155,9 @@ jobs:
         run: bash apps/minds/scripts/launch-and-verify.sh
       - name: first message round-trip
         if: ${{ inputs.skip_first_message != true }}
+        env:
+          GIT_BRANCH: ${{ inputs.template_ref }}
+          GIT_URL:    ${{ inputs.template_url }}
         run: bash apps/minds/scripts/first-message-verify.sh
       - name: collect diagnostic artifacts on failure
         if: failure()
