@@ -227,7 +227,7 @@ The new lockfile is shipped in the app bundle. On next launch, `uv sync` install
 ```
 apps/minds/
   package.json              # pnpm + Electron + ToDesktop config
-  todesktop.json            # ToDesktop build settings
+  todesktop.js              # ToDesktop build settings
   electron/
     main.js                 # Electron main process entry point
     preload.js              # Context bridge for renderer IPC

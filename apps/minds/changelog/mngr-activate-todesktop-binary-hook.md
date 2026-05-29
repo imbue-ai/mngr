@@ -5,19 +5,29 @@
   `./scripts/download-binaries.js`, and restores the `downloadUv()`
   orchestrator in that file (it had been removed in the bundled-git
   carve-out because it was dormant without this PR's hook wiring).
-- `apps/minds`: pin `pnpm` via ToDesktop's first-class `pnpmVersion`
-  config field instead of a home-rolled install ladder. ToDesktop's
-  build server provisions the requested `pnpmVersion` (and
-  `nodeVersion` / `npmVersion`) before installing dependencies; setting
-  `"pnpmVersion": "10.33.4"` in `todesktop.json` is enough to keep
-  ToDesktop's CI off pnpm 11.1.0 (which crashes on the Linux runner's
-  Node 20.20.0 with `ERR_UNKNOWN_BUILTIN_MODULE: node:sqlite`).
-  Empirically verified against a draft ToDesktop build from
-  `wz/minds_onboard` (build `260528yf2ma2jd4`): both Linux and Mac
-  arm64 finished, packaged binary launches and round-trips a first
-  message end-to-end. The `beforeInstall` hook stays for `uv` + `git`
-  (no first-class ToDesktop knob); the four-strategy `installPnpm()`
-  ladder, its helpers, and the `PNPM_VERSION` constant are gone.
+- `apps/minds`: pin both `pnpm` and `node` via ToDesktop's first-class
+  `pnpmVersion` / `nodeVersion` config fields, sourcing the literal
+  values from `package.json`'s `engines` block (which #1710 already
+  pins to `pnpm 10.33.4` and `node 24.15.0`). To make this work,
+  `todesktop.json` is replaced with a `todesktop.js` that does
+  `require('./package.json')` and reads `engines.pnpm` and
+  `engines.node` into the `pnpmVersion` and `nodeVersion` ToDesktop
+  config fields; ToDesktop's CLI supports `.json`, `.js`, and `.ts`
+  config formats. Net effect: `package.json` is now the single source
+  of truth for the pnpm + node versions used on dev laptops (via
+  `engines` + `.nvmrc`), in imbue CI (via the workflow's explicit
+  installs, still a separate pin), and on ToDesktop's runner (via
+  `todesktop.js` reading `package.json`). Replaces a draft of this
+  PR that had a home-rolled `installPnpm()` fallback ladder
+  (~80 LoC + a 14-line rationale comment) -- ToDesktop's runtime
+  already provisions the requested versions before installing
+  dependencies, so the ladder was working around the absence of a
+  knob that isn't absent. Empirically verified end-to-end against a
+  draft ToDesktop build from `wz/minds_onboard` (build
+  `260528yf2ma2jd4`) with the earlier `"pnpmVersion": "10.33.4"`
+  spelling: both Linux and Mac arm64 finished, packaged binary
+  launches and round-trips a first message E2E. The `beforeInstall`
+  hook stays for `uv` + `git` (no first-class ToDesktop knob).
 - `apps/minds`: consolidate `downloadUv` into a single definition in
   `scripts/download-binaries.js` and import it into `scripts/build.js`,
   mirroring how `downloadGit` and `download` are already shared.
