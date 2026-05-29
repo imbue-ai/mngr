@@ -7,6 +7,11 @@ on:
         description: 'ToDesktop .zip URL to verify. Leave empty to resolve the latest released build from the electron-updater feed.'
         required: false
         default: ''
+      skip_first_message:
+        description: 'Skip the first-message round-trip step (smoke-only: install + launch + backend-ready). Use when only validating the runner/install path.'
+        type: boolean
+        required: false
+        default: false
   push:
     branches: [mngr/mac-runner]
     paths:
@@ -50,6 +55,7 @@ jobs:
       - name: launch and wait for backend
         run: bash apps/minds/scripts/launch-and-verify.sh
       - name: first message round-trip
+        if: ${{ inputs.skip_first_message != true }}
         run: bash apps/minds/scripts/first-message-verify.sh
       - name: collect diagnostic artifacts on failure
         if: failure()
