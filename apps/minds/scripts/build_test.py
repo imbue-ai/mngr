@@ -192,6 +192,7 @@ def test_workspace_package_lists_are_consistent() -> None:
         "Update every file so the package sets match exactly."
     )
 
+
 _NODE_BINARY: Final[str | None] = shutil.which("node")
 
 pytestmark = pytest.mark.skipif(
