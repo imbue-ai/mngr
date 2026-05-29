@@ -1,0 +1,1 @@
+The usage plugin now contributes its `cron_recipes` documentation as a `mngr help` topic via mngr's new `register_help_topics` hook. With the plugin installed, `mngr help` lists `cron_recipes` and `mngr help cron_recipes` shows the cron automation recipes.
