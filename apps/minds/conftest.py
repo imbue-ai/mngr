@@ -50,6 +50,11 @@ register_marker(
     "explicitly excluded from every other offload run because they would fail anywhere without "
     "the snapshot's pre-baked state."
 )
+register_marker(
+    "minds_node_required: tests that require a Node.js runtime on PATH (e.g. to evaluate "
+    "apps/minds/todesktop.js). Routed to the `test-docker-electron` CI job, which provisions "
+    "Node and pnpm; excluded from every offload run because the shared mngr image has no Node."
+)
 register_conftest_hooks(globals())
 register_plugin_test_fixtures(globals())
 

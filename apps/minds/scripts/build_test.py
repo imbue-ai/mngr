@@ -2,28 +2,20 @@
 
 import json
 import plistlib
-import shutil
 import subprocess
 from pathlib import Path
-from typing import Final
 
 import pytest
 
 APP_ROOT = Path(__file__).resolve().parents[1]
 
-_NODE_BINARY: Final[str | None] = shutil.which("node")
-
-pytestmark = pytest.mark.skipif(
-    _NODE_BINARY is None,
-    reason="evaluating apps/minds/todesktop.js requires a node binary on PATH",
-)
+pytestmark = pytest.mark.minds_node_required
 
 
 def _load_todesktop_config() -> dict:
     """Evaluate ``apps/minds/todesktop.js`` and return its exported config."""
-    assert _NODE_BINARY is not None  # narrowed by module-level pytestmark
     result = subprocess.run(
-        [_NODE_BINARY, "-e", "console.log(JSON.stringify(require('./todesktop.js')))"],
+        ["node", "-e", "console.log(JSON.stringify(require('./todesktop.js')))"],
         cwd=APP_ROOT,
         check=True,
         capture_output=True,

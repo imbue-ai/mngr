@@ -1,0 +1,1 @@
+Excluded the new `minds_node_required` pytest marker from every offload run (`offload-modal.toml`, both the `all` and `flaky` groups), since the shared mngr Modal image has no Node. Added a `test-docker-electron` CI step (`.github/workflows/ci.yml`) that runs the `minds_node_required` tests on that Node-and-pnpm-equipped runner, before the existing xvfb-wrapped Electron e2e step.

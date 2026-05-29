@@ -406,6 +406,9 @@ jobs:
       - name: Install Python dependencies
         run: uv sync --all-packages
 
+      - name: Run minds tests that need Node (no display)
+        run: env PYTEST_MAX_DURATION_SECONDS=300 uv run pytest apps/minds -m 'minds_node_required and not release' --no-cov --cov-fail-under=0 -v --tb=short
+
       - name: Run minds Electron e2e test
         # `xvfb-run -a` provides the display server the Electron renderer
         # needs; `env` sets PYTEST_MAX_DURATION_SECONDS for the wrapped
