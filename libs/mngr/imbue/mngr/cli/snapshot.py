@@ -88,6 +88,7 @@ class SnapshotDestroyCliOptions(CommonCliOptions):
     snapshots: tuple[str, ...]
     all_snapshots: bool
     force: bool
+    dry_run: bool
 
 
 # =============================================================================
@@ -314,8 +315,13 @@ def _emit_list_snapshots(
 def _emit_destroy_result(
     destroyed: list[dict[str, Any]],
     output_opts: OutputOptions,
+    dry_run: bool = False,
 ) -> None:
-    """Emit final output for snapshot destroy."""
+    """Emit final output for snapshot destroy.
+
+    When ``dry_run`` is True the entries represent snapshots that *would* be
+    destroyed rather than snapshots that were actually destroyed.
+    """
     if output_opts.format_template is not None:
         items: list[dict[str, str]] = []
         for entry in destroyed:
@@ -330,12 +336,13 @@ def _emit_destroy_result(
         return
     match output_opts.output_format:
         case OutputFormat.JSON:
-            emit_final_json({"snapshots_destroyed": destroyed, "count": len(destroyed)})
+            emit_final_json({"snapshots_destroyed": destroyed, "count": len(destroyed), "dry_run": dry_run})
         case OutputFormat.JSONL:
-            emit_event("destroy_result", {"count": len(destroyed)}, OutputFormat.JSONL)
+            emit_event("destroy_result", {"count": len(destroyed), "dry_run": dry_run}, OutputFormat.JSONL)
         case OutputFormat.HUMAN:
             if destroyed:
-                write_human_line("Destroyed {} snapshot(s)", len(destroyed))
+                action = "Would destroy" if dry_run else "Destroyed"
+                write_human_line("{} {} snapshot(s)", action, len(destroyed))
         case _ as unreachable:
             assert_never(unreachable)
 
@@ -643,6 +650,11 @@ def snapshot_list(ctx: click.Context, **kwargs: Any) -> None:
     is_flag=True,
     help="Skip confirmation prompt",
 )
+@optgroup.option(
+    "--dry-run",
+    is_flag=True,
+    help="Show what would be destroyed without actually destroying anything",
+)
 @add_common_options
 @click.pass_context
 def snapshot_destroy(ctx: click.Context, **kwargs: Any) -> None:
@@ -702,7 +714,26 @@ def snapshot_destroy(ctx: click.Context, **kwargs: Any) -> None:
 
     if not snapshots_to_delete:
         emit_info("No snapshots found to destroy", output_opts.output_format)
-        _emit_destroy_result([], output_opts)
+        _emit_destroy_result([], output_opts, dry_run=opts.dry_run)
+        return
+
+    # Dry run: report what would be destroyed without deleting anything.
+    if opts.dry_run:
+        would_destroy: list[dict[str, Any]] = []
+        for host_id_str, provider_name, snap_id, _snap_name in snapshots_to_delete:
+            result = {
+                "snapshot_id": str(snap_id),
+                "host_id": host_id_str,
+                "provider": str(provider_name),
+            }
+            would_destroy.append(result)
+            if output_opts.format_template is None:
+                emit_event(
+                    "snapshot_would_be_destroyed",
+                    {"message": f"Would destroy snapshot {snap_id} on host {host_id_str}", **result},
+                    output_opts.output_format,
+                )
+        _emit_destroy_result(would_destroy, output_opts, dry_run=True)
         return
 
     # Confirmation prompt (human mode only, unless --force)
@@ -844,7 +875,8 @@ CommandHelpMetadata(
     synopsis="mngr snapshot destroy [AGENTS...|-] [OPTIONS]",
     description="""Requires either --snapshot (to delete specific snapshots) or --all-snapshots
 (to delete all snapshots for the resolved hosts). A confirmation prompt is
-shown unless --force is specified.
+shown unless --force is specified. Use --dry-run to preview what would be
+destroyed without deleting anything.
 
 Use '-' in place of agent names to read them from stdin, one per line.
 
@@ -854,6 +886,7 @@ snapshot_id, host_id, provider.""",
         ("Destroy a specific snapshot", "mngr snapshot destroy my-agent --snapshot snap-abc123 --force"),
         ("Destroy all snapshots for an agent", "mngr snapshot destroy my-agent --all-snapshots --force"),
         ("Destroy all snapshots for multiple agents", "mngr snapshot destroy agent1 agent2 --all-snapshots --force"),
+        ("Preview what would be destroyed (dry run)", "mngr snapshot destroy my-agent --all-snapshots --dry-run"),
     ),
     see_also=(
         ("snapshot create", "Create a new snapshot"),
