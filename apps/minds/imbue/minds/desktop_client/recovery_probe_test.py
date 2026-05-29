@@ -138,6 +138,50 @@ def test_services_agent_registered_probe_unknown_when_id_not_known() -> None:
     assert _answer(response, "system-services agent registered") == ProbeAnswer.UNKNOWN
 
 
+def test_host_state_probes_surface_mngr_list_failure_when_row_missing() -> None:
+    """A failed ``mngr list`` (no usable row) surfaces its reason on the host-state probes.
+
+    The reason is shown in place of a bare "no row" so the user can tell the
+    listing failed (e.g. a provider was unreachable) rather than concluding the
+    host / agent is genuinely absent; both probes answer UNKNOWN since the
+    listing told us nothing about this workspace.
+    """
+    response = build_host_health_response(
+        list_json=None,
+        agent_id=_AGENT_ID,
+        services_agent_id=_SERVICES_AGENT_ID,
+        in_container_stdout=None,
+        plugin_resolver_services={},
+        mngr_list_error="timed out after 120s",
+    )
+    container_probe = _probe_for(response, "container running")
+    assert container_probe.answer == ProbeAnswer.UNKNOWN
+    assert "mngr list failed: timed out after 120s" in container_probe.output
+    services_probe = _probe_for(response, "system-services agent registered")
+    assert services_probe.answer == ProbeAnswer.UNKNOWN
+    assert "mngr list failed: timed out after 120s" in services_probe.output
+
+
+def test_host_state_probes_prefer_partial_list_data_over_failure_reason() -> None:
+    """When ``mngr list`` returns this workspace's row despite a non-clean exit, show the data.
+
+    ``--on-error continue`` can yield a usable row for our own host even when an
+    unrelated provider failed, so a present row wins over the failure reason.
+    """
+    response = build_host_health_response(
+        list_json=_list_json(host_state="RUNNING", services_state="RUNNING"),
+        agent_id=_AGENT_ID,
+        services_agent_id=_SERVICES_AGENT_ID,
+        in_container_stdout=None,
+        plugin_resolver_services={},
+        mngr_list_error="exited 1: provider 'other' unreachable",
+    )
+    container_probe = _probe_for(response, "container running")
+    assert container_probe.answer == ProbeAnswer.YES
+    assert container_probe.output == "RUNNING"
+    assert "mngr list failed" not in container_probe.output
+
+
 def test_can_run_commands_probe_no_when_sentinel_absent() -> None:
     response = build_host_health_response(
         list_json=_list_json(),

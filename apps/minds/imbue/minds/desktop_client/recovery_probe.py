@@ -347,7 +347,9 @@ def _mngr_exec_command(mngr_binary: str, services_agent_id: AgentId | None, inne
     return shlex.join([mngr_binary, "exec", str(services_agent_id), inner_command, "--no-start", "--quiet"])
 
 
-def _build_container_running_probe(host_state: str, agent_id: AgentId, mngr_list_command: str) -> Probe:
+def _build_container_running_probe(
+    host_state: str, agent_id: AgentId, mngr_list_command: str, mngr_list_error: str | None
+) -> Probe:
     """Probe 1: host.state from ``mngr list``, extracted with jq."""
     upper = host_state.upper()
     if upper == _RUNNING_STATE:
@@ -356,7 +358,14 @@ def _build_container_running_probe(host_state: str, agent_id: AgentId, mngr_list
         answer = ProbeAnswer.NO
     else:
         answer = ProbeAnswer.UNKNOWN
-    output = host_state or _NO_HOST_ROW
+    if host_state:
+        output = host_state
+    elif mngr_list_error is not None:
+        # No row for this host AND the listing did not exit cleanly: surface why
+        # rather than a bare "no host row" (the answer stays UNKNOWN either way).
+        output = f"mngr list failed: {mngr_list_error}"
+    else:
+        output = _NO_HOST_ROW
     jq_filter = f'([.agents[] | select(.id == "{agent_id}")][0].host.state) // "{_NO_HOST_ROW}"'
     return Probe(
         question=_QUESTION_CONTAINER_RUNNING,
@@ -370,6 +379,7 @@ def _build_services_agent_registered_probe(
     list_json: str | None,
     services_agent_id: AgentId | None,
     mngr_list_command: str,
+    mngr_list_error: str | None,
 ) -> Probe:
     """Probe 2: lifecycle state of the system-services agent, extracted with jq."""
     if services_agent_id is None:
@@ -385,6 +395,11 @@ def _build_services_agent_registered_probe(
     if services_state:
         answer = ProbeAnswer.YES
         output = services_state
+    elif mngr_list_error is not None:
+        # No row AND the listing did not exit cleanly: we cannot tell whether the
+        # agent is registered, so answer UNKNOWN and surface why instead of NO.
+        answer = ProbeAnswer.UNKNOWN
+        output = f"mngr list failed: {mngr_list_error}"
     else:
         answer = ProbeAnswer.NO
         output = _NO_AGENT_ROW
@@ -596,6 +611,7 @@ def build_host_health_response(
     in_container_stdout: str | None,
     plugin_resolver_services: dict[str, str],
     mngr_list_command: str = "",
+    mngr_list_error: str | None = None,
     mngr_exec_command: str = "",
     mngr_binary: str = "mngr",
 ) -> HostHealthResponse:
@@ -608,14 +624,17 @@ def build_host_health_response(
     ``mngr_binary`` is used to render the ``mngr exec`` reproduction commands
     for the in-container probes; ``mngr_list_command`` is the real list argv
     those probes pipe through ``jq`` to print exactly their extracted field.
+    ``mngr_list_error`` is the reason ``mngr list`` did not exit cleanly (or
+    None); the host-state probes surface it in place of a bare "no row" when the
+    listing failed to produce this workspace's row, so the user can see *why*.
     """
     in_container = _parse_in_container_probe(in_container_stdout)
     agent_row = _extract_agent_row(list_json, agent_id)
     host_state = _extract_host_state(agent_row)
     exec_cmd = mngr_exec_command or "(mngr exec <system-services-agent>)"
     probes: tuple[Probe, ...] = (
-        _build_container_running_probe(host_state, agent_id, mngr_list_command),
-        _build_services_agent_registered_probe(list_json, services_agent_id, mngr_list_command),
+        _build_container_running_probe(host_state, agent_id, mngr_list_command, mngr_list_error),
+        _build_services_agent_registered_probe(list_json, services_agent_id, mngr_list_command, mngr_list_error),
         _build_can_run_commands_probe(in_container, exec_cmd),
         _build_services_toml_probe(in_container, mngr_binary, services_agent_id),
         _build_port_listening_probe(in_container, mngr_binary, services_agent_id),
