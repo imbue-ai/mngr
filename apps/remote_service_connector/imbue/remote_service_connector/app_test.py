@@ -2023,18 +2023,21 @@ def _make_bucket_test_client(
 ) -> tuple[TestClient, FakeCloudflareOps, InMemoryKeyStore]:
     """Create a TestClient with the R2 fakes installed (Cloudflare ops + key store)."""
     client = _make_test_client(monkeypatch)
-    ctx = app_mod.get_ctx()
-    fake = ctx.fake
+    # Build our own fake ctx so the fake is typed as FakeForwardingCtx (which
+    # exposes ``.fake``); re-patching get_ctx overrides the one _make_test_client
+    # installed.
+    fake_ctx = make_fake_forwarding_ctx()
     store = make_fake_key_store()
     # Single-loop patching (same pattern as the Fake*Backend.install_on_app_module
     # helpers) so the monkeypatch ratchet only counts one occurrence.
     bucket_fakes: dict[str, object] = {
+        "get_ctx": lambda: fake_ctx,
         "get_key_store": lambda: store,
         "_get_user_id_from_access_token": lambda token: _ADMIN_STUB_USER_ID,
     }
     for name, fake_impl in bucket_fakes.items():
         monkeypatch.setattr(app_mod, name, fake_impl)
-    return client, fake, store
+    return client, fake_ctx.fake, store
 
 
 # --- Unit tests for naming + helpers ---
