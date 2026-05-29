@@ -1,7 +1,11 @@
-"""Unit + local-restic integration tests for backup status computation."""
+"""Unit + local-restic integration tests for backup status computation.
+
+restic is a required dependency of the minds app (installed in the test
+images), so the integration test runs unconditionally and FAILs -- not
+skips -- if the ``restic`` binary is missing.
+"""
 
 import os
-import shutil
 import subprocess
 from datetime import datetime
 from datetime import timezone
@@ -16,9 +20,6 @@ from imbue.minds.desktop_client.backup_status import BackupStatusState
 from imbue.minds.desktop_client.backup_status import compute_backup_status_for_workspace
 from imbue.minds.desktop_client.backup_status import compute_backup_status_for_workspaces
 from imbue.mngr.primitives import AgentId
-
-_HAS_RESTIC = shutil.which("restic") is not None
-_requires_restic = pytest.mark.skipif(not _HAS_RESTIC, reason="restic binary not installed")
 
 
 def _paths(tmp_path: Path) -> WorkspacePaths:
@@ -73,7 +74,6 @@ def _backup_a_file(repo: str, password: str, source: Path) -> None:
     assert result.returncode == 0, result.stderr
 
 
-@_requires_restic
 @pytest.mark.timeout(60)
 def test_status_never_then_backed_up_against_local_repo(tmp_path: Path) -> None:
     paths = _paths(tmp_path)

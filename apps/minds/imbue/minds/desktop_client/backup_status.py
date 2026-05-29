@@ -29,10 +29,13 @@ from imbue.minds.desktop_client.backup_env_store import read_canonical_env
 from imbue.minds.errors import BackupProvisioningError
 from imbue.mngr.primitives import AgentId
 
-# Per-workspace wall-clock cap for the whole status check (a couple of restic
-# round-trips over the network). Kept modest so one slow/unreachable repo
-# can't stall the landing page's status fill.
-_PER_WORKSPACE_TIMEOUT_SECONDS: Final[float] = 20.0
+# Wall-clock budget for the whole batch status check. After this elapses the
+# response is returned (still-running workspaces report UNKNOWN); the executor
+# is shut down non-blocking so a slow/unreachable repo can't stall the route.
+_STATUS_BATCH_TIMEOUT_SECONDS: Final[float] = 20.0
+# Hard cap on each restic invocation made for status, so a straggler thread
+# that outlives the batch budget still terminates promptly in the background.
+_STATUS_RESTIC_TIMEOUT_SECONDS: Final[float] = 12.0
 _MAX_STATUS_WORKERS: Final[int] = 8
 
 
@@ -67,6 +70,7 @@ def compute_backup_status_for_workspace(
     *,
     now: datetime,
     parent_cg: ConcurrencyGroup | None = None,
+    restic_timeout_seconds: float = _STATUS_RESTIC_TIMEOUT_SECONDS,
 ) -> BackupStatus:
     """Compute the backup status for one workspace from its canonical restic.env.
 
@@ -88,12 +92,21 @@ def compute_backup_status_for_workspace(
 
     try:
         if restic_cli.is_backup_in_progress(
-            repository=repository, backend_env=backend_env, password=password, now=now, parent_cg=parent_cg
+            repository=repository,
+            backend_env=backend_env,
+            password=password,
+            now=now,
+            parent_cg=parent_cg,
+            timeout_seconds=restic_timeout_seconds,
         ):
-            last_success = _safe_latest_snapshot(repository, backend_env, password, parent_cg)
+            last_success = _safe_latest_snapshot(repository, backend_env, password, parent_cg, restic_timeout_seconds)
             return BackupStatus(state=BackupStatusState.BACKING_UP, last_success_at=last_success)
         last_success = restic_cli.get_latest_snapshot_time(
-            repository=repository, backend_env=backend_env, password=password, parent_cg=parent_cg
+            repository=repository,
+            backend_env=backend_env,
+            password=password,
+            parent_cg=parent_cg,
+            timeout_seconds=restic_timeout_seconds,
         )
     except BackupProvisioningError as e:
         logger.warning("Could not read backup status for {}: {}", agent_id, e)
@@ -109,11 +122,16 @@ def _safe_latest_snapshot(
     backend_env: dict[str, str],
     password: str | None,
     parent_cg: ConcurrencyGroup | None,
+    timeout_seconds: float,
 ) -> datetime | None:
     """Best-effort latest-snapshot lookup used while a backup is in progress."""
     try:
         return restic_cli.get_latest_snapshot_time(
-            repository=repository, backend_env=backend_env, password=password, parent_cg=parent_cg
+            repository=repository,
+            backend_env=backend_env,
+            password=password,
+            parent_cg=parent_cg,
+            timeout_seconds=timeout_seconds,
         )
     except BackupProvisioningError:
         return None
@@ -125,31 +143,36 @@ def compute_backup_status_for_workspaces(
     *,
     parent_cg: ConcurrencyGroup | None = None,
 ) -> dict[str, BackupStatus]:
-    """Compute backup status for many workspaces in parallel, with a per-workspace timeout.
+    """Compute backup status for many workspaces in parallel, bounded in wall-clock.
 
-    A workspace whose status check times out or errors is reported as
-    ``UNKNOWN`` so a single slow repository never stalls the whole response.
+    Returns within roughly ``_STATUS_BATCH_TIMEOUT_SECONDS``: any workspace
+    whose check hasn't finished by then is reported as ``UNKNOWN`` so a single
+    slow/unreachable repository never stalls the landing page. The executor is
+    shut down non-blocking, so straggler threads (each bounded by the inner
+    restic timeout) finish in the background after the response is sent.
     """
     if not agent_ids:
         return {}
     now = datetime.now(timezone.utc)
     result_by_agent_id: dict[str, BackupStatus] = {}
     worker_count = min(_MAX_STATUS_WORKERS, len(agent_ids))
-    with ThreadPoolExecutor(max_workers=worker_count, thread_name_prefix="backup-status") as executor:
+    executor = ThreadPoolExecutor(max_workers=worker_count, thread_name_prefix="backup-status")
+    try:
         future_by_agent_id = {
             agent_id: executor.submit(
                 compute_backup_status_for_workspace, paths, agent_id, now=now, parent_cg=parent_cg
             )
             for agent_id in agent_ids
         }
-        # Bounded overall wait; any future still running after the cap is read
-        # as UNKNOWN below (its restic calls carry their own inner timeouts, so
-        # the threads do not linger indefinitely).
-        wait(future_by_agent_id.values(), timeout=_PER_WORKSPACE_TIMEOUT_SECONDS)
+        wait(future_by_agent_id.values(), timeout=_STATUS_BATCH_TIMEOUT_SECONDS)
         for agent_id, future in future_by_agent_id.items():
             try:
                 result_by_agent_id[str(agent_id)] = future.result(timeout=0)
             except (FuturesTimeoutError, BackupProvisioningError) as e:
                 logger.warning("Backup status for {} unavailable: {}", agent_id, e)
                 result_by_agent_id[str(agent_id)] = BackupStatus(state=BackupStatusState.UNKNOWN)
+    finally:
+        # Non-blocking: don't wait on stragglers (that would defeat the batch
+        # timeout). cancel_futures drops any not-yet-started task.
+        executor.shutdown(wait=False, cancel_futures=True)
     return result_by_agent_id

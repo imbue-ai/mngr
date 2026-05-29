@@ -1,13 +1,11 @@
 """Unit + local-restic integration tests for the minds restic wrapper.
 
-The pure helpers (timestamp parsing, env/flag construction, init-error
-matching) are always tested. The subprocess-driven functions are exercised
-against a real local restic repository when the ``restic`` binary is
-available, and skipped otherwise.
+restic is a required dependency of the minds app (and is installed in the
+test images), so the integration tests run unconditionally and FAIL -- not
+skip -- if the ``restic`` binary is missing.
 """
 
 import os
-import shutil
 import subprocess
 from datetime import datetime
 from datetime import timezone
@@ -19,10 +17,6 @@ from imbue.minds.desktop_client import restic_cli
 from imbue.minds.desktop_client.restic_cli import _env_and_flags
 from imbue.minds.desktop_client.restic_cli import _looks_already_initialized
 from imbue.minds.desktop_client.restic_cli import parse_restic_timestamp
-
-_HAS_RESTIC = shutil.which("restic") is not None
-_requires_restic = pytest.mark.skipif(not _HAS_RESTIC, reason="restic binary not installed")
-
 
 # --- parse_restic_timestamp ---
 
@@ -84,9 +78,8 @@ def test_looks_already_initialized_matches_common_phrases() -> None:
 # --- ensure_restic_available ---
 
 
-@_requires_restic
-def test_ensure_restic_available_passes_when_installed() -> None:
-    # Should not raise when restic is on PATH.
+def test_ensure_restic_available_does_not_raise() -> None:
+    # restic is a required dependency: this must pass in every test env.
     restic_cli.ensure_restic_available()
 
 
@@ -108,7 +101,6 @@ def _restic_backup_a_file(repo: str, password: str, source: Path) -> None:
     assert result.returncode == 0, result.stderr
 
 
-@_requires_restic
 @pytest.mark.timeout(60)
 def test_init_add_key_and_status_against_local_repo(tmp_path: Path) -> None:
     repo = str(tmp_path / "repo")
@@ -139,7 +131,6 @@ def test_init_add_key_and_status_against_local_repo(tmp_path: Path) -> None:
     assert latest.tzinfo is not None
 
 
-@_requires_restic
 @pytest.mark.timeout(60)
 def test_init_repo_is_idempotent_on_existing_repo(tmp_path: Path) -> None:
     repo = str(tmp_path / "repo")
