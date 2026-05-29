@@ -83,9 +83,10 @@ jobs:
       - name: pnpm install
         working-directory: apps/minds
         run: pnpm install --frozen-lockfile
-      - name: read ToDesktop APP_ID from todesktop.json
+      - name: read ToDesktop APP_ID from todesktop.js
+        working-directory: apps/minds
         run: |
-          APP_ID=$(python3 -c 'import json; print(json.load(open("apps/minds/todesktop.json"))["id"])')
+          APP_ID=$(node -e "console.log(require('./todesktop.js').id)")
           echo "APP_ID=$APP_ID" >> "$GITHUB_ENV"
       - name: resolve full commit_sha (input may be a branch/tag)
         id: sha
@@ -104,7 +105,7 @@ jobs:
           # `todesktop builds --format json`. If a clean ready build exists
           # for this SHA we can skip the 15+ min build by reusing its
           # arm64 .zip URL.
-          mkdir -p resources  # todesktop.json validation requires the dir to exist
+          mkdir -p resources  # todesktop config validation requires extraResources dir
           pnpm exec todesktop builds --format json --count 30 --exit > /tmp/td-builds.json 2>&1 || true
           URL=$(python3 -c '
           import json, os, sys

@@ -5,10 +5,10 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-TODESKTOP_JSON="$SCRIPT_DIR/../todesktop.json"
+TODESKTOP_JS="$SCRIPT_DIR/../todesktop.js"
 APP_ID="${1:-}"
 if [[ -z "$APP_ID" ]]; then
-  APP_ID=$(python3 -c "import json; print(json.load(open('$TODESKTOP_JSON'))['id'])")
+  APP_ID=$(node -e "console.log(require('$TODESKTOP_JS').id)")
 fi
 FEED="https://download.todesktop.com/${APP_ID}/latest-mac.yml"
 
