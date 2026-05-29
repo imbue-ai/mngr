@@ -488,14 +488,8 @@ def test_non_proxy_paths_return_404(
     assert state.received == []
 
 
-def test_proxy_returns_503_when_env_var_unset(
-    fake_minds_api: tuple[ThreadingHTTPServer, _FakeMindsApiState, str],
-) -> None:
+def test_proxy_returns_503_when_env_var_unset() -> None:
     """Without ``LATCHKEY_EXTENSION_MINDS_API_URL``, the proxy must 503 deterministically."""
-    # The ``fake_minds_api`` fixture is requested only to share the
-    # skip-when-node-missing gate; the upstream server it stands up is
-    # irrelevant to this test (the proxy must 503 before contacting it).
-    del fake_minds_api
     assert _NODE_BINARY is not None
     script = _build_node_driver_script()
     process = subprocess.Popen(
