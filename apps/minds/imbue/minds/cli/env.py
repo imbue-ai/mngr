@@ -34,6 +34,7 @@ from pydantic import AnyUrl
 from pydantic import SecretStr
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.concurrency_group.errors import ConcurrencyGroupError
 from imbue.minds.bootstrap import DEFAULT_MINDS_ROOT_NAME
 from imbue.minds.bootstrap import MINDS_ROOT_NAME_ENV_VAR
 from imbue.minds.bootstrap import mngr_host_dir_for
@@ -888,7 +889,10 @@ def _destroy_agents_and_state_container_for_wipe(env_name: str) -> None:
             if destroyed_count:
                 logger.info("Destroyed {} mngr agent(s) during wipe of env {!r}", destroyed_count, env_name)
             cleanup_env_state_container(dev_env_name, parent_concurrency_group=cg)
-    except (MngrAgentCleanupError, DockerCleanupError, OSError) as exc:
+    except (MngrAgentCleanupError, DockerCleanupError, ConcurrencyGroupError, OSError) as exc:
+        # ConcurrencyGroupError covers a failure to launch the `mngr` / `docker`
+        # subprocess (e.g. the binary is missing) so a teardown hiccup can never
+        # wedge the eval-sourced activation.
         logger.warning(
             "Could not fully tear down agents / Docker state container for env {!r} during wipe "
             "({}); proceeding with the local-state wipe anyway.",
