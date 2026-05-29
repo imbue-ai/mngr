@@ -64,7 +64,6 @@ from imbue.mngr.plugins.hookspecs import OptionStackItem
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import AgentName
-from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import CommandString
 from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import HostName
@@ -2796,18 +2795,15 @@ def on_before_create(args: OnBeforeCreateArgs, mngr_ctx: MngrContext) -> OnBefor
         return None
 
     # Resolve through the centralized agent-type registry so any subtype of the
-    # claude agent is accepted, not just the literal "claude" type name. The CLI
-    # always supplies a concrete type (cli.create requires one); the "claude"
-    # fallback here only covers direct API callers that leave agent_type unset,
-    # mirroring api.create.create's own unset->"claude" fallback (which runs
-    # after this hook).
-    agent_type = args.agent_options.agent_type or AgentTypeName("claude")
-    resolved = resolve_agent_type(agent_type, mngr_ctx.config)
-    if not issubclass(resolved.agent_class, ClaudeAgent):
-        raise UserInputError(
-            f"--adopt-session can only be used with a Claude agent type (claude or a subtype of it), "
-            f"not '{agent_type}'."
-        )
+    # claude agent is accepted, not just the literal "claude" type name.
+    agent_type = args.agent_options.agent_type
+    if agent_type is not None:
+        resolved = resolve_agent_type(agent_type, mngr_ctx.config)
+        if not issubclass(resolved.agent_class, ClaudeAgent):
+            raise UserInputError(
+                f"--adopt-session can only be used with a Claude agent type (claude or a subtype of it), "
+                f"not '{agent_type}'."
+            )
 
     if args.agent_options.source_agent_state_location is not None:
         raise UserInputError(

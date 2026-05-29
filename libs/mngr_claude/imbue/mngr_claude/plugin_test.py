@@ -3164,6 +3164,21 @@ def test_on_before_create_passes_with_adopt_session(temp_mngr_ctx: MngrContext) 
     assert result is None
 
 
+def test_on_before_create_skips_type_check_when_type_unset(temp_mngr_ctx: MngrContext) -> None:
+    """When the agent type is unset, on_before_create does not assume claude and
+    does not raise: the missing type is left for the create pipeline to reject.
+    """
+    args = OnBeforeCreateArgs(
+        agent_options=CreateAgentOptions(
+            agent_type=None,
+            plugin_data={"adopt_session": ("some-id",)},
+        ),
+        target_host=NewHostOptions(provider=ProviderInstanceName("local")),
+        create_work_dir=True,
+    )
+    assert on_before_create(args=args, mngr_ctx=temp_mngr_ctx) is None
+
+
 def test_on_before_create_rejects_non_claude_agent_type(temp_mngr_ctx: MngrContext) -> None:
     """on_before_create should raise UserInputError for non-claude agent types."""
     args = OnBeforeCreateArgs(
