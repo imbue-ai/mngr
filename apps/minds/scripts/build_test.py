@@ -21,7 +21,7 @@ pytestmark = pytest.mark.skipif(
 
 def _load_todesktop_config() -> dict:
     """Evaluate ``apps/minds/todesktop.js`` and return its exported config."""
-    assert _NODE_BINARY is not None  # narrowed by module-level pytestmark
+    assert _NODE_BINARY is not None
     result = subprocess.run(
         [_NODE_BINARY, "-e", "console.log(JSON.stringify(require('./todesktop.js')))"],
         cwd=APP_ROOT,
