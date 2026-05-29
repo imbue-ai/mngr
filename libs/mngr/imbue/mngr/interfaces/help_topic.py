@@ -19,6 +19,7 @@ nothing is inferred by parsing the body.
 """
 
 from pathlib import Path
+from typing import assert_never
 
 from pydantic import Field
 
@@ -76,3 +77,5 @@ class TopicHelpPage(FrozenModel):
                 return markdown
             case DocFile(path=path):
                 return path.read_text()
+            case _ as unreachable:
+                assert_never(unreachable)
