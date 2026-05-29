@@ -7,6 +7,9 @@ on:
         description: 'How many recent builds to list'
         required: false
         default: '5'
+  push:
+    branches: [mngr/mac-runner]
+    paths: ['.github/workflows/minds-todesktop-list-builds.yml']
 
 jobs:
   list:
@@ -26,14 +29,14 @@ jobs:
         run: pnpm install --frozen-lockfile --ignore-scripts
       - name: list builds (table)
         working-directory: apps/minds
-        run: pnpm exec todesktop builds --count ${{ inputs.count }} --exit
+        run: pnpm exec todesktop builds --count ${{ inputs.count || '5' }} --exit
       - name: list builds (raw JSON)
         working-directory: apps/minds
         run: |
           # We want to see the exact JSON keys returned. Stream stdout
           # straight to the log; nothing is masked here that isn't already
           # a public ToDesktop artifact URL.
-          pnpm exec todesktop builds --format json --count ${{ inputs.count }} --exit \
+          pnpm exec todesktop builds --format json --count ${{ inputs.count || '5' }} --exit \
             | tee /tmp/builds.json
       - name: inspect first build's keys
         working-directory: apps/minds
