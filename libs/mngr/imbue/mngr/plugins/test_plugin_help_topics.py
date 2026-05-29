@@ -14,10 +14,9 @@ import imbue.mngr.main
 from imbue.mngr import hookimpl
 from imbue.mngr.cli.help import load_help_topics_from_plugins
 from imbue.mngr.cli.help_topics import TopicHelpPage
-from imbue.mngr.cli.help_topics import _topic_alias_to_canonical
-from imbue.mngr.cli.help_topics import _topic_registry
 from imbue.mngr.cli.help_topics import build_topics_from_directory
 from imbue.mngr.cli.help_topics import get_topic
+from imbue.mngr.cli.help_topics import preserve_topic_registry
 from imbue.mngr.main import cli
 from imbue.mngr.main import reset_plugin_manager
 from imbue.mngr.plugins import hookspecs
@@ -82,16 +81,11 @@ def _registered_plugin_topics(plugin: Any) -> Generator[pluggy.PluginManager, No
     old_pm = imbue.mngr.main._plugin_manager_container["pm"]
     imbue.mngr.main._plugin_manager_container["pm"] = pm
 
-    keys_before = set(_topic_registry)
-    aliases_before = set(_topic_alias_to_canonical)
     try:
-        load_help_topics_from_plugins(pm)
-        yield pm
+        with preserve_topic_registry():
+            load_help_topics_from_plugins(pm)
+            yield pm
     finally:
-        for key in set(_topic_registry) - keys_before:
-            del _topic_registry[key]
-        for alias in set(_topic_alias_to_canonical) - aliases_before:
-            del _topic_alias_to_canonical[alias]
         imbue.mngr.main._plugin_manager_container["pm"] = old_pm
 
 
