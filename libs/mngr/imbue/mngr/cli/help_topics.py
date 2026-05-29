@@ -2,9 +2,9 @@
 
 A topic help page documents a concept that spans multiple commands (e.g. agent
 address syntax or filter syntax) rather than a single CLI command. Built-in
-topics are registered from markdown files in the docs tree (see ``help.py``),
-and plugins can contribute their own topics via the ``register_help_topics``
-hook.
+topics are registered from markdown files in the docs tree (see
+``builtin_help_topics.py``), and plugins can contribute their own topics via the
+``register_help_topics`` hook. Both flow through the same hook.
 
 This module is intentionally lightweight (no CLI or plugin-manager imports) so
 that plugins can import :class:`TopicHelpPage` and
