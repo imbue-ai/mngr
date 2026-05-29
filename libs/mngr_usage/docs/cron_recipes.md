@@ -40,9 +40,10 @@ mngr usage --format json | jq -e '
 
 ## Use up an about-to-expire 5h window
 
-Dedicate an agent to this and let one cron job own its whole lifecycle: it starts
-the agent during the tail of a 5h window when there's budget to spare and the week
-is on pace, then stops it once the window rolls over or the week falls off pace.
+Create a dedicated agent once up front (`mngr create my-agent claude
+--no-connect`) and let one cron job own its lifecycle from there: it starts the
+agent during the tail of a 5h window when there's budget to spare and the week is
+on pace, then stops it once the window rolls over or the week falls off pace.
 Letting it run one tick into the fresh window warms that window too.
 
 ```bash
