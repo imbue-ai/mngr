@@ -399,11 +399,11 @@ def test_python_probe_commands_are_well_formed_and_runnable() -> None:
         ),
         plugin_resolver_services={},
     )
-    checked = [
-        (p.question, _inner_python_body(p.command))
-        for p in response.probes
-        if _inner_python_body(p.command) is not None
-    ]
+    checked: list[tuple[str, str]] = []
+    for p in response.probes:
+        body = _inner_python_body(p.command)
+        if body is not None:
+            checked.append((p.question, body))
     assert checked, "expected at least one python3 -c probe command"
     for question, body in checked:
         compile(body, f"<probe:{question}>", "exec")

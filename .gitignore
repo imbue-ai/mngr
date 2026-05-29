@@ -339,4 +339,4 @@
 **/.antigravitycli/
 
 # Playwright MCP scratch artifacts (mock screenshots, page snapshots)
-.playwright-mcp/
+**/.playwright-mcp/
